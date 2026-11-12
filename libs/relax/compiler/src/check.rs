@@ -854,6 +854,8 @@ fn body_rows_path() -> Option<&'static std::path::Path> {
     P.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CHECK_BODY_TIMES").filter(|v| !v.is_empty()).map(Into::into)).as_deref()
 }
 static BODY_ROWS: relax_session::sync::Mutex<Vec<String>> = relax_session::sync::Mutex::new(Vec::new());
+/// MAKEPAD_RUN_MEM_REPORT: each body's peak and kept bytes, then its owner.
+static BODY_MEM_ROWS: relax_session::sync::Mutex<Vec<(i64, i64, crate::program::DefId)>> = relax_session::sync::Mutex::new(Vec::new());
 thread_local! {
     static BODY_LOCAL: std::cell::Cell<[u64; 9]> = const { std::cell::Cell::new([0; 9]) };
 }
@@ -891,6 +893,35 @@ fn body_times_report() {
     stderr_line!("makepad check: body cpu s: {}", parts.join(", "));
 }
 
+fn body_mem_report(prog: &crate::program::Program) {
+    if !crate::memstat::enabled() { return; }
+    let mut rows = std::mem::take(&mut *BODY_MEM_ROWS.lock().unwrap());
+    if rows.is_empty() { return; }
+    let mb = |bytes: i64| bytes as f64 / 1048576.0;
+    let mut sum_peak = 0;
+    let mut sum_kept = 0;
+    let mut buckets = [(0usize, 0i64); 4];
+    for &(peak, kept, _) in &rows {
+        sum_peak += peak;
+        sum_kept += kept;
+        let bucket = if kept < 64 * 1024 { 0 } else if kept < 1024 * 1024 { 1 } else if kept < 16 * 1024 * 1024 { 2 } else { 3 };
+        buckets[bucket].0 += 1;
+        buckets[bucket].1 += kept;
+    }
+    rows.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+    stderr_line!("makepad-run mem: bodies: {} bodies, kept sum {:.1} MB, peak sum {:.1} MB, largest peak {:.1} MB",
+        rows.len(), mb(sum_kept), mb(sum_peak), mb(rows[0].0));
+    for &(peak, kept, d) in rows.iter().take(12) {
+        stderr_line!("makepad-run mem: bodies: top peak: peak {:.1} MB, kept {:.1} MB, {}", mb(peak), mb(kept), prog.def_path(d));
+    }
+    rows.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    for &(peak, kept, d) in rows.iter().take(12) {
+        stderr_line!("makepad-run mem: bodies: top kept: kept {:.1} MB, peak {:.1} MB, {}", mb(kept), mb(peak), prog.def_path(d));
+    }
+    stderr_line!("makepad-run mem: bodies: kept buckets: under 64 KB: {} bodies, {:.1} MB; 64 KB-1 MB: {} bodies, {:.1} MB; 1-16 MB: {} bodies, {:.1} MB; 16 MB and over: {} bodies, {:.1} MB",
+        buckets[0].0, mb(buckets[0].1), buckets[1].0, mb(buckets[1].1), buckets[2].0, mb(buckets[2].1), buckets[3].0, mb(buckets[3].1));
+}
+
 fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &crate::options::Options, owner: &crate::borrowck::body::CheckedBody, generic: bool, lints: bool) -> (Vec<(crate::check_order::Stage, String)>, Vec<crate::borrowck::event::GandalfEvent>) {
     use crate::check_order::{Phase, Stage};
     use crate::memstat::Tag;
@@ -899,6 +930,7 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
     let typeck = Stage::of(Phase::Typeck, 0, d);
     let unsafety_stage = Stage::of(Phase::Mir, crate::check_order::MIR_UNSAFETY, d);
     let patterns = Stage::of(Phase::Mir, crate::check_order::MIR_PATTERNS, d);
+    let mem = crate::memstat::enabled().then(|| (crate::memstat::thread_live(), crate::memstat::peak_start()));
     // the syntax-level lints do not wait for the types (rustc runs them before analysis)
     if lints { body_step(0, || crate::memstat::tagged(Tag::BodyLints, || relax_types::lint_early::check_def(prog, tcx, d))); }
     let body = body_step(1, || if lints { tcx.typeck(prog, d) } else { tcx.typeck_unstored(prog, d) });
@@ -953,6 +985,12 @@ fn body_errors(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, options: &
     };
     let (mut errs, events) = inner();
     errs.extend(staged(Stage::new(Phase::Attrs, 0), gates));
+    if let Some((start, scope)) = mem {
+        let peak = crate::memstat::peak_end(scope);
+        let kept = crate::memstat::thread_live() - start;
+        let _k = crate::zone_alloc::kept();
+        BODY_MEM_ROWS.lock().unwrap().push((peak, kept, d));
+    }
     body_row(prog, d, body.expr_ty.len());
     (errs, events)
 }
@@ -1395,6 +1433,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     } crate::memstat::trim(); }
     if crate::memstat::enabled() {
         crate::memstat::print("check: type/borrow checked", &crate::memreport::unit_sizes(unsafe { &*up }));
+        body_mem_report(unsafe { &(*up).prog });
     }
     for (_, e) in errors.iter_mut() {
         if is_internal(unsafe { &*up }, &own_all, e) && !e.contains(": internal:") && !e.starts_with("internal: ") {

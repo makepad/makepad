@@ -462,6 +462,12 @@ pub fn macro_def_for(krate: &str, name: &str) -> Option<crate::macros::MacroRef>
     Some(def_for_id(name, id))
 }
 
+/// The macro definition standing for the hosted function-like proc macro with entry point `entry`.
+pub fn hosted_macro_def(entry: &crate::macro_reg::Entry) -> Option<crate::macros::MacroRef> {
+    let i = crate::macro_reg::bang_index_of(entry)?;
+    (i < (u16::MAX - HOSTED) as usize).then(|| def_for_id(&entry.fname, HOSTED + i as u16))
+}
+
 /// The macro definition standing for built-in `name` (no arms; `builtin` set), if any.
 pub fn macro_def(name: &str) -> Option<crate::macros::MacroRef> {
     macro_def_for("", name)
@@ -1287,7 +1293,7 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
             Span { file: 0, lo: a, hi: z, start: indexed_line_col(src, ls, cs, &src_cursor, a), end: indexed_line_col(src, ls, cs, &src_cursor, z.min(base)) }
         }
     };
-    let input = to_stream_buf(buf, &p.toks, lo, hi, &span_of).ok_or_else(|| "unbalanced delimiters in macro input".to_string())?;
+    let mut input = to_stream_buf(buf, &p.toks, lo, hi, &span_of).ok_or_else(|| "unbalanced delimiters in macro input".to_string())?;
     let call = span_of(call_lo, call_hi);
     drop(stream_timer);
     drop(input_timer);
@@ -1298,7 +1304,35 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
         verify_pm_spans(&input, &expected);
         assert_eq!(call, expected_call, "macro call span");
     }
-    run(input, call)
+    // rustc hands a proc macro a fragment a macro_rules arm forwards in an invisible group
+    // (proc_macro bridge: `OpenInvisible(MetaVar(..))` .. `CloseInvisible` becomes
+    // `Group(Delimiter::None)`), and syn reads through one (`Expr::Group`). The parentheses the
+    // transcriber wrote around a forwarded expression (synth_parens) stand for that group. As real
+    // parentheses, sqlx's expand_query! refused `("sql" + "sql")` for its `source` ("expected
+    // string literal") and kept the cast of `(x as _)`, whose `_` it looks for in an `Expr::Group`.
+    // A group the macro hands back as it came (its span) stays one group, as under rustc, where it
+    // keeps its macro_rules origin: `same!($e * 2)` of `1 + 1` is 4. A macro's own invisible group
+    // reads as its tokens (rustc_ast token.rs InvisibleOrigin::ProcMacro; emit_tokens).
+    if p.synth_parens.is_empty() {
+        return run(input, call);
+    }
+    regroup(&mut input.trees, &p.synth_parens, Delimiter::Parenthesis, Delimiter::None);
+    let mut output = run(input, call)?;
+    regroup(&mut output.trees, &p.synth_parens, Delimiter::None, Delimiter::Parenthesis);
+    Ok(output)
+}
+
+/// The groups of `trees` whose opening parenthesis is one the transcriber wrote around a
+/// forwarded expression (`synth`: its position): delimited `from`, they become `to`.
+fn regroup(trees: &mut [TokenTree], synth: &crate::fxhash::HashSet<u32>, from: Delimiter, to: Delimiter) {
+    for t in trees {
+        if let TokenTree::Group(g) = t {
+            if g.delim == from && synth.contains(&g.span.lo) {
+                g.delim = to;
+            }
+            regroup(&mut g.stream.trees, synth, from, to);
+        }
+    }
 }
 
 fn env_value(ctx: Option<&FileCtx>, name: &str) -> Option<String> {

@@ -1,7 +1,8 @@
 //! Process-level services: foreign symbols and libraries, power state, the process's own
 //! arguments, private cache files.
 //!
-//! - `find(name)`: a symbol in any image loaded into the process (`name` NUL-terminated);
+//! - `find(name)`: a symbol in any image loaded into the process (`name` NUL-terminated; on
+//!   Linux a miss asks a native bundle's address accessor for a symbol its link keeps hidden);
 //!   `find_system(name)`: the C/math libraries the host may not have loaded (Linux libm/libc).
 //! - `load_library(name, framework)`: a program's `#[link(name = ..)]` library (false: not found);
 //!   `load_library_versioned(name)`: Linux's lib<name>.so.N where lib<name>.so is a linker script.
@@ -20,6 +21,23 @@ pub use imp::*;
 pub unsafe fn find_any(name: *const u8) -> *mut u8 {
     let p = find(name);
     if p.is_null() { find_system(name) } else { p }
+}
+
+/// Resolve ordinary exports first. Linux native bundles also expose address
+/// accessors for archive symbols that the shared link keeps hidden.
+#[cfg(target_os = "linux")]
+pub unsafe fn find(name: *const u8) -> *mut u8 {
+    let address = imp::find(name);
+    if address.is_null() {
+        let name = std::ffi::CStr::from_ptr(name.cast()).to_bytes();
+        let accessor = std::ffi::CString::new(relax_front::native::address_name(name)).unwrap();
+        let entry = imp::find(accessor.as_ptr().cast());
+        if !entry.is_null() {
+            let get: unsafe extern "C" fn() -> *mut u8 = std::mem::transmute(entry);
+            return get();
+        }
+    }
+    address
 }
 
 /// The status an embedded run (the Android host) ended with when it failed; 0: it has not.

@@ -111,6 +111,21 @@ pub struct Built {
 
 const BUILD_DEPS: [&str; 6] = ["cc", "cmake", "pkg_config", "bindgen", "vcpkg", "nasm_rs"];
 
+/// An exported accessor for a native symbol whose own visibility may be hidden.
+/// Hex keeps arbitrary assembler names out of the generated C identifiers.
+pub fn address_name(name: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("__relax_native_address_");
+    for byte in name { write!(out, "{byte:02x}").unwrap(); }
+    out
+}
+
+/// Packages that keep `cc` as a build-dependency but compile nothing with it under a feature:
+/// (package, feature). blake3's `pure` leaves every C and assembly implementation out, so its
+/// script builds nothing with `cc`; it and a build script that depends on blake3 (an app's
+/// script that hashes its assets) need no `--allow-c` and run under Relax like any other.
+const C_FREE_WITH_FEATURE: [(&str, &str); 1] = [("blake3", "pure")];
+
 /// Why a package's build script is native, if it is.
 pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
     let (dir, name, _) = &g.pkg[bs.krate];
@@ -122,8 +137,9 @@ pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
     if links {
         return Some(format!("{}: links =", name));
     }
+    let c_free = C_FREE_WITH_FEATURE.iter().any(|(p, f)| p == name && bs.features.iter().any(|x| x == f));
     for (_, ext) in &bs.build_deps {
-        if BUILD_DEPS.contains(&ext.as_str()) {
+        if BUILD_DEPS.contains(&ext.as_str()) && !c_free {
             return Some(format!("{}: build-dependency {}", name, ext));
         }
     }
@@ -240,7 +256,7 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     let flags: Vec<String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").cloned().collect();
 
     // ---- the key
-    let mut h = fnv(b"native-link-v12", 0xcbf29ce484222325);
+    let mut h = fnv(b"native-link-v13", 0xcbf29ce484222325);
     h = fnv(req.triple.as_bytes(), h);
     h = fnv(&selection_key(&script_pkgs, &lib_pkgs).to_le_bytes(), h);
     for f in &flags {
@@ -724,6 +740,8 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
     }
     let tmp = format!("{}.tmp{}", lib_path, std::process::id());
     let symbols_path = format!("{}.symbols", tmp);
+    // the accessors' object (Linux): the callback relink below reuses the link's arguments
+    let addresses_path = format!("{}.addresses.o", tmp);
     let mut cmd = Command::new(cc());
     if cfg!(target_os = "macos") {
         cmd.args(["-dynamiclib", "-o", &tmp, "-Wl,-undefined,dynamic_lookup"]);
@@ -742,28 +760,62 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
         }
         // Force each exported symbol through normal archive extraction. A merged
         // archive may contain the same object twice; --whole-archive would load
-        // both copies and fail with duplicate definitions.
-        let mut symbols = std::collections::BTreeSet::new();
+        // both copies and fail with duplicate definitions. Each symbol notes whether
+        // it is thread-local (the address accessors below leave those out).
+        let mut symbols = std::collections::BTreeMap::new();
         for archive in archives {
-            let out = Command::new("nm").args(["-g", "--defined-only", "-P", archive])
+            let out = Command::new("nm").args(["-g", "--defined-only", "--format=sysv", archive])
                 .output().map_err(|e| format!("--allow-c: cannot read archive symbols: {e}"))?;
             if !out.status.success() {
                 return Err(format!("--allow-c: nm failed for {archive}: {}", String::from_utf8_lossy(&out.stderr)));
             }
+            // name | value | class | type | size | line | section; the member and column headers have no `|`
             for line in String::from_utf8_lossy(&out.stdout).lines() {
-                let mut words = line.split_whitespace();
-                if let (Some(name), Some(kind)) = (words.next(), words.next()) {
-                    if kind.len() == 1 && !name.ends_with(':') {
-                        symbols.insert(name.to_string());
-                    }
+                let columns: Vec<&str> = line.split('|').map(str::trim).collect();
+                if columns.len() >= 4 && columns[2].len() == 1 && !columns[0].is_empty() {
+                    symbols.insert(columns[0].to_string(), columns[3] == "TLS");
                 }
             }
         }
-        let args = symbols.into_iter().map(|name| {
+        let args = symbols.keys().map(|name| {
             format!("--undefined=\"{}\"\n", name.replace('\\', "\\\\").replace('"', "\\\""))
         }).collect::<String>();
         std::fs::write(&symbols_path, args).map_err(|e| format!("{symbols_path}: {e}"))?;
         cmd.arg(format!("-Wl,@{symbols_path}"));
+        if cfg!(target_os = "linux") {
+            // Rust's static link can refer to hidden archive symbols, whereas dlsym cannot.
+            // Export an address accessor for each (crate::native::address_name, which the
+            // loader's lookup tries on a miss) without changing the symbols' own visibility.
+            // Thread-local symbols get none: an accessor would answer the calling thread's
+            // instance, and rustc links no plain extern static to a thread-local one. Names
+            // that need assembler directives (versioned ones) stay on the ordinary dlsym path.
+            let mut source = String::new();
+            let plain = symbols.iter().filter(|(name, tls)| {
+                !**tls && name.bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b"_.".contains(&b))
+                    && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.$".contains(&b))
+            });
+            for (i, (name, _)) in plain.enumerate() {
+                use std::fmt::Write;
+                let escaped = name.bytes().map(|b| format!("\\{b:03o}")).collect::<String>();
+                writeln!(source, "extern char s{i}[] __asm__(\"{escaped}\");").unwrap();
+                writeln!(source, "__attribute__((visibility(\"default\"))) void *{}(void) {{ return s{i}; }}", address_name(name.as_bytes())).unwrap();
+            }
+            let source_path = format!("{tmp}.addresses.c");
+            std::fs::write(&source_path, source).map_err(|e| format!("{source_path}: {e}"))?;
+            let compile = Command::new(cc()).args(["-fPIC", "-c", &source_path, "-o", &addresses_path]).output();
+            let _ = std::fs::remove_file(&source_path);
+            let failed = match compile {
+                Err(e) => Some(format!("cannot compile native address accessors: {e}")),
+                Ok(out) if !out.status.success() => Some(format!("compiling native address accessors failed: {}", String::from_utf8_lossy(&out.stderr))),
+                Ok(_) => None,
+            };
+            if let Some(e) = failed {
+                let _ = std::fs::remove_file(&addresses_path);
+                let _ = std::fs::remove_file(&symbols_path);
+                return Err(format!("--allow-c: {e}"));
+            }
+            cmd.arg(&addresses_path);
+        }
         cmd.args(archives);
         // what the archives' C code needs from the C runtime
         cmd.args(["-lm", "-lpthread", "-ldl"]);
@@ -818,6 +870,7 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
         let _ = std::fs::remove_file(&stubs_path);
     }
     let _ = std::fs::remove_file(&symbols_path);
+    let _ = std::fs::remove_file(&addresses_path);
     if linked.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

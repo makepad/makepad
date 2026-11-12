@@ -1,0 +1,3 @@
+[workspace]
+members = ["hack", "imp", "decl", "app"]
+resolver = "2"

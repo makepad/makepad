@@ -524,6 +524,13 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
 
 pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
     registry_net::install();
+    // cargo runs rustc, and with it every proc macro, with CARGO naming the cargo of the build
+    // (cargo's environment variables for crates). Here the run is that build: sqlx's query macros
+    // run `$CARGO metadata` for the workspace root ("env var CARGO must be set to use the query
+    // macros"). A build script's CARGO is the loader (unitgraph.rs run_one).
+    if std::env::var_os("CARGO").is_none() {
+        std::env::set_var("CARGO", "cargo");
+    }
     if std::env::var_os("MAKEPAD_RUN_CODE_SIG").is_some() {
         relax_backend::regalloc::SIG_ON.store(true, std::sync::atomic::Ordering::Relaxed);
     }

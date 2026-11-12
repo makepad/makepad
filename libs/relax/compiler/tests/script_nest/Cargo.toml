@@ -1,0 +1,5 @@
+# Three nested build scripts (tools/run/fixture/modules_harness.rs): app's script uses helper_a,
+# whose script uses helper_b. `cargo run -p script-nest-app` prints `scan=b`.
+[workspace]
+members = ["app", "helper_a", "helper_b"]
+resolver = "2"

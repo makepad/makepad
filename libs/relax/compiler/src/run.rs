@@ -871,9 +871,19 @@ pub(crate) fn resolve_package(
 /// The warm front end: the program and type context restored from this launch's collected
 /// image, and the proof the cache opens with. None: no usable image (the caller loads the sources;
 /// restore_collected's trace names the check that refused it).
-fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::Session>, pre: &[crate::preload::PreCrate])
+/// `flight`: a `makepad check` (it records its stores as its last step, then ends): when no graph
+/// of these crates is stored and another check is making their first load, this one waits for
+/// that load's stores and restores from them (FrontImages::follow_first_load).
+fn warm_front(images: &crate::cache::FrontImages, sess: &std::sync::Arc<crate::Session>, pre: &[crate::preload::PreCrate], flight: bool)
     -> Option<(crate::program::Program, crate::tcx::Tcx, Option<crate::cache::CollectedCache>)> {
-    images.restore_collected(sess, pre).ok()
+    match images.restore_collected(sess, pre) {
+        Ok(restored) => Some(restored),
+        Err(_) if flight && images.follow_first_load(pre) => {
+            verbose!("makepad-run: another check made the first load of these crates: restoring from its stores");
+            images.restore_collected(sess, pre).ok()
+        }
+        Err(_) => None,
+    }
 }
 
 
@@ -1476,7 +1486,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     let mut collected_tcx = None;
     let mut collected_definitions = None;
     let restored = if check && !check_restore { None } else {
-        front_images.as_ref().and_then(|images| warm_front(images, sess, &pre))
+        front_images.as_ref().and_then(|images| warm_front(images, sess, &pre, check_restore))
     };
     let restored = if verify_collected {
         verification_graph = restored.filter(|(p, _, _)| p.crates.len() == pre.len());
@@ -1707,8 +1717,16 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         }
     }
     if load_errors > 0 && !watch {
-        // a test target's program: its other targets (test_pkg.rs) would end the same way
-        return if harness || plain_test { makepad_remote::hot::LOAD_ERROR_EXIT } else { 1 };
+        // the load errors end the run before `main` (a test program's before its tests): say so,
+        // or the exit reads as the program's own
+        let crates = if load_errors == 1 { "1 crate".to_string() } else { format!("{load_errors} crates") };
+        if harness || plain_test {
+            eprintln!("makepad-run: {crates} did not load (the load errors above), so the tests do not run");
+            // its other targets (test_pkg.rs) would end the same way
+            return makepad_remote::hot::LOAD_ERROR_EXIT;
+        }
+        eprintln!("makepad-run: {crates} did not load (the load errors above), so the run stops before `main`; `--watch` runs it anyway");
+        return 1;
     }
     {
         // what the unit holds, by identity: a domain started later shares these crates (domain.rs)
@@ -4237,6 +4255,8 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options, boot: Opt
         let r = c.record_collected(&u.prog, &u.tcx);
         verbose!("makepad check: collected program recorded ({:?}) in {:.0} ms; the program holds {} types", r.is_some(), t.elapsed().as_secs_f64() * 1e3, u.tcx.tys.len());
     }
+    // the checks that waited for this first load restore from what it recorded
+    crate::store::flight_landed();
 }
 
 /// The early record (check_reuse.rs Early) of a check that stored every verdict (`reuse`), under

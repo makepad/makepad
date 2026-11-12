@@ -903,12 +903,18 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         Ok(e) => e,
         Err(e) => return (Err(format!("this executable: {e}")), out_dir),
     };
-    // nesting: a build-dependency's own script runs inside a script's run (depth 2); anything
-    // deeper is a loop (MAKEPAD_RUN_SCRIPT_DEPTH counts the levels)
+    // nesting: a build-dependency's own script runs inside a script's run, and its
+    // build-dependencies' scripts inside that, as deep as the graph goes (cargo refuses a cyclic
+    // one). MAKEPAD_RUN_SCRIPT_DEPTH marks a script's run; MAKEPAD_RUN_SCRIPT_CHAIN names the
+    // packages whose scripts are running, each as name@version (two versions of one package may
+    // both sit in a chain). A package already in the chain is a script that runs itself again.
     let depth: u32 = std::env::var("MAKEPAD_RUN_SCRIPT_DEPTH").ok().and_then(|d| d.parse().ok()).unwrap_or(0) + 1;
-    if depth > 2 {
-        return (Err(format!("{}: build scripts nest {} deep (a script that runs itself again?); refused", bs.src_path, depth)), out_dir);
+    let chain = std::env::var("MAKEPAD_RUN_SCRIPT_CHAIN").unwrap_or_default();
+    let me = format!("{pname}@{ver}");
+    if chain.split('>').any(|p| p == me) {
+        return (Err(format!("{}: the build script of `{}` runs again inside its own run (build-dependency cycle: {} -> {}); refused", bs.src_path, me, chain.replace('>', " -> "), me)), out_dir);
     }
+    let chain = if chain.is_empty() { me } else { format!("{chain}>{me}") };
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(["run", "--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
     cmd.env("OUT_DIR", &out_dir)
@@ -929,6 +935,7 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("RUSTDOC", "rustdoc")
         .env("MAKEPAD_RUN_AS_RUSTC", "build-script")
         .env("MAKEPAD_RUN_SCRIPT_DEPTH", depth.to_string())
+        .env("MAKEPAD_RUN_SCRIPT_CHAIN", &chain)
         .env_remove("MAKEPAD_RUN_SELF_EXEC")
         // the script is compiled and run for the machine (cargo: build scripts are host
         // artifacts); the target it builds for reaches it only as TARGET / CARGO_CFG_TARGET_*
@@ -978,21 +985,43 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let output_path = format!("{}/output", build_dir);
     let key_path = format!("{}/makepad-run-rerun", build_dir);
     let env_path = format!("{}/makepad-run-rerun-env", build_dir);
-    let why = match (std::fs::read_to_string(&output_path), std::fs::read_to_string(&key_path)) {
+    // Ok: the previous output, which stands; Err: why the script runs again
+    let previous = || match (std::fs::read_to_string(&output_path), std::fs::read_to_string(&key_path)) {
         (Ok(old), Ok(key)) => {
             let now = rerun_key(&old, dir, &env_key).unwrap_or_default();
-            if now == key {
-                if sess.runtime.profile { eprintln!("makepad-run build-script: {} cached", pname); }
+            if now == key { Ok(old) } else { Err(rerun_reason(&key, &now, &std::fs::read_to_string(&env_path).unwrap_or_default(), &env_key)) }
+        }
+        _ => Err("no previous output".to_string()),
+    };
+    let mut why = match previous() {
+        Ok(old) => {
+            if sess.runtime.profile { eprintln!("makepad-run build-script: {} cached", pname); }
+            return (Ok(old), out_dir);
+        }
+        Err(why) => why,
+    };
+    // One run at a time makes a script's output (its OUT_DIR is one folder for every run of this
+    // run dir): the run holds `makepad-run-claim` beside it locked while its script runs. A run
+    // that finds it held waits and takes the output the other made, where two runs started
+    // together each compiled and ran every script. The OS drops the lock with a run that dies.
+    // The script slot (this process's) comes first: a run holding the claim and waiting for a slot
+    // could wait on a slot whose script's nested run waits for this claim (a package that is
+    // both a dependency here and a build-dependency of another script).
+    let _slot = script_slot();
+    let claim = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(format!("{}/makepad-run-claim", build_dir)).ok();
+    if let Some(claim) = claim.as_ref().filter(|claim| claim.try_lock().is_err()) {
+        let _ = claim.lock();
+        match previous() {
+            Ok(old) => {
+                if sess.runtime.profile { eprintln!("makepad-run build-script: {} made by another run", pname); }
                 return (Ok(old), out_dir);
             }
-            rerun_reason(&key, &now, &std::fs::read_to_string(&env_path).unwrap_or_default(), &env_key)
+            Err(now) => why = now,
         }
-        _ => "no previous output".to_string(),
-    };
+    }
     // why this script runs again, kept beside its output (relax-rerun-why: the last 20) and shown with MAKEPAD_RUN_PROFILE
     if sess.runtime.profile { eprintln!("makepad-run build-script: {} runs: {}", pname, why); }
     note_rerun(&build_dir, &why);
-    let _slot = script_slot();
     let started = std::time::Instant::now();
     let output = cmd.output();
     if sess.runtime.profile {

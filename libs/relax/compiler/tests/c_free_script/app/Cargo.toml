@@ -1,0 +1,8 @@
+[package]
+name = "c-free-script-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+blake3 = { path = "../blake3", features = ["pure"] }

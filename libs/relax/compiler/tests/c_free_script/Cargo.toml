@@ -1,0 +1,6 @@
+# A build script whose `cc` build-dependency compiles nothing under a feature
+# (tools/run/fixture/modules_harness.rs): stand-ins named blake3 and cc, path packages of this
+# workspace. `cargo run -p c-free-script-app` prints `impl=portable`.
+[workspace]
+members = ["app", "blake3", "cc"]
+resolver = "2"

@@ -387,6 +387,14 @@ pub fn bang_index(name: &str) -> Option<usize> {
     REG.with(|r| r.borrow().as_ref().and_then(|r| r.macros.iter().position(|(n, e)| n == name && e.kind == Kind::Bang)))
 }
 
+/// Index of the function-like proc macro whose entry point is `entry`.
+pub fn bang_index_of(entry: &Entry) -> Option<usize> {
+    if in_world() {
+        return None;
+    }
+    REG.with(|r| r.borrow().as_ref().and_then(|r| r.macros.iter().position(|(_, e)| e.kind == Kind::Bang && e.unit == entry.unit && e.fname == entry.fname)))
+}
+
 /// Index of function-like proc macro `name` as crate `krate` sees it (`resolve_entry`).
 pub fn bang_index_for(krate: &str, name: &str) -> Option<usize> {
     if in_world() {
@@ -922,6 +930,18 @@ fn scan_tokens_for_entries(
                             b"proc_macro_derive" => Kind::Derive,
                             b"proc_macro" => Kind::Bang,
                             b"proc_macro_attribute" => Kind::Attr,
+                            // proc-macro-hack 0.5 (src/lib.rs expand_export): `#[proc_macro_hack] pub fn name`
+                            // becomes `#[proc_macro_derive(_proc_macro_hack_name)] pub fn
+                            // _proc_macro_hack_name`, an entry point this scan of the source cannot
+                            // read; the declaration crate imports it by that name
+                            // (unic-langid-macros: `unic_langid_macros_impl::_proc_macro_hack_langid`).
+                            b"proc_macro_hack" => {
+                                let name = format!("_proc_macro_hack_{}", String::from_utf8_lossy(text(i + 1)).trim_start_matches("r#"));
+                                if !reg.derives.iter().any(|(n, ex)| n == &name && ex.unit == unit) {
+                                    reg.derives.push((name.clone(), Entry { unit, fname: name, kind: Kind::Derive }));
+                                }
+                                continue;
+                            }
                             _ => continue,
                         };
                         let mut name = String::new();

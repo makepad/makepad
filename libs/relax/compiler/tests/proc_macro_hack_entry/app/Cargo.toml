@@ -1,0 +1,9 @@
+[package]
+name = "pmh-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pmh-decl = { path = "../decl" }
+pmh-hack = { path = "../hack" }

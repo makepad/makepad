@@ -264,25 +264,42 @@ pub fn world_alive() -> bool {
 }
 
 pub fn free_world() -> bool {
-    let bw: Vec<_> = {
-        let mut g = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner());
-        let (free, keep): (Vec<_>, Vec<_>) = g.drain(..).partition(|w| std::sync::Arc::strong_count(w) == 1);
-        *g = keep;
-        free
+    // A build in flight keeps the stage worlds until it is done: the final world's crates that use
+    // a stage's macros expand them there (world_for), and nothing else holds a stage. The load
+    // does not wait for every thread that can start a build (a demand plan's discovery runs a
+    // hosted item macro on its own thread): a warm load that parsed one file ended while that
+    // build went on, the stages went here, and every derive of the world's own crates failed
+    // ("a proc macro used while the macro world itself is being built": 85 errors of a check).
+    // The worlds stay for a later free. BUILDING is held only while they are taken: dropping
+    // one retires its unit, which parks every compile job, and a thread that waits for BUILDING
+    // must not wait behind that.
+    let (bw, w) = {
+        let _building = match BUILDING.try_lock() {
+            Ok(held) => held,
+            Err(std::sync::TryLockError::Poisoned(e)) => e.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return false,
+        };
+        let bw: Vec<_> = {
+            let mut g = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner());
+            let (free, keep): (Vec<_>, Vec<_>) = g.drain(..).partition(|w| std::sync::Arc::strong_count(w) == 1);
+            *g = keep;
+            free
+        };
+        let w = {
+            let mut g = WORLD.lock().unwrap_or_else(|e| e.into_inner());
+            // Only the caller retires the world's unit (retire_unit parks every compile job): a macro
+            // call still in flight keeps it for a later free. Dropped by whichever call finished last,
+            // the retire would run on an arbitrary thread -- a parse worker or script thread whose
+            // loader holds a compile job and waits for it, so the park would wait forever. Nobody
+            // clones it without this lock: a count of 1 here stays 1.
+            match g.as_ref() {
+                Some(w) if std::sync::Arc::strong_count(w) == 1 => g.take(),
+                _ => None,
+            }
+        };
+        (bw, w)
     };
     drop(bw);
-    let w = {
-        let mut g = WORLD.lock().unwrap_or_else(|e| e.into_inner());
-        // Only the caller retires the world's unit (retire_unit parks every compile job): a macro
-        // call still in flight keeps it for a later free. Dropped by whichever call finished last,
-        // the retire would run on an arbitrary thread -- a parse worker or script thread whose
-        // loader holds a compile job and waits for it, so the park would wait forever. Nobody
-        // clones it without this lock: a count of 1 here stays 1.
-        match g.as_ref() {
-            Some(w) if std::sync::Arc::strong_count(w) == 1 => g.take(),
-            _ => None,
-        }
-    };
     let Some(w) = w else { return false };
     if crate::preload::trace() {
         eprintln!("boot-trace: macro world freed");
@@ -897,4 +914,24 @@ pub(crate) unsafe fn reset_statics() {
         }
         !ended
     });
+}
+
+#[cfg(test)]
+mod tests {
+    /// The worlds stay while a world is being built (BUILDING held by its builder): the build's
+    /// crates expand a stage's macros there. A free after the build takes them.
+    #[test]
+    fn a_world_build_in_flight_keeps_the_worlds() {
+        isolated_test!(a_world_build_in_flight_keeps_the_worlds);
+        let stand_in = || std::sync::Arc::new(Err::<super::World, String>("stand-in".into()));
+        super::BOOT_WORLDS.lock().unwrap().push(stand_in());
+        *super::WORLD.lock().unwrap() = Some(stand_in());
+        {
+            let _building = super::BUILDING.lock().unwrap();
+            assert!(!std::thread::spawn(super::free_world).join().unwrap(), "nothing goes while a build is in flight");
+            assert!(super::world_alive(), "the world and the stage world stay");
+        }
+        assert!(super::free_world(), "the world goes after the build");
+        assert!(!super::world_alive(), "and the stage world with it");
+    }
 }

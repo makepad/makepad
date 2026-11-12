@@ -1755,7 +1755,17 @@ impl<'a> Parser<'a> {
                 .filter(|&q| !matches!(q, "crate" | "self" | "super" | "std" | "core" | "alloc"))
                 .and_then(|q| m.table.crates.get(&self.krate).and_then(|c| c.externs.get(q)).map(|s| s.as_str()).or(Some(q)))
                 .unwrap_or(&self.krate);
-            crate::builtins::macro_def_for(scope_krate, &name)
+            // A path names a proc macro through the imports it crosses, a rename among them
+            // (rustc resolves a macro path as any other): `time::serde::format_description!` is
+            // `pub use time_macros::serde_format_description as format_description;`, not the
+            // `format_description` time_macros also has ("unexpected token: ,"). A path the
+            // imports do not lead through keeps the macro of that name the crate can see. (Only
+            // for a call no macro_rules! answered: the walk is per call.)
+            let renamed = (r.is_none() && qual.is_some() && crate::builtins::builtin_macro_def(&name).is_none())
+                .then(|| m.proc_macro_path(&self.krate, &module, &full_path, crate::macro_reg::Kind::Bang, &mut Default::default())).flatten()
+                .filter(|entry| entry.fname != name)
+                .and_then(|entry| crate::builtins::hosted_macro_def(&entry));
+            renamed.or_else(|| crate::builtins::macro_def_for(scope_krate, &name))
         };
         // MAKEPAD_RUN_TRACE=macmiss: a qualified macro path that resolves to nothing (the call stays
         // unexpanded and its body's check reports it as not supported)

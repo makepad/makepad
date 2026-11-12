@@ -31,7 +31,9 @@ impl Repositories {
                 }
                 visited.push(dir.to_path_buf());
                 let dot = dir.join(".git");
-                if dot.is_dir() {
+                // as git: a `.git` folder without HEAD is no repository, and the search goes on
+                // up (an empty one would read as busy forever and hold every edit back)
+                if dot.is_dir() && dot.join("HEAD").is_file() {
                     self.roots.insert(dot.clone(), dir.to_path_buf());
                     found = Some(dot);
                     break;
@@ -144,5 +146,46 @@ impl Snapshot {
         let text = std::fs::read_to_string(&path).ok();
         self.identities.push((path, stamp, text.clone()));
         text
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Repositories;
+
+    /// A `.git` folder without HEAD (git: not a repository) is passed over: the search goes on
+    /// up, and the snapshot is not busy. It read as a repository whose HEAD never resolved, so
+    /// every save waited for a quiet window that never came.
+    #[test]
+    fn a_git_folder_without_head_is_no_repository() {
+        let root = std::env::temp_dir().join(format!("relax-git-no-head-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let outer = root.join("outer");
+        std::fs::create_dir_all(outer.join(".git/refs/heads")).unwrap();
+        std::fs::write(outer.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(outer.join(".git/refs/heads/main"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(inner.join(".git")).unwrap();
+        std::fs::create_dir_all(inner.join("src")).unwrap();
+        let file = inner.join("src/main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut repos = Repositories::default();
+        repos.include(std::iter::once(file.to_str().unwrap()));
+        assert_eq!(repos.dirs.iter().cloned().collect::<Vec<_>>(), vec![outer.join(".git")], "the repository above the empty .git folder");
+        assert!(!repos.snapshot().busy, "a repository with HEAD and its ref is not busy");
+
+        // without the outer repository the search goes on up as it does from the scratch folder
+        // (a repository above it, if the temp folder sits in one; none, and so not busy, elsewhere)
+        std::fs::remove_dir_all(outer.join(".git")).unwrap();
+        let mut above = Repositories::default();
+        above.include(std::iter::once(root.join("probe").to_str().unwrap()));
+        let mut repos = Repositories::default();
+        repos.include(std::iter::once(file.to_str().unwrap()));
+        assert_eq!(repos.dirs, above.dirs, "the repositories above the scratch folder, never the empty .git");
+        if above.dirs.is_empty() {
+            assert!(!repos.snapshot().busy, "no repository is not busy");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

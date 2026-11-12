@@ -132,6 +132,9 @@ struct Req {
     panic_at: Cell<crate::lifeline::PanicAt>,
     /// false: posted (heap, nobody waits); the owner frees it
     waited: bool,
+    /// asked only of a free owner (`call_within` 0: the abort reporter's warm-up): withdrawn rather
+    /// than waited for, so long work does not give way for it (request_waiting)
+    probe: bool,
     /// a program thread's lazy compile front (`call_or_yield`): served outermost, it gives the owner
     /// back rather than wait for a build another thread runs while program requests queue
     yields: bool,
@@ -170,8 +173,8 @@ static FOREGROUND: AtomicU32 = AtomicU32::new(0);
 static MAIN_QUEUED: AtomicU32 = AtomicU32::new(0);
 /// the main thread's queued publish requests (its lazy compiles' finishes): served first (pick)
 static MAIN_PUBLISH: AtomicU32 = AtomicU32::new(0);
-/// Job requests queued that a thread waits for (not posted ones): long work stops for them too
-/// (request_waiting)
+/// Job requests queued that a thread waits for (not posted ones, nor probes of a free owner): long
+/// work stops for them too (request_waiting)
 static JOBS_WAITING: AtomicU32 = AtomicU32::new(0);
 /// requests queued (any class): the idle owner spins on it
 static QUEUED_N: AtomicU32 = AtomicU32::new(0);
@@ -733,7 +736,7 @@ pub fn bailing() -> bool {
 /// an install. `f` may not run what `forbid_in_publish` guards; doing so panics.
 #[track_caller]
 pub fn publish<R>(f: impl FnOnce() -> R) -> R {
-    request(std::panic::Location::caller(), Class::Publish, None, false, move || {
+    request(std::panic::Location::caller(), Class::Publish, None, false, false, move || {
         let _p = Publishing::enter(PUB_STRICT);
         f()
     })
@@ -751,7 +754,7 @@ pub fn publish_or_bail<R>(f: impl FnOnce() -> R) -> Result<R, PublishBail> {
     }
     let site = std::panic::Location::caller();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        request(site, Class::Publish, None, false, move || {
+        request(site, Class::Publish, None, false, false, move || {
             let _p = Publishing::enter(PUB_BAIL);
             let _ = take_needs();
             let _clear = ClearNeeds;
@@ -882,8 +885,9 @@ pub fn program_waiting() -> bool {
 
 /// A request waits now that long work on the owner (the cache's mid-run writes, the settle
 /// rebuild) gives the owner back for, at its next check: what `program_waiting` counts, or a Job
-/// a thread waits for (a back end's constant or static, a report, inspect). Background publishes
-/// and posted requests wait for the work to end. (A startup write held the owner 4.7 s with a
+/// a thread waits for (a back end's constant or static, a report, inspect). Background publishes,
+/// posted requests and probes of a free owner (`call_within` 0, which are withdrawn rather than
+/// waited for) wait for the work to end. (A startup write held the owner 4.7 s with a
 /// back end's Job queued, since it stopped only for program requests.)
 pub fn request_waiting() -> bool {
     program_waiting() || JOBS_WAITING.load(Ordering::Relaxed) > 0
@@ -1015,7 +1019,7 @@ pub(crate) fn stop() {
 /// waits, so `f` may borrow its locals (as `std::thread::scope`'s threads do).
 #[track_caller]
 pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
-    request(std::panic::Location::caller(), class, None, false, f).unwrap()
+    request(std::panic::Location::caller(), class, None, false, false, f).unwrap()
 }
 
 /// `call` for a program thread's lazy compile front: served outermost, it may give the owner back
@@ -1024,18 +1028,18 @@ pub fn call<R>(class: Class, f: impl FnOnce() -> R) -> R {
 /// main thread's front is never given back (it would queue behind the requests it let go first).
 #[track_caller]
 pub fn call_or_yield<R>(class: Class, f: impl FnOnce() -> R) -> Option<R> {
-    request(std::panic::Location::caller(), class, None, true, f)
+    request(std::panic::Location::caller(), class, None, true, false, f)
 }
 
 /// `call`, unless the owner has not started it within `ms`: then it is withdrawn (None).
 #[track_caller]
 pub fn call_within<R>(class: Class, ms: u64, f: impl FnOnce() -> R) -> Option<R> {
     // (at least 2 ms: an idle owner picks a request up in microseconds; 0 means "only if the
-    // owner is free now")
-    request(std::panic::Location::caller(), class, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), false, f)
+    // owner is free now": a probe, which long work does not give way for)
+    request(std::panic::Location::caller(), class, Some(std::time::Instant::now() + std::time::Duration::from_millis(ms.max(2))), false, ms == 0, f)
 }
 
-fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, f: impl FnOnce() -> R) -> Option<R> {
+fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, probe: bool, f: impl FnOnce() -> R) -> Option<R> {
     forbid_in_publish("a request", u32::MAX);
     debug_assert!(!NO_WAIT.try_with(|n| n.get()).unwrap_or(false), "makepad: a request to the compiler's owner on a JIT call's path (rule I-CALL: rt_hot waits for nothing)");
     if is_owner() || CHILD.load(Ordering::Relaxed) {
@@ -1044,7 +1048,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
     let mut out: Option<R> = None;
     let mut f = Some(f);
     let mut run = || out = Some((f.take().unwrap())());
-    if !request_dyn(site, class, deadline, yields, &mut run) {
+    if !request_dyn(site, class, deadline, yields, probe, &mut run) {
         return None;
     }
     Some(out.unwrap())
@@ -1052,7 +1056,7 @@ fn request<R>(site: &'static std::panic::Location<'static>, class: Class, deadli
 
 /// `request` past its owner fast path, for every result type (one copy, not one per caller's
 /// closure): false when the request was withdrawn or given back, and the caller asks again.
-fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, run: &mut dyn FnMut()) -> bool {
+fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadline: Option<std::time::Instant>, yields: bool, probe: bool, run: &mut dyn FnMut()) -> bool {
     assert_no_leaf("a request to the compiler's owner");
     // a front reader that must not wait (lowering ahead) gives the work back first; a back
     // end's finish is never refused (its slots stay in flight until it is served)
@@ -1084,6 +1088,7 @@ fn request_dyn(site: &'static std::panic::Location<'static>, class: Class, deadl
         panic: Cell::new(None),
         panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: true,
+        probe,
         yields: yields && !on_main,
         yielded: Cell::new(None),
         waiter_class: thread_class(),
@@ -1224,6 +1229,7 @@ pub fn post_queued(class: Class, f: impl FnOnce() + Send + 'static) {
         panic: Cell::new(None),
         panic_at: Cell::new(crate::lifeline::NO_PANIC_AT),
         waited: false,
+        probe: false,
         yields: false,
         yielded: Cell::new(None),
         waiter_class: makepad_cpu_budget::INTERACTIVE,
@@ -1248,7 +1254,7 @@ fn push(r: usize, class: Class) {
         }
     } else if class == Class::Publish && from_main(r) {
         MAIN_PUBLISH.fetch_add(1, Ordering::Relaxed);
-    } else if class == Class::Job && is_waited(r) {
+    } else if class == Class::Job && job_waited(r) {
         JOBS_WAITING.fetch_add(1, Ordering::Relaxed);
     }
     QUEUED_N.fetch_add(1, Ordering::SeqCst);
@@ -1268,7 +1274,7 @@ fn dequeued(class: usize, r: usize) {
         }
     } else if class == Class::Publish as usize && from_main(r) {
         MAIN_PUBLISH.fetch_sub(1, Ordering::Relaxed);
-    } else if class == Class::Job as usize && is_waited(r) {
+    } else if class == Class::Job as usize && job_waited(r) {
         JOBS_WAITING.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -1277,6 +1283,12 @@ fn dequeued(class: usize, r: usize) {
 fn is_waited(r: usize) -> bool {
     // SAFETY: a queued request stays alive until the owner releases it
     unsafe { (*(r as *const Req)).waited }
+}
+
+/// A queued Job that counts in JOBS_WAITING: one a thread waits for, not a probe of a free owner.
+fn job_waited(r: usize) -> bool {
+    // SAFETY: a queued request stays alive until the owner releases it
+    is_waited(r) && !unsafe { (*(r as *const Req)).probe }
 }
 
 /// A queued request asked by the program's main thread.
@@ -1939,32 +1951,48 @@ mod tests {
     /// Long work on the owner (the cache's mid-run writes, the settle rebuild) asks
     /// `request_waiting` between its sections and gives the owner back when it says yes. A Job a
     /// thread waits for counts: a startup write held the owner 4.7 s with a back end's Job queued,
-    /// since it stopped only for program requests. A posted Job and a background thread's publish
-    /// do not: they wait for the work to end.
+    /// since it stopped only for program requests. A posted Job, a background thread's publish
+    /// and a probe of a free owner do not: they wait for the work to end, or are withdrawn. (The
+    /// abort reporter's warm-up is such a probe: started late on a loaded machine, it reached the
+    /// owner during the work, counted as a waited Job and stopped it; stopped before the posted
+    /// Job and the publish queued, the test waited for a queue that never filled.) Every wait of
+    /// the test ends on an event: work that ends early fails it, and work that runs on 1000
+    /// sections with the waited Job queued is stopped and fails it, so it never hangs.
     #[test]
     fn long_owner_work_gives_way_to_a_waited_job() {
         isolated_test!(long_owner_work_gives_way_to_a_waited_job);
         static RUNNING: AtomicBool = AtomicBool::new(false);
         static SECTIONS: AtomicU32 = AtomicU32::new(0);
         static POSTED_RAN: AtomicBool = AtomicBool::new(false);
-        // the long work: sections until a request waits; then the sections it ran, and whether a
-        // program request waited
+        static GIVE_UP: AtomicBool = AtomicBool::new(false);
+        // the long work: sections until a request waits (or the test gives up on it); then the
+        // sections it ran, whether a program request waited, and whether a waited Job was counted
         let work = std::thread::spawn(|| {
             call(Class::Program, || {
                 RUNNING.store(true, Ordering::SeqCst);
-                while !request_waiting() {
+                while !request_waiting() && !GIVE_UP.load(Ordering::SeqCst) {
                     SECTIONS.fetch_add(1, Ordering::SeqCst);
                     std::thread::yield_now();
                 }
-                (SECTIONS.load(Ordering::SeqCst), program_waiting())
+                (SECTIONS.load(Ordering::SeqCst), program_waiting(), JOBS_WAITING.load(Ordering::SeqCst) > 0)
             })
         });
         while !RUNNING.load(Ordering::SeqCst) {
+            assert!(!work.is_finished(), "the long work ended before it ran");
+            std::thread::yield_now();
+        }
+        // a probe of a free owner is withdrawn, and the work goes on
+        let probe = std::thread::spawn(|| call_within(Class::Job, 0, || ()).is_some()).join().unwrap();
+        assert!(!probe, "a probe of the busy owner was served");
+        let probed_at = SECTIONS.load(Ordering::SeqCst);
+        while SECTIONS.load(Ordering::SeqCst) < probed_at + 3 {
+            assert!(!work.is_finished(), "the long work stopped for a probe of a free owner");
             std::thread::yield_now();
         }
         post(Class::Job, || POSTED_RAN.store(true, Ordering::SeqCst));
         let publisher = std::thread::Builder::new().name("run-test-pub".into()).spawn(|| call(Class::Publish, || ())).unwrap();
         while QUEUED_N.load(Ordering::SeqCst) < 2 {
+            assert!(!work.is_finished(), "the long work stopped before the posted Job and the publish were queued");
             std::thread::yield_now();
         }
         // with both queued the work runs more sections
@@ -1973,9 +2001,35 @@ mod tests {
             assert!(!work.is_finished(), "the long work stopped for a posted Job or a background publish");
             std::thread::yield_now();
         }
-        let served_at = call(Class::Job, || SECTIONS.load(Ordering::SeqCst));
-        let (stopped_at, program) = work.join().unwrap();
+        // a waited Job: the work gives way; work that runs on with it queued is stopped (whether the
+        // Job counts or not). Its own request in the queue is the event: another request (the abort
+        // reporter's probe) can be queued meanwhile.
+        static WAITER: AtomicU64 = AtomicU64::new(0);
+        let waiter = std::thread::spawn(|| {
+            WAITER.store(me(), Ordering::SeqCst);
+            call(Class::Job, || SECTIONS.load(Ordering::SeqCst))
+        });
+        let queued_from = |tid: u64| {
+            let q = Q.lock().unwrap_or_else(|e| e.into_inner());
+            tid != 0 && q.lanes.iter().flatten().any(|r| unsafe { (*(*r as *const Req)).from } == tid)
+        };
+        let mut waited_at = None;
+        while !work.is_finished() {
+            let sections = SECTIONS.load(Ordering::SeqCst);
+            match waited_at {
+                None if queued_from(WAITER.load(Ordering::SeqCst)) => waited_at = Some(sections),
+                Some(at) if sections > at + 1000 => {
+                    GIVE_UP.store(true, Ordering::SeqCst);
+                    panic!("the long work ran {} sections with a waited Job queued: it did not give way", sections - at);
+                }
+                _ => {}
+            }
+            std::thread::yield_now();
+        }
+        let (stopped_at, program, job_counted) = work.join().unwrap();
+        let served_at = waiter.join().unwrap();
         assert!(!program, "a program request waited: the work did not stop for the Job");
+        assert!(job_counted, "the work stopped with no waited Job counted");
         assert_eq!(served_at, stopped_at, "the waited Job was served when the work gave way, with no section after");
         assert!(POSTED_RAN.load(Ordering::SeqCst), "the posted Job, queued first, ran before the waited one");
         publisher.join().unwrap();

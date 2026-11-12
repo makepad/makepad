@@ -266,6 +266,26 @@ impl PartialEq for OsString {
     }
 }
 impl Eq for OsString {}
+impl PartialEq<OsStr> for OsString {
+    fn eq(&self, other: &OsStr) -> bool {
+        self.as_os_str() == other
+    }
+}
+impl PartialEq<&OsStr> for OsString {
+    fn eq(&self, other: &&OsStr) -> bool {
+        self.as_os_str() == *other
+    }
+}
+impl PartialEq<OsString> for OsStr {
+    fn eq(&self, other: &OsString) -> bool {
+        self == other.as_os_str()
+    }
+}
+impl PartialEq<OsString> for &OsStr {
+    fn eq(&self, other: &OsString) -> bool {
+        *self == other.as_os_str()
+    }
+}
 impl PartialEq<str> for OsString {
     fn eq(&self, other: &str) -> bool {
         self.inner.as_slice() == other.as_bytes()

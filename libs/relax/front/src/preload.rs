@@ -1197,6 +1197,21 @@ pub(crate) enum ScanSurface {
 fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, src_len: usize,
     src: ScanBytes, toks: Vec<Tok>, context: &crate::source_context::Context, surface: ScanSurface,
 ) -> Option<Scanned> {
+    // A scan of one of the macro world's crates runs for the world's builder, on whichever thread
+    // takes it (a parse worker, a demand plan's discovery). A hosted item macro in it that the boot
+    // world lacks (builtins.rs prescan_defs) must not wait for the world, as on the builder's own
+    // thread: the builder waits for this scan (take_ahead). A parse job carries the same state
+    // (CrateCtx::world). Before: every scan worker stood in pmhost world_inner behind the builder,
+    // which stood in take_ahead (sqlx-macros' world holds tokio, serde_json and time).
+    struct ForBuilder(bool);
+    impl Drop for ForBuilder {
+        fn drop(&mut self) { crate::macro_reg::set_world_builder(self.0); }
+    }
+    let _for_builder = context.world_builder().then(|| {
+        let was = crate::macro_reg::world_builder();
+        crate::macro_reg::set_world_builder(true);
+        ForBuilder(was)
+    });
     let mut defs = Vec::new();
     let mut children = Vec::new();
     let mut probes = Vec::new();

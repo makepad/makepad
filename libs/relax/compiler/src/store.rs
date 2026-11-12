@@ -1217,6 +1217,41 @@ pub fn build_of(p: &Path) -> Option<u64> {
     r
 }
 
+/// The flights this process leads: (crate set, its lock file, the open lock).
+static FLIGHTS: std::sync::Mutex<Vec<(u128, PathBuf, std::fs::File)>> = std::sync::Mutex::new(Vec::new());
+
+/// A first load of crate set `identity` with the stores of `dir` (none of its graphs is
+/// stored): one run at a time makes it. The run that finds `<dir>/flight/<32 hex>` free leads:
+/// it holds the file locked until it has recorded the set ([`flight_landed`]) or exits (the OS
+/// drops the lock with the process, also on a crash). A run that finds it held waits for that,
+/// as long as the leader takes, and returns true: the leader's stores are there to restore from,
+/// where two runs started together each parsed and recorded the same crates (a leader that ended
+/// without recording leaves nothing to restore: the follower then loads on its own). false: this
+/// run leads (or no lock file can be made: it loads on its own).
+pub fn flight(dir: &Path, identity: u128) -> bool {
+    // a set this process leads already: no wait on itself
+    if FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|(id, ..)| *id == identity) { return false; }
+    let folder = dir.join("flight");
+    if std::fs::create_dir_all(&folder).is_err() { return false; }
+    let path = folder.join(format!("{identity:032x}"));
+    let Ok(f) = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(&path) else { return false };
+    if f.try_lock().is_ok() {
+        // the file went between the open and the lock: its leader landed
+        if !still_at(&f, &path) { return true; }
+        FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).push((identity, path, f));
+        return false;
+    }
+    f.lock().is_ok()
+}
+
+/// This process recorded what its flights were for (or will not): their followers go on.
+pub fn flight_landed() {
+    for (_, path, f) in FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+        let _ = std::fs::remove_file(&path);
+        let _ = f.unlock();
+    }
+}
+
 /// Which builds run: every process holds a shared lock on `<cache dir>/live/<build hex>` from
 /// the first store it touches in that folder until it exits (the OS drops the lock with the
 /// process, also on a crash). retire_build takes a build's lock exclusively, so no process of
@@ -1387,6 +1422,26 @@ mod tests {
         let d = std::env::temp_dir().join(format!("rcs-test-{}-{}", tag, std::process::id()));
         let _ = std::fs::create_dir_all(&d);
         d
+    }
+
+    /// A first load is led by one run: its flight file stays locked until the leader has recorded
+    /// the set (what another run's lock waits for), the leader does not wait on itself, and a
+    /// landing leaves no file, so the next run leads.
+    #[test]
+    fn a_flight_is_held_by_its_leader_until_it_lands() {
+        let d = tmpdir("flight");
+        let identity = 0x00f1_1957_u128 << 64 | std::process::id() as u128;
+        let file = d.join("flight").join(format!("{identity:032x}"));
+        assert!(!flight(&d, identity), "the first run leads");
+        let other = std::fs::OpenOptions::new().read(true).write(true).open(&file).unwrap();
+        assert!(other.try_lock().is_err(), "another run finds it held, and waits");
+        assert!(!flight(&d, identity), "the leader does not wait on itself");
+        flight_landed();
+        assert!(other.try_lock().is_ok(), "landed: the waiting run goes on");
+        assert!(!file.exists(), "a landed flight leaves no file");
+        assert!(!flight(&d, identity), "a run after the landing leads again");
+        flight_landed();
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

@@ -190,6 +190,24 @@ impl crate::borrow::ToOwned for CStr {
     }
 }
 
+impl<'a> From<&'a CStr> for crate::borrow::Cow<'a, CStr> {
+    fn from(s: &'a CStr) -> crate::borrow::Cow<'a, CStr> {
+        crate::borrow::Cow::Borrowed(s)
+    }
+}
+
+impl<'a> From<CString> for crate::borrow::Cow<'a, CStr> {
+    fn from(s: CString) -> crate::borrow::Cow<'a, CStr> {
+        crate::borrow::Cow::Owned(s)
+    }
+}
+
+impl<'a> From<&'a CString> for crate::borrow::Cow<'a, CStr> {
+    fn from(s: &'a CString) -> crate::borrow::Cow<'a, CStr> {
+        crate::borrow::Cow::Borrowed(s.as_c_str())
+    }
+}
+
 impl NulError {
     pub fn nul_position(&self) -> usize {
         self.0

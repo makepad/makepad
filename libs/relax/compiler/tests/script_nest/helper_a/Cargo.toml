@@ -1,0 +1,8 @@
+[package]
+name = "script-nest-helper-a"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[build-dependencies]
+script-nest-helper-b = { path = "../helper_b" }

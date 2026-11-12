@@ -11,6 +11,10 @@ pub struct Context {
     outline_reuse: Mutex<BTreeMap<String, Arc<crate::parse_work::Reuse>>>,
     demand_identity: OnceLock<u128>,
     fingerprint: OnceLock<u128>,
+    /// made by the thread that builds the macro world (macro_reg world_builder), for a crate of
+    /// that world: its scans run for the builder on whichever thread takes them (preload.rs
+    /// scan_tokens)
+    world_builder: bool,
 }
 impl Context {
     pub fn new(_root: &str, sources: Arc<SourceRegistry>, session: &crate::Session) -> Arc<Self> {
@@ -19,8 +23,10 @@ impl Context {
     fn with_reads(sources: Arc<SourceRegistry>, session: &crate::Session, reads: Arc<crate::vfs::ReadSnapshot>) -> Arc<Self> {
         Arc::new(Self { sources, reads, session: crate::Session { options: session.options.clone(), runtime: session.runtime.clone() },
             rust_outlines: Default::default(), outline_reuse: Default::default(),
-            demand_identity: OnceLock::new(), fingerprint: OnceLock::new() })
+            demand_identity: OnceLock::new(), fingerprint: OnceLock::new(), world_builder: crate::macro_reg::world_builder() })
     }
+    /// Whether the macro world's builder made this context (a crate of the world it builds).
+    pub(crate) fn world_builder(&self) -> bool { self.world_builder }
     pub fn for_units(crates: &[crate::crates::CrateUnit], sources: Arc<SourceRegistry>, session: &crate::Session) -> Vec<Arc<Self>> {
         let reads = crate::vfs::ReadSnapshot::new(session.runtime.profile);
         crates.iter().map(|_| Self::with_reads(sources.clone(), session, reads.clone())).collect()

@@ -5922,6 +5922,15 @@ impl FrontImages {
     pub(crate) fn reloading(&self) -> bool {
         !self.reload.lock().unwrap().is_empty()
     }
+    /// A first load of `pre`'s crate set (no graph of it is stored here): true when another
+    /// run was making it and has now recorded it (store.rs `flight`), so a restore finds its
+    /// stores; the begun load is forgotten for that read. false: this run makes the load.
+    pub(crate) fn follow_first_load(&self, pre: &[crate::preload::PreCrate]) -> bool {
+        let identity = crate::crate_image::GraphRecipe::new(pre).identity;
+        if self.front_graph(identity).is_some() || !crate::store::flight(&self.dir, identity) { return false; }
+        *self.begun.lock().unwrap() = None;
+        true
+    }
     /// Graph `identity` as its store holds it: the begun load's read when it is that graph.
     pub(crate) fn front_graph(&self, identity: u128) -> Option<std::sync::Arc<crate::crate_image::GraphImage>> {
         if let Some(g) = self.graph_read.lock().unwrap().as_ref().filter(|g| g.identity == identity) { return Some(g.clone()); }
