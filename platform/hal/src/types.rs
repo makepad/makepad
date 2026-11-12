@@ -358,12 +358,15 @@ impl OpenReq {
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
+            Ok("gl") if cfg!(target_os = "android") => (backend_id::GL, window_flags),
             Ok("vulkan") if cfg!(target_os = "linux") && !hidden => (backend_id::VULKAN, window_flags),
+            Ok("vulkan") if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
             Ok("vulkan") => (backend_id::VULKAN, window_flags | open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") && hidden => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") => (backend_id::METAL, window_flags),
             _ if cfg!(target_os = "linux") => (backend_id::AUTO, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
-            _ if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
+            // Vulkan where the device has 1.1, else GLES (`backend::android::open`)
+            _ if cfg!(target_os = "android") => (backend_id::AUTO, window_flags),
             _ if cfg!(windows) => (backend_id::D3D11, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
             _ => (backend_id::HEADLESS, 0),
         };

@@ -191,6 +191,7 @@ unsafe extern "system" fn surface_destroyed(_: *mut JNIEnv, _: jclass, _: jobjec
     if super::xr::active() { return; }
     let shared = Shared::global();
     let old = { let mut r = lock(&shared.registry); r.state.destroyed(); r.window.take() };
+    if let Some(release) = &*lock(&shared.release_window) { release(); }
     drop(old);
     emit_lifecycle(lifecycle::SURFACE_LOST); shared.display();
 }
@@ -431,6 +432,7 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onAndroidParams", "(Ljava/lang/String;Ljava/lang/String;FZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", params as *mut c_void),
         ("onNightModeChanged", "(Z)V", night_mode as *mut c_void),
         ("onDisplayRotation", "(I)V", display_rotation as *mut c_void),
+        ("onAppHalBackend", "(Ljava/lang/String;)V", super::shell::app_hal_backend as *mut c_void),
         ("initChoreographer", "(FI)V", choreographer as *mut c_void),
         ("onBackPressed", "()V", back as *mut c_void),
         ("onBackGesture", "(IFFFIJ)V", back_gesture as *mut c_void),

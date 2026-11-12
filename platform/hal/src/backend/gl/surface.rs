@@ -7,6 +7,8 @@ use std::sync::Arc;
 pub const PLATFORM_X11: u32 = 0x31D5;
 pub const PLATFORM_WAYLAND: u32 = 0x31D8;
 pub const PLATFORM_SURFACELESS: u32 = 0x31DD;
+/// Android's default display (`eglGetDisplay`), whose windows are `ANativeWindow`s
+pub const PLATFORM_ANDROID: u32 = 0x3141;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Display {
@@ -21,7 +23,7 @@ pub struct Display {
 pub struct NativeSurface {
     /// changes when the shell replaces the native window
     pub generation: u64,
-    /// X11 Window id or `wl_surface*`
+    /// X11 Window id, `wl_surface*` or `ANativeWindow*`
     pub window: usize,
     pub size: [u32; 2],
     pub keep: Arc<dyn std::any::Any + Send + Sync>,

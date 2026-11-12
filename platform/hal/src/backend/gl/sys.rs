@@ -18,6 +18,8 @@ macro_rules! gl_functions {
             $(pub $name: unsafe extern "C" fn($($arg),*) $(-> $ret)?,)*
             /// KHR_parallel_shader_compile: links finish on driver threads while frames render.
             pub glMaxShaderCompilerThreadsKHR: Option<unsafe extern "C" fn(GLuint)>,
+            /// EXT_disjoint_timer_query's 64-bit results: a frame's GPU time.
+            pub glGetQueryObjectui64vEXT: Option<unsafe extern "C" fn(GLuint, GLenum, *mut u64)>,
         }
         impl Gl {
             pub fn load(get: impl Fn(&CStr) -> *mut c_void) -> Result<Self, String> {
@@ -30,6 +32,10 @@ macro_rules! gl_functions {
                     glMaxShaderCompilerThreadsKHR: {
                         let f = get(c"glMaxShaderCompilerThreadsKHR");
                         (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLuint)>(f) })
+                    },
+                    glGetQueryObjectui64vEXT: {
+                        let f = get(c"glGetQueryObjectui64vEXT");
+                        (!f.is_null()).then(|| unsafe { std::mem::transmute::<*mut c_void, unsafe extern "C" fn(GLuint, GLenum, *mut u64)>(f) })
                     },
                 })
             }
@@ -84,6 +90,9 @@ gl_functions! {
     glGetProgramiv(GLuint, GLenum, *mut GLint);
     glGetProgramInfoLog(GLuint, GLsizei, *mut GLsizei, *mut u8);
     glDeleteProgram(GLuint);
+    glProgramParameteri(GLuint, GLenum, GLint);
+    glGetProgramBinary(GLuint, GLsizei, *mut GLsizei, *mut GLenum, *mut c_void);
+    glProgramBinary(GLuint, GLenum, *const c_void, GLsizei);
     glUseProgram(GLuint);
     glGetAttribLocation(GLuint, *const u8) -> GLint;
     glGetActiveAttrib(GLuint, GLuint, GLsizei, *mut GLsizei, *mut GLint, *mut GLenum, *mut u8);
@@ -123,6 +132,12 @@ gl_functions! {
     glCullFace(GLenum);
     glFrontFace(GLenum);
     glDrawElementsInstanced(GLenum, GLsizei, GLenum, *const c_void, GLsizei);
+    glGenQueries(GLsizei, *mut GLuint);
+    glDeleteQueries(GLsizei, *const GLuint);
+    glBeginQuery(GLenum, GLuint);
+    glEndQuery(GLenum);
+    glGetQueryiv(GLenum, GLenum, *mut GLint);
+    glGetQueryObjectuiv(GLuint, GLenum, *mut GLuint);
     glFlush();
     glFinish();
     glFenceSync(GLenum, GLbitfield) -> GLsync;
@@ -150,6 +165,10 @@ impl Gl {
         unsafe { (self.glGetIntegerv)(name, &mut v) };
         v
     }
+    /// The vendor, renderer and version lines, which program binaries are only good for.
+    pub fn driver(&self) -> String {
+        [VENDOR, RENDERER, VERSION].map(|name| self.string(name)).join("\n")
+    }
 }
 
 pub const TRUE: GLboolean = 1;
@@ -176,6 +195,7 @@ pub const ONE: GLenum = 1;
 pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 pub const FUNC_ADD: GLenum = 0x8006;
 pub const MAX: GLenum = 0x8008;
+pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
 pub const VERSION: GLenum = 0x1F02;
 pub const EXTENSIONS: GLenum = 0x1F03;
@@ -206,6 +226,7 @@ pub const TEXTURE_COMPARE_FUNC: GLenum = 0x884D;
 pub const COMPARE_REF_TO_TEXTURE: GLenum = 0x884E;
 pub const NEAREST: GLenum = 0x2600;
 pub const LINEAR: GLenum = 0x2601;
+pub const NEAREST_MIPMAP_NEAREST: GLenum = 0x2700;
 pub const NEAREST_MIPMAP_LINEAR: GLenum = 0x2702;
 pub const LINEAR_MIPMAP_LINEAR: GLenum = 0x2703;
 pub const REPEAT: GLenum = 0x2901;
@@ -260,6 +281,9 @@ pub const UNSIGNED_INT_VEC2: GLenum = 0x8DC6;
 pub const UNSIGNED_INT_VEC3: GLenum = 0x8DC7;
 pub const UNSIGNED_INT_VEC4: GLenum = 0x8DC8;
 pub const COMPLETION_STATUS_KHR: GLenum = 0x91B1;
+pub const PROGRAM_BINARY_LENGTH: GLenum = 0x8741;
+pub const NUM_PROGRAM_BINARY_FORMATS: GLenum = 0x87FE;
+pub const PROGRAM_BINARY_RETRIEVABLE_HINT: GLenum = 0x8257;
 // framebuffers
 pub const FRAMEBUFFER: GLenum = 0x8D40;
 pub const READ_FRAMEBUFFER: GLenum = 0x8CA8;
@@ -271,6 +295,12 @@ pub const DEPTH_STENCIL_ATTACHMENT: GLenum = 0x821A;
 pub const COLOR: GLenum = 0x1800;
 pub const DEPTH: GLenum = 0x1801;
 pub const COLOR_BUFFER_BIT: GLbitfield = 0x4000;
+// queries
+pub const TIME_ELAPSED_EXT: GLenum = 0x88BF;
+pub const QUERY_COUNTER_BITS_EXT: GLenum = 0x8864;
+pub const QUERY_RESULT: GLenum = 0x8866;
+pub const QUERY_RESULT_AVAILABLE: GLenum = 0x8867;
+pub const GPU_DISJOINT_EXT: GLenum = 0x8FBB;
 // sync
 pub const SYNC_GPU_COMMANDS_COMPLETE: GLenum = 0x9117;
 pub const SYNC_FLUSH_COMMANDS_BIT: GLbitfield = 0x0001;
