@@ -5922,15 +5922,62 @@ impl<'a> Lcx<'a> {
         provider.mir_const_qualif(d).is_ok_and(|q| !q.tainted_by_errors && !q.needs_drop && !q.has_mut_interior)
     }
 
+    /// Is an aggregate of the ADT type `t` qualified only by its operands (rustc Qualif::
+    /// is_structural_in_adt_value: no `Drop` impl of its own, not `UnsafeCell`; a union is
+    /// judged by its type)?
+    fn adt_value_structural(&self, t: TyId) -> bool {
+        match self.kind(t) {
+            TyKind::Adt(d, ..) => self.u.tcx.adt_destructor(d).is_none() && self.u.tcx.adts.get(&d).is_some_and(|a| !a.is_union() && !a.is_unsafe_cell()),
+            _ => false,
+        }
+    }
+
+    /// Does the value the rvalue `e` builds hold neither a destructor nor an `UnsafeCell`
+    /// (rustc_const_eval/src/check_consts/qualifs.rs: NeedsDrop and HasMutInterior, Qualif::
+    /// in_rvalue)? The value, not every value of its type: `Phase::Choose` of an enum whose
+    /// other variants own a `Box` has nothing to drop, and `&Phase::Choose` returned inside a
+    /// struct must not point at the callee's stack.
+    fn value_unqualified(&mut self, e: ExprId) -> bool {
+        let t = self.body_ty(e);
+        let env = crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog);
+        if !self.u.tcx.needs_drop(&self.u.prog, env, t) && self.u.tcx.is_freeze(&self.u.prog, env, t) {
+            return true;
+        }
+        let ast = self.ast();
+        match ast.expr(e).kind.clone() {
+            ExprKind::Paren(x) => self.value_unqualified(x),
+            ExprKind::Array(v) | ExprKind::Tuple(v) => ast.list(v).iter().all(|x| self.value_unqualified(*x)),
+            ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
+                Some(Res::Def(d)) => match self.u.prog.def(d).kind {
+                    DefKind::Const | DefKind::AssocConst => self.const_promotable(e),
+                    // a unit variant / unit struct: an aggregate without operands
+                    DefKind::Variant | DefKind::Struct => self.adt_value_structural(t),
+                    _ => false,
+                },
+                _ => false,
+            },
+            ExprKind::Struct(row) if ast.row(row).base == crate::ast::OptExprId::NONE && !ast.row(row).rest => {
+                self.adt_value_structural(t) && ast.list(ast.row(row).fields).iter().all(|f| self.value_unqualified(f.expr))
+            }
+            ExprKind::Call(f, args) => {
+                matches!(self.b.res.get(&strip_paren(ast, f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct))
+                    && self.adt_value_structural(t)
+                    && ast.list(args).iter().all(|x| self.value_unqualified(*x))
+            }
+            _ => false,
+        }
+    }
+
     /// Can the rvalue `e` be promoted to a static (rustc promote_consts: built only from
-    /// literals, constants, constructors and operations that cannot fail, of a type without
-    /// drop glue)?
+    /// literals, constants, constructors and operations that cannot fail, of a value without
+    /// a destructor or interior mutability)?
     fn promotable(&mut self, e: ExprId) -> bool {
         let t = self.body_ty(e);
         if self.unsized_ty(t) { return false; }
-        if self.u.tcx.needs_drop(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t)
-            || !self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t) {
-            return self.const_promotable(e) || self.drop_free_ctor_promotable(e, t);
+        if (self.u.tcx.needs_drop(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t)
+            || !self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t))
+            && !self.value_unqualified(e) {
+            return self.const_promotable(e);
         }
         let ast = self.ast();
         match ast.expr(e).kind.clone() {
@@ -6006,28 +6053,6 @@ impl<'a> Lcx<'a> {
         }
     }
 
-
-    /// rustc qualifies a promotion candidate by its value, not its type
-    /// (rustc_const_eval/src/check_consts/qualifs.rs, in_rvalue for an Aggregate): a unit
-    /// variant, or a variant or struct built from operands that are themselves promotable,
-    /// of an ADT without a Drop impl, needs no drop even when its type does. So
-    /// `&E::B` with `enum E { B, S(String) }` is a 'static, not a stack temporary.
-    /// The type must still be Freeze: interior mutability stays type-based here.
-    fn drop_free_ctor_promotable(&mut self, e: ExprId, t: TyId) -> bool {
-        if self.u.tcx.has_drop_impl(t)
-            || !self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t) {
-            return false;
-        }
-        let ast = self.ast();
-        let is_ctor = |s: &Self, x: ExprId| matches!(s.b.res.get(&strip_paren(s.ast(), x).0), Some(Res::Def(d)) if matches!(s.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
-        match ast.expr(e).kind.clone() {
-            ExprKind::Paren(x) => self.promotable(x),
-            ExprKind::Path(_) => is_ctor(self, e),
-            ExprKind::Call(f, args) => is_ctor(self, f) && ast.list(args).iter().all(|x| self.promotable(*x)),
-            ExprKind::Struct(row) if ast.row(row).base == crate::ast::OptExprId::NONE && !ast.row(row).rest => ast.list(ast.row(row).fields).iter().all(|f| self.promotable(f.expr)),
-            _ => false,
-        }
-    }
 
     /// The value of the promotable integer operand `x` (rustc promote_consts: try_eval_scalar
     /// of a division's constant operand), sign-extended; None when it cannot be evaluated here.
