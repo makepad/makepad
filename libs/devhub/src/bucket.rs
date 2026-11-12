@@ -2459,7 +2459,8 @@ mod tests {
         // the watch on a fake clock, a wait taking no time: second t's /proc is <case>/proc/<t>, its
         // processes `mem(t)`'s (pid, command line, VmHWM and VmRSS in KB), the session's own at `cpu(t)`
         // ticks; its output is `outs`' text from the second each is given on; a stall is said after 5 s
-        // with no new result. What it kept: the first lines of <out>.hung and <out>.busy, <out>.peak,
+        // with no new result; a watch that has not ended by 40 s is stopped as the gate's TERM does,
+        // not hung. What it kept: the first lines of <out>.hung and <out>.busy, <out>.peak,
         // what it said live (its fd 4) and <out>.peak.by
         let watch = |case: &str, cpu: &dyn Fn(u64) -> u64, outs: &[(u64, &str)], mem: &dyn Fn(u64) -> Vec<(u32, &'static str, u64, u64)>| -> (String, String, String, String, String) {
             let dir = root.join(case);
@@ -2487,7 +2488,7 @@ mod tests {
             }
             let script = dir.join("fake_watch.sh");
             std::fs::write(&script, format!(
-                "now=0 nap=\"\" proc={0}/0\nwait_s() {{ now=$((now + $1)); proc={0}/$now; [ ! -f \"$out.at$now\" ] || cp \"$out.at$now\" \"$out\"; }}\nread_gpu() {{ :; }}\nwall() {{ echo $((1794000000 + now)); }}\nexec 4> \"$2.live\"\n. {1}\n",
+                "now=0 nap=\"\" proc={0}/0\nwait_s() {{ now=$((now + $1)); [ \"$now\" -le 40 ] || {{ stop; exit 0; }}; proc={0}/$now; [ ! -f \"$out.at$now\" ] || cp \"$out.at$now\" \"$out\"; }}\nread_gpu() {{ :; }}\nwall() {{ echo $((1794000000 + now)); }}\nexec 4> \"$2.live\"\n. {1}\n",
                 proc.display(), body.display())).unwrap();
             assert!(std::process::Command::new("bash").arg(&script).arg(pid.to_string()).arg(&out)
                 .env("HUNG_LOOK", "1").env("HUNG_QUIET", "2").env("BUSY_S", "5").env("BUSY_UNIT", "test p").env("DEVHUB_KEEP", dir.join("keep"))
@@ -2531,6 +2532,18 @@ mod tests {
         assert_eq!(peak.trim(), "10", "results: its peak in MB");
         assert_eq!(hung, hung_at(8), "results: a new test result is progress");
         assert_eq!((busy.as_str(), live.as_str()), ("", ""), "results: no stall");
+        // a target's tests done and nothing while the next one builds; then that target's tests, one of
+        // them run again in a child of its own whose output is the unit's (the harness's self-exec: its
+        // own `running 1 test` to `test result:` inside the target's), then nothing: the target's tests
+        // still run. Each such child's result read as its target's end, and relax-compiler's tests,
+        // idle in a later test, were a build to the watch: they held their shards' boxes 28 min to 1h38m,
+        // and the runs ended with no verdict, three times (11-11, 11-12)
+        let first = "running 1 test\ntest a ... ok\n\ntest result: ok. 1 passed; 0 failed\n";
+        let next = format!("{first}\nrunning 3 tests\ntest b ... ok\n");
+        let child = format!("{next}     Running unittests src/lib.rs\n\nrunning 1 test\ntest c ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out\n\ntest c ... ok\n");
+        let (hung, _, busy, live, _) = watch("nested", &|_| 0, &[(0, first), (6, &next), (7, &child)], &one);
+        assert_eq!(hung, hung_at(9), "nested: a child's own tests inside its target's do not end them; between targets is a build");
+        assert_eq!((busy.as_str(), live.as_str()), ("", ""), "nested: no stall");
         let _ = std::fs::remove_dir_all(&root);
     }
 
