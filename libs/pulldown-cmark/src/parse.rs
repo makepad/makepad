@@ -294,6 +294,22 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         &self.allocs.refdefs
     }
 
+    /// Declares footnote labels defined outside the text being parsed, so a
+    /// reference to one of them is a `FootnoteReference` under the GFM rule
+    /// (which otherwise leaves a reference to an undefined label as text).
+    /// For a host that parses a slice of a larger document. Labels the text
+    /// defines itself are kept as they are.
+    pub fn declare_footnote_labels<'l>(&mut self, labels: impl IntoIterator<Item = &'l str>) {
+        for label in labels {
+            let key: FootnoteLabel<'input> = UniCase::new(CowStr::from(label.to_string()));
+            self.allocs
+                .footdefs
+                .0
+                .entry(key)
+                .or_insert(FootnoteDef { use_count: 0 });
+        }
+    }
+
     /// Use a link label to fetch a type, url, and title.
     ///
     /// This function enforces the [`link_ref_expansion_limit`].
