@@ -6014,6 +6014,44 @@ fn vminvq_u8() {
 }
 
 #[test]
+fn vmlal_high_u32() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("neon"),
+            "required native neon coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint32x4_t = neon_sample(&mut rng, case, 1, 0);
+            let p2: hr::uint32x4_t = neon_sample(&mut rng, case, 2, 0);
+            let got = hr::vmlal_high_u32(p0, p1, p2);
+            let expected = real::vmlal_high_u32(cast(p0), cast(p1), cast(p2));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vmlal_u32() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("neon"),
+            "required native neon coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint32x2_t = neon_sample(&mut rng, case, 1, 0);
+            let p2: hr::uint32x2_t = neon_sample(&mut rng, case, 2, 0);
+            let got = hr::vmlal_u32(p0, p1, p2);
+            let expected = real::vmlal_u32(cast(p0), cast(p1), cast(p2));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
 fn vmlaq_s32() {
     let mut rng = Rng(0x9e3779b97f4a7c15);
     unsafe {
@@ -8346,6 +8384,24 @@ fn vuzpq_u16() {
             let p1: hr::uint16x8_t = neon_sample(&mut rng, case, 1, 0);
             let got = hr::vuzpq_u16(p0, p1);
             let expected = real::vuzpq_u16(cast(p0), cast(p1));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vuzpq_u32() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("neon"),
+            "required native neon coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint32x4_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint32x4_t = neon_sample(&mut rng, case, 1, 0);
+            let got = hr::vuzpq_u32(p0, p1);
+            let expected = real::vuzpq_u32(cast(p0), cast(p1));
             assert_eq!(bytes(&got), bytes(&expected), "case {case}");
         }
     }

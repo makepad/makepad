@@ -594,6 +594,17 @@ pub fn vmlal_high_u16(a: uint32x4_t, b: uint16x8_t, c: uint16x8_t) -> uint32x4_t
     uint32x4_t(r)
 }
 
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_high_u32(a: uint64x2_t, b: uint32x4_t, c: uint32x4_t) -> uint64x2_t {
+    let mut r = [0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = a.0[i].wrapping_add((b.0[i + 2] as u64) * (c.0[i + 2] as u64));
+        i += 1;
+    }
+    uint64x2_t(r)
+}
+
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(3))]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vmlal_laneq_s16<const LANE: i32>(
@@ -619,6 +630,17 @@ pub fn vmlal_u16(a: uint32x4_t, b: uint16x4_t, c: uint16x4_t) -> uint32x4_t {
         i += 1;
     }
     uint32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_u32(a: uint64x2_t, b: uint32x2_t, c: uint32x2_t) -> uint64x2_t {
+    let mut r = [0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = a.0[i].wrapping_add((b.0[i] as u64) * (c.0[i] as u64));
+        i += 1;
+    }
+    uint64x2_t(r)
 }
 
 #[inline]
@@ -4029,6 +4051,14 @@ pub fn vuzpq_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8x2_t {
             }
             uint16x8_t(r)
         },
+    )
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzpq_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4x2_t {
+    uint32x4x2_t(
+        uint32x4_t([a.0[0], a.0[2], b.0[0], b.0[2]]),
+        uint32x4_t([a.0[1], a.0[3], b.0[1], b.0[3]]),
     )
 }
 

@@ -417,6 +417,10 @@ fn arch() {
     bin("chain_aes", |a: uint8x16_t, k: uint8x16_t| unsafe { [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))] }, |a: uint8x16_t, k: uint8x16_t| unsafe {
         [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))]
     });
+    // xxh3's stripe loop (xxhash-rust)
+    t!(vmlal_u32, uint64x2_t, uint32x2_t, uint32x2_t);
+    t!(vmlal_high_u32, uint64x2_t, uint32x4_t, uint32x4_t);
+    b!(vuzpq_u32, uint32x4_t, uint32x4_t);
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
