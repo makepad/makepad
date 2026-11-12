@@ -1127,7 +1127,7 @@ mod tests {
             assert_eq!(XrClientMsg::decode(ty, &p).unwrap(), m);
         }
         let server = [
-            XrServerMsg::Welcome { version: XR_VERSION, server: "166".into(), instance: 7, session: 9, size: [2560, 1824], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into(), eye: [2016, 2112], fovea: Fovea::DEFAULT },
+            XrServerMsg::Welcome { version: XR_VERSION, server: "89".into(), instance: 7, session: 9, size: [2560, 1824], codec: CODEC_HEVC, tiles: 2, encoder: "nvidia".into(), eye: [2016, 2112], fovea: Fovea::DEFAULT },
             XrServerMsg::Refused { reason: "busy".into() },
             XrServerMsg::Video {
                 seq: 9,
