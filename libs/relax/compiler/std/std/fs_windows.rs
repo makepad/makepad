@@ -346,6 +346,11 @@ fn get_path(h: HANDLE) -> io::Result<PathBuf> {
 const INTERVALS_PER_SEC: i128 = 10_000_000;
 const INTERVALS_TO_UNIX_EPOCH: i128 = 11_644_473_600 * INTERVALS_PER_SEC;
 
+/// A FILETIME count of a time given in ns since the Unix epoch (a virtual file's stat).
+fn intervals_from_unix_ns(ns: u64) -> u64 {
+    (ns / 100).saturating_add(INTERVALS_TO_UNIX_EPOCH as u64)
+}
+
 fn filetime_u64(ft: &FILETIME) -> u64 {
     (ft.dwLowDateTime as u64) | ((ft.dwHighDateTime as u64) << 32)
 }
@@ -371,7 +376,8 @@ fn intervals_from_system_time(t: SystemTime) -> io::Result<FILETIME> {
 
 pub struct File {
     handle: OwnedHandle,
-    virtual_len: Option<u64>,
+    /// A virtual file's stat (its bytes are a private copy in `handle`).
+    virtual_stat: Option<vfs::Stat>,
 }
 
 fn virtual_file() -> io::Result<File> {
@@ -478,12 +484,12 @@ impl OpenOptions {
                 return self.open_native(&maybe_verbatim(&disk)?);
             }
             return match k {
-                vfs::Kind::File(_) => {
+                vfs::Kind::File(stat) => {
                     let data = vfs::read(&*abs)?;
                     let mut file = virtual_file()?;
                     file.write_all(&data)?;
                     file.seek(SeekFrom::Start(0))?;
-                    file.virtual_len = Some(data.len() as u64);
+                    file.virtual_stat = Some(vfs::Stat { len: data.len() as u64, mtime_ns: stat.mtime_ns });
                     Ok(file)
                 }
                 vfs::Kind::Dir => Err(os_error(ERROR_ACCESS_DENIED)),
@@ -550,7 +556,7 @@ impl OpenOptions {
         if h == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let file = File { handle: unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }, virtual_len: None };
+        let file = File { handle: unsafe { OwnedHandle::from_raw_handle(h as RawHandle) }, virtual_stat: None };
         if self.truncate && creation == OPEN_ALWAYS && last_error() == ERROR_ALREADY_EXISTS {
             // FileAllocationInfo first, FileEndOfFileInfo for filesystems without it (WINE)
             let alloc_info = FILE_ALLOCATION_INFO { AllocationSize: 0 };
@@ -623,15 +629,15 @@ impl File {
         self.sync_all()
     }
     pub fn set_len(&self, size: u64) -> io::Result<()> {
-        if self.virtual_len.is_some() {
+        if self.virtual_stat.is_some() {
             return Err(vfs::read_only());
         }
         let info = FILE_END_OF_FILE_INFO { EndOfFile: size as i64 };
         set_info(self.raw(), FileEndOfFileInfo, &info)
     }
     pub fn metadata(&self) -> io::Result<Metadata> {
-        if let Some(len) = self.virtual_len {
-            return Ok(Metadata::virtual_entry(&vfs::Kind::File(len)));
+        if let Some(stat) = self.virtual_stat {
+            return Ok(Metadata::virtual_entry(&vfs::Kind::File(stat)));
         }
         unsafe {
             let mut info: BY_HANDLE_FILE_INFORMATION = core::mem::zeroed();
@@ -664,7 +670,7 @@ impl File {
         Ok(info)
     }
     pub fn try_clone(&self) -> io::Result<File> {
-        Ok(File { handle: self.handle.try_clone()?, virtual_len: self.virtual_len })
+        Ok(File { handle: self.handle.try_clone()?, virtual_stat: self.virtual_stat })
     }
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         let info = FILE_BASIC_INFO { CreationTime: 0, LastAccessTime: 0, LastWriteTime: 0, ChangeTime: 0, FileAttributes: perm.attrs };
@@ -804,7 +810,7 @@ impl File {
         Ok(read as usize)
     }
     fn write_raw(&self, buf: &[u8], offset: Option<u64>) -> io::Result<usize> {
-        if self.virtual_len.is_some() {
+        if self.virtual_stat.is_some() {
             return Err(vfs::read_only());
         }
         let len = if buf.len() > u32::MAX as usize { u32::MAX } else { buf.len() as u32 };
@@ -939,7 +945,7 @@ impl AsHandle for File {
 }
 impl FromRawHandle for File {
     unsafe fn from_raw_handle(handle: RawHandle) -> File {
-        File { handle: OwnedHandle::from_raw_handle(handle), virtual_len: None }
+        File { handle: OwnedHandle::from_raw_handle(handle), virtual_stat: None }
     }
 }
 impl IntoRawHandle for File {
@@ -954,7 +960,7 @@ impl From<File> for OwnedHandle {
 }
 impl From<OwnedHandle> for File {
     fn from(handle: OwnedHandle) -> File {
-        File { handle, virtual_len: None }
+        File { handle, virtual_stat: None }
     }
 }
 
@@ -1084,17 +1090,17 @@ impl Metadata {
         self.file_index
     }
 
-    /// A virtual entry of a git run (Relax's VFS): a read-only file of its size, or a folder.
+    /// A virtual entry of a git run (Relax's VFS): a read-only file of its size and time, or a folder.
     fn virtual_entry(k: &vfs::Kind) -> Metadata {
-        let (attributes, file_size) = match k {
-            vfs::Kind::File(n) => (FILE_ATTRIBUTE_READONLY, *n),
-            _ => (FILE_ATTRIBUTE_DIRECTORY, 0),
+        let (attributes, file_size, last_write_time) = match k {
+            vfs::Kind::File(s) => (FILE_ATTRIBUTE_READONLY, s.len, intervals_from_unix_ns(s.mtime_ns)),
+            _ => (FILE_ATTRIBUTE_DIRECTORY, 0, 0),
         };
         Metadata {
             attributes,
             creation_time: 0,
             last_access_time: 0,
-            last_write_time: 0,
+            last_write_time,
             change_time: None,
             file_size,
             reparse_tag: 0,
@@ -1714,19 +1720,19 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
                 let mut virt = Vec::new();
                 for (name, is_dir) in vfs::list(&*abs)? {
                     let name_s = String::from_utf8_lossy(&name).into_owned();
-                    let file_size = if is_dir {
-                        0
+                    let (file_size, last_write_time) = if is_dir {
+                        (0, 0)
                     } else {
                         match vfs::kind(&abs.join(&name_s)) {
-                            Some((_, vfs::Kind::File(n))) => n,
-                            _ => 0,
+                            Some((_, vfs::Kind::File(s))) => (s.len, intervals_from_unix_ns(s.mtime_ns)),
+                            _ => (0, 0),
                         }
                     };
                     virt.push(FindData {
                         attributes: if is_dir { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_READONLY },
                         creation_time: 0,
                         last_access_time: 0,
-                        last_write_time: 0,
+                        last_write_time,
                         file_size,
                         reserved0: 0,
                         name: name_s.encode_utf16().collect(),

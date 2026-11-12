@@ -12,7 +12,7 @@ use crate::io;
 use crate::path::{Path, PathBuf};
 
 extern "C" {
-    fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32;
+    fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64, mtime_ns: *mut u64) -> i32;
     fn relax_vfs_read(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64;
     fn relax_vfs_list(p: *const u8, n: usize, out: *mut *const u8, out_len: *mut usize) -> u64;
     fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64;
@@ -53,8 +53,16 @@ pub(crate) fn edit_target(path: &Path, how: Edit) -> Option<io::Result<PathBuf>>
     })
 }
 
+/// A virtual file's stat: its length, and when it last changed in ns since the Unix epoch (an
+/// edited file's disk time; a store file's, derived from its blob, moves when the blob does).
+#[derive(Clone, Copy)]
+pub(crate) struct Stat {
+    pub len: u64,
+    pub mtime_ns: u64,
+}
+
 pub(crate) enum Kind {
-    File(u64),
+    File(Stat),
     Dir,
     Missing,
 }
@@ -88,9 +96,9 @@ fn key(path: &Path) -> &[u8] {
 
 fn kind_abs(path: &Path) -> Option<Kind> {
     let b = key(path);
-    let mut size = 0u64;
-    match unsafe { relax_vfs_stat(b.as_ptr(), b.len(), &mut size) } {
-        1 => Some(Kind::File(size)),
+    let (mut len, mut mtime_ns) = (0u64, 0u64);
+    match unsafe { relax_vfs_stat(b.as_ptr(), b.len(), &mut len, &mut mtime_ns) } {
+        1 => Some(Kind::File(Stat { len, mtime_ns })),
         2 => Some(Kind::Dir),
         -1 => Some(Kind::Missing),
         _ => None,

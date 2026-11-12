@@ -4,6 +4,141 @@ use crate::loops::{head_pos, U64_TY};
 use relax_backend::regalloc::{for_defs, for_uses};
 use relax_backend::rir::*;
 
+/// Record the failed check without changing the planner's result.
+macro_rules! refuse {
+    ($reason:expr) => {{
+        relax_backend::remark::loop_refuse($reason);
+        return None;
+    }};
+}
+
+/// Static names for unsupported memory element kinds (signed bytes need extension).
+fn element_reason(m: Mem) -> &'static str {
+    match m {
+        Mem::F64 => "elem-f64",
+        Mem::Int(8, _) => "elem-i64",
+        Mem::Int(2, _) => "elem-i16",
+        Mem::Int(1, true) => "elem-i8",
+        Mem::Int(_, _) => "elem-int-width",
+        Mem::F32 => "elem-f32",
+    }
+}
+
+fn float_op_reason(op: FOp) -> &'static str {
+    match op {
+        FOp::Add => "op-fadd",
+        FOp::Sub => "op-fsub",
+        FOp::Mul => "op-fmul",
+        FOp::Div => "op-fdiv",
+        FOp::Min => "op-fminnum",
+        FOp::Max => "op-fmaxnum",
+        FOp::MinLt => "op-fminlt",
+        FOp::MaxGt => "op-fmaxgt",
+    }
+}
+
+fn float_unary_reason(op: FUn) -> &'static str {
+    match op {
+        FUn::Neg => "op-fneg",
+        FUn::Abs => "op-fabs",
+        FUn::Sqrt => "op-fsqrt",
+        FUn::Floor => "op-ffloor",
+        FUn::Ceil => "op-fceil",
+        FUn::Trunc => "op-ftrunc",
+        FUn::RoundEven => "op-fround-even",
+        FUn::RoundAway => "op-fround-away",
+    }
+}
+
+/// Only called after the symbolic reader has rejected an instruction; it accepts nothing new.
+fn instruction_reason(i: &Inst, stored: bool) -> &'static str {
+    match i {
+        Inst::Load(..) if stored => "load-after-store",
+        Inst::Store(..) if stored => "second-store",
+        _ if stored => "store-not-last",
+        Inst::FBin(op, ..) => float_op_reason(*op),
+        Inst::FUnary(op, ..) => float_unary_reason(*op),
+        Inst::IBin(op, ..) | Inst::IBinI(op, ..) => match op {
+            IOp::Add => "op-iadd",
+            IOp::Sub => "op-isub",
+            IOp::Mul => "op-imul",
+            IOp::And => "op-iand",
+            IOp::Or => "op-ior",
+            IOp::Xor => "op-ixor",
+            IOp::Shl => "op-ishl",
+            IOp::Shr => "op-ishr",
+            IOp::Div => "op-idiv",
+            IOp::Rem => "op-irem",
+            IOp::MulHi => "op-imulhi",
+            IOp::Rotl => "op-irotl",
+            IOp::Bzhi => "op-ibzhi",
+            IOp::Crc32B => "op-icrc32b",
+            IOp::Crc32H => "op-icrc32h",
+            IOp::Crc32W => "op-icrc32w",
+            IOp::Crc32X => "op-icrc32x",
+            IOp::Crc32CB => "op-icrc32cb",
+            IOp::Crc32CH => "op-icrc32ch",
+            IOp::Crc32CW => "op-icrc32cw",
+            IOp::Crc32CX => "op-icrc32cx",
+        },
+        Inst::IBit(op, ..) => match op {
+            BitOp::Popcnt => "op-popcnt",
+            BitOp::Clz => "op-clz",
+            BitOp::Ctz => "op-ctz",
+            BitOp::Bswap => "op-bswap",
+            BitOp::Rev => "op-bitrev",
+        },
+        Inst::Coverage { .. } => "op-coverage",
+        Inst::Iconst(..) => "op-iconst",
+        Inst::Fconst(..) => "op-fconst",
+        Inst::Mov(..) => "op-mov",
+        Inst::INeg(..) => "op-ineg",
+        Inst::INot(..) => "op-inot",
+        Inst::ICmp(..) => "op-icmp",
+        Inst::ICmpI(..) => "op-icmp",
+        Inst::FCmp(..) => "op-fcmp",
+        Inst::Conv(..) => "op-conv",
+        Inst::Load(..) => "op-load",
+        Inst::Store(..) => "op-store",
+        Inst::LoadX(..) => "op-load-indexed",
+        Inst::StoreX(..) => "op-store-indexed",
+        Inst::SlotAddr(..) => "op-slot-addr",
+        Inst::Addr(..) => "op-addr",
+        Inst::FnAddr(..) => "op-fn-addr",
+        Inst::Call(..) => "op-call",
+        Inst::Copy(..) => "op-copy",
+        Inst::Sel(..) => "op-select",
+        Inst::SelCmp(..) => "op-select-cmp",
+        Inst::FMulAdd(..) => "op-fmuladd",
+        Inst::AtomicLoad(..) => "op-atomic-load",
+        Inst::AtomicStore(..) => "op-atomic-store",
+        Inst::AtomicRmw(..) => "op-atomic-rmw",
+        Inst::AtomicCas(..) => "op-atomic-cas",
+        Inst::Fence(..) => "op-fence",
+        Inst::FpEnv(..) => "op-fp-env",
+        Inst::Cpuid(..) => "op-cpuid",
+        Inst::Xgetbv(..) => "op-xgetbv",
+        Inst::TlsAddr(..) => "op-tls-addr",
+        Inst::TlsStatic(..) => "op-tls-static",
+        Inst::VSel(..) => "op-vselect",
+        Inst::VFma(..) => "op-vfma",
+        Inst::VSplat(..) => "op-vsplat",
+        Inst::VConst(..) => "op-vconst",
+        Inst::VExtract(..) => "op-vextract",
+        Inst::VInsert(..) => "op-vinsert",
+        Inst::VLoad(..) => "op-vload",
+        Inst::VStore(..) => "op-vstore",
+        Inst::VLoadX(..) => "op-vload-indexed",
+        Inst::VStoreX(..) => "op-vstore-indexed",
+        Inst::VAny(..) => "op-vany",
+        Inst::VGather(..) => "op-vgather",
+        Inst::VTbl(..) => "op-vtbl",
+        Inst::VShuffle(..) => "op-vshuffle",
+        Inst::VX(..) => "op-vx",
+        Inst::VX3(..) => "op-vx3",
+    }
+}
+
 /// What a value of a stream loop is, per vreg, while the body is read symbolically.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Sv {
@@ -180,11 +315,18 @@ fn stream_maps(options: &relax_session::Options, f: &mut Func, only: Option<u32>
                     for (b, block) in saved { f.blocks[b] = block; }
                 }
             }
+            // plan (including a folded retry) recorded the failed check with loop_refuse.
             continue;
         };
         let span = if options.cpu.avx2 && p.kind != Lane::Byte { 32 } else { 16 };
-        let Some(checks) = legal(f, &mut p, span, &reach, &preds, &mut reads) else { continue };
-        let Some(shape) = cost(options, &p) else { continue };
+        let Some(checks) = legal(f, &mut p, span, &reach, &preds, &mut reads) else {
+            // legal recorded its failed check with loop_refuse.
+            continue;
+        };
+        let Some(shape) = cost(options, &p) else {
+            relax_backend::remark::loop_refuse("cost-shape");
+            continue;
+        };
         emit(f, p, checks, shape);
         for (done, member) in transformed.iter_mut().zip(&members) { *done |= *member; }
         reads = None;
@@ -274,7 +416,7 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
     // the store. No interior entries or nested control flow can be bypassed.
     let Some(chain) = linear_cycle(f, head, members, preds) else {
         *nonlinear = true;
-        return None;
+        refuse!("not-linear");
     };
     let nv = f.vregs.len();
     let mut defined = vec![false; nv];
@@ -286,7 +428,7 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
             for_defs(i, |v| { defined[v.0 as usize] = true; definitions[v.0 as usize] += 1; });
         }
     }
-    if definitions.iter().any(|n| *n > 1) { return None; }
+    if definitions.iter().any(|n| *n > 1) { refuse!("multiple-definitions"); }
     relax_backend::remark::loop_stage(1);
     // a slot's address the body makes (Alloc remat leaves it there) is invariant: a root
     // too, which the vector code makes for itself
@@ -324,7 +466,7 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                     wops.push(WOp::Const(c));
                     wops.len() - 1
                 }
-                _ => return None,
+                _ => refuse!("operand-shape"),
             }
         }};
     }
@@ -343,21 +485,24 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                     wops.push(WOp::Const(c));
                     wops.len() - 1
                 }
-                _ => return None,
+                _ => refuse!("operand-shape"),
             };
             let t = wtype(&wops, &f.vregs, Lane::F32, k);
-            if t != $t && !(t == Wt::Any && $t != Wt::M) { return None; }
+            if t != $t && !(t == Wt::Any && $t != Wt::M) { refuse!("operand-lane-type"); }
             k
         }};
     }
     // the stream an access `[p + off]` goes to
     macro_rules! stream_at {
         ($p:expr, $off:expr) => {{
-            match sv[$p.0 as usize] {
-                Sv::Addr(r, o) if roots.contains(&r) => o.checked_add($off as i64).filter(|d| d.abs() < 1 << 20).map(|disp| Stream { root: r, iv: None, sh: 0, disp }),
-                Sv::Ptr(base, iv, o, sh) => o.checked_add($off as i64).filter(|d| d.abs() < 1 << 20).map(|disp| Stream { root: base, iv: Some(iv), sh, disp }),
-                _ => None,
-            }
+            let (root, iv, o, sh) = match sv[$p.0 as usize] {
+                Sv::Addr(r, o) if roots.contains(&r) => (r, None, o, 0),
+                Sv::Ptr(base, iv, o, sh) => (base, Some(iv), o, sh),
+                _ => refuse!("stream-address"),
+            };
+            let Some(disp) = o.checked_add($off as i64) else { refuse!("addr-overflow") };
+            if !(disp.abs() < 1 << 20) { refuse!("stream-displacement"); }
+            Stream { root, iv, sh, disp }
         }};
     }
     let last = *chain.last().unwrap();
@@ -367,7 +512,7 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
         let block = &f.blocks[b as usize];
         if let Term::Branch(c, ..) = block.term {
             if !matches!(block.insts.last(), Some(Inst::ICmpI(Cond::Eq | Cond::Ne, false, d, _, 0) | Inst::ICmpI(Cond::Lt | Cond::Ge, _, d, _, _) | Inst::ICmp(Cond::Eq | Cond::Ne | Cond::Lt | Cond::Ge, _, d, _, _)) if *d == c) {
-                return None;
+                refuse!("guard-terminator");
             }
         }
         for i in &block.insts {
@@ -380,66 +525,66 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                 }
                 Inst::Mov(d, s) => match sv[s.0 as usize] {
-                    Sv::No => return None,
+                    Sv::No => refuse!("mov-unknown"),
                     x => {
-                        if f.vregs[d.0 as usize] != f.vregs[s.0 as usize] { return None; }
+                        if f.vregs[d.0 as usize] != f.vregs[s.0 as usize] { refuse!("mov-class"); }
                         sv[d.0 as usize] = x;
                     }
                 },
                 Inst::IBinI(op @ (IOp::Add | IOp::Sub), it, d, s, k) if it == U64_TY => {
-                    let Sv::Addr(r, off) = sv[s.0 as usize] else { return None };
-                    let Some(off) = (if op == IOp::Add { off.checked_add(k) } else { off.checked_sub(k) }) else { return None };
+                    let Sv::Addr(r, off) = sv[s.0 as usize] else { refuse!("addr-not-affine") };
+                    let Some(off) = (if op == IOp::Add { off.checked_add(k) } else { off.checked_sub(k) }) else { refuse!("addr-overflow") };
                     sv[d.0 as usize] = Sv::Addr(r, off);
                 }
                 Inst::IBinI(IOp::Shl, it, d, s, k @ 1..=3) if it == U64_TY => {
-                    let Sv::Addr(r, off) = sv[s.0 as usize] else { return None };
-                    if !roots.contains(&r) { return None; }
+                    let Sv::Addr(r, off) = sv[s.0 as usize] else { refuse!("addr-not-affine") };
+                    if !roots.contains(&r) { refuse!("addr-not-root"); }
                     sv[d.0 as usize] = Sv::Scaled(r, off, k as u8);
                 }
                 Inst::IBin(IOp::Add, it, d, a, b2) if it == U64_TY && (matches!(sv[a.0 as usize], Sv::Scaled(..)) || matches!(sv[b2.0 as usize], Sv::Scaled(..))) => {
                     let (Sv::Addr(base, 0), Sv::Scaled(iv, off, sh)) = (match (sv[a.0 as usize], sv[b2.0 as usize]) {
                         (x @ Sv::Addr(..), y @ Sv::Scaled(..)) => (x, y),
                         (y @ Sv::Scaled(..), x @ Sv::Addr(..)) => (x, y),
-                        _ => return None,
-                    }) else { return None };
-                    let Some(disp) = off.checked_mul(1 << sh) else { return None };
-                    if !roots.contains(&base) || base == iv { return None; }
+                        _ => refuse!("addr-index-shape"),
+                    }) else { refuse!("addr-index-base") };
+                    let Some(disp) = off.checked_mul(1 << sh) else { refuse!("addr-overflow") };
+                    if !roots.contains(&base) || base == iv { refuse!(if !roots.contains(&base) { "addr-not-root" } else { "addr-index-alias" }); }
                     sv[d.0 as usize] = Sv::Ptr(base, iv, disp, sh);
                 }
                 Inst::ICmp(c @ (Cond::Lt | Cond::Ge), sg, d, a, b2) => {
-                    let Term::Branch(cv, t, e) = block.term else { return None };
+                    let Term::Branch(cv, t, e) = block.term else { refuse!("guard-not-branch") };
                     if cv != d || (if c == Cond::Lt { !members[t as usize] || members[e as usize] } else { members[t as usize] || !members[e as usize] }) {
-                        return None;
+                        refuse!(if cv != d { "guard-condition" } else { "guard-lt-edge" });
                     }
-                    let (Sv::Addr(ra, oa), Sv::Addr(rb, 0)) = (sv[a.0 as usize], sv[b2.0 as usize]) else { return None };
-                    if !roots.contains(&ra) || !roots.contains(&rb) { return None; }
+                    let (Sv::Addr(ra, oa), Sv::Addr(rb, 0)) = (sv[a.0 as usize], sv[b2.0 as usize]) else { refuse!("guard-lt-operands") };
+                    if !roots.contains(&ra) || !roots.contains(&rb) { refuse!("guard-not-root"); }
                     lt_guards.push((ra, oa, Bound::Reg(rb), sg));
                 }
                 Inst::ICmpI(c @ (Cond::Lt | Cond::Ge), sg, d, a, k) => {
-                    let Term::Branch(cv, t, e) = block.term else { return None };
+                    let Term::Branch(cv, t, e) = block.term else { refuse!("guard-not-branch") };
                     if cv != d || (if c == Cond::Lt { !members[t as usize] || members[e as usize] } else { members[t as usize] || !members[e as usize] }) {
-                        return None;
+                        refuse!(if cv != d { "guard-condition" } else { "guard-lt-edge" });
                     }
-                    let Sv::Addr(ra, oa) = sv[a.0 as usize] else { return None };
-                    if !roots.contains(&ra) { return None; }
+                    let Sv::Addr(ra, oa) = sv[a.0 as usize] else { refuse!("guard-lt-operands") };
+                    if !roots.contains(&ra) { refuse!("guard-not-root"); }
                     lt_guards.push((ra, oa, Bound::Imm(k), sg));
                 }
                 Inst::ICmpI(c @ (Cond::Eq | Cond::Ne), false, d, s, 0) => {
-                    let Term::Branch(cv, t, e) = block.term else { return None };
+                    let Term::Branch(cv, t, e) = block.term else { refuse!("guard-not-branch") };
                     if cv != d || (if c == Cond::Ne { !members[t as usize] || members[e as usize] } else { members[t as usize] || !members[e as usize] }) {
-                        return None;
+                        refuse!(if cv != d { "guard-condition" } else { "guard-zero-edge" });
                     }
-                    let Sv::Addr(r, o) = sv[s.0 as usize] else { return None };
-                    if !roots.contains(&r) { return None; }
+                    let Sv::Addr(r, o) = sv[s.0 as usize] else { refuse!("guard-zero-operand") };
+                    if !roots.contains(&r) { refuse!("guard-not-root"); }
                     zero_guards.push((r, o));
                 }
                 Inst::ICmp(c @ (Cond::Eq | Cond::Ne), false, d, a, b2) => {
-                    let Term::Branch(cv, t, e) = block.term else { return None };
+                    let Term::Branch(cv, t, e) = block.term else { refuse!("guard-not-branch") };
                     if cv != d || (if c == Cond::Ne { !members[t as usize] || members[e as usize] } else { members[t as usize] || !members[e as usize] }) {
-                        return None;
+                        refuse!(if cv != d { "guard-condition" } else { "guard-end-edge" });
                     }
-                    let (Sv::Addr(ra, oa), Sv::Addr(rb, ob)) = (sv[a.0 as usize], sv[b2.0 as usize]) else { return None };
-                    if !roots.contains(&ra) || !roots.contains(&rb) { return None; }
+                    let (Sv::Addr(ra, oa), Sv::Addr(rb, ob)) = (sv[a.0 as usize], sv[b2.0 as usize]) else { refuse!("guard-end-operands") };
+                    if !roots.contains(&ra) || !roots.contains(&rb) { refuse!("guard-not-root"); }
                     end_guards.push((ra, oa, rb, ob));
                 }
                 Inst::Iconst(d, k) if store.is_none() => sv[d.0 as usize] = Sv::K(k as u32),
@@ -447,17 +592,17 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                 // a re-extension of a 32-bit value keeps its low 32 bits
                 Inst::Conv(Conv::IntToInt(it), d, s) if store.is_none() && it.bits == 32 && matches!(sv[s.0 as usize], Sv::Lane(_)) && kind == Some(Lane::I32) => sv[d.0 as usize] = sv[s.0 as usize],
                 Inst::Load(m, d, p, off) if store.is_none() => {
-                    let k = match m { Mem::Int(1, false) => Lane::Byte, Mem::F32 => Lane::F32, Mem::Int(4, _) => Lane::I32, _ => return None };
-                    if kind.is_some_and(|o| o != k) { return None; }
+                    let k = match m { Mem::Int(1, false) => Lane::Byte, Mem::F32 => Lane::F32, Mem::Int(4, _) => Lane::I32, _ => refuse!(element_reason(m)) };
+                    if kind.is_some_and(|o| o != k) { refuse!("elem-mixed"); }
                     kind = Some(k);
-                    let Some(st) = stream_at!(p, off) else { return None };
+                    let st = stream_at!(p, off);
                     wops.push(WOp::Load(st));
                     loads.push((st, wops.len() - 1));
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                 }
                 Inst::IBin(op @ (IOp::Add | IOp::Sub | IOp::And | IOp::Or | IOp::Xor | IOp::Mul), it, d, a, b2) if store.is_none() && matches!(kind, Some(Lane::Byte | Lane::I32)) && it.bits as i64 == 8 * kind.unwrap().bytes() => {
                     let k = kind.unwrap();
-                    if k == Lane::Byte && op == IOp::Mul { return None; }
+                    if k == Lane::Byte && op == IOp::Mul { refuse!("op-imul-byte"); }
                     let (x, y) = (operand!(a, k), operand!(b2, k));
                     let w = if k == Lane::Byte { VW::B } else { VW::S };
                     let o = match op { IOp::Add => VX::Add(w), IOp::Sub => VX::Sub(w), IOp::Mul => VX::MulLo(w), IOp::And => VX::And, IOp::Or => VX::Or, _ => VX::Xor };
@@ -484,13 +629,13 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                 }
                 Inst::FBin(op, false, d, a, b2) if store.is_none() && kind == Some(Lane::F32) => {
-                    let o = match op { FOp::Add => VX::FAdd(VW::S, NanBits::Host), FOp::Sub => VX::FSub(VW::S, NanBits::Host), FOp::Mul => VX::FMul(VW::S, NanBits::Host), FOp::Div => VX::FDiv(VW::S, NanBits::Host), FOp::MinLt => VX::FMinLt(VW::S), FOp::MaxGt => VX::FMaxGt(VW::S), _ => return None };
+                    let o = match op { FOp::Add => VX::FAdd(VW::S, NanBits::Host), FOp::Sub => VX::FSub(VW::S, NanBits::Host), FOp::Mul => VX::FMul(VW::S, NanBits::Host), FOp::Div => VX::FDiv(VW::S, NanBits::Host), FOp::MinLt => VX::FMinLt(VW::S), FOp::MaxGt => VX::FMaxGt(VW::S), _ => refuse!(float_op_reason(op)) };
                     let (x, y) = (lane_of!(a, Wt::F), lane_of!(b2, Wt::F));
                     wops.push(WOp::Bin(o, x, y));
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                 }
                 Inst::FUnary(op, false, d, a) if store.is_none() && kind == Some(Lane::F32) => {
-                    let o = match op { FUn::Neg => VX::FNeg(VW::S), FUn::Abs => VX::FAbs(VW::S), FUn::Sqrt => VX::FSqrt(VW::S, NanBits::Host), _ => return None };
+                    let o = match op { FUn::Neg => VX::FNeg(VW::S), FUn::Abs => VX::FAbs(VW::S), FUn::Sqrt => VX::FSqrt(VW::S, NanBits::Host), _ => refuse!(float_unary_reason(op)) };
                     let x = lane_of!(a, Wt::F);
                     wops.push(WOp::Un(o, x));
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
@@ -504,7 +649,7 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                 }
                 Inst::Conv(c @ (Conv::FToBits(false) | Conv::BitsToF(false)), d, s) if store.is_none() && kind == Some(Lane::F32) => {
                     let (from, to) = if matches!(c, Conv::FToBits(_)) { (Wt::F, Wt::I) } else { (Wt::I, Wt::F) };
-                    let Sv::Lane(_) = sv[s.0 as usize] else { return None };
+                    let Sv::Lane(_) = sv[s.0 as usize] else { refuse!("bitcast-not-lane") };
                     let x = lane_of!(s, from);
                     wops.push(WOp::Same(x, to));
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
@@ -530,23 +675,23 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
                     sv[d.0 as usize] = Sv::Lane(wops.len() - 1);
                 }
                 Inst::Store(m, p, off, s) if store.is_none() => {
-                    let k = match m { Mem::Int(1, false) => Lane::Byte, Mem::F32 => Lane::F32, Mem::Int(4, _) => Lane::I32, _ => return None };
-                    if kind != Some(k) { return None; }
-                    let Some(st) = stream_at!(p, off) else { return None };
-                    let Sv::Lane(w) = sv[s.0 as usize] else { return None };
-                    if k == Lane::F32 && !matches!(wtype(&wops, &f.vregs, k, w), Wt::F | Wt::Any) { return None; }
+                    let k = match m { Mem::Int(1, false) => Lane::Byte, Mem::F32 => Lane::F32, Mem::Int(4, _) => Lane::I32, _ => refuse!(element_reason(m)) };
+                    if kind != Some(k) { refuse!(if kind.is_none() { "no-load" } else { "elem-mixed" }); }
+                    let st = stream_at!(p, off);
+                    let Sv::Lane(w) = sv[s.0 as usize] else { refuse!("store-not-lane") };
+                    if k == Lane::F32 && !matches!(wtype(&wops, &f.vregs, k, w), Wt::F | Wt::Any) { refuse!("store-lane-type"); }
                     store = Some((st, w));
                 }
                 Inst::SlotAddr(d, _) if slots.iter().any(|s| s.0 == d) => {}
-                _ => return None,
+                _ => refuse!(instruction_reason(i, store.is_some())),
             }
         }
         // the store ends the body: only its block's own exit test follows (`p == end` of the
         // next element), and the sole back edge leaves that block
-        if store.is_some() && b != *chain.last().unwrap() { return None; }
+        if store.is_some() && b != *chain.last().unwrap() { refuse!("store-not-last"); }
     }
-    let (Some((dst, value)), Some(kind)) = (store, kind) else { return None };
-    if loads.is_empty() { return None; }
+    let (Some((dst, value)), Some(kind)) = (store, kind) else { refuse!("no-store") };
+    if loads.is_empty() { refuse!("no-load"); }
     relax_backend::remark::loop_stage(2);
     let sz = kind.bytes();
     let mut p = Plan {
@@ -556,14 +701,14 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
     };
     let streams: Vec<Stream> = p.loads.iter().map(|x| x.0).chain(std::iter::once(dst)).collect();
     // indexed streams scale by the element size
-    if streams.iter().any(|s| s.iv.is_some() && 1i64 << s.sh != p.sz) { return None; }
+    if streams.iter().any(|s| s.iv.is_some() && 1i64 << s.sh != p.sz) { refuse!("stream-scale"); }
     relax_backend::remark::loop_stage(3);
     let ptr_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_none()).map(|s| s.root).collect();
     let base_roots: Vec<VReg> = streams.iter().filter(|s| s.iv.is_some()).map(|s| s.root).collect();
     let mut iv_roots: Vec<VReg> = streams.iter().filter_map(|s| s.iv).collect();
     iv_roots.extend(p.lt_guards.iter().map(|g| g.0));
     // an order test of a pointer or an equality test with the wrong roles: leave the loop
-    if p.lt_guards.iter().any(|g| ptr_roots.contains(&g.0)) { return None; }
+    if p.lt_guards.iter().any(|g| ptr_roots.contains(&g.0)) { refuse!("guard-lt-pointer"); }
     let walks = |v: VReg| matches!(p.sv[v.0 as usize], Sv::Addr(r, s) if r == v && (s == p.sz || s == 1));
     for g in p.end_guards.iter_mut() {
         if walks(g.2) && !walks(g.0) {
@@ -587,24 +732,49 @@ fn plan<'a>(f: &Func, head: u32, members: &'a [bool], preds: &[Vec<u32>], nonlin
             Sv::Addr(r, 1) if r == v && is_i && guarded_end && !base_roots.contains(&v) => p.ivs.push(v),
             // invariant: never defined in the loop (or a slot's address)
             Sv::Addr(r, 0) if r == v && (p.definitions[v.0 as usize] == 0 || p.slots.iter().any(|s| s.0 == v)) && !ptr_roots.contains(&v) && !iv_roots.contains(&v) => {}
-            _ => return None,
+            _ => refuse!(match fin {
+                Sv::Addr(r, 0) if r == v && (p.definitions[v.0 as usize] == 0 || p.slots.iter().any(|s| s.0 == v)) && p.loads.iter().any(|(s, _)| s.iv.is_none() && s.root == v) => "load-invariant",
+                Sv::Addr(r, _) if r != v => "recurrence-root",
+                Sv::Addr(..) if !is_i => "recurrence-class",
+                Sv::Addr(..) if base_roots.contains(&v) => "recurrence-base",
+                Sv::Addr(..) if ptr_roots.contains(&v) && iv_roots.contains(&v) => "recurrence-role",
+                Sv::Addr(..) if ptr_roots.contains(&v) => "recurrence-pointer-step",
+                Sv::Addr(..) if iv_roots.contains(&v) => "recurrence-index-step",
+                Sv::Addr(_, -1) if !guarded_zero => "recurrence-count-guard",
+                Sv::Addr(_, 0) => "recurrence-invariant-defined",
+                Sv::Addr(..) => "recurrence-step",
+                _ => "recurrence-value",
+            }),
         }
     }
     // a zero test of a counter or a pointer: fine; of an invariant it is a loop that never ends
     // or exits at once. Offsets: a counter is tested after its steps (<= 0), a pointer ahead
     for &(r, o) in &p.zero_guards {
-        if !(p.counts.contains(&r) && o <= 0 || p.walkers.contains(&r) && o >= 0) { return None; }
+        if !(p.counts.contains(&r) && o <= 0 || p.walkers.contains(&r) && o >= 0) { refuse!(match () {
+                _ if !p.counts.contains(&r) && !p.walkers.contains(&r) => "guard-zero-recurrence",
+                _ => "guard-zero-offset",
+            }); }
     }
     // every end guard compares a walking pointer or index (ahead of its entry value, whole
     // elements) with an invariant
     for &(a, oa, b2, ob) in &p.end_guards {
         let step = if p.walkers.contains(&a) { p.sz } else { 1 };
-        if !((p.walkers.contains(&a) || p.ivs.contains(&a)) && !p.walkers.contains(&b2) && !p.ivs.contains(&b2) && !p.counts.contains(&b2) && ob == 0 && oa >= 0 && oa % step == 0) { return None; }
+        if !((p.walkers.contains(&a) || p.ivs.contains(&a)) && !p.walkers.contains(&b2) && !p.ivs.contains(&b2) && !p.counts.contains(&b2) && ob == 0 && oa >= 0 && oa % step == 0) { refuse!(match () {
+                _ if !p.walkers.contains(&a) && !p.ivs.contains(&a) => "guard-end-recurrence",
+                _ if p.walkers.contains(&b2) || p.ivs.contains(&b2) || p.counts.contains(&b2) => "guard-end-bound",
+                _ if ob != 0 => "guard-end-bound-offset",
+                _ if oa < 0 => "guard-end-offset",
+                _ => "guard-end-alignment",
+            }); }
     }
     for &(a, oa, b2, _) in &p.lt_guards {
-        if !(p.ivs.contains(&a) && oa >= 0 && match b2 { Bound::Reg(r) => !p.walkers.contains(&r) && !p.ivs.contains(&r) && !p.counts.contains(&r), Bound::Imm(_) => true }) { return None; }
+        if !(p.ivs.contains(&a) && oa >= 0 && match b2 { Bound::Reg(r) => !p.walkers.contains(&r) && !p.ivs.contains(&r) && !p.counts.contains(&r), Bound::Imm(_) => true }) { refuse!(match () {
+                _ if !p.ivs.contains(&a) => "guard-lt-recurrence",
+                _ if oa < 0 => "guard-lt-offset",
+                _ => "guard-lt-bound",
+            }); }
     }
-    if p.counts.is_empty() && p.end_guards.is_empty() && p.lt_guards.is_empty() { return None; }
+    if p.counts.is_empty() && p.end_guards.is_empty() && p.lt_guards.is_empty() { refuse!("guard-unbounded"); }
     relax_backend::remark::loop_stage(4);
     Some(p)
 }
@@ -617,7 +787,7 @@ fn legal(f: &Func, p: &mut Plan<'_>, span: i64, reach: &[bool], preds: &[Vec<u32
     // dependencies between the store and the loads that a vector would reorder, when their
     // distance is known
     for l in loads.iter().map(|x| x.0) {
-        if l.root == dst.root && l.iv == dst.iv && l.sh == dst.sh && dst.disp - l.disp > 0 && dst.disp - l.disp < span { return None; }
+        if l.root == dst.root && l.iv == dst.iv && l.sh == dst.sh && dst.disp - l.disp > 0 && dst.disp - l.disp < span { refuse!("static-distance"); }
     }
     // The scalar temporaries are not produced by the widened body. All observable
     // loop-carried values must be precisely the pointer and length recurrences -- except
@@ -642,7 +812,7 @@ fn legal(f: &Func, p: &mut Plan<'_>, span: i64, reach: &[bool], preds: &[Vec<u32
         if b < members.len() && members[b] || b < reach.len() && !reach[b] { continue; }
         // left only from the chain: the earliest exit's position
         let from = preds.get(b).and_then(|ps| ps.iter().map(|&p| at_of(p)).try_fold(u32::MAX, |m, k| k.map(|k| m.min(k))));
-        if reads_temporary(b, &|v| from.is_some_and(|k| k != u32::MAX && def_at[v.0 as usize] <= k)) { return None; }
+        if reads_temporary(b, &|v| from.is_some_and(|k| k != u32::MAX && def_at[v.0 as usize] <= k)) { refuse!("temporary-live-out"); }
     }
     // The back edge's own test (the last block's guard, after all of the iteration's work)
     // for the vector's last element is made after the vector loop, by `tail`: on into the

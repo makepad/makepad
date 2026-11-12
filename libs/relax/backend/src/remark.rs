@@ -37,6 +37,8 @@ pub struct LoopRemark {
     pub pass: &'static str,
     pub stage: u8,
     pub done: bool,
+    /// The failed check, or empty when no refusal was recorded.
+    pub reason: &'static str,
 }
 
 /// What one build recorded.
@@ -86,7 +88,7 @@ pub fn loop_try(pass: &'static str, pos: u64) {
     SINK.with(|s| {
         if let Some(r) = s.borrow_mut().as_mut() {
             r.loops.retain(|l| !(l.pass == pass && l.pos == pos));
-            r.loops.push(LoopRemark { pos, pass, stage: 0, done: false });
+            r.loops.push(LoopRemark { pos, pass, stage: 0, done: false, reason: "" });
         }
     });
 }
@@ -99,6 +101,18 @@ pub fn loop_stage(stage: u8) {
     SINK.with(|s| {
         if let Some(l) = s.borrow_mut().as_mut().and_then(|r| r.loops.last_mut()) {
             l.stage = l.stage.max(stage);
+        }
+    });
+}
+
+/// The current loop failed this check; a folded attempt replaces the earlier reason.
+pub fn loop_refuse(reason: &'static str) {
+    if !on() {
+        return;
+    }
+    SINK.with(|s| {
+        if let Some(l) = s.borrow_mut().as_mut().and_then(|r| r.loops.last_mut()) {
+            l.reason = reason;
         }
     });
 }
@@ -132,7 +146,13 @@ impl LoopRemark {
             ("lane-accumulators", 0) => "no group of independent accumulators of one array",
             _ => "a later check failed",
         };
-        format!("{}: not vectorised: {}", self.pass, why)
+        let mut text = format!("{}: not vectorised: {}", self.pass, why);
+        if !self.reason.is_empty() {
+            text.push_str(" [");
+            text.push_str(self.reason);
+            text.push(']');
+        }
+        text
     }
 }
 

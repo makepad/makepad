@@ -21371,6 +21371,15 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let c = crate::memstat::tagged(crate::memstat::Tag::Codegen, || relax_codegen::native::compile_freq(options, &func, &env, freq.as_deref()));
         let rk = relax_backend::remark::take(remarks);
         crate::inspect::remarks::record_spills(id, rk.spills);
+        static LOOP_TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *LOOP_TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_LOOP_TRACE").is_some()) {
+            // This build runs off the owner without its source files: keep the raw RIR
+            // position rather than reaching into the live Unit to render file:line.
+            for l in &rk.loops {
+                let verdict = if l.done { "vectorised" } else if l.reason.is_empty() { "-" } else { l.reason };
+                eprintln!("loop-remark {} {} {} stage {} {}", name, l.pos, l.pass, l.stage, verdict);
+            }
+        }
         crate::inspect::remarks::record_loops(id, rk.loops);
         crate::memstat::note_big("codegen O3", &func.name, mps, || cg_shape(&func));
         let c = c?;

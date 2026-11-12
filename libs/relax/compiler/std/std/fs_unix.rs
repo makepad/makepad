@@ -20,11 +20,11 @@ use crate::time::SystemTime;
 
 use super::vfs;
 
-/// The stat of a virtual entry (a regular file of its size, or a folder).
+/// The stat of a virtual entry (a regular file of its size and time, or a folder).
 pub(crate) fn vfs_stat(k: &vfs::Kind) -> stat_t {
     match k {
-        vfs::Kind::File(n) => stat_t::synthetic(sys::S_IFREG | 0o644, *n as i64),
-        _ => stat_t::synthetic(sys::S_IFDIR | 0o755, 0),
+        vfs::Kind::File(s) => stat_t::synthetic(sys::S_IFREG | 0o644, s.len as i64, s.mtime_ns),
+        _ => stat_t::synthetic(sys::S_IFDIR | 0o755, 0, 0),
     }
 }
 
@@ -100,7 +100,8 @@ fn needs_write() -> io::Error {
 
 pub struct File {
     fd: OwnedFd,
-    virtual_len: Option<u64>,
+    /// A virtual file's stat (its bytes are a private copy in `fd`).
+    virtual_stat: Option<vfs::Stat>,
 }
 
 fn virtual_fd() -> io::Result<OwnedFd> {
@@ -196,13 +197,13 @@ impl OpenOptions {
                 return run_path_with_cstr(&disk, &|c| self.open_c(c));
             }
             return match k {
-                vfs::Kind::File(_) => {
+                vfs::Kind::File(stat) => {
                     let data = vfs::read(&*abs)?;
-                    let mut file = File { fd: virtual_fd()?, virtual_len: None };
+                    let mut file = File { fd: virtual_fd()?, virtual_stat: None };
                     cvt_r(|| unsafe { sys::fchmod(file.raw(), 0o644 as sys::mode_t) })?;
                     file.write_all(&data)?;
                     file.seek(SeekFrom::Start(0))?;
-                    file.virtual_len = Some(data.len() as u64);
+                    file.virtual_stat = Some(vfs::Stat { len: data.len() as u64, mtime_ns: stat.mtime_ns });
                     Ok(file)
                 }
                 // open(2) of a folder for reading succeeds on the disk (its reads fail EISDIR; a
@@ -215,7 +216,7 @@ impl OpenOptions {
                             return Ok(file);
                         }
                     }
-                    Ok(File { fd: virtual_dir_fd()?, virtual_len: None })
+                    Ok(File { fd: virtual_dir_fd()?, virtual_stat: None })
                 }
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
             };
@@ -267,7 +268,7 @@ impl OpenOptions {
         let flags = sys::os::O_CLOEXEC | self.access_mode()? | self.creation_mode()? | (self.custom_flags & !3);
         let mode = self.mode;
         let fd = cvt_r(|| unsafe { sys::open(path.as_ptr(), flags, mode as core::ffi::c_uint) })?;
-        Ok(File { fd: unsafe { OwnedFd::from_raw_fd(fd) }, virtual_len: None })
+        Ok(File { fd: unsafe { OwnedFd::from_raw_fd(fd) }, virtual_stat: None })
     }
 }
 
@@ -327,7 +328,7 @@ impl File {
         self.sync_all()
     }
     pub fn set_len(&self, size: u64) -> io::Result<()> {
-        if self.virtual_len.is_some() {
+        if self.virtual_stat.is_some() {
             return Err(vfs::read_only());
         }
         if size > i64::MAX as u64 {
@@ -337,15 +338,15 @@ impl File {
         Ok(())
     }
     pub fn metadata(&self) -> io::Result<Metadata> {
-        if let Some(len) = self.virtual_len {
-            return Ok(Metadata { st: vfs_stat(&vfs::Kind::File(len)) });
+        if let Some(stat) = self.virtual_stat {
+            return Ok(Metadata { st: vfs_stat(&vfs::Kind::File(stat)) });
         }
         let mut st = stat_t::zeroed();
         cvt(unsafe { sys::os::fstat(self.raw(), &mut st as *mut stat_t) })?;
         Ok(Metadata { st })
     }
     pub fn try_clone(&self) -> io::Result<File> {
-        Ok(File { fd: self.fd.try_clone()?, virtual_len: self.virtual_len })
+        Ok(File { fd: self.fd.try_clone()?, virtual_stat: self.virtual_stat })
     }
     pub fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
         cvt_r(|| unsafe { sys::fchmod(self.raw(), perm.mode as sys::mode_t) })?;
@@ -407,7 +408,7 @@ impl File {
         }
     }
     fn write_raw(&self, buf: &[u8]) -> io::Result<usize> {
-        if self.virtual_len.is_some() {
+        if self.virtual_stat.is_some() {
             return Err(vfs::read_only());
         }
         let len = if buf.len() > crate::os::unix::fs::READ_LIMIT { crate::os::unix::fs::READ_LIMIT } else { buf.len() };
@@ -526,7 +527,7 @@ impl AsFd for File {
 }
 impl FromRawFd for File {
     unsafe fn from_raw_fd(fd: RawFd) -> File {
-        File { fd: OwnedFd::from_raw_fd(fd), virtual_len: None }
+        File { fd: OwnedFd::from_raw_fd(fd), virtual_stat: None }
     }
 }
 impl IntoRawFd for File {
@@ -541,7 +542,7 @@ impl From<File> for OwnedFd {
 }
 impl From<OwnedFd> for File {
     fn from(fd: OwnedFd) -> File {
-        File { fd, virtual_len: None }
+        File { fd, virtual_stat: None }
     }
 }
 impl crate::io::IsTerminal for File {

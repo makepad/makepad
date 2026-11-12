@@ -147,11 +147,14 @@ pub struct stat_t {
 }
 
 impl stat_t {
-    /// A stat of a file Relax's VFS serves (git runs): its type bits and size only.
-    pub fn synthetic(mode: u32, size: i64) -> stat_t {
+    /// A stat of a file Relax's VFS serves (git runs): its type bits, size and modification time
+    /// (ns since the Unix epoch).
+    pub fn synthetic(mode: u32, size: i64, mtime_ns: u64) -> stat_t {
         let mut st = stat_t::zeroed();
         st.st_mode = mode as u32;
         st.st_size = size;
+        st.st_mtime = (mtime_ns / 1_000_000_000) as _;
+        st.st_mtime_nsec = (mtime_ns % 1_000_000_000) as _;
         st
     }
     pub fn zeroed() -> stat_t {

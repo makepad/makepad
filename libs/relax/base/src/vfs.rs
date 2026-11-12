@@ -565,6 +565,16 @@ pub struct Metadata {
     pub is_symlink: bool,
 }
 
+/// When a store entry last changed, as its stat says (ns since the Unix epoch): derived from its
+/// mount's commit and its blob, so it holds while the file does and moves whenever its blob does.
+fn store_time_ns(mount: &Mount, entry: Option<&Entry>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    mount.commit.hash(&mut hash);
+    if let Some(entry) = entry { entry.oid.hash(&mut hash); }
+    hash.finish()
+}
+
 /// Content metadata for either backend. Immutable store identities supply a stable
 /// timestamp; edited virtual files use their overlay's filesystem metadata.
 pub fn metadata(path: impl AsRef<std::path::Path>) -> io::Result<Metadata> {
@@ -583,13 +593,9 @@ fn metadata_inner(path: &std::path::Path) -> io::Result<Metadata> {
         let is_dir = mount.is_dir(&rel);
         let entry = mount.file(&rel);
         if !is_dir && entry.is_none() { return Err(not_found(&s)); }
-        use std::hash::{Hash, Hasher};
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        mount.commit.hash(&mut hash);
-        if let Some(entry) = entry { entry.oid.hash(&mut hash); }
         return Ok(Metadata {
             len: if is_dir { 0 } else { read(path)?.len() as u64 },
-            modified: std::time::UNIX_EPOCH + std::time::Duration::from_nanos(hash.finish()),
+            modified: std::time::UNIX_EPOCH + std::time::Duration::from_nanos(store_time_ns(&mount, entry)),
             is_dir, is_file: entry.is_some_and(|e| e.mode != 0o160000),
             is_symlink: entry.is_some_and(|e| e.mode == 0o120000),
         });
@@ -973,16 +979,22 @@ fn hold(data: Vec<u8>, out: *mut *const u8, out_len: *mut usize) -> u64 {
     id
 }
 
-/// 0: not a virtual path (the disk), 1: a file (`*size` its length), 2: a folder, -1: virtual but
-/// missing.
-pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 {
+/// 0: not a virtual path (the disk), 1: a file (`*size` its length, `*mtime_ns` when it last
+/// changed: an edited file's disk time, a store file's [`store_time_ns`]), 2: a folder, -1: virtual
+/// but missing.
+pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64, mtime_ns: *mut u64) -> i32 {
     if !ANY.load(Ordering::Acquire) {
         return 0;
     }
     let path = unsafe { path_arg(p, n) };
     let Some((m, rel)) = find(path) else { return 0 };
     if let Some(f) = edited_file(path) {
-        unsafe { *size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0) };
+        let meta = std::fs::metadata(f).ok();
+        let since = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        unsafe {
+            *size = meta.as_ref().map_or(0, |m| m.len());
+            *mtime_ns = meta.and_then(|m| m.modified().ok()).map_or(0, since);
+        }
         return 1;
     }
     if let Some(e) = m.file(&rel) {
@@ -990,7 +1002,10 @@ pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64) -> i32 
             return -1;
         }
         let len = m.store.object_size(&e.oid).ok().flatten().unwrap_or(0);
-        unsafe { *size = len };
+        unsafe {
+            *size = len;
+            *mtime_ns = store_time_ns(&m, Some(e));
+        }
         return 1;
     }
     if m.is_dir(&rel) || edit_path(path).is_some_and(|(p, _)| p.is_dir()) { 2 } else { -1 }
@@ -1513,6 +1528,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&edits);
     }
 
+    /// A virtual file's stat time (`relax_vfs_stat`: what the JIT std's `metadata().modified()`
+    /// reports) holds while the file does and moves when it changes: a store file's with its blob,
+    /// an edited file's with its disk time, a same-size edit included. Before, every virtual file
+    /// stated time 0, and no mtime watcher of a program run from a store saw an edit.
+    #[test]
+    fn a_virtual_files_stat_time_moves_only_when_the_file_changes() {
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let v1 = test_store::Fixture::new(&[("app/a.rs", b"a1"), ("app/b.rs", b"b1")]);
+        let v2 = test_store::Fixture::new(&[("app/a.rs", b"a2"), ("app/b.rs", b"b1")]);
+        let root = "/mtime-test/vfs/m";
+        let edits = v1.store.path.with_extension("mtime-edits");
+        let stat = |rel: &str| {
+            let p = format!("{root}/{rel}");
+            let (mut len, mut mtime) = (0, 0);
+            assert_eq!(relax_vfs_stat(p.as_ptr(), p.len(), &mut len, &mut mtime), 1, "{p}");
+            (len, mtime)
+        };
+        mount(root, v1.store.clone(), &v1.commit).unwrap();
+        let a1 = stat("app/a.rs");
+        assert_ne!(a1.1, 0, "a store file has a time");
+        assert_eq!(stat("app/a.rs"), a1, "two stats with no change between them agree");
+        mount(root, v2.store.clone(), &v2.commit).unwrap();
+        assert_ne!(stat("app/a.rs").1, a1.1, "a new blob is a new time");
+        set_edits(Some(edits.clone()));
+        let disk = prepare_edit(&format!("{root}/app/a.rs"), false).unwrap();
+        let at = |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        let edit = |text: &[u8], secs: u64| {
+            std::fs::write(&disk, text).unwrap();
+            std::fs::File::options().write(true).open(&disk).unwrap().set_modified(at(secs)).unwrap();
+        };
+        edit(b"edit-1", 1_700_000_000);
+        assert_eq!(stat("app/a.rs"), (6, 1_700_000_000_000_000_000), "an edited file states its disk time");
+        assert_eq!(stat("app/a.rs"), (6, 1_700_000_000_000_000_000), "and holds it while unchanged");
+        edit(b"edit-2", 1_700_000_002);
+        assert_eq!(stat("app/a.rs"), (6, 1_700_000_002_000_000_000), "a same-size edit moves it");
+        set_edits(None);
+        MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
+        let _ = std::fs::remove_dir_all(&edits);
+    }
+
     /// Sandbox game_store (asset client cache.rs open: create_dir_all(tmp), then read_dir(tmp)): a
     /// folder the run made in a virtual folder lists, empty, as the disk's new folder does; it
     /// was NotFound while it had no entries.
@@ -1667,10 +1722,10 @@ mod tests {
             assert_eq!(metadata(&missing).unwrap_err().kind(), io::ErrorKind::NotFound);
             assert_eq!(canonicalize(&missing).unwrap_err().kind(), io::ErrorKind::NotFound);
             assert_eq!(canonicalize(format!("{root}/../outside")).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-            let mut len = 0;
-            assert_eq!(relax_vfs_stat(path.as_ptr(), path.len(), &mut len), 1);
+            let (mut len, mut mtime) = (0, 0);
+            assert_eq!(relax_vfs_stat(path.as_ptr(), path.len(), &mut len, &mut mtime), 1);
             assert_eq!(len, bytes.len() as u64);
-            assert_eq!(relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len), -1);
+            assert_eq!(relax_vfs_stat(missing.as_ptr(), missing.len(), &mut len, &mut mtime), -1);
             for (path, list) in [(&path, false), (&dir, true)] {
                 let (mut data, mut len) = (std::ptr::null(), 0);
                 let id = if list { relax_vfs_list(path.as_ptr(), path.len(), &mut data, &mut len) }
