@@ -207,7 +207,6 @@ tools/linux/build-xr-proton.sh
 tools/linux/with-xr-runtime.sh
 xr/*
 libs/xr_*/*
-apps/xr_remote/*
 examples/xr/*
 tools/cargo_makepad/quest/*
 

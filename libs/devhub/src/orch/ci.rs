@@ -1540,6 +1540,11 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("libs/relax/compiler/tests/allow_c_cached_check/verify.py") {
         push("live:allow-c-cached".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"])], Judge::Exit, 120.0, None);
     }
+    // a save the live session holds, or one that changes nothing the program runs, says so in a
+    // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
+    if tree.has("tools/run/fixture/live_gates.sh") {
+        push("live:gates".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/live_gates.sh"])], Judge::Exit, 120.0, None);
+    }
     // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
     // only the panics that ended a thread or a test
     if tree.has("tools/run/fixture/caught_report.py") {
