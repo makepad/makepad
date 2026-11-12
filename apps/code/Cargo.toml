@@ -19,6 +19,8 @@ path = "src/main.rs"
 makepad-code-agent = { path = "agent" }
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass", "rich_text", "data", "dock"] }
 makepad-code-editor = { path = "../../code_editor" }
+# The final view of a Markdown file.
+makepad-markdown-editor = { path = "../../widgets/families/markdown_editor" }
 # The terminal tabs: the terminal app's widget and PTY, as a library.
 makepad-app-terminal = { path = "../terminal", default-features = false }
 makepad-regex = { path = "../../libs/regex" }

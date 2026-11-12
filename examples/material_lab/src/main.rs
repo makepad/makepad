@@ -504,10 +504,12 @@ impl Widget for MaterialLab {
         // then), and say so once for the test.
         if !self.announced && scene() != Scene::Hooks {
             // Built-in item materials compile on first use; give the
-            // pipelines time, then say so once.
+            // pipelines time, then say so once. The IBL scene's environment
+            // prepares off the UI thread: ready waits until it is in the
+            // frame, however fast the frames come.
             let names = ["__item_unlit"];
             let ready = names.iter().all(|n| self.renderer.custom_material_shader(n).is_some_and(|id| cx.cx.draw_shader_ready(id, false)));
-            if ready && self.frames > 90 {
+            if ready && self.frames > 90 && !self.renderer.environment_pending() {
                 self.announced = true;
                 log!("material lab: ready, world scene, {} items skipped", self.renderer.skipped_items());
             }

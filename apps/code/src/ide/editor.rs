@@ -19,6 +19,11 @@
 //!
 //! Keys in the code: Cmd/Ctrl+S save, Cmd/Ctrl+F find, Cmd/Ctrl+G (and
 //! Ctrl+G) go to line, Cmd/Ctrl+Z undo, Shift+Cmd/Ctrl+Z or Ctrl+Y redo.
+//!
+//! A Markdown file has two views of its one document: SOURCE (the code view)
+//! and FINAL (the text as it reads, `MarkdownEditor`). Cmd/Ctrl+/ or the keys
+//! over the text switch between them, keeping the caret and its place on
+//! screen.
 
 use makepad_code_editor::code_view::{CodeView, CodeViewAction};
 use makepad_code_editor::document::PreparedDocument;
@@ -30,6 +35,7 @@ use makepad_code_editor::inlays::InlineInlay;
 use makepad_code_editor::text::Position;
 use makepad_code_editor::{CodeDocument, CodeSession};
 use makepad_code_agent::runs::{Diagnostic, Level, RunManager};
+use makepad_markdown_editor::{MarkdownEditor, MarkdownEditorAction};
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -168,6 +174,16 @@ script_mod! {
         }
     }
 
+    /// SOURCE / FINAL over a Markdown file: the key of the view shown is lit.
+    let ModeKey = BarKey{
+        draw_text +: {
+            on: instance(0.0)
+            get_color: fn() {
+                return mix(mod.look.meta, mod.look.text_hi, max(self.on, self.hover))
+            }
+        }
+    }
+
     let Count = BarText{
         padding: Inset{left: 4 right: 4}
         draw_text +: {
@@ -217,6 +233,26 @@ script_mod! {
             View{ width: Fill height: 1 }
             reload := BarKey{ text: "Reload  r" }
             keep := BarKey{ text: "Keep mine  k" }
+        }
+
+        // Over a Markdown file: which view of it shows.
+        mode_bar := View{
+            visible: false
+            width: Fill
+            height: 22
+            flow: Right
+            spacing: 4
+            align: Align{x: 1.0 y: 0.5}
+            padding: Inset{left: 10 right: 8}
+            mode_keys := BarText{
+                text: "⌘/"
+                draw_text +: {
+                    color: mod.look.dim
+                    text_style: mod.look.mono{font_size: 7.5}
+                }
+            }
+            source_mode := ModeKey{ text: "SOURCE" }
+            final_mode := ModeKey{ text: "FINAL" }
         }
 
         body := View{
@@ -307,6 +343,39 @@ script_mod! {
                     }
                     find_open +: {
                         open +: { draw_icon +: { color: mod.look.meta } }
+                    }
+                }
+            }
+
+            // A Markdown file as it reads, edited in place.
+            final_box := View{
+                visible: false
+                width: Fill
+                height: Fill
+                md := MarkdownEditor{
+                    draw_caret +: { color: mod.look.agent }
+                    list +: {
+                        Row := Markdown{
+                            width: Fill
+                            height: Fit
+                            padding: Inset{left: 28 right: 28 top: 0 bottom: 0}
+                            host_selection: true
+                            inline_links: true
+                            body: ""
+                            font_color: mod.look.text
+                            link_color: mod.look.agent
+                            draw_text +: { color: mod.look.text }
+                            draw_selection +: { color: mod.look.agent_select }
+                            draw_block +: {
+                                line_color: mod.look.hair_hi
+                                sep_color: mod.look.hair
+                                quote_bg_color: mod.look.agent_wash
+                                quote_fg_color: mod.look.agent
+                                code_color: mod.look.agent_wash
+                                table_header_bg_color: mod.look.raised
+                                table_border_color: mod.look.hair
+                            }
+                        }
                     }
                 }
             }
@@ -540,6 +609,12 @@ pub struct FileEditor {
     marked: Vec<Diagnostic>,
     #[rust]
     marks_seen: u64,
+    /// The Markdown file shows as it reads (FINAL), not as source.
+    #[rust]
+    final_view: bool,
+    /// The load generation whose document the final view shows.
+    #[rust]
+    final_generation: u64,
 }
 
 impl FileEditor {
@@ -570,6 +645,10 @@ impl FileEditor {
             self.set_conflict(cx, DiskConflict::None);
         }
         if old_ext.as_deref() != extension(rel) {
+            if !self.is_markdown() {
+                self.set_final_view(cx, false);
+            }
+            self.show_mode(cx);
             if let Some(view) = self.code(cx).borrow::<CodeView>() {
                 if let Some(session) = view.session.as_ref() {
                     session.document().set_language_for_path(rel);
@@ -589,6 +668,74 @@ impl FileEditor {
 
     fn code(&self, cx: &mut Cx) -> WidgetRef {
         self.view.widget(cx, ids!(code))
+    }
+
+    fn md(&self, cx: &mut Cx) -> WidgetRef {
+        self.view.widget(cx, ids!(md))
+    }
+
+    /// A Markdown file: it has a final view.
+    fn is_markdown(&self) -> bool {
+        self.path
+            .as_deref()
+            .and_then(extension)
+            .is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown" | "mdown" | "mkd"))
+    }
+
+    /// Shows the file as it reads (`on`) or as source, keeping the caret and
+    /// its height on screen.
+    fn set_final_view(&mut self, cx: &mut Cx, on: bool) {
+        let on = on && self.is_markdown() && self.ready;
+        if on == self.final_view {
+            self.show_mode(cx);
+            return;
+        }
+        let code = self.code(cx);
+        let md = self.md(cx);
+        if on {
+            let Some(code_view) = code.borrow::<CodeView>() else { return };
+            let Some(session) = code_view.session.as_ref() else { return };
+            let document = session.document().clone();
+            let caret = session.selections()[session.last_added_selection_index().unwrap_or(0)].cursor.position;
+            let view_y = code_view.editor.line_view_y(session, caret.line_index);
+            drop(code_view);
+            let Some(mut md) = md.borrow_mut::<MarkdownEditor>() else { return };
+            if self.final_generation != self.generation || !md.is_attached() {
+                md.attach(cx, document);
+                self.final_generation = self.generation;
+            }
+            md.set_caret(cx, caret, view_y);
+        } else {
+            let Some((caret, view_y)) = md.borrow::<MarkdownEditor>().map(|md| (md.caret(), md.caret_view_y())) else { return };
+            if let Some(mut code_view) = code.borrow_mut::<CodeView>() {
+                if let Some(session) = code_view.session.as_ref() {
+                    let caret = session.clamp_position(caret);
+                    session.set_selection(caret, Affinity::Before, SelectionMode::Simple, NewGroup::Yes);
+                }
+                match view_y {
+                    Some(y) => code_view.editor.place_line(cx, caret.line_index, y),
+                    None => code_view.editor.center_line(cx, caret.line_index),
+                }
+            }
+        }
+        self.final_view = on;
+        self.view.view(cx, ids!(code_box)).set_visible(cx, !on);
+        self.view.view(cx, ids!(final_box)).set_visible(cx, on);
+        self.show_mode(cx);
+        self.focus(cx);
+        self.emit_caret(cx);
+    }
+
+    /// The SOURCE / FINAL keys: shown over a Markdown file, the key of the
+    /// view on screen lit.
+    fn show_mode(&mut self, cx: &mut Cx) {
+        let markdown = self.is_markdown() && self.ready;
+        self.view.view(cx, ids!(mode_bar)).set_visible(cx, markdown);
+        for (path, lit) in [(ids!(source_mode), !self.final_view), (ids!(final_mode), self.final_view)] {
+            let on = if lit { 1.0 } else { 0.0 };
+            let mut key = self.view.button(cx, path);
+            script_apply_eval!(cx, key, { draw_text +: { on: #(on) } });
+        }
     }
 
     pub fn save(&mut self, cx: &mut Cx) -> std::io::Result<()> {
@@ -730,7 +877,7 @@ impl FileEditor {
                 let version = document.version();
                 let session = match CodeSession::from_prepared(document.clone(), view) {
                     Ok(session) => session,
-                    Err(_) => CodeSession::new(document),
+                    Err(_) => CodeSession::new(document.clone()),
                 };
                 let code = self.code(cx);
                 if let Some(mut code_view) = code.borrow_mut::<CodeView>() {
@@ -746,12 +893,29 @@ impl FileEditor {
                     code_view.editor.line_washes.clear();
                 }
                 self.view.view(cx, ids!(notice)).set_visible(cx, false);
-                self.view.view(cx, ids!(code_box)).set_visible(cx, true);
                 self.format = format;
                 self.disk_hash = load.hash;
                 self.saved_digest = Some(digest);
                 self.checked_version = version;
                 self.ready = true;
+                if !self.is_markdown() {
+                    self.final_view = false;
+                }
+                self.view.view(cx, ids!(code_box)).set_visible(cx, !self.final_view);
+                self.view.view(cx, ids!(final_box)).set_visible(cx, self.final_view);
+                if self.final_view {
+                    // The reloaded text replaces the document: the final view
+                    // follows it, its caret where it was.
+                    let md = self.md(cx);
+                    if let Some(mut md) = md.borrow_mut::<MarkdownEditor>() {
+                        let caret = md.caret();
+                        let view_y = md.caret_view_y();
+                        md.attach(cx, document.clone());
+                        md.set_caret(cx, caret, view_y);
+                    }
+                    self.final_generation = self.generation;
+                }
+                self.show_mode(cx);
                 self.set_conflict(cx, DiskConflict::None);
                 self.set_dirty(cx, false);
                 if let Some((line, col)) = self.pending_goto.take() {
@@ -867,7 +1031,12 @@ impl FileEditor {
         let code = self.code(cx);
         let Some(view) = code.borrow::<CodeView>() else { return };
         let Some(session) = view.session.as_ref() else { return };
-        let position = session.selections()[session.last_added_selection_index().unwrap_or(0)].cursor.position;
+        let mut position = session.selections()[session.last_added_selection_index().unwrap_or(0)].cursor.position;
+        if self.final_view {
+            if let Some(md) = self.md(cx).borrow::<MarkdownEditor>() {
+                position = md.caret();
+            }
+        }
         let col = session
             .document()
             .as_text()
@@ -1017,6 +1186,7 @@ impl Widget for FileEditor {
         let code = self.code(cx);
         let uid = code.widget_uid();
         let mut changed = false;
+        let mut toggle = false;
         for action in actions.filter_widget_actions(uid) {
             match action.cast::<CodeViewAction>() {
                 CodeViewAction::Changed => changed = true,
@@ -1025,11 +1195,60 @@ impl Widget for FileEditor {
                 {
                     let _ = self.save(cx);
                 }
+                CodeViewAction::UnhandledKey(KeyEvent { key_code: KeyCode::Slash, modifiers, .. })
+                    if modifiers.is_primary() && !modifiers.shift && !modifiers.alt =>
+                {
+                    toggle = true;
+                }
                 _ => {}
             }
         }
+        let md_uid = self.md(cx).widget_uid();
+        let mut md_changed = false;
+        for action in actions.filter_widget_actions(md_uid) {
+            match action.cast::<MarkdownEditorAction>() {
+                MarkdownEditorAction::Caret => self.emit_caret(cx),
+                MarkdownEditorAction::Changed => md_changed = true,
+                MarkdownEditorAction::UnhandledKey(KeyEvent { key_code: KeyCode::KeyS, modifiers, .. })
+                    if modifiers.is_primary() && !modifiers.shift && !modifiers.alt =>
+                {
+                    let _ = self.save(cx);
+                }
+                MarkdownEditorAction::UnhandledKey(KeyEvent { key_code: KeyCode::Slash, modifiers, .. })
+                    if modifiers.is_primary() && !modifiers.shift && !modifiers.alt =>
+                {
+                    toggle = true;
+                }
+                _ => {}
+            }
+        }
+        if self.view.button(cx, ids!(source_mode)).clicked(&actions) {
+            self.set_final_view(cx, false);
+        } else if self.view.button(cx, ids!(final_mode)).clicked(&actions) {
+            self.set_final_view(cx, true);
+        } else if toggle {
+            let on = !self.final_view;
+            self.set_final_view(cx, on);
+        }
+        if md_changed {
+            // The hidden source view takes the final view's edits now, so its
+            // selections and layout stay current for the bar, the washes and
+            // the next switch.
+            if let Some(mut view) = code.borrow_mut::<CodeView>() {
+                if let Some(session) = view.session.as_mut() {
+                    session.handle_changes();
+                }
+            }
+            self.update_dirty(cx);
+        }
         if changed {
             self.update_dirty(cx);
+            // The final view keeps up with the source while it is hidden.
+            if self.final_generation == self.generation {
+                if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+                    md.follow_edits(cx);
+                }
+            }
         }
         if event.requires_visibility() || changed || matches!(event, Event::KeyDown(_) | Event::Signal) {
             self.emit_caret(cx);
@@ -1045,7 +1264,11 @@ impl Widget for FileEditor {
         let step = self.view.draw_walk(cx, scope, walk);
         if self.focus_pending && self.ready {
             self.focus_pending = false;
-            if let Some(mut code_view) = self.code(cx).borrow_mut::<CodeView>() {
+            if self.final_view {
+                if let Some(md) = self.md(cx).borrow::<MarkdownEditor>() {
+                    md.set_key_focus(cx);
+                }
+            } else if let Some(mut code_view) = self.code(cx).borrow_mut::<CodeView>() {
                 code_view.editor.set_key_focus(cx);
             }
         }

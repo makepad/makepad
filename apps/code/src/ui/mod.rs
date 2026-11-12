@@ -16,6 +16,7 @@ use makepad_widgets::*;
 pub fn script_mod(vm: &mut ScriptVm) {
     theme::script_mod(vm);
     makepad_code_editor::script_mod(vm);
+    makepad_markdown_editor::script_mod(vm);
     charts::script_mod(vm);
     hud::script_mod(vm);
     layout::script_mod(vm);
