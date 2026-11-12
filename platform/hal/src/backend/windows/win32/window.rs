@@ -44,6 +44,8 @@ pub(super) struct Press {
     y: f64,
     mods: u32,
     screen: POINT,
+    /// its message's time (`GetMessageTime`): how long the app takes to answer does not count
+    time: u32,
 }
 
 pub(super) struct Win {
@@ -59,6 +61,10 @@ pub(super) struct Win {
     pub(super) dpi: Cell<f64>,
     tracking: Cell<bool>,
     pub(super) pending: Cell<Option<Press>>,
+    /// a left press the next one can close a double click with: no answer put it off the caption
+    click: Cell<Option<Press>>,
+    /// a press closed a double click: the next answer says whether it was on the caption
+    double: Cell<bool>,
     high_surrogate: Cell<u16>,
     cursor: Cell<u32>,
     /// closed because its session went: no `Closed` event
@@ -434,6 +440,8 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         dpi: Cell::new(dpi),
         tracking: Cell::new(false),
         pending: Cell::new(None),
+        click: Cell::new(None),
+        double: Cell::new(false),
         high_surrogate: Cell::new(0),
         cursor: Cell::new(cursor::DEFAULT),
         silent: Cell::new(false),
@@ -885,8 +893,22 @@ fn set_cursor(cursor: u32) {
 }
 
 /// The app's answer to a press's drag query: a caption drag hands the press to the system move
-/// loop, anything else delivers it as a click.
+/// loop, anything else delivers it as a click. A double click on the caption goes to the system
+/// instead, also when a tap's release has already delivered its press as a click.
 fn query_answer(w: &Rc<Win>, answer: u32) {
+    let double = w.double.take();
+    if answer != input::drag_query::CAPTION {
+        w.click.set(None);
+    } else if double {
+        w.pending.set(None);
+        unsafe {
+            // a press still held keeps the capture, and with it Windows does nothing here
+            let _ = ReleaseCapture();
+            // maximizes or restores as for a real caption; a window without the box stays
+            SendMessageW(w.hwnd.get(), WM_NCLBUTTONDBLCLK, Some(WPARAM(HTCAPTION as usize)), None);
+        }
+        return;
+    }
     let Some(press) = w.pending.take() else { return };
     let hwnd = w.hwnd.get();
     if answer == input::drag_query::CAPTION && press.button == 1 {
@@ -910,6 +932,19 @@ fn query_answer(w: &Rc<Win>, answer: u32) {
         }
     } else {
         w.push(|q, id| q.mouse_down(id, press.x, press.y, press.button, press.mods));
+    }
+}
+
+/// Whether a press follows another within the system's double click time and rectangle (the
+/// caption is client area here, and the window class takes no double clicks).
+fn closes_double_click(first: Press, press: Press) -> bool {
+    let (dx, dy) = (press.screen.x - first.screen.x, press.screen.y - first.screen.y);
+    unsafe {
+        let (half_x, half_y) = (GetSystemMetrics(SM_CXDOUBLECLK) / 2, GetSystemMetrics(SM_CYDOUBLECLK) / 2);
+        // centred on the first press and, like any RECT, without its right and bottom edges
+        press.time.wrapping_sub(first.time) <= GetDoubleClickTime()
+            && (-half_x..half_x).contains(&dx)
+            && (-half_y..half_y).contains(&dy)
     }
 }
 
@@ -941,7 +976,11 @@ fn mouse_button(w: &Rc<Win>, button: u32, down: bool, lparam: LPARAM) {
             unsafe {
                 let _ = ClientToScreen(hwnd, &mut screen);
             }
-            w.pending.set(Some(Press { button, x, y, mods, screen }));
+            let press = Press { button, x, y, mods, screen, time: unsafe { GetMessageTime() } as u32 };
+            let double = w.click.take().is_some_and(|first| button == 1 && closes_double_click(first, press));
+            w.double.set(double);
+            w.click.set((button == 1 && !double).then_some(press));
+            w.pending.set(Some(press));
             w.push(|q, id| q.drag_query(id, x, y));
         } else {
             w.push(|q, id| q.mouse_down(id, x, y, button, mods));

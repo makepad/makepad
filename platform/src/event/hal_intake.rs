@@ -562,7 +562,9 @@ impl Cx {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     let geom = self.windows[window_id].window_geom.clone();
-                    let state = if geom.is_fullscreen { window_state::FULLSCREEN } else { window_state::RESTORE };
+                    // the state the backend last reported: maximized first, since a hosted window's
+                    // `is_fullscreen` can come from its host while the backend has it maximized
+                    let state = if geom.is_maximized { window_state::MAXIMIZE } else if geom.is_fullscreen { window_state::FULLSCREEN } else { window_state::RESTORE };
                     // the layout geometry back to what the OS reported (`native_window_geom_to_layout` inverse)
                     let scale = geom.dpi_factor / self.windows[window_id].native_dpi_factor();
                     self.hal_window_geom(window_id, geom.position, geom.inner_size * scale, dpi as f64, state);
@@ -1220,6 +1222,7 @@ impl Cx {
         new_geom.dpi_factor = dpi;
         // A hosted window is fullscreen when its host window manager says so (`HostedFullscreen`).
         new_geom.is_fullscreen = state == window_state::FULLSCREEN || self.windows[window_id].hosted_fullscreen;
+        new_geom.is_maximized = state == window_state::MAXIMIZE;
         let safe = self.hal.safe_area;
         let window = &mut self.windows[window_id];
         window.os_dpi_factor = Some(dpi);
@@ -1373,6 +1376,25 @@ mod tests {
         let items = drag_items(&payload, 2);
         assert_eq!(items[0], DragItem::FilePath { path: "/a/b".into(), internal_id: None });
         assert_eq!(items[1], DragItem::String { value: "x".into(), internal_id: None });
+    }
+
+    /// A maximized window says so (`is_maximized`, not `is_fullscreen`), and a display change,
+    /// which sends its geometry again at the new dpi, keeps it maximized, also while its host has
+    /// it fullscreen: the maximize button restores it then.
+    #[test]
+    fn a_maximized_window_stays_maximized_through_a_display_change() {
+        let mut cx = Cx::new(Box::new(|_: &mut Cx, _: &Event| {}));
+        let window = crate::window::WindowHandle::new(&mut cx);
+        let id = window.window_id();
+        cx.hal_window_geom(id, dvec2(0.0, 0.0), dvec2(800.0, 600.0), 1.0, window_state::MAXIMIZE);
+        assert!(window.is_maximized(&cx) && !window.is_fullscreen(&cx), "maximized, not fullscreen");
+        cx.windows[id].hosted_fullscreen = true;
+        cx.hal_intake(0, HalEvent::Display { window: hal_window_id(id), dpi: 2.0, refresh: 60.0 });
+        assert_eq!(cx.windows[id].window_geom.dpi_factor, 2.0, "the geometry at the new dpi");
+        assert!(window.is_maximized(&cx) && window.is_fullscreen(&cx), "still maximized, and fullscreen by its host");
+        cx.windows[id].hosted_fullscreen = false;
+        cx.hal_window_geom(id, dvec2(0.0, 0.0), dvec2(400.0, 300.0), 2.0, window_state::RESTORE);
+        assert!(!window.is_maximized(&cx) && !window.is_fullscreen(&cx), "restored");
     }
 
     #[test]
