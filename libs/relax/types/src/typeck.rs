@@ -3850,8 +3850,16 @@ impl<'a> Fcx<'a> {
                 if let Some(m) = crate::lint::privacy_diag(prog, self.file, path.lo, &e) { self.err(path.lo, m); }
             }
         }
-        // container path (module / enum / trait)
-        let parent = if segs[0].0 == SegKind::SelfType && n == 2 {
+        // container path (module / enum / trait). A type parameter of the item hides a module
+        // item of its name (rustc's generics rib comes before the module's items): `T::item` with
+        // a `T` in scope is type-relative even beside a trait `T` (`fn f<T>() where T: self::T`).
+        // A const parameter is in the value namespace alone: `N::item` stays the module's.
+        let first_is_param = !path.global()
+            && path.no_qself()
+            && segs[0].0 == SegKind::Ident
+            && self.env.names.iter().take(self.b.args.len()).enumerate()
+                .any(|(i, nm)| *nm == segs[0].1 && !self.env.consts.iter().any(|c| c.0 as usize == i));
+        let parent = if (segs[0].0 == SegKind::SelfType && n == 2) || first_is_param {
             None
         } else {
             prog.resolve_mod_path(self.module, path.global(), &segs[..n - 1], false, false)

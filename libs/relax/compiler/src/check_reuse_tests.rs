@@ -493,3 +493,59 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     assert!(r.0.is_some_and(|c| c != 0) && r.2 && named(&r.1, "extra"), "{}", r.3);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// relax#39: an error in a crate the check does not check -- an unresolved import or a signature
+/// error of a dependency outside the workspace -- fails the check, as cargo check fails compiling
+/// that dependency: on the cold check, on the same check again (no run record, no collected image
+/// of that load hides it) and after an edit of the checked crate; with the dependency fixed the
+/// check passes.
+#[test]
+fn a_dependency_error_fails_the_check() {
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    let dir = package("deperror", &[]);
+    let write = |f: &str, src: &str| {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, src).unwrap();
+    };
+    write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
+    write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
+    write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
+    let app = |n: u32| format!("pub fn top() -> u32 {{ dep::value() + {n} }}\n");
+    // (exit code, stderr)
+    let check = || {
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"))
+            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
+        (code, stderr.into_owned())
+    };
+    // (`named`: the load printed the error, and the check names the crate it failed, as cargo does)
+    let fails = |what: &str, code: &str, named: bool| {
+        let r = check();
+        assert!(r.0.is_some_and(|c| c != 0) && r.1.contains(code) && (!named || r.1.contains("could not compile `dep`")), "{what}: {}", r.1);
+    };
+    write("ws/app/lib.rs", &app(1));
+    for (what, dep, code, named) in [
+        ("an unresolved import", "use std::collections::NoSuchMap;\npub fn value() -> u32 { 7 }\n", "E0432", true),
+        ("a field type", "pub struct S { pub f: NoSuchType }\npub fn value() -> u32 { 7 }\n", "E0412", true),
+        // (a fn signature is collected when a body reaches it)
+        ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0412", false),
+    ] {
+        write("dep/lib.rs", dep);
+        fails(&format!("{what}, cold"), code, named);
+        fails(&format!("{what}, again"), code, named);
+        write("ws/app/lib.rs", &app(2));
+        fails(&format!("{what}, after an app edit"), code, named);
+        write("ws/app/lib.rs", &app(1));
+    }
+    write("dep/lib.rs", "pub fn value() -> u32 { 7 }\n");
+    for what in ["fixed", "fixed, again"] {
+        let r = check();
+        assert!(r.0 == Some(0) && !r.1.contains("could not compile"), "{what}: {}", r.1);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}

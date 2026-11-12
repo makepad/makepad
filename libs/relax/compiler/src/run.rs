@@ -1848,8 +1848,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         tcx.collect_declarations(&prog);
     }
     phase("signatures", t);
-    // (a check that printed a signature error stores no run record: check_reuse.rs)
-    if let Some(r) = reuse.as_mut() { r.sig_clean = tcx.errors.is_empty() && deferred_errors.is_empty(); }
+    // a check whose load printed an error -- an unresolved import, a signature error, a module
+    // that failed to load, in any crate -- stores no run record (check_reuse.rs) and records no
+    // collected image: a check restoring either would not load those crates again, and their
+    // errors would go unprinted
+    let load_clean = prog.errors.is_empty() && tcx.errors.is_empty() && deferred_errors.is_empty();
+    if let Some(r) = reuse.as_mut() { r.sig_clean = load_clean; }
+    if check && !load_clean { CHECK_RECORDS_COLLECTED.store(false, Ordering::Relaxed); }
     if !tcx.errors.is_empty() {
         for e in &tcx.errors {
             if crate::run_state::observed() { crate::run_state::diagnostic(None, crate::diag::from_legacy(e, "typeck")); }
@@ -1890,6 +1895,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             pre.extend(crate::check::own_errors(&u.prog, k, &u.prog.errors, "resolve"));
             pre.extend(crate::check::own_errors(&u.prog, k, &u.tcx.errors, "typeck"));
         }
+        // the errors the load printed for crates this check does not check (a dependency's
+        // unresolved import or signature error): cargo check fails compiling that crate, and so
+        // does the check
+        let foreign = crate::check::foreign_errors(&u.prog, &checked, u.prog.errors.iter().chain(&u.tcx.errors).chain(&deferred_errors));
         // every body is checked, so the files the selection skipped load first: all of them for
         // selftest or a watch session; the checked crates' for --root-only or the app check
         let t = Instant::now();
@@ -1942,6 +1951,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             Some(r) => crate::check::check_crate_reusing(&mut u, root, &checked, pre, r),
             None => crate::check::check_crate(&mut u, root, &checked, pre, selftest),
         };
+        for (name, n) in &foreign {
+            eprintln!("error: could not compile `{name}` due to {n} previous error{}", if *n == 1 { "" } else { "s" });
+        }
+        let code = if code == 0 && !foreign.is_empty() { 1 } else { code };
         // the parsed files go to the cache's front images as a run's do (one store shared with
         // `makepad run`): the next check (or run) of the package maps them instead of parsing
         // every file again (Stage: 6 s of a warm check was parsing)

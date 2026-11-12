@@ -57,6 +57,23 @@ pub fn own_errors(prog: &crate::program::Program, root: u32, errs: &[String], ph
     }).collect()
 }
 
+/// The errors of `errs` (`file:line:col: ..` lines) in no file of the `checked` crates, counted by
+/// the crate whose file they name, in the order those crates first come (`?`: a line that names
+/// no file of the program).
+pub fn foreign_errors<'e>(prog: &crate::program::Program, checked: &[u32], errs: impl Iterator<Item = &'e String>) -> Vec<(String, usize)> {
+    let files: Vec<(&str, u32)> = prog.file_paths.iter().enumerate().filter_map(|(i, p)| prog.file_crate.get(i).map(|&c| (p.as_str(), c))).collect();
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for e in errs {
+        if files.iter().any(|(p, c)| checked.contains(c) && e.starts_with(p)) { continue; }
+        let name = files.iter().find(|(p, _)| e.starts_with(p)).map_or("?", |&(_, c)| prog.syms.str(prog.crates[c as usize].name));
+        match out.iter_mut().find(|(n, _)| n == name) {
+            Some(x) => x.1 += 1,
+            None => out.push((name.to_string(), 1)),
+        }
+    }
+    out
+}
+
 /// The crates a one-shot `makepad check` covers: the root and every loaded crate whose root file
 /// is in the workspace, except std (MAKEPAD_RUN_STD may live inside it) and proc-macro crates (their
 /// code runs in the macro host, never in the program).
