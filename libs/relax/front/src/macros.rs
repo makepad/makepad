@@ -1827,6 +1827,12 @@ impl MacroScope {
         if matches!(k, "core" | "std" | "alloc") && m == k && (crate::program::BUILTIN_MACROS.contains(&name.as_str()) || (k == "std" && name == "dbg")) {
             return Some(name.clone());
         }
+        // the smallvec Relax provides (std/substitutes.txt) has no `macro_rules! smallvec`: its root's
+        // `smallvec!` is the built-in one, through the crate's path as through an import (a smallvec
+        // compiled from its own source defines the macro, and the call resolves to that first)
+        if krate_name(k) == "smallvec" && name == "smallvec" && r.crate_root(k).1 == m {
+            return Some(name.clone());
+        }
         let uses = self.table.crates.get(k)?.uses.get(m)?;
         for u in uses.iter().filter(|u| (k == cur || u.is_pub) && u.bind.as_deref() == Some(name)) {
             if let Some(name) = self.builtin_macro_path(k, m, &u.path, seen) { return Some(name); }

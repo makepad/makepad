@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files), ("smallvec_macro", smallvec_macro)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -183,4 +183,15 @@ fn inflate_files() {
             Err(e) => d!("inflate {} in={} error {:?}", name, z.len(), e),
         }
     }
+}
+
+/// `smallvec!` through the crate's path, in its three forms and from the root (relax issue 24): under
+/// Relax the crate is its own smallvec (std/substitutes.txt), whose macro is built in, and only the
+/// imported name expanded ("macro `smallvec!` is not supported").
+fn smallvec_macro() {
+    let one: smallvec::SmallVec<[u8; 1]> = smallvec::smallvec![7];
+    let repeated: smallvec::SmallVec<[u8; 1]> = smallvec::smallvec![7; 2];
+    let empty: smallvec::SmallVec<[u8; 1]> = smallvec::smallvec![];
+    let rooted: smallvec::SmallVec<[u8; 1]> = ::smallvec::smallvec![7];
+    d!("smallvec {:?} {:?} {:?} {:?} spilled {} {}", one, repeated, empty, rooted, one.spilled(), repeated.spilled());
 }
