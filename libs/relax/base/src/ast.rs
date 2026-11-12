@@ -1624,6 +1624,14 @@ impl Ast {
             None => self.part_or_panic("item", id.0).item(id),
         }
     }
+    /// Whether this tree holds item `id`: in its own arrays, or in a lazily parsed part that is
+    /// present. A reader that may come before the part's parse asks first.
+    pub fn has_item(&self, id: ItemId) -> bool {
+        if (id.0.wrapping_sub(self.base[23]) as usize) < self.items.len() {
+            return true;
+        }
+        self.part.get().is_some_and(|p| p.has_item(id))
+    }
     #[inline]
     pub fn block(&self, id: BlockId) -> &Block {
         match self.blocks.get(id.0.wrapping_sub(self.base[3]) as usize) {

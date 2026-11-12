@@ -1534,3 +1534,76 @@ fn a_settle_sweep_lets_main_through_between_steps() {
     assert!(drops.retired_bodies.is_empty() && drops.retired_rir.is_empty());
     drop(u);
 }
+
+/// SPEC-V: a twin that turns hot asks for its base's verdict then: the base's check is the next one
+/// the background checker runs (RANK_HOT, no check ahead of it), from the pool worker's pick after
+/// its inbox drain (prioritize_hot_verdicts). A twin has no owner of its own, so it asked for
+/// nothing, and an unverified slot asked only when its O3 build started: a cold Fab's hot UI fns
+/// ran twin code for the whole run, their bases' checks behind a 13.6k-job queue. The checker is
+/// held here (the startup phase: it runs live edits' checks only), so its queue reads as the hot
+/// push left it.
+#[test]
+fn hot_twin_asks_for_its_base_verdict() {
+    const CHILD: &str = "MAKEPAD_RUN_HOT_TWIN_VERDICT_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "jit::settle_tests::hot_twin_asks_for_its_base_verdict", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0").env("MAKEPAD_RUN_SPEC", "0"));
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    CHECK_FIRST.store(false, Ordering::Relaxed);
+    SPECV_HOLD.store(1, Ordering::Relaxed);
+    begin_startup_phase();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-hot-twin-verdict-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    std::fs::write(dir.join("app/src/lib.rs"), "#[inline(never)] pub fn mid(a: &mut u32, b: &u32) -> u32 { *a += *b; *a }\n\
+        pub fn root(out: &mut u32) { let mut x = 1u32; let y = 2u32; *out = mid(&mut x, &y); }\n").unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "hot_twin_verdict", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let (mid_def, root_def) = (find("mid"), find("root"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    crate::syms::set_unit(up);
+    let (mid, root_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let m = u.fn_id(FnKey::Inst(mid_def, vec![]));
+        let r = u.fn_id(FnKey::Inst(root_def, vec![]));
+        (m, u.entry(r))
+    });
+    let mut result = 0u32;
+    unsafe { call_jit(up, root_entry, &mut result as *mut u32 as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    assert_eq!(result, 3);
+    // (read on the owner, asserted here: a panic on the owner prints nothing)
+    let (twin, state, epoch) = crate::owner::call(crate::owner::Class::Program, || {
+        let twin = u.plain_twin_of(mid);
+        let state = twin.map(|t| unsafe { (*tier_rec(&u.slots, t).add(3)).load(Ordering::Acquire) });
+        (twin, state, u.tcx.collect_epoch.load(Ordering::SeqCst))
+    });
+    let twin = twin.expect("root's call runs mid's twin (verdicts held)");
+    assert_eq!(state, Some(T_COUNTING), "the twin's code counts its calls");
+    let checker = u.front.checker_id;
+    let place = || crate::borrowck::lazy::queue_place(checker, mid_def, epoch);
+    assert!(place().is_none_or(|p| p.0 > crate::borrowck::lazy::RANK_HOT), "nothing asked for mid's verdict yet: {:?}", place());
+    // the twin turns hot; this thread is the pool worker that picks it (the workers stopped)
+    queue::start();
+    queue::stop_workers(std::time::Duration::from_secs(10));
+    assert!(unsafe { queue_counting(&u, twin, tier_rec(&u.slots, twin), Q_CALLS, 1) }, "the twin is queued hot");
+    drain_tier_inbox();
+    prioritize_hot_verdicts();
+    assert_eq!(place(), Some((crate::borrowck::lazy::RANK_HOT, 0)), "mid's check is the checker's next");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}

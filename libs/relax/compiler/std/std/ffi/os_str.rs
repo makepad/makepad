@@ -207,6 +207,24 @@ impl ToOwned for OsStr {
     }
 }
 
+// std ffi/os_str.rs: `[S]::join` with an OsStr separator (a `Vec<&OsStr>` of path components
+// joined with "/", as ring's build script does)
+impl<S: Borrow<OsStr>> core::slice::Join<&OsStr> for [S] {
+    type Output = OsString;
+
+    fn join(slice: &Self, sep: &OsStr) -> OsString {
+        let Some((first, suffix)) = slice.split_first() else {
+            return OsString::new();
+        };
+        let first_owned = first.borrow().to_owned();
+        suffix.iter().fold(first_owned, |mut a, b| {
+            a.push(sep);
+            a.push(b.borrow());
+            a
+        })
+    }
+}
+
 impl AsRef<OsStr> for OsStr {
     fn as_ref(&self) -> &OsStr {
         self
@@ -249,6 +267,11 @@ impl PartialOrd for OsStr {
         Some(self.inner.cmp(&other.inner))
     }
 }
+impl PartialOrd<str> for OsStr {
+    fn partial_cmp(&self, other: &str) -> Option<Ordering> {
+        Some(self.inner.cmp(other.as_bytes()))
+    }
+}
 impl Ord for OsStr {
     fn cmp(&self, other: &OsStr) -> Ordering {
         self.inner.cmp(&other.inner)
@@ -266,26 +289,6 @@ impl PartialEq for OsString {
     }
 }
 impl Eq for OsString {}
-impl PartialEq<OsStr> for OsString {
-    fn eq(&self, other: &OsStr) -> bool {
-        self.as_os_str() == other
-    }
-}
-impl PartialEq<&OsStr> for OsString {
-    fn eq(&self, other: &&OsStr) -> bool {
-        self.as_os_str() == *other
-    }
-}
-impl PartialEq<OsString> for OsStr {
-    fn eq(&self, other: &OsString) -> bool {
-        self == other.as_os_str()
-    }
-}
-impl PartialEq<OsString> for &OsStr {
-    fn eq(&self, other: &OsString) -> bool {
-        *self == other.as_os_str()
-    }
-}
 impl PartialEq<str> for OsString {
     fn eq(&self, other: &str) -> bool {
         self.inner.as_slice() == other.as_bytes()
@@ -311,6 +314,47 @@ impl PartialOrd for OsString {
         Some(self.inner.cmp(&other.inner))
     }
 }
+impl PartialOrd<str> for OsString {
+    fn partial_cmp(&self, other: &str) -> Option<Ordering> {
+        Some(self.inner.as_slice().cmp(other.as_bytes()))
+    }
+}
+
+// Real std's impl_cmp: equality and order both ways between OsStr's owned, borrowed and Cow
+// forms, as OsStr compares (relax issue 72: `Cow<OsStr> == &OsStr` found no impl).
+macro_rules! impl_cmp {
+    (<$($life:lifetime),*> $lhs:ty, $rhs:ty) => {
+        impl<$($life),*> PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                <OsStr as PartialEq>::eq(self, other)
+            }
+        }
+        impl<$($life),*> PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool {
+                <OsStr as PartialEq>::eq(self, other)
+            }
+        }
+        impl<$($life),*> PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                <OsStr as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+        impl<$($life),*> PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<Ordering> {
+                <OsStr as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+    };
+}
+impl_cmp!(<> OsString, OsStr);
+impl_cmp!(<'a> OsString, &'a OsStr);
+impl_cmp!(<'a> Cow<'a, OsStr>, OsStr);
+impl_cmp!(<'a, 'b> Cow<'a, OsStr>, &'b OsStr);
+impl_cmp!(<'a> Cow<'a, OsStr>, OsString);
 impl Ord for OsString {
     fn cmp(&self, other: &OsString) -> Ordering {
         self.inner.cmp(&other.inner)

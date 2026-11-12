@@ -1,6 +1,6 @@
 # Contributing to Relax
 
-Relax is makepad's Rust JIT: it parses, type-checks and compiles Rust from source at run time.
+Relax is a Rust JIT from the Makepad project: it parses, type-checks and compiles Rust from source at run time.
 The crates are in libs/relax (front end, types, codegen, backend, compiler) and the command-line
 runner, `relax`, is in tools/run/runner. Open gaps with repros: KNOWN_GAPS.md.
 

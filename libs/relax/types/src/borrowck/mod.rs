@@ -183,9 +183,22 @@ static RELAXED_RECORDS: relax_session::sync::Mutex<Vec<field_views::RelaxedRecor
 
 /// `makepad check`: remember a verdict's field-view-only acceptances (relaxed crates).
 pub fn note_verdict(v: &Verdict) {
-    FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_only.iter().cloned());
-    FV_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_records.iter().cloned());
-    RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.relaxed_records.iter().cloned());
+    if !crate::body_facts::record(|f| {
+        f.fv_only.extend(v.fv_only.iter().cloned());
+        f.fv_records.extend(v.fv_records.iter().cloned());
+        f.relaxed_records.extend(v.relaxed_records.iter().cloned());
+    }) {
+        FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_only.iter().cloned());
+        FV_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.fv_records.iter().cloned());
+        RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(v.relaxed_records.iter().cloned());
+    }
+}
+
+/// Publishes one owner's acceptance notes before the check reports or exports relaxed code.
+pub(crate) fn merge_verdict_notes(fv_only: Vec<event::BorrowError>, fv_records: Vec<field_views::FvRecordRaw>, relaxed_records: Vec<field_views::RelaxedRecord>) {
+    if !fv_only.is_empty() { FV_ONLY.lock().unwrap_or_else(|e| e.into_inner()).extend(fv_only); }
+    if !fv_records.is_empty() { FV_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(fv_records); }
+    if !relaxed_records.is_empty() { RELAXED_RECORDS.lock().unwrap_or_else(|e| e.into_inner()).extend(relaxed_records); }
 }
 
 /// Whether the check's bodies accepted anything only relaxed Rust allows (field views, Polonius,
@@ -206,6 +219,7 @@ pub fn finish_check(prog: &Program) {
     for n in field_views::edit::plan_relaxed(prog, &relaxed) { crate::relaxed::note(n); }
     if !fvo.is_empty() {
         eprintln!("makepad check: {} conflict(s) accepted only in relaxed Rust (field views, extended two-phase borrows, Polonius, disjoint indices; rustc would reject them):", fvo.len());
+        // The body phase's list comes in owner order (body_facts::merge).
         for d in &fvo {
             eprintln!("{}", d.render());
         }

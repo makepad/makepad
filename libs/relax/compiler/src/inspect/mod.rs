@@ -202,7 +202,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("session", "view [open|dismiss]", "the run's view over the app (compile errors, a parked panic, the JIT's state): what it shows, or open / dismiss it (the caption's JIT ring is display only)"),
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
     ("hold", "[files=<path>=<blob id or ->, one a line> | take dir=<dir> files=... | off]", "hold back a landing (devhub's show, until its tip is proven): while a file says what the landing wrote (its git blob id, - when it removes the file) its change waits; every other save applies at once; take: the held files move to a proven tip's text (<dir>/<path>, of that blob id; -: gone), the rest stays held; off: the landing goes in; no words: how many files are held"),
-    ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, and which others lie in no package of the graph (`outside`)"),
+    ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, which others lie in no package of the graph (`outside`), and which others the program opened, probed or listed the folder of (`read`)"),
     ("session", "relaunch", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames)"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("capture", "[why=<text>]", "capture the JIT's state and flight recording; answers the likely cause and report path"),
@@ -434,6 +434,9 @@ fn dispatch_command(req: &Req, out: &mut Out) {
                     for path in crate::reload::outside_packages(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a))) {
                         out.always(&format!("{{\"outside\":{}}}", json_str(path)));
                     }
+                    for path in crate::reload::read_by_program(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a)), &ends_with_rel) {
+                        out.always(&format!("{{\"read\":{}}}", json_str(path)));
+                    }
                     for path in paths {
                         if out.cancelled() { break; }
                         out.always(&format!("{{\"path\":{}}}", json_str(&path)));
@@ -580,7 +583,7 @@ fn hold_files(list: &str) -> Result<Vec<(String, Option<[u8; 20]>)>, String> {
 
 /// `req` with `word` put in front of its positional words (an alias for a subcommand).
 /// Whether `path` ends with the relative `rel` at a path component ('/' and '\\' alike).
-fn ends_with_rel(path: &str, rel: &str) -> bool {
+pub(crate) fn ends_with_rel(path: &str, rel: &str) -> bool {
     let (p, r) = (path.as_bytes(), rel.as_bytes());
     let sep = |c: u8| c == b'/' || c == b'\\';
     let Some(at) = p.len().checked_sub(r.len()) else { return false };

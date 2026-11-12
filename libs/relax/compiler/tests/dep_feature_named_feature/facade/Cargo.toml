@@ -1,0 +1,11 @@
+[package]
+name = "df-facade"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+df-ratio = { path = "../ratio" }
+
+[features]
+default = ["std"]
+std = ["df-ratio/wide-std"]

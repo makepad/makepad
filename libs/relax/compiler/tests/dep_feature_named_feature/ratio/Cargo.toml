@@ -1,0 +1,13 @@
+[package]
+name = "df-ratio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+df-wide = { path = "../wide", optional = true }
+
+# `df-wide` is both the optional dependency and the feature that turns it on (`dep:` syntax);
+# `wide-std` names it only as `df-wide/std`
+[features]
+df-wide = ["dep:df-wide"]
+wide-std = ["df-wide/std"]

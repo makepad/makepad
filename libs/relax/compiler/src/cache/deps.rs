@@ -705,7 +705,7 @@ fn file_nodes(pf: &ParsedFile, dg: &super::items::FileDigest, path: &str) -> Vec
     let ident = |i: u32| -> u128 {
         let mut h = Sip128::new();
         h.str("dep-ident");
-        h.str(path);
+        h.str(&crate::dirs::anchored(path));
         let mut at = parent_of.get(&i).copied().flatten();
         let mut depth = 0;
         while let Some(p) = at {
@@ -1028,7 +1028,7 @@ impl Deps {
             // order (an edited crate restored after the kept ones), the places with the crate only
             h.u32(place[c as usize]);
             place[c as usize] += 1;
-            h.str(prog.file_paths.get(f).map_or("", |p| p.as_str()));
+            h.str(&crate::dirs::anchored(prog.file_paths.get(f).map_or("", |p| p.as_str())));
             h.u32(parsed[f].ast.items.len() as u32);
         }
         files.into_iter().enumerate().map(|(c, files)| {
@@ -1036,7 +1036,7 @@ impl Deps {
             let mut ident = Sip128::new();
             ident.str("crate-ident");
             ident.str(prog.syms.str(ci.name));
-            ident.str(prog.mods.get(ci.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize)).map_or("", |p| p.as_str()));
+            ident.str(&crate::dirs::anchored(prog.mods.get(ci.root_mod as usize).and_then(|m| prog.file_paths.get(m.file as usize)).map_or("", |p| p.as_str())));
             ident.u8(ci.cfg.holds("test") as u8);
             CrateRow { ident: h2(ident.finish128()), files: h2(files.finish128()),
                 iface: h2(iface.get(c).copied().unwrap_or(0)), always: [0; 2], always_at: [0; 2], aliases_at: [0; 2], macros_at: [0; 2],
@@ -1616,7 +1616,7 @@ impl Deps {
         h.u32(prog.files.len() as u32);
         h.u32(prog.boot_files as u32);
         for (i, p) in prog.file_paths.iter().enumerate().take(prog.boot_files.min(prog.files.len())) {
-            h.str(p);
+            h.str(&crate::dirs::anchored(p));
             h.u32(prog.file_crate.get(i).copied().unwrap_or(u32::MAX));
             h.u32(prog.files.get(i).map_or(0, |f| f.ast.items.len() as u32));
         }

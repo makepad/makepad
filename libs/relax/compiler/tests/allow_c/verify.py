@@ -60,6 +60,7 @@ command = [binary, "run", "--allow-c", "allow-c-fixture"]
 first = run("first", command)
 assert first.stdout == baseline.stdout, "native/JIT fixture output differs from cargo"
 assert "callback 50\n" in first.stdout, f"C code calling back into Rust: {first.stdout}"
+assert "shadowed cnative cnative\n" in first.stdout, f"a system library's copy of a name the C defines: {first.stdout}"
 assert "building native dependencies with cargo" in first.stderr, "cold native build was not exercised"
 
 native = scratch / "jit" / "native"
@@ -78,6 +79,12 @@ assert "building native dependencies with cargo" not in second.stderr, "warm lau
 assert keys == sorted(p.name for p in native.iterdir() if (p / "messages.jsonl").is_file()), "lock order changed native key"
 assert receipts == {key: (native / key / "messages.jsonl").stat().st_mtime_ns for key in keys}, "warm launch rewrote native build receipt"
 print("PASS cache: reordered unused patches keep one key; second launch reuses native build")
+
+# `makepad selftest --allow-c` builds every fn against the libraries the run links: `add` reads the
+# C static cn_offset, which a selftest that linked nothing reported as "foreign static not found"
+selftest = run("selftest", [binary, "selftest", "--allow-c", "allow-c-fixture"])
+assert "foreign static" not in selftest.stderr, f"selftest: {selftest.stderr}"
+print("PASS selftest: every fn builds against the native library, its C static included")
 
 # Keep the loader case independent of Cargo's unused-patch order checks.
 manifest = fixture / "Cargo.toml"

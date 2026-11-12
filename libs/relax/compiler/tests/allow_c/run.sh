@@ -1,6 +1,6 @@
 #!/bin/sh
 # makepad run --allow-c on the fixture (a path crate whose build script compiles C); prints the same
-# five lines as `cargo run`. Usage: run.sh <makepad binary> [run flags]
+# six lines as `cargo run`. Usage: run.sh <makepad binary> [run flags]
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 m=$1

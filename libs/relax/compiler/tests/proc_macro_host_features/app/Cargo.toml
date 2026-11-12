@@ -1,0 +1,8 @@
+[package]
+name = "hf-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hf-shared = { path = "../shared" }
+hf-macro = { path = "../macro" }

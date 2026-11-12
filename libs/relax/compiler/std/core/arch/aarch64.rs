@@ -1671,6 +1671,28 @@ pub fn vaddq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vaddlv_u8(a: uint8x8_t) -> u16 {
+    let mut r = 0u16;
+    let mut i = 0;
+    while i < 8 {
+        r += a.0[i] as u16;
+        i += 1;
+    }
+    r
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vaddlvq_u8(a: uint8x16_t) -> u16 {
+    let mut r = 0u16;
+    let mut i = 0;
+    while i < 16 {
+        r += a.0[i] as u16;
+        i += 1;
+    }
+    r
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vaddvq_f32(a: float32x4_t) -> f32 {
     neon_add_f32(neon_add_f32(a.0[0], a.0[1]), neon_add_f32(a.0[2], a.0[3]))
 }
@@ -3316,6 +3338,88 @@ pub fn vrev64q_f32(a: float32x4_t) -> float32x4_t {
     let mut i = 0;
     while i < 4 {
         r[i] = a.0[i ^ 1];
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+/// FRECPE on one f32: Arm's FPRecipEstimate under the FPCR every OS sets (round to nearest, no
+/// flush to zero, NaNs kept): an 8-bit estimate of 1/x from the top 8 bits of x's fraction.
+fn neon_recpe_f32(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let sign = bits & 0x8000_0000;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let frac = bits & 0x7f_ffff;
+    if exp == 0xff {
+        // a NaN comes back quieted, an infinity as zero
+        return f32::from_bits(if frac != 0 { bits | 0x40_0000 } else { sign });
+    }
+    // zero, and anything below 2^-128 (a subnormal under 2^21 ulps), overflow to infinity
+    if exp == 0 && frac < 0x20_0000 {
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    // the fraction as the pseudocode's 52 bits; a subnormal is normalised by one or two places
+    const F52: u64 = (1 << 52) - 1;
+    let mut e = exp;
+    let mut f = (frac as u64) << 29;
+    if e == 0 {
+        if f & (1 << 51) == 0 {
+            e = -1;
+            f = (f << 2) & F52;
+        } else {
+            f = (f << 1) & F52;
+        }
+    }
+    // RecipEstimate: 1/a for a in [0.5, 1) in 1/512 steps, rounded to nearest, in [1, 2)
+    let a = (256 | (f >> 44) as u32) * 2 + 1;
+    let r = ((1u32 << 19) / a + 1) / 2;
+    let mut result_exp = 253 - e;
+    let mut f = ((r & 0xff) as u64) << 44;
+    if result_exp == 0 {
+        f = (1 << 51) | (f >> 1);
+    } else if result_exp == -1 {
+        f = (1 << 50) | (f >> 2);
+        result_exp = 0;
+    }
+    f32::from_bits(sign | ((result_exp as u32) << 23) | (f >> 29) as u32)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrecpe_f32(a: float32x2_t) -> float32x2_t {
+    float32x2_t([neon_recpe_f32(a.0[0]), neon_recpe_f32(a.0[1])])
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrecpeq_f32(a: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_recpe_f32(a.0[i]);
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+/// FRECPS on one f32 pair: Arm's FPRecipStepFused, 2 - a * b rounded once (the Newton step that
+/// refines FRECPE's estimate); an infinity times a zero is 2. A NaN comes back as FMSUB's does.
+fn neon_recps_f32(a: f32, b: f32) -> f32 {
+    if (a.is_infinite() && b == 0.0) || (a == 0.0 && b.is_infinite()) {
+        return 2.0;
+    }
+    (-a).mul_add(b, 2.0)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrecps_f32(a: float32x2_t, b: float32x2_t) -> float32x2_t {
+    float32x2_t([neon_recps_f32(a.0[0], b.0[0]), neon_recps_f32(a.0[1], b.0[1])])
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrecpsq_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_recps_f32(a.0[i], b.0[i]);
         i += 1;
     }
     float32x4_t(r)

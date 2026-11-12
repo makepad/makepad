@@ -4605,6 +4605,13 @@ impl Program {
         RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && self.uses_stretch == Some(RECORD_STRETCH.load(std::sync::atomic::Ordering::Relaxed))
     }
 
+    /// Merges a body's captured resolutions into the sets read by the unused-import passes.
+    pub fn add_import_uses(&self, u: &ImportUses) {
+        if !u.import.is_empty() { self.import_used.lock().unwrap_or_else(|e| e.into_inner()).extend(u.import.iter().copied()); }
+        if !u.glob.is_empty() { self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).extend(u.glob.iter().copied()); }
+        if !u.ext.is_empty() { self.extern_used.lock().unwrap_or_else(|e| e.into_inner()).extend(u.ext.iter().copied()); }
+    }
+
     /// Whether a resolution went through the import binding `name` of module `m`.
     pub fn import_binding_used(&self, m: u32, name: Sym) -> bool {
         let u = self.import_used.lock().unwrap_or_else(|e| e.into_inner());
@@ -4810,7 +4817,7 @@ impl Program {
         let krate = self.mods[module as usize].krate;
         for (n, c) in &self.crates[krate as usize].deps {
             if *n == name {
-                if record_import_uses() { self.extern_used.lock().unwrap_or_else(|e| e.into_inner()).insert((krate, name)); }
+                if record_import_uses() && !record_import_use(|u| u.ext.push((krate, name))) { self.extern_used.lock().unwrap_or_else(|e| e.into_inner()).insert((krate, name)); }
                 return Some(*c);
             }
         }
@@ -5043,7 +5050,7 @@ impl Program {
         let md = &self.mods[m as usize];
         let direct = if ns_type { md.types.get(&name) } else { md.values.get(&name) };
         if let Some(&d) = direct {
-            if record_import_uses() && md.import_pub.contains_key(&(name, ns_type)) { self.import_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, name, ns_type)); }
+            if record_import_uses() && md.import_pub.contains_key(&(name, ns_type)) && !record_import_use(|u| u.import.push((m, name, ns_type))) { self.import_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, name, ns_type)); }
             return Some((d, if q.precise { self.precise_vis(m, name, ns_type, d) } else { self.binding_vis(m, name, ns_type, d) }));
         }
         if md.globs.is_empty() {
@@ -5113,7 +5120,7 @@ impl Program {
                 }
                 let gv = if gpub { None } else { Some(md.normal) };
                 let v = self.vis_min(gv, v);
-                if record_import_uses() { self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, g)); }
+                if record_import_uses() && !record_import_use(|u| u.glob.push((m, g))) { self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, g)); }
                 match best {
                     None => best = Some((d, v)),
                     Some((bd, bv)) => {
@@ -5848,6 +5855,56 @@ static RECORD_IMPORT_USES: std::sync::atomic::AtomicBool = std::sync::atomic::At
 /// starts one. A program made in one has every use of its name resolutions while it lasts.
 static RECORD_STRETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && !quiet_lookups() }
+
+/// Import resolutions captured by one body scope, without depending on the type layer's facts.
+#[derive(Default)]
+pub struct ImportUses {
+    /// Module, imported name and namespace, for the used-binding set.
+    pub import: Vec<(u32, Sym, bool)>,
+    /// Module and glob target, for the used-glob set.
+    pub glob: Vec<(u32, DefId)>,
+    /// Crate and extern-prelude name, for the used-extern set.
+    pub ext: Vec<(u32, Sym)>,
+}
+
+/// Captures of the same owner combine without losing resolutions made in an earlier scope.
+impl ImportUses {
+    /// Appends all three kinds of use in their recording order.
+    pub fn append(&mut self, mut other: ImportUses) {
+        self.import.append(&mut other.import);
+        self.glob.append(&mut other.glob);
+        self.ext.append(&mut other.ext);
+    }
+}
+
+thread_local! {
+    /// The current scope's import uses; none leaves resolution writing the program's sets.
+    static IMPORT_USE_SINK: std::cell::RefCell<Option<ImportUses>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Captures a resolution on this thread, or lets the caller insert into its program as before.
+fn record_import_use(f: impl FnOnce(&mut ImportUses)) -> bool {
+    IMPORT_USE_SINK.with(|s| match s.borrow_mut().as_mut() {
+        Some(u) => { let _k = crate::zone_alloc::kept(); f(u); true }
+        None => false,
+    })
+}
+
+/// Runs `f` with a fresh import-use buffer and restores the previous capture, including on unwind.
+pub fn capture_import_uses<R>(f: impl FnOnce() -> R) -> (R, ImportUses) {
+    /// The suspended capture, retained so an unwinding body cannot leak its sink to the next one.
+    struct Restore(Option<Option<ImportUses>>);
+    /// Scope cleanup restores the outer capture if normal return has not already taken it.
+    impl Drop for Restore {
+        /// Restores the saved capture without masking a panic from the body.
+        fn drop(&mut self) { if let Some(prev) = self.0.take() { IMPORT_USE_SINK.with(|s| *s.borrow_mut() = prev); } }
+    }
+    let mut restore = Restore(Some(IMPORT_USE_SINK.with(|s| s.replace(Some(ImportUses::default())))));
+    let r = f();
+    let prev = restore.0.take().unwrap_or_default();
+    let got = IMPORT_USE_SINK.with(|s| s.replace(prev)).unwrap_or_default();
+    (r, got)
+}
 
 thread_local! {
     static QUIET_LOOKUPS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };

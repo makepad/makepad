@@ -134,6 +134,24 @@ impl Write for Cursor<&mut Vec<u8>> {
     }
 }
 
+impl Write for Cursor<Box<[u8]>> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        slice_write(&mut self.pos, &mut self.inner, buf)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl<const N: usize> Write for Cursor<[u8; N]> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        slice_write(&mut self.pos, &mut self.inner, buf)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl Write for Cursor<Vec<u8>> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         vec_write(&mut self.pos, &mut self.inner, buf)

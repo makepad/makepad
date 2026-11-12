@@ -878,9 +878,13 @@ impl Plan {
         let mut hash = crate::sip::Sip128::new();
         hash.str("source-demand-v24-impl-declarations");
         hash.u128(graph);
-        for (p, h) in &inputs { hash.str(p); hash.u128(*h); }
-        for (p, exists) in &plan.probes { hash.str(p); hash.u8(*exists as u8); }
-        for (c, kind, name, content) in &late_inputs { hash.str(c); hash.u8(*kind); hash.str(name); hash.u128(*content); }
+        for (p, h) in &inputs { hash.str(&crate::dirs::anchored(p)); hash.u128(*h); }
+        for (p, exists) in &plan.probes { hash.str(&crate::dirs::anchored(p)); hash.u8(*exists as u8); }
+        for (c, kind, name, content) in &late_inputs {
+            hash.str(c); hash.u8(*kind);
+            if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { hash.str(&crate::dirs::anchored(name)); } else { hash.str(name); }
+            hash.u128(*content);
+        }
         let fingerprint = hash.finish128();
         drop(inputs_profile);
         // The closure is certified. Transient glob lookup results are not part
@@ -985,7 +989,7 @@ impl Plan {
                 hash.str("source-demand-crate-v1");
                 hash
             });
-            hash.str(&key.1);
+            hash.str(&crate::dirs::anchored(&key.1));
             hash.u8(self.reached.contains(key) as u8);
         }
         self.selection = hashes.into_iter().map(|h| h.map_or(0, |h| h.finish128())).collect();
@@ -1458,7 +1462,7 @@ pub fn recipe_identity(crates: &[PreCrate]) -> u128 {
     hash.str("source-demand-v24-impl-declarations");
     hash.u128(crate::macro_reg::outline_identity());
     for c in crates {
-        hash.str(&c.name); hash.str(&c.root); hash.u32(c.edition as u32);
+        hash.str(&c.name); hash.str(&crate::dirs::anchored(&c.root)); hash.u32(c.edition as u32);
         hash.u128(c.cfg.session.options.fingerprint()); hash.u8(c.proc_macro as u8);
         let mut cfg = c.cfg.set.clone(); cfg.sort();
         for value in cfg { hash.str(&value); }

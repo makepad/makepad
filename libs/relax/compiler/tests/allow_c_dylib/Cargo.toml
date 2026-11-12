@@ -1,0 +1,12 @@
+[package]
+name = "allow-c-dylib-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "makepad run --allow-c fixture: C code that calls a shared library from a rustc-link-search folder outside the loader's path"
+
+[dependencies]
+cdemo = { path = "cdemo" }
+
+# its own workspace (no registry dependencies: runs offline anywhere with cargo and cc)
+[workspace]

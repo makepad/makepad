@@ -1329,12 +1329,9 @@ impl Tcx {
                 push_generics(prog, def.file, &sig.generics, &mut env);
                 // each `impl Trait` in a parameter type is an anonymous generic param, also nested
                 // in generic args, tuples, slices, arrays (`&mut Image2d<u8, impl AsMut<[u8]>>`;
-                // rustc: synthetic params in order of appearance)
-                let mut found = Vec::new();
-                for p in ast.list(sig.params) {
-                    collect_argument_impl_traits(ast, p.ty, &mut found);
-                }
-                for t in found {
+                // rustc: synthetic params in order of appearance), and so is one in a type
+                // parameter's bounds (fn_impl_trait_params)
+                for t in fn_impl_trait_params(ast, sig) {
                     if let ast::Ty::ImplTrait(bs) = ast.ty(t) {
                         let pi = env.names.len() as u32;
                         env.impl_params.push((t.0, pi));
@@ -4477,6 +4474,40 @@ impl Drop for Tcx {
     }
 }
 
+/// A fn's anonymous type parameters, its `impl Trait`s, in rustc's order (rustc_ast_lowering
+/// lower_generics lowers the generic parameters' bounds, then the signature): those in its type
+/// parameters' bounds (`<I: Iterator<Item = impl AsRef<[u8]>>>`, universal there as in an argument;
+/// one in a where clause stays E0562), then those in its argument types.
+pub(crate) fn fn_impl_trait_params(ast: &ast::Ast, sig: &ast::FnSig) -> Vec<ast::TyId> {
+    let mut out = Vec::new();
+    for p in ast.list(sig.generics.params) {
+        if let GenericParamKind::Type(bounds, _) = &p.kind {
+            for b in ast.list(*bounds) {
+                if let ast::Bound::Trait { path, .. } = b {
+                    collect_path_impl_traits(ast, path, &mut out);
+                }
+            }
+        }
+    }
+    for p in ast.list(sig.params) {
+        collect_argument_impl_traits(ast, p.ty, &mut out);
+    }
+    out
+}
+
+/// The `impl Trait`s in a path's generic arguments and associated-type bindings.
+fn collect_path_impl_traits(ast: &ast::Ast, p: &ast::Path, out: &mut Vec<ast::TyId>) {
+    for seg in ast.segs(p.segs) {
+        if let Some(GenericArgs::Angle(v)) = ast.gargs(seg.args()) {
+            for g in ast.list(*v) {
+                if let GenericArg::Type(x) | GenericArg::Binding(_, _, x) = g {
+                    collect_argument_impl_traits(ast, *x, out);
+                }
+            }
+        }
+    }
+}
+
 fn collect_argument_impl_traits(ast: &ast::Ast, t: ast::TyId, out: &mut Vec<ast::TyId>) {
     match ast.ty(t) {
         ast::Ty::Ref(_, _, x) | ast::Ty::Paren(x) | ast::Ty::Ptr(_, x) | ast::Ty::Slice(x) | ast::Ty::Array(x, _) => collect_argument_impl_traits(ast, *x, out),
@@ -4486,34 +4517,11 @@ fn collect_argument_impl_traits(ast: &ast::Ast, t: ast::TyId, out: &mut Vec<ast:
             // nested in its own bounds too (`impl IntoIterator<Item = impl Into<String>>`)
             for b in ast.list(*bs) {
                 if let ast::Bound::Trait { path, .. } = b {
-                    for seg in ast.segs(path.segs) {
-                        if let Some(a) = ast.gargs(seg.args()) {
-                            if let GenericArgs::Angle(v) = a {
-                                for g in ast.list(*v) {
-                                    if let GenericArg::Type(x) | GenericArg::Binding(_, _, x) = g {
-                                        collect_argument_impl_traits(ast, *x, out);
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    collect_path_impl_traits(ast, path, out);
                 }
             }
         }
-        ast::Ty::Path(p) => {
-            for seg in ast.segs(p.segs) {
-                if let Some(a) = ast.gargs(seg.args()) {
-                    if let GenericArgs::Angle(v) = a {
-                        for g in ast.list(*v) {
-                            match g {
-                                GenericArg::Type(x) | GenericArg::Binding(_, _, x) => collect_argument_impl_traits(ast, *x, out),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        ast::Ty::Path(p) => collect_path_impl_traits(ast, p, out),
         _ => {}
     }
 }

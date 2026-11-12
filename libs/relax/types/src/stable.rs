@@ -25,7 +25,7 @@ fn crate_ident(prog: &Program, krate: u32, h: &mut Sip128) {
     h.str(relax_front::crates::base_crate_name(prog.syms.str(c.name)));
     let root_file = prog.mods.get(c.root_mod as usize).map(|m| m.file);
     match root_file.and_then(|f| prog.file_paths.get(f as usize)) {
-        Some(p) => h.str(p),
+        Some(p) => h.str(&crate::dirs::anchored(p)),
         None => h.str(""),
     }
 }
@@ -62,7 +62,7 @@ pub fn def_ident(prog: &Program, d: DefId, h: &mut Sip128) {
         return;
     }
     match prog.file_paths.get(def.file as usize) {
-        Some(p) => h.str(p),
+        Some(p) => h.str(&crate::dirs::anchored(p)),
         None => h.str(""),
     }
     let (owner, ord) = block_place(prog, d);
@@ -263,7 +263,7 @@ fn type_into(prog: &Program, tcx: &Tcx, t: TyId, h: &mut Sip128, depth: u32) {
         TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state }) => {
             h.u8(17);
             match prog.file_paths.get(*file as usize) {
-                Some(p) => h.str(p),
+                Some(p) => h.str(&crate::dirs::anchored(p)),
                 None => h.str(""),
             }
             h.u32(*expr);

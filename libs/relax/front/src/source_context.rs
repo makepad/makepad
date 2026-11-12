@@ -196,7 +196,7 @@ fn output_dir_entry(dir: &Path, name: &str) -> bool {
 
 fn directory_hash(path: &str, entries: &[(String, bool)]) -> u128 {
     let mut hash = crate::sip::Sip128::new();
-    hash.str(path);
+    hash.str(&crate::dirs::anchored(path));
     for (name, dir) in entries {
         hash.str(name);
         hash.u32(*dir as u32);

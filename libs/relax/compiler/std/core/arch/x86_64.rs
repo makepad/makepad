@@ -80,6 +80,53 @@ pub fn _rdrand64_step(val: &mut u64) -> i32 {
     0
 }
 
+// The ADX carry chain (stdarch x86/adx.rs and x86_64/adx.rs, Intel's pseudocode: a carry-in is
+// any nonzero `c_in`): `a + b + carry` and `a - (b + borrow)` into `out`, the carry or borrow out
+// returned. The `x` forms are the same operation under the `adx` feature.
+#[inline]
+pub fn _addcarry_u32(c_in: u8, a: u32, b: u32, out: &mut u32) -> u8 {
+    let (r, c1) = a.overflowing_add(b);
+    let (r, c2) = r.overflowing_add((c_in != 0) as u32);
+    *out = r;
+    (c1 | c2) as u8
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "adx"))]
+pub fn _addcarryx_u32(c_in: u8, a: u32, b: u32, out: &mut u32) -> u8 {
+    _addcarry_u32(c_in, a, b, out)
+}
+
+#[inline]
+pub fn _subborrow_u32(c_in: u8, a: u32, b: u32, out: &mut u32) -> u8 {
+    let (r, b1) = a.overflowing_sub(b);
+    let (r, b2) = r.overflowing_sub((c_in != 0) as u32);
+    *out = r;
+    (b1 | b2) as u8
+}
+
+#[inline]
+pub fn _addcarry_u64(c_in: u8, a: u64, b: u64, out: &mut u64) -> u8 {
+    let (r, c1) = a.overflowing_add(b);
+    let (r, c2) = r.overflowing_add((c_in != 0) as u64);
+    *out = r;
+    (c1 | c2) as u8
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "adx"))]
+pub fn _addcarryx_u64(c_in: u8, a: u64, b: u64, out: &mut u64) -> u8 {
+    _addcarry_u64(c_in, a, b, out)
+}
+
+#[inline]
+pub fn _subborrow_u64(c_in: u8, a: u64, b: u64, out: &mut u64) -> u8 {
+    let (r, b1) = a.overflowing_sub(b);
+    let (r, b2) = r.overflowing_sub((c_in != 0) as u64);
+    *out = r;
+    (b1 | b2) as u8
+}
+
 #[derive(Copy, Clone)]
 #[repr(C, align(16))]
 pub struct __m128i(pub [i64; 2]);

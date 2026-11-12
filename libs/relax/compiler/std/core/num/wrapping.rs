@@ -141,6 +141,62 @@ impl<T: BitAnd<Output = T> + Copy> BitAndAssign for Wrapping<T> {
         self.0 = self.0 & rhs.0;
     }
 }
+impl<T: Div<Output = T> + Copy> DivAssign for Wrapping<T> {
+    fn div_assign(&mut self, rhs: Wrapping<T>) {
+        self.0 = self.0 / rhs.0;
+    }
+}
+impl<T: Rem<Output = T> + Copy> RemAssign for Wrapping<T> {
+    fn rem_assign(&mut self, rhs: Wrapping<T>) {
+        self.0 = self.0 % rhs.0;
+    }
+}
+// The by-reference forms real core gets from forward_ref_binop!, forward_ref_op_assign! and
+// forward_ref_unop!: `a + &b`, `&a + b`, `&a + &b`, `a += &b`, `-&a`, `!&a`.
+macro_rules! wrapping_ref_ops {
+    ($($Op:ident $op:ident $OpAssign:ident $op_assign:ident;)*) => {$(
+        impl<'a, T: $Op<Output = T> + Copy> $Op<&'a Wrapping<T>> for Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $op(self, rhs: &'a Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Op::$op(self.0, rhs.0))
+            }
+        }
+        impl<'a, T: $Op<Output = T> + Copy> $Op<Wrapping<T>> for &'a Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $op(self, rhs: Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Op::$op(self.0, rhs.0))
+            }
+        }
+        impl<'a, 'b, T: $Op<Output = T> + Copy> $Op<&'b Wrapping<T>> for &'a Wrapping<T> {
+            type Output = Wrapping<T>;
+            fn $op(self, rhs: &'b Wrapping<T>) -> Wrapping<T> {
+                Wrapping($Op::$op(self.0, rhs.0))
+            }
+        }
+        impl<'a, T: $Op<Output = T> + Copy> $OpAssign<&'a Wrapping<T>> for Wrapping<T> {
+            fn $op_assign(&mut self, rhs: &'a Wrapping<T>) {
+                self.0 = $Op::$op(self.0, rhs.0);
+            }
+        }
+    )*};
+}
+wrapping_ref_ops! {
+    Add add AddAssign add_assign; Sub sub SubAssign sub_assign; Mul mul MulAssign mul_assign;
+    Div div DivAssign div_assign; Rem rem RemAssign rem_assign; BitXor bitxor BitXorAssign bitxor_assign;
+    BitOr bitor BitOrAssign bitor_assign; BitAnd bitand BitAndAssign bitand_assign;
+}
+impl<'a, T: Neg<Output = T> + Copy> Neg for &'a Wrapping<T> {
+    type Output = Wrapping<T>;
+    fn neg(self) -> Wrapping<T> {
+        Wrapping(-self.0)
+    }
+}
+impl<'a, T: Not<Output = T> + Copy> Not for &'a Wrapping<T> {
+    type Output = Wrapping<T>;
+    fn not(self) -> Wrapping<T> {
+        Wrapping(!self.0)
+    }
+}
 impl<T: Shl<usize, Output = T> + Copy> ShlAssign<usize> for Wrapping<T> {
     fn shl_assign(&mut self, rhs: usize) {
         self.0 = self.0 << rhs;

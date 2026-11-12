@@ -508,30 +508,33 @@ step_wasmcheck() {
 # is no pass; so does a target that is neither. One unit `guard <pkg>` each: the bucket
 # names the landing that changed its inputs, not every landing of the run. One at a time, on the lease's cores
 # (its pools and JIT workers too: MAKEPAD_CPU_CORES).
+# A guard's unit is `guard <pkg>` for its library's tests and `guard <pkg> --test <target>` for one test
+# target's (affected.py guard_unit), its log `guard-<pkg>` or `guard-<pkg>@<target>`: two guards of one package
+# (the Sandbox's store start and its still shadow edges, 11-12) are two units, each with its own log and verdict.
 step_guards() {
-  local status r bad target_args
+  local status r bad target_args unit out
   while read -r _ pkg dir target filter; do
     case "$target" in
-      lib) target_args="--lib";;
-      test:?*) target_args="--test ${target#test:}";;
-      *) target_args="";;
+      lib) target_args="--lib"; unit="guard $pkg"; out="guard-$pkg";;
+      test:?*) target_args="--test ${target#test:}"; unit="guard $pkg $target_args"; out="guard-$pkg@${target#test:}";;
+      *) target_args=""; unit="guard $pkg $target"; out="guard-$pkg@$target";;
     esac
     if [ -z "$target_args" ]; then
-      echo "guard $pkg: no target $target"; r=""; status=1
+      echo "$unit: no target $target"; r=""; status=1
     else
-      (cd "$dir" && exec env ${MAKEPAD_RUN_JOBS:+MAKEPAD_CPU_CORES=$MAKEPAD_RUN_JOBS} $B test "$pkg" $target_args -- "$filter") > "$log/guard-$pkg" 2>&1
+      (cd "$dir" && exec env ${MAKEPAD_RUN_JOBS:+MAKEPAD_CPU_CORES=$MAKEPAD_RUN_JOBS} $B test "$pkg" $target_args -- "$filter") > "$log/$out" 2>&1
       status=$?
-      r=$(grep -E '^test result:' "$log/guard-$pkg" | tail -1)
+      r=$(grep -E '^test result:' "$log/$out" | tail -1)
     fi
-    echo "guard $pkg $filter: ${r:-no result}"
+    echo "$unit $filter: ${r:-no result}"
     bad=1
     case "$r" in
-      "test result: ok. 0 passed"*) echo "guard $pkg: no test matches $filter";;
+      "test result: ok. 0 passed"*) echo "$unit: no test matches $filter";;
       "test result: ok."*) [ "$status" = 0 ] && bad=0;;
-      *) [ ! -f "$log/guard-$pkg" ] || test_failures "$log/guard-$pkg";;
+      *) [ ! -f "$log/$out" ] || test_failures "$log/$out";;
     esac
-    if [ "$bad" = 0 ]; then unit_line ok "guard $pkg"
-    else fail="$fail guard-$pkg"; echo "GATEREPRO guard $pkg :: makepad test $pkg $target_args -- $filter"; unit_line fail "guard $pkg"; fi
+    if [ "$bad" = 0 ]; then unit_line ok "$unit"
+    else fail="$fail $out"; echo "GATEREPRO $unit :: makepad test $pkg $target_args -- $filter"; unit_line fail "$unit"; fi
   done < "$log/guards"
 }
 # a cold present takes about PRESENT_CORES cores (its JIT compiling, its first pipelines): five side by side on

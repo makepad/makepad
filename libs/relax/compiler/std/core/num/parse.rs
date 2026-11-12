@@ -11,7 +11,7 @@ fn err(kind: IntErrorKind) -> ParseIntError {
 #[track_caller]
 fn check_radix(radix: u32) {
     if radix < 2 || radix > 36 {
-        crate::panicking::panic_fmt(format_args!("from_ascii_radix: radix must lie in the range `[2, 36]` - found {}", radix));
+        crate::panicking::panic_fmt(format_args!("from_ascii_bytes_radix: radix must lie in the range `[2, 36]` - found {}", radix));
     }
 }
 

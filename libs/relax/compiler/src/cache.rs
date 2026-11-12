@@ -99,6 +99,8 @@ impl OwnerVerdicts {
         let (Some(fp), Some(iface)) = (self.fps.get(krate as usize), self.ifaces.get(krate as usize)) else { return (None, None) };
         let mut h = Sip128::new();
         h.str("borrowck-owner");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u32(BORROWCK_VERSION);
         h.u128(self.cfg);
         h.u128(*fp); // includes the crate's transitive dependencies
@@ -1062,7 +1064,7 @@ impl Cache {
             h.str("crate-ident");
             h.str(prog.syms.str(prog.crates[c].name));
             let root_file = prog.mods.get(prog.crates[c].root_mod as usize).map(|m| m.file);
-            h.str(root_file.and_then(|f| prog.file_paths.get(f as usize)).map_or("", |p| p.as_str()));
+            h.str(&crate::dirs::anchored(root_file.and_then(|f| prog.file_paths.get(f as usize)).map_or("", |p| p.as_str())));
             h.u8(prog.crates[c].cfg.holds("test") as u8);
             let id = h.finish128();
             crate_ident.push(id);
@@ -1432,22 +1434,28 @@ impl Cache {
         Ok(c)
     }
 
+    /// The persisted parsed-file key, including its anchored path and current worktree.
     fn front_key(path: &str, source_hash: u128) -> u128 {
         let mut h = Sip128::new();
         h.str("front");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u32(crate::image::VERSION);
         h.u128(crate::codegen_id::front_id());
-        h.str(path);
+        h.str(&crate::dirs::anchored(path));
         h.u128(source_hash);
         h.finish128()
     }
 
+    /// The persisted expansion-part key, including its anchored path and current worktree.
     fn front_part_key(path: &str, source_hash: u128) -> u128 {
         let mut h = Sip128::new();
         h.str("front-part");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u32(crate::image::VERSION);
         h.u128(crate::codegen_id::front_id());
-        h.str(path);
+        h.str(&crate::dirs::anchored(path));
         h.u128(source_hash);
         h.finish128()
     }
@@ -2563,6 +2571,8 @@ impl Cache {
                 let g = self.deps_graph(u);
                 let mut h = Sip128::new();
                 h.str("code-deps");
+                // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+                h.u128(crate::dirs::anchors_key());
                 h.u128(self.cfg);
                 h.write(&e.0);
                 h.write(&shim.0);
@@ -2731,6 +2741,8 @@ impl Cache {
     fn deps_key(&self, root: u32) -> Option<u128> {
         let mut h = Sip128::new();
         h.str("deps-graph-v2");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u128(self.cfg);
         h.u128(*self.crate_ident.get(root as usize)?);
         Some(h.finish128())
@@ -2914,6 +2926,8 @@ impl Cache {
         if !crate::reload::edited_crates().is_empty() || self.iface_plain.len() != prog.crates.len() { return None; }
         let mut h = Sip128::new();
         h.str("coherence-verdict");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u32(COHERENCE_VERSION);
         h.u128(self.cfg);
         // by the crates' interfaces (their impls and every item they can name; a fn body is
@@ -2926,7 +2940,7 @@ impl Cache {
         }
         h.u32(prog.impls.len() as u32);
         for (i, f) in from.iter().enumerate() {
-            if *f { h.str(prog.file_paths.get(i).map_or("", |p| p.as_str())); }
+            if *f { h.str(&crate::dirs::anchored(prog.file_paths.get(i).map_or("", |p| p.as_str()))); }
         }
         Some(h.finish128())
     }
@@ -2945,6 +2959,8 @@ impl Cache {
         let fp = self.fp_now(c as usize)?;
         let mut h = Sip128::new();
         h.str(if mode == 0 { "run-typeck-crate" } else { "test-check-crate" });
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u8(mode);
         h.u32(CRATE_CHECK_VERSION);
         h.u128(self.cfg);
@@ -2997,6 +3013,8 @@ impl Cache {
     pub fn dep_check_key(&mut self, c: u32, own: u128, skipped: u128, closure: impl Iterator<Item = (u32, u128)>) -> Option<u128> {
         let mut h = Sip128::new();
         h.str("test-deps-check-crate");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u32(CRATE_CHECK_VERSION);
         h.u128(self.cfg);
         h.u128(own);
@@ -3223,6 +3241,8 @@ impl Cache {
             let key = {
                 let mut h = Sip128::new();
                 h.str("data");
+                // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+                h.u128(crate::dirs::anchors_key());
                 h.u128(self.cfg);
                 h.write(&e.0);
                 // a named object (a constant, a vtable, a location) is its own entry: two
@@ -3863,6 +3883,8 @@ impl Cache {
     fn manifest_key(&self, root: u32) -> Option<u128> {
         let mut h = Sip128::new();
         h.str("startup slots");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u128(self.cfg);
         // the program's view, not its interface: the manifest names each slot's key, which says
         // whether its entry holds after an edit (load_manifest)
@@ -4516,7 +4538,7 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
         }
         // each input is read once per open, however many packs name it
         let now = *memo.entry((k, c.to_string(), name.to_string())).or_insert_with(|| {
-            if k == crate::sip::LATE_FILE {
+            if crate::sip::late_base(k) == crate::sip::LATE_FILE {
                 crate::sip::late_hash(crate::vfs::read(name).ok().as_deref())
             } else {
                 crate::sip::late_hash(crate::crates::crate_env_named(c, name).as_deref().map(|s| s.as_bytes()))
@@ -4524,7 +4546,7 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
         });
         if now != h {
             if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("makepad-run cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if k == crate::sip::LATE_FILE { "file" } else { "env" });
+                eprintln!("makepad-run cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if crate::sip::late_base(k) == crate::sip::LATE_FILE { "file" } else { "env" });
             }
             return false;
         }
@@ -5011,7 +5033,7 @@ fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident
     }
     let def = prog.def(d);
     let parent = if def.parent == NO_DEF { crate_ident.get(def.krate as usize).copied().unwrap_or(u128::MAX ^ def.krate as u128) } else { def_key_in(prog, tcx, crate_ident, memo, files, def.parent) };
-    let fk = *files.entry(def.file).or_insert_with(|| hash_bytes(prog.file_paths.get(def.file as usize).map_or("", |p| p.as_str()).as_bytes()));
+    let fk = *files.entry(def.file).or_insert_with(|| hash_bytes(crate::dirs::anchored(prog.file_paths.get(def.file as usize).map_or("", |p| p.as_str())).as_bytes()));
     let mut h = Sip128::new();
     h.u128(parent);
     h.str(prog.syms.str(def.name));
@@ -5466,7 +5488,7 @@ pub(crate) fn closure_identity_ok(u: &Unit, file: u32, expr: u32) -> bool {
 fn file_ident(path: &str, source: u128, owner: u128, numbering: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("file-ident");
-    h.str(path);
+    h.str(&crate::dirs::anchored(path));
     h.u128(source);
     h.u128(owner);
     h.u128(numbering);
@@ -5509,6 +5531,8 @@ fn front_store_name(options: &crate::options::Options, name: &str, fp: u128) -> 
 fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
     let mut h = Sip128::new();
     h.str("store");
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
     h.u128(crate::codegen_id::id());
     h.str(&crate::codegen_id::target_tag());
     h.u128(fp);
@@ -5522,6 +5546,8 @@ fn front_store_name_with(parse_options: u128, name: &str, fp: u128) -> String {
 fn code_store_name(options: &crate::options::Options, name: &str, iface: u128) -> String {
     let mut h = Sip128::new();
     h.str("code-store");
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
     h.u128(crate::codegen_id::id());
     h.str(&crate::codegen_id::target_tag());
     h.u128(iface);
@@ -5533,24 +5559,32 @@ fn code_store_name(options: &crate::options::Options, name: &str, iface: u128) -
 fn front_crate_key(name: &str, root: &str) -> u128 {
     let mut h = Sip128::new();
     h.str("front-crate");
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
     h.u32(crate::crate_image::VERSION);
     h.u128(crate::codegen_id::front_id());
     h.str(name);
-    h.str(root);
+    h.str(&crate::dirs::anchored(root));
     h.finish128()
 }
 
+/// The persisted front graph key for this recipe and worktree.
 fn front_graph_key(identity: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-graph");
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
     h.u128(crate::codegen_id::id());
     h.str(&crate::codegen_id::target_tag());
     h.u128(identity);
     h.finish128()
 }
+/// The persisted load order key for this crate set and worktree.
 fn front_order_key(set: u128) -> u128 {
     let mut h = Sip128::new();
     h.str("front-order");
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
     h.u128(crate::codegen_id::id());
     h.str(&crate::codegen_id::target_tag());
     h.u128(set);
@@ -6431,7 +6465,7 @@ impl crate::crate_image::CrateImages for FrontImages {
             return None;
         }
         let late = image.late_inputs.iter().map(|(c, kind, name, hash)| {
-            let content = if *kind == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
+            let content = if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
                 else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
             (c, *kind, name, *hash, content)
         }).collect::<Vec<_>>();
@@ -6498,7 +6532,7 @@ impl crate::crate_image::CrateImages for FrontImages {
                 return None;
             }
             let late = part.late_inputs.iter().map(|(c, kind, name, hash)| {
-                let content = if *kind == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
+                let content = if crate::sip::late_base(*kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() }
                     else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
                 (c, *kind, name, *hash, content)
             }).collect::<Vec<_>>();
@@ -6574,7 +6608,7 @@ fn replay_front_ledger(st: &Store) -> Option<()> {
         let k = d.u8()?;
         let name = d.str()?;
         let _hash = d.u128()?;
-        let content = if k == crate::sip::LATE_FILE { crate::vfs::read(name).ok() } else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
+        let content = if crate::sip::late_base(k) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() } else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
         crate::sip::note_late_input(c, k, name, content.as_deref());
     }
     Some(())
@@ -9755,6 +9789,8 @@ impl Cache {
         crates.dedup();
         let mut h = Sip128::new();
         h.str("const-value-v2");
+        // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+        h.u128(crate::dirs::anchors_key());
         h.u128(self.cfg);
         h.write(&e.0);
         let dom = self.dominant(&crates);

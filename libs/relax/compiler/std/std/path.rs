@@ -1250,26 +1250,84 @@ impl Hash for PathBuf {
         self.as_path().hash(h)
     }
 }
-impl PartialEq<Path> for PathBuf {
-    fn eq(&self, other: &Path) -> bool {
-        self.as_path() == other
-    }
+// Real std's impl_cmp and impl_cmp_os_str: equality and order both ways between Path's owned,
+// borrowed and Cow forms, and between those and OsStr's, as Path compares (by components).
+macro_rules! impl_cmp {
+    (<$($life:lifetime),*> $lhs:ty, $rhs:ty) => {
+        impl<$($life),*> PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                <Path as PartialEq>::eq(self, other)
+            }
+        }
+        impl<$($life),*> PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool {
+                <Path as PartialEq>::eq(self, other)
+            }
+        }
+        impl<$($life),*> PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+        impl<$($life),*> PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+    };
 }
-impl PartialEq<PathBuf> for Path {
-    fn eq(&self, other: &PathBuf) -> bool {
-        self == other.as_path()
-    }
+impl_cmp!(<> PathBuf, Path);
+impl_cmp!(<'a> PathBuf, &'a Path);
+impl_cmp!(<'a> Cow<'a, Path>, Path);
+impl_cmp!(<'a, 'b> Cow<'a, Path>, &'b Path);
+impl_cmp!(<'a> Cow<'a, Path>, PathBuf);
+
+macro_rules! impl_cmp_os_str {
+    (<$($life:lifetime),*> $lhs:ty, $rhs:ty) => {
+        impl<$($life),*> PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool {
+                <Path as PartialEq>::eq(self, other.as_ref())
+            }
+        }
+        impl<$($life),*> PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool {
+                <Path as PartialEq>::eq(self.as_ref(), other)
+            }
+        }
+        impl<$($life),*> PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other.as_ref())
+            }
+        }
+        impl<$($life),*> PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<Ordering> {
+                <Path as PartialOrd>::partial_cmp(self.as_ref(), other)
+            }
+        }
+    };
 }
-impl<'a> PartialEq<&'a Path> for PathBuf {
-    fn eq(&self, other: &&'a Path) -> bool {
-        self.as_path() == *other
-    }
-}
-impl<'a> PartialEq<PathBuf> for &'a Path {
-    fn eq(&self, other: &PathBuf) -> bool {
-        *self == other.as_path()
-    }
-}
+impl_cmp_os_str!(<> PathBuf, OsStr);
+impl_cmp_os_str!(<'a> PathBuf, &'a OsStr);
+impl_cmp_os_str!(<'a> PathBuf, Cow<'a, OsStr>);
+impl_cmp_os_str!(<> PathBuf, OsString);
+impl_cmp_os_str!(<> Path, OsStr);
+impl_cmp_os_str!(<'a> Path, &'a OsStr);
+impl_cmp_os_str!(<'a> Path, Cow<'a, OsStr>);
+impl_cmp_os_str!(<> Path, OsString);
+impl_cmp_os_str!(<'a> &'a Path, OsStr);
+impl_cmp_os_str!(<'a, 'b> &'a Path, Cow<'b, OsStr>);
+impl_cmp_os_str!(<'a> &'a Path, OsString);
+impl_cmp_os_str!(<'a> Cow<'a, Path>, OsStr);
+impl_cmp_os_str!(<'a, 'b> Cow<'a, Path>, &'b OsStr);
+impl_cmp_os_str!(<'a> Cow<'a, Path>, OsString);
 
 impl fmt::Debug for Path {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

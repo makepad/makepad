@@ -18,6 +18,16 @@ extern "C" {
     fn relax_vfs_mounts(out: *mut *const u8, out_len: *mut usize) -> u64;
     fn relax_vfs_release(id: u64);
     fn relax_vfs_edit(p: *const u8, n: usize, mode: u32, out: *mut *const u8, out_len: *mut usize) -> u64;
+    fn relax_vfs_note(p: *const u8, n: usize, kind: u32);
+}
+
+/// What the program looked at on the disk, opened or not, as given (relative to its current
+/// folder): `b'f'` a file it opened for reading, `b'd'` a folder it listed, `b'p'` a path it probed
+/// (metadata, exists). A live session keeps it (compiler reload.rs `relax_vfs_note`): a data file a
+/// test reads is part of its verdict wherever it lies.
+pub(crate) fn note(path: &Path, kind: u8) {
+    let b = key(path);
+    unsafe { relax_vfs_note(b.as_ptr(), b.len(), kind as u32) };
 }
 
 /// What a write into a virtual path does (relax_vfs_edit's mode).

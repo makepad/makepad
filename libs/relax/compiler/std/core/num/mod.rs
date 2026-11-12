@@ -1,6 +1,6 @@
 //! Numbers: error types, Wrapping/Saturating, NonZero, FpCategory, integer parsing.
 //! Inherent integer/float methods and the primitive trait impls are generated
-//! (int_impls.rs, float_impls.rs, prim_traits.rs by check/src/gen_num.rs).
+//! (int_impls.rs, float_impls.rs, prim_traits.rs by gen/src/gen_num.rs).
 
 pub mod dec2flt;
 mod dec2flt_table;

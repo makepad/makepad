@@ -44,6 +44,8 @@ pub mod layout;
 pub mod const_fold;
 pub mod cycle;
 pub mod borrowck;
+/// Per-owner body-check side effects, merged before the crate-wide passes read their sinks.
+pub mod body_facts;
 pub mod lint;
 pub mod lint_table;
 pub mod lint_levels;
@@ -109,6 +111,7 @@ include!(concat!(env!("OUT_DIR"), "/src_stamp.rs"));
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub unsafe fn reset_statics() {
+    body_facts::reset_statics();
     borrowck::reset_statics();
     layout::reset_statics();
     lint::reset_statics();

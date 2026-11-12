@@ -75,9 +75,21 @@ impl Tcx {
         match self.tys.kind(t) {
             TyKind::Tuple(v) => self.tys.list(*v).get(fi as usize).copied(),
             TyKind::Adt(d, args, _) => {
-                let adt = self.adts.get(d)?;
-                adt.variants.get(vi as usize)?.fields.get(fi as usize)?;
-                Some(self.field_ty(prog, cx.typing_env, *d, vi, fi, self.tys.list(*args)))
+                let decl = self.adts.get(d)?.variants.get(vi as usize)?.fields.get(fi as usize)?.ty;
+                let ty = self.tys.subst(decl, self.tys.list(*args));
+                // a type check's own place (its upvar analysis walks its patterns) holds the check's
+                // inference variables, which the normalizing query's own inference context cannot
+                // read (an index past its empty table, relax#73): resolved here first, and a field
+                // type that still holds one stays as it is (erased) until the check's writeback
+                // normalizes the captured places
+                if let Some(infcx) = cx.infcx.filter(|_| self.tys.has_infer(ty)) {
+                    let ty = infcx.deeply_resolve_ignoring_regions(ty);
+                    if self.tys.has_infer(ty) {
+                        return Some(self.tys.erase_regions(ty));
+                    }
+                    return Some(self.normalize_erasing_regions(prog, cx.typing_env, ty));
+                }
+                Some(self.normalize_erasing_regions(prog, cx.typing_env, ty))
             }
             TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: up, .. }) => self.place_field_ty(prog, cx, *up, 0, fi),
             _ => None,

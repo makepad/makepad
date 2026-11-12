@@ -39,6 +39,14 @@ pub fn take_method_traits() -> HashMap<u32, HashSet<DefId>> {
     METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
 }
 
+/// Publishes captured trait uses while a check owns the sink, as the original recorders do.
+pub(crate) fn merge_method_traits(traits: Vec<(u32, DefId)>) {
+    if traits.is_empty() { return; }
+    if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        for (krate, t) in traits { m.entry(krate).or_default().insert(t); }
+    }
+}
+
 /// A method or associated item a body of crate `krate` resolved to: its trait counts as used
 /// in that crate.
 pub fn note_method(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) {
@@ -49,7 +57,9 @@ pub fn note_method(prog: &Program, tcx: &Tcx, krate: u32, d: DefId) {
         DefKind::Impl => match tcx.impl_trait.get(&def.parent) { Some(&t) => t, None => return },
         _ => return,
     };
-    if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().insert(t); }
+    if !crate::body_facts::record(|f| f.method_traits.push((krate, t))) {
+        if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().insert(t); }
+    }
 }
 
 /// The traits in scope at code of module `m` (its block scopes up to the item's module: what it
@@ -73,7 +83,9 @@ pub fn note_scope_traits(prog: &Program, krate: u32, m: u32, item: &str) {
         traits.extend(md.anon_traits.iter().map(|&(t, _)| t).filter(|&t| has_item(t)));
         for &(g, _) in &md.globs { if prog.def(g).kind == DefKind::Mod { stack.push(prog.def(g).sub); } }
     }
-    if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().extend(traits); }
+    if !crate::body_facts::record(|f| f.method_traits.extend(traits.iter().map(|&t| (krate, t)))) {
+        if let Some(m) = METHOD_TRAITS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { m.entry(krate).or_default().extend(traits); }
+    }
 }
 
 /// An identifier token of a file and where it is written.

@@ -1985,6 +1985,61 @@ mod tests {
     }
 
     #[test]
+    fn calls_lowered_at_one_place_are_sites_of_their_own() {
+        // The front lowers a match guard of an or-pattern once per alternative: calls of one
+        // callee at one source place, here `v = leaf(v)` in a loop and again behind a bounds
+        // check, `if v < 8 { v = leaf(v) } else { panic }`. Keyed by place and callee alone, the
+        // first copy's slow call took the second call for one of its own: the inliner kept it a
+        // call, and the split read the bounds check before it as a guard test whose fast side is
+        // the panic, so the fast half panicked on every iteration.
+        let options = &relax_session::Options::default();
+        let lf = leaf("leaf", Some(FLAG));
+        let get = |id: u32| (id == 1).then_some((&lf as *const Func, ATTR_ALWAYS));
+        let build = |second: bool| {
+            let (mut f, v) = new_root();
+            root(Vec::new(), &[1], Vec::new(), v, &mut f);
+            let (c, k) = (f.params[0], f.vreg(Cls::I));
+            let (ok, panic) = (f.block(), f.block());
+            f.blocks[1].insts.push(Inst::ICmpI(Cond::Lt, false, k, v, 8));
+            f.blocks[1].pos.push(11);
+            f.blocks[1].term = Term::Branch(k, ok, panic);
+            if second {
+                f.blocks[ok as usize].insts = vec![Inst::Call(Callee::Fn(1), vec![v], vec![v])];
+                f.blocks[ok as usize].pos = vec![10];
+            }
+            f.blocks[ok as usize].term = Term::Branch(c, 1, 2);
+            f.blocks[panic as usize].insts = vec![Inst::Call(Callee::Fn(7), vec![], vec![])];
+            f.blocks[panic as usize].pos = vec![30];
+            f.blocks[panic as usize].term = Term::Unreachable;
+            (f, v, k, ok as usize)
+        };
+        let keeps_check = |f: &Func, k: VReg| {
+            let (_, fast, _, _) = halves(f);
+            (0..f.blocks.len()).any(|b| fast[b] && matches!(f.blocks[b].term, Term::Branch(x, t, e) if x == k && t != e))
+        };
+        // both calls inlined, each copy with its own guard; the split keeps the bounds check
+        let (mut f, _, k, _) = build(true);
+        assert_eq!(inline_calls(options, &mut f, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 2, "each call is a site: {}", f.dump());
+        assert_eq!(f.guard_calls.len(), 2, "{}", f.dump());
+        split_patched_path(&mut f, &get).expect("a split");
+        f.verify().unwrap();
+        verify_patched_path(&f).unwrap_or_else(|e| panic!("{}\n{}", e, f.dump()));
+        assert!(keeps_check(&f, k), "the fast half keeps the bounds check: {}", f.dump());
+        // the second call left a call (as an inliner that priced it out leaves it): a plain call,
+        // not the copy's slow call, and the bounds check before it stays a branch
+        let (mut f, v, k, ok) = build(false);
+        assert_eq!(inline_calls(options, &mut f, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+        f.blocks[ok].insts.insert(0, Inst::Call(Callee::Fn(1), vec![v], vec![v]));
+        f.blocks[ok].pos.insert(0, 10);
+        assert_eq!(f.guard_calls.len(), 1, "{}", f.dump());
+        assert!(!f.guard_call(ok, 0), "a plain call at a guarded copy's place is no slow call: {}", f.dump());
+        split_patched_path(&mut f, &get).expect("a split");
+        f.verify().unwrap();
+        verify_patched_path(&f).unwrap_or_else(|e| panic!("{}\n{}", e, f.dump()));
+        assert!(keeps_check(&f, k), "the fast half keeps the bounds check before a plain call: {}", f.dump());
+    }
+
+    #[test]
     fn exits_fill_the_slots_the_patched_path_copies() {
         // a slot both halves address whose address stays in the fast half is the patched path's
         // own copy: an exit fills the cells the patched path reads before it writes them, a load

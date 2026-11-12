@@ -142,6 +142,20 @@ pub fn hash_bytes(b: &[u8]) -> u128 {
 /// re-checks them before trusting the world (C3).
 pub const LATE_FILE: u8 = 1;
 pub const LATE_ENV: u8 = 2;
+/// Or'ed into a late input's kind when read while parsing a hole body: a fn body that is not
+/// const, not async and returns no `impl Trait`; no other crate's check sees it.
+pub const LATE_HOLE: u8 = 0x80;
+/// Or'ed into a late input's kind when read while expanding an item-position macro call (an
+/// `include!` of items and its arguments): the expansion is the crate's interface text, so another
+/// crate's check sees the input through that text, not through the input.
+pub const LATE_ITEMS: u8 = 0x40;
+
+/// A late input's kind without its position bits: LATE_FILE or LATE_ENV.
+pub fn late_base(kind: u8) -> u8 { kind & !(LATE_HOLE | LATE_ITEMS) }
+
+/// Whether a late input of a checked dependency can change another crate's check by its value
+/// (read in an expression of the dependency's interface: a const, a const fn's body, an array length).
+pub fn late_reaches_callers(kind: u8) -> bool { kind & (LATE_HOLE | LATE_ITEMS) == 0 }
 
 static LATE: crate::sync::Mutex<Option<std::collections::HashMap<(String, u8, String), u128>>> = crate::sync::Mutex::new(None);
 
@@ -188,7 +202,7 @@ pub fn late_count() -> u64 {
 /// The files read by include_str!/include_bytes! so far (any crate), each once.
 pub fn late_files() -> Vec<String> {
     let g = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    let mut v: Vec<String> = g.as_ref().map_or(Vec::new(), |m| m.keys().filter(|k| k.1 == LATE_FILE).map(|k| k.2.clone()).collect());
+    let mut v: Vec<String> = g.as_ref().map_or(Vec::new(), |m| m.keys().filter(|k| late_base(k.1) == LATE_FILE).map(|k| k.2.clone()).collect());
     v.sort();
     v.dedup();
     v
@@ -197,7 +211,7 @@ pub fn late_files() -> Vec<String> {
 /// The included files' records, (crate, path, content hash): what the code compiled so far read.
 pub fn late_file_records() -> Vec<(String, String, u128)> {
     let g = LATE.lock().unwrap_or_else(|e| e.into_inner());
-    g.as_ref().map_or(Vec::new(), |m| m.iter().filter(|(k, _)| k.1 == LATE_FILE).map(|((c, _, n), h)| (c.clone(), n.clone(), *h)).collect())
+    g.as_ref().map_or(Vec::new(), |m| m.iter().filter(|(k, _)| late_base(k.1) == LATE_FILE).map(|((c, _, n), h)| (c.clone(), n.clone(), *h)).collect())
 }
 
 /// Puts included files' records back (a live edit whose parse read new contents was not applied:

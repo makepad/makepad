@@ -574,10 +574,7 @@ pub(crate) fn resolve_bound_vars(tcx: &Tcx, prog: &Program, owner: DefId, parent
     let generics = owner_generics(prog, owner);
     let function = match ast.item(def.item).kind { ItemKind::Fn(sig, _, _) => Some(ast.fn_sig(sig)), _ => None };
     let mut late = Vec::new();
-    let mut apits = Vec::new();
-    if let Some(sig) = function {
-        for param in ast.list(sig.params) { super::collect_argument_impl_traits(ast, param.ty, &mut apits); }
-    }
+    let apits = function.map_or_else(Vec::new, |sig| super::fn_impl_trait_params(ast, sig));
     if let Some(sig) = function {
         let collector = |constrained| LifetimeCollector { tcx, prog, owner, names: &names, constrained, regions: Vec::new(), has_fully_capturing_opaque: false };
         let mut inputs = collector(true);

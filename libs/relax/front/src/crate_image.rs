@@ -487,7 +487,7 @@ pub fn proc_fps(crates: impl Iterator<Item = (String, Option<u128>)>) -> Option<
 }
 pub fn file_hash(path: &str, src: &[u8]) -> u128 {
     let mut h = crate::sip::Sip128::new();
-    h.str(path);
+    h.str(&crate::dirs::anchored(path));
     h.write(src);
     h.finish128()
 }
@@ -519,7 +519,7 @@ pub fn fingerprint_head(name: &str, root: &str, edition: u16, proc_macro: bool, 
     let mut h = crate::sip::Sip128::new();
     h.str("crate");
     h.str(name);
-    h.str(root);
+    h.str(&crate::dirs::anchored(root));
     h.u32(edition as u32);
     h.u8(proc_macro as u8);
     let mut cfg = cfg.to_vec();
@@ -698,7 +698,7 @@ impl GraphRecipe {
         for c in crates {
             let mut k = crate::sip::Sip128::new();
             for h in [&mut h, &mut k] {
-                h.str(&c.name); h.str(&c.root); h.u32(c.edition as u32);
+                h.str(&c.name); h.str(&crate::dirs::anchored(&c.root)); h.u32(c.edition as u32);
                 h.u128(parse_options(&c.cfg.session.options)); h.u8(c.proc_macro as u8);
                 let mut cfg = c.cfg.set.clone(); cfg.sort();
                 h.u32(cfg.len() as u32);

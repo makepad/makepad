@@ -38,17 +38,10 @@ enum Ref {
 
 /// What one body owner references, and the diagnostics it emits when it is live.
 #[derive(Default)]
-struct BodyInfo {
+pub(crate) struct BodyInfo {
     refs: Vec<Ref>,
     /// (position, message, attributes in scope): `useless assignment ... to itself`
     notes: Vec<(u32, String, Vec<Attr>)>,
-}
-
-/// Positions (file, site) of the names patterns bind (they are definitions, not uses).
-static BINDING_SITES: Mutex<Option<HashSet<(u32, u32)>>> = Mutex::new(None);
-
-pub fn is_binding_site(file: u32, pos: u32) -> bool {
-    BINDING_SITES.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|s| s.contains(&(file, pos)))
 }
 
 /// Each body owner's references, from a check's `reset` to its `finish` (None otherwise: a body
@@ -56,7 +49,6 @@ pub fn is_binding_site(file: u32, pos: u32) -> bool {
 static BODY_REFS: Mutex<Option<HashMap<DefId, BodyInfo>>> = Mutex::new(None);
 
 pub fn reset() {
-    *BINDING_SITES.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashSet::new());
     crate::lint_imports::reset();
     *BODY_REFS.lock().unwrap_or_else(|e| e.into_inner()) = Some(HashMap::new());
 }
@@ -446,12 +438,17 @@ pub fn collect_body(prog: &Program, tcx: &Tcx, body: &Body) {
     };
     let mut out = std::mem::take(&mut b.out);
     out.append(&mut b.tw.out);
-    let mut notes = std::mem::take(&mut b.notes);
+    let mut info = BodyInfo { refs: out, notes: std::mem::take(&mut b.notes) };
+    if !crate::body_facts::record(|f| f.refs.push((holder, std::mem::take(&mut info)))) { merge_refs(holder, info); }
+}
+
+/// Appends a body's references and notes to its holder before the dead-code pass reads them.
+pub(crate) fn merge_refs(holder: DefId, mut other: BodyInfo) {
     let mut g = BODY_REFS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(g) = g.as_mut() else { return };
     let info = g.entry(holder).or_default();
-    info.refs.append(&mut out);
-    info.notes.append(&mut notes);
+    info.refs.append(&mut other.refs);
+    info.notes.append(&mut other.notes);
 }
 
 struct BodyRefs<'a> {
@@ -699,12 +696,7 @@ impl<'a> Visitor<'a> for BodyRefs<'a> {
                     self.handle_res(d);
                 }
             }
-            Pat::Ident { name, .. } => {
-                // (a binding a macro made has no place of its own: it maps to the call)
-                if self.body.pat_local.get(&p.0).is_some() && self.body.pat_res.get(&p.0).is_none() && name.lo < self.prog.files[self.body.file as usize].src_len {
-                    let site = self.prog.files[self.body.file as usize].diagnostic_pos(name.lo);
-                    BINDING_SITES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashSet::new).insert((self.body.file, site));
-                }
+            Pat::Ident { .. } => {
                 if let Some(Res::Def(d)) = self.body.pat_res.get(&p.0).copied() {
                     let pi = self.body.pat_ix(p);
                     if pi < self.body.pat_ty.len() {
@@ -1724,6 +1716,5 @@ fn unnameable_types(prog: &Program, own: &[bool], reach: &Reach) {
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
-    reset(&BINDING_SITES, Mutex::new(None));
     reset(&BODY_REFS, Mutex::new(None));
 }

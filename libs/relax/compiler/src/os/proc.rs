@@ -2,7 +2,8 @@
 //! arguments, private cache files.
 //!
 //! - `find(name)`: a symbol in any image loaded into the process (`name` NUL-terminated; on
-//!   Linux a miss asks a native bundle's address accessor for a symbol its link keeps hidden);
+//!   Linux and macOS a miss asks a native bundle's address accessor for a symbol its link keeps
+//!   hidden);
 //!   `find_system(name)`: the C/math libraries the host may not have loaded (Linux libm/libc).
 //! - `load_library(name, framework)`: a program's `#[link(name = ..)]` library (false: not found);
 //!   `load_library_versioned(name)`: Linux's lib<name>.so.N where lib<name>.so is a linker script.
@@ -23,9 +24,9 @@ pub unsafe fn find_any(name: *const u8) -> *mut u8 {
     if p.is_null() { find_system(name) } else { p }
 }
 
-/// Resolve ordinary exports first. Linux native bundles also expose address
+/// Resolve ordinary exports first. Linux and macOS native bundles also expose address
 /// accessors for archive symbols that the shared link keeps hidden.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub unsafe fn find(name: *const u8) -> *mut u8 {
     let address = imp::find(name);
     if address.is_null() {
@@ -251,10 +252,30 @@ mod unix {
         }
     }
 
+    /// Gives back a handle load_path took: the library unloads once nothing else holds it.
+    pub fn unload(handle: usize) {
+        extern "C" {
+            fn dlclose(handle: *mut u8) -> i32;
+        }
+        unsafe {
+            dlclose(handle as *mut u8);
+        }
+    }
+
     /// The address of `name` (a C symbol) in the library `handle` (load_path) and what it loaded.
     pub fn symbol_in(handle: usize, name: &str) -> usize {
         let Ok(name) = std::ffi::CString::new(name) else { return 0 };
         unsafe { dlsym(handle as *mut u8, name.as_ptr().cast()) as usize }
+    }
+
+    /// The image (its load base) holding `addr`, and that image's file (dladdr).
+    pub fn image_of(addr: usize) -> Option<(usize, std::path::PathBuf)> {
+        let mut info = super::DlInfo::default();
+        if unsafe { super::dladdr(addr as *const u8, &mut info) } == 0 || info.fname.is_null() {
+            return None;
+        }
+        let file = unsafe { std::ffi::CStr::from_ptr(info.fname) }.to_string_lossy().into_owned();
+        Some((info.fbase as usize, std::path::PathBuf::from(file)))
     }
 
     // (Android's own `lookup` also asks the host library and the program's libraries)
@@ -381,7 +402,7 @@ mod imp {
     pub fn load_path(path: &str) -> Result<usize, String> {
         super::unix::load_path(path, 2 | 0x100)
     }
-    pub use super::unix::symbol_in;
+    pub use super::unix::{image_of, symbol_in, unload};
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
@@ -545,7 +566,7 @@ mod imp {
     pub fn load_path(path: &str) -> Result<usize, String> {
         super::unix::load_path(path, 2 | 0x100)
     }
-    pub use super::unix::symbol_in;
+    pub use super::unix::{image_of, symbol_in, unload};
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
@@ -614,7 +635,7 @@ mod imp {
     pub fn load_path(path: &str) -> Result<usize, String> {
         super::unix::load_path(path, 2 | 8)
     }
-    pub use super::unix::symbol_in;
+    pub use super::unix::{image_of, symbol_in, unload};
 
     pub fn load_library(name: &str, framework: bool) -> bool {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.dylib\0", name) };
@@ -702,6 +723,13 @@ mod imp {
 
     pub fn symbol_in(_handle: usize, _name: &str) -> usize {
         0
+    }
+
+    /// load_path takes no handle here.
+    pub fn unload(_handle: usize) {}
+
+    pub fn image_of(_addr: usize) -> Option<(usize, std::path::PathBuf)> {
+        None
     }
 
     /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.

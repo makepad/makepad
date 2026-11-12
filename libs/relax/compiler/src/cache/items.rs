@@ -121,22 +121,7 @@ fn digest_into(pf: &ParsedFile, mut text: Option<&mut Vec<u8>>) -> FileDigest {
                 _ => continue,
             };
             if blo < lo || bhi > hi || blo < it.lo || blo >= bhi || bhi > it.hi { continue; }
-            // `impl Trait` in the return type: callers' types are the body's. (In an argument the
-            // fn is generic: an instance is a slot of its own, keyed by this body.) An `impl` after
-            // the first `->` outside brackets: an arrow inside the generics (`F: Fn() -> u32`)
-            // comes first and only makes an argument's `impl` count as the return's.
-            let t0 = pf.toks.partition_point(|t| t.lo < it.lo);
-            let mut depth = 0i32;
-            let mut ret = false;
-            if pf.toks.iter_from(t0).take_while(|t| t.lo < blo).any(|t| {
-                match t.kind {
-                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
-                    T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
-                    T::RArrow if depth <= 0 => ret = true,
-                    _ => {}
-                }
-                ret && t.kind == T::KwImpl
-            }) { continue; }
+            if pf.returns_impl(it.lo, blo) { continue; }
             // the items the body defines (written there or expanded from there)
             let Some(v) = (if eager { in_body(blo, bhi) } else { Some(Vec::new()) }) else { continue };
             nested_in.extend(v.into_iter().map(|x| (x, i as u32)));
@@ -345,7 +330,7 @@ pub(crate) fn pos_digest(pf: &ParsedFile, d: &FileDigest, item: ItemId) -> u128 
         let source = if file == 0 { None } else { pf.sources.as_ref().and_then(|s| s.get(file).ok()) };
         match source {
             Some(sf) => {
-                h.str(&sf.path);
+                h.str(&crate::dirs::anchored(&sf.path));
                 let (l, c) = sf.line_col(lo);
                 h.u64(l as u64);
                 h.u64(c as u64);
@@ -401,7 +386,7 @@ pub(crate) fn crate_ifaces_keeping(prog: &crate::program::Program, fps: &[u128],
         if prog.front_macro_fragments.contains(&i) { continue; }
         let (Some(&c), Some(d)) = (prog.file_crate.get(i), digests.get(i).and_then(|d| d.as_ref())) else { continue };
         if let Some(h) = per.get_mut(c as usize) {
-            h.str(prog.file_paths.get(i).map_or("", |p| p.as_str()));
+            h.str(&crate::dirs::anchored(prog.file_paths.get(i).map_or("", |p| p.as_str())));
             h.u128(d.iface);
         }
     }
@@ -477,7 +462,7 @@ pub(crate) fn late_texts(prog: &crate::program::Program, memo: &mut std::collect
         v.dedup();
         let mut h = Sip128::new();
         h.str("late-text");
-        for (p, x) in v { h.str(p); h.u128(x); }
+        for (p, x) in v { h.str(&crate::dirs::anchored(p)); h.u128(x); }
         h.finish128()
     }).collect()
 }

@@ -1,0 +1,10 @@
+[package]
+name = "hf-macro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+hf-shared = { path = "../shared", features = ["rate"] }

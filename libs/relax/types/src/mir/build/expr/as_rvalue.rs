@@ -660,6 +660,36 @@ pub(super) mod tests {
         assert!(matches!(b.as_constant(nc).unwrap().const_, Const::Unevaluated { def, promoted: None, .. } if def == c));
     }
 
+    /// rustc's categories (category.rs): a static's address is a Constant, a thread-local's an
+    /// Rvalue(AsRvalue). An operand of the first is the constant pointer itself; a place of either
+    /// is a temporary holding the address. Both were Place, which neither place lowering nor `into`
+    /// takes: a debug build asserted on every static read (as_place.rs, into.rs).
+    #[test]
+    fn statics_and_thread_locals_lower_by_rustcs_categories() {
+        let mut fx = fixture();
+        let (prog, tcx, _, _) = fx.builder_parts;
+        let s = (0..prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| prog.name(d) == "S").unwrap();
+        let i32_ = tcx.tys.i32_;
+        let mut expr = |kind| fx.thir.alloc_expr(Expr { kind, ty: i32_, temp_scope: None, bid: None, span: Span::default() });
+        let (sr, sr_place, tl, tl_place) = (expr(ExprKind::StaticRef { def: s, ty: i32_ }), expr(ExprKind::StaticRef { def: s, ty: i32_ }), expr(ExprKind::ThreadLocalRef(s)), expr(ExprKind::ThreadLocalRef(s)));
+        let (mut b, _) = builder(fx);
+        assert_eq!(Category::of(&b.thir.thir[sr].kind), Some(Category::Constant));
+        assert_eq!(Category::of(&b.thir.thir[tl].kind), Some(Category::Rvalue(super::super::category::RvalueFunc::AsRvalue)));
+        let start = b.cfg.start_new_block();
+
+        let BlockAnd(block, op) = b.as_operand(start, b.local_temp_lifetime(), sr, LocalInfo::Boring, true).unwrap();
+        assert!(matches!(op, Operand::Constant(ref c) if c.const_.check_static_ptr(&b.allocs) == Some(s)), "a static's address is a constant operand: {op:?}");
+        let BlockAnd(block, place) = b.as_place(block, sr_place).unwrap();
+        assert!(place.projection.is_empty() && matches!(b.local_decls[place.local.0 as usize].local_info, LocalInfo::StaticRef { def_id, is_thread_local: false } if def_id == s), "a static's place is a temporary: {place:?}");
+
+        let BlockAnd(block, op) = b.as_operand(block, b.local_temp_lifetime(), tl, LocalInfo::Boring, true).unwrap();
+        assert!(matches!(op, Operand::Move(_)), "a thread-local's address is computed into a temporary: {op:?}");
+        let BlockAnd(_, place) = b.as_place(block, tl_place).unwrap();
+        assert!(place.projection.is_empty(), "a thread-local's place is a temporary: {place:?}");
+        let reads = b.cfg.basic_blocks.iter().flat_map(|bb| &bb.statements).filter(|st| matches!(&st.kind, crate::mir::StatementKind::Assign(_, Rvalue::ThreadLocalRef(d)) if *d == s)).count();
+        assert_eq!(reads, 2, "each takes the address with Rvalue::ThreadLocalRef");
+    }
+
     fn binary(fx: &mut Fx, op: BinOp, ty: TyId, lhs: &str, rhs: &str, rhs_ty: TyId) -> ExprId {
         let (l, r) = (lit(fx, lhs, ty, false), lit(fx, rhs, rhs_ty, false));
         fx.thir.alloc_expr(Expr { kind: ExprKind::Binary { op, lhs: l, rhs: r }, ty, temp_scope: None, bid: None, span: Span::default() })

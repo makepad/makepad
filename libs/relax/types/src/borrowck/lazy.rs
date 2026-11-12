@@ -292,8 +292,7 @@ pub fn set_ranks(src: usize, epoch: u64, ranks: &[(DefId, Vec<TyId>, u32)]) {
     let q = guard.get_or_insert_with(Queue::default);
     let epoch = q.canon(src, epoch);
     if !q.advance(src, epoch) { return; }
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let trace = *TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SPECV_TRACE").is_some());
+    let trace = specv_trace();
     for (def, _, rank) in ranks {
         let key = (src, *def, epoch);
         if trace {
@@ -860,7 +859,16 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
             }
         }
         if *def != crate::program::NO_DEF && !reused_owner { CHECKED.fetch_add(1, Ordering::Relaxed); }
+        if rank <= RANK_HOT && *def != crate::program::NO_DEF && specv_trace() {
+            eprintln!("gandalf @{:.3}: hot check of {:?} done{}", crate::clock::wall_ns() as f64 / 1e9, def, if reused_owner { " (its stored verdict)" } else { "" });
+        }
     }
+}
+
+/// MAKEPAD_RUN_SPECV_TRACE: the ranks asked for (set_ranks) and the hot checks run.
+fn specv_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SPECV_TRACE").is_some())
 }
 
 /// `makepad run` never executes a body its checker rejects (check-before-run): the verdict of

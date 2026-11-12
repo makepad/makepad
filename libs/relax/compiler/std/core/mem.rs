@@ -16,7 +16,7 @@ pub const fn align_of<T>() -> usize {
 pub const fn align_of_val<T: ?Sized>(val: &T) -> usize {
     unsafe { im::align_of_val(val) }
 }
-pub const fn needs_drop<T>() -> bool {
+pub const fn needs_drop<T: ?Sized>() -> bool {
     unsafe { im::needs_drop::<T>() }
 }
 #[rustc_diagnostic_item = "mem_forget"]

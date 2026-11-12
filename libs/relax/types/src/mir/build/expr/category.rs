@@ -23,18 +23,18 @@ impl Category {
         match kind {
             ExprKind::Scope { .. } => None,
             ExprKind::VarRef { .. } | ExprKind::UpvarRef { .. } | ExprKind::Deref { .. } | ExprKind::Index { .. }
-            | ExprKind::Field { .. } | ExprKind::PlaceTypeAscription { .. } | ExprKind::StaticRef { .. }
-            | ExprKind::ThreadLocalRef(_) => Some(Category::Place),
+            | ExprKind::Field { .. } | ExprKind::PlaceTypeAscription { .. } => Some(Category::Place),
             ExprKind::If { .. } | ExprKind::Match { .. } | ExprKind::NeverToAny { .. } | ExprKind::Let { .. } | ExprKind::Block { .. }
             | ExprKind::Assign { .. } | ExprKind::AssignOp { .. } | ExprKind::Break { .. } | ExprKind::Continue { .. }
             | ExprKind::Return { .. } | ExprKind::Loop { .. } | ExprKind::Call { .. } | ExprKind::Yield { .. } | ExprKind::Unreachable
             | ExprKind::Adt(..) => Some(Category::Rvalue(RvalueFunc::Into)),
+            // a static's address is a constant (as_constant: a pointer to its allocation)
             ExprKind::Literal { .. } | ExprKind::NonHirLiteral { .. } | ExprKind::ZstLiteral { .. } | ExprKind::ConstParam { .. }
-            | ExprKind::ConstBlock { .. } | ExprKind::NamedConst { .. } => Some(Category::Constant),
+            | ExprKind::ConstBlock { .. } | ExprKind::NamedConst { .. } | ExprKind::StaticRef { .. } => Some(Category::Constant),
             ExprKind::Array { .. } | ExprKind::Tuple { .. } | ExprKind::Closure(..) | ExprKind::Unary { .. } | ExprKind::Binary { .. }
             | ExprKind::LogicalOp { .. } | ExprKind::Cast { .. } | ExprKind::Use { .. } | ExprKind::ByUse { .. }
             | ExprKind::PointerCoercion { .. } | ExprKind::Repeat { .. } | ExprKind::Borrow { .. } | ExprKind::RawBorrow { .. }
-            | ExprKind::ValueTypeAscription { .. } => Some(Category::Rvalue(RvalueFunc::AsRvalue)),
+            | ExprKind::ValueTypeAscription { .. } | ExprKind::ThreadLocalRef(_) => Some(Category::Rvalue(RvalueFunc::AsRvalue)),
         }
     }
 }

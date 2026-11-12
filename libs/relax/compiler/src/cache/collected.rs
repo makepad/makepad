@@ -71,9 +71,14 @@ fn with_dependents(pre: &[crate::preload::PreCrate], dirty: &mut [bool]) {
     }
 }
 
+/// The collected program's key, scoped to the build, target, recipe and worktree.
 fn key(identity: u128) -> u128 {
     let mut h = Sip128::new();
-    h.str("collected-graph-v1"); h.u128(front_graph_key(identity)); h.finish128()
+    h.str("collected-graph-v1");
+    h.u128(crate::codegen_id::id()); h.str(&crate::codegen_id::target_tag()); h.u128(identity);
+    // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
+    h.u128(crate::dirs::anchors_key());
+    h.finish128()
 }
 pub(super) fn path(dir: &std::path::Path, identity: u128) -> PathBuf {
     dir.join(format!("collected_graph-{:016x}.rcs", key(identity) as u64))

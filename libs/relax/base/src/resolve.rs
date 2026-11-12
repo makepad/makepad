@@ -269,6 +269,9 @@ impl Manifest {
     fn has_dep(&self, key: &str) -> bool {
         self.deps.iter().any(|d| d.key == key)
     }
+    fn optional_deps(&self) -> BTreeSet<String> {
+        self.deps.iter().filter(|d| d.optional).map(|d| d.key.clone()).collect()
+    }
     fn implicit_features(&self) -> BTreeSet<String> {
         let hidden: BTreeSet<&str> = self.features.values().flatten().filter_map(|v| v.strip_prefix("dep:")).collect();
         self.deps.iter().filter(|d| d.optional && !hidden.contains(d.key.as_str())).map(|d| d.key.clone()).collect()
@@ -1192,7 +1195,7 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     let mut r = Resolver::new(sess, dir)?;
     let i = r.find_member(package)?;
     let m = &r.manifests[i];
-    let features = enabled_features(&m.features, &m.implicit_features(), &o).map_err(|e| format!("package `{package}`: {e}"))?;
+    let features = enabled_features(&m.features, &m.implicit_features(), &m.optional_deps(), &o).map_err(|e| format!("package `{package}`: {e}"))?;
     let enabled = |targets: &[Target], names: &[String]| -> Result<Vec<(String, String, bool)>, String> {
         let mut out = Vec::new();
         for t in targets {
@@ -1379,7 +1382,7 @@ pub fn find_root(dir: &str) -> Result<String, String> {
 /// `.cargo/config` (else `.cargo/config.toml`) of `dir` and of every folder above it, then
 /// $CARGO_HOME's when none of those is it. Each with the folder its relative paths resolve
 /// against: the one holding that `.cargo` (the folder above CARGO_HOME for its config).
-fn cargo_config_files(dir: &str) -> Vec<(String, String)> {
+pub fn cargo_config_files(dir: &str) -> Vec<(String, String)> {
     let in_dir = |d: &str| ["config", "config.toml"].iter().map(|f| format!("{}/{}", d, f)).find(|p| crate::vfs::is_file(p));
     let mut files: Vec<(String, String)> = Vec::new();
     let mut cur = Some(normalize(dir));
@@ -1638,9 +1641,10 @@ fn feature_requests(features: &BTreeMap<String, Vec<String>>, implicit: &BTreeSe
 }
 
 /// Package-local feature closure for target selection, without resolving or fetching dependencies.
-/// Dependency features are not local features; a strong `dep/feature` can enable an implicit
-/// optional-dependency feature, while `dep:dep` and `dep?/feature` cannot.
-fn enabled_features(features: &BTreeMap<String, Vec<String>>, implicit: &BTreeSet<String>, o: &Options) -> Result<BTreeSet<String>, String> {
+/// Dependency features are not local features; a strong `dep/feature` on an optional dependency
+/// (a key of `optional`) enables the feature named `dep` when there is one, the implicit one or an
+/// explicit `dep = ["dep:dep"]` (as Feat::run), while `dep:dep` and `dep?/feature` do not.
+fn enabled_features(features: &BTreeMap<String, Vec<String>>, implicit: &BTreeSet<String>, optional: &BTreeSet<String>, o: &Options) -> Result<BTreeSet<String>, String> {
     let mut enabled = BTreeSet::new();
     let mut work = feature_requests(features, implicit, o);
     while let Some(req) = work.pop() {
@@ -1656,7 +1660,7 @@ fn enabled_features(features: &BTreeMap<String, Vec<String>>, implicit: &BTreeSe
                     return Err(format!("has no feature `{f}`"));
                 }
             }
-            Req::DepFeature(d, _, false) if implicit.contains(&d) => work.push(Req::Feature(d)),
+            Req::DepFeature(d, _, false) if implicit.contains(&d) || (optional.contains(&d) && features.contains_key(&d)) => work.push(Req::Feature(d)),
             _ => {}
         }
     }
@@ -1928,8 +1932,8 @@ impl<'a> Feat<'a> {
             let m = &self.r.manifests[k.0];
             let mname = m.name.clone();
             let fvals = if let Req::Feature(f) = &req { m.features.get(f).cloned() } else { None };
-            let (opt, syntax, has) = match &req {
-                Req::Feature(x) | Req::Dep(x) | Req::DepFeature(x, _, _) => (m.is_optional_dep(x), m.dep_syntax(x), m.has_dep(x)),
+            let (opt, syntax, has, named) = match &req {
+                Req::Feature(x) | Req::Dep(x) | Req::DepFeature(x, _, _) => (m.is_optional_dep(x), m.dep_syntax(x), m.has_dep(x), m.features.contains_key(x)),
             };
             match req {
                 Req::Feature(f) => {
@@ -1962,7 +1966,12 @@ impl<'a> Feat<'a> {
                         return Err(format!("package `{}`: feature value `{}/{}` names no dependency", mname, d, f));
                     }
                     if !weak && opt {
-                        if !syntax {
+                        // cargo features.rs activate_dep_feature: a strong `x/f` turns optional
+                        // dependency x on and, for compatibility, the feature named x when the
+                        // package has one: an explicit `x = ["dep:x"]` (num-rational's `num-bigint`,
+                        // which its `num-bigint-std = ["num-bigint/std"]` turns on) or the implicit
+                        // one no `dep:x` hides (cargo#10788)
+                        if named || !syntax {
                             self.work.push((k, Req::Feature(d.clone())));
                         }
                         self.switch_dep(k, &d)?;
@@ -2648,6 +2657,30 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
 mod root_tests {
     use super::*;
 
+    /// A strong `x/f` on an optional dependency enables the package's feature `x` when it has one,
+    /// an explicit `x = ["dep:x"]` included (num-rational's `num-bigint-std = ["num-bigint/std"]`
+    /// beside `num-bigint = ["dep:num-bigint"]`; relax issue 63, from makepad/relax#66).
+    #[test]
+    fn a_strong_dependency_feature_enables_an_explicit_feature_of_that_name() {
+        let manifest = parse_toml(r#"
+[dependencies]
+extra = { version = "1", optional = true }
+[features]
+extra = ["dep:extra"]
+fast = ["extra/boost"]
+weak = ["extra?/boost"]
+"#).unwrap().root;
+        let definitions = table(&manifest, "features").unwrap();
+        let features = definitions.keys().map(|k| (k.clone(), strs(definitions, k))).collect();
+        let optional = BTreeSet::from(["extra".to_string()]);
+        let enabled = |feature: &str| {
+            let flags: Vec<String> = ["--features", feature].iter().map(|f| f.to_string()).collect();
+            enabled_features(&features, &BTreeSet::new(), &optional, &parse_flags(&flags).unwrap()).unwrap()
+        };
+        assert!(enabled("fast").contains("extra"), "a strong `extra/boost` enables the explicit feature `extra`");
+        assert!(!enabled("weak").contains("extra"), "a weak `extra?/boost` does not");
+    }
+
     #[test]
     fn required_features_follow_package_feature_flags() {
         let manifest = parse_toml(r#"
@@ -2668,6 +2701,7 @@ required-features = ["b", "manual"]
         let definitions = table(&manifest, "features").unwrap();
         let features = definitions.keys().map(|k| (k.clone(), strs(definitions, k))).collect();
         let implicit = BTreeSet::from(["optional".to_string()]);
+        let optional = BTreeSet::from(["optional".to_string(), "hidden".to_string()]);
         let target = &manifest.get("test").unwrap().as_array_of_tables().unwrap()[0];
         let target = Target {
             name: s(target, "name").unwrap(), path: String::new(), edition: "2021".into(),
@@ -2675,7 +2709,7 @@ required-features = ["b", "manual"]
         };
         let enabled = |flags: &[&str]| {
             let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
-            enabled_features(&features, &implicit, &parse_flags(&flags).unwrap()).unwrap()
+            enabled_features(&features, &implicit, &optional, &parse_flags(&flags).unwrap()).unwrap()
         };
         assert_eq!(enabled(&[]), BTreeSet::from(["default".into(), "a".into(), "b".into()]));
         assert!(enabled(&["--no-default-features"]).is_empty());

@@ -199,6 +199,69 @@ fn hot_fns_reach_o3() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+const OPAQUE_SOURCE: &str = r#"
+pub struct Handle { x: u32 }
+impl Handle {
+    pub fn get(&self) -> u32 { self.x.rotate_left(3) ^ 7 }
+}
+impl Clone for Handle {
+    fn clone(&self) -> Self { Handle { x: self.x } }
+}
+fn main() {
+    let h = Handle { x: 5 };
+    let _ = h.clone().get();
+}
+"#;
+
+/// A provided crate's opaque type (as the loader binds makepad-script's ScriptHeap) keeps the
+/// source bodies of its inherent methods: the owner's build lowers them, so their fronts are made
+/// off the owner too. They were refused there as if every impl's method were bridged, and the O3
+/// builds of their hot callers left them calls for the rest of the run ("its front is not made off
+/// the owner: refused": ScriptHeap::heap_key and ::value under a text view's draw).
+#[test]
+fn an_opaque_types_own_methods_are_made_off_the_owner() {
+    isolated_test!(an_opaque_types_own_methods_are_made_off_the_owner);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-opaque-front-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, OPAQUE_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "opaque_front", false).unwrap();
+    let def = |prog: &Program, n: &str, kind: DefKind| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == kind && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (handle_d, get_d, clone_d) = (def(&prog, "Handle", DefKind::Struct), def(&prog, "get", DefKind::AssocFn), def(&prog, "clone", DefKind::AssocFn));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    // the fixture's crate provided as the loader provides makepad-script: Handle an opaque handle
+    // laid out as rustc does, no op listed
+    unsafe extern "C" fn no_panic_text(_: *mut *const u8, _: *mut usize) {}
+    let fixture = crate::provided::ProvidedCrate { name: "opaque_front".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[] };
+    u.provided.push((krate, fixture));
+    u.provided_types.insert(handle_d, 0);
+    assert!(u.provided_rustc_layout(handle_d));
+    // the owner's build lowers both from source (no bridge, no forward), so the front may as well
+    for (d, what) in [(get_d, "an inherent method"), (clone_d, "a Clone its attribute does not list")] {
+        assert!(matches!(unsafe { provided_fmt_hash(&mut u, d, &[], 0) }, Ok(None)), "{what}: the owner's build is its source body");
+        assert!(provided_source_body(&u, d), "{what}: the owner lowers its source body, and the front was refused");
+    }
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    enable_pipelining(&u.prog.session.options);
+    let get = crate::owner::call(crate::owner::Class::Program, || u.fn_id(FnKey::Inst(get_d, Vec::new())));
+    let front = crate::owner::call(crate::owner::Class::Program, || u.front.clone());
+    assert!(prefront_slot(&front, get), "the front of Handle::get was not made off the owner");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// The stable quicksort's O3 build keeps the sort's closure as a call (its verdict pending: its
 /// code unverified) and is stored so; the next launch links that code, the closure's verdict clean
 /// by then. Its O3 build turns the closure hot: the linked quicksort is queued again (a retier) and
@@ -330,4 +393,246 @@ fn linked_incomplete_o3_is_built_again() {
     }
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
+}
+
+const TLS_SOURCE: &str = r#"
+use std::collections::HashMap;
+fn main() {
+    let mut m: HashMap<u32, u32> = HashMap::new();
+    m.insert(1, 2);
+}
+"#;
+
+/// A body that reads a `#[thread_local]` static (core's hash keys: every HashMap::new) is made off
+/// the owner after the settle rebuild too. The rebuild gives the Unit a new front state, which has
+/// none of the places the owner made before it; the owner's drain placed the static again for a
+/// front that asked, found it placed already and published nothing, so every such front failed
+/// for the rest of the run ("needs unit" at the place, all its tries) and the hot callers' O3
+/// builds kept next_keys a call.
+#[test]
+fn a_thread_local_readers_front_is_made_after_the_settle_rebuild() {
+    isolated_test!(a_thread_local_readers_front_is_made_after_the_settle_rebuild);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-tls-front-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TLS_SOURCE).unwrap();
+    let (prog, core, _) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "tls_front", false).unwrap();
+    let core_def = |prog: &Program, n: &str, kind: DefKind| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == core && d.kind == kind && prog.name(id) == n && prog.def_path(id).contains("random")).then_some(id)
+    }).unwrap();
+    let (next_keys, keys) = (core_def(&prog, "next_keys", DefKind::Fn), core_def(&prog, "KEYS", DefKind::Static));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    enable_pipelining(&u.prog.session.options);
+    let id = crate::owner::call(crate::owner::Class::Program, || u.fn_id(FnKey::Inst(next_keys, Vec::new())));
+    // the owner placed KEYS before the rebuild (the first HashMap's build), then the rebuild's
+    // replace: a new front state, the Unit's places kept
+    crate::owner::call(crate::owner::Class::Program, || {
+        assert!(u.thread_local_place(keys).is_some(), "KEYS is placed on the owner");
+        let mut front = FrontShared::new(&u.prog.session);
+        for (i, f) in u.fns.iter().enumerate() {
+            front.slot_keys.insert(i as u32, f.key.clone());
+        }
+        u.front.retire_memos();
+        queue::retire_front(&u.front);
+        u.front = std::sync::Arc::new(front);
+        set_shared_front(&mut u, core);
+    });
+    let front = crate::owner::call(crate::owner::Class::Program, || u.front.clone());
+    assert!(prefront_slot(&front, id), "the front of next_keys was not made off the owner after the rebuild");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const TAKE_SOURCE: &str = r#"
+pub fn twice(x: u32) -> u32 { x.wrapping_mul(2) }
+fn main() {
+    let _ = twice(3);
+}
+"#;
+
+/// A take that bails gives back the lowerings its preparations took (TakenBack), also one taken for
+/// the normal body of a slot whose RIR is an O2 build's full body: callers below O2 inline that
+/// normal body, built from a fresh lowering. The give-back asked only whether the slot had RIR,
+/// kept it taken, and the next round needed its front made again: an O3 build left the candidate
+/// out once the tries were spent (Code's draw: i32::saturating_add, a damage walk's closure).
+#[test]
+fn a_bailed_take_gives_back_a_full_bodys_normal_lowering() {
+    isolated_test!(a_bailed_take_gives_back_a_full_bodys_normal_lowering);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-take-back-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TAKE_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "take_back", false).unwrap();
+    let twice = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "twice").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    crate::owner::call(crate::owner::Class::Program, || {
+        let u = unsafe { &mut *up };
+        let id = u.fn_id(FnKey::Inst(twice, Vec::new()));
+        let file = u.fns[id as usize].file;
+        // an O2 build's full body, no normal body beside it, and the lowering made ahead for that
+        let mut full = relax_backend::rir::Func::new("twice".into(), file);
+        full.full = true;
+        u.fns[id as usize].rir = Some(std::sync::Arc::new(full));
+        assert!(needs_normal(&u.fns[id as usize]));
+        give_back_lowered(u, id, relax_backend::rir::Func::new("twice".into(), file));
+        {
+            let _take = TakenBack::start();
+            let f = take_lowered_ahead(u, id).expect("the lowering made ahead is taken");
+            TakenBack::note(up, id, f);
+            // (the take bails here: a later candidate needs a front)
+        }
+        assert!(matches!(u.front.lowered.lock().unwrap_or_else(|e| e.into_inner()).get(&id), Some(LoweredState::Ready(_))),
+            "the bailed take kept the lowering for the full body's normal one: its next round needs the front made again");
+    });
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const LEFT_SOURCE: &str = r#"
+const K: u32 = 40 + 2;
+pub fn leaf(x: u32) -> u32 { x ^ 7 }
+pub fn root(x: u32) -> u32 { leaf(x).wrapping_add(K) }
+fn main() {
+    let _ = root(1);
+}
+"#;
+
+/// An O3 build that leaves an inline candidate out (the fronts it needed were not had within the
+/// build's tries) is queued again once the owner's drain has made something since the build began,
+/// and only then: the candidate is never left a call for the rest of the run, as it was ("a call
+/// for this run"), and a build whose fronts wait on nothing new is not built over and over.
+#[test]
+fn a_left_out_candidates_build_is_queued_again_after_the_drain() {
+    isolated_test!(a_left_out_candidates_build_is_queued_again_after_the_drain);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-left-out-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, LEFT_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "left_out", false).unwrap();
+    let def = |prog: &Program, n: &str, kind: DefKind| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == kind && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (root_d, leaf_d, k_d) = (def(&prog, "root", DefKind::Fn), def(&prog, "leaf", DefKind::Fn), def(&prog, "K", DefKind::Const));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    let (root, leaf) = crate::owner::call(crate::owner::Class::Program, || (u.fn_id(FnKey::Inst(root_d, Vec::new())), u.fn_id(FnKey::Inst(leaf_d, Vec::new()))));
+    // root's O3 build began, then left leaf out: leaf's own front was not had in its tries
+    crate::inspect::tierlog::init();
+    let drained0 = DRAIN_MADE.load(Ordering::SeqCst);
+    assert!(o3_left_out(up, root, leaf, &[leaf], &HashMap::new(), drained0), "leaf has no RIR: its build waits");
+    // (the owner runs the drain steps between its requests: each call below ends with them; a
+    // worker may take the queued build at once, so the decision is read from the tier log)
+    let retiers = || crate::inspect::tierlog::history(root).0.map_or(0, |h| h.n[crate::inspect::tierlog::ev::RETIER as usize]);
+    let epoch = crate::owner::call(crate::owner::Class::Program, || u.tcx.collect_epoch.load(Ordering::SeqCst));
+    assert_eq!(retiers(), 0, "built again before the drain made anything its fronts could wait for");
+    // a front asks for a constant, and the owner's drain evaluates it
+    want(Wanted::Const(k_d, Vec::new()), epoch);
+    crate::owner::call(crate::owner::Class::Job, const_drain);
+    crate::owner::call(crate::owner::Class::Program, || ());
+    assert_eq!(retiers(), 1, "the build that left leaf out is not queued again after the drain made something");
+    crate::owner::call(crate::owner::Class::Program, || ());
+    assert_eq!(retiers(), 1, "queued again at a later drain too: one left-out queues its build once");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+const TWIN_SOURCE: &str = r#"
+pub struct S { a: Vec<u32> }
+pub fn inner(s: &mut S, t: &S) -> u32 {
+    s.a.push(t.a.len() as u32);
+    s.a.len() as u32
+}
+pub fn outer(s: &mut S, t: &S) -> u32 {
+    inner(s, t)
+}
+fn main() {
+    let mut s = S { a: Vec::new() };
+    let t = S { a: vec![1] };
+    let _ = outer(&mut s, &t);
+}
+"#;
+
+/// SPEC-V: an unverified-mode twin's front is made off the owner when it calls (aliasing-prone) a
+/// callee that has no slot yet: its call goes to the callee's twin, named by a temporary reference
+/// the take makes after the callee's slot. Before, the lowering needed the unit and nothing made
+/// the callee's slot, so the twin's front failed for the rest of the run (Code: a glyph lookup's
+/// twin, whose base inlines the callee) and its hot caller's O3 build left it out every time.
+#[test]
+fn a_twins_front_is_made_when_its_callee_has_no_slot_yet() {
+    isolated_test!(a_twins_front_is_made_when_its_callee_has_no_slot_yet);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-twin-front-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TWIN_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "twin_front", false).unwrap();
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (outer_d, inner_d) = (def(&prog, "outer"), def(&prog, "inner"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    // outer and its twin have slots, inner none yet
+    let (outer, twin) = crate::owner::call(crate::owner::Class::Program, || {
+        let outer = u.fn_id(FnKey::Inst(outer_d, Vec::new()));
+        (outer, u.fn_id(FnKey::Plain(outer)))
+    });
+    let inner_key = FnKey::Inst(inner_d, Vec::new());
+    assert!(u.fn_map.get(&inner_key).is_none(), "the fixture's callee must have no slot yet");
+    let front = crate::owner::call(crate::owner::Class::Program, || u.front.clone());
+    assert!(prefront_slot(&front, twin), "the twin's front was not made off the owner: its callee had no slot");
+    // the take makes the callee's slot, then its twin, and the twin's call goes there
+    let func = crate::owner::call(crate::owner::Class::Program, || take_lowered_ahead(&mut u, twin)).expect("the twin's lowering is taken");
+    let inner = u.fn_map.get(&inner_key).expect("the take made the callee's slot");
+    let inner_twin = u.fn_map.get(&FnKey::Plain(inner)).expect("the take made the callee's twin");
+    let calls: Vec<u32> = func.blocks.iter().flat_map(|b| b.insts.iter()).filter_map(|i| match i {
+        relax_backend::rir::Inst::Call(relax_backend::rir::Callee::Fn(c), _, _) => Some(*c),
+        _ => None,
+    }).collect();
+    assert!(calls.contains(&inner_twin), "the twin's call does not go to its callee's twin: {calls:?} (callee #{inner}, its twin #{inner_twin}, outer #{outer})");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
 }

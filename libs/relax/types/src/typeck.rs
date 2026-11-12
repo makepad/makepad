@@ -1239,6 +1239,16 @@ impl<'a> Fcx<'a> {
 
     /// rustc_hir_typeck/src/coercion.rs:1134-1164: a failed coercion returns
     /// failure without reporting. Only the demanding caller emits a diagnostic.
+    /// rustc check_expr_index: the index operand of an overloaded index is coerced to the selected
+    /// impl's index type (demand_coerce), so a reference index is reborrowed with a fresh region:
+    /// `files[name]` with `name: &String` passes `&*name`, and a closure captures `*name`, not the
+    /// local `name` (relax issue 77: an inner closure borrowed the outer closure's parameter).
+    fn reborrow_index_operand(&mut self, ti: TyId, i: ExprId) {
+        if let TyKind::Ref(m, inner, _) = self.tcx.tys.kind(self.shallow(ti)).clone() {
+            let want = self.tcx.tys.intern(TyKind::Ref(m, inner, self.fresh_region()));
+            self.try_coerce(ti, want, Some(i));
+        }
+    }
     fn try_coerce(&mut self, a: TyId, x: TyId, e: Option<ExprId>) -> bool {
         self.try_coerce_inner(a, x, e, self.last_lo, false).is_some()
     }
@@ -5175,10 +5185,11 @@ impl<'a> Fcx<'a> {
                 }
                 let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
                 let tb = self.check_expr(*b, if is_shift { None } else { Some(ta) });
-                // a primitive place with a non-primitive right operand is an `<Op>Assign` call
-                // (`n /= NonZero<u32>`; rustc is_builtin_binop needs both sides primitive)
+                // a primitive place with a non-primitive right operand, or a reference to one, is an
+                // `<Op>Assign` call (`n /= NonZero<u32>`, `x %= &big`; rustc is_builtin_binop needs
+                // both sides primitive)
                 let sb0 = self.shallow(tb);
-                if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..)) {
+                if self.non_prim_operand(sb0) {
                     self.cur_binop = e.0;
                     if self.prim_lhs_op(*op, e, sa, sb0, lo, true).is_some() {
                         return unit;
@@ -5875,6 +5886,7 @@ impl<'a> Fcx<'a> {
                                     for st in [cur, slice] {
                                         let ds = self.infcx.deeply_resolve_ignoring_regions(st);
                                         if !matches!(self.select_trait(td, ds, &[ti2]), Err(_)) {
+                                            self.reborrow_index_operand(ti, *i);
                                             let m = self.trait_fn(td, "index").unwrap();
                                             self.b.ov_index.insert(e.0, (m, self.tcx.tys.mk_list(&[ds, ti2])));
                                             let out = self.tcx.trait_assoc(self.prog, td, self.prog.syms.get("Output").unwrap()).unwrap();
@@ -5938,6 +5950,9 @@ impl<'a> Fcx<'a> {
                                     }
                                 }
                                 if !matches!(found, Err(_)) {
+                                    if coerced_idx.is_none() {
+                                        self.reborrow_index_operand(ti, *i);
+                                    }
                                     self.set_operand_derefs(e.0, derefs);
                                     let m = self.trait_fn(td, "index").unwrap();
                                     let index = coerced_idx.unwrap_or(ti2);
@@ -6663,7 +6678,7 @@ impl<'a> Fcx<'a> {
                 // a primitive left operand with a non-primitive right one is an operator trait
                 // call too (`3u32 * duration`: `impl Mul<Duration> for u32`; rustc is_builtin_binop
                 // needs both sides primitive)
-                if matches!(self.tcx.tys.kind(sb0), TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..) | TyKind::Infer(_)) {
+                if self.non_prim_operand(sb0) || matches!(self.tcx.tys.kind(sb0), TyKind::Infer(_)) {
                     let sa = self.shallow(ta);
                     if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo, false) {
                         return r;
@@ -7561,6 +7576,21 @@ impl<'a> Fcx<'a> {
         self.norm(r)
     }
 
+    /// A right operand no primitive operator takes: a non-primitive type, or a reference to one
+    /// (`x %= &big` with `impl RemAssign<&BigUint> for u32`). rustc is_builtin_binop needs both
+    /// operands primitive; core's forward-ref operator impls take references to primitives only.
+    fn non_prim_operand(&mut self, sb: TyId) -> bool {
+        let non_prim = |k: &TyKind| matches!(k, TyKind::Adt(..) | TyKind::Param(_) | TyKind::Alias(..));
+        if non_prim(self.tcx.tys.kind(sb)) {
+            return true;
+        }
+        if let TyKind::Ref(_, inner, _) = self.tcx.tys.kind(sb).clone() {
+            let si = self.shallow(inner);
+            return non_prim(self.tcx.tys.kind(si));
+        }
+        false
+    }
+
     /// `prim op adt`: the operator trait impl of the primitive for the right type. A literal
     /// left operand takes the type of the single primitive impl with that right type.
     /// With `assign`, `prim op= adt` through the `<Op>Assign` impl (`n /= NonZero<u32>`).
@@ -7574,6 +7604,8 @@ impl<'a> Fcx<'a> {
             (BinOp::BitAnd, true) => ("BitAndAssign", "bitand_assign"),
             (BinOp::BitOr, true) => ("BitOrAssign", "bitor_assign"),
             (BinOp::BitXor, true) => ("BitXorAssign", "bitxor_assign"),
+            (BinOp::Shl, true) => ("ShlAssign", "shl_assign"),
+            (BinOp::Shr, true) => ("ShrAssign", "shr_assign"),
             (_, true) => return None,
             (op, false) => match op {
                 BinOp::Add => ("Add", "add"),
@@ -7584,6 +7616,8 @@ impl<'a> Fcx<'a> {
                 BinOp::BitAnd => ("BitAnd", "bitand"),
                 BinOp::BitOr => ("BitOr", "bitor"),
                 BinOp::BitXor => ("BitXor", "bitxor"),
+                BinOp::Shl => ("Shl", "shl"),
+                BinOp::Shr => ("Shr", "shr"),
                 _ => return None,
             },
         };

@@ -1431,7 +1431,8 @@ pub struct Func {
     /// copy's site calls the slot, which holds the patched body (`guard_calls`). Side metadata of
     /// the callee for its callers' inliner: the body's own code does not read it.
     pub patch_flag: Option<Sym>,
-    /// The calls a guarded inline copy falls back to (call position, slot): never inlined again.
+    /// The calls a guarded inline copy falls back to (call position, with `POS_GUARD`; slot): never
+    /// inlined again.
     pub guard_calls: Vec<(u64, u32)>,
     /// A live session: the patch flags of the copies this body inlined unguarded (no call and no
     /// loop on any path from its entry to the site: a frame there cannot wait for a patch; the
@@ -1806,12 +1807,19 @@ impl Func {
     }
 }
 
-/// Source positions are `(file << 32) | byte`, with the inline context in bits 48..62 (0: the
-/// function's own body; k: inlined through `Func::inl[k - 1]`) and bit 63 set on the code of a
-/// split body's patched path (`POS_PATCHED`). File indices stay below 1 << 16.
+/// Source positions are `(file << 32) | byte`, with the inline context in bits 48..61 (0: the
+/// function's own body; k: inlined through `Func::inl[k - 1]`), bit 62 set on a guarded inline
+/// copy's slow call (`POS_GUARD`) and bit 63 on the code of a split body's patched path
+/// (`POS_PATCHED`). File indices stay below 1 << 16.
 pub const POS_CTX_SHIFT: u32 = 48;
-/// An inline chain deeper / wider than 15 bits: the context is lost (positions still name lines).
-pub const POS_CTX_LOST: u64 = 0x7fff;
+/// An inline chain deeper / wider than 14 bits: the context is lost (positions still name lines).
+pub const POS_CTX_LOST: u64 = 0x3fff;
+/// The position bit of a guarded inline copy's slow call (`Func::guard_calls`, `codegen::opt`
+/// `inline_site`). The front lowers some source places more than once (a match guard of an
+/// or-pattern, once per alternative): a call there of the same callee is a plain call, which the
+/// call position alone would take for the slow call (never inlined, and its block's branch read as
+/// a guard test: `codegen::patched` sent the fast half to the panic side of a bounds check).
+pub const POS_GUARD: u64 = 1 << 62;
 /// The position bit of an instruction in a split body's patched path (`codegen::patched`): the
 /// pc map tells a frame there from one in the fast half (makepad inspect, the patch report).
 pub const POS_PATCHED: u64 = 1 << 63;
@@ -1836,9 +1844,9 @@ pub fn pos_file(p: u64) -> u32 {
     ((p >> 32) & 0xffff) as u32
 }
 
-/// `p` with inline context `ctx` (in the patched path when `p` is).
+/// `p` with inline context `ctx` (a slow call, in the patched path, when `p` is).
 pub fn pos_with_ctx(p: u64, ctx: u64) -> u64 {
-    (p & POS_PATCHED) | pos_plain(p) | (ctx.min(POS_CTX_LOST) << POS_CTX_SHIFT)
+    (p & (POS_PATCHED | POS_GUARD)) | pos_plain(p) | (ctx.min(POS_CTX_LOST) << POS_CTX_SHIFT)
 }
 
 /// The pc-map entries carrying `f`'s inline stack: two per context, at code offset u32::MAX

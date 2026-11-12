@@ -1,0 +1,11 @@
+[package]
+name = "hf-shared"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+rate = ["dep:hf-trait", "dep:hf-derive"]
+
+[dependencies]
+hf-trait = { path = "../trait", optional = true }
+hf-derive = { path = "../derive", optional = true }

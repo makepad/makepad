@@ -378,6 +378,7 @@ fn def_spans(prog: &Program, file: u32) -> Vec<(u32, u32, DefId)> {
         let named_mod = d.kind == DefKind::Mod && d.parent != crate::program::NO_DEF && prog.block_owner.get(&d.sub).is_none();
         if !(named_mod || matches!(d.kind, DefKind::Fn | DefKind::AssocFn | DefKind::ForeignFn | DefKind::Struct | DefKind::Union | DefKind::Enum
             | DefKind::TypeAlias | DefKind::AssocTy | DefKind::Trait | DefKind::Impl | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::ForeignStatic)) { continue; }
+        crate::lint::parse_owner(prog, file, d.item);
         let it = ast.item(d.item);
         out.push((it.lo, it.hi, DefId(i as u32)));
     }

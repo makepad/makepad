@@ -14,10 +14,15 @@ struct Run { diags: Vec<String>, hits: usize, full: bool, code: i32 }
 /// The check of the package in `dir` in a child (`reuse_child`), with the store when `reuse`,
 /// the variables `env` set.
 fn check_in_child(dir: &std::path::Path, reuse: bool, env: &[(&str, &str)]) -> Run {
+    check_in_child_store(dir, reuse, &dir.join("store"), env)
+}
+
+/// A child check with an explicit verdict store, so separate workspaces can use the same one.
+fn check_in_child_store(dir: &std::path::Path, reuse: bool, store: &std::path::Path, env: &[(&str, &str)]) -> Run {
     let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
     cmd.args(["--exact", "check_reuse_tests::reuse_child", "--nocapture", "--test-threads=1", "--format=terse"])
         .env(CHILD, dir).env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("RELAX_CHECK_REUSE_STORE");
-    if reuse { cmd.env("RELAX_CHECK_REUSE_STORE", dir.join("store")); }
+    if reuse { cmd.env("RELAX_CHECK_REUSE_STORE", store); }
     for (k, v) in env { cmd.env(k, v); }
     let out = crate::test_child::output(&mut cmd);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -73,8 +78,8 @@ fn reuse_child() {
     if let Some(r) = reuse.as_mut() { r.sig_clean = tcx.errors.is_empty(); }
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     let code = match reuse.as_mut() {
-        Some(r) => crate::check::check_crate_reusing(&mut u, root, &crates, pre, r),
-        None => crate::check::check_crate(&mut u, root, &crates, pre, false),
+        Some(r) => crate::check::check_crate_reusing(&mut u, root, &crates, pre, r).0,
+        None => crate::check::check_crate(&mut u, root, &crates, pre, false).0,
     };
     eprintln!("reuse child exit {code}");
     std::mem::forget(u);
@@ -107,6 +112,30 @@ fn changed(name: &str, files: &[(&str, &str)], before: &[(&str, &str)], change: 
 
 const LIB: &str = "pub fn f() -> u32 { 1 }\nfn unused_in_lib() {}\n";
 const BIN: &str = "fn main() { let x = pkg::f(); }\nfn unused_in_bin() {}\n";
+
+/// A verdict stored in one worktree never prints another worktree's paths; when Target B
+/// anchors the stored texts this test's hits become 2 with the same diagnostics.
+#[test]
+fn a_copy_in_another_worktree_prints_its_own_paths() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = format!("{LIB}fn another_unused() {{}}\n");
+    let files = [("lib.rs", lib.as_str()), ("bin.rs", BIN), ("Cargo.toml", "[workspace]\n")];
+    let a = package("wt-a", &files);
+    let b = package("wt-b", &files);
+    let store = a.join("store");
+    let (a_path, b_path) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let first = check_in_child_store(&a, true, &store, &[("MAKEPAD_RUN_WORKSPACE", a_path)]);
+    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    let env = [("MAKEPAD_RUN_WORKSPACE", b_path)];
+    let reused = check_in_child_store(&b, true, &store, &env);
+    let cold = check_in_child_store(&b, false, &store, &env);
+    assert_eq!((reused.hits, reused.code, cold.code), (0, 0, 0), "{reused:?}, {cold:?}");
+    assert_eq!(reused.diags, cold.diags, "{reused:?}, {cold:?}");
+    assert!(reused.diags.iter().any(|d| d.contains(b_path)), "{reused:?}");
+    assert!(reused.diags.iter().all(|d| !d.contains(a_path)), "{reused:?}");
+    std::fs::remove_dir_all(&a).unwrap();
+    std::fs::remove_dir_all(&b).unwrap();
+}
 
 /// Warm: every crate unchanged, the stored diagnostics are the check's, nothing is checked; a
 /// body edit in the library (its lines moved) checks the library again, not the binary above it.
@@ -306,20 +335,56 @@ fn an_env_value_change_checks_again() {
 }
 
 /// An `include_str!` file is a late input: edited, the crates reading it are checked again.
+/// Undoing the edit reuses the verdicts stored for its earlier value.
 #[test]
 fn an_included_file_edit_checks_again() {
     let lib = format!("{LIB}pub const T: &str = include_str!(\"data.txt\");\n");
     changed("include", &[("lib.rs", &lib), ("bin.rs", BIN), ("data.txt", "one")], &[], |d| std::fs::write(d.join("data.txt"), "two").unwrap(), &[], 0);
+    if std::env::var_os(CHILD).is_some() { return; }
+    let dir = package("include-undo", &[("lib.rs", &lib), ("bin.rs", BIN), ("data.txt", "one")]);
+    let first = check_in_child(&dir, true, &[]);
+    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    std::fs::write(dir.join("data.txt"), "two").unwrap();
+    let edited = check_in_child(&dir, true, &[]);
+    assert_eq!(edited.hits, 0, "{edited:?}");
+    std::fs::write(dir.join("data.txt"), "one").unwrap();
+    let undone = check_in_child(&dir, true, &[]);
+    assert!(undone.full && undone.hits == 2, "undoing a late input's change finds the verdicts of its earlier value: {undone:?}");
+    assert_eq!((&undone.diags, undone.code), (&first.diags, first.code));
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// A build script's output (code `include!`d from OUT_DIR): edited, its warnings are the new code's.
+/// A late input only a hole body reads (a fn body no caller's check sees: not const, not async, no
+/// `impl Trait` return) is the library's own: changed, the library is checked again, not the
+/// binary above it. Read in a const fn's body, or by an item as well (the hole's read of the same
+/// file does not hide it), it reaches the binary, whose array length rests on it.
+#[test]
+fn a_late_input_only_a_body_reads_checks_only_its_crate() {
+    let hole = format!("{LIB}pub fn g() -> usize {{ include_str!(\"data.txt\").len() + env!(\"RELAX_CHECK_REUSE_V\").len() }}\n");
+    changed("late-hole", &[("lib.rs", &hole), ("bin.rs", BIN), ("data.txt", "one")], &[("RELAX_CHECK_REUSE_V", "a")],
+        |d| std::fs::write(d.join("data.txt"), "two").unwrap(), &[("RELAX_CHECK_REUSE_V", "b")], 1);
+    let konst = format!("{LIB}pub const fn g() -> usize {{ env!(\"RELAX_CHECK_REUSE_V\").len() }}\n");
+    let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::g()] = [0; 1]; }\nfn unused_in_bin() {}\n";
+    changed("late-const-fn", &[("lib.rs", &konst), ("bin.rs", bin)], &[("RELAX_CHECK_REUSE_V", "a")], |_| {}, &[("RELAX_CHECK_REUSE_V", "bb")], 0);
+    let both = format!("{LIB}pub const N: usize = include!(\"n.in\");\npub fn g() -> usize {{ include_str!(\"n.in\").len() }}\n");
+    let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::N] = [0; 1]; }\nfn unused_in_bin() {}\n";
+    changed("late-both", &[("lib.rs", &both), ("bin.rs", bin), ("n.in", "1")], &[], |d| std::fs::write(d.join("n.in"), "2").unwrap(), &[], 0);
+}
+
+/// A build script's output (code `include!`d from OUT_DIR, at item position): edited, its warnings
+/// are the new code's. Its text is the library's interface text: the binary, which names none of
+/// its items, is not checked again; one whose array length names a changed const is.
 #[test]
 fn a_build_output_edit_checks_again() {
     let lib = format!("{LIB}include!(concat!(env!(\"RELAX_CHECK_REUSE_OUT\"), \"/gen.rs\"));\n");
     let changed_out = |d: &std::path::Path| std::fs::write(d.join("gen.rs"), "fn generated_two() {}\n").unwrap();
     // (the package's folder stands for OUT_DIR)
     let out = std::env::temp_dir().join(format!("relax-check-reuse-buildout-{}", std::process::id())).display().to_string();
-    changed("buildout", &[("lib.rs", &lib), ("bin.rs", BIN), ("gen.rs", "fn generated_one() {}\n")], &[("RELAX_CHECK_REUSE_OUT", &out)], changed_out, &[("RELAX_CHECK_REUSE_OUT", &out)], 0);
+    changed("buildout", &[("lib.rs", &lib), ("bin.rs", BIN), ("gen.rs", "fn generated_one() {}\n")], &[("RELAX_CHECK_REUSE_OUT", &out)], changed_out, &[("RELAX_CHECK_REUSE_OUT", &out)], 1);
+    let lib = format!("{LIB}include!(\"gen.rs\");\n");
+    let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::N] = [0; 1]; }\nfn unused_in_bin() {}\n";
+    changed("buildout-const", &[("lib.rs", &lib), ("bin.rs", bin), ("gen.rs", "pub const N: usize = 1;\n")], &[],
+        |d| std::fs::write(d.join("gen.rs"), "pub const N: usize = 2;\n").unwrap(), &[], 0);
 }
 
 /// A command-line lint level is in every key: set, every crate is checked again under it.
@@ -498,7 +563,8 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
 /// error of a dependency outside the workspace -- fails the check, as cargo check fails compiling
 /// that dependency: on the cold check, on the same check again (no run record, no collected image
 /// of that load hides it) and after an edit of the checked crate; with the dependency fixed the
-/// check passes.
+/// check passes. A published crate's error (its source under the cargo home's registry) also says
+/// it is most likely a makepad run divergence and asks for a report; a path dependency's does not.
 #[test]
 fn a_dependency_error_fails_the_check() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
@@ -509,39 +575,50 @@ fn a_dependency_error_fails_the_check() {
         std::fs::write(path, src).unwrap();
     };
     write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
-    write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
+    let app_toml = |dep: &str| format!("[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = {{ path = \"../../{dep}\" }}\n");
+    write("ws/app/Cargo.toml", &app_toml("dep"));
     write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
     let app = |n: u32| format!("pub fn top() -> u32 {{ dep::value() + {n} }}\n");
     // (exit code, stderr)
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"))
+            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("CARGO_HOME", dir.join("cargo"))
             .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
         (code, stderr.into_owned())
     };
-    // (`named`: the load printed the error, and the check names the crate it failed, as cargo does)
-    let fails = |what: &str, code: &str, named: bool| {
+    // (`named`: the check names the crate whose error the load or check printed, as cargo does;
+    // `published`: and asks for a report)
+    let fails = |what: &str, code: &str, named: bool, published: bool| {
         let r = check();
         assert!(r.0.is_some_and(|c| c != 0) && r.1.contains(code) && (!named || r.1.contains("could not compile `dep`")), "{what}: {}", r.1);
+        assert!(!r.1.contains(": internal:"), "{what}: a dependency's error is its own, not internal: {}", r.1);
+        assert_eq!(r.1.contains("`dep` is a published crate"), published, "{what}: only a published crate's error asks for a report: {}", r.1);
     };
     write("ws/app/lib.rs", &app(1));
     for (what, dep, code, named) in [
         ("an unresolved import", "use std::collections::NoSuchMap;\npub fn value() -> u32 { 7 }\n", "E0432", true),
         ("a field type", "pub struct S { pub f: NoSuchType }\npub fn value() -> u32 { 7 }\n", "E0412", true),
         // (a fn signature is collected when a body reaches it)
-        ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0412", false),
+        ("a signature the app reaches", "pub fn value() -> NoSuchType { loop {} }\n", "E0412", true),
     ] {
         write("dep/lib.rs", dep);
-        fails(&format!("{what}, cold"), code, named);
-        fails(&format!("{what}, again"), code, named);
+        fails(&format!("{what}, cold"), code, named, false);
+        fails(&format!("{what}, again"), code, named, false);
         write("ws/app/lib.rs", &app(2));
-        fails(&format!("{what}, after an app edit"), code, named);
+        fails(&format!("{what}, after an app edit"), code, named, false);
         write("ws/app/lib.rs", &app(1));
     }
+    // the same dependency as a published crate: its source under the cargo home's registry
+    let registry_dep = "cargo/registry/src/index.example-0/dep-0.1.0";
+    write(&format!("{registry_dep}/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
+    write(&format!("{registry_dep}/lib.rs"), "pub fn value() -> NoSuchType { loop {} }\n");
+    write("ws/app/Cargo.toml", &app_toml(registry_dep));
+    fails("a published crate's signature the app reaches", "E0412", true, true);
+    write("ws/app/Cargo.toml", &app_toml("dep"));
     write("dep/lib.rs", "pub fn value() -> u32 { 7 }\n");
     for what in ["fixed", "fixed, again"] {
         let r = check();

@@ -1,0 +1,3 @@
+[workspace]
+members = ["wide", "ratio", "facade", "app"]
+resolver = "2"

@@ -29,6 +29,48 @@ use std::sync::OnceLock;
 static SET: OnceLock<PathBuf> = OnceLock::new();
 static SET_WORKSPACE: OnceLock<String> = OnceLock::new();
 static DEFAULT: OnceLock<PathBuf> = OnceLock::new();
+/// An absolute, lexically normalized anchor directory.
+fn absolute_dir(dir: &str) -> String {
+    let path = std::path::absolute(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    crate::vfs::normalize_path(&path.to_string_lossy())
+}
+
+/// The anchors, fixed once per process. std has none of its own: inside the workspace its files
+/// are the workspace's, elsewhere (an installed runner's) its absolute path is one place for
+/// every worktree that runs that install -- and a key must not change with when std is located.
+fn anchors() -> &'static [(&'static str, String)] {
+    static ANCHORS: OnceLock<Vec<(&'static str, String)>> = OnceLock::new();
+    ANCHORS.get_or_init(|| crate::zone_alloc::kept_with(|| {
+        let mut v = vec![("run", absolute_dir(&relax_dir().to_string_lossy())), ("cargo", absolute_dir(&crate::git::cargo::home().to_string_lossy()))];
+        if let Ok(root) = crate::resolve::find_root(&workspace_dir()) { v.push(("ws", absolute_dir(&root))); }
+        v
+    }))
+}
+
+/// The longest normalized containing anchor, with component-wise containment on every OS.
+fn anchor_from<'a>(path: &str, anchors: impl Iterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    anchors.filter_map(|(tag, dir)| {
+        crate::vfs::relative_path(path, dir).map(|rel| (crate::vfs::normalize_path(dir).len(), tag, rel))
+    }).max_by_key(|(len, _, _)| *len).map(|(_, tag, rel)| format!("\0{tag}\0{rel}"))
+}
+
+/// Chooses an anchored spelling from an explicit list, independent of process state.
+fn anchor_in(path: &str, anchors: &[(&'static str, String)]) -> Option<String> {
+    anchor_from(path, anchors.iter().map(|(tag, dir)| (*tag, dir.as_str())))
+}
+
+/// The persisted spelling of a path under its longest anchor; unrelated paths stay borrowed.
+pub fn anchored(path: &str) -> std::borrow::Cow<'_, str> {
+    anchor_in(path, anchors()).map_or(std::borrow::Cow::Borrowed(path), std::borrow::Cow::Owned)
+}
+
+/// The absolute anchor locations as one key input (the worktree).
+pub fn anchors_key() -> u128 {
+    let mut h = crate::sip::Sip128::new();
+    h.str("relax-anchors");
+    for (tag, dir) in anchors() { h.str(tag); h.str(dir); }
+    h.finish128()
+}
 
 /// The run dir handed over by a parent run (`makepad run --run-dir`). Set before anything
 /// asks for relax_dir().
@@ -108,4 +150,25 @@ pub fn relax_dir_for(start: &str) -> PathBuf {
 /// The store files' folder: `<relax dir>/cache`.
 pub fn cache_dir() -> PathBuf {
     relax_dir().join("cache")
+}
+
+/// Where published crates' sources live: the cargo home's `registry/` and the relax dir's
+/// (registry.rs).
+pub fn registry_dirs() -> [PathBuf; 2] {
+    [crate::git::cargo::home().join("registry"), relax_dir().join("registry")]
+}
+
+#[cfg(test)]
+mod tests {
+    /// Anchors use normalized components, prefer nested roots and recognize Windows drives.
+    #[test]
+    fn paths_choose_the_longest_anchor() {
+        let anchors = [("ws", "/a/./ws/".to_string()), ("run", "/a/ws/target/run".to_string())];
+        assert_eq!(super::anchor_in("/a/ws/f.rs", &anchors).as_deref(), Some("\0ws\0f.rs"));
+        assert_eq!(super::anchor_in("/a/ws/target/run/f.rs", &anchors).as_deref(), Some("\0run\0f.rs"));
+        assert_eq!(super::anchor_in("/a/ws/std/core/lib.rs", &anchors).as_deref(), Some("\0ws\0std/core/lib.rs"));
+        assert_eq!(super::anchor_in("/b/f.rs", &anchors), None);
+        assert_eq!(super::anchor_in("/a/wsx/f.rs", &anchors), None);
+        assert_eq!(super::anchor_in("C:/a/ws/f.rs", &[("ws", "C:/a/ws".to_string())]).as_deref(), Some("\0ws\0f.rs"));
+    }
 }

@@ -808,7 +808,10 @@ pub(crate) fn resolve_package(
                 Some(Box::new(alone))
             };
             let hook: Option<&unitgraph::ScriptsDone<'_>> = (boot && !check_only).then_some(&early_world);
-            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_mode, check_only, hook);
+            // a build script's own child run (no native request of its own) compiles the native
+            // packages its parent built, from the receipt the parent handed it
+            let receipt = native_request.is_none().then(|| std::env::var(unitgraph::NATIVE_RECEIPT).ok()).flatten();
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_mode, check_only, receipt.as_deref(), hook);
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
             (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)
@@ -1926,7 +1929,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // the errors the load printed for crates this check does not check (a dependency's
         // unresolved import or signature error): cargo check fails compiling that crate, and so
         // does the check
-        let foreign = crate::check::foreign_errors(&u.prog, &checked, u.prog.errors.iter().chain(&u.tcx.errors).chain(&deferred_errors));
+        let mut foreign = crate::check::foreign_errors(&u.prog, &checked, u.prog.errors.iter().chain(&u.tcx.errors).chain(&deferred_errors));
         // every body is checked, so the files the selection skipped load first: all of them for
         // selftest or a watch session; the checked crates' for --root-only or the app check
         let t = Instant::now();
@@ -1972,15 +1975,37 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             let mut session = crate::serve::Session::new(u, root, pre);
             return session.watch(deep);
         }
+        // a selftest builds every fn as the run builds it: against the libraries the run links (the
+        // --allow-c native library, the build scripts' libraries). Without them a fn that reads a C
+        // static failed ("foreign static not found in the loaded libraries", relax#75) where the
+        // run binds it.
+        if selftest {
+            match link_libraries(&u.prog, &g.link_libs, g.native.as_ref(), 0, None) {
+                Ok((_, missing, _)) => if !missing.is_empty() { verbose!("makepad-run: libraries not found: {:?}", missing); },
+                Err(error) => {
+                    eprintln!("makepad-run: {error}");
+                    return 1;
+                }
+            }
+        }
         // the collected image is the program as its load left it, before the bodies make their
         // types (a run's boot snapshot): the record at the end encodes this snapshot
         let boot_cache = if selftest { None } else { check_boot_cache(&mut u, options) };
-        let code = match reuse.as_mut() {
+        let (code, check_foreign) = match reuse.as_mut() {
             Some(r) => crate::check::check_crate_reusing(&mut u, root, &checked, pre, r),
             None => crate::check::check_crate(&mut u, root, &checked, pre, selftest),
         };
+        for (name, n) in check_foreign {
+            match foreign.iter_mut().find(|(old, _)| *old == name) {
+                Some(x) => x.1 += n,
+                None => foreign.push((name, n)),
+            }
+        }
         for (name, n) in &foreign {
             eprintln!("error: could not compile `{name}` due to {n} previous error{}", if *n == 1 { "" } else { "s" });
+            if crate::check::published_crate(&u.prog, name) {
+                eprintln!("note: `{name}` is a published crate, and published crates build under rustc: this is most likely a makepad run divergence, not an error in `{name}` -- report it");
+            }
         }
         let code = if code == 0 && !foreign.is_empty() { 1 } else { code };
         // the parsed files go to the cache's front images as a run's do (one store shared with
@@ -2663,18 +2688,36 @@ pub(crate) fn exported_fns(prog: &crate::program::Program, prefixes: &[String]) 
 
 /// native::Resolvable for this process: the libraries loaded, which of the symbols the
 /// dynamic loader binds (what a native library's import resolves to without the program),
-/// searched as the program's own foreign calls are (proc::find_any).
-fn native_resolvable(names: &[String], dylibs: &[String], frameworks: &[String]) -> Vec<bool> {
+/// searched as the program's own foreign calls are (proc::find_any). A library is the one the
+/// linker took: `lib<name>.so` (`.dylib`) of the first of the scripts' search folders that holds
+/// one, else the one the loader finds by its name. A library loaded from a search folder is given
+/// back after the lookup: the search folders are the linker's, and the run loads the library
+/// where the loader finds it (the program's rpath, the loader's path), as the rustc-built binary
+/// does. Kept loaded, it answered a native library's `@rpath` dependency on macOS (dyld matches a
+/// loaded image by its install name) where the rustc-built binary cannot load it.
+fn native_resolvable(names: &[String], dylibs: &[String], frameworks: &[String], search: &[String]) -> Vec<bool> {
+    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let mut linked_only = Vec::new();
     for l in dylibs {
-        let _ = crate::os::proc::load_library(l, false) || crate::os::proc::load_library_versioned(l);
+        let linked = search.iter().map(|d| format!("{d}/lib{l}.{ext}")).find(|p| std::path::Path::new(p).is_file());
+        match linked.map(|p| crate::os::proc::load_path(&p)) {
+            Some(Ok(handle)) => linked_only.push(handle),
+            _ => {
+                let _ = crate::os::proc::load_library(l, false) || crate::os::proc::load_library_versioned(l);
+            }
+        }
     }
     for f in frameworks {
         let _ = crate::os::proc::load_library(f, true);
     }
-    names.iter().map(|n| {
+    let found = names.iter().map(|n| {
         let Ok(c) = std::ffi::CString::new(n.as_str()) else { return false };
         unsafe { !crate::os::proc::find_any(c.as_ptr().cast()).is_null() }
-    }).collect()
+    }).collect();
+    for handle in linked_only {
+        crate::os::proc::unload(handle);
+    }
+    found
 }
 
 #[cfg(test)]
@@ -2683,7 +2726,7 @@ mod native_tests {
     #[test]
     fn native_resolvable_finds_process_symbols() {
         let names = ["strlen", "malloc", "relax_native_no_such_symbol"].map(String::from);
-        assert_eq!(super::native_resolvable(&names, &[], &[]), [true, true, false]);
+        assert_eq!(super::native_resolvable(&names, &[], &[], &[]), [true, true, false]);
     }
 
     /// Domain 2 of an edited package (its `#[no_mangle]` fn another DefId) does not take the
@@ -2710,6 +2753,41 @@ pub(crate) struct NativeCallbacks {
     lib: String,
     crates: String,
     slots: Vec<(usize, DefId, String)>,
+}
+
+/// --allow-c's native libraries (handle, file, load base once a symbol of theirs was found): the
+/// program's own C, whose definitions its extern blocks bind to first.
+static NATIVE_BUNDLES: std::sync::Mutex<Vec<(usize, std::path::PathBuf, usize)>> = std::sync::Mutex::new(Vec::new());
+
+fn note_native_bundle(handle: usize, path: &str) {
+    let file = std::fs::canonicalize(path).unwrap_or_else(|_| std::path::PathBuf::from(path));
+    let mut bundles = NATIVE_BUNDLES.lock().unwrap_or_else(|e| e.into_inner());
+    if !bundles.iter().any(|b| b.0 == handle) {
+        crate::zone_alloc::kept_with(|| bundles.push((handle, file, 0)));
+    }
+}
+
+/// `name`'s address when an --allow-c native library defines it itself: what the system linker
+/// binds first for a static library the program links. A process-wide lookup (RTLD_DEFAULT) finds
+/// the first image that defines the name, which can be a system library the host loaded before
+/// (macOS: libsqlite3 behind its frameworks, so a bundled SQLite ran as the system's; relax issue
+/// 78). A name the library only imports resolves in the library it comes from, not here.
+pub(crate) fn native_definition(name: &str) -> Option<u64> {
+    let mut bundles = NATIVE_BUNDLES.lock().unwrap_or_else(|e| e.into_inner());
+    for (handle, file, base) in bundles.iter_mut() {
+        let p = crate::os::proc::symbol_in(*handle, name);
+        if p == 0 {
+            continue;
+        }
+        let Some((image, image_file)) = crate::os::proc::image_of(p) else { continue };
+        if *base == 0 && std::fs::canonicalize(&image_file).is_ok_and(|f| f == *file) {
+            *base = image;
+        }
+        if *base != 0 && image == *base {
+            return Some(p as u64);
+        }
+    }
+    None
 }
 
 /// The stubs of the library `handle`, each matched to the program's fn of its name (one of the
@@ -2794,10 +2872,13 @@ pub(crate) fn link_libraries(prog: &crate::program::Program, link_libs: &[(Strin
     // `--allow-c`: the native dependencies' library (front native.rs), its symbols global
     let mut callbacks = NativeCallbacks::default();
     if let Some(n) = native {
-        let handle = crate::os::proc::load_path(&n.path).map_err(|error| {
+        let loaded = crate::os::proc::load_path(&n.path).map_err(|error| {
             format!("cannot load {} (--allow-c native library of {}): {}", n.path, n.crates.join(", "), error)
-        })?;
-        callbacks = native_callbacks(prog, n, handle, crates)?;
+        }).and_then(|handle| native_callbacks(prog, n, handle, crates).inspect(|_| note_native_bundle(handle, &n.path)));
+        // a library that does not load is not kept: what its link found (the libraries, which of
+        // its imports are the program's callbacks) can be what changed since, and the next run
+        // links it again
+        callbacks = loaded.inspect_err(|_| { let _ = std::fs::remove_file(&n.path); })?;
     }
     let provided_static = |name: &str| native.is_some_and(|n| n.statics.iter().any(|s| s == name));
     for (name, fw) in link_libs {
@@ -2944,6 +3025,10 @@ pub(crate) fn check_test_subjects(u: &mut Unit, root: u32, subjects: &[u32], har
 /// program's children inherit them (a test's run of its own binary, a `makepad check` it starts);
 /// they steer no check (check_reuse.rs env_key).
 pub(crate) const RUN_STATE_VARS: [&str; 5] = ["MAKEPAD_RUN_STARTUP_T0", "MAKEPAD_RUN_MAIN_MS", "MAKEPAD_RUN_CACHE_STATE", "MAKEPAD_RUN_LIVE_LOG", "MAKEPAD_RUN_REPORT_TO"];
+
+/// Locations only: anchors_key covers workspace, run and std dirs, VFS content hashes cover
+/// edits, and the read log changes no checked input. Their spellings can leave env_key.
+pub(crate) const RUN_LOCATING_VARS: [&str; 5] = ["MAKEPAD_RUN_WORKSPACE", "MAKEPAD_RUN_EDITS", "MAKEPAD_RUN_CACHE_DIR", "MAKEPAD_RUN_READ_LOG", "MAKEPAD_RUN_STD"];
 
 static HAL_RUN: AtomicBool = AtomicBool::new(false);
 static APP_DOMAIN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -4567,7 +4652,7 @@ fn summary_inner(why: &str) {
     if why != "stats" && std::env::var_os("MAKEPAD_RUN_CACHE_FP").is_some() {
         let late = crate::sip::late_inputs();
         for (c, k, n, h) in &late {
-            verbose!("makepad-run cache: late {} {} {} {:032x}", c, if *k == crate::sip::LATE_FILE { "file" } else { "env" }, n, h);
+            verbose!("makepad-run cache: late {} {}{} {} {:032x}", c, if crate::sip::late_base(*k) == crate::sip::LATE_FILE { "file" } else { "env" }, if *k & crate::sip::LATE_HOLE != 0 { " body" } else if *k & crate::sip::LATE_ITEMS != 0 { " items" } else { "" }, n, h);
         }
         verbose!("makepad-run cache: {} late inputs", late.len());
     }

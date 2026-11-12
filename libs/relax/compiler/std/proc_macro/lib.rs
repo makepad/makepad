@@ -109,6 +109,16 @@ impl Span {
     pub fn byte_range(&self) -> std::ops::Range<usize> {
         self.lo as usize..self.hi as usize
     }
+    /// The path of the span's source file, for display (stable since 1.88). The host sends no
+    /// file with a span yet, so it is empty, as rustc's is for a span of no real file.
+    pub fn file(&self) -> String {
+        String::new()
+    }
+    /// The span's source file on disk (stable since 1.88). None: the host sends no file with a
+    /// span yet, rustc's answer for a span of no local file (a macro then keeps absolute paths).
+    pub fn local_file(&self) -> Option<std::path::PathBuf> {
+        None
+    }
 }
 
 /// A proc macro is running on this thread (the macro host's bridge call); false in a build script

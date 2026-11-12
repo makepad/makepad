@@ -732,7 +732,7 @@ impl<T> Index<usize> for VecDeque<T> {
     fn index(&self, index: usize) -> &T {
         match self.get(index) {
             Some(v) => v,
-            None => crate::panicking::panic_str("Out of bounds access"),
+            None => crate::panicking::panic_str("out of bounds access"),
         }
     }
 }
@@ -741,7 +741,7 @@ impl<T> IndexMut<usize> for VecDeque<T> {
     fn index_mut(&mut self, index: usize) -> &mut T {
         match self.get_mut(index) {
             Some(v) => v,
-            None => crate::panicking::panic_str("Out of bounds access"),
+            None => crate::panicking::panic_str("out of bounds access"),
         }
     }
 }

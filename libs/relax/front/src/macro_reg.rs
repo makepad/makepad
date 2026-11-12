@@ -90,38 +90,51 @@ pub struct Reg {
     /// Application dependency edges for caller-side macro lookup. `units` keeps
     /// the distinct host graph used to compile and execute the macros themselves.
     pub target_deps: std::collections::HashMap<usize, Vec<(usize, String)>>,
-    /// crate name -> the units its unit(s) reach through `deps` (transitively; memoised)
-    pub reach: std::collections::HashMap<String, Vec<bool>>,
+    /// (crate name, host side) -> the units its unit(s) reach through their caller edges
+    /// (transitively; memoised)
+    pub reach: std::collections::HashMap<(String, bool), Vec<bool>>,
 }
 
 impl Reg {
-    fn caller_deps(&self, unit: usize) -> &[(usize, String)] {
+    /// The dependency edges of `unit` as a caller there sees them: the program's (target)
+    /// edges, or on the host side (a crate of the macro world) the unit's own. Cargo builds a
+    /// crate a proc macro uses as a host unit with that side's features and dependencies
+    /// (cargo reference features.md#feature-resolver-version-2), so a macro crate one side
+    /// imports can be missing from the other.
+    fn caller_deps(&self, unit: usize, host: bool) -> &[(usize, String)] {
+        if host {
+            return &self.units[unit].deps;
+        }
         self.target_deps.get(&unit).map_or(&self.units[unit].deps, Vec::as_slice)
     }
 }
 
-/// The units in the dependency closure of the unit(s) named `krate`, themselves included. A
-/// name no unit has (core, alloc, std, proc_macro: never cargo units) reaches nothing.
-fn reach<'a>(reg: &'a mut Reg, krate: &str) -> &'a [bool] {
-    if !reg.reach.contains_key(krate) {
+/// The units in the dependency closure of the unit(s) named `krate` on one side, themselves
+/// included. A name no unit has (core, alloc, std, proc_macro: never cargo units) reaches nothing.
+fn reach<'a>(reg: &'a mut Reg, krate: &str, host: bool) -> &'a [bool] {
+    let key = (krate.to_string(), host);
+    if !reg.reach.contains_key(&key) {
         let mut seen = vec![false; reg.units.len()];
         let mut stack: Vec<usize> = (0..reg.units.len()).filter(|&i| reg.units[i].name == krate).collect();
         while let Some(i) = stack.pop() {
             if std::mem::replace(&mut seen[i], true) {
                 continue;
             }
-            stack.extend(reg.caller_deps(i).iter().map(|d| d.0));
+            stack.extend(reg.caller_deps(i, host).iter().map(|d| d.0));
         }
-        reg.reach.insert(krate.to_string(), seen);
+        reg.reach.insert(key.clone(), seen);
     }
-    &reg.reach[krate]
+    &reg.reach[&key]
 }
 
 /// Resolves proc-macro `name` of `kind` as crate `krate` sees it:
 /// Tier 1: direct proc-macro dependency of `krate`
 /// Tier 2: 1-hop library wrapper dependency of `krate` (`krate -> wrapper -> proc_macro`)
 /// Tier 3: transitive dependency closure of `krate`
+/// A crate the macro world builds (`world_builder`) is the host side of its package and sees the
+/// macros of its host dependencies, those the proc macro's features turn on.
 fn resolve_entry(reg: &mut Reg, krate: &str, name: &str, kind: Kind) -> Option<Entry> {
+    let host = world_builder();
     let hits: Vec<Entry> = match kind {
         Kind::Derive => reg.derives.iter().filter(|(n, _)| n == name).map(|x| x.1.clone()).collect(),
         _ => reg.macros.iter().filter(|(n, e)| n == name && e.kind == kind).map(|x| x.1.clone()).collect(),
@@ -139,13 +152,13 @@ fn resolve_entry(reg: &mut Reg, krate: &str, name: &str, kind: Kind) -> Option<E
         // sysroot crate absent from this graph has no proc-macro dependencies.
         return if krate.is_empty() && kind != Kind::Attr { hits.into_iter().next() } else { None };
     }
-    if let Some(e) = hits.iter().find(|e| u_idxs.contains(&e.unit) || u_idxs.iter().any(|&u| reg.caller_deps(u).iter().any(|&(d, _)| d == e.unit))) {
+    if let Some(e) = hits.iter().find(|e| u_idxs.contains(&e.unit) || u_idxs.iter().any(|&u| reg.caller_deps(u, host).iter().any(|&(d, _)| d == e.unit))) {
         return Some(e.clone());
     }
-    if let Some(e) = hits.iter().find(|e| u_idxs.iter().any(|&u| reg.caller_deps(u).iter().any(|&(d, _)| reg.caller_deps(d).iter().any(|&(dd, _)| dd == e.unit)))) {
+    if let Some(e) = hits.iter().find(|e| u_idxs.iter().any(|&u| reg.caller_deps(u, host).iter().any(|&(d, _)| reg.caller_deps(d, host).iter().any(|&(dd, _)| dd == e.unit)))) {
         return Some(e.clone());
     }
-    let rc = reach(reg, krate);
+    let rc = reach(reg, krate, host);
     hits.into_iter().find(|e| rc[e.unit])
 }
 
@@ -587,6 +600,32 @@ fn merged_host_units_keep_features_and_dependencies() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A crate a proc macro and the program both use, with different features, sees on the
+/// program's side the macros of its target dependencies and in the macro world those of its host
+/// dependencies (relax issue 53: the host side's derive was looked up among the target side's).
+#[cfg(test)]
+#[test]
+fn a_macro_world_crate_resolves_macros_through_its_host_dependencies() {
+    let unit = |name: &str, proc_macro, deps: &[usize]| UnitInfo {
+        name: name.to_string(), src_path: format!("{name}/src/lib.rs"), edition: 2021, features: Vec::new(),
+        deps: deps.iter().map(|&d| (d, String::new())).collect(), proc_macro, harness: false, registry: false,
+        cfgs: Vec::new(), env: Vec::new(),
+    };
+    // host edges: shared -> wrapper -> inner -> the derive crate (beyond tiers 1 and 2: the
+    // dependency closure); the program's shared depends on nothing
+    let mut reg = Reg { units: vec![unit("shared", false, &[1]), unit("wrapper", false, &[2]), unit("inner", false, &[3]), unit("rate_derive", true, &[])], ..Default::default() };
+    reg.target_deps.insert(0, Vec::new());
+    reg.derives.push(("Rate".to_string(), Entry { unit: 3, fname: "derive_rate".to_string(), kind: Kind::Derive }));
+    let saved = REG.with(|r| r.borrow_mut().replace(reg));
+    let program = derive_entry("shared", "Rate").map(|e| e.unit);
+    set_world_builder(true);
+    let world = derive_entry("shared", "Rate").map(|e| e.unit);
+    set_world_builder(false);
+    REG.with(|r| *r.borrow_mut() = saved);
+    assert_eq!(program, None, "the program's shared has no derive crate in reach");
+    assert_eq!(world, Some(3), "the macro world's shared reaches the derive through its host dependencies");
+}
+
 /// Updates registered units with build-script `cfgs` and `env` outputs (`run.rs` after
 /// `run_build_scripts`), and re-scans proc-macro units whose `cfgs` changed.
 pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], cfgs: &[Vec<String>], env: &[Vec<(String, String)>]) {
@@ -742,11 +781,11 @@ pub fn outline_identity() -> u128 {
     )).unwrap_or_default());
     let mut hash = crate::sip::Sip128::new();
     for (name, entry, source) in entries {
-        hash.str(&name); hash.str(&source); hash.str(&entry.fname); hash.u8(entry.kind as u8);
+        hash.str(&name); hash.str(&crate::dirs::anchored(&source)); hash.str(&entry.fname); hash.u8(entry.kind as u8);
         hash.u8(RUNNER.get().is_some_and(|r| r.native(&entry)) as u8);
     }
     for (source, name, attributes) in helpers {
-        hash.str(&source); hash.str(&name); hash.u32(attributes.len() as u32);
+        hash.str(&crate::dirs::anchored(&source)); hash.str(&name); hash.u32(attributes.len() as u32);
         for attribute in attributes { hash.str(&attribute); }
     }
     hash.finish128()

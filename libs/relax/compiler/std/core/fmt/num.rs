@@ -1,7 +1,7 @@
 //! Integer formatting: Display (decimal), Debug ({:x?}/{:X?} aware), LowerHex, UpperHex,
 //! Octal, Binary for every integer type, through Formatter::pad_integral as in real core.
 //! Shared non-generic helpers here; the per-type impls are generated (num/impls.rs, by
-//! check/src/gen_fmt.rs).
+//! gen/src/gen_fmt.rs).
 
 mod impls;
 

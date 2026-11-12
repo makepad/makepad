@@ -1,6 +1,8 @@
 #!/bin/bash
 # Regression test: the hot bucket's GPU guards (affected.py GUARDS, land_gate.sh step_guards) are units of their
-# own, `guard <pkg>`, so the bucket names the landing that changed a red guard's inputs, not every landing of the
+# own, `guard <pkg>` (a library's) or `guard <pkg> --test <target>` (a test target's: the Sandbox has two, one
+# unit and log per package could not tell them apart, 11-12), so the bucket names the landing that changed a red
+# guard's inputs, not every landing of the
 # run (MATRIXFX's first guard failed as a step, blamed on all of them, 11-06). A guard runs when the diff reaches
 # its package or the JIT (it runs under the JIT), and while it is red (GATE_RETRY) whatever the diff reaches; not
 # for a diff that reaches neither. A guard runs its own target: the library's tests or one test target (Fab's). A
@@ -76,6 +78,8 @@ pub fn f() {}'
 branch jit libs/relax/codegen guard-units-codegen 'pub fn f() { let _ = 1; }'
 branch fab apps/fab makepad-fab '// BROKEN
 pub fn f() {}'
+branch sandbox apps/sandbox makepad-sandbox '// BROKEN
+pub fn f() {}'
 branch other apps/stage makepad-stage 'pub fn f() {}
 pub fn g() {}'
 fail=""
@@ -96,9 +100,13 @@ guard() {
   [ -z "$5" ] || ! echo "$out" | grep -qF -- "$5" || fail="$fail $1(has \`$5\`)"
 }
 guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --lib -- gpu_guard|fail= guard-makepad-scope"
-guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab|GATEREPRO guard makepad-fab :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab"
-guard jit jit "makepad-fab@xr_far_face makepad-render makepad-sandbox@store_play_ready makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-sandbox|GATEUNIT ok guard makepad-scope|fail="
+guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab --test xr_far_face|GATEREPRO guard makepad-fab --test xr_far_face :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab@xr_far_face"
+# two guards of one package: a unit and a log each, not one `guard makepad-sandbox` the second overwrote
+guard sandbox sandbox "makepad-sandbox@penumbra_still makepad-sandbox@store_play_ready" "GATEUNIT fail guard makepad-sandbox --test store_play_ready|GATEUNIT fail guard makepad-sandbox --test penumbra_still|fail= guard-makepad-sandbox@store_play_ready guard-makepad-sandbox@penumbra_still"
+guard jit jit "makepad-fab@xr_far_face makepad-render makepad-sandbox@penumbra_still makepad-sandbox@store_play_ready makepad-scope" "GATEUNIT ok guard makepad-fab --test xr_far_face|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-sandbox --test penumbra_still|GATEUNIT ok guard makepad-sandbox --test store_play_ready|GATEUNIT ok guard makepad-scope|fail="
 guard other other - "fail=" "GATEUNIT"
 GATE_RETRY="guard makepad-scope" guard retry other makepad-scope "GATEUNIT ok guard makepad-scope|fail="
+# a red guard reruns alone, not its package's other guards
+GATE_RETRY="guard makepad-sandbox --test penumbra_still" guard retry-one other makepad-sandbox@penumbra_still "GATEUNIT ok guard makepad-sandbox --test penumbra_still|fail="
 if [ -n "$fail" ]; then echo "guard_units FAILED:$fail"; exit 1; fi
 echo "guard_units: ok"

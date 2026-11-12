@@ -38,6 +38,11 @@ impl<T: crate::marker::PointeeSized> *const T {
             Some(&*self)
         }
     }
+    /// `&*self`: as_ref without the null check (stable 1.95); the pointer must be valid for 'a.
+    #[must_use]
+    pub const unsafe fn as_ref_unchecked<'a>(self) -> &'a T {
+        unsafe { &*self }
+    }
     pub const fn byte_add(self, count: usize) -> *const T {
         self.wrapping_byte_add(count)
     }
@@ -186,6 +191,17 @@ impl<T: crate::marker::PointeeSized> *mut T {
         } else {
             Some(&mut *self)
         }
+    }
+    /// `&*self`: as_ref without the null check (stable 1.95); the pointer must be valid for 'a.
+    #[must_use]
+    pub const unsafe fn as_ref_unchecked<'a>(self) -> &'a T {
+        unsafe { &*self }
+    }
+    /// `&mut *self`: as_mut without the null check (stable 1.95); the pointer must be valid and
+    /// unaliased for 'a.
+    #[must_use]
+    pub const unsafe fn as_mut_unchecked<'a>(self) -> &'a mut T {
+        unsafe { &mut *self }
     }
     pub const fn byte_add(self, count: usize) -> *mut T {
         self.wrapping_byte_add(count)

@@ -8,8 +8,8 @@
 //! (`jit::compile_slot`), and so is every instance, closure and glue those reach (rustc's
 //! monomorphization collector for `build-pass`), on `MAKEPAD_RUN_JOBS` threads. Every failure prints
 //! as one line (`file:line:col: error|internal: ..`); `internal` marks a makepad run bug (a compiler
-//! panic, an error without a user-facing code, or an error inside std or a dependency rustc
-//! builds). `--root-only` and the watch session's deep check (`collect_deep`) cover the root
+//! panic, an error without a user-facing code, or an error inside std or outside any crate).
+//! `--root-only` and the watch session's deep check (`collect_deep`) cover the root
 //! crate (and what it reaches) only.
 
 macro_rules! eprintln {
@@ -72,6 +72,15 @@ pub fn foreign_errors<'e>(prog: &crate::program::Program, checked: &[u32], errs:
         }
     }
     out
+}
+
+/// Whether a crate named `name` comes from a registry (the cargo home's or the run dir's
+/// `registry/`): a published crate, which builds under rustc -- its error is most likely a
+/// makepad run divergence, and the check asks for a report (run.rs).
+pub fn published_crate(prog: &crate::program::Program, name: &str) -> bool {
+    use crate::vfs::canonical as canon;
+    let dirs = crate::dirs::registry_dirs().map(|d| format!("{}/", canon(&d.to_string_lossy()).trim_end_matches('/')));
+    prog.crates.iter().any(|c| prog.syms.str(c.name) == name && dirs.iter().any(|d| canon(c.root_path()).starts_with(d.as_str())))
 }
 
 /// The crates a one-shot `makepad check` covers: the root and every loaded crate whose root file
@@ -137,7 +146,7 @@ pub(crate) fn skipped_text_hash(c: u32) -> u128 {
     let Some(paths) = BOOT_SKIPPED.get().and_then(|v| v.get(c as usize)).filter(|v| !v.is_empty()) else { return 0 };
     let mut h = crate::sip::Sip128::new();
     for p in paths {
-        h.str(p);
+        h.str(&crate::dirs::anchored(p));
         // (an unreadable file: its absence is the input, its load reports it)
         h.u128(crate::vfs::read(p).map_or(0, |src| crate::crate_image::file_hash(p, &src)));
     }
@@ -787,15 +796,18 @@ fn par_map<T: Sync, R: Send>(items: &[T], jobs: usize, f: impl Fn(&T) -> R + Syn
 }
 
 /// Check the selected crates; `selftest` also compiles every function (see the module doc).
-pub fn check_crate(u: &mut Unit, root: u32, crates: &[u32], errors: Vec<String>, selftest: bool) -> i32 {
-    check_crate_impl(u, root, crates, errors, true, selftest, None).0
+/// Returns the exit code and the errors in other crates, counted by crate.
+pub fn check_crate(u: &mut Unit, root: u32, crates: &[u32], errors: Vec<String>, selftest: bool) -> (i32, Vec<(String, usize)>) {
+    let (code, _, foreign) = check_crate_impl(u, root, crates, errors, true, selftest, None);
+    (code, foreign)
 }
 
 /// `check_crate` reusing the verdicts of `reuse`'s unchanged crates (check_reuse.rs): their
 /// diagnostics replayed, the per-crate passes run on the other crates only; a passing check
 /// stores the others' verdicts.
-pub(crate) fn check_crate_reusing(u: &mut Unit, root: u32, crates: &[u32], errors: Vec<String>, reuse: &mut crate::check_reuse::Reuse) -> i32 {
-    check_crate_impl(u, root, crates, errors, true, false, Some(reuse)).0
+pub(crate) fn check_crate_reusing(u: &mut Unit, root: u32, crates: &[u32], errors: Vec<String>, reuse: &mut crate::check_reuse::Reuse) -> (i32, Vec<(String, usize)>) {
+    let (code, _, foreign) = check_crate_impl(u, root, crates, errors, true, false, Some(reuse));
+    (code, foreign)
 }
 
 /// Whether a check may reuse verdicts: nothing it was asked to do needs every body walked (a
@@ -1034,7 +1046,7 @@ pub(crate) fn live_lints(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, 
     crate::check_order::sort(prog, entries).into_iter().filter_map(|e| match e.out { Out::Warning(s) | Out::Error(s) => Some(s), Out::Borrow(_) => None }).collect()
 }
 
-fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>, emit: bool, compile: bool, mut reuse: Option<&mut crate::check_reuse::Reuse>) -> (i32, Vec<crate::diag::Diagnostic>) {
+fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>, emit: bool, compile: bool, mut reuse: Option<&mut crate::check_reuse::Reuse>) -> (i32, Vec<crate::diag::Diagnostic>, Vec<(String, usize)>) {
     use crate::check_order::{Phase, Stage};
     let t_check = std::time::Instant::now();
     // every error with where rustc reports it (check_order.rs); the front end's come first
@@ -1167,17 +1179,17 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     crate::borrowck::lazy::disable_gandalf();
     if options.borrowck_all != crate::options::BorrowckAll::Default {
         let n = crate::borrowck::check_all(&u.prog, &u.tcx, options.borrowck_all == crate::options::BorrowckAll::Std);
-        return (if n == 0 { 0 } else { 1 }, Vec::new());
+        return (if n == 0 { 0 } else { 1 }, Vec::new(), Vec::new());
     }
     // MIR borrowck pipeline harness (docs: relax_types::mir::build::driver_borrowck).
     if let Some(mode) = std::env::var_os("MAKEPAD_RUN_MIR_BORROWCK_ALL") {
         let errors = relax_types::mir::build::driver_borrowck::borrowck_all(&u.prog, &u.tcx, mode == "std");
-        return (if errors == 0 { 0 } else { 1 }, Vec::new());
+        return (if errors == 0 { 0 } else { 1 }, Vec::new(), Vec::new());
     }
     // MIR construction harness (docs: relax_types::mir::build::driver): build + validate every body.
     if let Some(mode) = std::env::var_os("MAKEPAD_RUN_MIR_BUILD_ALL") {
         let failures = relax_types::mir::build::driver::build_all(&u.prog, &u.tcx, mode == "std");
-        return (if failures == 0 { 0 } else { 1 }, Vec::new());
+        return (if failures == 0 { 0 } else { 1 }, Vec::new(), Vec::new());
     }
     // (the check's borrow errors are printed with its other diagnostics, in rustc's order)
     let borrow_events = crate::gandalf_out::Collector::start();
@@ -1278,7 +1290,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         let r = def_work(|said| def_ice(prog, d, "the body", said), || {
             #[cfg(test)]
             forced_body_unwind(prog, d);
-            let (errors, events) = body_errors(prog, tcx, options, owner, generic, true);
+            let (errors, events) = relax_types::body_facts::with_owner(prog, d, || body_errors(prog, tcx, options, owner, generic, true));
             (errors, events.iter().map(|ev| ev.error.to_diagnostic()).collect())
         });
         match r {
@@ -1298,6 +1310,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         if !out.errors.is_empty() { out.needs_load = true; }
         out
     };
+    relax_types::body_facts::open();
     let t_par = t_check.elapsed();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let mut outcomes: Vec<(usize, Outcome)> = Vec::new();
@@ -1379,7 +1392,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     for &k in &fresh_crates {
         let uu = unsafe { &*up };
         for (anon, owner, e) in crate::borrowck::body::body_anon_consts(&uu.prog, &uu.tcx, k) {
-            let errs = settled_def(up, anon, "the constant", || {
+            let errs = settled_def(up, anon, "the constant", || relax_types::body_facts::with_owner(&uu.prog, owner, || {
                 let outer = uu.tcx.typeck(&uu.prog, owner);
                 let owner_typed = outer.has_expr(e) && outer.expr_typed.get(outer.expr_ix(e));
                 let body = uu.tcx.typeck(&uu.prog, anon);
@@ -1388,10 +1401,14 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
                     relax_types::lint_dead::collect_body(&uu.prog, &uu.tcx, &body);
                 }
                 body.errors.to_vec()
-            }).unwrap_or_else(|failed| vec![failed]);
+            })).unwrap_or_else(|failed| vec![failed]);
             errors.extend(staged(Stage::of(Phase::Typeck, 0, anon), errs));
         }
     }
+    relax_types::body_facts::close();
+    relax_types::body_facts::merge(&u.prog);
+    #[cfg(test)]
+    assert_eq!(relax_types::body_facts::escaped(), 0, "BodyFacts escape guard: body-phase sink writes without an owner");
     st.mark("body anon consts");
     relax_types::lint_early::finish(&u.prog, &own); st.mark("lint_early::finish");
     errors.extend(staged(Stage::new(Phase::Typeck, 0), static_self_access(up, &own))); st.mark("static_self_access");
@@ -1436,7 +1453,7 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         body_mem_report(unsafe { &(*up).prog });
     }
     for (_, e) in errors.iter_mut() {
-        if is_internal(unsafe { &*up }, &own_all, e) && !e.contains(": internal:") && !e.starts_with("internal: ") {
+        if is_internal(unsafe { &*up }, e) && !e.contains(": internal:") && !e.starts_with("internal: ") {
             *e = label_internal(e);
         }
     }
@@ -1448,13 +1465,13 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     // what the builds reported besides their own failures: constants that could not be
     // evaluated (CTFE panics), recorded instead of ending the check
     for e in unsafe { (&(*up).errors).iter().filter(|e| !e.starts_with("compile error in ")).cloned().collect::<Vec<_>>() } {
-        let e = if is_internal(unsafe { &*up }, &own_all, &e) { label_internal(&e) } else { e };
+        let e = if is_internal(unsafe { &*up }, &e) { label_internal(&e) } else { e };
         errors.push((unit_stage(&e), e));
     }
     let mut compile_errors = Vec::new();
     for (id, e) in failures {
         let name = unsafe { (&(*up).fns)[id as usize].name.clone() };
-        report(up, id, &name, &e, "compile", &own_all, &mut compile_errors);
+        report(up, id, &name, &e, "compile", &mut compile_errors);
     }
     errors.extend(staged(Stage::new(Phase::Post, 0), compile_errors));
     // MAKEPAD_RUN_BORROWCK_INSTANCES=1: every reached instance is borrow-checked too (the background
@@ -1579,7 +1596,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
     crate::relaxed::finish_check();
     let mut diagnostics: Vec<_> = errors.iter().map(|e| crate::diag::from_legacy(e, "typeck")).collect();
     diagnostics.extend(borrow_diagnostics);
-    (i32::from(!errors.is_empty() || borrow_count != 0), diagnostics)
+    let foreign = foreign_errors(&u.prog, crates, errors.iter().filter(|e| !e.contains(": internal:") && !e.starts_with("internal: ")))
+        .into_iter().filter(|(name, _)| name != "?").collect();
+    (i32::from(!errors.is_empty() || borrow_count != 0), diagnostics, foreign)
 }
 
 /// Compiles every seed fn, then every slot the compiled code creates (callees, closures, glue,
@@ -1675,10 +1694,18 @@ unsafe fn compile_all(up: *mut Unit, seeds: &[crate::program::DefId]) -> Vec<(u3
     out
 }
 
+fn std_crate(prog: &crate::program::Program, k: u32) -> bool {
+    use crate::vfs::canonical as canon;
+    let c = &prog.crates[k as usize];
+    if matches!(prog.syms.str(c.name), "core" | "alloc" | "std" | "proc_macro") { return true; }
+    let std_dir = format!("{}/", canon(&crate::std_dir()).trim_end_matches('/'));
+    canon(c.root_path()).starts_with(&std_dir)
+}
+
 /// Is a failure a makepad run bug rather than an error rustc would report? A compiler panic, an
-/// internal error, an error without an error code, or one located outside the checked crates
-/// (std or a dependency: rustc builds those).
-fn is_internal(u: &Unit, own: &[bool], e: &str) -> bool {
+/// internal error, an error without an error code, or one located in std or outside any crate.
+/// An error in any other crate belongs to the program, including a dependency cargo builds.
+fn is_internal(u: &Unit, e: &str) -> bool {
     let first = e.lines().next().unwrap_or("");
     if first.contains("internal compiler error") || first.contains("internal:") || first.contains("makepad run bug") {
         return true;
@@ -1696,7 +1723,7 @@ fn is_internal(u: &Unit, own: &[bool], e: &str) -> bool {
         return true;
     }
     match u.prog.file_paths.iter().position(|p| p == path) {
-        Some(i) => !u.prog.file_crate.get(i).is_some_and(|k| own.get(*k as usize).copied().unwrap_or(false)),
+        Some(i) => u.prog.file_crate.get(i).map_or(true, |&k| std_crate(&u.prog, k)),
         None => true,
     }
 }
@@ -1714,7 +1741,7 @@ fn label_internal(e: &str) -> String {
 
 /// One failed build as an error line: its location (the error's own, else the fn's), the
 /// message's first line, the instance it failed for, and `internal` for a makepad run bug.
-fn report(up: *mut Unit, id: u32, name: &str, e: &str, phase: &'static str, own: &[bool], errors: &mut Vec<String>) {
+fn report(up: *mut Unit, id: u32, name: &str, e: &str, phase: &'static str, errors: &mut Vec<String>) {
     let u = unsafe { &*up };
     let mut first = e.lines().next().unwrap_or("").to_string();
     // an error without a location takes its fn's
@@ -1729,7 +1756,7 @@ fn report(up: *mut Unit, id: u32, name: &str, e: &str, phase: &'static str, own:
             first = format!("{}:{}:{}: {}", path, l, c, first);
         }
     }
-    let internal = is_internal(u, own, &first);
+    let internal = is_internal(u, &first);
     // the type check of the fn reported it already (a non-generic body checked before compiling)
     let shown = if internal { label_internal(&first) } else { first.clone() };
     if errors.iter().any(|x| *x == shown) {

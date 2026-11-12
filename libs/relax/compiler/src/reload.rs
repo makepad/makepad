@@ -8745,6 +8745,51 @@ pub(crate) fn outside_packages<'a>(asked: impl Iterator<Item = &'a str>) -> Vec<
     asked.filter(|p| v.inputs.outside_packages(p, &std_dir)).collect()
 }
 
+/// What a live session's program looked at on the disk (std's fs_vfs `note`), absolute and
+/// normalized: the files it opened for reading or probed, and the folders it listed.
+#[derive(Default)]
+struct ProgramReads {
+    paths: std::collections::HashSet<String>,
+    dirs: std::collections::HashSet<String>,
+}
+
+static PROGRAM_READS: relax_session::sync::Mutex<Option<ProgramReads>> = relax_session::sync::Mutex::new(None);
+
+/// std's fs_vfs `note`: `kind` b'f' a file opened for reading, b'p' a path probed, b'd' a folder
+/// listed; the path as the program gave it (a relative one is its current folder's). Only a live
+/// session keeps it, once per path: a data file its tests read is part of their verdict wherever it
+/// lies (`read_by_program`). One relaxed load otherwise.
+pub(crate) extern "C" fn relax_vfs_note(p: *const u8, n: usize, kind: u32) {
+    if !crate::layout::LIVE_SESSION.load(Ordering::Relaxed) || p.is_null() {
+        return;
+    }
+    // process state: built in the kept heap
+    let _k = crate::zone_alloc::kept();
+    let given = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(p, n) });
+    let abs = if std::path::Path::new(&*given).is_absolute() {
+        given.into_owned()
+    } else {
+        let Ok(cwd) = std::env::current_dir() else { return };
+        cwd.join(&*given).to_string_lossy().into_owned()
+    };
+    let path = crate::vfs::normalize_path(&abs);
+    let mut g = PROGRAM_READS.lock().unwrap();
+    let r = g.get_or_insert_with(ProgramReads::default);
+    if kind == b'd' as u32 { r.dirs.insert(path); } else { r.paths.insert(path); }
+}
+
+/// Of `asked` (workspace-relative paths), those the program opened or probed, or whose folder it
+/// listed (a fixture added to a folder it reads): `at(absolute, relative)` says whether the one is
+/// the other. A file in no package of the graph that is one of them still changes what its tests see.
+pub(crate) fn read_by_program<'a>(asked: impl Iterator<Item = &'a str>, at: &dyn Fn(&str, &str) -> bool) -> Vec<&'a str> {
+    let g = PROGRAM_READS.lock().unwrap();
+    let Some(r) = g.as_ref() else { return Vec::new() };
+    asked.filter(|a| {
+        let rel = a.trim_start_matches("../");
+        r.paths.iter().any(|p| at(p, rel)) || rel.rsplit_once('/').is_some_and(|(dir, _)| r.dirs.iter().any(|p| at(p, dir)))
+    }).collect()
+}
+
 static STD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// A source file a live session watches and patches (`own_source`).
@@ -10820,6 +10865,48 @@ mod ledger_tests {
         assert_eq!(ledger.round(at(2), false, None, &hot, &virt), [0], "no native events: the hot set's disk files");
         assert_eq!(ledger.round(at(3), false, None, &hot, &virt), [0, 1, 3], "no native events, the ledger moved: and every virtual file");
         assert_eq!(ledger.round(at(3), false, Some(vec![3]), &hot, &virt), [3], "a virtual file the watch named (an in-app edit leaves the ledger)");
+    }
+}
+
+#[cfg(test)]
+mod program_reads_tests {
+    use crate::reload_async_tests::{in_child, live_app};
+
+    const LOOK: &str = r#"pub fn look(out: &mut u64) {
+    let read = std::fs::read_to_string("../data/game.splash").map_or(0, |s| s.len() as u64);
+    let missing = std::fs::File::open("../data/missing.splash").is_err() as u64;
+    let listed = std::fs::read_dir("../levels").map_or(0, |d| d.count() as u64);
+    let probed = std::path::Path::new("../data/probe.txt").exists() as u64;
+    *out = read * 1000 + missing * 100 + listed * 10 + probed;
+}
+"#;
+
+    /// What a live session's program reads from the disk is what its tests' verdict is about,
+    /// wherever it lies: a session's `inputs` names the files it opened (found or not) or probed,
+    /// and those in the folders it listed, by paths relative to its current folder. A data file in
+    /// no package kept a stale verdict when only sources counted (RACECARS game.splash, 11-12).
+    #[test]
+    fn a_live_programs_disk_reads_are_what_its_verdict_covers() {
+        in_child("reload::program_reads_tests::a_live_programs_disk_reads_are_what_its_verdict_covers", &["only"], |_| {
+            let dir = std::env::temp_dir().join(format!("relax-reload-{}-{}", "program-reads", std::process::id()));
+            live_app("program-reads", &[("lib.rs", LOOK)], &["look"], |call, _| {
+                std::fs::create_dir_all(dir.join("data")).unwrap();
+                std::fs::create_dir_all(dir.join("levels")).unwrap();
+                std::fs::write(dir.join("data/game.splash"), "12345").unwrap();
+                std::fs::write(dir.join("data/other.splash"), "1").unwrap();
+                std::fs::write(dir.join("levels/one.splash"), "1").unwrap();
+                std::env::set_current_dir(dir.join("app")).unwrap();
+                assert_eq!(call("look"), 5110, "the program read 5 bytes, missed one file, listed one level and probed nothing there");
+                let asked = ["data/game.splash", "data/missing.splash", "levels/two.splash", "data/probe.txt", "data/other.splash", "app/src/lib.rs"];
+                let read = super::read_by_program(asked.into_iter(), &crate::inspect::ends_with_rel);
+                assert!(read.contains(&"data/game.splash"), "a file read by a path relative to the program's folder: {read:?}");
+                assert!(read.contains(&"data/missing.splash"), "a file the program opened and did not find: {read:?}");
+                assert!(read.contains(&"levels/two.splash"), "a file new in a folder the program listed: {read:?}");
+                assert!(read.contains(&"data/probe.txt"), "a path the program probed: {read:?}");
+                assert!(!read.contains(&"data/other.splash"), "a file the program never looked at: {read:?}");
+                assert!(!read.contains(&"app/src/lib.rs"), "the compiler's reads of the sources are not the program's: {read:?}");
+            });
+        });
     }
 }
 

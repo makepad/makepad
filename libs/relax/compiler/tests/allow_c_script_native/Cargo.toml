@@ -1,0 +1,12 @@
+[package]
+name = "script-native-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "makepad run --allow-c fixture: a build script that calls into a C crate it build-depends on, so the script's own child run needs the native build's outputs and library"
+
+[dependencies]
+helper = { path = "helper" }
+
+# its own workspace (no registry dependencies: runs offline anywhere with cargo, cc and ar)
+[workspace]

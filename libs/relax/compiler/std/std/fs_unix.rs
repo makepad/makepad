@@ -221,6 +221,9 @@ impl OpenOptions {
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
             };
         }
+        if self.read {
+            vfs::note(path.as_ref(), b'f');
+        }
         run_path_with_cstr(path.as_ref(), &|c| self.open_c(c))
     }
 
@@ -938,6 +941,7 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
             k => Ok(Metadata { st: vfs_stat(&k) }),
         };
     }
+    vfs::note(path.as_ref(), b'p');
     run_path_with_cstr(path.as_ref(), &|c| {
         let mut st = stat_t::zeroed();
         cvt(unsafe { sys::os::stat(c.as_ptr(), &mut st as *mut stat_t) })?;
@@ -949,6 +953,7 @@ pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
     if vfs::kind(path.as_ref()).is_some() {
         return metadata(path);
     }
+    vfs::note(path.as_ref(), b'p');
     run_path_with_cstr(path.as_ref(), &|c| {
         let mut st = stat_t::zeroed();
         cvt(unsafe { sys::os::lstat(c.as_ptr(), &mut st as *mut stat_t) })?;
@@ -1099,6 +1104,7 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
             vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
         };
     }
+    vfs::note(path, b'd');
     run_path_with_cstr(path, &|c| {
         let dir = unsafe { sys::opendir(c.as_ptr()) };
         if dir.is_null() {

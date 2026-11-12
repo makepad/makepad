@@ -46,16 +46,37 @@ case_of() { # case_of <file> <expected 0|1>
   out=$(cd "$W/$n" && $J test "$n" 2>&1); verdict "test:$n" "$2" "$text" $? "$out"
   out=$($J test "$1" 2>&1); verdict "file:$n" "$2" "$text" $? "$out"
 }
+diff_of() { # diff_of <file>: a differential file (tests/std, core_diff.sh's rule): `rustc --test` runs it on
+  # real std and `makepad test` on Relax's, one test at a time in file order (tests named a01..); their
+  # `| ` lines must be equal, and there must be some
+  n=d_$(basename "$1" .rs)
+  out=$(rustc --edition 2021 -O --test -o "$W/$n.real" "$1" 2>&1) || { verdict "rustc:$n" 0 "" 1 "$out"; return; }
+  "$W/$n.real" --test-threads=1 --nocapture > "$W/$n.real.out" 2>&1 || { verdict "real:$n" 0 "" 1 "$(tail -12 "$W/$n.real.out")"; return; }
+  out=$($J test "$1" -- --test-threads=1 --nocapture 2>&1); verdict "test:$n" 0 "" $? "$out"
+  grep -o '| .*' "$W/$n.real.out" > "$W/$n.real.lines"
+  printf '%s\n' "$out" | grep -o '| .*' > "$W/$n.relax.lines"
+  if [ ! -s "$W/$n.real.lines" ] || ! cmp -s "$W/$n.real.lines" "$W/$n.relax.lines"; then
+    echo "diff:$n: $(wc -l < "$W/$n.real.lines" | tr -d ' ') lines under rustc, $(wc -l < "$W/$n.relax.lines" | tr -d ' ') under makepad test; first differences:"
+    diff "$W/$n.real.lines" "$W/$n.relax.lines" | head -12 | cut -c1-200
+    fail="$fail diff:$n"
+  fi
+}
 T=libs/relax/compiler/tests
 named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_ptr_capture_accept.rs tools/run/fixture/diff/pr1330_fixes.rs
   $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs
   $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs $T/macro_inner_use.rs $T/macro_file_order.rs $T/macro_file_shadow.rs
   $T/arch_legacy_const_generics.rs $T/cow_slice_eq.rs $T/macro_tail_cfg.rs $T/macro_matcher_positions.rs $T/macro_forwarded_empty_vis.rs $T/derive_eq_nested_qself.rs $T/core_net_paths.rs $T/path_from_str.rs $T/macro_doc_after_empty_vis.rs $T/std_unchecked_split_collect.rs
-  $T/std/core_dep_gaps_batch2.rs $T/std/box_dyn_read.rs $T/std/core_arch_neon_zmij.rs $T/std/derive_split_tokens.rs
+  $T/std/core_dep_gaps_batch2.rs $T/std/core_dep_gaps_async_crypto.rs $T/std/box_dyn_read.rs $T/std/core_arch_neon_zmij.rs $T/std/core_arch_neon_recpe.rs $T/std/derive_split_tokens.rs
   $T/path_hash_matches_rustc.rs $T/cow_from_cstr.rs $T/avx_shuffle_and_mask_types.rs $T/avx_zext_si128.rs
-  $T/vec_cfg_elements.rs $T/promoted_closure_fields.rs $T/self_path_param_impl.rs $T/gat_value_path_elided_lifetime.rs $T/const_owned_async_block.rs"
-[ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs"
+  $T/vec_cfg_elements.rs $T/promoted_closure_fields.rs $T/self_path_param_impl.rs $T/gat_value_path_elided_lifetime.rs $T/const_owned_async_block.rs $T/int_bit_ones.rs $T/os_str_join.rs $T/op_assign_ref_rhs.rs $T/closure_index_ref_capture.rs $T/slice_element_offset.rs $T/float_consts_golden_euler.rs $T/os_str_path_cow_cmp.rs $T/hint_cold_path.rs
+  $T/async_option_closure_future.rs $T/impl_trait_in_param_bounds.rs
+  $T/async_borrow_across_pending.rs $T/std/core_ptr_unchecked_needs_drop.rs"
+[ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs $T/x86_carry_intrinsics.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
+# the differential files: real std and Relax's print the same `| ` lines
+diffed="$T/std/core_int_methods.rs $T/std/core_char_props.rs $T/std/core_str_ops.rs $T/std/core_btree_random.rs
+  $T/std/core_vec_deque.rs"
+for f in $diffed; do diff_of "$f"; done
 for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs $T/macro_inner_use_before_module_reject.rs $T/macro_file_before_module_reject.rs \
   $T/macro_tt_ambiguity_reject.rs $T/macro_fragment_ambiguity_reject.rs $T/macro_fragment_error_reject.rs $T/macro_two_parses_reject.rs \
   $T/macro_vis_at_end_reject.rs $T/macro_forwarded_expr_reject.rs $T/macro_optional_separator_reject.rs; do case_of "$f" 1; done

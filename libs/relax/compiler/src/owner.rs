@@ -1612,6 +1612,8 @@ fn owner_loop() {
         if std::panic::catch_unwind(crate::jit::const_drain).is_err() {
             eprintln!("makepad-run: the owner's constant drain panicked ({}); the owner goes on", crate::lifeline::panic_at());
         }
+        // ... and the O3 builds that left a candidate out for what the drain makes
+        let _ = crate::jit::left_out_drain();
         #[cfg(test)]
         {
             let work = OWN_WORK_TEST.lock().unwrap_or_else(|e| e.into_inner()).take();

@@ -11,10 +11,6 @@ publish = false
 path = "src/lib.rs"
 doctest = false
 
-[[bin]]
-name = "relax-std-gen"
-path = "src/gen.rs"
-
 [workspace]
 
 [lints.rust]

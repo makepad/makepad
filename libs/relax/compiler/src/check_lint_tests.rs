@@ -117,7 +117,7 @@ fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono:
         relax_front::program::set_record_import_uses(false);
         relax_front::program::set_record_import_uses(true);
     }
-    let code = crate::check::check_crate(&mut u, root, &crates, pre, false);
+    let code = crate::check::check_crate(&mut u, root, &crates, pre, false).0;
     for f in &files {
         std::fs::remove_file(f).unwrap();
     }

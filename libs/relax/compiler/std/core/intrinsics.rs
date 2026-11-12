@@ -38,6 +38,10 @@ pub mod intrinsics {
     pub use super::intrinsics_simd as simd;
     /// rustc's `intrinsics::assume` (UB when false): hint::assert_unchecked
     pub use crate::hint::assert_unchecked as assume;
+    /// rustc's `intrinsics::cold_path`, safe and const: `#[cold]`, with the empty body rustc's
+    /// fallback (its spec). hint::cold_path calls it.
+    #[cold]
+    pub const fn cold_path() {}
 }
 
 /// rustc's generic SIMD intrinsics (`core::intrinsics::simd`) on `#[repr(simd)]` types, lane-wise
@@ -147,7 +151,7 @@ pub mod intrinsics_mem {
         #[rustc_intrinsic_const_stable_indirect]
         pub fn align_of_val<T: ?Sized>(v: *const T) -> usize;
         #[rustc_intrinsic_const_stable_indirect]
-        pub fn needs_drop<T>() -> bool;
+        pub fn needs_drop<T: ?Sized>() -> bool;
         /// `T: Copy` for this instantiation (a constant per instance): std's Copy fast paths
         /// (real std specializes Clone-for-Copy into memcpy)
         pub fn is_copy<T>() -> bool;

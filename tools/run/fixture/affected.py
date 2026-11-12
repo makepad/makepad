@@ -48,7 +48,8 @@ CALC = "makepad-app-calculator"
 # hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its package
 # (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06); Fab's far wall face in the
 # headset, its layers even (11-11); the GI field, empty for weeks with every test green (11-12); a store game
-# entered at startup with no click, held behind its loading screen for good (11-12). Every package named in SMOKE,
+# entered at startup with no click, held behind its loading screen for good (11-12); the sun's shadow edges
+# boiling under a moving camera (11-12). Each is a unit of its own (guard_unit). Every package named in SMOKE,
 # JIT_CHECKS and GUARDS needs a stub in the gate fixtures' workspaces (merge_break.sh, jit_break.sh, guard_units.sh,
 # tests_features.sh): main() refuses a workspace without one
 GUARDS = (
@@ -56,7 +57,14 @@ GUARDS = (
     ("makepad-fab", "test:xr_far_face", "a_far_wall_face_shows_no_darker_layers_in_the_headset"),
     ("makepad-render", "lib", "gpu_guard"),
     ("makepad-sandbox", "test:store_play_ready", "a_store_game_entered_at_startup_reaches_world_ready"),
+    ("makepad-sandbox", "test:penumbra_still", "the_sun_s_shadow_edges_hold_still_while_the_camera_moves"),
 )
+
+
+def guard_unit(name, target):
+    """A GPU guard's unit, as land_gate.sh step_guards names it: `guard <pkg>` for a library's guard,
+    `guard <pkg> --test <target>` for a test target's, so two guards of one package are two units."""
+    return ["guard", name] if target == "lib" else ["guard", name, "--test", target.removeprefix("test:")]
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"
 DEVHUB_PACKAGE = "makepad-devhub"
@@ -325,7 +333,10 @@ def main():
     # Workspace-wide resolver/patch/profile inputs apply to every member.
     workspace = workspace_wide(compiled)
     retry = retried()
-    gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)]
+    # a guard unit no GUARDS entry names any more (renamed, or the guard removed) is gone too
+    guard_units = [guard_unit(name, target) for name, target, _ in GUARDS]
+    gone = [words for words in retry if words[1] not in by_name or (words[0] == "present" and words[1] not in PRESENT_ARGS)
+            or (words[0] == "guard" and words not in guard_units)]
     live = [words for words in retry if words not in gone]
     retry_presents = {words[1] for words in live if words[0] == "present"}
     retry_devhub = any(words[0] == "devhub" for words in live)
@@ -358,9 +369,9 @@ def main():
                 print(" ".join(["present", name, str(by_name[name].relative_to(root)), *PRESENT_ARGS[name]]))
         # a guard runs under the JIT: a JIT change reaches it as much as one of its package's crates; a guard
         # red since runs whatever the diff reaches, until it passes
-        retry_guards = {words[1] for words in live if words[0] == "guard"}
+        retry_guards = [words for words in live if words[0] == "guard"]
         for name, target, test in GUARDS:
-            if workspace or by_name[name] in affected or touched & jit_code or name in retry_guards:
+            if workspace or by_name[name] in affected or touched & jit_code or guard_unit(name, target) in retry_guards:
                 print(f"guard {name} {by_name[name].relative_to(root)} {target} {test}")
         return
     if workspace:

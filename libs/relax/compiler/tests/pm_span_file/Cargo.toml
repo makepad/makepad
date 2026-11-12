@@ -1,0 +1,5 @@
+# `Span::file` and `Span::local_file` in a proc macro (tools/run/fixture/modules_harness.rs).
+# `cargo run -p pmsf-app` prints `local_file ok`.
+[workspace]
+members = ["mac", "app"]
+resolver = "2"

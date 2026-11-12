@@ -1,10 +1,10 @@
 # Warm check server
 
-`makepad serve [--workspace DIR] [--idle-min 30]` resolves and canonicalizes the workspace
+`relax serve [--workspace DIR] [--idle-min 30]` resolves and canonicalizes the workspace
 with Relax's resolver. It publishes `PORT TOKEN PID\n` in
 `<workspace>/target/makepad-run/serve/<16 lowercase hex digits>/endpoint`. Cargo target-dir overrides
 select `<target>/makepad-run`; `MAKEPAD_RUN_CACHE_DIR` explicitly replaces that directory. Run
-`makepad clean` from the workspace root or a member subdirectory to remove the entire makepad-run
+`relax clean` from the workspace root or a member subdirectory to remove the whole `makepad-run`
 directory, including serve files and startup manifests. The directory key is the
 low 64 bits of Relax's Sip128 hash of the canonical root. The token is 32 OS-random bytes,
 hex encoded. The endpoint and lock are private files. An OS file lock prevents duplicate
@@ -106,13 +106,13 @@ use the same cleanup path.
 
 ## CLI
 
-- `makepad check [--json] PKG`: connect if a live endpoint authenticates; otherwise one-shot.
-- `makepad check --no-serve [--json] PKG`: always one-shot.
-- `makepad check --serve [--json] PKG`: start a detached server if necessary, with stdin closed
+- `relax check [--json] PKG`: connect if a live endpoint authenticates; otherwise one-shot.
+- `relax check --no-serve [--json] PKG`: always one-shot.
+- `relax check --serve [--json] PKG`: start a detached server if necessary, with stdin closed
   and stdout/stderr appended to `serve.log` beside the endpoint; wait up to 30 minutes.
-- `makepad schema [--serve] PKG ITEM`
-- `makepad hover [--serve] PKG FILE LINE COL`
-- `makepad definition [--serve] PKG FILE LINE COL`
+- `relax schema [--serve] PKG ITEM`
+- `relax hover [--serve] PKG FILE LINE COL`
+- `relax definition [--serve] PKG FILE LINE COL`
 
 Query commands emit one JSON result, falling back to a one-shot session when no server is available; `--serve` explicitly requests persistent startup. Check emits J1 diagnostic lines followed by the
 same four-field JSON summary as one-shot, with integer milliseconds; human diagnostics
@@ -122,7 +122,7 @@ watch, etc.) keep their one-shot behavior and do not implicitly connect. Explici
 
 ## Validation
 
-Run `./run.sh /absolute/path/to/makepad`. The Python socket client creates an isolated copy
+Run `./run.sh /absolute/path/to/target/release/relax`. The Python socket client creates an isolated copy
 of the adjacent fixture, sets both Relax and Cargo offline, and retains logs and sources
 under the printed temporary directory. It compares diagnostic lines and summary fields
 with one-shot output, normalizing only milliseconds, and prints warm check/edit timings.
@@ -131,8 +131,7 @@ The compiler has process-global registries, so all package work currently runs o
 server worker. Socket reads/writes run independently. This is stricter serialization
 than one writer per package, and avoids sharing compiler pointers between threads.
 
-The supplementary `python3 queries.py /absolute/path/to/makepad` gate exercises query
+The supplementary `python3 queries.py /absolute/path/to/target/release/relax` gate exercises query
 fallbacks without a listener, including `.rx` coordinates/properties, negative blanket
 impl coverage, and warm J2 edits over the existing `check --watch` pipe. It does not
-replace the socket gate. See [REPORT.md](REPORT.md) for this implementation's validation
-results and deviations.
+replace the socket gate.

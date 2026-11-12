@@ -759,7 +759,7 @@ impl Tcx {
         // have done (feed_anon_const_from_holder): done before the query, which a holder's body
         // evaluating the constant enters
         self.feed_anon_const_from_holder(prog, def);
-        match (Providers { tcx: self, prog }).typeck(def) {
+        match crate::body_facts::with_owner(prog, def, || (Providers { tcx: self, prog }).typeck(def)) {
             Ok(body) => body,
             // rustc_query_system cycle_error: E0391, the query's error value
             Err(QueryError::Cycle(_)) => {

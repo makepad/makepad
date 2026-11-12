@@ -4,7 +4,7 @@
 //! `relax-std-gen fmt <core dir>` (integer formatting impls).
 //! `relax-std-gen grisu <core dir>` (cached powers for float formatting).
 //! `relax-std-gen dec2flt <core dir>` (exact powers of five for float parsing).
-//! Run from libs/relax/compiler/std/check: cargo run --release --bin relax-std-gen -- <what> ../core
+//! Run from libs/relax/compiler/std/gen: cargo run --release -- <what> ../core
 
 mod gen_dec2flt;
 mod gen_fmt;

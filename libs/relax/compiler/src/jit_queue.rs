@@ -867,6 +867,7 @@ fn worker_loop(index: usize) {
             worker.waiting.store(true, Ordering::SeqCst);
             // Atomics-only producers publish to the existing tier-record inbox.
             drain_tier_inbox();
+            prioritize_hot_verdicts();
             // one queue lock per pick, idle or not: the tick's timer is taken and given back
             // under it too
             let next = {

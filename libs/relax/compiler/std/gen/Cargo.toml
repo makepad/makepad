@@ -1,0 +1,17 @@
+# Generators of Relax std sources whose content is derived mechanically, most from the real std of
+# the rustc that runs them (Unicode tables, integer, float and tuple impls, float formatting and
+# parsing constants). std only; not a workspace member.
+[package]
+name = "relax-std-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "relax-std-gen"
+path = "src/gen.rs"
+
+[workspace]
+
+[profile.release]
+debug = false

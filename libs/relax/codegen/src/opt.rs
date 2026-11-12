@@ -1356,13 +1356,16 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
         let blk = &mut f.blocks[bi];
         blk.insts.extend(at_site);
         blk.pos.extend(std::iter::repeat(call_pos).take(n));
-        f.guard_calls.push((call_pos, id));
-        guard = Some(NewGuard { cond, fast: boff, check: None, slow: 0, insts: n, size, added, pos: call_pos, slot: id, flags: std::mem::take(&mut flags) });
+        // the slow call's own position: a call of the callee the front lowered at the same place
+        // (an or-pattern's match guard, once per alternative) stays a plain call
+        let slow_pos = call_pos | POS_GUARD;
+        f.guard_calls.push((slow_pos, id));
+        guard = Some(NewGuard { cond, fast: boff, check: None, slow: 0, insts: n, size, added, pos: slow_pos, slot: id, flags: std::mem::take(&mut flags) });
         let term = match unwind {
             Some(u) => Term::Invoke(cont, u),
             None => Term::Jump(cont),
         };
-        (cond, check, Block { insts: vec![call], pos: vec![call_pos], term, term_pos: call_pos, count: cold })
+        (cond, check, Block { insts: vec![call], pos: vec![slow_pos], term, term_pos: call_pos, count: cold })
     });
     for &(p, s) in &callee.guard_calls {
         f.guard_calls.push((ctx_of(p), s));
@@ -6842,7 +6845,7 @@ mod inline_priority_tests {
         assert_eq!(mid.blocks[fast as usize].insts.len(), 2);
         assert_eq!(mid.blocks[slow as usize].insts, vec![Inst::Call(Callee::Fn(1), vec![], vec![])]);
         assert_eq!(mid.blocks[slow as usize].term, Term::Jump(1));
-        assert_eq!(mid.guard_calls, vec![(5, 1)]);
+        assert_eq!(mid.guard_calls, vec![(5 | POS_GUARD, 1)]);
         assert!(mid.unguarded_flags.is_empty());
         // the slot call stays a call
         assert!(inline_calls(options, &mut mid, 0, &get, &|_| false, &InlineLimits::tier1()).is_empty());
@@ -6906,7 +6909,7 @@ mod inline_priority_tests {
         let read: Vec<Sym> = outer.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i { Inst::Addr(_, s) => Some(*s), _ => None }).collect();
         assert_eq!(read, vec![flag, mid_flag], "{}", outer.dump());
         assert!(outer.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::IBin(IOp::Or, ..))));
-        assert_eq!(outer.guard_calls, vec![(7, 2)]);
+        assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
         assert!(outer.unguarded_flags.is_empty());
         // before the loop: unguarded as well, both flags noted
         let mut outer = caller();
@@ -6958,7 +6961,7 @@ mod inline_priority_tests {
         let Term::Branch(_, fast2, slow) = cb.term else { panic!("{}", outer.dump()) };
         assert_eq!(fast2, fast);
         assert_eq!(outer.blocks[slow as usize].insts, vec![Inst::Call(Callee::Fn(2), vec![], vec![])]);
-        assert_eq!(outer.guard_calls, vec![(7, 2)]);
+        assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
         let words = outer.blocks.iter().flat_map(|b| &b.insts).filter(|i| matches!(i, Inst::Addr(_, s) if *s == word)).count();
         assert_eq!(words, 1, "{}", outer.dump());
         // before the loop: unguarded, both blocks dropped, both flags noted

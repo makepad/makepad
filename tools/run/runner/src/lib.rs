@@ -38,6 +38,7 @@ mod lexer {
     pub use relax_compiler::lexer::*;
 }
 mod cargo;
+mod change_report;
 pub mod fetch;
 mod help;
 pub mod launch;
@@ -295,6 +296,8 @@ fn run(raw_args: Vec<Vec<u8>>) {
             std::process::exit(0);
         }
         Some("help") => std::process::exit(help::help(&args[2..])),
+        // `change-report guide|check|send`: a report of an app's changes for Makepad (no compiler)
+        Some("change-report") => std::process::exit(change_report::main(&args[2..])),
         // `inspect <pid|app|all|list> <command>`: ask a running app (no compiler started here)
         Some("inspect") => std::process::exit(relax_compiler::inspect::client::main(&args[2..])),
         // the remote hub: `hub [--listen <addr>]`, `remote-relay [--dial ..]`, `remote add|pair|list`

@@ -64,6 +64,11 @@ impl<P: DerefMut> Pin<P> {
     pub const fn as_mut(&mut self) -> Pin<&mut P::Target> {
         Pin { pointer: &mut *self.pointer }
     }
+    /// `Pin<&mut Pin<P>>` -> `Pin<&mut P::Target>`, as real core's (tokio's AsyncRead / AsyncWrite
+    /// for `Pin<P>` call it).
+    pub fn as_deref_mut(self: Pin<&mut Pin<P>>) -> Pin<&mut P::Target> {
+        Pin { pointer: &mut *self.pointer.pointer }
+    }
     pub fn set(&mut self, value: P::Target)
     where
         P::Target: Sized,

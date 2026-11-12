@@ -1,10 +1,10 @@
 # Relax std comparison
 
-Run `./libs/relax/compiler/std/bench/run.sh <label> [relax executable]` from a checkout:
-`run.sh mac` on the Mac, `run.sh linux` on a Linux node, from that node's checkout. The label
-names the results (logs-<label>/, results-<label>.md); the Relax executable defaults to the
-checkout's target/release/makepad. The runner does not sync, install software, build Relax, or
-alter its dependencies.
+Run `libs/relax/compiler/std/bench/run.sh <label> [relax executable]` on each machine you compare,
+for example `run.sh mac` and `run.sh linux`. The label names the results (logs-<label>/,
+results-<label>.md). Pass the runner you built, target/release/relax: left out, the executable is
+target/release/makepad, the Makepad project's runner. The script does not sync, install software,
+build Relax, or alter its dependencies.
 It uses the existing release Relax executable and offline release rustc builds.
 Cargo uses four jobs. Every build and measured process is invoked with nice -n 10.
 
@@ -20,8 +20,7 @@ One exception is hashset_string: Relax's shim String does not implement the
 host Hash trait. B uses real std for that entire row (including key creation
 and the key vector), visibly marked B=real. C still uses Relax std.
 The other fallback is rc_refcell_churn: the optimized shim panicked with
-`RefCell already borrowed` in the initial probe (preserved in
-logs-mac/rc_refcell_churn-B-shim-failure.log). Its custom UnsafeCell is
+`RefCell already borrowed` in the initial probe. Its custom UnsafeCell is
 recognized by Relax but is not rustc's interior-mutability lang item.
 B therefore uses host Rc, RefCell and Vec for this entire row.
 
@@ -37,7 +36,7 @@ Each workload is deterministic, black-boxes inputs/results, warms up once,
 and prints the best of five measurements with two decimal places and a
 checksum. Input construction, allocation, checksum work and destruction
 are included; process start and JIT boot are excluded. Each C workload has
-an isolated entry point/unit graph following /tmp/rp/runone.sh's schema.
+an isolated entry point and unit graph.
 This lets later workloads run even if one JIT compilation fails. Raw build
 and per-workload logs, generated entry points, units, and the markdown
 result table remain under this directory. Binary/JIT output uses the host's
@@ -48,10 +47,3 @@ These are standalone CPU workloads with no UI loop, per-frame work or app
 changes. Results include checksum overhead and are not claims about an
 application's frame latency. Timings should be repeated outside the sandbox
 if nice reports `setpriority: Operation not permitted`.
-
-Validation on this Mac: 51 existing release tests passed (core_vec,
-coll_hash_map, coll_btree, coll_heap_rc, text_str, text_string, fmt_int,
-fmt_float, fmt_parse, and check_os's futex_backend). Raw output is in
-logs-mac/tests.log and logs-mac/tests-os.log. No test files were added.
-The initial unbatched calibration table is logs-mac/calibration.md;
-results-mac.md is the final batched comparison.

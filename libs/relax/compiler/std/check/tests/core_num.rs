@@ -62,6 +62,10 @@ macro_rules! check_int {
                 assert_eq!(h.overflowing_neg(), a.overflowing_neg());
                 assert_eq!(h.checked_neg(), a.checked_neg());
                 assert_eq!(h.wrapping_neg(), a.wrapping_neg());
+                assert_eq!(h.isolate_highest_one(), a.isolate_highest_one(), "isolate_highest_one of {}", a);
+                assert_eq!(h.isolate_lowest_one(), a.isolate_lowest_one(), "isolate_lowest_one of {}", a);
+                assert_eq!(h.highest_one(), a.highest_one(), "highest_one of {}", a);
+                assert_eq!(h.lowest_one(), a.lowest_one(), "lowest_one of {}", a);
                 assert_eq!(h.checked_ilog2(), a.checked_ilog2());
                 assert_eq!(h.checked_ilog10(), a.checked_ilog10());
                 for base in [2 as $t, 3, 10, 16] {

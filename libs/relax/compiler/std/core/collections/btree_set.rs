@@ -59,6 +59,11 @@ impl<T> BTreeSet<T> {
 }
 
 impl<T: Ord> BTreeSet<T> {
+    /// The elements of `range`, in order, for which `pred` holds: each is removed as the iterator
+    /// yields it (real std 1.91; an element the iterator does not reach stays).
+    pub fn extract_if<'a, F: 'a + FnMut(&T) -> bool, R: RangeBounds<T>>(&'a mut self, range: R, pred: F) -> ExtractIf<'a, T, R, F> {
+        ExtractIf { inner: btree_map::ExtractIfInner::new(&mut self.map, range), pred }
+    }
     pub fn range<K: ?Sized + Ord, R: RangeBounds<K>>(&self, range: R) -> Range<'_, T>
     where
         T: Borrow<K>,
@@ -305,6 +310,24 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 }
 
 impl<T> ExactSizeIterator for IntoIter<T> {}
+
+pub struct ExtractIf<'a, T, R, F> {
+    inner: btree_map::ExtractIfInner<'a, T, (), R>,
+    pred: F,
+}
+
+impl<'a, T: Ord, R: RangeBounds<T>, F: 'a + FnMut(&T) -> bool> Iterator for ExtractIf<'a, T, R, F> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        let pred = &mut self.pred;
+        self.inner.next(&mut |k: &T, _: &mut ()| pred(k)).map(|(k, _)| k)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<'a, T: Ord, R: RangeBounds<T>, F: 'a + FnMut(&T) -> bool> FusedIterator for ExtractIf<'a, T, R, F> {}
 
 pub struct Range<'a, T: 'a> {
     iter: btree_map::Range<'a, T, ()>,

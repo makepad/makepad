@@ -496,6 +496,9 @@ impl OpenOptions {
                 vfs::Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
             };
         }
+        if self.read {
+            vfs::note(path.as_ref(), b'f');
+        }
         let path = maybe_verbatim(path.as_ref())?;
         self.open_native(&path)
     }
@@ -1493,6 +1496,7 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
             k => Ok(Metadata::virtual_entry(&k)),
         };
     }
+    vfs::note(path.as_ref(), b'p');
     let p = maybe_verbatim(path.as_ref())?;
     match stat_native(&p, 0) {
         Err(e) => {
@@ -1514,6 +1518,7 @@ pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
     if vfs::kind(path.as_ref()).is_some() {
         return metadata(path);
     }
+    vfs::note(path.as_ref(), b'p');
     let p = maybe_verbatim(path.as_ref())?;
     stat_native(&p, FILE_FLAG_OPEN_REPARSE_POINT)
 }
@@ -1522,6 +1527,7 @@ pub fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
     if let Some((_, k)) = vfs::kind(path.as_ref()) {
         return Ok(!matches!(k, vfs::Kind::Missing));
     }
+    vfs::note(path.as_ref(), b'p');
     let p = maybe_verbatim(path.as_ref())?;
     match open_for_meta(&p, 0) {
         Ok(_) => Ok(true),
@@ -1750,6 +1756,7 @@ pub fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
     if p.as_os_str().is_empty() {
         return Err(os_error(ERROR_PATH_NOT_FOUND));
     }
+    vfs::note(p, b'd');
     let root = p.to_path_buf();
     let star = p.join("*");
     let w = maybe_verbatim(&star)?;

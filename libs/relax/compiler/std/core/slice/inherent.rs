@@ -163,6 +163,20 @@ impl<T> [T] {
         let end = unsafe { im::ptr_add(start, self.len()) };
         start..end
     }
+    /// Real core's `element_offset` (slice/mod.rs): the index of `element` if it is one of this
+    /// slice's elements by address (not by value); panics for a zero-sized `T`.
+    pub fn element_offset(&self, element: &T) -> Option<usize> {
+        let size = crate::mem::size_of::<T>();
+        if size == 0 {
+            panic!("elements are zero-sized");
+        }
+        let byte_offset = (element as *const T as usize).wrapping_sub(self.as_ptr() as usize);
+        if byte_offset % size != 0 {
+            return None;
+        }
+        let offset = byte_offset / size;
+        if offset < self.len() { Some(offset) } else { None }
+    }
     #[track_caller]
     pub fn swap(&mut self, a: usize, b: usize) {
         super::swap(self, a, b)

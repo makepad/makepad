@@ -788,7 +788,7 @@ pub fn expand(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
         return Ok(out);
     }
     if from_id(id) == Builtin::Include {
-        let (path, data) = include_input(p, lo, hi, call_lo)?;
+        let (path, data) = include_input(p, lo, hi, call_lo, false)?;
         let text = String::from_utf8(data).map_err(|_| format!("`{}` is not UTF-8", path))?;
         let sources = p.sources.as_ref().ok_or("include! requires a source registry")?;
         let file = sources.register(&path, std::sync::Arc::from(text.as_bytes()))?;
@@ -895,7 +895,8 @@ pub fn include_literals<'a>(texts: &[&'a [u8]]) -> Vec<String> {
 }
 
 /// Resolve nested includes relative to the file that authored the invocation.
-fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32) -> Result<(String, Vec<u8>), String> {
+/// `literal`: include_str! / include_bytes! (Parser::late_flags).
+fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32, literal: bool) -> Result<(String, Vec<u8>), String> {
     let args = lit_args(p, lo, hi)?;
     let rel = args.first().ok_or("include! takes a path")?;
     let source = p.source_span(call_lo);
@@ -905,7 +906,7 @@ fn include_input(p: &crate::parser::Parser, lo: usize, hi: usize, call_lo: u32) 
     let current = authored.as_ref().map(|s| s.path.as_str()).or_else(|| p.bctx.as_ref().map(|c| c.path.as_str()));
     let path = include_path(current, rel);
     let data = crate::vfs::read(&path).map_err(|e| format!("couldn't read `{}`: {}", path, e))?;
-    crate::sip::note_late_input(p.bctx.as_ref().map_or("", |c| c.krate.as_str()), crate::sip::LATE_FILE, &path, Some(&data));
+    crate::sip::note_late_input(p.bctx.as_ref().map_or("", |c| c.krate.as_str()), crate::sip::LATE_FILE | p.late_flags(literal), &path, Some(&data));
     Ok((path, data))
 }
 
@@ -996,7 +997,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
                 args.push(v);
             }
             let name = args.first().cloned().ok_or_else(|| "env! takes a variable name -- env!(\"NAME\")".to_string())?;
-            let v = env_value(ctx, &name);
+            let v = env_value(ctx, &name, p.late_flags(true));
             return if b == Builtin::OptionEnv {
                 let mut g = TokBuf::new(p.edition);
                 match v {
@@ -1103,7 +1104,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
             return Err("none of the predicates in this `cfg_select` evaluated to true".to_string());
         }
         Builtin::IncludeStr | Builtin::IncludeBytes => {
-            let (path, data) = include_input(p, lo, hi, call_lo)?;
+            let (path, data) = include_input(p, lo, hi, call_lo, true)?;
             return if b == Builtin::IncludeStr {
                 let s = String::from_utf8(data).map_err(|_| format!("`{}` wasn't a utf-8 file", path))?;
                 Ok(one_str(&s))
@@ -1335,10 +1336,10 @@ fn regroup(trees: &mut [TokenTree], synth: &crate::fxhash::HashSet<u32>, from: D
     }
 }
 
-fn env_value(ctx: Option<&FileCtx>, name: &str) -> Option<String> {
+fn env_value(ctx: Option<&FileCtx>, name: &str, flags: u8) -> Option<String> {
     let v = env_value_inner(ctx, name);
     // a macro input outside the source: part of the crate's cache validity (stable.rs ledger)
-    crate::sip::note_late_input(ctx.map_or("", |c| c.krate.as_str()), crate::sip::LATE_ENV, name, v.as_deref().map(|x| x.as_bytes()));
+    crate::sip::note_late_input(ctx.map_or("", |c| c.krate.as_str()), crate::sip::LATE_ENV | flags, name, v.as_deref().map(|x| x.as_bytes()));
     v
 }
 

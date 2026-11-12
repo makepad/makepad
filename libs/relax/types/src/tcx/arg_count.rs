@@ -37,9 +37,7 @@ impl Tcx {
         }
         if let ItemKind::Fn(sig, _, _) = &item.kind {
             let sig = ast.fn_sig(*sig);
-            let mut found = Vec::new();
-            for p in ast.list(sig.params) { super::collect_argument_impl_traits(ast, p.ty, &mut found); }
-            c.synth = found.len();
+            c.synth = super::fn_impl_trait_params(ast, sig).len();
         }
         if let Some(n) = early_lifetimes { c.lifetimes = n; }
         c

@@ -5,4 +5,5 @@ fn main() {
     println!("apply {}", cnative::apply(inc, 20));
     println!("cfg {}", cnative::built());
     println!("callback {}", cnative::square_plus(7));
+    println!("shadowed {}", cnative::shadowed());
 }

@@ -7,7 +7,7 @@ use std::io::IsTerminal;
 /// The word a command line starts with, for every command `makepad` knows (help pages or not).
 pub const COMMANDS: &[&str] = &[
     "run", "app", "fetch", "export", "pack-src", "inspect", "devhub", "observe", "ci", "check", "selftest", "test", "live", "fix", "clean", "serve", "schema", "hover", "definition",
-    "parse", "resolve", "file", "std-surface", "lex", "hub", "remote-relay", "remote", "help",
+    "parse", "resolve", "file", "std-surface", "lex", "hub", "remote-relay", "remote", "change-report", "help",
 ];
 
 #[derive(Clone, Copy)]
@@ -189,6 +189,7 @@ fn main_page(st: &Style) -> String {
     p.row("live <file.rs> <edit.rs>...", "Run tests, then apply edits as live patches");
     p.row("fix --to-strict <package>", "Rewrite relaxed code to plain rustc Rust");
     p.row("clean [-p <package>]", "Remove the workspace's target/makepad-run cache");
+    p.row("change-report <check|send>", "Send Makepad what you changed in an app (you read it first)");
     p.row("serve", "Run the warm check server");
     p.row("schema|hover|definition", "Editor queries to the check server");
     p.row("help [command]", "Show this help, or a command's page");
@@ -450,6 +451,26 @@ fn observe_page(st: &Style) -> String {
     p.out
 }
 
+fn change_report_page(st: &Style) -> String {
+    let mut p = Page::new(st, 40);
+    title(&mut p, "send Makepad what you changed in an app");
+    p.blank();
+    p.usage("makepad change-report <guide|check|send> [<folder|zip>]");
+    p.blank();
+    p.text("A change report tells Makepad what you changed in an app and why, as concepts, with");
+    p.text("your code only when you choose to include it. Your coding agent writes it; you read it");
+    p.text("before it is sent. Nothing leaves this machine without that.");
+    p.section("Commands:");
+    p.row("guide", "The format and the anonymisation rules, for the agent writing a report");
+    p.row("check <folder|zip>", "Check a report exactly as makepad.nl will (format, sizes, the scan\nfor emails, home paths, keys and private addresses)");
+    p.row("send <folder|zip> [--reply-to <email>]", "Show it, ask whether to include the code (default: no), and send it\nwhen you type the app's id; only at a terminal, never for an agent");
+    p.text("In the Makepad Runner, the report goes in local/change-report/ of the folder your agent");
+    p.text("edits, and you send it from the app's panel: Send my changes to Makepad.");
+    p.section("Environment:");
+    p.row("MAKEPAD_FEEDBACK_URL", "The feedback endpoint (reports go to it + /changes); default makepad.nl");
+    p.out
+}
+
 fn ci_page(st: &Style) -> String {
     let mut p = Page::new(st, 40);
     title(&mut p, "committed CI proofs for this checkout");
@@ -482,6 +503,7 @@ fn page(st: &Style, cmd: Option<&str>) -> Option<String> {
         Some("fix") => fix_page(st),
         Some("serve" | "schema" | "hover" | "definition") => serve_page(st),
         Some("clean") => clean_page(st),
+        Some("change-report") => change_report_page(st),
         Some(c) if COMMANDS.contains(&c) => main_page(st),
         Some(_) => return None,
     })
