@@ -609,6 +609,22 @@ pub(crate) fn take_boot_resolved() -> Option<Resolved> {
 }
 
 
+/// cargo's run-time environment of crate `ci`'s target (cargo Compilation::fill_env, the same for
+/// `cargo run` and `cargo test`): its package's CARGO_MANIFEST_DIR, CARGO_MANIFEST_PATH and
+/// CARGO_PKG_* variables, its build script's OUT_DIR and rustc-env and an integration test's
+/// CARGO_BIN_EXE_<bin> (its compile-time environment less what cargo hands rustc alone), then the
+/// `[env]` configuration where none of those names it (cargo apply_env_config). A package's
+/// variables are what its crates were compiled with: a member of a virtual workspace run from the
+/// workspace root reads its own folder in CARGO_MANIFEST_DIR at run time too.
+fn program_env(g: &unitgraph::Graph, ci: usize) -> Vec<(String, String)> {
+    const RUSTC_ONLY: [&str; 6] = ["CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR", "CARGO_RUSTC_CURRENT_DIR", "CARGO_SBOM_PATH"];
+    let mut env: Vec<(String, String)> = g.env[ci].iter().filter(|(k, _)| !RUSTC_ONLY.contains(&k.as_str())).cloned().collect();
+    for (k, v) in crate::crates::config_env() {
+        if !env.iter().any(|(n, _)| *n == k) { env.push((k, v)); }
+    }
+    env
+}
+
 /// rustc's crate locator finds `extern crate proc_macro;` in the sysroot for any crate, of any
 /// crate type (rustc_metadata locator.rs / creader.rs `resolve_crate` on an `extern crate` item:
 /// sysroot crates need no `--extern`). Relax's sysroot is its std dir, whose `proc_macro` the app
@@ -1308,6 +1324,13 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     } else {
         g.root
     };
+    // what cargo gives the process of the target it runs (set at main): its package's variables,
+    // and a test's folder (cargo test runs one in its package's folder, cargo run where it was
+    // started); a virtual package (a git run) has no folder to go to. A build script's run has its
+    // environment from the run that started it (cargo's build-script variables of its package):
+    // its own graph's package is the script's.
+    let program_env = if std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_some() { Vec::new() } else { program_env(&g, subject_ci) };
+    let program_dir = (harness || plain_test).then(|| g.pkg[subject_ci].0.clone()).filter(|d| !crate::vfs::is_virtual(d));
     let mut also_graph = Vec::new();
     for name in &also {
         // The original units distinguish target libs from host-only deps, even after substitution.
@@ -2355,6 +2378,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     MAIN_START_MS.store(main_ms as u64, Ordering::Relaxed);
     crate::boot_stats::main_called();
     crate::tui::compiling();
+    // cargo's run-time environment of the target (program_env), and a test's folder; a test's
+    // later look for its workspace still finds the one it was started in
+    if program_dir.is_some() { crate::dirs::set_workspace_dir(workspace.clone()); }
+    crate::crates::set_program_env(&program_env, program_dir.as_deref());
     unsafe {
         std::env::set_var("MAKEPAD_RUN_STARTUP_T0", crate::clock::process_start_epoch().to_string());
         std::env::set_var("MAKEPAD_RUN_MAIN_MS", crate::clock::ms_since_process_start().to_string());

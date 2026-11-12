@@ -1,0 +1,11 @@
+[package]
+name = "relax-run-env"
+version = "1.2.3-rc.1"
+edition = "2021"
+authors = ["Relax", "Fixture"]
+description = "A member of a virtual workspace whose lib test, integration test and program check cargo's run-time environment (tools/run/fixture/run_env.sh)"
+license = "MIT"
+repository = "https://example.com/run-env"
+homepage = "https://example.com"
+rust-version = "1.70"
+publish = false

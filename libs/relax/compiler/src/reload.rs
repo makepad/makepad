@@ -7961,6 +7961,16 @@ fn exec_restart(state: Option<&[u8]>) -> Result<(), String> {
         let exe = host::loader().ok_or("the makepad binary's path is unknown")?;
         let mut cmd = std::process::Command::new(exe);
         cmd.args(crate::harness::live::restart_args(std::env::args_os().skip(1).collect()));
+        // the process as this run was started: what it set for its program (its target's cargo
+        // variables, a test's folder) goes back, and the next run sets it again
+        let (before, dir) = crate::crates::program_process_before();
+        for (name, value) in before {
+            match value {
+                Some(value) => { cmd.env(name, value); }
+                None => { cmd.env_remove(name); }
+            }
+        }
+        if let Some(dir) = dir { cmd.current_dir(dir); }
         for (name, value) in next_run_env(state)? {
             match value {
                 Some(value) => { cmd.env(name, value); }

@@ -1,0 +1,5 @@
+# run_env.sh starts the runs with RUN_ENV_CONFIG_KEPT and RUN_ENV_CONFIG_FORCED set to "outer"
+[env]
+RUN_ENV_CONFIG = "from-config"
+RUN_ENV_CONFIG_KEPT = "from-config"
+RUN_ENV_CONFIG_FORCED = { value = "forced", force = true }

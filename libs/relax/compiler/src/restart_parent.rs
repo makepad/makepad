@@ -60,7 +60,7 @@ fn put(out: &mut Vec<u8>, word: &OsStr) {
 }
 
 impl Next {
-    /// This process's directory and environment with `cmd`'s changes.
+    /// This process's directory and environment with `cmd`'s changes (its folder, when it names one).
     #[cfg(windows)]
     fn of(cmd: &std::process::Command) -> std::io::Result<Next> {
         let mut envs: Vec<(OsString, OsString)> = std::env::vars_os().collect();
@@ -73,7 +73,7 @@ impl Next {
         Ok(Next {
             program: cmd.get_program().to_os_string(),
             args: cmd.get_args().map(OsStr::to_os_string).collect(),
-            dir: std::env::current_dir()?.into_os_string(),
+            dir: match cmd.get_current_dir() { Some(dir) => dir.as_os_str().to_os_string(), None => std::env::current_dir()?.into_os_string() },
             envs,
         })
     }

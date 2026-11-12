@@ -355,10 +355,12 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     Ok(Graph { crates, root, build_scripts, pkg, cfgs, env, link_libs: Vec::new(), native: None, raw, bins })
 }
 
-/// cargo's per-package compile-time environment (CARGO_MANIFEST_DIR, CARGO_PKG_*).
+/// cargo's per-package environment (CARGO_MANIFEST_DIR, CARGO_MANIFEST_PATH, CARGO_PKG_*): its
+/// crates' at compile time, its build script's and its targets' at run time.
 fn pkg_env(dir: &str, name: &str, ver: &str) -> Vec<(String, String)> {
     let mut e = vec![
         ("CARGO_MANIFEST_DIR".to_string(), dir.to_string()),
+        ("CARGO_MANIFEST_PATH".to_string(), crate::crates::join_path(dir, "Cargo.toml")),
         ("CARGO_PKG_NAME".to_string(), name.to_string()),
         ("CARGO_PKG_VERSION".to_string(), ver.to_string()),
     ];
@@ -896,11 +898,7 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("OPT_LEVEL", "3")
         .env("DEBUG", "false")
         .env("NUM_JOBS", "4")
-        .env("CARGO_MANIFEST_DIR", dir)
-        .env("CARGO_PKG_NAME", pname)
-        .env("CARGO_PKG_VERSION", ver)
-        .env("CARGO_PKG_VERSION_PRE", version_parts(ver).1)
-        .envs(crate::resolve::package_meta_env(dir))
+        .envs(pkg_env(dir, pname, ver))
         // Both tools are the loader: RUSTC probes use its target model, CARGO metadata its
         // resolver and VFS. The runner consumes `build-script` on entry, then marks tool calls.
         // RUSTDOC too (the `built` crate requires it); nothing documents here

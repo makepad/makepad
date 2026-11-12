@@ -599,9 +599,55 @@ pub fn config_env_value(key: &str) -> Option<String> {
     CONFIG_ENV.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
-/// Value of `env!(key)` / `option_env!(key)` in crate `krate`.
+/// Value of `env!(key)` / `option_env!(key)` in crate `krate`. The process environment is the one
+/// the run was started with: a variable the run set for its program (set_program_env) reads as it
+/// was before, as rustc never sees the run-time variables of the target cargo runs.
 pub fn crate_env_named(krate: &str, key: &str) -> Option<String> {
-    crate_env_registered(krate, key).or_else(|| config_env_value(key)).or_else(|| std::env::var(key).ok())
+    crate_env_registered(krate, key).or_else(|| config_env_value(key)).or_else(|| match program_env_before(key) {
+        Some(before) => before.and_then(|v| v.into_string().ok()),
+        None => std::env::var(key).ok(),
+    })
+}
+
+/// What the run changed in its own process for its program, as it was before: each variable it set
+/// (None: it was unset) and the working folder it left.
+struct ProgramProcess {
+    env: Vec<(String, Option<std::ffi::OsString>)>,
+    dir: Option<std::path::PathBuf>,
+}
+
+static PROGRAM_PROCESS: Mutex<ProgramProcess> = Mutex::new(ProgramProcess { env: Vec::new(), dir: None });
+
+/// Sets the variables of `env` in this process for the program the run calls next (the first
+/// value of a name stands), and makes `dir` the working folder when given. Each one's previous
+/// state is kept: crate_env_named reads it, and the run's end puts it back (reset_statics), so a
+/// restart starts as this run did. Call it with no program thread running.
+pub fn set_program_env(env: &[(String, String)], dir: Option<&str>) {
+    // the record lives for the run: grown in the kept phase
+    let _k = crate::zone_alloc::kept();
+    let mut p = PROGRAM_PROCESS.lock().unwrap();
+    for (i, (k, v)) in env.iter().enumerate() {
+        if env[..i].iter().any(|(n, _)| n == k) { continue; }
+        if !p.env.iter().any(|(n, _)| n == k) { p.env.push((k.clone(), std::env::var_os(k))); }
+        unsafe { std::env::set_var(k, v) };
+    }
+    if let Some(dir) = dir {
+        if let Ok(before) = std::env::current_dir() {
+            if std::env::set_current_dir(dir).is_ok() && p.dir.is_none() { p.dir = Some(before); }
+        }
+    }
+}
+
+/// Some(the value before the run set it for its program) for a variable set_program_env set.
+fn program_env_before(key: &str) -> Option<Option<std::ffi::OsString>> {
+    PROGRAM_PROCESS.lock().unwrap().env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+}
+
+/// The process as the run was started, for a restart that starts another process from this one:
+/// the variables set_program_env changed with their values before, and the folder it left.
+pub fn program_process_before() -> (Vec<(String, Option<std::ffi::OsString>)>, Option<std::path::PathBuf>) {
+    let p = PROGRAM_PROCESS.lock().unwrap();
+    (p.env.clone(), p.dir.clone())
 }
 
 /// The value `makepad run` registered for the crate (cargo's per-crate vars, build-script
@@ -634,6 +680,16 @@ fn a_package_crate_never_keeps_a_sysroot_name() {
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
+    // the process as the run was started: its program's variables and folder go back
+    let (env, dir) = program_process_before();
+    for (k, before) in env {
+        match before {
+            Some(v) => std::env::set_var(k, v),
+            None => std::env::remove_var(k),
+        }
+    }
+    if let Some(dir) = dir { let _ = std::env::set_current_dir(dir); }
     reset(&CRATE_ENV, relax_session::sync::Mutex::new(Vec::new()));
     reset(&CONFIG_ENV, relax_session::sync::Mutex::new(Vec::new()));
+    reset(&PROGRAM_PROCESS, Mutex::new(ProgramProcess { env: Vec::new(), dir: None }));
 }

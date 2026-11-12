@@ -1,0 +1,4 @@
+# run_env.sh: a virtual workspace (no [package] at its root) and its one member
+[workspace]
+members = ["member"]
+resolver = "2"
