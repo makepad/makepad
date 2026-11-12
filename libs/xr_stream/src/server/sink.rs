@@ -61,6 +61,18 @@ script_mod! {
         depth_clear: uniform(1.0)
         mode: uniform(0.0)
         opaque: uniform(0.0)
+        // 1: the eyes hold linear light (`XrPresented::linear_light`): the colour is encoded
+        // (gamma 2.2) after its filter, as a pass without linear light writes it
+        linear: uniform(0.0)
+        // `c` (premultiplied) encoded for display when the eyes hold linear light; alpha 0 holds
+        // nothing to encode (the pass decoded nothing there)
+        encoded: fn(c: vec4) -> vec4 {
+            if self.linear < 0.5 || c.w <= 0.0 {
+                return c
+            }
+            let g = 1.0 / 2.2
+            return vec4(pow(max(c.xyz / c.w, vec3(0.0, 0.0, 0.0)), vec3(g, g, g)) * c.w, c.w)
+        }
         unsqueeze: fn(e: float, r: float, d: float) -> float {
             let er = r * (1.0 + d) * 0.5
             if e <= er {
@@ -119,11 +131,11 @@ script_mod! {
             let hi_q = vec2(self.column.x + self.column.y - 0.5, self.column.z - 0.5)
             let inv = vec2(1.0 / self.extent.x, 1.0 / self.extent.y)
             if fp.x * fp.y <= 1.0 {
-                let c = self.image.sample(clamp(q, lo_q, hi_q) * inv)
+                let c = self.encoded(self.image.sample(clamp(q, lo_q, hi_q) * inv))
                 return vec4(c.xyz, mix(c.w, 1.0, self.opaque))
             }
-            let c = (self.image.sample(clamp(q + vec2(-dq.x, -dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, -dq.y), lo_q, hi_q) * inv)
-                + self.image.sample(clamp(q + vec2(-dq.x, dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, dq.y), lo_q, hi_q) * inv)) * 0.25
+            let c = self.encoded((self.image.sample(clamp(q + vec2(-dq.x, -dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, -dq.y), lo_q, hi_q) * inv)
+                + self.image.sample(clamp(q + vec2(-dq.x, dq.y), lo_q, hi_q) * inv) + self.image.sample(clamp(q + vec2(dq.x, dq.y), lo_q, hi_q) * inv)) * 0.25)
             return vec4(c.xyz, mix(c.w, 1.0, self.opaque))
         }
     }
@@ -414,8 +426,8 @@ impl XrPack {
 
     /// After the app drew its XR pass (its colour and depth, eyes side by side): a new XR frame
     /// is packed into the stream picture.
-    fn pack(&mut self, cx: &mut Cx2d, color: &Texture, depth: &Texture) {
-        self.pack_images(cx, color, depth, None);
+    fn pack(&mut self, cx: &mut Cx2d, color: &Texture, depth: &Texture, linear: bool) {
+        self.pack_images(cx, color, depth, linear, None);
     }
 
     pub(super) fn external_ready(&self) -> bool {
@@ -439,11 +451,13 @@ impl XrPack {
         }
         if !self.external_ready() { return Ok(false); }
         if frame.tracking.display_ns == self.last_display_ns { return Err("external XR frame already submitted".into()); }
-        self.pack_images(cx, frame.eyes[0].color, frame.eyes[0].color, Some(frame));
+        self.pack_images(cx, frame.eyes[0].color, frame.eyes[0].color, false, Some(frame));
         Ok(self.packed.is_some())
     }
 
-    fn pack_images(&mut self, cx: &mut Cx2d, color: &Texture, depth: &Texture, external: Option<&ExternalFrame<'_>>) {
+    /// `linear`: the XR pass's colour holds linear light (`XrPresented::linear_light`): the
+    /// foveation encodes it, FXAA works on it in a float target, the mirror encodes what it shows.
+    fn pack_images(&mut self, cx: &mut Cx2d, color: &Texture, depth: &Texture, linear: bool, external: Option<&ExternalFrame<'_>>) {
         if external.is_none() && !cx.cx.xr_offscreen() {
             return;
         }
@@ -452,7 +466,10 @@ impl XrPack {
         // the desktop's mirrors read the XR pass (on their own clock, `XrMirrorClock`); the
         // desktop renders nothing for the headset's frames (the platform paints no window for them)
         let source = cx.cx.global::<crate::mirror::XrMirrorSource>();
-        if external.is_none() { source.color = Some(color.clone()); }
+        if external.is_none() {
+            source.color = Some(color.clone());
+            source.linear = linear;
+        }
         source.mirror = external.is_none() && shared.mirror.load(Ordering::Acquire);
         if let Some(eye) = shared.session_eye() {
             source.eye = eye;
@@ -524,12 +541,14 @@ impl XrPack {
         // on its own; the foveation reads that (it paints after the XR pass, before the pack)
         let fxaa = if fxaa_on {
             let target = self.fxaa.get_or_insert_with(|| RenderTarget::new(cx.cx, "xr_stream_fxaa"));
-            target.ensure(cx.cx, (2 * sw, sh), RenderTargetFormat::Bgra8);
+            // linear light stays linear (a float target) until the foveation encodes it
+            target.ensure(cx.cx, (2 * sw, sh), if linear { RenderTargetFormat::Rgba16f } else { RenderTargetFormat::Bgra8 });
             target.begin(cx, vec4(0.0, 0.0, 0.0, 0.0));
             self.draw_fxaa.draw_vars.set_texture(0, color);
             self.draw_fxaa.extent = extent;
             self.draw_fxaa.split = 2.0;
             self.draw_fxaa.subpix = 0.5;
+            self.draw_fxaa.linear = if linear { 1.0 } else { 0.0 };
             self.draw_fxaa.draw_abs(cx, Rect { pos: dvec2(0.0, 0.0), size: dvec2((2 * sw) as f64, sh as f64) });
             target.end(cx);
             Some(target.texture.clone())
@@ -576,6 +595,7 @@ impl XrPack {
                 set(d, cx, live_id!(clip), &clip);
                 set(d, cx, live_id!(depth_clear), &[external.and_then(|f| f.eyes[e].depth.as_ref()).map_or(1.0, |d| d.range[1])]);
                 set(d, cx, live_id!(mode), &[mode]);
+                set(d, cx, live_id!(linear), &[if linear && external.is_none() { 1.0 } else { 0.0 }]);
                 d.new_draw_call(cx);
                 d.draw_abs(cx, Rect { pos: dvec2((e as u32 * ew) as f64, 0.0), size: dvec2(ew as f64, eh as f64) });
             }
@@ -941,7 +961,7 @@ impl Counts {
 
 impl XrFrameSink for XrPack {
     fn presented(&mut self, cx: &mut Cx2d, frame: &XrPresented) {
-        self.pack(cx, frame.color, frame.depth);
+        self.pack(cx, frame.color, frame.depth, frame.linear_light);
     }
 
     fn empty(&mut self, cx: &mut Cx, why: &'static str) {
