@@ -95,7 +95,7 @@ pub struct CodecCudaSession {
 impl CodecCudaSession {
     pub fn new(model: &SemanticCodecDecoder) -> Result<Self> {
         let owner = WeightOwner::new("indextts-codec");
-        let ns = owner.namespace();
+        let ns = &owner;
         ensure_weight(
             ns,
             "embed",
@@ -183,7 +183,7 @@ impl CodecCudaSession {
             idx_cache.insert(t, CodecRunIdx::build(t)?);
         }
         let idx = idx_cache.get(&t).expect("just inserted");
-        let ns = self.owner.namespace();
+        let ns = &self.owner;
 
         let x = gpu_upload(&quantized, t, SEMANTIC_CODEC_DIM).map_err(gm)?;
         let h = conv_gemm(&x, &idx.taps7, &idx.zero_1024, ns, "embed", VOCOS_DIM, &model.embed.b)?;

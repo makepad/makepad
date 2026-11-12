@@ -7,7 +7,7 @@
 
 use makepad_diffusion::backend::{
     gpu_device_available, gpu_download, gpu_linear_nt_cached, gpu_runtime_trim, gpu_upload,
-    gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_prefix_if_loaded, GpuLinearPart,
+    gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_owner, GpuLinearPart, WeightOwner,
 };
 use makepad_ai_common::quant::{
     dequantize_nvfp4_pairs_row, dequantize_q4_k, f32_to_f16, h3_nvfp4_pairs_pack,
@@ -17,7 +17,6 @@ use makepad_ai_common::quant::{
 
 const ROWS: usize = 128;
 const COLS: usize = 256;
-const NAMESPACE: &str = "h3-quant-cuda-canary";
 
 fn bf16_trunc(value: f32) -> f32 {
     // gpu_linear_nt_cached uses the backend's deliberately truncating f32 to
@@ -104,13 +103,14 @@ fn check_result(label: &str, expected: &[f32], actual: &[f32]) -> Result<(), Str
 }
 
 fn run_cached_linear(
+    owner: &WeightOwner,
     label: &str,
     ggml_type: u32,
     payload: Vec<u8>,
     expected: &[f32],
 ) -> Result<(), String> {
     let cache_key = format!("{label}.weight");
-    gpu_weight_cache_ensure_quant(NAMESPACE, &cache_key, ggml_type, ROWS, COLS, || {
+    gpu_weight_cache_ensure_quant(owner, &cache_key, ggml_type, ROWS, COLS, || {
         Ok(payload)
     })?;
     let input = input_values();
@@ -118,12 +118,12 @@ fn run_cached_linear(
     let part = GpuLinearPart {
         bt_ggml_type: ggml_type,
         n: ROWS,
-        cache_key: &cache_key,
+        cache_key: cache_key.as_str(),
         // Match the real H3 path: ensure the payload first, then hand the
         // linear a cache-only descriptor rather than a duplicate host copy.
         bytes: &[],
     };
-    let output = gpu_linear_nt_cached(&x, NAMESPACE, &[part], &[])?;
+    let output = gpu_linear_nt_cached(&x, owner, &[part], &[])?;
     let actual = gpu_download(&output)?;
     check_result(label, expected, &actual)
 }
@@ -206,7 +206,7 @@ fn nvfp4_case(with_pre_scale: bool) -> Result<(Vec<u8>, Vec<Vec<f32>>), String> 
     Ok((payload, decoded))
 }
 
-fn run() -> Result<(), String> {
+fn run(owner: &WeightOwner) -> Result<(), String> {
     if !gpu_device_available() {
         return Err("CUDA device tensor backend is unavailable".to_string());
     }
@@ -214,11 +214,12 @@ fn run() -> Result<(), String> {
 
     let (q4_payload, q4_rows) = q4_k_case();
     let q4_expected = reference_linear(&input, &q4_rows);
-    run_cached_linear("q4_k", GGML_TYPE_Q4_K, q4_payload, &q4_expected)?;
+    run_cached_linear(owner, "q4_k", GGML_TYPE_Q4_K, q4_payload, &q4_expected)?;
 
     let (nv_payload, nv_rows) = nvfp4_case(false)?;
     let nv_expected = reference_linear(&input, &nv_rows);
     run_cached_linear(
+        owner,
         "nvfp4_pairs",
         GGML_TYPE_H3_NVFP4_PAIRS,
         nv_payload,
@@ -228,6 +229,7 @@ fn run() -> Result<(), String> {
     let (awq_payload, awq_rows) = nvfp4_case(true)?;
     let awq_expected = reference_linear(&input, &awq_rows);
     run_cached_linear(
+        owner,
         "nvfp4_pairs_prescale",
         GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE,
         awq_payload,
@@ -241,8 +243,9 @@ fn main() {
 }
 
 fn model_main() {
-    let result = run();
-    let evict_result = gpu_weight_cache_evict_prefix_if_loaded(NAMESPACE);
+    let owner = WeightOwner::new("h3-quant-cuda-canary");
+    let result = run(&owner);
+    let evict_result = gpu_weight_cache_evict_owner(&owner);
     let trim_result = gpu_runtime_trim();
     if let Err(error) = result {
         eprintln!("H3_QUANT_CUDA_CANARY_FAILED: {error}");

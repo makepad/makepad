@@ -442,6 +442,7 @@ pub fn expected_shape_canaries() -> &'static [(&'static str, &'static [usize])] 
 /// Official condition encoder: mix 8 per-frame hiddens, Conv1d 4096→2048, nearest
 /// resample onto the Flow-VAE timeline. CPU f32; dump compare allows bf16 noise.
 pub struct Music3ConditionEncoder {
+    owner: crate::backend::WeightOwner,
     pub layer_weight_logits: Vec<f32>,
     pub layer_scale: f32,
     pub proj_weight: Vec<f32>, // [2048, 4096, 3]
@@ -476,6 +477,7 @@ impl Music3ConditionEncoder {
             )));
         }
         Ok(Self {
+            owner: crate::backend::WeightOwner::new("music3-cond"),
             layer_weight_logits,
             layer_scale,
             proj_weight,
@@ -563,7 +565,7 @@ impl Music3ConditionEncoder {
         progress("conv", 0, 1);
         let use_gpu = gpu_device_available();
         let conv = if use_gpu {
-            cond_conv1d_gpu_taps(&mixed, frames, &self.proj_weight, &self.proj_bias)?
+            cond_conv1d_gpu_taps(&self.owner, &mixed, frames, &self.proj_weight, &self.proj_bias)?
         } else {
             let mut conv = vec![0f32; MUSIC3_COND_OUT * frames];
             let conv_tick = (MUSIC3_COND_OUT / 16).max(1);
@@ -608,6 +610,7 @@ impl Music3ConditionEncoder {
 /// Conv1d k=3 pad=1 as three 1x1 GEMMs on time-shifted copies.
 /// Weight is official `[out, in, 3]`. Same arithmetic as the CPU loop.
 fn cond_conv1d_gpu_taps(
+    owner: &crate::backend::WeightOwner,
     mixed: &[f32],
     frames: usize,
     weight: &[f32],
@@ -647,7 +650,7 @@ fn cond_conv1d_gpu_taps(
             &x,
             frames,
             1,
-            "music3-cond",
+            owner,
             &format!("proj_tap{k}"),
             &tap,
             if k == 0 { bias } else { &zeros },

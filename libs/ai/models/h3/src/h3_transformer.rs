@@ -15,7 +15,7 @@ use crate::backend::{
     gpu_linear_f32_resident, gpu_linear_nt_cached_f16_with_precision,
     gpu_linear_nt_cached_with_precision, gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rope_half,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_upload_u32,
-    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor,
+    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, gpu_weight_cache_evict_keys, GpuLinearPart, GpuTensor,
     GemmPrecision,
 };
 use crate::h3::{
@@ -287,7 +287,7 @@ impl H3AdaLnCache {
                 Ok(())
             })();
             // Also release this projection when cancelled or when a copy fails.
-            let release = gpu_weight_cache_evict_prefix(&format!("{}::{name}", weights.cache_namespace()))
+            let release = gpu_weight_cache_evict_keys(&weights.owner().key(&name))
                 .map_err(DiffusionError::model);
             result?;
             release?;
@@ -329,13 +329,13 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name)?;
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
+        gpu_weight_cache_ensure_quant(weights.owner(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
     } else {
         let want_a16 = precision.f16_accumulate && m > 1;
-        gpu_weight_cache_ensure(weights.cache_namespace(), name, ggml_type, n, k, want_a16, || {
+        gpu_weight_cache_ensure(weights.owner(), name, ggml_type, n, k, want_a16, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -362,7 +362,7 @@ fn linear_cached(
     if out_half {
         gpu_linear_nt_cached_f16_with_precision(
             x,
-            weights.cache_namespace(),
+            weights.owner(),
             &parts,
             bias,
             precision,
@@ -370,7 +370,7 @@ fn linear_cached(
     } else {
         gpu_linear_nt_cached_with_precision(
             x,
-            weights.cache_namespace(),
+            weights.owner(),
             &parts,
             bias,
             precision,
@@ -397,7 +397,7 @@ fn qkv_cached(
     let qkv = if out_half {
         gpu_linear_nt_cached_f16_with_precision(
             x,
-            weights.cache_namespace(),
+            weights.owner(),
             &parts,
             &[],
             precision,
@@ -405,7 +405,7 @@ fn qkv_cached(
     } else {
         gpu_linear_nt_cached_with_precision(
             x,
-            weights.cache_namespace(),
+            weights.owner(),
             &parts,
             &[],
             precision,
@@ -487,7 +487,7 @@ fn refiner_block(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_HIDDEN_SIZE,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.norm1"),
         &prepared.refiner_norm1[layer],
         H3_NORM_EPS,
@@ -498,7 +498,7 @@ fn refiner_block(
     let q = gpu_rms_norm_mul(
         &q,
         H3_HEAD_DIM,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.attn.norm_q"),
         &prepared.refiner_q_norm[layer],
         H3_NORM_EPS,
@@ -507,7 +507,7 @@ fn refiner_block(
     let k = gpu_rms_norm_mul(
         &k,
         H3_HEAD_DIM,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.attn.norm_k"),
         &prepared.refiner_k_norm[layer],
         H3_NORM_EPS,
@@ -530,7 +530,7 @@ fn refiner_block(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_HIDDEN_SIZE,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.norm2"),
         &prepared.refiner_norm2[layer],
         H3_NORM_EPS,
@@ -613,7 +613,7 @@ pub fn h3_dit_forward(
     text = gpu_rms_norm_mul(
         &text,
         H3_HIDDEN_SIZE,
-        weights.cache_namespace(),
+        weights.owner(),
         "token_refiner.final_norm",
         &prepared.refiner_final_norm,
         H3_NORM_EPS,
@@ -740,7 +740,7 @@ pub fn h3_dit_forward(
         let q = gpu_rms_norm_mul(
             &q,
             H3_HEAD_DIM,
-            weights.cache_namespace(),
+            weights.owner(),
             &format!("{prefix}.attn.norm_q"),
             &prepared.q_norm[layer],
             H3_NORM_EPS,
@@ -749,7 +749,7 @@ pub fn h3_dit_forward(
         let k = gpu_rms_norm_mul(
             &k,
             H3_HEAD_DIM,
-            weights.cache_namespace(),
+            weights.owner(),
             &format!("{prefix}.attn.norm_k"),
             &prepared.k_norm[layer],
             H3_NORM_EPS,

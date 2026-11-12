@@ -28,7 +28,7 @@
 use crate::backend::{
     gpu_add_bf16, gpu_attention_packed_causal_bf16, gpu_bf16_round, gpu_concat_cols, gpu_download,
     gpu_linear_nt_cached_f8_mm, gpu_slice_cols, gpu_swiglu_value_gate, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor, WeightOwner,
+    gpu_weight_cache_ensure, gpu_weight_cache_evict_owner, gpu_weight_cache_evict_keys, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::flux2::{Flux2WeightFile, Mistral3TextConfig, FLUX2_HIDDEN_STATE_TAPS};
 use crate::flux2_text::{
@@ -69,7 +69,7 @@ impl Flux2DevTextPrepared {
     /// Evict this encoder's device weights; the next encode re-uploads them.
     /// Returns the number of buffers freed.
     pub fn release_device(&self) -> Result<usize> {
-        gpu_weight_cache_evict_prefix(self.owner.namespace()).map_err(DiffusionError::model)
+        gpu_weight_cache_evict_owner(&self.owner).map_err(DiffusionError::model)
     }
 
     pub fn prepare(weights: &Flux2WeightFile, config: Mistral3TextConfig) -> Result<Self> {
@@ -163,7 +163,7 @@ fn ensure_f8_linear<'a>(
         )));
     }
     gpu_weight_cache_ensure(
-        prepared.owner.namespace(),
+        &prepared.owner,
         name,
         GGML_TYPE_F8_E4M3,
         output_cols,
@@ -199,7 +199,7 @@ fn f8_linear(
         ensure_f8_linear(weights, prepared, name, output_cols, input.cols())?;
     gpu_linear_nt_cached_f8_mm(
         input,
-        prepared.owner.namespace(),
+        &prepared.owner,
         &[part],
         scale,
         input_scale,
@@ -208,7 +208,7 @@ fn f8_linear(
 }
 
 fn norm_bf16(
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
@@ -332,7 +332,7 @@ pub fn flux2_dev_text_encode(
         let prefix = flux2_dev_layer_prefix(layer as u32);
 
         let normed = norm_bf16(
-            prepared.owner.namespace(),
+            &prepared.owner,
             &hidden,
             hidden_size,
             &format!("{prefix}input_layernorm.weight"),
@@ -380,7 +380,7 @@ pub fn flux2_dev_text_encode(
         let residual = gpu_add_bf16(&hidden, &attention).map_err(DiffusionError::model)?;
 
         let normed = norm_bf16(
-            prepared.owner.namespace(),
+            &prepared.owner,
             &residual,
             hidden_size,
             &format!("{prefix}post_attention_layernorm.weight"),
@@ -425,7 +425,7 @@ pub fn flux2_dev_text_encode(
         // encoder streams beside the resident DiT.
         if !te_resident() {
             let _ =
-                gpu_weight_cache_evict_prefix(&format!("{}::{prefix}", prepared.owner.namespace()));
+                gpu_weight_cache_evict_keys(&prepared.owner.key(&prefix));
         }
     }
 

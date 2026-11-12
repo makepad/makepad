@@ -153,12 +153,12 @@ impl SkinTokensWeights {
         })
     }
 
-    pub(crate) fn cache_namespace(&self) -> &str {
-        self.owner.namespace()
+    pub(crate) fn owner(&self) -> &WeightOwner {
+        &self.owner
     }
 
-    pub(crate) fn qwen_cache_namespace(&self) -> &str {
-        self.qwen_owner.namespace()
+    pub(crate) fn qwen_owner(&self) -> &WeightOwner {
+        &self.qwen_owner
     }
 
     pub fn header(&self) -> &MlxSafetensorsHeader {

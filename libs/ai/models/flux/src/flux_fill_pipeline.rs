@@ -316,7 +316,7 @@ impl FluxFillPipeline {
             vae_weights,
             vae,
         };
-        crate::backend::gpu_weight_cache_protect_prefixes(pipeline.residency_namespaces())
+        crate::backend::gpu_weight_cache_protect(&pipeline.residency_owners())
             .map_err(DiffusionError::model)?;
         Ok((
             pipeline,
@@ -382,18 +382,18 @@ impl FluxFillPipeline {
         }
     }
 
-    fn residency_namespaces(&self) -> Vec<String> {
+    fn residency_owners(&self) -> Vec<&crate::backend::WeightOwner> {
         vec![
-            crate::flux_transformer::flux_cache_namespace(&self.transformer_weights).to_owned(),
-            crate::flux_vae::flux_vae_cache_namespace(&self.vae_weights).to_owned(),
-            crate::t5_encoder::t5_cache_namespace(&self.text_weights.t5xxl).to_owned(),
-            crate::clip_l::clip_cache_namespace(&self.text_weights.clip_l).to_owned(),
+            crate::flux_transformer::flux_owner(&self.transformer_weights),
+            crate::flux_vae::flux_vae_owner(&self.vae_weights),
+            crate::t5_encoder::t5_owner(&self.text_weights.t5xxl),
+            crate::clip_l::clip_owner(&self.text_weights.clip_l),
         ]
     }
 
     /// See [`crate::flux_pipeline::FluxPipeline::evict_device_caches`].
     pub fn evict_device_caches(&self) -> usize {
-        let _ = crate::backend::gpu_weight_cache_protect_prefixes(Vec::new());
+        let _ = crate::backend::gpu_weight_cache_protect(&[]);
         crate::flux_transformer::evict_device_weight_cache(&self.transformer_weights)
             + crate::flux_vae::evict_device_weight_cache(&self.vae_weights)
             + crate::t5_encoder::evict_device_weight_cache(&self.text_weights.t5xxl)

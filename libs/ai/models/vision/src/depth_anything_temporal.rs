@@ -236,7 +236,7 @@ impl MotionModule {
             x.width,
             x.height,
             GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             &self.gn_key,
             &self.gn_gamma,
             &self.gn_beta,

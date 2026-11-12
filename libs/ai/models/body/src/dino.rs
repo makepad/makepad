@@ -139,7 +139,7 @@ impl Bf16Linear {
             f8.as_ref().map(|(bytes, scale)| {
                 gpu_linear_nt_cached_f8_mm(
                     input,
-                    self.owner.namespace(),
+                    &self.owner,
                     &[GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F8_E4M3,
                         n: self.out,
@@ -170,23 +170,23 @@ impl Bf16Linear {
         let part = GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n: self.out,
-            cache_key: &self.key,
+            cache_key: self.key.as_str(),
             bytes: &self.bytes,
         };
         let fast = if self.bias.is_empty() {
-            gpu_linear_nt_cached_bf16_mm(input, self.owner.namespace(), &[part])
+            gpu_linear_nt_cached_bf16_mm(input, &self.owner, &[part])
         } else {
-            gpu_linear_nt_cached_bf16_bias_epilogue(input, self.owner.namespace(), &[part], &self.bias)
+            gpu_linear_nt_cached_bf16_bias_epilogue(input, &self.owner, &[part], &self.bias)
         };
         match fast {
             Ok(out) => Ok(out),
             Err(_) => gpu_linear_nt_cached_bf16_f32acc(
                 input,
-                self.owner.namespace(),
+                &self.owner,
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_BF16,
                     n: self.out,
-                    cache_key: &self.key,
+                    cache_key: self.key.as_str(),
                     bytes: &self.bytes,
                 }],
                 &self.bias,

@@ -918,7 +918,7 @@ fn gather_rows_ggml(
         matrix.cols,
         matrix.rows,
         row_indices,
-        &clip_cache_namespace(weights),
+        &clip_owner(weights),
         name,
         || Ok(std::borrow::Cow::Borrowed(matrix.bytes)),
     ) {
@@ -961,7 +961,7 @@ fn linear_rows_ggml(
         input.rows,
         input.cols,
         weight.rows,
-        &clip_cache_namespace(weights),
+        &clip_owner(weights),
         weight_name,
         || Ok(std::borrow::Cow::Borrowed(weight.bytes)),
     ) {
@@ -1152,14 +1152,14 @@ fn add_rows(lhs: &RowsTensor, rhs: &RowsTensor) -> Result<RowsTensor> {
     RowsTensor::new(lhs.rows, lhs.cols, output)
 }
 
-pub fn clip_cache_namespace(weights: &LoadedClipLWeights) -> &str {
-    weights.owner.namespace()
+pub fn clip_owner(weights: &LoadedClipLWeights) -> &WeightOwner {
+    &weights.owner
 }
 
 /// Drops every device weight-cache entry belonging to these clip weights.
 /// Called on a model switch; owner drop also retires the entries.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedClipLWeights) -> usize {
-    crate::backend::gpu_weight_cache_evict_prefix(&clip_cache_namespace(weights)).unwrap_or(0)
+    crate::backend::gpu_weight_cache_evict_owner(&clip_owner(weights)).unwrap_or(0)
 }
 
 fn can_fallback_from_accel_error(err: &str) -> bool {

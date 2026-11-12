@@ -1,6 +1,7 @@
 //! Cross-backend host-path dispatch (Metal first, then CUDA).
 //! Spec types live in `makepad_ai_loader::accel`.
 
+use makepad_ai_loader::{WeightKey, WeightOwner};
 use crate::gpu as cuda;
 use makepad_ai_loader::prof;
 use makepad_ai_metal as metal;
@@ -36,7 +37,7 @@ pub fn try_matmul_nt_ggml_bytes_cached<'a, F>(
     m: usize,
     k: usize,
     n: usize,
-    cache_namespace: &str,
+    owner: &WeightOwner,
     bt_cache_key: &str,
     load_bt_bytes: F,
 ) -> Option<Result<Vec<f32>, String>>
@@ -50,7 +51,7 @@ where
             m,
             k,
             n,
-            cache_namespace,
+            owner,
             bt_cache_key,
             load_bt_bytes,
         ) {
@@ -66,7 +67,7 @@ where
             m,
             k,
             n,
-            cache_namespace,
+            owner,
             bt_cache_key,
             || load_bt_bytes().map(std::borrow::Cow::into_owned),
         );
@@ -109,7 +110,7 @@ pub fn try_get_rows_ggml_bytes_cached<'a, F>(
     n_cols: usize,
     n_rows: usize,
     row_indices: &[i32],
-    cache_namespace: &str,
+    owner: &WeightOwner,
     src_cache_key: &str,
     load_src_bytes: F,
 ) -> Option<Result<Vec<f32>, String>>
@@ -134,7 +135,7 @@ where
             n_cols,
             n_rows,
             row_indices,
-            cache_namespace,
+            owner,
             src_cache_key,
             || load_src_bytes().map(std::borrow::Cow::into_owned),
         ));
@@ -144,9 +145,9 @@ where
 
 pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
     spec: AffineQuantizedMatmulSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,
@@ -183,9 +184,9 @@ where
 
 pub fn try_affine_quantized_matmul_bf16_top1<FW, FS, FB>(
     spec: AffineQuantizedMatmulSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,
@@ -211,9 +212,9 @@ where
 
 pub fn try_affine_quantized_matmul_bf16_rows<FW, FS, FB>(
     spec: AffineQuantizedMatmulRowsSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,

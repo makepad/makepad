@@ -52,9 +52,9 @@ impl Music3Shards {
         })
     }
 
-    /// The namespace of the device weights read from these shards.
-    pub fn cache_namespace(&self) -> &str {
-        self.owner.namespace()
+    /// The owner of the device weights read from these shards.
+    pub fn owner(&self) -> &WeightOwner {
+        &self.owner
     }
 
     pub fn has_tensor(&self, name: &str) -> bool {

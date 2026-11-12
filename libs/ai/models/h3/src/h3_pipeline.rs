@@ -66,7 +66,7 @@ impl H3OwnerSlot {
                 "h3 {}: weights still held at retire", self.label
             )));
         }
-        let ns = self.owner.namespace().to_string();
+        let ns = self.owner.trace();
         let (count, _) = gpu_weight_cache_resident(&ns).map_err(DiffusionError::model)?;
         self.owner = Arc::new(WeightOwner::new(self.label));
         gpu_weight_cache_resident(&ns).map_err(DiffusionError::model)?;

@@ -575,7 +575,7 @@ fn embed_t5_tokens(
             embedding.cols,
             embedding.rows,
             token_ids,
-            &t5_cache_namespace(weights),
+            &t5_owner(weights),
             "shared.weight",
             || Ok(std::borrow::Cow::Borrowed(embedding.bytes)),
         ) {
@@ -640,7 +640,7 @@ fn linear_rows_ggml(
             input.rows,
             input.cols,
             weight.rows,
-            &t5_cache_namespace(weights),
+            &t5_owner(weights),
             weight_name,
             || Ok(std::borrow::Cow::Borrowed(weight.bytes)),
         ) {
@@ -669,14 +669,14 @@ fn linear_rows_ggml(
 }
 
 /// Device weight-cache namespace of this loaded component's owner.
-pub(crate) fn t5_cache_namespace(weights: &LoadedT5xxlWeights) -> &str {
-    weights.owner.namespace()
+pub(crate) fn t5_owner(weights: &LoadedT5xxlWeights) -> &WeightOwner {
+    &weights.owner
 }
 
 /// Drops every device weight-cache entry belonging to these t5 weights
 /// (raw FP8 payloads + gathered embedding). Called on a model switch.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedT5xxlWeights) -> usize {
-    crate::backend::gpu_weight_cache_evict_prefix(&t5_cache_namespace(weights)).unwrap_or(0)
+    crate::backend::gpu_weight_cache_evict_owner(&t5_owner(weights)).unwrap_or(0)
 }
 
 fn linear_rows_ggml_matrix(

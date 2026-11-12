@@ -16,7 +16,7 @@
 //!
 //! The price is that a LoRA change is a re-load, not a hot swap. That is
 //! paid for by making the LoRA set part of the pipeline identity
-//! ([`FluxLoraStack::fingerprint`] keys `flux_cache_namespace` and
+//! ([`FluxLoraStack::fingerprint`] keys `flux_owner` and
 //! `FluxPipeline::serves_plan`), so a job with different LoRAs or strengths
 //! rebuilds instead of reusing patched weights, and the device weight cache
 //! can never alias pristine and patched bytes under one key.

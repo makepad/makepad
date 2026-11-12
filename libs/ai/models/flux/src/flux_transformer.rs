@@ -1,4 +1,4 @@
-use crate::backend::WeightOwner;
+use crate::backend::{WeightKey, WeightOwner};
 use crate::backend::{
     create_graph_session, gpu_act_f16_enabled, gpu_attention_packed, gpu_concat_cols,
     gpu_concat_rows,
@@ -180,7 +180,7 @@ struct ResidentMatrix<'a> {
     ggml_type: u32,
     cols: usize,
     rows: usize,
-    cache_key: String,
+    cache_key: WeightKey,
 }
 
 impl LoadedFluxTransformerWeights {
@@ -407,12 +407,12 @@ impl LoadedFluxTransformerWeights {
 
     fn tensor_matrix_parts(&self, base_name: &str) -> Result<Vec<ResidentMatrix<'_>>> {
         let mut parts = Vec::new();
-        let namespace = flux_cache_namespace(self);
+        let namespace = flux_owner(self);
         for part_name in tensor_part_names(&self.tensor_ids, base_name)? {
             parts.push(resident_matrix(
                 &self.ctx,
                 self.tensor_id(&part_name)?,
-                format!("{namespace}::{part_name}"),
+                namespace.key(&part_name),
             )?);
         }
         Ok(parts)
@@ -1435,10 +1435,10 @@ impl LazyFluxTransformer {
     ) -> Result<FluxTransformerRun> {
         FLUX_DEVICE_GRAPH.with(|cell| {
             let mut slot = cell.borrow_mut();
-            let namespace = flux_cache_namespace(weights);
+            let namespace = flux_owner(weights);
             let f16_activations = flux_f16_activations_enabled(weights);
             let matches = slot.as_ref().is_some_and(|state| {
-                state.namespace == namespace
+                state.owner_id == namespace.id()
                     && state.image_token_count == self.image_token_count
                     && state.text_token_count == self.text_token_count
                     && state.f16_activations == f16_activations
@@ -1453,7 +1453,7 @@ impl LazyFluxTransformer {
                 // Drop the old graph first: its Drop unpins the pool buffers.
                 *slot = None;
                 *slot = Some(FluxDeviceGraphState {
-                    namespace: namespace.to_owned(),
+                    owner_id: weights.owner.id(),
                     image_token_count: self.image_token_count,
                     text_token_count: self.text_token_count,
                     f16_activations,
@@ -1581,7 +1581,7 @@ impl LazyFluxTransformer {
         rope_sin: &GpuTensor,
         progress: &mut Option<ProgressHook>,
     ) -> Result<GpuTensor> {
-        let namespace = flux_cache_namespace(weights);
+        let namespace = flux_owner(weights);
         let attention_scale = 1.0 / (self.head_dim as f32).sqrt();
         // The f16 activation spine: modulated-norm outputs, qkv/linear1/mlp
         // activations and the q/k/v pipeline stay f16 between the f16acc
@@ -1660,7 +1660,7 @@ impl LazyFluxTransformer {
             .map(|(part, (ggml_type, bytes))| GpuLinearPart {
                 bt_ggml_type: *ggml_type,
                 n: part.rows,
-                cache_key: &part.cache_key,
+                cache_key: part.cache_key.as_str(),
                 bytes: bytes.as_slice(part.bytes),
             })
             .collect::<Vec<_>>();
@@ -2046,7 +2046,7 @@ impl LazyFluxTransformer {
 /// keyed by (weights namespace, shape, spine mode). Thread-local because
 /// GpuTensor is single-thread; the denoise loop runs on one thread.
 struct FluxDeviceGraphState {
-    namespace: String,
+    owner_id: u64,
     image_token_count: usize,
     text_token_count: usize,
     f16_activations: bool,
@@ -2094,7 +2094,7 @@ impl DeviceBytes {
 }
 
 thread_local! {
-    static F32_AS_BF16: RefCell<BTreeMap<String, Arc<Vec<u8>>>> = const { RefCell::new(BTreeMap::new()) };
+    static F32_AS_BF16: RefCell<std::collections::HashMap<WeightKey, Arc<Vec<u8>>>> = RefCell::new(std::collections::HashMap::new());
 }
 
 fn device_weight(part: &ResidentMatrix<'_>) -> Result<(u32, DeviceBytes)> {
@@ -2126,7 +2126,7 @@ fn device_weight(part: &ResidentMatrix<'_>) -> Result<(u32, DeviceBytes)> {
 /// the host lazy path exactly so both paths share one weight cache.
 fn linear_device(
     weights: &LoadedFluxTransformerWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     weight_name: &str,
     bias_name: &str,
@@ -2150,7 +2150,7 @@ fn linear_device(
         .map(|(part, (ggml_type, bytes))| GpuLinearPart {
             bt_ggml_type: *ggml_type,
             n: part.rows,
-            cache_key: &part.cache_key,
+            cache_key: part.cache_key.as_str(),
             bytes: bytes.as_slice(part.bytes),
         })
         .collect::<Vec<_>>();
@@ -2162,7 +2162,7 @@ fn linear_device(
 /// the bias into the consumer (the fused gelu).
 fn linear_device_f16(
     weights: &LoadedFluxTransformerWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     weight_name: &str,
     bias_name: Option<&str>,
@@ -2189,7 +2189,7 @@ fn linear_device_f16(
         .map(|(part, (ggml_type, bytes))| GpuLinearPart {
             bt_ggml_type: *ggml_type,
             n: part.rows,
-            cache_key: &part.cache_key,
+            cache_key: part.cache_key.as_str(),
             bytes: bytes.as_slice(part.bytes),
         })
         .collect::<Vec<_>>();
@@ -2214,7 +2214,7 @@ fn head_rms_norm_device(
     gpu_rms_norm_mul(
         input,
         head_dim,
-        &flux_cache_namespace(weights),
+        &flux_owner(weights),
         scale_name,
         &scale,
         FLUX_LAYER_NORM_EPSILON,
@@ -2227,7 +2227,7 @@ fn head_rms_norm_device(
 /// f16 activations directly.
 fn feed_forward_device(
     weights: &LoadedFluxTransformerWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     weight0: &str,
     bias0: &str,
@@ -2552,8 +2552,8 @@ fn linear_rows(
             input.rows,
             input.cols,
             part.rows,
-            &flux_cache_namespace(weights),
-            &part.cache_key,
+            &flux_owner(weights),
+            part.cache_key.as_str(),
             || Ok(std::borrow::Cow::Borrowed(part.bytes)),
         ) {
             match result {
@@ -2990,8 +2990,8 @@ fn push_debug_heads(
     });
 }
 
-pub(crate) fn flux_cache_namespace(weights: &LoadedFluxTransformerWeights) -> &str {
-    weights.owner.namespace()
+pub(crate) fn flux_owner(weights: &LoadedFluxTransformerWeights) -> &WeightOwner {
+    &weights.owner
 }
 
 /// The f16 activation spine requires f16-accumulate gemms, which the F8
@@ -3030,21 +3030,21 @@ pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxTransformerWeights) 
     // The host f32 expansions key on the same namespace and never evict on
     // their own; a checkpoint (or LoRA) switch must drop them too, or the
     // CPU fallback path can serve the outgoing model's decoded weights.
-    let namespace = flux_cache_namespace(weights);
+    let namespace = flux_owner(weights);
     DECODED_F32_MATRIX_CACHE.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|key, _| !key.starts_with(&namespace));
+            .retain(|key, _| !key.belongs_to(namespace));
     });
-    F32_AS_BF16.with(|cache| cache.borrow_mut().retain(|key, _| !key.starts_with(&namespace)));
-    crate::backend::gpu_weight_cache_evict_prefix(&namespace).unwrap_or(0)
+    F32_AS_BF16.with(|cache| cache.borrow_mut().retain(|key, _| !key.belongs_to(namespace)));
+    crate::backend::gpu_weight_cache_evict_owner(&namespace).unwrap_or(0)
 }
 
 fn can_fallback_from_accel_error(err: &str) -> bool {
     err.contains("only supports NVFP4 today") || err.contains("unsupported ggml type")
 }
 
-fn resident_matrix<'a>(ctx: &'a Context, tensor_id: TensorId, cache_key: String) -> Result<ResidentMatrix<'a>> {
+fn resident_matrix<'a>(ctx: &'a Context, tensor_id: TensorId, cache_key: WeightKey) -> Result<ResidentMatrix<'a>> {
     let tensor = require_tensor(ctx, tensor_id)?;
     let cols = usize::try_from(tensor.ne[0])
         .map_err(|_| DiffusionError::model(format!("flux tensor {} cols exceed usize", tensor_id)))?;
@@ -3133,8 +3133,8 @@ fn decode_ggml_matrix_to_f32(matrix: &ResidentMatrix<'_>) -> Result<Vec<f32>> {
 thread_local! {
     /// Host-side f32 expansions of resident weight matrices (the lazy/CPU
     /// math fallback), keyed by `{namespace}::{tensor}`.
-    static DECODED_F32_MATRIX_CACHE: RefCell<BTreeMap<String, Arc<Vec<f32>>>> =
-        const { RefCell::new(BTreeMap::new()) };
+    static DECODED_F32_MATRIX_CACHE: RefCell<std::collections::HashMap<WeightKey, Arc<Vec<f32>>>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 fn decoded_matrix_f32_cached(matrix: &ResidentMatrix<'_>) -> Result<Arc<Vec<f32>>> {

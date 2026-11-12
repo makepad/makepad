@@ -9,6 +9,30 @@ pub struct WeightOwner {
     namespace: String,
 }
 
+/// A non-owning residency record. It outlives the owner and cannot key the cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeightOwnerTrace { namespace: String }
+
+impl WeightOwnerTrace {
+    pub fn namespace(&self) -> &str { &self.namespace }
+}
+
+/// A qualified cache key made only from an owner, for qualified-key entry points.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct WeightKey(String);
+
+impl WeightKey {
+    /// Append a qualified sub-key, preserving the cache key's existing bytes.
+    pub fn sub(&self, suffix: &str) -> WeightKey {
+        WeightKey(format!("{}::{suffix}", self.0))
+    }
+
+    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn belongs_to(&self, owner: &WeightOwner) -> bool {
+        self.0.starts_with(owner.namespace())
+    }
+}
+
 fn next_id() -> u64 {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
@@ -21,6 +45,14 @@ impl WeightOwner {
     pub fn new(label: &str) -> Self {
         let id = next_id();
         Self { id, namespace: format!("\u{1f}{}#{id}::", label.replace(':', "_")) }
+    }
+
+    pub fn trace(&self) -> WeightOwnerTrace {
+        WeightOwnerTrace { namespace: self.namespace.clone() }
+    }
+
+    pub fn key(&self, name: &str) -> WeightKey {
+        WeightKey(format!("{}::{name}", self.namespace))
     }
 
     pub fn id(&self) -> u64 { self.id }

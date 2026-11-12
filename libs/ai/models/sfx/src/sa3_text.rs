@@ -393,14 +393,14 @@ impl T5GemmaEncoder {
             }
             let norm_key = |what: &str| format!("l{i}.{what}");
             let normed = gpu_rms_norm_mul(
-                &x, d, device.owner.namespace(), &norm_key("pre_attn"), &layer.pre_attn_norm, T5GEMMA_EPS,
+                &x, d, &device.owner, &norm_key("pre_attn"), &layer.pre_attn_norm, T5GEMMA_EPS,
             )
             .map_err(|e| dev_err("te pre_attn norm", e))?;
-            let q = gpu_linear_nt_cached(&normed, device.owner.namespace(), &[layer.q.part()], &[])
+            let q = gpu_linear_nt_cached(&normed, &device.owner, &[layer.q.part()], &[])
                 .map_err(|e| dev_err("te q", e))?;
-            let k = gpu_linear_nt_cached(&normed, device.owner.namespace(), &[layer.k.part()], &[])
+            let k = gpu_linear_nt_cached(&normed, &device.owner, &[layer.k.part()], &[])
                 .map_err(|e| dev_err("te k", e))?;
-            let v = gpu_linear_nt_cached(&normed, device.owner.namespace(), &[layer.v.part()], &[])
+            let v = gpu_linear_nt_cached(&normed, &device.owner, &[layer.v.part()], &[])
                 .map_err(|e| dev_err("te v", e))?;
             let q = gpu_rope_half(&q, T5GEMMA_HEADS, half, &cos, &sin).map_err(|e| dev_err("te rope q", e))?;
             let k = gpu_rope_half(&k, T5GEMMA_HEADS, half, &cos, &sin).map_err(|e| dev_err("te rope k", e))?;
@@ -414,38 +414,38 @@ impl T5GemmaEncoder {
                 Some(&key_mask),
             )
             .map_err(|e| dev_err("te attention", e))?;
-            let projected = gpu_linear_nt_cached(&attn, device.owner.namespace(), &[layer.o.part()], &[])
+            let projected = gpu_linear_nt_cached(&attn, &device.owner, &[layer.o.part()], &[])
                 .map_err(|e| dev_err("te o", e))?;
             let post = gpu_rms_norm_mul(
-                &projected, d, device.owner.namespace(), &norm_key("post_attn"), &layer.post_attn_norm,
+                &projected, d, &device.owner, &norm_key("post_attn"), &layer.post_attn_norm,
                 T5GEMMA_EPS,
             )
             .map_err(|e| dev_err("te post_attn norm", e))?;
             x = gpu_add(&x, &post).map_err(|e| dev_err("te attn residual", e))?;
 
             let normed = gpu_rms_norm_mul(
-                &x, d, device.owner.namespace(), &norm_key("pre_ff"), &layer.pre_ff_norm, T5GEMMA_EPS,
+                &x, d, &device.owner, &norm_key("pre_ff"), &layer.pre_ff_norm, T5GEMMA_EPS,
             )
             .map_err(|e| dev_err("te pre_ff norm", e))?;
             // [up (value), gate] packed output for the geglu kernel.
             let packed = gpu_linear_nt_cached(
                 &normed,
-                device.owner.namespace(),
+                &device.owner,
                 &[layer.up.part(), layer.gate.part()],
                 &[],
             )
             .map_err(|e| dev_err("te up/gate", e))?;
             let inner = gpu_geglu_tanh_value_gate(&packed).map_err(|e| dev_err("te geglu", e))?;
-            let down = gpu_linear_nt_cached(&inner, device.owner.namespace(), &[layer.down.part()], &[])
+            let down = gpu_linear_nt_cached(&inner, &device.owner, &[layer.down.part()], &[])
                 .map_err(|e| dev_err("te down", e))?;
             let post = gpu_rms_norm_mul(
-                &down, d, device.owner.namespace(), &norm_key("post_ff"), &layer.post_ff_norm, T5GEMMA_EPS,
+                &down, d, &device.owner, &norm_key("post_ff"), &layer.post_ff_norm, T5GEMMA_EPS,
             )
             .map_err(|e| dev_err("te post_ff norm", e))?;
             x = gpu_add(&x, &post).map_err(|e| dev_err("te ff residual", e))?;
         }
 
-        let out = gpu_rms_norm_mul(&x, d, device.owner.namespace(), "final", &device.final_norm, T5GEMMA_EPS)
+        let out = gpu_rms_norm_mul(&x, d, &device.owner, "final", &device.final_norm, T5GEMMA_EPS)
             .map_err(|e| dev_err("te final norm", e))?;
         gpu_download(&out).map_err(|e| dev_err("te download", e))
     }

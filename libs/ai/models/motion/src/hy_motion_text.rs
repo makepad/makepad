@@ -158,7 +158,7 @@ fn require_bf16_shape(
 }
 
 fn ensure_linear<'a>(
-    namespace: &str,
+    namespace: &WeightOwner,
     weights: &H3ShardedWeights,
     name: &'a str,
     n: usize,
@@ -185,7 +185,7 @@ fn ensure_linear<'a>(
 }
 
 fn linear_for_precision(
-    namespace: &str,
+    namespace: &WeightOwner,
     weights: &H3ShardedWeights,
     input: &GpuTensor,
     name: &str,
@@ -226,8 +226,8 @@ pub struct HyMotionQwenPrepared {
 }
 
 impl HyMotionQwenPrepared {
-    pub fn cache_namespace(&self) -> &str {
-        self.owner.namespace()
+    pub fn owner(&self) -> &WeightOwner {
+        &self.owner
     }
 
     pub fn prepare(weights: &H3ShardedWeights) -> Result<Self> {
@@ -454,7 +454,7 @@ fn hy_motion_qwen_encode_inner(
     Vec<HyMotionQwenTap>,
     Vec<HyMotionQwenOperatorTap>,
 )> {
-    let namespace = prepared.cache_namespace();
+    let namespace = prepared.owner();
     let real_sequence = tokens.input_ids.len();
     let sequence = tokens.crop_start + HY_MOTION_TEXT_TOKENS;
     if real_sequence == 0
@@ -592,7 +592,7 @@ fn tap_operator(
 }
 
 fn norm_for_precision(
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
@@ -643,7 +643,7 @@ fn add_for_precision(
 }
 
 fn qwen_layer(
-    namespace: &str,
+    namespace: &WeightOwner,
     weights: &H3ShardedWeights,
     prepared: &HyMotionQwenPrepared,
     layer: usize,

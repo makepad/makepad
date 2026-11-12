@@ -323,7 +323,7 @@ impl FlowBlock {
             heads,
             head_dim,
             &self.q_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.attn.q_norm", self.name),
         )?;
         let k = rms_norm_per_head(
@@ -331,7 +331,7 @@ impl FlowBlock {
             heads,
             head_dim,
             &self.k_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.attn.k_norm", self.name),
         )?;
         let attn = attention(&q, &k, &v, heads, scale)?;

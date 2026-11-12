@@ -3887,7 +3887,7 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) -> usize 
         feature = "upscale-native"
     ))]
     {
-        match makepad_ai_common::backend::gpu_weight_cache_evict_prefix_if_loaded("") {
+        match makepad_ai_common::backend::gpu_weight_cache_evict_all_if_loaded() {
             Ok(count) => progress(&format!(
                 "vram-release: evicted {count} cached weight buffers on the service worker thread"
             )),

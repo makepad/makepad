@@ -451,7 +451,7 @@ mod flux_worker {
         // `_if_loaded` semantics: a thread that never touched CUDA must not
         // initialize a device merely to discover it has nothing to release.
         let (residual, trouble) =
-            match makepad_ai_common::backend::release_gpu_runtime_namespaces(&[""]) {
+            match makepad_ai_common::backend::release_gpu_runtime_all() {
                 Ok(count) => (count, String::new()),
                 Err(error) => (0, format!(", release error: {error}")),
             };

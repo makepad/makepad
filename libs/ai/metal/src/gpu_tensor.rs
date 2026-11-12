@@ -2,6 +2,7 @@
 //! one ordered process batch; host operations borrow mapped storage after
 //! flushing its writer. Row views share immutable contents until a host write.
 
+use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
 use crate::gpu_types::{fresh_tensor_id, GpuLinearPart, GpuTensor, TensorStorage};
 pub use crate::shim::{DecAttnRef, DecLinearRef, TwoWayLayerRef, VitLayerRef, VitLinearRef};
 use crate::shim;
@@ -295,13 +296,13 @@ pub fn layer_norm_mod(x: &GpuTensor, mods: &GpuTensor, scale_off: usize, shift_o
     Ok(out)
 }
 
-pub fn linear_nt(x: &GpuTensor, namespace: &str, parts: &[GpuLinearPart<'_>], bias: &[f32]) -> Result<GpuTensor, String> {
+pub fn linear_nt(x: &GpuTensor, owner: &WeightOwner, parts: &[GpuLinearPart<'_>], bias: &[f32]) -> Result<GpuTensor, String> {
     let n: usize = parts.iter().map(|p| p.n).sum();
     if parts.is_empty() || (!bias.is_empty() && bias.len() != n) { return Err("metal linear parts/bias shape".into()); }
     let input = x.storage.try_borrow().map_err(|_| "metal linear borrow".to_string())?;
     let mut outputs = Vec::with_capacity(parts.len());
     for part in parts {
-        let weight = shim::tensor_named_weight(namespace, part.cache_key, || Ok(std::borrow::Cow::Borrowed(part.bytes)))?;
+        let weight = shim::tensor_named_weight(owner, part.cache_key, || Ok(std::borrow::Cow::Borrowed(part.bytes)))?;
         let out = empty(x.rows, part.n, false)?;
         let output = out.storage.borrow();
         out.writer_batch.set(shim::tensor_matmul(&input.buffer, input.offset, &weight, 0,
@@ -882,11 +883,14 @@ pub fn group_norm_planar(
 
 /// Resident named weight entries and bytes after retiring dropped owners.
 /// Like tensor operations, this query refuses the main thread.
-pub fn resident_weights(prefix: &str) -> Result<(usize, usize), String> {
-    shim::tensor_resident_weights(prefix)
+pub fn resident_weights(owner: &WeightOwnerTrace) -> Result<(usize, usize), String> {
+    shim::tensor_resident_weights(owner)
 }
 
-pub fn evict_prefix(prefix: &str) -> Result<usize, String> { shim::tensor_evict_prefix(prefix) }
+/// Evict every representation belonging to an owner; return released bytes.
+pub fn evict_owner(owner: &WeightOwner) -> Result<usize, String> { shim::tensor_evict_owner(owner) }
+/// Evict qualified keys starting with the given key; return released bytes.
+pub fn evict_keys(prefix: &WeightKey) -> Result<usize, String> { shim::tensor_evict_keys(prefix) }
 
 pub fn pool_clear() -> Result<(), String> { shim::tensor_pool_clear() }
 
@@ -905,7 +909,7 @@ mod tests {
             let w2: Vec<u8> = [2.0f32; 32].iter().flat_map(|v| v.to_le_bytes()).collect();
             let product = |owner: &WeightOwner, bytes: &[u8]| {
                 shim::try_matmul_nt_ggml_bytes_keyed(&a, GGML_TYPE_F32, 4, 8, 4,
-                    owner.namespace(), "w", || Ok(Cow::Borrowed(bytes))).unwrap()
+                    &owner, "w", || Ok(Cow::Borrowed(bytes))).unwrap()
             };
             let first = WeightOwner::new("reload");
             assert_eq!(product(&first, &w1), [8.0; 16], "first owner uses W1");
@@ -918,7 +922,7 @@ mod tests {
 
             let shared = WeightOwner::new("shared");
             let calls = AtomicUsize::new(0);
-            let lookup = || shim::tensor_named_weight(shared.namespace(), "w", || {
+            let lookup = || shim::tensor_named_weight(&shared, "w", || {
                 calls.fetch_add(1, Ordering::Relaxed);
                 Ok(Cow::Borrowed(w1.as_slice()))
             }).unwrap();
@@ -938,15 +942,15 @@ mod tests {
                 }
             });
             assert_eq!(calls.load(Ordering::Relaxed), 1, "warm calls across two threads invoke loader once");
-            assert_eq!(evict_prefix(shared.namespace()).unwrap(), w1.len(), "explicit eviction frees the map retain");
+            assert_eq!(evict_owner(&shared).unwrap(), w1.len(), "explicit eviction frees the map retain");
             drop(lookup());
             assert_eq!(calls.load(Ordering::Relaxed), 2, "first lookup after eviction reloads once");
 
-            let held = shim::tensor_named_weight(second.namespace(), "w", || panic!("cached weight reloaded")).unwrap();
+            let held = shim::tensor_named_weight(&second, "w", || panic!("cached weight reloaded")).unwrap();
             std::thread::scope(|scope| {
                 let second = &second;
                 scope.spawn(move || {
-                    assert_eq!(evict_prefix(second.namespace()).unwrap(), w2.len(), "another thread evicts held weight");
+                    assert_eq!(evict_owner(&second).unwrap(), w2.len(), "another thread evicts held weight");
                 }).join().unwrap();
             });
             let input = upload(&a, 4, 8).unwrap();
@@ -956,16 +960,16 @@ mod tests {
             out.writer_batch.set(batch);
             assert_eq!(download(&out).unwrap(), [16.0; 16], "held weight remains usable after cross-thread eviction");
 
-            let prefix = simultaneous.namespace().to_owned();
+            let prefix = simultaneous.trace();
             shim::tensor_test_drop_owner_locked(simultaneous).unwrap();
             pool_clear().unwrap();
             assert_eq!(resident_weights(&prefix).unwrap(), (0, 0), "drop inside tensor lock drains without deadlock");
-            let prefix = shared.namespace().to_owned();
+            let prefix = shared.trace();
             std::thread::spawn(move || drop(shared)).join().unwrap();
             pool_clear().unwrap();
             assert_eq!(resident_weights(&prefix).unwrap(), (0, 0), "drop on a thread without context retires weights");
             let fresh = WeightOwner::new("unused");
-            assert_eq!(evict_prefix(fresh.namespace()).unwrap(), 0, "fresh owner has nothing to evict");
+            assert_eq!(evict_owner(&fresh).unwrap(), 0, "fresh owner has nothing to evict");
             drop((fresh, second, held, first_handle, input, out));
             pool_clear().unwrap();
         });
@@ -1029,12 +1033,12 @@ mod tests {
                 out.writer_batch.set(batch);
                 let resident = download(&out).unwrap();
                 let keyed = shim::try_matmul_nt_ggml_bytes_keyed(&a, *ty, m, k, n,
-                    owner.namespace(), keys[index], || Ok(Cow::Borrowed(bytes.as_slice()))).unwrap();
+                    &owner, keys[index], || Ok(Cow::Borrowed(bytes.as_slice()))).unwrap();
                 assert_eq!(bits(&keyed), bits(&resident), "{} {m}x{k} by {n}x{k}: keyed equals upload + tensor_matmul", keys[index]);
                 assert_eq!(bits(&keyed), bits(&legacy[index]), "{} {m}x{k} by {n}x{k}: keyed equals old matmul_nt_ggml_bytes_impl", keys[index]);
             }
             let matrices: Vec<_> = weights.iter().enumerate().map(|(i, (ty, _))| shim::MatmulNtGgmlBytesKeyedMatrix {
-                bt_ggml_type: *ty, n, namespace: owner.namespace(), cache_key: keys[i],
+                bt_ggml_type: *ty, n, owner: &owner, cache_key: keys[i],
             }).collect();
             let multi = shim::try_matmul_nt_ggml_bytes_keyed_multi(&a, m, k, &matrices,
                 |_, _| panic!("multi must share single's named weights")).unwrap();
@@ -1042,7 +1046,7 @@ mod tests {
                 assert_eq!(bits(values), bits(&legacy[index]), "{} multi equals old path", keys[index]);
             }
             assert!(shim::try_matmul_nt_ggml_bytes_keyed(&a[..a.len()-1], GGML_TYPE_F32,
-                m, k, n, owner.namespace(), "bad", || panic!("invalid input loaded weight")).is_none(), "invalid input still declines");
+                m, k, n, &owner, "bad", || panic!("invalid input loaded weight")).is_none(), "invalid input still declines");
             assert!(shim::try_matmul_nt_ggml_bytes_keyed_multi(&[], 0, 0, &[],
                 |_, _| panic!("empty multi loaded weight")).unwrap().is_empty(), "empty multi still returns empty");
             drop((input, owner));
@@ -1167,17 +1171,17 @@ mod tests {
         assert_eq!(download(&pending).unwrap(), [10.0, 12.0, 14.0, 16.0], "pool clear preserves pending work");
         shim::tensor_test_error_and_guard().expect("error-path drop, UI guard, and batch failure recovery");
 
-        let ns = format!("resident_eviction_{}", fresh_tensor_id());
+        let ns = WeightOwner::new("resident-eviction");
         let bytes: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0].iter().flat_map(|v| v.to_le_bytes()).collect();
         let parts = [GpuLinearPart { bt_ggml_type: GGML_TYPE_F32, n: 2, cache_key: "weight", bytes: &bytes }];
         let result = linear_nt(&b, &ns, &parts, &[]).unwrap();
         download(&result).unwrap();
-        assert_eq!(evict_prefix(&ns).unwrap(), bytes.len(), "eviction returns named weight bytes");
+        assert_eq!(evict_owner(&ns).unwrap(), bytes.len(), "eviction returns named weight bytes");
         let calls = std::cell::Cell::new(0);
         let weight = shim::tensor_named_weight(&ns, "weight", || { calls.set(calls.get() + 1); Ok(std::borrow::Cow::Owned(bytes.clone())) }).unwrap();
         assert_eq!(calls.get(), 1, "evicted key invokes loader again");
         drop(weight);
-        assert_eq!(evict_prefix(&ns).unwrap(), bytes.len(), "reloaded key evicts again");
+        assert_eq!(evict_owner(&ns).unwrap(), bytes.len(), "reloaded key evicts again");
         let values: Vec<f32> = (0..96).map(|i| (i as f32 - 48.0) / 64.0).collect();
         let q_parent = upload(&values, 3, 32).unwrap();
         let q = slice_rows(&q_parent, 1, 2).unwrap();
@@ -1227,7 +1231,7 @@ mod tests {
         }).collect();
         let rounded: Vec<f32> = words.iter().map(|&w| f32::from_bits(u32::from(w) << 16)).collect();
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
-        let namespace = format!("linear_nt_test_bf16_{}", fresh_tensor_id());
+        let owner = WeightOwner::new("linear_nt_test_bf16");
         let mut parts = [
             GpuLinearPart { bt_ggml_type: GGML_TYPE_BF16, n: 2, cache_key: "first", bytes: &bytes[..16] },
             GpuLinearPart { bt_ggml_type: GGML_TYPE_BF16, n: 3, cache_key: "second", bytes: &bytes[16..] },
@@ -1245,13 +1249,13 @@ mod tests {
                 }
             }
         };
-        check("bf16 first call with bias", linear_nt(&x, &namespace, &parts, &bias)
+        check("bf16 first call with bias", linear_nt(&x, &owner, &parts, &bias)
             .expect("bf16 first call with bias"), &rounded, &bias);
         // Changed host bytes must not replace weights already cached under these keys.
         let zeros = [0u8; 40];
         parts[0].bytes = &zeros[..16];
         parts[1].bytes = &zeros[16..];
-        check("bf16 cached call with bias", linear_nt(&x, &namespace, &parts, &bias)
+        check("bf16 cached call with bias", linear_nt(&x, &owner, &parts, &bias)
             .expect("bf16 cached call with bias"), &rounded, &bias);
 
         let f32_bytes: Vec<u8> = weights[..8].iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -1263,7 +1267,7 @@ mod tests {
             GpuLinearPart { bt_ggml_type: GGML_TYPE_F32, n: 2, cache_key: "first", bytes: &f32_bytes },
             GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: 3, cache_key: "second", bytes: &f16_bytes },
         ];
-        let mixed_namespace = format!("linear_nt_test_mixed_{}", fresh_tensor_id());
+        let mixed_namespace = WeightOwner::new("linear_nt_test_mixed");
         check("f32 and f16 separate namespace without bias",
             linear_nt(&x, &mixed_namespace, &mixed_parts, &[]).expect("f32 and f16 call"),
             &mixed_weights, &[]);

@@ -952,7 +952,7 @@ impl<'p> Graph<'p> {
             // Inference with a parameter: keep the weight resident on the GPU.
             let key = format!("w{}", wv.key);
             let bytes = || Ok(std::borrow::Cow::Owned(wv.data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()));
-            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, self.params.owner.namespace(), &key, bytes)
+            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, &self.params.owner, &key, bytes)
                 .unwrap_or_else(|| mm_nt(&xv.data, &wv.data, t, k, n))
         } else {
             mm_nt(&xv.data, &wv.data, t, k, n)

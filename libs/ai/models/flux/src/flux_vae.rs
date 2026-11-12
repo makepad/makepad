@@ -521,7 +521,7 @@ impl LazyFluxVae {
                 latents_whcb.len()
             )));
         }
-        let namespace = flux_vae_cache_namespace(weights);
+        let namespace = flux_vae_owner(weights);
         // Phase boundary: drop the denoise loop's pooled activation buckets
         // so the transformer and VAE working sets never coexist in VRAM, and
         // clamp the idle-pool cap for the decode — its multi-GB planes on top
@@ -1878,19 +1878,19 @@ struct GpuSpatial {
     channels: usize,
 }
 
-pub(crate) fn flux_vae_cache_namespace(weights: &LoadedFluxVaeWeights) -> &str {
-    weights.owner.namespace()
+pub(crate) fn flux_vae_owner(weights: &LoadedFluxVaeWeights) -> &WeightOwner {
+    &weights.owner
 }
 
 /// Drops every device weight-cache entry belonging to these vae weights.
 /// Called on a model switch; owner drop also retires the entries.
 pub(crate) fn evict_device_weight_cache(weights: &LoadedFluxVaeWeights) -> usize {
-    crate::backend::gpu_weight_cache_evict_prefix(&flux_vae_cache_namespace(weights)).unwrap_or(0)
+    crate::backend::gpu_weight_cache_evict_owner(&flux_vae_owner(weights)).unwrap_or(0)
 }
 
 fn conv2d_device(
     weights: &LoadedFluxVaeWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuSpatial,
     weight_name: &str,
     bias_name: &str,
@@ -1937,7 +1937,7 @@ fn conv2d_device(
 
 fn group_norm_device(
     weights: &LoadedFluxVaeWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuSpatial,
     weight_name: &str,
     bias_name: &str,
@@ -2006,7 +2006,7 @@ fn upsample_nearest2x_device(input: &GpuSpatial) -> Result<GpuSpatial> {
 
 fn resnet_block_device(
     weights: &LoadedFluxVaeWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {
@@ -2068,7 +2068,7 @@ fn resnet_block_device(
 
 fn mid_attention_device(
     weights: &LoadedFluxVaeWeights,
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {

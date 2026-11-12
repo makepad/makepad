@@ -89,7 +89,7 @@ fn norm_mods(weights: &Sam3Weights, prefix: &str, dim: usize) -> Result<GpuTenso
 }
 
 fn linear(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     bytes: &[u8],
     key: &str,
@@ -98,7 +98,7 @@ fn linear(
 ) -> Result<GpuTensor> {
     gpu_linear_nt_cached_bf16_f32acc(
         x,
-        namespace,
+        owner,
         &[GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n,
@@ -117,7 +117,7 @@ fn linear(
 /// spreading it to the decoder/score path cost IoU for ~2ms and was
 /// rejected. The generic model default deliberately selects this policy.
 fn linear_fast(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     bytes: &[u8],
     key: &str,
@@ -126,7 +126,7 @@ fn linear_fast(
 ) -> Result<GpuTensor> {
     gpu_linear_nt_cached(
         x,
-        namespace,
+        owner,
         &[GpuLinearPart {
             bt_ggml_type: GGML_TYPE_BF16,
             n,
@@ -193,11 +193,11 @@ impl Linear {
     }
 
     fn forward(&self, x: &GpuTensor) -> Result<GpuTensor> {
-        linear(self.owner.namespace(), x, &self.bytes, &self.key, self.n, &self.bias)
+        linear(&self.owner, x, &self.bytes, &self.key, self.n, &self.bias)
     }
 
     fn forward_fast(&self, x: &GpuTensor) -> Result<GpuTensor> {
-        linear_fast(self.owner.namespace(), x, &self.bytes, &self.key, self.n, &self.bias)
+        linear_fast(&self.owner, x, &self.bytes, &self.key, self.n, &self.bias)
     }
 }
 
@@ -282,7 +282,7 @@ impl Conv2d {
             &input.tensor,
             input.width,
             input.height,
-            self.owner.namespace(),
+            &self.owner,
             &self.key,
             &self.weights,
             &self.bias,
@@ -363,7 +363,7 @@ impl ConvTransposeNoOverlap {
             input.height,
             self.out_channels,
             self.scale,
-            self.owner.namespace(),
+            &self.owner,
             &self.bias_key,
             &self.bias,
         )
@@ -2136,7 +2136,7 @@ impl Sam3Model {
             let added = add_planar(&fpn[feat], &up)?;
             let conv = self.pixel_conv[i].forward(&added)?;
             let normed = group_norm_planar(
-                self.owner.namespace(),
+                &self.owner,
                 &conv,
                 8,
                 &self.pixel_gn_gamma[i],
@@ -2358,7 +2358,7 @@ impl Sam3Model {
             side,
             side / 2,
             side / 2,
-            self.owner.namespace(),
+            &self.owner,
             "interactive.mask_ds0",
             &sam.mask_ds0_w,
             &sam.mask_ds0_b,
@@ -2383,7 +2383,7 @@ impl Sam3Model {
             side / 2,
             side / 4,
             side / 4,
-            self.owner.namespace(),
+            &self.owner,
             "interactive.mask_ds1",
             &sam.mask_ds1_w,
             &sam.mask_ds1_b,
@@ -2672,7 +2672,7 @@ fn relu_planar(p: &Planar) -> Result<Planar> {
 }
 
 fn group_norm_planar(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     p: &Planar,
     groups: usize,
     gamma: &[f32],
@@ -2685,7 +2685,7 @@ fn group_norm_planar(
             p.width,
             p.height,
             groups,
-            namespace,
+            owner,
             key,
             gamma,
             beta,

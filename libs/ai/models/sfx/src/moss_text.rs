@@ -359,10 +359,10 @@ impl MossTextEncoder {
                 )?;
             }
             let normed = gpu_rms_norm_mul(
-                &x, h, device.owner.namespace(), &format!("l{i}.in"), &layer.input_ln, MOSS_TE_RMS_EPS,
+                &x, h, &device.owner, &format!("l{i}.in"), &layer.input_ln, MOSS_TE_RMS_EPS,
             )
             .map_err(|e| dev_err("moss te input norm", e))?;
-            let qkv = gpu_linear_nt_cached(&normed, device.owner.namespace(), &[dev.qkv.part()], &[])
+            let qkv = gpu_linear_nt_cached(&normed, &device.owner, &[dev.qkv.part()], &[])
                 .map_err(|e| dev_err("moss te qkv", e))?;
             let q = makepad_ai_common::backend::cuda::gpu_slice_cols(&qkv, 0, q_heads * hd)
                 .map_err(|e| dev_err("moss te q slice", e))?;
@@ -377,11 +377,11 @@ impl MossTextEncoder {
             // Qwen3 q/k norms share ONE head_dim weight across heads: group
             // RMS with group_cols = head_dim applies exactly that.
             let q = gpu_rms_norm_mul(
-                &q, hd, device.owner.namespace(), &format!("l{i}.qn"), &layer.q_norm, MOSS_TE_RMS_EPS,
+                &q, hd, &device.owner, &format!("l{i}.qn"), &layer.q_norm, MOSS_TE_RMS_EPS,
             )
             .map_err(|e| dev_err("moss te q norm", e))?;
             let k = gpu_rms_norm_mul(
-                &k, hd, device.owner.namespace(), &format!("l{i}.kn"), &layer.k_norm, MOSS_TE_RMS_EPS,
+                &k, hd, &device.owner, &format!("l{i}.kn"), &layer.k_norm, MOSS_TE_RMS_EPS,
             )
             .map_err(|e| dev_err("moss te k norm", e))?;
             let q = gpu_rope_half(&q, q_heads, half, &rope_cos, &rope_sin)
@@ -415,25 +415,25 @@ impl MossTextEncoder {
             };
             let attn = gpu_attention_packed_causal(&q, &k, &v, q_heads, scale)
                 .map_err(|e| dev_err("moss te attention", e))?;
-            let proj = gpu_linear_nt_cached(&attn, device.owner.namespace(), &[dev.o.part()], &[])
+            let proj = gpu_linear_nt_cached(&attn, &device.owner, &[dev.o.part()], &[])
                 .map_err(|e| dev_err("moss te o", e))?;
             x = makepad_ai_common::backend::cuda::gpu_add(&x, &proj)
                 .map_err(|e| dev_err("moss te attn residual", e))?;
 
             let normed = gpu_rms_norm_mul(
-                &x, h, device.owner.namespace(), &format!("l{i}.pn"), &layer.post_ln, MOSS_TE_RMS_EPS,
+                &x, h, &device.owner, &format!("l{i}.pn"), &layer.post_ln, MOSS_TE_RMS_EPS,
             )
             .map_err(|e| dev_err("moss te post norm", e))?;
-            let gate_up = gpu_linear_nt_cached(&normed, device.owner.namespace(), &[dev.gate_up.part()], &[])
+            let gate_up = gpu_linear_nt_cached(&normed, &device.owner, &[dev.gate_up.part()], &[])
                 .map_err(|e| dev_err("moss te gate up", e))?;
             let act = makepad_ai_common::backend::cuda::gpu_swiglu_value_gate(&gate_up)
                 .map_err(|e| dev_err("moss te swiglu", e))?;
-            let down = gpu_linear_nt_cached(&act, device.owner.namespace(), &[dev.down.part()], &[])
+            let down = gpu_linear_nt_cached(&act, &device.owner, &[dev.down.part()], &[])
                 .map_err(|e| dev_err("moss te down", e))?;
             x = makepad_ai_common::backend::cuda::gpu_add(&x, &down)
                 .map_err(|e| dev_err("moss te mlp residual", e))?;
         }
-        let x = gpu_rms_norm_mul(&x, h, device.owner.namespace(), "final", &self.final_norm, MOSS_TE_RMS_EPS)
+        let x = gpu_rms_norm_mul(&x, h, &device.owner, "final", &self.final_norm, MOSS_TE_RMS_EPS)
             .map_err(|e| dev_err("moss te final norm", e))?;
         let host = gpu_download(&x).map_err(|e| dev_err("moss te download", e))?;
         let mut out = vec![0f32; MOSS_TEXT_TOKENS * h];

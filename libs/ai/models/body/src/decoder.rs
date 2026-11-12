@@ -3,7 +3,7 @@
 use crate::backend::{
     gpu_add, gpu_download, gpu_gelu_erf, gpu_layer_norm_mul_add, gpu_linear_f32_resident,
     gpu_slice_rows, gpu_two_way_layer_resident, gpu_upload, GpuTensor, GpuTwoWayAttention,
-    GpuTwoWayLayer, GpuTwoWayLinear,
+    GpuTwoWayLayer, GpuTwoWayLinear, WeightOwner,
 };
 use crate::heads::{DecoderHeads, GpuStepHeads, HostLinear};
 use crate::weights::BodyWeights;
@@ -368,6 +368,7 @@ impl DecoderLayer {
 }
 
 pub struct Decoder {
+    owner: WeightOwner,
     layers: Vec<DecoderLayer>,
     norm_final: NormWeights,
     heads: DecoderHeads,
@@ -381,8 +382,9 @@ pub struct Decoder {
 }
 
 impl GpuLinear {
-    fn two_way_ref(&self) -> GpuTwoWayLinear<'_> {
+    fn two_way_ref<'a>(&'a self, owner: &'a WeightOwner) -> GpuTwoWayLinear<'a> {
         GpuTwoWayLinear {
+            owner,
             weight: &self.weight,
             bias: Some(&self.bias),
         }
@@ -390,18 +392,18 @@ impl GpuLinear {
 }
 
 impl GpuAttention {
-    fn two_way_ref(&self) -> GpuTwoWayAttention<'_> {
+    fn two_way_ref<'a>(&'a self, owner: &'a WeightOwner) -> GpuTwoWayAttention<'a> {
         GpuTwoWayAttention {
-            q: self.q.two_way_ref(),
-            k: self.k.two_way_ref(),
-            v: self.v.two_way_ref(),
-            out: self.out.two_way_ref(),
+            q: self.q.two_way_ref(owner),
+            k: self.k.two_way_ref(owner),
+            v: self.v.two_way_ref(owner),
+            out: self.out.two_way_ref(owner),
         }
     }
 }
 
 impl DecoderLayer {
-    fn two_way_ref<'a>(&'a self, norm_final: &'a NormWeights, pe_on_self: bool) -> GpuTwoWayLayer<'a> {
+    fn two_way_ref<'a>(&'a self, owner: &'a WeightOwner, norm_final: &'a NormWeights, pe_on_self: bool) -> GpuTwoWayLayer<'a> {
         let affine = |n: &'a NormWeights| (n.weight.as_slice(), n.bias.as_slice());
         GpuTwoWayLayer {
             ln_pe_1: affine(&self.ln_pe_1),
@@ -411,10 +413,10 @@ impl DecoderLayer {
             ln2_2: affine(&self.ln2_2),
             ln3: affine(&self.ln3),
             ln_final: affine(norm_final),
-            self_attn: self.self_attn.two_way_ref(),
-            cross_attn: self.cross_attn.two_way_ref(),
-            ffn_first: self.ffn_first.two_way_ref(),
-            ffn_second: self.ffn_second.two_way_ref(),
+            self_attn: self.self_attn.two_way_ref(owner),
+            cross_attn: self.cross_attn.two_way_ref(owner),
+            ffn_first: self.ffn_first.two_way_ref(owner),
+            ffn_second: self.ffn_second.two_way_ref(owner),
             n_head: DEC_HEADS,
             eps: DEC_NORM_EPS,
             pe_on_self,
@@ -506,6 +508,7 @@ impl Decoder {
         }
         let step_heads = GpuStepHeads::upload(&weights.heads)?;
         Ok(Self {
+            owner: WeightOwner::new("body-two-way"),
             layers,
             norm_final: weights.norm_final,
             heads: weights.heads,
@@ -593,7 +596,7 @@ impl Decoder {
             // (Metal: one command buffer, no host round trips between ops).
             let mut resident = None;
             if !self.resident_refused.get() {
-                let layer_ref = layer.two_way_ref(&self.norm_final, layer_index != 0);
+                let layer_ref = layer.two_way_ref(&self.owner, &self.norm_final, layer_index != 0);
                 match gpu_two_way_layer_resident(&hidden, &token_pe, context, &context_pe, &layer_ref)
                 {
                     Ok(pair) => resident = Some(pair),

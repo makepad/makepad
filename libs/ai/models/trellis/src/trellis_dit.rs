@@ -234,7 +234,7 @@ impl T2Dit {
             }
         };
         let want_a16 = crate::backend::gpu_gemm_f16acc_enabled();
-        gpu_weight_cache_ensure(self.owner.namespace(), name, ggml_type, n, k, want_a16, || {
+        gpu_weight_cache_ensure(&self.owner, name, ggml_type, n, k, want_a16, || {
             self.weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -249,7 +249,7 @@ impl T2Dit {
     fn linear_cached(&self, x: &GpuTensor, name: &str, n: usize, bias: &[f32]) -> Result<GpuTensor> {
         let part = self.ensure_linear(name, n, x.cols())?;
         let parts = [part];
-        gpu_linear_nt_cached(x, self.owner.namespace(), &parts, bias).map_err(DiffusionError::model)
+        gpu_linear_nt_cached(x, &self.owner, &parts, bias).map_err(DiffusionError::model)
     }
 
     /// Host timestep path: sinusoid(1000t) -> mlp -> t_emb, then the shared
@@ -352,7 +352,7 @@ impl T2Dit {
                 &q,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.owner.namespace(),
+                &self.owner,
                 &format!("{p}.self_attn.q_rms_norm"),
                 &self.self_qn[layer],
                 0.0,
@@ -362,7 +362,7 @@ impl T2Dit {
                 &k,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.owner.namespace(),
+                &self.owner,
                 &format!("{p}.self_attn.k_rms_norm"),
                 &self.self_kn[layer],
                 0.0,
@@ -407,7 +407,7 @@ impl T2Dit {
                 &q,
                 T2_HEAD_COUNT,
                 T2_HEAD_DIM,
-                self.owner.namespace(),
+                &self.owner,
                 &format!("{cross_prefix}.q_rms_norm"),
                 &self.cross_qn[layer],
                 0.0,
@@ -433,7 +433,7 @@ impl T2Dit {
                     &k,
                     T2_HEAD_COUNT,
                     T2_HEAD_DIM,
-                    self.owner.namespace(),
+                    &self.owner,
                     &format!("{cross_prefix}.k_rms_norm"),
                     &self.cross_kn[layer],
                     0.0,

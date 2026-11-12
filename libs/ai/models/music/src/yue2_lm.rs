@@ -184,23 +184,23 @@ impl Yue2DecodeMode {
 
 struct WeightName {
     tensor: String,
-    key: String,
-    q8_key: String,
+    key: makepad_ai_common::backend::WeightKey,
+    q8_key: makepad_ai_common::backend::WeightKey,
 }
 
 impl WeightName {
-    fn linear(ns: &str, base: &str) -> Self {
+    fn linear(owner: &makepad_ai_common::backend::WeightOwner, base: &str) -> Self {
         let tensor = format!("{base}.weight");
-        let key = format!("{ns}::{tensor}");
-        let q8_key = format!("{key}::q8_0");
+        let key = owner.key(&tensor);
+        let q8_key = key.sub("q8_0");
         Self { tensor, key, q8_key }
     }
 
-    fn norm(ns: &str, base: &str) -> Self {
+    fn norm(owner: &makepad_ai_common::backend::WeightOwner, base: &str) -> Self {
         Self {
             tensor: format!("{base}.weight"),
-            key: format!("{ns}::{base}::rms"),
-            q8_key: String::new(),
+            key: owner.key(&format!("{base}::rms")),
+            q8_key: owner.key(""),
         }
     }
 }
@@ -220,29 +220,29 @@ struct SetNames {
 }
 
 impl Yue2Set {
-    fn names(self, ns: &str, layer: usize) -> SetNames {
+    fn names(self, owner: &makepad_ai_common::backend::WeightOwner, layer: usize) -> SetNames {
         let p = format!("model.layers.{layer}");
         let (input, post, attn, mlp) = match self {
             Self::Ar => ("input_layernorm", "post_attention_layernorm", "self_attn", "mlp"),
             Self::Nar => ("nar_input_layernorm", "nar_pre_mlp_layernorm", "nar_self_attn", "nar_mlp"),
         };
         let mut names = SetNames {
-            input_norm: WeightName::norm(ns, &format!("{p}.{input}")),
-            post_norm: WeightName::norm(ns, &format!("{p}.{post}")),
-            q_norm: WeightName::norm(ns, &format!("{p}.{attn}.q_norm")),
-            k_norm: WeightName::norm(ns, &format!("{p}.{attn}.k_norm")),
-            q: WeightName::linear(ns, &format!("{p}.{attn}.q_proj")),
-            k: WeightName::linear(ns, &format!("{p}.{attn}.k_proj")),
-            v: WeightName::linear(ns, &format!("{p}.{attn}.v_proj")),
-            o: WeightName::linear(ns, &format!("{p}.{attn}.o_proj")),
-            up: WeightName::linear(ns, &format!("{p}.{mlp}.up_proj")),
-            gate: WeightName::linear(ns, &format!("{p}.{mlp}.gate_proj")),
-            down: WeightName::linear(ns, &format!("{p}.{mlp}.down_proj")),
+            input_norm: WeightName::norm(owner, &format!("{p}.{input}")),
+            post_norm: WeightName::norm(owner, &format!("{p}.{post}")),
+            q_norm: WeightName::norm(owner, &format!("{p}.{attn}.q_norm")),
+            k_norm: WeightName::norm(owner, &format!("{p}.{attn}.k_norm")),
+            q: WeightName::linear(owner, &format!("{p}.{attn}.q_proj")),
+            k: WeightName::linear(owner, &format!("{p}.{attn}.k_proj")),
+            v: WeightName::linear(owner, &format!("{p}.{attn}.v_proj")),
+            o: WeightName::linear(owner, &format!("{p}.{attn}.o_proj")),
+            up: WeightName::linear(owner, &format!("{p}.{mlp}.up_proj")),
+            gate: WeightName::linear(owner, &format!("{p}.{mlp}.gate_proj")),
+            down: WeightName::linear(owner, &format!("{p}.{mlp}.down_proj")),
         };
         // Only packed QKV and up|gate Q8 copies are resident. BF16 names
         // remain individual for prefill/NAR; no duplicate Q8 allocations.
-        names.q.q8_key = format!("{ns}::{p}.{attn}.qkv_proj::q8_0");
-        names.up.q8_key = format!("{ns}::{p}.{mlp}.up_gate_proj::q8_0");
+        names.q.q8_key = owner.key(&format!("{p}.{attn}.qkv_proj::q8_0"));
+        names.up.q8_key = owner.key(&format!("{p}.{mlp}.up_gate_proj::q8_0"));
         names
     }
 }
@@ -256,10 +256,10 @@ struct SetNorms {
 }
 
 impl SetNorms {
-    fn load(w: &Yue2Weights, set: Yue2Set, ns: &str) -> Result<Self> {
+    fn load(w: &Yue2Weights, set: Yue2Set, owner: &makepad_ai_common::backend::WeightOwner) -> Result<Self> {
         let mut out = Self { names: vec![], input: vec![], post: vec![], q: vec![], k: vec![] };
         for layer in 0..YUE2_LAYERS {
-            let n = set.names(ns, layer);
+            let n = set.names(owner, layer);
             out.input.push(w.tensor_f32(&n.input_norm.tensor)?);
             out.post.push(w.tensor_f32(&n.post_norm.tensor)?);
             out.q.push(w.tensor_f32(&n.q_norm.tensor)?);
@@ -273,9 +273,9 @@ impl SetNorms {
 /// The checkpoint, precomputed weight keys and lazily uploaded RoPE tables.
 pub struct Yue2Model {
     owner: WeightOwner,
-    embed_key: String,
-    final_norm_key: String,
-    head_keys: [[String; 2]; 2],
+    embed_key: makepad_ai_common::backend::WeightKey,
+    final_norm_key: makepad_ai_common::backend::WeightKey,
+    head_keys: [[makepad_ai_common::backend::WeightKey; 2]; 2],
     pub weights: Yue2Weights,
     ar: SetNorms,
     nar: SetNorms,
@@ -389,17 +389,16 @@ fn bf16_round(v: f32) -> f32 {
 impl Yue2Model {
     pub fn load(weights: Yue2Weights) -> Result<Self> {
         let owner = WeightOwner::new("yue2-lm");
-        let ns = owner.namespace();
-        let embed_key = format!("{ns}::model.embed_tokens.weight");
-        let final_norm_key = format!("{ns}::model.norm::rms");
+        let embed_key = owner.key("model.embed_tokens.weight");
+        let final_norm_key = owner.key("model.norm::rms");
         let head_keys = [
-            [format!("{ns}::lm_head.weight#abc"), format!("{ns}::lm_head.weight#abc::q8_0")],
-            [format!("{ns}::lm_head.weight#semantic"), format!("{ns}::lm_head.weight#semantic::q8_0")],
+            [owner.key("lm_head.weight#abc"), owner.key("lm_head.weight#abc::q8_0")],
+            [owner.key("lm_head.weight#semantic"), owner.key("lm_head.weight#semantic::q8_0")],
         ];
         let ar_weights = Yue2ArWeights::from_env()?;
         let nar_precision = Yue2NarPrecision::from_env()?;
-        let ar = SetNorms::load(&weights, Yue2Set::Ar, ns)?;
-        let nar = SetNorms::load(&weights, Yue2Set::Nar, ns)?;
+        let ar = SetNorms::load(&weights, Yue2Set::Ar, &owner)?;
+        let nar = SetNorms::load(&weights, Yue2Set::Nar, &owner)?;
         let final_norm = weights.tensor_f32("model.norm.weight")?;
         let half = YUE2_HEAD_DIM / 2;
         // Reference: 1 / base ** (arange(0, hd, 2) / hd) in f32.
@@ -427,9 +426,9 @@ impl Yue2Model {
         })
     }
 
-    /// The namespace of the model's device weights.
-    pub fn cache_namespace(&self) -> &str {
-        self.owner.namespace()
+    /// The owner of the model's device weights.
+    pub fn owner(&self) -> &WeightOwner {
+        &self.owner
     }
 
     pub fn set_decode_mode(&self, mode: Yue2DecodeMode) {
@@ -457,7 +456,7 @@ impl Yue2Model {
 
     fn ensure(&self, name: &str, n: usize, k: usize) -> Result<()> {
         let w = &self.weights;
-        gpu_weight_cache_ensure(self.owner.namespace(), name, GGML_BF16, n, k, false, || {
+        gpu_weight_cache_ensure(&self.owner, name, GGML_BF16, n, k, false, || {
             w.tensor_bytes(name).map_err(|e| e.to_string())
         })
         .map_err(dev("weight upload"))
@@ -470,7 +469,7 @@ impl Yue2Model {
             self.ensure(name, n, x.cols())?;
             list.push(GpuLinearPart { bt_ggml_type: GGML_BF16, n, cache_key: name, bytes: &[] });
         }
-        gpu_linear_nt_cached_bf16_f32acc(x, self.owner.namespace(), &list, bias).map_err(dev("linear"))
+        gpu_linear_nt_cached_bf16_f32acc(x, &self.owner, &list, bias).map_err(dev("linear"))
     }
 
     fn linear_keyed<const N: usize>(
@@ -512,7 +511,7 @@ impl Yue2Model {
             }).map_err(dev("weight upload"))?;
         }
         let list = parts.map(|(name, n)| GpuLinearPart {
-            bt_ggml_type: GGML_BF16, n, cache_key: name.key.as_str(), bytes: &[],
+            bt_ggml_type: GGML_BF16, n, cache_key: &name.key, bytes: &[],
         });
         gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(&parts[0].0.q8_key, &list, k)
             .map_err(dev("packed q8 weight quantization"))
@@ -520,7 +519,7 @@ impl Yue2Model {
 
     fn decode_add_rms(
         &self, input: &GpuTensor, weight: &WeightName, residual: &GpuTensor,
-        norm_key: &str, scale: &[f32],
+        norm_key: &makepad_ai_common::backend::WeightKey, scale: &[f32],
     ) -> Result<(GpuTensor, GpuTensor)> {
         let update = self.linear_keyed(input, [(weight, YUE2_HIDDEN)], true)?;
         gpu_add_rms_norm_keyed(residual, &update, norm_key, scale, YUE2_RMS_EPS)
@@ -539,7 +538,7 @@ impl Yue2Model {
         }
     }
 
-    fn rms_keyed(&self, x: &GpuTensor, group: usize, key: &str, scale: &[f32]) -> Result<GpuTensor> {
+    fn rms_keyed(&self, x: &GpuTensor, group: usize, key: &makepad_ai_common::backend::WeightKey, scale: &[f32]) -> Result<GpuTensor> {
         gpu_rms_norm_mul_keyed(x, group, key, scale, YUE2_RMS_EPS).map_err(dev("rms"))
     }
 
@@ -727,9 +726,9 @@ impl Yue2Model {
             let ff = self.decode_swiglu(&ff_in, names)?;
             drop(ff_in);
             let (key, weights) = if layer + 1 < YUE2_LAYERS {
-                (norms.names[layer + 1].input_norm.key.as_str(), norms.input[layer + 1].as_slice())
+                (&norms.names[layer + 1].input_norm.key, norms.input[layer + 1].as_slice())
             } else {
-                (self.final_norm_key.as_str(), self.final_norm.as_slice())
+                (&self.final_norm_key, self.final_norm.as_slice())
             };
             (x, normed) = self.decode_add_rms(
                 &ff, &names.down, &residual, key, weights,
@@ -870,7 +869,7 @@ impl Yue2Model {
         Ok(())
     }
 
-    fn head_key(&self, phase: Yue2Phase, q8: bool) -> &str {
+    fn head_key(&self, phase: Yue2Phase, q8: bool) -> &makepad_ai_common::backend::WeightKey {
         let phase = match phase {
             Yue2Phase::Abc => 0,
             Yue2Phase::Semantic => 1,
@@ -918,7 +917,7 @@ impl Yue2Model {
 /// Prepared projections. Cache lookup and operand conversion use only
 /// caller-owned storage during evaluation; even the qualified keys are fixed.
 struct NarLinear<const N: usize> {
-    keys: [String; N],
+    keys: [makepad_ai_common::backend::WeightKey; N],
     widths: [usize; N],
     fused_fast: bool,
 }
@@ -927,14 +926,14 @@ impl<const N: usize> NarLinear<N> {
     fn new(
         model: &Yue2Model, parts: [(&str, usize); N], input: usize, precision: GpuLinearPrecision,
     ) -> Result<Self> {
-        let mut keys = parts.map(|(name, _)| format!("{}::{name}", model.owner.namespace()));
+        let mut keys = parts.map(|(name, _)| model.owner.key(name));
         let mut widths = parts.map(|(_, width)| width);
         let fused_fast = precision != GpuLinearPrecision::Bf16F32;
         if fused_fast {
             // One resident matrix for Q|K|V or up|gate, uploaded/converted
             // once. Do not retain individual bf16 shadows for the NAR set.
             let total = widths.iter().sum();
-            keys[0] = format!("{}::fused::{precision:?}", keys[0]);
+            keys[0] = keys[0].sub(&format!("fused::{precision:?}"));
             gpu_weight_cache_ensure_bf16_precision_keyed(&keys[0], total, input, precision, || {
                 let mut bytes = Vec::with_capacity(total * input * 2);
                 for &(name, _) in &parts {
@@ -952,7 +951,7 @@ impl<const N: usize> NarLinear<N> {
     fn run(
         &self, x: &GpuTensor, scratch: &NarLinearScratch, bias: Option<&GpuTensor>, out: &GpuTensor,
     ) -> Result<()> {
-        let parts: [(&str, usize); N] = std::array::from_fn(|i| (self.keys[i].as_str(), self.widths[i]));
+        let parts: [(&makepad_ai_common::backend::WeightKey, usize); N] = std::array::from_fn(|i| (&self.keys[i], self.widths[i]));
         if self.fused_fast {
             gpu_linear_nt_cached_precision_into(x,
                 scratch.fast.as_ref().ok_or_else(|| DiffusionError::model("missing NAR fast scratch"))?,

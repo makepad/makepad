@@ -68,7 +68,8 @@ fn a_3x3_conv_as_gemms_over_im2col_matches_the_reference() {
     assert!(gpu_device_available(), "this test needs a CUDA device");
     let case = case();
     let x = gpu_upload(&case.x, IN, W * H).unwrap();
-    let out = gpu_conv2d_planar_cached(&x, W, H, "planar-conv-test", "gemm", &case.weights, &case.bias, OUT, 3, 3, 1, 1)
+    let owner = makepad_ai_common::backend::WeightOwner::new("planar-conv-test");
+    let out = gpu_conv2d_planar_cached(&x, W, H, &owner, "gemm", &case.weights, &case.bias, OUT, 3, 3, 1, 1)
         .unwrap();
     let got = gpu_download(&out).unwrap();
     let error = worst(&got, &case.reference);
@@ -82,7 +83,8 @@ fn a_3x3_conv_on_cudnn_matches_the_reference() {
     gpu_cudnn_require().unwrap();
     let case = case();
     let x = gpu_upload(&case.x, IN, W * H).unwrap();
-    let out = gpu_conv2d_planar_cudnn_f16(&x, W, H, "planar-conv-test::cudnn", &case.weights, &case.bias, OUT).unwrap();
+    let owner = makepad_ai_common::backend::WeightOwner::new("planar-conv-test");
+    let out = gpu_conv2d_planar_cudnn_f16(&x, W, H, &owner.key("cudnn"), &case.weights, &case.bias, OUT).unwrap();
     let got = gpu_download(&out).unwrap();
     let error = worst(&got, &case.reference);
     // As the GEMM path, and each output stored f16 before its bias.

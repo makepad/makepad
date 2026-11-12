@@ -65,11 +65,11 @@ pub fn add_rows_broadcast_compat(
     gpu_add(x, &expanded)
 }
 
-/// One SD ResNet block on device. `ns` is the weight-cache namespace (one per
+/// One SD ResNet block on device. `owner` is the weight-cache namespace (one per
 /// residency group), `key` the unique block prefix within it.
 #[allow(clippy::too_many_arguments)]
 pub fn resnet_block(
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     key: &str,
     x: &Planar,
     temb: &GpuTensor,
@@ -82,7 +82,7 @@ pub fn resnet_block(
         width,
         height,
         w.gn1_groups,
-        ns,
+        owner,
         &format!("{key}.norm1"),
         &w.gn1_gamma,
         &w.gn1_beta,
@@ -93,7 +93,7 @@ pub fn resnet_block(
         &h,
         width,
         height,
-        ns,
+        owner,
         &format!("{key}.conv1"),
         &w.conv1_w,
         &w.conv1_b,
@@ -108,7 +108,7 @@ pub fn resnet_block(
     let temb_act = gpu_silu(temb)?;
     let temb_proj = gpu_linear_nt_cached(
         &temb_act,
-        ns,
+        owner,
         &[GpuLinearPart {
             bt_ggml_type: GGML_TYPE_F16,
             n: w.cout,
@@ -123,7 +123,7 @@ pub fn resnet_block(
         width,
         height,
         w.gn2_groups,
-        ns,
+        owner,
         &format!("{key}.norm2"),
         &w.gn2_gamma,
         &w.gn2_beta,
@@ -134,7 +134,7 @@ pub fn resnet_block(
         &h,
         width,
         height,
-        ns,
+        owner,
         &format!("{key}.conv2"),
         &w.conv2_w,
         &w.conv2_b,
@@ -148,7 +148,7 @@ pub fn resnet_block(
         &x.t,
         width,
         height,
-        ns,
+        owner,
         &format!("{key}.conv_shortcut"),
         &w.short_w,
         &w.short_b,

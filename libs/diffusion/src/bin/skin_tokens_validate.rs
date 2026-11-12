@@ -21,7 +21,7 @@ use makepad_diffusion::backend::{
     gpu_attention_packed_cross_composite_bf16, gpu_bf16_round, gpu_download,
     gpu_gelu_erf, gpu_layer_norm_pytorch, gpu_linear_nt_cached_bf16_bias_epilogue,
     gpu_linear_nt_cached_bf16_mm, gpu_perf_stats, gpu_skintokens_michelangelo_fourier,
-    gpu_slice_cols, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart,
+    gpu_slice_cols, gpu_upload, gpu_weight_cache_ensure, GpuLinearPart, WeightOwner,
 };
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
@@ -455,7 +455,7 @@ fn validate_projection(weights: &Path, oracle: &Path, seed: u64) -> Result<(), S
 /// this separate from `project_condition` lets the backend contract be
 /// proven against the pinned PyTorch oracle before production routing.
 fn validate_projection_lt(weights: &Path, oracle: &Path, seed: u64) -> Result<(), String> {
-    const NAMESPACE: &str = "skin-tokens-lt-projection-validate";
+    let owner = WeightOwner::new("skin-tokens-lt-projection-validate");
     let weights = SkinTokensWeights::load(weights).map_err(|error| error.to_string())?;
     let condition_npy = load_npy(&oracle.join("cond_input.npy"))?;
     require_shape("condition", &condition_npy.shape, &[1, 54_000, 6])?;
@@ -477,7 +477,7 @@ fn validate_projection_lt(weights: &Path, oracle: &Path, seed: u64) -> Result<()
         ),
     ] {
         gpu_weight_cache_ensure(
-            NAMESPACE,
+            &owner,
             weight_name,
             GGML_TYPE_BF16,
             width,
@@ -532,7 +532,7 @@ fn validate_projection_lt(weights: &Path, oracle: &Path, seed: u64) -> Result<()
             let input = gpu_upload(&input_reference, rows, 54)?;
             let native = gpu_linear_nt_cached_bf16_bias_epilogue(
                 &input,
-                NAMESPACE,
+                &owner,
                 std::slice::from_ref(&part),
                 &bias,
             )?;
@@ -557,7 +557,7 @@ fn validate_projection_lt(weights: &Path, oracle: &Path, seed: u64) -> Result<()
 /// Michelangelo cross-attention block. Official LayerNorm outputs are fed in
 /// so input-projection and PMPE differences cannot contaminate this gate.
 fn validate_mesh_mm(weights: &Path, oracle: &Path) -> Result<(), String> {
-    const NAMESPACE: &str = "skin-tokens-mesh-mm-validate";
+    let owner = WeightOwner::new("skin-tokens-mesh-mm-validate");
     let weights = SkinTokensWeights::load(weights).map_err(|error| error.to_string())?;
     for (name, input_name, output_name, weight_name, rows, width) in [
         (
@@ -578,7 +578,7 @@ fn validate_mesh_mm(weights: &Path, oracle: &Path) -> Result<(), String> {
         ),
     ] {
         gpu_weight_cache_ensure(
-            NAMESPACE,
+            &owner,
             weight_name,
             GGML_TYPE_BF16,
             width,
@@ -597,7 +597,7 @@ fn validate_mesh_mm(weights: &Path, oracle: &Path) -> Result<(), String> {
         let input = gpu_upload(&input.f32()?, rows, 512)?;
         let native = gpu_download(&gpu_linear_nt_cached_bf16_mm(
             &input,
-            NAMESPACE,
+            &owner,
             std::slice::from_ref(&part),
         )?)?;
         let reference = load_npy(&oracle.join(format!("{output_name}.npy")))?;
@@ -618,7 +618,7 @@ fn validate_mesh_mm(weights: &Path, oracle: &Path) -> Result<(), String> {
 /// inputs. Torch folds these contiguous 3D tensors to 2D `addmm`, whose BF16
 /// bias epilogue is represented by the narrowly scoped cuBLASLt helper.
 fn validate_mesh_biased_linears(weights: &Path, oracle: &Path) -> Result<(), String> {
-    const NAMESPACE: &str = "skin-tokens-mesh-biased-linear-validate";
+    let owner = WeightOwner::new("skin-tokens-mesh-biased-linear-validate");
     let weights = SkinTokensWeights::load(weights).map_err(|error| error.to_string())?;
     for (name, input_name, output_name, weight_name, bias_name, input_width, output_width) in [
         (
@@ -659,7 +659,7 @@ fn validate_mesh_biased_linears(weights: &Path, oracle: &Path) -> Result<(), Str
         ),
     ] {
         gpu_weight_cache_ensure(
-            NAMESPACE,
+            &owner,
             weight_name,
             GGML_TYPE_BF16,
             output_width,
@@ -681,7 +681,7 @@ fn validate_mesh_biased_linears(weights: &Path, oracle: &Path) -> Result<(), Str
         let input = gpu_upload(&input.f32()?, 512, input_width)?;
         let native = gpu_download(&gpu_linear_nt_cached_bf16_bias_epilogue(
             &input,
-            NAMESPACE,
+            &owner,
             std::slice::from_ref(&part),
             &bias,
         )?)?;

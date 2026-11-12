@@ -340,7 +340,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let want_a16 = H3_VAE_PRECISION.f16_accumulate && m > 1;
     let (dtype, _shape) = weights.tensor_dtype_shape(name)?;
-    gpu_weight_cache_ensure(weights.cache_namespace(), name, GGML_TYPE_F16, n, k, want_a16, || {
+    gpu_weight_cache_ensure(weights.owner(), name, GGML_TYPE_F16, n, k, want_a16, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
         let mut out = vec![0u8; n * k * 2];
         match dtype {
@@ -378,7 +378,7 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    gpu_linear_nt_cached_with_precision(x, weights.cache_namespace(), &parts, bias, H3_VAE_PRECISION)
+    gpu_linear_nt_cached_with_precision(x, weights.owner(), &parts, bias, H3_VAE_PRECISION)
         .map_err(DiffusionError::model)
 }
 
@@ -602,7 +602,7 @@ fn decoder_vit_forward_group(
         let normed = gpu_rms_norm_mul(
             &hidden,
             dim,
-            weights.cache_namespace(),
+            weights.owner(),
             &format!("{prefix}.norm1"),
             &prepared.norm1_w[layer],
             H3_VAE_NORM_EPS,
@@ -618,7 +618,7 @@ fn decoder_vit_forward_group(
         ];
         let qkv = gpu_linear_nt_cached_with_precision(
             &normed,
-            weights.cache_namespace(),
+            weights.owner(),
             &parts,
             &prepared.qkv_bias[layer],
             H3_VAE_PRECISION,
@@ -633,7 +633,7 @@ fn decoder_vit_forward_group(
         let q = gpu_rms_norm_mul(
             &q,
             H3_VAE_HEAD_DIM,
-            weights.cache_namespace(),
+            weights.owner(),
             "qk_norm_ones",
             &prepared.qk_norm_ones,
             H3_VAE_NORM_EPS,
@@ -642,7 +642,7 @@ fn decoder_vit_forward_group(
         let k = gpu_rms_norm_mul(
             &k,
             H3_VAE_HEAD_DIM,
-            weights.cache_namespace(),
+            weights.owner(),
             "qk_norm_ones",
             &prepared.qk_norm_ones,
             H3_VAE_NORM_EPS,
@@ -693,7 +693,7 @@ fn decoder_vit_forward_group(
         let normed = gpu_rms_norm_mul(
             &hidden,
             dim,
-            weights.cache_namespace(),
+            weights.owner(),
             &format!("{prefix}.norm2"),
             &prepared.norm2_w[layer],
             H3_VAE_NORM_EPS,
@@ -1433,7 +1433,7 @@ fn stride2_indices(src_w: usize, out_w: usize, out_h: usize) -> Vec<u32> {
 
 // --- GPU composition of the reference convs ---------------------------------
 
-fn enc_conv3_reflect(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_conv3_reflect(ns: &WeightOwner, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     debug_assert_eq!(conv.k, 3);
     let padded = gpu_gather_cols(x, &reflect_pad1_indices(w, h)).map_err(DiffusionError::model)?;
     let out = gpu_conv2d_planar_cached(
@@ -1457,7 +1457,7 @@ fn enc_conv3_reflect(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize
 /// The Downsample3d spatial path: asym pad + k3 stride-2 conv; returns the
 /// output and its (w, h).
 fn enc_conv3_down2(
-    ns: &str,
+    ns: &WeightOwner,
     conv: &EncConv,
     x: &GpuTensor,
     w: usize,
@@ -1487,7 +1487,7 @@ fn enc_conv3_down2(
     Ok((sampled, out_w, out_h))
 }
 
-fn enc_conv1x1(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_conv1x1(ns: &WeightOwner, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     debug_assert_eq!(conv.k, 1);
     gpu_conv2d_planar_cached(
         x,
@@ -1506,7 +1506,7 @@ fn enc_conv1x1(ns: &str, conv: &EncConv, x: &GpuTensor, w: usize, h: usize) -> R
     .map_err(DiffusionError::model)
 }
 
-fn enc_group_norm(ns: &str, norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_group_norm(ns: &WeightOwner, norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     gpu_group_norm_planar(
         x,
         w,
@@ -1521,7 +1521,7 @@ fn enc_group_norm(ns: &str, norm: &EncNorm, x: &GpuTensor, w: usize, h: usize) -
     .map_err(DiffusionError::model)
 }
 
-fn enc_resnet(ns: &str, resnet: &EncResnet, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
+fn enc_resnet(ns: &WeightOwner, resnet: &EncResnet, x: &GpuTensor, w: usize, h: usize) -> Result<GpuTensor> {
     let mut hidden = enc_group_norm(ns, &resnet.norm1, x, w, h)?;
     hidden = gpu_silu(&hidden).map_err(DiffusionError::model)?;
     hidden = enc_conv3_reflect(ns, &resnet.conv1, &hidden, w, h)?;
@@ -1545,7 +1545,7 @@ fn encode_tile(
     w: usize,
     h: usize,
 ) -> Result<Vol> {
-    let ns = prepared.owner.namespace();
+    let ns = &prepared.owner;
     let mut x = gpu_upload(pixels, 3, w * h).map_err(DiffusionError::model)?;
     let (mut cur_w, mut cur_h) = (w, h);
     x = enc_conv3_reflect(ns, &prepared.conv_in, &x, cur_w, cur_h)?;

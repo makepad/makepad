@@ -53,12 +53,9 @@ fn dit_ffn(
     normed: &[f32],
     rows: usize,
 ) -> Result<Vec<f32>> {
-    let ns = file.owner.namespace();
     let in_n = format!("transformer_blocks.{layer}.ff_in.weight");
     let out_n = format!("transformer_blocks.{layer}.ff_out.weight");
-    let in_bk = format!("transformer_blocks.{layer}.ff_in.bias");
-    let out_bk = format!("transformer_blocks.{layer}.ff_out.bias");
-    if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(ns, &in_n), file.keyed_mat(ns, &out_n)) {
+    if let (Some(ff_in), Some(ff_out)) = (file.keyed_mat(&in_n), file.keyed_mat(&out_n)) {
         if let Some(y) = makepad_ai_common::backend::metal::try_dit_ffn_resident(
             normed,
             rows,
@@ -66,8 +63,8 @@ fn dit_ffn(
             MUSIC3_DIT_FF,
             &prep.ff_in_b[layer],
             &prep.ff_out_b[layer],
-            &in_bk,
-            &out_bk,
+            &prep.ff_in_b_key[layer],
+            &prep.ff_out_b_key[layer],
             false,
             ff_in,
             ff_out,
@@ -551,7 +548,6 @@ impl Music3GgufLm {
         use makepad_ai_common::backend::metal;
         use std::sync::OnceLock;
         static LOG: OnceLock<()> = OnceLock::new();
-        let ns = file.owner.namespace();
         let mut hidden = Vec::with_capacity(2 * MUSIC3_LM_HIDDEN);
         hidden.extend_from_slice(embed_c);
         hidden.extend_from_slice(embed_u);
@@ -567,6 +563,7 @@ impl Music3GgufLm {
         let scale = 1.0 / (MUSIC3_LM_HEAD_DIM as f32).sqrt();
         let q_w = MUSIC3_LM_HEADS * MUSIC3_LM_HEAD_DIM;
         let kv_w = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;
+        let mut resid = metal::ArResidual::new();
         for layer in 0..cond.layers {
             let p = format!("model.layers.{layer}");
             let qn = format!("{p}.self_attn.q_proj.weight");
@@ -576,20 +573,17 @@ impl Music3GgufLm {
             let un = format!("{p}.mlp.up_proj.weight");
             let gn = format!("{p}.mlp.gate_proj.weight");
             let dn = format!("{p}.mlp.down_proj.weight");
-            let qm = file.keyed_mat(ns, &qn)?;
-            let km = file.keyed_mat(ns, &kn)?;
-            let vm = file.keyed_mat(ns, &vn)?;
-            let om = file.keyed_mat(ns, &on)?;
-            let um = file.keyed_mat(ns, &un)?;
-            let gm = file.keyed_mat(ns, &gn)?;
-            let dm = file.keyed_mat(ns, &dn)?;
-            let in_key = format!("{p}.input_layernorm.weight");
-            let qn_key = format!("{p}.self_attn.q_norm.weight");
-            let kn_key = format!("{p}.self_attn.k_norm.weight");
-            let post_key = format!("{p}.post_attention_layernorm.weight");
+            let qm = file.keyed_mat(&qn)?;
+            let km = file.keyed_mat(&kn)?;
+            let vm = file.keyed_mat(&vn)?;
+            let om = file.keyed_mat(&on)?;
+            let um = file.keyed_mat(&un)?;
+            let gm = file.keyed_mat(&gn)?;
+            let dm = file.keyed_mat(&dn)?;
             let upload = if layer == 0 { Some(hidden.as_slice()) } else { None };
             let t0 = std::time::Instant::now();
             let (mut q, mut k, v) = metal::try_ar_pre_attn(
+                &mut resid,
                 upload,
                 2,
                 MUSIC3_LM_HIDDEN,
@@ -598,10 +592,10 @@ impl Music3GgufLm {
                 Some((
                     self.q_norm[layer].as_slice(),
                     self.k_norm[layer].as_slice(),
-                    qn_key.as_str(),
-                    kn_key.as_str(),
+                    &self.q_norm_key[layer],
+                    &self.k_norm_key[layer],
                 )),
-                &in_key,
+                &self.input_norm_key[layer],
                 MUSIC3_LM_RMS_EPS,
                 qm,
                 km,
@@ -652,11 +646,12 @@ impl Music3GgufLm {
             perf::add(&perf::RES_ATTN, t0);
             let t0 = std::time::Instant::now();
             metal::try_ar_post_attn(
+                &mut resid,
                 &attn,
                 2,
                 MUSIC3_LM_HIDDEN,
                 &self.post_attn_norm[layer],
-                &post_key,
+                &self.post_attn_norm_key[layer],
                 MUSIC3_LM_RMS_EPS,
                 om,
                 um,
@@ -668,10 +663,11 @@ impl Music3GgufLm {
         }
         let t0 = std::time::Instant::now();
         let hidden = metal::try_ar_final_rms(
+            &mut resid,
             2,
             MUSIC3_LM_HIDDEN,
             &self.final_norm,
-            "model.norm.weight",
+            &self.final_norm_key,
             MUSIC3_LM_RMS_EPS,
         )?;
         perf::add(&perf::RES_FINAL, t0);
@@ -1254,6 +1250,9 @@ struct DitPrepared {
     norm2_b: Vec<Vec<f32>>,
     ff_in_b: Vec<Vec<f32>>,
     ff_out_b: Vec<Vec<f32>>,
+    /// The FFN biases' resident cache keys under the file's owner, made at load.
+    ff_in_b_key: Vec<makepad_ai_common::backend::WeightKey>,
+    ff_out_b_key: Vec<makepad_ai_common::backend::WeightKey>,
     rope_inv_freq: Vec<f32>,
 }
 
@@ -1265,13 +1264,19 @@ impl DitPrepared {
         let mut norm2_b = Vec::new();
         let mut ff_in_b = Vec::new();
         let mut ff_out_b = Vec::new();
+        let mut ff_in_b_key = Vec::new();
+        let mut ff_out_b_key = Vec::new();
         for layer in 0..MUSIC3_DIT_LAYERS {
             norm1_w.push(file.read_f32_any(&format!("transformer_blocks.{layer}.norm1.weight"))?);
             norm1_b.push(file.read_f32_any(&format!("transformer_blocks.{layer}.norm1.bias"))?);
             norm2_w.push(file.read_f32_any(&format!("transformer_blocks.{layer}.norm2.weight"))?);
             norm2_b.push(file.read_f32_any(&format!("transformer_blocks.{layer}.norm2.bias"))?);
-            ff_in_b.push(file.read_f32_any(&format!("transformer_blocks.{layer}.ff_in.bias"))?);
-            ff_out_b.push(file.read_f32_any(&format!("transformer_blocks.{layer}.ff_out.bias"))?);
+            let in_bias = format!("transformer_blocks.{layer}.ff_in.bias");
+            let out_bias = format!("transformer_blocks.{layer}.ff_out.bias");
+            ff_in_b.push(file.read_f32_any(&in_bias)?);
+            ff_out_b.push(file.read_f32_any(&out_bias)?);
+            ff_in_b_key.push(file.owner.key(&in_bias));
+            ff_out_b_key.push(file.owner.key(&out_bias));
         }
         let half = MUSIC3_DIT_ROPE / 2;
         let mut rope_inv_freq = Vec::with_capacity(half);
@@ -1318,6 +1323,8 @@ impl DitPrepared {
             norm2_b,
             ff_in_b,
             ff_out_b,
+            ff_in_b_key,
+            ff_out_b_key,
             rope_inv_freq,
         })
     }
@@ -1732,7 +1739,7 @@ pub fn gguf_generate(
     )?;
     drop(lm);
     drop(rvq);
-    makepad_ai_common::backend::metal::ar_resident_clear();
+    makepad_ai_common::backend::metal::transient_pool_clear();
     pack.language_model.clear_byte_cache();
     pack.rvq.clear_byte_cache();
     let frames = music3_ar_frames(&hiddens);

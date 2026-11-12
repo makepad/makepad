@@ -326,9 +326,9 @@ impl AceTextEncoder {
             .map_err(|e| dev_err("ace te rope cos", e))?;
         let rope_sin = gpu_upload(&device.rope_sin_full[..seq * half], seq, half)
             .map_err(|e| dev_err("ace te rope sin", e))?;
-        let lin = |x: &GpuTensor, w: &TeBf16Weight| gpu_linear_nt_cached_bf16_mm(x, device.owner.namespace(), &[w.part()]);
+        let lin = |x: &GpuTensor, w: &TeBf16Weight| gpu_linear_nt_cached_bf16_mm(x, &device.owner, &[w.part()]);
         let rms = |x: &GpuTensor, group: usize, key: &str, w: &[f32]| -> Result<GpuTensor> {
-            let n = gpu_rms_norm_mul(x, group, device.owner.namespace(), key, w, ACE_RMS_EPS)
+            let n = gpu_rms_norm_mul(x, group, &device.owner, key, w, ACE_RMS_EPS)
                 .map_err(|e| dev_err("ace te rms", e))?;
             gpu_bf16_round(&n).map_err(|e| dev_err("ace te rms rnd", e))
         };

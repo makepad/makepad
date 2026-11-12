@@ -3,6 +3,8 @@
 //! specs and the per-model GEMM precision policy. Dispatch itself
 //! (`try_matmul_nt_*`) stays in the caller that can see both stores.
 
+use crate::WeightOwner;
+
 #[derive(Clone, Copy, Debug)]
 pub struct AffineQuantizedMatmulSpec<'a> {
     pub input_bf16_words: &'a [u16],
@@ -11,7 +13,7 @@ pub struct AffineQuantizedMatmulSpec<'a> {
     pub qparams_per_row: usize,
     pub bits: u32,
     pub group_size: u64,
-    pub cache_namespace: &'a str,
+    pub owner: &'a WeightOwner,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -23,7 +25,7 @@ pub struct AffineQuantizedMatmulRowsSpec<'a> {
     pub qparams_per_row: usize,
     pub bits: u32,
     pub group_size: u64,
-    pub cache_namespace: &'a str,
+    pub owner: &'a WeightOwner,
 }
 
 /// Per-model precision policy for the generic dense-linear path.

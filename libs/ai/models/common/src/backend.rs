@@ -8,7 +8,7 @@ pub use crate::gpu as cuda;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use makepad_ai_cuda::llm_ops;
 pub use makepad_ai_loader::prof;
-pub use makepad_ai_loader::WeightOwner;
+pub use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
 
 pub mod metal {
@@ -110,19 +110,19 @@ pub use crate::gpu::{
     gpu_quant_linear_type_supported,
     gpu_release_cached, gpu_runtime_trim, gpu_set_blocking_sync, gpu_memory_info, gpu_device_reset, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
     gpu_weight_cache_ensure_quant, gpu_weight_cache_ensure_bf16_keyed,
-    gpu_weight_cache_evict_prefix, gpu_weight_cache_evict_prefix_if_loaded,
-    gpu_weight_cache_protect_prefixes,
+    gpu_weight_cache_evict_owner, gpu_weight_cache_evict_keys, gpu_weight_cache_evict_all_if_loaded,
+    gpu_weight_cache_protect,
     gpu_upsample_nearest2x, GemmPrecision, GpuBf16Buf, GpuLinearPart, GpuPerfStats, GpuStepGraph, GpuTensor,
 };
 
-/// Resident weight entries and bytes for an owner prefix on the active backend.
-pub fn gpu_weight_cache_resident(prefix: &str) -> std::result::Result<(usize, usize), String> {
+/// Resident weight entries and bytes for a non-owning owner trace on the active backend.
+pub fn gpu_weight_cache_resident(owner: &WeightOwnerTrace) -> std::result::Result<(usize, usize), String> {
     #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
-    { return makepad_ai_cuda::launch::gpu_weight_cache_resident(prefix); }
+    { return makepad_ai_cuda::launch::gpu_weight_cache_resident(owner); }
     #[cfg(target_os = "macos")]
-    { return makepad_ai_metal::gpu_tensor::resident_weights(prefix); }
+    { return makepad_ai_metal::gpu_tensor::resident_weights(owner); }
     #[cfg(not(any(target_os = "macos", all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))))]
-    { let _ = prefix; Ok((0, 0)) }
+    { let _ = owner; Ok((0, 0)) }
 }
 
 pub type GraphSession = MetalGraphSession;
@@ -385,19 +385,15 @@ impl DeviceGraphSession {
     }
 }
 
-/// Release model-owned dense CUDA weight namespaces plus every reusable
-/// activation/scratch buffer on the current thread. Teardown is deliberately
-/// conditional: a cold/CPU backend never initializes CUDA just to unload.
-/// All prefixes are attempted before an error is returned so one bad release
-/// cannot strand the remaining model namespaces.
-pub fn release_gpu_runtime_namespaces(prefixes: &[&str]) -> Result<usize> {
+/// Release every dense CUDA weight and reusable activation/scratch buffer on this thread.
+/// A cold/CPU backend never initializes CUDA just to unload. Eviction and trim
+/// are both attempted and their errors are collected.
+pub fn release_gpu_runtime_all() -> Result<usize> {
     let mut released = 0usize;
     let mut errors = Vec::new();
-    for prefix in prefixes {
-        match gpu_weight_cache_evict_prefix_if_loaded(prefix) {
-            Ok(count) => released += count,
-            Err(error) => errors.push(format!("evict {prefix:?}: {error}")),
-        }
+    match gpu_weight_cache_evict_all_if_loaded() {
+        Ok(count) => released += count,
+        Err(error) => errors.push(format!("evict all weights: {error}")),
     }
     if let Err(error) = gpu_runtime_trim() {
         errors.push(format!("trim CUDA scratch: {error}"));

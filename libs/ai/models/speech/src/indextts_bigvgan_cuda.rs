@@ -64,7 +64,7 @@ pub(crate) fn f32_to_f16_bytes(values: &[f32]) -> Vec<u8> {
 }
 
 pub(crate) fn ensure_weight(
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     key: &str,
     w: &[f32],
     out_dim: usize,
@@ -74,7 +74,7 @@ pub(crate) fn ensure_weight(
     // Same ::a16 cache-key rule as the s2mel path: rows > 1 GEMMs look up
     // with the f16acc suffix exactly when f16acc gemms are enabled.
     let want_a16 = gpu_gemm_f16acc_enabled();
-    gpu_weight_cache_ensure(ns, key, GGML_TYPE_F16, out_dim, in_dim, want_a16, || {
+    gpu_weight_cache_ensure(owner, key, GGML_TYPE_F16, out_dim, in_dim, want_a16, || {
         Ok(f32_to_f16_bytes(w))
     })
     .map_err(gm)
@@ -82,7 +82,7 @@ pub(crate) fn ensure_weight(
 
 pub(crate) fn lin(
     x: &GpuTensor,
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     key: &str,
     n: usize,
     bias: &[f32],
@@ -93,7 +93,7 @@ pub(crate) fn lin(
         cache_key: key,
         bytes: &[],
     }];
-    gpu_linear_nt_cached(x, ns, &parts, bias).map_err(gm)
+    gpu_linear_nt_cached(x, owner, &parts, bias).map_err(gm)
 }
 
 /// Conv1d weight `(out, in, k)` packed to GEMM rows `[out, k*in]` kk-major,
@@ -253,9 +253,8 @@ pub struct BigVganCudaSession {
 impl BigVganCudaSession {
     pub fn new(model: &IndexTtsBigVgan) -> Result<Self> {
         let owner = WeightOwner::new("indextts-bigvgan");
-        let ns = owner.namespace();
         ensure_weight(
-            ns,
+            &owner,
             "conv_pre",
             &pack_conv1d(&model.conv_pre),
             model.conv_pre.out_ch,
@@ -269,7 +268,7 @@ impl BigVganCudaSession {
             let scale = if i == 0 { 1.0 } else { inv_mean };
             for r in 0..stage.up.stride {
                 ensure_weight(
-                    ns,
+                    &owner,
                     &format!("ups{i}.ph{r}"),
                     &pack_convt_phase(&stage.up, r, scale),
                     stage.up.out_ch,
@@ -279,7 +278,7 @@ impl BigVganCudaSession {
             for (b, block) in stage.blocks.iter().enumerate() {
                 for (j, conv) in block.convs1.iter().enumerate() {
                     ensure_weight(
-                        ns,
+                        &owner,
                         &format!("rb{i}.{b}.c1.{j}"),
                         &pack_conv1d(conv),
                         conv.out_ch,
@@ -288,7 +287,7 @@ impl BigVganCudaSession {
                 }
                 for (j, conv) in block.convs2.iter().enumerate() {
                     ensure_weight(
-                        ns,
+                        &owner,
                         &format!("rb{i}.{b}.c2.{j}"),
                         &pack_conv1d(conv),
                         conv.out_ch,
@@ -298,7 +297,7 @@ impl BigVganCudaSession {
             }
         }
         ensure_weight(
-            ns,
+            &owner,
             "conv_post",
             &pack_conv1d(&model.conv_post),
             model.conv_post.out_ch,
@@ -348,7 +347,7 @@ impl BigVganCudaSession {
             &mel_rows,
             &idx.conv_pre,
             &idx.zero[&model.conv_pre.in_ch],
-            self.owner.namespace(),
+            &self.owner,
             "conv_pre",
             model.conv_pre.out_ch,
             &model.conv_pre.bias,
@@ -356,10 +355,10 @@ impl BigVganCudaSession {
 
         let inv_mean = 1.0 / model.num_kernels as f32;
         for (i, stage) in model.stages.iter().enumerate() {
-            let up = convt_gemm(self.owner.namespace(), &hidden, stage, i, idx)?;
+            let up = convt_gemm(&self.owner, &hidden, stage, i, idx)?;
             let mut sum: Option<GpuTensor> = None;
             for (b, block) in stage.blocks.iter().enumerate() {
-                let out = amp_block(self.owner.namespace(), &up, block, i, b, idx, threads)?;
+                let out = amp_block(&self.owner, &up, block, i, b, idx, threads)?;
                 sum = Some(match sum {
                     None => out,
                     Some(acc) => gpu_add(&acc, &out).map_err(gm)?,
@@ -374,7 +373,7 @@ impl BigVganCudaSession {
             &post,
             &idx.conv_post,
             &idx.zero[&model.conv_post.in_ch],
-            self.owner.namespace(),
+            &self.owner,
             "conv_post",
             model.conv_post.out_ch,
             &model.conv_post.bias,
@@ -394,7 +393,7 @@ pub(crate) fn conv_gemm(
     x: &GpuTensor,
     taps: &[GpuTensor],
     zero: &GpuTensor,
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     key: &str,
     out_ch: usize,
     bias: &[f32],
@@ -406,13 +405,13 @@ pub(crate) fn conv_gemm(
     }
     let refs: Vec<&GpuTensor> = gathered.iter().collect();
     let cols = gpu_concat_cols(&refs).map_err(gm)?;
-    lin(&cols, ns, key, out_ch, bias)
+    lin(&cols, owner, key, out_ch, bias)
 }
 
 /// Polyphase transposed conv: shared 3-offset gather, per-phase GEMMs,
 /// stack + interleave back to `[s*t, out_ch]`.
 fn convt_gemm(
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     stage: &UpStage,
     stage_index: usize,
@@ -428,7 +427,7 @@ fn convt_gemm(
     let cols = gpu_concat_cols(&refs).map_err(gm)?;
     let mut stacked: Option<GpuTensor> = None;
     for r in 0..up.stride {
-        let phase = lin(&cols, ns, &format!("ups{stage_index}.ph{r}"), up.out_ch, &up.bias)?;
+        let phase = lin(&cols, owner, &format!("ups{stage_index}.ph{r}"), up.out_ch, &up.bias)?;
         stacked = Some(match stacked {
             None => phase,
             Some(acc) => gpu_concat_rows(&acc, &phase).map_err(gm)?,
@@ -447,7 +446,7 @@ fn convt_gemm(
 /// AMPBlock1 on device: per dilation `x += conv2(act2(conv1(act1(x))))`,
 /// activations through the host.
 fn amp_block(
-    ns: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     block: &AmpBlock,
     stage_index: usize,
@@ -466,7 +465,7 @@ fn amp_block(
             &a1,
             &idx.taps[&(t, c1.k, c1.dilation, c1.padding)],
             &idx.zero[&c1.in_ch],
-            ns,
+            owner,
             &format!("rb{stage_index}.{block_index}.c1.{j}"),
             c1.out_ch,
             &c1.bias,
@@ -477,7 +476,7 @@ fn amp_block(
             &a2,
             &idx.taps[&(t, c2.k, c2.dilation, c2.padding)],
             &idx.zero[&c2.in_ch],
-            ns,
+            owner,
             &format!("rb{stage_index}.{block_index}.c2.{j}"),
             c2.out_ch,
             &c2.bias,

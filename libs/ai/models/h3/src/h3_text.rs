@@ -24,7 +24,7 @@ use crate::backend::{
     gpu_concat_rows, gpu_download, gpu_gelu, gpu_gelu_erf, gpu_layer_norm_mul_add,
     gpu_linear_nt_cached_with_precision, gpu_rms_norm_mul, gpu_rope_half,
     gpu_slice_cols, gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload,
-    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, GemmPrecision, GpuLinearPart,
+    gpu_weight_cache_ensure, gpu_weight_cache_ensure_quant, GemmPrecision, GpuLinearPart, WeightOwner,
     GpuTensor,
 };
 use crate::h3::H3ShardedWeights;
@@ -48,11 +48,11 @@ pub const H3_TE_PRECISION: GemmPrecision = GemmPrecision {
 
 fn linear_launch(
     x: &GpuTensor,
-    cache_namespace: &str,
+    owner: &WeightOwner,
     parts: &[GpuLinearPart<'_>],
     bias: &[f32],
 ) -> std::result::Result<GpuTensor, String> {
-    gpu_linear_nt_cached_with_precision(x, cache_namespace, parts, bias, H3_TE_PRECISION)
+    gpu_linear_nt_cached_with_precision(x, owner, parts, bias, H3_TE_PRECISION)
 }
 
 fn layer_prefix(layer: usize) -> String {
@@ -72,13 +72,13 @@ fn ensure_linear<'a>(
     // scratch.
     let ggml_type = weights.linear_ggml_type(name)?;
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
+        gpu_weight_cache_ensure_quant(weights.owner(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
     } else {
         let want_a16 = H3_TE_PRECISION.f16_accumulate && m > 1;
-        gpu_weight_cache_ensure(weights.cache_namespace(), name, ggml_type, n, k, want_a16, || {
+        gpu_weight_cache_ensure(weights.owner(), name, ggml_type, n, k, want_a16, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -99,7 +99,7 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    linear_launch(x, weights.cache_namespace(), &parts, &[]).map_err(DiffusionError::model)
+    linear_launch(x, weights.owner(), &parts, &[]).map_err(DiffusionError::model)
 }
 
 /// Host-cached per-layer norm scales (small, read once).
@@ -230,7 +230,7 @@ fn text_layer_forward(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_TE_HIDDEN,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.input_layernorm"),
         &prepared.input_norm[layer],
         H3_TE_RMS_EPS,
@@ -252,7 +252,7 @@ fn text_layer_forward(
         && q_part.bt_ggml_type == v_part.bt_ggml_type
     {
         let parts = [q_part, k_part, v_part];
-        let qkv = linear_launch(&normed, weights.cache_namespace(), &parts, &[])
+        let qkv = linear_launch(&normed, weights.owner(), &parts, &[])
             .map_err(DiffusionError::model)?;
         let q = gpu_slice_cols(&qkv, 0, q_inner).map_err(DiffusionError::model)?;
         let k = gpu_slice_cols(&qkv, q_inner, kv_inner).map_err(DiffusionError::model)?;
@@ -261,11 +261,11 @@ fn text_layer_forward(
         drop(qkv);
         (q, k, v)
     } else {
-        let q = linear_launch(&normed, weights.cache_namespace(), &[q_part], &[])
+        let q = linear_launch(&normed, weights.owner(), &[q_part], &[])
             .map_err(DiffusionError::model)?;
-        let k = linear_launch(&normed, weights.cache_namespace(), &[k_part], &[])
+        let k = linear_launch(&normed, weights.owner(), &[k_part], &[])
             .map_err(DiffusionError::model)?;
-        let v = linear_launch(&normed, weights.cache_namespace(), &[v_part], &[])
+        let v = linear_launch(&normed, weights.owner(), &[v_part], &[])
             .map_err(DiffusionError::model)?;
         (q, k, v)
     };
@@ -275,7 +275,7 @@ fn text_layer_forward(
     let q = gpu_rms_norm_mul(
         &q,
         H3_TE_HEAD_DIM,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
         H3_TE_RMS_EPS,
@@ -284,7 +284,7 @@ fn text_layer_forward(
     let k = gpu_rms_norm_mul(
         &k,
         H3_TE_HEAD_DIM,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
         H3_TE_RMS_EPS,
@@ -340,7 +340,7 @@ fn text_layer_forward(
     let normed = gpu_rms_norm_mul(
         &hidden,
         H3_TE_HIDDEN,
-        weights.cache_namespace(),
+        weights.owner(),
         &format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
         H3_TE_RMS_EPS,
@@ -352,7 +352,7 @@ fn text_layer_forward(
         ensure_linear(weights, &up_name, H3_TE_FFN, H3_TE_HIDDEN, n)?,
         ensure_linear(weights, &gate_name, H3_TE_FFN, H3_TE_HIDDEN, n)?,
     ];
-    let up_gate = linear_launch(&normed, weights.cache_namespace(), &parts, &[])
+    let up_gate = linear_launch(&normed, weights.owner(), &parts, &[])
         .map_err(DiffusionError::model)?;
     drop(normed);
     let ff = gpu_swiglu_value_gate(&up_gate).map_err(DiffusionError::model)?;
@@ -657,7 +657,7 @@ fn linear_cached_bias(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     let parts = [part];
-    linear_launch(x, weights.cache_namespace(), &parts, bias).map_err(DiffusionError::model)
+    linear_launch(x, weights.owner(), &parts, bias).map_err(DiffusionError::model)
 }
 
 /// Reinterpret (rows, cols) as (rows/4, cols*4): 4 consecutive block-major
@@ -698,7 +698,7 @@ fn vision_block_forward(
     let qkv_name = vis_name(&format!("{prefix}.attn.qkv.weight"));
     let qkv_part = ensure_linear(weights, &qkv_name, 3 * H3_VIS_HIDDEN, H3_VIS_HIDDEN, seq)?;
     let parts = [qkv_part];
-    let qkv = linear_launch(&normed, weights.cache_namespace(), &parts, &prepared.qkv_bias[block])
+    let qkv = linear_launch(&normed, weights.owner(), &parts, &prepared.qkv_bias[block])
         .map_err(DiffusionError::model)?;
     drop(normed);
     let q = gpu_slice_cols(&qkv, 0, H3_VIS_HIDDEN).map_err(DiffusionError::model)?;

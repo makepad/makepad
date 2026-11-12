@@ -22,7 +22,7 @@ use makepad_diffusion::skin_tokens_tokenizer::{
 };
 use makepad_diffusion::backend::{
     gpu_download, gpu_linear_nt_cached_bf16_mm, gpu_slice_rows, gpu_upload,
-    gpu_weight_cache_ensure, GpuLinearPart,
+    gpu_weight_cache_ensure, GpuLinearPart, WeightOwner,
 };
 use makepad_ai_common::quant::GGML_TYPE_BF16;
 use std::path::Path;
@@ -403,7 +403,7 @@ fn validate_qwen_mm(weights: &SkinTokensWeights, oracle: &Path) -> Result<(), St
         println!("[qwen_mm] SKIP no detailed official operator taps");
         return Ok(());
     }
-    const NAMESPACE: &str = "skin-tokens-qwen-mm-validate";
+    let owner = WeightOwner::new("skin-tokens-qwen-mm-validate");
     let mut failures = Vec::new();
     for (stage, rows) in [("prefill", 514usize), ("first_decode", 10usize)] {
         for (name, input_suffix, output_suffix, weight_name, input_cols, output_cols) in [
@@ -473,7 +473,7 @@ fn validate_qwen_mm(weights: &SkinTokensWeights, oracle: &Path) -> Result<(), St
             };
             let input = load_f32(&oracle.join(input_name), &input_shape)?;
             gpu_weight_cache_ensure(
-                NAMESPACE,
+                &owner,
                 weight_name,
                 GGML_TYPE_BF16,
                 output_cols,
@@ -490,7 +490,7 @@ fn validate_qwen_mm(weights: &SkinTokensWeights, oracle: &Path) -> Result<(), St
             let input = gpu_upload(&input, rows, input_cols)?;
             let native = gpu_download(&gpu_linear_nt_cached_bf16_mm(
                 &input,
-                NAMESPACE,
+                &owner,
                 std::slice::from_ref(&part),
             )?)?;
             let expected = if stage == "prefill" {
@@ -519,7 +519,7 @@ fn validate_qwen_mm(weights: &SkinTokensWeights, oracle: &Path) -> Result<(), St
         )?;
         let weight_name = "transformer.lm_head.weight";
         gpu_weight_cache_ensure(
-            NAMESPACE,
+            &owner,
             weight_name,
             GGML_TYPE_BF16,
             SKIN_TOKENS_VOCAB,
@@ -536,7 +536,7 @@ fn validate_qwen_mm(weights: &SkinTokensWeights, oracle: &Path) -> Result<(), St
         let input = gpu_upload(&input, rows, SKIN_TOKENS_QWEN_WIDTH)?;
         let native = gpu_linear_nt_cached_bf16_mm(
             &input,
-            NAMESPACE,
+            &owner,
             std::slice::from_ref(&part),
         )?;
         let (native, reference) = if stage == "prefill" {

@@ -43,7 +43,7 @@ fn ensure_linear<'a>(
 ) -> Result<GpuLinearPart<'a>> {
     let ggml_type = weights.linear_ggml_type(name);
     if crate::backend::gpu_quant_linear_type_supported(ggml_type) {
-        crate::backend::gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
+        crate::backend::gpu_weight_cache_ensure_quant(weights.owner(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -56,7 +56,7 @@ fn ensure_linear<'a>(
     }
     // Safetensors DiT weights are F32 on disk (converted to bf16 here);
     // GGUF F32/BF16 members take the same length-switched path.
-    gpu_weight_cache_ensure(weights.cache_namespace(), name, GGML_TYPE_BF16, n, k, false, || {
+    gpu_weight_cache_ensure(weights.owner(), name, GGML_TYPE_BF16, n, k, false, || {
         let raw = weights.tensor_bytes(name).map_err(|err| err.to_string())?;
         if raw.len() == n * k * 4 {
             Ok(f32_le_to_bf16(&raw))
@@ -74,16 +74,16 @@ fn ensure_linear<'a>(
 }
 
 fn linear_parts(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     parts: &[GpuLinearPart<'_>],
     bias: &[f32],
 ) -> Result<GpuTensor> {
     if crate::backend::gpu_quant_linear_type_supported(parts[0].bt_ggml_type) {
-        return crate::backend::gpu_linear_nt_cached(x, namespace, parts, bias)
+        return crate::backend::gpu_linear_nt_cached(x, owner, parts, bias)
             .map_err(DiffusionError::model);
     }
-    gpu_linear_nt_cached_bf16_f32acc(x, namespace, parts, bias)
+    gpu_linear_nt_cached_bf16_f32acc(x, owner, parts, bias)
         .map_err(DiffusionError::model)
 }
 
@@ -95,7 +95,7 @@ fn linear(
     bias: &[f32],
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols())?;
-    linear_parts(weights.cache_namespace(), x, &[part], bias)
+    linear_parts(weights.owner(), x, &[part], bias)
 }
 
 pub struct Music3DitPrepared {
@@ -211,7 +211,7 @@ fn block(
         ensure_linear(weights, &k_name, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM)?,
         ensure_linear(weights, &v_name, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM)?,
     ];
-    let qkv = linear_parts(weights.cache_namespace(), &normed, &parts, &[])?;
+    let qkv = linear_parts(weights.owner(), &normed, &parts, &[])?;
     drop(normed);
     let q = gpu_slice_cols(&qkv, 0, MUSIC3_DIT_DIM).map_err(DiffusionError::model)?;
     let k = gpu_slice_cols(&qkv, MUSIC3_DIT_DIM, MUSIC3_DIT_DIM).map_err(DiffusionError::model)?;

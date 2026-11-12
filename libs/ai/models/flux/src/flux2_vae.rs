@@ -345,7 +345,7 @@ fn encode_moments(
     }
     gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
-    let ns = weights.owner.namespace();
+    let ns = &weights.owner;
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&image.data, 3, image.width * image.height)
             .map_err(DiffusionError::model)?,
@@ -463,7 +463,7 @@ pub fn flux2_vae_decode(
     let height = packed.height * 2;
     gpu_pool_phase_end();
     gpu_pool_cap_override(Some(vae_pool_cap_bytes()));
-    let ns = weights.owner.namespace();
+    let ns = &weights.owner;
     let mut hidden = GpuSpatial {
         tensor: gpu_upload(&unpacked, z_channels, width * height).map_err(DiffusionError::model)?,
         width,
@@ -600,7 +600,7 @@ fn banker_u8(unit: f32) -> u8 {
 
 fn conv2d(
     weights: &Flux2VaeWeights,
-    ns: &str,
+    ns: &WeightOwner,
     input: &GpuSpatial,
     weight_name: &str,
     bias_name: &str,
@@ -628,7 +628,7 @@ fn conv2d(
             &input.tensor,
             input.width,
             input.height,
-            &format!("{ns}::{weight_name}"),
+            &ns.key(weight_name),
             kernel.data,
             bias,
             kernel.out_channels,
@@ -660,7 +660,7 @@ fn conv2d(
 
 fn downsample(
     weights: &Flux2VaeWeights,
-    ns: &str,
+    ns: &WeightOwner,
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {
@@ -700,7 +700,7 @@ fn downsample(
 
 fn group_norm(
     weights: &Flux2VaeWeights,
-    ns: &str,
+    ns: &WeightOwner,
     input: &GpuSpatial,
     weight_name: &str,
     bias_name: &str,
@@ -757,7 +757,7 @@ fn upsample(input: &GpuSpatial) -> Result<GpuSpatial> {
 
 fn resnet(
     weights: &Flux2VaeWeights,
-    ns: &str,
+    ns: &WeightOwner,
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {
@@ -819,7 +819,7 @@ fn resnet(
 
 fn mid_attn(
     weights: &Flux2VaeWeights,
-    ns: &str,
+    ns: &WeightOwner,
     input: &GpuSpatial,
     prefix: &str,
 ) -> Result<GpuSpatial> {

@@ -344,7 +344,7 @@ impl Conv3 {
             self.inputs,
             x.width,
             x.height,
-            self.owner.namespace(),
+            &self.owner,
             &self.key,
             &self.weights,
             self.outputs,
@@ -352,7 +352,7 @@ impl Conv3 {
         .map_err(model_error)?;
         if let Some(bias) = &self.bias {
             // A leaky slope of 1 is a pure bias add.
-            gpu_realesrgan_bias_lrelu_f32(&out, self.owner.namespace(), &format!("{}.bias", self.key), bias, 1.0)
+            gpu_realesrgan_bias_lrelu_f32(&out, &self.owner, &format!("{}.bias", self.key), bias, 1.0)
                 .map_err(model_error)?;
         }
         Ok(Planar {

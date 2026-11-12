@@ -218,7 +218,7 @@ impl DinoLayer {
     ) -> Result<GpuTensor> {
         gpu_linear_nt_cached_bf16_f32acc(
             x,
-            self.owner.namespace(),
+            &self.owner,
             &[GpuLinearPart {
                 bt_ggml_type: GGML_TYPE_BF16,
                 n,
@@ -370,7 +370,7 @@ impl Conv2d {
             &input.tensor,
             input.width,
             input.height,
-            self.owner.namespace(),
+            &self.owner,
             &self.key,
             &self.weights,
             &self.bias,
@@ -448,7 +448,7 @@ impl ConvTransposeNoOverlap {
             input.height,
             self.out_channels,
             self.scale,
-            self.owner.namespace(),
+            &self.owner,
             &self.bias_key,
             &self.bias,
         )

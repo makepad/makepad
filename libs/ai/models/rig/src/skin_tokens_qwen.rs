@@ -137,7 +137,7 @@ fn ensure_linear<'a>(
         &[output_cols as u64, input_cols as u64],
     )?;
     gpu_weight_cache_ensure(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         name,
         GGML_TYPE_BF16,
         output_cols,
@@ -162,7 +162,7 @@ fn linear_bf16(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, output_cols, input.cols())?;
     let output =
-        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_cache_namespace(), &[part], &[])
+        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_owner(), &[part], &[])
             .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
@@ -183,7 +183,7 @@ fn qkv_bf16(
         ensure_linear(weights, &v_name, kv_width, input.cols())?,
     ];
     let projected =
-        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_cache_namespace(), &parts, &[])
+        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_owner(), &parts, &[])
             .map_err(DiffusionError::model)?;
     let projected = gpu_bf16_round(&projected).map_err(DiffusionError::model)?;
     let q = gpu_slice_cols(&projected, 0, q_width).map_err(DiffusionError::model)?;
@@ -205,13 +205,13 @@ fn up_gate_bf16(
         ensure_linear(weights, &gate_name, SKIN_TOKENS_QWEN_FFN, input.cols())?,
     ];
     let output =
-        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_cache_namespace(), &parts, &[])
+        gpu_linear_nt_cached_bf16_f32acc(input, weights.qwen_owner(), &parts, &[])
             .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
 
 fn norm_bf16(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
@@ -220,7 +220,7 @@ fn norm_bf16(
     gpu_rms_norm_mul_bf16(
         input,
         group_cols,
-        namespace,
+        owner,
         cache_key,
         scale,
         SKIN_TOKENS_QWEN_RMS_EPS,
@@ -667,7 +667,7 @@ fn skin_tokens_qwen_decode_step_inner(
         });
     }
     let hidden = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         "transformer.model.norm",
@@ -828,7 +828,7 @@ fn skin_tokens_qwen_decode_beams_inner(
         });
     }
     let hidden = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         "transformer.model.norm",
@@ -1528,7 +1528,7 @@ pub fn skin_tokens_qwen_projection_tap(
         .map_err(DiffusionError::model)?;
     let prefix = layer_prefix(0);
     let input_norm = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.input_layernorm"),
@@ -1537,14 +1537,14 @@ pub fn skin_tokens_qwen_projection_tap(
     let (query_projected, key_projected, value_projected) =
         qkv_bf16(weights, &input_norm, &prefix)?;
     let query_normalized = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &query_projected,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[0],
     )?;
     let key_normalized = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &key_projected,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.k_norm"),
@@ -1669,7 +1669,7 @@ fn skin_tokens_qwen_prefill_hidden_inner(
     }
 
     let hidden = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         "transformer.model.norm",
@@ -1712,7 +1712,7 @@ fn qwen_prefill_layer(
 ) -> Result<LayerOutput> {
     let prefix = layer_prefix(layer);
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.input_layernorm"),
@@ -1721,14 +1721,14 @@ fn qwen_prefill_layer(
 
     let (q, key, value) = qkv_bf16(weights, &normed, &prefix)?;
     let q = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &q,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let key = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &key,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.k_norm"),
@@ -1770,7 +1770,7 @@ fn qwen_prefill_layer(
     let residual = gpu_add_bf16(&hidden, &attention).map_err(DiffusionError::model)?;
 
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &residual,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.post_attention_layernorm"),
@@ -1809,7 +1809,7 @@ fn qwen_decode_layer(
         )));
     }
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.input_layernorm"),
@@ -1817,14 +1817,14 @@ fn qwen_decode_layer(
     )?;
     let (q, key_step, value_step) = qkv_bf16(weights, &normed, &prefix)?;
     let q = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &q,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let key_step = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &key_step,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.k_norm"),
@@ -1866,7 +1866,7 @@ fn qwen_decode_layer(
     )?;
     let residual = gpu_add_bf16(&hidden, &attention).map_err(DiffusionError::model)?;
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &residual,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.post_attention_layernorm"),
@@ -1912,7 +1912,7 @@ fn qwen_decode_beam_layer(
         )));
     }
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &hidden,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.input_layernorm"),
@@ -1940,14 +1940,14 @@ fn qwen_decode_beam_layer(
         Vec::new()
     };
     let q = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &q,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let key_step = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &key_step,
         SKIN_TOKENS_QWEN_HEAD_DIM,
         &format!("{prefix}.self_attn.k_norm"),
@@ -2029,7 +2029,7 @@ fn qwen_decode_beam_layer(
         Vec::new()
     };
     let normed = norm_bf16(
-        weights.qwen_cache_namespace(),
+        weights.qwen_owner(),
         &residual,
         SKIN_TOKENS_QWEN_WIDTH,
         &format!("{prefix}.post_attention_layernorm"),

@@ -63,10 +63,10 @@ fn check_bias(n: usize, bias: Option<&[f32]>) -> Result<()> {
 }
 
 /// Puts the f16 weight `name` (`[n, k]`, rounded to nearest even like torch
-/// `.half()`) in the device weight cache as `namespace::name`, reading it from
+/// `.half()`) in the device weight cache as `owner::name`, reading it from
 /// `source` only when the cache does not hold it.
-fn ensure_f16(namespace: &str, source: &SplatWeights, name: &str, n: usize, k: usize) -> Result<()> {
-    gpu_weight_cache_ensure(namespace, name, GGML_TYPE_F16, n, k, false, || {
+fn ensure_f16(owner: &makepad_ai_common::backend::WeightOwner, source: &SplatWeights, name: &str, n: usize, k: usize) -> Result<()> {
+    gpu_weight_cache_ensure(owner, name, GGML_TYPE_F16, n, k, false, || {
         let values = source.f32_shaped(name, &[n, k]).map_err(|err| err.to_string())?;
         let mut bytes = Vec::with_capacity(values.len() * 2);
         for value in values {
@@ -244,7 +244,7 @@ impl Lin {
             return Self::new(device, &source.f32_shaped(name, &[n, k])?, n, k, bias);
         }
         check_bias(n, bias)?;
-        ensure_f16(owner.namespace(), source, name, n, k)?;
+        ensure_f16(&owner, source, name, n, k)?;
         Ok(Self {
             n,
             k,
@@ -301,9 +301,9 @@ pub fn linear(x: &Ten, lin: &Lin) -> Result<Ten> {
             Ok(Ten::from_gpu(out))
         }
         (Inner::Gpu(tensor), LinWeight::F16 { owner, key, source, bias }) => {
-            ensure_f16(owner.namespace(), source, key, lin.n, lin.k)?;
-            let part = GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: lin.n, cache_key: key, bytes: &[] };
-            let out = gpu_linear_nt_cached_with_precision(tensor, owner.namespace(), &[part], bias, F16_OPERANDS)
+            ensure_f16(&owner, source, key, lin.n, lin.k)?;
+            let part = GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: lin.n, cache_key: key.as_str(), bytes: &[] };
+            let out = gpu_linear_nt_cached_with_precision(tensor, &owner, &[part], bias, F16_OPERANDS)
                 .map_err(model_err)?;
             Ok(Ten::from_gpu(out))
         }
@@ -466,15 +466,15 @@ pub fn host_gelu_tanh(x: f32) -> f32 {
 /// `MultiHeadRMSNorm`: `F.normalize(x, dim=-1) * gamma * sqrt(head_dim)`,
 /// which is exactly an eps-free RMS norm scaled by `gamma`. `gamma` is
 /// `(heads, head_dim)` row-major.
-/// `cache_namespace`/`cache_key` name the DEVICE-CACHED copy of `gamma`. The
-/// shared kernel uploads the vector once under `{namespace}::{key}::rmsph`
+/// `owner`/`cache_key` name the DEVICE-CACHED copy of `gamma`. The
+/// shared kernel uploads the vector once under `{owner}::{key}::rmsph`
 /// and reuses it forever, so two different gammas must never share a key.
 pub fn rms_norm_per_head(
     x: &Ten,
     heads: usize,
     head_dim: usize,
     gamma: &[f32],
-    cache_namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     cache_key: &str,
 ) -> Result<Ten> {
     if x.cols != heads * head_dim || gamma.len() != heads * head_dim {
@@ -506,7 +506,7 @@ pub fn rms_norm_per_head(
                 tensor,
                 heads,
                 head_dim,
-                cache_namespace,
+                owner,
                 cache_key,
                 gamma,
                 0.0,
@@ -820,17 +820,18 @@ mod tests {
 
     #[test]
     fn rms_norm_per_head_is_l2_normalize_times_gamma_times_sqrt_dim() {
+        let owner = WeightOwner::new("splat-rms-test");
         // One head, dim 4, x = [1,1,1,1] -> ||x|| = 2, normalize -> 0.5 each,
         // * sqrt(4) = 2 -> 1.0 each, * gamma.
         let x = ten(&[1.0, 1.0, 1.0, 1.0], 1, 4);
-        let out = rms_norm_per_head(&x, 1, 4, &[1.0, 2.0, 3.0, 4.0], "test", "a")
+        let out = rms_norm_per_head(&x, 1, 4, &[1.0, 2.0, 3.0, 4.0], &owner, "a")
             .unwrap()
             .to_host()
             .unwrap();
         assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0]);
         // Two heads must normalize independently.
         let x = ten(&[1.0, 0.0, 0.0, 3.0], 1, 4);
-        let out = rms_norm_per_head(&x, 2, 2, &[1.0, 1.0, 1.0, 1.0], "test", "b")
+        let out = rms_norm_per_head(&x, 2, 2, &[1.0, 1.0, 1.0, 1.0], &owner, "b")
             .unwrap()
             .to_host()
             .unwrap();

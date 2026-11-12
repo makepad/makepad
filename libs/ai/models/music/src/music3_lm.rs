@@ -57,12 +57,12 @@ fn ensure_linear<'a>(
     if gpu_quant_linear_type_supported(ggml_type) {
         // Q4_0 pack: the packed block stream stays resident; the gemm
         // bulk-dequantizes into bf16 scratch (same f32-accumulate contract).
-        gpu_weight_cache_ensure_quant(weights.cache_namespace(), name, ggml_type, n, k, || {
+        gpu_weight_cache_ensure_quant(weights.owner(), name, ggml_type, n, k, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
     } else {
-        gpu_weight_cache_ensure(weights.cache_namespace(), name, ggml_type, n, k, false, || {
+        gpu_weight_cache_ensure(weights.owner(), name, ggml_type, n, k, false, || {
             weights.tensor_bytes(name).map_err(|err| err.to_string())
         })
         .map_err(DiffusionError::model)?;
@@ -83,14 +83,14 @@ fn linear_cached(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     if gpu_quant_linear_type_supported(part.bt_ggml_type) {
-        return gpu_linear_nt_cached(x, weights.cache_namespace(), &[part], &[])
+        return gpu_linear_nt_cached(x, weights.owner(), &[part], &[])
             .map_err(DiffusionError::model);
     }
     if official_py() {
-        return gpu_linear_nt_cached_bf16_mm(x, weights.cache_namespace(), &[part])
+        return gpu_linear_nt_cached_bf16_mm(x, weights.owner(), &[part])
             .map_err(DiffusionError::model);
     }
-    gpu_linear_nt_cached_bf16_f32acc(x, weights.cache_namespace(), &[part], &[])
+    gpu_linear_nt_cached_bf16_f32acc(x, weights.owner(), &[part], &[])
         .map_err(DiffusionError::model)
 }
 
@@ -102,14 +102,14 @@ fn linear_qk(
 ) -> Result<GpuTensor> {
     let part = ensure_linear(weights, name, n, x.cols(), x.rows())?;
     if gpu_quant_linear_type_supported(part.bt_ggml_type) {
-        return gpu_linear_nt_cached(x, weights.cache_namespace(), &[part], &[])
+        return gpu_linear_nt_cached(x, weights.owner(), &[part], &[])
             .map_err(DiffusionError::model);
     }
     if qk_official() {
-        return gpu_linear_nt_cached_bf16_mm(x, weights.cache_namespace(), &[part])
+        return gpu_linear_nt_cached_bf16_mm(x, weights.owner(), &[part])
             .map_err(DiffusionError::model);
     }
-    gpu_linear_nt_cached_bf16_f32acc(x, weights.cache_namespace(), &[part], &[])
+    gpu_linear_nt_cached_bf16_f32acc(x, weights.owner(), &[part], &[])
         .map_err(DiffusionError::model)
 }
 
@@ -193,7 +193,7 @@ pub fn music3_mlp_from_attn_resid(
     let hidden = gpu_upload(resid, batch, MUSIC3_LM_HIDDEN).map_err(DiffusionError::model)?;
     let prefix = layer_prefix(layer);
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
@@ -449,12 +449,12 @@ fn music3_rope(
     gpu_rope_half(&x, heads, half, cos, sin).map_err(DiffusionError::model)
 }
 
-fn music3_qk_rms(namespace: &str, x: GpuTensor, cache_key: String, scale: &[f32]) -> Result<GpuTensor> {
+fn music3_qk_rms(owner: &makepad_ai_common::backend::WeightOwner, x: GpuTensor, cache_key: String, scale: &[f32]) -> Result<GpuTensor> {
     if qk_official() {
         return gpu_rms_norm_qwen3(
             &x,
             MUSIC3_LM_HEAD_DIM,
-            namespace,
+            owner,
             &cache_key,
             scale,
             MUSIC3_LM_RMS_EPS,
@@ -464,7 +464,7 @@ fn music3_qk_rms(namespace: &str, x: GpuTensor, cache_key: String, scale: &[f32]
     gpu_rms_norm_mul(
         &x,
         MUSIC3_LM_HEAD_DIM,
-        namespace,
+        owner,
         &cache_key,
         scale,
         MUSIC3_LM_RMS_EPS,
@@ -472,12 +472,12 @@ fn music3_qk_rms(namespace: &str, x: GpuTensor, cache_key: String, scale: &[f32]
     .map_err(DiffusionError::model)
 }
 
-fn music3_hidden_rms(namespace: &str, x: &GpuTensor, cache_key: String, scale: &[f32]) -> Result<GpuTensor> {
+fn music3_hidden_rms(owner: &makepad_ai_common::backend::WeightOwner, x: &GpuTensor, cache_key: String, scale: &[f32]) -> Result<GpuTensor> {
     if official_py() {
         return gpu_rms_norm_qwen3(
             x,
             MUSIC3_LM_HIDDEN,
-            namespace,
+            owner,
             &cache_key,
             scale,
             MUSIC3_LM_RMS_EPS,
@@ -487,7 +487,7 @@ fn music3_hidden_rms(namespace: &str, x: &GpuTensor, cache_key: String, scale: &
     gpu_rms_norm_mul(
         x,
         MUSIC3_LM_HIDDEN,
-        namespace,
+        owner,
         &cache_key,
         scale,
         MUSIC3_LM_RMS_EPS,
@@ -545,7 +545,7 @@ fn layer_forward(
     let mut hidden = hidden;
 
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.input_layernorm"),
         &prepared.input_norm[layer],
@@ -563,13 +563,13 @@ fn layer_forward(
     // Precise f32 RMS is correct (GPU==CPU 8e-6) but last-token knorm
     // maxabs 0.244 is one bf16 ULP at |x|~92.5; attn must see bf16 q/k.
     let q = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         q,
         format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let k = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         k,
         format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
@@ -632,7 +632,7 @@ fn layer_forward(
     drop(attn);
 
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
@@ -704,7 +704,7 @@ pub fn music3_lm_prefill(
         hidden = out.hidden;
     }
 
-    hidden = music3_hidden_rms(weights.cache_namespace(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
+    hidden = music3_hidden_rms(weights.owner(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
     gpu_download(&hidden).map_err(DiffusionError::model)
 }
 
@@ -726,9 +726,9 @@ pub fn music3_lm_head_last(
     // logit gap 0.077→0.125; tokens still sem[15]/RVQ[12,2]. Revert.
     let part = ensure_linear(weights, "lm_head.weight", MUSIC3_LM_VOCAB, MUSIC3_LM_HIDDEN, 1)?;
     let y = if gpu_quant_linear_type_supported(part.bt_ggml_type) {
-        gpu_linear_nt_cached(&x, weights.cache_namespace(), &[part], &[])
+        gpu_linear_nt_cached(&x, weights.owner(), &[part], &[])
     } else {
-        gpu_linear_nt_cached_bf16_f32acc(&x, weights.cache_namespace(), &[part], &[])
+        gpu_linear_nt_cached_bf16_f32acc(&x, weights.owner(), &[part], &[])
     }
     .map_err(DiffusionError::model)?;
     gpu_download(&y).map_err(DiffusionError::model)
@@ -756,9 +756,9 @@ pub fn music3_lm_head_audio(
     if quant {
         // Q4_0 rows are self-contained block runs, so the head slice stays
         // packed on device just like the full linears.
-        gpu_weight_cache_ensure_quant(weights.cache_namespace(), AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, load)
+        gpu_weight_cache_ensure_quant(weights.owner(), AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, load)
     } else {
-        gpu_weight_cache_ensure(weights.cache_namespace(), AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, false, load)
+        gpu_weight_cache_ensure(weights.owner(), AUDIO_HEAD, ggml_type, n, MUSIC3_LM_HIDDEN, false, load)
     }
     .map_err(DiffusionError::model)?;
     let part = GpuLinearPart {
@@ -768,9 +768,9 @@ pub fn music3_lm_head_audio(
         bytes: &[],
     };
     let y = if quant {
-        gpu_linear_nt_cached(hidden, weights.cache_namespace(), &[part], &[])
+        gpu_linear_nt_cached(hidden, weights.owner(), &[part], &[])
     } else {
-        gpu_linear_nt_cached_bf16_f32acc(hidden, weights.cache_namespace(), &[part], &[])
+        gpu_linear_nt_cached_bf16_f32acc(hidden, weights.owner(), &[part], &[])
     }
     .map_err(DiffusionError::model)?;
     let slim = gpu_download(&y).map_err(DiffusionError::model)?;
@@ -865,7 +865,7 @@ impl Music3LmSession {
             v.push(out.value);
             progress(layer + 1, MUSIC3_LM_LAYERS);
         }
-        hidden = music3_hidden_rms(weights.cache_namespace(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
+        hidden = music3_hidden_rms(weights.owner(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
         let last = gpu_slice_rows(&hidden, n - 1, 1).map_err(DiffusionError::model)?;
         let last = gpu_download(&last).map_err(DiffusionError::model)?;
         Ok((Self { k, v, seq: n }, last))
@@ -919,7 +919,7 @@ impl Music3LmSession {
             v_uncond.push(gpu_slice_rows(&out.value, t, t).map_err(DiffusionError::model)?);
             progress(layer + 1, MUSIC3_LM_LAYERS);
         }
-        hidden = music3_hidden_rms(weights.cache_namespace(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
+        hidden = music3_hidden_rms(weights.owner(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
         let last_c = gpu_download(
             &gpu_slice_rows(&hidden, t - 1, 1).map_err(DiffusionError::model)?,
         )
@@ -985,7 +985,7 @@ impl Music3LmSession {
                 self.seq,
             )?;
         }
-        hidden = music3_hidden_rms(weights.cache_namespace(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
+        hidden = music3_hidden_rms(weights.owner(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
         self.seq += 1;
         gpu_download(&hidden).map_err(DiffusionError::model)
     }
@@ -1031,7 +1031,7 @@ impl Music3LmSession {
                 pos,
             )?;
         }
-        hidden = music3_hidden_rms(weights.cache_namespace(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
+        hidden = music3_hidden_rms(weights.owner(), &hidden, "model.norm".to_string(), &prepared.final_norm)?;
         cond.seq += 1;
         uncond.seq += 1;
         let host = gpu_download(&hidden).map_err(DiffusionError::model)?;
@@ -1089,7 +1089,7 @@ fn decode_layer(
     let kv_inner = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;
     let prefix = layer_prefix(layer);
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.input_layernorm"),
         &prepared.input_norm[layer],
@@ -1102,13 +1102,13 @@ fn decode_layer(
     let v_step = linear_cached(weights, &normed, &v_name, kv_inner)?;
     drop(normed);
     let q = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         q,
         format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let k_step = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         k_step,
         format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
@@ -1146,7 +1146,7 @@ fn decode_layer(
     let hidden = music3_cast_hidden(hidden)?;
     drop(attn);
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],
@@ -1196,7 +1196,7 @@ fn decode_layer_pair(
     let kv_inner = MUSIC3_LM_KV_HEADS * MUSIC3_LM_HEAD_DIM;
     let prefix = layer_prefix(layer);
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.input_layernorm"),
         &prepared.input_norm[layer],
@@ -1209,13 +1209,13 @@ fn decode_layer_pair(
     let v_step = linear_cached(weights, &normed, &v_name, kv_inner)?;
     drop(normed);
     let q = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         q,
         format!("{prefix}.self_attn.q_norm"),
         &prepared.q_norm[layer],
     )?;
     let k_step = music3_qk_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         k_step,
         format!("{prefix}.self_attn.k_norm"),
         &prepared.k_norm[layer],
@@ -1270,7 +1270,7 @@ fn decode_layer_pair(
     let hidden = music3_cast_hidden(hidden)?;
     drop(attn);
     let normed = music3_hidden_rms(
-        weights.cache_namespace(),
+        weights.owner(),
         &hidden,
         format!("{prefix}.post_attention_layernorm"),
         &prepared.post_attn_norm[layer],

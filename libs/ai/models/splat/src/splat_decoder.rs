@@ -100,7 +100,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.q_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.q_rms_norm", self.name),
         )?;
         let attn = attention(&q, &kv.0, &kv.1, heads, scale)?;
@@ -120,7 +120,7 @@ impl CrossAttn {
             heads,
             head_dim,
             &self.k_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.k_rms_norm", self.name),
         )?;
         Ok((k, v))
@@ -185,7 +185,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.q_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.q_rms_norm", self.name),
         )?;
         let k = rms_norm_per_head(
@@ -193,7 +193,7 @@ impl SelfAttn {
             heads,
             head_dim,
             &self.k_norm,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{}.k_rms_norm", self.name),
         )?;
         let attn = attention(&q, &k, &v, heads, scale)?;

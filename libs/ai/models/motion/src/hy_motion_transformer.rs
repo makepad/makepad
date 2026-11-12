@@ -193,7 +193,7 @@ impl HyMotionDeviceWeights {
         gpu_rms_norm_mul(
             input,
             HY_MOTION_HEAD_DIM,
-            self.owner.namespace(),
+            &self.owner,
             weight_name,
             self.vector(weight_name)?,
             HY_MOTION_NORM_EPS,

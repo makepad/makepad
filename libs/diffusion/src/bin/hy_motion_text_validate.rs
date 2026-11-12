@@ -322,7 +322,7 @@ fn run() -> Result<(), String> {
         // full-f32 DiT is uploaded, then measure the resulting trajectory.
         let evict_started = Instant::now();
         let (evicted, _) =
-            makepad_diffusion::backend::gpu_weight_cache_resident(prepared.cache_namespace())
+            makepad_diffusion::backend::gpu_weight_cache_resident(&prepared.owner().trace())
                 .map_err(|error| error.to_string())?;
         drop(prepared);
         makepad_diffusion::backend::gpu_pool_clear();

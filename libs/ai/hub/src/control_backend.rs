@@ -403,7 +403,7 @@ mod control_worker {
             None => 0,
         };
         let (residual, trouble) =
-            match makepad_ai_common::backend::release_gpu_runtime_namespaces(&[""]) {
+            match makepad_ai_common::backend::release_gpu_runtime_all() {
                 Ok(count) => (count, String::new()),
                 Err(error) => (0, format!(", release error: {error}")),
             };

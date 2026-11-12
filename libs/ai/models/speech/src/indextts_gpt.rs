@@ -1311,8 +1311,8 @@ fn gm(error: String) -> DiffusionError {
 
 /// Weight-cached bf16 linear with the torch addmm bias epilogue. The weight
 /// converts f32 -> bf16 once (round-to-nearest-even) into the device cache.
-fn gpt_linear_gpu(ns: &str, x: &GpuTensor, key: &str, lin: &Lin) -> Result<GpuTensor> {
-    gpu_weight_cache_ensure(ns, key, GGML_TYPE_BF16, lin.o, lin.i, false, || {
+fn gpt_linear_gpu(owner: &makepad_ai_common::backend::WeightOwner, x: &GpuTensor, key: &str, lin: &Lin) -> Result<GpuTensor> {
+    gpu_weight_cache_ensure(owner, key, GGML_TYPE_BF16, lin.o, lin.i, false, || {
         Ok(f32_to_bf16_bytes(&lin.w))
     })
     .map_err(gm)?;
@@ -1326,7 +1326,7 @@ fn gpt_linear_gpu(ns: &str, x: &GpuTensor, key: &str, lin: &Lin) -> Result<GpuTe
         .b
         .as_deref()
         .ok_or_else(|| DiffusionError::model(format!("gpt cuda: linear {key} has no bias")))?;
-    gpu_linear_nt_cached_bf16_bias_epilogue(x, ns, &[part], bias).map_err(gm)
+    gpu_linear_nt_cached_bf16_bias_epilogue(x, owner, &[part], bias).map_err(gm)
 }
 
 fn gpt_norm_gpu(x: &GpuTensor, norm: &Norm) -> Result<GpuTensor> {
@@ -1338,7 +1338,7 @@ impl IndexTtsGpt {
     fn lm_head_gpu(&self, hidden: &GpuTensor) -> Result<Vec<f32>> {
         let normed = gpt_norm_gpu(hidden, &self.ln_f)?;
         let normed = gpt_norm_gpu(&normed, &self.final_norm)?;
-        let logits = gpt_linear_gpu(self.owner.namespace(), &normed, "mel_head", &self.mel_head)?;
+        let logits = gpt_linear_gpu(&self.owner, &normed, "mel_head", &self.mel_head)?;
         gpu_download(&logits).map_err(gm)
     }
 
@@ -1363,18 +1363,18 @@ impl IndexTtsGpt {
         let mut v_cache = Vec::with_capacity(GPT_LAYERS);
         for (li, blk) in self.blocks.iter().enumerate() {
             let xn = gpt_norm_gpu(&h, &blk.ln_1)?;
-            let qkv = gpt_linear_gpu(self.owner.namespace(), &xn, &format!("h{li}.c_attn"), &blk.c_attn)?;
+            let qkv = gpt_linear_gpu(&self.owner, &xn, &format!("h{li}.c_attn"), &blk.c_attn)?;
             let q = gpu_slice_cols(&qkv, 0, d).map_err(gm)?;
             let k = gpu_slice_cols(&qkv, d, d).map_err(gm)?;
             let v = gpu_slice_cols(&qkv, 2 * d, d).map_err(gm)?;
             let ctx = gpu_attention_packed_causal_bf16(&q, &k, &v, GPT_HEADS, scale).map_err(gm)?;
             let ctx = gpu_bf16_round(&ctx).map_err(gm)?;
-            let proj = gpt_linear_gpu(self.owner.namespace(), &ctx, &format!("h{li}.attn_proj"), &blk.attn_proj)?;
+            let proj = gpt_linear_gpu(&self.owner, &ctx, &format!("h{li}.attn_proj"), &blk.attn_proj)?;
             h = gpu_add_bf16(&h, &proj).map_err(gm)?;
             let x2 = gpt_norm_gpu(&h, &blk.ln_2)?;
-            let fc = gpt_linear_gpu(self.owner.namespace(), &x2, &format!("h{li}.c_fc"), &blk.c_fc)?;
+            let fc = gpt_linear_gpu(&self.owner, &x2, &format!("h{li}.c_fc"), &blk.c_fc)?;
             let fc = gpu_gelu(&fc).map_err(gm)?;
-            let mp = gpt_linear_gpu(self.owner.namespace(), &fc, &format!("h{li}.mlp_proj"), &blk.mlp_proj)?;
+            let mp = gpt_linear_gpu(&self.owner, &fc, &format!("h{li}.mlp_proj"), &blk.mlp_proj)?;
             h = gpu_add_bf16(&h, &mp).map_err(gm)?;
             k_cache.push(k);
             v_cache.push(v);
@@ -1446,7 +1446,7 @@ impl GptCudaSession<'_> {
         let scale = 1.0 / (HEAD_DIM as f32).sqrt();
         for (li, blk) in self.gpt.blocks.iter().enumerate() {
             let xn = gpt_norm_gpu(&h, &blk.ln_1)?;
-            let qkv = gpt_linear_gpu(self.gpt.owner.namespace(), &xn, &format!("h{li}.c_attn"), &blk.c_attn)?;
+            let qkv = gpt_linear_gpu(&self.gpt.owner, &xn, &format!("h{li}.c_attn"), &blk.c_attn)?;
             let q = gpu_slice_cols(&qkv, 0, d).map_err(gm)?;
             let k_step = gpu_slice_cols(&qkv, d, d).map_err(gm)?;
             let v_step = gpu_slice_cols(&qkv, 2 * d, d).map_err(gm)?;
@@ -1457,12 +1457,12 @@ impl GptCudaSession<'_> {
             let ctx =
                 gpu_attention_gqa_decode_bf16(&q, &k, &v, GPT_HEADS, GPT_HEADS, scale).map_err(gm)?;
             let ctx = gpu_bf16_round(&ctx).map_err(gm)?;
-            let proj = gpt_linear_gpu(self.gpt.owner.namespace(), &ctx, &format!("h{li}.attn_proj"), &blk.attn_proj)?;
+            let proj = gpt_linear_gpu(&self.gpt.owner, &ctx, &format!("h{li}.attn_proj"), &blk.attn_proj)?;
             h = gpu_add_bf16(&h, &proj).map_err(gm)?;
             let x2 = gpt_norm_gpu(&h, &blk.ln_2)?;
-            let fc = gpt_linear_gpu(self.gpt.owner.namespace(), &x2, &format!("h{li}.c_fc"), &blk.c_fc)?;
+            let fc = gpt_linear_gpu(&self.gpt.owner, &x2, &format!("h{li}.c_fc"), &blk.c_fc)?;
             let fc = gpu_gelu(&fc).map_err(gm)?;
-            let mp = gpt_linear_gpu(self.gpt.owner.namespace(), &fc, &format!("h{li}.mlp_proj"), &blk.mlp_proj)?;
+            let mp = gpt_linear_gpu(&self.gpt.owner, &fc, &format!("h{li}.mlp_proj"), &blk.mlp_proj)?;
             h = gpu_add_bf16(&h, &mp).map_err(gm)?;
             self.k_cache[li] = k;
             self.v_cache[li] = v;

@@ -192,7 +192,7 @@ impl CantorDit {
         let owner = WeightOwner::new("cantor-dit");
         for (name, t) in params.names.iter().zip(&params.vals) {
             if t.rows > 1 && t.cols > 1 && !name.starts_with("voice.") && !name.starts_with("enc.") && !name.ends_with(".dw") && name != "mel_basis" {
-                g::gpu_weight_cache_ensure(owner.namespace(), name, GGML_TYPE_F16, t.rows, t.cols, false, || Ok(f16_bytes(&t.data))).map_err(ge)?;
+                g::gpu_weight_cache_ensure(&owner, name, GGML_TYPE_F16, t.rows, t.cols, false, || Ok(f16_bytes(&t.data))).map_err(ge)?;
             }
         }
         let mut res = HashMap::new();
@@ -247,13 +247,13 @@ impl CantorDit {
     fn lin(&self, x: &GpuTensor, name: &str) -> Result<GpuTensor, String> {
         let n = self.params.get(name).rows;
         let part = GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n, cache_key: name, bytes: &[] };
-        g::gpu_linear_nt_cached_with_precision(x, self.owner.namespace(), &[part], self.bias(name), PRECISION).map_err(ge)
+        g::gpu_linear_nt_cached_with_precision(x, &self.owner, &[part], self.bias(name), PRECISION).map_err(ge)
     }
 
     /// Several bias-free weights side by side (`[x W1^T | x W2^T ..]`).
     fn lin_parts(&self, x: &GpuTensor, names: &[&str]) -> Result<GpuTensor, String> {
-        let parts: Vec<GpuLinearPart<'_>> = names.iter().map(|n| GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: self.params.get(n).rows, cache_key: n, bytes: &[] }).collect();
-        g::gpu_linear_nt_cached_with_precision(x, self.owner.namespace(), &parts, &[], PRECISION).map_err(ge)
+        let parts: Vec<GpuLinearPart<'_>> = names.iter().map(|&n| GpuLinearPart { bt_ggml_type: GGML_TYPE_F16, n: self.params.get(n).rows, cache_key: n, bytes: &[] }).collect();
+        g::gpu_linear_nt_cached_with_precision(x, &self.owner, &parts, &[], PRECISION).map_err(ge)
     }
 
     /// Linear, SiLU, linear (`<name>.0`, `<name>.2`).

@@ -478,7 +478,7 @@ fn run(dump: &Path, models: &Path, stage: &str, gates: &mut Gates) -> Result<(),
                 "te.prompt_embeds",
                 compare("te.prompt_embeds", &hidden, &reference),
             );
-            let ns = weights.cache_namespace().to_string();
+            let ns = weights.owner().trace();
             let (freed, _) = makepad_diffusion::backend::gpu_weight_cache_resident(&ns)?;
             drop(prepared);
             drop(weights);

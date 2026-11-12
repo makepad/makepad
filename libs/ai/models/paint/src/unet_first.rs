@@ -281,7 +281,7 @@ impl UnetFirst {
         if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
-                self.owner.namespace(),
+                &self.owner,
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_F16,
                     n: lin.n,
@@ -293,7 +293,7 @@ impl UnetFirst {
         } else {
             gpu_linear_nt_cached(
                 x,
-                self.owner.namespace(),
+                &self.owner,
                 &[GpuLinearPart {
                     bt_ggml_type: GGML_TYPE_F16,
                     n: lin.n,
@@ -327,7 +327,7 @@ impl UnetFirst {
         let qkv = if x.is_half() {
             gpu_linear_nt_cached_f16(
                 x,
-                self.owner.namespace(),
+                &self.owner,
                 &[
                     GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F16,
@@ -353,7 +353,7 @@ impl UnetFirst {
         } else {
             gpu_linear_nt_cached(
                 x,
-                self.owner.namespace(),
+                &self.owner,
                 &[
                     GpuLinearPart {
                         bt_ggml_type: GGML_TYPE_F16,
@@ -545,7 +545,7 @@ impl UnetFirst {
             x,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             prefix,
             &weight.data,
             &bias.data,
@@ -600,7 +600,7 @@ impl UnetFirst {
                 height,
                 xs.len(),
                 GN_GROUPS,
-                self.owner.namespace(),
+                &self.owner,
                 prefix,
                 gamma,
                 beta,
@@ -618,7 +618,7 @@ impl UnetFirst {
                     width,
                     height,
                     GN_GROUPS,
-                    self.owner.namespace(),
+                    &self.owner,
                     prefix,
                     gamma,
                     beta,
@@ -684,7 +684,7 @@ impl UnetFirst {
                 height,
                 y.len(),
                 GN_GROUPS,
-                self.owner.namespace(),
+                &self.owner,
                 &format!("{prefix}.norm2"),
                 &n2w.data,
                 &n2b.data,
@@ -703,7 +703,7 @@ impl UnetFirst {
                     width,
                     height,
                     GN_GROUPS,
-                    self.owner.namespace(),
+                    &self.owner,
                     &format!("{prefix}.norm2"),
                     &n2w.data,
                     &n2b.data,
@@ -741,7 +741,7 @@ impl UnetFirst {
             x.w,
             x.h,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             prefix,
             gamma,
             beta,
@@ -787,7 +787,7 @@ impl UnetFirst {
             x.h,
             out_w,
             out_h,
-            self.owner.namespace(),
+            &self.owner,
             prefix,
             &weight.data,
             &bias.data,
@@ -1114,7 +1114,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             "unet.conv_norm_out",
             &nw.data,
             &nb.data,
@@ -1146,7 +1146,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             "unet.conv_norm_out",
             &nw.data,
             &nb.data,
@@ -1232,7 +1232,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{prefix}.norm1"),
             &n1w.data,
             &n1b.data,
@@ -1255,7 +1255,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{prefix}.norm2"),
             &n2w.data,
             &n2b.data,
@@ -1320,7 +1320,7 @@ impl UnetFirst {
             height,
             out_w,
             out_h,
-            self.owner.namespace(),
+            &self.owner,
             prefix,
             &weight.data,
             &bias.data,

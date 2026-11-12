@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use makepad_ai_loader::{WeightKey, WeightOwner};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::slice;
@@ -49,7 +50,8 @@ impl AffineMetalBackend {
         })
     }
 
-    fn prepare_scope(&mut self, scope: &str) {
+    fn prepare_scope(&mut self, owner: &WeightOwner) {
+            let scope = owner.namespace();
         if self.current_scope.as_deref() != Some(scope) {
             self.current_scope = Some(scope.to_owned());
             self.tensor_buffers.clear();
@@ -328,7 +330,7 @@ impl AffineMetalBackend {
         FS: FnOnce() -> Result<Vec<u8>, String>,
         FB: FnOnce() -> Result<Vec<u8>, String>,
     {
-        self.prepare_scope(spec.cache_namespace);
+        self.prepare_scope(spec.owner);
 
         if spec.out_rows == 0 {
             return Ok(Vec::new());
@@ -380,7 +382,7 @@ impl AffineMetalBackend {
         FS: FnOnce() -> Result<Vec<u8>, String>,
         FB: FnOnce() -> Result<Vec<u8>, String>,
     {
-        self.prepare_scope(spec.cache_namespace);
+        self.prepare_scope(spec.owner);
 
         if spec.out_rows == 0 {
             return Err("cannot compute top1 with zero output rows".to_string());
@@ -432,7 +434,7 @@ impl AffineMetalBackend {
         FS: FnOnce() -> Result<Vec<u8>, String>,
         FB: FnOnce() -> Result<Vec<u8>, String>,
     {
-        self.prepare_scope(spec.cache_namespace);
+        self.prepare_scope(spec.owner);
 
         if spec.input_rows == 0 || spec.out_rows == 0 {
             return Ok(Vec::new());
@@ -528,9 +530,9 @@ pub fn supports_affine_quantized_matmul(bits: u32, group_size: u64) -> bool {
 
 pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
     spec: AffineQuantizedMatmulSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,
@@ -540,6 +542,9 @@ where
     FS: FnOnce() -> Result<Vec<u8>, String>,
     FB: FnOnce() -> Result<Vec<u8>, String>,
 {
+        let weight_cache_key = weight_cache_key.as_str();
+        let scales_cache_key = scales_cache_key.as_str();
+        let biases_cache_key = biases_cache_key.as_str();
     with_affine_backend(|backend| {
         backend.matmul(
             spec,
@@ -555,9 +560,9 @@ where
 
 pub fn try_affine_quantized_matmul_bf16_top1<FW, FS, FB>(
     spec: AffineQuantizedMatmulSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,
@@ -567,6 +572,9 @@ where
     FS: FnOnce() -> Result<Vec<u8>, String>,
     FB: FnOnce() -> Result<Vec<u8>, String>,
 {
+        let weight_cache_key = weight_cache_key.as_str();
+        let scales_cache_key = scales_cache_key.as_str();
+        let biases_cache_key = biases_cache_key.as_str();
     with_affine_backend(|backend| {
         backend.matmul_top1(
             spec,
@@ -582,9 +590,9 @@ where
 
 pub fn try_affine_quantized_matmul_bf16_rows<FW, FS, FB>(
     spec: AffineQuantizedMatmulRowsSpec<'_>,
-    weight_cache_key: &str,
-    scales_cache_key: &str,
-    biases_cache_key: &str,
+    weight_cache_key: &WeightKey,
+    scales_cache_key: &WeightKey,
+    biases_cache_key: &WeightKey,
     load_weight_bytes: FW,
     load_scales_bytes: FS,
     load_biases_bytes: FB,
@@ -594,6 +602,9 @@ where
     FS: FnOnce() -> Result<Vec<u8>, String>,
     FB: FnOnce() -> Result<Vec<u8>, String>,
 {
+        let weight_cache_key = weight_cache_key.as_str();
+        let scales_cache_key = scales_cache_key.as_str();
+        let biases_cache_key = biases_cache_key.as_str();
     with_affine_backend(|backend| {
         backend.matmul_rows(
             spec,

@@ -314,7 +314,7 @@ fn run(dump: &Path, models: &Path, stage: &str) -> Result<(), String> {
             .or_else(|_| load("te_hidden_50.npy"))?
             .as_f32()?;
         compare("te.hidden50", &hidden, &reference);
-        let ns = te_weights.cache_namespace().to_string();
+        let ns = te_weights.owner().trace();
         let (freed, _) = makepad_diffusion::backend::gpu_weight_cache_resident(&ns)?;
         drop(prepared);
         drop(te_weights);

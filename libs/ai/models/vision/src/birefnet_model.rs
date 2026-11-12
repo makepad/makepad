@@ -280,10 +280,10 @@ impl BiRefNetModel {
         let part = GpuLinearPart {
             bt_ggml_type: weight.ggml_type,
             n: weight.shape[0],
-            cache_key: &weight_name,
+            cache_key: weight_name.as_str(),
             bytes: &weight.bytes,
         };
-        gpu_linear_nt_cached(input, self.owner.namespace(), &[part], bias)
+        gpu_linear_nt_cached(input, &self.owner, &[part], bias)
             .map_err(|error| device_error(prefix, error))
     }
 
@@ -321,7 +321,7 @@ impl BiRefNetModel {
             input,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             &weight_name,
             &weight.values,
             bias,
@@ -443,7 +443,7 @@ impl BiRefNetModel {
         };
         gpu_linear_nt_cached(
             &patches,
-            self.owner.namespace(),
+            &self.owner,
             &[part],
             self.values("bb.patch_embed.proj.bias")?,
         )
@@ -491,7 +491,7 @@ impl BiRefNetModel {
             &q,
             &k,
             &v,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{prefix}.attn"),
             &relative_bias,
             regions_gpu.as_ref(),
@@ -925,7 +925,7 @@ impl BiRefNetModel {
             &modulator,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             &weight_name,
             &weight.values,
             bias,

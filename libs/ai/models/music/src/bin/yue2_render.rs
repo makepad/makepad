@@ -235,7 +235,7 @@ fn narlayer_bench(operation: &str) {
         gpu_alloc_bf16, gpu_alloc_f32, gpu_attention_gqa_flash_bf16_buf_into,
         gpu_copy_f32_to_bf16_into, gpu_linear_nt_cached_precision_into, gpu_linear_scratch,
         gpu_pool_cap_override, gpu_runtime_trim, gpu_weight_cache_ensure_bf16_precision_keyed,
-        gpu_swiglu_value_gate_into, gpu_weight_cache_evict_prefix, GpuLinearPrecision, WeightOwner,
+        gpu_swiglu_value_gate_into, gpu_weight_cache_evict_owner, GpuLinearPrecision, WeightOwner,
     };
     let owner = WeightOwner::new("yue2-narlayer");
     assert!(matches!(operation, "all" | "attention" | "linears"), "--narlayer-op all|attention|linears");
@@ -270,11 +270,11 @@ fn narlayer_bench(operation: &str) {
         for (index, precision) in [GpuLinearPrecision::Bf16F32, GpuLinearPrecision::F16F16,
             GpuLinearPrecision::Fp8F32].into_iter().enumerate() {
             // Evict after each variant; no simultaneous bf16/f16/fp8 copies.
-            let key = format!("{}::weight::{precision:?}", owner.namespace());
+            let key = owner.key(&format!("weight::{precision:?}"));
             gpu_weight_cache_ensure_bf16_precision_keyed(&key, n, k, precision, || Ok(weights.clone())).unwrap();
             let scratch = gpu_linear_scratch(m, k, n, precision).unwrap();
             let timing = narlayer_time(&format!("{name} {precision:?}"), flops, || {
-                gpu_linear_nt_cached_precision_into(&input, &scratch, &[(key.as_str(), n)], None, &output)
+                gpu_linear_nt_cached_precision_into(&input, &scratch, &[(&key, n)], None, &output)
             });
             match timing {
                 Ok(seconds) => linear_seconds[index] += seconds,
@@ -284,7 +284,7 @@ fn narlayer_bench(operation: &str) {
                     linear_seconds[index] = f64::NAN;
                     gpu_synchronize().unwrap();
                     drop(scratch);
-                    gpu_weight_cache_evict_prefix(owner.namespace()).unwrap();
+                    gpu_weight_cache_evict_owner(&owner).unwrap();
                     continue;
                 }
             }
@@ -313,7 +313,7 @@ fn narlayer_bench(operation: &str) {
                 }
             }
             drop(scratch);
-            gpu_weight_cache_evict_prefix(owner.namespace()).unwrap();
+            gpu_weight_cache_evict_owner(&owner).unwrap();
         }
         drop((input, output));
         gpu_runtime_trim().unwrap();
@@ -606,7 +606,7 @@ fn report_kernel_classes(profile: &GpuKernelProfile) {
 
 // This choice belongs only to the bench. Production retains its fixed
 // decode path; neither the model nor captured sessions gain a variant flag.
-fn bench_swiglu_projection(input: &GpuTensor, key: &str, fused: bool) -> Result<GpuTensor, String> {
+fn bench_swiglu_projection(input: &GpuTensor, key: &makepad_ai_common::backend::WeightKey, fused: bool) -> Result<GpuTensor, String> {
     if fused {
         gpu_linear_nt_cached_q8_0_swiglu_keyed(input, key, YUE2_FF)
     } else {
@@ -629,8 +629,8 @@ fn bench_swiglu(model: &Yue2Model, variant: &str) {
     };
     // These are the real packed keys already warmed by the decode session.
     // Sweep all layers rather than repeatedly reading one matrix from L2.
-    let keys: Vec<String> = (0..YUE2_LAYERS).map(|layer| {
-        format!("{}::model.layers.{layer}.mlp.up_gate_proj::q8_0", model.cache_namespace())
+    let keys: Vec<makepad_ai_common::backend::WeightKey> = (0..YUE2_LAYERS).map(|layer| {
+        model.owner().key(&format!("model.layers.{layer}.mlp.up_gate_proj::q8_0"))
     }).collect();
     let values: Vec<f32> = (0..YUE2_HIDDEN)
         .map(|i| ((i * 17 % 257) as f32 - 128.0) / 64.0).collect();
@@ -643,7 +643,7 @@ fn bench_swiglu(model: &Yue2Model, variant: &str) {
             if let Some(reference) = &reference {
                 let mismatches = reference.iter().zip(&values)
                     .filter(|(a, b)| a.to_bits() != b.to_bits()).count();
-                assert_eq!(mismatches, 0, "SwiGLU variant bitwise mismatch: {key}");
+                assert_eq!(mismatches, 0, "SwiGLU variant bitwise mismatch: {key:?}");
             }
             reference = Some(values);
         }

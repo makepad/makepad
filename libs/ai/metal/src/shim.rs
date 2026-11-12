@@ -3,7 +3,7 @@ use std::borrow::Cow;
 pub(crate) use imp::{tensor_test_error_and_guard,
     tensor_test_drop_owner_locked, tensor_test_legacy_matmuls};
 #[cfg(target_os = "macos")]
-pub(crate) use imp::{TensorBuffer, tensor_thread_guard, tensor_available, tensor_profile, tensor_cow_record, tensor_buffer, tensor_host_written, tensor_flush_until, tensor_pool_clear, tensor_evict_prefix, tensor_resident_weights, shape4_from_row_major, tensor_binary, tensor_unary, tensor_norm, tensor_matmul, tensor_named_weight, tensor_attention, tensor_im2col, tensor_copy_strided};
+pub(crate) use imp::{TensorBuffer, tensor_thread_guard, tensor_available, tensor_profile, tensor_cow_record, tensor_buffer, tensor_host_written, tensor_flush_until, tensor_pool_clear, tensor_evict_owner, tensor_evict_keys, tensor_resident_weights, shape4_from_row_major, tensor_binary, tensor_unary, tensor_norm, tensor_matmul, tensor_named_weight, tensor_attention, tensor_im2col, tensor_copy_strided};
 
 /// Missing-kernel fallbacks fire per matmul; print each distinct message once.
 #[cfg(target_os = "macos")]
@@ -47,6 +47,7 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
+use makepad_ai_loader::{WeightKey, WeightOwner};
 use crate::gpu_types::GpuTensor;
 use makepad_ai_loader::prof;
 
@@ -98,7 +99,7 @@ pub fn try_matmul_nt_ggml_bytes_keyed<'a, F>(
     m: usize,
     k: usize,
     n: usize,
-    namespace: &str,
+    owner: &WeightOwner,
     cache_key: &str,
     load: F,
 ) -> Option<Vec<f32>>
@@ -107,7 +108,7 @@ where
 {
     let t = std::time::Instant::now();
     let out = imp::try_matmul_nt_ggml_bytes_keyed(
-        a, bt_ggml_type, m, k, n, namespace, cache_key, load,
+        a, bt_ggml_type, m, k, n, owner, cache_key, load,
     );
     if let Some(v) = &out {
         prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + v.len());
@@ -121,7 +122,7 @@ where
 pub struct MatmulNtGgmlBytesKeyedMatrix<'a> {
     pub bt_ggml_type: u32,
     pub n: usize,
-    pub namespace: &'a str,
+    pub owner: &'a WeightOwner,
     pub cache_key: &'a str,
 }
 
@@ -133,7 +134,7 @@ pub fn try_matmul_nt_ggml_bytes_keyed_multi<'a, F>(
     load: F,
 ) -> Option<Vec<Vec<f32>>>
 where
-    F: FnMut(&str, &str) -> Result<Cow<'a, [u8]>, String>,
+    F: FnMut(&WeightOwner, &str) -> Result<Cow<'a, [u8]>, String>,
 {
     let t = std::time::Instant::now();
     let out = imp::try_matmul_nt_ggml_bytes_keyed_multi(a, m, k, matrices, load);
@@ -144,17 +145,32 @@ where
     out
 }
 
+/// The AR residual stream between `try_ar_*` calls, owned by the caller (one per decode
+/// step or prefill). Dropping it releases the device buffer.
+pub struct ArResidual(imp::ArResidual);
+impl ArResidual {
+    pub fn new() -> Self {
+        Self(imp::ArResidual::default())
+    }
+}
+impl Default for ArResidual {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Upload (optional) hidden, RMS + QKV (+ optional Q/K RMS) on GPU.
 /// Returns host q,k,v. `qk_norm` is `(q_norm, k_norm, q_key, k_key)`;
 /// pass `None` for stacks without per-head Q/K norms (Music3 RVQ).
 pub fn try_ar_pre_attn<F>(
+    resid: &mut ArResidual,
     hidden: Option<&[f32]>,
     m: usize,
     hidden_w: usize,
     head_dim: usize,
     in_norm: &[f32],
-    qk_norm: Option<(&[f32], &[f32], &str, &str)>,
-    in_norm_key: &str,
+    qk_norm: Option<(&[f32], &[f32], &WeightKey, &WeightKey)>,
+    in_norm_key: &WeightKey,
     eps: f32,
     q: MatmulNtGgmlBytesKeyedMatrix<'_>,
     k: MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -162,9 +178,10 @@ pub fn try_ar_pre_attn<F>(
     load: F,
 ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
 where
-    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
 {
     imp::try_ar_pre_attn(
+        &mut resid.0,
         hidden,
         m,
         hidden_w,
@@ -182,11 +199,12 @@ where
 
 /// o_proj + residual + RMS + up/gate + SiLU*mul + down + residual. Hidden stays on GPU.
 pub fn try_ar_post_attn<F>(
+    resid: &mut ArResidual,
     attn: &[f32],
     m: usize,
     hidden_w: usize,
     post_norm: &[f32],
-    post_norm_key: &str,
+    post_norm_key: &WeightKey,
     eps: f32,
     o: MatmulNtGgmlBytesKeyedMatrix<'_>,
     up: MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -195,9 +213,10 @@ pub fn try_ar_post_attn<F>(
     load: F,
 ) -> Option<()>
 where
-    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
 {
     imp::try_ar_post_attn(
+        &mut resid.0,
         attn,
         m,
         hidden_w,
@@ -213,20 +232,17 @@ where
 }
 
 pub fn try_ar_final_rms(
+    resid: &mut ArResidual,
     m: usize,
     hidden_w: usize,
     gamma: &[f32],
-    gamma_key: &str,
+    gamma_key: &WeightKey,
     eps: f32,
 ) -> Option<Vec<f32>> {
-    imp::try_ar_final_rms(m, hidden_w, gamma, gamma_key, eps)
+    imp::try_ar_final_rms(&mut resid.0, m, hidden_w, gamma, gamma_key, eps)
 }
 
-pub fn ar_resident_clear() {
-    imp::ar_resident_clear();
-}
-
-/// Drop all recycled transient buffers (keeps act/weight caches). Call at a
+/// Drop all recycled transient buffers in the tensor runtime (keeps weights). Call at a
 /// phase edge when the previous phase used much larger shapes (e.g. after
 /// prefill, before decode) so the pool's retained giants don't sit wired
 /// through a long small-shape loop.
@@ -241,15 +257,15 @@ pub fn try_dit_ffn_resident<F>(
     ff_dim: usize,
     ff_in_b: &[f32],
     ff_out_b: &[f32],
-    ff_in_b_key: &str,
-    ff_out_b_key: &str,
+    ff_in_b_key: &WeightKey,
+    ff_out_b_key: &WeightKey,
     swap: bool,
     ff_in: MatmulNtGgmlBytesKeyedMatrix<'_>,
     ff_out: MatmulNtGgmlBytesKeyedMatrix<'_>,
     load: F,
 ) -> Option<Vec<f32>>
 where
-    F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+    F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
 {
     imp::try_dit_ffn_resident(
         normed,
@@ -295,6 +311,7 @@ pub fn try_flash_attn_f32_packed(
 /// optional `[1, n]` bias.
 #[derive(Clone, Copy)]
 pub struct DecLinearRef<'a> {
+    pub owner: &'a WeightOwner,
     pub weight: &'a GpuTensor,
     pub bias: Option<&'a GpuTensor>,
 }
@@ -797,6 +814,10 @@ mod tests {
 
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
+    #[derive(Default)]
+    pub(super) struct ArResidual;
+
+    use makepad_ai_loader::{WeightKey, WeightOwner};
     use super::Cow;
     use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
@@ -927,7 +948,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
-        _namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _load: F,
     ) -> Option<Vec<f32>>
@@ -945,19 +966,20 @@ mod imp {
         _load: F,
     ) -> Option<Vec<Vec<f32>>>
     where
-        F: FnMut(&str, &str) -> Result<Cow<'a, [u8]>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Cow<'a, [u8]>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_pre_attn<F>(
+        _resid: &mut ArResidual,
         _hidden: Option<&[f32]>,
         _m: usize,
         _hidden_w: usize,
         _head_dim: usize,
         _in_norm: &[f32],
-        _qk_norm: Option<(&[f32], &[f32], &str, &str)>,
-        _in_norm_key: &str,
+        _qk_norm: Option<(&[f32], &[f32], &WeightKey, &WeightKey)>,
+        _in_norm_key: &WeightKey,
         _eps: f32,
         _q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -965,17 +987,18 @@ mod imp {
         _load: F,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_post_attn<F>(
+        _resid: &mut ArResidual,
         _attn: &[f32],
         _m: usize,
         _hidden_w: usize,
         _post_norm: &[f32],
-        _post_norm_key: &str,
+        _post_norm_key: &WeightKey,
         _eps: f32,
         _o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -984,22 +1007,21 @@ mod imp {
         _load: F,
     ) -> Option<()>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_final_rms(
+        _resid: &mut ArResidual,
         _m: usize,
         _hidden_w: usize,
         _gamma: &[f32],
-        _gamma_key: &str,
+        _gamma_key: &WeightKey,
         _eps: f32,
     ) -> Option<Vec<f32>> {
         None
     }
-
-    pub(super) fn ar_resident_clear() {}
 
     pub(super) fn transient_pool_clear() {}
 
@@ -1010,15 +1032,15 @@ mod imp {
         _ff_dim: usize,
         _ff_in_b: &[f32],
         _ff_out_b: &[f32],
-        _ff_in_b_key: &str,
-        _ff_out_b_key: &str,
+        _ff_in_b_key: &WeightKey,
+        _ff_out_b_key: &WeightKey,
         _swap: bool,
         _ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _load: F,
     ) -> Option<Vec<f32>>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
@@ -1390,6 +1412,10 @@ mod imp {
 )))]
 #[allow(unused_variables)]
 mod imp {
+    #[derive(Default)]
+    pub(super) struct ArResidual;
+
+    use makepad_ai_loader::{WeightKey, WeightOwner};
     use super::Cow;
     pub(super) fn try_matmul_nn_f32(
         a: &[f32],
@@ -1428,7 +1454,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
-        _namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _load: F,
     ) -> Option<Vec<f32>>
@@ -1446,19 +1472,20 @@ mod imp {
         _load: F,
     ) -> Option<Vec<Vec<f32>>>
     where
-        F: FnMut(&str, &str) -> Result<Cow<'a, [u8]>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Cow<'a, [u8]>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_pre_attn<F>(
+        _resid: &mut ArResidual,
         _hidden: Option<&[f32]>,
         _m: usize,
         _hidden_w: usize,
         _head_dim: usize,
         _in_norm: &[f32],
-        _qk_norm: Option<(&[f32], &[f32], &str, &str)>,
-        _in_norm_key: &str,
+        _qk_norm: Option<(&[f32], &[f32], &WeightKey, &WeightKey)>,
+        _in_norm_key: &WeightKey,
         _eps: f32,
         _q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -1466,17 +1493,18 @@ mod imp {
         _load: F,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_post_attn<F>(
+        _resid: &mut ArResidual,
         _attn: &[f32],
         _m: usize,
         _hidden_w: usize,
         _post_norm: &[f32],
-        _post_norm_key: &str,
+        _post_norm_key: &WeightKey,
         _eps: f32,
         _o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -1485,22 +1513,21 @@ mod imp {
         _load: F,
     ) -> Option<()>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
 
     pub(super) fn try_ar_final_rms(
+        _resid: &mut ArResidual,
         _m: usize,
         _hidden_w: usize,
         _gamma: &[f32],
-        _gamma_key: &str,
+        _gamma_key: &WeightKey,
         _eps: f32,
     ) -> Option<Vec<f32>> {
         None
     }
-
-    pub(super) fn ar_resident_clear() {}
 
     pub(super) fn transient_pool_clear() {}
 
@@ -1511,15 +1538,15 @@ mod imp {
         _ff_dim: usize,
         _ff_in_b: &[f32],
         _ff_out_b: &[f32],
-        _ff_in_b_key: &str,
-        _ff_out_b_key: &str,
+        _ff_in_b_key: &WeightKey,
+        _ff_out_b_key: &WeightKey,
         _swap: bool,
         _ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         _load: F,
     ) -> Option<Vec<f32>>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
         None
     }
@@ -1678,6 +1705,13 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    #[derive(Default)]
+    pub(super) struct ArResidual {
+        h: Option<Arc<TensorBuffer>>,
+        elems: usize,
+    }
+
+    use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
     use super::Cow;
     use makepad_ai_loader::quant::{
         block_elements, block_size, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
@@ -2700,7 +2734,6 @@ mod imp {
         pipeline_cache: HashMap<String, PipelineState>,
         cached_weight_buffers: HashMap<BufferKey, StrongId>,
         named_weight_buffers: HashMap<(String, String), StrongId>,
-        act_buffers: HashMap<String, (StrongId, usize)>,
         scratch_buffers: HashMap<u8, ScratchBuffer>,
         matmul_out_buffers: HashMap<u8, ScratchBuffer>,
         batch_depth: usize,
@@ -2790,7 +2823,6 @@ mod imp {
                     pipeline_cache: HashMap::new(),
                     cached_weight_buffers: HashMap::new(),
                     named_weight_buffers: HashMap::new(),
-                    act_buffers: HashMap::new(),
                     scratch_buffers: HashMap::new(),
                     matmul_out_buffers: HashMap::new(),
                     batch_depth: 0,
@@ -3001,11 +3033,6 @@ mod imp {
                 total -= self.pool_free[i].cap_bytes;
                 self.pool_free.swap_remove(i);
             }
-        }
-
-        fn pool_clear(&mut self) {
-            self.pool_free.clear();
-            self.pool_in_flight.clear();
         }
 
         fn get_or_create_scratch_buffer(
@@ -3219,17 +3246,11 @@ mod imp {
 
         fn get_or_create_named_weight_buffer(
             &mut self,
-            namespace: &str,
+            owner: &WeightOwner,
             cache_key: &str,
             load: impl FnOnce() -> Result<Vec<u8>, String>,
         ) -> Result<ObjcId, String> {
-            let key = (namespace.to_string(), cache_key.to_string());
-            if !self.named_weight_buffers.contains_key(&key) {
-                let bytes = load()?;
-                let buf = self.new_buffer_with_bytes(&bytes)?;
-                self.named_weight_buffers.insert(key.clone(), buf);
-            }
-            Ok(self.named_weight_buffers.get(&key).unwrap().as_id())
+            Ok(tensor_named_weight(owner, cache_key, || load().map(Cow::Owned))?.id())
         }
 
         fn compile_pipeline(
@@ -4494,7 +4515,7 @@ mod imp {
             let k = lin.weight.cols;
             let weight = lin.weight;
             let w_id = self.get_or_create_named_weight_buffer(
-                "two_way",
+                lin.owner,
                 &format!("w{}", weight.id.get()),
                 || Self::tensor_f32_bytes(weight),
             )?;
@@ -4508,7 +4529,7 @@ mod imp {
                     ));
                 }
                 let b_id = self.get_or_create_named_weight_buffer(
-                    "two_way",
+                    lin.owner,
                     &format!("b{}", bias.id.get()),
                     || Self::tensor_f32_bytes(bias),
                 )?;
@@ -4922,6 +4943,7 @@ mod imp {
             let base = "kernel_swiglu_f32";
             let (pipeline, _smem, _nr0, _nr1, _nsg) =
                 self.get_or_compile_cached_pipeline(base.to_string(), base, &[], 0, 0, 0, 0)?;
+            if self.tensor_prepare { return Ok(()); }
             let nth = (ff_dim as u64 / 2).max(1).min(256);
             let (_command_buffer, encoder, encoder_handles) = self.begin_command_encoder()?;
             unsafe {
@@ -4932,9 +4954,9 @@ mod imp {
                     length: std::mem::size_of::<KArgsGluCompat>() as u64
                     atIndex: 0u64
                 ];
-                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 1u64];
-                let _: () = msg_send![encoder, setBuffer: src_id offset: 0u64 atIndex: 2u64];
-                let _: () = msg_send![encoder, setBuffer: dst_id offset: 0u64 atIndex: 3u64];
+                self.bind_buffer(encoder, src_id, 0, 1)?;
+                self.bind_buffer(encoder, src_id, 0, 2)?;
+                self.bind_buffer(encoder, dst_id, 0, 3)?;
                 let tgs = MTLSize {
                     width: rows.max(1) as u64,
                     height: 1,
@@ -5067,23 +5089,6 @@ mod imp {
             }
 
             self.end_command_encoder(encoder_handles)
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        fn dispatch_rms_norm_f32(
-            &mut self,
-            src0_id: ObjcId,
-            src1_0_id: ObjcId,
-            src1_1_id: ObjcId,
-            dst_id: ObjcId,
-            src0_shape: &Shape4,
-            src1_0_shape: &Shape4,
-            src1_1_shape: &Shape4,
-            eps: f32,
-            n_fuse: i32,
-        ) -> Result<(), String> {
-            self.dispatch_rms_norm_f32_offsets(src0_id, src1_0_id, src1_1_id, dst_id,
-                src0_shape, src1_0_shape, src1_1_shape, eps, n_fuse, [0, 0, 0, 0])
         }
 
         fn dispatch_rms_norm_f32_offsets(
@@ -5262,25 +5267,6 @@ mod imp {
             }
 
             self.end_command_encoder(encoder_handles)
-        }
-
-        fn dispatch_im2col_2d_f32(
-            &mut self,
-            src_id: ObjcId,
-            src_offset: usize,
-            dst_id: ObjcId,
-            ic: usize,
-            iw: usize,
-            ih: usize,
-            channel_stride: usize,
-            kw: usize,
-            kh: usize,
-            pad_x: usize,
-            pad_y: usize,
-            ow: usize,
-            oh: usize,
-        ) -> Result<(), String> {
-            self.dispatch_im2col_2d_f32_offsets(src_id, src_offset, dst_id, ic, iw, ih, channel_stride, kw, kh, pad_x, pad_y, ow, oh, [0, 0])
         }
 
         fn dispatch_im2col_2d_f32_offsets(
@@ -6581,450 +6567,6 @@ mod imp {
             Ok((dst_buffer, m, n))
         }
 
-        /// Dispatch into a destination owned by the caller (the activation pool).
-        fn matmul_nt_ggml_resident_into(
-            &mut self,
-            src0_id: ObjcId,
-            src1_id: ObjcId,
-            dst_id: ObjcId,
-            bt_ggml_type: u32,
-            m: usize,
-            k: usize,
-            n: usize,
-        ) -> Result<(), String> {
-            if m == 0 || k == 0 || n == 0 {
-                return Ok(());
-            }
-            let src0 = src0_type_from_ggml(bt_ggml_type).ok_or_else(|| {
-                format!(
-                    "unsupported src0 ggml_type for metal matmul: {}",
-                    bt_ggml_type
-                )
-            })?;
-            let (src0_row_bytes, nb00) = src0_layout_bytes_per_row(src0, k)?;
-            let ne00 = i32::try_from(k).map_err(|_| format!("k too large: {}", k))?;
-            let ne01 = i32::try_from(n).map_err(|_| format!("n too large: {}", n))?;
-            let ne10 = ne00;
-            let ne11 = i32::try_from(m).map_err(|_| format!("m too large: {}", m))?;
-            let ne0 = ne01;
-            let ne1 = ne11;
-            let nb01 = src0_row_bytes as u64;
-            let nb10 = 4u64;
-            let nb11 = (k as u64)
-                .checked_mul(4)
-                .ok_or_else(|| "overflow computing nb11".to_string())?;
-            let used_mul_mv_ext = can_use_mul_mv_ext(src0, ne00, ne11);
-            let used_mul_mm = ne00 >= 64 && ne11 > 8;
-            if used_mul_mv_ext {
-                self.dispatch_mul_mv_ext(
-                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
-                    nb11, ne0, ne1,
-                )?;
-            } else if used_mul_mm {
-                if let Err(e) = self.dispatch_mul_mm(
-                    src0, src0_id, src1_id, dst_id, ne00, ne01, nb01, 1, nb10, nb11, ne0, ne1,
-                ) {
-                    super::log_metal_error_once(format!(
-                        "[ggml][metal] mul_mm failed for type {:?}, falling back to mul_mv: {}",
-                        src0, e
-                    ));
-                    self.dispatch_mul_mv(
-                        src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01,
-                        nb10, nb11, ne0, ne1,
-                    )?;
-                }
-            } else {
-                self.dispatch_mul_mv(
-                    src0, src0_id, src1_id, dst_id, ne00, ne01, ne10, ne11, nb00, nb01, nb10,
-                    nb11, ne0, ne1,
-                )?;
-            }
-            Ok(())
-        }
-
-        fn act_buf(&mut self, name: &str, elems: usize) -> Result<ObjcId, String> {
-            let bytes = elems
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| "act buffer overflow".to_string())?;
-            if let Some((buf, cap)) = self.act_buffers.get(name) {
-                if *cap >= bytes {
-                    return Ok(buf.as_id());
-                }
-            }
-            let buf = self.new_buffer_with_length(bytes.max(4))?;
-            let id = buf.as_id();
-            self.act_buffers.insert(name.to_string(), (buf, bytes));
-            Ok(id)
-        }
-
-        fn act_write(&mut self, name: &str, data: &[f32]) -> Result<ObjcId, String> {
-            let id = self.act_buf(name, data.len())?;
-            let ptr: *mut c_void = unsafe { msg_send![id, contents] };
-            if ptr.is_null() {
-                return Err(format!("act {name} contents null"));
-            }
-            unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr as *mut f32, data.len());
-            }
-            Ok(id)
-        }
-
-        fn act_read(&self, name: &str, elems: usize) -> Result<Vec<f32>, String> {
-            let (buf, cap) = self
-                .act_buffers
-                .get(name)
-                .ok_or_else(|| format!("act {name} missing"))?;
-            let need = elems
-                .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| "act read overflow".to_string())?;
-            if need > *cap {
-                return Err(format!("act {name} read {need} > cap {cap}"));
-            }
-            self.copy_f32_buffer_contents_readable(buf.as_id(), elems)
-        }
-
-        fn act_norm_gamma(&mut self, key: &str, gamma: &[f32]) -> Result<ObjcId, String> {
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    gamma.as_ptr() as *const u8,
-                    gamma.len() * std::mem::size_of::<f32>(),
-                )
-            };
-            self.get_or_create_named_weight_buffer("music3-act-norm", key, || Ok(bytes.to_vec()))
-        }
-
-        fn act_rms_norm_mul(
-            &mut self,
-            src: ObjcId,
-            dst: ObjcId,
-            gamma: ObjcId,
-            rows: usize,
-            width: usize,
-            eps: f32,
-        ) -> Result<(), String> {
-            let x_s = shape4_from_row_major(&[rows, width], 4)?;
-            let m_s = shape4_from_row_major(&[width], 4)?;
-            self.dispatch_rms_norm_f32(src, gamma, src, dst, &x_s, &m_s, &x_s, eps, 2)
-        }
-
-        fn act_add_inplace(
-            &mut self,
-            a: ObjcId,
-            b: ObjcId,
-            dst: ObjcId,
-            elems: usize,
-        ) -> Result<(), String> {
-            let s = shape4_from_row_major(&[elems], 4)?;
-            self.dispatch_bin_f32(0, a, b, dst, &s, &s)
-        }
-
-        fn act_silu(&mut self, src: ObjcId, dst: ObjcId, elems: usize) -> Result<(), String> {
-            let s = shape4_from_row_major(&[elems], 4)?;
-            self.dispatch_unary_f32(OP_UNARY_NUM_SILU, src, dst, &s)
-        }
-
-        fn act_mul(&mut self, a: ObjcId, b: ObjcId, dst: ObjcId, elems: usize) -> Result<(), String> {
-            let s = shape4_from_row_major(&[elems], 4)?;
-            self.dispatch_bin_f32(2, a, b, dst, &s, &s)
-        }
-
-        fn act_linear_keyed<F>(
-            &mut self,
-            src1: ObjcId,
-            dst_name: &str,
-            bt_ggml_type: u32,
-            m: usize,
-            k: usize,
-            n: usize,
-            namespace: &str,
-            cache_key: &str,
-            load: F,
-        ) -> Result<ObjcId, String>
-        where
-            F: FnOnce() -> Result<Vec<u8>, String>,
-        {
-            let weight = tensor_named_weight(namespace, cache_key, || load().map(Cow::Owned))?;
-            let elems = m
-                .checked_mul(n)
-                .ok_or_else(|| "act linear overflow".to_string())?;
-            let dst = self.act_buf(dst_name, elems)?;
-            self.matmul_nt_ggml_resident_into(weight.id(), src1, dst, bt_ggml_type, m, k, n)?;
-            Ok(dst)
-        }
-
-        fn ar_pre_attn<F>(
-            &mut self,
-            hidden: Option<&[f32]>,
-            m: usize,
-            hidden_w: usize,
-            head_dim: usize,
-            in_norm: &[f32],
-            qk_norm: Option<(&[f32], &[f32], &str, &str)>,
-            in_norm_key: &str,
-            eps: f32,
-            q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            v: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            mut load: F,
-        ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String>
-        where
-            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
-        {
-            let h_elems = m * hidden_w;
-            if let Some(h) = hidden {
-                if h.len() != h_elems {
-                    return Err("ar hidden len".to_string());
-                }
-                self.act_write("h", h)?;
-            }
-            let q_elems = m * q.n;
-            let k_elems = m * k.n;
-            let v_elems = m * v.n;
-            self.with_batch(|this| {
-                let h = this.act_buf("h", h_elems)?;
-                let n1 = this.act_buf("n1", h_elems)?;
-                let gamma = this.act_norm_gamma(in_norm_key, in_norm)?;
-                this.act_rms_norm_mul(h, n1, gamma, m, hidden_w, eps)?;
-                this.act_linear_keyed(
-                    n1,
-                    "q",
-                    q.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    q.n,
-                    q.namespace,
-                    q.cache_key,
-                    || load(q.namespace, q.cache_key),
-                )?;
-                this.act_linear_keyed(
-                    n1,
-                    "k",
-                    k.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    k.n,
-                    k.namespace,
-                    k.cache_key,
-                    || load(k.namespace, k.cache_key),
-                )?;
-                this.act_linear_keyed(
-                    n1,
-                    "v",
-                    v.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    v.n,
-                    v.namespace,
-                    v.cache_key,
-                    || load(v.namespace, v.cache_key),
-                )?;
-                if let Some((q_norm, k_norm, q_norm_key, k_norm_key)) = qk_norm {
-                    let q_id = this.act_buf("q", q_elems)?;
-                    let k_id = this.act_buf("k", k_elems)?;
-                    let qn = this.act_buf("qn", q_elems)?;
-                    let kn = this.act_buf("kn", k_elems)?;
-                    let qg = this.act_norm_gamma(q_norm_key, q_norm)?;
-                    let kg = this.act_norm_gamma(k_norm_key, k_norm)?;
-                    this.act_rms_norm_mul(q_id, qn, qg, q_elems / head_dim, head_dim, eps)?;
-                    this.act_rms_norm_mul(k_id, kn, kg, k_elems / head_dim, head_dim, eps)?;
-                }
-                Ok(())
-            })?;
-            self.wait_queue_idle()?;
-            let (q_src, k_src) = if qk_norm.is_some() {
-                ("qn", "kn")
-            } else {
-                ("q", "k")
-            };
-            let qv = self.act_read(q_src, q_elems)?;
-            let kv = self.act_read(k_src, k_elems)?;
-            let vv = self.act_read("v", v_elems)?;
-            Ok((qv, kv, vv))
-        }
-
-        fn ar_post_attn<F>(
-            &mut self,
-            attn: &[f32],
-            m: usize,
-            hidden_w: usize,
-            post_norm: &[f32],
-            post_norm_key: &str,
-            eps: f32,
-            o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            gate: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            down: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            mut load: F,
-        ) -> Result<(), String>
-        where
-            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
-        {
-            let h_elems = m * hidden_w;
-            let ff_elems = m * up.n;
-            if attn.len() != h_elems {
-                return Err("ar attn len".to_string());
-            }
-            self.act_write("attn", attn)?;
-            self.with_batch(|this| {
-                let attn_id = this.act_buf("attn", h_elems)?;
-                this.act_linear_keyed(
-                    attn_id,
-                    "o",
-                    o.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    o.n,
-                    o.namespace,
-                    o.cache_key,
-                    || load(o.namespace, o.cache_key),
-                )?;
-                let h = this.act_buf("h", h_elems)?;
-                let o_id = this.act_buf("o", h_elems)?;
-                let h2 = this.act_buf("h2", h_elems)?;
-                this.act_add_inplace(h, o_id, h2, h_elems)?;
-                let n2 = this.act_buf("n2", h_elems)?;
-                let pg = this.act_norm_gamma(post_norm_key, post_norm)?;
-                this.act_rms_norm_mul(h2, n2, pg, m, hidden_w, eps)?;
-                this.act_linear_keyed(
-                    n2,
-                    "up",
-                    up.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    up.n,
-                    up.namespace,
-                    up.cache_key,
-                    || load(up.namespace, up.cache_key),
-                )?;
-                this.act_linear_keyed(
-                    n2,
-                    "gate",
-                    gate.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    gate.n,
-                    gate.namespace,
-                    gate.cache_key,
-                    || load(gate.namespace, gate.cache_key),
-                )?;
-                let up_id = this.act_buf("up", ff_elems)?;
-                let gate_id = this.act_buf("gate", ff_elems)?;
-                let gs = this.act_buf("gs", ff_elems)?;
-                let ff = this.act_buf("ff", ff_elems)?;
-                this.act_silu(gate_id, gs, ff_elems)?;
-                this.act_mul(up_id, gs, ff, ff_elems)?;
-                this.act_linear_keyed(
-                    ff,
-                    "down",
-                    down.bt_ggml_type,
-                    m,
-                    up.n,
-                    down.n,
-                    down.namespace,
-                    down.cache_key,
-                    || load(down.namespace, down.cache_key),
-                )?;
-                let down_id = this.act_buf("down", h_elems)?;
-                let h3 = this.act_buf("h", h_elems)?;
-                this.act_add_inplace(h2, down_id, h3, h_elems)?;
-                Ok(())
-            })?;
-            Ok(())
-        }
-
-        fn ar_final_rms(
-            &mut self,
-            m: usize,
-            hidden_w: usize,
-            gamma: &[f32],
-            gamma_key: &str,
-            eps: f32,
-        ) -> Result<Vec<f32>, String> {
-            let h_elems = m * hidden_w;
-            self.with_batch(|this| {
-                let h = this.act_buf("h", h_elems)?;
-                let out = this.act_buf("hout", h_elems)?;
-                let g = this.act_norm_gamma(gamma_key, gamma)?;
-                this.act_rms_norm_mul(h, out, g, m, hidden_w, eps)?;
-                Ok(())
-            })?;
-            self.wait_queue_idle()?;
-            self.act_read("hout", h_elems)
-        }
-
-        fn ar_clear_acts(&mut self) {
-            self.act_buffers.clear();
-            self.pool_clear();
-        }
-
-        fn dit_ffn_resident<F>(
-            &mut self,
-            normed: &[f32],
-            m: usize,
-            hidden_w: usize,
-            ff_dim: usize,
-            ff_in_b: &[f32],
-            ff_out_b: &[f32],
-            ff_in_b_key: &str,
-            ff_out_b_key: &str,
-            swap: bool,
-            ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
-            mut load: F,
-        ) -> Result<Vec<f32>, String>
-        where
-            F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
-        {
-            if normed.len() != m * hidden_w {
-                return Err("dit ffn normed len".to_string());
-            }
-            if ff_in.n != ff_dim * 2 || ff_out.n != hidden_w {
-                return Err("dit ffn weight n".to_string());
-            }
-            self.act_write("dn", normed)?;
-            self.with_batch(|this| {
-                let dn = this.act_buf("dn", m * hidden_w)?;
-                this.act_linear_keyed(
-                    dn,
-                    "ffin",
-                    ff_in.bt_ggml_type,
-                    m,
-                    hidden_w,
-                    ff_in.n,
-                    ff_in.namespace,
-                    ff_in.cache_key,
-                    || load(ff_in.namespace, ff_in.cache_key),
-                )?;
-                let ffin = this.act_buf("ffin", m * ff_in.n)?;
-                let in_b = this.act_norm_gamma(ff_in_b_key, ff_in_b)?;
-                let ffinb = this.act_buf("ffinb", m * ff_in.n)?;
-                let x_s = shape4_from_row_major(&[m, ff_in.n], 4)?;
-                let b_s = shape4_from_row_major(&[ff_in.n], 4)?;
-                this.dispatch_bin_f32(0, ffin, in_b, ffinb, &x_s, &b_s)?;
-                let gated = this.act_buf("gated", m * ff_dim)?;
-                this.dispatch_swiglu_packed(ffinb, gated, m, ff_dim, swap)?;
-                this.act_linear_keyed(
-                    gated,
-                    "ffout",
-                    ff_out.bt_ggml_type,
-                    m,
-                    ff_dim,
-                    ff_out.n,
-                    ff_out.namespace,
-                    ff_out.cache_key,
-                    || load(ff_out.namespace, ff_out.cache_key),
-                )?;
-                let ffout = this.act_buf("ffout", m * hidden_w)?;
-                let out_b = this.act_norm_gamma(ff_out_b_key, ff_out_b)?;
-                let y = this.act_buf("ffy", m * hidden_w)?;
-                let y_s = shape4_from_row_major(&[m, hidden_w], 4)?;
-                let ob_s = shape4_from_row_major(&[hidden_w], 4)?;
-                this.dispatch_bin_f32(0, ffout, out_b, y, &y_s, &ob_s)?;
-                Ok(())
-            })?;
-            self.wait_queue_idle()?;
-            self.act_read("ffy", m * hidden_w)
-        }
 
     }
 
@@ -7085,6 +6627,138 @@ mod imp {
         }
     }
 
+    const SLICE_NS: f64 = 4_000_000.0;
+
+    #[derive(Clone, Copy)]
+    struct TensorCost {
+        ns_per_mac: f64,
+        ns_per_byte: f64,
+        ns_per_dispatch: f64,
+        ns_per_commit: f64,
+    }
+
+    fn estimate_ns(cost: &TensorCost, macs: u64, bytes: u64, dispatches: usize) -> f64 {
+        macs as f64 * cost.ns_per_mac + bytes as f64 * cost.ns_per_byte
+            + dispatches as f64 * cost.ns_per_dispatch
+    }
+
+    fn should_commit(open_ns: f64, gpu_idle: bool, cost: &TensorCost) -> bool {
+        open_ns >= SLICE_NS || (gpu_idle && open_ns >= cost.ns_per_commit)
+    }
+
+    fn row_chunks(
+        rows: usize, est_ns: f64, align: usize, min_rows: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        if est_ns <= SLICE_NS || rows <= min_rows {
+            return vec![0..rows];
+        }
+        let chunks = (est_ns / SLICE_NS).ceil() as usize;
+        let chunk_rows = rows.div_ceil(chunks).max(min_rows).div_ceil(align) * align;
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        while start < rows {
+            let mut end = start.saturating_add(chunk_rows).min(rows);
+            if rows - end < min_rows {
+                end = rows;
+            }
+            ranges.push(start..end);
+            start = end;
+        }
+        ranges
+    }
+
+    fn back_pressure_target(
+        mine: &VecDeque<u64>, open_batch: u64, completed: u64,
+    ) -> Option<u64> {
+        let mut unfinished = mine.iter().copied()
+            .filter(|number| *number > completed && *number != open_batch);
+        let oldest = unfinished.next()?;
+        if unfinished.nth(1).is_some() { Some(oldest) } else { None }
+    }
+
+    fn measure_tensor_gpu_ns(
+        context: &mut MetalContext,
+        dispatch: impl Fn(&mut MetalContext) -> Result<(), String>,
+    ) -> Result<f64, String> {
+        // Three runs, the fastest kept: the first lets the GPU clocks ramp up.
+        let mut fastest = f64::INFINITY;
+        for _ in 0..3 {
+            context.with_batch(|ctx| dispatch(ctx))?;
+            context.wait_queue_idle()?;
+            let command = context.last_command_buffer.as_ref()
+                .ok_or("tensor calibration command buffer missing")?;
+            let start: f64 = unsafe { msg_send![command.as_id(), GPUStartTime] };
+            let end: f64 = unsafe { msg_send![command.as_id(), GPUEndTime] };
+            if !start.is_finite() || !end.is_finite() || end <= start {
+                return Err("tensor calibration GPU timestamps invalid".into());
+            }
+            fastest = fastest.min((end - start) * 1e9);
+        }
+        Ok(fastest)
+    }
+
+    fn measure_tensor_cost(context: &mut MetalContext) -> Result<TensorCost, String> {
+        let elements = 8 * 1024 * 1024;
+        let a = context.new_buffer_with_length(elements * 4)?;
+        let b = context.new_buffer_with_length(elements * 4)?;
+        let out = context.new_buffer_with_length(elements * 4)?;
+        for buffer in [&a, &b] {
+            let contents: *mut u8 = unsafe { msg_send![buffer.as_id(), contents] };
+            if contents.is_null() {
+                return Err("tensor calibration buffer contents unavailable".into());
+            }
+            unsafe { std::ptr::write_bytes(contents, 0, elements * 4); }
+        }
+        // Long enough (4.3 G multiply-adds, a few ms) to measure the GPU at its working clocks.
+        let ns_per_mac = measure_tensor_gpu_ns(context, |ctx| {
+            ctx.matmul_nt_into_buffer_offsets(
+                GGML_TYPE_F32, a.as_id(), b.as_id(), out.as_id(),
+                1024, 2048, 2048, [0; 3])
+        })? / (1024.0 * 2048.0 * 2048.0);
+        let shape = shape4_from_row_major(&[elements], 4)?;
+        let ns_per_byte = measure_tensor_gpu_ns(context, |ctx| {
+            ctx.dispatch_bin_f32_offsets(
+                0, a.as_id(), b.as_id(), out.as_id(), &shape, &shape, [0; 3])
+        })? / (3 * elements * 4) as f64;
+        let shape = shape4_from_row_major(&[1024], 4)?;
+        let dispatch_ns = measure_tensor_gpu_ns(context, |ctx| {
+            for _ in 0..256 {
+                ctx.dispatch_bin_f32_offsets(
+                    0, a.as_id(), b.as_id(), out.as_id(), &shape, &shape, [0; 3])?;
+            }
+            Ok(())
+        })?;
+        let ns_per_dispatch =
+            ((dispatch_ns - (256 * 3 * 1024 * 4) as f64 * ns_per_byte) / 256.0).max(0.0);
+        let mut ns_per_commit = f64::INFINITY;
+        for _ in 0..2 {
+            let mut commands = Vec::new();
+            for _ in 0..32 {
+                let command: ObjcId = unsafe {
+                    msg_send![context.command_queue.as_id(), commandBuffer]
+                };
+                commands.push(unsafe { StrongId::from_unowned(command) }
+                    .ok_or("tensor calibration commandBuffer returned nil")?);
+            }
+            let start = std::time::Instant::now();
+            for command in &commands {
+                unsafe { let _: () = msg_send![command.as_id(), commit]; }
+            }
+            ns_per_commit = ns_per_commit.min(start.elapsed().as_nanos() as f64 / 32.0);
+            context.wait_queue_idle()?; // One queue: this waits for all 32.
+            drop(commands);
+        }
+        if !ns_per_commit.is_finite() || ns_per_commit <= 0.0 {
+            return Err("tensor calibration commit timing invalid".into());
+        }
+        context.last_command_buffer.take();
+        eprintln!(
+            "[metal] tensor slices: {:.0} GMAC/s, {:.0} GB/s, {:.1} us/dispatch, {:.1} us/commit, slice {} ms",
+            1.0 / ns_per_mac, 1.0 / ns_per_byte, ns_per_dispatch / 1000.0,
+            ns_per_commit / 1000.0, SLICE_NS / 1_000_000.0);
+        Ok(TensorCost { ns_per_mac, ns_per_byte, ns_per_dispatch, ns_per_commit })
+    }
+
     struct TensorState {
         context: MetalContext,
         lock_phases: TensorLockPhases,
@@ -7095,7 +6769,8 @@ mod imp {
         in_flight: VecDeque<(u64, StrongId)>,
         next_batch: u64,
         open_batch: u64,
-        dispatches: usize,
+        open_ns: f64,
+        thread_batches: HashMap<std::thread::ThreadId, VecDeque<u64>>,
         completed_batch: u64,
         failed: BTreeSet<u64>,
         failure_floor: Option<u64>,
@@ -7106,6 +6781,8 @@ mod imp {
 
     struct TensorRuntime {
         state: Mutex<TensorState>,
+        /// Measured once at init; read without the lock.
+        cost: TensorCost,
         device: StrongId,
         library: StrongId,
         queue: StrongId,
@@ -7167,13 +6844,15 @@ mod imp {
             context.end_batch()?;
             context.wait_queue_idle()?;
             context.last_command_buffer.take();
+            let cost = measure_tensor_cost(&mut context)?;
             let (returns, receiver) = mpsc::channel();
             Ok(TensorRuntime {
                 device: context.device.clone(), library: context.library.clone(),
-                queue: context.command_queue.clone(), returns,
+                queue: context.command_queue.clone(), returns, cost,
                 state: Mutex::new(TensorState {
                     context, lock_phases: TensorLockPhases::default(), returns: receiver, free: Vec::new(), deferred_drop: Vec::new(), dead_owners: makepad_ai_loader::DeadOwnerInbox::register(), in_flight: VecDeque::new(),
-                    next_batch: 1, open_batch: 0, dispatches: 0, completed_batch: 0,
+                    next_batch: 1, open_batch: 0, open_ns: 0.0,
+                    thread_batches: HashMap::new(), completed_batch: 0,
                     failed: BTreeSet::new(), failure_floor: None,
                     #[cfg(test)]
                     injected_failure: None,
@@ -7253,9 +6932,9 @@ mod imp {
             }
         }
         fn drain_returns(&mut self) {
-            self.dead_owners.take(|namespace| {
+            self.dead_owners.take(|owner| {
                 let keys: Vec<_> = self.context.named_weight_buffers.keys()
-                    .filter(|(ns, _)| ns.starts_with(namespace)).cloned().collect();
+                    .filter(|(ns, _)| ns.starts_with(owner)).cloned().collect();
                 for key in keys {
                     if let Some(buffer) = self.context.named_weight_buffers.remove(&key) {
                         self.deferred_drop.push(buffer);
@@ -7285,6 +6964,21 @@ mod imp {
             self.remove_writer(old);
             if batch != 0 { *self.live_writers.entry(batch).or_default() += 1; }
         }
+        fn prune_thread_batches(&mut self) {
+            let completed = self.completed_batch;
+            self.thread_batches.retain(|_, mine| {
+                while mine.front().is_some_and(|number| *number <= completed) {
+                    mine.pop_front();
+                }
+                !mine.is_empty()
+            });
+        }
+        fn back_pressure_command(&self, thread: std::thread::ThreadId) -> Option<(u64, StrongId)> {
+            let mine = self.thread_batches.get(&thread)?;
+            let target = back_pressure_target(mine, self.open_batch, self.completed_batch)?;
+            self.in_flight.iter().find(|(number, _)| *number == target)
+                .map(|(number, command)| (*number, command.clone()))
+        }
         fn reap(&mut self, retired: &mut Vec<StrongId>) {
             while let Some((number, command)) = self.in_flight.front() {
                 let status: u64 = unsafe { msg_send![command.as_id(), status] };
@@ -7297,6 +6991,7 @@ mod imp {
                 self.completed_batch = self.completed_batch.max(number);
                 if let Some((_, command)) = self.in_flight.pop_front() { retired.push(command); }
             }
+            self.prune_thread_batches();
         }
         fn commit(&mut self, retired: &mut Vec<StrongId>) -> Result<(), String> {
             let start = std::time::Instant::now();
@@ -7310,7 +7005,7 @@ mod imp {
                 .ok_or_else(|| "committed tensor batch missing".to_string())?;
             self.in_flight.push_back((number, command));
             self.open_batch = 0;
-            self.dispatches = 0;
+            self.open_ns = 0.0;
             Ok(())
         }
     }
@@ -7371,6 +7066,11 @@ mod imp {
                 .map(|(batch, command)| (*batch, command.clone())).collect::<Vec<_>>())
         })?;
         drop(retired);
+        wait_committed(runtime, commands)?;
+        tensor_locked_in(runtime, |state| state.check_writer(number))
+    }
+
+    fn wait_committed(runtime: &TensorRuntime, commands: Vec<(u64, StrongId)>) -> Result<(), String> {
         for (batch, command) in commands {
             let _pool = AutoreleasePool::new();
             unsafe { let _: () = msg_send![command.as_id(), waitUntilCompleted]; }
@@ -7381,10 +7081,11 @@ mod imp {
                 let failed = failed || state.injected_failure == Some(batch);
                 if failed { state.record_failure(batch); }
                 state.completed_batch = state.completed_batch.max(batch);
+                state.prune_thread_batches();
                 Ok(())
             })?;
         }
-        tensor_locked_in(runtime, |state| state.check_writer(number))
+        Ok(())
     }
 
     pub(crate) fn tensor_pool_clear() -> Result<(), String> {
@@ -7400,11 +7101,25 @@ mod imp {
         Ok(())
     }
 
-    pub(crate) fn tensor_evict_prefix(prefix: &str) -> Result<usize, String> {
+    pub(crate) fn tensor_evict_owner(owner: &WeightOwner) -> Result<usize, String> {
         let buffers = tensor_locked(|state| {
             state.drain_returns();
             let keys: Vec<_> = state.context.named_weight_buffers.keys()
-                .filter(|(namespace, _)| namespace.starts_with(prefix)).cloned().collect();
+                .filter(|(namespace, _)| namespace.starts_with(owner.namespace())).cloned().collect();
+            Ok(keys.into_iter().filter_map(|key| state.context.named_weight_buffers.remove(&key)).collect::<Vec<_>>())
+        })?;
+        let bytes = buffers.iter().map(|buffer| unsafe {
+            let bytes: u64 = msg_send![buffer.as_id(), length]; bytes as usize
+        }).sum();
+        drop(buffers);
+        Ok(bytes)
+    }
+
+    pub(crate) fn tensor_evict_keys(prefix: &WeightKey) -> Result<usize, String> {
+        let buffers = tensor_locked(|state| {
+            state.drain_returns();
+            let keys: Vec<_> = state.context.named_weight_buffers.keys()
+                .filter(|(namespace, key)| format!("{namespace}::{key}").starts_with(prefix.as_str())).cloned().collect();
             Ok(keys.into_iter().filter_map(|key| state.context.named_weight_buffers.remove(&key)).collect::<Vec<_>>())
         })?;
         let bytes = buffers.iter().map(|buffer| unsafe {
@@ -7423,7 +7138,7 @@ mod imp {
                 tensor_mode: true, tensor_prepare: true, tensor_batch: 0, tensor_dispatches: 0, tensor_bindings: HashMap::new(),
                 device: runtime.device.clone(), command_queue: runtime.queue.clone(), library: runtime.library.clone(),
                 pipeline_cache: HashMap::new(), cached_weight_buffers: HashMap::new(), named_weight_buffers: HashMap::new(),
-                act_buffers: HashMap::new(), scratch_buffers: HashMap::new(), matmul_out_buffers: HashMap::new(),
+                scratch_buffers: HashMap::new(), matmul_out_buffers: HashMap::new(),
                 batch_depth: 0,
                 batch_command_buffer: None, batch_encoder: None, last_command_buffer: None,
                 pool_free: Vec::new(), pool_in_flight: Vec::new(),
@@ -7443,20 +7158,31 @@ mod imp {
 
     #[track_caller]
     fn tensor_encode(
-        buffers: &[&Arc<TensorBuffer>], output: &Arc<TensorBuffer>,
+        macs: u64, buffers: &[&Arc<TensorBuffer>], output: &Arc<TensorBuffer>,
+        dispatch: impl Fn(&mut MetalContext) -> Result<(), String>,
+    ) -> Result<u64, String> {
+        tensor_encode_group(macs, buffers, &[output], dispatch)
+    }
+
+    #[track_caller]
+    fn tensor_encode_group(
+        macs: u64, inputs: &[&Arc<TensorBuffer>], outputs: &[&Arc<TensorBuffer>],
         dispatch: impl Fn(&mut MetalContext) -> Result<(), String>,
     ) -> Result<u64, String> {
         let _pool = AutoreleasePool::new();
+        let runtime = tensor_runtime()?;
+        let thread = std::thread::current().id();
+        let bytes = inputs.iter().chain(outputs).map(|buffer| buffer.capacity as u64).sum();
         let mut prepared = MetalContext::tensor_preparation()?;
-        for buffer in buffers.iter().copied().chain(std::iter::once(output)) {
+        for buffer in inputs.iter().chain(outputs).copied() {
             prepared.tensor_bindings.insert(buffer.id() as usize, buffer.clone());
         }
         dispatch(&mut prepared)?; // Compile and allocate, without the encoding lock.
         prepared.tensor_prepare = false;
         let mut retired = Vec::new();
-        let result = tensor_locked(|state| {
+        let result = tensor_locked_in(runtime, |state| {
             state.drain_returns();
-            for buffer in buffers { state.check_writer(buffer.writer_batch.load(Ordering::Acquire))?; }
+            for buffer in inputs { state.check_writer(buffer.writer_batch.load(Ordering::Acquire))?; }
             if state.open_batch == 0 {
                 let start = std::time::Instant::now();
                 let result = state.context.begin_batch();
@@ -7470,7 +7196,7 @@ mod imp {
             prepared.batch_command_buffer = state.context.batch_command_buffer.clone();
             prepared.batch_encoder = state.context.batch_encoder.clone();
             prepared.tensor_batch = number;
-            state.set_writer(output, number);
+            for output in outputs { state.set_writer(output, number); }
             let start = std::time::Instant::now();
             let encoded = dispatch(&mut prepared);
             state.lock_phases.encode_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -7479,14 +7205,29 @@ mod imp {
                 state.record_failure(number);
                 return Err(error);
             }
-            state.dispatches += prepared.tensor_dispatches;
-            // A commit boundary, not a work limit. Step 4 replaces this with
-            // measured time slices and per-thread back pressure.
-            if state.dispatches >= 64 { state.commit(&mut retired)?; }
-            Ok(number)
+            let mine = state.thread_batches.entry(thread).or_default();
+            if mine.back() != Some(&number) { mine.push_back(number); }
+            state.open_ns += estimate_ns(&runtime.cost, macs, bytes, prepared.tensor_dispatches);
+            state.reap(&mut retired);
+            if should_commit(state.open_ns, state.in_flight.is_empty(), &runtime.cost) {
+                state.commit(&mut retired)?;
+            }
+            Ok((number, state.back_pressure_command(thread)))
         });
         drop(retired);
-        result
+        let (number, mut waiting) = result?;
+        while let Some(command) = waiting {
+            wait_committed(runtime, vec![command])?;
+            let mut retired = Vec::new();
+            let next = tensor_locked_in(runtime, |state| {
+                state.reap(&mut retired);
+                state.check_writer(number)?;
+                Ok(state.back_pressure_command(thread))
+            });
+            drop(retired);
+            waiting = next?;
+        }
+        Ok(number)
     }
 
     /// Copy a logical 4-D tensor into fresh pool storage. Dimensions are in
@@ -7530,7 +7271,7 @@ mod imp {
             nb0: dst_nb[0] as u64, nb1: dst_nb[1] as u64,
             nb2: dst_nb[2] as u64, nb3: dst_nb[3] as u64,
         };
-        tensor_encode(&[src], dst, |ctx| {
+        tensor_encode(0, &[src], dst, |ctx| {
             // This scalar kernel also handles offsets not divisible by 16.
             // It never makes float4 loads, even for aligned tensors.
             let base = "kernel_cpy_f32_f32";
@@ -7561,14 +7302,14 @@ mod imp {
         b: &Arc<TensorBuffer>, b_offset: usize, b_shape: &Shape4,
         out: &Arc<TensorBuffer>, multiply: bool,
     ) -> Result<u64, String> {
-        tensor_encode(&[a, b], out, |ctx| ctx.dispatch_bin_f32_offsets(
+        tensor_encode(0, &[a, b], out, |ctx| ctx.dispatch_bin_f32_offsets(
             if multiply { 2 } else { 0 }, a.id(), b.id(), out.id(), a_shape, b_shape, [a_offset, b_offset, 0]))
     }
 
     pub(crate) fn tensor_unary(
         x: &Arc<TensorBuffer>, offset: usize, shape: &Shape4, out: &Arc<TensorBuffer>, op: i16,
     ) -> Result<u64, String> {
-        tensor_encode(&[x], out, |ctx| ctx.dispatch_unary_f32_offsets(op, x.id(), out.id(), shape, [offset, 0]))
+        tensor_encode(0, &[x], out, |ctx| ctx.dispatch_unary_f32_offsets(op, x.id(), out.id(), shape, [offset, 0]))
     }
 
     fn check_norm_affine(x: &Shape4, affine: &Shape4) -> Result<(), String> {
@@ -7591,7 +7332,7 @@ mod imp {
     ) -> Result<u64, String> {
         if n_fuse >= 2 { check_norm_affine(shape, mul_shape)?; }
         if n_fuse >= 3 { check_norm_affine(shape, add_shape)?; }
-        tensor_encode(&[x, mul, add], out, |ctx| ctx.dispatch_norm_f32_offsets(
+        tensor_encode(0, &[x, mul, add], out, |ctx| ctx.dispatch_norm_f32_offsets(
             x.id(), mul.id(), add.id(), out.id(), shape, mul_shape, add_shape, eps, n_fuse,
             [offset, mul_offset, add_offset, 0]))
     }
@@ -7604,7 +7345,7 @@ mod imp {
     ) -> Result<u64, String> {
         if n_fuse >= 2 { check_norm_affine(shape, mul_shape)?; }
         if n_fuse >= 3 { check_norm_affine(shape, add_shape)?; }
-        tensor_encode(&[x, mul, add], out, |ctx| ctx.dispatch_rms_norm_f32_offsets(
+        tensor_encode(0, &[x, mul, add], out, |ctx| ctx.dispatch_rms_norm_f32_offsets(
             x.id(), mul.id(), add.id(), out.id(), shape, mul_shape, add_shape, eps, n_fuse,
             [offset, mul_offset, add_offset, 0]))
     }
@@ -7644,7 +7385,7 @@ mod imp {
     ) -> Result<u64, String> {
         let (src_shape, idx_shape, dst_shape) =
             get_rows_shapes(src_ggml_type, n_cols, n_rows, n_indices)?;
-        tensor_encode(&[src, rows], out, |ctx| {
+        tensor_encode(0, &[src, rows], out, |ctx| {
             ctx.dispatch_get_rows_ggml(
                 src_ggml_type, src.id(), &src_shape, rows.id(), &idx_shape,
                 out.id(), &dst_shape, [src_offset, rows_offset, 0],
@@ -7701,6 +7442,20 @@ mod imp {
         x: &Arc<TensorBuffer>, x_offset: usize, w: &Arc<TensorBuffer>, w_offset: usize,
         out: &Arc<TensorBuffer>, m: usize, k: usize, n: usize, ty: u32,
     ) -> Result<u64, String> {
+        let macs = m as u64 * k as u64 * n as u64;
+        let bytes = x.capacity as u64 + w.capacity as u64 + out.capacity as u64;
+        let est = estimate_ns(&tensor_runtime()?.cost, macs, bytes, 1);
+        let rows = if m > 8 && k >= 64 {
+            row_chunks(m, est, 32, 32)
+        } else { vec![0..m] };
+        tensor_matmul_rows(x, x_offset, w, w_offset, out, m, k, n, ty, &rows)
+    }
+
+    fn tensor_matmul_rows(
+        x: &Arc<TensorBuffer>, x_offset: usize, w: &Arc<TensorBuffer>, w_offset: usize,
+        out: &Arc<TensorBuffer>, m: usize, k: usize, n: usize, ty: u32,
+        rows: &[std::ops::Range<usize>],
+    ) -> Result<u64, String> {
         let src0 = src0_type_from_ggml(ty).ok_or_else(|| "unsupported tensor weight type".to_string())?;
         let (row, _) = src0_layout_bytes_per_row(src0, k)?;
         let fits = |offset: usize, rows: usize, bytes: usize, cap: usize| {
@@ -7710,13 +7465,26 @@ mod imp {
             || !fits(0, m, n.checked_mul(4).ok_or("tensor matmul overflow")?, out.capacity) {
             return Err("tensor matmul buffer extent mismatch".into());
         }
-        tensor_encode(&[x, w], out, |ctx| ctx.matmul_nt_into_buffer_offsets(
-            ty, w.id(), x.id(), out.id(), m, k, n, [w_offset, x_offset, 0]))
+        let mut batch = 0;
+        for r in rows {
+            batch = tensor_encode(r.len() as u64 * k as u64 * n as u64, &[x, w], out,
+                |ctx| ctx.matmul_nt_into_buffer_offsets(
+                    ty, w.id(), x.id(), out.id(), r.len(), k, n,
+                    [w_offset, x_offset + r.start * k * 4, r.start * n * 4]))?;
+        }
+        Ok(batch)
     }
 
-    pub(crate) fn tensor_named_weight<'a>(namespace: &str, key: &str, load: impl FnOnce() -> Result<Cow<'a, [u8]>, String>) -> Result<Arc<TensorBuffer>, String> {
+    pub(crate) fn tensor_named_weight<'a>(owner: &WeightOwner, key: &str, load: impl FnOnce() -> Result<Cow<'a, [u8]>, String>) -> Result<Arc<TensorBuffer>, String> {
+        tensor_named_weight_buffer((owner.namespace().to_owned(), key.to_owned()), load)
+    }
+
+    pub(crate) fn tensor_keyed_weight<'a>(key: &WeightKey, load: impl FnOnce() -> Result<Cow<'a, [u8]>, String>) -> Result<Arc<TensorBuffer>, String> {
+        tensor_named_weight_buffer((key.as_str().to_owned(), "act-norm".to_owned()), load)
+    }
+
+    fn tensor_named_weight_buffer<'a>(key: (String, String), load: impl FnOnce() -> Result<Cow<'a, [u8]>, String>) -> Result<Arc<TensorBuffer>, String> {
         let runtime = tensor_runtime()?;
-        let key = (namespace.to_string(), key.to_string());
         let existing = tensor_locked(|state| {
             state.drain_returns();
             Ok(state.context.named_weight_buffers.get(&key).cloned())
@@ -7729,7 +7497,7 @@ mod imp {
                 StrongId::from_owned(obj)
             }.ok_or_else(|| "named tensor weight allocation failed".to_string())?;
             tensor_locked(|state| {
-                state.dead_owners.holds(namespace);
+                state.dead_owners.holds(&key.0);
                 Ok(state.context.named_weight_buffers.entry(key)
                     .or_insert_with(|| candidate.clone()).clone())
             })?
@@ -7744,23 +7512,51 @@ mod imp {
         v: &Arc<TensorBuffer>, vo: usize, out: &Arc<TensorBuffer>,
         nq: usize, nk: usize, heads: usize, d: usize, scale: f32,
     ) -> Result<u64, String> {
-        tensor_encode(&[q, k, v], out, |ctx| {
-            let vector = flash_attn_use_vec(nq, d);
-            let pad = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD,
-                flash_attn_ext_extra_pad_bytes(nq, nk, heads, d, 4, false, vector)?)?;
-            if vector {
-                let tmp = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_TMP, flash_attn_ext_extra_tmp_bytes(nq, heads, d, 32)?)?;
-                ctx.dispatch_flash_attn_ext_vec_f32_offsets(q.id(), k.id(), v.id(), q.id(), q.id(), pad,
-                    Some(tmp), out.id(), nq, nk, heads, d, Src0Type::F32, scale, false, false, 0.0, 0.0,
-                    [qo, ko, vo, qo, qo, 0, 0, 0])
-            } else {
-                let blk = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_BLK,
-                    flash_attn_ext_extra_blk_bytes(nq, nk, false, false)?)?;
-                ctx.dispatch_flash_attn_ext_f32_offsets(q.id(), k.id(), v.id(), q.id(), q.id(), pad, blk,
-                    out.id(), nq, nk, heads, d, Src0Type::F32, scale, false, false, 0.0, 0.0,
-                    [qo, ko, vo, qo, qo, 0, 0, 0])
-            }
-        })
+        let rows = if !flash_attn_use_vec(nq, d) {
+            let macs = 2 * nq as u64 * nk as u64 * heads as u64 * d as u64;
+            let bytes = q.capacity as u64 + k.capacity as u64
+                + v.capacity as u64 + out.capacity as u64;
+            let dispatches = 1 + usize::from(nk % OP_FLASH_ATTN_EXT_NCPSG as usize != 0);
+            let est = estimate_ns(&tensor_runtime()?.cost, macs, bytes, dispatches);
+            row_chunks(nq, est, 1, 20)
+        } else { vec![0..nq] };
+        tensor_attention_rows(q, qo, k, ko, v, vo, out, nq, nk, heads, d, scale, &rows)
+    }
+
+    fn tensor_attention_rows(
+        q: &Arc<TensorBuffer>, qo: usize, k: &Arc<TensorBuffer>, ko: usize,
+        v: &Arc<TensorBuffer>, vo: usize, out: &Arc<TensorBuffer>,
+        nq: usize, nk: usize, heads: usize, d: usize, scale: f32,
+        rows: &[std::ops::Range<usize>],
+    ) -> Result<u64, String> {
+        let vector = flash_attn_use_vec(nq, d);
+        let mut batch = 0;
+        for r in rows {
+            let nq = r.len();
+            let q_offset = qo + r.start * heads * d * 4;
+            let out_offset = r.start * heads * d * 4;
+            batch = tensor_encode(2 * nq as u64 * nk as u64 * heads as u64 * d as u64,
+                &[q, k, v], out, |ctx| {
+                let pad = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_PAD,
+                    flash_attn_ext_extra_pad_bytes(nq, nk, heads, d, 4, false, vector)?)?;
+                if vector {
+                    let tmp = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_TMP,
+                        flash_attn_ext_extra_tmp_bytes(nq, heads, d, 32)?)?;
+                    ctx.dispatch_flash_attn_ext_vec_f32_offsets(
+                        q.id(), k.id(), v.id(), q.id(), q.id(), pad, Some(tmp), out.id(),
+                        nq, nk, heads, d, Src0Type::F32, scale, false, false, 0.0, 0.0,
+                        [q_offset, ko, vo, q_offset, q_offset, 0, 0, out_offset])
+                } else {
+                    let blk = ctx.get_or_create_scratch_buffer(SCRATCH_FLASH_BLK,
+                        flash_attn_ext_extra_blk_bytes(nq, nk, false, false)?)?;
+                    ctx.dispatch_flash_attn_ext_f32_offsets(
+                        q.id(), k.id(), v.id(), q.id(), q.id(), pad, blk, out.id(),
+                        nq, nk, heads, d, Src0Type::F32, scale, false, false, 0.0, 0.0,
+                        [q_offset, ko, vo, q_offset, q_offset, 0, 0, out_offset])
+                }
+            })?;
+        }
+        Ok(batch)
     }
 
     pub(crate) fn tensor_im2col(
@@ -7768,15 +7564,15 @@ mod imp {
         ic: usize, iw: usize, ih: usize, stride: usize, kw: usize, kh: usize,
         px: usize, py: usize, ow: usize, oh: usize,
     ) -> Result<u64, String> {
-        tensor_encode(&[x], out, |ctx| ctx.dispatch_im2col_2d_f32_offsets(
+        tensor_encode(0, &[x], out, |ctx| ctx.dispatch_im2col_2d_f32_offsets(
             x.id(), 0, out.id(), ic, iw, ih, stride, kw, kh, px, py, ow, oh, [offset, 0]))
     }
 
-    pub(crate) fn tensor_resident_weights(prefix: &str) -> Result<(usize, usize), String> {
+    pub(crate) fn tensor_resident_weights(owner: &WeightOwnerTrace) -> Result<(usize, usize), String> {
         tensor_locked(|state| {
             state.drain_returns();
             Ok(state.context.named_weight_buffers.iter()
-                .filter(|((namespace, _), _)| namespace.starts_with(prefix))
+                .filter(|((namespace, _), _)| namespace.starts_with(owner.namespace()))
                 .fold((0, 0), |(count, bytes), (_, buffer)| {
                     let length: u64 = unsafe { msg_send![buffer.as_id(), length] };
                     (count + 1, bytes + length as usize)
@@ -7814,6 +7610,7 @@ mod imp {
         // Isolate injected failures from other tests, but exercise the same
         // commit/wait/read gate and return-channel accounting used in production.
         let (sender, returns) = mpsc::channel();
+        let cost = tensor_runtime()?.cost;
         let mut context = MetalContext::tensor_preparation()?;
         context.tensor_mode = false;
         context.tensor_prepare = false;
@@ -7824,10 +7621,11 @@ mod imp {
         let second = Arc::new(TensorBuffer { object: Some(second_object), capacity: 16,
             last_batch: AtomicU64::new(2), writer_batch: AtomicU64::new(2), returns: sender.clone(), recycle: true });
         let runtime = Arc::new(TensorRuntime {
-            device: context.device.clone(), queue: context.command_queue.clone(), library: context.library.clone(), returns: sender,
+            device: context.device.clone(), queue: context.command_queue.clone(), library: context.library.clone(), returns: sender, cost,
             state: Mutex::new(TensorState {
                 context, lock_phases: TensorLockPhases::default(), returns, free: Vec::new(), deferred_drop: Vec::new(), dead_owners: makepad_ai_loader::DeadOwnerInbox::register(),
-                in_flight: VecDeque::new(), next_batch: 3, open_batch: 0, dispatches: 0,
+                in_flight: VecDeque::new(), next_batch: 3, open_batch: 0,
+                open_ns: 0.0, thread_batches: HashMap::new(),
                 completed_batch: 0, failed: BTreeSet::new(), failure_floor: None, injected_failure: Some(1),
                 live_writers: BTreeMap::from([(1, 1), (2, 1)]),
             }),
@@ -7861,6 +7659,141 @@ mod imp {
             state.check_writer(3)
         })?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tensor_slice_tests {
+        use super::*;
+
+        #[test]
+        fn row_plans_cover_and_preserve_kernel_rows() {
+            assert_eq!(row_chunks(300, SLICE_NS, 32, 32), vec![0..300]);
+            assert_eq!(row_chunks(300, 3.5 * SLICE_NS, 32, 32),
+                vec![0..96, 96..192, 192..300], "short tail merges");
+            assert_eq!(row_chunks(100, 9.0 * SLICE_NS, 1, 20),
+                vec![0..20, 20..40, 40..60, 60..80, 80..100],
+                "minimum rows preserve non-vector attention");
+            for (rows, slices, align, min_rows) in [
+                (300, 3.5, 32, 32), (100, 9.0, 1, 20),
+                (320, 4.0, 32, 32), (33, 20.0, 32, 32),
+                (101, 3.0, 1, 20),
+            ] {
+                let plan = row_chunks(rows, slices * SLICE_NS, align, min_rows);
+                let mut end = 0;
+                for (index, range) in plan.iter().enumerate() {
+                    assert_eq!(range.start, end, "contiguous ordered cover");
+                    assert_eq!(range.start % align, 0, "aligned start");
+                    assert!(range.len() >= min_rows, "minimum kernel rows");
+                    if index + 1 < plan.len() {
+                        assert_eq!(range.len() % align, 0, "aligned non-tail size");
+                    }
+                    end = range.end;
+                }
+                assert_eq!(end, rows, "exact final extent");
+            }
+        }
+
+        #[test]
+        fn commit_and_back_pressure_rules() {
+            let cost = TensorCost {
+                ns_per_mac: 2.0, ns_per_byte: 3.0,
+                ns_per_dispatch: 5.0, ns_per_commit: 1000.0,
+            };
+            assert_eq!(estimate_ns(&cost, 7, 11, 13), 112.0);
+            assert!(!should_commit(999.0, true, &cost), "idle commit floor");
+            assert!(should_commit(1000.0, true, &cost), "idle starts work");
+            assert!(!should_commit(1000.0, false, &cost), "busy accumulates");
+            assert!(!should_commit(SLICE_NS - 1.0, false, &cost));
+            assert!(should_commit(SLICE_NS, false, &cost), "slice boundary");
+            assert!(should_commit(SLICE_NS + 1.0, true, &cost));
+            for (mine, open, completed, expected) in [
+                (vec![], 0, 0, None),
+                (vec![1, 2], 0, 0, None),
+                (vec![1, 2, 3], 3, 0, None),
+                (vec![1, 2, 3], 0, 0, Some(1)),
+                (vec![1, 2, 3, 4], 4, 1, None),
+                (vec![1, 2, 3, 4, 5], 5, 1, Some(2)),
+                (vec![1, 3, 7], 0, 7, None),
+            ] {
+                assert_eq!(back_pressure_target(&VecDeque::from(mine), open, completed),
+                    expected, "only committed unfinished batches count");
+            }
+        }
+
+        fn next_random(state: &mut u32) -> u32 {
+            *state ^= *state << 13;
+            *state ^= *state >> 17;
+            *state ^= *state << 5;
+            *state
+        }
+
+        fn random_input(state: &mut u32, elements: usize) -> Vec<f32> {
+            (0..elements).map(|_| next_random(state) as i32 as f32 / i32::MAX as f32)
+                .collect()
+        }
+
+        fn output_bits(buffer: &TensorBuffer, elements: usize, batch: u64) -> Vec<u32> {
+            tensor_flush_until(batch).unwrap();
+            unsafe { std::slice::from_raw_parts(buffer.contents().unwrap(), elements) }
+                .iter().map(|value| value.to_bits()).collect()
+        }
+
+        #[test]
+        fn matmul_row_slices_preserve_f32_and_q8_bits() {
+            crate::run_model_worker("matmul-slices-test", || {
+                let (m, k, n) = (300, 256, 512);
+                let mut seed = 0x6d2b79f5;
+                let x = random_input(&mut seed, m * k);
+                let shape = shape4_from_row_major(&[m, k], 4).unwrap();
+                let x = tensor_upload_f32(&x, &shape).unwrap();
+                let weights = random_input(&mut seed, n * k);
+                let f32_bytes: Vec<_> = weights.iter().flat_map(|v| v.to_le_bytes()).collect();
+                let mut q8_bytes = Vec::new();
+                for _ in 0..n * k / 32 {
+                    q8_bytes.extend(makepad_ai_loader::quant::f32_to_f16(0.03125).to_le_bytes());
+                    q8_bytes.extend((0..32).map(|_| next_random(&mut seed) as u8));
+                }
+                for (ty, bytes) in [(GGML_TYPE_F32, f32_bytes), (GGML_TYPE_Q8_0, q8_bytes)] {
+                    let w = tensor_buffer(bytes.len(), true).unwrap();
+                    unsafe { std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(), w.contents().unwrap().cast::<u8>(), bytes.len()); }
+                    let whole = tensor_buffer(m * n * 4, false).unwrap();
+                    let split = tensor_buffer(m * n * 4, false).unwrap();
+                    let whole_batch = tensor_matmul_rows(
+                        &x, 0, &w, 0, &whole, m, k, n, ty, &[0..m]).unwrap();
+                    let split_batch = tensor_matmul_rows(
+                        &x, 0, &w, 0, &split, m, k, n, ty,
+                        &[0..96, 96..192, 192..300]).unwrap();
+                    assert_eq!(output_bits(&whole, m * n, whole_batch),
+                        output_bits(&split, m * n, split_batch),
+                        "GEMM row slices preserve every bit for type {ty}");
+                }
+            });
+        }
+
+        #[test]
+        fn attention_row_slices_preserve_bits() {
+            crate::run_model_worker("attention-slices-test", || {
+                let (nq, nk, heads, d) = (100, 64, 2, 64);
+                let mut seed = 0xa341316c;
+                let q_shape = shape4_from_row_major(&[nq, heads, d], 4).unwrap();
+                let kv_shape = shape4_from_row_major(&[nk, heads, d], 4).unwrap();
+                let q = tensor_upload_f32(&random_input(&mut seed, q_shape.numel), &q_shape).unwrap();
+                let k = tensor_upload_f32(&random_input(&mut seed, kv_shape.numel), &kv_shape).unwrap();
+                let v = tensor_upload_f32(&random_input(&mut seed, kv_shape.numel), &kv_shape).unwrap();
+                let whole = tensor_buffer(q_shape.numel * 4, false).unwrap();
+                let split = tensor_buffer(q_shape.numel * 4, false).unwrap();
+                let scale = 1.0 / (d as f32).sqrt();
+                let whole_batch = tensor_attention_rows(
+                    &q, 0, &k, 0, &v, 0, &whole, nq, nk, heads, d, scale, &[0..nq]).unwrap();
+                let split_batch = tensor_attention_rows(
+                    &q, 0, &k, 0, &v, 0, &split, nq, nk, heads, d, scale,
+                    &[0..34, 34..68, 68..100]).unwrap();
+                assert_eq!(output_bits(&whole, q_shape.numel, whole_batch),
+                    output_bits(&split, q_shape.numel, split_batch),
+                    "attention row slices preserve every bit");
+            });
+        }
     }
 
     #[test]
@@ -7965,11 +7898,11 @@ mod imp {
                         try_layer_norm_f32(&x, &dims, eps)
                     }
                     4 => {
-                        legacy.dispatch_rms_norm_f32(xb.as_id(), xb.as_id(), xb.as_id(), dst.as_id(), &shape, &shape, &shape, eps, 1).unwrap();
+                        legacy.dispatch_rms_norm_f32_offsets(xb.as_id(), xb.as_id(), xb.as_id(), dst.as_id(), &shape, &shape, &shape, eps, 1, [0; 4]).unwrap();
                         try_rms_norm_f32(&x, &dims, eps)
                     }
                     5 => {
-                        legacy.dispatch_rms_norm_f32(xb.as_id(), mb.as_id(), xb.as_id(), dst.as_id(), &shape, &ms, &shape, eps, 2).unwrap();
+                        legacy.dispatch_rms_norm_f32_offsets(xb.as_id(), mb.as_id(), xb.as_id(), dst.as_id(), &shape, &ms, &shape, eps, 2, [0; 4]).unwrap();
                         try_rms_norm_mul_f32(&x, &dims, &mul, &mul_dims, eps)
                     }
                     _ => {
@@ -8204,7 +8137,7 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
-        namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         load: F,
     ) -> Option<Vec<f32>>
@@ -8218,7 +8151,7 @@ mod imp {
             let a_shape = shape4_from_row_major(&[m, k], 4)?;
             let out_shape = shape4_from_row_major(&[m, n], 4)?;
             let a = tensor_upload_f32(a, &a_shape)?;
-            let weight = tensor_named_weight(namespace, cache_key, load)?;
+            let weight = tensor_named_weight(owner, cache_key, load)?;
             tensor_host_result(&out_shape, |out| {
                 tensor_matmul(&a, 0, &weight, 0, out, m, k, n, bt_ggml_type)
             })
@@ -8233,7 +8166,7 @@ mod imp {
         load: F,
     ) -> Option<Vec<Vec<f32>>>
     where
-        F: FnMut(&str, &str) -> Result<Cow<'a, [u8]>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Cow<'a, [u8]>, String>,
     {
         if matrices.is_empty() { return Some(Vec::new()); }
         if a.len() != m.checked_mul(k)? || m == 0 || k == 0 || matrices.iter().any(|matrix| matrix.n == 0) {
@@ -8246,8 +8179,8 @@ mod imp {
             let mut outputs = Vec::with_capacity(matrices.len());
             let mut last_batch = 0;
             for matrix in matrices {
-                let weight = tensor_named_weight(matrix.namespace, matrix.cache_key,
-                    || load(matrix.namespace, matrix.cache_key))?;
+                let weight = tensor_named_weight(matrix.owner, matrix.cache_key,
+                    || load(matrix.owner, matrix.cache_key))?;
                 let shape = shape4_from_row_major(&[m, matrix.n], 4)?;
                 let bytes = shape.numel.checked_mul(4).ok_or("metal output extent overflow")?;
                 let out = tensor_buffer(bytes, false)?;
@@ -8262,13 +8195,14 @@ mod imp {
     }
 
     pub(super) fn try_ar_pre_attn<F>(
+        resid: &mut ArResidual,
         hidden: Option<&[f32]>,
         m: usize,
         hidden_w: usize,
         head_dim: usize,
         in_norm: &[f32],
-        qk_norm: Option<(&[f32], &[f32], &str, &str)>,
-        in_norm_key: &str,
+        qk_norm: Option<(&[f32], &[f32], &WeightKey, &WeightKey)>,
+        in_norm_key: &WeightKey,
         eps: f32,
         q: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         k: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -8276,32 +8210,73 @@ mod imp {
         load: F,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
-        with_context(|ctx| {
-            ctx.ar_pre_attn(
-                hidden,
-                m,
-                hidden_w,
-                head_dim,
-                in_norm,
-                qk_norm,
-                in_norm_key,
-                eps,
-                q,
-                k,
-                v,
-                load,
-            )
+        let mut load = load;
+        tensor_try(|| {
+            let x_s = shape4_from_row_major(&[m, hidden_w], 4)?;
+            let g_s = shape4_from_row_major(&[hidden_w], 4)?;
+            if let Some(hidden) = hidden {
+                if hidden.len() != x_s.numel { return Err("ar hidden len".into()); }
+                resid.h = Some(tensor_upload_f32(hidden, &x_s)?);
+                resid.elems = x_s.numel;
+            }
+            let h = resid.h.as_ref().filter(|_| resid.elems == x_s.numel).ok_or("ar residual missing")?;
+            let q_s = shape4_from_row_major(&[m, q.n], 4)?;
+            let k_s = shape4_from_row_major(&[m, k.n], 4)?;
+            let v_s = shape4_from_row_major(&[m, v.n], 4)?;
+            let g = tensor_keyed_weight(in_norm_key, || Ok(Cow::Owned(in_norm.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+            let qw = tensor_named_weight(q.owner, q.cache_key, || load(q.owner, q.cache_key).map(Cow::Owned))?;
+            let kw = tensor_named_weight(k.owner, k.cache_key, || load(k.owner, k.cache_key).map(Cow::Owned))?;
+            let vw = tensor_named_weight(v.owner, v.cache_key, || load(v.owner, v.cache_key).map(Cow::Owned))?;
+            let qk = if let Some((q_norm, k_norm, q_key, k_key)) = qk_norm {
+                let qg = tensor_keyed_weight(q_key, || Ok(Cow::Owned(q_norm.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+                let kg = tensor_keyed_weight(k_key, || Ok(Cow::Owned(k_norm.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+                let qs = shape4_from_row_major(&[q_s.numel / head_dim, head_dim], 4)?;
+                let ks = shape4_from_row_major(&[k_s.numel / head_dim, head_dim], 4)?;
+                let gs = shape4_from_row_major(&[head_dim], 4)?;
+                Some((qg, kg, qs, ks, gs))
+            } else { None };
+            let n1 = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let qo = tensor_buffer((q_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let ko = tensor_buffer((k_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let vo = tensor_buffer((v_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let normalized = if qk.is_some() {
+                Some((tensor_buffer(q_s.numel.checked_mul(4).ok_or("metal output extent overflow")?, false)?,
+                      tensor_buffer(k_s.numel.checked_mul(4).ok_or("metal output extent overflow")?, false)?))
+            } else { None };
+            let mut inputs = vec![h, &g, &qw, &kw, &vw];
+            let mut outputs = vec![&n1, &qo, &ko, &vo];
+            if let Some((qg, kg, _, _, _)) = &qk { inputs.extend([qg, kg]); }
+            if let Some((qn, kn)) = &normalized { outputs.extend([qn, kn]); }
+            let batch = tensor_encode_group(
+                m as u64 * hidden_w as u64 * (q.n as u64 + k.n as u64 + v.n as u64),
+                &inputs, &outputs, |ctx| {
+                ctx.dispatch_rms_norm_f32_offsets(h.id(), g.id(), h.id(), n1.id(), &x_s, &g_s, &x_s, eps, 2, [0; 4])?;
+                ctx.matmul_nt_into_buffer_offsets(q.bt_ggml_type, qw.id(), n1.id(), qo.id(), m, hidden_w, q.n, [0; 3])?;
+                ctx.matmul_nt_into_buffer_offsets(k.bt_ggml_type, kw.id(), n1.id(), ko.id(), m, hidden_w, k.n, [0; 3])?;
+                ctx.matmul_nt_into_buffer_offsets(v.bt_ggml_type, vw.id(), n1.id(), vo.id(), m, hidden_w, v.n, [0; 3])?;
+                if let (Some((qg, kg, qs, ks, gs)), Some((qn, kn))) = (&qk, &normalized) {
+                    ctx.dispatch_rms_norm_f32_offsets(qo.id(), qg.id(), qo.id(), qn.id(), qs, gs, qs, eps, 2, [0; 4])?;
+                    ctx.dispatch_rms_norm_f32_offsets(ko.id(), kg.id(), ko.id(), kn.id(), ks, gs, ks, eps, 2, [0; 4])?;
+                }
+                Ok(())
+            })?;
+            tensor_flush_until(batch)?;
+            let (q_src, k_src) = normalized.as_ref().map(|(q, k)| (q, k)).unwrap_or((&qo, &ko));
+            Ok((unsafe { std::slice::from_raw_parts(q_src.contents()?, q_s.numel) }.to_vec(),
+                unsafe { std::slice::from_raw_parts(k_src.contents()?, k_s.numel) }.to_vec(),
+                unsafe { std::slice::from_raw_parts(vo.contents()?, v_s.numel) }.to_vec()))
         })
     }
 
     pub(super) fn try_ar_post_attn<F>(
+        resid: &mut ArResidual,
         attn: &[f32],
         m: usize,
         hidden_w: usize,
         post_norm: &[f32],
-        post_norm_key: &str,
+        post_norm_key: &WeightKey,
         eps: f32,
         o: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         up: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
@@ -8310,47 +8285,83 @@ mod imp {
         load: F,
     ) -> Option<()>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
-        with_context(|ctx| {
-            ctx.ar_post_attn(
-                attn,
-                m,
-                hidden_w,
-                post_norm,
-                post_norm_key,
-                eps,
-                o,
-                up,
-                gate,
-                down,
-                load,
-            )
+        let mut load = load;
+        tensor_try(|| {
+            let x_s = shape4_from_row_major(&[m, hidden_w], 4)?;
+            let g_s = shape4_from_row_major(&[hidden_w], 4)?;
+            let h_s = shape4_from_row_major(&[x_s.numel], 4)?;
+            let up_s = shape4_from_row_major(&[m, up.n], 4)?;
+            let ff_s = shape4_from_row_major(&[up_s.numel], 4)?;
+            let o_s = shape4_from_row_major(&[m, o.n], 4)?;
+            let gate_s = shape4_from_row_major(&[m, gate.n], 4)?;
+            let down_s = shape4_from_row_major(&[m, down.n], 4)?;
+            if attn.len() != x_s.numel { return Err("ar attn len".into()); }
+            let h = resid.h.as_ref().filter(|_| resid.elems == x_s.numel).ok_or("ar residual missing")?;
+            let attn = tensor_upload_f32(attn, &x_s)?;
+            let g = tensor_keyed_weight(post_norm_key, || Ok(Cow::Owned(post_norm.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+            let ow = tensor_named_weight(o.owner, o.cache_key, || load(o.owner, o.cache_key).map(Cow::Owned))?;
+            let uw = tensor_named_weight(up.owner, up.cache_key, || load(up.owner, up.cache_key).map(Cow::Owned))?;
+            let gw = tensor_named_weight(gate.owner, gate.cache_key, || load(gate.owner, gate.cache_key).map(Cow::Owned))?;
+            let dw = tensor_named_weight(down.owner, down.cache_key, || load(down.owner, down.cache_key).map(Cow::Owned))?;
+            let oo = tensor_buffer((o_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let h2 = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let n2 = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let uo = tensor_buffer((up_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let go = tensor_buffer((gate_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let gs = tensor_buffer((up_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let ff = tensor_buffer((up_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let d = tensor_buffer((down_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let h3 = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            tensor_encode_group(m as u64 * (
+                hidden_w as u64 * o.n as u64 + hidden_w as u64 * up.n as u64
+                + hidden_w as u64 * gate.n as u64 + up.n as u64 * down.n as u64),
+                &[h, &attn, &g, &ow, &uw, &gw, &dw],
+                &[&oo, &h2, &n2, &uo, &go, &gs, &ff, &d, &h3], |ctx| {
+                ctx.matmul_nt_into_buffer_offsets(o.bt_ggml_type, ow.id(), attn.id(), oo.id(), m, hidden_w, o.n, [0; 3])?;
+                ctx.dispatch_bin_f32_offsets(0, h.id(), oo.id(), h2.id(), &h_s, &h_s, [0; 3])?;
+                ctx.dispatch_rms_norm_f32_offsets(h2.id(), g.id(), h2.id(), n2.id(), &x_s, &g_s, &x_s, eps, 2, [0; 4])?;
+                ctx.matmul_nt_into_buffer_offsets(up.bt_ggml_type, uw.id(), n2.id(), uo.id(), m, hidden_w, up.n, [0; 3])?;
+                ctx.matmul_nt_into_buffer_offsets(gate.bt_ggml_type, gw.id(), n2.id(), go.id(), m, hidden_w, gate.n, [0; 3])?;
+                ctx.dispatch_unary_f32_offsets(OP_UNARY_NUM_SILU, go.id(), gs.id(), &ff_s, [0; 2])?;
+                ctx.dispatch_bin_f32_offsets(2, uo.id(), gs.id(), ff.id(), &ff_s, &ff_s, [0; 3])?;
+                ctx.matmul_nt_into_buffer_offsets(down.bt_ggml_type, dw.id(), ff.id(), d.id(), m, up.n, down.n, [0; 3])?;
+                ctx.dispatch_bin_f32_offsets(0, h2.id(), d.id(), h3.id(), &h_s, &h_s, [0; 3])?;
+                Ok(())
+            })?;
+            resid.h = Some(h3);
+            Ok(())
         })
     }
 
     pub(super) fn try_ar_final_rms(
+        resid: &mut ArResidual,
         m: usize,
         hidden_w: usize,
         gamma: &[f32],
-        gamma_key: &str,
+        gamma_key: &WeightKey,
         eps: f32,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.ar_final_rms(m, hidden_w, gamma, gamma_key, eps))
-    }
-
-    pub(super) fn ar_resident_clear() {
-        let _ = with_context(|ctx| {
-            ctx.ar_clear_acts();
-            Ok(())
-        });
+        tensor_try(|| {
+            let x_s = shape4_from_row_major(&[m, hidden_w], 4)?;
+            let g_s = shape4_from_row_major(&[hidden_w], 4)?;
+            let h = resid.h.as_ref().filter(|_| resid.elems == x_s.numel).ok_or("ar residual missing")?;
+            let g = tensor_keyed_weight(gamma_key, || Ok(Cow::Owned(gamma.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+            let out = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let batch = tensor_encode_group(0, &[h, &g], &[&out], |ctx| {
+                ctx.dispatch_rms_norm_f32_offsets(h.id(), g.id(), h.id(), out.id(), &x_s, &g_s, &x_s, eps, 2, [0; 4])?;
+                Ok(())
+            })?;
+            tensor_flush_until(batch)?;
+            Ok(unsafe { std::slice::from_raw_parts(out.contents()?, x_s.numel) }.to_vec())
+        })
     }
 
     pub(super) fn transient_pool_clear() {
-        let _ = with_context(|ctx| {
-            ctx.pool_clear();
-            Ok(())
-        });
+        if let Err(error) = tensor_pool_clear() {
+            super::log_metal_error_once(format!("[ggml][metal] transient pool clear failed: {error}"));
+        }
     }
 
     pub(super) fn try_dit_ffn_resident<F>(
@@ -8360,31 +8371,47 @@ mod imp {
         ff_dim: usize,
         ff_in_b: &[f32],
         ff_out_b: &[f32],
-        ff_in_b_key: &str,
-        ff_out_b_key: &str,
+        ff_in_b_key: &WeightKey,
+        ff_out_b_key: &WeightKey,
         swap: bool,
         ff_in: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         ff_out: super::MatmulNtGgmlBytesKeyedMatrix<'_>,
         load: F,
     ) -> Option<Vec<f32>>
     where
-        F: FnMut(&str, &str) -> Result<Vec<u8>, String>,
+        F: FnMut(&WeightOwner, &str) -> Result<Vec<u8>, String>,
     {
-        with_context(|ctx| {
-            ctx.dit_ffn_resident(
-                normed,
-                m,
-                hidden_w,
-                ff_dim,
-                ff_in_b,
-                ff_out_b,
-                ff_in_b_key,
-                ff_out_b_key,
-                swap,
-                ff_in,
-                ff_out,
-                load,
-            )
+        let mut load = load;
+        tensor_try(|| {
+            if normed.len() != m * hidden_w { return Err("dit ffn normed len".into()); }
+            if ff_in.n != ff_dim * 2 || ff_out.n != hidden_w { return Err("dit ffn weight n".into()); }
+            let y_s = shape4_from_row_major(&[m, hidden_w], 4)?;
+            let x_s = shape4_from_row_major(&[m, ff_in.n], 4)?;
+            let b_s = shape4_from_row_major(&[ff_in.n], 4)?;
+            let ob_s = shape4_from_row_major(&[hidden_w], 4)?;
+            let gated_s = shape4_from_row_major(&[m, ff_dim], 4)?;
+            let dn = tensor_upload_f32(normed, &y_s)?;
+            let iw = tensor_named_weight(ff_in.owner, ff_in.cache_key, || load(ff_in.owner, ff_in.cache_key).map(Cow::Owned))?;
+            let ow = tensor_named_weight(ff_out.owner, ff_out.cache_key, || load(ff_out.owner, ff_out.cache_key).map(Cow::Owned))?;
+            let ib = tensor_keyed_weight(ff_in_b_key, || Ok(Cow::Owned(ff_in_b.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+            let ob = tensor_keyed_weight(ff_out_b_key, || Ok(Cow::Owned(ff_out_b.iter().flat_map(|v| v.to_le_bytes()).collect())))?;
+            let ffin = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let ffinb = tensor_buffer((x_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let gated = tensor_buffer((gated_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let ffout = tensor_buffer((y_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let y = tensor_buffer((y_s.numel).checked_mul(4).ok_or("metal output extent overflow")?, false)?;
+            let batch = tensor_encode_group(
+                m as u64 * (hidden_w as u64 * ff_in.n as u64 + ff_dim as u64 * ff_out.n as u64),
+                &[&dn, &iw, &ow, &ib, &ob], &[&ffin, &ffinb, &gated, &ffout, &y], |ctx| {
+                ctx.matmul_nt_into_buffer_offsets(ff_in.bt_ggml_type, iw.id(), dn.id(), ffin.id(), m, hidden_w, ff_in.n, [0; 3])?;
+                ctx.dispatch_bin_f32_offsets(0, ffin.id(), ib.id(), ffinb.id(), &x_s, &b_s, [0; 3])?;
+                ctx.dispatch_swiglu_packed(ffinb.id(), gated.id(), m, ff_dim, swap)?;
+                ctx.matmul_nt_into_buffer_offsets(ff_out.bt_ggml_type, ow.id(), gated.id(), ffout.id(), m, ff_dim, ff_out.n, [0; 3])?;
+                ctx.dispatch_bin_f32_offsets(0, ffout.id(), ob.id(), y.id(), &y_s, &ob_s, [0; 3])?;
+                Ok(())
+            })?;
+            tensor_flush_until(batch)?;
+            Ok(unsafe { std::slice::from_raw_parts(y.contents()?, y_s.numel) }.to_vec())
         })
     }
 

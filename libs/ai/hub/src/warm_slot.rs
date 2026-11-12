@@ -46,8 +46,8 @@ pub(crate) fn finish<P, T, E>(
 mod tests {
     use super::*;
     use makepad_ai_common::backend::{
-        gpu_weight_cache_evict_prefix, gpu_weight_cache_resident,
-        try_matmul_nt_ggml_bytes_cached, WeightOwner,
+        gpu_weight_cache_evict_owner, gpu_weight_cache_resident,
+        try_matmul_nt_ggml_bytes_cached, WeightOwner, WeightOwnerTrace,
     };
     use std::cell::Cell;
     use std::sync::Arc;
@@ -65,8 +65,8 @@ mod tests {
             owners: Option<Vec<Option<Arc<WeightOwner>>>>,
             calls: &Cell<usize>,
             fail: bool,
-            seen: &mut Vec<String>,
-            retired: &[String],
+            seen: &mut Vec<WeightOwnerTrace>,
+            retired: &[WeightOwnerTrace],
         ) -> Result<Self, &'static str> {
             let carried: Vec<bool> = (0..2)
                 .map(|i| owners.as_ref().is_some_and(|owners| owners[i].is_some()))
@@ -78,7 +78,7 @@ mod tests {
                     .map(|owner| owner.unwrap_or_else(|| Arc::new(WeightOwner::new("hub-warm-slot"))))
                     .collect(),
             };
-            *seen = pipeline.owners.iter().map(|o| o.namespace().to_owned()).collect();
+            *seen = pipeline.owners.iter().map(|o| o.trace()).collect();
             // Two 8x16 F16 matrices per component. Both backends use their
             // actual keyed entry; the loader count measures device uploads.
             for (component, owner) in pipeline.owners.iter().enumerate() {
@@ -87,7 +87,7 @@ mod tests {
                 for key in ["first", "second"] {
                     let out = try_matmul_nt_ggml_bytes_cached(
                         &vec![1.0; size * 16], 1, size, 16, 8,
-                        owner.namespace(), key,
+                        &owner, key,
                         || { calls.set(calls.get() + 1); Ok(std::borrow::Cow::Borrowed(&bytes)) },
                     ).expect("test requires a real GPU backend").expect("keyed matmul succeeds");
                     let expected = if model[component] == 0x3c00 { 16.0 } else { 32.0 };
@@ -108,11 +108,11 @@ mod tests {
 
     fn rebuild(
         slot: &mut Option<Pipeline>, model: [u16; 2], size: usize, calls: &Cell<usize>,
-        fail: bool, seen: &mut Vec<String>, evictions: &Cell<usize>,
+        fail: bool, seen: &mut Vec<WeightOwnerTrace>, evictions: &Cell<usize>,
     ) -> Result<(), &'static str> {
-        let retired: Vec<String> = slot.as_ref().map(|p| p.owners.iter().enumerate()
+        let retired: Vec<WeightOwnerTrace> = slot.as_ref().map(|p| p.owners.iter().enumerate()
             .filter(|(i, _)| p.model[0] != model[0] || p.model[*i] != model[*i])
-            .map(|(_, owner)| owner.namespace().to_owned()).collect()).unwrap_or_default();
+            .map(|(_, owner)| owner.trace()).collect()).unwrap_or_default();
         ensure(
             slot, (model, size),
             |p, &(model, size)| p.model == model && p.size == size,
@@ -121,8 +121,8 @@ mod tests {
                 .map(|(i, owner)| (p.model[i] == model[i]).then(|| owner.clone())).collect(),
             |p, _| {
                 for owner in &p.owners {
-                    gpu_weight_cache_evict_prefix(owner.namespace()).unwrap();
-                    assert_eq!(gpu_weight_cache_resident(owner.namespace()).unwrap(), (0, 0),
+                    gpu_weight_cache_evict_owner(&owner).unwrap();
+                    assert_eq!(gpu_weight_cache_resident(&owner.trace()).unwrap(), (0, 0),
                         "model switch frees the old stack before the next load");
                 }
                 evictions.set(evictions.get() + 1);
@@ -135,7 +135,7 @@ mod tests {
         )
     }
 
-    fn resident(names: &[String]) -> (usize, usize) {
+    fn resident(names: &[WeightOwnerTrace]) -> (usize, usize) {
         names.iter().map(|ns| gpu_weight_cache_resident(ns).unwrap())
             .fold((0, 0), |(ac, ab), (c, b)| (ac + c, ab + b))
     }
@@ -180,7 +180,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_load_then_cold_load_retires_dead_namespace() {
+    fn failed_load_then_cold_load_retires_dead_owner() {
         std::thread::spawn(|| {
             let (calls, evictions) = (Cell::new(0), Cell::new(0));
             let mut slot = None;
@@ -197,12 +197,12 @@ mod tests {
                     assert!(owners.is_none(), "failed load carries no owners");
                     let bytes = vec![0u8; 8 * 16 * 2];
                     try_matmul_nt_ggml_bytes_cached(&[1.0; 16], 1, 1, 16, 8,
-                        owner.namespace(), "w", || Ok(std::borrow::Cow::Borrowed(&bytes)))
+                        &owner, "w", || Ok(std::borrow::Cow::Borrowed(&bytes)))
                         .expect("real GPU backend").unwrap();
                     assert_eq!(resident(&failed), (0, 0), "first cold matmul drains the failed owner's namespace");
-                    assert_eq!(gpu_weight_cache_resident(owner.namespace()).unwrap(), (1, 256),
+                    assert_eq!(gpu_weight_cache_resident(&owner.trace()).unwrap(), (1, 256),
                         "only the new owner's weight remains");
-                    names = vec![owner.namespace().to_owned()];
+                    names = vec![owner.trace()];
                     Ok(Some(Pipeline { model: [0; 2], size: 1, owners: vec![owner] }))
                 }, |_: &&str| false,
             ).unwrap();

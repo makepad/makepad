@@ -157,7 +157,7 @@ fn ensure_bf16_linear<'a>(
         )));
     }
     gpu_weight_cache_ensure(
-        weights.cache_namespace(),
+        weights.owner(),
         name,
         GGML_TYPE_BF16,
         output_cols,
@@ -292,7 +292,7 @@ pub(crate) fn ensure_packed_bf16_linear<'a>(
         }
     }
     gpu_weight_cache_ensure(
-        weights.cache_namespace(),
+        weights.owner(),
         cache_key,
         GGML_TYPE_BF16,
         width * streams,
@@ -345,7 +345,7 @@ pub(crate) fn linear_bf16_optional_bias(
         }
         None => Vec::new(),
     };
-    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.cache_namespace(), &[part], &bias)
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.owner(), &[part], &bias)
         .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
@@ -385,7 +385,7 @@ pub(crate) fn linear_bf16_bias_epilogue(
             bias.len(),
         )));
     }
-    gpu_linear_nt_cached_bf16_bias_epilogue(input, weights.cache_namespace(), &[part], &bias)
+    gpu_linear_nt_cached_bf16_bias_epilogue(input, weights.owner(), &[part], &bias)
         .map_err(DiffusionError::model)
 }
 
@@ -398,7 +398,7 @@ pub(crate) fn linear_bf16_mm(
     output_cols: usize,
 ) -> Result<GpuTensor> {
     let part = ensure_bf16_linear(weights, weight_name, output_cols, input.cols())?;
-    gpu_linear_nt_cached_bf16_mm(input, weights.cache_namespace(), &[part])
+    gpu_linear_nt_cached_bf16_mm(input, weights.owner(), &[part])
         .map_err(DiffusionError::model)
 }
 
@@ -430,7 +430,7 @@ pub(crate) fn packed_linear_bf16(
 ) -> Result<GpuTensor> {
     let part =
         ensure_packed_bf16_linear(weights, source_names, cache_key, width, heads, input.cols())?;
-    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.cache_namespace(), &[part], &[])
+    let output = gpu_linear_nt_cached_bf16_f32acc(input, weights.owner(), &[part], &[])
         .map_err(DiffusionError::model)?;
     gpu_bf16_round(&output).map_err(DiffusionError::model)
 }
@@ -963,7 +963,7 @@ fn encode_mesh_prefix_inner(
     let prefix = gpu_rms_norm_mul_bf16(
         &output_linear,
         896,
-        weights.cache_namespace(),
+        weights.owner(),
         "output_proj.1",
         &rms_scale,
         f32::EPSILON,

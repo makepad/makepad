@@ -47,10 +47,10 @@ impl GpuTensor {
     }
 }
 
-pub struct GpuLinearPart<'a> {
+pub struct GpuLinearPart<'a, K = &'a str> {
     pub bt_ggml_type: u32,
     pub n: usize,
-    pub cache_key: &'a str,
+    pub cache_key: K,
     pub bytes: &'a [u8],
 }
 

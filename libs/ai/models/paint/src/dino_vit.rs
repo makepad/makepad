@@ -635,7 +635,7 @@ mod exec {
                 PROC_CROP,
                 grid,
                 grid,
-                self.owner.namespace(),
+                &self.owner,
                 "patch",
                 &self.patch_w,
                 &self.patch_b,

@@ -204,7 +204,7 @@ impl RealEsrganModel {
         progress: &mut Option<ProgressHook>,
         want_rgb8: bool,
     ) -> Result<ForwardOutput> {
-        let namespace = self.owner.namespace();
+        let namespace = &self.owner;
         let feat = REALESRGAN_NUM_FEAT;
         let grow = REALESRGAN_NUM_GROW;
         let slope = REALESRGAN_LRELU_SLOPE;
@@ -374,7 +374,7 @@ impl RealEsrganModel {
             in_channels,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             name,
             &weight.weights,
             out_channels,
@@ -397,7 +397,7 @@ impl RealEsrganModel {
             tensor,
             row_offset,
             channels,
-            self.owner.namespace(),
+            &self.owner,
             name,
             bias,
             slope,
@@ -426,7 +426,7 @@ impl RealEsrganModel {
             in_channels,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             name,
             &weight.weights,
             out_channels,
@@ -438,7 +438,7 @@ impl RealEsrganModel {
         let bias = &self.weight(name)?.bias;
         gpu_realesrgan_bias_lrelu_f32(
             tensor,
-            self.owner.namespace(),
+            &self.owner,
             name,
             bias,
             slope,
@@ -532,7 +532,7 @@ impl RealEsrganModel {
             input,
             width,
             height,
-            self.owner.namespace(),
+            &self.owner,
             name,
             &weight.weights,
             &weight.bias,

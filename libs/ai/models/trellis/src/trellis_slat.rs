@@ -310,7 +310,7 @@ impl T2SparseDec {
             )));
         }
         let key = format!("{weight_name}::full");
-        gpu_weight_cache_ensure(self.owner.namespace(), &key, GGML_TYPE_F16, co, 27 * ci, false, || {
+        gpu_weight_cache_ensure(&self.owner, &key, GGML_TYPE_F16, co, 27 * ci, false, || {
             self.weights
                 .tensor_bytes(weight_name)
                 .map_err(|e| e.to_string())
@@ -335,7 +335,7 @@ impl T2SparseDec {
             .ok_or_else(|| DiffusionError::model(format!("missing conv bias {name}")))?;
         let weight_name = format!("{name}.weight");
         let key = self.ensure_conv_full(&weight_name, co, ci)?;
-        gpu_sparse_conv27(x, &ctx.neighbors27, self.owner.namespace(), &key, co, bias)
+        gpu_sparse_conv27(x, &ctx.neighbors27, &self.owner, &key, co, bias)
             .map_err(DiffusionError::model)
     }
 
@@ -352,7 +352,7 @@ impl T2SparseDec {
             }
         };
         let want_a16 = crate::backend::gpu_gemm_f16acc_enabled();
-        gpu_weight_cache_ensure(self.owner.namespace(), &weight_name, ggml_type, n, x.cols(), want_a16, || {
+        gpu_weight_cache_ensure(&self.owner, &weight_name, ggml_type, n, x.cols(), want_a16, || {
             self.weights
                 .tensor_bytes(&weight_name)
                 .map_err(|e| e.to_string())
@@ -361,11 +361,11 @@ impl T2SparseDec {
         let part = GpuLinearPart {
             bt_ggml_type: ggml_type,
             n,
-            cache_key: &weight_name,
+            cache_key: weight_name.as_str(),
             bytes: &[],
         };
         let parts = [part];
-        gpu_linear_nt_cached(x, self.owner.namespace(), &parts, bias).map_err(DiffusionError::model)
+        gpu_linear_nt_cached(x, &self.owner, &parts, bias).map_err(DiffusionError::model)
     }
 
     fn convnext(

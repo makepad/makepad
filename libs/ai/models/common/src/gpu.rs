@@ -42,6 +42,7 @@ pub struct GpuVitLayer<'a> {
 /// weight tensor and an optional `[1, n]` bias, both long-lived.
 #[derive(Clone, Copy)]
 pub struct GpuTwoWayLinear<'a> {
+    pub owner: &'a makepad_ai_loader::WeightOwner,
     pub weight: &'a GpuTensor,
     pub bias: Option<&'a GpuTensor>,
 }
@@ -113,6 +114,7 @@ pub fn gpu_vit_backbone_resident(
 
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
+    use makepad_ai_loader::{WeightKey, WeightOwner};
     use super::GemmPrecision;
     use makepad_ai_loader::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
 
@@ -1965,9 +1967,9 @@ mod imp {
 
     pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
         _spec: AffineQuantizedMatmulSpec<'_>,
-        _weight_cache_key: &str,
-        _scales_cache_key: &str,
-        _biases_cache_key: &str,
+        _weight_cache_key: &WeightKey,
+        _scales_cache_key: &WeightKey,
+        _biases_cache_key: &WeightKey,
         _load_weight_bytes: FW,
         _load_scales_bytes: FS,
         _load_biases_bytes: FB,
@@ -1982,9 +1984,9 @@ mod imp {
 
     pub fn try_affine_quantized_matmul_bf16_rows<FW, FS, FB>(
         _spec: AffineQuantizedMatmulRowsSpec<'_>,
-        _weight_cache_key: &str,
-        _scales_cache_key: &str,
-        _biases_cache_key: &str,
+        _weight_cache_key: &WeightKey,
+        _scales_cache_key: &WeightKey,
+        _biases_cache_key: &WeightKey,
         _load_weight_bytes: FW,
         _load_scales_bytes: FS,
         _load_biases_bytes: FB,
@@ -2003,7 +2005,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _bt_cache_key: &str,
         _load_bt_bytes: F,
     ) -> Result<Vec<f32>, String>
@@ -2042,7 +2044,7 @@ mod imp {
         _n_cols: usize,
         _n_rows: usize,
         _row_indices: &[i32],
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _src_cache_key: &str,
         _load_src_bytes: F,
     ) -> Result<Vec<f32>, String>
@@ -2080,10 +2082,10 @@ mod imp {
     }
 
     #[cfg(not(target_os = "macos"))]
-    pub struct GpuLinearPart<'a> {
+    pub struct GpuLinearPart<'a, K = &'a str> {
         pub bt_ggml_type: u32,
         pub n: usize,
-        pub cache_key: &'a str,
+        pub cache_key: K,
         pub bytes: &'a [u8],
     }
 
@@ -2265,7 +2267,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_f16_f32acc(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -2275,7 +2277,7 @@ mod imp {
     pub fn gpu_rms_norm_mul_bf16(
         _x: &GpuTensor,
         _group_cols: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -2286,7 +2288,7 @@ mod imp {
     pub fn gpu_rms_norm_qwen3(
         _x: &GpuTensor,
         _group_cols: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -2296,13 +2298,13 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_f32acc(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _owner, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2312,21 +2314,21 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_f32acc_keyed(
         _x: &GpuTensor,
-        _parts: &[GpuLinearPart<'_>],
+        _parts: &[GpuLinearPart<'_, &WeightKey>],
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_linear_nt_cached_q8_0_f32acc_keyed(
         _x: &GpuTensor,
-        _parts: &[GpuLinearPart<'_>],
+        _parts: &[GpuLinearPart<'_, &WeightKey>],
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_linear_nt_cached_q8_0_swiglu_keyed(
         _x: &GpuTensor,
-        _qualified_key: &str,
+        _qualified_key: &WeightKey,
         _n: usize,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -2388,7 +2390,7 @@ mod imp {
     pub fn gpu_add_rms_norm_keyed(
         _x: &GpuTensor,
         _add: &GpuTensor,
-        _qualified_key: &str,
+        _qualified_key: &WeightKey,
         _scale: &[f32],
         _eps: f32,
     ) -> Result<(GpuTensor, GpuTensor), String> {
@@ -2397,9 +2399,9 @@ mod imp {
 
     pub fn gpu_qk_rms_norm_rope_cache(
         _qkv: &GpuTensor,
-        _q_key: &str,
+        _q_key: &WeightKey,
         _q_scale: &[f32],
-        _k_key: &str,
+        _k_key: &WeightKey,
         _k_scale: &[f32],
         _cos: &GpuTensor,
         _sin: &GpuTensor,
@@ -2415,9 +2417,9 @@ mod imp {
 
     pub fn gpu_qk_rms_norm_rope_cache_bf16(
         _qkv: &GpuTensor,
-        _q_key: &str,
+        _q_key: &WeightKey,
         _q_scale: &[f32],
-        _k_key: &str,
+        _k_key: &WeightKey,
         _k_scale: &[f32],
         _cos: &GpuTensor,
         _sin: &GpuTensor,
@@ -2469,7 +2471,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_mm(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -2477,7 +2479,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_bias_epilogue(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -2569,13 +2571,13 @@ mod imp {
 
     pub fn gpu_linear_nt_cached(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _owner, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2585,23 +2587,23 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_with_precision(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
         _precision: GemmPrecision,
     ) -> Result<GpuTensor, String> {
-        gpu_linear_nt_cached(_x, _cache_namespace, _parts, _bias)
+        gpu_linear_nt_cached(_x, _owner, _parts, _bias)
     }
 
     pub fn gpu_linear_nt_cached_f16(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _cache_namespace, _parts, _bias);
+            return makepad_ai_metal::gpu_tensor::linear_nt(_x, _owner, _parts, _bias);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -2611,17 +2613,17 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_f16_with_precision(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _bias: &[f32],
         _precision: GemmPrecision,
     ) -> Result<GpuTensor, String> {
-        gpu_linear_nt_cached_f16(_x, _cache_namespace, _parts, _bias)
+        gpu_linear_nt_cached_f16(_x, _owner, _parts, _bias)
     }
 
     pub fn gpu_gelu_bias_f16(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -2665,7 +2667,7 @@ mod imp {
 
     pub fn gpu_layer_norm_mul_add_cached(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _mul: &[f32],
         _add: &[f32],
@@ -2703,7 +2705,7 @@ mod imp {
     pub fn gpu_rms_norm_mul(
         _x: &GpuTensor,
         _group_cols: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -2714,7 +2716,7 @@ mod imp {
     pub fn gpu_rms_norm_mul_keyed(
         _x: &GpuTensor,
         _group_cols: usize,
-        _qualified_key: &str,
+        _qualified_key: &WeightKey,
         _scale: &[f32],
         _eps: f32,
     ) -> Result<GpuTensor, String> {
@@ -2725,7 +2727,7 @@ mod imp {
         _x: &GpuTensor,
         _heads: usize,
         _head_dim: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -2736,7 +2738,7 @@ mod imp {
     pub fn gpu_rms_norm_mul_round_bf16(
         _x: &GpuTensor,
         _group_cols: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -2798,7 +2800,7 @@ mod imp {
     pub fn gpu_dyt(
         _x: &GpuTensor,
         _width: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _gamma: &[f32],
         _beta: &[f32],
@@ -3004,7 +3006,7 @@ mod imp {
     pub fn gpu_sparse_conv27(
         _x: &GpuTensor,
         _neighbors: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _co: usize,
         _bias: &[f32],
@@ -3085,7 +3087,7 @@ mod imp {
 
     pub fn gpu_gather_rows_cached_bf16(
         _indices: &GpuTensor,
-        _qualified_key: &str,
+        _qualified_key: &WeightKey,
         _table_rows: usize,
         _cols: usize,
     ) -> Result<GpuTensor, String> {
@@ -3214,14 +3216,14 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure_bf16_precision_keyed<F>(
-        _key: &str, _n: usize, _k: usize, _precision: GpuLinearPrecision, _load: F,
+        _key: &WeightKey, _n: usize, _k: usize, _precision: GpuLinearPrecision, _load: F,
     ) -> Result<(), String>
     where F: FnOnce() -> Result<Vec<u8>, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_linear_nt_cached_precision_into(
-        _x: &GpuTensor, _scratch: &GpuLinearScratch, _parts: &[(&str, usize)],
+        _x: &GpuTensor, _scratch: &GpuLinearScratch, _parts: &[(&WeightKey, usize)],
         _bias: Option<&GpuTensor>, _out: &GpuTensor,
     ) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -3252,7 +3254,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_f32acc_into(
         _x: &GpuTensor, _scratch: &GpuBf16Buf,
-        _parts: &[(&str, usize)], _bias: Option<&GpuTensor>, _out: &GpuTensor,
+        _parts: &[(&WeightKey, usize)], _bias: Option<&GpuTensor>, _out: &GpuTensor,
     ) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
@@ -3290,14 +3292,14 @@ mod imp {
 
     pub fn gpu_conv1d_cached(
         _x: &GpuTensor, _weight: &[f32], _bias: &[f32], _out_channels: usize,
-        _taps: usize, _dilation: usize, _padding: usize, _namespace: &str, _key: &str,
+        _taps: usize, _dilation: usize, _padding: usize, _owner: &WeightOwner, _key: &str,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
     pub fn gpu_linear_nt_cached_bf16_mm_from_buf(
         _x: &GpuBf16Buf,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -3305,7 +3307,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(
         _x: &GpuBf16Buf,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuBf16Buf, String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -3313,7 +3315,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_f8_mm(
         _x: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
         _input_scale: Option<f32>,
@@ -3323,7 +3325,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_f8_mm_from_buf(
         _x: &GpuBf16Buf,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
         _input_scale: Option<f32>,
@@ -3333,7 +3335,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
         _x: &GpuBf16Buf,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _parts: &[GpuLinearPart<'_>],
         _weight_scale: f32,
         _input_scale: Option<f32>,
@@ -3345,7 +3347,7 @@ mod imp {
         _x: &GpuTensor,
         _width: usize,
         _height: usize,
-        _weight_key: &str,
+        _weight_key: &WeightKey,
         _weights: &[f32],
         _bias: &[f32],
         _out_channels: usize,
@@ -3355,7 +3357,7 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf(
         _x: &GpuBf16Buf,
-        _key: &str,
+        _key: &WeightKey,
         _n: usize,
     ) -> Result<GpuBf16Buf, String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -3363,13 +3365,13 @@ mod imp {
 
     pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf(
         _x: &GpuBf16Buf,
-        _key: &str,
+        _key: &WeightKey,
         _n: usize,
     ) -> Result<GpuTensor, String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
-    pub fn gpu_stream_ring_setup(_groups: Vec<Vec<(String, Vec<u8>)>>) -> Result<(), String> {
+    pub fn gpu_stream_ring_setup(_groups: Vec<Vec<(WeightKey, Vec<u8>)>>) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
@@ -3413,7 +3415,7 @@ mod imp {
         _col_off: usize,
         _cols: usize,
         _group_cols: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _scale: &[f32],
         _eps: f32,
@@ -3487,7 +3489,7 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure<F>(
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _bt_ggml_type: u32,
         _n: usize,
@@ -3502,7 +3504,7 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure_bf16_keyed<F>(
-        _qualified_key: &str,
+        _qualified_key: &WeightKey,
         _n: usize,
         _k: usize,
         _load: F,
@@ -3514,8 +3516,8 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure_q8_0_from_bf16_keyed(
-        _qualified_key: &str,
-        _bf16_key: &str,
+        _qualified_key: &WeightKey,
+        _bf16_key: &WeightKey,
         _n: usize,
         _k: usize,
     ) -> Result<(), String> {
@@ -3523,8 +3525,8 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(
-        _qualified_key: &str,
-        _parts: &[GpuLinearPart<'_>],
+        _qualified_key: &WeightKey,
+        _parts: &[GpuLinearPart<'_, &WeightKey>],
         _k: usize,
     ) -> Result<(), String> {
         Err(GPU_UNAVAILABLE.to_string())
@@ -3535,7 +3537,7 @@ mod imp {
     }
 
     pub fn gpu_weight_cache_ensure_quant<F>(
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _bt_ggml_type: u32,
         _n: usize,
@@ -3548,16 +3550,17 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
-    pub fn gpu_weight_cache_protect_prefixes(_prefixes: Vec<String>) -> Result<(), String> {
-        // No device cache exists without CUDA; protection is a no-op so the
-        // pipeline's residency registration never fails on stub builds.
+    /// Replace the protected owner set; protection is a no-op on this fallback backend.
+    pub fn gpu_weight_cache_protect(_owners: &[&WeightOwner]) -> Result<(), String> {
+        // Only CUDA has the allocation-failure eviction ladder.
         Ok(())
     }
 
-    pub fn gpu_weight_cache_evict_prefix(_prefix: &str) -> Result<usize, String> {
+    /// Evict all representations of one owner; Metal returns released bytes.
+    pub fn gpu_weight_cache_evict_owner(_owner: &WeightOwner) -> Result<usize, String> {
         #[cfg(target_os = "macos")]
         {
-            return makepad_ai_metal::gpu_tensor::evict_prefix(_prefix);
+            return makepad_ai_metal::gpu_tensor::evict_owner(_owner);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -3565,7 +3568,20 @@ mod imp {
         }
     }
 
-    pub fn gpu_weight_cache_evict_prefix_if_loaded(_prefix: &str) -> Result<usize, String> {
+    /// Evict qualified keys beginning with this key; Metal returns released bytes.
+    pub fn gpu_weight_cache_evict_keys(_prefix: &WeightKey) -> Result<usize, String> {
+        #[cfg(target_os = "macos")]
+        {
+            return makepad_ai_metal::gpu_tensor::evict_keys(_prefix);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
+    }
+
+    /// Release the loaded CUDA cache; the fallback backend keeps its existing no-op behavior.
+    pub fn gpu_weight_cache_evict_all_if_loaded() -> Result<usize, String> {
         Ok(0)
     }
 
@@ -3859,6 +3875,7 @@ mod imp {
             use makepad_ai_metal::gpu_tensor::{DecAttnRef, DecLinearRef, TwoWayLayerRef};
             fn lin<'a>(l: &super::GpuTwoWayLinear<'a>) -> DecLinearRef<'a> {
                 DecLinearRef {
+                    owner: l.owner,
                     weight: l.weight,
                     bias: l.bias,
                 }
@@ -4083,7 +4100,7 @@ mod imp {
         _width: usize,
         _height: usize,
         _groups: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _gamma: &[f32],
         _beta: &[f32],
@@ -4098,7 +4115,7 @@ mod imp {
         _width: usize,
         _height: usize,
         _groups: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _gamma: &[f32],
         _beta: &[f32],
@@ -4164,7 +4181,7 @@ mod imp {
         _height: usize,
         _out_width: usize,
         _out_height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4185,7 +4202,7 @@ mod imp {
         _batch: usize,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4204,7 +4221,7 @@ mod imp {
         _batch: usize,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4225,7 +4242,7 @@ mod imp {
         _height: usize,
         _out_width: usize,
         _out_height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4248,7 +4265,7 @@ mod imp {
         _height: usize,
         _out_width: usize,
         _out_height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4267,7 +4284,7 @@ mod imp {
         _x: &GpuTensor,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4279,7 +4296,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _weight_cache_key);
+            let _ = (_owner, _weight_cache_key);
             return makepad_ai_metal::gpu_tensor::conv2d_planar(
                 _x,
                 _width,
@@ -4306,7 +4323,7 @@ mod imp {
         _in_height: usize,
         _out_width: usize,
         _out_height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4320,7 +4337,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _weight_cache_key);
+            let _ = (_owner, _weight_cache_key);
             return makepad_ai_metal::rife::conv2d_planar_strided(
                 _x, _in_width, _in_height, _out_width, _out_height, _weights, _bias,
                 _out_channels, _kw, _kh, _pad_x, _pad_y, _stride_x, _stride_y,
@@ -4389,7 +4406,7 @@ mod imp {
         _x: &GpuTensor,
         _in_width: usize,
         _in_height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4401,7 +4418,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _weight_cache_key);
+            let _ = (_owner, _weight_cache_key);
             return makepad_ai_metal::rife::conv_transpose2d(
                 _x, _in_width, _in_height, _weights, _bias, _out_channels, _kw, _kh,
                 _pad, _stride,
@@ -4501,7 +4518,7 @@ mod imp {
         _in_channels: usize,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _out_channels: usize,
@@ -4516,7 +4533,7 @@ mod imp {
         _tensor: &GpuTensor,
         _row_offset: usize,
         _channels: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _bias_cache_key: &str,
         _bias: &[f32],
         _slope: f32,
@@ -4530,14 +4547,14 @@ mod imp {
         _in_channels: usize,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _out_channels: usize,
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _weight_cache_key);
+            let _ = (_owner, _weight_cache_key);
             let plane = _width * _height;
             if _input.cols() != plane || _in_channels > _input.rows() {
                 return Err(format!(
@@ -4561,14 +4578,14 @@ mod imp {
 
     pub fn gpu_realesrgan_bias_lrelu_f32(
         _tensor: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _bias_cache_key: &str,
         _bias: &[f32],
         _slope: f32,
     ) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _bias_cache_key);
+            let _ = (_owner, _bias_cache_key);
             return makepad_ai_metal::gpu_tensor::bias_lrelu_inplace(_tensor, _bias, _slope);
         }
         #[cfg(not(target_os = "macos"))]
@@ -4593,7 +4610,7 @@ mod imp {
         _dst32: &GpuTensor,
         _dst16: Option<(&GpuTensor, usize)>,
         _channels: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _bias_cache_key: &str,
         _bias: &[f32],
         _scale: f32,
@@ -4677,7 +4694,7 @@ mod imp {
         _height: usize,
         _batch: usize,
         _groups: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _gamma: &[f32],
         _beta: &[f32],
@@ -4722,13 +4739,13 @@ mod imp {
         _in_height: usize,
         _out_channels: usize,
         _scale: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _bias_cache_key: &str,
         _bias: &[f32],
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_out_channels, _cache_namespace, _bias_cache_key, _bias);
+            let _ = (_out_channels, _owner, _bias_cache_key, _bias);
             return makepad_ai_metal::gpu_tensor::pixel_shuffle(
                 _x, _in_width, _in_height, _scale,
             );
@@ -4788,7 +4805,7 @@ mod imp {
         _q: &GpuTensor,
         _k: &GpuTensor,
         _v: &GpuTensor,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _relative_bias: &[f32],
         _regions: Option<&GpuTensor>,
@@ -4806,7 +4823,7 @@ mod imp {
         _modulator: &GpuTensor,
         _width: usize,
         _height: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _weight_cache_key: &str,
         _weights: &[f32],
         _bias: &[f32],
@@ -4822,7 +4839,7 @@ mod imp {
         _width: usize,
         _height: usize,
         _groups: usize,
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
         _cache_key: &str,
         _gamma: &[f32],
         _beta: &[f32],
@@ -4830,7 +4847,7 @@ mod imp {
     ) -> Result<GpuTensor, String> {
         #[cfg(target_os = "macos")]
         {
-            let _ = (_cache_namespace, _cache_key);
+            let _ = (_owner, _cache_key);
             return makepad_ai_metal::gpu_tensor::group_norm_planar(
                 _x, _width, _height, _groups, _gamma, _beta, _eps,
             );

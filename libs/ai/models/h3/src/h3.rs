@@ -451,11 +451,7 @@ impl H3ShardedWeights {
         self
     }
 
-    pub fn cache_namespace(&self) -> &str {
-        self.owner.namespace()
-    }
-
-    pub(crate) fn owner(&self) -> &Arc<WeightOwner> {
+    pub fn owner(&self) -> &Arc<WeightOwner> {
         &self.owner
     }
 }

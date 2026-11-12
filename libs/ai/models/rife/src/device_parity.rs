@@ -48,6 +48,7 @@ mod tests {
         if !rife_device_available() {
             return;
         }
+        let owner = crate::backend::WeightOwner::new("rife-device-parity");
         let (w, h) = (23usize, 17usize);
 
         // conv2d, stride 2, pad 1, k3 — the IFBlock shape.
@@ -65,7 +66,7 @@ mod tests {
         let cpu = conv2d(&x, &cw).unwrap();
         let dev = gpu_upload(&x.data, 5, w * h).unwrap();
         let dev = gpu_conv2d_planar_strided(
-            &dev, w, h, cpu.width, cpu.height, "t", "conv", &cw.weights, &cw.bias, 7, 3, 3,
+            &dev, w, h, cpu.width, cpu.height, &owner, "conv", &cw.weights, &cw.bias, 7, 3, 3,
             1, 1, 2, 2,
         )
         .unwrap();
@@ -86,7 +87,7 @@ mod tests {
         let cpu = conv_transpose2d(&x, &dw).unwrap();
         let dev = gpu_upload(&x.data, 6, w * h).unwrap();
         let dev = gpu_rife_conv_transpose2d(
-            &dev, w, h, "t", "deconv", &dw.weights, &dw.bias, 5, 4, 4, 1, 2,
+            &dev, w, h, &owner, "deconv", &dw.weights, &dw.bias, 5, 4, 4, 1, 2,
         )
         .unwrap();
         assert_close("deconv", &cpu.data, &gpu_download(&dev).unwrap(), 2e-4);
@@ -121,7 +122,7 @@ mod tests {
         let cpu = res_conv(&x, &rw).unwrap();
         let dev_x = gpu_upload(&x.data, 4, w * h).unwrap();
         let dev_conv = gpu_conv2d_planar_strided(
-            &dev_x, w, h, w, h, "t", "res", &rw.conv.weights, &rw.conv.bias, 4, 3, 3, 1, 1,
+            &dev_x, w, h, w, h, &owner, "res", &rw.conv.weights, &rw.conv.bias, 4, 3, 3, 1, 1,
             1, 1,
         )
         .unwrap();

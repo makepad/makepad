@@ -855,11 +855,11 @@ mod imp {
                     let owner = owner.borrow();
                     if ty == 8 {
                         // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
-                        try_matmul_nt_q8_0_cached(a, m, k, n, owner.namespace(), &key, || {
+                        try_matmul_nt_q8_0_cached(a, m, k, n, &owner, &key, || {
                             Ok(bytes.to_vec())
                         })
                     } else {
-                        try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, owner.namespace(), &key, || {
+                        try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, &owner, &key, || {
                             Ok(bytes.to_vec())
                         })
                     }
@@ -948,7 +948,7 @@ mod imp {
                 &resident_layers,
                 final_ln_w,
                 final_ln_b,
-                owner.namespace(),
+                &owner,
             )
         })
     }

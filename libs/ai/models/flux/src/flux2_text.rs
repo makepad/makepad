@@ -42,7 +42,7 @@ use crate::backend::{
     gpu_bf16_round, gpu_concat_cols, gpu_concat_rows, gpu_download,
     gpu_linear_nt_cached_bf16_f32acc, gpu_rms_norm_mul_bf16, gpu_rope_half_bf16, gpu_slice_cols,
     gpu_slice_rows, gpu_swiglu_value_gate, gpu_upload, gpu_weight_cache_ensure,
-    gpu_weight_cache_evict_prefix, GpuLinearPart, GpuTensor, WeightOwner,
+    gpu_weight_cache_evict_owner, GpuLinearPart, GpuTensor, WeightOwner,
 };
 use crate::flux2::{
     mistral3_layer_prefix, Flux2TextEncoderWeights, Mistral3TextConfig, FLUX2_HIDDEN_STATE_TAPS,
@@ -72,7 +72,7 @@ impl Flux2TextEncoderPrepared {
     /// Evict this encoder's device weights; the next encode re-uploads them.
     /// Returns the number of buffers freed.
     pub fn release_device(&self) -> Result<usize> {
-        gpu_weight_cache_evict_prefix(self.owner.namespace()).map_err(DiffusionError::model)
+        gpu_weight_cache_evict_owner(&self.owner).map_err(DiffusionError::model)
     }
 
     pub fn prepare(weights: &Flux2TextEncoderWeights, config: Mistral3TextConfig) -> Result<Self> {
@@ -161,7 +161,7 @@ fn require_bf16_shape(
 }
 
 fn ensure_linear<'a>(
-    namespace: &str,
+    namespace: &WeightOwner,
     weights: &Flux2TextEncoderWeights,
     name: &'a str,
     output_cols: usize,
@@ -192,7 +192,7 @@ fn ensure_linear<'a>(
 }
 
 fn linear_bf16(
-    namespace: &str,
+    namespace: &WeightOwner,
     weights: &Flux2TextEncoderWeights,
     input: &GpuTensor,
     name: &str,
@@ -205,7 +205,7 @@ fn linear_bf16(
 }
 
 fn norm_bf16(
-    namespace: &str,
+    namespace: &WeightOwner,
     input: &GpuTensor,
     group_cols: usize,
     cache_key: &str,
@@ -481,7 +481,7 @@ fn mistral3_layer_forward(
     let prefix = mistral3_layer_prefix(layer as u32);
 
     let normed = norm_bf16(
-        prepared.owner.namespace(),
+        &prepared.owner,
         &hidden,
         hidden_size,
         &format!("{prefix}input_layernorm.weight"),
@@ -497,28 +497,28 @@ fn mistral3_layer_forward(
     let v_name = format!("{prefix}self_attn.v_proj.weight");
     let parts = [
         ensure_linear(
-            prepared.owner.namespace(),
+            &prepared.owner,
             weights,
             &q_name,
             q_width,
             hidden_size,
         )?,
         ensure_linear(
-            prepared.owner.namespace(),
+            &prepared.owner,
             weights,
             &k_name,
             kv_width,
             hidden_size,
         )?,
         ensure_linear(
-            prepared.owner.namespace(),
+            &prepared.owner,
             weights,
             &v_name,
             kv_width,
             hidden_size,
         )?,
     ];
-    let qkv = gpu_linear_nt_cached_bf16_f32acc(&normed, prepared.owner.namespace(), &parts, &[])
+    let qkv = gpu_linear_nt_cached_bf16_f32acc(&normed, &prepared.owner, &parts, &[])
         .map_err(DiffusionError::model)?;
     let qkv = gpu_bf16_round(&qkv).map_err(DiffusionError::model)?;
     let q = gpu_slice_cols(&qkv, 0, q_width).map_err(DiffusionError::model)?;
@@ -547,7 +547,7 @@ fn mistral3_layer_forward(
         taps.attention_raw = gpu_download(&attention).map_err(DiffusionError::model)?;
     }
     let attention = linear_bf16(
-        prepared.owner.namespace(),
+        &prepared.owner,
         weights,
         &attention,
         &format!("{prefix}self_attn.o_proj.weight"),
@@ -562,7 +562,7 @@ fn mistral3_layer_forward(
     }
 
     let normed = norm_bf16(
-        prepared.owner.namespace(),
+        &prepared.owner,
         &residual,
         hidden_size,
         &format!("{prefix}post_attention_layernorm.weight"),
@@ -578,14 +578,14 @@ fn mistral3_layer_forward(
     let gate_name = format!("{prefix}mlp.gate_proj.weight");
     let parts = [
         ensure_linear(
-            prepared.owner.namespace(),
+            &prepared.owner,
             weights,
             &up_name,
             ffn,
             hidden_size,
         )?,
         ensure_linear(
-            prepared.owner.namespace(),
+            &prepared.owner,
             weights,
             &gate_name,
             ffn,
@@ -593,7 +593,7 @@ fn mistral3_layer_forward(
         )?,
     ];
     let up_gate =
-        gpu_linear_nt_cached_bf16_f32acc(&normed, prepared.owner.namespace(), &parts, &[])
+        gpu_linear_nt_cached_bf16_f32acc(&normed, &prepared.owner, &parts, &[])
             .map_err(DiffusionError::model)?;
     let up_gate = gpu_bf16_round(&up_gate).map_err(DiffusionError::model)?;
     if let Some(taps) = taps.as_deref_mut() {
@@ -605,7 +605,7 @@ fn mistral3_layer_forward(
         taps.activated = gpu_download(&activated).map_err(DiffusionError::model)?;
     }
     let update = linear_bf16(
-        prepared.owner.namespace(),
+        &prepared.owner,
         weights,
         &activated,
         &format!("{prefix}mlp.down_proj.weight"),

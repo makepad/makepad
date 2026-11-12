@@ -191,7 +191,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{prefix}.norm"),
             &nw.data,
             &nb.data,
@@ -241,7 +241,7 @@ impl UnetFirst {
             width,
             height,
             GN_GROUPS,
-            self.owner.namespace(),
+            &self.owner,
             &format!("{prefix}.norm"),
             &nw.data,
             &nb.data,
@@ -301,7 +301,7 @@ impl UnetFirst {
         let b = self.get(&format!("{prefix}.bias"))?;
         let x32 = as_f32(x)?;
         let out = gpu_layer_norm_mul_add_cached(
-            &x32, self.owner.namespace(), prefix, &w.data, &b.data, LN_EPS,
+            &x32, &self.owner, prefix, &w.data, &b.data, LN_EPS,
         )?;
         match_half(out, x)
     }

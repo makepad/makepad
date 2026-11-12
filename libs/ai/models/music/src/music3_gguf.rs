@@ -15,6 +15,7 @@ use crate::music3_ar::{sample_top_k, TorchPhilox};
 use crate::music3_quant::Music3GgufFile;
 use makepad_ai_sfx::sa3::rms_norm_rows;
 use crate::{DiffusionError, Result};
+use makepad_ai_common::backend::WeightKey;
 use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
@@ -476,6 +477,10 @@ pub struct Music3GgufRvq {
     input_norm: Vec<Vec<f32>>,
     post_attn_norm: Vec<Vec<f32>>,
     final_norm: Vec<f32>,
+    /// The norms' resident cache keys under the file's owner, made at load.
+    input_norm_key: Vec<WeightKey>,
+    post_attn_norm_key: Vec<WeightKey>,
+    final_norm_key: WeightKey,
     pos_embedding: Vec<f32>,
 }
 
@@ -490,16 +495,23 @@ impl Music3GgufRvq {
     pub fn load(file: &Music3GgufFile) -> Result<Self> {
         let mut input_norm = Vec::with_capacity(MUSIC3_RVQ_LAYERS);
         let mut post_attn_norm = Vec::with_capacity(MUSIC3_RVQ_LAYERS);
+        let mut input_norm_key = Vec::with_capacity(MUSIC3_RVQ_LAYERS);
+        let mut post_attn_norm_key = Vec::with_capacity(MUSIC3_RVQ_LAYERS);
         for layer in 0..MUSIC3_RVQ_LAYERS {
-            input_norm.push(file.read_f32_any(&format!("layers.{layer}.input_layernorm.weight"))?);
-            post_attn_norm.push(
-                file.read_f32_any(&format!("layers.{layer}.post_attention_layernorm.weight"))?,
-            );
+            let input = format!("layers.{layer}.input_layernorm.weight");
+            let post = format!("layers.{layer}.post_attention_layernorm.weight");
+            input_norm.push(file.read_f32_any(&input)?);
+            post_attn_norm.push(file.read_f32_any(&post)?);
+            input_norm_key.push(file.owner.key(&input));
+            post_attn_norm_key.push(file.owner.key(&post));
         }
         Ok(Self {
             input_norm,
             post_attn_norm,
             final_norm: file.read_f32_any("norm.weight")?,
+            input_norm_key,
+            post_attn_norm_key,
+            final_norm_key: file.owner.key("norm.weight"),
             pos_embedding: file.read_f32_any("pos_embedding.weight")?,
         })
     }
@@ -805,7 +817,7 @@ impl Music3GgufRvq {
     /// Whole-layer resident RVQ decode step: RMS + QKV + o/up/gate/down and
     /// the elementwise glue stay on GPU (one command buffer per layer half via
     /// `try_ar_pre_attn`/`try_ar_post_attn`); only the tiny t≤8 attention runs
-    /// on host. BF16 weights ride the F16 sidecar namespace.
+    /// on host. BF16 weights ride the F16 sidecar sub-key.
     fn try_step_pair_resident(
         &self,
         file: &Music3GgufFile,
@@ -814,11 +826,10 @@ impl Music3GgufRvq {
         hidden: &[f32],
     ) -> Option<()> {
         use makepad_ai_common::backend::metal;
-        let ns = file.owner.namespace();
-        let ns_f16 = format!("{}f16::", file.owner.namespace());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
         let scale = 1.0 / (head_dim as f32).sqrt();
         let kv_w = MUSIC3_RVQ_HEADS * head_dim;
+        let mut resid = metal::ArResidual::new();
         for layer in 0..MUSIC3_RVQ_LAYERS {
             let qn = format!("layers.{layer}.attn.to_q.weight");
             let kn = format!("layers.{layer}.attn.to_k.weight");
@@ -827,24 +838,25 @@ impl Music3GgufRvq {
             let un = format!("layers.{layer}.up_proj.weight");
             let gn = format!("layers.{layer}.gate_proj.weight");
             let dn = format!("layers.{layer}.down_proj.weight");
-            let qm = file.keyed_mat_any(ns, &ns_f16, &qn)?;
-            let km = file.keyed_mat_any(ns, &ns_f16, &kn)?;
-            let vm = file.keyed_mat_any(ns, &ns_f16, &vn)?;
-            let om = file.keyed_mat_any(ns, &ns_f16, &on)?;
-            let um = file.keyed_mat_any(ns, &ns_f16, &un)?;
-            let gm = file.keyed_mat_any(ns, &ns_f16, &gn)?;
-            let dm = file.keyed_mat_any(ns, &ns_f16, &dn)?;
-            let in_key = format!("layers.{layer}.input_layernorm.weight");
-            let post_key = format!("layers.{layer}.post_attention_layernorm.weight");
+            let qm = file.keyed_mat_any(&qn)?;
+            let km = file.keyed_mat_any(&kn)?;
+            let vm = file.keyed_mat_any(&vn)?;
+            let om = file.keyed_mat_any(&on)?;
+            let um = file.keyed_mat_any(&un)?;
+            let gm = file.keyed_mat_any(&gn)?;
+            let dm = file.keyed_mat_any(&dn)?;
+            let in_key = &self.input_norm_key[layer];
+            let post_key = &self.post_attn_norm_key[layer];
             let upload = if layer == 0 { Some(hidden) } else { None };
             let (q, k, v) = metal::try_ar_pre_attn(
+                &mut resid,
                 upload,
                 2,
                 MUSIC3_RVQ_HIDDEN,
                 head_dim,
                 &self.input_norm[layer],
                 None,
-                &in_key,
+                in_key,
                 MUSIC3_LM_RMS_EPS,
                 qm,
                 km,
@@ -876,11 +888,12 @@ impl Music3GgufRvq {
                 scale,
             ));
             metal::try_ar_post_attn(
+                &mut resid,
                 &attn,
                 2,
                 MUSIC3_RVQ_HIDDEN,
                 &self.post_attn_norm[layer],
-                &post_key,
+                post_key,
                 MUSIC3_LM_RMS_EPS,
                 om,
                 um,
@@ -890,10 +903,11 @@ impl Music3GgufRvq {
             )?;
         }
         let out = metal::try_ar_final_rms(
+            &mut resid,
             2,
             MUSIC3_RVQ_HIDDEN,
             &self.final_norm,
-            "norm.weight",
+            &self.final_norm_key,
             MUSIC3_LM_RMS_EPS,
         )?;
         cond.pos += 1;
@@ -913,8 +927,6 @@ impl Music3GgufRvq {
         seq: usize,
     ) -> Option<(Music3GgufRvqSession, Music3GgufRvqSession)> {
         use makepad_ai_common::backend::metal;
-        let ns = file.owner.namespace();
-        let ns_f16 = format!("{}f16::", file.owner.namespace());
         let head_dim = MUSIC3_RVQ_HIDDEN / MUSIC3_RVQ_HEADS;
         let scale = 1.0 / (head_dim as f32).sqrt();
         let kv_w = seq * MUSIC3_RVQ_HEADS * head_dim;
@@ -923,6 +935,7 @@ impl Music3GgufRvq {
         let mut v_c = vec![Vec::new(); MUSIC3_RVQ_LAYERS];
         let mut k_u = vec![Vec::new(); MUSIC3_RVQ_LAYERS];
         let mut v_u = vec![Vec::new(); MUSIC3_RVQ_LAYERS];
+        let mut resid = metal::ArResidual::new();
         for layer in 0..MUSIC3_RVQ_LAYERS {
             let qn = format!("layers.{layer}.attn.to_q.weight");
             let kn = format!("layers.{layer}.attn.to_k.weight");
@@ -931,24 +944,25 @@ impl Music3GgufRvq {
             let un = format!("layers.{layer}.up_proj.weight");
             let gn = format!("layers.{layer}.gate_proj.weight");
             let dn = format!("layers.{layer}.down_proj.weight");
-            let qm = file.keyed_mat_any(ns, &ns_f16, &qn)?;
-            let km = file.keyed_mat_any(ns, &ns_f16, &kn)?;
-            let vm = file.keyed_mat_any(ns, &ns_f16, &vn)?;
-            let om = file.keyed_mat_any(ns, &ns_f16, &on)?;
-            let um = file.keyed_mat_any(ns, &ns_f16, &un)?;
-            let gm = file.keyed_mat_any(ns, &ns_f16, &gn)?;
-            let dm = file.keyed_mat_any(ns, &ns_f16, &dn)?;
-            let in_key = format!("layers.{layer}.input_layernorm.weight");
-            let post_key = format!("layers.{layer}.post_attention_layernorm.weight");
+            let qm = file.keyed_mat_any(&qn)?;
+            let km = file.keyed_mat_any(&kn)?;
+            let vm = file.keyed_mat_any(&vn)?;
+            let om = file.keyed_mat_any(&on)?;
+            let um = file.keyed_mat_any(&un)?;
+            let gm = file.keyed_mat_any(&gn)?;
+            let dm = file.keyed_mat_any(&dn)?;
+            let in_key = &self.input_norm_key[layer];
+            let post_key = &self.post_attn_norm_key[layer];
             let upload = if layer == 0 { Some(hidden_in) } else { None };
             let (q, k, v) = metal::try_ar_pre_attn(
+                &mut resid,
                 upload,
                 m,
                 MUSIC3_RVQ_HIDDEN,
                 head_dim,
                 &self.input_norm[layer],
                 None,
-                &in_key,
+                in_key,
                 MUSIC3_LM_RMS_EPS,
                 qm,
                 km,
@@ -979,11 +993,12 @@ impl Music3GgufRvq {
                 scale,
             ));
             metal::try_ar_post_attn(
+                &mut resid,
                 &attn,
                 m,
                 MUSIC3_RVQ_HIDDEN,
                 &self.post_attn_norm[layer],
-                &post_key,
+                post_key,
                 MUSIC3_LM_RMS_EPS,
                 om,
                 um,
@@ -993,10 +1008,11 @@ impl Music3GgufRvq {
             )?;
         }
         let out = metal::try_ar_final_rms(
+            &mut resid,
             m,
             MUSIC3_RVQ_HIDDEN,
             &self.final_norm,
-            "norm.weight",
+            &self.final_norm_key,
             MUSIC3_LM_RMS_EPS,
         )?;
         let cond = Music3GgufRvqSession {
@@ -1242,6 +1258,12 @@ pub struct Music3GgufLm {
     pub(crate) q_norm: Vec<Vec<f32>>,
     pub(crate) k_norm: Vec<Vec<f32>>,
     pub(crate) final_norm: Vec<f32>,
+    /// The norms' resident cache keys under the file's owner, made at load.
+    pub(crate) input_norm_key: Vec<WeightKey>,
+    pub(crate) post_attn_norm_key: Vec<WeightKey>,
+    pub(crate) q_norm_key: Vec<WeightKey>,
+    pub(crate) k_norm_key: Vec<WeightKey>,
+    pub(crate) final_norm_key: WeightKey,
     pub(crate) rope_inv_freq: Vec<f32>,
     audio_head: RefCell<Option<AudioHeadCache>>,
 }
@@ -1252,12 +1274,22 @@ impl Music3GgufLm {
         let mut post_attn_norm = Vec::with_capacity(MUSIC3_LM_LAYERS);
         let mut q_norm = Vec::with_capacity(MUSIC3_LM_LAYERS);
         let mut k_norm = Vec::with_capacity(MUSIC3_LM_LAYERS);
+        let mut input_norm_key = Vec::with_capacity(MUSIC3_LM_LAYERS);
+        let mut post_attn_norm_key = Vec::with_capacity(MUSIC3_LM_LAYERS);
+        let mut q_norm_key = Vec::with_capacity(MUSIC3_LM_LAYERS);
+        let mut k_norm_key = Vec::with_capacity(MUSIC3_LM_LAYERS);
         for layer in 0..MUSIC3_LM_LAYERS {
             let p = format!("model.layers.{layer}");
-            input_norm.push(file.read_f32_any(&format!("{p}.input_layernorm.weight"))?);
-            post_attn_norm.push(file.read_f32_any(&format!("{p}.post_attention_layernorm.weight"))?);
-            q_norm.push(file.read_f32_any(&format!("{p}.self_attn.q_norm.weight"))?);
-            k_norm.push(file.read_f32_any(&format!("{p}.self_attn.k_norm.weight"))?);
+            for (name, values, keys) in [
+                ("input_layernorm", &mut input_norm, &mut input_norm_key),
+                ("post_attention_layernorm", &mut post_attn_norm, &mut post_attn_norm_key),
+                ("self_attn.q_norm", &mut q_norm, &mut q_norm_key),
+                ("self_attn.k_norm", &mut k_norm, &mut k_norm_key),
+            ] {
+                let tensor = format!("{p}.{name}.weight");
+                values.push(file.read_f32_any(&tensor)?);
+                keys.push(file.owner.key(&tensor));
+            }
         }
         let half = MUSIC3_LM_HEAD_DIM / 2;
         let mut rope_inv_freq = Vec::with_capacity(half);
@@ -1271,6 +1303,11 @@ impl Music3GgufLm {
             q_norm,
             k_norm,
             final_norm: file.read_f32_any("model.norm.weight")?,
+            input_norm_key,
+            post_attn_norm_key,
+            q_norm_key,
+            k_norm_key,
+            final_norm_key: file.owner.key("model.norm.weight"),
             rope_inv_freq,
             audio_head: RefCell::new(None),
         })

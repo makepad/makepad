@@ -48,7 +48,7 @@ impl Extent {
 }
 
 fn conv2d(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     extent: Extent,
     weight: &ConvWeight,
@@ -71,7 +71,7 @@ fn conv2d(
         extent.height,
         out.width,
         out.height,
-        namespace,
+        owner,
         key,
         &weight.weights,
         &weight.bias,
@@ -88,20 +88,20 @@ fn conv2d(
 }
 
 fn conv2d_lrelu(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     extent: Extent,
     weight: &ConvWeight,
     key: &str,
 ) -> Result<(GpuTensor, Extent)> {
-    let (tensor, out) = conv2d(namespace, x, extent, weight, key)?;
+    let (tensor, out) = conv2d(owner, x, extent, weight, key)?;
     let activated = gpu_realesrgan_lrelu(&tensor, RIFE_LRELU_SLOPE)
         .map_err(|error| device_error("lrelu", error))?;
     Ok((activated, out))
 }
 
 fn conv_transpose2d(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     extent: Extent,
     weight: &DeconvWeight,
@@ -122,7 +122,7 @@ fn conv_transpose2d(
         x,
         extent.width,
         extent.height,
-        namespace,
+        owner,
         key,
         &weight.weights,
         &weight.bias,
@@ -149,15 +149,15 @@ fn resize(x: &GpuTensor, from: Extent, to: Extent) -> Result<GpuTensor> {
 /// provably a no-op and no kernel is spent on it — the portable reference
 /// still performs it, which keeps the two paths comparable on any input.
 fn head_forward(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     image: &GpuTensor,
     extent: Extent,
     weights: &crate::rife::HeadWeights,
 ) -> Result<GpuTensor> {
-    let (x, small) = conv2d_lrelu(namespace, image, extent, &weights.cnn0, "encode.cnn0")?;
-    let (x, small) = conv2d_lrelu(namespace, &x, small, &weights.cnn1, "encode.cnn1")?;
-    let (x, small) = conv2d_lrelu(namespace, &x, small, &weights.cnn2, "encode.cnn2")?;
-    let (x, full) = conv_transpose2d(namespace, &x, small, &weights.cnn3, "encode.cnn3")?;
+    let (x, small) = conv2d_lrelu(owner, image, extent, &weights.cnn0, "encode.cnn0")?;
+    let (x, small) = conv2d_lrelu(owner, &x, small, &weights.cnn1, "encode.cnn1")?;
+    let (x, small) = conv2d_lrelu(owner, &x, small, &weights.cnn2, "encode.cnn2")?;
+    let (x, full) = conv_transpose2d(owner, &x, small, &weights.cnn3, "encode.cnn3")?;
     if full.width != extent.width || full.height != extent.height {
         return Err(DiffusionError::model(format!(
             "rife encode returned {}x{}, expected {}x{}",
@@ -169,7 +169,7 @@ fn head_forward(
 
 /// One IFBlock; returns `(flow, mask, feat)` at the full extent.
 fn if_block_forward(
-    namespace: &str,
+    owner: &makepad_ai_common::backend::WeightOwner,
     x: &GpuTensor,
     extent: Extent,
     flow: Option<&GpuTensor>,
@@ -205,14 +205,14 @@ fn if_block_forward(
         )));
     }
     let (feat, quarter) = conv2d_lrelu(
-        namespace,
+        owner,
         &input,
         small,
         &weights.conv0_a,
         &format!("blocks.{index}.conv0.0.0"),
     )?;
     let (mut feat, quarter) = conv2d_lrelu(
-        namespace,
+        owner,
         &feat,
         quarter,
         &weights.conv0_b,
@@ -220,12 +220,12 @@ fn if_block_forward(
     )?;
     for (res_index, res) in weights.convblock.iter().enumerate() {
         let key = format!("blocks.{index}.convblock.{res_index}.conv");
-        let (convolved, _) = conv2d(namespace, &feat, quarter, &res.conv, &key)?;
+        let (convolved, _) = conv2d(owner, &feat, quarter, &res.conv, &key)?;
         feat = gpu_rife_res_conv(&convolved, &feat, &res.beta, RIFE_LRELU_SLOPE)
             .map_err(|error| device_error(&key, error))?;
     }
     let (tmp, half) = conv_transpose2d(
-        namespace,
+        owner,
         &feat,
         quarter,
         &weights.lastconv,
@@ -273,7 +273,7 @@ pub fn interpolate_rgb8(
     timestep: f32,
     scale: RifeScale,
 ) -> Result<Vec<u8>> {
-    let namespace = weights.owner.namespace();
+    let owner = &weights.owner;
     let (padded_w, padded_h) = padded_extent(pair.width, pair.height, scale);
     let extent = Extent {
         width: padded_w,
@@ -289,8 +289,8 @@ pub fn interpolate_rgb8(
     drop(host0);
     drop(host1);
 
-    let f0 = head_forward(namespace, &img0, extent, &weights.encode)?;
-    let f1 = head_forward(namespace, &img1, extent, &weights.encode)?;
+    let f0 = head_forward(owner, &img0, extent, &weights.encode)?;
+    let f1 = head_forward(owner, &img1, extent, &weights.encode)?;
     let time =
         gpu_rife_fill(1, plane, timestep).map_err(|error| device_error("timestep", error))?;
 
@@ -309,7 +309,7 @@ pub fn interpolate_rgb8(
                 let input = gpu_concat_rows_many(&[&img0, &img1, &f0, &f1, &time])
                     .map_err(|error| device_error("block0 concat", error))?;
                 let (flow_out, mask_out, feat_out) =
-                    if_block_forward(namespace, &input, extent, None, block, index, step)?;
+                    if_block_forward(owner, &input, extent, None, block, index, step)?;
                 mask = mask_out;
                 feat = feat_out;
                 flow_out
@@ -328,7 +328,7 @@ pub fn interpolate_rgb8(
                 ])
                 .map_err(|error| device_error("block concat", error))?;
                 let (delta, mask_out, feat_out) =
-                    if_block_forward(namespace, &input, extent, Some(current), block, index, step)?;
+                    if_block_forward(owner, &input, extent, Some(current), block, index, step)?;
                 mask = mask_out;
                 feat = feat_out;
                 gpu_add(current, &delta).map_err(|error| device_error("flow update", error))?
@@ -368,7 +368,7 @@ pub fn flow_field(
     timestep: f32,
     scale: RifeScale,
 ) -> Result<(Vec<f32>, Vec<f32>)> {
-    let namespace = weights.owner.namespace();
+    let owner = &weights.owner;
     let (padded_w, padded_h) = padded_extent(pair.width, pair.height, scale);
     let extent = Extent {
         width: padded_w,
@@ -384,8 +384,8 @@ pub fn flow_field(
     drop(host0);
     drop(host1);
 
-    let f0 = head_forward(namespace, &img0, extent, &weights.encode)?;
-    let f1 = head_forward(namespace, &img1, extent, &weights.encode)?;
+    let f0 = head_forward(owner, &img0, extent, &weights.encode)?;
+    let f1 = head_forward(owner, &img1, extent, &weights.encode)?;
     let time =
         gpu_rife_fill(1, plane, timestep).map_err(|error| device_error("timestep", error))?;
 
@@ -404,7 +404,7 @@ pub fn flow_field(
                 let input = gpu_concat_rows_many(&[&img0, &img1, &f0, &f1, &time])
                     .map_err(|error| device_error("block0 concat", error))?;
                 let (flow_out, mask_out, feat_out) =
-                    if_block_forward(namespace, &input, extent, None, block, index, step)?;
+                    if_block_forward(owner, &input, extent, None, block, index, step)?;
                 mask = mask_out;
                 feat = feat_out;
                 flow_out
@@ -423,7 +423,7 @@ pub fn flow_field(
                 ])
                 .map_err(|error| device_error("block concat", error))?;
                 let (delta, mask_out, feat_out) =
-                    if_block_forward(namespace, &input, extent, Some(current), block, index, step)?;
+                    if_block_forward(owner, &input, extent, Some(current), block, index, step)?;
                 mask = mask_out;
                 feat = feat_out;
                 gpu_add(current, &delta).map_err(|error| device_error("flow update", error))?

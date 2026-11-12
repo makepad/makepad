@@ -21,6 +21,7 @@ pub struct WhisperEncLayerQ8<'a> {
 
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
+    use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
     use super::WhisperEncLayerQ8;
     use crate::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
     use crate::quant::{
@@ -2821,7 +2822,8 @@ mod imp {
             crate::set_device(self.device).map_err(|err| err.to_string())
         }
 
-        fn prepare_scope(&mut self, scope: &str) {
+        fn prepare_scope(&mut self, owner: &WeightOwner) {
+            let scope = owner.namespace();
             if self.current_scope.as_deref() != Some(scope) {
                 self.current_scope = Some(scope.to_owned());
                 self.tensor_buffers.clear();
@@ -2891,7 +2893,7 @@ mod imp {
             FB: FnOnce() -> Result<Vec<u8>, String>,
         {
             self.prepare_device()?;
-            self.prepare_scope(spec.cache_namespace);
+            self.prepare_scope(spec.owner);
             let stream = self.stream;
 
             if spec.out_rows == 0 {
@@ -2966,7 +2968,7 @@ mod imp {
             FB: FnOnce() -> Result<Vec<u8>, String>,
         {
             self.prepare_device()?;
-            self.prepare_scope(spec.cache_namespace);
+            self.prepare_scope(spec.owner);
             let stream = self.stream;
 
             if spec.input_rows == 0 || spec.out_rows == 0 {
@@ -3084,7 +3086,8 @@ mod imp {
             crate::set_device(self.device).map_err(|err| err.to_string())
         }
 
-        fn prepare_scope(&mut self, scope: &str) {
+        fn prepare_scope(&mut self, owner: &WeightOwner) {
+            let scope = owner.namespace();
             if self.current_scope.as_deref() != Some(scope) {
                 self.current_scope = Some(scope.to_owned());
                 self.tensor_buffers.clear();
@@ -3141,7 +3144,7 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
-            cache_namespace: &str,
+            owner: &WeightOwner,
             bt_cache_key: &str,
             load_bt_bytes: F,
         ) -> Result<Vec<f32>, String>
@@ -3170,7 +3173,7 @@ mod imp {
             }
 
             self.prepare_device()?;
-            self.prepare_scope(cache_namespace);
+            self.prepare_scope(owner);
             let stream = self.stream;
 
             let input_q8_1 = quantize_f32_to_q8_1(a);
@@ -3208,7 +3211,7 @@ mod imp {
             n_cols: usize,
             n_rows: usize,
             row_indices: &[i32],
-            cache_namespace: &str,
+            owner: &WeightOwner,
             src_cache_key: &str,
             load_src_bytes: F,
         ) -> Result<Vec<f32>, String>
@@ -3228,7 +3231,7 @@ mod imp {
             }
 
             self.prepare_device()?;
-            self.prepare_scope(cache_namespace);
+            self.prepare_scope(owner);
             let stream = self.stream;
 
             let weight_ptr = {
@@ -3320,12 +3323,12 @@ mod imp {
         /// device is made current only when there is something to free.
         fn drain_dead_owners(&mut self) -> Result<(), String> {
             let mut dead = Vec::new();
-            self.dead_owners.take(|namespace| dead.push(namespace.to_owned()));
+            self.dead_owners.take(|owner| dead.push(owner.to_owned()));
             if dead.is_empty() {
                 return Ok(());
             }
             self.prepare_device()?;
-            self.weight_buffers.retain(|key, _| !dead.iter().any(|namespace| key.starts_with(namespace.as_str())));
+            self.weight_buffers.retain(|key, _| !dead.iter().any(|owner| key.starts_with(owner.as_str())));
             Ok(())
         }
 
@@ -3510,7 +3513,7 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
-            cache_namespace: &str,
+            owner: &WeightOwner,
             bt_cache_key: &str,
             load_bt_bytes: F,
         ) -> Result<Vec<f32>, String>
@@ -3579,9 +3582,9 @@ mod imp {
             // The dtype rides in the F8 key so a layout change can never
             // silently reuse a stale same-size half buffer (and vice versa).
             let qualified_key = if weight_is_f8 {
-                format!("{cache_namespace}::{bt_cache_key}::f8")
+                format!("{}::{bt_cache_key}::f8", owner.namespace())
             } else {
-                format!("{cache_namespace}::{bt_cache_key}")
+                format!("{}::{bt_cache_key}", owner.namespace())
             };
             self.cached_weight_buffer(&qualified_key, weight_bytes, load_bt_bytes)?;
             crate::prof::record(
@@ -3770,7 +3773,7 @@ mod imp {
             n_cols: usize,
             n_rows: usize,
             row_indices: &[i32],
-            cache_namespace: &str,
+            owner: &WeightOwner,
             src_cache_key: &str,
             load_src_bytes: F,
         ) -> Result<Vec<f32>, String>
@@ -3797,7 +3800,7 @@ mod imp {
                 .ok_or_else(|| "f8 embedding gather output overflow".to_string())?;
 
             self.prepare_device()?;
-            let qualified_key = format!("{cache_namespace}::{src_cache_key}::f8");
+            let qualified_key = format!("{}::{src_cache_key}::f8", owner.namespace());
             self.cached_weight_buffer(&qualified_key, payload_bytes, load_src_bytes)?;
             self.ensure_output_f32(total_output)?;
 
@@ -4938,7 +4941,7 @@ mod imp {
     /// No allocation, upload, or backend scratch growth occurs during replay.
     pub fn gpu_linear_nt_cached_bf16_f32acc_into(
         x: &GpuTensor, scratch: &GpuBf16Buf,
-        parts: &[(&str, usize)], bias: Option<&GpuTensor>, out: &GpuTensor,
+        parts: &[(&WeightKey, usize)], bias: Option<&GpuTensor>, out: &GpuTensor,
     ) -> Result<(), String> {
         let (m, k, n) = (x.rows, x.cols, out.cols);
         if x.half || out.half || m == 0 || k == 0 || n == 0 || out.rows != m
@@ -4961,6 +4964,7 @@ mod imp {
             let (alpha, beta) = (1.0f32, 0.0f32);
             let mut offset = 0;
             for &(key, width) in parts {
+                let key = key.as_str();
                 let (weight, bytes) = backend.weight_ptr(key)?;
                 if bytes != width * k * size_of::<u16>() {
                     return Err(format!("short bf16 weight {key}"));
@@ -5030,7 +5034,7 @@ mod imp {
     /// so ordinary prefix eviction also releases the scale. No bf16 shadow
     /// remains in the cache for either fast format.
     pub fn gpu_weight_cache_ensure_bf16_precision_keyed<F>(
-        key: &str, n: usize, k: usize, precision: GpuLinearPrecision, load: F,
+        key: &WeightKey, n: usize, k: usize, precision: GpuLinearPrecision, load: F,
     ) -> Result<(), String>
     where F: FnOnce() -> Result<Vec<u8>, String> {
         let values = n.checked_mul(k).filter(|&n| n > 0)
@@ -5039,6 +5043,7 @@ mod imp {
         if precision == GpuLinearPrecision::Bf16F32 {
             return gpu_weight_cache_ensure_bf16_keyed(key, n, k, load);
         }
+        let key = key.as_str();
         if precision == GpuLinearPrecision::Fp8F32 && (n % 16 != 0 || k % 16 != 0) {
             return Err("FP8 linear requires n/k multiples of 16".into());
         }
@@ -5087,7 +5092,7 @@ mod imp {
     /// Includes per-call input conversion (dynamic device absmax for FP8),
     /// GEMM and f16->f32 output expansion. No process-wide precision switch.
     pub fn gpu_linear_nt_cached_precision_into(
-        x: &GpuTensor, scratch: &GpuLinearScratch, parts: &[(&str, usize)],
+        x: &GpuTensor, scratch: &GpuLinearScratch, parts: &[(&WeightKey, usize)],
         bias: Option<&GpuTensor>, out: &GpuTensor,
     ) -> Result<(), String> {
         if scratch.precision == GpuLinearPrecision::Bf16F32 {
@@ -5125,6 +5130,7 @@ mod imp {
             }
             let mut offset = 0;
             for &(key, width) in parts {
+                let key = key.as_str();
                 let (weight, bytes) = backend.weight_ptr(key)?;
                 if scratch.precision == GpuLinearPrecision::F16F16 {
                     if bytes != width * k * 2 { return Err(format!("f16 weight size: {key}")); }
@@ -5269,7 +5275,7 @@ mod imp {
     /// axis with their receptive-field halo to bound activation storage.
     pub fn gpu_conv1d_cached(
         x: &GpuTensor, weight: &[f32], bias: &[f32], out_channels: usize,
-        taps: usize, dilation: usize, padding: usize, namespace: &str, key: &str,
+        taps: usize, dilation: usize, padding: usize, owner: &WeightOwner, key: &str,
     ) -> Result<GpuTensor, String> {
         let channels = x.cols;
         if x.half || x.rows == 0 || channels == 0 || taps == 0 || dilation == 0 || out_channels == 0
@@ -5284,7 +5290,7 @@ mod imp {
         let width = channels * taps;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let wk = format!("{namespace}::{key}::conv1d");
+            let wk = format!("{}::{key}::conv1d", owner.namespace());
             backend.cached_weight_buffer(&wk, weight.len() * 2, || {
                 let mut bytes = Vec::with_capacity(weight.len() * 2);
                 for o in 0..out_channels {
@@ -5334,10 +5340,10 @@ mod imp {
     /// One weight matrix part of a (possibly column-concatenated) linear
     /// layer: `n` output features whose BF16/F16 bytes live at `bytes` and
     /// cache under `cache_key`.
-    pub struct GpuLinearPart<'a> {
+    pub struct GpuLinearPart<'a, K = &'a str> {
         pub bt_ggml_type: u32,
         pub n: usize,
-        pub cache_key: &'a str,
+        pub cache_key: K,
         pub bytes: &'a [u8],
     }
 
@@ -5580,13 +5586,13 @@ mod imp {
     /// is needed.
     pub fn gpu_linear_nt_cached(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
         gpu_linear_nt_cached_with_precision(
             x,
-            cache_namespace,
+            owner,
             parts,
             bias,
             GemmPrecision::default(),
@@ -5596,14 +5602,13 @@ mod imp {
     /// Generic cached linear under an explicit per-model precision policy.
     pub fn gpu_linear_nt_cached_with_precision(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
         precision: GemmPrecision,
     ) -> Result<GpuTensor, String> {
         gpu_linear_nt_impl(
             x,
-            cache_namespace,
             parts,
             bias,
             false,
@@ -5611,6 +5616,7 @@ mod imp {
             false,
             precision,
             false,
+            |part, quant, f16, bias| owner_linear_part_key(owner, part, quant, f16, bias),
         )
     }
 
@@ -5620,7 +5626,7 @@ mod imp {
     /// Qwen3, whose weights must not be silently converted to f16.
     pub fn gpu_linear_nt_cached_bf16_f32acc(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -5632,7 +5638,6 @@ mod imp {
         }
         gpu_linear_nt_impl(
             x,
-            cache_namespace,
             parts,
             bias,
             false,
@@ -5640,6 +5645,7 @@ mod imp {
             false,
             GemmPrecision::default(),
             false,
+            |part, quant, f16, bias| owner_linear_part_key(owner, part, quant, f16, bias),
         )
     }
 
@@ -5648,14 +5654,13 @@ mod imp {
     /// `gpu_weight_cache_ensure_bf16_keyed`; warm calls allocate no key strings.
     pub fn gpu_linear_nt_cached_bf16_f32acc_keyed(
         x: &GpuTensor,
-        parts: &[GpuLinearPart<'_>],
+        parts: &[GpuLinearPart<'_, &WeightKey>],
     ) -> Result<GpuTensor, String> {
         if parts.iter().any(|part| part.bt_ggml_type != GGML_TYPE_BF16) {
             return Err("gpu_linear_nt_cached_bf16_f32acc_keyed requires BF16 weights".to_string());
         }
         gpu_linear_nt_impl(
             x,
-            "",
             parts,
             &[],
             false,
@@ -5663,6 +5668,7 @@ mod imp {
             false,
             GemmPrecision::default(),
             true,
+            |part, _, _, _| Cow::Borrowed(part.cache_key.as_str()),
         )
     }
 
@@ -5672,7 +5678,7 @@ mod imp {
     /// staging; products and output are f32. No full-weight dequantization.
     pub fn gpu_linear_nt_cached_q8_0_f32acc_keyed(
         x: &GpuTensor,
-        parts: &[GpuLinearPart<'_>],
+        parts: &[GpuLinearPart<'_, &WeightKey>],
     ) -> Result<GpuTensor, String> {
         if x.half || !(1..=2).contains(&x.rows) || x.cols == 0 || x.cols % 32 != 0
             || parts.is_empty() || parts.iter().any(|p| p.bt_ggml_type != GGML_TYPE_Q8_0 || p.n == 0)
@@ -5691,9 +5697,9 @@ mod imp {
             for part in parts {
                 let expected = part.n.checked_mul(x.cols / 32).and_then(|b| b.checked_mul(34))
                     .ok_or_else(|| "Q8_0 weight size overflow".to_string())?;
-                let (weight, bytes) = backend.weight_ptr(part.cache_key)?;
+                let (weight, bytes) = backend.weight_ptr(part.cache_key.as_str())?;
                 if bytes != expected {
-                    return Err(format!("Q8_0 weight {}: {bytes} bytes, expected {expected}", part.cache_key));
+                    return Err(format!("Q8_0 weight {}: {bytes} bytes, expected {expected}", part.cache_key.as_str()));
                 }
                 gpu_check(unsafe {
                     makepad_cuda_q8_0_gemv_f32(
@@ -5713,9 +5719,10 @@ mod imp {
     /// the cache entry has 2*n rows. The next GEMV does activation staging.
     pub fn gpu_linear_nt_cached_q8_0_swiglu_keyed(
         x: &GpuTensor,
-        qualified_key: &str,
+        qualified_key: &WeightKey,
         n: usize,
     ) -> Result<GpuTensor, String> {
+        let qualified_key = qualified_key.as_str();
         if x.half || x.rows != 1 || x.cols == 0 || x.cols % 32 != 0 || n == 0 {
             return Err("gpu_linear_nt_cached_q8_0_swiglu_keyed shape/dtype mismatch".into());
         }
@@ -5748,7 +5755,7 @@ mod imp {
     /// multi-projection geometry retain their established behavior.
     pub fn gpu_linear_nt_cached_bf16_mm(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuTensor, String> {
         if x.half {
@@ -5776,7 +5783,7 @@ mod imp {
                 .checked_mul(k)
                 .and_then(|len| len.checked_mul(size_of::<u16>()))
                 .ok_or_else(|| "PyTorch BF16 mm weight size overflow".to_string())?;
-            let weight_key = format!("{cache_namespace}::{}", part.cache_key);
+            let weight_key = format!("{}::{}", owner.namespace(), part.cache_key);
             backend.cached_weight_buffer(&weight_key, weight_bytes, || {
                 Ok(part.bytes.to_vec())
             })?;
@@ -5866,7 +5873,7 @@ mod imp {
     /// path instead.
     pub fn gpu_linear_nt_cached_bf16_bias_epilogue(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -5900,14 +5907,14 @@ mod imp {
                 .checked_mul(k)
                 .and_then(|len| len.checked_mul(size_of::<u16>()))
                 .ok_or_else(|| "cuBLASLt BF16 weight size overflow".to_string())?;
-            let weight_key = format!("{cache_namespace}::{}", part.cache_key);
+            let weight_key = format!("{}::{}", owner.namespace(), part.cache_key);
             backend.cached_weight_buffer(&weight_key, weight_bytes, || {
                 Ok(part.bytes.to_vec())
             })?;
 
             // The checkpoint bias is BF16. Keep a separate BF16 cache entry
             // from the generic path's expanded-f32 bias buffer.
-            let bias_key = format!("{cache_namespace}::{}::b16", part.cache_key);
+            let bias_key = format!("{}::{}::b16", owner.namespace(), part.cache_key);
             backend.cached_weight_buffer(&bias_key, n * size_of::<u16>(), || {
                 let mut bytes = Vec::with_capacity(n * size_of::<u16>());
                 for &value in bias {
@@ -6145,7 +6152,7 @@ mod imp {
     /// the process-wide Flux precision switches.
     pub fn gpu_linear_nt_cached_f16_f32acc(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -6157,7 +6164,6 @@ mod imp {
         }
         gpu_linear_nt_impl(
             x,
-            cache_namespace,
             parts,
             bias,
             false,
@@ -6165,6 +6171,7 @@ mod imp {
             true,
             GemmPrecision::default(),
             false,
+            |part, quant, f16, bias| owner_linear_part_key(owner, part, quant, f16, bias),
         )
     }
 
@@ -6173,13 +6180,13 @@ mod imp {
     /// Pass an empty bias to defer it into the consumer (e.g. fused gelu).
     pub fn gpu_linear_nt_cached_f16(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
         gpu_linear_nt_cached_f16_with_precision(
             x,
-            cache_namespace,
+            owner,
             parts,
             bias,
             GemmPrecision::default(),
@@ -6189,14 +6196,13 @@ mod imp {
     /// F16-output cached linear under an explicit per-model precision policy.
     pub fn gpu_linear_nt_cached_f16_with_precision(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         bias: &[f32],
         precision: GemmPrecision,
     ) -> Result<GpuTensor, String> {
         gpu_linear_nt_impl(
             x,
-            cache_namespace,
             parts,
             bias,
             true,
@@ -6204,19 +6210,35 @@ mod imp {
             false,
             precision,
             false,
+            |part, quant, f16, bias| owner_linear_part_key(owner, part, quant, f16, bias),
         )
     }
 
-    fn gpu_linear_nt_impl(
+    fn owner_linear_part_key<'a>(
+        owner: &WeightOwner, part: &GpuLinearPart<'a>, quant: bool, f16: bool, bias: bool,
+    ) -> Cow<'a, str> {
+        let namespace = owner.namespace();
+        Cow::Owned(if bias {
+            format!("{namespace}::{}::b", part.cache_key)
+        } else if quant {
+            format!("{namespace}::{}::q{}", part.cache_key, part.bt_ggml_type)
+        } else if f16 {
+            format!("{namespace}::{}::a16", part.cache_key)
+        } else {
+            format!("{namespace}::{}", part.cache_key)
+        })
+    }
+
+    fn gpu_linear_nt_impl<'a, K: Copy>(
         x: &GpuTensor,
-        cache_namespace: &str,
-        parts: &[GpuLinearPart<'_>],
+        parts: &[GpuLinearPart<'a, K>],
         bias: &[f32],
         out_half: bool,
         force_native_bf16: bool,
         force_f16_operands: bool,
         precision: GemmPrecision,
         qualified_keys: bool,
+        part_key: impl Fn(&GpuLinearPart<'a, K>, bool, bool, bool) -> Cow<'a, str>,
     ) -> Result<GpuTensor, String> {
         let m = x.rows;
         let k = x.cols;
@@ -6270,18 +6292,7 @@ mod imp {
             } else {
                 native_type
             };
-            let part_key = |index: usize| {
-                let part = &parts[index];
-                if qualified_keys {
-                    Cow::Borrowed(part.cache_key)
-                } else if quant_call {
-                    Cow::Owned(quant_part_key(cache_namespace, part.cache_key, part.bt_ggml_type))
-                } else if f16acc {
-                    Cow::Owned(format!("{cache_namespace}::{}::a16", part.cache_key))
-                } else {
-                    Cow::Owned(format!("{cache_namespace}::{}", part.cache_key))
-                }
-            };
+            let weight_key = |index: usize| part_key(&parts[index], quant_call, f16acc, false);
 
             // Warm every weight part FIRST: a cold-weight upload can trigger
             // alloc_with_evict, which clears input_half — converting the
@@ -6295,7 +6306,7 @@ mod imp {
                         .and_then(|len| len.checked_mul(size_of::<u16>()))
                         .ok_or_else(|| "gpu_linear weight size overflow".to_string())?
                 };
-                let qualified_key = part_key(index);
+                let qualified_key = weight_key(index);
                 let part_bytes = part.bytes;
                 let needs_convert = f16acc && part.bt_ggml_type == GGML_TYPE_BF16;
                 backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
@@ -6390,7 +6401,7 @@ mod imp {
             };
             let mut col_off = 0usize;
             for (index, part) in parts.iter().enumerate() {
-                let qualified_key = part_key(index);
+                let qualified_key = weight_key(index);
                 let weight = backend
                     .weight_buffers
                     .get(qualified_key.as_ref())
@@ -6551,7 +6562,7 @@ mod imp {
             let bias_key = if bias.is_empty() {
                 None
             } else {
-                let key = format!("{cache_namespace}::{}::b", parts[0].cache_key);
+                let key = part_key(&parts[0], false, false, true);
                 let bias_bytes = bias.len() * size_of::<f32>();
                 backend.cached_weight_buffer(&key, bias_bytes, || {
                     let raw = unsafe {
@@ -6565,7 +6576,7 @@ mod imp {
                 Some(key) => Some(
                     backend
                         .weight_buffers
-                        .get(key)
+                        .get(key.as_ref())
                         .ok_or_else(|| format!("missing cached CUDA bias buffer {key}"))?
                         .ptr
                         .as_ptr()
@@ -6675,7 +6686,7 @@ mod imp {
     /// under `{namespace}::{key}::ln` instead of H2D every call.
     pub fn gpu_layer_norm_mul_add_cached(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         mul: &[f32],
         add: &[f32],
@@ -6690,7 +6701,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::ln");
+            let vec_key = format!("{}::{cache_key}::ln", owner.namespace());
             let vec_bytes = 2 * mul.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let mut concat = Vec::with_capacity(mul.len() + add.len());
@@ -6958,12 +6969,12 @@ mod imp {
     pub fn gpu_rms_norm_mul(
         x: &GpuTensor,
         group_cols: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
     ) -> Result<GpuTensor, String> {
-        let key = format!("{cache_namespace}::{cache_key}::rms");
+        let key = owner.key(&format!("{cache_key}::rms"));
         gpu_rms_norm_mul_keyed(x, group_cols, &key, scale, eps)
     }
 
@@ -6971,10 +6982,11 @@ mod imp {
     pub fn gpu_rms_norm_mul_keyed(
         x: &GpuTensor,
         group_cols: usize,
-        qualified_key: &str,
+        qualified_key: &WeightKey,
         scale: &[f32],
         eps: f32,
     ) -> Result<GpuTensor, String> {
+        let qualified_key = qualified_key.as_str();
         if group_cols == 0 || (x.rows * x.cols) % group_cols != 0 || scale.len() != group_cols {
             return Err("gpu_rms_norm_mul shape mismatch".to_string());
         }
@@ -7040,10 +7052,11 @@ mod imp {
     pub fn gpu_add_rms_norm_keyed(
         x: &GpuTensor,
         add: &GpuTensor,
-        qualified_key: &str,
+        qualified_key: &WeightKey,
         scale: &[f32],
         eps: f32,
     ) -> Result<(GpuTensor, GpuTensor), String> {
+        let qualified_key = qualified_key.as_str();
         if x.half || add.half || x.rows != add.rows || x.cols != add.cols
             || x.rows == 0 || x.cols == 0 || scale.len() != x.cols
         {
@@ -7075,9 +7088,9 @@ mod imp {
     /// cover all positions, and the caller must keep position < capacity.
     pub fn gpu_qk_rms_norm_rope_cache(
         qkv: &GpuTensor,
-        q_key: &str,
+        q_key: &WeightKey,
         q_scale: &[f32],
-        k_key: &str,
+        k_key: &WeightKey,
         k_scale: &[f32],
         cos: &GpuTensor,
         sin: &GpuTensor,
@@ -7088,6 +7101,8 @@ mod imp {
         kv_heads: usize,
         eps: f32,
     ) -> Result<GpuTensor, String> {
+        let q_key = q_key.as_str();
+        let k_key = k_key.as_str();
         let dim = q_scale.len();
         if [qkv, cos, sin, position, key_cache, value_cache].iter().any(|t| t.half)
             || heads == 0 || kv_heads == 0 || dim == 0 || dim % 2 != 0
@@ -7128,9 +7143,9 @@ mod imp {
     /// variant. `position` is a device u32 and must stay below capacity.
     pub fn gpu_qk_rms_norm_rope_cache_bf16(
         qkv: &GpuTensor,
-        q_key: &str,
+        q_key: &WeightKey,
         q_scale: &[f32],
-        k_key: &str,
+        k_key: &WeightKey,
         k_scale: &[f32],
         cos: &GpuTensor,
         sin: &GpuTensor,
@@ -7141,6 +7156,8 @@ mod imp {
         kv_heads: usize,
         eps: f32,
     ) -> Result<GpuTensor, String> {
+        let q_key = q_key.as_str();
+        let k_key = k_key.as_str();
         let dim = q_scale.len();
         if [qkv, cos, sin, position].iter().any(|t| t.half)
             || heads == 0 || kv_heads == 0 || dim == 0 || dim % 2 != 0
@@ -7183,7 +7200,7 @@ mod imp {
     pub fn gpu_rms_norm_mul_round_bf16(
         x: &GpuTensor,
         group_cols: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
@@ -7198,7 +7215,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::rmsrnd");
+            let vec_key = format!("{}::{cache_key}::rmsrnd", owner.namespace());
             let vec_bytes = scale.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let raw = unsafe {
@@ -7348,7 +7365,7 @@ mod imp {
     pub fn gpu_rms_norm_mul_bf16(
         x: &GpuTensor,
         group_cols: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
@@ -7363,7 +7380,7 @@ mod imp {
         let group_rows = (x.rows * x.cols) / group_cols;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::rmsbf16");
+            let vec_key = format!("{}::{cache_key}::rmsbf16", owner.namespace());
             let vec_bytes = scale.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let raw = unsafe {
@@ -7398,7 +7415,7 @@ mod imp {
     pub fn gpu_rms_norm_qwen3(
         x: &GpuTensor,
         group_cols: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
@@ -7413,7 +7430,7 @@ mod imp {
         let group_rows = (x.rows * x.cols) / group_cols;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::rmsqwen3");
+            let vec_key = format!("{}::{cache_key}::rmsqwen3", owner.namespace());
             let vec_bytes = scale.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let raw = unsafe {
@@ -7451,7 +7468,7 @@ mod imp {
         x: &GpuTensor,
         heads: usize,
         head_dim: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
@@ -7470,7 +7487,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::rmsph");
+            let vec_key = format!("{}::{cache_key}::rmsph", owner.namespace());
             let vec_bytes = scale.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let raw = unsafe {
@@ -7536,7 +7553,7 @@ mod imp {
     pub fn gpu_dyt(
         x: &GpuTensor,
         width: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         gamma: &[f32],
         beta: &[f32],
@@ -7556,7 +7573,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let key = format!("{cache_namespace}::{cache_key}::dyt");
+            let key = format!("{}::{cache_key}::dyt", owner.namespace());
             let vec_bytes = 2 * width * size_of::<f32>();
             backend.cached_weight_buffer(&key, vec_bytes, || {
                 let mut raw = Vec::with_capacity(vec_bytes);
@@ -7729,10 +7746,11 @@ mod imp {
     /// Ids must be less than `table_rows`; invalid ids yield NaN rows.
     pub fn gpu_gather_rows_cached_bf16(
         indices: &GpuTensor,
-        qualified_key: &str,
+        qualified_key: &WeightKey,
         table_rows: usize,
         cols: usize,
     ) -> Result<GpuTensor, String> {
+        let qualified_key = qualified_key.as_str();
         if indices.half || indices.cols != 1 || indices.rows == 0 || table_rows == 0 || cols == 0 {
             return Err("gpu_gather_rows_cached_bf16 shape mismatch".to_string());
         }
@@ -7873,7 +7891,7 @@ mod imp {
     pub fn gpu_sparse_conv27(
         x: &GpuTensor,
         neighbors: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         co: usize,
         bias: &[f32],
@@ -7900,7 +7918,7 @@ mod imp {
         // final stage (chunking keeps every gemm fat enough to saturate).
         const SLAB_CAP_BYTES: usize = 512 * 1024 * 1024;
         let max_rows = (SLAB_CAP_BYTES / (k_total * size_of::<u16>())).clamp(1, n);
-        let qualified_key = format!("{cache_namespace}::{weight_cache_key}");
+        let qualified_key = format!("{}::{weight_cache_key}", owner.namespace());
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
@@ -9655,7 +9673,7 @@ mod imp {
     /// same values from f32 storage.
     pub fn gpu_linear_nt_cached_bf16_mm_from_buf(
         x: &GpuBf16Buf,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuTensor, String> {
         if parts.len() != 1 || parts[0].bt_ggml_type != GGML_TYPE_BF16 {
@@ -9677,7 +9695,7 @@ mod imp {
                 .checked_mul(k)
                 .and_then(|len| len.checked_mul(size_of::<u16>()))
                 .ok_or_else(|| "PyTorch BF16 mm weight size overflow".to_string())?;
-            let weight_key = format!("{cache_namespace}::{}", part.cache_key);
+            let weight_key = format!("{}::{}", owner.namespace(), part.cache_key);
             backend.cached_weight_buffer(&weight_key, weight_bytes, || {
                 Ok(part.bytes.to_vec())
             })?;
@@ -9738,7 +9756,7 @@ mod imp {
     /// result.
     pub fn gpu_linear_nt_cached_bf16_mm_from_buf_to_buf(
         x: &GpuBf16Buf,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
     ) -> Result<GpuBf16Buf, String> {
         if parts.len() != 1 || parts[0].bt_ggml_type != GGML_TYPE_BF16 {
@@ -9761,7 +9779,7 @@ mod imp {
                 .checked_mul(k)
                 .and_then(|len| len.checked_mul(size_of::<u16>()))
                 .ok_or_else(|| "PyTorch BF16 mm weight size overflow".to_string())?;
-            let weight_key = format!("{cache_namespace}::{}", part.cache_key);
+            let weight_key = format!("{}::{}", owner.namespace(), part.cache_key);
             backend.cached_weight_buffer(&weight_key, weight_bytes, || {
                 Ok(part.bytes.to_vec())
             })?;
@@ -9946,7 +9964,7 @@ mod imp {
 
     /// Register the streamed groups (pinned host copies + 2 device slot-sets)
     /// and prime groups 0 and 1. Replaces any previous ring.
-    pub fn gpu_stream_ring_setup(groups: Vec<Vec<(String, Vec<u8>)>>) -> Result<(), String> {
+    pub fn gpu_stream_ring_setup(groups: Vec<Vec<(WeightKey, Vec<u8>)>>) -> Result<(), String> {
         if groups.len() < 3 {
             return Err("stream ring needs at least 3 groups".to_string());
         }
@@ -9982,7 +10000,7 @@ mod imp {
                         );
                     }
                     tensors.push(RingTensor {
-                        key,
+                        key: key.as_str().to_owned(),
                         len: bytes.len(),
                         host,
                     });
@@ -10109,7 +10127,7 @@ mod imp {
     fn f8_linear_gemm(
         backend: &mut CudaDenseLinearBackend,
         input_bf16_ptr: *const std::ffi::c_void,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         part: &GpuLinearPart<'_>,
         weight_scale: f32,
         input_scale: Option<f32>,
@@ -10122,7 +10140,7 @@ mod imp {
             return kq_linear_gemm(
                 backend,
                 input_bf16_ptr,
-                cache_namespace,
+                owner,
                 part,
                 m,
                 k,
@@ -10132,7 +10150,7 @@ mod imp {
         let weight_bytes = n
             .checked_mul(k)
             .ok_or_else(|| "f8 mm weight size overflow".to_string())?;
-        let weight_key = format!("{cache_namespace}::{}::f8", part.cache_key);
+        let weight_key = format!("{}::{}::f8", owner.namespace(), part.cache_key);
         backend.cached_weight_buffer(&weight_key, weight_bytes, || Ok(part.bytes.to_vec()))?;
 
         if let Some(input_scale) = input_scale.filter(|_| f8_scaled_mm_enabled()) {
@@ -10206,7 +10224,7 @@ mod imp {
     fn kq_linear_gemm(
         backend: &mut CudaDenseLinearBackend,
         input_bf16_ptr: *const std::ffi::c_void,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         part: &GpuLinearPart<'_>,
         m: usize,
         k: usize,
@@ -10215,7 +10233,7 @@ mod imp {
         let n = part.n;
         let ggml_type = part.bt_ggml_type;
         let payload_bytes = quant_linear_payload_bytes(ggml_type, n, k)?;
-        let weight_key = quant_part_key(cache_namespace, part.cache_key, ggml_type);
+        let weight_key = quant_part_key(owner, part.cache_key, ggml_type);
         backend.cached_weight_buffer(&weight_key, payload_bytes, || {
             if part.bytes.len() != payload_bytes {
                 return Err(format!(
@@ -10563,7 +10581,7 @@ mod imp {
     /// the bf16 grid like the bf16_mm twin: bf16 D, expanded losslessly).
     pub fn gpu_linear_nt_cached_f8_mm(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
         input_scale: Option<f32>,
@@ -10610,7 +10628,7 @@ mod imp {
             f8_linear_gemm(
                 backend,
                 input_ptr,
-                cache_namespace,
+                owner,
                 part,
                 weight_scale,
                 input_scale,
@@ -10636,7 +10654,7 @@ mod imp {
     /// F8_E4M3-resident dense linear from a bf16 buffer, f32 out.
     pub fn gpu_linear_nt_cached_f8_mm_from_buf(
         x: &GpuBf16Buf,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
         input_scale: Option<f32>,
@@ -10659,7 +10677,7 @@ mod imp {
             f8_linear_gemm(
                 backend,
                 x.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
-                cache_namespace,
+                owner,
                 part,
                 weight_scale,
                 input_scale,
@@ -10686,7 +10704,7 @@ mod imp {
     /// buffer (the gemm's own bf16 D is the result).
     pub fn gpu_linear_nt_cached_f8_mm_from_buf_to_buf(
         x: &GpuBf16Buf,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         parts: &[GpuLinearPart<'_>],
         weight_scale: f32,
         input_scale: Option<f32>,
@@ -10705,7 +10723,7 @@ mod imp {
             f8_linear_gemm(
                 backend,
                 x.device_ptr_u16()?.cast::<std::ffi::c_void>().cast_const(),
-                cache_namespace,
+                owner,
                 part,
                 weight_scale,
                 input_scale,
@@ -10765,9 +10783,10 @@ mod imp {
     /// f32 accumulation.
     pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf(
         x: &GpuBf16Buf,
-        key: &str,
+        key: &WeightKey,
         n: usize,
     ) -> Result<GpuBf16Buf, String> {
+        let key = key.as_str();
         let (m, k) = (x.rows, x.cols);
         if m == 0 || k == 0 || n == 0 {
             return Err(format!("gpu_linear_nt_cached_fp8_dynamic_from_buf_to_buf empty shape: x={m}x{k} n={n}"));
@@ -10794,9 +10813,10 @@ mod imp {
     /// GEMM's bf16 values, expanded losslessly, like the bf16 twin).
     pub fn gpu_linear_nt_cached_fp8_dynamic_from_buf(
         x: &GpuBf16Buf,
-        key: &str,
+        key: &WeightKey,
         n: usize,
     ) -> Result<GpuTensor, String> {
+        let key = key.as_str();
         let (m, k) = (x.rows, x.cols);
         if m == 0 || k == 0 || n == 0 {
             return Err(format!("gpu_linear_nt_cached_fp8_dynamic_from_buf empty shape: x={m}x{k} n={n}"));
@@ -10917,7 +10937,7 @@ mod imp {
         col_off: usize,
         cols: usize,
         group_cols: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         scale: &[f32],
         eps: f32,
@@ -10934,7 +10954,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::rms");
+            let vec_key = format!("{}::{cache_key}::rms", owner.namespace());
             let vec_bytes = scale.len() * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let raw = unsafe {
@@ -11221,7 +11241,7 @@ mod imp {
     /// loudly instead of uploading garbage). This is the H3 streaming-load
     /// path: model weights never need a whole-model host-RAM copy.
     pub fn gpu_weight_cache_ensure<F>(
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         bt_ggml_type: u32,
         n: usize,
@@ -11244,11 +11264,11 @@ mod imp {
             .and_then(|len| len.checked_mul(elem_bytes))
             .ok_or_else(|| "gpu_weight_cache_ensure size overflow".to_string())?;
         let qualified_key = if want_a16 {
-            format!("{cache_namespace}::{cache_key}::a16")
+            format!("{}::{cache_key}::a16", owner.namespace())
         } else if bt_ggml_type == GGML_TYPE_F8_E4M3 {
-            format!("{cache_namespace}::{cache_key}::f8")
+            format!("{}::{cache_key}::f8", owner.namespace())
         } else {
-            format!("{cache_namespace}::{cache_key}")
+            format!("{}::{cache_key}", owner.namespace())
         };
         let needs_convert = want_a16 && bt_ggml_type == GGML_TYPE_BF16;
         with_dense_linear_backend(|backend| {
@@ -11281,7 +11301,7 @@ mod imp {
     /// This shares the ordinary weight cache and eviction policy, without
     /// rebuilding `namespace::key` on each decode step.
     pub fn gpu_weight_cache_ensure_bf16_keyed<F>(
-        qualified_key: &str,
+        qualified_key: &WeightKey,
         n: usize,
         k: usize,
         load: F,
@@ -11289,6 +11309,7 @@ mod imp {
     where
         F: FnOnce() -> Result<Vec<u8>, String>,
     {
+        let qualified_key = qualified_key.as_str();
         let bytes = n
             .checked_mul(k)
             .and_then(|v| v.checked_mul(size_of::<u16>()))
@@ -11308,8 +11329,8 @@ mod imp {
     /// a nonfinite flag is read back on a miss; no host weight load or copy.
     /// The BF16 cache is retained, and warm calls are safe during capture.
     pub fn gpu_weight_cache_ensure_q8_0_from_bf16_keyed(
-        qualified_key: &str,
-        bf16_key: &str,
+        qualified_key: &WeightKey,
+        bf16_key: &WeightKey,
         n: usize,
         k: usize,
     ) -> Result<(), String> {
@@ -11322,16 +11343,17 @@ mod imp {
     /// Q8_0 allocation. No intermediate individual Q8 copies or host weights.
     /// Part keys are fully qualified; warm calls are safe during capture.
     pub fn gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(
-        qualified_key: &str,
-        parts: &[GpuLinearPart<'_>],
+        qualified_key: &WeightKey,
+        parts: &[GpuLinearPart<'_, &WeightKey>],
         k: usize,
     ) -> Result<(), String> {
+        let qualified_key = qualified_key.as_str();
         if k == 0 || k % 32 != 0 || parts.is_empty()
             || parts.iter().any(|p| p.n == 0 || p.bt_ggml_type != GGML_TYPE_BF16)
         {
             return Err("gpu_weight_cache_ensure_q8_0_concat_bf16_keyed invalid shape/dtype".into());
         }
-        if parts.iter().any(|p| qualified_key == p.cache_key) {
+        if parts.iter().any(|p| qualified_key == p.cache_key.as_str()) {
             return Err("Q8_0 destination must differ from the BF16 source key".into());
         }
         let n = parts.iter().try_fold(0usize, |sum, p| sum.checked_add(p.n))
@@ -11365,9 +11387,9 @@ mod imp {
             for part in parts {
                 let raw_bytes = part.n.checked_mul(k).and_then(|v| v.checked_mul(2))
                     .ok_or("Q8_0 source size overflow")?;
-                let (source, source_bytes) = backend.weight_ptr(part.cache_key)?;
+                let (source, source_bytes) = backend.weight_ptr(part.cache_key.as_str())?;
                 if source_bytes != raw_bytes {
-                    return Err(format!("Q8_0 source {}: {source_bytes} bytes, expected {raw_bytes}", part.cache_key));
+                    return Err(format!("Q8_0 source {}: {source_bytes} bytes, expected {raw_bytes}", part.cache_key.as_str()));
                 }
                 let part_blocks = part.n * (k / 32);
                 gpu_check(unsafe {
@@ -11431,17 +11453,17 @@ mod imp {
         }
     }
 
-    fn quant_part_key(cache_namespace: &str, cache_key: &str, ggml_type: u32) -> String {
+    fn quant_part_key(owner: &WeightOwner, cache_key: &str, ggml_type: u32) -> String {
         // The type rides in the key so a format change can never silently
         // reuse a stale same-size buffer cached under another layout.
-        format!("{cache_namespace}::{cache_key}::q{ggml_type}")
+        format!("{}::{cache_key}::q{ggml_type}", owner.namespace())
     }
 
     /// `gpu_weight_cache_ensure` twin for quantized linears: uploads the raw
     /// quantized payload verbatim (K-quant block stream / NVFP4 pairs blob)
     /// under the type-suffixed key the quantized gemm path looks up.
     pub fn gpu_weight_cache_ensure_quant<F>(
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         bt_ggml_type: u32,
         n: usize,
@@ -11452,7 +11474,7 @@ mod imp {
         F: FnOnce() -> Result<Vec<u8>, String>,
     {
         let payload_bytes = quant_linear_payload_bytes(bt_ggml_type, n, k)?;
-        let qualified_key = quant_part_key(cache_namespace, cache_key, bt_ggml_type);
+        let qualified_key = quant_part_key(owner, cache_key, bt_ggml_type);
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             backend.cached_weight_buffer(&qualified_key, payload_bytes, || {
@@ -11468,73 +11490,61 @@ mod imp {
         })
     }
 
-    /// Marks weight-cache key prefixes that must survive allocation-failure
-    /// recovery on this thread (the resident FLUX checkpoint namespaces).
-    /// Replaces the previous protected set; pass an empty vec to clear.
+    /// Marks weight owners that must survive allocation-failure
+    /// recovery on this thread (the resident checkpoint owners).
+    /// Replaces the previous protected set; pass an empty slice to clear.
     /// Protection only guards the implicit OOM eviction ladder — explicit
-    /// `gpu_weight_cache_evict_prefix` calls (model switch/unload) still
+    /// `gpu_weight_cache_evict_owner` / `gpu_weight_cache_evict_keys` calls (model switch/unload) still
     /// evict protected keys, keeping residency reporting truthful.
-    pub fn gpu_weight_cache_protect_prefixes(prefixes: Vec<String>) -> Result<(), String> {
+    pub fn gpu_weight_cache_protect(owners: &[&WeightOwner]) -> Result<(), String> {
         with_dense_linear_backend(|backend| {
-            backend.protected_prefixes = prefixes;
+            backend.protected_prefixes = owners.iter().map(|owner| owner.namespace().to_owned()).collect();
             Ok(())
         })
     }
 
-    /// Drop every cached weight buffer whose qualified key starts with
-    /// `prefix` (e.g. the H3 text-encoder namespace after its encode pass).
+    /// Drop all cached weight buffers belonging to this owner, including representations.
     /// Returns the number of buffers freed.
-    pub fn gpu_weight_cache_evict_prefix(prefix: &str) -> Result<usize, String> {
+    pub fn gpu_weight_cache_evict_owner(owner: &WeightOwner) -> Result<usize, String> {
         with_dense_linear_backend(|backend| {
-            let keys: Vec<String> = backend
-                .weight_buffers
-                .keys()
-                .filter(|key| key.starts_with(prefix))
-                .cloned()
-                .collect();
-            let count = keys.len();
-            for key in keys {
-                backend.weight_buffers.remove(&key);
-            }
-            Ok(count)
+            let before = backend.weight_buffers.len();
+            backend.weight_buffers.retain(|key, _| !key.starts_with(owner.namespace()));
+            Ok(before - backend.weight_buffers.len())
         })
     }
 
-    /// Resident entries and bytes on this thread, without initializing CUDA.
-    pub fn gpu_weight_cache_resident(prefix: &str) -> Result<(usize, usize), String> {
+    /// Drop cached weight buffers whose qualified keys start with this owner's key.
+    /// Returns the number of buffers freed.
+    pub fn gpu_weight_cache_evict_keys(prefix: &WeightKey) -> Result<usize, String> {
+        with_dense_linear_backend(|backend| {
+            let before = backend.weight_buffers.len();
+            backend.weight_buffers.retain(|key, _| !key.starts_with(prefix.as_str()));
+            Ok(before - backend.weight_buffers.len())
+        })
+    }
+
+    /// Resident entries and bytes for a non-owning trace, without initializing CUDA.
+    pub fn gpu_weight_cache_resident(owner: &WeightOwnerTrace) -> Result<(usize, usize), String> {
         DENSE_LINEAR_BACKEND.with(|slot| {
             let mut slot = slot.borrow_mut();
             let Some(backend) = slot.as_mut() else { return Ok((0, 0)); };
             backend.drain_dead_owners()?;
             Ok(backend.weight_buffers.iter()
-                .filter(|(key, _)| key.starts_with(prefix))
+                .filter(|(key, _)| key.starts_with(owner.namespace()))
                 .fold((0, 0), |(count, bytes), (_, buffer)|
                     (count + 1, bytes + buffer.size_bytes)))
         })
     }
 
-    /// Drop cached dense-linear weights matching `prefix` without creating a
-    /// CUDA backend when this thread has never used one. Lifecycle teardown
-    /// uses this variant: unloading a cold/CPU model must not initialize a
-    /// device merely to discover that there is nothing to release.
-    pub fn gpu_weight_cache_evict_prefix_if_loaded(prefix: &str) -> Result<usize, String> {
+    /// Drop every cached dense-linear weight without initializing a cold CUDA backend.
+    pub fn gpu_weight_cache_evict_all_if_loaded() -> Result<usize, String> {
         DENSE_LINEAR_BACKEND.with(|slot| {
             let mut slot = slot.borrow_mut();
-            let Some(backend) = slot.as_mut() else {
-                return Ok(0);
-            };
+            let Some(backend) = slot.as_mut() else { return Ok(0); };
             backend.prepare_device()?;
             backend.drain_dead_owners()?;
-            let keys: Vec<String> = backend
-                .weight_buffers
-                .keys()
-                .filter(|key| key.starts_with(prefix))
-                .cloned()
-                .collect();
-            let count = keys.len();
-            for key in keys {
-                backend.weight_buffers.remove(&key);
-            }
+            let count = backend.weight_buffers.len();
+            backend.weight_buffers.clear();
             Ok(count)
         })
     }
@@ -13156,7 +13166,7 @@ mod imp {
     /// device-cached under the given key.
     pub fn gpu_gelu_bias_f16(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -13169,7 +13179,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let key = format!("{cache_namespace}::{cache_key}::b");
+            let key = format!("{}::{cache_key}::b", owner.namespace());
             let bias_bytes = bias.len() * size_of::<f32>();
             backend.cached_weight_buffer(&key, bias_bytes, || {
                 let raw = unsafe {
@@ -13896,7 +13906,7 @@ mod imp {
     }
 
     /// Stride-1 "same" planar conv2d; weights are device-cached under
-    /// `{cache_namespace}::{weight_cache_key}` so warm decodes upload nothing.
+    /// `{owner.namespace()}::{weight_cache_key}` so warm decodes upload nothing.
     ///
     /// Odd kernels with matching "same" padding use implicit GEMM: the input
     /// is zero-padded + converted to f16
@@ -13909,7 +13919,7 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -13937,7 +13947,7 @@ mod imp {
                 x,
                 width,
                 height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -13949,7 +13959,7 @@ mod imp {
                 x,
                 width,
                 height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -13963,7 +13973,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let weight_bytes = weights.len() * size_of::<f32>();
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}");
+            let qualified_key = format!("{}::{weight_cache_key}", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weight_bytes)
@@ -14089,7 +14099,7 @@ mod imp {
         width: usize,
         height: usize,
         groups: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         gamma: &[f32],
         beta: &[f32],
@@ -14111,7 +14121,7 @@ mod imp {
                 height,
                 batch,
                 groups,
-                cache_namespace,
+                owner,
                 cache_key,
                 gamma,
                 beta,
@@ -14122,8 +14132,8 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let g_key = format!("{cache_namespace}::{cache_key}::gn_w");
-            let b_key = format!("{cache_namespace}::{cache_key}::gn_b");
+            let g_key = format!("{}::{cache_key}::gn_w", owner.namespace());
+            let b_key = format!("{}::{cache_key}::gn_b", owner.namespace());
             backend.cached_weight_buffer(&g_key, gamma.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -14412,7 +14422,7 @@ mod imp {
         height: usize,
         out_width: usize,
         out_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -14448,7 +14458,7 @@ mod imp {
                 channels,
                 width,
                 height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -14464,7 +14474,7 @@ mod imp {
                 height,
                 out_width,
                 out_height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -14548,14 +14558,14 @@ mod imp {
                     })?
                 };
                 let w_key = if x.half {
-                    format!("{cache_namespace}::{weight_cache_key}::nchw16")
+                    format!("{}::{weight_cache_key}::nchw16", owner.namespace())
                 } else {
-                    format!("{cache_namespace}::{weight_cache_key}")
+                    format!("{}::{weight_cache_key}", owner.namespace())
                 };
                 let bias_key = if x.half {
-                    format!("{cache_namespace}::{weight_cache_key}::bias16")
+                    format!("{}::{weight_cache_key}::bias16", owner.namespace())
                 } else {
-                    format!("{cache_namespace}::{weight_cache_key}::bias")
+                    format!("{}::{weight_cache_key}::bias", owner.namespace())
                 };
                 if x.half {
                     backend.cached_weight_buffer(
@@ -14667,7 +14677,7 @@ mod imp {
         channels: usize,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -14681,7 +14691,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let w_key = format!("{cache_namespace}::{weight_cache_key}::nchw16");
+            let w_key = format!("{}::{weight_cache_key}::nchw16", owner.namespace());
             backend.cached_weight_buffer(&w_key, weights.len() * size_of::<u16>(), || {
                 Ok(pack_f16_bytes(weights))
             })?;
@@ -14721,7 +14731,7 @@ mod imp {
                 )
                 .map_err(|err| format!("packed nchw 1x1 gemm: {err}"))?;
             }
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias16");
+            let bias_key = format!("{}::{weight_cache_key}::bias16", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<u16>(), || {
                 Ok(pack_f16_bytes(bias))
             })?;
@@ -14750,7 +14760,7 @@ mod imp {
         batch: usize,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -14767,7 +14777,7 @@ mod imp {
             height,
             width,
             height,
-            cache_namespace,
+            owner,
             weight_cache_key,
             weights,
             bias,
@@ -14789,7 +14799,7 @@ mod imp {
         height: usize,
         out_width: usize,
         out_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -14818,7 +14828,7 @@ mod imp {
         if kw == 1 && kh == 1 && pad_x == 0 && pad_y == 0 && stride_x == 1 && stride_y == 1 {
             return gpu_conv2d_1x1_nhwc_f16(
                 x,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -14887,7 +14897,7 @@ mod imp {
                         Ok(slot.as_ref().unwrap().ptr.as_ptr())
                     })?
                 };
-                let w_key = format!("{cache_namespace}::{weight_cache_key}::nhwc16");
+                let w_key = format!("{}::{weight_cache_key}::nhwc16", owner.namespace());
                 backend.cached_weight_buffer(&w_key, weights.len() * size_of::<u16>(), || {
                     let packed = pack_filter_nhwc_f16(weights, out_channels, in_channels, kh, kw);
                     let raw = unsafe {
@@ -14912,7 +14922,7 @@ mod imp {
                     ws_ptr,
                     backend.stream,
                 )?;
-                let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias16");
+                let bias_key = format!("{}::{weight_cache_key}::bias16", owner.namespace());
                 backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<u16>(), || {
                     let mut packed = vec![0u16; bias.len()];
                     for (dst, src) in packed.iter_mut().zip(bias) {
@@ -14947,7 +14957,7 @@ mod imp {
 
     fn gpu_conv2d_1x1_nhwc_f16(
         x: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -14959,7 +14969,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             // W NHWC 1x1 is [oc, ic] row-major = same as [oc, ic] planar.
-            let w_key = format!("{cache_namespace}::{weight_cache_key}::imcf16");
+            let w_key = format!("{}::{weight_cache_key}::imcf16", owner.namespace());
             backend.cached_weight_buffer(&w_key, weights.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; weights.len()];
                 for (dst, src) in packed.iter_mut().zip(weights) {
@@ -15015,7 +15025,7 @@ mod imp {
                 )
                 .map_err(|err| format!("nhwc 1x1 gemm: {err}"))?;
             }
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias16");
+            let bias_key = format!("{}::{weight_cache_key}::bias16", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; bias.len()];
                 for (dst, src) in packed.iter_mut().zip(bias) {
@@ -15057,7 +15067,7 @@ mod imp {
         batch: usize,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15074,7 +15084,7 @@ mod imp {
             height,
             width,
             height,
-            cache_namespace,
+            owner,
             weight_cache_key,
             weights,
             bias,
@@ -15096,7 +15106,7 @@ mod imp {
         height: usize,
         out_width: usize,
         out_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15126,7 +15136,7 @@ mod imp {
                 x,
                 width,
                 batch * height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -15148,7 +15158,7 @@ mod imp {
                 height,
                 out_width,
                 out_height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -15172,7 +15182,7 @@ mod imp {
                 &x32,
                 width,
                 batch * height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -15188,7 +15198,7 @@ mod imp {
             x,
             width,
             batch * height,
-            cache_namespace,
+            owner,
             weight_cache_key,
             weights,
             bias,
@@ -15204,7 +15214,7 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15215,7 +15225,7 @@ mod imp {
                 x,
                 width,
                 height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -15226,7 +15236,7 @@ mod imp {
                 x,
                 width,
                 height,
-                cache_namespace,
+                owner,
                 weight_cache_key,
                 weights,
                 bias,
@@ -15273,7 +15283,7 @@ mod imp {
         height: usize,
         out_width: usize,
         out_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15349,9 +15359,9 @@ mod imp {
                     })?
                 };
                 let w_key = if half {
-                    format!("{cache_namespace}::{weight_cache_key}::imcf16")
+                    format!("{}::{weight_cache_key}::imcf16", owner.namespace())
                 } else {
-                    format!("{cache_namespace}::{weight_cache_key}")
+                    format!("{}::{weight_cache_key}", owner.namespace())
                 };
                 if half {
                     backend.cached_weight_buffer(&w_key, weights.len() * size_of::<u16>(), || {
@@ -15406,7 +15416,7 @@ mod imp {
                     backend.stream,
                 )?;
                 if half {
-                    let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias16");
+                    let bias_key = format!("{}::{weight_cache_key}::bias16", owner.namespace());
                     backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<u16>(), || {
                         let mut packed = vec![0u16; bias.len()];
                         for (dst, src) in packed.iter_mut().zip(bias) {
@@ -15434,7 +15444,7 @@ mod imp {
                         backend.stream,
                     )?;
                 } else {
-                    let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias");
+                    let bias_key = format!("{}::{weight_cache_key}::bias", owner.namespace());
                     backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                         let raw = unsafe {
                             std::slice::from_raw_parts(
@@ -15475,7 +15485,7 @@ mod imp {
         in_height: usize,
         out_width: usize,
         out_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15503,7 +15513,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let weight_bytes = weights.len() * size_of::<f32>();
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}");
+            let qualified_key = format!("{}::{weight_cache_key}", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weight_bytes)
@@ -15548,7 +15558,7 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15562,7 +15572,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}::imcf16");
+            let qualified_key = format!("{}::{weight_cache_key}::imcf16", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weights.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; weights.len()];
                 for (dst, src) in packed.iter_mut().zip(weights) {
@@ -15621,7 +15631,7 @@ mod imp {
                 .map_err(|err| format!("gpu_conv2d 1x1 gemm failed (oc={out_channels} ic={in_channels}): {err}"))?;
             }
             gpu_pool_release(x16);
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias");
+            let bias_key = format!("{}::{weight_cache_key}::bias", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -15653,7 +15663,7 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15667,7 +15677,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}::imcf16");
+            let qualified_key = format!("{}::{weight_cache_key}::imcf16", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weights.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; weights.len()];
                 for (dst, src) in packed.iter_mut().zip(weights) {
@@ -15718,7 +15728,7 @@ mod imp {
                     format!("gpu_conv2d 1x1 f16 gemm failed (oc={out_channels} ic={in_channels}): {err}")
                 })?;
             }
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias16");
+            let bias_key = format!("{}::{weight_cache_key}::bias16", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; bias.len()];
                 for (dst, src) in packed.iter_mut().zip(bias) {
@@ -15767,7 +15777,7 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -15784,7 +15794,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
 
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}::imcf16");
+            let qualified_key = format!("{}::{weight_cache_key}::imcf16", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weights.len() * size_of::<u16>(), || {
                 let mut packed = vec![0u16; weights.len()];
                 for (dst, src) in packed.iter_mut().zip(weights) {
@@ -15875,7 +15885,7 @@ mod imp {
 
             // The bias is model-constant: cache it on device — every-call
             // pageable uploads hit the WDDM slow path under VRAM pressure.
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::bias");
+            let bias_key = format!("{}::{weight_cache_key}::bias", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -15999,7 +16009,7 @@ mod imp {
         in_channels: usize,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         out_channels: usize,
@@ -16033,7 +16043,7 @@ mod imp {
             let x_ptr = input.device_ptr_u16()?;
             let y_ptr = unsafe { output.device_ptr_u16()?.add(out_row_offset * plane) };
             let conv = Conv3x3 { in_channels, out_channels, width, height };
-            cudnn_conv3x3_f16(backend, conv, &format!("{cache_namespace}::{weight_cache_key}"), weights, x_ptr, y_ptr)?;
+            cudnn_conv3x3_f16(backend, conv, &format!("{}::{weight_cache_key}", owner.namespace()), weights, x_ptr, y_ptr)?;
             gpu_prof(backend.stream, crate::prof::CAT_CONV2D, prof_start, 0);
             Ok(())
         })
@@ -16141,11 +16151,12 @@ mod imp {
         x: &GpuTensor,
         width: usize,
         height: usize,
-        weight_key: &str,
+        weight_key: &WeightKey,
         weights: &[f32],
         bias: &[f32],
         out_channels: usize,
     ) -> Result<GpuTensor, String> {
+        let weight_key = weight_key.as_str();
         let (in_channels, plane) = (x.rows, width * height);
         if x.half || x.cols != plane {
             return Err(format!("gpu_conv2d_planar_cudnn_f16 wants f32 {in_channels}x{plane}, got {}x{} half={}", x.rows, x.cols, x.half));
@@ -16198,7 +16209,7 @@ mod imp {
         tensor: &GpuTensor,
         row_offset: usize,
         channels: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bias_cache_key: &str,
         bias: &[f32],
         slope: f32,
@@ -16212,7 +16223,7 @@ mod imp {
         let plane = tensor.cols;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let bias_key = format!("{cache_namespace}::{bias_cache_key}::bias32");
+            let bias_key = format!("{}::{bias_cache_key}::bias32", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -16253,7 +16264,7 @@ mod imp {
         in_channels: usize,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         out_channels: usize,
@@ -16325,7 +16336,7 @@ mod imp {
                         Ok(slot.as_ref().unwrap().ptr.as_ptr())
                     })?
                 };
-                let w_key = format!("{cache_namespace}::{weight_cache_key}::nchw32");
+                let w_key = format!("{}::{weight_cache_key}::nchw32", owner.namespace());
                 backend.cached_weight_buffer(
                     &w_key,
                     weights.len() * size_of::<f32>(),
@@ -16364,7 +16375,7 @@ mod imp {
     /// degenerates to a pure bias add for linear conv tails).
     pub fn gpu_realesrgan_bias_lrelu_f32(
         tensor: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bias_cache_key: &str,
         bias: &[f32],
         slope: f32,
@@ -16378,7 +16389,7 @@ mod imp {
         let plane = tensor.cols;
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let bias_key = format!("{cache_namespace}::{bias_cache_key}::bias32");
+            let bias_key = format!("{}::{bias_cache_key}::bias32", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -16443,7 +16454,7 @@ mod imp {
         dst32: &GpuTensor,
         dst16: Option<(&GpuTensor, usize)>,
         channels: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bias_cache_key: &str,
         bias: &[f32],
         scale: f32,
@@ -16482,7 +16493,7 @@ mod imp {
             let bias_ptr = if bias.is_empty() {
                 std::ptr::null()
             } else {
-                let bias_key = format!("{cache_namespace}::{bias_cache_key}::bias32");
+                let bias_key = format!("{}::{bias_cache_key}::bias32", owner.namespace());
                 backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                     let raw = unsafe {
                         std::slice::from_raw_parts(
@@ -16604,7 +16615,7 @@ mod imp {
         x: &GpuTensor,
         in_width: usize,
         in_height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -16629,7 +16640,7 @@ mod imp {
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let weight_bytes = weights.len() * size_of::<f32>();
-            let qualified_key = format!("{cache_namespace}::{weight_cache_key}");
+            let qualified_key = format!("{}::{weight_cache_key}", owner.namespace());
             backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(weights.as_ptr().cast::<u8>(), weight_bytes)
@@ -17261,7 +17272,7 @@ mod imp {
         height: usize,
         batch: usize,
         groups: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         gamma: &[f32],
         beta: &[f32],
@@ -17279,7 +17290,7 @@ mod imp {
         }
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let vec_key = format!("{cache_namespace}::{cache_key}::gn");
+            let vec_key = format!("{}::{cache_key}::gn", owner.namespace());
             let vec_bytes = 2 * channels * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let mut concat = Vec::with_capacity(2 * channels);
@@ -17325,7 +17336,7 @@ mod imp {
         width: usize,
         height: usize,
         groups: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         gamma: &[f32],
         beta: &[f32],
@@ -17349,9 +17360,9 @@ mod imp {
         let gn_result = with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             let vec_key = if x.half {
-                format!("{cache_namespace}::{cache_key}::gn_nchw16")
+                format!("{}::{cache_key}::gn_nchw16", owner.namespace())
             } else {
-                format!("{cache_namespace}::{cache_key}::gn_nchw")
+                format!("{}::{cache_key}::gn_nchw", owner.namespace())
             };
             if x.half {
                 let mut concat = Vec::with_capacity(2 * channels);
@@ -17458,7 +17469,7 @@ mod imp {
                     width,
                     height,
                     groups,
-                    cache_namespace,
+                    owner,
                     cache_key,
                     gamma,
                     beta,
@@ -17647,7 +17658,7 @@ mod imp {
         in_height: usize,
         out_channels: usize,
         scale: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bias_cache_key: &str,
         bias: &[f32],
     ) -> Result<GpuTensor, String> {
@@ -17667,7 +17678,7 @@ mod imp {
             let out_height = in_height
                 .checked_mul(scale)
                 .ok_or_else(|| "gpu_pixel_shuffle_planar height overflow".to_string())?;
-            let bias_key = format!("{cache_namespace}::{bias_cache_key}::psbias");
+            let bias_key = format!("{}::{bias_cache_key}::psbias", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -17807,7 +17818,7 @@ mod imp {
         q: &GpuTensor,
         k: &GpuTensor,
         v: &GpuTensor,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         relative_bias: &[f32],
         regions: Option<&GpuTensor>,
@@ -17833,7 +17844,7 @@ mod imp {
         }
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let bias_key = format!("{cache_namespace}::{cache_key}::relbias");
+            let bias_key = format!("{}::{cache_key}::relbias", owner.namespace());
             backend.cached_weight_buffer(
                 &bias_key,
                 relative_bias.len() * size_of::<f32>(),
@@ -17887,7 +17898,7 @@ mod imp {
         modulator: &GpuTensor,
         width: usize,
         height: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         weight_cache_key: &str,
         weights: &[f32],
         bias: &[f32],
@@ -17916,7 +17927,7 @@ mod imp {
         let prof_start = std::time::Instant::now();
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
-            let weight_key = format!("{cache_namespace}::{weight_cache_key}::deform-f16");
+            let weight_key = format!("{}::{weight_cache_key}::deform-f16", owner.namespace());
             backend.cached_weight_buffer(&weight_key, weights.len() * size_of::<u16>(), || {
                 let packed: Vec<u16> = weights.iter().map(|&value| crate::quant::f32_to_f16(value)).collect();
                 let raw = unsafe {
@@ -17989,7 +18000,7 @@ mod imp {
                 }
                 p0 += rows;
             }
-            let bias_key = format!("{cache_namespace}::{weight_cache_key}::deform-bias");
+            let bias_key = format!("{}::{weight_cache_key}::deform-bias", owner.namespace());
             backend.cached_weight_buffer(&bias_key, bias.len() * size_of::<f32>(), || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(
@@ -18023,7 +18034,7 @@ mod imp {
         width: usize,
         height: usize,
         groups: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         cache_key: &str,
         gamma: &[f32],
         beta: &[f32],
@@ -18042,7 +18053,7 @@ mod imp {
             backend.prepare_device()?;
             // gamma/beta are model-constant: cache them on device as one
             // [gamma || beta] buffer instead of re-uploading every call.
-            let vec_key = format!("{cache_namespace}::{cache_key}::gn");
+            let vec_key = format!("{}::{cache_key}::gn", owner.namespace());
             let vec_bytes = 2 * channels * size_of::<f32>();
             backend.cached_weight_buffer(&vec_key, vec_bytes, || {
                 let mut concat = Vec::with_capacity(2 * channels);
@@ -22313,9 +22324,9 @@ mod imp {
 
     pub fn try_affine_quantized_matmul_bf16<FW, FS, FB>(
         spec: AffineQuantizedMatmulSpec<'_>,
-        weight_cache_key: &str,
-        scales_cache_key: &str,
-        biases_cache_key: &str,
+        weight_cache_key: &WeightKey,
+        scales_cache_key: &WeightKey,
+        biases_cache_key: &WeightKey,
         load_weight_bytes: FW,
         load_scales_bytes: FS,
         load_biases_bytes: FB,
@@ -22325,6 +22336,9 @@ mod imp {
         FS: FnOnce() -> Result<Vec<u8>, String>,
         FB: FnOnce() -> Result<Vec<u8>, String>,
     {
+        let weight_cache_key = weight_cache_key.as_str();
+        let scales_cache_key = scales_cache_key.as_str();
+        let biases_cache_key = biases_cache_key.as_str();
         thread_local! {
             static AFFINE_CUDA_BACKEND: RefCell<Option<CudaAffineBackend>> = const { RefCell::new(None) };
         }
@@ -22351,9 +22365,9 @@ mod imp {
 
     pub fn try_affine_quantized_matmul_bf16_rows<FW, FS, FB>(
         spec: AffineQuantizedMatmulRowsSpec<'_>,
-        weight_cache_key: &str,
-        scales_cache_key: &str,
-        biases_cache_key: &str,
+        weight_cache_key: &WeightKey,
+        scales_cache_key: &WeightKey,
+        biases_cache_key: &WeightKey,
         load_weight_bytes: FW,
         load_scales_bytes: FS,
         load_biases_bytes: FB,
@@ -22363,6 +22377,9 @@ mod imp {
         FS: FnOnce() -> Result<Vec<u8>, String>,
         FB: FnOnce() -> Result<Vec<u8>, String>,
     {
+        let weight_cache_key = weight_cache_key.as_str();
+        let scales_cache_key = scales_cache_key.as_str();
+        let biases_cache_key = biases_cache_key.as_str();
         thread_local! {
             static AFFINE_CUDA_BACKEND: RefCell<Option<CudaAffineBackend>> = const { RefCell::new(None) };
         }
@@ -22432,7 +22449,7 @@ mod imp {
         layers: &[WhisperEncLayerQ8<'_>],
         final_ln_w: &[f32],
         final_ln_b: &[f32],
-        cache_namespace: &str,
+        owner: &WeightOwner,
     ) -> Result<Vec<f32>, String> {
         if n_state == 0 || n_head == 0 || n_state % n_head != 0 || n_state % 32 != 0 {
             return Err("CUDA Whisper encoder has invalid state/head dimensions".to_string());
@@ -22524,7 +22541,7 @@ mod imp {
                 // the dense cache may evict unprotected weights on OOM.
                 for (index, layer) in layers.iter().enumerate() {
                     for (name, bytes, _, _) in layer.matrices(n_state) {
-                        let key = format!("{cache_namespace}::enc{index}::{name}::q8");
+                        let key = format!("{}::enc{index}::{name}::q8", owner.namespace());
                         backend.cached_weight_buffer(&key, bytes.len(), || Ok(bytes.to_vec()))?;
                     }
                 }
@@ -22554,7 +22571,7 @@ mod imp {
                 for index in 0..layers.len() {
                     let param = |slot| unsafe { pp.add((12 * index + slot) * n_state) };
                     let gemm = |input, output, name: &str, k, n| {
-                        let key = format!("{cache_namespace}::enc{index}::{name}::q8");
+                        let key = format!("{}::enc{index}::{name}::q8", owner.namespace());
                         let weight = backend.weight_buffers.get(&key).ok_or_else(|| {
                             format!("missing cached CUDA Whisper weight {key}")
                         })?;
@@ -22677,7 +22694,7 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bt_cache_key: &str,
         load_q8_bytes: F,
     ) -> Result<Vec<f32>, String>
@@ -22720,7 +22737,7 @@ mod imp {
             let prof_on = crate::prof::enabled();
             let t_weight = std::time::Instant::now();
             backend.prepare_device()?;
-            let qualified_key = format!("{cache_namespace}::{bt_cache_key}::q8");
+            let qualified_key = format!("{}::{bt_cache_key}::q8", owner.namespace());
             // The cache validates the closure's byte length on a miss.
             backend.cached_weight_buffer(&qualified_key, weight_bytes, load_q8_bytes)?;
             crate::prof::record(crate::prof::CAT_DENSE_WEIGHT_UPLOAD, t_weight, 0);
@@ -23006,7 +23023,7 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
-        cache_namespace: &str,
+        owner: &WeightOwner,
         bt_cache_key: &str,
         load_bt_bytes: F,
     ) -> Result<Vec<f32>, String>
@@ -23025,7 +23042,7 @@ mod imp {
                     m,
                     k,
                     n,
-                    cache_namespace,
+                    owner,
                     bt_cache_key,
                     load_bt_bytes,
                 )
@@ -23050,7 +23067,7 @@ mod imp {
                     m,
                     k,
                     n,
-                    cache_namespace,
+                    owner,
                     bt_cache_key,
                     load_bt_bytes,
                 )
@@ -23164,7 +23181,7 @@ mod imp {
         n_cols: usize,
         n_rows: usize,
         row_indices: &[i32],
-        cache_namespace: &str,
+        owner: &WeightOwner,
         src_cache_key: &str,
         load_src_bytes: F,
     ) -> Result<Vec<f32>, String>
@@ -23182,7 +23199,7 @@ mod imp {
                     n_cols,
                     n_rows,
                     row_indices,
-                    cache_namespace,
+                    owner,
                     src_cache_key,
                     load_src_bytes,
                 )
@@ -23206,7 +23223,7 @@ mod imp {
                     n_cols,
                     n_rows,
                     row_indices,
-                    cache_namespace,
+                    owner,
                     src_cache_key,
                     load_src_bytes,
                 )
@@ -23256,16 +23273,16 @@ mod imp {
         #[test]
         fn dropped_owner_retires_cached_weight_on_next_backend_entry() {
             let owner = makepad_ai_loader::WeightOwner::new("cuda-retirement");
-            let prefix = owner.namespace().to_owned();
-            let key = format!("{prefix}::w");
+            let trace = owner.trace();
+            let key = owner.key("w");
             with_dense_linear_backend(|backend| {
                 backend.prepare_device()?;
-                backend.cached_weight_buffer(&key, 16, || Ok(vec![0; 16]))?;
+                backend.cached_weight_buffer(key.as_str(), 16, || Ok(vec![0; 16]))?;
                 Ok(())
             }).unwrap();
-            assert_eq!(gpu_weight_cache_resident(&prefix).unwrap(), (1, 16), "owner weight was cached");
+            assert_eq!(gpu_weight_cache_resident(&trace).unwrap(), (1, 16), "owner weight was cached");
             std::thread::spawn(move || drop(owner)).join().unwrap();
-            assert_eq!(gpu_weight_cache_resident(&prefix).unwrap(), (0, 0), "next entry drains dropped owner's weight");
+            assert_eq!(gpu_weight_cache_resident(&trace).unwrap(), (0, 0), "next entry drains dropped owner's weight");
         }
 
         fn is_nan_word(word: u16) -> bool {
@@ -23400,7 +23417,7 @@ mod imp {
             let words: Vec<u16> = (0..n * k).map(|_| host_bf16(next())).collect();
             let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
             let owner = makepad_ai_loader::WeightOwner::new("cuda-bf16-keyed");
-            let got = try_matmul_nt_ggml_bytes_cached(&a, GGML_TYPE_BF16, m, k, n, owner.namespace(), "w", || Ok(bytes))
+            let got = try_matmul_nt_ggml_bytes_cached(&a, GGML_TYPE_BF16, m, k, n, &owner, "w", || Ok(bytes))
                 .expect("keyed BF16 matmul");
             assert_eq!(got.len(), m * n, "output extent");
             for row in 0..m {
@@ -23423,6 +23440,7 @@ mod imp {
 
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
 mod imp {
+    use makepad_ai_loader::WeightOwner;
     #[allow(clippy::too_many_arguments)]
     pub fn whisper_encoder_stack_q8(
         _x: &[f32],
@@ -23432,7 +23450,7 @@ mod imp {
         _layers: &[super::WhisperEncLayerQ8<'_>],
         _final_ln_w: &[f32],
         _final_ln_b: &[f32],
-        _cache_namespace: &str,
+        _owner: &WeightOwner,
     ) -> Result<Vec<f32>, String> {
         Err("CUDA kernels are not compiled into this build".to_string())
     }
