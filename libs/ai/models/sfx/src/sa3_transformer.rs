@@ -6,9 +6,10 @@
 //! CPU f32. Mirrors models/dit.py + models/transformer.py exactly; validated
 //! stage-by-stage against local/sa3_ref/dumps by `sa3-validate`.
 
-use crate::backend::WeightOwner;
+use crate::backend::{F32Weight, WeightOwner};
+use std::sync::Arc;
 use crate::sa3::{
-    apply_rope, attention, expo_fourier, linear, rms_norm_rows, rope_tables, sigmoid, silu,
+    apply_rope, attention, expo_fourier, linear, linear_w, rms_norm_rows, rope_tables, sigmoid, silu,
     Sa3Tensors, SA3_COND_DIM, SA3_COND_TOKENS, SA3_DIT_DEPTH, SA3_DIT_DIM, SA3_DIT_HEADS,
     SA3_HEAD_DIM, SA3_LATENT_DIM, SA3_LOCAL_COND_DIM, SA3_MEMORY_TOKENS, SA3_NORM_EPS,
     SA3_QK_NORM_EPS, SA3_TIMESTEP_FEATURES,
@@ -30,18 +31,18 @@ struct DitBlock {
     cross_norm: Vec<f32>,
     ff_norm: Vec<f32>,
     scale_shift_gate: Vec<f32>,
-    self_qkv: Vec<f32>,
-    self_out: Vec<f32>,
+    self_qkv: F32Weight,
+    self_out: F32Weight,
     self_q_norm: Vec<f32>,
     self_k_norm: Vec<f32>,
-    cross_q: Vec<f32>,
-    cross_kv: Vec<f32>,
-    cross_out: Vec<f32>,
+    cross_q: F32Weight,
+    cross_kv: F32Weight,
+    cross_out: F32Weight,
     cross_q_norm: Vec<f32>,
     cross_k_norm: Vec<f32>,
-    ff_proj_w: Vec<f32>,
+    ff_proj_w: F32Weight,
     ff_proj_b: Vec<f32>,
-    ff_out_w: Vec<f32>,
+    ff_out_w: F32Weight,
     ff_out_b: Vec<f32>,
     /// to_local_embed evaluated at the zero t2a local conditioning: a single
     /// constant 1024-vector added to every latent token.
@@ -49,22 +50,23 @@ struct DitBlock {
 }
 
 pub struct Sa3Dit {
-    preprocess_conv: Vec<f32>,
-    postprocess_conv: Vec<f32>,
-    timestep_w0: Vec<f32>,
+    _owner: Arc<WeightOwner>,
+    preprocess_conv: F32Weight,
+    postprocess_conv: F32Weight,
+    timestep_w0: F32Weight,
     timestep_b0: Vec<f32>,
-    timestep_w2: Vec<f32>,
+    timestep_w2: F32Weight,
     timestep_b2: Vec<f32>,
-    cond_w0: Vec<f32>,
-    cond_w2: Vec<f32>,
-    global_w0: Vec<f32>,
-    global_w2: Vec<f32>,
+    cond_w0: F32Weight,
+    cond_w2: F32Weight,
+    global_w0: F32Weight,
+    global_w2: F32Weight,
     memory_tokens: Vec<f32>,
-    project_in: Vec<f32>,
-    project_out: Vec<f32>,
-    gce_w0: Vec<f32>,
+    project_in: F32Weight,
+    project_out: F32Weight,
+    gce_w0: F32Weight,
     gce_b0: Vec<f32>,
-    gce_w2: Vec<f32>,
+    gce_w2: F32Weight,
     gce_b2: Vec<f32>,
     blocks: Vec<DitBlock>,
 }
@@ -72,6 +74,7 @@ pub struct Sa3Dit {
 impl Sa3Dit {
     /// Loads from the combined SA3 checkpoint (model.model.* prefix).
     pub fn load(t: &Sa3Tensors) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("sa3-dit-f32"));
         let d = SA3_DIT_DIM;
         let n = |s: &str| format!("model.model.{s}");
         let mut blocks = Vec::with_capacity(SA3_DIT_DEPTH);
@@ -92,39 +95,40 @@ impl Sa3Dit {
                 cross_norm: t.f32_shaped(&l("cross_attend_norm.gamma"), &[d])?,
                 ff_norm: t.f32_shaped(&l("ff_norm.gamma"), &[d])?,
                 scale_shift_gate: t.f32_shaped(&l("to_scale_shift_gate"), &[6 * d])?,
-                self_qkv: t.f32_shaped(&l("self_attn.to_qkv.weight"), &[3 * d, d])?,
-                self_out: t.f32_shaped(&l("self_attn.to_out.weight"), &[d, d])?,
+                self_qkv: t.weight(&l("self_attn.to_qkv.weight"), &[3 * d, d], &owner)?,
+                self_out: t.weight(&l("self_attn.to_out.weight"), &[d, d], &owner)?,
                 self_q_norm: t.f32_shaped(&l("self_attn.q_norm.gamma"), &[SA3_HEAD_DIM])?,
                 self_k_norm: t.f32_shaped(&l("self_attn.k_norm.gamma"), &[SA3_HEAD_DIM])?,
-                cross_q: t.f32_shaped(&l("cross_attn.to_q.weight"), &[d, d])?,
-                cross_kv: t.f32_shaped(&l("cross_attn.to_kv.weight"), &[2 * d, d])?,
-                cross_out: t.f32_shaped(&l("cross_attn.to_out.weight"), &[d, d])?,
+                cross_q: t.weight(&l("cross_attn.to_q.weight"), &[d, d], &owner)?,
+                cross_kv: t.weight(&l("cross_attn.to_kv.weight"), &[2 * d, d], &owner)?,
+                cross_out: t.weight(&l("cross_attn.to_out.weight"), &[d, d], &owner)?,
                 cross_q_norm: t.f32_shaped(&l("cross_attn.q_norm.gamma"), &[SA3_HEAD_DIM])?,
                 cross_k_norm: t.f32_shaped(&l("cross_attn.k_norm.gamma"), &[SA3_HEAD_DIM])?,
-                ff_proj_w: t.f32_shaped(&l("ff.ff.0.proj.weight"), &[8 * d, d])?,
+                ff_proj_w: t.weight(&l("ff.ff.0.proj.weight"), &[8 * d, d], &owner)?,
                 ff_proj_b: t.f32_shaped(&l("ff.ff.0.proj.bias"), &[8 * d])?,
-                ff_out_w: t.f32_shaped(&l("ff.ff.2.weight"), &[d, 4 * d])?,
+                ff_out_w: t.weight(&l("ff.ff.2.weight"), &[d, 4 * d], &owner)?,
                 ff_out_b: t.f32_shaped(&l("ff.ff.2.bias"), &[d])?,
                 local_const,
             });
         }
         Ok(Self {
-            preprocess_conv: t.f32_shaped(&n("preprocess_conv.weight"), &[SA3_LATENT_DIM, SA3_LATENT_DIM, 1])?,
-            postprocess_conv: t.f32_shaped(&n("postprocess_conv.weight"), &[SA3_LATENT_DIM, SA3_LATENT_DIM, 1])?,
-            timestep_w0: t.f32_shaped(&n("to_timestep_embed.0.weight"), &[d, SA3_TIMESTEP_FEATURES])?,
+            _owner: owner.clone(),
+            preprocess_conv: t.weight(&n("preprocess_conv.weight"), &[SA3_LATENT_DIM, SA3_LATENT_DIM, 1], &owner)?,
+            postprocess_conv: t.weight(&n("postprocess_conv.weight"), &[SA3_LATENT_DIM, SA3_LATENT_DIM, 1], &owner)?,
+            timestep_w0: t.weight(&n("to_timestep_embed.0.weight"), &[d, SA3_TIMESTEP_FEATURES], &owner)?,
             timestep_b0: t.f32_shaped(&n("to_timestep_embed.0.bias"), &[d])?,
-            timestep_w2: t.f32_shaped(&n("to_timestep_embed.2.weight"), &[d, d])?,
+            timestep_w2: t.weight(&n("to_timestep_embed.2.weight"), &[d, d], &owner)?,
             timestep_b2: t.f32_shaped(&n("to_timestep_embed.2.bias"), &[d])?,
-            cond_w0: t.f32_shaped(&n("to_cond_embed.0.weight"), &[d, SA3_COND_DIM])?,
-            cond_w2: t.f32_shaped(&n("to_cond_embed.2.weight"), &[d, d])?,
-            global_w0: t.f32_shaped(&n("to_global_embed.0.weight"), &[d, SA3_COND_DIM])?,
-            global_w2: t.f32_shaped(&n("to_global_embed.2.weight"), &[d, d])?,
+            cond_w0: t.weight(&n("to_cond_embed.0.weight"), &[d, SA3_COND_DIM], &owner)?,
+            cond_w2: t.weight(&n("to_cond_embed.2.weight"), &[d, d], &owner)?,
+            global_w0: t.weight(&n("to_global_embed.0.weight"), &[d, SA3_COND_DIM], &owner)?,
+            global_w2: t.weight(&n("to_global_embed.2.weight"), &[d, d], &owner)?,
             memory_tokens: t.f32_shaped(&n("transformer.memory_tokens"), &[SA3_MEMORY_TOKENS, d])?,
-            project_in: t.f32_shaped(&n("transformer.project_in.weight"), &[d, SA3_LATENT_DIM])?,
-            project_out: t.f32_shaped(&n("transformer.project_out.weight"), &[SA3_LATENT_DIM, d])?,
-            gce_w0: t.f32_shaped(&n("transformer.global_cond_embedder.0.weight"), &[d, d])?,
+            project_in: t.weight(&n("transformer.project_in.weight"), &[d, SA3_LATENT_DIM], &owner)?,
+            project_out: t.weight(&n("transformer.project_out.weight"), &[SA3_LATENT_DIM, d], &owner)?,
+            gce_w0: t.weight(&n("transformer.global_cond_embedder.0.weight"), &[d, d], &owner)?,
             gce_b0: t.f32_shaped(&n("transformer.global_cond_embedder.0.bias"), &[d])?,
-            gce_w2: t.f32_shaped(&n("transformer.global_cond_embedder.2.weight"), &[6 * d, d])?,
+            gce_w2: t.weight(&n("transformer.global_cond_embedder.2.weight"), &[6 * d, d], &owner)?,
             gce_b2: t.f32_shaped(&n("transformer.global_cond_embedder.2.bias"), &[6 * d])?,
             blocks,
         })
@@ -134,32 +138,32 @@ impl Sa3Dit {
     /// Compute once per generation (t-independent).
     pub fn embed_conditioning(&self, cross_attn_cond: &[f32]) -> Vec<f32> {
         let d = SA3_DIT_DIM;
-        let mut h = linear(cross_attn_cond, &self.cond_w0, None, SA3_COND_TOKENS, SA3_COND_DIM, d);
+        let mut h = linear_w(cross_attn_cond, &self.cond_w0, None, SA3_COND_TOKENS, SA3_COND_DIM, d);
         for v in h.iter_mut() {
             *v = silu(*v);
         }
-        linear(&h, &self.cond_w2, None, SA3_COND_TOKENS, d, d)
+        linear_w(&h, &self.cond_w2, None, SA3_COND_TOKENS, d, d)
     }
 
     /// to_global_embed of the 768-dim seconds conditioning (t-independent).
     pub fn embed_global(&self, global_cond: &[f32]) -> Vec<f32> {
         let d = SA3_DIT_DIM;
-        let mut h = linear(global_cond, &self.global_w0, None, 1, SA3_COND_DIM, d);
+        let mut h = linear_w(global_cond, &self.global_w0, None, 1, SA3_COND_DIM, d);
         for v in h.iter_mut() {
             *v = silu(*v);
         }
-        linear(&h, &self.global_w2, None, 1, d, d)
+        linear_w(&h, &self.global_w2, None, 1, d, d)
     }
 
     /// Timestep embedding: ExpoFourier(256) -> Linear+b -> SiLU -> Linear+b.
     pub fn embed_timestep(&self, t: f32) -> Vec<f32> {
         let d = SA3_DIT_DIM;
         let features = expo_fourier(t, SA3_TIMESTEP_FEATURES);
-        let mut h = linear(&features, &self.timestep_w0, Some(&self.timestep_b0), 1, SA3_TIMESTEP_FEATURES, d);
+        let mut h = linear_w(&features, &self.timestep_w0, Some(&self.timestep_b0), 1, SA3_TIMESTEP_FEATURES, d);
         for v in h.iter_mut() {
             *v = silu(*v);
         }
-        linear(&h, &self.timestep_w2, Some(&self.timestep_b2), 1, d, d)
+        linear_w(&h, &self.timestep_w2, Some(&self.timestep_b2), 1, d, d)
     }
 
     /// One velocity forward. `x` is `[latent_len, 256]` token-major,
@@ -191,21 +195,20 @@ impl Sa3Dit {
             .map(|(a, b)| a + b)
             .collect();
         // global_cond_embedder -> 6144, shared across blocks.
-        let mut g = linear(&gemb, &self.gce_w0, Some(&self.gce_b0), 1, d, d);
+        let mut g = linear_w(&gemb, &self.gce_w0, Some(&self.gce_b0), 1, d, d);
         for v in g.iter_mut() {
             *v = silu(*v);
         }
-        let gcond = linear(&g, &self.gce_w2, Some(&self.gce_b2), 1, d, 6 * d);
+        let gcond = linear_w(&g, &self.gce_w2, Some(&self.gce_b2), 1, d, 6 * d);
 
         // preprocess_conv (1x1, no bias) + residual, channels-last rows.
-        let conv_w: Vec<f32> = self.preprocess_conv.clone(); // [c_out, c_in]
-        let mut x_pre = linear(x, &conv_w, None, latent_len, c, c);
+        let mut x_pre = linear_w(x, &self.preprocess_conv, None, latent_len, c, c);
         for (o, i) in x_pre.iter_mut().zip(x) {
             *o += *i;
         }
 
         // project_in + memory tokens.
-        let projected = linear(&x_pre, &self.project_in, None, latent_len, c, d);
+        let projected = linear_w(&x_pre, &self.project_in, None, latent_len, c, d);
         let mut h = vec![0f32; seq * d];
         h[..mem * d].copy_from_slice(&self.memory_tokens);
         h[mem * d..].copy_from_slice(&projected);
@@ -239,7 +242,7 @@ impl Sa3Dit {
                     row[i] = row[i] * (1.0 + ada(0, i)) + ada(1, i);
                 }
             }
-            let qkv = linear(&a, &block.self_qkv, None, seq, d, 3 * d);
+            let qkv = linear_w(&a, &block.self_qkv, None, seq, d, 3 * d);
             let mut q = vec![0f32; seq * d];
             let mut k = vec![0f32; seq * d];
             let mut v = vec![0f32; seq * d];
@@ -268,7 +271,7 @@ impl Sa3Dit {
                 additive_mask.as_deref(),
                 1.0 / (SA3_HEAD_DIM as f32).sqrt(),
             );
-            let mut out = linear(&attn, &block.self_out, None, seq, d, d);
+            let mut out = linear_w(&attn, &block.self_out, None, seq, d, d);
             for (tok, row) in out.chunks_mut(d).enumerate() {
                 let h_row = &mut h[tok * d..(tok + 1) * d];
                 for i in 0..d {
@@ -279,8 +282,8 @@ impl Sa3Dit {
             // --- cross-attention (plain residual, no adaLN, no rope) ---
             let mut cnorm = h.clone();
             rms_norm_rows(&mut cnorm, &block.cross_norm, d, SA3_NORM_EPS);
-            let mut cq = linear(&cnorm, &block.cross_q, None, seq, d, d);
-            let ckv = linear(cond_embed, &block.cross_kv, None, SA3_COND_TOKENS, d, 2 * d);
+            let mut cq = linear_w(&cnorm, &block.cross_q, None, seq, d, d);
+            let ckv = linear_w(cond_embed, &block.cross_kv, None, SA3_COND_TOKENS, d, 2 * d);
             let mut ck = vec![0f32; SA3_COND_TOKENS * d];
             let mut cv = vec![0f32; SA3_COND_TOKENS * d];
             for tok in 0..SA3_COND_TOKENS {
@@ -300,7 +303,7 @@ impl Sa3Dit {
                 None,
                 1.0 / (SA3_HEAD_DIM as f32).sqrt(),
             );
-            let cout = linear(&cattn, &block.cross_out, None, seq, d, d);
+            let cout = linear_w(&cattn, &block.cross_out, None, seq, d, d);
             for i in 0..h.len() {
                 h[i] += cout[i];
             }
@@ -321,7 +324,7 @@ impl Sa3Dit {
                     row[i] = row[i] * (1.0 + ada(3, i)) + ada(4, i);
                 }
             }
-            let proj = linear(&f, &block.ff_proj_w, Some(&block.ff_proj_b), seq, d, 8 * d);
+            let proj = linear_w(&f, &block.ff_proj_w, Some(&block.ff_proj_b), seq, d, 8 * d);
             let inner_dim = 4 * d;
             let mut inner = vec![0f32; seq * inner_dim];
             for tok in 0..seq {
@@ -331,7 +334,7 @@ impl Sa3Dit {
                     out_row[i] = row[i] * silu(row[inner_dim + i]);
                 }
             }
-            let ff_out = linear(&inner, &block.ff_out_w, Some(&block.ff_out_b), seq, inner_dim, d);
+            let ff_out = linear_w(&inner, &block.ff_out_w, Some(&block.ff_out_b), seq, inner_dim, d);
             for (tok, row) in ff_out.chunks(d).enumerate() {
                 let h_row = &mut h[tok * d..(tok + 1) * d];
                 for i in 0..d {
@@ -342,9 +345,8 @@ impl Sa3Dit {
 
         // Strip memory tokens, project out, postprocess conv residual.
         let latent_h = &h[mem * d..];
-        let mut out = linear(latent_h, &self.project_out, None, latent_len, d, c);
-        let conv_w: Vec<f32> = self.postprocess_conv.clone();
-        let conv = linear(&out, &conv_w, None, latent_len, c, c);
+        let mut out = linear_w(latent_h, &self.project_out, None, latent_len, d, c);
+        let conv = linear_w(&out, &self.postprocess_conv, None, latent_len, c, c);
         for (o, cv) in out.iter_mut().zip(conv) {
             *o += cv;
         }
@@ -418,21 +420,21 @@ impl Sa3Dit {
             .iter()
             .enumerate()
             .map(|(i, block)| DitDeviceBlock {
-                qkv: F16Weight::new(format!("sa3dit.{i}.qkv"), &block.self_qkv, 3 * d, d),
-                self_out: F16Weight::new(format!("sa3dit.{i}.so"), &block.self_out, d, d),
-                cross_q: F16Weight::new(format!("sa3dit.{i}.cq"), &block.cross_q, d, d),
-                cross_kv: F16Weight::new(format!("sa3dit.{i}.ckv"), &block.cross_kv, 2 * d, d),
-                cross_out: F16Weight::new(format!("sa3dit.{i}.co"), &block.cross_out, d, d),
-                ff_proj: F16Weight::new(format!("sa3dit.{i}.fp"), &block.ff_proj_w, 8 * d, d),
-                ff_out: F16Weight::new(format!("sa3dit.{i}.fo"), &block.ff_out_w, d, 4 * d),
+                qkv: F16Weight::new(format!("sa3dit.{i}.qkv"), block.self_qkv.as_slice(), 3 * d, d),
+                self_out: F16Weight::new(format!("sa3dit.{i}.so"), block.self_out.as_slice(), d, d),
+                cross_q: F16Weight::new(format!("sa3dit.{i}.cq"), block.cross_q.as_slice(), d, d),
+                cross_kv: F16Weight::new(format!("sa3dit.{i}.ckv"), block.cross_kv.as_slice(), 2 * d, d),
+                cross_out: F16Weight::new(format!("sa3dit.{i}.co"), block.cross_out.as_slice(), d, d),
+                ff_proj: F16Weight::new(format!("sa3dit.{i}.fp"), block.ff_proj_w.as_slice(), 8 * d, d),
+                ff_out: F16Weight::new(format!("sa3dit.{i}.fo"), block.ff_out_w.as_slice(), d, 4 * d),
             })
             .collect();
         Sa3DitDevice {
             owner: WeightOwner::new("sa3-dit"),
-            preprocess: F16Weight::new("sa3dit.pre", &self.preprocess_conv, c, c),
-            postprocess: F16Weight::new("sa3dit.post", &self.postprocess_conv, c, c),
-            project_in: F16Weight::new("sa3dit.pin", &self.project_in, d, c),
-            project_out: F16Weight::new("sa3dit.pout", &self.project_out, c, d),
+            preprocess: F16Weight::new("sa3dit.pre", self.preprocess_conv.as_slice(), c, c),
+            postprocess: F16Weight::new("sa3dit.post", self.postprocess_conv.as_slice(), c, c),
+            project_in: F16Weight::new("sa3dit.pin", self.project_in.as_slice(), d, c),
+            project_out: F16Weight::new("sa3dit.pout", self.project_out.as_slice(), c, d),
             blocks,
         }
     }
@@ -543,11 +545,11 @@ impl Sa3Dit {
             .zip(&temb)
             .map(|(a, b)| a + b)
             .collect();
-        let mut g = linear(&gemb, &self.gce_w0, Some(&self.gce_b0), 1, d, d);
+        let mut g = linear_w(&gemb, &self.gce_w0, Some(&self.gce_b0), 1, d, d);
         for v in g.iter_mut() {
             *v = silu(*v);
         }
-        let gcond = linear(&g, &self.gce_w2, Some(&self.gce_b2), 1, d, 6 * d);
+        let gcond = linear_w(&g, &self.gce_w2, Some(&self.gce_b2), 1, d, 6 * d);
         let depth = self.blocks.len();
         let mut table = vec![0f32; depth * 6 * d];
         for (b, block) in self.blocks.iter().enumerate() {

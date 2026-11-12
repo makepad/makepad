@@ -11,9 +11,10 @@
 //! made with both zeroed, so parity is exact. Encoder (a2a/inpaint) is not
 //! ported yet.
 
-use crate::backend::WeightOwner;
+use crate::backend::{F32Weight, WeightOwner};
+use std::sync::Arc;
 use crate::sa3::{
-    dyt_rows, linear, par_rows, silu, Sa3Tensors, SA3_AE_CHUNK_TOKENS, SA3_AE_DEPTH, SA3_AE_DIM,
+    dyt_rows, linear_w, par_rows, silu, Sa3Tensors, SA3_AE_CHUNK_TOKENS, SA3_AE_DEPTH, SA3_AE_DIM,
     SA3_AE_FF_INNER, SA3_AE_GROUP, SA3_AE_PATCH, SA3_AE_PATCH_CHANNELS, SA3_AE_STRIDE,
     SA3_AUDIO_CHANNELS, SA3_HEAD_DIM, SA3_LATENT_DIM,
 };
@@ -58,8 +59,9 @@ struct AeBlock {
 }
 
 pub struct Sa3AeDecoder {
+    _owner: Arc<WeightOwner>,
     running_std: f32,
-    latent_w: Vec<f32>,
+    latent_w: F32Weight,
     latent_b: Vec<f32>,
     new_tokens: Vec<f32>,
     blocks: Vec<AeBlock>,
@@ -71,10 +73,11 @@ pub struct Sa3AeDecoder {
 impl Sa3AeDecoder {
     /// Loads from the combined SA3 checkpoint (pretransform.model.* prefix).
     pub fn load(t: &Sa3Tensors) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("sa3-ae-f32"));
         let d = SA3_AE_DIM;
         let n = |s: &str| format!("pretransform.model.{s}");
         let running_std = t.f32_shaped(&n("bottleneck.running_std"), &[1])?[0];
-        let latent_w = t.f32_shaped(&n("decoder.layers.1.weight"), &[d, SA3_LATENT_DIM])?;
+        let latent_w = t.weight(&n("decoder.layers.1.weight"), &[d, SA3_LATENT_DIM], &owner)?;
         let latent_b = t.f32_shaped(&n("decoder.layers.1.bias"), &[d])?;
         let new_tokens = t.f32_shaped(&n("decoder.layers.3.new_tokens"), &[1, 1, d])?;
         let mut blocks = Vec::with_capacity(SA3_AE_DEPTH);
@@ -108,6 +111,7 @@ impl Sa3AeDecoder {
             }
         }
         Ok(Self {
+            _owner: owner.clone(),
             running_std,
             latent_w,
             latent_b,
@@ -145,7 +149,7 @@ impl Sa3AeDecoder {
         let scaled: Vec<f32> = latents.iter().map(|v| v * self.running_std).collect();
 
         // Linear 256 -> 768.
-        let projected = linear(&scaled, &self.latent_w, Some(&self.latent_b), latent_len, SA3_LATENT_DIM, d);
+        let projected = linear_w(&scaled, &self.latent_w, Some(&self.latent_b), latent_len, SA3_LATENT_DIM, d);
 
         // Build [latent, 16 x new_token] groups: seq = latent_len * 17.
         let group = SA3_AE_GROUP;
@@ -378,7 +382,7 @@ impl Sa3AeDecoder {
     pub fn prepare_device(&self) -> Sa3AeDevice {
         let d = SA3_AE_DIM;
         // Fold bottleneck decode (x * running_std) into the latent linear.
-        let folded: Vec<f32> = self.latent_w.iter().map(|w| w * self.running_std).collect();
+        let folded: Vec<f32> = self.latent_w.as_slice().iter().map(|w| w * self.running_std).collect();
         let blocks = self
             .blocks
             .iter()

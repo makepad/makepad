@@ -8,7 +8,7 @@ pub use crate::gpu as cuda;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use makepad_ai_cuda::llm_ops;
 pub use makepad_ai_loader::prof;
-pub use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
+pub use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner, WeightOwnerTrace};
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
 pub use makepad_ai_metal::{device_memory, device_name};
 
@@ -20,7 +20,7 @@ pub mod metal {
 pub use metal::{
     try_add_f32, try_attention_softmax_weighted_sum_f32, try_conv2d_planar_f32,
     try_flash_attn_f32_packed, try_gelu_f32, try_group_norm_planar_f32,
-    try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32,
+    try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_matmul_nt_f32_weight, try_mul_f32,
     try_rms_norm_mul_f32, try_silu_f32, BufferStorageMode,
     MetalGraphTensorWrite as GraphTensorWrite, MetalRuntime as Runtime,
 };
@@ -91,7 +91,7 @@ pub use crate::gpu::{
     gpu_stream_ring_release_slots, gpu_stream_ring_setup,
     gpu_linear_nt_cached_f16_f32acc,
     gpu_linear_nt_cached_f16,
-    gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear, gpu_pool_keep, gpu_pool_phase_end, gpu_pool_trim, GpuPoolKeep,
+    gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear, gpu_pool_alloc_bytes, gpu_pool_keep, gpu_pool_phase_end, gpu_pool_trim, GpuPoolKeep,
     gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rms_norm_mul_keyed, gpu_rms_norm_mul_bf16, gpu_rms_norm_qwen3,
     gpu_sparse_conv27,
     gpu_skintokens_michelangelo_fourier,

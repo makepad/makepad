@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 #[cfg(all(test, target_os = "macos"))]
-pub(crate) use imp::{tensor_test_error_and_guard,
+pub(crate) use imp::{tensor_f32_weight, tensor_test_error_and_guard,
     tensor_test_drop_owner_locked, tensor_test_legacy_matmuls};
 #[cfg(target_os = "macos")]
-pub(crate) use imp::{TensorBuffer, tensor_thread_guard, tensor_available, tensor_profile, tensor_cow_record, tensor_buffer, tensor_host_written, tensor_flush_until, tensor_pool_clear, tensor_evict_owner, tensor_evict_keys, tensor_resident_weights, shape4_from_row_major, tensor_binary, tensor_unary, tensor_norm, tensor_matmul, tensor_named_weight, tensor_attention, tensor_im2col, tensor_copy_strided};
+pub(crate) use imp::{TensorBuffer, tensor_thread_guard, tensor_available, tensor_profile, tensor_cow_record, tensor_buffer, tensor_host_written, tensor_flush_until, tensor_pool_clear, tensor_alloc_bytes, tensor_evict_owner, tensor_evict_keys, tensor_resident_weights, shape4_from_row_major, tensor_binary, tensor_unary, tensor_norm, tensor_matmul, tensor_named_weight, tensor_attention, tensor_im2col, tensor_copy_strided};
 
 /// Missing-kernel fallbacks fire per matmul; print each distinct message once.
 #[cfg(target_os = "macos")]
@@ -57,7 +57,7 @@ pub fn device_name() -> Option<String> {
     imp::device_name()
 }
 
-use makepad_ai_loader::{WeightKey, WeightOwner};
+use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner};
 use crate::gpu_types::GpuTensor;
 use makepad_ai_loader::prof;
 
@@ -99,6 +99,15 @@ pub fn try_matmul_nt_ggml_bytes(
             t,
             a.len() + bt_bytes.len() / 4 + v.len(),
         );
+    }
+    out
+}
+
+pub fn try_matmul_nt_f32_weight(a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_f32_weight(a, w, m, k, n);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + v.len());
     }
     out
 }
@@ -835,7 +844,7 @@ mod imp {
     #[derive(Default)]
     pub(super) struct ArResidual;
 
-    use makepad_ai_loader::{WeightKey, WeightOwner};
+    use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner};
     use super::Cow;
     use makepad_ai_cuda as cuda;
     use std::cell::RefCell;
@@ -921,6 +930,12 @@ mod imp {
             cuda.matmul_nn_f32(&a_buf, &b_buf, &out_buf, m, k, n)?;
             cuda.read_f32s(&out_buf, out_len)
         })
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight(
+        a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize,
+    ) -> Option<Vec<f32>> {
+        try_matmul_nt_f32(a, w.as_slice(), m, k, n)
     }
 
     pub(super) fn try_matmul_nt_f32(
@@ -1441,7 +1456,7 @@ mod imp {
     #[derive(Default)]
     pub(super) struct ArResidual;
 
-    use makepad_ai_loader::{WeightKey, WeightOwner};
+    use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner};
     use super::Cow;
     pub(super) fn try_matmul_nn_f32(
         a: &[f32],
@@ -1449,6 +1464,12 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight(
+        a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -1754,7 +1775,7 @@ mod imp {
         elems: usize,
     }
 
-    use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
+    use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner, WeightOwnerTrace};
     use super::Cow;
     use makepad_ai_loader::quant::{
         block_elements, block_size, ggml_type_name, GGML_TYPE_BF16, GGML_TYPE_F16,
@@ -1770,6 +1791,12 @@ mod imp {
     use std::ptr::NonNull;
     use std::thread;
     use std::time::Duration;
+
+    #[link(name = "System")]
+    unsafe extern "C" {
+        // Referenced by name from `objc_block!`.
+        static _NSConcreteStackBlock: [*const c_void; 32];
+    }
 
     const LOG_METAL_PIPELINES: bool = false;
     const DISABLE_GGML_METAL_BF16: bool = false;
@@ -6816,9 +6843,10 @@ mod imp {
         thread_batches: HashMap<std::thread::ThreadId, VecDeque<u64>>,
         completed_batch: u64,
         failed: BTreeSet<u64>,
+        failed_oom: BTreeSet<u64>,
         failure_floor: Option<u64>,
         #[cfg(test)]
-        injected_failure: Option<u64>,
+        injected_failure: Option<(u64, bool)>,
         live_writers: BTreeMap<u64, usize>,
     }
 
@@ -6896,7 +6924,7 @@ mod imp {
                     context, lock_phases: TensorLockPhases::default(), returns: receiver, free: Vec::new(), deferred_drop: Vec::new(), dead_owners: makepad_ai_loader::DeadOwnerInbox::register(), in_flight: VecDeque::new(),
                     next_batch: 1, open_batch: 0, open_ns: 0.0,
                     thread_batches: HashMap::new(), completed_batch: 0,
-                    failed: BTreeSet::new(), failure_floor: None,
+                    failed: BTreeSet::new(), failed_oom: BTreeSet::new(), failure_floor: None,
                     #[cfg(test)]
                     injected_failure: None,
                     live_writers: BTreeMap::new(),
@@ -6919,7 +6947,7 @@ mod imp {
             Err(poisoned) => {
                 let mut state = poisoned.into_inner();
                 let open = state.open_batch;
-                if open != 0 { state.record_failure(open); }
+                if open != 0 { state.record_failure(open, false); }
                 runtime.state.clear_poison();
                 state
             }
@@ -6963,7 +6991,8 @@ mod imp {
     }
 
     impl TensorState {
-        fn record_failure(&mut self, number: u64) {
+        fn record_failure(&mut self, number: u64, oom: bool) {
+            if oom { self.failed_oom.insert(number); }
             if self.failed.insert(number) {
                 self.failure_floor = Some(self.failure_floor.map_or(number, |old| old.min(number)));
             }
@@ -6997,7 +7026,10 @@ mod imp {
         fn check_writer(&self, writer: u64) -> Result<(), String> {
             if writer != 0 {
                 if let Some(first) = self.failure_floor {
-                    if writer >= first { return Err(format!("Metal tensor writer batch {writer} depends on failed batch {first}")); }
+                    if writer >= first {
+                        let suffix = if self.failed_oom.contains(&first) { " (out of memory)" } else { "" };
+                        return Err(format!("Metal tensor writer batch {writer} depends on failed batch {first}{suffix}"));
+                    }
                 }
             }
             Ok(())
@@ -7028,9 +7060,13 @@ mod imp {
                 if status < 4 { break; }
                 let number = *number;
                 let failed = status == 5;
+                let oom = failed && command_out_of_memory(command);
                 #[cfg(test)]
-                let failed = failed || self.injected_failure == Some(number);
-                if failed { self.record_failure(number); }
+                let (failed, oom) = match self.injected_failure {
+                    Some((batch, injected_oom)) if batch == number => (true, oom || injected_oom),
+                    _ => (failed, oom),
+                };
+                if failed { self.record_failure(number, oom); }
                 self.completed_batch = self.completed_batch.max(number);
                 if let Some((_, command)) = self.in_flight.pop_front() { retired.push(command); }
             }
@@ -7053,9 +7089,13 @@ mod imp {
         }
     }
 
+    pub(crate) fn tensor_alloc_bytes(bytes: usize) -> usize {
+        bytes.max(4)
+    }
+
     pub(crate) fn tensor_buffer(bytes: usize, host: bool) -> Result<Arc<TensorBuffer>, String> {
         let runtime = tensor_runtime()?;
-        let bytes = bytes.max(4);
+        let bytes = tensor_alloc_bytes(bytes);
         let mut discarded = Vec::new();
         let pooled = tensor_locked(|state| {
             state.drain_returns();
@@ -7079,7 +7119,7 @@ mod imp {
             let object = unsafe {
                 let id: ObjcId = msg_send![runtime.device.as_id(), newBufferWithLength: bytes as u64 options: MTL_RESOURCE_STORAGE_MODE_SHARED];
                 StrongId::from_owned(id)
-            }.ok_or_else(|| format!("Metal tensor allocation failed for {bytes} bytes"))?;
+            }.ok_or_else(|| format!("Metal tensor allocation failed for {bytes} bytes (out of memory)"))?;
             (object, 0)
         };
         Ok(Arc::new(TensorBuffer {
@@ -7113,16 +7153,29 @@ mod imp {
         tensor_locked_in(runtime, |state| state.check_writer(number))
     }
 
+    fn command_out_of_memory(command: &StrongId) -> bool {
+        unsafe {
+            let error: ObjcId = msg_send![command.as_id(), error];
+            if error == nil { return false; }
+            let code: isize = msg_send![error, code];
+            code == 8 // MTLCommandBufferErrorOutOfMemory
+        }
+    }
+
     fn wait_committed(runtime: &TensorRuntime, commands: Vec<(u64, StrongId)>) -> Result<(), String> {
         for (batch, command) in commands {
             let _pool = AutoreleasePool::new();
             unsafe { let _: () = msg_send![command.as_id(), waitUntilCompleted]; }
             let status: u64 = unsafe { msg_send![command.as_id(), status] };
+            let oom = status == 5 && command_out_of_memory(&command);
             tensor_locked_in(runtime, |state| {
                 let failed = status == 5;
                 #[cfg(test)]
-                let failed = failed || state.injected_failure == Some(batch);
-                if failed { state.record_failure(batch); }
+                let (failed, oom) = match state.injected_failure {
+                    Some((number, injected_oom)) if number == batch => (true, oom || injected_oom),
+                    _ => (failed, oom),
+                };
+                if failed { state.record_failure(batch, oom); }
                 state.completed_batch = state.completed_batch.max(batch);
                 state.prune_thread_batches();
                 Ok(())
@@ -7136,11 +7189,16 @@ mod imp {
     }
 
     fn tensor_pool_clear_in(runtime: &TensorRuntime) -> Result<(), String> {
+        let mut retired = Vec::new();
         let buffers = tensor_locked_in(runtime, |state| {
             state.drain_returns();
+            // Completed commands still retain every buffer they used (the last batch stays in
+            // `in_flight` until the next commit): retire them so their buffers come back now.
+            state.reap(&mut retired);
             Ok(std::mem::take(&mut state.free))
         })?;
-        drop(buffers); // Commands retain their resources; clearing never waits.
+        drop(buffers); // Unfinished commands retain their resources; clearing never waits.
+        drop(retired);
         Ok(())
     }
 
@@ -7245,7 +7303,7 @@ mod imp {
             state.lock_phases.encode_ns = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
             state.lock_phases.dispatches = prepared.tensor_dispatches;
             if let Err(error) = encoded {
-                state.record_failure(number);
+                state.record_failure(number, false);
                 return Err(error);
             }
             let mine = state.thread_batches.entry(thread).or_default();
@@ -7527,18 +7585,44 @@ mod imp {
     }
 
     fn tensor_named_weight_buffer<'a>(key: (String, String), load: impl FnOnce() -> Result<Cow<'a, [u8]>, String>) -> Result<Arc<TensorBuffer>, String> {
+        tensor_cached_weight_buffer(key, |device| {
+            let bytes = load()?;
+            unsafe {
+                let obj: ObjcId = msg_send![device, newBufferWithBytes: bytes.as_ptr() as *const c_void length: bytes.len() as u64 options: MTL_RESOURCE_STORAGE_MODE_SHARED];
+                StrongId::from_owned(obj)
+            }.ok_or_else(|| "named tensor weight allocation failed (out of memory)".to_string())
+        })
+    }
+
+    pub(crate) fn tensor_f32_weight(w: &F32Weight) -> Result<Arc<TensorBuffer>, String> {
+        let key = (w.owner().namespace().to_owned(), w.name().to_owned());
+        tensor_cached_weight_buffer(key, |device| {
+            let storage = Arc::clone(w.storage());
+            let bytes = storage.page_bytes();
+            // Metal copies the block and holds its Arc until the buffer's
+            // last reference (including in-flight commands) is released.
+            unsafe {
+                let deallocator = makepad_objc_sys::objc_block!(move |_pointer: *mut c_void, _length: u64| {
+                    let _ = &storage;
+                });
+                let obj: ObjcId = msg_send![device, newBufferWithBytesNoCopy: w.storage().as_ptr() as *mut c_void length: bytes as u64 options: MTL_RESOURCE_STORAGE_MODE_SHARED deallocator: &deallocator];
+                StrongId::from_owned(obj)
+            }.ok_or_else(|| format!("f32 weight no-copy buffer failed for {bytes} bytes (out of memory)"))
+        })
+    }
+
+    fn tensor_cached_weight_buffer(
+        key: (String, String),
+        create: impl FnOnce(ObjcId) -> Result<StrongId, String>,
+    ) -> Result<Arc<TensorBuffer>, String> {
         let runtime = tensor_runtime()?;
         let existing = tensor_locked(|state| {
             state.drain_returns();
             Ok(state.context.named_weight_buffers.get(&key).cloned())
         })?;
         let object = if let Some(buffer) = existing { buffer } else {
-            let bytes = load()?;
             let _pool = AutoreleasePool::new();
-            let candidate = unsafe {
-                let obj: ObjcId = msg_send![runtime.device.as_id(), newBufferWithBytes: bytes.as_ptr() as *const c_void length: bytes.len() as u64 options: MTL_RESOURCE_STORAGE_MODE_SHARED];
-                StrongId::from_owned(obj)
-            }.ok_or_else(|| "named tensor weight allocation failed".to_string())?;
+            let candidate = create(runtime.device.as_id())?;
             tensor_locked(|state| {
                 state.dead_owners.holds(&key.0);
                 Ok(state.context.named_weight_buffers.entry(key)
@@ -7670,7 +7754,7 @@ mod imp {
                 context, lock_phases: TensorLockPhases::default(), returns, free: Vec::new(), deferred_drop: Vec::new(), dead_owners: makepad_ai_loader::DeadOwnerInbox::register(),
                 in_flight: VecDeque::new(), next_batch: 3, open_batch: 0,
                 open_ns: 0.0, thread_batches: HashMap::new(),
-                completed_batch: 0, failed: BTreeSet::new(), failure_floor: None, injected_failure: Some(1),
+                completed_batch: 0, failed: BTreeSet::new(), failed_oom: BTreeSet::new(), failure_floor: None, injected_failure: Some((1, false)),
                 live_writers: BTreeMap::from([(1, 1), (2, 1)]),
             }),
         });
@@ -7679,7 +7763,9 @@ mod imp {
             state.open_batch = 1;
             Ok(())
         })?;
-        assert!(tensor_flush_in(&runtime, 1).is_err(), "failed producer read rejected on A");
+        let error = tensor_flush_in(&runtime, 1).unwrap_err();
+        assert!(error.contains("failed batch 1"), "failed producer read rejected on A: {error}");
+        assert!(!error.contains("out of memory"), "plain failure is not OOM: {error}");
         assert!(tensor_flush_in(&runtime, 0).is_ok(), "host weights survive failed batch");
         let other = runtime.clone();
         std::thread::spawn(move || {
@@ -7699,9 +7785,18 @@ mod imp {
             "pool clear on B neither commits nor waits for A's open batch");
         assert!(tensor_flush_in(&runtime, 3).is_ok(), "next job commits and reads after failed outputs drop");
         tensor_locked_in(&runtime, |state| {
-            state.record_failure(1);
+            state.record_failure(1, false);
             state.check_writer(3)
         })?;
+        tensor_locked_in(&runtime, |state| {
+            state.injected_failure = Some((4, true));
+            state.live_writers.insert(4, 1);
+            state.context.begin_batch()?;
+            state.open_batch = 4;
+            Ok(())
+        })?;
+        let error = tensor_flush_in(&runtime, 4).unwrap_err();
+        assert!(error.contains("out of memory"), "OOM failure keeps its classification: {error}");
         Ok(())
     }
 
@@ -8122,6 +8217,24 @@ mod imp {
             }
         }
         try_matmul_nt_f32(a, &bt, m, k, n)
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight(
+        a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize,
+    ) -> Option<Vec<f32>> {
+        if a.len() != m.checked_mul(k)? || w.len() != n.checked_mul(k)?
+            || m == 0 || k == 0 || n == 0 {
+            return None;
+        }
+        tensor_try(|| {
+            let a_shape = shape4_from_row_major(&[m, k], 4)?;
+            let out_shape = shape4_from_row_major(&[m, n], 4)?;
+            let a = tensor_upload_f32(a, &a_shape)?;
+            let weight = tensor_f32_weight(w)?;
+            tensor_host_result(&out_shape, |out| {
+                tensor_matmul(&a, 0, &weight, 0, out, m, k, n, GGML_TYPE_F32)
+            })
+        })
     }
 
     pub(super) fn try_matmul_nt_f32(

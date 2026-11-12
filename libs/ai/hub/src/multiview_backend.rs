@@ -123,6 +123,51 @@ pub fn chunk_plan(views: usize, fits: impl Fn(usize) -> bool) -> Vec<Vec<usize>>
         .collect()
 }
 
+#[cfg(any(feature = "multiview-native", test))]
+fn oom_cap(views: usize) -> Option<usize> {
+    (views > 2).then(|| views.div_ceil(2).max(2))
+}
+
+/// Runs `plan(None)`'s anchored chunks in order and stitches them. A chunk that runs out of device memory asks
+/// `on_oom` for a smaller cap and restarts the whole attempt with `plan(Some(cap))` (every chunk shares view 0
+/// and one scale); `None` returns the error. `on_stitch(index, chunks, ratio, pixels)` reports each stitch.
+pub fn run_chunks(
+    views: usize,
+    plan: impl Fn(Option<usize>) -> Vec<Vec<usize>>,
+    mut forward: impl FnMut(usize, &[usize]) -> Result<MultiviewResult, AssetAiError>,
+    mut on_oom: impl FnMut(usize, &AssetAiError) -> Option<usize>,
+    mut on_stitch: impl FnMut(usize, usize, f32, usize),
+) -> Result<MultiviewResult, AssetAiError> {
+    let mut cap = None;
+    'attempt: loop {
+        let chunks = plan(cap);
+        let mut result = None;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let chunk = match forward(index, chunk) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    if crate::residency::error_is_oom(&err) {
+                        if let Some(next) = on_oom(chunk.len(), &err) {
+                            cap = Some(next);
+                            continue 'attempt;
+                        }
+                    }
+                    return Err(err);
+                }
+            };
+            if let Some(result) = &mut result {
+                let (ratio, pixels) = stitch_chunk(result, chunk);
+                on_stitch(index, chunks.len(), ratio, pixels);
+            } else {
+                result = Some(chunk);
+            }
+        }
+        let result = result.expect("at least one chunk");
+        debug_assert_eq!(result.views.len(), views);
+        return Ok(result);
+    }
+}
+
 /// Aligns a later chunk to the first chunk's view 0 and appends its other views.
 /// Chunks must follow `chunk_plan` order. Returns the scale ratio and valid pixel count.
 pub fn stitch_chunk(result: &mut MultiviewResult, mut chunk: MultiviewResult) -> (f32, usize) {
@@ -718,44 +763,51 @@ fn run_native(
             metric: request.metric,
         })
         .collect();
-    let plan = |free_mb: Option<u64>| {
-        chunk_plan(views.len(), |count| {
-            free_mb.is_none_or(|free| forward_activation_bytes(count) / (1 << 20) <= free)
-        })
+    let free_mb = std::cell::Cell::new(crate::residency::fresh_free_mb());
+    let chunk_count = std::cell::Cell::new(1);
+    let progress = std::cell::RefCell::new(progress);
+    let plan = |cap: Option<usize>| {
+        let fits = |count| {
+            free_mb.get().is_none_or(|free| forward_activation_bytes(count, makepad_ai_common::backend::gpu_pool_alloc_bytes) / (1 << 20) <= free)
+        };
+        let make_plan = || chunk_plan(views.len(), |count| {
+            cap.is_none_or(|cap| count <= cap) && fits(count)
+        });
+        let mut chunks = make_plan();
+        if cap.is_none() && chunks.len() > 1 {
+            // Pooled activations of earlier jobs count as used: return them, then plan again.
+            makepad_ai_common::backend::gpu_pool_clear();
+            free_mb.set(crate::residency::fresh_free_mb());
+            chunks = make_plan();
+        }
+        chunk_count.set(chunks.len());
+        if chunks.len() > 1 {
+            let capacity = chunks.iter().map(Vec::len).max().unwrap_or(2);
+            let free = free_mb.get().map_or_else(|| "unknown".into(), |free| free.to_string());
+            progress.borrow_mut()(
+                &format!(
+                    "multiview: {} views in {} chunks of <= {} (needs {} MB per chunk, free {} MB)",
+                    views.len(),
+                    chunks.len(),
+                    capacity,
+                    forward_activation_bytes(capacity, makepad_ai_common::backend::gpu_pool_alloc_bytes) / (1 << 20),
+                    free,
+                ),
+                0.02,
+            );
+        }
+        chunks
     };
-    let mut free_mb = crate::residency::fresh_free_mb();
-    let mut chunks = plan(free_mb);
-    if chunks.len() > 1 {
-        // Pooled activations of earlier jobs count as used: return them, then plan again.
-        makepad_ai_common::backend::gpu_pool_clear();
-        free_mb = crate::residency::fresh_free_mb();
-        chunks = plan(free_mb);
-    }
-    if let (true, Some(free)) = (chunks.len() > 1, free_mb) {
-        let capacity = chunks.iter().map(Vec::len).max().unwrap_or(2);
-        progress(
-            &format!(
-                "multiview: {} views in {} chunks of <= {} (needs {} MB per chunk, free {} MB)",
-                views.len(),
-                chunks.len(),
-                capacity,
-                forward_activation_bytes(capacity) / (1 << 20),
-                free,
-            ),
-            0.02,
-        );
-    }
-    let mut result = None;
-    for (index, chunk) in chunks.iter().enumerate() {
+    run_chunks(views.len(), plan, |index, chunk| {
         cancel.check()?;
         let chunk_views: Vec<_> = chunk.iter().map(|&view| views[view]).collect();
         let mut hook = |stage: &str, fraction: f64| {
             if cancel.is_cancelled() {
                 return Err(DiffusionError::Cancelled);
             }
-            progress(
+            progress.borrow_mut()(
                 &format!("multiview: {stage}"),
-                0.02 + 0.96 * (index as f64 + fraction) / chunks.len() as f64,
+                0.02 + 0.96 * (index as f64 + fraction) / chunk_count.get() as f64,
             );
             Ok(())
         };
@@ -789,25 +841,34 @@ fn run_native(
                 pose: (output.quat, output.trans),
             });
         }
-        let chunk = MultiviewResult {
+        Ok(MultiviewResult {
             views,
             metric_scale: output.metric_scale,
-        };
-        if let Some(result) = &mut result {
-            let (ratio, pixels) = stitch_chunk(result, chunk);
-            let no_overlap = if pixels == 0 { " (no shared valid pixel; using ratio 1)" } else { "" };
-            progress(
-                &format!(
-                    "multiview: chunk {} scale ratio {ratio:.4} over {pixels} pixels{no_overlap}",
-                    index + 1,
-                ),
-                0.02 + 0.96 * (index + 1) as f64 / chunks.len() as f64,
-            );
-        } else {
-            result = Some(chunk);
-        }
-    }
-    Ok(result.expect("at least one chunk"))
+        })
+    }, |count, _err| {
+        let cap = oom_cap(count)?;
+        let free_plan = free_mb.get().map_or_else(|| "unknown".into(), |free| free.to_string());
+        makepad_ai_common::backend::gpu_pool_clear();
+        free_mb.set(crate::residency::fresh_free_mb());
+        let free_now = free_mb.get().map_or_else(|| "unknown".into(), |free| free.to_string());
+        let est = forward_activation_bytes(count, makepad_ai_common::backend::gpu_pool_alloc_bytes) / (1 << 20);
+        progress.borrow_mut()(
+            &format!(
+                "multiview: {count} views ran out of device memory (estimate {est} MB, free {free_plan} MB at plan, {free_now} MB after pool clear): replanning into chunks of <= {cap}"
+            ),
+            0.02,
+        );
+        Some(cap)
+    }, |index, total, ratio, pixels| {
+        let no_overlap = if pixels == 0 { " (no shared valid pixel; using ratio 1)" } else { "" };
+        progress.borrow_mut()(
+            &format!(
+                "multiview: chunk {} scale ratio {ratio:.4} over {pixels} pixels{no_overlap}",
+                index + 1,
+            ),
+            0.02 + 0.96 * (index + 1) as f64 / total as f64,
+        );
+    })
 }
 
 impl ContentBackend for MultiviewBackend {
@@ -1007,6 +1068,92 @@ mod tests {
         assert!(largest - smallest <= 1, "groups are balanced");
         assert_eq!(chunk_plan(4, |_| false), vec![vec![0, 1], vec![0, 2], vec![0, 3]]);
         assert_eq!(chunk_plan(1, |_| false), vec![vec![0]]);
+    }
+
+    #[test]
+    fn multiview_oom_caps_halve_up_to_two_views() {
+        for (views, expected) in [(12, Some(6)), (5, Some(3)), (3, Some(2)), (2, None), (1, None)] {
+            assert_eq!(oom_cap(views), expected, "failed chunk size {views}");
+        }
+    }
+
+    #[test]
+    fn multiview_chunks_restart_after_oom_and_keep_final_anchor() {
+        // Also fail a later chunk after one success, proving partial results are discarded.
+        for fail_later in [false, true] {
+            let mut first_sizes = Vec::new();
+            let mut attempt = 0;
+            let mut oom_sizes = Vec::new();
+            let result = run_chunks(
+                12,
+                |cap| chunk_plan(12, |count| cap.is_none_or(|cap| count <= cap)),
+                |index, chunk| {
+                    if index == 0 {
+                        attempt += 1;
+                        first_sizes.push(chunk.len());
+                    }
+                    if chunk.len() > 4 || (fail_later && attempt == 3 && index == 1) {
+                        return Err(AssetAiError::Backend("multiview: CUDA error: out of memory".into()));
+                    }
+                    Ok(MultiviewResult {
+                        metric_scale: attempt as f32,
+                        views: chunk.iter().map(|&view| MultiviewViewResult {
+                            depth_z: vec![1.0; 2],
+                            confidence: vec![(attempt * 100 + index) as f32; 2],
+                            mask: vec![1; 2],
+                            k: K,
+                            pose: (IDENTITY, [view as f32, 0.0, 0.0]),
+                        }).collect(),
+                    })
+                },
+                |count, _| {
+                    oom_sizes.push(count);
+                    oom_cap(count)
+                },
+                |_, _, _, _| {},
+            ).expect("smaller chunks succeed");
+            assert_eq!(first_sizes, if fail_later { vec![12, 5, 3, 2] } else { vec![12, 5, 3] }, "balanced replan sizes");
+            assert_eq!(oom_sizes, if fail_later { vec![12, 5, 3] } else { vec![12, 5] }, "only failed chunks replan");
+            assert_eq!(result.views.len(), 12, "all requested views returned exactly once");
+            assert_eq!(result.metric_scale, attempt as f32, "scale comes from the final attempt");
+            assert_eq!(result.views[0].confidence, vec![(attempt * 100) as f32; 2], "anchor comes from the final first chunk");
+            for (index, view) in result.views.iter().enumerate() {
+                assert_eq!(view.pose.1, [index as f32, 0.0, 0.0], "request order and unit scale");
+                assert_eq!(view.depth_z, vec![1.0; 2], "constant depths give ratio one");
+                assert!(view.confidence[0] >= (attempt * 100) as f32, "no views survive from discarded attempts");
+            }
+        }
+    }
+
+    #[test]
+    fn multiview_chunks_stop_at_minimum_or_non_oom_error() {
+        let mut sizes = Vec::new();
+        let error = run_chunks(
+            12,
+            |cap| chunk_plan(12, |count| cap.is_none_or(|cap| count <= cap)),
+            |_, chunk| {
+                sizes.push(chunk.len());
+                Err(AssetAiError::Backend("multiview: CUDA error: out of memory".into()))
+            },
+            |count, _| oom_cap(count),
+            |_, _, _, _| {},
+        ).err().expect("two-view OOM is a real failure");
+        assert!(crate::residency::error_is_oom(&error));
+        assert_eq!(sizes, vec![12, 5, 3, 2], "stop retrying at two views");
+        for error in [AssetAiError::Backend("bad output".into()), AssetAiError::Cancelled] {
+            let expected = error.to_string();
+            let mut error = Some(error);
+            let plans = std::cell::Cell::new(0);
+            let actual = run_chunks(
+                12,
+                |_| { plans.set(plans.get() + 1); chunk_plan(12, |_| true) },
+                |_, _| Err(error.take().expect("forward is called only once")),
+                |_, _| panic!("non-OOM errors must not replan"),
+                |_, _, _, _| {},
+            ).err().expect("error is returned");
+            assert_eq!(actual.to_string(), expected, "original error preserved");
+            assert_eq!(plans.get(), 1, "no replan for non-OOM or cancellation");
+        }
     }
 
     #[test]

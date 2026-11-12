@@ -8,7 +8,7 @@
 //! same-seed outputs match the reference distributionally, not bit-for-bit.
 
 use crate::sa3::{
-    expo_fourier, linear, sa3_latent_len, sa3_sigmas, sa3_valid_len, sa3_whole_seconds, Sa3Tensors, SA3_COND_DIM,
+    expo_fourier, linear_w, sa3_latent_len, sa3_sigmas, sa3_valid_len, sa3_whole_seconds, Sa3Tensors, SA3_COND_DIM,
     SA3_COND_TOKENS, SA3_DOWNSAMPLE, SA3_LATENT_DIM, SA3_SECONDS_MAX, SA3_TEXT_TOKENS,
     SA3_TIMESTEP_FEATURES,
 };
@@ -17,6 +17,8 @@ use crate::sa3_text::{apply_learned_padding, T5GemmaEncoder};
 use crate::sa3_transformer::{Sa3Dit, Sa3PadMode};
 use crate::{band_progress, emit_progress, hook_ref, DiffusionError, ProgressHook, Result};
 use std::path::Path;
+use std::sync::Arc;
+use crate::backend::{F32Weight, WeightOwner};
 
 /// Per-draw noise provider. `draw` is called with the draw index:
 /// 0 = initial latent noise, then one per ping-pong step injection.
@@ -83,11 +85,12 @@ pub struct Sa3Conditioning {
 }
 
 pub struct Sa3Pipeline {
+    _owner: Arc<WeightOwner>,
     pub dit: Sa3Dit,
     pub ae: Sa3AeDecoder,
     pub text: T5GemmaEncoder,
     padding_embedding: Vec<f32>,
-    seconds_w: Vec<f32>,
+    seconds_w: F32Weight,
     seconds_b: Vec<f32>,
     /// Prepared CUDA weights (f16), present when the device path is active.
     device: Option<Sa3DeviceState>,
@@ -111,6 +114,7 @@ impl Sa3Pipeline {
         t5gemma: impl AsRef<Path>,
         mut progress: Option<ProgressHook>,
     ) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("sa3-cond-f32"));
         let tensors = Sa3Tensors::load(ckpt)?;
         emit_progress(&mut progress, "load sa3 dit", 0.0)?;
         let dit = Sa3Dit::load(&tensors)?;
@@ -120,9 +124,10 @@ impl Sa3Pipeline {
             "conditioner.conditioners.prompt.padding_embedding",
             &[SA3_COND_DIM],
         )?;
-        let seconds_w = tensors.f32_shaped(
+        let seconds_w = tensors.weight(
             "conditioner.conditioners.seconds_total.embedder.embedding.1.weight",
             &[SA3_COND_DIM, SA3_TIMESTEP_FEATURES],
+            &owner,
         )?;
         let seconds_b = tensors.f32_shaped(
             "conditioner.conditioners.seconds_total.embedder.embedding.1.bias",
@@ -141,6 +146,7 @@ impl Sa3Pipeline {
             None
         };
         Ok(Self {
+            _owner: owner,
             dit,
             ae,
             text,
@@ -169,7 +175,7 @@ impl Sa3Pipeline {
     pub fn seconds_embedding(&self, seconds: f64) -> Vec<f32> {
         let normalized = (seconds.clamp(0.0, SA3_SECONDS_MAX) / SA3_SECONDS_MAX) as f32;
         let features = expo_fourier(normalized, SA3_TIMESTEP_FEATURES);
-        linear(
+        linear_w(
             &features,
             &self.seconds_w,
             Some(&self.seconds_b),

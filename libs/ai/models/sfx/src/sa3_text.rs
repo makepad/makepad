@@ -10,8 +10,9 @@
 //! The SA3 conditioner then replaces padding positions with the learned
 //! `padding_embedding` from the main checkpoint (padding_mode "learned").
 
-use crate::backend::WeightOwner;
-use crate::sa3::{gelu_tanh, linear, par_rows, Sa3Tensors};
+use crate::backend::{F32Weight, WeightOwner};
+use std::sync::Arc;
+use crate::sa3::{gelu_tanh, linear_w, par_rows, Sa3Tensors};
 use crate::{emit_progress, DiffusionError, ProgressHook, Result};
 use std::path::Path;
 
@@ -29,16 +30,17 @@ struct Layer {
     post_attn_norm: Vec<f32>,
     pre_ff_norm: Vec<f32>,
     post_ff_norm: Vec<f32>,
-    q: Vec<f32>,
-    k: Vec<f32>,
-    v: Vec<f32>,
-    o: Vec<f32>,
-    gate: Vec<f32>,
-    up: Vec<f32>,
-    down: Vec<f32>,
+    q: F32Weight,
+    k: F32Weight,
+    v: F32Weight,
+    o: F32Weight,
+    gate: F32Weight,
+    up: F32Weight,
+    down: F32Weight,
 }
 
 pub struct T5GemmaEncoder {
+    _owner: Arc<WeightOwner>,
     embed: Vec<f32>,
     layers: Vec<Layer>,
     final_norm: Vec<f32>,
@@ -64,6 +66,7 @@ fn gemma_rms_norm(x: &[f32], w: &[f32]) -> Vec<f32> {
 impl T5GemmaEncoder {
     /// Loads the encoder half of t5gemma-b-b-ul2/model.safetensors.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("sa3-text-f32"));
         let t = Sa3Tensors::load(path)?;
         let name = |suffix: &str| format!("model.encoder.{suffix}");
         let embed = t.f32_shaped(&name("embed_tokens.weight"), &[256_000, T5GEMMA_DIM])?;
@@ -75,17 +78,18 @@ impl T5GemmaEncoder {
                 post_attn_norm: t.f32_shaped(&l("post_self_attn_layernorm.weight"), &[T5GEMMA_DIM])?,
                 pre_ff_norm: t.f32_shaped(&l("pre_feedforward_layernorm.weight"), &[T5GEMMA_DIM])?,
                 post_ff_norm: t.f32_shaped(&l("post_feedforward_layernorm.weight"), &[T5GEMMA_DIM])?,
-                q: t.f32_shaped(&l("self_attn.q_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM])?,
-                k: t.f32_shaped(&l("self_attn.k_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM])?,
-                v: t.f32_shaped(&l("self_attn.v_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM])?,
-                o: t.f32_shaped(&l("self_attn.o_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM])?,
-                gate: t.f32_shaped(&l("mlp.gate_proj.weight"), &[T5GEMMA_FFN, T5GEMMA_DIM])?,
-                up: t.f32_shaped(&l("mlp.up_proj.weight"), &[T5GEMMA_FFN, T5GEMMA_DIM])?,
-                down: t.f32_shaped(&l("mlp.down_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_FFN])?,
+                q: t.weight(&l("self_attn.q_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM], &owner)?,
+                k: t.weight(&l("self_attn.k_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM], &owner)?,
+                v: t.weight(&l("self_attn.v_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM], &owner)?,
+                o: t.weight(&l("self_attn.o_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_DIM], &owner)?,
+                gate: t.weight(&l("mlp.gate_proj.weight"), &[T5GEMMA_FFN, T5GEMMA_DIM], &owner)?,
+                up: t.weight(&l("mlp.up_proj.weight"), &[T5GEMMA_FFN, T5GEMMA_DIM], &owner)?,
+                down: t.weight(&l("mlp.down_proj.weight"), &[T5GEMMA_DIM, T5GEMMA_FFN], &owner)?,
             });
         }
         let final_norm = t.f32_shaped(&name("norm.weight"), &[T5GEMMA_DIM])?;
         Ok(Self {
+            _owner: owner.clone(),
             embed,
             layers,
             final_norm,
@@ -175,9 +179,9 @@ impl T5GemmaEncoder {
             }
             // Self-attention branch.
             let normed = gemma_rms_norm(&x, &layer.pre_attn_norm);
-            let mut q = linear(&normed, &layer.q, None, tokens, dim, dim);
-            let mut k = linear(&normed, &layer.k, None, tokens, dim, dim);
-            let v = linear(&normed, &layer.v, None, tokens, dim, dim);
+            let mut q = linear_w(&normed, &layer.q, None, tokens, dim, dim);
+            let mut k = linear_w(&normed, &layer.k, None, tokens, dim, dim);
+            let v = linear_w(&normed, &layer.v, None, tokens, dim, dim);
             apply_rope_full(&mut q);
             apply_rope_full(&mut k);
 
@@ -219,7 +223,7 @@ impl T5GemmaEncoder {
                     }
                 }
             });
-            let projected = linear(&attn_out, &layer.o, None, tokens, dim, dim);
+            let projected = linear_w(&attn_out, &layer.o, None, tokens, dim, dim);
             let post = gemma_rms_norm(&projected, &layer.post_attn_norm);
             for i in 0..x.len() {
                 x[i] += post[i];
@@ -227,13 +231,13 @@ impl T5GemmaEncoder {
 
             // Feedforward branch (GeGLU).
             let normed = gemma_rms_norm(&x, &layer.pre_ff_norm);
-            let gate = linear(&normed, &layer.gate, None, tokens, dim, T5GEMMA_FFN);
-            let up = linear(&normed, &layer.up, None, tokens, dim, T5GEMMA_FFN);
+            let gate = linear_w(&normed, &layer.gate, None, tokens, dim, T5GEMMA_FFN);
+            let up = linear_w(&normed, &layer.up, None, tokens, dim, T5GEMMA_FFN);
             let mut inner = vec![0f32; tokens * T5GEMMA_FFN];
             for i in 0..inner.len() {
                 inner[i] = gelu_tanh(gate[i]) * up[i];
             }
-            let down = linear(&inner, &layer.down, None, tokens, T5GEMMA_FFN, dim);
+            let down = linear_w(&inner, &layer.down, None, tokens, T5GEMMA_FFN, dim);
             let post = gemma_rms_norm(&down, &layer.post_ff_norm);
             for i in 0..x.len() {
                 x[i] += post[i];
@@ -305,13 +309,13 @@ impl T5GemmaEncoder {
                 post_attn_norm: fold_gemma_norm(&layer.post_attn_norm),
                 pre_ff_norm: fold_gemma_norm(&layer.pre_ff_norm),
                 post_ff_norm: fold_gemma_norm(&layer.post_ff_norm),
-                q: F16Weight::new(format!("sa3te.{i}.q"), &layer.q, d, d),
-                k: F16Weight::new(format!("sa3te.{i}.k"), &layer.k, d, d),
-                v: F16Weight::new(format!("sa3te.{i}.v"), &layer.v, d, d),
-                o: F16Weight::new(format!("sa3te.{i}.o"), &layer.o, d, d),
-                up: F16Weight::new(format!("sa3te.{i}.up"), &layer.up, T5GEMMA_FFN, d),
-                gate: F16Weight::new(format!("sa3te.{i}.gate"), &layer.gate, T5GEMMA_FFN, d),
-                down: F16Weight::new(format!("sa3te.{i}.down"), &layer.down, d, T5GEMMA_FFN),
+                q: F16Weight::new(format!("sa3te.{i}.q"), layer.q.as_slice(), d, d),
+                k: F16Weight::new(format!("sa3te.{i}.k"), layer.k.as_slice(), d, d),
+                v: F16Weight::new(format!("sa3te.{i}.v"), layer.v.as_slice(), d, d),
+                o: F16Weight::new(format!("sa3te.{i}.o"), layer.o.as_slice(), d, d),
+                up: F16Weight::new(format!("sa3te.{i}.up"), layer.up.as_slice(), T5GEMMA_FFN, d),
+                gate: F16Weight::new(format!("sa3te.{i}.gate"), layer.gate.as_slice(), T5GEMMA_FFN, d),
+                down: F16Weight::new(format!("sa3te.{i}.down"), layer.down.as_slice(), d, T5GEMMA_FFN),
             })
             .collect();
         T5GemmaDevice {

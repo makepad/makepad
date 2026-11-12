@@ -4890,6 +4890,17 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
+    pub fn gpu_pool_alloc_bytes(bytes: usize) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            makepad_ai_metal::gpu_tensor::alloc_bytes(bytes)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            bytes
+        }
+    }
+
     pub fn gpu_pool_clear() {
         #[cfg(target_os = "macos")]
         if let Err(error) = makepad_ai_metal::gpu_tensor::pool_clear() {

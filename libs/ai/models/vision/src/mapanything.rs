@@ -65,30 +65,39 @@ const NORM_EPS: f32 = 1e-6;
 const SCALE_FEATURES: usize = 196;
 const UNSHUFFLE: usize = MAPANYTHING_PATCH * MAPANYTHING_PATCH;
 
-/// Forward activation estimate in bytes; resident weights are excluded.
-/// All tensors are counted as f32, including the bf16 compute path's activations.
-pub fn forward_activation_bytes(views: usize) -> u64 {
-    let f32_bytes = std::mem::size_of::<f32>() as u64; // Bytes in each activation element.
-    let fused = (PATCHES * HIDDEN) as u64 * f32_bytes; // Fused patch tokens kept for the dense head.
-    let registers = HIDDEN as u64 * f32_bytes; // One encoder class token per view.
-    let hidden = (VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Multi-view transformer hidden rows.
-    let normed_taps = (SHARE_TAPS.len() * VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Three normalised taps.
-    let features = (SHARE_TAPS.len() * PATCHES * HIDDEN) as u64 * f32_bytes; // Patch rows copied from the taps.
-    let block_normed = (2 * VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Both shadowed block normed inputs.
-    let block_qkv = (3 * VIEW_TOKENS * HEADS * HEAD_DIM) as u64 * f32_bytes; // Packed q, k, v retained through the MLP.
-    let block_attention = (2 * VIEW_TOKENS * HEADS * HEAD_DIM) as u64 * f32_bytes; // Attention parts and their concatenation.
-    let block_residual = (VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Post-attention residual hidden rows.
-    let block_swiglu = (3 * VIEW_TOKENS * SWIGLU) as u64 * f32_bytes; // Gate/up rows and their product at the MLP peak.
-    let per_view = fused + registers + hidden + normed_taps + features
-        + block_normed + block_qkv + block_attention + block_residual + block_swiglu; // Retained rows plus one block's peak.
-
-    let dense_inner = crate::mapanything_heads::OUTPUT_INNER; // DenseHead's inner channel count.
-    let dense_output = crate::mapanything_heads::OUTPUT_CHANNELS; // DenseHead's output channel count.
-    let dense_low = ((MAPANYTHING_SIDE * 8).pow(2) * dense_inner) as u64 * f32_bytes; // conv1 output retained across shadowing at 296 x 296.
-    let dense_full = (PIXELS * (4 * dense_inner + 2 * dense_output)) as u64 * f32_bytes; // Resized, conv2, ReLU, transposed input, and both conv3 output layouts.
-    let scale_token = HIDDEN as u64 * f32_bytes; // The shared scale token.
-    let fixed = dense_low + dense_full + scale_token; // One dense-head peak and the scale token.
-    fixed + views as u64 * per_view
+/// Peak live device bytes over the forward's stages, each tensor at the size
+/// the backend allocates (`alloc`); weights are excluded (resident before a forward).
+pub fn forward_activation_bytes(views: usize, alloc: impl Fn(usize) -> usize) -> u64 {
+    // Every activation in the forward is f32.
+    let t = |rows, cols| alloc(rows * cols * 4);
+    // Encoder token rows across all views.
+    let v = views * VIEW_TOKENS;
+    // Multi-view transformer rows include the scale token.
+    let r = v + 1;
+    // Forward keeps fused patches, registers and reference view rows.
+    let retained = views * t(PATCHES, HIDDEN) + views * t(1, HIDDEN) + t(VIEW_TOKENS, HIDDEN);
+    // Block keeps per-view attention outputs alongside their concatenation.
+    let parts = if views == 1 { 0 } else { views * t(VIEW_TOKENS, HIDDEN) };
+    // Block's swiglu statement retains the inputs and intermediate tensors.
+    let block_mlp = |rows, parts| {
+        5 * t(rows, HIDDEN) + t(rows, 3 * HIDDEN) + parts
+            + t(rows, 2 * SWIGLU) + t(rows, SWIGLU)
+    };
+    // Encoder block at the swiglu statement.
+    let encoder = block_mlp(v, parts);
+    // Odd shared block holds two SHARE_TAPS, caller hidden and scale row beside its body copy.
+    let odd_block = retained + 2 * t(r, HIDDEN) + t(r, HIDDEN) + t(1, HIDDEN)
+        + block_mlp(v, parts);
+    // Even shared block holds two SHARE_TAPS and attends over the scale row too.
+    let even_block = retained + 2 * t(r, HIDDEN) + block_mlp(r, 0);
+    // Forward copies per-view features while all three taps are alive.
+    let features = retained + 3 * t(r, HIDDEN) + 3 * views * t(PATCHES, HIDDEN);
+    // DenseHead retains conv1, resized, conv2, relu, transposed and both conv3 layouts.
+    let dense = retained + 3 * views * t(PATCHES, HIDDEN)
+        + t(crate::mapanything_heads::OUTPUT_INNER, (MAPANYTHING_SIDE * 8).pow(2))
+        + 4 * t(crate::mapanything_heads::OUTPUT_INNER, PIXELS)
+        + 2 * t(crate::mapanything_heads::OUTPUT_CHANNELS, PIXELS);
+    encoder.max(odd_block).max(even_block).max(features).max(dense) as u64
 }
 
 /// Explicit compute mode, chosen at load: it decides which weight copies exist
@@ -1128,6 +1137,33 @@ impl MapAnything {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapanything_activation_estimate_tracks_allocated_stage_peaks() {
+        let cuda_alloc = |bytes: usize| {
+            let bytes = bytes.max(256);
+            let step = 256 * 1024 * 1024;
+            if bytes <= step {
+                bytes.next_power_of_two()
+            } else {
+                bytes.div_ceil(step) * step
+            }
+        };
+        let mut previous_exact = 0;
+        let mut previous_rounded = 0;
+        for views in 1..=40 {
+            let exact = forward_activation_bytes(views, |bytes| bytes);
+            let rounded = forward_activation_bytes(views, cuda_alloc);
+            assert!(exact >= previous_exact, "exact estimate decreased at {views} views");
+            assert!(rounded >= previous_rounded, "rounded estimate decreased at {views} views");
+            assert!(rounded >= exact, "rounded estimate below exact at {views} views");
+            previous_exact = exact;
+            previous_rounded = rounded;
+        }
+        // Measured-and-modelled points; these move if the forward's live set changes.
+        assert_eq!(forward_activation_bytes(12, cuda_alloc) / (1 << 20), 3216);
+        assert_eq!(forward_activation_bytes(32, cuda_alloc) / (1 << 20), 8464);
+    }
 
     #[test]
     fn mapanything_unshuffle_puts_each_pixel_in_its_patch_channel() {

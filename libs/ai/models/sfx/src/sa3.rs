@@ -10,6 +10,8 @@
 use crate::{DiffusionError, Result};
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader};
 use std::path::Path;
+use std::sync::Arc;
+use crate::backend::{F32Weight, WeightOwner};
 
 pub const SA3_SAMPLE_RATE: usize = 44_100;
 pub const SA3_AUDIO_CHANNELS: usize = 2;
@@ -161,19 +163,32 @@ impl Sa3Tensors {
             .header
             .read_tensor_bytes(name)
             .map_err(|err| DiffusionError::model(format!("sa3 read {name}: {err:?}")))?;
-        match dtype {
-            MlxDType::F32 => Ok(bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()),
-            MlxDType::BF16 => Ok(bytes
-                .chunks_exact(2)
-                .map(|c| f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16))
-                .collect()),
-            other => Err(DiffusionError::model(format!(
+        let len = match dtype {
+            MlxDType::F32 => bytes.len() / 4,
+            MlxDType::BF16 => bytes.len() / 2,
+            other => return Err(DiffusionError::model(format!(
                 "sa3 tensor {name}: unsupported dtype {other:?}"
             ))),
+        };
+        let mut out = vec![0.0; len];
+        decode_into(name, dtype, &bytes, &mut out)?;
+        Ok(out)
+    }
+
+    /// Decode directly into immutable page-aligned weight storage.
+    pub fn weight(&self, name: &str, shape: &[usize], owner: &Arc<WeightOwner>) -> Result<F32Weight> {
+        let actual = self.shape(name)?;
+        if actual != shape {
+            return Err(DiffusionError::model(format!(
+                "sa3 tensor {name}: shape {actual:?}, expected {shape:?}"
+            )));
         }
+        let dtype = self.header.tensors[name].dtype;
+        let bytes = self.header.read_tensor_bytes(name)
+            .map_err(|err| DiffusionError::model(format!("sa3 read {name}: {err:?}")))?;
+        F32Weight::new(owner, name, shape.iter().product(), |out| {
+            decode_into(name, dtype, &bytes, out)
+        })
     }
 
     /// f32 tensor with an exact-shape check.
@@ -186,6 +201,25 @@ impl Sa3Tensors {
         }
         self.f32(name)
     }
+}
+
+fn decode_into(name: &str, dtype: MlxDType, bytes: &[u8], out: &mut [f32]) -> Result<()> {
+    match dtype {
+        MlxDType::F32 => {
+            for (value, c) in out.iter_mut().zip(bytes.chunks_exact(4)) {
+                *value = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            }
+        }
+        MlxDType::BF16 => {
+            for (value, c) in out.iter_mut().zip(bytes.chunks_exact(2)) {
+                *value = f32::from_bits(u32::from(u16::from_le_bytes([c[0], c[1]])) << 16);
+            }
+        }
+        other => return Err(DiffusionError::model(format!(
+            "sa3 tensor {name}: unsupported dtype {other:?}"
+        ))),
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +272,19 @@ pub fn linear(a: &[f32], w: &[f32], bias: Option<&[f32]>, m: usize, k: usize, n:
     if let Some(out) = crate::metal_accel::linear_nt(a, w, bias, m, k, n) {
         return out;
     }
+    linear_cpu(a, w, bias, m, k, n)
+}
+
+pub fn linear_w(a: &[f32], w: &F32Weight, bias: Option<&[f32]>, m: usize, k: usize, n: usize) -> Vec<f32> {
+    debug_assert_eq!(a.len(), m * k);
+    debug_assert_eq!(w.len(), n * k);
+    if let Some(out) = crate::metal_accel::linear_nt_w(a, w, bias, m, k, n) {
+        return out;
+    }
+    linear_cpu(a, w.as_slice(), bias, m, k, n)
+}
+
+fn linear_cpu(a: &[f32], w: &[f32], bias: Option<&[f32]>, m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut out = vec![0f32; m * n];
     par_rows(&mut out, n, &|row, slice| {
         let a_row = &a[row * k..(row + 1) * k];

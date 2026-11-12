@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
+use crate::backend::F32Weight;
 
 /// Below this many multiply-accumulates a GPU dispatch is not worth it.
 const MIN_MACS: usize = 4 * 1024 * 1024;
@@ -49,6 +50,25 @@ pub fn linear_nt(
         return None;
     }
     let mut out = crate::backend::try_matmul_nt_f32(a, w, m, k, n)?;
+    add_bias(&mut out, bias, m, n)?;
+    mark_used();
+    Some(out)
+}
+
+/// Resident immutable weights for `C[m, n] = A[m, k] * W[n, k]^T (+ bias[n])`.
+pub fn linear_nt_w(
+    a: &[f32], w: &F32Weight, bias: Option<&[f32]>, m: usize, k: usize, n: usize,
+) -> Option<Vec<f32>> {
+    if !worth_it(m, k, n) {
+        return None;
+    }
+    let mut out = crate::backend::try_matmul_nt_f32_weight(a, w, m, k, n)?;
+    add_bias(&mut out, bias, m, n)?;
+    mark_used();
+    Some(out)
+}
+
+fn add_bias(out: &mut [f32], bias: Option<&[f32]>, m: usize, n: usize) -> Option<()> {
     if let Some(b) = bias {
         if b.len() != n || out.len() != m * n {
             return None;
@@ -59,8 +79,7 @@ pub fn linear_nt(
             }
         }
     }
-    mark_used();
-    Some(out)
+    Some(())
 }
 
 /// Packed `[tokens, heads, d]` flash attention. No mask, no GQA.

@@ -22,6 +22,8 @@ pub mod quant_iq;
 pub mod quant_iq_tables;
 pub mod weight_owner;
 pub use weight_owner::{DeadOwnerInbox, WeightKey, WeightOwner, WeightOwnerTrace};
+pub mod f32_weight;
+pub use f32_weight::{F32Weight, PageF32};
 
 // The safetensors slice is the only format lane T2 re-points consumers to;
 // re-export its types at the crate root so `use makepad_ai_loader::X`

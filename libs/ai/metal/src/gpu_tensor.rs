@@ -894,6 +894,10 @@ pub fn evict_keys(prefix: &WeightKey) -> Result<usize, String> { shim::tensor_ev
 
 pub fn pool_clear() -> Result<(), String> { shim::tensor_pool_clear() }
 
+pub fn alloc_bytes(bytes: usize) -> usize {
+    shim::tensor_alloc_bytes(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -995,6 +999,38 @@ mod tests {
             let second = shim::try_matmul_nt_ggml_bytes(&a, bytes(&weight), GGML_TYPE_F32, m, k, n)
                 .expect("second raw matmul");
             assert_eq!(second, [16.0; 16], "second call uses overwritten contents");
+        });
+    }
+
+    #[test]
+    fn f32_weights_share_host_pages_and_retire() {
+        crate::run_model_worker("f32-weight-test", || {
+            use makepad_ai_loader::{F32Weight, WeightOwner};
+            let (m, k, n) = (4, 32, 8);
+            let owner = Arc::new(WeightOwner::new("f32-resident"));
+            let a: Vec<f32> = (0..m * k).map(|i| (i as i32 % 23 - 11) as f32 * 0.0317).collect();
+            let w = F32Weight::new(&owner, "matrix", n * k, |out| {
+                for (i, value) in out.iter_mut().enumerate() {
+                    *value = (i as i32 % 19 - 9) as f32 * 0.0731;
+                }
+                Ok::<_, ()>(())
+            }).unwrap();
+            let weak = Arc::downgrade(w.storage());
+            let legacy = shim::try_matmul_nt_f32(&a, w.as_slice(), m, k, n).unwrap();
+            let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+            let first = shim::try_matmul_nt_f32_weight(&a, &w, m, k, n).unwrap();
+            assert_eq!(bits(&first), bits(&legacy), "resident f32 preserves legacy output bits");
+            let buffer = shim::tensor_f32_weight(&w).unwrap();
+            assert_eq!(buffer.contents().unwrap().cast::<u8>() as *const u8, w.storage().as_ptr(), "Metal shares the host allocation");
+            drop(buffer);
+            assert_eq!(resident_weights(&owner.trace()).unwrap().0, 1, "one entry after first call");
+            let second = shim::try_matmul_nt_f32_weight(&a, &w, m, k, n).unwrap();
+            assert_eq!(bits(&second), bits(&legacy), "reuse preserves output bits");
+            assert_eq!(resident_weights(&owner.trace()).unwrap().0, 1, "reuse does not add an entry");
+            drop(w);
+            drop(owner);
+            pool_clear().unwrap();
+            assert!(weak.upgrade().is_none(), "retirement releases the shared allocation");
         });
     }
 

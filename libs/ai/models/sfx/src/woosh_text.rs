@@ -14,34 +14,37 @@
 //! Weights: `checkpoints/TextConditionerA/weights.safetensors`, prefix
 //! `sentence_frontend.`.
 
+use crate::backend::{F32Weight, WeightOwner};
 use crate::error::{DiffusionError, Result};
-use crate::sa3::{linear, par_rows, Sa3Tensors};
+use crate::sa3::{linear_w, par_rows, Sa3Tensors};
 use crate::woosh::{
     gelu_erf, WOOSH_DESC_TOKENS, WOOSH_TE_FFN, WOOSH_TE_HEADS, WOOSH_TE_HEAD_DIM,
     WOOSH_TE_HIDDEN, WOOSH_TE_LAYERS_RUN, WOOSH_TE_LN_EPS, WOOSH_TE_PAD_ID,
 };
 use crate::{emit_progress, ProgressHook};
+use std::sync::Arc;
 
 struct TeLayer {
-    q_w: Vec<f32>,
+    q_w: F32Weight,
     q_b: Vec<f32>,
-    k_w: Vec<f32>,
+    k_w: F32Weight,
     k_b: Vec<f32>,
-    v_w: Vec<f32>,
+    v_w: F32Weight,
     v_b: Vec<f32>,
-    attn_out_w: Vec<f32>,
+    attn_out_w: F32Weight,
     attn_out_b: Vec<f32>,
     attn_ln_w: Vec<f32>,
     attn_ln_b: Vec<f32>,
-    inter_w: Vec<f32>,
+    inter_w: F32Weight,
     inter_b: Vec<f32>,
-    out_w: Vec<f32>,
+    out_w: F32Weight,
     out_b: Vec<f32>,
     out_ln_w: Vec<f32>,
     out_ln_b: Vec<f32>,
 }
 
 pub struct WooshTextEncoder {
+    _owner: Arc<WeightOwner>,
     word_embed: Vec<f32>,
     position_embed: Vec<f32>,
     token_type_embed: Vec<f32>,
@@ -52,6 +55,7 @@ pub struct WooshTextEncoder {
 
 impl WooshTextEncoder {
     pub fn load(weights: &Sa3Tensors) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("woosh-te-f32"));
         let h = WOOSH_TE_HIDDEN;
         let get = |name: &str, len: usize| -> Result<Vec<f32>> {
             let full = format!("sentence_frontend.{name}");
@@ -64,29 +68,41 @@ impl WooshTextEncoder {
             }
             Ok(v)
         };
+        let getw = |name: &str, len: usize| -> Result<F32Weight> {
+            let full = format!("sentence_frontend.{name}");
+            let shape = weights.shape(&full)?;
+            let count: usize = shape.iter().product();
+            if count != len {
+                return Err(DiffusionError::model(format!(
+                    "woosh te tensor {full}: {count} values, expected {len}"
+                )));
+            }
+            weights.weight(&full, &shape, &owner)
+        };
         let mut layers = Vec::with_capacity(WOOSH_TE_LAYERS_RUN);
         for l in 0..WOOSH_TE_LAYERS_RUN {
             let p = format!("encoder.layer.{l}");
             layers.push(TeLayer {
-                q_w: get(&format!("{p}.attention.self.query.weight"), h * h)?,
+                q_w: getw(&format!("{p}.attention.self.query.weight"), h * h)?,
                 q_b: get(&format!("{p}.attention.self.query.bias"), h)?,
-                k_w: get(&format!("{p}.attention.self.key.weight"), h * h)?,
+                k_w: getw(&format!("{p}.attention.self.key.weight"), h * h)?,
                 k_b: get(&format!("{p}.attention.self.key.bias"), h)?,
-                v_w: get(&format!("{p}.attention.self.value.weight"), h * h)?,
+                v_w: getw(&format!("{p}.attention.self.value.weight"), h * h)?,
                 v_b: get(&format!("{p}.attention.self.value.bias"), h)?,
-                attn_out_w: get(&format!("{p}.attention.output.dense.weight"), h * h)?,
+                attn_out_w: getw(&format!("{p}.attention.output.dense.weight"), h * h)?,
                 attn_out_b: get(&format!("{p}.attention.output.dense.bias"), h)?,
                 attn_ln_w: get(&format!("{p}.attention.output.LayerNorm.weight"), h)?,
                 attn_ln_b: get(&format!("{p}.attention.output.LayerNorm.bias"), h)?,
-                inter_w: get(&format!("{p}.intermediate.dense.weight"), WOOSH_TE_FFN * h)?,
+                inter_w: getw(&format!("{p}.intermediate.dense.weight"), WOOSH_TE_FFN * h)?,
                 inter_b: get(&format!("{p}.intermediate.dense.bias"), WOOSH_TE_FFN)?,
-                out_w: get(&format!("{p}.output.dense.weight"), h * WOOSH_TE_FFN)?,
+                out_w: getw(&format!("{p}.output.dense.weight"), h * WOOSH_TE_FFN)?,
                 out_b: get(&format!("{p}.output.dense.bias"), h)?,
                 out_ln_w: get(&format!("{p}.output.LayerNorm.weight"), h)?,
                 out_ln_b: get(&format!("{p}.output.LayerNorm.bias"), h)?,
             });
         }
         Ok(Self {
+            _owner: owner.clone(),
             word_embed: weights.f32("sentence_frontend.embeddings.word_embeddings.weight")?,
             position_embed: get("embeddings.position_embeddings.weight", 514 * h)?,
             token_type_embed: get("embeddings.token_type_embeddings.weight", h)?,
@@ -157,9 +173,9 @@ impl WooshTextEncoder {
                 index as f64 / WOOSH_TE_LAYERS_RUN as f64,
             )?;
             // --- self attention (post-LN) ---
-            let q = linear(&x, &layer.q_w, Some(&layer.q_b), seq, h, h);
-            let k = linear(&x, &layer.k_w, Some(&layer.k_b), seq, h, h);
-            let v = linear(&x, &layer.v_w, Some(&layer.v_b), seq, h, h);
+            let q = linear_w(&x, &layer.q_w, Some(&layer.q_b), seq, h, h);
+            let k = linear_w(&x, &layer.k_w, Some(&layer.k_b), seq, h, h);
+            let v = linear_w(&x, &layer.v_w, Some(&layer.v_b), seq, h, h);
             let mut attn = vec![0f32; seq * h];
             par_rows(&mut attn, h, &|row, out_row| {
                 let mut scores = vec![0f32; seq];
@@ -192,20 +208,20 @@ impl WooshTextEncoder {
                     }
                 }
             });
-            let proj = linear(&attn, &layer.attn_out_w, Some(&layer.attn_out_b), seq, h, h);
+            let proj = linear_w(&attn, &layer.attn_out_w, Some(&layer.attn_out_b), seq, h, h);
             for (xv, pv) in x.iter_mut().zip(proj.iter()) {
                 *xv += *pv;
             }
             layer_norm_rows(&mut x, h, &layer.attn_ln_w, &layer.attn_ln_b);
 
             // --- feed forward (post-LN) ---
-            let mut hidden = linear(&x, &layer.inter_w, Some(&layer.inter_b), seq, h, WOOSH_TE_FFN);
+            let mut hidden = linear_w(&x, &layer.inter_w, Some(&layer.inter_b), seq, h, WOOSH_TE_FFN);
             par_rows(&mut hidden, WOOSH_TE_FFN, &|_row, slice| {
                 for value in slice.iter_mut() {
                     *value = gelu_erf(*value);
                 }
             });
-            let out = linear(&hidden, &layer.out_w, Some(&layer.out_b), seq, WOOSH_TE_FFN, h);
+            let out = linear_w(&hidden, &layer.out_w, Some(&layer.out_b), seq, WOOSH_TE_FFN, h);
             for (xv, ov) in x.iter_mut().zip(out.iter()) {
                 *xv += *ov;
             }

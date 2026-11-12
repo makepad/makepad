@@ -4213,6 +4213,11 @@ mod imp {
         }
     }
 
+    /// Device bytes a pooled tensor of `bytes` occupies.
+    pub fn gpu_pool_alloc_bytes(bytes: usize) -> usize {
+        gpu_pool_round(bytes)
+    }
+
     /// Drop every idle pooled activation buffer (used at phase boundaries —
     /// e.g. denoise -> VAE decode — so the two phases' working sets never
     /// coexist in VRAM). Buffers pinned by a live captured graph are kept.

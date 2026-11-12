@@ -16,14 +16,16 @@
 //! Weights: `checkpoints/Woosh-AE/weights.safetensors` (`autoencoder.decoder.*`
 //! + `z_mean`/`z_std`); the encoder half is not ported (only text-to-audio).
 
+use crate::backend::{F32Weight, WeightOwner};
 use crate::error::{DiffusionError, Result};
-use crate::sa3::{linear, par_rows, Sa3Tensors};
+use crate::sa3::{linear_w, par_rows, Sa3Tensors};
 use crate::woosh::{
     gelu_erf, softplus, WOOSH_AE_BINS, WOOSH_AE_DIM, WOOSH_AE_HEAD_OUT, WOOSH_AE_HOP,
     WOOSH_AE_INTER, WOOSH_AE_LAYERS, WOOSH_AE_NFFT, WOOSH_AE_SAMPLES, WOOSH_LATENT_DIM,
     WOOSH_LATENT_FRAMES, WOOSH_LN_EPS,
 };
 use crate::{emit_progress, ProgressHook};
+use std::sync::Arc;
 
 const K: usize = 7;
 const PAD: usize = 3;
@@ -33,29 +35,30 @@ struct CnxBlock {
     dw_b: Vec<f32>,
     ln_w: Vec<f32>,
     ln_b: Vec<f32>,
-    pw1_w: Vec<f32>, // (3072 x 2048)
+    pw1_w: F32Weight, // (3072 x 2048)
     pw1_b: Vec<f32>,
-    pw2_w: Vec<f32>, // (2048 x 3072)
+    pw2_w: F32Weight, // (2048 x 3072)
     pw2_b: Vec<f32>,
     gamma: Vec<f32>,
 }
 
 pub struct WooshAe {
+    _owner: Arc<WeightOwner>,
     z_mean: Vec<f32>,
     z_std: Vec<f32>,
     /// Embed conv reordered to (2048 x 896): out[o] += w[o][k*128+c] * in-window.
-    embed_w: Vec<f32>,
+    embed_w: F32Weight,
     embed_b: Vec<f32>,
     in_ln_w: Vec<f32>,
     in_ln_b: Vec<f32>,
     blocks: Vec<CnxBlock>,
     final_ln_w: Vec<f32>,
     final_ln_b: Vec<f32>,
-    head_w: Vec<f32>, // (1443 x 2048)
+    head_w: F32Weight, // (1443 x 2048)
     head_b: Vec<f32>,
     window: Vec<f32>, // (960) hann, from the checkpoint buffer
     /// irfft-as-GEMM basis, (960 x 962): sample row n dot [Re bins | Im bins].
-    istft_basis: Vec<f32>,
+    istft_basis: F32Weight,
 }
 
 /// Validation taps recorded by [`WooshAe::decode_with_taps`]:
@@ -64,6 +67,7 @@ pub type WooshAeTaps = Vec<(String, Vec<f32>)>;
 
 impl WooshAe {
     pub fn load(weights: &Sa3Tensors) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("woosh-ae-f32"));
         let dim = WOOSH_AE_DIM;
         let c = WOOSH_LATENT_DIM;
         let get = |name: &str, len: usize| -> Result<Vec<f32>> {
@@ -76,17 +80,34 @@ impl WooshAe {
             }
             Ok(v)
         };
+        let getw = |name: &str, len: usize| -> Result<F32Weight> {
+            let shape = weights.shape(name)?;
+            let count: usize = shape.iter().product();
+            if count != len {
+                return Err(DiffusionError::model(format!(
+                    "woosh ae tensor {name}: {count} values, expected {len}"
+                )));
+            }
+            weights.weight(name, &shape, &owner)
+        };
         // Reorder the (2048, 128, 7) embed conv to (2048, 7*128) with the
         // window-major layout the shifted-row GEMM consumes.
-        let embed_raw = get("autoencoder.decoder.backbone.embed.weight", dim * c * K)?;
-        let mut embed_w = vec![0f32; dim * K * c];
-        for o in 0..dim {
-            for ch in 0..c {
-                for k in 0..K {
-                    embed_w[o * K * c + k * c + ch] = embed_raw[o * c * K + ch * K + k];
+        let embed_w = F32Weight::new(
+            &owner,
+            "autoencoder.decoder.backbone.embed.weight",
+            dim * K * c,
+            |out| {
+                let embed_raw = get("autoencoder.decoder.backbone.embed.weight", dim * c * K)?;
+                for o in 0..dim {
+                    for ch in 0..c {
+                        for k in 0..K {
+                            out[o * K * c + k * c + ch] = embed_raw[o * c * K + ch * K + k];
+                        }
+                    }
                 }
-            }
-        }
+                Ok::<(), DiffusionError>(())
+            },
+        )?;
         let mut blocks = Vec::with_capacity(WOOSH_AE_LAYERS);
         for l in 0..WOOSH_AE_LAYERS {
             let p = format!("autoencoder.decoder.backbone.convnext.{l}");
@@ -95,9 +116,9 @@ impl WooshAe {
                 dw_b: get(&format!("{p}.dwconv.bias"), dim)?,
                 ln_w: get(&format!("{p}.norm.weight"), dim)?,
                 ln_b: get(&format!("{p}.norm.bias"), dim)?,
-                pw1_w: get(&format!("{p}.pwconv1.weight"), WOOSH_AE_INTER * dim)?,
+                pw1_w: getw(&format!("{p}.pwconv1.weight"), WOOSH_AE_INTER * dim)?,
                 pw1_b: get(&format!("{p}.pwconv1.bias"), WOOSH_AE_INTER)?,
-                pw2_w: get(&format!("{p}.pwconv2.weight"), dim * WOOSH_AE_INTER)?,
+                pw2_w: getw(&format!("{p}.pwconv2.weight"), dim * WOOSH_AE_INTER)?,
                 pw2_b: get(&format!("{p}.pwconv2.bias"), dim)?,
                 gamma: get(&format!("{p}.gamma"), dim)?,
             });
@@ -109,20 +130,23 @@ impl WooshAe {
         //   + sum_{k=1..479} 2*(Re_k cos(2 pi k n / N) - Im_k sin(...))).
         let n_fft = WOOSH_AE_NFFT;
         let bins = WOOSH_AE_BINS;
-        let mut istft_basis = vec![0f32; n_fft * 2 * bins];
-        for n in 0..n_fft {
-            let row = &mut istft_basis[n * 2 * bins..(n + 1) * 2 * bins];
-            for k in 0..bins {
-                let theta = 2.0 * std::f64::consts::PI * (k * n) as f64 / n_fft as f64;
-                let weight = if k == 0 || k == bins - 1 { 1.0 } else { 2.0 };
-                row[k] = (weight * theta.cos() / n_fft as f64) as f32;
-                if k > 0 && k < bins - 1 {
-                    row[bins + k] = (-weight * theta.sin() / n_fft as f64) as f32;
+        let istft_basis = F32Weight::new(&owner, "istft_basis", n_fft * 2 * bins, |out| {
+            for n in 0..n_fft {
+                let row = &mut out[n * 2 * bins..(n + 1) * 2 * bins];
+                for k in 0..bins {
+                    let theta = 2.0 * std::f64::consts::PI * (k * n) as f64 / n_fft as f64;
+                    let weight = if k == 0 || k == bins - 1 { 1.0 } else { 2.0 };
+                    row[k] = (weight * theta.cos() / n_fft as f64) as f32;
+                    if k > 0 && k < bins - 1 {
+                        row[bins + k] = (-weight * theta.sin() / n_fft as f64) as f32;
+                    }
                 }
             }
-        }
+            Ok::<(), DiffusionError>(())
+        })?;
 
         Ok(Self {
+            _owner: owner.clone(),
             z_mean: get("z_mean", c)?,
             z_std: get("z_std", c)?,
             embed_w,
@@ -132,7 +156,7 @@ impl WooshAe {
             blocks,
             final_ln_w: get("autoencoder.decoder.backbone.final_layer_norm.weight", dim)?,
             final_ln_b: get("autoencoder.decoder.backbone.final_layer_norm.bias", dim)?,
-            head_w: get("autoencoder.decoder.head.out.weight", WOOSH_AE_HEAD_OUT * dim)?,
+            head_w: getw("autoencoder.decoder.head.out.weight", WOOSH_AE_HEAD_OUT * dim)?,
             head_b: get("autoencoder.decoder.head.out.bias", WOOSH_AE_HEAD_OUT)?,
             window,
             istft_basis,
@@ -204,7 +228,7 @@ impl WooshAe {
                     .copy_from_slice(&z_rows[src * c..(src + 1) * c]);
             }
         }
-        let mut x = linear(&windows, &self.embed_w, Some(&self.embed_b), frames, K * c, dim);
+        let mut x = linear_w(&windows, &self.embed_w, Some(&self.embed_b), frames, K * c, dim);
         tap("embed", &x, dim);
         layer_norm_rows(&mut x, dim, &self.in_ln_w, &self.in_ln_b);
 
@@ -230,13 +254,13 @@ impl WooshAe {
                 }
             });
             layer_norm_rows(&mut conv, dim, &block.ln_w, &block.ln_b);
-            let mut hidden = linear(&conv, &block.pw1_w, Some(&block.pw1_b), frames, dim, WOOSH_AE_INTER);
+            let mut hidden = linear_w(&conv, &block.pw1_w, Some(&block.pw1_b), frames, dim, WOOSH_AE_INTER);
             par_rows(&mut hidden, WOOSH_AE_INTER, &|_row, slice| {
                 for v in slice.iter_mut() {
                     *v = gelu_erf(*v);
                 }
             });
-            let update = linear(&hidden, &block.pw2_w, Some(&block.pw2_b), frames, WOOSH_AE_INTER, dim);
+            let update = linear_w(&hidden, &block.pw2_w, Some(&block.pw2_b), frames, WOOSH_AE_INTER, dim);
             par_rows(&mut x, dim, &|t, row| {
                 let u = &update[t * dim..(t + 1) * dim];
                 for ch in 0..dim {
@@ -252,7 +276,7 @@ impl WooshAe {
 
         // Head conv (k1 == linear) then circle-normalized complex spectrum.
         emit_progress(&mut progress, "ae-decode 10/10", 0.9)?;
-        let head = linear(&x, &self.head_w, Some(&self.head_b), frames, dim, WOOSH_AE_HEAD_OUT);
+        let head = linear_w(&x, &self.head_w, Some(&self.head_b), frames, dim, WOOSH_AE_HEAD_OUT);
         tap("head_conv", &head, WOOSH_AE_HEAD_OUT);
         let bins = WOOSH_AE_BINS;
         let mut spec = vec![0f32; frames * 2 * bins];
@@ -272,7 +296,7 @@ impl WooshAe {
         // envelope-normalize, center crop.
         let n_fft = WOOSH_AE_NFFT;
         let hop = WOOSH_AE_HOP;
-        let frame_time = linear(&spec, &self.istft_basis, None, frames, 2 * bins, n_fft);
+        let frame_time = linear_w(&spec, &self.istft_basis, None, frames, 2 * bins, n_fft);
         let full = (frames - 1) * hop + n_fft;
         let mut ola = vec![0f32; full];
         let mut envelope = vec![0f32; full];

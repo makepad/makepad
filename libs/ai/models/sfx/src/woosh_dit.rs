@@ -20,32 +20,34 @@
 //!   truncation behavior, reproduced exactly;
 //! - the DFlow output sign flip is folded into the final linear at load.
 
+use crate::backend::{F32Weight, WeightOwner};
 use crate::error::{DiffusionError, Result};
-use crate::sa3::{gelu_tanh, linear, par_rows, silu, Sa3Tensors};
+use crate::sa3::{gelu_tanh, linear_w, par_rows, silu, Sa3Tensors};
 use crate::woosh::{
     woosh_fixed_fourier, woosh_freqs_cis_audio, woosh_learned_fourier, WOOSH_AUDIO_TOKENS,
     WOOSH_DESC_TOKENS, WOOSH_DIM, WOOSH_HEADS, WOOSH_HEAD_DIM, WOOSH_INTER_DIM, WOOSH_JOINT_TOKENS,
     WOOSH_LATENT_DIM, WOOSH_LATENT_FRAMES, WOOSH_LN_EPS, WOOSH_MM_LAYERS, WOOSH_ROPE_DIM,
     WOOSH_ROPE_FREQS, WOOSH_TIMESTEP_FEATURES,
 };
+use std::sync::Arc;
 
 struct ModalityAttn {
-    qkv_w: Vec<f32>,
+    qkv_w: F32Weight,
     qkv_b: Vec<f32>,
     norm_q: Vec<f32>,
     norm_k: Vec<f32>,
-    out_w: Vec<f32>,
+    out_w: F32Weight,
     out_b: Vec<f32>,
-    mod_w: Vec<f32>,
+    mod_w: F32Weight,
     mod_b: Vec<f32>,
 }
 
 struct ModalityFfn {
-    w1_w: Vec<f32>,
+    w1_w: F32Weight,
     w1_b: Vec<f32>,
-    w2_w: Vec<f32>,
+    w2_w: F32Weight,
     w2_b: Vec<f32>,
-    mod_w: Vec<f32>,
+    mod_w: F32Weight,
     mod_b: Vec<f32>,
 }
 
@@ -57,47 +59,48 @@ struct MmBlock {
 }
 
 struct SsBlock {
-    qkv_mlp_w: Vec<f32>,
+    qkv_mlp_w: F32Weight,
     qkv_mlp_b: Vec<f32>,
-    out_w: Vec<f32>,
+    out_w: F32Weight,
     out_b: Vec<f32>,
     norm_q: Vec<f32>,
     norm_k: Vec<f32>,
-    mod_w: Vec<f32>,
+    mod_w: F32Weight,
     mod_b: Vec<f32>,
 }
 
 pub struct WooshDit {
+    _owner: Arc<WeightOwner>,
     // --- preprocessing (Flow-era module reused by the DFlow student) ---
     memory_token: Vec<f32>,    // (1024)
     description_pad: Vec<f32>, // (77 x 1024)
-    project_in_w: Vec<f32>,    // (1024 x 128)
+    project_in_w: F32Weight,    // (1024 x 128)
     project_in_b: Vec<f32>,
-    cond0_w: Vec<f32>, // (4096 x 1024)
+    cond0_w: F32Weight, // (4096 x 1024)
     cond0_b: Vec<f32>,
-    cond2_w: Vec<f32>, // (1024 x 4096)
+    cond2_w: F32Weight, // (1024 x 4096)
     cond2_b: Vec<f32>,
     // Flow-era timestep path — kept only to validate the m_plus tap.
     old_tf_w: Vec<f32>, // (128)
-    old_t0_w: Vec<f32>, // (4096 x 256)
+    old_t0_w: F32Weight, // (4096 x 256)
     old_t0_b: Vec<f32>,
-    old_t2_w: Vec<f32>, // (1024 x 4096)
+    old_t2_w: F32Weight, // (1024 x 4096)
     old_t2_b: Vec<f32>,
     // --- DFlow (t, r, cfg) timestep path ---
     tf_t: Vec<f32>,   // (128) fourier freq buffers from the checkpoint
     tf_r: Vec<f32>,
     tf_cfg: Vec<f32>,
-    ts0_w: Vec<f32>, // (4096 x 768)
+    ts0_w: F32Weight, // (4096 x 768)
     ts0_b: Vec<f32>,
-    ts2_w: Vec<f32>, // (1024 x 4096)
+    ts2_w: F32Weight, // (1024 x 4096)
     ts2_b: Vec<f32>,
     // --- trunk ---
     mm_blocks: Vec<MmBlock>,
     ss_blocks: Vec<SsBlock>,
     // --- postprocessing (sign flip folded into the linear) ---
-    post_mod_w: Vec<f32>, // (2048 x 1024)
+    post_mod_w: F32Weight, // (2048 x 1024)
     post_mod_b: Vec<f32>,
-    post_lin_w: Vec<f32>, // (128 x 1024), negated
+    post_lin_w: F32Weight, // (128 x 1024), negated
     post_lin_b: Vec<f32>, // (128), negated
     /// Memtok-prepended YaRN table, (1003 x 64 x 2) — row layout identical
     /// to the dumped freqs_cis_audio_real.
@@ -117,6 +120,7 @@ pub type WooshTaps = Vec<(String, Vec<f32>)>;
 
 impl WooshDit {
     pub fn load(weights: &Sa3Tensors) -> Result<Self> {
+        let owner = Arc::new(WeightOwner::new("woosh-dit-f32"));
         let d = WOOSH_DIM;
         let inter = WOOSH_INTER_DIM;
         let get = |name: &str, len: usize| -> Result<Vec<f32>> {
@@ -130,25 +134,36 @@ impl WooshDit {
             }
             Ok(v)
         };
+        let getw = |name: &str, len: usize| -> Result<F32Weight> {
+            let full = format!("dit.{name}");
+            let shape = weights.shape(&full)?;
+            let count: usize = shape.iter().product();
+            if count != len {
+                return Err(DiffusionError::model(format!(
+                    "woosh dit tensor {full}: {count} values, expected {len}"
+                )));
+            }
+            weights.weight(&full, &shape, &owner)
+        };
         let attn = |p: &str| -> Result<ModalityAttn> {
             Ok(ModalityAttn {
-                qkv_w: get(&format!("{p}.qkv.weight"), 3 * d * d)?,
+                qkv_w: getw(&format!("{p}.qkv.weight"), 3 * d * d)?,
                 qkv_b: get(&format!("{p}.qkv.bias"), 3 * d)?,
                 norm_q: get(&format!("{p}.norm_q.weight"), WOOSH_HEAD_DIM)?,
                 norm_k: get(&format!("{p}.norm_k.weight"), WOOSH_HEAD_DIM)?,
-                out_w: get(&format!("{p}.out_proj.weight"), d * d)?,
+                out_w: getw(&format!("{p}.out_proj.weight"), d * d)?,
                 out_b: get(&format!("{p}.out_proj.bias"), d)?,
-                mod_w: get(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
+                mod_w: getw(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
                 mod_b: get(&format!("{p}.mod_proj.bias"), 3 * d)?,
             })
         };
         let ffn = |p: &str| -> Result<ModalityFfn> {
             Ok(ModalityFfn {
-                w1_w: get(&format!("{p}.w1.weight"), inter * d)?,
+                w1_w: getw(&format!("{p}.w1.weight"), inter * d)?,
                 w1_b: get(&format!("{p}.w1.bias"), inter)?,
-                w2_w: get(&format!("{p}.w2.weight"), d * inter)?,
+                w2_w: getw(&format!("{p}.w2.weight"), d * inter)?,
                 w2_b: get(&format!("{p}.w2.bias"), d)?,
-                mod_w: get(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
+                mod_w: getw(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
                 mod_b: get(&format!("{p}.mod_proj.bias"), 3 * d)?,
             })
         };
@@ -165,53 +180,65 @@ impl WooshDit {
         for l in WOOSH_MM_LAYERS..2 * WOOSH_MM_LAYERS {
             let p = format!("layers.{l}");
             ss_blocks.push(SsBlock {
-                qkv_mlp_w: get(&format!("{p}.qkv_mlp.weight"), (3 * d + inter) * d)?,
+                qkv_mlp_w: getw(&format!("{p}.qkv_mlp.weight"), (3 * d + inter) * d)?,
                 qkv_mlp_b: get(&format!("{p}.qkv_mlp.bias"), 3 * d + inter)?,
-                out_w: get(&format!("{p}.out_proj.weight"), d * (d + inter))?,
+                out_w: getw(&format!("{p}.out_proj.weight"), d * (d + inter))?,
                 out_b: get(&format!("{p}.out_proj.bias"), d)?,
                 norm_q: get(&format!("{p}.norm_q.weight"), WOOSH_HEAD_DIM)?,
                 norm_k: get(&format!("{p}.norm_k.weight"), WOOSH_HEAD_DIM)?,
-                mod_w: get(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
+                mod_w: getw(&format!("{p}.mod_proj.weight"), 3 * d * d)?,
                 mod_b: get(&format!("{p}.mod_proj.bias"), 3 * d)?,
             });
         }
         // DFlow: postprocessing output is negated -> fold into the linear.
-        let mut post_lin_w = get("postprocessing.old_postprocessing.linear.weight", WOOSH_LATENT_DIM * d)?;
+        let post_lin_w = F32Weight::new(
+            &owner,
+            "dit.postprocessing.old_postprocessing.linear.weight",
+            WOOSH_LATENT_DIM * d,
+            |out| {
+                let raw = get("postprocessing.old_postprocessing.linear.weight", out.len())?;
+                for (dst, value) in out.iter_mut().zip(raw) {
+                    *dst = -value;
+                }
+                Ok::<(), DiffusionError>(())
+            },
+        )?;
         let mut post_lin_b = get("postprocessing.old_postprocessing.linear.bias", WOOSH_LATENT_DIM)?;
-        for v in post_lin_w.iter_mut().chain(post_lin_b.iter_mut()) {
+        for v in post_lin_b.iter_mut() {
             *v = -*v;
         }
         let half_tf = WOOSH_TIMESTEP_FEATURES / 2;
         Ok(Self {
+            _owner: owner.clone(),
             memory_token: get("preprocessing.old_preprocessing.memory_tokens_rope", d)?,
             description_pad: get(
                 "preprocessing.old_preprocessing.description_pad",
                 WOOSH_DESC_TOKENS * d,
             )?,
-            project_in_w: get("preprocessing.old_preprocessing.project_in.weight", d * WOOSH_LATENT_DIM)?,
+            project_in_w: getw("preprocessing.old_preprocessing.project_in.weight", d * WOOSH_LATENT_DIM)?,
             project_in_b: get("preprocessing.old_preprocessing.project_in.bias", d)?,
-            cond0_w: get("preprocessing.old_preprocessing.to_cond_embed.0.weight", inter * d)?,
+            cond0_w: getw("preprocessing.old_preprocessing.to_cond_embed.0.weight", inter * d)?,
             cond0_b: get("preprocessing.old_preprocessing.to_cond_embed.0.bias", inter)?,
-            cond2_w: get("preprocessing.old_preprocessing.to_cond_embed.2.weight", d * inter)?,
+            cond2_w: getw("preprocessing.old_preprocessing.to_cond_embed.2.weight", d * inter)?,
             cond2_b: get("preprocessing.old_preprocessing.to_cond_embed.2.bias", d)?,
             old_tf_w: get("preprocessing.old_preprocessing.timestep_features.weight", half_tf)?,
-            old_t0_w: get(
+            old_t0_w: getw(
                 "preprocessing.old_preprocessing.to_timestep_embed.0.weight",
                 inter * WOOSH_TIMESTEP_FEATURES,
             )?,
             old_t0_b: get("preprocessing.old_preprocessing.to_timestep_embed.0.bias", inter)?,
-            old_t2_w: get("preprocessing.old_preprocessing.to_timestep_embed.2.weight", d * inter)?,
+            old_t2_w: getw("preprocessing.old_preprocessing.to_timestep_embed.2.weight", d * inter)?,
             old_t2_b: get("preprocessing.old_preprocessing.to_timestep_embed.2.bias", d)?,
             tf_t: get("preprocessing.timestep_features_t.freqs", half_tf)?,
             tf_r: get("preprocessing.timestep_features_r.freqs", half_tf)?,
             tf_cfg: get("preprocessing.cfg_features.freqs", half_tf)?,
-            ts0_w: get("preprocessing.to_timestep_embed.0.weight", inter * 3 * WOOSH_TIMESTEP_FEATURES)?,
+            ts0_w: getw("preprocessing.to_timestep_embed.0.weight", inter * 3 * WOOSH_TIMESTEP_FEATURES)?,
             ts0_b: get("preprocessing.to_timestep_embed.0.bias", inter)?,
-            ts2_w: get("preprocessing.to_timestep_embed.2.weight", d * inter)?,
+            ts2_w: getw("preprocessing.to_timestep_embed.2.weight", d * inter)?,
             ts2_b: get("preprocessing.to_timestep_embed.2.bias", d)?,
             mm_blocks,
             ss_blocks,
-            post_mod_w: get("postprocessing.old_postprocessing.mod_proj.weight", 2 * d * d)?,
+            post_mod_w: getw("postprocessing.old_postprocessing.mod_proj.weight", 2 * d * d)?,
             post_mod_b: get("postprocessing.old_postprocessing.mod_proj.bias", 2 * d)?,
             post_lin_w,
             post_lin_b,
@@ -246,11 +273,11 @@ impl WooshDit {
             };
             padded[row * d..(row + 1) * d].copy_from_slice(src);
         }
-        let mut hidden = linear(&padded, &self.cond0_w, Some(&self.cond0_b), n, d, WOOSH_INTER_DIM);
+        let mut hidden = linear_w(&padded, &self.cond0_w, Some(&self.cond0_b), n, d, WOOSH_INTER_DIM);
         for v in hidden.iter_mut() {
             *v = silu(*v);
         }
-        let desc = linear(&hidden, &self.cond2_w, Some(&self.cond2_b), n, WOOSH_INTER_DIM, d);
+        let desc = linear_w(&hidden, &self.cond2_w, Some(&self.cond2_b), n, WOOSH_INTER_DIM, d);
         Ok(WooshCond { desc })
     }
 
@@ -260,7 +287,7 @@ impl WooshDit {
         features.extend(woosh_fixed_fourier(t, &self.tf_t));
         features.extend(woosh_fixed_fourier(r, &self.tf_r));
         features.extend(woosh_fixed_fourier(cfg, &self.tf_cfg));
-        let mut hidden = linear(
+        let mut hidden = linear_w(
             &features,
             &self.ts0_w,
             Some(&self.ts0_b),
@@ -271,7 +298,7 @@ impl WooshDit {
         for v in hidden.iter_mut() {
             *v = silu(*v);
         }
-        let mut t_vec = linear(&hidden, &self.ts2_w, Some(&self.ts2_b), 1, WOOSH_INTER_DIM, WOOSH_DIM);
+        let mut t_vec = linear_w(&hidden, &self.ts2_w, Some(&self.ts2_b), 1, WOOSH_INTER_DIM, WOOSH_DIM);
         for v in t_vec.iter_mut() {
             *v = silu(*v);
         }
@@ -282,7 +309,7 @@ impl WooshDit {
     /// computed only to validate the dumped tap.
     pub fn m_plus(&self, t: f32) -> Vec<f32> {
         let features = woosh_learned_fourier(t, &self.old_tf_w);
-        let mut hidden = linear(
+        let mut hidden = linear_w(
             &features,
             &self.old_t0_w,
             Some(&self.old_t0_b),
@@ -293,7 +320,7 @@ impl WooshDit {
         for v in hidden.iter_mut() {
             *v = silu(*v);
         }
-        linear(&hidden, &self.old_t2_w, Some(&self.old_t2_b), 1, WOOSH_INTER_DIM, WOOSH_DIM)
+        linear_w(&hidden, &self.old_t2_w, Some(&self.old_t2_b), 1, WOOSH_INTER_DIM, WOOSH_DIM)
     }
 
     /// One velocity prediction. `latents` is channel-major (128 x 501) like
@@ -341,7 +368,7 @@ impl WooshDit {
                 frame_rows[f * c + ch] = latents[ch * frames + f];
             }
         }
-        let projected = linear(&frame_rows, &self.project_in_w, Some(&self.project_in_b), frames, c, d);
+        let projected = linear_w(&frame_rows, &self.project_in_w, Some(&self.project_in_b), frames, c, d);
         let mut audio = vec![0f32; a_len * d];
         audio[..d].copy_from_slice(&self.memory_token);
         audio[d..].copy_from_slice(&projected);
@@ -380,7 +407,7 @@ impl WooshDit {
 
         // Postprocessing: strip the memory token, AdaLN, linear (sign folded).
         let x = &audio[d..];
-        let mods = linear(&t_vec, &self.post_mod_w, Some(&self.post_mod_b), 1, d, 2 * d);
+        let mods = linear_w(&t_vec, &self.post_mod_w, Some(&self.post_mod_b), 1, d, 2 * d);
         let (bias, scale) = mods.split_at(d);
         let mut normed = x.to_vec();
         layer_norm_rows_noaffine(&mut normed, d);
@@ -389,7 +416,7 @@ impl WooshDit {
                 *v = (1.0 + scale[i]) * *v + bias[i];
             }
         });
-        let out_rows = linear(&normed, &self.post_lin_w, Some(&self.post_lin_b), frames, d, c);
+        let out_rows = linear_w(&normed, &self.post_lin_w, Some(&self.post_lin_b), frames, d, c);
         let mut out = vec![0f32; c * frames];
         for f in 0..frames {
             for ch in 0..c {
@@ -428,9 +455,9 @@ impl WooshDit {
         v.extend_from_slice(&dv);
         let z = attention_joint(&q, &k, &v, joint);
 
-        let a_out = linear(&z[..a_len * d], &block.x_attn.out_w, Some(&block.x_attn.out_b), a_len, d, d);
+        let a_out = linear_w(&z[..a_len * d], &block.x_attn.out_w, Some(&block.x_attn.out_b), a_len, d, d);
         gated_residual(audio, &a_out, &a_gate);
-        let d_out = linear(&z[a_len * d..], &block.d_attn.out_w, Some(&block.d_attn.out_b), d_len, d, d);
+        let d_out = linear_w(&z[a_len * d..], &block.d_attn.out_w, Some(&block.d_attn.out_b), d_len, d, d);
         gated_residual(desc, &d_out, &d_gate);
 
         ffn_forward(&block.x_ffn, audio, a_len, t_vec);
@@ -459,7 +486,7 @@ impl WooshDit {
         x.extend_from_slice(desc);
         layer_norm_rows_noaffine(&mut x, d);
 
-        let mods = linear(t_vec, &block.mod_w, Some(&block.mod_b), 1, d, 3 * d);
+        let mods = linear_w(t_vec, &block.mod_w, Some(&block.mod_b), 1, d, 3 * d);
         let (bias, rest) = mods.split_at(d);
         let (scale, gate) = rest.split_at(d);
         par_rows(&mut x, d, &|_row, row| {
@@ -468,7 +495,7 @@ impl WooshDit {
             }
         });
 
-        let fused = linear(&x, &block.qkv_mlp_w, Some(&block.qkv_mlp_b), joint, d, 3 * d + inter);
+        let fused = linear_w(&x, &block.qkv_mlp_w, Some(&block.qkv_mlp_b), joint, d, 3 * d + inter);
         let mut q = vec![0f32; joint * d];
         let mut k = vec![0f32; joint * d];
         let mut v = vec![0f32; joint * d];
@@ -495,7 +522,7 @@ impl WooshDit {
             out_in[row * (d + inter)..row * (d + inter) + d]
                 .copy_from_slice(&z[row * d..(row + 1) * d]);
         }
-        let out = linear(&out_in, &block.out_w, Some(&block.out_b), joint, d + inter, d);
+        let out = linear_w(&out_in, &block.out_w, Some(&block.out_b), joint, d + inter, d);
         gated_residual(audio, &out[..a_len * d], gate);
         gated_residual(desc, &out[a_len * d..], gate);
     }
@@ -513,7 +540,7 @@ fn attn_precompute(
     let d = WOOSH_DIM;
     let mut normed = stream.to_vec();
     layer_norm_rows_noaffine(&mut normed, d);
-    let mods = linear(t_vec, &attn.mod_w, Some(&attn.mod_b), 1, d, 3 * d);
+    let mods = linear_w(t_vec, &attn.mod_w, Some(&attn.mod_b), 1, d, 3 * d);
     let (bias, rest) = mods.split_at(d);
     let (scale, gate) = rest.split_at(d);
     par_rows(&mut normed, d, &|_row, row| {
@@ -521,7 +548,7 @@ fn attn_precompute(
             *v = (1.0 + scale[i]) * *v + bias[i];
         }
     });
-    let qkv = linear(&normed, &attn.qkv_w, Some(&attn.qkv_b), len, d, 3 * d);
+    let qkv = linear_w(&normed, &attn.qkv_w, Some(&attn.qkv_b), len, d, 3 * d);
     let mut q = vec![0f32; len * d];
     let mut k = vec![0f32; len * d];
     let mut v = vec![0f32; len * d];
@@ -557,7 +584,7 @@ fn ffn_forward(ffn: &ModalityFfn, stream: &mut Vec<f32>, len: usize, t_vec: &[f3
     let inter = WOOSH_INTER_DIM;
     let mut normed = stream.clone();
     layer_norm_rows_noaffine(&mut normed, d);
-    let mods = linear(t_vec, &ffn.mod_w, Some(&ffn.mod_b), 1, d, 3 * d);
+    let mods = linear_w(t_vec, &ffn.mod_w, Some(&ffn.mod_b), 1, d, 3 * d);
     let (bias, rest) = mods.split_at(d);
     let (scale, gate) = rest.split_at(d);
     par_rows(&mut normed, d, &|_row, row| {
@@ -565,13 +592,13 @@ fn ffn_forward(ffn: &ModalityFfn, stream: &mut Vec<f32>, len: usize, t_vec: &[f3
             *v = (1.0 + scale[i]) * *v + bias[i];
         }
     });
-    let mut hidden = linear(&normed, &ffn.w1_w, Some(&ffn.w1_b), len, d, inter);
+    let mut hidden = linear_w(&normed, &ffn.w1_w, Some(&ffn.w1_b), len, d, inter);
     par_rows(&mut hidden, inter, &|_row, row| {
         for v in row.iter_mut() {
             *v = gelu_tanh(*v);
         }
     });
-    let out = linear(&hidden, &ffn.w2_w, Some(&ffn.w2_b), len, inter, d);
+    let out = linear_w(&hidden, &ffn.w2_w, Some(&ffn.w2_b), len, inter, d);
     gated_residual(stream, &out, gate);
 }
 
