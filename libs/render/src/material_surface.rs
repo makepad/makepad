@@ -86,6 +86,10 @@ pub struct SplatLayer {
     pub relief: f32,
     pub wet: f32,
     pub puddles: f32,
+    /// World macro variation over the tiled texture: [brightness, warm/cool
+    /// hue, roughness] amplitudes (0..1) and the size in metres of its middle
+    /// octave; size 0 = none (shaders/splat.rs).
+    pub macro_variation: [f32; 4],
 }
 
 /// How lit a signal lamp of `role` is on a copy whose vehicle shows
@@ -569,6 +573,8 @@ pub struct PreparedSplat {
     pub params: [[f32; 4]; SPLAT_LAYERS],
     /// Per-layer relief and surface factors (shader parameters, not pixels).
     pub surface: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer world macro variation (SplatLayer::macro_variation).
+    pub macro_variation: [[f32; 4]; SPLAT_LAYERS],
     pub map: [f32; 4],
     pub size: [f32; 4],
 }
@@ -584,6 +590,8 @@ pub struct UploadedSplat {
     pub params: [[f32; 4]; SPLAT_LAYERS],
     /// Per-layer relief and surface factors (shader parameters, not pixels).
     pub surface: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer world macro variation (SplatLayer::macro_variation).
+    pub macro_variation: [[f32; 4]; SPLAT_LAYERS],
     /// Weight map: world x, z of texel 0, texels per metre.
     pub map: [f32; 4],
     /// Weight map: texels per row, rows per page, pages, layers.
@@ -678,8 +686,10 @@ impl PreparedSplat {
             }
             *p = [l.relief, l.wet, l.puddles, level];
         }
+        let mut macro_variation = [[0.0f32; 4]; SPLAT_LAYERS];
+        for (m, l) in macro_variation.iter_mut().zip(layers) { *m = l.macro_variation; }
         let pages = layers.len().div_ceil(4) as f32;
-        Ok(Self { albedo, normal, weights, params, surface, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
+        Ok(Self { albedo, normal, weights, params, surface, macro_variation, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
     }
 
     /// Upload, sharing the arrays (by their layers' content) and the
@@ -705,7 +715,7 @@ impl PreparedSplat {
         let albedo = array(cx, cache, &self.albedo);
         let normal = array(cx, cache, &self.normal);
         let weights = self.weights.upload_cached(cx, cache);
-        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, map: self.map, size: self.size }
+        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, macro_variation: self.macro_variation, map: self.map, size: self.size }
     }
 
     pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
@@ -753,7 +763,7 @@ mod tests{
         let layer = SplatLayer {
             albedo_png: Some(Cx::encode_rgba_as_png(2, 2, &albedo).unwrap()), color: [0.5; 3],
             normal_png: Some(Cx::encode_rgba_as_png(2, 2, &normal).unwrap()),
-            scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25,
+            scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25, macro_variation: [0.2, 0.05, 0.1, 14.0],
         };
         let source = SplatSurface { layers: vec![layer], weights_png: Vec::new(), origin: [0.0; 2], cell: 1.0, width: 1.0, rows: 1.0 };
         let prepared = PreparedSplat::prepare(&source, &mut 4096).unwrap();
@@ -762,6 +772,7 @@ mod tests{
         assert_eq!(prepared.normal[0].data[..4].iter().map(|p| p >> 24).collect::<Vec<_>>(), [16, 80, 176, 240], "level-zero roughness alpha survives");
         assert_eq!(prepared.normal[0].data[4] >> 24, 128, "mip alpha averages linearly");
         assert_eq!(prepared.size[3], 1.0, "single mesh surface needs no weight map read");
+        assert_eq!(prepared.macro_variation[0], [0.2, 0.05, 0.1, 14.0], "the layer's macro variation reaches its uniform");
     }
 
     #[test]

@@ -531,6 +531,9 @@ impl ModelDraw<'_> {
             for (i, id) in [live_id!(splat_s0), live_id!(splat_s1), live_id!(splat_s2), live_id!(splat_s3), live_id!(splat_s4), live_id!(splat_s5), live_id!(splat_s6), live_id!(splat_s7)].into_iter().enumerate() {
                 vars.set_uniform(cx, id, &p.surface[i]);
             }
+            for (i, id) in [live_id!(splat_m0), live_id!(splat_m1), live_id!(splat_m2), live_id!(splat_m3), live_id!(splat_m4), live_id!(splat_m5), live_id!(splat_m6), live_id!(splat_m7)].into_iter().enumerate() {
+                vars.set_uniform(cx, id, &p.macro_variation[i]);
+            }
             if let Some(id) = vars.draw_shader_id {
                 for (name, texture) in [(live_id!(normal_map), &p.normal), (live_id!(occlusion_map), &p.weights)] {
                     if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name).filter(|slot| *slot < vars.texture_slots.len()) {

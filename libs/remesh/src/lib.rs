@@ -23,6 +23,7 @@ pub mod parallel;
 pub mod post;
 pub mod qef;
 pub mod sat;
+pub mod simplify;
 pub mod spatial;
 pub mod surface;
 

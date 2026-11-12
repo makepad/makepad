@@ -4,10 +4,12 @@
 //! slot their binding ABI already fixed, and spread this for the uniforms and
 //! the filter. Realtime cascaded shadow maps (shadow_csm.rs): 4 sun-depth
 //! tiles in a 2x2 grid of one sampled D32 target, read with hardware compare.
-//! csm_p = (tier on, one tile's inverse resolution, filter seed, 0); csm_r*N are
+//! csm_p = (tier on, one tile's inverse resolution, filter seed, the world
+//! texel grid's period: shadow_csm::CSM_CELL_PERIOD); csm_r*N are
 //! cascade N's world->map rows; csm_da/db map a z01 reference to stored
 //! depth per cascade; csm_zw = z01 per world unit; csm_texel = texel size in
-//! world units. When the tier is on, `csm_vis` REPLACES every baked
+//! world units; csm_gx/csm_gy = each tile's place on its world texel grid
+//! (`CsmCascade::grid`). When the tier is on, `csm_vis` REPLACES every baked
 //! sun-visibility path — one receive path for statics, dynamics and
 //! characters alike.
 
@@ -31,6 +33,8 @@ script_mod! {
         csm_db: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         csm_zw: uniform(vec4(0.01, 0.01, 0.01, 0.01))
         csm_texel: uniform(vec4(0.01, 0.01, 0.01, 0.01))
+        csm_gx: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        csm_gy: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         csm_rx0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
         csm_ry0: uniform(vec4(0.0, 1.0, 0.0, 0.0))
         csm_rz0: uniform(vec4(0.0, 0.0, 1.0, 0.0))
@@ -114,8 +118,9 @@ script_mod! {
 
         // Filtered visibility of wp in cascade ci: 12 Poisson taps plus the
         // centre, each a hardware 2x2 compare, on a disk rotated per quarter
-        // shadow texel (stable on the surface, no temporal crawl) so the
-        // kernel's taps never line up into bands. The disk radius holds a
+        // texel of the cascade's WORLD texel grid (stable on the surface while
+        // the camera moves and the tile snaps under it, no temporal crawl) so
+        // the kernel's taps never line up into bands. The disk radius holds a
         // roughly constant world penumbra (2.5 cm) within 1.5..3 texels, so
         // the penumbra does not jump in width at every cascade seam.
         //
@@ -137,7 +142,12 @@ script_mod! {
             let u = q.x * 0.5 + 0.5
             let v = 0.5 - q.y * 0.5
             let e = self.csm_p.y
-            let cell = floor(vec2(u, v) / e * 4.0)
+            // The world texel: the tile's texel plus the tile's place on the
+            // grid, wrapped at the grid's period (csm_p.w).
+            let period = self.csm_p.w
+            let gx = u / e + self.csm_pick(self.csm_gx, ci)
+            let gy = self.csm_pick(self.csm_gy, ci) - v / e
+            let cell = floor(vec2(gx - floor(gx / period) * period, gy - floor(gy / period) * period) * 4.0)
             // The disk's rotation per cell, turned by the golden angle per
             // seed (csm_p.z): a still view's averaged recordings smooth the
             // penumbra's noise out.

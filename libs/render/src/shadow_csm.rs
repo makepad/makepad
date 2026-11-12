@@ -60,6 +60,10 @@ const RADIUS_STEPS_PER_OCTAVE: f32 = 16.0;
 /// One step moves a 10 m caster's shadow by under 2 cm.
 const SUN_STEP_RAD: f32 = 0.001_745;
 
+/// The receiver filter's rotation cells repeat every this many shadow
+/// texels of a cascade's world grid ([`CsmCascade::grid`]).
+pub const CSM_CELL_PERIOD: f64 = 1024.0;
+
 /// Metre-sized floors shrink below the outdoor ladder's 10 m detail range.
 fn range_scale(range: f32) -> f32 {
     (range / 10.0).clamp(f32::EPSILON, 1.0)
@@ -144,6 +148,16 @@ pub struct CsmCascade {
     pub view_planes: [Vec4f; 5],
     /// The scene's lowest point: nothing below it receives a shadow.
     pub floor: f32,
+    /// Where the tile's texels sit on the cascade's WORLD texel grid, modulo
+    /// [`CSM_CELL_PERIOD`]: x is the grid column of the tile's uv origin
+    /// (columns run along `rx`), y the grid row of the tile's uv origin
+    /// (rows run along `ry`, against v). The receiver's filter turns its
+    /// disk by a hash of the world texel it samples (tile uv x resolution
+    /// plus this), so the texel snap of a moving camera keeps every
+    /// receiver's rotation. Hashing the tile-local texel dealt the
+    /// penumbra's noise anew at every snap: walking, every shadow edge
+    /// boiled, and it froze when the camera stopped.
+    pub grid: [f32; 2],
 }
 
 /// The frame's fitted cascade set.
@@ -260,10 +274,12 @@ fn fit_cascade(
     let radius = quantize_radius(radius.max(0.5 * scale));
     let ex = radius * (1.0 + 2.0 / res);
     let texel = 2.0 * ex / res;
-    // Texel snap: quantize the center's right/up coordinates.
-    let snap = |v: f32| (v / texel).floor() * texel;
-    let cr = snap(right.dot(center));
-    let cu = snap(up.dot(center));
+    // Texel snap: quantize the center's right/up coordinates to whole
+    // texels of the world grid (column kr, row ku).
+    let kr = (right.dot(center) / texel).floor();
+    let ku = (up.dot(center) / texel).floor();
+    let cr = kr * texel;
+    let cu = ku * texel;
     let cf = fwd.dot(center);
     let c = right * cr + up * cu + fwd * cf;
     // z window: from the whole scene toward the sun (a caster far outside
@@ -311,6 +327,12 @@ fn fit_cascade(
         view_hull_n: 0,
         view_planes: [Vec4f::default(); 5],
         floor: scene_min.y,
+        // u = 0 is half a tile left of the snapped centre; v = 0 half a tile
+        // above it (v runs down).
+        grid: [
+            (kr as f64 - res as f64 * 0.5).rem_euclid(CSM_CELL_PERIOD) as f32,
+            (ku as f64 + res as f64 * 0.5).rem_euclid(CSM_CELL_PERIOD) as f32,
+        ],
     }
 }
 
@@ -862,7 +884,9 @@ mod tests {
     /// (the map's world-space grid phase never drifts) — sub-texel phase
     /// drift is what re-rasterizes every edge each frame and makes them
     /// crawl. The origin itself may legitimately step, so comparing rows
-    /// directly over-asserts.
+    /// directly over-asserts. And the receiver filter's world texel (the
+    /// cell `csm_sample` hashes its disk rotation from) stays the point's
+    /// own: keyed to the tile, every snap re-dealt the penumbra's noise.
     #[test]
     fn texel_snap_keeps_the_grid_phase_through_camera_motion() {
         let view = test_view();
@@ -913,6 +937,22 @@ mod tests {
                         (du - du.round()).abs() < 0.05,
                         "cascade {i} drifted {du} texels (fraction {})",
                         du - du.round()
+                    );
+                }
+                // The shader's world texel: tile uv x resolution plus the
+                // tile's grid place, wrapped at the period.
+                let period = CSM_CELL_PERIOD as f32;
+                let world_texel = |c: &CsmCascade, q: Vec3f| {
+                    let wrap = |x: f32| x - (x / period).floor() * period;
+                    [wrap((q.x * 0.5 + 0.5) * res + c.grid[0]), wrap(c.grid[1] - (0.5 - q.y * 0.5) * res)]
+                };
+                let (ta, tb) = (world_texel(ca, pa), world_texel(cb, pb));
+                for k in 0..2 {
+                    let d = (ta[k] - tb[k]).abs();
+                    assert!(
+                        d.min(period - d) < 0.05,
+                        "cascade {i}: the filter's world texel moved {} texels with the camera",
+                        d.min(period - d)
                     );
                 }
             }

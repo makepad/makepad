@@ -87,7 +87,7 @@ pub enum ProgramOp {
 pub enum MeshPrimitive {
     Sphere { object: String, radius: f64, segments: u32, rings: u32, smooth: bool },
     Cylinder { object: String, radius: f64, height: f64, segments: u32, smooth: bool },
-    Polygons { object: String, positions: Vec<[f64; 3]>, polygons: Vec<crate::mesh::Polygon> },
+    Polygons { object: String, positions: Vec<[f64; 3]>, polygons: Vec<crate::mesh::Polygon>, normals: Vec<[f64; 3]>, colors: Vec<[f64; 4]> },
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PrimitiveKey {
@@ -103,38 +103,76 @@ impl MeshPrimitive {
             Self::Polygons { .. } => None,
         }
     }
-    fn cached_operation(&self, limits: &Limits, cache: &mut BTreeMap<PrimitiveKey, CachedPrimitive>) -> crate::Result<Operation> {
-        let Some((key, object)) = self.cache_key() else { return self.operation(limits) };
-        let Some(cached) = cache.get_mut(&key) else { return self.operation(limits) };
+    fn cached_operations(&self, limits: &Limits, cache: &mut BTreeMap<PrimitiveKey, CachedPrimitive>) -> crate::Result<Vec<Operation>> {
+        let Some((key, object)) = self.cache_key() else { return self.operations(limits) };
+        let Some(cached) = cache.get_mut(&key) else { return self.operations(limits) };
         cached.remaining -= 1;
         if let Some(source) = &mut cached.source {
             // Move the last use out so the cache does not retain completed inputs.
             let source = if cached.remaining == 0 { std::mem::take(source) } else { source.clone() };
-            return Ok(Operation::ImportMesh { object: object.into(), source });
+            return Ok(vec![Operation::ImportMesh { object: object.into(), source }]);
         }
-        let op = self.operation(limits)?;
-        if let Operation::ImportMesh { source, .. } = &op { cached.source = Some(source.clone()); }
-        Ok(op)
+        let ops = self.operations(limits)?;
+        if let Some(Operation::ImportMesh { source, .. }) = ops.first() { cached.source = Some(source.clone()); }
+        Ok(ops)
     }
-    fn operation(&self, limits: &Limits) -> crate::Result<Operation> {
-        match self {
+    fn operations(&self, limits: &Limits) -> crate::Result<Vec<Operation>> {
+        let op = match self {
             Self::Sphere { object, radius, segments, rings, smooth } => Operation::sphere(object.clone(), *radius, *segments, *rings, *smooth, limits),
             Self::Cylinder { object, radius, height, segments, smooth } => Operation::cylinder(object.clone(), *radius, *height, *segments, *smooth, limits),
-            Self::Polygons { object, positions, polygons } => Operation::polygon_mesh(object.clone(), positions, polygons, limits),
-        }
+            Self::Polygons { object, positions, polygons, normals, colors } => {
+                if normals.is_empty() && colors.is_empty() {
+                    return Ok(vec![Operation::polygon_mesh(object.clone(), positions, polygons, limits)?]);
+                }
+                for (attribute, count) in [("normals", normals.len()), ("colors", colors.len())] {
+                    if count != 0 && count != positions.len() {
+                        return Err(Error::Mesh(crate::mesh::MeshError::InvalidInput(format!("mesh '{object}': {attribute} needs one value per vertex ({count} for {} vertices)", positions.len()))));
+                    }
+                }
+                let mut ctx = crate::mesh::Context::new(limits.mesh.clone(), None);
+                let mut mesh = crate::ops::polygon_mesh(positions, polygons, &mut ctx)?;
+                if !normals.is_empty() {
+                    // Polygon order is corner order, so shared vertices receive the
+                    // same authored normal without changing topology or UV seams.
+                    let values = mesh.corners().iter().zip(polygons.iter().flat_map(|p| &p.vertices))
+                        .map(|(corner, &vertex)| (corner.id, Some(normals[vertex as usize]))).collect::<Vec<_>>();
+                    mesh.set_corner_normals_bulk(&values, &mut ctx)?;
+                }
+                let mut ops = vec![Operation::ImportMesh { object: object.clone(), source: mesh.to_bytes(&mut ctx)? }];
+                if !colors.is_empty() {
+                    ops.push(Operation::Surface(crate::SurfaceOperation::VertexColors {
+                        object: object.clone(), vertices: mesh.vertices().iter().map(|v| v.id).collect(), colors: colors.clone(),
+                    }));
+                }
+                // UV edits and export welding keep these corner normals and vertex
+                // colours. Explicit normal recalculation replaces the authored field;
+                // topology welds and decimation clear normals on changed faces because
+                // those faces no longer describe the authored surface. Derived LODs
+                // may approximate that field; the full-detail source keeps it intact.
+                // Surface reconciliation and LOD transfer retain or interpolate colours.
+                return Ok(ops);
+            }
+        }?;
+        Ok(vec![op])
     }
     fn write(&self, w: &mut Writer) -> crate::Result<()> {
         match self {
             Self::Sphere { object, radius, segments, rings, smooth } => { w.u8(0)?; w.string(object)?; w.f64(*radius)?; w.u32(*segments)?; w.u32(*rings)?; w.u8(*smooth as u8) }
             Self::Cylinder { object, radius, height, segments, smooth } => { w.u8(1)?; w.string(object)?; w.f64(*radius)?; w.f64(*height)?; w.u32(*segments)?; w.u8(*smooth as u8) }
-            Self::Polygons { object, positions, polygons } => {
-                w.u8(2)?; w.string(object)?;
+            Self::Polygons { object, positions, polygons, normals, colors } => {
+                // Keep the original encoding for meshes without authored attributes.
+                let attributes = !normals.is_empty() || !colors.is_empty();
+                w.u8(if attributes { 3 } else { 2 })?; w.string(object)?;
                 w.count(positions.len())?; for p in positions { for v in p { w.f64(*v)?; } }
                 w.count(polygons.len())?;
                 for p in polygons {
                     w.count(p.vertices.len())?; for v in &p.vertices { w.u32(*v)?; }
                     w.count(p.uvs.len())?; for uv in &p.uvs { w.f64(uv[0])?; w.f64(uv[1])?; }
                     w.u32(p.material)?;
+                }
+                if attributes {
+                    w.count(normals.len())?; for normal in normals { for v in normal { w.f64(*v)?; } }
+                    w.count(colors.len())?; for color in colors { for v in color { w.f64(*v)?; } }
                 }
                 Ok(())
             }
@@ -248,7 +286,10 @@ impl Runner<'_> {
     fn remember(&mut self, indices: &[usize], operations: Vec<Operation>) {
         let batch = indices.iter().zip(operations).map(|(&index, operation)| {
             self.replay_bytes = self.replay_bytes.saturating_add(std::mem::size_of::<ReplayInput>());
-            if matches!(self.program[index], ProgramOp::Op(_) | ProgramOp::Mesh(_)) {
+            // Coloured polygons expand to two operations, which may straddle a
+            // batch boundary. Retain each expansion so error replay applies it once.
+            let expanded_mesh = matches!(&self.program[index], ProgramOp::Mesh(MeshPrimitive::Polygons { colors, .. }) if !colors.is_empty());
+            if !expanded_mesh && matches!(self.program[index], ProgramOp::Op(_) | ProgramOp::Mesh(_)) {
                 ReplayInput::Program(index)
             } else {
                 self.replay_bytes = self.replay_bytes.saturating_add(operation.memory_bytes());
@@ -258,14 +299,17 @@ impl Runner<'_> {
         self.replay_batches.push(batch);
     }
     fn materialize(&self, batch: &[ReplayInput]) -> crate::Result<Vec<Operation>> {
-        batch.iter().map(|input| match input {
-            ReplayInput::Expanded(op) => Ok((**op).clone()),
-            ReplayInput::Program(index) => match &self.program[*index] {
-                ProgramOp::Op(op) => Ok(op.clone()),
-                ProgramOp::Mesh(mesh) => mesh.operation(&self.limits),
-                _ => unreachable!(),
-            },
-        }).collect()
+        batch.iter().try_fold(Vec::new(), |mut operations, input| {
+            match input {
+                ReplayInput::Expanded(op) => operations.push((**op).clone()),
+                ReplayInput::Program(index) => match &self.program[*index] {
+                    ProgramOp::Op(op) => operations.push(op.clone()),
+                    ProgramOp::Mesh(mesh) => operations.extend(mesh.operations(&self.limits)?),
+                    _ => unreachable!(),
+                },
+            }
+            Ok(operations)
+        })
     }
     fn flush(&mut self, names: &[String]) -> Result<(), ProgramFailure> {
         let _flush = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::FlushApply);
@@ -374,9 +418,9 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             ProgramOp::Impostor { .. } => {}
             ProgramOp::Mesh(m) => {
                 let started = ProgramInstant::now();
-                let operation = m.cached_operation(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?;
+                let operations = m.cached_operations(&run.limits, &mut primitives).map_err(|e| fail(index, describe_error(&e)))?;
                 crate::build_detail::record_operation(crate::build_detail::primitive_kind(m).1, 0, started.elapsed());
-                run.pending.push((index, operation));
+                run.pending.extend(operations.into_iter().map(|op| (index, op)));
             }
             ProgramOp::ImageLayer { material, channel, layer, image } => {
                 use crate::{SurfaceChannel as Ch, SurfaceOperation as S};
@@ -541,4 +585,66 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
     detail.triangles = compiled.triangles;
     detail.weathering = weathering_detail;
     Ok(BuiltProgram { document, compiled, warnings, timings, detail })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polygon_attributes_export_and_plain_mesh_keeps_legacy_bytes() {
+        let positions = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+        let polygons = vec![crate::mesh::Polygon::new(vec![0, 1, 2]), crate::mesh::Polygon::new(vec![0, 3, 1])];
+        let normals = vec![[2., 0., 0.], [0., 3., 0.], [0., 0., 4.], [-2., 0., 0.]];
+        let colors = vec![[1., 1., 1., 0.], [1., 1., 1., 0.25], [1., 1., 1., 0.75], [1.; 4]];
+        let primitive = |normals: Vec<[f64; 3]>, colors: Vec<[f64; 4]>| MeshPrimitive::Polygons {
+            object: "card".into(), positions: positions.clone(), polygons: polygons.clone(), normals, colors,
+        };
+        let build = |ops: &[ProgramOp], limits| build_program(ops, limits, &mut |_| Err("no external inputs".into()), None);
+        let legacy = build(&[ProgramOp::Op(Operation::polygon_mesh("card", &positions, &polygons, &Limits::default()).unwrap())], Limits::default()).unwrap();
+        let plain = primitive(Vec::new(), Vec::new());
+        let original = build(&[ProgramOp::Mesh(plain.clone())], Limits::default()).unwrap();
+        assert_eq!(original.compiled.glb, legacy.compiled.glb, "no attributes keeps the original GLB bytes");
+        let mut encodings = std::collections::BTreeSet::new();
+        for (with_normals, with_colors) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mesh = primitive(if with_normals { normals.clone() } else { Vec::new() }, if with_colors { colors.clone() } else { Vec::new() });
+            let ops = vec![ProgramOp::Mesh(mesh)];
+            assert!(encodings.insert(program_bytes(&ops).unwrap()), "each attribute changes the cache key");
+            let built = build(&ops, Limits::default()).unwrap();
+            let loaded = makepad_gltf::load_gltf_from_bytes(&built.compiled.glb, None).unwrap();
+            let decoded = makepad_gltf::decode_mesh_primitive(&loaded, 0, 0).unwrap();
+            assert_eq!(decoded.colors0.is_some(), with_colors, "only authored colours add COLOR_0");
+            let actual_normals = decoded.normals.as_ref().unwrap();
+            for (i, position) in decoded.positions.iter().enumerate() {
+                let vertex = positions.iter().position(|p| p.map(|v| v as f32) == *position).unwrap();
+                if with_normals {
+                    assert_eq!(actual_normals[i], normalized(normals[vertex]).unwrap().map(|v| v as f32), "normal of vertex {vertex}");
+                }
+                if let Some(actual) = &decoded.colors0 {
+                    assert_eq!(actual[i], colors[vertex].map(|v| v as f32), "colour of vertex {vertex}");
+                }
+            }
+            if !with_normals {
+                for (face, triangle) in decoded.indices.chunks_exact(3).enumerate() {
+                    for &corner in triangle {
+                        assert_eq!(actual_normals[corner as usize], [[0., 0., 1.], [0., 1., 0.]][face], "legacy face normal");
+                    }
+                }
+            }
+        }
+        // A colour operation can fall in the next transaction. Error replay must
+        // not expand either half twice or lose the original failure attribution.
+        let mut limits = Limits::default();
+        limits.max_operations = 1;
+        let mut ops = vec![ProgramOp::Mesh(primitive(normals.clone(), colors.clone()))];
+        build(&ops, limits.clone()).unwrap();
+        ops.push(ProgramOp::Op(Operation::DeleteObject { object: "missing".into() }));
+        let error = build(&ops, limits).err().unwrap();
+        assert_eq!(error.index, 1, "replay keeps the failing program index");
+        assert!(error.message.contains("missing"), "{}", error.message);
+        for (normals, colors, attribute) in [(vec![[1., 0., 0.]], Vec::new(), "normals"), (Vec::new(), vec![[1.; 4]], "colors")] {
+            let error = build(&[ProgramOp::Mesh(primitive(normals, colors))], Limits::default()).err().unwrap();
+            assert!(error.message.contains("card") && error.message.contains(attribute), "{}", error.message);
+        }
+    }
 }

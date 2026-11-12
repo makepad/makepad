@@ -1745,7 +1745,8 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
 /// A generated terrain tile's paint (gen level glb.rs `splat_material`):
 /// `weights` (a texture index), `map` [x, z, cell, width, rows] and per
 /// layer its `albedo` (or flat sRGB `color`), `normal` and `bump`, `scale`
-/// (1/metres), `roughness`, `metallic`.
+/// (1/metres), `roughness`, `metallic`, and `macro` [brightness, hue,
+/// roughness, size metres] (world macro variation; absent = none).
 fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
     let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
     let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
@@ -1757,6 +1758,10 @@ fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::S
         scale:num(l,"scale",1.0),roughness:num(l,"roughness",0.9),metallic:num(l,"metallic",0.0),bump:num(l,"bump",0.0),
         relief:num(l,"relief",0.0).clamp(0.0,0.12),
         wet:num(l,"wet",0.0).clamp(0.0,1.0),puddles:num(l,"puddles",0.0).clamp(0.0,1.0),
+        macro_variation:{
+            let v=|i:usize|l.get("macro").and_then(|m|m.idx(i)).and_then(Val::f64).map_or(0.0,|v|v as f32);
+            if v(3)>0.0 {[v(0).clamp(0.0,1.0),v(1).clamp(0.0,1.0),v(2).clamp(0.0,1.0),v(3)]} else {[0.0;4]}
+        },
     }).collect::<Vec<_>>();
     Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights")).unwrap_or_default(),origin:[m(0,0.0),m(1,0.0)],cell:m(2,1.0),width:m(3,1.0),rows:m(4,1.0)})
 }
@@ -3906,6 +3911,9 @@ pub(crate) mod tests {
         let old = JsonParser::parse(br#"{"layers":[{}]}"#).unwrap();
         let old = gltf_splat(&old, &[], &old).unwrap();
         assert_eq!((old.layers[0].relief, old.layers[0].wet, old.layers[0].puddles), (0.0, 0.0, 0.0));
+        assert_eq!(old.layers[0].macro_variation, [0.0; 4], "no macro variation unless a layer asks");
+        let varied = JsonParser::parse(br#"{"layers":[{"macro":[0.2,0.05,0.1,14]}]}"#).unwrap();
+        assert_eq!(gltf_splat(&varied, &[], &varied).unwrap().layers[0].macro_variation, [0.2, 0.05, 0.1, 14.0]);
     }
 
     #[test]

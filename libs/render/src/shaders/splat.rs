@@ -63,6 +63,53 @@ script_mod! {
         splat_s6: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_s7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
+        // World macro variation per layer: x brightness, y warm/cool hue,
+        // z roughness amplitudes, w the middle octave's size in metres (0:
+        // none; a terrain layer then keeps the brightness drift).
+        splat_m0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m3: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m4: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m5: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m6: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_m7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
+        splat_macro_param: fn(l: float) -> vec4 {
+            if l < 0.5 { return self.splat_m0 }
+            if l < 1.5 { return self.splat_m1 }
+            if l < 2.5 { return self.splat_m2 }
+            if l < 3.5 { return self.splat_m3 }
+            if l < 4.5 { return self.splat_m4 }
+            if l < 5.5 { return self.splat_m5 }
+            if l < 6.5 { return self.splat_m6 }
+            return self.splat_m7
+        }
+
+        // World macro variation at wp (xz) for a layer's `mv`: x the
+        // brightness field, y the roughness field (both about -1..1), z the
+        // hue field (-0.5..0.5). Three octaves of world value noise at 4.7x,
+        // 1x and 0.2x the size (about 70, 15 and 3 m at size 15): no tile
+        // period can show through it. Roughness takes its own two finer
+        // octaves and shares only the broadest one, inverted (light, worn
+        // stretches are polished), so the specular sheen does not just
+        // repeat the brightness. An octave fades out where one pixel spans an
+        // eighth to a quarter of its cell, so nothing shimmers at grazing
+        // angles; `span` is the pixel's footprint in metres.
+        splat_macro: fn(mv: vec4, wp: vec3, span: float) -> vec3 {
+            let q = vec2(wp.x, wp.z) / mv.w
+            let s = span / mv.w
+            let k2 = 1.0 - smoothstep(0.12, 0.25, s)
+            let k3 = 1.0 - smoothstep(0.024, 0.05, s)
+            let a1 = self.tn_noise(q * 0.21 + vec2(3.7, 1.3)) - 0.5
+            let a2 = (self.tn_noise(q + vec2(7.1, 2.9)) - 0.5) * k2
+            let a3 = (self.tn_noise(q * 5.0 + vec2(1.9, 5.3)) - 0.5) * k3
+            let r2 = (self.tn_noise(q * 1.3 + vec2(13.7, 8.3)) - 0.5) * k2
+            let r3 = (self.tn_noise(q * 4.3 + vec2(5.9, 17.1)) - 0.5) * k3
+            let hue = self.tn_noise(q * 0.47 + vec2(11.3, 4.1)) - 0.5
+            return vec3((a1 * 0.5 + a2 * 0.33 + a3 * 0.22) * 2.0, (a1 * -0.4 + r2 * 0.4 + r3 * 0.3) * 2.0, hue)
+        }
+
         splat_surface_param: fn(l: float) -> vec4 {
             if l < 0.5 { return self.splat_s0 }
             if l < 1.5 { return self.splat_s1 }
@@ -311,8 +358,13 @@ script_mod! {
                 let t2 = self.tex.sample_grad_repeat(vec3(wp.x * s2 + 0.31, wp.z * s2 - 0.47, l), vec2(dx.x, dx.z) * s2, vec2(dy.x, dy.z) * s2)
                 tex = vec4(mix(tex.xyz, t2.xyz, 0.5 * far * bw.y), tex.w)
             }
-            // The brightness drift over ~60 m.
-            if self.triplanar != 0.0 {
+            // World macro variation (the layer's own), else on terrain the
+            // brightness drift over ~60 m.
+            let mv = self.splat_macro_param(l)
+            var macro_field = vec3(0.0, 0.0, 0.0)
+            if mv.w > 0.0 {
+                macro_field = self.splat_macro(mv, wp, max(length(dx), length(dy)))
+            } else if self.triplanar != 0.0 {
                 let drift = self.tn_noise(vec2(wp.x, wp.z) * 0.017) * 0.65 + self.tn_noise(vec2(wp.x, wp.z) * 0.061) * 0.35
                 tex = vec4(tex.xyz * (0.86 + 0.28 * drift), tex.w)
             }
@@ -329,7 +381,9 @@ script_mod! {
                 if surface_param.z >= 1.0 { water = 1.0 }
             }
             let wet = surface_param.y
+            let hue = macro_field.z * mv.y * 2.0
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z)) * ((1.0 - 0.35 * wet) * (1.0 - 0.35 * water))
+                * (1.0 + macro_field.x * mv.x) * vec3(1.0 + hue, 1.0, 1.0 - hue)
             var vertex_tint = self.to_lin(self.v_tint.xyz)
             if self.triplanar == 0.0 { vertex_tint = self.to_scene(self.v_tint.xyz) }
             let surf = self.surface(vec4(self.color_adjust(
@@ -350,7 +404,7 @@ script_mod! {
             }
             n = self.mat_normal(n)
             if water > 0.0 { n = normalize(mix(n, geometric_normal, water)) }
-            let dry_rough = clamp(p.y + (normal_rough.w - 0.5) * 0.7, 0.04, 1.0)
+            let dry_rough = clamp(p.y + (normal_rough.w - 0.5) * 0.7 + macro_field.y * mv.z, 0.04, 1.0)
             let wet_rough = mix(dry_rough, 0.08, wet)
             let mr = self.mat_metal_rough(vec2(clamp(p.z, 0.0, 1.0) * (1.0 - water), mix(wet_rough, 0.03, water)))
             let f0 = mix(mix(vec3(0.04, 0.04, 0.04), surf.xyz, mr.x), vec3(0.02, 0.02, 0.02), water)

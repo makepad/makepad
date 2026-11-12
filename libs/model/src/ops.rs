@@ -299,8 +299,12 @@ impl Operation {
     }
     /// A typed import operation for a mesh built from positions and polygons.
     pub fn polygon_mesh(object: impl Into<String>, positions: &[[f64; 3]], polygons: &[crate::mesh::Polygon], limits: &crate::Limits) -> crate::Result<Self> {
-        if positions.len() > limits.mesh.max_vertices || polygons.len() > limits.mesh.max_faces { return Err(crate::Error::Budget("polygon mesh size")); }
         let mut ctx = crate::mesh::Context::new(limits.mesh.clone(), None);
-        Ok(Self::ImportMesh { object: object.into(), source: crate::mesh::Mesh::from_polygons(positions, polygons, &mut ctx)?.to_bytes(&mut ctx)? })
+        Ok(Self::ImportMesh { object: object.into(), source: polygon_mesh(positions, polygons, &mut ctx)?.to_bytes(&mut ctx)? })
     }
+}
+
+pub(crate) fn polygon_mesh(positions: &[[f64; 3]], polygons: &[crate::mesh::Polygon], ctx: &mut crate::mesh::Context<'_>) -> crate::Result<crate::mesh::Mesh> {
+    if positions.len() > ctx.limits.max_vertices || polygons.len() > ctx.limits.max_faces { return Err(crate::Error::Budget("polygon mesh size")); }
+    Ok(crate::mesh::Mesh::from_polygons(positions, polygons, ctx)?)
 }

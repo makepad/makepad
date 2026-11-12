@@ -2935,24 +2935,28 @@ pub fn sol_newton(m: &Model, d: &mut Data, maxiter: i32) {
     sol_primal_whole(m, d, maxiter, 1);
 }
 
-// The serial work of an island's solve for `thread::part_count`, in nanoseconds per row and dof of the
-// island, on the node that measured the pool's fan-out cost: Newton's constraint stage took 1093 us on 100
-// humanoids (6300 rows and dofs over 100 islands), 238 us on 22 and 8.2 us on one (63). CG and elliptic cones
-// take 1.5 to 5 times as long a row, so their solves split a little less than they could.
-const ISLAND_SIZE_NS: usize = 170;
+// The serial work of an island's solve in nanoseconds, for `thread::part_count` and to balance the parts: each
+// row and dof about 64 ns, and the dofs squared 8 ns more each (the Hessian and its factor). Fitted on a 16-thread
+// Linux node over Newton solves of thirteen models at 1 thread: a humanoid (27 dofs, 6 to 36 rows: 8.3 to 9.6 us),
+// 22 of them, a dragon of 180 rows on 23 dofs, vehicles, and an athlete of five islands of 1 to 3 dofs (8.5 us in
+// all; rows and dofs alone made it 21 us, two parts). Within x0.6 to x1.2 at one or two iterations: the iterations
+// a solve takes, unknown before it, make the rest. A rows x dofs term fits no better once the dofs squared are in.
+// CG and elliptic cones take 1.5 to 5 times as long a row, so their solves split a little less than they could.
+const ISLAND_ROW_NS: usize = 64;
+const ISLAND_DOF2_NS: usize = 8;
 
-// An island's size, for the work estimate and to balance the parts: its rows and dofs.
-fn island_size(d: &Data, island: usize) -> usize {
-    (d.island_nefc[island] + d.island_nv[island]) as usize
+fn island_ns(d: &Data, island: usize) -> usize {
+    let (rows, dofs) = (d.island_nefc[island] as usize, d.island_nv[island] as usize);
+    ISLAND_ROW_NS * (rows + dofs) + ISLAND_DOF2_NS * dofs * dofs
 }
 
-// The islands of the next run from `start`: islands join a run until it holds `share` of rows and dofs, and an
-// island of a share or more is a run alone.
+// The islands of the next run from `start`: islands join a run until it holds `share` of their work
+// (`island_ns`), and an island of a share or more is a run alone.
 fn island_run(d: &Data, start: usize, share: usize) -> usize {
     let nisland = d.nisland as usize;
     let (mut k, mut size) = (start, 0);
     while k < nisland {
-        let s = island_size(d, k);
+        let s = island_ns(d, k);
         if k > start && (size >= share || s >= share) {
             break;
         }
@@ -2986,7 +2990,7 @@ impl<'d, 'a> Iterator for IslandRuns<'d, 'a> {
 
 impl ExactSizeIterator for IslandRuns<'_, '_> {}
 
-/// CG (flg_newton 0) or Newton on every island. Runs of consecutive islands of about equal rows and dofs are
+/// CG (flg_newton 0) or Newton on every island. Runs of consecutive islands of about equal work are
 /// the parts of one fan-out on the pool bound to d (a phase too small to pay for one runs whole on the caller,
 /// `thread::part_count`). Each island's solve reads Data and writes its own part of the island-ordered
 /// outputs (`d.iacc`, `ifrc_constraint`, `iefc_force`, `iefc_state`), its statistics and its contacts' cone
@@ -2994,8 +2998,8 @@ impl ExactSizeIterator for IslandRuns<'_, '_> {}
 /// parts' warnings after, in island order.
 pub fn sol_primal_islands(m: &Model, d: &mut Data, maxiter: i32, flg_newton: i32) {
     let nisland = d.nisland as usize;
-    let work: usize = (0..nisland).map(|k| island_size(d, k)).sum();
-    let share = work.div_ceil(part_count(d, nisland, ISLAND_SIZE_NS * work)).max(1);
+    let work: usize = (0..nisland).map(|k| island_ns(d, k)).sum();
+    let share = work.div_ceil(part_count(d, nisland, work)).max(1);
     let mut nrun = 0;
     let mut k = 0;
     while k < nisland {

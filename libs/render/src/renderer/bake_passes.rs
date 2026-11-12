@@ -749,7 +749,7 @@ impl Renderer {
             da[i] = gs;
             db[i] = go;
         }
-        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, frame.seed, 0.0]);
+        dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, frame.seed, crate::shadow_csm::CSM_CELL_PERIOD as f32]);
         dv.set_uniform(cx, live_id!(csm_da), &da);
         dv.set_uniform(cx, live_id!(csm_db), &db);
         dv.set_uniform(
@@ -762,6 +762,8 @@ impl Renderer {
             live_id!(csm_texel),
             &[c[0].texel_world, c[1].texel_world, c[2].texel_world, c[3].texel_world],
         );
+        dv.set_uniform(cx, live_id!(csm_gx), &[c[0].grid[0], c[1].grid[0], c[2].grid[0], c[3].grid[0]]);
+        dv.set_uniform(cx, live_id!(csm_gy), &[c[0].grid[1], c[1].grid[1], c[2].grid[1], c[3].grid[1]]);
         let rows = |v: Vec4f| [v.x, v.y, v.z, v.w];
         for (i, (rx, ry, rz)) in [
             (live_id!(csm_rx0), live_id!(csm_ry0), live_id!(csm_rz0)),
