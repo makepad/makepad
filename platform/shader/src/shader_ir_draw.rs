@@ -776,6 +776,7 @@ pub fn build_draw_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl
         let call = b.e(ExprKind::Call(ff, Vec::new()), TY_VOID);
         b.f.body.push(Stmt::Expr(call));
     }
+    linear_light_output(&mut b, types, output, &io_globals);
     for (k, (_, i)) in frag_outputs.iter().enumerate() {
         let Some(g) = io_globals[*i] else { continue };
         let ty = b.m.globals[g as usize].ty;
@@ -893,6 +894,83 @@ fn copy_uniforms(b: &mut Bld, dyn_block: Option<GlobalId>, dyn_ios: &[usize], sc
             b.assign(place, field);
         }
     }
+}
+
+/// The uniform buffer `block`'s global (made here when the shader's own code never reads it)
+/// and the index of its `field`; None for a shader without that buffer or field.
+fn uniform_field(ir: &mut IrModule, types: &impl crate::shader_types::ShaderTypes, output: &ShaderOutput, block: LiveId, field: LiveId) -> Option<(GlobalId, u32, TyId)> {
+    let io = output.io.iter().position(|io| matches!(io.kind, ShaderIoKind::UniformBuffer) && io.name == block)?;
+    let g = io_global(types, output, ir, io)?;
+    let IrTy::Struct(si) = ir.get(ir.globals[g as usize].ty).clone() else { return None };
+    let (k, f) = ir.structs[si as usize].fields.iter().enumerate().find(|(_, f)| f.name == field)?;
+    Some((g, k as u32, f.ty))
+}
+
+/// The output epilogue of a pass that holds linear light (`DrawPassUniforms::linear_light`,
+/// `DrawPass::set_linear_light`): the shaders write display colour (gamma 2.2), and the first
+/// colour output is decoded to linear light as it is written, so the target blends, and an
+/// MSAA target resolves, in linear light. A call that blends over writes premultiplied colour
+/// (`DrawCallUniforms::premultiplied`): it is unpremultiplied, decoded and premultiplied again
+/// (alpha 0: nothing to decode, kept as it is). Any other call (no blending: in an MSAA pass its
+/// alpha is coverage; a max blend) has its colour decoded as it is. In every other pass this is
+/// one uniform compare per fragment; a shader without the pass or call uniforms is untouched.
+fn linear_light_output(b: &mut Bld, types: &impl crate::shader_types::ShaderTypes, output: &ShaderOutput, io_globals: &[Option<GlobalId>]) {
+    let Some(io) = output.io.iter().position(|io| matches!(io.kind, ShaderIoKind::FragmentOutput(0))) else { return };
+    let Some(color) = io_globals[io] else { return };
+    if *b.m.get(b.m.globals[color as usize].ty) != IrTy::Vec(4, IrScalar::F32) {
+        return;
+    }
+    let (Some((pass, on_k, on_ty)), Some((call, pm_k, pm_ty))) = (
+        uniform_field(b.m, types, output, id!(draw_pass), id!(linear_light)),
+        uniform_field(b.m, types, output, id!(draw_call), id!(premultiplied)),
+    ) else {
+        return;
+    };
+    let vec4 = b.m.vec_ty(4, IrScalar::F32);
+    // the colour decoded: per channel max(c (/ a), 0) ^ 2.2 (* a), alpha as it is
+    fn decoded(b: &mut Bld, color: GlobalId, vec4: TyId, premultiplied: bool) -> Stmt {
+        let mut lanes = Vec::with_capacity(4);
+        for k in 0..3 {
+            let c = b.glob(color);
+            let mut x = b.lane(c, k);
+            if premultiplied {
+                let c = b.glob(color);
+                let a = b.lane(c, 3);
+                x = b.bin(BinOp::Div, x, a, TY_F32);
+            }
+            let zero = b.f32(0.0);
+            let x = b.builtin(Builtin::Max, vec![x, zero], TY_F32);
+            let gamma = b.f32(2.2);
+            let mut x = b.builtin(Builtin::Pow, vec![x, gamma], TY_F32);
+            if premultiplied {
+                let c = b.glob(color);
+                let a = b.lane(c, 3);
+                x = b.bin(BinOp::Mul, x, a, TY_F32);
+            }
+            lanes.push(x);
+        }
+        let c = b.glob(color);
+        lanes.push(b.lane(c, 3));
+        let v = b.e(ExprKind::Construct(lanes), vec4);
+        let place = b.glob(color);
+        Stmt::Assign(place, v)
+    }
+    let over = decoded(b, color, vec4, true);
+    let straight = decoded(b, color, vec4, false);
+    let c = b.glob(color);
+    let a = b.lane(c, 3);
+    let zero = b.f32(0.0);
+    let covered = b.bin(BinOp::Gt, a, zero, TY_BOOL);
+    let blk = b.glob(call);
+    let pm = b.e(ExprKind::Field(blk, pm_k), pm_ty);
+    let half = b.f32(0.5);
+    let premultiplied = b.bin(BinOp::Gt, pm, half, TY_BOOL);
+    let blk = b.glob(pass);
+    let on = b.e(ExprKind::Field(blk, on_k), on_ty);
+    let half = b.f32(0.5);
+    let linear = b.bin(BinOp::Gt, on, half, TY_BOOL);
+    let body = vec![Stmt::If(premultiplied, vec![Stmt::If(covered, vec![over], Vec::new())], vec![straight])];
+    b.f.body.push(Stmt::If(linear, body, Vec::new()));
 }
 
 /// The clip volume test at the top of `depth_clip`: discard the fragment when its world
@@ -1511,6 +1589,7 @@ pub fn build_gl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl c
         let call = b.e(ExprKind::Call(ff, Vec::new()), TY_VOID);
         b.f.body.push(Stmt::Expr(call));
     }
+    linear_light_output(&mut b, types, output, &io_globals);
     for (k, i) in frag_outputs.iter().enumerate() {
         let Some(g) = io_globals[*i] else { continue };
         let ty = b.m.globals[g as usize].ty;
@@ -1882,6 +1961,7 @@ pub fn build_hlsl_entries(output: &ShaderOutput, ir: &mut IrModule, types: &impl
         let call = b.e(ExprKind::Call(ff, Vec::new()), TY_VOID);
         b.f.body.push(Stmt::Expr(call));
     }
+    linear_light_output(&mut b, types, output, &io_globals);
     for (k, (_, i)) in frag_outputs.iter().enumerate() {
         let Some(g) = io_globals[*i] else { continue };
         let ty = b.m.globals[g as usize].ty;
@@ -2231,6 +2311,7 @@ pub fn build_metal_entries(output: &ShaderOutput, ir: &mut IrModule, types: &imp
         let call = b.e(ExprKind::Call(ff, Vec::new()), TY_VOID);
         b.f.body.push(Stmt::Expr(call));
     }
+    linear_light_output(&mut b, types, output, &io_globals);
     for (k, (_, i)) in frag_outputs.iter().enumerate() {
         let Some(g) = io_globals[*i] else { continue };
         let ty = b.m.globals[g as usize].ty;
