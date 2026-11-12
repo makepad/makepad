@@ -97,8 +97,8 @@ impl AiServicePort {
     /// `None` when the process is standalone (nothing was sent) — the app
     /// then decides whether to embed its own chat panel.
     ///
-    /// The manifest must validate; a bad one is a programming error in the
-    /// app and is refused loudly rather than registered half-way.
+    /// Invalid tools and topics are logged and omitted. Invalid service
+    /// fields still refuse the manifest.
     pub fn hosted(cx: &Cx, manifest: ServiceManifest) -> Option<AiServicePort> {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(sender) = cx.hal_parent_sender() {
@@ -115,7 +115,10 @@ impl AiServicePort {
         Self::with_host_transport(manifest, Transport::Hosted)
     }
 
-    fn with_host_transport(manifest: ServiceManifest, transport: Transport) -> Option<AiServicePort> {
+    fn with_host_transport(mut manifest: ServiceManifest, transport: Transport) -> Option<AiServicePort> {
+        for problem in manifest.admit() {
+            makepad_platform::error!("{problem}");
+        }
         if let Err(e) = manifest.validate() {
             makepad_platform::error!("ai service manifest refused: {e}");
             return None;
@@ -133,7 +136,10 @@ impl AiServicePort {
 
     /// Open the port in-process. The returned link goes to the embedding
     /// host's own `ServiceRegistry`, which issues the endpoint.
-    pub fn in_process(manifest: ServiceManifest) -> Result<(AiServicePort, ServiceLink), String> {
+    pub fn in_process(mut manifest: ServiceManifest) -> Result<(AiServicePort, ServiceLink), String> {
+        for problem in manifest.admit() {
+            makepad_platform::error!("{problem}");
+        }
         manifest.validate()?;
         let (link, host) = ServiceLink::pair(manifest.clone());
         let port = AiServicePort {
@@ -403,10 +409,16 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_manifest_is_refused_before_anything_is_sent() {
-        let mut bad = files();
-        bad.tools[0].name = "Stat".into();
-        assert!(AiServicePort::in_process(bad).is_err());
+    fn a_bad_tool_is_left_out_and_a_bad_service_is_refused() {
+        let with_bad_tool = files().with_tool(ToolDef::new("Stat", "Not an identifier.", r#"{"type":"object"}"#, Risk::Read));
+        let (_port, link) = AiServicePort::in_process(with_bad_tool).unwrap();
+        match link.up.try_recv().unwrap().msg {
+            ServiceUp::Register { manifest, .. } => assert_eq!(manifest, files(), "the good tools are served, the bad one is left out"),
+            other => panic!("{other:?}"),
+        }
+        let mut bad_service = files();
+        bad_service.id = "Files".into();
+        assert!(AiServicePort::in_process(bad_service).is_err());
     }
 
     #[test]
@@ -526,7 +538,7 @@ mod open_tests {
     #[test]
     fn a_bad_manifest_opens_nothing_either_way() {
         let mut bad = sheets();
-        bad.tools[0].name = "Summary".into();
+        bad.id = "Sheets".into();
         let registry = ServiceRegistry::new();
         assert!(AiServicePort::open_in(false, &registry, bad.clone()).is_none());
         assert!(registry.services().is_empty());
