@@ -24,6 +24,7 @@ use makepad_dynamics::types::*;
 use makepad_dynamics::sdf::{self, Sdf};
 use makepad_box3d::field::DistanceField;
 use std::collections::{BTreeMap, BTreeSet};
+use makepad_dynamics::thread::TaskPool;
 use std::sync::Arc;
 
 // The sliding coefficient is to be chosen by measurement of the printed surfaces.
@@ -444,6 +445,13 @@ fn moving_joint(model: &Model, pair: (i32,i32)) -> Option<usize> {
 }
 
 impl DynWorld {
+    /// Spreads the engine's parallel work (the narrowphase, tactile sensors) over `pool`, or keeps it on the
+    /// stepping thread with None; the steps come out the same either way. The stepping thread helps and waits
+    /// for each spread, so a world bound to a pool is never stepped on the UI thread.
+    pub fn bind_pool(&mut self, pool: Option<Arc<dyn TaskPool>>) {
+        makepad_dynamics::thread::bind_thread_pool(&mut self.data, pool);
+    }
+
     pub fn new(asm: &Assembly, gravity: P3, floor: Option<f64>) -> Result<DynWorld, String> {
         let n = asm.bodies.len();
         if !gravity.iter().all(|x| x.is_finite()) { return Err("gravity must be finite".into()); }
@@ -1281,6 +1289,7 @@ impl DynWorld {
             (id>=0).then_some((id as usize,a.friction))
         }).collect();
         data.ctrl.copy_from_slice(&self.data.ctrl);
+        data.threadpool=self.data.threadpool.clone();
         self.model=model; self.data=data;
         self.configure();
         self.tune_motors();

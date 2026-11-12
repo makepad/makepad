@@ -8,6 +8,7 @@
 //! that goes idle takes it, and no state it believes the sim is in can leave it asleep over news.
 
 use crate::dyn_world::{DynWorld, Reset};
+use makepad_dynamics::thread::TaskPool;
 use crate::geom::*;
 use crate::sim::{AnchorKind, Assembly, BodyAction, JointKind, MechWorld, Pose, StringPath};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -312,6 +313,13 @@ impl Engine {
         on!(self, w => w.poses())
     }
 
+    /// The dynamics engine's parallel work on `pool` (box3d keeps its own).
+    fn bind_pool(&mut self, pool: &Option<Arc<dyn TaskPool>>) {
+        if let Engine::Dynamics(w) = self {
+            w.bind_pool(pool.clone());
+        }
+    }
+
     pub(crate) fn new(asm: &Assembly, gravity: P3, floor: Option<f64>) -> Result<Engine, String> {
         if on_dynamics(asm) {
             dynamics_world(asm, gravity, floor).map(|w| Engine::Dynamics(Box::new(w)))
@@ -375,11 +383,12 @@ impl Runner {
     /// Start the sim thread, paused at the print pose. The sim calls `wake` (on its thread) when it
     /// publishes news the UI has not taken yet: an app passes its signal to the UI thread.
     pub fn start(asm: Assembly, gravity: P3, wake: impl Fn() + Send + 'static) -> Runner {
-        Self::start_with_floor(asm, gravity, None, wake)
+        Self::start_with_floor(asm, gravity, None, None, wake)
     }
 
-    /// [`Runner::start`] with a floor across gravity (`MechWorld::new`'s level), for a piece that rests on the bed.
-    pub fn start_with_floor(asm: Assembly, gravity: P3, floor: Option<f64>, wake: impl Fn() + Send + 'static) -> Runner {
+    /// [`Runner::start`] with a floor across gravity (`MechWorld::new`'s level), for a piece that rests on the bed,
+    /// and the app's workpool for the dynamics engine's parallel work, which the sim thread helps with.
+    pub fn start_with_floor(asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn TaskPool>>, wake: impl Fn() + Send + 'static) -> Runner {
         let (tx, rx) = channel();
         // The print pose is known without constructing collision hulls on the caller's UI thread.
         // The physics world is built once, by its owning worker.
@@ -412,7 +421,10 @@ impl Runner {
             let (events, stop) = (events.clone(), stop.clone());
             std::thread::Builder::new().name("mech-sim".into()).spawn(move || {
                 match Engine::new(&asm, gravity, floor) {
-                    Ok(w) => run(asm, gravity, floor, w, rx, outbox, events, stop),
+                    Ok(mut w) => {
+                        w.bind_pool(&pool);
+                        run(asm, gravity, floor, pool, w, rx, outbox, events, stop)
+                    }
                     Err(e) => failed(&outbox, e, 0),
                 }
             }).ok()
@@ -465,7 +477,7 @@ impl Drop for Runner {
     }
 }
 
-fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, mut w: Engine, rx: Receiver<Command>, outbox: Outbox, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>) {
+fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn TaskPool>>, mut w: Engine, rx: Receiver<Command>, outbox: Outbox, events: Arc<Mutex<Vec<Event>>>, stop: Arc<AtomicBool>) {
     let dt = 1.0 / HZ;
     let mut running = false;
     let mut speed = 1.0;
@@ -505,6 +517,7 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, mut w: Engine, rx: Re
                         Ok(w) => w,
                         Err(e) => return failed(&outbox, e, commands),
                     };
+                    w.bind_pool(&pool);
                     running = true;
                     owed = 0.0;
                     at_limit.iter_mut().for_each(|a| *a = false);
