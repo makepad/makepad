@@ -50,6 +50,9 @@ pub struct BlockDefs {
     pub links: Vec<(String, String, String)>,
     /// Footnote definitions: normalised labels.
     pub footnotes: Vec<String>,
+    /// Footnote references in source order, normalised labels, whether the
+    /// document defines them or not (a definition elsewhere can come later).
+    pub footnote_refs: Vec<String>,
 }
 
 /// One top-level block. Its lines run from `start` to the next block's start
@@ -227,9 +230,10 @@ pub fn front_matter_end(lines: &[String]) -> Option<usize> {
 }
 
 /// Parses the lines of `range` (which starts at a top-level block boundary)
-/// into blocks with absolute start lines. `footnotes` are the footnote
-/// labels defined anywhere in the document.
-fn parse_window(lines: &[String], range: Range<usize>, footnotes: &[String]) -> Vec<Block> {
+/// into blocks with absolute start lines. Every `[^label]` counts as a
+/// footnote reference here, so a block's references do not depend on the
+/// definitions elsewhere in the document.
+fn parse_window(lines: &[String], range: Range<usize>) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut start = range.start;
     if start == 0 {
@@ -250,7 +254,7 @@ fn parse_window(lines: &[String], range: Range<usize>, footnotes: &[String]) -> 
     let first_new = blocks.len();
     let slice = Slice::new(lines, start..range.end);
     let mut parser = Parser::new_ext(&slice.text, parse_options());
-    parser.declare_footnote_labels(footnotes.iter().map(String::as_str));
+    parser.assume_footnote_labels_defined();
     let mut iter = parser.into_offset_iter();
     let mut depth = 0usize;
     // The open top-level block is the last one pushed while depth > 0.
@@ -322,6 +326,11 @@ fn parse_window(lines: &[String], range: Range<usize>, footnotes: &[String]) -> 
                     }
                 }
             }
+            Event::FootnoteReference(label) => {
+                if let Some(block) = blocks.last_mut() {
+                    block.defs_mut().footnote_refs.push(normalize_label(label));
+                }
+            }
             Event::Rule if depth == 0 => {
                 let line = slice.line_of(range.start);
                 push_block(&mut blocks, first_new, Block::new(line, BlockKind::Rule));
@@ -384,8 +393,10 @@ pub struct Index {
     /// The first row of each block, and the row count at the end.
     row_starts: Vec<usize>,
     links: HashMap<String, (String, String)>,
-    /// Defined footnote labels, numbered in order of definition.
+    /// Defined footnote labels, in order of definition.
     footnotes: Vec<String>,
+    /// The number of each defined label: in order of first reference, then
+    /// the unreferenced ones in order of definition.
     footnote_numbers: HashMap<String, usize>,
 }
 
@@ -411,7 +422,7 @@ impl Index {
         self.blocks = if lines.is_empty() {
             Vec::new()
         } else {
-            parse_window(lines, 0..lines.len(), &[])
+            parse_window(lines, 0..lines.len())
         };
         for block in &mut self.blocks {
             block.gen = self.next_gen;
@@ -541,7 +552,8 @@ impl Index {
             .map(|(dest, title)| (dest.as_str(), title.as_str()))
     }
 
-    /// The number a footnote label shows as (1-based, in order of definition).
+    /// The number a footnote label shows as (1-based, in order of first
+    /// reference; a label never referenced comes after, in definition order).
     pub fn footnote_number(&self, label: &str) -> Option<usize> {
         self.footnote_numbers.get(&normalize_label(label)).copied()
     }
@@ -654,7 +666,7 @@ impl Index {
             } else {
                 self.blocks[end_block].start
             };
-            let parsed = parse_window(lines, window_start..window_end, &self.footnotes);
+            let parsed = parse_window(lines, window_start..window_end);
             let resync = (guard..end_block).find(|&candidate| {
                 let line = self.blocks[candidate].start;
                 parsed
@@ -692,7 +704,7 @@ impl Index {
             }
         }
         let old_rows = self.row_starts[replace_from]..self.row_starts[resync];
-        let globals_changed = self.blocks[replace_from..resync]
+        let touches_globals = self.blocks[replace_from..resync]
             .iter()
             .chain(parsed.iter())
             .any(|block| block.defs.is_some());
@@ -704,9 +716,7 @@ impl Index {
         self.blocks.splice(replace_from..resync, parsed);
         self.line_count = line_count;
         self.rebuild_rows();
-        if globals_changed {
-            self.rebuild_globals();
-        }
+        let globals_changed = touches_globals && self.rebuild_globals();
         Some(Splice {
             old_blocks: replace_from..resync,
             new_blocks: replace_from..replace_from + new_len,
@@ -726,26 +736,42 @@ impl Index {
         self.row_starts.push(row);
     }
 
-    fn rebuild_globals(&mut self) {
-        self.links.clear();
-        self.footnotes.clear();
-        self.footnote_numbers.clear();
-        let mut seen = HashSet::new();
+    /// Rebuilds the link and footnote tables from the blocks' definitions
+    /// and references: one walk over the blocks. Returns whether they changed.
+    fn rebuild_globals(&mut self) -> bool {
+        let mut links = HashMap::new();
+        let mut footnotes = Vec::new();
+        let mut defined = HashSet::new();
         for block in &self.blocks {
             let Some(defs) = &block.defs else { continue };
             for (label, dest, title) in &defs.links {
-                self.links
+                links
                     .entry(label.clone())
                     .or_insert_with(|| (dest.clone(), title.clone()));
             }
             for label in &defs.footnotes {
-                if seen.insert(label.clone()) {
-                    self.footnotes.push(label.clone());
-                    self.footnote_numbers
-                        .insert(label.clone(), self.footnotes.len());
+                if defined.insert(label.as_str()) {
+                    footnotes.push(label.clone());
                 }
             }
         }
+        let mut numbers = HashMap::new();
+        let referenced = self
+            .blocks
+            .iter()
+            .filter_map(|block| block.defs.as_ref())
+            .flat_map(|defs| defs.footnote_refs.iter());
+        for label in referenced.chain(footnotes.iter()) {
+            if defined.contains(label.as_str()) && !numbers.contains_key(label) {
+                numbers.insert(label.clone(), numbers.len() + 1);
+            }
+        }
+        let changed =
+            links != self.links || footnotes != self.footnotes || numbers != self.footnote_numbers;
+        self.links = links;
+        self.footnotes = footnotes;
+        self.footnote_numbers = numbers;
+        changed
     }
 
     /// The blocks' shapes, for comparing two indexes of one text.
@@ -760,5 +786,6 @@ impl Index {
             && self.row_starts == other.row_starts
             && self.links == other.links
             && self.footnotes == other.footnotes
+            && self.footnote_numbers == other.footnote_numbers
     }
 }

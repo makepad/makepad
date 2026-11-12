@@ -156,8 +156,18 @@ fn incremental_reparse_equals_full_parse() {
     assert_eq!(index.link("ref"), None, "the removed definition is gone");
     replace(&mut lines, &mut index, "ref def added", "# Title", "# Title\n\n[ref]: /here");
     assert_eq!(index.link("ref"), Some(("/here", "")), "the added definition resolves");
-    replace(&mut lines, &mut index, "footnote def", "[^n]: The note.", "[^m]: First.\n[^n]: The note.");
-    assert_eq!(index.footnote_number("n"), Some(2), "footnotes number in definition order");
+    // Footnotes number in order of first reference; a definition nothing
+    // references comes after them. References typed before their
+    // definitions exist count once the definitions appear. (The tail
+    // paragraph's `[^n]` is raw HTML by now: the html block took it.)
+    replace(&mut lines, &mut index, "unresolved references", "Intro with", "Intro[^o] with[^n]");
+    let splice = replace(&mut lines, &mut index, "footnote defs", "[^n]: The note.", "[^m]: First.\n[^n]: The note.\n[^o]: Third.");
+    assert!(splice.globals_changed, "new definitions renumber");
+    let numbers = |index: &Index| ["m", "n", "o"].map(|label| index.footnote_number(label).unwrap_or(0));
+    assert_eq!(numbers(&index), [3, 2, 1], "footnotes number by first reference, unreferenced last");
+    let splice = replace(&mut lines, &mut index, "reference removed", "Intro[^o] with", "Intro with");
+    assert!(splice.globals_changed, "removing the first reference renumbers");
+    assert_eq!(numbers(&index), [2, 1, 3], "the next reference moves up, the unreferenced follow by definition");
     // Front matter at line 0 appears, an unclosed one closes far below, and
     // it goes again.
     replace(&mut lines, &mut index, "front matter", "# Title", "---\ntitle: x\n---\n# Title");
