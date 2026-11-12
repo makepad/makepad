@@ -440,7 +440,6 @@ impl Music3GgufFile {
     /// pad to 32: that selected `mul_mm` and produced all-zero outputs.
     /// If Metal returns zeros, Q4_0 falls back to packed `vec_dot` GEMV.
     pub fn linear_nt(&self, name: &str, a: &[f32], m: usize) -> Result<Vec<f32>> {
-        let info = self.require(name)?;
         let (k, n, ty) = self.linear_kn(name)?;
         if a.len() != m.saturating_mul(k) {
             return Err(DiffusionError::model(format!(
@@ -449,9 +448,7 @@ impl Music3GgufFile {
                 m * k
             )));
         }
-        if info.dimensions.len() != 2 {
-            return self.linear_nt_host_f32(name, a, m, k, n);
-        }
+        // Squeezed size-1 dims keep element order, so linear_kn's (k, n) is exact for 3-D GGUF weights too.
         // Native `m` — do not pad decode (m=1) to 32. Padding forced
         // `kernel_mul_mm_q4_0_f32`, which wrote zeros on the older metallib.
         // m=1 hits official `kernel_mul_mv_q4_0_f32`.
@@ -632,28 +629,6 @@ impl Music3GgufFile {
             &mats,
             |owner, key| self.load_keyed_bytes(owner, key).map(std::borrow::Cow::Owned),
         )
-    }
-
-    fn linear_nt_host_f32(
-        &self,
-        name: &str,
-        a: &[f32],
-        m: usize,
-        k: usize,
-        n: usize,
-    ) -> Result<Vec<f32>> {
-        let w = self.read_f32_any(name)?;
-        if w.len() != n.saturating_mul(k) {
-            return Err(DiffusionError::model(format!(
-                "music3 {name}: dense weight {} values, expected {}",
-                w.len(),
-                n * k
-            )));
-        }
-        match makepad_ai_common::backend::metal::try_matmul_nt_f32(a, &w, m, k, n) {
-            Some(y) if y.iter().any(|v| v.is_finite() && *v != 0.0) => Ok(y),
-            _ => matmul_nt_f32_cpu(a, &w, m, k, n),
-        }
     }
 
     fn try_metal_quant_linear(

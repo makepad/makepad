@@ -1027,7 +1027,19 @@ mod tests {
             let second = shim::try_matmul_nt_f32_weight(&a, &w, m, k, n).unwrap();
             assert_eq!(bits(&second), bits(&legacy), "reuse preserves output bits");
             assert_eq!(resident_weights(&owner.trace()).unwrap().0, 1, "reuse does not add an entry");
+            let w2 = F32Weight::new(&owner, "matrix2", 5 * k, |out| {
+                for (i, value) in out.iter_mut().enumerate() {
+                    *value = (i as i32 % 17 - 8) as f32 * 0.0473;
+                }
+                Ok::<_, ()>(())
+            }).unwrap();
+            let single2 = shim::try_matmul_nt_f32_weight(&a, &w2, m, k, 5).unwrap();
+            let multi = shim::try_matmul_nt_f32_weight_multi(&a, m, k, &[&w, &w2]).unwrap();
+            assert_eq!(multi.len(), 2, "one output per resident weight");
+            assert_eq!(bits(&multi[0]), bits(&first), "first multi output preserves single output bits");
+            assert_eq!(bits(&multi[1]), bits(&single2), "second multi output preserves single output bits");
             drop(w);
+            drop(w2);
             drop(owner);
             pool_clear().unwrap();
             assert!(weak.upgrade().is_none(), "retirement releases the shared allocation");

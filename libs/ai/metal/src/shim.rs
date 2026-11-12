@@ -112,6 +112,21 @@ pub fn try_matmul_nt_f32_weight(a: &[f32], w: &F32Weight, m: usize, k: usize, n:
     out
 }
 
+pub fn try_matmul_nt_f32_weight_multi(
+    a: &[f32],
+    m: usize,
+    k: usize,
+    weights: &[&F32Weight],
+) -> Option<Vec<Vec<f32>>> {
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_f32_weight_multi(a, m, k, weights);
+    if let Some(vs) = &out {
+        let n_out: usize = vs.iter().map(|v| v.len()).sum();
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, a.len() + n_out);
+    }
+    out
+}
+
 pub fn try_matmul_nt_ggml_bytes_keyed<'a, F>(
     a: &[f32],
     bt_ggml_type: u32,
@@ -938,6 +953,28 @@ mod imp {
         try_matmul_nt_f32(a, w.as_slice(), m, k, n)
     }
 
+    pub(super) fn try_matmul_nt_f32_weight_multi(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        weights: &[&F32Weight],
+    ) -> Option<Vec<Vec<f32>>> {
+        if weights.is_empty() {
+            return Some(Vec::new());
+        }
+        if a.len() != m.checked_mul(k)?
+            || m == 0
+            || k == 0
+            || weights.iter().any(|w| w.len() % k != 0 || w.len() / k == 0)
+        {
+            return None;
+        }
+        weights
+            .iter()
+            .map(|w| try_matmul_nt_f32(a, w.as_slice(), m, k, w.len() / k))
+            .collect()
+    }
+
     pub(super) fn try_matmul_nt_f32(
         a: &[f32],
         bt: &[f32],
@@ -1471,6 +1508,15 @@ mod imp {
     pub(super) fn try_matmul_nt_f32_weight(
         a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize,
     ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight_multi(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        weights: &[&F32Weight],
+    ) -> Option<Vec<Vec<f32>>> {
         None
     }
 
@@ -6956,7 +7002,10 @@ mod imp {
         let sequence = TENSOR_LOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         state.lock_phases = TensorLockPhases::default();
         let result = f(&mut state);
-        let released = std::mem::take(&mut state.deferred_drop);
+        // Release what this call retired before unlocking: the next lock holder (a pool clear)
+        // then finds every buffer and command the runtime let go of already released, none of
+        // them still in another thread's hands.
+        state.deferred_drop.clear();
         let phases = state.lock_phases;
         let elapsed = start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         drop(state);
@@ -6986,7 +7035,6 @@ mod imp {
             }
         }
         TENSOR_LOCK_HIGH_WATER_NS.fetch_max(elapsed, Ordering::Relaxed);
-        drop(released);
         result
     }
 
@@ -7054,27 +7102,45 @@ mod imp {
             self.in_flight.iter().find(|(number, _)| *number == target)
                 .map(|(number, command)| (*number, command.clone()))
         }
-        fn reap(&mut self, retired: &mut Vec<StrongId>) {
-            while let Some((number, command)) = self.in_flight.front() {
-                let status: u64 = unsafe { msg_send![command.as_id(), status] };
+        /// Records a finished command's failure and queues it on `deferred_drop`: it and the
+        /// buffers it retains are released before this lock is.
+        fn retire(&mut self, number: u64, command: StrongId, status: u64) {
+            let failed = status == 5;
+            let oom = failed && command_out_of_memory(&command);
+            #[cfg(test)]
+            let (failed, oom) = match self.injected_failure {
+                Some((batch, injected_oom)) if batch == number => (true, oom || injected_oom),
+                _ => (failed, oom),
+            };
+            if failed { self.record_failure(number, oom); }
+            self.deferred_drop.push(command);
+        }
+        fn reap(&mut self) {
+            while let Some(status) = self.in_flight.front().map(|(_, command)| command_status(command)) {
                 if status < 4 { break; }
-                let number = *number;
-                let failed = status == 5;
-                let oom = failed && command_out_of_memory(command);
-                #[cfg(test)]
-                let (failed, oom) = match self.injected_failure {
-                    Some((batch, injected_oom)) if batch == number => (true, oom || injected_oom),
-                    _ => (failed, oom),
-                };
-                if failed { self.record_failure(number, oom); }
+                let Some((number, command)) = self.in_flight.pop_front() else { break };
                 self.completed_batch = self.completed_batch.max(number);
-                if let Some((_, command)) = self.in_flight.pop_front() { retired.push(command); }
+                self.retire(number, command, status);
             }
             self.prune_thread_batches();
         }
-        fn commit(&mut self, retired: &mut Vec<StrongId>) -> Result<(), String> {
+        /// Every finished command, wherever it sits: Metal can finish a later batch while an
+        /// earlier one still runs, and `reap` stops at the first unfinished one.
+        /// `completed_batch` stays the in-order watermark.
+        fn retire_finished(&mut self) {
+            self.reap();
+            let mut index = 0;
+            while index < self.in_flight.len() {
+                let status = command_status(&self.in_flight[index].1);
+                if status < 4 { index += 1; continue; }
+                if let Some((number, command)) = self.in_flight.remove(index) {
+                    self.retire(number, command, status);
+                }
+            }
+        }
+        fn commit(&mut self) -> Result<(), String> {
             let start = std::time::Instant::now();
-            self.reap(retired);
+            self.reap();
             if self.open_batch == 0 { return Ok(()); }
             let number = self.open_batch;
             let result = self.context.end_batch();
@@ -7138,19 +7204,21 @@ mod imp {
     }
 
     fn tensor_flush_in(runtime: &TensorRuntime, number: u64) -> Result<(), String> {
-        let mut retired = Vec::new();
         let commands = tensor_locked_in(runtime, |state| {
             state.drain_returns();
             if number != 0 && state.open_batch != 0 && state.open_batch <= number {
-                state.commit(&mut retired)?;
+                state.commit()?;
             }
-            state.reap(&mut retired);
+            state.reap();
             Ok(state.in_flight.iter().take_while(|(batch, _)| *batch <= number)
                 .map(|(batch, command)| (*batch, command.clone())).collect::<Vec<_>>())
         })?;
-        drop(retired);
         wait_committed(runtime, commands)?;
         tensor_locked_in(runtime, |state| state.check_writer(number))
+    }
+
+    fn command_status(command: &StrongId) -> u64 {
+        unsafe { msg_send![command.as_id(), status] }
     }
 
     fn command_out_of_memory(command: &StrongId) -> bool {
@@ -7189,16 +7257,15 @@ mod imp {
     }
 
     fn tensor_pool_clear_in(runtime: &TensorRuntime) -> Result<(), String> {
-        let mut retired = Vec::new();
         let buffers = tensor_locked_in(runtime, |state| {
             state.drain_returns();
-            // Completed commands still retain every buffer they used (the last batch stays in
-            // `in_flight` until the next commit): retire them so their buffers come back now.
-            state.reap(&mut retired);
+            // Finished commands still retain every buffer they used (the last batch stays in
+            // `in_flight` until the next commit, and a later batch can finish before an earlier
+            // one): retire them all so their buffers come back now.
+            state.retire_finished();
             Ok(std::mem::take(&mut state.free))
         })?;
         drop(buffers); // Unfinished commands retain their resources; clearing never waits.
-        drop(retired);
         Ok(())
     }
 
@@ -7280,7 +7347,6 @@ mod imp {
         }
         dispatch(&mut prepared)?; // Compile and allocate, without the encoding lock.
         prepared.tensor_prepare = false;
-        let mut retired = Vec::new();
         let result = tensor_locked_in(runtime, |state| {
             state.drain_returns();
             for buffer in inputs { state.check_writer(buffer.writer_batch.load(Ordering::Acquire))?; }
@@ -7309,24 +7375,20 @@ mod imp {
             let mine = state.thread_batches.entry(thread).or_default();
             if mine.back() != Some(&number) { mine.push_back(number); }
             state.open_ns += estimate_ns(&runtime.cost, macs, bytes, prepared.tensor_dispatches);
-            state.reap(&mut retired);
+            state.reap();
             if should_commit(state.open_ns, state.in_flight.is_empty(), &runtime.cost) {
-                state.commit(&mut retired)?;
+                state.commit()?;
             }
             Ok((number, state.back_pressure_command(thread)))
         });
-        drop(retired);
         let (number, mut waiting) = result?;
         while let Some(command) = waiting {
             wait_committed(runtime, vec![command])?;
-            let mut retired = Vec::new();
-            let next = tensor_locked_in(runtime, |state| {
-                state.reap(&mut retired);
+            waiting = tensor_locked_in(runtime, |state| {
+                state.reap();
                 state.check_writer(number)?;
                 Ok(state.back_pressure_command(thread))
-            });
-            drop(retired);
-            waiting = next?;
+            })?;
         }
         Ok(number)
     }
@@ -8234,6 +8296,43 @@ mod imp {
             tensor_host_result(&out_shape, |out| {
                 tensor_matmul(&a, 0, &weight, 0, out, m, k, n, GGML_TYPE_F32)
             })
+        })
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight_multi(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        weights: &[&F32Weight],
+    ) -> Option<Vec<Vec<f32>>> {
+        if weights.is_empty() {
+            return Some(Vec::new());
+        }
+        if a.len() != m.checked_mul(k)?
+            || m == 0
+            || k == 0
+            || weights.iter().any(|w| w.len() % k != 0 || w.len() / k == 0)
+        {
+            return None;
+        }
+        tensor_try(|| {
+            let a_shape = shape4_from_row_major(&[m, k], 4)?;
+            let a = tensor_upload_f32(a, &a_shape)?;
+            let mut outputs = Vec::with_capacity(weights.len());
+            let mut last_batch = 0;
+            for w in weights {
+                let n = w.len() / k;
+                let weight = tensor_f32_weight(w)?;
+                let shape = shape4_from_row_major(&[m, n], 4)?;
+                let bytes = shape.numel.checked_mul(4).ok_or("metal output extent overflow")?;
+                let out = tensor_buffer(bytes, false)?;
+                last_batch = tensor_matmul(&a, 0, &weight, 0, &out, m, k, n, GGML_TYPE_F32)?;
+                outputs.push((out, shape.numel));
+            }
+            tensor_flush_until(last_batch)?;
+            outputs.into_iter().map(|(out, numel)| {
+                Ok(unsafe { std::slice::from_raw_parts(out.contents()?, numel) }.to_vec())
+            }).collect()
         })
     }
 
