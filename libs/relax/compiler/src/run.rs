@@ -1935,6 +1935,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             let mut session = crate::serve::Session::new(u, root, pre);
             return session.watch(deep);
         }
+        // the collected image is the program as its load left it, before the bodies make their
+        // types (a run's boot snapshot): the record at the end encodes this snapshot
+        let boot_cache = if selftest { None } else { check_boot_cache(&mut u, options) };
         let code = match reuse.as_mut() {
             Some(r) => crate::check::check_crate_reusing(&mut u, root, &checked, pre, r),
             None => crate::check::check_crate(&mut u, root, &checked, pre, selftest),
@@ -1943,7 +1946,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         // `makepad run`): the next check (or run) of the package maps them instead of parsing
         // every file again (Stage: 6 s of a warm check was parsing)
         let t = Instant::now();
-        if !selftest { record_check_front(&mut u, options); }
+        if !selftest { record_check_front(&mut u, options, boot_cache); }
         phase("record check front", t);
         if let (Some(r), Some((pre, graph))) = (reuse.as_ref().filter(|r| r.complete()), early_next.as_ref()) {
             let t = Instant::now();
@@ -4166,7 +4169,19 @@ pub(crate) extern "C" fn relax_self_spawn() {
 /// `makepad check`: this load's files written as front images and its crate records, as a run's
 /// boot does (`push_front_images` + `record_front_crates` + the front graph), so the next check
 /// maps them. Only when the cache is on and some file was parsed (nothing new otherwise).
-fn record_check_front(u: &mut Unit, options: &crate::options::Options) {
+/// The cache of a check that records its collected image, opened before the bodies with the
+/// program's snapshot taken then (Cache::preserve_collected_boot): record_check_front encodes it, so
+/// the image holds no type the bodies made (the next check makes the ones it needs again).
+fn check_boot_cache(u: &mut Unit, options: &crate::options::Options) -> Option<crate::cache::Cache> {
+    if !front_recordable() || !CHECK_RECORDS_COLLECTED.load(Ordering::Relaxed) { return None; }
+    let mode = crate::cache::mode_from_env(options)?;
+    let mut c = crate::cache::Cache::open_collected(u, mode, None).ok()?;
+    c.preserve_collected_boot(&u.prog, &u.tcx);
+    verbose!("makepad check: boot snapshot of {} types for the collected image", u.tcx.tys.len());
+    Some(c)
+}
+
+fn record_check_front(u: &mut Unit, options: &crate::options::Options, boot: Option<crate::cache::Cache>) {
     if !front_recordable() { return; }
     // the loader's front graph write runs on its own thread from load finish: a check ends
     // sooner than a run's first present, so it waits for that write here (else the process
@@ -4180,7 +4195,7 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options) {
     }
     let Some(mode) = crate::cache::mode_from_env(options) else { return };
     let t = Instant::now();
-    let mut c = match crate::cache::Cache::open_collected(u, mode, None) {
+    let mut c = match boot.map(Ok).unwrap_or_else(|| crate::cache::Cache::open_collected(u, mode, None)) {
         Ok(c) => c,
         Err(e) => { verbose!("makepad check: front images not written: {}", e); return; }
     };
@@ -4197,7 +4212,7 @@ fn record_check_front(u: &mut Unit, options: &crate::options::Options) {
     if collected && written.is_ok() && graph.is_ok() {
         let t = Instant::now();
         let r = c.record_collected(&u.prog, &u.tcx);
-        verbose!("makepad check: collected program recorded ({:?}) in {:.0} ms", r.is_some(), t.elapsed().as_secs_f64() * 1e3);
+        verbose!("makepad check: collected program recorded ({:?}) in {:.0} ms; the program holds {} types", r.is_some(), t.elapsed().as_secs_f64() * 1e3, u.tcx.tys.len());
     }
 }
 

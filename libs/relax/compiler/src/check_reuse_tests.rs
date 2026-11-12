@@ -405,21 +405,23 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
 const APP_CHILD: &str = "RELAX_CHECK_APP_CHILD";
 
 /// In a child (APP_CHILD names the workspace folder): `makepad check app_pkg` there, as the command
-/// line runs it: the checked crates load again, the crates below them come from the collected image.
+/// line runs it (verbose: the type counts of the image it records and restores): the checked crates
+/// load again, the crates below them come from the collected image.
 #[test]
 fn app_check_child() {
     let Some(dir) = std::env::var_os(APP_CHILD).map(std::path::PathBuf::from) else { return };
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     std::env::set_current_dir(&dir).unwrap();
     let sess = std::sync::Arc::new(crate::Session::default());
-    let code = crate::run::cmd_run(&sess, &["--check".to_string(), "app_pkg".to_string()]);
+    let code = crate::run::cmd_run(&sess, &["--verbose".to_string(), "--check".to_string(), "app_pkg".to_string()]);
     eprintln!("app child exit {code}");
 }
 
 /// The collected image certifies each crate it holds by its fingerprint: an app check restores the
 /// crates below its checked ones after every edit of those (a check that restored them writes its
 /// graph, not the image again), and no crate that changed since loads from it -- an edited
-/// dependency, or one whose features changed (another graph): the verdicts are the sources'.
+/// dependency, or one whose features changed (another graph): the verdicts are the sources'. The
+/// image is the program before its bodies were checked: it holds none of the types they made.
 #[test]
 fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
@@ -431,7 +433,8 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     };
     let dep = |ty: &str| format!("pub fn value() -> {ty} {{ 7 }}\n#[cfg(feature = \"extra\")]\npub fn extra() -> u32 {{ 1 }}\n");
     let app_toml = |features: &str| format!("[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = {{ path = \"../dep\"{features} }}\n");
-    let app = |unused: &str, body: &str| format!("pub fn top() -> u32 {{ {body} }}\nfn {unused}() {{}}\n");
+    // the nested tuple is a type only the body's check makes
+    let app = |unused: &str, body: &str| format!("pub fn top() -> u32 {{ let t: (u8, (u16, (u32, (u64, i8)))) = (1, (2, (3, (4, 5)))); {body} + t.1.1.0 }}\nfn {unused}() {{}}\n");
     write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[features]\nextra = []\n");
     write("dep/lib.rs", &dep("u32"));
     write("app/Cargo.toml", &app_toml(""));
@@ -450,14 +453,26 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
         (code, diags, restored, stderr.into_owned())
     };
     let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
+    // the number before `before` in the stderr line that starts with `prefix` and holds `before`
+    let count = |stderr: &str, prefix: &str, before: &str| -> usize {
+        let line = stderr.lines().find(|l| l.starts_with(prefix) && l.contains(before)).unwrap_or_else(|| panic!("no `{prefix}` line: {stderr}"));
+        let head = &line[..line.rfind(before).unwrap()];
+        head[head.rfind(|c: char| !c.is_ascii_digit()).unwrap() + 1..].parse().unwrap()
+    };
     let cold = check();
     assert!(cold.0 == Some(0) && named(&cold.1, "unused_a") && !cold.2, "{}", cold.3);
+    // the cold check snapshots the program before its bodies and records that as the image
+    let boot = count(&cold.3, "makepad check: boot snapshot of ", " types");
+    let checked = count(&cold.3, "makepad check: collected program recorded (true)", " types");
+    assert!(boot < checked, "the bodies made types ({boot} before, {checked} after): {}", cold.3);
     // two edits of the checked crate: both checks restore the crates below it from the image the
     // cold check recorded, the second after the first wrote its graph
     for (before, now) in [("unused_a", "unused_b"), ("unused_b", "unused_c")] {
         write("app/lib.rs", &app(now, "dep::value() + 1"));
         let r = check();
         assert!(r.0 == Some(0) && r.2 && named(&r.1, now) && !named(&r.1, before), "the edit to {now}: {}", r.3);
+        let held = count(&r.3, "makepad-run collected: restored ", " types");
+        assert!(held <= boot, "the image holds {held} types, the program before its bodies {boot}: {}", r.3);
     }
     // an edit of a kept crate: it loads from its source (the app's sum no longer adds up), and back
     write("dep/lib.rs", &dep("u64"));
