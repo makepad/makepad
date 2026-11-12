@@ -233,7 +233,7 @@ fn no_frame_shows_a_blank_glyph_and_a_retained_list_keeps_its_words() {
 /// A draw list recorded once and painted from its kept instances ever after (never redrawn,
 /// not even on a full redraw, as a render target's passes are) keeps its words while the churn
 /// fills a small curve store with fresh glyphs in three faces: its glyphs stay in use and are
-/// touched at every sweep, so the store takes back unused glyphs first. Before (149, the Relax
+/// touched at every sweep, so the store takes back unused glyphs first. Before (on a Linux node, the Relax
 /// deck title): they were let go as unused, their curves given to another glyph ("Re ax").
 #[test]
 fn a_kept_draw_list_keeps_its_words() {
