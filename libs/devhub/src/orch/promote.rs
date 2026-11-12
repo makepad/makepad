@@ -95,7 +95,8 @@ fn plan(repo: &Path) -> Result<Plan, String> {
     if !is_ancestor(repo, &base, &tip) {
         blockers.push("origin/main has commits work doesn't: merge main into work first".to_string());
     }
-    let groups = Groups::between(repo, &base, &tip)?;
+    let mut groups = Groups::between(repo, &base, &tip)?;
+    groups.credit(repo, &base)?;
     let mut notes = vec![format!("{} binary files changed", groups.binaries)];
 
     // the tree itself: names that must not be there
@@ -196,6 +197,9 @@ fn print_plan(plan: &Plan, set: &[(usize, String)]) {
         let stat = &plan.groups.stats[*at];
         let ready = plan.ready.values().filter(|r| **r <= *at).count();
         println!("{:2} {:.10} {} [{} files, +{} -{}, {ready}/{} crates]", n + 1, sha, plan.groups.blocks[*at].title, stat.files.len(), stat.added, stat.removed, plan.ready.len());
+        if let Some(c) = plan.groups.contributors.get(*at).filter(|c| !c.is_empty()) {
+            println!("   {c}");
+        }
     }
     plan.notes.iter().for_each(|n| println!("note: {n}"));
     plan.blockers.iter().for_each(|b| println!("BLOCKER: {b}"));

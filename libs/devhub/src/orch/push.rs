@@ -143,8 +143,8 @@ fn commit_rows(groups: &Groups, set: &[(usize, String)]) -> String {
         .map(|(at, sha)| {
             let stat = &groups.stats[*at];
             let areas: Vec<String> = groups.areas(*at).iter().map(|a| json_str(a)).collect();
-            let credits: Vec<String> = groups.co_authors.get(*at).map_or(Vec::new(), |c| c.iter().map(|l| json_str(l.trim_start_matches("Co-authored-by: "))).collect());
-            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}],\"co_authors\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","), credits.join(","))
+            let credits: Vec<String> = groups.contributors.get(*at).filter(|c| !c.is_empty()).map(|c| json_str(c.trim_start_matches("Contributors: "))).into_iter().collect();
+            format!("{{\"sha\":{},\"title\":{},\"files\":{},\"added\":{},\"removed\":{},\"areas\":[{}],\"contributors\":[{}]}}", json_str(sha), json_str(&groups.blocks[*at].title), stat.files.len(), stat.added, stat.removed, areas.join(","), credits.join(","))
         })
         .collect();
     rows.join(",")

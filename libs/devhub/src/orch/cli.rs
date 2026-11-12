@@ -994,9 +994,9 @@ fn push_answer(v: &Value) -> String {
         let shown = areas.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
         let more = if areas.len() > 6 { format!(" and {} more", areas.len() - 6) } else { String::new() };
         out.push_str(&format!("{:2} {} {} [{} files, +{} -{}] {shown}{more}\n", i + 1, super::short(&s(c, "sha")), s(c, "title"), n(c, "files"), n(c, "added"), n(c, "removed")));
-        let credits = words(c, "co_authors");
+        let credits = words(c, "contributors");
         if !credits.is_empty() {
-            out.push_str(&format!("   co-authored by {}\n", credits.join(", ")));
+            out.push_str(&format!("   contributors: {}\n", credits.join(", ")));
         }
     }
     if !dry {
