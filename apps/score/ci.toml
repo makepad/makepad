@@ -9,10 +9,10 @@ work = "f846b2047215349aa13ba2a265f13f3305635e8f"
 
 [app.macos]
 capture = ""
-date = "2026-11-02"
-digest = "edb72c8175b0c290015189b95a8721a65ac3ce246ab025bc01e9c6f31dfaea8e"
-main = "397b658a8bf5cfbb05644da6c00591325a079101"
-work = "628527fcd4f9b89ec0203bce6b2266b7d8e8fe55"
+date = "2026-11-12"
+digest = "bb57b196e679694cefeeffb88a14446e00e3f8e15deb10ab4c7a78035fcd6e97"
+main = "7bd5b1e91a4a7e6249969879dee69d3e24346d0c"
+work = "a600b76871b2d76ddbcedec911cc10e9a5a009a8"
 
 [app.windows]
 capture = ""
