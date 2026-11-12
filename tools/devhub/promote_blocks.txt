@@ -141,6 +141,7 @@ libs/render/*
 libs/render_*/*
 libs/scene/*
 libs/csg/*
+libs/dynamics/*
 libs/geom3d/*
 libs/gizmo/*
 libs/gltf/*

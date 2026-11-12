@@ -1,6 +1,6 @@
 # The devhub NODE on a Windows box (a pool node), as its desktop user: the devhub tray in the
 # notification area, started at logon. Never the master (that is the user's Mac).
-#   powershell -ep bypass -f tools\devhub\windows\install-node.ps1 [-Name 105] [-Checkout <dir>] [-Start] [-Enable]
+#   powershell -ep bypass -f tools\devhub\windows\install-node.ps1 [-Name 89] [-Checkout <dir>] [-Start] [-Enable]
 # 1. writes %USERPROFILE%\.makepad\devhub\node.conf when there is none (name, host, port 8797,
 #    discovery = off: the master dials the node from its nodes.conf) and sync.conf (the synced
 #    checkout; no WM to build or restart);

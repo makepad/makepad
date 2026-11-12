@@ -1529,6 +1529,17 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("tools/run/fixture/run_env.sh") {
         push("live:run-env".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/run_env.sh"])], Judge::Exit, 120.0, None);
     }
+    // `makepad run --allow-c`: a path crate whose build script compiles C with the system cc runs
+    // as under cargo; its native build is keyed and reused, and a bad native library is refused
+    // with the symbol and crate named
+    if tree.has("libs/relax/compiler/tests/allow_c/verify.py") {
+        push("live:allow-c".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c/verify.py"])], Judge::Exit, 120.0, None);
+    }
+    // a check without --allow-c reads the build script outputs a cached --allow-c build left
+    // (relax#41), and names the missing OUT_DIR when there is none
+    if tree.has("libs/relax/compiler/tests/allow_c_cached_check/verify.py") {
+        push("live:allow-c-cached".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"])], Judge::Exit, 120.0, None);
+    }
     // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
     // only the panics that ended a thread or a test
     if tree.has("tools/run/fixture/caught_report.py") {
