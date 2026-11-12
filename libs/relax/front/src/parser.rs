@@ -27,6 +27,12 @@ const NO_STRUCT: u8 = 1;
 /// rustc `Restrictions::ALLOW_LET`: set for `if`/`while` conditions and match guards, kept across
 /// binary operators and parentheses, cleared by every other primary expression
 const ALLOW_LET: u8 = 2;
+/// what ends a list element by itself (Parser::list_elem_at): a `,` or a closing delimiter; a `,`
+/// only (the first element after a `(`: a `)` makes it a parenthesized expression); a `,`, a `;` or a
+/// closing delimiter (a built-in `vec!`'s element)
+const ELEM_LIST: u8 = 0;
+const ELEM_PAREN_FIRST: u8 = 1;
+const ELEM_MAC_ARG: u8 = 2;
 
 #[derive(Clone, Copy)]
 enum BodyOutline {
@@ -172,6 +178,12 @@ pub struct Parser<'a> {
     /// the statement macro whose expansion is being parsed was called with a `;` after it: its
     /// last statement gets that `;` (rustc add_trailing_semicolon), so it is not a trailing macro
     expansion_semi: bool,
+    /// the list element being parsed (`list_elem`, `mac_list_elem`): where it starts (u32::MAX:
+    /// none), and which tokens end it (ELEM_LIST, ELEM_PAREN_FIRST, ELEM_MAC_ARG)
+    list_elem_at: (u32, u8),
+    /// the expression a macro call expands to is a list element by itself or a method call's
+    /// receiver: its outer attributes are not gated (taken by the expansion's first `expr_bp`)
+    expn_attrs_ungated: bool,
     /// attributes whose shape is checked once their item is known to be configured in (check only)
     pending_shape: Vec<(TokRange, Option<PErr>)>,
 }
@@ -244,6 +256,8 @@ impl<'a> Parser<'a> {
             foreign_abi: None,
             cfg_out: 0,
             expansion_semi: false,
+            list_elem_at: (u32::MAX, ELEM_LIST),
+            expn_attrs_ungated: false,
             pending_shape: Vec::new(),
         }
     }
@@ -2159,7 +2173,7 @@ impl<'a> Parser<'a> {
         let before = self.trace();
         let (pos, undo, mark) = (self.pos, self.tok_undo.len(), self.ast.mark());
         let lens = (self.item_start.len(), self.lazy_mods.len(), self.mod_stack.len(), self.scope_stack.len(), self.rule_scopes.len(), self.extra_items.len(), self.extra_assoc_items.len(), self.pending_shape.len());
-        let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth);
+        let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated);
         let (pending_inner, cfg_select_rest) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone());
         let r = f(self);
         self.pos = pos;
@@ -2177,7 +2191,7 @@ impl<'a> Parser<'a> {
         self.extra_items.truncate(lens.5);
         self.extra_assoc_items.truncate(lens.6);
         self.pending_shape.truncate(lens.7);
-        (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth) = flags;
+        (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated) = flags;
         self.pending_inner = pending_inner;
         *self.cfg_select_rest.borrow_mut() = cfg_select_rest;
         #[cfg(test)]
@@ -2201,7 +2215,7 @@ impl<'a> Parser<'a> {
             pm_editions, tok_undo, frag_groups, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
-            include_as_expr, foreign_abi, cfg_out, expansion_semi, pending_shape,
+            include_as_expr, foreign_abi, cfg_out, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape,
         } = self;
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
@@ -2214,7 +2228,7 @@ impl<'a> Parser<'a> {
             tables {tables:?} token_input {token_input} exp_depth {exp_depth} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
             mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
             items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
-            stmt {stmt_ctx} {include_as_expr} {expansion_semi} cfg {cfg_out} {:?} shapes {shapes:?}\nast {ast:?}",
+            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} shapes {shapes:?}\nast {ast:?}",
             macros.is_some(), cfg_select_rest.borrow())
     }
 
@@ -2352,6 +2366,7 @@ impl<'a> Parser<'a> {
                 if had_semi {
                     match v.last_mut() {
                         Some(Stmt::Expr(semi, _)) => *semi = true,
+                        Some(Stmt::Attrs(r)) => { let r = *r; self.ast.row_mut(r).semi = true; }
                         // rustc_expand `flat_map_stmt`: a call with a trailing `;` that expands to
                         // nothing leaves an empty statement (a block's tail stays what it was)
                         None => v.push(Stmt::Empty),
@@ -4841,12 +4856,15 @@ impl<'a> Parser<'a> {
     fn expr_bp(&mut self, min: u8, r: u8) -> PResult<ExprId> {
         let lo = self.lo();
         // attributes on expressions
-        if self.kind() == T::Pound {
+        if self.kind() != T::Pound {
+            self.expn_attrs_ungated = false;
+        } else {
             let at = self.tok().lo;
             // (rustc gates these when the expression is configured, not while a macro fragment is matched)
             let real = self.macros.is_some();
+            let ungated = std::mem::take(&mut self.expn_attrs_ungated);
             let attrs = self.outer_attrs()?;
-            if !attrs.is_empty() && real { self.ast.gated_syntax.push(("stmt_expr_attributes", at)); }
+            if !attrs.is_empty() && real && !ungated { self.ast.gated_syntax.push(("stmt_expr_attributes", at)); }
             // rustc_expand expand.rs (InvocationCollectorNode for P<Expr>, expand_cfg_false): only a
             // statement or a list element (`list_elem`) can be configured away; anywhere else a false
             // `#[cfg]` is RemoveExprNotSupported at the attribute
@@ -5162,7 +5180,7 @@ impl<'a> Parser<'a> {
         self.expect(T::OpenParen)?;
         let mut v = Vec::new();
         while self.kind() != T::CloseParen {
-            if let Some(e) = self.list_elem(0)? {
+            if let Some(e) = self.list_elem(0, false)? {
                 v.push(e);
             }
             if !self.eat(T::Comma) {
@@ -5210,8 +5228,9 @@ impl<'a> Parser<'a> {
 
     /// An element of an array / tuple / call-argument list: None when a `#[cfg(..)]` on it is false
     /// (the element is removed; Reference expressions.md [expr.attr.restriction] and
-    /// conditional-compilation.md [cfg.attr]; rustc_expand config.rs configure_expr).
-    fn list_elem(&mut self, r: u8) -> PResult<Option<ExprId>> {
+    /// conditional-compilation.md [cfg.attr]; rustc_expand config.rs configure_expr). `paren`: the
+    /// first element after a `(`, which a `)` right after it makes a parenthesized expression.
+    fn list_elem(&mut self, r: u8, paren: bool) -> PResult<Option<ExprId>> {
         let pend0 = self.pending_shape.len();
         let attrs = if self.kind() == T::Pound && self.nth(1) == T::OpenBracket { self.outer_attrs()? } else { Vec::new() };
         if !attrs.is_empty() && !self.cfg_present(&attrs) {
@@ -5220,8 +5239,21 @@ impl<'a> Parser<'a> {
             return Ok(None);
         }
         self.closure_attrs(&attrs)?;
-        let e = self.expr_bp(0, r)?;
-        Ok(Some(e))
+        let at = self.lo();
+        let outer = std::mem::replace(&mut self.list_elem_at, (at, if paren { ELEM_PAREN_FIRST } else { ELEM_LIST }));
+        let e = self.expr_bp(0, r);
+        self.list_elem_at = outer;
+        Ok(Some(e?))
+    }
+
+    /// An element of a built-in `vec!` / `smallvec!`: rustc's expansion makes it an array's element
+    /// or a call's argument (`from_elem(elem, n)`), a list element either way.
+    fn mac_list_elem(&mut self) -> PResult<ExprId> {
+        let at = self.lo();
+        let outer = std::mem::replace(&mut self.list_elem_at, (at, ELEM_MAC_ARG));
+        let e = self.expr();
+        self.list_elem_at = outer;
+        e
     }
 
     /// rustc_parse parse_expr_block: a labeled or unsafe block, or a closure body after its return
@@ -5270,7 +5302,7 @@ impl<'a> Parser<'a> {
                 if self.eat(T::CloseParen) {
                     return Ok(self.mk_expr(ExprKind::Tuple(List::EMPTY), lo));
                 }
-                let first = self.list_elem(r & ALLOW_LET)?;
+                let first = self.list_elem(r & ALLOW_LET, true)?;
                 if let Some(f) = first {
                     if self.eat(T::CloseParen) {
                         return Ok(self.mk_expr(ExprKind::Paren(f), lo));
@@ -5281,7 +5313,7 @@ impl<'a> Parser<'a> {
                     if self.kind() == T::CloseParen {
                         break;
                     }
-                    if let Some(e) = self.list_elem(r & ALLOW_LET)? {
+                    if let Some(e) = self.list_elem(r & ALLOW_LET, false)? {
                         v.push(e);
                     }
                 }
@@ -5294,7 +5326,7 @@ impl<'a> Parser<'a> {
                 if self.eat(T::CloseBracket) {
                     return Ok(self.mk_expr(ExprKind::Array(List::EMPTY), lo));
                 }
-                let first = self.list_elem(0)?;
+                let first = self.list_elem(0, false)?;
                 if let Some(f) = first {
                     if self.eat(T::Semi) {
                         let n = self.expr()?;
@@ -5307,7 +5339,7 @@ impl<'a> Parser<'a> {
                     if self.kind() == T::CloseBracket {
                         break;
                     }
-                    if let Some(e) = self.list_elem(0)? {
+                    if let Some(e) = self.list_elem(0, false)? {
                         v.push(e);
                     }
                 }
@@ -5473,6 +5505,17 @@ impl<'a> Parser<'a> {
                     self.pos += 1;
                     let (delim, toks) = self.delim_tt()?;
                     if let Some(def) = self.rules_macro(&path) {
+                        // rustc_expand InvocationCollector: the expression's outer attributes are
+                        // gated (visit_expr), except where the call is a list element by itself
+                        // (filter_map_expr: an array's, a tuple's, a call's) or a method call's
+                        // receiver (visit_method_receiver_expr)
+                        let elem = self.list_elem_at.0 == lo && match self.kind() {
+                            T::Comma => true,
+                            T::CloseParen | T::CloseBracket | T::CloseBrace => self.list_elem_at.1 != ELEM_PAREN_FIRST,
+                            T::Semi => self.list_elem_at.1 == ELEM_MAC_ARG,
+                            _ => false,
+                        };
+                        let receiver = self.kind() == T::Dot && matches!(self.nth(1), T::Ident | T::RawIdent) && matches!(self.nth(2), T::OpenParen | T::PathSep);
                         self.include_as_expr = true;
                         self.cfg_select_rest.borrow_mut().clear();
                         let start = self.expand_call(&def, toks, lo);
@@ -5481,6 +5524,7 @@ impl<'a> Parser<'a> {
                         let rest = std::mem::take(&mut *self.cfg_select_rest.borrow_mut());
                         let include = def.builtin < crate::builtins::HOSTED && crate::builtins::from_id(def.builtin) == crate::builtins::Builtin::Include;
                         let e = self.in_expansion(start, |p| {
+                            p.expn_attrs_ungated = elem || receiver;
                             let e = p.expr()?;
                             if p.kind() == T::Semi && def.builtin == 0 && crate::macros::uses::recording() {
                                 let file = p.bctx.as_ref().map_or("", |c| c.path.as_str()).to_string();

@@ -202,8 +202,10 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
     // The checker's worker and its panic counters are process-global: each case has its process.
     const CHILD: &str = "MAKEPAD_RUN_CHECK_PANIC_TEST";
     let Ok(case) = std::env::var(CHILD) else {
-        for (case, panics_in) in [("check", "target:gandalf"), ("both", "target")] {
-            // (its own home: the injected panics are no record for this machine's ledger)
+        for (case, panics_in) in [("check", "typeck_panic_probe:gandalf"), ("both", "typeck_panic_probe")] {
+            // (its own home: the injected panics are no record for this machine's ledger; the body's
+            // name is the panic's only key, and the JIT running this test checks its own fns by it
+            // too when its code cache is off: a name no fn of the compiler has, unlike `target`)
             let home = std::env::temp_dir().join(format!("relax-check-panic-home-{}-{case}", std::process::id()));
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::a_background_check_panic_leaves_the_query_to_the_apps_compile", "--nocapture", "--test-threads=1"])
@@ -212,7 +214,7 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
             assert!(output.status.success(), "{case}: {}\n{stderr}", String::from_utf8_lossy(&output.stdout));
             std::fs::remove_dir_all(&home).unwrap();
             // the check's panic is on the run's log when it happens
-            assert!(stderr.contains("thread 'gandalf'") && stderr.contains("forced panic type-checking `target`"), "{case}: {stderr}");
+            assert!(stderr.contains("thread 'gandalf'") && stderr.contains("forced panic type-checking `typeck_panic_probe`"), "{case}: {stderr}");
         }
         return;
     };
@@ -221,14 +223,14 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"check_panic\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
     let root = dir.join("lib.rs").to_string_lossy().into_owned();
-    std::fs::write(&root, "pub fn target(out: &mut u32) { *out = 11; }\npub fn other(out: &mut u32) { *out = 3; }\n").unwrap();
+    std::fs::write(&root, "pub fn typeck_panic_probe(out: &mut u32) { *out = 11; }\npub fn other(out: &mut u32) { *out = 3; }\n").unwrap();
     let session = Arc::new(crate::Session::default());
     let (prog, core, app_crate) = crate::load_with_std(&session, &root, "check_panic", false).unwrap();
     let named = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
         let id = crate::program::DefId(i as u32);
         (d.krate == app_crate && prog.name(id) == name).then_some(id)
     }).unwrap();
-    let (target, other) = (named("target"), named("other"));
+    let (target, other) = (named("typeck_panic_probe"), named("other"));
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     crate::borrowck::event::set_app_scope(vec![crate::vfs::normalize_path(&root)]);
@@ -248,15 +250,15 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
             _ => std::thread::sleep(std::time::Duration::from_millis(5)),
         }
     };
-    assert!(why.contains("forced panic type-checking `target`"), "{why}");
+    assert!(why.contains("forced panic type-checking `typeck_panic_probe`"), "{why}");
     assert_eq!(crate::borrowck::lazy::PANICS.load(std::sync::atomic::Ordering::Relaxed), 1);
-    assert!(crate::borrowck::lazy::PANIC_NOTES.lock().unwrap()[0].contains("target"));
+    assert!(crate::borrowck::lazy::PANIC_NOTES.lock().unwrap()[0].contains("typeck_panic_probe"));
     // devhub's ledger gets it, naming the body and what panicked, with no hot load counted
     let records: Vec<_> = std::fs::read_dir(makepad_remote::hot::outbox()).unwrap().map(|f| std::fs::read_to_string(f.unwrap().path()).unwrap()).collect();
     assert_eq!(records.len(), 1, "{records:?}");
     let record = makepad_remote::hot::Record::parse(&records[0]).unwrap();
     assert_eq!(record.outcome, makepad_remote::hot::Outcome::CheckerPanic);
-    assert_eq!(record.reason, "checker panic in `check_panic::target`: MAKEPAD_RUN_TEST_TYPECK_PANIC: forced panic type-checking `target`");
+    assert_eq!(record.reason, "checker panic in `check_panic::typeck_panic_probe`: MAKEPAD_RUN_TEST_TYPECK_PANIC: forced panic type-checking `typeck_panic_probe`");
     assert!(!record.outcome.failure());
     // call_jit returns a recovery status, so the function's output comes back via its argument.
     let call = |entry| {
@@ -268,7 +270,7 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
         assert_eq!(result, 11);
     } else {
         let failed = call(target_entry).expect_err("the provider panics on the app's thread as well");
-        assert!(failed.message.contains("internal compiler error") && failed.message.contains("forced panic type-checking `target`"), "{}", failed.message);
+        assert!(failed.message.contains("internal compiler error") && failed.message.contains("forced panic type-checking `typeck_panic_probe`"), "{}", failed.message);
     }
     assert_eq!(call(other_entry).unwrap_or_else(|p| panic!("another body after it: {}", p.message)), 3);
     // Like settle_tests: process exit owns the runtime worker/executable-memory teardown.
@@ -1513,26 +1515,17 @@ fn realtime_reach_follows_vtables_made_after_the_mark() {
         id.is_some_and(|id| u.fns[id as usize].compiled)
     });
     let compiled = |t| crate::jit::__relax_realtime_compiled(t);
-    let wait = |t| {
-        for _ in 0..5000 {
-            if compiled(t) {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-        panic!("the real-time reach was not compiled in 10 s");
-    };
     // the mark, then at once the first unsizing (a Fab arms run's order), polled right after it ran
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
     call(start_e);
     assert!(!compiled(ticket) || next_built(), "compiled right after the first `Box<Ded> -> Box<dyn Route>`, with `<Ded as Route>::next` lazy");
-    wait(ticket);
+    wait_realtime_compiled(ticket);
     assert!(next_built(), "compiled, with `<Ded as Route>::next` lazy");
     assert_eq!(run_rt(cp), (4, 0), "the real-time thread met a lazy compile");
     // a second type's vtable, made after the reach is done: false at once, until it is compiled
     call(switch_e);
     assert!(!compiled(ticket) || next_built(), "compiled right after the first `Box<Arc2> -> Box<dyn Route>`, with `<Arc2 as Route>::next` lazy");
-    wait(ticket);
+    wait_realtime_compiled(ticket);
     assert_eq!(run_rt(cp), (42, 0), "the real-time thread met a lazy compile");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
@@ -1591,13 +1584,7 @@ fn realtime_reach_follows_trait_objects_held_deep_in_the_roots_value() {
     // the mark, then the first `Box<Ded> -> Box<dyn Route>` (made by other code, after it)
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
     unsafe { crate::jit::call_jit(up, start_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let (out, misses) = std::thread::spawn(move || {
         crate::jit::__relax_realtime_thread();
         let before = crate::jit::__relax_realtime_misses();
@@ -1667,13 +1654,7 @@ fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
     unsafe { crate::jit::call_jit(up, make_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
     assert_eq!(cell[0], 1);
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     assert!(!crate::jit::realtime_reached(helper), "the reach took in `helper`, which only a closure of other code calls (every vtable of `dyn FnMut(u32)` followed)");
     let (out, misses) = std::thread::spawn(move || {
         crate::jit::__relax_realtime_thread();
@@ -1747,13 +1728,7 @@ fn realtime_reach_walks_code_that_ran_before_the_mark() {
     unsafe { crate::jit::call_jit(up, warm_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
     assert_eq!(cell[1], 1);
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let (out, misses) = std::thread::spawn(move || {
         crate::jit::__relax_realtime_thread();
         let before = crate::jit::__relax_realtime_misses();
@@ -1764,6 +1739,15 @@ fn realtime_reach_walks_code_that_ran_before_the_mark() {
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Waits until the real-time reach of `ticket` is compiled, with no wall-clock limit (as lazy_tests):
+/// a reach that never finishes hangs the test, and a loaded machine only makes it slower (a 10 s
+/// cap failed three suite copies at once with the code cache off).
+fn wait_realtime_compiled(ticket: u64) {
+    while !crate::jit::__relax_realtime_compiled(ticket) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
 }
 
 /// What a Fab run's misses on a node were, on a cold store: the marked root formats floats
@@ -1821,13 +1805,7 @@ fn realtime_reach_covers_float_formatting_and_container_drops() {
         (id, u.entry(id))
     });
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let mut cell = [2u32, 0];
     let cp = cell.as_mut_ptr() as u64;
     let (out, misses) = std::thread::spawn(move || {
@@ -1895,13 +1873,7 @@ fn realtime_tier_up_compiles_new_callees_before_its_install() {
     });
     let [root, first, second, third, twenty, three_hundred] = slots[..] else { unreachable!() };
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let mut cell = [0u32];
     let cp = cell.as_mut_ptr() as u64;
     // (value, lazy compiles) of a call on a real-time thread
@@ -2055,13 +2027,7 @@ fn realtime_reach_reads_the_installed_code() {
     });
     assert!(stored.0 && stored.1.iter().any(|n| n.contains("more")) && !stored.1.iter().any(|n| n.contains("twice")), "the disk cache holds `run`'s O2 entry, which calls `more` and not `twice` (else this fixture proves nothing): linked {}, it calls {:?}", stored.0, stored.1);
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![run]) });
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let missed: Vec<String> = callees.iter().filter(|&&c| !crate::jit::realtime_reached(c)).map(|&c| u.fns[c as usize].name.to_string()).collect();
     assert!(missed.is_empty(), "the reach did not take in what the installed code calls: {missed:?} (it read another version's references)");
     let mut cell = [2u32, 0];
@@ -2140,13 +2106,7 @@ fn realtime_reach_follows_calls_through_statics_and_fn_pointers() {
     unsafe { crate::jit::call_jit(up, start_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
     unsafe { crate::jit::call_jit(up, later_e, 0) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
-    for _ in 0..5000 {
-        if crate::jit::__relax_realtime_compiled(ticket) {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(2));
-    }
-    assert!(crate::jit::__relax_realtime_compiled(ticket), "the real-time reach was not compiled in 10 s");
+    wait_realtime_compiled(ticket);
     let next = crate::owner::call(crate::owner::Class::Program, || u.fns.iter().position(|f| f.name.contains("Ded as") && f.name.ends_with("::next")));
     // (each hole on its own: both are said when both are open)
     let holes: Vec<&str> = [

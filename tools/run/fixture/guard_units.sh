@@ -97,7 +97,7 @@ guard() {
 }
 guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --lib -- gpu_guard|fail= guard-makepad-scope"
 guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab|GATEREPRO guard makepad-fab :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab"
-guard jit jit "makepad-fab@xr_far_face makepad-render makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-scope|fail="
+guard jit jit "makepad-fab@xr_far_face makepad-render makepad-sandbox@store_play_ready makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-sandbox|GATEUNIT ok guard makepad-scope|fail="
 guard other other - "fail=" "GATEUNIT"
 GATE_RETRY="guard makepad-scope" guard retry other makepad-scope "GATEUNIT ok guard makepad-scope|fail="
 if [ -n "$fail" ]; then echo "guard_units FAILED:$fail"; exit 1; fi

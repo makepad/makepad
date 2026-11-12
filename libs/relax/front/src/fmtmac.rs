@@ -346,9 +346,9 @@ impl<'a> Parser<'a> {
                 if self.pos >= hi {
                     tg!(&mut g; #core() :: vec :: Vec :: new ());
                 } else {
-                    let first = self.expr()?;
+                    let first = self.mac_list_elem()?;
                     if self.eat(T::Semi) {
-                        let n = self.expr()?;
+                        let n = self.mac_list_elem()?;
                         tg!(&mut g; #core() :: vec :: from_elem (#expr(first), #expr(n)));
                     } else {
                         let mut v = vec![first];
@@ -356,7 +356,7 @@ impl<'a> Parser<'a> {
                             if self.pos >= hi {
                                 break;
                             }
-                            v.push(self.expr()?);
+                            v.push(self.mac_list_elem()?);
                         }
                         // rustc: `<[_]>::into_vec(box [a, b, ..])` -- the expected `Vec<T>`
                         // reaches the elements (each coerces to T: `vec![Box::new(|x| ..), ..]`
@@ -373,9 +373,9 @@ impl<'a> Parser<'a> {
                 if self.pos >= hi {
                     tg!(&mut g; smallvec :: SmallVec :: new ());
                 } else {
-                    let first = self.expr()?;
+                    let first = self.mac_list_elem()?;
                     if self.eat(T::Semi) {
-                        let n = self.expr()?;
+                        let n = self.mac_list_elem()?;
                         tg!(&mut g; smallvec :: SmallVec :: from_elem (#expr(first), #expr(n)));
                     } else {
                         let mut v = vec![first];
@@ -383,7 +383,7 @@ impl<'a> Parser<'a> {
                             if self.pos >= hi {
                                 break;
                             }
-                            v.push(self.expr()?);
+                            v.push(self.mac_list_elem()?);
                         }
                         tg!(&mut g; smallvec :: SmallVec :: from_vec #open() < [_] > :: into_vec #open() #core() :: boxed :: Box :: new #open() #open_bracket());
                         for e in v {

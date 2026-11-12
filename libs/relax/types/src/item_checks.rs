@@ -1873,8 +1873,12 @@ pub fn global_allocators_and_lang_items(prog: &Program, own: &[bool], binaries: 
 }
 
 /// rustc_ast_passes feature_gate `gate_all`: syntax the parser recorded (ParseSess::gated_spans)
-/// whose feature the crate does not enable is E0658. Text a macro expanded is not judged.
+/// whose feature the crate does not enable is E0658. The crate's own text is judged: the file's,
+/// and the body of a `macro_rules!` defined in it (reported at the token in the definition, as
+/// rustc does); what a built-in macro or another crate's macro produced is not (it may carry
+/// `allow_internal_unstable`).
 pub fn gated_syntax(prog: &Program, own: &[bool]) -> Vec<String> {
+    use crate::parser::ExpnKind;
     let mut errors = Vec::new();
     for (f, pf) in prog.files.iter().enumerate() {
         if pf.ast.gated_syntax.is_empty() { continue; }
@@ -1882,7 +1886,7 @@ pub fn gated_syntax(prog: &Program, own: &[bool]) -> Vec<String> {
         if !own.get(krate as usize).copied().unwrap_or(false) { continue; }
         let features = prog.crates[krate as usize].features(prog);
         for &(feature, pos) in &pf.ast.gated_syntax {
-            if pos >= pf.src_len || features.has(feature) { continue; }
+            if features.has(feature) || !matches!(pf.expansion_kind(pos), ExpnKind::Root | ExpnKind::LocalRules) { continue; }
             let msg = match feature {
                 "stmt_expr_attributes" => "attributes on expressions are experimental",
                 "coroutines" => "coroutine syntax is experimental",
@@ -1891,7 +1895,7 @@ pub fn gated_syntax(prog: &Program, own: &[bool]) -> Vec<String> {
                 "default_field_values" => "default values on fields are experimental",
                 _ => continue,
             };
-            errors.push(prog.record_error(f as u32, pos, "typeck", format!("E0658: {msg}")));
+            errors.push(prog.record_error(f as u32, pf.lint_pos(pos), "typeck", format!("E0658: {msg}")));
         }
     }
     errors
