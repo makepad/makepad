@@ -267,8 +267,8 @@ pub fn vision_mode_name() -> &'static str {
     if mode == "start" { "start" } else { "lazy" }
 }
 
-/// GPU memory this process holds (nvidia-smi per-process figure), cached
-/// for a second; `None` without NVIDIA tools.
+/// GPU memory this process holds (Metal allocations or nvidia-smi's
+/// per-process figure), cached for a second; `None` without a device probe.
 pub fn process_gpu_mb() -> Option<u64> {
     static CACHE: OnceLock<Mutex<Option<(Instant, Option<u64>)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
@@ -278,19 +278,26 @@ pub fn process_gpu_mb() -> Option<u64> {
             return value;
         }
     }
-    let pid = std::process::id().to_string();
-    let value = crate::child_process::output(
-        std::process::Command::new("nvidia-smi")
-            .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]),
-    )
-    .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
-                let (p, mb) = line.split_once(',')?;
-                (p.trim() == pid).then(|| mb.trim().parse::<u64>().ok()).flatten()
+    #[cfg(all(target_os = "macos", feature = "ai-common"))]
+    let value = makepad_ai_common::backend::device_memory()
+        .ok()
+        .map(|(current, _)| current / (1 << 20));
+    #[cfg(not(all(target_os = "macos", feature = "ai-common")))]
+    let value = {
+        let pid = std::process::id().to_string();
+        crate::child_process::output(
+            std::process::Command::new("nvidia-smi")
+                .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]),
+        )
+        .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| {
+                String::from_utf8_lossy(&out.stdout).lines().find_map(|line| {
+                    let (p, mb) = line.split_once(',')?;
+                    (p.trim() == pid).then(|| mb.trim().parse::<u64>().ok()).flatten()
+                })
             })
-        });
+    };
     *guard = Some((Instant::now(), value));
     value
 }

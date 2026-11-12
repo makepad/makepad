@@ -6,7 +6,7 @@ use makepad_ai_hub::backend::{
 };
 use makepad_ai_hub::download::Downloader;
 use makepad_ai_hub::multiview_backend::{
-    decode_result, MultiviewBackend, MultiviewFrame, MultiviewResult, MULTIVIEW_MAX_VIEWS,
+    decode_result, MultiviewBackend, MultiviewFrame, MultiviewResult,
     MULTIVIEW_SIZE,
 };
 use makepad_ai_hub::protocol::GenerateRequestJson;
@@ -222,7 +222,7 @@ fn score(
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let usage = "usage: multiview-check <weights-dir> <model-id> <views> (1..=32)";
+    let usage = "usage: multiview-check <weights-dir> <model-id> <views> (>= 1)";
     let mut args = std::env::args_os().skip(1);
     let cache_dir = PathBuf::from(args.next().ok_or(usage)?);
     let model_id = args
@@ -233,7 +233,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .next()
         .and_then(|s| s.into_string().ok())
         .and_then(|s| s.parse::<usize>().ok())
-        .filter(|n| (1..=MULTIVIEW_MAX_VIEWS).contains(n))
+        .filter(|&n| n >= 1)
         .ok_or(usage)?;
     if args.next().is_some() {
         return Err(usage.into());

@@ -5,8 +5,7 @@
 //!   `view_<N-1>`, `image/png`, contiguous (a `view_<i>` without `view_<i-1>`
 //!   is refused, naming both). Every view decodes with
 //!   `crate::trellis_backend::decode_png_rgba8`, alpha dropped, to exactly
-//!   518 x 518, else refused with its size. 1 <= N <= `MULTIVIEW_MAX_VIEWS`
-//!   = 32, else refused.
+//!   518 x 518, else refused with its size. N >= 1; large requests run in chunks.
 //! - Optional named `views`, `application/json`:
 //!   `{"metric": true, "views": [{"k": [fx, fy, cx, cy], "pose":
 //!   {"quat": [x, y, z, w], "trans": [x, y, z]}}, ...]}`.
@@ -47,7 +46,7 @@ use std::collections::BTreeMap;
 use makepad_ai_common::DiffusionError;
 #[cfg(feature = "multiview-native")]
 use makepad_ai_vision::{
-    mapanything::{MapAnything, MapAnythingPrecision, MapAnythingView},
+    mapanything::{forward_activation_bytes, MapAnything, MapAnythingPrecision, MapAnythingView},
     mapanything_prep::{
         depth_z_to_along_ray, normalize_rgb8, pinhole_from_rays, rays_from_pinhole,
     },
@@ -57,8 +56,6 @@ use std::path::PathBuf;
 
 /// MapAnything's input side in pixels.
 pub const MULTIVIEW_SIZE: usize = 518;
-/// Maximum number of views in one request.
-pub const MULTIVIEW_MAX_VIEWS: usize = 32;
 const PIXELS: usize = MULTIVIEW_SIZE * MULTIVIEW_SIZE;
 #[cfg(feature = "multiview-native")]
 const _: () = assert!(MULTIVIEW_SIZE == makepad_ai_vision::mapanything::MAPANYTHING_SIZE);
@@ -103,6 +100,66 @@ pub struct MultiviewResult {
     pub views: Vec<MultiviewViewResult>,
     /// Scale already applied by the model to its predictions.
     pub metric_scale: f32,
+}
+
+/// Plans balanced chunks in request order, each anchored by view 0.
+/// A two-view chunk is the fallback even when the estimate does not fit.
+pub fn chunk_plan(views: usize, fits: impl Fn(usize) -> bool) -> Vec<Vec<usize>> {
+    if views == 1 || fits(views) {
+        return vec![(0..views).collect()];
+    }
+    let capacity = (2..views).rev().find(|&count| fits(count)).unwrap_or(2);
+    let groups = (views - 1).div_ceil(capacity - 1);
+    let group_size = (views - 1) / groups;
+    let larger_groups = (views - 1) % groups;
+    let mut next = 1;
+    (0..groups)
+        .map(|group| {
+            let end = next + group_size + usize::from(group < larger_groups);
+            let chunk = std::iter::once(0).chain(next..end).collect();
+            next = end;
+            chunk
+        })
+        .collect()
+}
+
+/// Aligns a later chunk to the first chunk's view 0 and appends its other views.
+/// Chunks must follow `chunk_plan` order. Returns the scale ratio and valid pixel count.
+pub fn stitch_chunk(result: &mut MultiviewResult, mut chunk: MultiviewResult) -> (f32, usize) {
+    let reference = &result.views[0];
+    let anchor = &chunk.views[0];
+    let mut ratios: Vec<f32> = reference
+        .depth_z
+        .iter()
+        .zip(&anchor.depth_z)
+        .zip(reference.mask.iter().zip(&anchor.mask))
+        .filter_map(|((&first, &next), (&first_mask, &next_mask))| {
+            (first_mask == 1 && next_mask == 1 && first > 0.0 && next > 0.0)
+                .then(|| first / next)
+        })
+        .collect();
+    let count = ratios.len();
+    let ratio = if count == 0 {
+        1.0
+    } else {
+        let (lower, middle, _) = ratios.select_nth_unstable_by(count / 2, f32::total_cmp);
+        if count % 2 == 0 {
+            let below = lower.iter().copied().max_by(f32::total_cmp).expect("lower median");
+            below * 0.5 + *middle * 0.5
+        } else {
+            *middle
+        }
+    };
+    for view in &mut chunk.views {
+        for depth in &mut view.depth_z {
+            *depth *= ratio;
+        }
+        for translation in &mut view.pose.1 {
+            *translation *= ratio;
+        }
+    }
+    result.views.extend(chunk.views.into_iter().skip(1));
+    (ratio, count)
 }
 
 #[derive(DeJson, SerJson)]
@@ -216,12 +273,6 @@ pub fn parse_request(params: &GenerateParams) -> Result<MultiviewRequest, AssetA
                 continue;
             }
             check_type(&input.name, &input.content_type, "image/png")?;
-            if i >= MULTIVIEW_MAX_VIEWS {
-                return Err(AssetAiError::Params(format!(
-                    "{}: at most {MULTIVIEW_MAX_VIEWS} views are supported",
-                    input.name
-                )));
-            }
             if images.insert(i, input).is_some() {
                 return Err(AssetAiError::Params(format!(
                     "{}: duplicate input",
@@ -667,47 +718,96 @@ fn run_native(
             metric: request.metric,
         })
         .collect();
-    let mut hook = |stage: &str, fraction: f64| {
-        if cancel.is_cancelled() {
-            return Err(DiffusionError::Cancelled);
-        }
-        progress(&format!("multiview: {stage}"), 0.02 + 0.96 * fraction);
-        Ok(())
+    let plan = |free_mb: Option<u64>| {
+        chunk_plan(views.len(), |count| {
+            free_mb.is_none_or(|free| forward_activation_bytes(count) / (1 << 20) <= free)
+        })
     };
-    let output = model
-        .forward(&views, Some(&mut hook), None)
-        .map_err(diffusion_err)?;
-    let mut views = Vec::with_capacity(output.views.len());
-    for output in output.views {
-        if output.rays.len() != PIXELS * 3
-            || output.depth_along_ray.len() != PIXELS
-            || output.confidence.len() != PIXELS
-            || output.mask_logits.len() != PIXELS
-        {
-            return Err(bad("native output map lengths disagree".into()));
-        }
-        let k = pinhole_from_rays(&output.rays, MULTIVIEW_SIZE, MULTIVIEW_SIZE).map_err(bad)?;
-        views.push(MultiviewViewResult {
-            depth_z: output
-                .depth_along_ray
-                .iter()
-                .zip(output.rays.chunks_exact(3))
-                .map(|(d, r)| d * r[2])
-                .collect(),
-            confidence: output.confidence,
-            mask: output
-                .mask_logits
-                .iter()
-                .map(|&v| (v > 0.0) as u8)
-                .collect(),
-            k,
-            pose: (output.quat, output.trans),
-        });
+    let mut free_mb = crate::residency::fresh_free_mb();
+    let mut chunks = plan(free_mb);
+    if chunks.len() > 1 {
+        // Pooled activations of earlier jobs count as used: return them, then plan again.
+        makepad_ai_common::backend::gpu_pool_clear();
+        free_mb = crate::residency::fresh_free_mb();
+        chunks = plan(free_mb);
     }
-    Ok(MultiviewResult {
-        views,
-        metric_scale: output.metric_scale,
-    })
+    if let (true, Some(free)) = (chunks.len() > 1, free_mb) {
+        let capacity = chunks.iter().map(Vec::len).max().unwrap_or(2);
+        progress(
+            &format!(
+                "multiview: {} views in {} chunks of <= {} (needs {} MB per chunk, free {} MB)",
+                views.len(),
+                chunks.len(),
+                capacity,
+                forward_activation_bytes(capacity) / (1 << 20),
+                free,
+            ),
+            0.02,
+        );
+    }
+    let mut result = None;
+    for (index, chunk) in chunks.iter().enumerate() {
+        cancel.check()?;
+        let chunk_views: Vec<_> = chunk.iter().map(|&view| views[view]).collect();
+        let mut hook = |stage: &str, fraction: f64| {
+            if cancel.is_cancelled() {
+                return Err(DiffusionError::Cancelled);
+            }
+            progress(
+                &format!("multiview: {stage}"),
+                0.02 + 0.96 * (index as f64 + fraction) / chunks.len() as f64,
+            );
+            Ok(())
+        };
+        let output = model
+            .forward(&chunk_views, Some(&mut hook), None)
+            .map_err(diffusion_err)?;
+        let mut views = Vec::with_capacity(output.views.len());
+        for output in output.views {
+            if output.rays.len() != PIXELS * 3
+                || output.depth_along_ray.len() != PIXELS
+                || output.confidence.len() != PIXELS
+                || output.mask_logits.len() != PIXELS
+            {
+                return Err(bad("native output map lengths disagree".into()));
+            }
+            let k = pinhole_from_rays(&output.rays, MULTIVIEW_SIZE, MULTIVIEW_SIZE).map_err(bad)?;
+            views.push(MultiviewViewResult {
+                depth_z: output
+                    .depth_along_ray
+                    .iter()
+                    .zip(output.rays.chunks_exact(3))
+                    .map(|(d, r)| d * r[2])
+                    .collect(),
+                confidence: output.confidence,
+                mask: output
+                    .mask_logits
+                    .iter()
+                    .map(|&v| (v > 0.0) as u8)
+                    .collect(),
+                k,
+                pose: (output.quat, output.trans),
+            });
+        }
+        let chunk = MultiviewResult {
+            views,
+            metric_scale: output.metric_scale,
+        };
+        if let Some(result) = &mut result {
+            let (ratio, pixels) = stitch_chunk(result, chunk);
+            let no_overlap = if pixels == 0 { " (no shared valid pixel; using ratio 1)" } else { "" };
+            progress(
+                &format!(
+                    "multiview: chunk {} scale ratio {ratio:.4} over {pixels} pixels{no_overlap}",
+                    index + 1,
+                ),
+                0.02 + 0.96 * (index + 1) as f64 / chunks.len() as f64,
+            );
+        } else {
+            result = Some(chunk);
+        }
+    }
+    Ok(result.expect("at least one chunk"))
 }
 
 impl ContentBackend for MultiviewBackend {
@@ -895,6 +995,75 @@ mod tests {
     }
 
     #[test]
+    fn multiview_chunk_plan_covers_views_in_balanced_anchored_groups() {
+        assert_eq!(chunk_plan(32, |_| true), vec![(0..32).collect::<Vec<_>>()]);
+        let chunks = chunk_plan(32, |count| count <= 11);
+        assert_eq!(chunks.len(), 4, "largest fitting chunk size determines group count");
+        assert!(chunks.iter().all(|chunk| chunk[0] == 0 && chunk.len() <= 11));
+        let others: Vec<_> = chunks.iter().flat_map(|chunk| chunk[1..].iter().copied()).collect();
+        assert_eq!(others, (1..32).collect::<Vec<_>>(), "other views appear once in request order");
+        let smallest = chunks.iter().map(Vec::len).min().unwrap();
+        let largest = chunks.iter().map(Vec::len).max().unwrap();
+        assert!(largest - smallest <= 1, "groups are balanced");
+        assert_eq!(chunk_plan(4, |_| false), vec![vec![0, 1], vec![0, 2], vec![0, 3]]);
+        assert_eq!(chunk_plan(1, |_| false), vec![vec![0]]);
+    }
+
+    #[test]
+    fn multiview_stitch_aligns_scale_and_preserves_reference_and_request_order() {
+        let view = |index: usize, scale: f32| MultiviewViewResult {
+            depth_z: vec![(index + 1) as f32 * 17.0 / scale; 8],
+            confidence: vec![index as f32 + 0.25; 8],
+            mask: vec![1; 8],
+            k: [K[0] + index as f32, K[1], K[2], K[3]],
+            pose: (IDENTITY, [index as f32 / scale, -3.4 / scale, 5.1 / scale]),
+        };
+        let mut first = MultiviewResult {
+            views: vec![view(0, 1.0), view(1, 1.0), view(2, 1.0)],
+            metric_scale: 2.5,
+        };
+        first.views[0].depth_z = vec![17.0, 34.0, 51.0, 340.0, 68.0, 0.0, 85.0, 102.0];
+        first.views[0].mask[4] = 0;
+        let reference_depth = first.views[0].depth_z.clone();
+        let reference_mask = first.views[0].mask.clone();
+        let reference_pose = first.views[0].pose;
+        let mut second = MultiviewResult {
+            views: vec![view(0, 1.7), view(3, 1.7), view(4, 1.7)],
+            metric_scale: 9.0,
+        };
+        second.views[0].depth_z = vec![10.0, 20.0, 30.0, 20.0, 1.0, 1.0, 0.0, 1.0];
+        second.views[0].mask[7] = 0;
+        let (ratio, pixels) = stitch_chunk(&mut first, second);
+        assert_eq!(pixels, 4, "both masks and both positive depths are required");
+        assert!((ratio - 1.7).abs() < 1e-5, "median rejects the scale outlier");
+        assert_eq!(first.metric_scale, 2.5, "metric scale comes from chunk 1");
+        assert_eq!(first.views.len(), 5);
+        assert_eq!(first.views[0].depth_z, reference_depth, "reference depth comes from chunk 1");
+        assert_eq!(first.views[0].mask, reference_mask, "reference mask comes from chunk 1");
+        assert_eq!(first.views[0].pose, reference_pose, "reference pose comes from chunk 1");
+        for (index, actual) in first.views.iter().enumerate().skip(1) {
+            let expected = view(index, 1.0);
+            for (actual, expected) in actual.depth_z.iter().zip(&expected.depth_z)
+                .chain(actual.pose.1.iter().zip(&expected.pose.1)) {
+                assert!((actual - expected).abs() <= expected.abs() * 1e-5, "view {index} depth and translation align");
+            }
+            assert_eq!(actual.k, expected.k, "intrinsics and request order preserved");
+            assert_eq!(actual.confidence, expected.confidence, "confidence preserved");
+            assert_eq!(actual.mask, expected.mask, "mask preserved");
+            assert_eq!(actual.pose.0, expected.pose.0, "rotation preserved");
+        }
+        let mut no_overlap = MultiviewResult {
+            views: vec![view(0, 1.7), view(5, 1.7)],
+            metric_scale: 9.0,
+        };
+        no_overlap.views[0].mask.fill(0);
+        let expected = view(5, 1.7);
+        assert_eq!(stitch_chunk(&mut first, no_overlap), (1.0, 0));
+        assert_eq!(first.views[5].depth_z, expected.depth_z, "no overlap keeps scale unchanged");
+        assert_eq!(first.views[5].pose, expected.pose, "no overlap keeps translation unchanged");
+    }
+
+    #[test]
     fn multiview_parse_preserves_rgb_geometry_depth_and_metric_defaults() {
         let mut params = params(3);
         params.inputs.push(metadata(3, true));
@@ -951,7 +1120,7 @@ mod tests {
         let original = std::mem::replace(&mut params.inputs[1].bytes, png(517));
         refuses(&params, &["view_2", "517x518"]);
         params.inputs[1].bytes = original;
-        // Full 33-view request; rejected before decoding its images.
+        // Full 33-view request is accepted; large forwards can run in chunks.
         for i in 3..33 {
             params.inputs.push(named(
                 &format!("view_{i}"),
@@ -959,7 +1128,7 @@ mod tests {
                 params.input_bytes.clone(),
             ));
         }
-        refuses(&params, &["view_32", "32"]);
+        assert_eq!(parse_request(&params).expect("33 views accepted").views.len(), 33);
         params.inputs.truncate(2);
         params.inputs.push(metadata(4, false));
         refuses(&params, &["views"]);

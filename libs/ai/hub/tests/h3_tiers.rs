@@ -15,6 +15,7 @@ fn gpu(vram_total_mb: u64, compute_cap: f64) -> GpuInfo {
         vram_free_mb: Some(vram_total_mb),
         vram_total_mb: Some(vram_total_mb),
         compute_cap: Some(compute_cap),
+        unified: false,
     }
 }
 

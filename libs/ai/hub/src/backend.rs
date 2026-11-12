@@ -1828,7 +1828,8 @@ pub fn backend_provisioned(name: &str) -> bool {
     }
 }
 
-/// Applies the registry's hard GPU requirements. Unlike the scheduling
+/// Applies the registry's hard GPU requirements (memory is advisory on a
+/// unified device). Unlike the scheduling
 /// estimate, declared minimums fail closed when the corresponding hardware
 /// fact is unavailable: an architecture-specific checkpoint must never be
 /// advertised, pulled, or loaded on a box we cannot prove is compatible.
@@ -1844,7 +1845,7 @@ pub fn check_gpu_requirements(
             gpu.name, gpu.vram_total_mb, gpu.compute_cap
         )
     };
-    if let Some(min_vram_gb) = min_vram_gb {
+    if let Some(min_vram_gb) = min_vram_gb.filter(|_| !gpu.unified) {
         let Some(total_mb) = gpu.vram_total_mb else {
             return Err(format!(
                 "model {model_id} requires >= {min_vram_gb} GB VRAM but the GPU is unknown ({}) — refusing (fail closed)",
@@ -1912,7 +1913,7 @@ pub fn model_availability(
     )?;
 
     let estimate_mb = crate::residency::estimated_peak_mb(spec);
-    if estimate_mb > 0 {
+    if estimate_mb > 0 && !gpu.unified {
         if let Some(total_mb) = gpu.vram_total_mb {
             let required_mb = estimate_mb.saturating_add(vram_reserve_mb);
             if required_mb > total_mb {
@@ -2236,6 +2237,7 @@ mod tests {
             vram_free_mb: vram_total_mb,
             vram_total_mb,
             compute_cap,
+            unified: false,
         }
     }
 
@@ -2253,6 +2255,21 @@ mod tests {
             license: None,
             files: Vec::new(),
         }
+    }
+
+    #[test]
+    fn unified_memory_is_advisory_but_compute_requirements_still_apply() {
+        let mut unified = gpu(Some(1), None);
+        unified.unified = true;
+        let mut model = spec("testpattern", true, Some(90.0));
+        model.min_vram_gb = Some(90.0);
+        assert!(model_availability(&model, &unified, 2048).is_ok());
+        assert!(super::check_gpu_requirements(&model.id, Some(90.0), None, &unified).is_ok());
+        let error = super::check_gpu_requirements(&model.id, Some(90.0), Some(8.9), &unified)
+            .expect_err("unified memory must not bypass a CUDA requirement");
+        assert!(error.contains("compute capability"), "{error}");
+        unified.compute_cap = Some(8.0);
+        assert!(super::check_gpu_requirements(&model.id, None, Some(8.9), &unified).is_err());
     }
 
     #[test]

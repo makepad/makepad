@@ -1991,6 +1991,7 @@ mod tests {
             vram_free_mb: None,
             vram_total_mb: vram,
             compute_cap: cap,
+            unified: false,
         };
         // No requirements: any GPU, even unknown, passes (legacy models).
         check_gpu_requirements("legacy", None, None, &GpuInfo::default()).unwrap();

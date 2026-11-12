@@ -65,6 +65,32 @@ const NORM_EPS: f32 = 1e-6;
 const SCALE_FEATURES: usize = 196;
 const UNSHUFFLE: usize = MAPANYTHING_PATCH * MAPANYTHING_PATCH;
 
+/// Forward activation estimate in bytes; resident weights are excluded.
+/// All tensors are counted as f32, including the bf16 compute path's activations.
+pub fn forward_activation_bytes(views: usize) -> u64 {
+    let f32_bytes = std::mem::size_of::<f32>() as u64; // Bytes in each activation element.
+    let fused = (PATCHES * HIDDEN) as u64 * f32_bytes; // Fused patch tokens kept for the dense head.
+    let registers = HIDDEN as u64 * f32_bytes; // One encoder class token per view.
+    let hidden = (VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Multi-view transformer hidden rows.
+    let normed_taps = (SHARE_TAPS.len() * VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Three normalised taps.
+    let features = (SHARE_TAPS.len() * PATCHES * HIDDEN) as u64 * f32_bytes; // Patch rows copied from the taps.
+    let block_normed = (2 * VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Both shadowed block normed inputs.
+    let block_qkv = (3 * VIEW_TOKENS * HEADS * HEAD_DIM) as u64 * f32_bytes; // Packed q, k, v retained through the MLP.
+    let block_attention = (2 * VIEW_TOKENS * HEADS * HEAD_DIM) as u64 * f32_bytes; // Attention parts and their concatenation.
+    let block_residual = (VIEW_TOKENS * HIDDEN) as u64 * f32_bytes; // Post-attention residual hidden rows.
+    let block_swiglu = (3 * VIEW_TOKENS * SWIGLU) as u64 * f32_bytes; // Gate/up rows and their product at the MLP peak.
+    let per_view = fused + registers + hidden + normed_taps + features
+        + block_normed + block_qkv + block_attention + block_residual + block_swiglu; // Retained rows plus one block's peak.
+
+    let dense_inner = crate::mapanything_heads::OUTPUT_INNER; // DenseHead's inner channel count.
+    let dense_output = crate::mapanything_heads::OUTPUT_CHANNELS; // DenseHead's output channel count.
+    let dense_low = ((MAPANYTHING_SIDE * 8).pow(2) * dense_inner) as u64 * f32_bytes; // conv1 output retained across shadowing at 296 x 296.
+    let dense_full = (PIXELS * (4 * dense_inner + 2 * dense_output)) as u64 * f32_bytes; // Resized, conv2, ReLU, transposed input, and both conv3 output layouts.
+    let scale_token = HIDDEN as u64 * f32_bytes; // The shared scale token.
+    let fixed = dense_low + dense_full + scale_token; // One dense-head peak and the scale token.
+    fixed + views as u64 * per_view
+}
+
 /// Explicit compute mode, chosen at load: it decides which weight copies exist
 /// on the device, so a loaded model runs in exactly one mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

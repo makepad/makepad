@@ -1626,7 +1626,9 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
     let now_ms = crate::jobs::now_ms();
     let num = |v: Option<u64>| v.map_or(Value::Null, |n| Value::Int(n as i64));
     let text = |v: Option<String>| v.map_or(Value::Null, json::s);
-    let device_kind = if gpu.name.is_some() {
+    let device_kind = if gpu.unified {
+        "metal"
+    } else if gpu.name.is_some() {
         "cuda"
     } else if cfg!(target_os = "macos") {
         "metal"
@@ -2266,10 +2268,10 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         .iter()
         .filter(|spec| {
             model_availability(spec, &gpu, shared.residency.reserve_mb).is_ok()
-                && shared.vram_usable.get().is_none_or(|usable_mb| {
+                && (gpu.unified || shared.vram_usable.get().is_none_or(|usable_mb| {
                     residency::too_small_note(spec, shared.residency.reserve_mb, usable_mb)
                         .is_none()
-                })
+                }))
         })
         .map(|spec| crate::claude_cli::advertised_domain(spec).to_string())
         .collect();
@@ -2291,6 +2293,7 @@ fn health_json(shared: &Arc<ServiceShared>) -> HealthJson {
         vram_free_mb: gpu.vram_free_mb,
         vram_total_mb: gpu.vram_total_mb,
         vram_usable_mb: shared.vram_usable.get(),
+        vram_unified: Some(gpu.unified),
         models_loaded,
         jobs_pending: Some(jobs_pending),
         node_id: Some(shared.node_id),
@@ -2395,7 +2398,7 @@ fn models_json(shared: &Arc<ServiceShared>) -> ModelsJson {
                     }
                 })
             });
-            let too_small_note = shared.vram_usable.get().and_then(|usable_mb| {
+            let too_small_note = shared.vram_usable.get().filter(|_| !gpu.unified).and_then(|usable_mb| {
                 residency::too_small_note(spec, shared.residency.reserve_mb, usable_mb)
             });
             let available = unavailable_reason.is_none() && too_small_note.is_none();
@@ -3868,24 +3871,7 @@ fn evict_resident(
 #[allow(unused_variables, unused_mut)]
 fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) -> usize {
     let mut released_bytes = 0usize;
-    #[cfg(any(
-        feature = "flux",
-        feature = "mesh",
-        feature = "matte-native",
-        feature = "depth-native",
-        feature = "segment-native",
-        feature = "rig-native",
-        feature = "motion-native",
-        feature = "video",
-        feature = "audio",
-        feature = "indextts",
-        // Both of these run heavy GPU pipelines through the same thread-local
-        // weight cache, and both were missing: a build enabled for them and
-        // nothing else compiled this whole function to a no-op, so the release
-        // that the retire path depends on silently did not exist.
-        feature = "paint-cuda",
-        feature = "upscale-native"
-    ))]
+    #[cfg(feature = "ai-common")]
     {
         match makepad_ai_common::backend::gpu_weight_cache_evict_all_if_loaded() {
             Ok(count) => progress(&format!(
@@ -3905,6 +3891,14 @@ fn release_worker_thread_device_caches(progress: &mut dyn FnMut(&str)) -> usize 
         }
     }
     released_bytes
+}
+
+/// After reclaiming idle allocations, unified memory may exceed its advisory
+/// working set. A note is also the admission decision; CUDA keeps its byte gate.
+fn over_recommended_admission(unified: bool, need: u64, free: u64) -> Option<String> {
+    (unified && free < need).then(|| {
+        format!("admitted over the recommended working set (unified memory): need {need} MB, free {free} MB")
+    })
 }
 
 /// The admission gate run before a model loads: single-heavy default
@@ -3999,13 +3993,17 @@ fn admit_for_load(
     // ensure-style device caches (weights parked by backends without unload
     // hooks, idle pool blocks), then give the driver a bounded window to
     // publish the freed memory (WDDM bookkeeping trails the allocator), and
-    // only then refuse — explicitly, never a silent fallback.
+    // only then refuse on discrete memory. Unified memory admits with a note.
     let pool_trim = pool_trim.unwrap_or_else(|| {
         trim_worker_thread_cached_pool(shared, backends, &mut progress)
     });
     let (post_trim_free, admitted) = residency::admission_after_trim(&pool_trim, free, need);
     free = post_trim_free;
     if admitted {
+        return Ok(());
+    }
+    if let Some(note) = over_recommended_admission(gpu.unified, need, free) {
+        progress(&note);
         return Ok(());
     }
     // The request can never fit when it is bigger than the device itself.
@@ -4075,6 +4073,28 @@ mod lifecycle_tests {
     use super::*;
     use crate::backend::{ArtifactData, CancelToken, ProgressSink};
     use crate::registry::{Domain, FileSpec, ModelSpec};
+
+    #[test]
+    fn unified_admission_reports_the_overage_without_bypassing_cuda() {
+        let need = 30720;
+        let free = 1;
+        assert_eq!(
+            over_recommended_admission(true, need, free).as_deref(),
+            Some("admitted over the recommended working set (unified memory): need 30720 MB, free 1 MB")
+        );
+        assert!(over_recommended_admission(false, need, free).is_none());
+        assert!(over_recommended_admission(true, need, need).is_none());
+        let trimmed = residency::CachedPoolTrim {
+            before_free_mb: Some(free),
+            after_gpu: crate::gpu::GpuInfo {
+                vram_free_mb: Some(free),
+                vram_total_mb: Some(2),
+                unified: false,
+                ..Default::default()
+            },
+        };
+        assert!(!residency::admission_after_trim(&trimmed, free, need).1);
+    }
 
     #[test]
     fn networked_hub_off_keeps_the_listener_on_loopback() {

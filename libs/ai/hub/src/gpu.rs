@@ -1,8 +1,10 @@
-//! Cheap GPU info for `/health`: name and VRAM via `nvidia-smi` when present
-//! (the content boxes are NVIDIA/Windows), otherwise nulls. Queried through a
-//! short-lived cache so /health polling does not spawn a process per request.
+//! Cheap GPU info for `/health`: Metal's advisory working set on macOS,
+//! otherwise VRAM via `nvidia-smi` when present. A short-lived cache avoids
+//! probing the device on every health request.
 
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 use crate::child_process;
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -14,12 +16,29 @@ pub struct GpuInfo {
     pub name: Option<String>,
     pub vram_free_mb: Option<u64>,
     pub vram_total_mb: Option<u64>,
+    /// Unified memory figures guide sizing and eviction, never refuse a load.
+    pub unified: bool,
     /// CUDA compute capability as reported by nvidia-smi (e.g. 8.9 for a
     /// GPU-A, 12.0 for Blackwell). Backends use this to fail closed on
     /// architecture-gated checkpoints (NVFP4 tiers).
     pub compute_cap: Option<f64>,
 }
 
+#[cfg(all(target_os = "macos", feature = "ai-common"))]
+pub fn query_gpu() -> GpuInfo {
+    let Ok((free, total)) = makepad_ai_common::backend::gpu_memory_info() else {
+        return GpuInfo::default();
+    };
+    GpuInfo {
+        name: makepad_ai_common::backend::device_name(),
+        vram_free_mb: Some((free as u64) / (1 << 20)),
+        vram_total_mb: Some((total as u64) / (1 << 20)),
+        compute_cap: None,
+        unified: true,
+    }
+}
+
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 pub fn query_gpu() -> GpuInfo {
     // nvidia-smi is on PATH on the GPU boxes (Windows and Linux). On machines
     // without it (macOS dev laptops) this just fails fast and we report nulls.
@@ -45,6 +64,7 @@ pub fn query_gpu() -> GpuInfo {
         vram_free_mb: parts.next().and_then(|v| v.parse().ok()),
         vram_total_mb: parts.next().and_then(|v| v.parse().ok()),
         compute_cap: parts.next().and_then(|v| v.parse().ok()),
+        unified: false,
     }
 }
 

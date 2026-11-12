@@ -506,6 +506,9 @@ fn vram_admission(
         // the advertised memory contract.
         return VramAdmission::Admitted;
     };
+    if health.vram_unified == Some(true) {
+        return VramAdmission::Admitted;
+    }
     // `vram_reserve_mb` doubles as the capability marker for services that
     // actually enforce residency: a v0.2+ node publishes it and retires
     // co-resident models plus byte-gates every load before a job runs. A
@@ -749,6 +752,9 @@ fn gpu_class(total_mb: u64) -> Option<&'static (u64, u32, f64)> {
 /// Total VRAM of the GPU a box names, if it names one.
 fn reported_gpu_total_mb(snapshot: &BoxSnapshot) -> Option<u64> {
     let health = snapshot.health.as_ref()?;
+    if health.vram_unified == Some(true) {
+        return None;
+    }
     health.gpu.as_ref()?;
     health.vram_total_mb
 }
@@ -1995,6 +2001,7 @@ mod tests {
                 vram_free_mb: Some(free_mb),
                 vram_total_mb: Some(total_mb),
                 vram_usable_mb: None,
+                vram_unified: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(0),
                 node_id: None,
@@ -2016,6 +2023,30 @@ mod tests {
             }),
             models: Vec::new(),
         }
+    }
+
+    #[test]
+    fn unified_memory_routes_despite_small_figures_and_has_unknown_speed() {
+        let mut node = snap("http://192.0.2.1", 0, 1);
+        let mut model = m("image-model", "image", MODEL_STATE_READY, 90.0);
+        for reserve in [None, Some(2048)] {
+            let health = node.health.as_mut().unwrap();
+            health.vram_unified = Some(true);
+            health.vram_usable_mb = Some(0);
+            health.vram_reserve_mb = reserve;
+            health.gpu = Some("unified GPU".to_string());
+            for state in [MODEL_STATE_READY, MODEL_STATE_LOADED] {
+                model.state = state.to_string();
+                node.models = vec![model.clone()];
+                assert!(matches!(vram_admission(&node, &model, 4096), VramAdmission::Admitted));
+            }
+        }
+        // A large recommended set must not turn shared RAM into a CUDA speed class.
+        node.health.as_mut().unwrap().vram_total_mb = Some(128 * 1024);
+        assert_eq!(gpu_rank(&node), 0);
+        assert_eq!(gpu_throughput_of(&node), UNKNOWN_GPU_RELATIVE_THROUGHPUT);
+        node.health.as_mut().unwrap().vram_unified = Some(false);
+        assert!(matches!(vram_admission(&node, &model, 4096), VramAdmission::Incompatible { .. }));
     }
 
 
@@ -2056,6 +2087,7 @@ mod tests {
                 vram_free_mb: None,
                 vram_total_mb: None,
                 vram_usable_mb: None,
+                vram_unified: None,
                 models_loaded: Vec::new(),
                 jobs_pending: Some(pending),
                 node_id: None,

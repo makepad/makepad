@@ -32,8 +32,8 @@ const HIDDEN: usize = 1536;
 const TOKENS: usize = SIDE * SIDE;
 /// DPT feature width and the output head's inner width.
 const FEATURES: usize = 256;
-const OUTPUT_INNER: usize = 128;
-const OUTPUT_CHANNELS: usize = 6;
+pub(crate) const OUTPUT_INNER: usize = 128;
+pub(crate) const OUTPUT_CHANNELS: usize = 6;
 /// Reassemble stage widths, shallow to deep.
 const STAGE_WIDTHS: [usize; 4] = [96, 192, 384, 768];
 const POSE_WIDTH: usize = 784;

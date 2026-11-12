@@ -2097,7 +2097,15 @@ mod imp {
     }
 
     pub fn gpu_memory_info() -> Result<(usize, usize), String> {
-        Err(GPU_UNAVAILABLE.to_string())
+        #[cfg(target_os = "macos")]
+        {
+            let (current, recommended) = makepad_ai_metal::device_memory()?;
+            Ok((recommended.saturating_sub(current) as usize, recommended as usize))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Err(GPU_UNAVAILABLE.to_string())
+        }
     }
 
     /// Without CUDA there is no context to destroy.

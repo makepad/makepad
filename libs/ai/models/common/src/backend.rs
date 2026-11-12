@@ -10,6 +10,7 @@ pub use makepad_ai_cuda::llm_ops;
 pub use makepad_ai_loader::prof;
 pub use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
 pub use makepad_ai_metal::{BackendCapabilities, BackendInfo, BackendKind};
+pub use makepad_ai_metal::{device_memory, device_name};
 
 pub mod metal {
     pub use makepad_ai_llm::metal_compiled::*;

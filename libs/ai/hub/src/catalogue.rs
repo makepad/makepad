@@ -442,7 +442,7 @@ mod tests {
     }
 
     fn gpu(vram_mb: Option<u64>) -> GpuInfo {
-        GpuInfo { name: Some("test".into()), vram_free_mb: vram_mb, vram_total_mb: vram_mb, compute_cap: Some(8.9) }
+        GpuInfo { name: Some("test".into()), vram_free_mb: vram_mb, vram_total_mb: vram_mb, compute_cap: Some(8.9), unified: false }
     }
 
     #[test]

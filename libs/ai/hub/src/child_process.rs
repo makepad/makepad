@@ -18,7 +18,10 @@
 //! in the kernel and kills every process in the job.
 
 use std::io;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, Command, ExitStatus};
+// nvidia-smi is the only caller; a Mac with the Metal probe has none.
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
+use std::process::{Output, Stdio};
 
 /// Spawns one contained child without changing its configured stdio or args.
 pub(crate) fn spawn(command: &mut Command) -> io::Result<Child> {
@@ -40,6 +43,7 @@ pub(crate) fn status(command: &mut Command) -> io::Result<ExitStatus> {
 }
 
 /// Equivalent to [`Command::output`], through the contained spawn path.
+#[cfg(not(all(target_os = "macos", feature = "ai-common")))]
 pub(crate) fn output(command: &mut Command) -> io::Result<Output> {
     command
         .stdin(Stdio::null())
@@ -233,6 +237,7 @@ mod windows {
 mod tests {
     use super::*;
     use std::io::BufRead;
+    use std::process::Stdio;
     use std::time::{Duration, Instant};
 
     const ESRCH: i32 = 3;

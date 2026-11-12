@@ -47,6 +47,16 @@ pub fn is_available() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// This process's device allocations and the advisory working-set size, in bytes.
+/// Reads device properties without initializing a tensor runtime.
+pub fn device_memory() -> Result<(u64, u64), String> {
+    imp::device_memory()
+}
+
+pub fn device_name() -> Option<String> {
+    imp::device_name()
+}
+
 use makepad_ai_loader::{WeightKey, WeightOwner};
 use crate::gpu_types::GpuTensor;
 use makepad_ai_loader::prof;
@@ -814,6 +824,14 @@ mod tests {
 
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
+    pub(super) fn device_memory() -> Result<(u64, u64), String> {
+        Err("no Metal device".to_string())
+    }
+
+    pub(super) fn device_name() -> Option<String> {
+        None
+    }
+
     #[derive(Default)]
     pub(super) struct ArResidual;
 
@@ -1412,6 +1430,14 @@ mod imp {
 )))]
 #[allow(unused_variables)]
 mod imp {
+    pub(super) fn device_memory() -> Result<(u64, u64), String> {
+        Err("no Metal device".to_string())
+    }
+
+    pub(super) fn device_name() -> Option<String> {
+        None
+    }
+
     #[derive(Default)]
     pub(super) struct ArResidual;
 
@@ -1705,6 +1731,23 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    pub(super) fn device_memory() -> Result<(u64, u64), String> {
+        let _pool = AutoreleasePool::new();
+        let device = MetalContext::create_device().ok_or_else(|| "no Metal device".to_string())?;
+        unsafe {
+            let current: u64 = msg_send![device.as_id(), currentAllocatedSize];
+            let recommended: u64 = msg_send![device.as_id(), recommendedMaxWorkingSetSize];
+            Ok((current, recommended))
+        }
+    }
+
+    pub(super) fn device_name() -> Option<String> {
+        let _pool = AutoreleasePool::new();
+        let device = MetalContext::create_device()?;
+        let name: ObjcId = unsafe { msg_send![device.as_id(), name] };
+        (!name.is_null()).then(|| nsstring_to_string(name))
+    }
+
     #[derive(Default)]
     pub(super) struct ArResidual {
         h: Option<Arc<TensorBuffer>>,
@@ -7518,7 +7561,8 @@ mod imp {
                 + v.capacity as u64 + out.capacity as u64;
             let dispatches = 1 + usize::from(nk % OP_FLASH_ATTN_EXT_NCPSG as usize != 0);
             let est = estimate_ns(&tensor_runtime()?.cost, macs, bytes, dispatches);
-            row_chunks(nq, est, 1, 20)
+            // Chunks hold whole query tiles: a partial tile costs a full one in every chunk.
+            row_chunks(nq, est, OP_FLASH_ATTN_EXT_NQPSG as usize, 20)
         } else { vec![0..nq] };
         tensor_attention_rows(q, qo, k, ko, v, vo, out, nq, nk, heads, d, scale, &rows)
     }
@@ -7676,7 +7720,7 @@ mod imp {
             for (rows, slices, align, min_rows) in [
                 (300, 3.5, 32, 32), (100, 9.0, 1, 20),
                 (320, 4.0, 32, 32), (33, 20.0, 32, 32),
-                (101, 3.0, 1, 20),
+                (101, 3.0, 1, 20), (101, 3.0, 8, 20), (8220, 36.0, 8, 20),
             ] {
                 let plan = row_chunks(rows, slices * SLICE_NS, align, min_rows);
                 let mut end = 0;

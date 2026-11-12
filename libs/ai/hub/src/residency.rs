@@ -19,8 +19,10 @@
 //! - a classified CUDA OOM evicts everything else once and retries once;
 //!   there is NO silent CPU/Python/other-node fallback — the second failure
 //!   is the job's explicit error;
-//! - machines without `nvidia-smi` (mac dev/test) skip the byte gating but
-//!   keep the deterministic single-resident retire semantics.
+//! - unified memory uses the figures to choose evictions and window sizes;
+//!   after reclamation it admits even beyond the recommended working set;
+//! - machines without a memory probe skip the byte gating but keep the
+//!   deterministic single-resident retire semantics.
 //!
 //! Everything here is pure math/classification plus the polling helper; the
 //! worker in `server.rs` owns the actual backend map and unload calls.
@@ -514,6 +516,7 @@ mod tests {
         let gpu = crate::gpu::GpuInfo {
             vram_free_mb: Some(30_000),
             vram_total_mb: Some(32_000),
+            unified: false,
             ..Default::default()
         };
         assert_eq!(usable_vram_mb(&gpu), Some(30_000));
@@ -531,6 +534,7 @@ mod tests {
             || crate::gpu::GpuInfo {
                 vram_free_mb: Some(free.get()),
                 vram_total_mb: Some(total_mb),
+                unified: false,
                 ..Default::default()
             },
             || {

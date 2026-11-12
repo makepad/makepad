@@ -618,12 +618,20 @@ impl ContentBackend for LlmBackend {
                     // reserve, from this model's own accounting at its last
                     // load; a model that would not leave the reserve free is
                     // not loaded at all.
-                    let free_before = crate::residency::fresh_free_mb();
+                    let gpu = crate::gpu::query_gpu();
+                    let free_before = gpu.vram_free_mb;
                     let reserve = crate::gpu_yield::ui_reserve_mb();
                     let known = crate::gpu_yield::llm_memory_of(&self.model_id)
                         .filter(|m| m.kv == kv_wanted.slug());
                     if let (Some(free), Some(memory), true) = (free_before, known.as_ref(), reserve > 0) {
                         let fit = crate::gpu_yield::fit_context(memory, free, reserve, llama_worker::configured_context(), crate::llm_context::MIN_CONTEXT)
+                            .or_else(|error| {
+                                if gpu.unified {
+                                    Ok(crate::llm_context::MIN_CONTEXT)
+                                } else {
+                                    Err(error)
+                                }
+                            })
                             .map_err(AssetAiError::Unavailable)?;
                         crate::gpu_yield::settle_ceiling(fit, llama_worker::configured_context());
                     }

@@ -6,6 +6,7 @@ description = "AI content generation service: wraps local GPU model runtimes (im
 license = "MIT OR Apache-2.0"
 
 [features]
+ai-common = ["dep:makepad-ai-common"]
 # Default for a build of this crate itself: the local LLM and Whisper
 # speech-to-text. Apps depend on the hub with defaults off and name what
 # they use; the standalone service (apps/ai-hub) lists every backend in its
@@ -29,7 +30,7 @@ python-backends = []
 # (fleet round-trip tests on any OS without anyone's login). Never in a shipped build.
 claude-stub = []
 # Real Flux image generation via makepad-ai-flux.
-flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
+flux = ["dep:makepad-ai-flux", "ai-common"]
 # The generative-PBR paint domain: mesh GLB + reference image -> PBR-textured
 # GLB + semantic maps + provenance manifest. Ships the deterministic
 # "paint-test" tier everywhere. The standalone service default (apps/ai-hub)
@@ -38,7 +39,7 @@ flux = ["dep:makepad-ai-flux", "dep:makepad-ai-common"]
 # like any other registry model.
 paint = ["dep:makepad-ai-paint", "dep:makepad-gltf", "dep:makepad-remesh", "dep:makepad-xatlas"]
 # Windows/Linux CUDA Hunyuan executor (in the standalone service default).
-paint-cuda = ["paint", "makepad-ai-paint/cuda-taps", "dep:makepad-ai-common"]
+paint-cuda = ["paint", "makepad-ai-paint/cuda-taps", "ai-common"]
 # Real LLM prompt expansion via makepad-ai-llm (Qwen3.5/3.6 GGUF).
 llm = ["dep:makepad-ai-llm"]
 # The CUDA kernels for every local model backend (makepad-ai-cuda `cuda`; Linux/Windows,
@@ -53,52 +54,52 @@ stt = ["speech", "dep:makepad-ai-speech", "makepad-ai-speech/whisper"]
 # Real Kokoro speech synthesis via makepad-ai-speech.
 tts = ["dep:makepad-ai-speech", "makepad-ai-speech/kokoro"]
 # Real IndexTTS-2.5 character-voice TTS via makepad-ai-speech.
-indextts = ["dep:makepad-ai-speech", "makepad-ai-speech/indextts", "dep:makepad-ai-common"]
+indextts = ["dep:makepad-ai-speech", "makepad-ai-speech/indextts", "ai-common"]
 # Real MiniMax H3 video generation via makepad-ai-h3 plus the hardware
 # video file encoder (makepad-platform-video). Does NOT pull the UI platform crate.
-video = ["dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-video"]
+video = ["dep:makepad-ai-h3", "ai-common", "dep:makepad-video"]
 # Native Practical-RIFE v4.26 frame interpolation as an optional post-stage
 # of the video backend (`interpolate: 2|4`). Independent of `video`: the
 # stage sits after the generator, so the stubbed CI video path exercises it
 # too. Weights ride along with each H3 tier through the "interpolate" file
 # role, so the domain never grows a second selectable model.
-interpolate = ["dep:makepad-ai-rife", "dep:makepad-ai-common"]
+interpolate = ["dep:makepad-ai-rife", "ai-common"]
 # Real SA3 / MOSS / Woosh / ACE / Music3 audio via the sfx + music crates.
-audio = ["dep:makepad-ai-sfx", "dep:makepad-ai-music", "dep:makepad-ai-common"]
+audio = ["dep:makepad-ai-sfx", "dep:makepad-ai-music", "ai-common"]
 # Real TRELLIS.2 image->GLB via makepad-ai-trellis plus the in-repo remesher.
 # Also needs H3's noise helper and BiRefNet (via matte-native).
-mesh = ["matte-native", "depth-native", "dep:makepad-ai-trellis", "dep:makepad-ai-h3", "dep:makepad-ai-common", "dep:makepad-remesh", "dep:makepad-gltf", "dep:makepad-xatlas"]
+mesh = ["matte-native", "depth-native", "dep:makepad-ai-trellis", "dep:makepad-ai-h3", "ai-common", "dep:makepad-remesh", "dep:makepad-gltf", "dep:makepad-xatlas"]
 # Native BiRefNet image matting. Separate from `mesh` so a matte-only
 # service does not pull TRELLIS/remesh.
-matte-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+matte-native = ["dep:makepad-ai-vision", "ai-common"]
 # Native DA3METRIC-LARGE metric depth. Independent of `mesh`.
-depth-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+depth-native = ["dep:makepad-ai-vision", "ai-common"]
 # MapAnything multi-view geometry; CUDA only.
-multiview-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common", "dep:makepad-ai-cuda"]
+multiview-native = ["dep:makepad-ai-vision", "ai-common", "dep:makepad-ai-cuda"]
 # Native SAM 3.1 multiplex segmentation. Independent of `mesh`.
-segment-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+segment-native = ["dep:makepad-ai-vision", "ai-common"]
 # Native SAM 3D Body pose estimation.
-body-native = ["dep:makepad-ai-body", "dep:makepad-ai-common"]
+body-native = ["dep:makepad-ai-body", "ai-common"]
 # Native RealESRGAN x4plus general-image upscaling. Independent of `mesh`.
-upscale-native = ["dep:makepad-ai-vision", "dep:makepad-ai-common"]
+upscale-native = ["dep:makepad-ai-vision", "ai-common"]
 # Native HY-Motion decode -> rig retarget -> animated GLB.
-motion-native = ["dep:makepad-ai-motion", "dep:makepad-ai-common", "dep:makepad-gltf", "dep:makepad-render"]
+motion-native = ["dep:makepad-ai-motion", "ai-common", "dep:makepad-gltf", "dep:makepad-render"]
 # Native TripoSplat image -> 3D gaussian splat. Needs BiRefNet (via
 # matte-native) for the cutout and the FLUX.2 VAE encoder (via the flux
 # family crate, which makepad-ai-splat depends on directly).
-splat-native = ["matte-native", "dep:makepad-ai-splat", "dep:makepad-ai-common"]
+splat-native = ["matte-native", "dep:makepad-ai-splat", "ai-common"]
 # Native SkinTokens checkpoint conversion, inference, surface transfer and
 # lossless skinned-GLB augmentation. The reference Torch/bpy backend remains
 # separately available as `rig-oracle` through `python-backends`.
-rig-native = ["dep:makepad-ai-rig", "dep:makepad-ai-common", "dep:makepad-gltf"]
+rig-native = ["dep:makepad-ai-rig", "ai-common", "dep:makepad-gltf"]
 # In-process registry/downloader/backend runner for desktop applications.
 # Opt-in so featureless fleet clients do not pull the GPU model substrate.
-local = ["dep:makepad-ai-common"]
+local = ["ai-common"]
 # Native Beat This! audio -> beat/downbeat JSON analysis.
-beats-native = ["dep:makepad-ai-beats", "dep:makepad-ai-common"]
+beats-native = ["dep:makepad-ai-beats", "ai-common"]
 # Native BS-RoFormer music source separation. Clients use the featureless hub
 # slice; only fleet service builds compile and load this model.
-stems-native = ["dep:makepad-ai-stems", "dep:makepad-ai-common", "dep:makepad-audio-encode"]
+stems-native = ["dep:makepad-ai-stems", "ai-common", "dep:makepad-audio-encode"]
 # Native Spotify Basic Pitch audio -> notes/MIDI transcription. The model is
 # tiny and has a CPU fallback, so this lane is available without a GPU.
 notes-native = ["dep:makepad-ai-notes"]
