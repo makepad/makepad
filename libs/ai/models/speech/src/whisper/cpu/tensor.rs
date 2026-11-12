@@ -1,4 +1,5 @@
 use crate::whisper::quant::*;
+use makepad_ai_loader::WeightOwner;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -998,7 +999,7 @@ impl Tensor {
     /// Both x and w are f32 Tensors. w has layout [out_features, in_features]
     /// where each row is a contiguous weight vector (ideal for SIMD dot products).
     /// Result is [M, N]. Uses multiple threads for large matmuls.
-    pub fn matmul_t(x: &Tensor, w: &Tensor) -> Tensor {
+    pub fn matmul_t(x: &Tensor, w: &Tensor, owner: Option<&WeightOwner>) -> Tensor {
         let _t = std::time::Instant::now();
         let in_features = w.cols();
         let out_features = w.rows();
@@ -1011,6 +1012,7 @@ impl Tensor {
             batch,
             in_features,
             out_features,
+            owner,
         ) {
             crate::whisper::PROF_MATMUL_T.fetch_add(
                 _t.elapsed().as_nanos() as u64,
@@ -1091,13 +1093,18 @@ impl Tensor {
     /// x is [batch, in_features] (f32)
     /// result is [batch, out_features] (f32)
     /// This computes x @ weight^T (each weight row dots with each x row)
-    pub fn matmul_raw(x: &Tensor, weight: &RawTensor) -> Tensor {
-        Self::matmul_raw_with_prequant(x, weight, None)
+    pub fn matmul_raw(x: &Tensor, weight: &RawTensor, owner: Option<&WeightOwner>) -> Tensor {
+        Self::matmul_raw_with_prequant(x, weight, None, owner)
     }
 
     /// Fused linear layer: x @ weight^T + bias.
     /// Uses fused Metal matmul+add when available.
-    pub fn linear_raw(x: &Tensor, weight: &RawTensor, bias: &Tensor) -> Tensor {
+    pub fn linear_raw(
+        x: &Tensor,
+        weight: &RawTensor,
+        bias: &Tensor,
+        owner: Option<&WeightOwner>,
+    ) -> Tensor {
         let in_features = weight.n_cols();
         let out_features = weight.n_rows();
         let batch = x.numel() / in_features;
@@ -1116,6 +1123,7 @@ impl Tensor {
                 in_features,
                 out_features,
                 &bias.data,
+                owner,
             ) {
                 return Tensor {
                     data: out,
@@ -1124,7 +1132,7 @@ impl Tensor {
             }
         }
 
-        Tensor::add(&Self::matmul_raw(x, weight), bias)
+        Tensor::add(&Self::matmul_raw(x, weight, owner), bias)
     }
 
     /// Same as linear_raw but allows pre-quantized activation rows for CPU fallback path.
@@ -1133,6 +1141,7 @@ impl Tensor {
         weight: &RawTensor,
         xq_rows: Option<&[u8]>,
         bias: &Tensor,
+        owner: Option<&WeightOwner>,
     ) -> Tensor {
         let in_features = weight.n_cols();
         let out_features = weight.n_rows();
@@ -1152,6 +1161,7 @@ impl Tensor {
                 in_features,
                 out_features,
                 &bias.data,
+                owner,
             ) {
                 return Tensor {
                     data: out,
@@ -1160,7 +1170,10 @@ impl Tensor {
             }
         }
 
-        Tensor::add(&Self::matmul_raw_with_prequant(x, weight, xq_rows), bias)
+        Tensor::add(
+            &Self::matmul_raw_with_prequant(x, weight, xq_rows, owner),
+            bias,
+        )
     }
 
     /// Same as matmul_raw but optionally accepts pre-quantized activation rows in Q8_0 layout.
@@ -1169,6 +1182,7 @@ impl Tensor {
         x: &Tensor,
         weight: &RawTensor,
         xq_rows: Option<&[u8]>,
+        owner: Option<&WeightOwner>,
     ) -> Tensor {
         let _t = std::time::Instant::now();
         let in_features = weight.n_cols();
@@ -1187,6 +1201,7 @@ impl Tensor {
                 batch,
                 in_features,
                 out_features,
+                owner,
             ) {
                 crate::whisper::PROF_MATMUL_RAW.fetch_add(
                     _t.elapsed().as_nanos() as u64,
@@ -1205,6 +1220,7 @@ impl Tensor {
                 batch,
                 in_features,
                 out_features,
+                owner,
             ) {
                 crate::whisper::PROF_MATMUL_RAW.fetch_add(
                     _t.elapsed().as_nanos() as u64,
@@ -1227,6 +1243,7 @@ impl Tensor {
                         batch,
                         in_features,
                         out_features,
+                        owner,
                     ) {
                         crate::whisper::PROF_MATMUL_RAW.fetch_add(
                             _t.elapsed().as_nanos() as u64,
@@ -1661,7 +1678,13 @@ impl Tensor {
     /// weight: [channels_out, channels_in, kernel_size] (stored as RawTensor)
     /// bias: [channels_out] (f32 Tensor, shaped [1, channels_out])
     /// output: [channels_out, length / stride]
-    pub fn conv1d(input: &Tensor, weight: &Tensor, bias: &Tensor, stride: usize) -> Tensor {
+    pub fn conv1d(
+        input: &Tensor,
+        weight: &Tensor,
+        bias: &Tensor,
+        stride: usize,
+        owner: Option<&WeightOwner>,
+    ) -> Tensor {
         let ch_out = weight.shape[0];
         let ch_in = weight.shape[1];
         let ksize = weight.shape[2];
@@ -1673,9 +1696,14 @@ impl Tensor {
             crate::whisper::accel::try_im2col_1d_f32(&input.data, ch_in, in_len, ksize, stride, pad)
         {
             let k = ch_in * ksize;
-            if let Some(mm_out) =
-                crate::whisper::accel::try_matmul_nt_f32(&im2col, &weight.data, out_len, k, ch_out)
-            {
+            if let Some(mm_out) = crate::whisper::accel::try_matmul_nt_f32(
+                &im2col,
+                &weight.data,
+                out_len,
+                k,
+                ch_out,
+                owner,
+            ) {
                 let mut out = vec![0.0f32; ch_out * out_len];
                 let out_ptr = SendPtr::new(out.as_mut_ptr());
                 let b_data = &bias.data;
@@ -1730,7 +1758,13 @@ impl Tensor {
     }
 
     /// Same as conv1d but with RawTensor weight (dequantize first)
-    pub fn conv1d_raw(input: &Tensor, weight: &RawTensor, bias: &Tensor, stride: usize) -> Tensor {
+    pub fn conv1d_raw(
+        input: &Tensor,
+        weight: &RawTensor,
+        bias: &Tensor,
+        stride: usize,
+        owner: Option<&WeightOwner>,
+    ) -> Tensor {
         if weight.shape.len() == 3 {
             let ksize = weight.shape[0];
             let ch_in = weight.shape[1];
@@ -1755,6 +1789,7 @@ impl Tensor {
                         out_len,
                         k,
                         ch_out,
+                        owner,
                     ),
                     GGML_TYPE_F16 => crate::whisper::accel::try_matmul_nt_f16_bytes(
                         &im2col,
@@ -1762,6 +1797,7 @@ impl Tensor {
                         out_len,
                         k,
                         ch_out,
+                        owner,
                     ),
                     GGML_TYPE_Q4_0 | GGML_TYPE_Q4_1 | GGML_TYPE_Q5_0 | GGML_TYPE_Q5_1
                     | GGML_TYPE_Q8_0 | GGML_TYPE_Q4_K | GGML_TYPE_Q5_K
@@ -1774,6 +1810,7 @@ impl Tensor {
                             out_len,
                             k,
                             ch_out,
+                            owner,
                         )
                     }
                     _ => None,
@@ -1800,6 +1837,6 @@ impl Tensor {
         }
 
         let w = weight.to_f32();
-        Self::conv1d(input, &w, bias, stride)
+        Self::conv1d(input, &w, bias, stride, None)
     }
 }

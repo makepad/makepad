@@ -1,8 +1,8 @@
-use crate::backend::WeightOwner;
+use crate::backend::{F32Weight, WeightOwner};
 use crate::backend::{
     compile_graph_session, new_runtime, try_add_f32, try_attention_softmax_weighted_sum_f32,
-    try_gelu_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_mul_f32, try_rms_norm_mul_f32,
-    BufferStorageMode, GraphSession, GraphTensorWrite, Runtime,
+    try_gelu_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_matmul_nt_f32_weight, try_mul_f32,
+    try_rms_norm_mul_f32, BufferStorageMode, GraphSession, GraphTensorWrite, Runtime,
 };
 use crate::flux::T5TextEncoderConfig;
 use crate::graph_growth::{build_with_graph_growth, GraphReserve};
@@ -13,8 +13,8 @@ use makepad_ai_common::backend::{
     try_matmul_nt_ggml_bytes_cached,
 };
 use makepad_ai_common::{
-    bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, get_rows_ggml_bytes_cpu, ggml_pad, BufferUsage,
-    Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
+    bf16_to_f32, f16_to_f32, f8_e4m3_to_f32, get_rows_ggml_bytes_cpu, get_rows_ggml_bytes_cpu_into,
+    ggml_pad, BufferUsage, Context, Graph, InitParams, Op, Tensor, TensorDesc, TensorId, TensorLayout, TensorType,
     UnaryOp, GGML_MEM_ALIGN, GGML_TYPE_F8_E4M3,
 };
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
@@ -71,7 +71,7 @@ pub struct LoadedT5xxlWeights {
 /// Decoded f32 matrices of one loaded T5, keyed by this context's tensor ids and freed with it. Clones of the
 /// weights share it (same context contents).
 #[derive(Clone, Default)]
-struct DecodedF32Matrices(Arc<Mutex<HashMap<TensorId, Arc<Vec<f32>>>>>);
+struct DecodedF32Matrices(Arc<Mutex<HashMap<TensorId, F32Weight>>>);
 
 impl std::fmt::Debug for DecodedF32Matrices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -721,9 +721,9 @@ fn linear_rows_ggml_matrix(
     };
     let mut output = {
         let dequantized = decoded_matrix_f32_cached(weights, weight)?;
-        if let Some(output) = try_matmul_nt_f32(
+        if let Some(output) = try_matmul_nt_f32_weight(
             input_values,
-            dequantized.as_slice(),
+            &dequantized,
             input.rows,
             input.cols,
             weight.rows,
@@ -1691,28 +1691,12 @@ fn resident_matrix<'a>(ctx: &'a Context, tensor_id: TensorId) -> Result<Resident
     })
 }
 
-fn decode_ggml_matrix_to_f32(matrix: ResidentMatrix<'_>) -> Result<Vec<f32>> {
-    let row_indices = (0..matrix.rows)
-        .map(|row| {
-            i32::try_from(row).map_err(|_| DiffusionError::model("t5xxl row index exceeds i32"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    get_rows_ggml_bytes_cpu(
-        matrix.bytes,
-        matrix.ggml_type,
-        matrix.cols,
-        matrix.rows,
-        &row_indices,
-    )
-    .ok_or_else(|| DiffusionError::model("t5xxl matrix decode fallback failed"))
-}
-
 /// The matrix decoded to f32 once per loaded T5: the cache lives in `weights`, so another load (another file, or
 /// the same tensor ids over other bytes) never sees these values. Decoding runs outside the lock.
 fn decoded_matrix_f32_cached(
     weights: &LoadedT5xxlWeights,
     matrix: ResidentMatrix<'_>,
-) -> Result<Arc<Vec<f32>>> {
+) -> Result<F32Weight> {
     let lock = || {
         weights
             .decoded_f32
@@ -1723,7 +1707,31 @@ fn decoded_matrix_f32_cached(
     if let Some(decoded) = lock()?.get(&matrix.cache_key) {
         return Ok(decoded.clone());
     }
-    let decoded = Arc::new(decode_ggml_matrix_to_f32(matrix)?);
+    let row_indices = (0..matrix.rows)
+        .map(|row| {
+            i32::try_from(row).map_err(|_| DiffusionError::model("t5xxl row index exceeds i32"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let len = matrix
+        .rows
+        .checked_mul(matrix.cols)
+        .ok_or_else(|| DiffusionError::model("t5xxl matrix decode fallback failed"))?;
+    let decoded = F32Weight::new(
+        &weights.owner,
+        &format!("decoded-f32/{}", matrix.cache_key),
+        len,
+        |out| {
+            get_rows_ggml_bytes_cpu_into(
+                matrix.bytes,
+                matrix.ggml_type,
+                matrix.cols,
+                matrix.rows,
+                &row_indices,
+                out,
+            )
+            .ok_or_else(|| DiffusionError::model("t5xxl matrix decode fallback failed"))
+        },
+    )?;
     Ok(lock()?.entry(matrix.cache_key).or_insert(decoded).clone())
 }
 
@@ -2059,12 +2067,6 @@ mod tests {
         let second = linear_rows_ggml(&twos, &input, "w", 1.0).unwrap();
         assert_eq!(first.data, vec![4.0; 2], "first load multiplies its own matrix");
         assert_eq!(second.data, vec![8.0; 2], "second load multiplies its own matrix, not the first load's decode");
-        #[cfg(target_os = "macos")]
-        assert_eq!(
-            crate::backend::gpu_weight_cache_evict_owner(&twos.owner),
-            Ok(0),
-            "an FP8 matrix Metal cannot multiply leaves no copy in the device store"
-        );
     }
 
     #[test]

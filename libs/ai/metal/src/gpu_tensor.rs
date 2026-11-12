@@ -909,6 +909,34 @@ mod tests {
             use std::borrow::Cow;
             use std::sync::atomic::{AtomicUsize, Ordering};
             let a = [1.0; 32];
+            let unsupported = WeightOwner::new("unsupported");
+            let bytes = [0x38; 32];
+            let mut loaded = false;
+            let result = shim::try_matmul_nt_ggml_bytes_keyed(
+                &a, makepad_ai_loader::quant::GGML_TYPE_F8_E4M3, 4, 8, 4,
+                &unsupported, "fp8", || {
+                    loaded = true;
+                    Ok(Cow::Borrowed(&bytes))
+                },
+            );
+            assert!(result.is_none(), "a type no kernel multiplies is declined");
+            assert!(!loaded, "a type no kernel multiplies is declined before its bytes load");
+            let mut loaded = false;
+            let result = shim::try_matmul_nt_ggml_bytes_keyed_multi(
+                &a, 4, 8,
+                &[shim::MatmulNtGgmlBytesKeyedMatrix {
+                    bt_ggml_type: makepad_ai_loader::quant::GGML_TYPE_F8_E4M3,
+                    n: 4,
+                    owner: &unsupported,
+                    cache_key: "fp8",
+                }],
+                |_, _| {
+                    loaded = true;
+                    Ok(Cow::Borrowed(&bytes))
+                },
+            );
+            assert!(result.is_none(), "a type no kernel multiplies is declined in multi");
+            assert!(!loaded, "a type no kernel multiplies is declined before its bytes load in multi");
             let w1: Vec<u8> = [1.0f32; 32].iter().flat_map(|v| v.to_le_bytes()).collect();
             let w2: Vec<u8> = [2.0f32; 32].iter().flat_map(|v| v.to_le_bytes()).collect();
             let product = |owner: &WeightOwner, bytes: &[u8]| {

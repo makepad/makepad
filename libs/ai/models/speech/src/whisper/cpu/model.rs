@@ -117,6 +117,7 @@ pub struct DecoderLayer {
 }
 
 pub struct WhisperModel {
+    pub(crate) weights_owner: std::sync::Arc<makepad_ai_loader::WeightOwner>,
     /// Stable lifetime identity for worker-local Vulkan weight residency.
     #[cfg(any(target_os = "linux", target_os = "android"))]
     pub(crate) vulkan_id: std::sync::Arc<()>,
@@ -507,6 +508,7 @@ impl WhisperModel {
         }
 
         Ok(WhisperModel {
+            weights_owner: std::sync::Arc::new(makepad_ai_loader::WeightOwner::new("whisper")),
             #[cfg(any(target_os = "linux", target_os = "android"))]
             vulkan_id: std::sync::Arc::new(()),
             hparams,

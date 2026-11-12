@@ -149,12 +149,19 @@ pub fn parse(bytes: &[u8]) -> io::Result<WeightFile> {
         if at + n * w > bytes.len() {
             return Err(bad("MKSING: truncated"));
         }
-        let data = match dt {
-            Dtype::F32 => bytes[at..at + 4 * n].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect(),
-            Dtype::F16 => bytes[at..at + 2 * n].chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect(),
-        };
+        params.insert_with(&name, rows, cols, |out| match dt {
+            Dtype::F32 => {
+                for (value, c) in out.iter_mut().zip(bytes[at..at + 4 * n].chunks_exact(4)) {
+                    *value = f32::from_le_bytes(c.try_into().unwrap());
+                }
+            }
+            Dtype::F16 => {
+                for (value, c) in out.iter_mut().zip(bytes[at..at + 2 * n].chunks_exact(2)) {
+                    *value = f16_to_f32(u16::from_le_bytes([c[0], c[1]]));
+                }
+            }
+        });
         at += n * w;
-        params.insert(&name, Tensor::new(rows, cols, data));
     }
     Ok(WeightFile { config, params })
 }

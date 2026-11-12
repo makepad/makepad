@@ -104,7 +104,7 @@ fn resident_quantized_matrices_match_cpu() {
             let w = quantized(&values(n * k, 91), &[k, n], ty);
             let bias = tensor(&[n], 43);
             let wf = w.to_f32();
-            let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf));
+            let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf, None));
             let got = try_matmul_nt_ggml_bytes(&x.data, &w.data, ty, m, k, n).unwrap();
             close("resident quantised matrix", &got, &want.data, 4e-5);
             let mut want = want.data;
@@ -159,10 +159,10 @@ fn matrices_match_cpu() {
         let bias = tensor(&[n], 43);
         for half in [false, true] {
             let w = raw(&weights, &[k, n], half);
-            let want = cpu(|| Tensor::linear_raw(&x, &w, &bias));
+            let want = cpu(|| Tensor::linear_raw(&x, &w, &bias, None));
             let got = try_matmul_nt_ggml_bytes_add_bias(&x.data, &w.data, w.ggml_type, m, k, n, &bias.data).unwrap();
             close(&format!("matrix {m}x{k}x{n} half={half}"), &got, &want.data, 3e-5);
-            let want = cpu(|| Tensor::matmul_raw(&x, &w));
+            let want = cpu(|| Tensor::matmul_raw(&x, &w, None));
             let got = try_matmul_nt_ggml_bytes(&x.data, &w.data, w.ggml_type, m, k, n).unwrap();
             close("matrix without bias", &got, &want.data, 3e-5);
         }
@@ -171,7 +171,7 @@ fn matrices_match_cpu() {
     let w = raw(&values(64 * 37, 91), &[64, 37], false).to_q8_0();
     // Compare the same weight values and per-block rounded activations.
     let wf = w.to_f32();
-    let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf));
+    let want = cpu(|| Tensor::matmul_t(&rounded_activations(&x), &wf, None));
     let got = try_matmul_nt_ggml_bytes(&x.data, &w.data, w.ggml_type, 7, 64, 37).unwrap();
     close("quantized matrix", &got, &want.data, 3e-5);
     let b = tensor(&[64, 9], 12);
@@ -213,7 +213,7 @@ fn convolutions_match_cpu() {
         let weights = if let Some(ty) = ty { quantized(&data, &[3, ic, oc], ty) }
             else { raw(&data, &[3, ic, oc], true) };
         let bias = tensor(&[oc], 43);
-        let want = cpu(|| Tensor::transpose_2d(&Tensor::conv1d_raw(&x, &weights, &bias, stride)));
+        let want = cpu(|| Tensor::transpose_2d(&Tensor::conv1d_raw(&x, &weights, &bias, stride, None)));
         let ow = want.shape[0];
         let want = if ty.is_some() {
             let mut cols = Tensor { data: vec![0.0; ow * ic * 3], shape: vec![ow, ic * 3] };
@@ -228,7 +228,7 @@ fn convolutions_match_cpu() {
                 }
             }
             let w = RawTensor { data: weights.data.to_vec().into(), shape: vec![ic * 3, oc], ggml_type: weights.ggml_type };
-            cpu(|| Tensor::linear_raw(&rounded_activations(&cols), &raw(&w.to_f32().data, &[ic * 3, oc], false), &bias))
+            cpu(|| Tensor::linear_raw(&rounded_activations(&cols), &raw(&w.to_f32().data, &[ic * 3, oc], false), &bias, None))
         } else { want };
         for time_major in [false, true] {
             let input = if time_major { Tensor::transpose_2d(&x) } else { x.clone() };
@@ -261,7 +261,7 @@ fn attention_cpu(q: &[f32], k: &[f32], v: &[f32], nq: usize, nk: usize, heads: u
                 data: (0..rows).flat_map(|r| data[r * width + h * 64..r * width + (h + 1) * 64].iter().copied()).collect(),
                 shape: vec![rows, 64],
             };
-            let mut scores = Tensor::matmul_t(&head(q, nq), &head(k, nk));
+            let mut scores = Tensor::matmul_t(&head(q, nq), &head(k, nk), None);
             if let Some(past) = past {
                 for row in 0..nq {
                     for col in past + row + 1..nk { scores.data[row * nk + col] = f32::NEG_INFINITY; }
@@ -464,7 +464,7 @@ fn int8_encoder_weights_keep_float_gemv_and_decoder() {
         assert!(weights.conv1.w.int8.is_none() && weights.conv2.w.int8.is_none() && weights.logits.int8.is_none());
         for rows in [1, 4] {
             let input = tensor(&[rows, 128], 19);
-            let want = cpu(|| Tensor::linear_raw(&input, &model.encoder_layers[0].attn_q_w, &model.encoder_layers[0].attn_q_b));
+            let want = cpu(|| Tensor::linear_raw(&input, &model.encoder_layers[0].attn_q_w, &model.encoder_layers[0].attn_q_b, Some(&model.weights_owner)));
             let mut plan = Layout::default();
             let x = plan.take(input.data.len())?;
             let dst = plan.take(input.data.len())?;

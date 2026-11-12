@@ -12,7 +12,9 @@
 //! item, and `lens` (valid rows per item) masks attention keys.
 
 use crate::dsp::{Rng, Stft};
+use makepad_ai_metal::F32Weight;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -89,21 +91,89 @@ macro_rules! gpu {
     };
 }
 
+/// Host values: a plain vector, or a parameter's resident weight (shared, immutable; a write copies it out).
+#[derive(Clone)]
+pub enum Data {
+    Host(Vec<f32>),
+    Weight(F32Weight),
+}
+
+impl Default for Data {
+    fn default() -> Self {
+        Self::Host(Vec::new())
+    }
+}
+
+impl From<Vec<f32>> for Data {
+    fn from(data: Vec<f32>) -> Self {
+        Self::Host(data)
+    }
+}
+
+impl Deref for Data {
+    type Target = [f32];
+
+    fn deref(&self) -> &[f32] {
+        match self {
+            Self::Host(data) => data,
+            Self::Weight(w) => w.as_slice(),
+        }
+    }
+}
+
+impl DerefMut for Data {
+    fn deref_mut(&mut self) -> &mut [f32] {
+        if let Self::Weight(w) = self {
+            *self = Self::Host(w.as_slice().to_vec());
+        }
+        match self {
+            Self::Host(data) => data,
+            Self::Weight(_) => unreachable!(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Data {
+    type Item = &'a f32;
+    type IntoIter = std::slice::Iter<'a, f32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a mut Data {
+    type Item = &'a mut f32;
+    type IntoIter = std::slice::IterMut<'a, f32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl Data {
+    pub fn to_vec(&self) -> Vec<f32> {
+        self.deref().to_vec()
+    }
+
+    pub fn weight(&self) -> Option<&F32Weight> {
+        match self {
+            Self::Host(_) => None,
+            Self::Weight(w) => Some(w),
+        }
+    }
+}
+
 pub struct Tensor {
     pub rows: usize,
     pub cols: usize,
     /// Host values (empty when the tensor lives on the device).
-    pub data: Vec<f32>,
+    pub data: Data,
     pub dev: Option<DevBuf>,
     /// Rows per batch item.
     pub seg: usize,
     /// Valid rows per item (attention keys past it are masked).
     pub lens: Option<Arc<Vec<u32>>>,
-    /// A parameter's identity (0 = none): lets an inference matmul keep the
-    /// weight resident on the GPU under this key. A copy has none: it may be
-    /// changed and stored back (the optimiser's host step), and the weight kept
-    /// under the original's key would then be served for it.
-    pub key: u64,
 }
 
 impl Clone for Tensor {
@@ -124,7 +194,6 @@ impl Clone for Tensor {
             }),
             seg: self.seg,
             lens: self.lens.clone(),
-            key: 0,
         }
     }
 }
@@ -144,7 +213,7 @@ impl PartialEq for Tensor {
 impl Tensor {
     pub fn new(rows: usize, cols: usize, data: Vec<f32>) -> Tensor {
         assert_eq!(rows * cols, data.len(), "tensor shape {rows}x{cols} vs {} values", data.len());
-        Tensor { rows, cols, data, dev: None, seg: rows.max(1), lens: None, key: 0 }
+        Tensor { rows, cols, data: data.into(), dev: None, seg: rows.max(1), lens: None }
     }
     /// `rows / seg` items of `seg` rows each; `lens` = valid rows per item.
     pub fn batched(rows: usize, cols: usize, data: Vec<f32>, seg: usize, lens: Option<Vec<u32>>) -> Tensor {
@@ -179,7 +248,7 @@ impl Tensor {
             Some(d) => d.to_host(),
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             Some(d) => match *d {},
-            None => self.data.clone(),
+            None => self.data.to_vec(),
         }
     }
     fn meta_like(mut self, o: &Tensor) -> Tensor {
@@ -328,8 +397,31 @@ impl Params {
     }
 
     pub fn insert(&mut self, name: &str, mut t: Tensor) {
+        if t.dev.is_none() && t.data.len() == t.rows * t.cols {
+            t.data = Data::Weight(self.new_weight(t.data.len(), |out| out.copy_from_slice(&t.data)));
+        }
+        self.insert_tensor(name, t);
+    }
+
+    /// Fill a parameter's resident storage directly, without an intermediate vector.
+    pub fn insert_with(&mut self, name: &str, rows: usize, cols: usize, fill: impl FnOnce(&mut [f32])) {
+        let data = Data::Weight(self.new_weight(rows * cols, fill));
+        self.insert_tensor(name, Tensor { rows, cols, data, dev: None, seg: rows.max(1), lens: None });
+    }
+
+    fn new_weight(&self, len: usize, fill: impl FnOnce(&mut [f32])) -> F32Weight {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        t.key = NEXT.fetch_add(1, Ordering::Relaxed);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        match F32Weight::new(&self.owner, &format!("p{n}"), len, |out| {
+            fill(out);
+            Ok::<_, std::convert::Infallible>(())
+        }) {
+            Ok(weight) => weight,
+            Err(never) => match never {},
+        }
+    }
+
+    fn insert_tensor(&mut self, name: &str, t: Tensor) {
         if let Some(&i) = self.index.get(name) {
             self.vals[i] = Arc::new(t);
             return;
@@ -720,7 +812,7 @@ impl<'p> Graph<'p> {
         let (xv, vv) = (self.vals[x].clone(), self.vals[v].clone());
         assert_eq!(vv.len(), xv.cols, "add_row width");
         let c = xv.cols;
-        let mut data = xv.data.clone();
+        let mut data = xv.data.to_vec();
         for (i, o) in data.iter_mut().enumerate() {
             *o += vv.data[i % c];
         }
@@ -928,7 +1020,7 @@ impl<'p> Graph<'p> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.gpu {
             let d = crate::nn_gpu::copy(xv.dev.as_ref().unwrap());
-            let t = Tensor { rows, cols, data: Vec::new(), dev: Some(d), seg, lens: None, key: 0 };
+            let t = Tensor { rows, cols, data: Data::default(), dev: Some(d), seg, lens: None };
             let back: Back = Box::new(move |d, g| {
                 if let Some(dx) = g.acc(x) {
                     crate::nn_gpu::axpy(d.dev(), dx, 1.0);
@@ -937,7 +1029,7 @@ impl<'p> Graph<'p> {
             return self.push(t, &[x], Some(back));
         }
         let back: Back = Box::new(move |d, g| g.add(x, d.host()));
-        self.push(Tensor::batched(rows, cols, xv.data.clone(), seg, None), &[x], Some(back))
+        self.push(Tensor::batched(rows, cols, xv.data.to_vec(), seg, None), &[x], Some(back))
     }
 
     // --- linear algebra ------------------------------------------------------
@@ -948,12 +1040,13 @@ impl<'p> Graph<'p> {
         let (xv, wv) = (self.vals[x].clone(), self.vals[w].clone());
         let (t, k, n) = (xv.rows, xv.cols, wv.rows);
         assert_eq!(wv.cols, k, "linear: input width {k} vs weight {}x{}", wv.rows, wv.cols);
-        let y = if !self.record && wv.key != 0 && gpu_ok(t, k, n) {
-            // Inference with a parameter: keep the weight resident on the GPU.
-            let key = format!("w{}", wv.key);
-            let bytes = || Ok(std::borrow::Cow::Owned(wv.data.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()));
-            makepad_ai_metal::try_matmul_nt_ggml_bytes_keyed(&xv.data, 0, t, k, n, &self.params.owner, &key, bytes)
-                .unwrap_or_else(|| mm_nt(&xv.data, &wv.data, t, k, n))
+        let y = if !self.record && gpu_ok(t, k, n) {
+            if let Some(w) = wv.data.weight() {
+                makepad_ai_metal::try_matmul_nt_f32_weight(&xv.data, w, t, k, n)
+                    .unwrap_or_else(|| mm_nt(&xv.data, &wv.data, t, k, n))
+            } else {
+                mm_nt(&xv.data, &wv.data, t, k, n)
+            }
         } else {
             mm_nt(&xv.data, &wv.data, t, k, n)
         };
@@ -1658,20 +1751,52 @@ mod tests {
         }
     }
 
-    /// A parameter changed by copy and replace (the optimiser's host step) is never
-    /// served from the device weight kept under the original's key.
+    /// The shipping vocoder renders the same bits with resident parameters as with host vectors (the per-call
+    /// path every parameter took before residency). 24 frames put its convnext linears over the GPU minimum, so
+    /// on a Mac the resident weights are multiplied on Metal.
     #[test]
-    fn a_replaced_parameter_is_not_served_from_its_old_key() {
+    fn vocoder_renders_the_same_bits_with_resident_or_host_parameters() {
+        let _device = device(false);
+        let cfg = crate::vocoder::VocoderConfig::base();
+        let mut rng = Rng::new(3);
+        let mut resident = Params::new();
+        cfg.declare(&mut resident, &mut rng);
+        let mut host = resident.clone();
+        for t in host.vals.iter_mut() {
+            *t = Arc::new(Tensor::new(t.rows, t.cols, t.data.to_vec()));
+        }
+        assert!(resident.vals.iter().all(|t| t.data.weight().is_some()), "declared parameters are resident");
+        assert!(host.vals.iter().all(|t| t.data.weight().is_none()), "the copies are host vectors");
+        let frames = 24;
+        let f0: Vec<f32> = (0..frames).map(|i| 180.0 + i as f32).collect();
+        let mel_values = (0..frames * crate::dsp::N_MEL).map(|_| rng.normal()).collect();
+        let mel = Tensor::new(frames, crate::dsp::N_MEL, mel_values);
+        let src = crate::vocoder::SourceCtl::new(&f0, frames, 11);
+        let render = |p: &Params| {
+            let mut g = Graph::new(p, false);
+            let m = g.input(mel.clone());
+            let w = crate::vocoder::forward(&mut g, &cfg, m, &f0, frames, &src);
+            g.host(w)
+        };
+        let (a, b) = (render(&resident), render(&host));
+        assert_eq!(a.len(), frames * crate::dsp::HOP, "one hop of audio per frame");
+        let same = a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits());
+        assert!(same, "resident and host parameters render the same bits");
+    }
+
+    /// A parameter changed by copy and replace (the optimiser's host step) is never
+    /// served from the original's resident weight.
+    #[test]
+    fn a_replaced_parameter_is_not_served_from_its_old_weight() {
         let _device = device(false);
         let mut rng = Rng::new(5);
         let mut p = Params::new();
         // 64 x 256 x 128 multiply-adds, over the GPU minimum: with the GPU on (a Mac,
-        // no `force_cpu`) the inference linear keeps the weight resident under its key.
+        // no `force_cpu`) the inference linear uses the resident weight.
         p.declare("w", 128, 256, Init::Fan(1.0), &mut rng);
         let x = Tensor::new(64, 256, (0..64 * 256).map(|_| rng.normal()).collect());
         let w = p.id("w");
-        assert_ne!(p.vals[w].key, 0, "a declared parameter has a key");
-        assert_eq!((*p.vals[w]).clone().key, 0, "a copy has no key");
+        assert!(p.vals[w].data.weight().is_some(), "a declared parameter is resident");
         let infer = |p: &Params| {
             let mut g = Graph::new(p, false);
             let xi = g.input(x.clone());
@@ -1681,9 +1806,13 @@ mod tests {
         };
         let before = infer(&p);
         let mut t = (*p.vals[w]).clone();
+        let shared = Arc::ptr_eq(t.data.weight().unwrap().storage(), p.vals[w].data.weight().unwrap().storage());
+        assert!(shared, "a clone shares the resident storage");
         for v in &mut t.data {
             *v = -*v;
         }
+        assert!(t.data.weight().is_none(), "writing a clone copies it out of resident storage");
+        assert!(p.vals[w].data.weight().is_some(), "the original remains resident after a clone is written");
         p.vals[w] = Arc::new(t);
         let after = infer(&p);
         for (i, (a, b)) in after.iter().zip(&before).enumerate() {

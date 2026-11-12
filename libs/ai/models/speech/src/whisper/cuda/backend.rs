@@ -1129,7 +1129,7 @@ mod tests {
                 shape: vec![1, ch_out],
             };
 
-            let reference = Tensor::conv1d(&input, &weight, &bias, stride);
+            let reference = Tensor::conv1d(&input, &weight, &bias, stride, None);
 
             let cols = im2col_1d(&input.data, ic, iw, kw, stride, pad).expect("im2col");
             assert_eq!(cols.len(), out_len * ic * kw);

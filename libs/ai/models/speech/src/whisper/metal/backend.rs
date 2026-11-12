@@ -1,3 +1,4 @@
+use makepad_ai_loader::WeightOwner;
 #[allow(dead_code)]
 fn log_mul_mat_requested() -> bool {
     crate::whisper::settings::LOG_METAL_MUL_MAT
@@ -26,11 +27,12 @@ pub(crate) fn try_matmul_nt_f32(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_matmul_nt_f32(a, bt, m, k, n)
+    imp::try_matmul_nt_f32(a, bt, m, k, n, owner)
 }
 
 pub(crate) fn try_matmul_nt_f32_bytes(
@@ -39,11 +41,12 @@ pub(crate) fn try_matmul_nt_f32_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_matmul_nt_f32_bytes(a, bt_bytes, m, k, n)
+    imp::try_matmul_nt_f32_bytes(a, bt_bytes, m, k, n, owner)
 }
 
 pub(crate) fn try_matmul_nt_f16_bytes(
@@ -52,11 +55,12 @@ pub(crate) fn try_matmul_nt_f16_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n)
+    imp::try_matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n, owner)
 }
 
 pub(crate) fn try_matmul_nt_ggml_bytes(
@@ -66,11 +70,12 @@ pub(crate) fn try_matmul_nt_ggml_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n)
+    imp::try_matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n, owner)
 }
 
 pub(crate) fn try_matmul_nt_ggml_bytes_add_bias(
@@ -81,11 +86,12 @@ pub(crate) fn try_matmul_nt_ggml_bytes_add_bias(
     k: usize,
     n: usize,
     bias: &[f32],
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
+    imp::try_matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias, owner)
 }
 
 pub(crate) fn try_flash_attn_f32_packed(
@@ -232,6 +238,7 @@ pub(crate) fn try_encoder_attn_block_f32(
     out_w_bytes: &[u8],
     out_w_ggml_type: u32,
     out_b: &[f32],
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
@@ -254,6 +261,7 @@ pub(crate) fn try_encoder_attn_block_f32(
         out_w_bytes,
         out_w_ggml_type,
         out_b,
+        owner,
     )
 }
 
@@ -270,6 +278,7 @@ pub(crate) fn try_encoder_ffn_block_f32(
     w1_bytes: &[u8],
     w1_ggml_type: u32,
     b1: &[f32],
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
@@ -286,6 +295,7 @@ pub(crate) fn try_encoder_ffn_block_f32(
         w1_bytes,
         w1_ggml_type,
         b1,
+        owner,
     )
 }
 
@@ -316,6 +326,7 @@ pub(crate) fn try_encoder_layer_f32(
     w1_bytes: &[u8],
     w1_ggml_type: u32,
     b1: &[f32],
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
@@ -346,6 +357,7 @@ pub(crate) fn try_encoder_layer_f32(
         w1_bytes,
         w1_ggml_type,
         b1,
+        owner,
     )
 }
 
@@ -357,11 +369,14 @@ pub(crate) fn try_encoder_stack_f32(
     layers: &[crate::whisper::model::EncoderLayer],
     final_ln_w: &[f32],
     final_ln_b: &[f32],
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
     }
-    imp::try_encoder_stack_f32(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b)
+    imp::try_encoder_stack_f32(
+        x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b, owner,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -378,6 +393,7 @@ pub(crate) fn try_decoder_self_qkv_step_f32(
     v_w_bytes: &[u8],
     v_w_ggml_type: u32,
     v_b: &[f32],
+    owner: &WeightOwner,
 ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
     if !metal_requested() {
         return None;
@@ -395,6 +411,7 @@ pub(crate) fn try_decoder_self_qkv_step_f32(
         v_w_bytes,
         v_w_ggml_type,
         v_b,
+        owner,
     )
 }
 
@@ -408,6 +425,7 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
     v_cross: &[f32],
     n_audio_ctx: usize,
     layer: &crate::whisper::model::DecoderLayer,
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
@@ -421,6 +439,7 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
         v_cross,
         n_audio_ctx,
         layer,
+        owner,
     )
 }
 
@@ -438,6 +457,7 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
     v_cross: &[f32],
     n_audio_ctx: usize,
     layer: &crate::whisper::model::DecoderLayer,
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if !metal_requested() {
         return None;
@@ -455,6 +475,7 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
         v_cross,
         n_audio_ctx,
         layer,
+        owner,
     )
 }
 
@@ -464,6 +485,7 @@ pub(crate) fn is_requested() -> bool {
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
+    use super::WeightOwner;
     pub(super) fn try_matmul_nn_f32(
         _a: &[f32],
         _b: &[f32],
@@ -480,6 +502,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
+        _owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -490,6 +513,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
+        _owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -500,6 +524,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
+        _owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -511,6 +536,7 @@ mod imp {
         _m: usize,
         _k: usize,
         _n: usize,
+        _owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -523,6 +549,7 @@ mod imp {
         _k: usize,
         _n: usize,
         _bias: &[f32],
+        _owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -639,6 +666,7 @@ mod imp {
         _out_w_bytes: &[u8],
         _out_w_ggml_type: u32,
         _out_b: &[f32],
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -656,6 +684,7 @@ mod imp {
         _w1_bytes: &[u8],
         _w1_ggml_type: u32,
         _b1: &[f32],
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -687,6 +716,7 @@ mod imp {
         _w1_bytes: &[u8],
         _w1_ggml_type: u32,
         _b1: &[f32],
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -699,6 +729,7 @@ mod imp {
         _layers: &[crate::whisper::model::EncoderLayer],
         _final_ln_w: &[f32],
         _final_ln_b: &[f32],
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -717,6 +748,7 @@ mod imp {
         _v_w_bytes: &[u8],
         _v_w_ggml_type: u32,
         _v_b: &[f32],
+        _owner: &WeightOwner,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
         None
     }
@@ -731,6 +763,7 @@ mod imp {
         _v_cross: &[f32],
         _n_audio_ctx: usize,
         _layer: &crate::whisper::model::DecoderLayer,
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -749,6 +782,7 @@ mod imp {
         _v_cross: &[f32],
         _n_audio_ctx: usize,
         _layer: &crate::whisper::model::DecoderLayer,
+        _owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -756,11 +790,13 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use super::WeightOwner;
     use crate::whisper::model::{DecoderLayer, EncoderLayer};
     use crate::whisper::quant::{
         block_size, f32_to_f16, GGML_TYPE_F16, GGML_TYPE_F32, GGML_TYPE_Q4_0, GGML_TYPE_Q4_1,
         GGML_TYPE_Q5_0, GGML_TYPE_Q5_1, GGML_TYPE_Q8_0,
     };
+    use makepad_ai_loader::DeadOwnerInbox;
     use makepad_objc_sys::runtime::{nil, ObjcId, Object, YES};
     use makepad_objc_sys::{class, msg_send, sel, sel_impl};
     use std::cell::RefCell;
@@ -845,6 +881,7 @@ mod imp {
 
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     struct BufferKey {
+        owner: u64,
         ptr: usize,
         len: usize,
         tag: u8,
@@ -1656,6 +1693,8 @@ mod imp {
         library: StrongId,
         pipeline_cache: HashMap<String, PipelineState>,
         cached_weight_buffers: HashMap<BufferKey, StrongId>,
+        inbox: DeadOwnerInbox,
+        owner_ids: HashMap<String, u64>,
         scratch_buffers: HashMap<u8, ScratchBuffer>,
         matmul_out_buffers: HashMap<u8, ScratchBuffer>,
         decoder_kv_layers: HashMap<usize, DecoderKvLayer>,
@@ -1727,6 +1766,8 @@ mod imp {
                 library,
                 pipeline_cache: HashMap::new(),
                 cached_weight_buffers: HashMap::new(),
+                inbox: DeadOwnerInbox::register(),
+                owner_ids: HashMap::new(),
                 scratch_buffers: HashMap::new(),
                 matmul_out_buffers: HashMap::new(),
                 decoder_kv_layers: HashMap::new(),
@@ -2135,26 +2176,40 @@ mod imp {
             &mut self,
             data: &[f32],
             tag: u8,
+            owner: &WeightOwner,
         ) -> Result<ObjcId, String> {
             let bytes = f32_slice_as_bytes(data);
             let key = BufferKey {
+                owner: owner.id(),
                 ptr: data.as_ptr() as usize,
                 len: bytes.len(),
                 tag,
             };
-            self.get_or_create_weight_buffer(key, bytes)
+            self.get_or_create_weight_buffer(key, bytes, owner)
         }
 
         fn get_or_create_weight_buffer(
             &mut self,
             key: BufferKey,
             bytes: &[u8],
+            owner: &WeightOwner,
         ) -> Result<ObjcId, String> {
             if !self.cached_weight_buffers.contains_key(&key) {
                 let buf = self.new_buffer_with_bytes(bytes)?;
+                self.inbox.holds(owner.namespace());
+                self.owner_ids
+                    .insert(owner.namespace().to_owned(), owner.id());
                 self.cached_weight_buffers.insert(key, buf);
             }
             Ok(self.cached_weight_buffers.get(&key).unwrap().as_id())
+        }
+
+        fn retire_dead_owners(&mut self) {
+            self.inbox.take(|namespace| {
+                if let Some(id) = self.owner_ids.remove(namespace) {
+                    self.cached_weight_buffers.retain(|key, _| key.owner != id);
+                }
+            });
         }
 
         fn clear_decoder_kv_cache(&mut self) {
@@ -4791,6 +4846,7 @@ mod imp {
             bias: Option<&[f32]>,
             weight_tag: u8,
             bias_tag: u8,
+            owner: &WeightOwner,
         ) -> Result<StrongId, String> {
             let dst = self.matmul_nt_ggml_from_src1_buffer(
                 src_id,
@@ -4800,6 +4856,7 @@ mod imp {
                 k,
                 n,
                 Some(weight_tag),
+                Some(owner),
             )?;
 
             if let Some(bias) = bias {
@@ -4810,7 +4867,7 @@ mod imp {
                         n
                     ));
                 }
-                let bias_id = self.get_or_create_cached_f32_buffer(bias, bias_tag)?;
+                let bias_id = self.get_or_create_cached_f32_buffer(bias, bias_tag, owner)?;
                 let dst_shape = shape4_from_row_major(&[m, n], 4)?;
                 let bias_shape = shape4_from_row_major(&[n], 4)?;
                 self.dispatch_bin_f32(
@@ -4846,6 +4903,7 @@ mod imp {
             out_w_bytes: &[u8],
             out_w_ggml_type: u32,
             out_b: &[f32],
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             if n_state == 0 || seq_len == 0 || n_head == 0 || n_state % n_head != 0 {
                 return Err(format!(
@@ -4873,8 +4931,8 @@ mod imp {
             let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
             let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
             let ln_shape = shape4_from_row_major(&[n_state], 4)?;
-            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 110)?;
-            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 111)?;
+            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 110, owner)?;
+            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 111, owner)?;
 
             let norm_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
             self.dispatch_norm_f32(
@@ -4899,6 +4957,7 @@ mod imp {
                 Some(q_b),
                 112,
                 113,
+                owner,
             )?;
             let k_buf = self.linear_from_src_buffer(
                 norm_buf.as_id(),
@@ -4910,6 +4969,7 @@ mod imp {
                 None,
                 114,
                 0,
+                owner,
             )?;
             let v_buf = self.linear_from_src_buffer(
                 norm_buf.as_id(),
@@ -4921,6 +4981,7 @@ mod imp {
                 Some(v_b),
                 115,
                 116,
+                owner,
             )?;
 
             let d = n_state / n_head;
@@ -4946,6 +5007,7 @@ mod imp {
                 Some(out_b),
                 117,
                 118,
+                owner,
             )?;
 
             self.dispatch_bin_f32(
@@ -4974,6 +5036,7 @@ mod imp {
             w1_bytes: &[u8],
             w1_ggml_type: u32,
             b1: &[f32],
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             if n_state == 0 || seq_len == 0 {
                 return Err(format!(
@@ -5002,8 +5065,8 @@ mod imp {
             let x_buf = self.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
             let x_shape = shape4_from_row_major(&[seq_len, n_state], 4)?;
             let ln_shape = shape4_from_row_major(&[n_state], 4)?;
-            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 120)?;
-            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 121)?;
+            let ln_w_id = self.get_or_create_cached_f32_buffer(ln_w, 120, owner)?;
+            let ln_b_id = self.get_or_create_cached_f32_buffer(ln_b, 121, owner)?;
 
             let norm_buf = self.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
             self.dispatch_norm_f32(
@@ -5028,6 +5091,7 @@ mod imp {
                 Some(b0),
                 122,
                 123,
+                owner,
             )?;
 
             let ff0_shape = shape4_from_row_major(&[seq_len, n_ff], 4)?;
@@ -5048,6 +5112,7 @@ mod imp {
                 Some(b1),
                 124,
                 125,
+                owner,
             )?;
 
             self.dispatch_bin_f32(
@@ -5091,6 +5156,7 @@ mod imp {
             w1_ggml_type: u32,
             b1: &[f32],
             tag_base: u8,
+            owner: &WeightOwner,
         ) -> Result<StrongId, String> {
             if n_state == 0 || seq_len == 0 || n_head == 0 || n_state % n_head != 0 {
                 return Err(format!(
@@ -5118,9 +5184,9 @@ mod imp {
 
             // Attention sub-block
             let attn_ln_w_id =
-                self.get_or_create_cached_f32_buffer(attn_ln_w, tag_base.wrapping_add(0))?;
+                self.get_or_create_cached_f32_buffer(attn_ln_w, tag_base.wrapping_add(0), owner)?;
             let attn_ln_b_id =
-                self.get_or_create_cached_f32_buffer(attn_ln_b, tag_base.wrapping_add(1))?;
+                self.get_or_create_cached_f32_buffer(attn_ln_b, tag_base.wrapping_add(1), owner)?;
             let norm_bytes = x_shape
                 .numel
                 .checked_mul(std::mem::size_of::<f32>())
@@ -5148,6 +5214,7 @@ mod imp {
                 Some(q_b),
                 tag_base.wrapping_add(2),
                 tag_base.wrapping_add(3),
+                owner,
             )?;
 
             // Match whisper.cpp encoder flash-attn usage: keep KV rows padded.
@@ -5163,6 +5230,7 @@ mod imp {
                 None,
                 tag_base.wrapping_add(4),
                 0,
+                owner,
             )?;
             let v_buf_f32 = self.linear_from_src_buffer(
                 norm0_id,
@@ -5174,6 +5242,7 @@ mod imp {
                 Some(v_b),
                 tag_base.wrapping_add(5),
                 tag_base.wrapping_add(6),
+                owner,
             )?;
             let k_buf_f16 = self.encoder_flash_kv_f16_buffer(
                 k_buf_f32.as_id(),
@@ -5215,6 +5284,7 @@ mod imp {
                 Some(out_b),
                 tag_base.wrapping_add(7),
                 tag_base.wrapping_add(8),
+                owner,
             )?;
             self.dispatch_bin_f32(
                 0,
@@ -5230,9 +5300,9 @@ mod imp {
 
             // FFN sub-block
             let mlp_ln_w_id =
-                self.get_or_create_cached_f32_buffer(mlp_ln_w, tag_base.wrapping_add(9))?;
+                self.get_or_create_cached_f32_buffer(mlp_ln_w, tag_base.wrapping_add(9), owner)?;
             let mlp_ln_b_id =
-                self.get_or_create_cached_f32_buffer(mlp_ln_b, tag_base.wrapping_add(10))?;
+                self.get_or_create_cached_f32_buffer(mlp_ln_b, tag_base.wrapping_add(10), owner)?;
             let norm1_id = self.get_or_create_scratch_buffer(SCRATCH_ENC_NORM1, norm_bytes)?;
             self.dispatch_norm_f32(
                 attn_res_buf.as_id(),
@@ -5256,6 +5326,7 @@ mod imp {
                 Some(b0),
                 tag_base.wrapping_add(11),
                 tag_base.wrapping_add(12),
+                owner,
             )?;
             let ff0_shape = shape4_from_row_major(&[seq_len, n_ff], 4)?;
             self.dispatch_unary_f32(
@@ -5274,6 +5345,7 @@ mod imp {
                 Some(b1),
                 tag_base.wrapping_add(13),
                 tag_base.wrapping_add(14),
+                owner,
             )?;
             self.dispatch_bin_f32(
                 0,
@@ -5315,6 +5387,7 @@ mod imp {
             w1_bytes: &[u8],
             w1_ggml_type: u32,
             b1: &[f32],
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             let x_need = seq_len
                 .checked_mul(n_state)
@@ -5355,6 +5428,7 @@ mod imp {
                 w1_ggml_type,
                 b1,
                 130,
+                owner,
             )?;
             self.read_f32_buffer(ff1_buf.as_id(), x_need)
         }
@@ -5368,6 +5442,7 @@ mod imp {
             layers: &[EncoderLayer],
             final_ln_w: &[f32],
             final_ln_b: &[f32],
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             if n_state == 0 || seq_len == 0 || n_head == 0 || n_state % n_head != 0 {
                 return Err(format!(
@@ -5432,11 +5507,12 @@ mod imp {
                         layer.mlp_1_w.ggml_type,
                         &layer.mlp_1_b.data,
                         tag_base,
+                        owner,
                     )?;
                 }
 
-                let ln_w_id = ctx.get_or_create_cached_f32_buffer(final_ln_w, 120)?;
-                let ln_b_id = ctx.get_or_create_cached_f32_buffer(final_ln_b, 121)?;
+                let ln_w_id = ctx.get_or_create_cached_f32_buffer(final_ln_w, 120, owner)?;
+                let ln_b_id = ctx.get_or_create_cached_f32_buffer(final_ln_b, 121, owner)?;
                 let out_buf = ctx.new_buffer_with_length(x_need * std::mem::size_of::<f32>())?;
                 ctx.dispatch_norm_f32(
                     cur_buf.as_id(),
@@ -5470,6 +5546,7 @@ mod imp {
             v_w_bytes: &[u8],
             v_w_ggml_type: u32,
             v_b: &[f32],
+            owner: &WeightOwner,
         ) -> Result<(Vec<f32>, Vec<f32>, Vec<f32>), String> {
             if n_state == 0 {
                 return Err("decoder qkv: n_state is zero".to_string());
@@ -5489,8 +5566,8 @@ mod imp {
             let (q_buf, k_buf, v_buf) = self.with_batch(|ctx| {
                 let x_buf = ctx.new_buffer_with_bytes(f32_slice_as_bytes(x))?;
 
-                let ln_w_id = ctx.get_or_create_cached_f32_buffer(attn_ln_w, 240)?;
-                let ln_b_id = ctx.get_or_create_cached_f32_buffer(attn_ln_b, 241)?;
+                let ln_w_id = ctx.get_or_create_cached_f32_buffer(attn_ln_w, 240, owner)?;
+                let ln_b_id = ctx.get_or_create_cached_f32_buffer(attn_ln_b, 241, owner)?;
                 let norm_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder qkv norm bytes".to_string())?;
@@ -5517,6 +5594,7 @@ mod imp {
                     Some(q_b),
                     242,
                     243,
+                    owner,
                 )?;
                 let k_buf = ctx.linear_from_src_buffer(
                     norm_id,
@@ -5528,6 +5606,7 @@ mod imp {
                     None,
                     244,
                     0,
+                    owner,
                 )?;
                 let v_buf = ctx.linear_from_src_buffer(
                     norm_id,
@@ -5539,6 +5618,7 @@ mod imp {
                     Some(v_b),
                     245,
                     246,
+                    owner,
                 )?;
 
                 Ok((q_buf, k_buf, v_buf))
@@ -5562,6 +5642,7 @@ mod imp {
             v_cross: &[f32],
             n_audio_ctx: usize,
             layer: &DecoderLayer,
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             if n_state == 0 || n_head == 0 || n_state % n_head != 0 {
                 return Err(format!(
@@ -5696,6 +5777,7 @@ mod imp {
                     Some(&layer.attn_ln_1_b.data),
                     212,
                     213,
+                    owner,
                 )?;
 
                 ctx.dispatch_bin_f32(
@@ -5711,9 +5793,9 @@ mod imp {
                     ctx.ensure_cross_kv_layer(layer_idx, n_state, n_audio_ctx, k_cross, v_cross)?;
 
                 let cross_ln_w_id =
-                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214)?;
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 214, owner)?;
                 let cross_ln_b_id =
-                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215)?;
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 215, owner)?;
                 let norm_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
@@ -5740,6 +5822,7 @@ mod imp {
                     Some(&layer.cross_attn_q_b.data),
                     216,
                     217,
+                    owner,
                 )?;
 
                 let cross_attn_buf = ctx.flash_attn_f32_from_buffers(
@@ -5763,6 +5846,7 @@ mod imp {
                     Some(&layer.cross_attn_ln_1_b.data),
                     218,
                     219,
+                    owner,
                 )?;
 
                 ctx.dispatch_bin_f32(
@@ -5774,8 +5858,10 @@ mod imp {
                     &x_shape,
                 )?;
 
-                let mlp_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 220)?;
-                let mlp_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 221)?;
+                let mlp_ln_w_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 220, owner)?;
+                let mlp_ln_b_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 221, owner)?;
                 let norm1_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM1, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     cross_proj_buf.as_id(),
@@ -5799,6 +5885,7 @@ mod imp {
                     Some(&layer.mlp_0_b.data),
                     222,
                     223,
+                    owner,
                 )?;
 
                 let ff0_shape = shape4_from_row_major(&[1, n_ff], 4)?;
@@ -5819,6 +5906,7 @@ mod imp {
                     Some(&layer.mlp_1_b.data),
                     224,
                     225,
+                    owner,
                 )?;
 
                 ctx.dispatch_bin_f32(
@@ -5847,6 +5935,7 @@ mod imp {
             v_cross: &[f32],
             n_audio_ctx: usize,
             layer: &DecoderLayer,
+            owner: &WeightOwner,
         ) -> Result<Vec<f32>, String> {
             if n_state == 0 || n_head == 0 || n_state % n_head != 0 {
                 return Err(format!(
@@ -5890,9 +5979,9 @@ mod imp {
 
                 // Cross-attention block
                 let cross_ln_w_id =
-                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 200)?;
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_w.data, 200, owner)?;
                 let cross_ln_b_id =
-                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 201)?;
+                    ctx.get_or_create_cached_f32_buffer(&layer.cross_attn_ln_0_b.data, 201, owner)?;
                 let norm_bytes = n_state
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| "overflow computing decoder norm bytes".to_string())?;
@@ -5919,6 +6008,7 @@ mod imp {
                     Some(&layer.cross_attn_q_b.data),
                     202,
                     203,
+                    owner,
                 )?;
 
                 let attn_buf = ctx.flash_attn_f32_from_buffers(
@@ -5942,6 +6032,7 @@ mod imp {
                     Some(&layer.cross_attn_ln_1_b.data),
                     204,
                     205,
+                    owner,
                 )?;
 
                 ctx.dispatch_bin_f32(
@@ -5954,8 +6045,10 @@ mod imp {
                 )?;
 
                 // FFN block
-                let mlp_ln_w_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 206)?;
-                let mlp_ln_b_id = ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 207)?;
+                let mlp_ln_w_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_w.data, 206, owner)?;
+                let mlp_ln_b_id =
+                    ctx.get_or_create_cached_f32_buffer(&layer.mlp_ln_b.data, 207, owner)?;
                 let norm1_id = ctx.get_or_create_scratch_buffer(SCRATCH_DEC_NORM1, norm_bytes)?;
                 ctx.dispatch_norm_f32(
                     cross_proj_buf.as_id(),
@@ -5979,6 +6072,7 @@ mod imp {
                     Some(&layer.mlp_0_b.data),
                     208,
                     209,
+                    owner,
                 )?;
 
                 let ff0_shape = shape4_from_row_major(&[1, n_ff], 4)?;
@@ -5999,6 +6093,7 @@ mod imp {
                     Some(&layer.mlp_1_b.data),
                     210,
                     211,
+                    owner,
                 )?;
 
                 ctx.dispatch_bin_f32(
@@ -6280,7 +6375,9 @@ mod imp {
             k: usize,
             n: usize,
             weight_cache_tag: Option<u8>,
+            owner: Option<&WeightOwner>,
         ) -> Result<StrongId, String> {
+            let weight_cache_tag = weight_cache_tag.filter(|_| owner.is_some());
             if m == 0 || k == 0 || n == 0 {
                 return self
                     .new_buffer_with_length(m.saturating_mul(n) * std::mem::size_of::<f32>());
@@ -6323,13 +6420,14 @@ mod imp {
                 .ok_or_else(|| "matmul overflow computing m*n".to_string())?;
 
             let mut src0_temp = None;
-            let src0_id = if let Some(tag) = weight_cache_tag {
+            let src0_id = if let Some((tag, owner)) = weight_cache_tag.zip(owner) {
                 let key = BufferKey {
+                    owner: owner.id(),
                     ptr: bt_bytes.as_ptr() as usize,
                     len: bt_bytes.len(),
                     tag,
                 };
-                self.get_or_create_weight_buffer(key, bt_bytes)?
+                self.get_or_create_weight_buffer(key, bt_bytes, owner)?
             } else {
                 let b = self.new_buffer_with_bytes(bt_bytes)?;
                 let id = b.as_id();
@@ -6416,6 +6514,7 @@ mod imp {
             k: usize,
             n: usize,
             weight_cache_tag: Option<u8>,
+            owner: Option<&WeightOwner>,
         ) -> Result<(StrongId, usize, usize), String> {
             let mk = m
                 .checked_mul(k)
@@ -6443,6 +6542,7 @@ mod imp {
                 k,
                 n,
                 weight_cache_tag,
+                owner,
             )?;
 
             Ok((dst_buffer, m, n))
@@ -6492,7 +6592,7 @@ mod imp {
             };
 
             let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, None)?;
+                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, None, None)?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6503,6 +6603,7 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
+            owner: Option<&WeightOwner>,
         ) -> Result<Vec<f32>, String> {
             let bt_bytes = unsafe {
                 std::slice::from_raw_parts(
@@ -6511,8 +6612,16 @@ mod imp {
                 )
             };
             let cache_tag = Some(1u8);
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, cache_tag)?;
+            let (dst, mr, nr) = self.matmul_nt_ggml_bytes_impl(
+                a,
+                bt_bytes,
+                GGML_TYPE_F32,
+                m,
+                k,
+                n,
+                cache_tag,
+                owner,
+            )?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6523,9 +6632,18 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
+            owner: Option<&WeightOwner>,
         ) -> Result<Vec<f32>, String> {
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, GGML_TYPE_F32, m, k, n, Some(2u8))?;
+            let (dst, mr, nr) = self.matmul_nt_ggml_bytes_impl(
+                a,
+                bt_bytes,
+                GGML_TYPE_F32,
+                m,
+                k,
+                n,
+                Some(2u8),
+                owner,
+            )?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6536,9 +6654,18 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
+            owner: Option<&WeightOwner>,
         ) -> Result<Vec<f32>, String> {
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_f16_bytes, GGML_TYPE_F16, m, k, n, Some(3u8))?;
+            let (dst, mr, nr) = self.matmul_nt_ggml_bytes_impl(
+                a,
+                bt_f16_bytes,
+                GGML_TYPE_F16,
+                m,
+                k,
+                n,
+                Some(3u8),
+                owner,
+            )?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6550,6 +6677,7 @@ mod imp {
             m: usize,
             k: usize,
             n: usize,
+            owner: Option<&WeightOwner>,
         ) -> Result<Vec<f32>, String> {
             let tag = match bt_ggml_type {
                 GGML_TYPE_F32 => 2u8,
@@ -6561,8 +6689,16 @@ mod imp {
                 GGML_TYPE_Q8_0 => 8u8,
                 _ => 0u8,
             };
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, bt_ggml_type, m, k, n, Some(tag))?;
+            let (dst, mr, nr) = self.matmul_nt_ggml_bytes_impl(
+                a,
+                bt_bytes,
+                bt_ggml_type,
+                m,
+                k,
+                n,
+                Some(tag),
+                owner,
+            )?;
             self.read_f32_buffer(dst.as_id(), mr * nr)
         }
 
@@ -6575,6 +6711,7 @@ mod imp {
             k: usize,
             n: usize,
             bias: &[f32],
+            owner: Option<&WeightOwner>,
         ) -> Result<Vec<f32>, String> {
             if bias.len() != n {
                 return Err(format!(
@@ -6595,8 +6732,16 @@ mod imp {
                 _ => 0u8,
             };
 
-            let (dst, mr, nr) =
-                self.matmul_nt_ggml_bytes_impl(a, bt_bytes, bt_ggml_type, m, k, n, Some(tag))?;
+            let (dst, mr, nr) = self.matmul_nt_ggml_bytes_impl(
+                a,
+                bt_bytes,
+                bt_ggml_type,
+                m,
+                k,
+                n,
+                Some(tag),
+                owner,
+            )?;
 
             let bias_shape = shape4_from_row_major(&[n], 4)?;
             let dst_shape = shape4_from_row_major(&[m, n], 4)?;
@@ -6648,6 +6793,7 @@ mod imp {
                 ContextState::Ready(ctx) => ctx,
                 ContextState::Disabled | ContextState::Uninitialized => return None,
             };
+            ctx.retire_dead_owners();
             match f(ctx) {
                 Ok(v) => Some(v),
                 Err(err) => {
@@ -6674,8 +6820,9 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
+        owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.matmul_nt_f32(a, bt, m, k, n))
+        with_context(|ctx| ctx.matmul_nt_f32(a, bt, m, k, n, owner))
     }
 
     pub(super) fn try_matmul_nt_f32_bytes(
@@ -6684,8 +6831,9 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
+        owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.matmul_nt_f32_bytes(a, bt_bytes, m, k, n))
+        with_context(|ctx| ctx.matmul_nt_f32_bytes(a, bt_bytes, m, k, n, owner))
     }
 
     pub(super) fn try_matmul_nt_f16_bytes(
@@ -6694,8 +6842,9 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
+        owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n))
+        with_context(|ctx| ctx.matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n, owner))
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes(
@@ -6705,8 +6854,9 @@ mod imp {
         m: usize,
         k: usize,
         n: usize,
+        owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
-        with_context(|ctx| ctx.matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n))
+        with_context(|ctx| ctx.matmul_nt_ggml_bytes(a, bt_bytes, bt_ggml_type, m, k, n, owner))
     }
 
     pub(super) fn try_matmul_nt_ggml_bytes_add_bias(
@@ -6717,9 +6867,10 @@ mod imp {
         k: usize,
         n: usize,
         bias: &[f32],
+        owner: Option<&WeightOwner>,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
-            ctx.matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias)
+            ctx.matmul_nt_ggml_bytes_add_bias(a, bt_bytes, bt_ggml_type, m, k, n, bias, owner)
         })
     }
 
@@ -6846,6 +6997,7 @@ mod imp {
         out_w_bytes: &[u8],
         out_w_ggml_type: u32,
         out_b: &[f32],
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.encoder_attn_block_f32(
@@ -6866,6 +7018,7 @@ mod imp {
                 out_w_bytes,
                 out_w_ggml_type,
                 out_b,
+                owner,
             )
         })
     }
@@ -6883,6 +7036,7 @@ mod imp {
         w1_bytes: &[u8],
         w1_ggml_type: u32,
         b1: &[f32],
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.encoder_ffn_block_f32(
@@ -6897,6 +7051,7 @@ mod imp {
                 w1_bytes,
                 w1_ggml_type,
                 b1,
+                owner,
             )
         })
     }
@@ -6928,6 +7083,7 @@ mod imp {
         w1_bytes: &[u8],
         w1_ggml_type: u32,
         b1: &[f32],
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.encoder_layer_f32(
@@ -6956,6 +7112,7 @@ mod imp {
                 w1_bytes,
                 w1_ggml_type,
                 b1,
+                owner,
             )
         })
     }
@@ -6968,9 +7125,12 @@ mod imp {
         layers: &[EncoderLayer],
         final_ln_w: &[f32],
         final_ln_b: &[f32],
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
-            ctx.encoder_stack_f32(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b)
+            ctx.encoder_stack_f32(
+                x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b, owner,
+            )
         })
     }
 
@@ -6988,6 +7148,7 @@ mod imp {
         v_w_bytes: &[u8],
         v_w_ggml_type: u32,
         v_b: &[f32],
+        owner: &WeightOwner,
     ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
         with_context(|ctx| {
             ctx.decoder_self_qkv_step_f32(
@@ -7003,6 +7164,7 @@ mod imp {
                 v_w_bytes,
                 v_w_ggml_type,
                 v_b,
+                owner,
             )
         })
     }
@@ -7017,6 +7179,7 @@ mod imp {
         v_cross: &[f32],
         n_audio_ctx: usize,
         layer: &DecoderLayer,
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.decoder_cross_ffn_step_f32(
@@ -7028,6 +7191,7 @@ mod imp {
                 v_cross,
                 n_audio_ctx,
                 layer,
+                owner,
             )
         })
     }
@@ -7046,6 +7210,7 @@ mod imp {
         v_cross: &[f32],
         n_audio_ctx: usize,
         layer: &DecoderLayer,
+        owner: &WeightOwner,
     ) -> Option<Vec<f32>> {
         with_context(|ctx| {
             ctx.decoder_self_cross_ffn_step_f32(
@@ -7061,7 +7226,73 @@ mod imp {
                 v_cross,
                 n_audio_ctx,
                 layer,
+                owner,
             )
         })
+    }
+    #[cfg(test)]
+    fn cached_weight_buffer_count(owner_id: u64) -> Option<usize> {
+        with_context(|ctx| {
+            Ok(ctx
+                .cached_weight_buffers
+                .keys()
+                .filter(|key| key.owner == owner_id)
+                .count())
+        })
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn a_dropped_owner_never_serves_reused_memory() {
+        // One allocation stays alive, so the "reused address" is certain: an owner caches the weights there and
+        // dies, other values land at the same address (what the allocator hands the next model), and the next
+        // owner must compute with those.
+        fn fill(bytes: &mut [u8], offset: f32) {
+            for (i, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+                chunk.copy_from_slice(&((i % 11) as f32 * 0.125 + offset).to_le_bytes());
+            }
+        }
+        fn check(a: &[f32], bytes: &[u8], m: usize, k: usize, n: usize, owner: Option<&WeightOwner>, property: &str) {
+            let got = try_matmul_nt_f32_bytes(a, bytes, m, k, n, owner).expect("Metal must run the product");
+            for row in 0..m {
+                for col in 0..n {
+                    let want: f32 = (0..k)
+                        .map(|i| {
+                            let at = (col * k + i) * 4;
+                            a[row * k + i] * f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
+                        })
+                        .sum();
+                    let got = got[row * n + col];
+                    assert!((got - want).abs() < 1e-3, "{property}: row {row}, column {col}: got {got}, expected {want}");
+                }
+            }
+        }
+        std::thread::spawn(|| {
+            let (m, k, n) = (4, 64, 8);
+            let a: Vec<f32> = (0..m * k).map(|i| (i % 7) as f32 * 0.125).collect();
+            let mut bytes = vec![0u8; n * k * 4];
+            fill(&mut bytes, 0.0);
+            let owner_a = WeightOwner::new("whisper-test");
+            let id_a = owner_a.id();
+            check(&a, &bytes, m, k, n, Some(&owner_a), "the first owner computes with its weights");
+            drop(owner_a);
+            fill(&mut bytes, 1.0);
+            let owner_b = WeightOwner::new("whisper-test");
+            check(&a, &bytes, m, k, n, Some(&owner_b), "a new owner at the reused address computes with the new values");
+            assert_eq!(cached_weight_buffer_count(id_a), Some(0), "the dead owner's buffer is retired");
+            assert_eq!(cached_weight_buffer_count(owner_b.id()), Some(1), "the live owner's buffer stays cached");
+            drop(owner_b);
+            for offset in [2.0f32, 3.0] {
+                fill(&mut bytes, offset);
+                check(&a, &bytes, m, k, n, None, "an ownerless call computes with its current values");
+                assert_eq!(
+                    with_context(|ctx| Ok(ctx.cached_weight_buffers.len())),
+                    Some(0),
+                    "ownerless calls cache nothing"
+                );
+            }
+        })
+        .join()
+        .expect("the cache regression worker must pass");
     }
 }

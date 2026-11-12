@@ -126,6 +126,7 @@ pub fn decode(
                     &layer.attn_v_w.data,
                     layer.attn_v_w.ggml_type,
                     &layer.attn_v_b.data,
+                    &model.weights_owner,
                 )
             {
                 (
@@ -146,18 +147,38 @@ pub fn decode(
                 let normed =
                     Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
                 (
-                    Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b),
-                    Tensor::matmul_raw(&normed, &layer.attn_k_w),
-                    Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b),
+                    Tensor::linear_raw(
+                        &normed,
+                        &layer.attn_q_w,
+                        &layer.attn_q_b,
+                        Some(&model.weights_owner),
+                    ),
+                    Tensor::matmul_raw(&normed, &layer.attn_k_w, Some(&model.weights_owner)),
+                    Tensor::linear_raw(
+                        &normed,
+                        &layer.attn_v_w,
+                        &layer.attn_v_b,
+                        Some(&model.weights_owner),
+                    ),
                 )
             }
         } else {
             let normed =
                 Tensor::layer_norm_mul_add(&cur, &layer.attn_ln_0_w, &layer.attn_ln_0_b, EPS);
             (
-                Tensor::linear_raw(&normed, &layer.attn_q_w, &layer.attn_q_b),
-                Tensor::matmul_raw(&normed, &layer.attn_k_w),
-                Tensor::linear_raw(&normed, &layer.attn_v_w, &layer.attn_v_b),
+                Tensor::linear_raw(
+                    &normed,
+                    &layer.attn_q_w,
+                    &layer.attn_q_b,
+                    Some(&model.weights_owner),
+                ),
+                Tensor::matmul_raw(&normed, &layer.attn_k_w, Some(&model.weights_owner)),
+                Tensor::linear_raw(
+                    &normed,
+                    &layer.attn_v_w,
+                    &layer.attn_v_b,
+                    Some(&model.weights_owner),
+                ),
             )
         };
 
@@ -191,6 +212,7 @@ pub fn decode(
                 &v_cross.data,
                 n_audio_ctx_flash,
                 layer,
+                &model.weights_owner,
             ) {
                 cur = Tensor {
                     data: out,
@@ -383,7 +405,12 @@ pub fn decode(
             data: attn_out,
             shape: vec![n_tokens, n_state],
         };
-        let projected = Tensor::linear_raw(&attn_result, &layer.attn_ln_1_w, &layer.attn_ln_1_b);
+        let projected = Tensor::linear_raw(
+            &attn_result,
+            &layer.attn_ln_1_w,
+            &layer.attn_ln_1_b,
+            Some(&model.weights_owner),
+        );
         cur = Tensor::add(&projected, &residual);
 
         if crate::whisper::accel::is_requested() && n_tokens == 1 && !capturing {
@@ -396,6 +423,7 @@ pub fn decode(
                 &v_cross.data,
                 n_audio_ctx_flash,
                 layer,
+                &model.weights_owner,
             ) {
                 cur = Tensor {
                     data: out,
@@ -415,7 +443,12 @@ pub fn decode(
             EPS,
         );
 
-        let q = Tensor::linear_raw(&normed, &layer.cross_attn_q_w, &layer.cross_attn_q_b);
+        let q = Tensor::linear_raw(
+            &normed,
+            &layer.cross_attn_q_w,
+            &layer.cross_attn_q_b,
+            Some(&model.weights_owner),
+        );
 
         let scale = 1.0 / (n_state_head as f32).sqrt();
 
@@ -606,6 +639,7 @@ pub fn decode(
             &attn_result,
             &layer.cross_attn_ln_1_w,
             &layer.cross_attn_ln_1_b,
+            Some(&model.weights_owner),
         );
         cur = Tensor::add(&projected, &residual);
 
@@ -614,9 +648,19 @@ pub fn decode(
 
         let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
 
-        let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
+        let mut ff = Tensor::linear_raw(
+            &normed,
+            &layer.mlp_0_w,
+            &layer.mlp_0_b,
+            Some(&model.weights_owner),
+        );
         ff = Tensor::gelu(&ff);
-        ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
+        ff = Tensor::linear_raw(
+            &ff,
+            &layer.mlp_1_w,
+            &layer.mlp_1_b,
+            Some(&model.weights_owner),
+        );
 
         cur = Tensor::add(&ff, &residual);
     }
@@ -626,7 +670,7 @@ pub fn decode(
 
     // Project to vocab logits: cur [n_tokens, n_state] @ d_te^T [n_state, n_vocab] -> [n_tokens, n_vocab]
     // d_te is [n_vocab, n_state], so we compute cur @ d_te^T
-    Tensor::matmul_t(&cur, &model.d_te)
+    Tensor::matmul_t(&cur, &model.d_te, Some(&model.weights_owner))
 }
 
 /// Increment KV cache position counter after a decode step.

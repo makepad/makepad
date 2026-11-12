@@ -690,8 +690,25 @@ pub fn get_rows_ggml_bytes_cpu(
     n_rows: usize,
     row_indices: &[i32],
 ) -> Option<Vec<f32>> {
+    let mut out = vec![0.0; n_cols.checked_mul(row_indices.len())?];
+    get_rows_ggml_bytes_cpu_into(src, src_ggml_type, n_cols, n_rows, row_indices, &mut out)?;
+    Some(out)
+}
+
+/// Gather row-major GGML tensor rows directly into caller-provided f32 storage.
+pub fn get_rows_ggml_bytes_cpu_into(
+    src: &[u8],
+    src_ggml_type: u32,
+    n_cols: usize,
+    n_rows: usize,
+    row_indices: &[i32],
+    out: &mut [f32],
+) -> Option<()> {
+    if out.len() != n_cols.checked_mul(row_indices.len())? {
+        return None;
+    }
     if row_indices.is_empty() {
-        return Some(Vec::new());
+        return Some(());
     }
 
     let row_bytes = match src_ggml_type {
@@ -713,49 +730,49 @@ pub fn get_rows_ggml_bytes_cpu(
         return None;
     }
 
-    let mut out = Vec::with_capacity(n_cols.checked_mul(row_indices.len())?);
-    for &row in row_indices {
+    for (index, &row) in row_indices.iter().enumerate() {
         let row = usize::try_from(row).ok()?;
         if row >= n_rows {
             return None;
         }
         let row_src = &src[row * row_bytes..(row + 1) * row_bytes];
+        let out = &mut out[index * n_cols..(index + 1) * n_cols];
         match src_ggml_type {
             GGML_TYPE_F32 => {
-                for chunk in row_src.chunks_exact(4) {
-                    out.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+                for (value, chunk) in out.iter_mut().zip(row_src.chunks_exact(4)) {
+                    *value = f32::from_le_bytes(chunk.try_into().unwrap());
                 }
             }
             GGML_TYPE_F16 => {
-                for chunk in row_src.chunks_exact(2) {
-                    out.push(f16_to_f32(u16::from_le_bytes(chunk.try_into().unwrap())));
+                for (value, chunk) in out.iter_mut().zip(row_src.chunks_exact(2)) {
+                    *value = f16_to_f32(u16::from_le_bytes(chunk.try_into().unwrap()));
                 }
             }
             GGML_TYPE_BF16 => {
-                for chunk in row_src.chunks_exact(2) {
-                    out.push(bf16_to_f32(u16::from_le_bytes(chunk.try_into().unwrap())));
+                for (value, chunk) in out.iter_mut().zip(row_src.chunks_exact(2)) {
+                    *value = bf16_to_f32(u16::from_le_bytes(chunk.try_into().unwrap()));
                 }
             }
             GGML_TYPE_F8_E4M3 => {
-                for &byte in row_src {
-                    out.push(f8_e4m3_to_f32(byte));
+                for (value, &byte) in out.iter_mut().zip(row_src) {
+                    *value = f8_e4m3_to_f32(byte);
                 }
             }
-            GGML_TYPE_Q4_0 => dequantize_row_blocks(row_src, n_cols, 18, dequantize_q4_0, &mut out),
-            GGML_TYPE_Q4_1 => dequantize_row_blocks(row_src, n_cols, 20, dequantize_q4_1, &mut out),
-            GGML_TYPE_Q5_0 => dequantize_row_blocks(row_src, n_cols, 22, dequantize_q5_0, &mut out),
-            GGML_TYPE_Q5_1 => dequantize_row_blocks(row_src, n_cols, 24, dequantize_q5_1, &mut out),
-            GGML_TYPE_Q8_0 => dequantize_row_blocks(row_src, n_cols, 34, dequantize_q8_0, &mut out),
-            GGML_TYPE_Q4_K => dequantize_row_q4_k(row_src, n_cols, &mut out),
-            GGML_TYPE_Q5_K => dequantize_row_q5_k(row_src, n_cols, &mut out),
-            GGML_TYPE_Q6_K => dequantize_row_q6_k(row_src, n_cols, &mut out),
+            GGML_TYPE_Q4_0 => dequantize_row_blocks(row_src, n_cols, 18, dequantize_q4_0, out),
+            GGML_TYPE_Q4_1 => dequantize_row_blocks(row_src, n_cols, 20, dequantize_q4_1, out),
+            GGML_TYPE_Q5_0 => dequantize_row_blocks(row_src, n_cols, 22, dequantize_q5_0, out),
+            GGML_TYPE_Q5_1 => dequantize_row_blocks(row_src, n_cols, 24, dequantize_q5_1, out),
+            GGML_TYPE_Q8_0 => dequantize_row_blocks(row_src, n_cols, 34, dequantize_q8_0, out),
+            GGML_TYPE_Q4_K => dequantize_row_q4_k(row_src, n_cols, out),
+            GGML_TYPE_Q5_K => dequantize_row_q5_k(row_src, n_cols, out),
+            GGML_TYPE_Q6_K => dequantize_row_q6_k(row_src, n_cols, out),
             GGML_TYPE_NVFP4 => {
-                dequantize_row_nvfp4(row_src, n_cols, &mut out);
+                dequantize_row_nvfp4(row_src, n_cols, out);
             }
             _ => return None,
         }
     }
-    Some(out)
+    Some(())
 }
 
 fn dequantize_row_blocks(
@@ -763,14 +780,12 @@ fn dequantize_row_blocks(
     n_cols: usize,
     block_bytes: usize,
     dequantize: fn(&[u8], &mut [f32]),
-    out: &mut Vec<f32>,
+    out: &mut [f32],
 ) {
     debug_assert_eq!(n_cols % QK, 0);
     debug_assert_eq!(row_src.len(), (n_cols / QK) * block_bytes);
-    let mut block_out = [0.0f32; QK];
-    for block in row_src.chunks_exact(block_bytes) {
-        dequantize(block, &mut block_out);
-        out.extend_from_slice(&block_out);
+    for (block, block_out) in row_src.chunks_exact(block_bytes).zip(out.chunks_exact_mut(QK)) {
+        dequantize(block, block_out);
     }
 }
 
@@ -804,13 +819,14 @@ pub fn dequantize_q4_k(block: &[u8], out: &mut [f32]) {
     }
 }
 
-fn dequantize_row_q4_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
+fn dequantize_row_q4_k(row_src: &[u8], n_cols: usize, out: &mut [f32]) {
     debug_assert_eq!(n_cols % QK_K, 0);
     debug_assert_eq!(row_src.len(), (n_cols / QK_K) * block_size(GGML_TYPE_Q4_K));
-    let mut block_out = [0.0f32; QK_K];
-    for block in row_src.chunks_exact(block_size(GGML_TYPE_Q4_K)) {
-        dequantize_q4_k(block, &mut block_out);
-        out.extend_from_slice(&block_out);
+    for (block, block_out) in row_src
+        .chunks_exact(block_size(GGML_TYPE_Q4_K))
+        .zip(out.chunks_exact_mut(QK_K))
+    {
+        dequantize_q4_k(block, block_out);
     }
 }
 
@@ -840,13 +856,14 @@ pub fn dequantize_q6_k(block: &[u8], out: &mut [f32]) {
     }
 }
 
-fn dequantize_row_q6_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
+fn dequantize_row_q6_k(row_src: &[u8], n_cols: usize, out: &mut [f32]) {
     debug_assert_eq!(n_cols % QK_K, 0);
     debug_assert_eq!(row_src.len(), (n_cols / QK_K) * block_size(GGML_TYPE_Q6_K));
-    let mut block_out = [0.0f32; QK_K];
-    for block in row_src.chunks_exact(block_size(GGML_TYPE_Q6_K)) {
-        dequantize_q6_k(block, &mut block_out);
-        out.extend_from_slice(&block_out);
+    for (block, block_out) in row_src
+        .chunks_exact(block_size(GGML_TYPE_Q6_K))
+        .zip(out.chunks_exact_mut(QK_K))
+    {
+        dequantize_q6_k(block, block_out);
     }
 }
 
@@ -889,26 +906,28 @@ pub fn dequantize_q5_k(block: &[u8], out: &mut [f32]) {
     }
 }
 
-fn dequantize_row_q5_k(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
+fn dequantize_row_q5_k(row_src: &[u8], n_cols: usize, out: &mut [f32]) {
     debug_assert_eq!(n_cols % QK_K, 0);
     debug_assert_eq!(row_src.len(), (n_cols / QK_K) * block_size(GGML_TYPE_Q5_K));
-    let mut block_out = [0.0f32; QK_K];
-    for block in row_src.chunks_exact(block_size(GGML_TYPE_Q5_K)) {
-        dequantize_q5_k(block, &mut block_out);
-        out.extend_from_slice(&block_out);
+    for (block, block_out) in row_src
+        .chunks_exact(block_size(GGML_TYPE_Q5_K))
+        .zip(out.chunks_exact_mut(QK_K))
+    {
+        dequantize_q5_k(block, block_out);
     }
 }
 
-fn dequantize_row_nvfp4(row_src: &[u8], n_cols: usize, out: &mut Vec<f32>) {
+fn dequantize_row_nvfp4(row_src: &[u8], n_cols: usize, out: &mut [f32]) {
     debug_assert_eq!(n_cols % QK_NVFP4, 0);
     debug_assert_eq!(
         row_src.len(),
         (n_cols / QK_NVFP4) * block_size(GGML_TYPE_NVFP4)
     );
-    let mut block_out = [0.0f32; QK_NVFP4];
-    for block in row_src.chunks_exact(block_size(GGML_TYPE_NVFP4)) {
-        dequantize_nvfp4(block, &mut block_out);
-        out.extend_from_slice(&block_out);
+    for (block, block_out) in row_src
+        .chunks_exact(block_size(GGML_TYPE_NVFP4))
+        .zip(out.chunks_exact_mut(QK_NVFP4))
+    {
+        dequantize_nvfp4(block, block_out);
     }
 }
 

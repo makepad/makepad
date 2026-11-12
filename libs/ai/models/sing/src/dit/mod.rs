@@ -169,7 +169,7 @@ impl CantorDit {
                 if !wf.params.has(&n) {
                     return Err(io_err(format!("missing {n}")));
                 }
-                Ok(wf.params.get(&n).data.clone())
+                Ok(wf.params.get(&n).data.to_vec())
             };
             let ints = |k: &str| -> std::io::Result<Vec<u32>> { Ok(get(k)?.iter().map(|v| *v as u32).collect()) };
             voices.push(Voice {

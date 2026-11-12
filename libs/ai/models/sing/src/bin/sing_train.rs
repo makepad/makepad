@@ -127,7 +127,7 @@ fn add_disc(opt: &mut Optimizer) {
         opt.params.insert(n, (**t).clone());
         opt.m.push(vec![0.0; t.len()]);
         opt.v.push(vec![0.0; t.len()]);
-        opt.ema.push(t.data.clone());
+        opt.ema.push(t.data.to_vec());
     }
 }
 
@@ -735,7 +735,7 @@ fn model_main() {
                     opt.params.insert(n, (**t).clone());
                     opt.m.push(vec![0.0; t.len()]);
                     opt.v.push(vec![0.0; t.len()]);
-                    opt.ema.push(t.data.clone());
+                    opt.ema.push(t.data.to_vec());
                 }
             }
             opt.cfg.b1 = 0.8;

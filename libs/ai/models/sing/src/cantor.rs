@@ -185,7 +185,7 @@ impl Cantor {
                 (t_all - t_rf).as_secs_f64() * 1e3
             );
         }
-        (mel.data, audio, f0)
+        (mel.data.to_vec(), audio, f0)
     }
 
     /// Render a whole line, phrase by phrase (split at rests of 0.6 s or more).

@@ -1,5 +1,6 @@
 use crate::whisper::model::WhisperModel;
 use crate::whisper::tensor::{parallel_for, RawTensor, Tensor};
+use makepad_ai_loader::WeightOwner;
 
 const EPS: f32 = 1e-5;
 
@@ -16,6 +17,7 @@ fn multi_head_attention(
     out_w: &RawTensor,
     out_b: &Tensor,
     n_head: usize,
+    owner: &WeightOwner,
 ) -> Tensor {
     let seq_len = x.shape[0];
     let n_state = x.shape[1];
@@ -29,9 +31,9 @@ fn multi_head_attention(
     };
 
     // Q, K, V projections: [seq_len, n_state]
-    let q = Tensor::linear_raw_with_prequant(x, q_w, xq.as_deref(), q_b);
-    let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref());
-    let v = Tensor::linear_raw_with_prequant(x, v_w, xq.as_deref(), v_b);
+    let q = Tensor::linear_raw_with_prequant(x, q_w, xq.as_deref(), q_b, Some(owner));
+    let k = Tensor::matmul_raw_with_prequant(x, k_w, xq.as_deref(), Some(owner));
+    let v = Tensor::linear_raw_with_prequant(x, v_w, xq.as_deref(), v_b, Some(owner));
 
     if crate::whisper::accel::is_requested() {
         if let Some(out) = crate::whisper::accel::try_flash_attn_f32_packed(
@@ -49,7 +51,7 @@ fn multi_head_attention(
                 shape: vec![seq_len, n_state],
             };
 
-            return Tensor::linear_raw(&attn_out, out_w, out_b);
+            return Tensor::linear_raw(&attn_out, out_w, out_b, Some(owner));
         }
     }
 
@@ -122,7 +124,7 @@ fn multi_head_attention(
     };
 
     // Output projection
-    Tensor::linear_raw(&attn_out, out_w, out_b)
+    Tensor::linear_raw(&attn_out, out_w, out_b, Some(owner))
 }
 
 /// Run the whisper encoder on a mel spectrogram chunk.
@@ -145,11 +147,23 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 
     // Conv1 + GELU: [n_mels, 2*n_ctx] -> [n_state, 2*n_ctx]
     let _tc = std::time::Instant::now();
-    let mut cur = Tensor::conv1d_raw(&mel, &model.e_conv_1_w, &model.e_conv_1_b, 1);
+    let mut cur = Tensor::conv1d_raw(
+        &mel,
+        &model.e_conv_1_w,
+        &model.e_conv_1_b,
+        1,
+        Some(&model.weights_owner),
+    );
     cur = Tensor::gelu(&cur);
 
     // Conv2 + GELU: [n_state, 2*n_ctx] -> [n_state, n_ctx] (stride 2)
-    cur = Tensor::conv1d_raw(&cur, &model.e_conv_2_w, &model.e_conv_2_b, 2);
+    cur = Tensor::conv1d_raw(
+        &cur,
+        &model.e_conv_2_w,
+        &model.e_conv_2_b,
+        2,
+        Some(&model.weights_owner),
+    );
     cur = Tensor::gelu(&cur);
     crate::whisper::PROF_ENC_CONV.fetch_add(
         _tc.elapsed().as_nanos() as u64,
@@ -178,6 +192,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
             &model.encoder_layers,
             &model.e_ln_w.data,
             &model.e_ln_b.data,
+            &model.weights_owner,
         ) {
             let dt = t_stack.elapsed().as_nanos() as u64;
             crate::whisper::PROF_ENC_ATTN.fetch_add(dt / 2, std::sync::atomic::Ordering::Relaxed);
@@ -219,6 +234,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
                 &layer.mlp_1_w.data,
                 layer.mlp_1_w.ggml_type,
                 &layer.mlp_1_b.data,
+                &model.weights_owner,
             ) {
                 cur = Tensor {
                     data: out,
@@ -253,6 +269,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
                 &layer.attn_ln_1_w.data,
                 layer.attn_ln_1_w.ggml_type,
                 &layer.attn_ln_1_b.data,
+                &model.weights_owner,
             ) {
                 cur = Tensor {
                     data: out,
@@ -279,6 +296,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
                 &layer.attn_ln_1_w,
                 &layer.attn_ln_1_b,
                 n_head,
+                &model.weights_owner,
             );
 
             cur = Tensor::add(&attn_out, &residual);
@@ -304,6 +322,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
                 &layer.mlp_1_w.data,
                 layer.mlp_1_w.ggml_type,
                 &layer.mlp_1_b.data,
+                &model.weights_owner,
             ) {
                 cur = Tensor {
                     data: out,
@@ -318,9 +337,19 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
             let normed = Tensor::layer_norm_mul_add(&cur, &layer.mlp_ln_w, &layer.mlp_ln_b, EPS);
 
             // MLP: linear -> gelu -> linear
-            let mut ff = Tensor::linear_raw(&normed, &layer.mlp_0_w, &layer.mlp_0_b);
+            let mut ff = Tensor::linear_raw(
+                &normed,
+                &layer.mlp_0_w,
+                &layer.mlp_0_b,
+                Some(&model.weights_owner),
+            );
             ff = Tensor::gelu(&ff);
-            ff = Tensor::linear_raw(&ff, &layer.mlp_1_w, &layer.mlp_1_b);
+            ff = Tensor::linear_raw(
+                &ff,
+                &layer.mlp_1_w,
+                &layer.mlp_1_b,
+                Some(&model.weights_owner),
+            );
 
             cur = Tensor::add(&ff, &residual);
         }
@@ -352,12 +381,18 @@ pub fn compute_cross_kv(model: &WhisperModel, encoder_out: &Tensor) -> Vec<(Tens
         None
     };
     for layer in &model.decoder_layers {
-        let k = Tensor::matmul_raw_with_prequant(encoder_out, &layer.cross_attn_k_w, xq.as_deref());
+        let k = Tensor::matmul_raw_with_prequant(
+            encoder_out,
+            &layer.cross_attn_k_w,
+            xq.as_deref(),
+            Some(&model.weights_owner),
+        );
         let v = Tensor::linear_raw_with_prequant(
             encoder_out,
             &layer.cross_attn_v_w,
             xq.as_deref(),
             &layer.cross_attn_v_b,
+            Some(&model.weights_owner),
         );
         cross_kv.push((k, v));
     }

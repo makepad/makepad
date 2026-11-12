@@ -597,7 +597,7 @@ impl Optimizer {
     pub fn new(params: Params, cfg: OptConfig) -> Optimizer {
         let m = params.vals.iter().map(|t| vec![0.0; t.len()]).collect();
         let v = params.vals.iter().map(|t| vec![0.0; t.len()]).collect();
-        let ema = params.vals.iter().map(|t| t.data.clone()).collect();
+        let ema = params.vals.iter().map(|t| t.data.to_vec()).collect();
         Optimizer {
             cfg,
             step: 0,
@@ -736,15 +736,15 @@ impl Optimizer {
         if let Ok(opt) = weights::read(&stem.with_extension("opt.mksing")) {
             for (i, n) in o.params.names.clone().iter().enumerate() {
                 if opt.params.has(&format!("m.{n}")) {
-                    o.m[i] = opt.params.get(&format!("m.{n}")).data.clone();
-                    o.v[i] = opt.params.get(&format!("v.{n}")).data.clone();
+                    o.m[i] = opt.params.get(&format!("m.{n}")).data.to_vec();
+                    o.v[i] = opt.params.get(&format!("v.{n}")).data.to_vec();
                 }
             }
         }
         if let Ok(e) = weights::read(&stem.with_extension("ema.mksing")) {
             for (i, n) in o.params.names.clone().iter().enumerate() {
                 if e.params.has(n) {
-                    o.ema[i] = e.params.get(n).data.clone();
+                    o.ema[i] = e.params.get(n).data.to_vec();
                 }
             }
         }

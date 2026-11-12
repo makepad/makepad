@@ -14,6 +14,6 @@ pub mod rife;
 pub use affine::*;
 pub use backend_kind::*;
 pub use gpu_types::{GpuLinearPart, GpuTensor};
-pub use makepad_ai_loader::{WeightKey, WeightOwner, WeightOwnerTrace};
+pub use makepad_ai_loader::{F32Weight, WeightKey, WeightOwner, WeightOwnerTrace};
 pub use runtime::*;
 pub use shim::*;
