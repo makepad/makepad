@@ -793,3 +793,24 @@ impl<K: Eq + Hash, V, const N: usize> From<[(K, V); N]> for HashMap<K, V, Random
         map
     }
 }
+
+// A drain prints the entries it has not yielded yet, read through a borrowing iterator from the
+// same position, as IterMut and IntoIter do (slotmap's SparseSecondaryMap iterators are
+// `#[derive(Debug)]` wrappers around all three).
+impl<'a, K, V> Drain<'a, K, V> {
+    fn iter(&self) -> Iter<'_, K, V> {
+        Iter { table: &*self.table, pos: self.pos, remaining: self.remaining }
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for Drain<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.iter(), f)
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, F> fmt::Debug for ExtractIf<'_, K, V, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtractIf").finish_non_exhaustive()
+    }
+}
