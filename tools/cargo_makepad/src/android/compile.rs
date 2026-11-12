@@ -969,6 +969,8 @@ struct ResolvedPackagingInputs {
     /// means use the cargo-makepad default from `urls.sdk_version`. Validated
     /// to be ≥ 21 (NDK floor) and ≤ `urls.target_sdk_version` (Android rule).
     min_sdk_version_override: Option<usize>,
+    /// `<meta-data android:name="dev.makepad.hal_backend">`: the backend the app picked.
+    hal_backend: Option<String>,
 }
 
 /// Resolve packaging inputs with priority: CLI flag > Cargo.toml metadata > built-in default.
@@ -979,6 +981,7 @@ struct ResolvedPackagingInputs {
 ///   `[package.metadata.packager].product_name`           -> default `app_label`
 ///   `[package.metadata.makepad.android].version_code`    -> default `version_code`
 ///   `[package.metadata.makepad.android].version_name`    -> overrides `[package].version`
+///   `[package.metadata.makepad.android].hal_backend`     -> the manifest's `dev.makepad.hal_backend`
 fn resolve_packaging_inputs(
     build_crate: &str,
     binary_name: &str,
@@ -1032,6 +1035,7 @@ fn resolve_packaging_inputs(
         version_code,
         version_name,
         min_sdk_version_override,
+        hal_backend: metadata.hal_backend,
     })
 }
 
@@ -1087,6 +1091,8 @@ pub struct PrepareBuildOpts<'a> {
     /// manifest as `.<launcher_class>`
     pub launcher_class: &'a str,
     pub extra_activities: &'a str,
+    /// The app's `[package.metadata.makepad.android] hal_backend`.
+    pub hal_backend: Option<&'a str>,
 }
 
 /// Replace `{key}` placeholders in a custom AndroidManifest template with the
@@ -1191,6 +1197,15 @@ fn prepare_build(opts: &PrepareBuildOpts<'_>) -> Result<BuildPaths, String> {
         substitute_manifest_template(&template, &manifest_args)
     } else {
         opts.variant.manifest_xml(&manifest_args)
+    };
+    // a custom template gets it too, so the Cargo.toml line is all an app needs
+    let manifest_xml = match opts.hal_backend {
+        Some(backend) => {
+            let meta = format!("<meta-data android:name=\"dev.makepad.hal_backend\" android:value=\"{backend}\" />\n    </application>");
+            if !manifest_xml.contains("</application>") { return Err("[package.metadata.makepad.android] hal_backend: the manifest has no </application> to put it in".into()); }
+            manifest_xml.replacen("</application>", &meta, 1)
+        }
+        None => manifest_xml,
     };
     let manifest_file = tmp_dir.join("AndroidManifest.xml");
     write_text(&manifest_file, &manifest_xml)?;
@@ -2783,6 +2798,7 @@ pub fn build_aab(
         debuggable: false,
         launcher_class: "MakepadApp",
         extra_activities: "",
+        hal_backend: resolved.hal_backend.as_deref(),
     };
     let build_paths = prepare_build(&prep_opts)?;
     let aab_paths = prepare_aab_paths(build_crate, &resolved.app_label)?;
@@ -2949,6 +2965,7 @@ pub fn build(
         debuggable,
         launcher_class: "MakepadApp",
         extra_activities: "",
+        hal_backend: resolved.hal_backend.as_deref(),
     };
     let build_paths = prepare_build(&prep_opts)?;
 
@@ -3248,6 +3265,7 @@ pub fn build_host(
         debuggable: host.debuggable,
         launcher_class: "RunActivity",
         extra_activities,
+        hal_backend: resolved.hal_backend.as_deref(),
     };
     let build_paths = prepare_build(&prep_opts)?;
     println!(

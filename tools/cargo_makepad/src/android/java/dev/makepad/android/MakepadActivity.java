@@ -1718,6 +1718,17 @@ public class MakepadActivity
         // An IME animation from a previous activity never ends in this one.
         MakepadImeInsets.imeAnimationInProgress = false;
 
+        // The backend the app picked in its Cargo.toml, which the HAL reads when the app starts.
+        // Only an app that picked one calls the native, so apps on a makepad without it still start.
+        String halBackend = "";
+        try {
+            Bundle meta = getPackageManager().getApplicationInfo(getPackageName(), PackageManager.GET_META_DATA).metaData;
+            if (meta != null) halBackend = meta.getString("dev.makepad.hal_backend", "");
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.e(LOG_TAG, "No application info for its meta-data: " + e);
+        }
+        if (!halBackend.isEmpty()) MakepadNative.onAppHalBackend(halBackend);
+
         // Set up before attaching, since a running app calls into this activity right away.
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.

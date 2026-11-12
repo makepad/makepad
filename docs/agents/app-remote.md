@@ -98,7 +98,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `settled` | Whether anything is still pending: `{"settled":bool,"reasons":[...]}` |
 | `cap start path=ABS.mp4 [fps=60]`, `cap stop` | In-process mp4 capture of the window, see below |
 | `cursor [show=1] [style=arrow]` | Synthetic cursor drawn into the frame |
-| `close [w=ID]`, `resize w=W h=H`, `window k=...` | Window operations |
+| `close [w=ID]`, `resize w=W h=H`, `window k=maximize\|fullscreen\|resize\|dragquery` | Window operations |
 | `activity` | Native user activity counters, see below |
 | `trace`, `midi`, `ai`, `ai transcript`, `handsoff`, `shader consts`, `shader const` | Diagnostics and overlays |
 | `tweak ...`, `design <op> ...` | Design feedback and source edits, see [Tweaker](tweaker.md) |

@@ -33,6 +33,7 @@ pub mod derivative;
 pub mod forward;
 pub mod hull;
 pub mod inline;
+pub mod inverse;
 pub mod io;
 pub mod island;
 pub mod memory;

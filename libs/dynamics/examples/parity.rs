@@ -4,6 +4,7 @@
 //!   parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]]
 //!   parity diff <a> <b>
 //!   parity speed <model file> <steps> <qvel scale> <runs>
+//!   parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags>
 //!
 //! The start state: reset, then qvel[i] = qvel_scale * sin(1 + i); every step is one `step`. With a
 //! ctrl scale, before step s: ctrl[i] = ctrl_scale * sin(0.01 s + 1 + i); an integrator replaces the model's.
@@ -13,9 +14,15 @@
 //!             i32 ncon, i32 nefc, i32 solver_niter[0], i32 nisland,
 //!             f64 efc_force[nefc],
 //!             per contact: i32 geom[2], f64 dist, f64 pos[3], f64 frame[9]
+//! Inverse file (`inverse`: the integrator replaces the model's, the flags are or-ed into its enable flags;
+//! after each step: forward, compare_fwd_inv, then inverse), little-endian, version 1:
+//!   "MPIV", i32 version, i32 nq, i32 nv, i32 nsensordata, i32 nsteps
+//!   per step: f64 time, i32 nefc, f64 solver_fwdinv[2], f64 qfrc_inverse[nv], f64 qfrc_constraint[nv],
+//!             f64 efc_force[nefc], f64 sensordata[nsensordata]
 
 use makepad_dynamics::data::Data;
 use makepad_dynamics::forward;
+use makepad_dynamics::inverse;
 use makepad_dynamics::io::make_data;
 use makepad_dynamics::model::Model;
 use makepad_dynamics::model_file::load_model_with;
@@ -301,6 +308,35 @@ fn run_trace(model: &str, steps: usize, scale: f64, out_path: &str, ctrl: Option
     Ok(true)
 }
 
+/// Inverse dynamics after each step: forward, the forward/inverse comparison, then the inverse itself.
+fn run_inverse(model: &str, steps: usize, scale: f64, out_path: &str, integrator: i32, flags: i32) -> Result<bool, String> {
+    let mut m = load_model_with(Path::new(model), attach)?;
+    m.opt.integrator = integrator;
+    m.opt.enableflags |= flags;
+    let mut d = start(&m, scale);
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MPIV");
+    for v in [1, m.nq as i32, m.nv as i32, m.nsensordata as i32, steps as i32] {
+        put_i32(&mut out, v);
+    }
+    for _ in 0..steps {
+        forward::step(&m, &mut d);
+        forward::forward(&m, &mut d);
+        inverse::compare_fwd_inv(&m, &mut d);
+        put(&mut out, &[d.time]);
+        put_i32(&mut out, d.nefc as i32);
+        put(&mut out, &d.solver_fwdinv);
+        inverse::inverse(&m, &mut d);
+        put(&mut out, &d.qfrc_inverse[..m.nv]);
+        put(&mut out, &d.qfrc_constraint[..m.nv]);
+        put(&mut out, &d.efc_force[..d.nefc as usize]);
+        put(&mut out, &d.sensordata[..m.nsensordata]);
+    }
+    std::fs::File::create(out_path).and_then(|mut f| f.write_all(&out)).map_err(|e| format!("{out_path}: {e}"))?;
+    println!("{model}: {steps} steps, last nefc {} fwdinv {:.3e} {:.3e} -> {out_path}", d.nefc, d.solver_fwdinv[0], d.solver_fwdinv[1]);
+    Ok(true)
+}
+
 /// Step rate: 100 warm-up steps, then `steps` timed, `runs` times, as the reference driver does.
 fn run_speed(model: &str, steps: usize, scale: f64, runs: usize) -> Result<bool, String> {
     let m = load_model_with(Path::new(model), attach)?;
@@ -415,6 +451,10 @@ fn main() {
             (Ok(n), Ok(q), Ok(c), Ok(i)) => run_trace(model, n, q, out, Some(c), Some(i)),
             _ => Err("trace: steps, qvel scale, ctrl scale and integrator are numbers".to_string()),
         },
+        ["inverse", model, steps, scale, out, integrator, flags] => match (steps.parse(), scale.parse(), integrator.parse(), flags.parse()) {
+            (Ok(n), Ok(q), Ok(i), Ok(f)) => run_inverse(model, n, q, out, i, f),
+            _ => Err("inverse: steps, qvel scale, integrator and enable flags are numbers".to_string()),
+        },
         ["speed", model, steps, scale, runs] => match (steps.parse(), scale.parse(), runs.parse()) {
             (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r),
             _ => Err("speed: steps, qvel scale and runs are numbers".to_string()),
@@ -427,7 +467,7 @@ fn main() {
             (Ok(n), Ok(q)) => run_stage_speed(model, n, q),
             _ => Err("stagespeed: steps and qvel scale are numbers".to_string()),
         },
-        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
+        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
     };
     match result {
         Ok(true) => {}

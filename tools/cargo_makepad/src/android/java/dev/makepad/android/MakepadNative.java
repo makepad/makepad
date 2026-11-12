@@ -27,6 +27,7 @@ public class MakepadNative {
 
     public static native void onNightModeChanged(boolean nightMode);
     public static native void onDisplayRotation(int rotation);
+    public static native void onAppHalBackend(String backend);
 
     public native static void initChoreographer(float deviceRefreshRate, int sdkVersion);
 

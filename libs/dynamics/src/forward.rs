@@ -11,6 +11,7 @@ use crate::core_util;
 use crate::data::Data;
 use crate::derivative;
 use crate::inline::{self, at3, at3_mut, at4, at4_mut, at6};
+use crate::inverse;
 use crate::io::reset_data;
 use crate::island::island;
 use crate::metric;
@@ -1135,7 +1136,7 @@ pub fn step(m: &Model, d: &mut Data) {
     check_vel(m, d);
     forward(m, d);
     check_acc(m, d);
-    if enabled(m, ENBL_FWDINV) { crate::unported!("mj_compareFwdInv"); }
+    if enabled(m, ENBL_FWDINV) { inverse::compare_fwd_inv(m, d); }
     match m.opt.integrator {
         INT_EULER => euler(m, d),
         INT_RK4 => runge_kutta(m, d, 4),
@@ -1176,7 +1177,7 @@ pub fn step2(m: &Model, d: &mut Data) {
     d.flg_rnepost = 0;
     sensor::sensor_acc(m, d);
     check_acc(m, d);
-    if enabled(m, ENBL_FWDINV) { crate::unported!("mj_compareFwdInv"); }
+    if enabled(m, ENBL_FWDINV) { inverse::compare_fwd_inv(m, d); }
     if m.opt.integrator == INT_DISCRETE {
         if enabled(m, ENBL_IPC) { crate::unported!("mj_ipc"); }
         else { crate::unported!("mj_discrete"); }

@@ -1108,9 +1108,6 @@ pub fn check_supported(m: &Model) -> Result<(), String> {
     if enabled(m, ENBL_IPC) {
         return refuse("IPC contacts");
     }
-    if enabled(m, ENBL_FWDINV) {
-        return refuse("the forward-inverse comparison");
-    }
     if disabled(m, DSBL_NATIVECCD) {
         return refuse("the external convex collision library");
     }
