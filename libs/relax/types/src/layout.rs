@@ -119,7 +119,8 @@ impl Niche {
     }
 
     fn some(self) -> Option<Niche> {
-        if self.available() > 0 && self.bytes <= 8 {
+        // (a 16-byte niche is a 128-bit scalar's: its tag is two words)
+        if self.available() > 0 && self.bytes <= 16 {
             Some(self)
         } else {
             None
@@ -944,7 +945,11 @@ impl Layouts {
                         // `rustc_layout_scalar_valid_range_*`: the range of the struct's scalar
                         if let Some(first) = l.leaves.as_ref().and_then(|v| v.first().copied()) {
                             if first.off == 0 && matches!(first.mem, Mem::Int(..)) {
+                                // a 128-bit scalar is two word leaves, but its valid range is over
+                                // all 16 bytes: `NonZero<u128>` excludes 0, not a zero low word
+                                let wide = fts.iter().any(|&f| matches!(tcx.tys.kind(f), TyKind::Int(p) if tcx.tys.int_info(*p).0 == 16));
                                 let bytes = match first.mem {
+                                    _ if wide => 16,
                                     Mem::Int(b, _) => b as u32,
                                     _ => 8,
                                 };

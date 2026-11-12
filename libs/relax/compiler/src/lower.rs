@@ -13235,6 +13235,25 @@ pub fn emit_decode_tag(u: &Unit, f: &mut Func, b: u32, pos: u64, raw: Vec<VReg>,
             };
             let inr = f.vreg(Cls::I);
             push_at(f, b, pos, Inst::ICmpI(Cond::Le, false, inr, rel, (hi - lo) as i64));
+            // a 128-bit tag (Option<NonZero<u128>>) is two words: the relative value is in range
+            // when its high word, `tag.hi - start.hi - borrow`, is zero as well
+            let inr = if raw.len() == 2 {
+                let borrow = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::ICmp(Cond::Lt, false, borrow, raw[0], ks));
+                let kh = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::Iconst(kh, (start >> 64) as u64 as i64));
+                let rh = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::IBin(IOp::Sub, U64, rh, raw[1], kh));
+                let rel_hi = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::IBin(IOp::Sub, U64, rel_hi, rh, borrow));
+                let hi_zero = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::ICmpI(Cond::Eq, false, hi_zero, rel_hi, 0));
+                let both = f.vreg(Cls::I);
+                push_at(f, b, pos, Inst::IBin(IOp::And, U64, both, inr, hi_zero));
+                both
+            } else {
+                inr
+            };
             // one niche variant: in range means exactly that variant
             let vidx = f.vreg(Cls::I);
             if hi == lo {
