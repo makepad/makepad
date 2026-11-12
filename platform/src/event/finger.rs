@@ -1261,6 +1261,11 @@ impl CxFingers {
             .any(|capture| capture.digit_id == digit_id && !self.is_scroll_drag_holder(digit_id, capture.area))
     }
 
+    /// Whether `digit_id`'s press was marked as held by something outside `area`, see [`Self::mark_press_as_held_outside`].
+    pub fn is_press_held_outside(&self, digit_id: DigitId, area: Area) -> bool {
+        self.presses_held_outside.contains(&(digit_id, area))
+    }
+
     /// Marks `digit_id`'s press as already held by something outside `area` (like an overlay drawn
     /// over it), so `area` never joins it. Call it before passing the press to what's inside `area`.
     pub fn mark_press_as_held_outside(&mut self, digit_id: DigitId, area: Area) {
