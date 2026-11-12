@@ -125,6 +125,10 @@ pub struct Vulkan {
     mailbox: Mailbox,
     queue: Option<Worker>,
     complete: Arc<Worker>,
+    /// Android: shows each window frame (`Batch::hand_to_presenter`), so the queue worker never waits for
+    /// the display or the copy into the swapchain image.
+    #[cfg(target_os = "android")]
+    present: Arc<Worker>,
     compiler: Worker,
     /// The UI's memory reserve and the creates waiting for room (`crate::gpu_pressure`).
     pressure: crate::gpu_pressure::Pressure,
@@ -217,6 +221,7 @@ impl Vulkan {
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
+            #[cfg(target_os = "android")] present: Arc::new(Worker::new("makepad-vulkan-present")?),
             compiler: Worker::new("makepad-vulkan-compile")?, pressure: Default::default(),
             instance_extensions, lost_posted: false, retry_ns: 0, reset_failures: 0, simulate: false,
             simulate_at_ns: super::simulated_loss_at() })
@@ -587,6 +592,9 @@ impl Backend for Vulkan {
         if let Some(queue) = self.queue.as_ref() { self.windows.clear(queue); }
         self.compiler.stop();
         if let Some(queue) = self.queue.as_ref() { queue.stop(); }
+        // Android: the presents hand their completions on
+        #[cfg(target_os = "android")]
+        self.present.stop();
         self.complete.stop();
     }
 }
@@ -671,9 +679,15 @@ impl exec::DeviceReset for Vulkan {
         let old_queue = self.queue.replace(queue).expect("live submit worker");
         let old_complete = std::mem::replace(&mut self.complete, complete);
         let old_compiler = std::mem::replace(&mut self.compiler, compiler);
+        #[cfg(target_os = "android")]
+        let old_present = std::mem::replace(&mut self.present, Arc::new(Worker::new("makepad-vulkan-present")?));
         self.windows.clear(&old_queue);
         let limit = std::time::Duration::from_secs(2);
-        if !(old_compiler.settle(limit) && old_queue.settle(limit) && old_complete.settle(limit)) {
+        // in dependency order: the queue hands frames to the presents, both hand completions on
+        let settled = old_compiler.settle(limit) && old_queue.settle(limit);
+        #[cfg(target_os = "android")]
+        let settled = settled && old_present.settle(limit);
+        if !(settled && old_complete.settle(limit)) {
             eprintln!("[hal-vulkan] device reset: the old device's work still runs after {limit:?}; its answers come later");
         }
         drop((old_queue, old_complete, old_compiler));

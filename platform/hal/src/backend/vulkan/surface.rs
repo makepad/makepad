@@ -189,6 +189,9 @@ pub(super) struct Present {
     /// The frame's window target, left in TRANSFER_SRC_OPTIMAL by the frame's command buffer.
     pub image: Arc<super::Image>,
     pub frame: u64,
+    /// Android: the worker that shows it (`Batch::hand_to_presenter`).
+    #[cfg(target_os = "android")]
+    pub presenter: Arc<Worker>,
 }
 
 pub(super) enum Shown {
@@ -208,9 +211,14 @@ impl Swapchain {
     /// that the compositor released a buffer only while it may wait in vkAcquireNextImageKHR
     /// (it reads its event queue there). With 0, after the third present every acquire was
     /// NOT_READY/TIMEOUT and every later frame was dropped (149, weston, video at ~0 fps shown).
+    ///
+    /// Android: called on the present worker instead (`Batch::hand_to_presenter`), which may wait here. Android
+    /// 10's loader ignores the acquire's timeout ("non-infinite timeouts not yet implemented"): it
+    /// blocks until the compositor frees an image. And the copy is waited for before the present
+    /// (see there).
     pub fn show(&self, image: &super::Image) -> Result<Shown, String> {
         if self.retired.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) { return Ok(Shown::Dropped); }
-        let _host = lock(&self.host);
+        let host = lock(&self.host);
         let available = Semaphore::new(self.dev.clone()).map_err(|e| format!("acquire semaphore key={:?}: {e}", self.key))?;
         let result = unsafe { self.dev.raw.acquire_next_image(self.raw, ACQUIRE_WAIT_NS, available.raw, vk::Fence::null()) };
         if log_enabled() && !self.logged_acquire.load(Ordering::Relaxed) && !self.logged_acquire.swap(true, Ordering::Relaxed) {
@@ -273,7 +281,24 @@ impl Swapchain {
             dev.queue_submit(self.dev.queue, &[info], b.fence).map_err(|e| format!("blit submit: {e:?}"))?;
         }
         b.available = Some(available); // waited on by that copy: kept until its fence is waited
+        let copied = b.fence;
         drop(blits);
+        // Android: the copy is finished before the image is presented. Presented with only the
+        // `ready` semaphore, a Lenovo YT-X705F (Qualcomm msm8937, Android 10) composited the image
+        // before the copy into it was done: the window went black for 30-70 ms on most redraws
+        // after input, or showed only its upper part (screen recordings: 15 of 15 screen changes;
+        // none with this wait). The present worker waits, never the queue worker, and without
+        // `host`: holding it for the copy (20-40 ms there) made the HAL thread skip the swapchain
+        // rebuild of a rotation (`Windows::swapchain` only tries `host`), and the window kept the
+        // old size's image. Presenting an image of a swapchain replaced meanwhile is allowed.
+        #[cfg(target_os = "android")]
+        let _host = {
+            drop(host);
+            unsafe { dev.wait_for_fences(&[copied], true, u64::MAX) }.map_err(|e| format!("blit wait: {e:?}"))?;
+            lock(&self.host)
+        };
+        #[cfg(not(target_os = "android"))]
+        let _host = { let _ = copied; host };
         let waits = [self.ready[index as usize].raw];
         let chains = [self.raw];
         let indices = [index];
@@ -282,6 +307,16 @@ impl Swapchain {
             unsafe { self.dev.raw.queue_present(self.dev.queue, &vk::PresentInfoKHR::default()
                 .wait_semaphores(&waits).swapchains(&chains).image_indices(&indices)) }
         };
+        // Android: retired meanwhile, the retirement's queue idle (`Windows::retire`, on the queue
+        // worker) may have run before this present: the queue is drained again, so the swapchain
+        // is never destroyed under it.
+        #[cfg(target_os = "android")]
+        if self.retired.load(Ordering::Acquire) {
+            let _queue = lock(&self.dev.queue_lock);
+            if let Err(e) = unsafe { self.dev.raw.queue_wait_idle(self.dev.queue) } {
+                eprintln!("[hal-vulkan] retired swapchain key={:?}: vkQueueWaitIdle failed: {e:?}", self.key);
+            }
+        }
         if result.is_ok() && log_enabled() && !self.logged_present.load(Ordering::Relaxed)
             && !self.logged_present.swap(true, Ordering::Relaxed) {
             eprintln!("[hal-vulkan] first frame presented key={:?} generation={} swapchain={:?} image={index} size={:?} (vkQueuePresentKHR succeeded)",
