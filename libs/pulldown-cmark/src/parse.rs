@@ -210,6 +210,9 @@ pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
     // To prevent this, track how much it's expanded and limit it.
     link_ref_expansion_limit: usize,
 
+    /// Every `[^label]` is a footnote reference, defined or not.
+    footnote_labels_assumed: bool,
+
     // used by inline passes. store them here for reuse
     inline_stack: InlineStack,
     link_stack: LinkStack,
@@ -283,6 +286,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             html_scan_guard,
             // always allow 100KiB
             link_ref_expansion_limit: text.len().max(100_000),
+            footnote_labels_assumed: false,
             code_delims: CodeDelims::new(),
             math_delims: MathDelims::new(),
         }
@@ -308,6 +312,14 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                 .entry(key)
                 .or_insert(FootnoteDef { use_count: 0 });
         }
+    }
+
+    /// Treats every footnote label as defined: each `[^label]` is a
+    /// `FootnoteReference`, while definitions keep the GFM syntax. For a host
+    /// that collects the references of a slice before it knows which labels
+    /// the larger document defines. Block structure is the same either way.
+    pub fn assume_footnote_labels_defined(&mut self) {
+        self.footnote_labels_assumed = true;
     }
 
     /// Use a link label to fetch a type, url, and title.
@@ -761,6 +773,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     def.use_count += 1;
                                 }
                                 if !self.options.has_gfm_footnotes()
+                                    || self.footnote_labels_assumed
                                     || self.allocs.footdefs.contains(&self.allocs.cows[footref.0])
                                 {
                                     // If this came from a MaybeImage, then the `!` prefix

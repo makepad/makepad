@@ -1,4 +1,4 @@
-//! Conformance battery for the TOML 1.0 subset parser: real-manifest corpus,
+//! Conformance battery for the TOML subset parser: real-manifest corpus,
 //! positive lexemes, negative cases with spans, and a quoted-string span check.
 use makepad_toml_parser::{parse_toml, Toml, TomlDocument, TomlErr};
 use std::fs;
@@ -166,6 +166,14 @@ fn positive_cases() {
     assert_eq!(arr[0].as_table().unwrap()["a"].as_num(), Some(1.0));
     assert_eq!(arr[1].as_table().unwrap()["a"].as_num(), Some(2.0));
 
+    // TOML 1.1 inline tables: entries over lines, comments, a trailing comma (a cargo
+    // [workspace.dependencies] entry).
+    let doc = parse_ok(
+        "[workspace.dependencies]\nhelper = {\n    path = \"helper\", # local\n    version = \"0.1.0\",\n}\n",
+    );
+    assert_eq!(get_str(&doc, &["workspace", "dependencies", "helper", "path"]), Some("helper"));
+    assert_eq!(get_str(&doc, &["workspace", "dependencies", "helper", "version"]), Some("0.1.0"));
+
     // Multi-line basic string with a line-ending backslash.
     let doc = parse_ok("s = \"\"\"\nhello \\\n    world\n\"\"\"\n");
     assert_eq!(get_str(&doc, &["s"]), Some("hello world\n"));
@@ -291,16 +299,16 @@ fn negative_cases_error_and_span() {
             why: "dotted extension of a header-defined table",
         },
         Case {
-            src: "t = {a=1,}\n",
-            token: "}",
-            nth: 0,
-            why: "inline table trailing comma",
+            src: "t = {a=1,,b=2}\n",
+            token: ",",
+            nth: 1,
+            why: "two commas in an inline table",
         },
         Case {
-            src: "t = {a=1,\nb=2}\n",
-            token: "\nb=2",
+            src: "t = {a=1\nb=2}\n",
+            token: "b=2",
             nth: 0,
-            why: "newline inside inline table",
+            why: "inline table entries on two lines without a comma",
         },
         Case {
             src: "n = 01\n",
