@@ -1523,6 +1523,12 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     if tree.has("libs/relax/compiler/tests/test_warnings/run.py") {
         push("live:test-warnings".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/test_warnings/run.py"])], Judge::Exit, 120.0, None);
     }
+    // a test's and a program's process have cargo's run-time environment (their package's
+    // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
+    // member of a virtual workspace run from the workspace root too
+    if tree.has("tools/run/fixture/run_env.sh") {
+        push("live:run-env".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/run_env.sh"])], Judge::Exit, 120.0, None);
+    }
     // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
     // only the panics that ended a thread or a test
     if tree.has("tools/run/fixture/caught_report.py") {
