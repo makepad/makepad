@@ -51,6 +51,47 @@ fn take<T: Copy + Default>(pool: &mut Vec<Vec<T>>, n: usize) -> Vec<T> {
     v
 }
 
+/// `n` elements of a pooled vector that keeps its length. Like the reference's stack allocations,
+/// taking one writes nothing once its vector has been that long: a vector lent for fewer elements is
+/// never cut, so a larger request after it does not fill it again.
+pub(crate) struct Buf<T> {
+    v: Vec<T>,
+    n: usize,
+}
+
+impl<T> std::ops::Deref for Buf<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        &self.v[..self.n]
+    }
+}
+
+impl<T> std::ops::DerefMut for Buf<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        &mut self.v[..self.n]
+    }
+}
+
+/// The shortest pooled vector at least `n` long, else the longest, grown to `n` (only the growth is
+/// written). Its elements hold what an earlier user left: every caller writes before it reads.
+fn take_buf<T: Copy + Default>(pool: &mut Vec<Vec<T>>, n: usize) -> Buf<T> {
+    let mut best: Option<usize> = None;
+    for (i, v) in pool.iter().enumerate() {
+        let better = best.is_none_or(|j| {
+            let (len, best_len) = (v.len(), pool[j].len());
+            if best_len >= n { len >= n && len < best_len } else { len > best_len }
+        });
+        if better {
+            best = Some(i);
+        }
+    }
+    let mut v = best.map_or_else(Vec::new, |i| pool.swap_remove(i));
+    if v.len() < n {
+        v.resize(n, T::default());
+    }
+    Buf { v, n }
+}
+
 // The typed pools below hand out vectors like take(): the elements they keep are not cleared.
 impl Scratch {
     pub(crate) fn contact_info(&mut self, n: usize) -> Vec<ContactInfo> {
@@ -83,19 +124,11 @@ impl Scratch {
         v
     }
     pub(crate) fn put_pair(&mut self, v: Vec<Pair>) { self.pairs.push(v); }
-    pub(crate) fn packed_pair(&mut self, n: usize) -> Vec<Packed32> {
-        // Reuse an undersized vector too: resize grows it, never shrink capacity.
-        let pool = &mut self.packed_pairs;
-        let mut best = None;
-        for (i, v) in pool.iter().enumerate() {
-            if v.capacity() >= n && best.is_none_or(|j: usize| v.capacity() < pool[j].capacity()) { best = Some(i); }
-        }
-        let index = best.or_else(|| pool.len().checked_sub(1));
-        let mut v = index.map_or_else(Vec::new, |i| pool.swap_remove(i));
-        v.resize(n, Packed32::default());
-        v
+    /// The broadphase's pair lists: sized for every pair of bodies, of which few are written.
+    pub(crate) fn packed_pair(&mut self, n: usize) -> Buf<Packed32> {
+        take_buf(&mut self.packed_pairs, n)
     }
-    pub(crate) fn put_packed_pair(&mut self, v: Vec<Packed32>) { self.packed_pairs.push(v); }
+    pub(crate) fn put_packed_pair(&mut self, b: Buf<Packed32>) { self.packed_pairs.push(b.v); }
     pub(crate) fn sap(&mut self, n: usize) -> Vec<Sap> {
         // Reuse an undersized vector too: resize grows it, never shrink capacity.
         let pool = &mut self.saps;

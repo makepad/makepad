@@ -4,7 +4,8 @@
 //! `src/engine/engine_collision_driver.h` of the engine named in
 //! CREDITS.md (Apache-2.0, Copyright 2021 DeepMind Technologies Limited);
 //! changed: translated to Rust; arena and stack storage use retained vectors; a sleeping body skips a
-//! mocap body that holds still as it skips the world.
+//! mocap body that holds still as it skips the world; the sweep and prune keeps its active objects' bounds
+//! in a row beside them.
 
 use crate::collision_box::{box_box, capsule_box, sphere_box};
 use crate::collision_continuous::{advance_geom_pair, geom_step_motion, geom_supported};
@@ -647,26 +648,32 @@ pub fn sap(d: &mut Data, aamm: &[f64], n: usize, axis_x: i32, pair: &mut [Packed
     let (axis_y, axis_z) = if axis_x == 0 { (1,2) } else if axis_x == 1 { (0,2) } else { (0,1) };
     let y_min = &aamm[n*axis_y..]; let y_max = &aamm[n*(axis_y+3)..];
     let z_min = &aamm[n*axis_z..]; let z_max = &aamm[n*(axis_z+3)..];
+    // the active objects' y and z bounds (min y, max y, min z, max z) in a row beside them, in the same
+    // order: the sweep reads them in turn instead of through each object's id
+    let mut bounds = d.scratch.num(4*n);
     let mut cnt = 0; let mut npair = 0;
     'sweep: for i in 0..2*n {
         if sortbuf[i].id_ismax & 0x10000 == 0 {
-            for j in 0..cnt {
-                let id1 = activebuf[j].id_ismax as usize; let id2 = sortbuf[i].id_ismax as usize;
-                if y_min[id1] > y_max[id2] || y_min[id2] > y_max[id1] || z_min[id1] > z_max[id2] || z_min[id2] > z_max[id1] { continue; }
+            let id2 = sortbuf[i].id_ismax as usize;
+            let (y_min2, y_max2, z_min2, z_max2) = (y_min[id2], y_max[id2], z_min[id2], z_max[id2]);
+            for (active, b) in activebuf[..cnt].iter().zip(bounds[..4*cnt].chunks_exact(4)) {
+                if b[0] > y_max2 || y_min2 > b[1] || b[2] > z_max2 || z_min2 > b[3] { continue; }
                 if npair >= maxpair { npair = maxpair + 1; break 'sweep; }
-                pair[npair].hi = id1 as u16; pair[npair].lo = id2 as u16; npair += 1;
+                pair[npair].hi = active.id_ismax as u16; pair[npair].lo = id2 as u16; npair += 1;
             }
-            activebuf[cnt] = sortbuf[i]; cnt += 1;
+            activebuf[cnt] = sortbuf[i];
+            bounds[4*cnt..4*cnt+4].copy_from_slice(&[y_min2, y_max2, z_min2, z_max2]);
+            cnt += 1;
         } else {
             let toremove = sortbuf[i].id_ismax & 0xFFFF;
-            for j in 0..cnt {
-                if activebuf[j].id_ismax == toremove {
-                    if j < cnt-1 { activebuf.copy_within(j+1..cnt, j); }
-                    cnt -= 1; break;
-                }
+            if let Some(j) = activebuf[..cnt].iter().position(|a| a.id_ismax == toremove) {
+                activebuf.copy_within(j+1..cnt, j);
+                bounds.copy_within(4*(j+1)..4*cnt, 4*j);
+                cnt -= 1;
             }
         }
     }
+    d.scratch.put_num(bounds);
     d.scratch.put_sap(buf); d.scratch.put_sap(activebuf); d.scratch.put_sap(sortbuf);
     npair as i32
 }
@@ -743,7 +750,7 @@ fn broadphase(m: &Model, d: &mut Data, bfpair: &mut [Packed32], maxpair: usize) 
     }
     if npair > 1 {
         let mut buf = d.scratch.packed_pair(npair);
-        sort(bfpair, &mut buf, npair, &mut packed32cmp);
+        sort(bfpair, &mut buf[..], npair, &mut packed32cmp);
         d.scratch.put_packed_pair(buf);
     }
     d.scratch.put_int(bfid);
