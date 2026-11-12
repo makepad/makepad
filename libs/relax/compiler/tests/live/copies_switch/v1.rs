@@ -1,10 +1,10 @@
 // Copy versions (opt::inline_site, jit::note_guard_reads): a patch switches every inlined copy, of
-// the callee itself and of a body the callee inlined unguarded. Two threads spin in loops (`spin_a`,
-// `spin_b`) whose O3 code holds a copy of `mid`; `mid`'s body inlined `leaf` before any call or
-// loop (an unguarded copy). Each guard reads its loop's copy version first, and the flags of `mid`
-// and `leaf` only once it moved. Each run stops the spinners the previous run started, prints what
-// they computed after the run began, then starts new ones (each run sleeps so its O3 code installs
-// before the spinners enter it).
+// the callee itself and of a body the callee inlined unguarded. Two threads spin in loops
+// (`spin_a`, `spin_b`) whose O3 code holds a copy of `mid`; `mid`'s body inlined `leaf` before any
+// call or loop (an unguarded copy). Each loop's exit reads its copy version and, once it moved,
+// leaves for the patched path, whose guard reads the flags of `mid` and `leaf`. Each run stops the
+// spinners the previous run started, prints what they computed after the run began, then starts new
+// ones (each run sleeps so its O3 code installs before the spinners enter it).
 //   v0: leaf = 1, mid(i) = leaf * 10 + i;  v1: leaf = 2;  v2: mid(i) = leaf * 100 + i
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;

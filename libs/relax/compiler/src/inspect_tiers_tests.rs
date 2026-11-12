@@ -279,3 +279,71 @@ fn inlined_fn_versions_probes_and_pins() {
     unsafe { UNIT = std::ptr::null_mut() };
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn a_frame_in_a_patched_path_is_named() {
+    isolated_test!(a_frame_in_a_patched_path_is_named);
+    // A live session's O3 build of `caller` splits (relax_codegen::patched): its loop runs leaf's
+    // copy unguarded behind an exit, the patched path keeps the guard. A pc in the patched path is
+    // named so (its pc-map positions carry POS_PATCHED), a fast one is not; a patch flag of leaf
+    // moves caller's copy version, and the loop then leaves for its patched path and computes the
+    // same.
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-patched-path-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, SOURCE).unwrap();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "patched_path", false).unwrap();
+    let def = |prog: &Program, n: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == n).then_some(id)
+    }).unwrap();
+    let (leaf_d, caller_d) = (def(&prog, "leaf"), def(&prog, "caller"));
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    assert!(u.tier1.is_some(), "the fixture needs O3");
+    let (leaf, caller) = crate::owner::call(crate::owner::Class::Program, || {
+        let ids = [leaf_d, caller_d].map(|d| u.fn_id(FnKey::Inst(d, Vec::new())));
+        for &id in &ids {
+            let c = unsafe { compile_fn(up, id) }.unwrap();
+            u.install(id, &c.0, &c.2, c.1, 0).unwrap();
+        }
+        (ids[0], ids[1])
+    });
+    assert!(unsafe { compile_tier1(up, caller) }, "O3 build of caller");
+    let ver = |u: &Unit| unsafe { (*tier_rec(&u.slots, caller).add((TIER_COPY / 8) as usize)).load(Ordering::Acquire) };
+    crate::owner::call(crate::owner::Class::Program, || {
+        let code = u.fns[caller as usize].code;
+        let (mut fast, mut pat) = (None, None);
+        u.fns[caller as usize].pc_map.each(|o, p| {
+            if o != u32::MAX {
+                if relax_backend::rir::pos_patched(p) { pat.get_or_insert(o); } else { fast.get_or_insert(o); }
+            }
+            true
+        });
+        let pat = pat.unwrap_or_else(|| panic!("caller's O3 code has a patched path: {}", u.fns[caller as usize].rir.as_ref().map(|r| r.dump()).unwrap_or_default()));
+        let mut r = codever::Resolver::new();
+        let d = codever::describe_pc(&u, &mut r, code + pat as u64).unwrap();
+        let (_, _, module, json) = codever::frame_fields(&u, &d);
+        assert!(d.patched && module.contains("patched path of") && json.contains("\"patched_path\""), "a pc in the patched path is named so: {} {}", module, json);
+        assert!(codever::in_patched_path(&u, caller, code, code + pat as u64), "the held-frame report sees it too");
+        let d = codever::describe_pc(&u, &mut r, code + fast.unwrap() as u64).unwrap();
+        assert!(!d.patched && !codever::frame_fields(&u, &d).2.contains("patched path"), "a fast pc is not");
+        assert_eq!(ver(&u), 0);
+    });
+    assert_eq!(unsafe { run(up, caller) }, 9984);
+    crate::owner::call(crate::owner::Class::Program, || set_patched(&u, leaf));
+    assert_ne!(ver(&u), 0, "a patch flag of leaf moves the copy version caller's exits read");
+    assert_eq!(unsafe { run(up, caller) }, 9984, "the patched path computes what the fast half did");
+    unsafe { UNIT = std::ptr::null_mut() };
+    std::fs::remove_dir_all(&dir).ok();
+}

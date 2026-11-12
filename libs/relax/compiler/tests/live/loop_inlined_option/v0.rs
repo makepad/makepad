@@ -1,12 +1,13 @@
 // M46, a loop over an Option result: the spinner's inner loop takes values from `next` until it
-// returns None. O3 inlines `next` into it behind its patch flag; the Option is returned in memory,
-// so the copy's slow call writes the result buffer and the loop reads it back from there, while
-// the copy's own path keeps it in registers. A live edit of `next` reaches the running loop: its
-// slow call's result is what the loop adds up. The loop runs in bursts (`burst`, called again and
-// again: each call enters its newest code, so it reaches O3 while the spinner runs); the session
-// settles before its second run (MAKEPAD_RUN_LIVE_SETTLE) and the edit's report names `next`'s
-// copies (expect.txt). Each run stops the spinner the previous run started, prints what it
-// computed after the run began, then starts a new one.
+// returns None. O3 inlines `next` into it; the loop's exit leaves for its patched path once a patch
+// moved its copy version. There the Option is returned in memory: the copy's slow call writes the
+// result buffer and the loop reads it back from there, while the fast half keeps it in registers. A
+// live edit of `next` reaches the running loop: its slow call's result is what the loop adds up.
+// The loop runs in bursts (`burst`, called again and again: each call enters its newest code, so it
+// reaches O3 while the spinner runs); the session settles before its second run
+// (MAKEPAD_RUN_LIVE_SETTLE) and the edit's report names `next`'s copies (expect.txt). Each run
+// stops the spinner the previous run started, prints what it computed after the run began, then
+// starts a new one.
 //   v0: next(i) = Some(i + 10) for i < N;  v1: Some(i + 20)
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;

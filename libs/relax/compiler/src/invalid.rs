@@ -374,7 +374,9 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
                 });
                 if let Some((k, start, len, slot)) = hit {
                     let ok = crate::inspect::instrument::hold_for_good(&c.t);
-                    let what = format!("slot #{} `{}` first-version code [{:#x}, {:#x}) (+{:#x})", slot, u.fns[slot as usize].name, start, start + len as u64, at.iter().find(|x| x.0 == k).map_or(0, |x| x.1 - start));
+                    let pc = at.iter().find(|x| x.0 == k).map_or(start, |x| x.1);
+                    let path = if crate::inspect::codever::in_patched_path(u, slot, start, pc) { ", its patched path" } else { "" };
+                    let what = format!("slot #{} `{}` first-version code [{:#x}, {:#x}) (+{:#x}{})", slot, u.fns[slot as usize].name, start, start + len as u64, pc - start, path);
                     held.push((c.t.os_id, c.frames.clone(), k, what, ok));
                 }
             }

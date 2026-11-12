@@ -9409,8 +9409,8 @@ impl Linker {
             // (an O3 build missing its body) has it built before its swap (jit prebuild_callees);
             // O3 entries register theirs at install (cached_tier1)
             for &c in &inl {
-                if c != id && (c as usize) < u.fns.len() && !u.fns[c as usize].history().inlined_into.contains(&id) {
-                    crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
+                if c != id && (c as usize) < u.fns.len() {
+                    crate::jit::note_inlined_copy(u, c, id);
                 }
             }
         }

@@ -1255,6 +1255,48 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
 }
 
 #[test]
+fn a_copy_that_reads_no_flag_moves_its_hosts_version() {
+    isolated_test!(a_copy_that_reads_no_flag_moves_its_hosts_version);
+    // A split build's fast half (relax_codegen::patched) holds copies that read no flag, only
+    // its exits' copy version: the install notes each patchable body the code inlined
+    // (note_inlined_copy), so a patch of one moves the host's version (set_patched), and a body
+    // patched before the install moves it at the install. Control: a host of a copy of a body
+    // that is not patched keeps its version.
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-copy-hosts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("input.rs"), "pub fn leaf() {}\npub fn early() {}\npub fn calm() {}\npub fn host() {}\npub fn late_host() {}\npub fn calm_host() {}\nfn main() {}\n").unwrap();
+    let mut session = crate::Session::default();
+    session.options.live = true;
+    let session = std::sync::Arc::new(session);
+    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "copy_hosts", false).unwrap();
+    let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| (d.krate == krate && prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
+    let defs = ["leaf", "early", "calm", "host", "late_host", "calm_host"].map(def);
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    crate::owner::call(crate::owner::Class::Program, || {
+        let [leaf, early, calm, host, late_host, calm_host] = defs.map(|d| u.fn_id(FnKey::Inst(d, Vec::new())));
+        let ver = |u: &Unit, id: u32| unsafe { (*tier_rec(&u.slots, id).add((TIER_COPY / 8) as usize)).load(Ordering::Acquire) };
+        assert!(patch_flag(&u, leaf).is_some(), "the program's own fns are patchable in a live session");
+        note_inlined_copy(&mut u, leaf, host);
+        note_inlined_copy(&mut u, calm, calm_host);
+        assert_eq!(ver(&u, host), 0);
+        set_patched(&u, leaf);
+        assert_eq!(ver(&u, host), 1, "a patch of a body the host holds a copy of moves its version");
+        set_patched(&u, early);
+        note_inlined_copy(&mut u, early, late_host);
+        assert_eq!(ver(&u, late_host), 1, "a body patched before the install moves the version at it");
+        assert_eq!(ver(&u, calm_host), 0, "a host of a copy of a body not patched keeps its version");
+        assert!(u.fns[leaf as usize].history().inlined_into.contains(&host));
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::mem::forget(u);
+}
+
+#[test]
 fn deferred_cache_record_is_dropped_when_a_source_changed() {
     // A deferred record (Cache::defer_record) is encoded after the install; an edit, rollback or
     // reload in between (the patch epoch moves) must drop it, never key old code by new text.

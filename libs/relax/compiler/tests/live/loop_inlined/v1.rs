@@ -1,11 +1,12 @@
 // M46, a loop: a thread spins in a loop that has no call left once O3 inlined `step` into it (an
-// atomic poll). A live edit of `step` reaches the running loop at its next iteration: the inlined
-// copy's guard reads `step`'s patch flag every iteration (never hoisted out of the loop). The loop
-// runs in bursts (`burst`, called again and again: each call enters its newest code, so the loop
-// reaches O3 while the spinner runs; a running call never moves to new code). The session settles
-// before its second run (MAKEPAD_RUN_LIVE_SETTLE), so the edit meets the settled code, and its
-// report names `step`'s copies (expect.txt). Each run stops the spinner the previous run started,
-// prints what it computed after the run began, then starts a new one.
+// atomic poll). A live edit of `step` reaches the running loop at its next iteration: the loop's
+// exit reads its copy version every iteration (never hoisted out of the loop) and, once the patch
+// moved it, leaves for the patched path, whose copy calls the new `step`. The loop runs in bursts
+// (`burst`, called again and again: each call enters its newest code, so the loop reaches O3 while
+// the spinner runs; a running call never moves to new code). The session settles before its second
+// run (MAKEPAD_RUN_LIVE_SETTLE), so the edit meets the settled code, and its report names `step`'s
+// copies (expect.txt). Each run stops the spinner the previous run started, prints what it computed
+// after the run began, then starts a new one.
 //   v0: step(i) = i + 10;  v1: step(i) = i + 20
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;

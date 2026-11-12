@@ -6814,7 +6814,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         if !hosts.is_empty() {
             let mut names: Vec<&str> = hosts.iter().take(4).map(|&h| &u.fns[h as usize].name[..]).collect();
             if hosts.len() > 4 { names.push(".."); }
-            out.lines.push(format!("guarded copies: `{}` was inlined into {} fn(s), whose copies call it now: {}", u.fns[id as usize].name, hosts.len(), names.join(", ")));
+            out.lines.push(format!("patched path: `{}` was inlined into {} fn(s): a frame in their code leaves for its patched path at its next exit (a guard), whose copies call it now: {}", u.fns[id as usize].name, hosts.len(), names.join(", ")));
         }
     }
     let u = &mut *up;

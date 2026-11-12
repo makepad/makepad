@@ -345,7 +345,7 @@ pub fn inline_calls(options: &relax_session::Options, f: &mut Func, self_id: u32
             // Most baseline callees stay calls. Copy operands only after admission,
             // when rewriting the caller actually needs to own them.
             let (args, rets) = (args.clone(), rets.clone());
-            guards.extend(inline_site(f, bi, ii, callee, &args, &rets, nounwind));
+            guards.extend(inline_site(f, bi, ii, callee, &args, &rets, nounwind, false));
             break;
         }
         bi += 1;
@@ -461,6 +461,11 @@ pub const WHY_FORBIDDEN: u8 = 9;
 pub const WHY_COLD_SITE: u8 = 10;
 /// the slow call of a guarded inline copy (a live session's patchable callee, `Func::guard_calls`)
 pub const WHY_GUARD: u8 = 11;
+/// a split body's fast half (`patched::split_patched_path`): a copy a patch must reach, at a site
+/// no exit covers (a frame may have waited since the last one), or a body with guards of its own
+pub const WHY_NO_EXIT: u8 = 12;
+/// a split body's patched path, which keeps its calls (it runs once a patch moved the copy version)
+pub const WHY_PATCHED_PATH: u8 = 13;
 
 impl SiteRemark {
     /// The refusal in words, with its numbers.
@@ -482,6 +487,8 @@ impl SiteRemark {
             WHY_FORBIDDEN => "forbidden by an inspect experiment (noinline)".into(),
             WHY_COLD_SITE => format!("size-first build, site neither hot nor in a loop: callee {} insts grows the caller", self.size),
             WHY_GUARD => "the slot call of a guarded inline copy (live session: runs once a patch replaced the callee)".into(),
+            WHY_NO_EXIT => "live session: a copy a patch must reach, where no exit to the patched path covers the site (a call or a loop since the last one), or a body with guards of its own".into(),
+            WHY_PATCHED_PATH => "live session: the patched path keeps its calls (it runs only once a patch moved the build's copy version)".into(),
             _ => "kept a call".into(),
         }
     }
@@ -893,6 +900,13 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     let mut specialized: std::collections::HashMap<(u32, bool, Vec<Option<i64>>), Option<Box<Func>>> = std::collections::HashMap::new();
     // MAKEPAD_RUN_INLINE_TRACE=<suffix>: every site decision of the callers whose name ends with it
     let trace = inline_trace(&f.name);
+    // a split body (`patched::split_patched_path`): its fast half takes a copy a patch must reach in
+    // only where an exit covers the site (one ran on every path since a frame last may have
+    // waited, and no call is before the site in its block), unguarded; its patched path keeps its
+    // calls. (The blocks inlining adds are the fast half's; their sites count as not covered.)
+    let split = f.patched_path.then(|| crate::patched::exit_cover(f));
+    let split_blocks = f.blocks.len();
+    let mut no_exit_calls = 0u32;
     while let Some((_, _, _, Reverse(bi), Reverse(ii))) = queue.pop() {
         let Some(Inst::Call(Callee::Fn(id), args, rets)) = f.blocks[bi].insts.get(ii) else { continue };
         if f.guard_call(bi, ii) {
@@ -901,6 +915,20 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             }
             continue;
         }
+        let (in_patched, covered) = match &split {
+            Some((patched, ran)) if bi < split_blocks => (patched[bi], ran[bi] && !f.blocks[bi].insts[..ii].iter().any(|i| matches!(i, Inst::Call(..)))),
+            _ => (false, false),
+        };
+        if in_patched {
+            if let Some(s) = stats.as_deref_mut() {
+                s.remarks.push(SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: *id, why: WHY_PATCHED_PATH, hot: priorities[bi].1, size: 0, a: 0, b: 0 });
+            }
+            continue;
+        }
+        // a body this site may not take in: a split body, or (in a split body's fast half) a copy a
+        // patch must reach where no exit covers the site, or one holding guards of its own
+        let no_exit = |c: &Func| c.patched_path || split.is_some() && crate::patched::patch_reaches(c) && !(covered && c.guard_calls.is_empty());
+        let mut kept_for_exit = false;
         let (id, args, rets) = (*id, args.clone(), rets.clone());
         let found = get(id);
         let consts: Vec<Option<i64>> = args.iter().map(|a| kdef.get(a.0 as usize).and_then(|e| if e.0 == 1 { e.1 } else { None })).collect();
@@ -950,7 +978,9 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                 shape.blocks.iter().filter(|b| matches!(b.term, Term::Ret(_))).count().saturating_mul(rets.len())
             ).saturating_sub(1);
             let cold_site = lim.cold_tiny && !priorities[bi].1 && !loop_sites[bi] && !tiny && !no_growth && rule != Some(RULE_SINGLE);
-            let refused = matches!(f.blocks[bi].term, Term::Unreachable | Term::Resume)
+            let uncovered = no_exit(callee);
+            kept_for_exit |= uncovered;
+            let refused = uncovered || matches!(f.blocks[bi].term, Term::Unreachable | Term::Resume)
                 || ancestry[bi].contains(&id) || rule.is_none() || cold_site
                 || attrs & ATTR_COLD != 0 && !free && rule != Some(RULE_COST)
                 || attrs & ATTR_COLD_SRC != 0 && !free
@@ -967,7 +997,9 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             }
             if want_why && why.is_none() {
                 let mk = |why: u8, a: usize, b: usize| SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why, hot: priorities[bi].1, size: size as u32, a: a.min(u32::MAX as usize) as u32, b: b.min(u32::MAX as usize) as u32 };
-                why = Some(if ancestry[bi].contains(&id) {
+                why = Some(if uncovered {
+                    mk(WHY_NO_EXIT, 0, 0)
+                } else if ancestry[bi].contains(&id) {
                     mk(WHY_RECURSIVE, 0, 0)
                 } else if rule.is_none() {
                     mk(WHY_NO_RULE, attrs as usize, 0)
@@ -997,7 +1029,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             } else if pick.is_none() && tok("+inl@") && !ancestry[bi].contains(&id) {
                 if let Some((p, _)) = found {
                     let callee: &Func = unsafe { &*p };
-                    if callee.params.len() == args.len() && callee.rets.len() == rets.len() && callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
+                    if !no_exit(callee) && callee.params.len() == args.len() && callee.rets.len() == rets.len() && callee.blocks.iter().any(|b| matches!(b.term, Term::Ret(_))) {
                         let size = inline_inst_count(callee);
                         let growth = size.saturating_add(args.len()).saturating_sub(1);
                         pick = Some((callee, RULE_ALWAYS, growth, size, size.saturating_sub(args.len() + rets.len() + 3), false, true, false));
@@ -1010,13 +1042,14 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                 let r = why.unwrap_or(SiteRemark { pos: f.blocks[bi].pos.get(ii).copied().unwrap_or(0), callee: id, why: WHY_NO_BODY, hot: priorities[bi].1, size: 0, a: 0, b: 0 });
                 s.remarks.push(r);
             }
+            no_exit_calls += u32::from(kept_for_exit);
         }
         if trace {
             let fq = f32::from_bits(priorities[bi].0);
             let name = found.map_or_else(|| format!("fn#{}", id), |(p, _)| unsafe { &*p }.name.clone());
             match &pick {
                 Some((c, r, g, sz, cost, free, _, ic)) => eprintln!("inline-trace {}: take {} freq {:.2} rule {} size {} (body {}) growth {} cost {} free {} ctx {} | budget {} priced {} limit {}", f.name, name, fq, r, sz, inline_inst_count(c), g, cost, free, ic, budget, priced, growth_limit),
-                None => eprintln!("inline-trace {}: left {} freq {:.2} tries {} work/size {:?} | budget {} priced {} limit {}", f.name, name, fq, tries.len(), found.and_then(|(p, _)| work_per_size(unsafe { &*p })), budget, priced, growth_limit),
+                None => eprintln!("inline-trace {}: left {} freq {:.2} tries {} work/size {:?} | budget {} priced {} limit {}{}", f.name, name, fq, tries.len(), found.and_then(|(p, _)| work_per_size(unsafe { &*p })), budget, priced, growth_limit, if kept_for_exit { " | no exit covers the site" } else { "" }),
             }
         }
         let Some((callee, rule, growth, size, cost, free, no_growth, in_context)) = pick else { continue };
@@ -1048,7 +1081,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
         // the site's own guard
         let raw = |f: &Func| f.blocks.iter().map(|b| b.insts.len()).sum::<usize>();
         let mut guard_insts = raw(callee.unwrap()).saturating_sub(inline_inst_count(callee.unwrap()));
-        let g = inline_site(f, bi, ii, callee.unwrap(), &args, &rets, nounwind);
+        let g = inline_site(f, bi, ii, callee.unwrap(), &args, &rets, nounwind, split.is_some());
         guard_insts += g.as_ref().map_or(0, |g| g.added);
         guards.extend(g);
         // the call's results lose its definition; the parameter moves and the body add theirs
@@ -1086,6 +1119,9 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     }
     unguard_prefix(f, guards);
     share_copy_ver_reads(options, f);
+    if trace && split.is_some() {
+        eprintln!("inline-trace {}: the fast half kept {} calls no exit covers", f.name, no_exit_calls);
+    }
     if let Some(s) = stats.as_deref_mut().filter(|s| !s.remarks_only) {
         s.growth_after = inst_count;
         for (bi, block) in f.blocks.iter().enumerate() {
@@ -1160,7 +1196,7 @@ fn release_arg_copies(f: &mut Func, args: &[VReg]) {
     }
 }
 
-fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg], rets: &[VReg], nounwind: &dyn Fn(u32) -> bool) -> Option<NewGuard> {
+fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg], rets: &[VReg], nounwind: &dyn Fn(u32) -> bool, unguarded: bool) -> Option<NewGuard> {
     let id = match &f.blocks[bi].insts[ii] {
         Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), _, _) => *id,
         _ => unreachable!("inline site must name a function instance"),
@@ -1275,6 +1311,15 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
     let mut flags: Vec<Sym> = callee.patch_flag.into_iter().chain(callee.unguarded_flags.iter().copied()).collect();
     flags.sort_unstable();
     flags.dedup();
+    // a split body's fast half takes the copy in unguarded where an exit covers the site
+    // (`patched::split_patched_path`): its flags are noted as a copy before any wait point's are
+    if unguarded {
+        for flag in flags.drain(..) {
+            if !f.unguarded_flags.contains(&flag) {
+                f.unguarded_flags.push(flag);
+            }
+        }
+    }
     let mut guard = None;
     let cold = if call_count >= 0.0 { 0.0 } else { -1.0 };
     let slow = (!flags.is_empty()).then(|| {
@@ -1549,7 +1594,18 @@ fn unguard_prefix(f: &mut Func, guards: Vec<NewGuard>) {
 /// box's three axes) ended the stretch until its back edge was gone (a mesh's distance walk kept 8
 /// reads of the word in its two loops, where 2 do).
 pub fn share_copy_ver_reads(options: &relax_session::Options, f: &mut Func) {
-    if f.guard_calls.is_empty() || opt_off(options, "-guardshare") {
+    if opt_off(options, "-guardshare") {
+        return;
+    }
+    // a split body's compares are its exits: one an earlier exit covers goes
+    if f.patched_path {
+        let n = crate::patched::share_exits(f);
+        if n > 0 && inline_trace(&f.name) {
+            eprintln!("inline-trace {}: {} exits an earlier one covers deleted", f.name, n);
+        }
+        return;
+    }
+    if f.guard_calls.is_empty() {
         return;
     }
     let nb = f.blocks.len();
@@ -7517,7 +7573,7 @@ mod slot_layout_tests {
         ];
         f.blocks[0].pos = vec![0; 4];
         f.blocks[0].term = Term::Ret(vec![]);
-        inline_site(&mut f, 0, 3, &callee, &[a], &[], &|_| false);
+        inline_site(&mut f, 0, 3, &callee, &[a], &[], &|_| false, false);
         f.verify().unwrap();
         assert!(!f.slots[s as usize].arg);
         let (at, _) = slot_layout(&f, 0, true);

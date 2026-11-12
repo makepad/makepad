@@ -36,6 +36,7 @@ pub mod warm;
 pub mod loops;
 pub mod native;
 pub mod opt;
+pub mod patched;
 pub mod ranges;
 pub mod version;
 pub mod web32;

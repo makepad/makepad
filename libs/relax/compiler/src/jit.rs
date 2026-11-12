@@ -1717,8 +1717,8 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
         // took in builds it again (reload), which the copies it inlined unguarded rely on
         let u = &mut *up;
         for &c in &s.inlined {
-            if c != s.id && (c as usize) < u.fns.len() && !u.fns[c as usize].history().inlined_into.contains(&s.id) {
-                crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(s.id));
+            if c != s.id && (c as usize) < u.fns.len() {
+                note_inlined_copy(u, c, s.id);
             }
         }
     }
@@ -9493,8 +9493,8 @@ unsafe fn cached_tier1(up: *mut Unit, id: u32, inlined: &[u32]) {
     }
     for &c in inlined {
         u.exec_event(c, "inline");
-        if c != id && !u.fns[c as usize].history().inlined_into.contains(&id) {
-            crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
+        if c != id {
+            note_inlined_copy(u, c, id);
         }
     }
     u.stats.tier1_cached += 1;
@@ -14114,9 +14114,7 @@ unsafe fn store_rir(up: *mut Unit, id: u32, func: relax_backend::rir::Func, inli
             }
         }
         u.stats.inline_rules[rule] += 1;
-        if !u.fns[c as usize].history().inlined_into.contains(&id) {
-            crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
-        }
+        note_inlined_copy(u, c, id);
     }
     u.stats.opt_ns += opt_ns;
     u.stats.rir_insts += relax_codegen::opt::inst_count(&func) as u64;
@@ -16159,6 +16157,17 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
         // the code must not depend on the order the sites were taken in
         relax_backend::passes::renumber_rpo(func);
         relax_backend::stats::pass_time(5, ti);
+        // a live session's root build: its copies run unguarded in a fast half whose exits leave
+        // for a patched path once a patch moved the build's copy version, before the pipeline sees
+        // a guard's slow call (relax_codegen::patched); MAKEPAD_RUN_OPT=-patchedpath keeps the
+        // guards (bisection)
+        if inlined_only.is_none() && options.live && !relax_backend::stats::opt_off(options, "-patchedpath") {
+            if let Some(st) = relax_codegen::patched::split_patched_path(func, get) {
+                if relax_codegen::opt::inline_trace(name) {
+                    eprintln!("inline-trace {}: patched path: {} exits for copy sites, {} for calls, {} sites covered; {} blocks, {} insts copied; {} slots copied, {} shared; the exits move {} registers and fill {} slots, {} bytes", name, st.site_exits, st.call_exits, st.covered, st.blocks, st.insts, st.cloned, st.shared, st.moved, st.filled, st.fill_bytes);
+                }
+            }
+        }
     }
     if let Some(raw) = inlined_only {
         *raw = (func.clone(), inlined.clone());
@@ -16171,7 +16180,20 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
         let ti = relax_backend::stats::pass_clock();
         let freqs = frequencies(1, func);
         let more = relax_codegen::opt::inline_calls_ordered(options, func, id, get, prepared, single, nounwind, &limits, freqs.as_deref(), inline_stats.as_deref_mut());
+        // a split body's exits whose stretch holds no copy a patch must reach (one before a call
+        // the round left a call) go
+        let pruned = if func.patched_path {
+            relax_codegen::patched::prune_exits(func, &|s| get(s).is_none_or(|(p, _)| unsafe { &*p }.patch_flag.is_some()))
+        } else {
+            0
+        };
+        if pruned > 0 && relax_codegen::opt::inline_trace(name) {
+            eprintln!("inline-trace {}: {} exits hold no copy: deleted", name, pruned);
+        }
         relax_backend::stats::pass_time(5, ti);
+        if more.is_empty() && pruned > 0 {
+            relax_backend::passes::simplify(options, func, ro, cfg.imm, cfg.cse);
+        }
         if !more.is_empty() {
             relax_backend::passes::renumber_rpo(func);
             for (c, rule) in more {
@@ -17063,6 +17085,27 @@ pub(crate) fn set_patched(u: &Unit, id: u32) {
     unsafe { (*tier_rec(&u.slots, id).add((TIER_PATCH / 8) as usize)).store(1, Ordering::Release) };
     for &h in &u.fns[id as usize].history().copy_hosts {
         move_copy_ver(u, h);
+    }
+}
+
+/// Code of slot `host` holds a copy of slot `c`'s body (its build inlined it): a live patch of `c`
+/// builds `host` again (reload: `inlined_into`). A live session's patchable `c` also notes `host`
+/// among its copy hosts, whose copy versions move when it is patched (set_patched), and one patched
+/// already moves it now: a split build's fast half holds its copies unguarded
+/// (relax_codegen::patched), reading no flag of `c` (note_guard_reads), only its exits' copy
+/// version. (Unit lock held, before the code can run.)
+pub(crate) fn note_inlined_copy(u: &mut Unit, c: u32, host: u32) {
+    if !u.fns[c as usize].history().inlined_into.contains(&host) {
+        crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(host));
+    }
+    if c == host || patch_flag(u, c).is_none() {
+        return;
+    }
+    if let Err(k) = u.fns[c as usize].history().copy_hosts.binary_search(&host) {
+        crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).copy_hosts.insert(k, host));
+    }
+    if unsafe { (*tier_rec(&u.slots, c).add((TIER_PATCH / 8) as usize)).load(Ordering::Acquire) } != 0 {
+        move_copy_ver(u, host);
     }
 }
 
@@ -21333,6 +21376,13 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let c = c?;
         code_sig(id, &func, &c.code, c.alloc_sig, true);
         note_frame(id, c.frame_size, slot_bytes(&func), true);
+        if func.patched_path && relax_codegen::opt::inline_trace(&name) {
+            // a split build's code: the fast half's bytes and the patched path's (the pc map's runs)
+            let runs: Vec<(u32, u64)> = c.pc_map.iter().copied().filter(|e| e.0 != u32::MAX).collect();
+            let ends = runs.iter().skip(1).map(|e| e.0).chain([c.text_len]);
+            let pat: u32 = runs.iter().zip(ends).filter(|(e, _)| relax_backend::rir::pos_patched(e.1)).map(|(e, end)| end.saturating_sub(e.0)).sum();
+            eprintln!("inline-trace {}: code {} bytes: fast half {}, patched path {}", name, c.text_len, c.text_len - pat, pat);
+        }
         if trace && cpu_ns() - t1 > 1_000_000_000 {
             // a slow build: where its time went (passes, sizes)
             let p1 = relax_backend::stats::pass_local();
@@ -21641,8 +21691,8 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     }
                     for &c in &inlined {
                         u.exec_event(c, "inline");
-                        if c != id && !u.fns[c as usize].history().inlined_into.contains(&id) {
-                            crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
+                        if c != id {
+                            note_inlined_copy(u, c, id);
                         }
                     }
                     u.stats.tier1_installed += 1;
@@ -21728,9 +21778,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 let n_inl = inlined.len();
                 for c in inlined {
                     u.exec_event(c, "inline");
-                    if !u.fns[c as usize].history().inlined_into.contains(&id) {
-                        crate::zone_alloc::slots_with(|| u.fns[c as usize].history.get_or_insert_with(Default::default).inlined_into.push(id));
-                    }
+                    note_inlined_copy(u, c, id);
                 }
                 o3_owner(4, tn);
                 let tr = cpu_ns();

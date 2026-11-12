@@ -1447,6 +1447,11 @@ pub struct Func {
     /// code only a patch runs, which a caller's inliner prices the body without, so a live session
     /// inlines what a run without patches does.
     pub guard_size: GuardSize,
+    /// A live session's root build split after its first inlining round (`opt::split_patched_path`):
+    /// its copy-version compares are exits, each leaving for the patched path (a copy of the rest of
+    /// the fn whose copies keep their guards) once a patch moved the version, and never coming back.
+    /// Its fast blocks hold no guard and no slow call.
+    pub patched_path: bool,
 }
 
 /// The guards' share of a body (`Func::guard_size`): their compares at the sites (the check and
@@ -1544,7 +1549,7 @@ impl Func {
     /// compared through its own map (`ma` for self, `mb` for `o`; block counts by bits). With
     /// injective maps: the bodies are equal up to a renaming of their slots.
     pub fn same_body_mapped(&self, ma: &mut dyn FnMut(u32) -> u32, o: &Func, mb: &mut dyn FnMut(u32) -> u32) -> bool {
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path } = self;
         let callee_eq = |a: &Callee, ma: &mut dyn FnMut(u32) -> u32, b: &Callee, mb: &mut dyn FnMut(u32) -> u32| match (a, b) {
             (Callee::Fn(x), Callee::Fn(y)) => ma(*x) == mb(*y),
             (Callee::CFn(x, xs), Callee::CFn(y, ys)) => ma(*x) == mb(*y) && xs == ys,
@@ -1602,12 +1607,13 @@ impl Func {
             && guard_calls.len() == o.guard_calls.len()
             && guard_calls.iter().zip(&o.guard_calls).all(|(x, y)| x.0 == y.0 && ma(x.1) == mb(y.1))
             && *guard_size == o.guard_size
+            && *patched_path == o.patched_path
     }
 
     /// A hash of what `same_body_mapped` compares, the function slots replaced by `m(slot)`.
     pub fn hash_body_mapped<H: std::hash::Hasher>(&self, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
         use std::hash::Hash;
-        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size } = self;
+        let Func { name: _, blocks, vregs, slots, params, rets, file, noalias, withheld_noalias, plain_calls, deref, cabi, sret, sret_callees, nocapture, nounwind_inputs, baseline, lowering: _, pending, full, owned, nonnull, param_ints, ranged, naked, inl, inl_slots, dbg, halves, patch_flag: _, guard_calls, unguarded_flags: _, copy_ver: _, guard_size, patched_path } = self;
         fn callee<H: std::hash::Hasher>(c: &Callee, h: &mut H, m: &mut dyn FnMut(u32) -> u32) {
             match c {
                 Callee::Fn(x) => {
@@ -1691,6 +1697,9 @@ impl Func {
                 (p, m(*x)).hash(h);
             }
             guard_size.hash(h);
+        }
+        if *patched_path {
+            patched_path.hash(h);
         }
     }
 
@@ -1797,15 +1806,24 @@ impl Func {
     }
 }
 
-/// Source positions are `(file << 32) | byte`, with the inline context in bits 48..63 (0: the
-/// function's own body; k: inlined through `Func::inl[k - 1]`). File indices stay below 1 << 16.
+/// Source positions are `(file << 32) | byte`, with the inline context in bits 48..62 (0: the
+/// function's own body; k: inlined through `Func::inl[k - 1]`) and bit 63 set on the code of a
+/// split body's patched path (`POS_PATCHED`). File indices stay below 1 << 16.
 pub const POS_CTX_SHIFT: u32 = 48;
-/// An inline chain deeper / wider than 16 bits: the context is lost (positions still name lines).
-pub const POS_CTX_LOST: u64 = 0xffff;
+/// An inline chain deeper / wider than 15 bits: the context is lost (positions still name lines).
+pub const POS_CTX_LOST: u64 = 0x7fff;
+/// The position bit of an instruction in a split body's patched path (`codegen::patched`): the
+/// pc map tells a frame there from one in the fast half (makepad inspect, the patch report).
+pub const POS_PATCHED: u64 = 1 << 63;
 
 /// The inline context of a position.
 pub fn pos_ctx(p: u64) -> u64 {
-    p >> POS_CTX_SHIFT
+    (p >> POS_CTX_SHIFT) & POS_CTX_LOST
+}
+
+/// Whether a position lies in a split body's patched path.
+pub fn pos_patched(p: u64) -> bool {
+    p & POS_PATCHED != 0
 }
 
 /// A position without its inline context: what names a source place (keys, lookups).
@@ -1818,9 +1836,9 @@ pub fn pos_file(p: u64) -> u32 {
     ((p >> 32) & 0xffff) as u32
 }
 
-/// `p` with inline context `ctx`.
+/// `p` with inline context `ctx` (in the patched path when `p` is).
 pub fn pos_with_ctx(p: u64, ctx: u64) -> u64 {
-    pos_plain(p) | (ctx.min(POS_CTX_LOST) << POS_CTX_SHIFT)
+    (p & POS_PATCHED) | pos_plain(p) | (ctx.min(POS_CTX_LOST) << POS_CTX_SHIFT)
 }
 
 /// The pc-map entries carrying `f`'s inline stack: two per context, at code offset u32::MAX
@@ -1832,7 +1850,7 @@ pub fn inline_pc_entries(f: &Func) -> impl Iterator<Item = (u32, u64)> + '_ {
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), withheld_noalias: Vec::new(), plain_calls: false, deref: Vec::new(), cabi: None, sret: None, sret_callees: Vec::new(), nocapture: Vec::new(), nounwind_inputs: Vec::new(), baseline: false, lowering: None, pending: Vec::new(), full: false, owned: Vec::new(), nonnull: Vec::new(), param_ints: Vec::new(), ranged: Vec::new(), naked: false, inl: Vec::new(), inl_slots: Vec::new(), dbg: Vec::new(), halves: Vec::new(), patch_flag: None, guard_calls: Vec::new(), unguarded_flags: Vec::new(), copy_ver: None, guard_size: GuardSize::default(), patched_path: false }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
@@ -1854,7 +1872,8 @@ impl Func {
             return false;
         }
         let Some(Inst::Call(Callee::Fn(id) | Callee::CFn(id, _), _, _)) = self.blocks[bi].insts.get(ii) else { return false };
-        let p = self.blocks[bi].pos.get(ii).copied().unwrap_or(0);
+        // (a copy's call in a split body's patched path: its position carries POS_PATCHED)
+        let p = self.blocks[bi].pos.get(ii).copied().unwrap_or(0) & !POS_PATCHED;
         self.guard_calls.iter().any(|&(q, s)| q == p && s == *id)
     }
 
