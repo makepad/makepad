@@ -164,6 +164,9 @@ pub struct GiStats {
     /// GI frame that requested the last completed count (not a GPU submission
     /// tag). None means counts are unavailable, not a measured zero.
     pub probe_counts_frame: Option<u64>,
+    /// The completed count followed a full scheduler sweep of the current
+    /// scene. Kept with the sample, never inferred from an empty work queue.
+    pub probe_counts_swept: bool,
     pub batch: usize,
     pub budget: usize,
     pub traced_rays: usize,
@@ -364,6 +367,7 @@ impl FastGi {
         self.scene_key!=Some(key)||moved
     }
     pub fn submit_scene(&mut self,key:SceneKey,center:Vec3f,snapshot:Snapshot){
+        self.stats.probe_counts_swept=false;
         self.stats.triangles=snapshot.triangles;self.stats.instances=snapshot.instances.len();
         self.scene_key=Some(key);self.scene_center=Some(center);
         let layout=VoxelLayout::new(self.config);
@@ -374,7 +378,7 @@ impl FastGi {
     /// runs or a newer scene waits.
     pub fn wants_frames(&self)->bool{self.mode==GiMode::Fast&&self.config.settle&&!self.settled&&!self.stats.rejected_scene}
     pub(crate) fn scene_is(&self,key:SceneKey)->bool{self.scene_key==Some(key)}
-    pub(crate) fn set_scene_stale(&mut self,stale:bool){self.scene_stale=stale;}
+    pub(crate) fn set_scene_stale(&mut self,stale:bool){self.scene_stale=stale;if stale{self.stats.probe_counts_swept=false;}}
     pub fn relight_pass(&self)->Option<DrawPassId>{self.gpu.as_ref().map(|g|g.stages[1].pass.draw_pass_id())}
 
     fn ensure(&mut self,cx:&mut Cx)->bool {
@@ -759,3 +763,6 @@ pub(crate) fn bind_texture(cx:&Cx,dv:&mut DrawVars,name:LiveId,t:&Texture){if le
 
 #[cfg(test)]
 #[path="fast_gi/tests.rs"] mod tests;
+
+#[cfg(test)]
+mod gpu_guard;

@@ -17,7 +17,7 @@ struct Sample {
     scene_key: Option<SceneKey>,
     voxel_jobs: usize,
     /// Eligibility belongs to the field we read, not the later poll's scheduler.
-    guard_eligible: bool,
+    swept: bool,
 }
 
 #[derive(Default)]
@@ -28,6 +28,11 @@ pub(super) struct ProbeCounts {
 }
 
 impl ProbeCounts {
+    #[cfg(test)]
+    pub(super) fn pass(&self) -> Option<&DrawPass> {
+        self.gpu.as_ref().map(|gpu| &gpu.pass)
+    }
+
     pub fn release(&mut self, retired: &mut Vec<Texture>) {
         if let Some(gpu) = self.gpu.take() {
             retired.push(gpu.texture);
@@ -58,8 +63,7 @@ impl FastGi {
             return Ok(false);
         }
         let config = self.config;
-        let guard_eligible = self.stats.instances > 0
-            && !self.scene_stale
+        let swept = !self.scene_stale
             && self.pending_scene.is_none()
             && self.voxel_job.is_none()
             && self.cascades.len() == config.cascades
@@ -104,7 +108,7 @@ impl FastGi {
         cx2.end_pass(&counts.pass);
         let ticket = counts.texture.read_back(cx2.cx, ReadbackRequest { next_render: true })?;
         self.probe_counts.pending = Some(Sample {
-            ticket, generation: self.generation, frame: self.frame, config, guard_eligible,
+            ticket, generation: self.generation, frame: self.frame, config, swept,
             scene_key: self.scene_key, voxel_jobs: self.stats.voxel_jobs,
         });
         Ok(true)
@@ -152,9 +156,13 @@ impl FastGi {
         self.stats.probe_counts_frame = Some(sample.frame);
         // A delayed pipeline may have sampled after a scroll or scene edit.
         // Such a result is still a count, but cannot prove the old sweep.
-        self.report_probe_health(sample.guard_eligible
+        self.stats.probe_counts_swept = sample.swept
             && sample.scene_key == self.scene_key
-            && sample.voxel_jobs == self.stats.voxel_jobs);
+            && sample.voxel_jobs == self.stats.voxel_jobs
+            && !self.scene_stale
+            && self.pending_scene.is_none()
+            && self.voxel_job.is_none();
+        self.report_probe_health(self.stats.probe_counts_swept && self.stats.instances > 0);
         Ok(Some(self.stats))
     }
 
