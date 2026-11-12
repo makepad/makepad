@@ -33,7 +33,11 @@ impl Objects {
     }
 
     pub(crate) fn stream(&mut self, id: usize, entries: &str, data: &[u8]) {
-        let compressed = zlib_compress(data, 6);
+        self.flate_stream(id, entries, &zlib_compress(data, 6));
+    }
+
+    /// A stream whose data is zlib-compressed already.
+    pub(crate) fn flate_stream(&mut self, id: usize, entries: &str, compressed: &[u8]) {
         self.begin(id);
         self.bytes.extend_from_slice(
             format!(
@@ -42,7 +46,7 @@ impl Objects {
             )
             .as_bytes(),
         );
-        self.bytes.extend_from_slice(&compressed);
+        self.bytes.extend_from_slice(compressed);
         self.bytes.extend_from_slice(b"\nendstream\nendobj\n");
     }
 

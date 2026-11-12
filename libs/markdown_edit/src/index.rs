@@ -386,6 +386,7 @@ fn push_block(blocks: &mut Vec<Block>, first_new: usize, block: Block) {
 }
 
 /// The block index of one document.
+#[derive(Clone)]
 pub struct Index {
     blocks: Vec<Block>,
     line_count: usize,

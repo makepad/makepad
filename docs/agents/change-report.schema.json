@@ -79,7 +79,8 @@
         }
       }
     },
-    "diff": {"type": "boolean", "description": "True exactly when the zip holds changes.diff (only when the person chose to include it)."}
+    "diff": {"type": "boolean", "description": "True exactly when the zip holds changes.diff (only when the person chose to include it)."},
+    "suggestion": {"type": "boolean", "description": "True for a suggestion: nothing in the app was changed, changes lists what the person would like changed, and diff is false. Left out otherwise."}
   },
   "$defs": {
     "identifier": {"type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$"},

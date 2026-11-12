@@ -6,6 +6,10 @@ use pulldown_cmark::{Event, Tag};
 use std::ops::Range;
 
 pub use crate::cut::{backspace, cut, delete_forward};
+pub use crate::format::{
+    indent_items, link_at, set_block, set_link, toggle_inline, toggle_task, BlockStyle, Mark,
+};
+pub use crate::table::{cell_at, cell_below, delete_column, delete_row, insert_column, insert_row, insert_table, table_from_header, table_step, Cell, Step};
 
 /// An edit as source replacements: ascending, disjoint ranges in the old
 /// text, and the caret's offset in the resulting text.

@@ -1,5 +1,7 @@
 //! In-memory PDF 1.7 writing with streamed raster pages and embedded vector text.
 //! Coordinates are points from the page's top-left, with y increasing downward.
+//! Images are compressed before they reach the writer (`RgbImage`), on any
+//! thread, so that pages compress in parallel and adding one only copies it in.
 
 mod font;
 mod object;
@@ -11,6 +13,7 @@ mod tests;
 use std::collections::{BTreeSet, HashMap};
 
 use font::Font;
+use makepad_fast_inflate::ZlibCompressor;
 use object::{number, string, uri, Objects};
 
 /// Document metadata.
@@ -34,14 +37,54 @@ pub struct Rect {
     pub h: f32,
 }
 
-/// An RGB image and its placement on a page.
+/// An RGB8 image, Flate-compressed and ready for a page.
+pub struct RgbImage {
+    width_px: u32,
+    height_px: u32,
+    flate: Vec<u8>,
+}
+
+/// Compresses an `RgbImage` from its tightly packed RGB8 rows as they come,
+/// top to bottom, in pieces of any size, so the whole image never has to be
+/// held uncompressed.
+pub struct RgbImageEncoder {
+    width_px: u32,
+    height_px: u32,
+    written: u64,
+    compressor: ZlibCompressor,
+    flate: Vec<u8>,
+}
+
+impl RgbImageEncoder {
+    /// Starts an image of the given size.
+    pub fn new(width_px: u32, height_px: u32) -> Self {
+        Self { width_px, height_px, written: 0, compressor: ZlibCompressor::new(6), flate: Vec::new() }
+    }
+
+    /// Compresses the next RGB8 bytes of the image.
+    pub fn write(&mut self, rgb: &[u8]) {
+        self.written += rgb.len() as u64;
+        self.compressor.write(rgb, &mut self.flate);
+    }
+
+    /// Ends the image. Panics unless exactly width_px * height_px * 3 bytes were written.
+    pub fn finish(mut self) -> RgbImage {
+        let expected = u64::from(self.width_px)
+            .checked_mul(u64::from(self.height_px))
+            .and_then(|pixels| pixels.checked_mul(3));
+        assert!(
+            expected == Some(self.written),
+            "an RgbImage takes width_px * height_px * 3 bytes"
+        );
+        self.compressor.finish(&mut self.flate);
+        RgbImage { width_px: self.width_px, height_px: self.height_px, flate: self.flate }
+    }
+}
+
+/// An image and its placement on a page.
 pub struct PageImage {
-    /// Pixel width.
-    pub width_px: u32,
-    /// Pixel height.
-    pub height_px: u32,
-    /// Tightly packed RGB8, width_px * height_px * 3 bytes, rows top to bottom.
-    pub rgb: Vec<u8>,
+    /// The compressed pixels.
+    pub image: RgbImage,
     /// Where the image is drawn on the page.
     pub rect: Rect,
 }
@@ -197,29 +240,22 @@ impl PdfWriter {
         id
     }
 
-    /// Writes the page's compressed content and images immediately, dropping its pixels.
-    /// Panics if an image's RGB length does not match its dimensions.
+    /// Writes the page's content and images immediately: the images are
+    /// compressed already, and the content stream is compressed here.
     pub fn add_page(&mut self, page: Page) {
         let page_object = self.reserve_page(self.pages.len());
         let mut content = String::new();
         let mut images = String::new();
         for (index, image) in page.images.into_iter().enumerate() {
-            let expected = u64::from(image.width_px)
-                .checked_mul(u64::from(image.height_px))
-                .and_then(|pixels| pixels.checked_mul(3));
-            assert!(
-                expected == Some(image.rgb.len() as u64),
-                "PageImage rgb length must equal width_px * height_px * 3"
-            );
             let object = self.objects.reserve();
-            self.objects.stream(
+            self.objects.flate_stream(
                 object,
                 &format!(
                     "/Type /XObject /Subtype /Image /Width {} /Height {} \
                      /ColorSpace /DeviceRGB /BitsPerComponent 8",
-                    image.width_px, image.height_px
+                    image.image.width_px, image.image.height_px
                 ),
-                &image.rgb,
+                &image.image.flate,
             );
             images.push_str(&format!("/Im{index} {object} 0 R "));
             content.push_str(&format!(

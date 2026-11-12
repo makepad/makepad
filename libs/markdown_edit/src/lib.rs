@@ -16,9 +16,11 @@
 //! document's lines as they are now.
 
 mod cut;
+mod format;
 mod index;
 pub mod plan;
 mod project;
+mod table;
 
 pub use index::{
     front_matter_end, parse_options, Block, BlockKind, Index, LineEdit, Row, RowPart, Slice,

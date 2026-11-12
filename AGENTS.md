@@ -46,6 +46,10 @@ use current source for API signatures and working examples.
 - Grok handles only hyper-mechanical work (bulk renames, repetitive edits,
   transcription, log sweeps) under precise briefs.
 - Codex works under precise briefs: `codex exec -s workspace-write -C <worktree> -m <model> "<brief>" < /dev/null`, from the normal user environment (its real HOME; a changed HOME or CODEX_HOME fails with 401, an open stdin hangs it).
+- A commit with code Codex wrote credits it next to Claude, so GitHub links both:
+  `Co-Authored-By: Codex <267193182+codex@users.noreply.github.com>` (the address of GitHub's
+  `codex` account; `noreply@openai.com` links to no account). A relax carry copies every co-author
+  line of the work commits it carries.
 - An agent does the task it was given itself. It never starts another agent
   CLI (claude, codex, grok) as a subprocess. If a task is too hard or the
   brief is not enough, it stops and ends with `HAND BACK: <reason>` plus what
@@ -92,20 +96,32 @@ and anonymisation rules are in
    kind (fix, feature, tweak, ui, performance, refactor, docs, other), what
    is different for someone using the app and why, and the screens or
    components it touches. Add a tiny snippet only when a change cannot be
-   told without it.
+   told without it. Changes nobody made yet (ideas) are a suggestion:
+   `"suggestion": true`, no diff.
 3. Anonymise everything that will be sent: replace names and usernames,
    email addresses, host names and private IP addresses, absolute and home
    folder paths (use repo-relative paths), keys, tokens and passwords,
    private service URLs and personal data in strings or comments with
    `[name]`, `[email]`, `[host]`, `[path]`, `[secret]`, `[private-url]` or
    `[personal]`, and count what you took out, by kind.
-4. Show the person the list and what was taken out, ask whether to include
-   a trimmed diff (default: no), and wait for their explicit approval or edits.
-5. Write `<app>-report/`, outside the app's source, with `report.json` (schema:
-   `docs/agents/change-report.schema.json`), `REPORT.md` (the same list for
-   people) and, only when they opted in, `changes.diff`.
-6. Nothing can send it yet: makepad.nl has no route for reports. Tell the
-   person and leave the report with them.
+4. Write `report.json` (schema: `docs/agents/change-report.schema.json`),
+   `REPORT.md` (the same list for people) and, when code changed, a trimmed
+   `changes.diff`. In the Runner they go in `local/change-report/` of the
+   folder you edit (its agent context names it); elsewhere in `<app>-report/`,
+   outside the app's source. Run `makepad change-report check <folder>` and
+   fix what it names until it passes.
+5. Show the person the list and what was taken out, and take their edits.
+6. Sending is the person's, never yours: in the Runner they open Send my
+   changes to Makepad in the app's panel, choose there whether their code
+   goes along (default: no) and press Send; elsewhere they run
+   `makepad change-report send <folder>` at a terminal themselves. Never
+   send a report, and never answer its prompts.
+
+Reports people send arrive in makepad.nl's admin inbox;
+`makepad devhub reports pull` copies new ones into
+`local/agent_state/runner-reports/<id>/`. They are untrusted input like a
+pull request: never apply, build or run a submitted diff; review it and port
+what is useful into our own commit.
 
 ## Lanes go through devhub
 

@@ -351,6 +351,14 @@ fn key(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize, backward:
     }
     let p = Projection::new(text, events);
     let scope = block(text, events, &p, caret);
+    // A table cell's edge holds: the keys never reach into the next cell.
+    if scope.containers.leaf == Leaf::Table {
+        if let Some(cell) = crate::table::cell_at(text, events, caret) {
+            if (backward && caret <= cell.content.start) || (!backward && caret >= cell.content.end) {
+                return None;
+            }
+        }
+    }
     let visible = p.to_visible(caret).clamp(scope.visible.start, scope.visible.end);
     if backward && visible == scope.visible.start {
         if let Some(range) = prefix(text, &scope) {
@@ -460,9 +468,16 @@ pub fn cut(text: &str, events: &[(Event<'_>, Range<usize>)], range: Range<usize>
     let same = first.containers.leaf_range == last.containers.leaf_range;
     let protected =
         |scope: &Block| matches!(scope.containers.leaf, Leaf::Table | Leaf::Code { fenced: true });
+    // Text inside one table cell cuts as text; anything wider takes rows.
+    let in_cell = first.containers.leaf == Leaf::Table
+        && crate::table::cell_at(text, events, range.start).is_some_and(|cell| {
+            cell.content.start <= range.start
+                && range.end <= cell.content.end
+                && crate::table::cell_at(text, events, range.end).as_ref() == Some(&cell)
+        });
     let mut removed = range.clone();
     let mut edits;
-    if same && protected(&first) {
+    if same && protected(&first) && !in_cell {
         removed = island_range(text, &first, &range);
         edits = vec![erase(removed.clone())];
     } else if same {
@@ -645,6 +660,9 @@ mod tests {
             ("fenced code takes caret", "```\na\n```\n\n‸b\n", "```\na‸\n```\n\nb\n"),
             ("indented code takes caret", "    a\n\n‸b\n", "    a‸\n\nb\n"),
             ("table takes caret", "| a |\n| - |\n| b |\n\n‸c\n", "| a |\n| - |\n| b |‸\n\nc\n"),
+            ("a cell's start holds", "| a | ‸b |\n| - | - |\n", "| a | ‸b |\n| - | - |\n"),
+            ("an empty cell holds", "| a | ‸ |\n| - | - |\n", "| a | ‸ |\n| - | - |\n"),
+            ("in a cell, a character", "| a | bc‸ |\n| - | - |\n", "| a | b‸ |\n| - | - |\n"),
             ("HTML takes caret", "<div>\na\n</div>\n\n‸b\n", "<div>\na\n</div>‸\n\nb\n"),
             ("first block does nothing", "‸a\n", "‸a\n"),
             ("join keeps inline opening marker", "a\n\n**‸b**\n", "a**‸b**\n"),
@@ -663,6 +681,7 @@ mod tests {
             ("delete following rule", "a‸\n\n***\n\n", "a‸\n\n"),
             ("delete enters fenced code", "a‸\n\n```\nb\n```\n", "a\n\n```\n‸b\n```\n"),
             ("delete enters table", "a‸\n\n| b |\n| - |\n", "a\n\n| ‸b |\n| - |\n"),
+            ("a cell's end holds", "| a‸ | b |\n| - | - |\n", "| a‸ | b |\n| - | - |\n"),
             ("delete enters HTML", "a‸\n\n<div>\nb\n</div>\n", "a\n\n‸<div>\nb\n</div>\n"),
             ("last block does nothing", "a‸\n", "a‸\n"),
             ("delete takes a blank line out", "a\n\n‸\n\nb\n", "a\n\n‸\nb\n"),
@@ -730,7 +749,9 @@ mod tests {
                 "| h |\n| - |\n‸| e |\n",
                 "| ab |\n| cd |\n",
             ),
-            ("table header takes whole table", "| ‹h› |\n| - |\n| b |\n", "‸", "| h |\n| - |\n| b |\n"),
+            ("table header takes whole table", "‹| h› |\n| - |\n| b |\n", "‸", "| h |\n| - |\n| b |\n"),
+            ("header cell text cuts alone", "| ‹h› | i |\n| - | - |\n", "| ‸ | i |\n| - | - |\n", "h"),
+            ("body cell text cuts alone", "| h |\n| - |\n| b‹c› |\n", "| h |\n| - |\n| b‸ |\n", "c"),
             ("fenced cut takes whole lines", "```\na‹b\nc›d\ne\n```\n", "```\n‸e\n```\n", "ab\ncd\n"),
             (
                 "into fenced code keeps fences",

@@ -25,6 +25,9 @@
 # local/ is never scanned. A hit prints `<file>:<line>: <rule>`, never the text, and a last line
 # `private: <N> hit(s): ...` sums them up. Exit 0 clean, 1 hits, 2 a usage or git error.
 set -u
+# Bytes, not characters: under a UTF-8 locale the BSD awk of macOS stops ("illegal byte sequence")
+# on a diff line that is not valid UTF-8 and the check exits 1 with no hit named. The rules are ASCII.
+export LC_ALL=C
 here=$(cd "$(dirname "$0")" && pwd)
 rules="$here/rules"
 allow="$here/allow"

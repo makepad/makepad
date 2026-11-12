@@ -90,17 +90,25 @@ fn text_run(data: &[u8], font: FontId, mode: TextMode, baseline: f32) -> TextRun
     }
 }
 
-fn image(width: u32, height: u32, rect: Rect) -> PageImage {
+fn pixels(width: u32, height: u32) -> Vec<u8> {
     let mut rgb = Vec::new();
     for y in 0..height {
         for x in 0..width {
             rgb.extend_from_slice(&[(x * 6) as u8, (y * 8) as u8, 128]);
         }
     }
+    rgb
+}
+
+/// Compressed in uneven pieces, not at row ends, as a page's bands come.
+fn image(width: u32, height: u32, rect: Rect) -> PageImage {
+    let rgb = pixels(width, height);
+    let mut encoder = RgbImageEncoder::new(width, height);
+    for piece in rgb.chunks(rgb.len() / 3 + 7) {
+        encoder.write(piece);
+    }
     PageImage {
-        width_px: width,
-        height_px: height,
-        rgb,
+        image: encoder.finish(),
         rect,
     }
 }
@@ -251,18 +259,7 @@ fn round_trip_raster_text_links_and_outline() {
         (40, 30),
         "image dimensions must be preserved"
     );
-    let expected = image(
-        40,
-        30,
-        Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 40.0,
-            h: 30.0,
-        },
-    );
-    let rgba: Vec<u8> = expected
-        .rgb
+    let rgba: Vec<u8> = pixels(40, 30)
         .chunks_exact(3)
         .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
         .collect();
