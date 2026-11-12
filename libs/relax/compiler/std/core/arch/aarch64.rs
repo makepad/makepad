@@ -622,6 +622,17 @@ pub fn vmlal_laneq_s16<const LANE: i32>(
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_s16(a: int32x4_t, b: int16x4_t, c: int16x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].wrapping_add((b.0[i] as i32) * (c.0[i] as i32));
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vmlal_u16(a: uint32x4_t, b: uint16x4_t, c: uint16x4_t) -> uint32x4_t {
     let mut r = [0; 4];
     let mut i = 0;
@@ -2266,6 +2277,18 @@ pub fn vcombine_u32(a: uint32x2_t, b: uint32x2_t) -> uint32x4_t {
     uint32x4_t(r)
 }
 
+/// FCVTAU: to nearest, ties away from zero.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vcvtaq_u32_f32(a: float32x4_t) -> uint32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].round() as u32;
+        i += 1;
+    }
+    uint32x4_t(r)
+}
+
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vcvtnq_s32_f32(a: float32x4_t) -> int32x4_t {
     let mut r = [0; 4];
@@ -3406,6 +3429,82 @@ pub fn vqmovun_s16(a: int16x8_t) -> uint8x8_t {
     unsafe {
         vx::vx_narrow(a, 19)
     }
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vqmovun_s32(a: int32x4_t) -> uint16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].max(0).min(65535) as u16;
+        i += 1;
+    }
+    uint16x4_t(r)
+}
+
+/// SQRDMLAH / SQRDMLSH (FEAT_RDM) on one i16 lane: the high half of (a << 16) + 2 * b * c (minus
+/// for SQRDMLSH), rounded, saturated once at the end.
+fn neon_qrdmlah_s16(a: i16, b: i16, c: i16, subtract: bool) -> i16 {
+    let product = b as i64 * c as i64 * 2;
+    let sum = ((a as i64) << 16) + if subtract { -product } else { product } + (1 << 15);
+    (sum >> 16).max(i16::MIN as i64).min(i16::MAX as i64) as i16
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlah_s16(a: int16x4_t, b: int16x4_t, c: int16x4_t) -> int16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], false);
+        i += 1;
+    }
+    int16x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlahq_s16(a: int16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], false);
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlahq_s32(a: int32x4_t, b: int32x4_t, c: int32x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = ((((a.0[i] as i128) << 32) + b.0[i] as i128 * c.0[i] as i128 * 2 + (1 << 31)) >> 32)
+            .max(i32::MIN as i128)
+            .min(i32::MAX as i128) as i32;
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlsh_s16(a: int16x4_t, b: int16x4_t, c: int16x4_t) -> int16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], true);
+        i += 1;
+    }
+    int16x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlshq_s16(a: int16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], true);
+        i += 1;
+    }
+    int16x8_t(r)
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]

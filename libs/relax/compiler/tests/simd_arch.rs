@@ -450,6 +450,17 @@ fn arch() {
     b!(vuzp2q_u32, uint32x4_t, uint32x4_t);
     b!(vzip1q_f64, float64x2_t, float64x2_t);
     b!(vzip2q_f64, float64x2_t, float64x2_t);
+    // moxcms's fixed-point paths (FEAT_RDM is not on every aarch64 CPU)
+    u!(vcvtaq_u32_f32, float32x4_t);
+    t!(vmlal_s16, int32x4_t, int16x4_t, int16x4_t);
+    u!(vqmovun_s32, int32x4_t);
+    if std::arch::is_aarch64_feature_detected!("rdm") {
+        t!(vqrdmlah_s16, int16x4_t, int16x4_t, int16x4_t);
+        t!(vqrdmlahq_s16, int16x8_t, int16x8_t, int16x8_t);
+        t!(vqrdmlahq_s32, int32x4_t, int32x4_t, int32x4_t);
+        t!(vqrdmlsh_s16, int16x4_t, int16x4_t, int16x4_t);
+        t!(vqrdmlshq_s16, int16x8_t, int16x8_t, int16x8_t);
+    }
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
