@@ -570,7 +570,7 @@ fn a_second_jit_job_waits_for_a_token() {
 }
 
 /// set_thread_idle: the thread runs at SCHED_IDLE, Background work leaves it there (it reads as
-/// Background), and the UI thread never goes there.
+/// Background), and UI protection refuses a later request to lower its policy.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
 fn idle_thread_stays_below_background() {
@@ -583,8 +583,17 @@ fn idle_thread_stays_below_background() {
         (unsafe { sched_getscheduler(0) }, thread_idle(), thread_class())
     }).join().unwrap();
     assert_eq!((policy, idle, class), (5, true, Some(BACKGROUND)), "SCHED_IDLE, kept by Background work");
-    let ui = thread::spawn(|| { set_ui_thread(); (set_thread_idle(), thread_idle(), unsafe { sched_getscheduler(0) }) }).join().unwrap();
-    assert_eq!(ui, (false, false, 0), "the UI thread stays SCHED_OTHER");
+    thread::spawn(|| {
+        let applied = set_ui_thread();
+        let policy = unsafe { sched_getscheduler(0) };
+        assert!(policy >= 0, "the UI thread's scheduler policy is readable");
+        // A test launched under SCHED_IDLE may not be allowed to return to SCHED_OTHER.
+        // The API reports that failure; UI protection still prevents later policy changes.
+        if applied { assert_eq!(policy, 0, "a successful UI promotion selects SCHED_OTHER"); }
+        assert!(!set_thread_idle(), "the UI thread refuses idle work");
+        assert!(!thread_idle(), "the refused request does not mark the UI thread idle");
+        assert_eq!(unsafe { sched_getscheduler(0) }, policy, "the refused request preserves the UI policy");
+    }).join().unwrap();
 }
 
 /// A run given fewer cores than its machine's (`MAKEPAD_CPU_CORES`) sizes the budget from them;
