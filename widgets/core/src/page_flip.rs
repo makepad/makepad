@@ -1,4 +1,4 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt, held_events::HeldEvents, view::View};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt, held_events::{self, HeldEvents}, view::View};
 use std::collections::HashMap;
 
 script_mod! {
@@ -36,11 +36,13 @@ pub struct PageFlip {
     templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust]
     pages: ComponentMap<LiveId, WidgetRef>,
-    /// What each page out of sight waits for (see `held_events`): a page
-    /// that is not shown skips frame requests (delivered once it is shown)
-    /// and actions, unless its root view sets `background_events: true`.
+    /// Frames a page out of sight isn't waiting on, kept until it's shown
+    /// (see `held_events`), unless its root view sets `background_events: true`.
     #[rust]
     held: HashMap<LiveId, HeldEvents>,
+    /// The page that was shown at the last event every page got.
+    #[rust]
+    shown_page: LiveId,
 }
 
 impl ScriptHook for PageFlip {
@@ -188,13 +190,25 @@ impl Widget for PageFlip {
             }
         } else {
             for (page_id, page) in self.pages.iter() {
-                if *page_id != active_page && !page.borrow::<View>().is_some_and(|view| view.background_events)
-                    && self.held.entry(*page_id).or_default().hold(event) {
+                let is_hidden = *page_id != active_page;
+                if is_hidden && !page.borrow::<View>().is_some_and(|view| view.background_events)
+                    && self.held.entry(*page_id).or_default().hold(event, *page_id == self.shown_page) {
                     continue;
                 }
+                let next_frame_id_before = cx.next_frame_id();
                 let item_uid = page.widget_uid();
-                cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                let mut handle = |cx: &mut Cx| cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
+                if is_hidden && matches!(event, Event::Actions(_)) {
+                    held_events::handle_in_hidden_subtree(cx, handle);
+                } else {
+                    handle(cx);
+                }
+                // A hidden page gets the next frame if it asked for one just now.
+                if let Some(held) = self.held.get_mut(page_id).filter(|_| is_hidden) {
+                    held.note_handled(cx.next_frame_id() != next_frame_id_before);
+                }
             }
+            self.shown_page = active_page;
         }
     }
 

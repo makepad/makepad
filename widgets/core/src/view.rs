@@ -2,7 +2,7 @@ use {
     crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
-        held_events::HeldEvents,
+        held_events::{self, HeldEvents},
         gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
         makepad_derive_widget::*,
         makepad_draw::*,
@@ -152,14 +152,15 @@ pub struct View {
     grab_key_focus: bool,
     #[live(false)]
     block_signal_event: bool,
-    /// While hidden (`visible: false`) this view's subtree still gets frame
-    /// requests and actions as they happen (see `held_events`); without it
-    /// frame requests wait until it is shown again and actions are skipped.
-    /// Signals and timers reach a hidden subtree either way.
+    /// While hidden (`visible: false`) its subtree still gets every frame request, not just the
+    /// ones it's waiting on (see `held_events`). Signals, timers and actions reach it either way.
     #[live(false)]
     pub background_events: bool,
     #[rust]
     held: Option<Box<HeldEvents>>,
+    /// This view was shown at its last event (see `held_events`).
+    #[rust]
+    was_shown: bool,
     #[live]
     pub cursor: Option<MouseCursor>,
     #[live(false)]
@@ -1696,15 +1697,21 @@ impl Widget for View {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let mut next_frame_id_before = None;
         if !self.visible && !self.background_events {
-            if event.requires_visibility() || self.held.get_or_insert_with(Default::default).hold(event) {
+            if event.requires_visibility() || self.held.get_or_insert_with(Default::default).hold(event, std::mem::take(&mut self.was_shown)) {
                 return;
             }
+            next_frame_id_before = Some(cx.next_frame_id());
         } else if let Some(held) = self.held.as_mut().filter(|held| !held.is_empty()) {
             // Shown again: what it waited for while hidden comes first.
             for held in held.take() {
                 self.handle_event(cx, &held, scope);
             }
+        }
+        self.was_shown = self.visible;
+        if !self.visible && matches!(event, Event::Actions(_)) && !held_events::in_hidden_subtree(cx) {
+            return held_events::handle_in_hidden_subtree(cx, |cx| self.handle_event(cx, event, scope));
         }
 
         let uid = self.widget_uid();
@@ -1893,6 +1900,11 @@ impl Widget for View {
                 }
                 _ => (),
             }
+        }
+
+        // Hidden, it gets the next frame if it asked for one just now.
+        if let (Some(before), Some(held)) = (next_frame_id_before, self.held.as_mut()) {
+            held.note_handled(cx.next_frame_id() != before);
         }
     }
 
