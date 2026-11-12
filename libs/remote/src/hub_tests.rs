@@ -37,7 +37,7 @@ fn ledger_dir(test: &str) -> std::path::PathBuf {
 fn relay_endpoint() -> Endpoint {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    relay::endpoint(relay::Config { name: "d".into(), launch: vec!["/bin/sleep".into()], env: vec![("SANDBOX_MUTE".into(), "1".into())], ledger: ledger_dir(&format!("shared{n}")) })
+    relay::endpoint(relay::Config { name: "d".into(), launch: vec!["sleep".into()], env: vec![("SANDBOX_MUTE".into(), "1".into())], ledger: ledger_dir(&format!("shared{n}")) })
 }
 
 /// A relay on an existing ledger (what a restarted relay does).
@@ -396,7 +396,7 @@ fn the_ledger_lets_a_restarted_relay_kill_and_drops_stale_entries() {
     let dir = ledger_dir("restart");
     // the first relay launches a session, then goes away
     let hub1 = Hub::new(&hosts());
-    let first = link(&hub1, &relay_on(&dir, vec!["/bin/sleep".into()], vec![]));
+    let first = link(&hub1, &relay_on(&dir, vec!["sleep".into()], vec![]));
     let c1 = client(&hub1);
     let ch1 = c1.open("route", "d session").unwrap();
     let pid: u32 = field(&ask(&ch1, "launch 30")[0], "launched").parse().unwrap();
@@ -407,7 +407,7 @@ fn the_ledger_lets_a_restarted_relay_kill_and_drops_stale_entries() {
     std::fs::write(dir.join(format!("{}.json", std::process::id())), format!("{{\"pid\":{},\"start\":1,\"app\":\"x\",\"args\":\"\",\"cwd\":\"\",\"env_keys\":\"\",\"log\":\"/dev/null\"}}", std::process::id())).unwrap();
     // a new relay on the same ledger knows the session
     let hub2 = Hub::new(&hosts());
-    let _second = link(&hub2, &relay_on(&dir, vec!["/bin/sleep".into()], vec![]));
+    let _second = link(&hub2, &relay_on(&dir, vec!["sleep".into()], vec![]));
     let c2 = client(&hub2);
     let ch2 = c2.open("route", "d session").unwrap();
     let listed = ask(&ch2, "launched");
@@ -425,7 +425,7 @@ fn the_ledger_lets_a_restarted_relay_kill_and_drops_stale_entries() {
 fn relaunch_starts_the_same_app_again() {
     let dir = ledger_dir("relaunch");
     let hub = Hub::new(&hosts());
-    let _l = link(&hub, &relay_on(&dir, vec!["/bin/sleep".into()], vec![]));
+    let _l = link(&hub, &relay_on(&dir, vec!["sleep".into()], vec![]));
     let c = client(&hub);
     let ch = c.open("route", "d session").unwrap();
     let old: u32 = field(&ask(&ch, "launch 30")[0], "launched").parse().unwrap();
@@ -447,7 +447,7 @@ fn relaunch_starts_the_same_app_again() {
 fn launches_get_the_relays_env() {
     let dir = ledger_dir("env");
     let hub = Hub::new(&hosts());
-    let _l = link(&hub, &relay_on(&dir, vec!["/usr/bin/env".into()], vec![("T3B_PROBE".into(), "from-hosts-toml".into())]));
+    let _l = link(&hub, &relay_on(&dir, vec!["env".into()], vec![("T3B_PROBE".into(), "from-hosts-toml".into())]));
     let c = client(&hub);
     let ch = c.open("route", "d session").unwrap();
     let l = ask(&ch, "launch printenv T3B_PROBE");
