@@ -220,6 +220,8 @@ use mod.pod.*
         let u = remote.wait();
         seen.extend(u.outputs.iter().map(|o| o.version));
         if !stopped && u.value("done").is_some() {
+            // a value said after a version comes with it or after it, as an in-process session's
+            assert_eq!(seen.iter().max(), Some(&200), "\"done\" came before the version published ahead of it: {seen:?}");
             remote.send("stop", Value::Bool(true));
             stopped = true;
         }
