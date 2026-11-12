@@ -2898,8 +2898,8 @@ impl WindowRef {
     /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
     /// `FullscreenWindow`/`NormalizeWindow` — not handled by every
     /// backend), `maximize`/`restore` push the ops the Windows backend
-    /// actually implements, and `is_fullscreen()` reflects this state
-    /// there too (`window_geom.is_fullscreen` mirrors `get_is_maximized`).
+    /// actually implements. Windows, X11 and Wayland report this state as
+    /// `window_geom.is_maximized`, macOS as `is_fullscreen`.
     pub fn maximize(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.window.handle.maximize(cx);
@@ -2984,8 +2984,7 @@ impl WindowRef {
     }
     /// Configure the window's size, position, title, and whether it starts out big.
     ///
-    /// `fullscreen` is the legacy maximize-or-fullscreen flag that `is_fullscreen()`
-    /// reports back, so saving that value on exit and feeding it in here round-trips.
+    /// `fullscreen` is the legacy maximize-or-fullscreen flag.
     /// x11, Wayland and Win32 all create the window MAXIMIZED for it, keeping the title
     /// bar and chrome buttons; only macOS takes it literally and enters fullscreen,
     /// where AppKit still supplies an auto-hiding menu bar and traffic lights. Nothing
@@ -3476,7 +3475,11 @@ impl Widget for Window {
                 }
                 if clicked(&self.hosted_max) {
                     self.say_caption_click(cx, "maximize");
-                    self.window.handle.maximize(cx);
+                    if self.window.handle.is_fullscreen(cx) || self.window.handle.is_maximized(cx) {
+                        self.window.handle.restore(cx);
+                    } else {
+                        self.window.handle.maximize(cx);
+                    }
                 }
                 if clicked(&self.hosted_close) {
                     self.say_caption_click(cx, "close");
@@ -3502,7 +3505,7 @@ impl Widget for Window {
                 .clicked(&actions)
             {
                 self.say_caption_click(cx, "maximize");
-                if self.window.handle.is_fullscreen(cx) {
+                if self.window.handle.is_fullscreen(cx) || self.window.handle.is_maximized(cx) {
                     self.window.handle.restore(cx);
                 } else {
                     self.window.handle.maximize(cx);
