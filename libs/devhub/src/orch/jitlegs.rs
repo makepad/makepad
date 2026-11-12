@@ -147,8 +147,9 @@ fn run(ctx: &Ctx, r: JitLegsRun) {
         let summary = ctx.store.read(|d| d.jitlegs.runs.last().and_then(|r| r.legs.iter().find(|l| l.name == def.name)).map(|l| l.summary.clone()).unwrap_or_default());
         let name = &def.name;
         match verdict {
-            Verdict::Fail => ctx.store.event("jitlegs", Sev::Err, format!("jitlegs {}: {name} failed: {summary}", r.pair.short()), None),
-            Verdict::Incomplete => ctx.store.event("jitlegs", Sev::Warn, format!("jitlegs {}: {name} incomplete: {summary}", r.pair.short()), None),
+            // the leg's whole output is its log (its failed steps' files beside it, in <leg>.keep), not the lease's
+            Verdict::Fail => ctx.store.event("jitlegs", Sev::Err, format!("jitlegs {}: {name} failed: {summary}; its log: {log}", r.pair.short()), None),
+            Verdict::Incomplete => ctx.store.event("jitlegs", Sev::Warn, format!("jitlegs {}: {name} incomplete: {summary}; its log: {log}", r.pair.short()), None),
             Verdict::Ok => ctx.store.event("jitlegs", Sev::Info, format!("jitlegs {}: {name} ok: {summary}", r.pair.short()), None),
         }
     }
@@ -186,6 +187,10 @@ pub fn render(v: &Value) -> String {
     let mut out = format!("jitlegs {},{} {} wall {}s\n", super::short(&s(pair, "work")), super::short(&s(pair, "main")), if ended == 0 { "running" } else { "ended" }, wall);
     for l in r.get("legs").and_then(|a| a.as_arr()).unwrap_or(&[]) {
         out.push_str(&format!("  {:<9} {:<10} {} {}\n", s(l, "name"), s(l, "state"), s(l, "node"), s(l, "summary")));
+        // a failed leg's output: its log, not the lease's
+        if matches!(s(l, "state").as_str(), "fail" | "incomplete") && !s(l, "log").is_empty() {
+            out.push_str(&format!("            log {}\n", s(l, "log")));
+        }
     }
     out
 }
