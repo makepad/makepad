@@ -1824,11 +1824,26 @@ impl<'a> ScriptVm<'a> {
     /// share one cumulative allowance across several callbacks in a tick.
     #[inline(always)]
     pub fn with_heap_allocation_limit<R>(&mut self, allocation_limit: usize, f: impl FnOnce(&mut Self) -> R) -> (R, ScriptAllocationReport) {
-        self.bx.vm_ctl(&mut ScriptCtlReq::with(CTL_ALLOC_BEGIN, allocation_limit as u64));
+        self.heap_allocation_limit_begin(allocation_limit);
         let result = f(self);
+        (result, self.heap_allocation_limit_end())
+    }
+
+    /// The first half of [`Self::with_heap_allocation_limit`], for a sliced run that pauses between
+    /// frames: the ceiling holds until [`Self::heap_allocation_limit_end`]. Whatever runs in this
+    /// VM meanwhile is charged to it too.
+    #[inline(always)]
+    pub fn heap_allocation_limit_begin(&mut self, allocation_limit: usize) {
+        self.bx.vm_ctl(&mut ScriptCtlReq::with(CTL_ALLOC_BEGIN, allocation_limit as u64));
+    }
+
+    /// The second half of [`Self::with_heap_allocation_limit`]: what the run charged, and whether
+    /// an allocation was refused (recorded as a captured error).
+    #[inline(always)]
+    pub fn heap_allocation_limit_end(&mut self) -> ScriptAllocationReport {
         let mut req = ScriptCtlReq::new(CTL_ALLOC_END);
         let allocated_bytes = self.bx.vm_ctl(&mut req) as usize;
-        (result, ScriptAllocationReport { allocated_bytes, exceeded: req.b != 0 })
+        ScriptAllocationReport { allocated_bytes, exceeded: req.b != 0 }
     }
 
     /// Instructions charged by the most recent `with_instruction_limit` call.
@@ -4215,6 +4230,63 @@ mod tests {
         vm4.declare_lazy_modules("demo", &[id!(demo)], expand_demo);
         assert_eq!(vm4.eval(script! { mod.nothing_here ?? 3 }).as_number(), Some(3.0));
         assert_eq!(vm4.eval(script! { mod.demo.x ?? 3 }).as_number(), Some(5.0), "an optional read expands too");
+    }
+
+    thread_local! {
+        /// The stepped demo's next step, and the step that panics (none: `u32::MAX`).
+        static STEP: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static STEP_PANICS_AT: std::cell::Cell<u32> = const { std::cell::Cell::new(u32::MAX) };
+    }
+
+    /// Three steps: `mod.stepped` in the first, a field of it in the second, `mod.stepped_late`
+    /// in the last. The owner of a stepped group keeps its own cursor (here `STEP`).
+    unsafe extern "C-unwind" fn step_demo(vm: *mut ScriptVm) -> bool {
+        let vm = &mut *vm;
+        let step = STEP.get();
+        if step == STEP_PANICS_AT.get() {
+            STEP_PANICS_AT.set(u32::MAX);
+            panic!("step {step} of the stepped demo fails");
+        }
+        match step {
+            0 => vm.eval(script! { mod.stepped = {a: 1} true }),
+            1 => vm.eval(script! { mod.stepped.b = 2 true }),
+            _ => vm.eval(script! { mod.stepped_late = {c: 3} true }),
+        };
+        STEP.set(step + 1);
+        step + 1 < 3
+    }
+
+    /// A stepped lazy group: `step_lazy_key` runs exactly one step and the group stays pending
+    /// until its last; a miss on a key not built yet runs the rest at once; a step that panics
+    /// leaves the group pending, for its owner to run again from the start.
+    #[test]
+    fn a_stepped_lazy_group_runs_a_step_per_call_and_a_miss_runs_the_rest() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        STEP.set(0);
+        vm.declare_lazy_modules_stepped("stepped", &[id!(stepped), id!(stepped_late)], step_demo);
+        assert!(vm.step_lazy_key(id!(stepped)), "steps remain after the first");
+        assert_eq!(STEP.get(), 1, "one step per call");
+        assert!(vm.has_lazy_modules(), "pending until its last step");
+        assert!(vm.step_lazy_key(id!(stepped)));
+        assert_eq!(STEP.get(), 2, "one step per call");
+        assert_eq!(vm.eval(script! { mod.stepped_late.c }).as_number(), Some(3.0), "a miss runs the rest");
+        assert_eq!(STEP.get(), 3, "the rest ran once");
+        assert!(!vm.has_lazy_modules(), "done");
+        assert!(!vm.step_lazy_key(id!(stepped)), "nothing left to step");
+        assert_eq!(vm.eval(script! { mod.stepped.a + mod.stepped.b }).as_number(), Some(3.0));
+
+        let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
+        STEP.set(0);
+        STEP_PANICS_AT.set(1);
+        vm.declare_lazy_modules_stepped("stepped", &[id!(stepped), id!(stepped_late)], step_demo);
+        assert!(vm.step_lazy_key(id!(stepped)));
+        let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.step_lazy_key(id!(stepped))));
+        assert!(failed.is_err(), "the second step panicked");
+        assert!(vm.has_lazy_modules(), "a failed step leaves the group pending");
+        STEP.set(0);
+        assert_eq!(vm.eval(script! { mod.stepped_late.c }).as_number(), Some(3.0), "the retry runs it all");
+        assert!(!vm.has_lazy_modules());
     }
 
     unsafe extern "C-unwind" fn expand_capturing(vm: *mut ScriptVm) {

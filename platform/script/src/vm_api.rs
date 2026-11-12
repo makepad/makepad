@@ -428,6 +428,8 @@ impl ScriptVm<'_> {
     /// Whether the current thread's run stopped at a sliced run's soft deadline
     /// ([`ScriptRunBudget::slice`]): it is paused between two instructions, the entry that ran
     /// it returned nil, and [`ScriptVm::resume`] continues it (and finishes that entry's work).
+    /// `resume` runs the current thread: a later entry to the VM selects an unpaused one, so a
+    /// caller keeps this thread's index ([`ScriptVm::current_thread`]) and selects it first.
     #[inline(always)]
     pub fn run_yielded(&self) -> bool {
         self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_RUN_YIELDED)) != 0
