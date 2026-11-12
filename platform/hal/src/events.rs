@@ -225,9 +225,9 @@ hal_events! {
     /// the reserve (plus the failed allocation); 0 = the shortage is over. Sent to every
     /// session; the one owning the desktop asks other GPU users (the AI hub) for room.
     GpuPressure = 67, gpu_pressure { wanted_mb: u32, free_mb: u32, budget_mb: u32, reserve_mb: u32, failed: bool };
-    /// Announced immediately BEFORE a result whose size the client could not predict.
-    /// Grow the next pump's arena to at least `bytes`. The queue never drains an oversized
-    /// payload after another event in the same pump, so the announcement arrives first.
+    /// Announced alone in a pump BEFORE an event whose payload is larger than the caller's event
+    /// arena; the queue holds that event. Grow the next pump's arena to at least `bytes`: a pump
+    /// with the same arena gets it without its payload (a readback fails, `readback::TOO_LARGE`).
     PayloadSize = 65, payload_size { bytes: u32 };
 
     // ---- embedded windows and domains (to a parent session)

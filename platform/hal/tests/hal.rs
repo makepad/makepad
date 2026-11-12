@@ -86,6 +86,45 @@ fn small_event_buffer_delivers_in_order_without_loss() {
     assert!(seen[9].contains(&format!("{:?}", b"event number 9".as_slice())));
 }
 
+/// A payload larger than the caller's event arena is announced (`PayloadSize`) and held: a
+/// caller that grows gets it whole on the next pump; one that pumps again with the same arena
+/// gets a failed readback or a cut event, never a silent cut and never a stuck queue.
+#[test]
+fn a_payload_larger_than_the_event_arena_is_announced_and_held() {
+    let window = Id::new(1, 1);
+    let mut q = EventQueue::new();
+    let pixels = vec![9u8; 64 * 64 * 4];
+    for req in [1, 2] {
+        q.readback(req, readback::OK, [0, 0, 64, 64], &pixels);
+        q.text(window, input::text::TYPED, b"after");
+    }
+    q.text(window, input::text::TYPED, &[7u8; 8192]);
+    let pump = |q: &mut EventQueue, store: &mut EventStore| -> Vec<String> {
+        let mut buf = store.buf();
+        let n = q.drain_into(&mut buf);
+        store.reader(n, buf.arena_len).map(|(_, e)| match e {
+            HalEvent::PayloadSize { bytes } => format!("size {bytes}"),
+            HalEvent::Readback { req, status, rect, pixels: p } =>
+                format!("readback {req} status {status} {rect:?} {} bytes{}", p.len(), if p.iter().all(|&b| b == 9) { "" } else { " WRONG" }),
+            HalEvent::Text { text, .. } => format!("text {} bytes", text.len()),
+            e => format!("{e:?}"),
+        }).collect()
+    };
+    let rect = [0, 0, 64, 64];
+    let mut store = EventStore::new(1, 8, 4096);
+    assert_eq!(pump(&mut q, &mut store), ["size 16384"], "announced alone, held");
+    let mut grown = EventStore::new(1, 8, 16384);
+    assert_eq!(pump(&mut q, &mut grown), [format!("readback 1 status {} {rect:?} 16384 bytes", readback::OK)], "whole from the grown arena");
+    assert_eq!(pump(&mut q, &mut grown), ["text 5 bytes"]);
+    assert_eq!(pump(&mut q, &mut store), ["size 16384"], "the next one is announced too");
+    assert_eq!(pump(&mut q, &mut store), [format!("readback 2 status {} {rect:?} 0 bytes", readback::TOO_LARGE), "text 5 bytes".into()],
+        "an arena that did not grow: the readback fails, the queue goes on");
+    assert_eq!(pump(&mut q, &mut store), ["size 8192"]);
+    assert_eq!(pump(&mut q, &mut store), ["text 4096 bytes"], "another event is cut to the arena");
+    assert!(q.is_empty());
+    assert_eq!(q.truncated, 2);
+}
+
 #[test]
 fn arrays_and_blobs_round_trip() {
     let mut w = CmdWriter::new(1);

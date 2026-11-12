@@ -1030,6 +1030,9 @@ pub mod readback {
     /// A pick replay skipped a pending pipeline or sampled an incomplete pick target. Retry it.
     pub const INCOMPLETE: u32 = 5;
     pub const DEVICE_LOST: u32 = 6;
+    /// The pixels were larger than the caller's event arena, and the caller pumped again without
+    /// growing it after the `PayloadSize` that announced them: `pixels` is empty.
+    pub const TOO_LARGE: u32 = 7;
 }
 
 /// One element of `DragStart` / `DragMove` item arrays.

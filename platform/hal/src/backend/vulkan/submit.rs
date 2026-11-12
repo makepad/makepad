@@ -9,8 +9,8 @@ use crate::font::FrameProgress;
 use crate::types::*;
 use makepad_vulkan::vk;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone)]
 pub(super) struct Token { pub sid: u32, pub incarnation: Arc<FrameProgress> }
@@ -125,6 +125,11 @@ pub(super) struct Spare {
     /// the larger, so steady beats reuse every slot and a burst's extra slots go two sweeps on
     peak: AtomicUsize,
     last_peak: AtomicUsize,
+    /// an arena is being made ahead (`make_ahead`)
+    ahead: AtomicBool,
+    /// the thread that makes arenas ahead, started with the first one (`None`: it could not start,
+    /// submits make their arenas)
+    maker: OnceLock<Option<Worker>>,
 }
 pub(super) type Spares = Arc<Spare>;
 
@@ -181,12 +186,34 @@ impl Spare {
         let released = lock(&self.arenas).release_all();
         drop(released);
     }
+
+    /// Makes a free arena of `size` on the arena thread, unless one is already on its way: the
+    /// batch that took the pool's last arena of a size leaves the next one to that thread instead
+    /// of to a later submit (making an 8 MiB arena took 1.4 ms on NVIDIA, a 32 MiB one 5.3 ms).
+    fn make_ahead(self: &Arc<Self>, dev: &Arc<Device>, size: u64) {
+        if self.ahead.swap(true, Ordering::AcqRel) { return; }
+        let maker = self.maker.get_or_init(|| Worker::new("makepad-vulkan-arenas")
+            .map_err(|e| eprintln!("[hal-vulkan] no arena thread ({e}): submits make their upload arenas")).ok());
+        // without the thread `ahead` stays set: nothing is made ahead
+        let Some(maker) = maker else { return };
+        let (spare, dev) = (self.clone(), dev.clone());
+        maker.push(move || {
+            // out of memory: no spare (a submit that needs one asks for room)
+            if let Ok(arena) = Buffer::scratch(dev, crate::ledger::Pool::UploadArena, size, buffer_usage()) {
+                crate::profile::count("upload arena made ahead");
+                let released = lock(&spare.arenas).give(std::iter::once(arena));
+                drop(released);
+            }
+            spare.ahead.store(false, Ordering::Release);
+        });
+    }
 }
 
 /// The smallest upload arena; arenas grow by powers of two up to `ARENA_MAX`.
 const ARENA_MIN: u64 = 256 * 1024;
 /// The largest arena a batch asks for: a frame with more upload bytes spreads them over several
-/// arenas. Only a single upload larger than this gets an arena of its own size.
+/// arenas, and so does a texture region (`put_rows`). Only an upload that stays whole (inline
+/// instances, a single texture row) and is larger than this gets an arena of its own size.
 const ARENA_MAX: u64 = 8 << 20;
 /// Free arena bytes kept for the next batches; beyond it the largest free arenas are released.
 const ARENA_KEEP: u64 = 64 << 20;
@@ -212,6 +239,17 @@ struct Arenas {
 }
 
 impl Arenas {
+    /// A batch took an arena within `ARENA_IDLE`: the uploads are going on (a batch that finds no
+    /// arena now is growing the pool, not waking an idle app).
+    fn in_use(&self) -> bool {
+        self.lent.is_some_and(|lent| crate::clock_ns().saturating_sub(lent) <= ARENA_IDLE.as_nanos() as u64)
+    }
+
+    /// A free arena of at least `want` bytes.
+    fn holds(&self, want: u64) -> bool {
+        self.free.iter().any(|(arena, _)| arena.size >= want)
+    }
+
     /// The smallest free arena of at least `want` bytes, else the largest that holds `len`.
     fn take(&mut self, want: u64, len: u64) -> Option<Arc<Buffer>> {
         self.lent = Some(crate::clock_ns());
@@ -303,6 +341,9 @@ pub(super) struct Batch {
     reserve: u64,
     /// arenas this batch had to allocate (none in steady frames): the frame stats' `arena_allocs`
     pub allocs: u64,
+    /// arenas this batch made while the pool was in use (no spare was ready), their bytes and the
+    /// time it took: said once at `finish`
+    grew: (u64, u64, u64),
     /// The uniform blocks this pass already uploaded, per binding role (`put_block`).
     blocks: [(usize, usize, Placed); 8],
     /// The pick block this pass uploaded last (`put_pick`).
@@ -374,7 +415,7 @@ impl Batch {
         let mut b = Self { dev, spares: spares.clone(), reusable: false, pool: vk::CommandPool::null(), cb: vk::CommandBuffer::null(), fence: vk::Fence::null(),
             query: (vk::QueryPool::null(), 0), idle_query: (vk::QueryPool::null(), 0), prof: None, prof_key: None, dispatch_query: 2, dispatch_times: Vec::new(),
             images: Vec::new(), buffers: Vec::new(), pipelines: Vec::new(), compute_pipelines: Vec::new(), compute_descriptors: Vec::new(), passes: Vec::new(), framebuffers: Vec::new(),
-            generations: Vec::new(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0,
+            generations: Vec::new(), tickets: Vec::new(), scanout: None, present: None, tap: None, arena: None, arenas: Vec::new(), reserve, allocs: 0, grew: (0, 0, 0),
             #[cfg(target_os = "android")] native_frame: None,
             #[cfg(target_os = "android")] native_signal: None,
             blocks: [(0, 0, Placed::NONE); 8], pick_block: None, finished_ns: 0,
@@ -449,9 +490,13 @@ impl Batch {
         let _ = image;
     }
 
+    /// Sixteen also satisfies the byte alignment of HAL's largest texel/compression block.
+    fn align(&self) -> u64 {
+        self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16)
+    }
+
     pub fn put(&mut self, bytes: &[u8]) -> Result<Placed, String> {
-        // Sixteen also satisfies the byte alignment of HAL's largest texel/compression block.
-        let align = self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16);
+        let align = self.align();
         let len = bytes.len().max(16) as u64;
         let step = len.div_ceil(align) * align;
         // the arena being filled, when it has room (the usual upload: a draw's uniform block)
@@ -465,14 +510,61 @@ impl Batch {
             }
         }
         // the rest of the frame's uploads in one arena when it fits under ARENA_MAX
-        let want = arena_size(self.reserve.min(ARENA_MAX).max(len));
-        let reused = lock(&self.spares.arenas).take(want, len);
+        let arena = self.next_arena(arena_size(self.reserve.min(ARENA_MAX).max(len)), len)?;
+        arena.write_unflushed(0, bytes)?;
+        let placed = Placed { buffer: arena.buffer, size: arena.size, serial: arena.serial, at: 0 };
+        self.arena = Some((arena, len));
+        self.reserve = self.reserve.saturating_sub(step);
+        Ok(placed)
+    }
+
+    /// Places an upload of whole rows of `row` bytes (a texture region's texels) over as many
+    /// arenas as it takes and calls `piece(placed, first_row, rows)` for each part: the room left
+    /// in the arena being filled, then free arenas, then new ones. A region larger than an arena
+    /// so spreads over the pool's arenas like the frame's other uploads, and only a single row
+    /// larger than ARENA_MAX gets an arena of its own size (a 32 MiB texture made one at its
+    /// submit: 5.3 ms of the frame).
+    pub fn put_rows(&mut self, bytes: &[u8], row: u64, mut piece: impl FnMut(Placed, u64, u64)) -> Result<(), String> {
+        let align = self.align();
+        let total = bytes.len() as u64 / row;
+        let mut first = 0;
+        while first < total {
+            if let Some((arena, used)) = self.arena.as_mut() {
+                let at = used.div_ceil(align) * align;
+                let rows = (arena.size.saturating_sub(at) / row).min(total - first);
+                if rows > 0 {
+                    arena.write_unflushed(at, &bytes[(first * row) as usize..((first + rows) * row) as usize])?;
+                    *used = at + rows * row;
+                    piece(Placed { buffer: arena.buffer, size: arena.size, serial: arena.serial, at }, first, rows);
+                    first += rows;
+                    continue;
+                }
+            }
+            let left = (total - first) * row;
+            let arena = self.next_arena(arena_size(self.reserve.max(left).min(ARENA_MAX).max(row)), row)?;
+            self.arena = Some((arena, 0));
+        }
+        Ok(())
+    }
+
+    /// The batch's next arena: a free one of at least `want` bytes (else the largest that holds
+    /// `len`), or a new one of `want`. Taking the pool's last arena of that size has the next one
+    /// made ahead on the arena thread; a submit that finds none while the uploads go on makes it
+    /// here and says so at `finish`.
+    fn next_arena(&mut self, want: u64, len: u64) -> Result<Arc<Buffer>, String> {
+        let (reused, in_use, short) = {
+            let mut arenas = lock(&self.spares.arenas);
+            let in_use = arenas.in_use();
+            let reused = arenas.take(want, len);
+            (reused, in_use, !arenas.holds(want))
+        };
         let arena = match reused {
             Some(b) => b,
             None => {
                 self.allocs += 1;
                 crate::profile::count("upload arena allocs");
-                match Buffer::scratch(self.dev.clone(), crate::ledger::Pool::UploadArena, want, buffer_usage()) {
+                let made_at = std::time::Instant::now();
+                let made = match Buffer::scratch(self.dev.clone(), crate::ledger::Pool::UploadArena, want, buffer_usage()) {
                     Ok(b) => b,
                     // out of memory: the pool's free arenas go first (and the host is
                     // asked for room), then one more try
@@ -483,15 +575,14 @@ impl Batch {
                         Buffer::scratch(self.dev.clone(), crate::ledger::Pool::UploadArena, want, buffer_usage())?
                     }
                     Err(e) => return Err(e),
-                }
+                };
+                if in_use { self.grew = (self.grew.0 + 1, self.grew.1 + want, self.grew.2 + made_at.elapsed().as_nanos() as u64); }
+                made
             }
         };
-        arena.write_unflushed(0, bytes)?;
-        let placed = Placed { buffer: arena.buffer, size: arena.size, serial: arena.serial, at: 0 };
+        if short { self.spares.make_ahead(&self.dev, want); }
         self.arenas.push(arena.clone());
-        self.arena = Some((arena, len));
-        self.reserve = self.reserve.saturating_sub(step);
-        Ok(placed)
+        Ok(arena)
     }
 
     /// Upload a uniform block for the binding role `which`, unless this pass's previous upload
@@ -525,6 +616,10 @@ impl Batch {
 
     pub fn finish(mut self, submit: &Worker, complete: Arc<Worker>, mailbox: Mailbox) {
         if crate::profile::on() { self.finished_ns = crate::clock_ns(); }
+        if self.grew.0 > 0 {
+            eprintln!("[hal-vulkan] upload arenas: no spare was ready, a submit made {} ({} KB) in {:.2} ms",
+                self.grew.0, self.grew.1 >> 10, self.grew.2 as f64 / 1e6);
+        }
         let later = submit.later();
         #[cfg(target_os = "linux")]
         let mut published: Vec<(Arc<super::share::sync::Timeline>, u64)> = Vec::new();

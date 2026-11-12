@@ -50,14 +50,18 @@ fn until(hal: &Hal, sid: u32, mut accept: impl FnMut(HalEvent<'_>) -> bool) {
         assert!(Instant::now() < deadline, "Vulkan event deadline");
         let mut buf = store.buf();
         let n = hal.pump(10_000_000, &mut buf);
+        let mut grow = None;
         for (_, event) in store.reader(n, buf.arena_len) {
             match event {
                 HalEvent::PipelineFailed { log, .. } => panic!("pipeline: {}", String::from_utf8_lossy(log)),
                 HalEvent::DeviceLost { .. } => panic!("Vulkan device lost"),
+                // a payload larger than the arena comes next: grow it, as the platform does
+                HalEvent::PayloadSize { bytes } => grow = Some(bytes as usize),
                 _ => {}
             }
             if accept(event) { return; }
         }
+        if let Some(bytes) = grow { store = EventStore::new(sid, 64, bytes); }
     }
 }
 
@@ -635,6 +639,41 @@ fn a_frame_larger_than_the_arena_pool_still_uploads() {
     assert!(hal.close(sid));
 }
 
+/// A texture upload larger than an arena spreads over the arenas the pool holds instead of
+/// making one of its own size at its submit (a 32 MiB texture's took 5.3 ms of the frame), and
+/// every row lands in its place.
+#[test]
+fn an_upload_larger_than_an_arena_uses_the_pools_arenas() {
+    let (hal, info) = open();
+    let sid = info.session;
+    resources(&hal, sid);
+    let size = [2048, 1536]; // 12 MiB: more than the largest arena a batch asks for
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(UPLOAD, usage::SAMPLED, format::RGBA8, size[0], size[1], [1, 1], Attr::default());
+    hal.submit(&w.buf());
+    let (first, _) = rendered(&hal, sid, TEX, target::TEXTURE, [32, 32], 1);
+    // frames of four 4 MiB uploads leave 4 MiB arenas in the pool
+    let band = [size[0], 512];
+    for f in first + 1..first + 4 { upload_frame(&hal, sid, f, band, &(0..4).map(|i| rows(band, f * 4 + i)).collect::<Vec<_>>()); }
+    let warm = arena_allocs(&hal, sid);
+    let big = rows(size, 7);
+    upload_frame(&hal, sid, first + 4, size, std::slice::from_ref(&big));
+    let allocs = arena_allocs(&hal, sid);
+    // a 16 pixel wide column of every row (96 KiB: more than the 64 KiB event arena `until`
+    // starts with)
+    let mut w = CmdWriter::new(sid);
+    w.texture_readback(UPLOAD, 10, [0, 0, 16, size[1]]);
+    hal.submit(&w.buf());
+    let got = pixels(&hal, sid, 10);
+    assert_eq!(got.len(), size[1] as usize * 64, "the readback's size");
+    let row = size[0] as usize * 4;
+    let wrong = (0..size[1] as usize).find(|&y| got[y * 64..][..64] != big[y * row..][..64]);
+    assert!(wrong.is_none(), "row {wrong:?} of the large upload is not where it belongs (it reads {:?}, wants {:?})",
+        wrong.map(|y| got[y * 64]), wrong.map(|y| big[y * row]));
+    assert_eq!(allocs, warm, "the large upload made an arena at its submit");
+    assert!(hal.close(sid));
+}
+
 #[test]
 fn a_child_frame_wakes_the_parent_at_its_completion_without_the_child_pumping() {
     // the WM pumps; the child presents an embedded window frame and then does not pump (it is
@@ -780,6 +819,37 @@ fn a_pass_a_pixel_larger_than_its_target_still_draws() {
     // the clear in the top corners, the triangle's base along the bottom
     for x in [0, 31] { assert_eq!(&image[x * 4..][..4], &[17, 34, 51, 255]); }
     for x in [6, 16, 26] { assert_eq!(&image[(29 * 32 + x) * 4..][..4], &[255; 4], "x {x}"); }
+    assert!(hal.close(sid));
+}
+
+/// A pass into a texture of its own keeps its viewport's size in a window's frame: a blur at
+/// half the window's size (the run loader's veil) was sized as the window and drawn clipped to
+/// its half-size target.
+#[test]
+fn a_texture_pass_in_a_window_frame_keeps_its_own_size() {
+    let (hal, info) = open();
+    let sid = info.session;
+    resources(&hal, sid);
+    let half = Id::new(110, 1);
+    let mut w = CmdWriter::new(sid);
+    w.window_create(WINDOW, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 32.0, 32.0], false);
+    w.texture_create(half, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 16, [1, 1], Attr::default());
+    hal.submit(&w.buf());
+    let stats = |hal: &Hal| hal.with_world(|w| w.session(sid).unwrap().stats);
+    let before = stats(&hal);
+    let mut w = CmdWriter::new(sid);
+    w.frame_begin(1, FrameMeta::default());
+    w.pass(pass(half, 16, 16, [0.0; 4]));
+    w.draw(draw());
+    w.pass(pass(Id::NONE, 32, 32, [0.0, 0.0, 0.0, 1.0]));
+    w.draw(draw());
+    w.frame_end(WINDOW, target::WINDOW);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, 1);
+    let after = stats(&hal);
+    assert_eq!(after.bad_args, 0);
+    assert_eq!(after.passes - before.passes, 2, "both passes ran");
+    assert_eq!(after.clamped_passes, before.clamped_passes, "the half-size pass was sized as the window");
     assert!(hal.close(sid));
 }
 

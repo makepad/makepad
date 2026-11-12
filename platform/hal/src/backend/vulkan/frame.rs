@@ -694,7 +694,11 @@ impl Vulkan {
         let views = pass_views(pass);
         if views > 1 && (!self.dev.multiview || pick) { return Err("a multiview pass on a device without multiview (or a pick pass)".into()); }
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
-        if is_window { size = [size[0].max(frame_size[0]), size[1].max(frame_size[1])]; }
+        // A pass into the window image (no colour target of its own) is the frame's size: that image
+        // holds every such pass of the frame. A pass into its own textures keeps its viewport's size
+        // (a blur at half and a quarter of the window, the run loader's veil, was sized as the window
+        // and drawn clipped to its targets).
+        if is_window && pass.color.iter().all(|c| c.is_none()) { size = [size[0].max(frame_size[0]), size[1].max(frame_size[1])]; }
         // a badge layer is drawn over what the window has (a resize may be landing)
         if let Some(c) = self.compose.as_ref().filter(|_| is_window) { size = [size[0].min(c.desc.w), size[1].min(c.desc.h)]; }
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();

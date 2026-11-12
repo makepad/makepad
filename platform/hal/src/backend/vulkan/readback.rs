@@ -23,6 +23,19 @@ fn region(mip: u32, layer: u32, rect: [u32; 4], aspect: vk::ImageAspectFlags) ->
         .image_extent(vk::Extent3D { width: rect[2], height: rect[3], depth: 1 })
 }
 
+/// Copies `bytes` (the texels of `rect` of a mip and layer, in rows of `tall` texel rows) into
+/// `image` from the batch's upload arenas: a region larger than an arena spreads over several
+/// (`Batch::put_rows`), one copy per part.
+fn copy_rows(batch: &mut Batch, image: &Image, (mip, layer): (u32, u32), rect: [u32; 4], aspect: vk::ImageAspectFlags, bytes: &[u8], tall: u32) -> Result<(), String> {
+    let rows = rect[3].div_ceil(tall) as u64;
+    let (dev, cb) = (batch.dev.clone(), batch.cb);
+    batch.put_rows(bytes, bytes.len() as u64 / rows, |staging, first, n| {
+        let y = first as u32 * tall;
+        let r = region(mip, layer, [rect[0], rect[1] + y, rect[2], (n as u32 * tall).min(rect[3] - y)], aspect).buffer_offset(staging.at);
+        unsafe { dev.raw.cmd_copy_buffer_to_image(cb, staging.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[r]); }
+    })
+}
+
 fn valid_rect(image: &Image, mip: u32, rect: [u32; 4]) -> bool {
     if !image.supports_transfer() || mip >= image.desc.mips { return false; }
     let [x, y, w, h] = rect;
@@ -47,15 +60,11 @@ impl Vulkan {
             copies.push((vk::ImageAspectFlags::STENCIL, data.chunks_exact(4).map(|p| p[3]).collect()));
         }
         if copies.is_empty() {
-            let staging = batch.put(data)?;
-            let r = region(mip as u32, layer, rect, image.aspect).buffer_offset(staging.at);
-            unsafe { batch.dev.raw.cmd_copy_buffer_to_image(batch.cb, staging.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[r]); }
+            // a row is one texel row, or one row of 4x4 blocks; NV12's two planes go whole
+            let tall = match image.desc.format { f if format::is_block(f) => 4, format::NV12 => rect[3], _ => 1 };
+            copy_rows(batch, &image, (mip as u32, layer), rect, image.aspect, data, tall)?;
         } else {
-            for (aspect, bytes) in copies {
-                let staging = batch.put(&bytes)?;
-                let r = region(mip as u32, layer, rect, aspect).buffer_offset(staging.at);
-                unsafe { batch.dev.raw.cmd_copy_buffer_to_image(batch.cb, staging.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[r]); }
-            }
+            for (aspect, bytes) in copies { copy_rows(batch, &image, (mip as u32, layer), rect, aspect, &bytes, 1)?; }
         }
         image.transition(batch.cb, image.sampled_layout());
         s.stats.arena_allocs += batch.allocs - allocs;
