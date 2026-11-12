@@ -5,7 +5,7 @@
 pub use makepad_widgets;
 
 use makepad_code_editor::{code_view::CodeView, text::Position};
-use makepad_widgets::*;
+use makepad_widgets::{reorder_list::ReorderList, *};
 
 app_main!(App);
 
@@ -17,6 +17,7 @@ const STRIP_ROW: usize = 9;
 /// A code block, a row, then another strip, far enough down to start out of view.
 const CODE_ROW: usize = 20;
 const FAR_STRIP_ROW: usize = 22;
+const REORDER_ROWS: usize = 6;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -34,6 +35,42 @@ script_mod! {
                 width: Fill
                 height: 30
                 title := Label{text: ""}
+            }
+        }
+    }
+
+    // A list whose rows move by a drag on their grip.
+    mod.widgets.ReorderRowsBase = #(ReorderRows::register_widget(vm))
+    mod.widgets.ReorderRows = set_type_default() do mod.widgets.ReorderRowsBase{
+        width: Fill
+        height: Fit
+        reorder := ReorderList{
+            width: Fill
+            height: 120
+            drag_handle: @grip
+            Row := View{
+                width: Fill
+                height: 30
+                flow: Right
+                grip := View{
+                    width: 60
+                    height: Fill
+                    grip_label := Label{text: ""}
+                }
+                title := Label{text: "Row"}
+            }
+        }
+    }
+
+    // A list whose text a mouse drag selects.
+    mod.widgets.SelectRows = mod.widgets.RowList{
+        height: 90
+        row_count: 10
+        row_prefix: "Sel"
+        list +: {
+            selectable: true
+            Row +: {
+                title +: {selectable: true}
             }
         }
     }
@@ -266,6 +303,21 @@ script_mod! {
                                                     Label{width: 150 text: "Swipe 5"}
                                                 }
                                                 Label{text: "BelowSwipeStrip"}
+                                                // A page holding controls that give a drag their own meaning.
+                                                drag_page := ScrollYView{
+                                                    width: Fill
+                                                    height: 260
+                                                    flow: Down
+                                                    drag_top := Label{height: 30 text: "DragTop"}
+                                                    reorder_rows := mod.widgets.ReorderRows{}
+                                                    select_rows := mod.widgets.SelectRows{}
+                                                    Label{height: 30 text: "Drag 1"}
+                                                    Label{height: 30 text: "Drag 2"}
+                                                    Label{height: 30 text: "Drag 3"}
+                                                    Label{height: 30 text: "Drag 4"}
+                                                    Label{height: 30 text: "Drag 5"}
+                                                    Label{height: 30 text: "Drag 6"}
+                                                }
                                             }
                                         }
                                     }
@@ -474,6 +526,54 @@ impl Widget for NestedLists {
     }
 }
 
+/// Rows that a drag on their grip moves: each grip names its row (`Grip 2`) wherever it is.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ReorderRows {
+    #[deref]
+    view: View,
+    #[rust]
+    order: Vec<usize>,
+    #[rust]
+    reorders: usize,
+}
+
+impl ReorderRows {
+    fn apply(&mut self, from: usize, to: usize) {
+        if from < self.order.len() {
+            let row = self.order.remove(from);
+            self.order.insert(to.min(self.order.len()), row);
+            self.reorders += 1;
+        }
+    }
+}
+
+impl Widget for ReorderRows {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.order.is_empty() {
+            self.order = (0..REORDER_ROWS).collect();
+        }
+        while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
+            let Some(mut list) = item.borrow_mut::<ReorderList>() else {
+                continue;
+            };
+            list.set_item_range(cx, 0, self.order.len());
+            while let Some(index) = list.next_visible_item(cx) {
+                let Some(&row) = self.order.get(index) else {
+                    continue;
+                };
+                let item = list.item(cx, index, id!(Row));
+                item.label(cx, ids!(grip_label)).set_text(cx, &format!("Grip {row}"));
+                item.draw_all(cx, &mut Scope::empty());
+            }
+        }
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        self.view.handle_event(cx, event, scope);
+    }
+}
+
 /// `child`'s offset from the top-left of `parent`, which shrinks as `parent` scrolls.
 fn offset(cx: &mut Cx, parent: &WidgetRef, child: &WidgetRef) -> Vec2d {
     child.area().rect(cx).pos - parent.area().rect(cx).pos
@@ -555,6 +655,10 @@ impl App {
         };
         let tap_page = ui.widget(cx, ids!(tap_page));
         let tap_page_y = -offset(cx, &tap_page, &ui.widget(cx, ids!(tap_top))).y;
+        let drag_page = ui.widget(cx, ids!(drag_page));
+        let drag_page_y = -offset(cx, &drag_page, &ui.widget(cx, ids!(drag_top))).y;
+        let reorders = ui.widget(cx, ids!(reorder_rows)).borrow::<ReorderRows>().map_or(0, |rows| rows.reorders);
+        let selected = ui.widget(cx, ids!(select_rows.list)).borrow::<PortalList>().map_or(0, |list| list.get_selected_text().len());
         format!(
             "page={page_y:.0} log={log:.0} short={short:.0} inner={inner_y:.0} carousel={carousel_x:.0} \
              outer={outer:.0} nested={nested:.0} nested_short={nested_short:.0} strip={strip_x:.0} \
@@ -562,7 +666,8 @@ impl App {
              swipe={swipe_x:.0} stack_depth={stack_depth} panel={panel:.0} panel_list={panel_list:.0} \
              modal={modal_y:.0} modal_list={modal_list:.0} code_page={code_page_y:.0} \
              code_x={code_view_x:.0} code_sel={code_sel} code_clicks={} \
-             tap_page={tap_page_y:.0} tap_clicks={} tap_row_taps={}",
+             tap_page={tap_page_y:.0} tap_clicks={} tap_row_taps={} \
+             drag_page={drag_page_y:.0} reorders={reorders} selected={selected}",
             self.code_clicks,
             self.tap_clicks,
             self.tap_row_taps,
@@ -603,6 +708,14 @@ impl MatchEvent for App {
         }
         if self.ui.view(cx, ids!(tap_row)).finger_up(actions).is_some_and(|fe| fe.is_over && fe.was_tap()) {
             self.tap_row_taps += 1;
+        }
+        let reordered = self.ui.reorder_list(cx, ids!(reorder_rows.reorder)).borrow().and_then(|list| list.reordered(actions));
+        if let Some((from, to)) = reordered {
+            let rows = self.ui.widget(cx, ids!(reorder_rows));
+            if let Some(mut rows) = rows.borrow_mut::<ReorderRows>() {
+                rows.apply(from, to);
+            }
+            rows.redraw(cx);
         }
     }
 }

@@ -614,6 +614,23 @@ fn mouse_dragging_from_a_button_scrolls_its_page_and_never_clicks_it(app: TestAp
     assert!(page_after >= page + 40.0, "the page followed the mouse ({page} -> {page_after})");
 }
 
+/// A mouse drag a control gives a meaning of its own stays the control's: one on a reorder list's
+/// grip carries the row, one over a selectable list's text selects it, and the page around them
+/// takes neither over, as it would a drag that starts on a button.
+#[makepad_test]
+fn a_mouse_drag_on_a_grip_or_selectable_text_never_scrolls_its_page(app: TestApp) {
+    let [page, reorders] = offsets(&app, ["drag_page", "reorders"]);
+    app.locator(Selector::all().text_exact("Grip 3")).drag_by_and_hold(0.0, -70.0);
+    let [page_after, reorders_after] = offsets(&app, ["drag_page", "reorders"]);
+    assert_eq!(reorders_after, reorders + 1.0, "the drag on the grip moved its row");
+    assert_eq!(page_after, page, "the drag on the grip left the page alone");
+
+    app.locator(Selector::all().text_exact("Sel 1")).drag_by_and_hold(0.0, -40.0);
+    let [page_after, selected] = offsets(&app, ["drag_page", "selected"]);
+    assert!(selected > 0.0, "the drag over the list's text selected some of it");
+    assert_eq!(page_after, page, "the selecting drag left the page alone");
+}
+
 #[makepad_test]
 fn a_scroll_view_never_joins_a_drag_on_a_scroller_drawn_over_it(app: TestApp) {
     open_code_modal(&app);
