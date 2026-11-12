@@ -347,6 +347,7 @@ impl Pipeline {
                         },
                         compare: sampler.compare,
                         pixel: sampler.coord == SamplerCoord::Pixel,
+                        anisotropy: sampler.anisotropy as u32,
                     })
                     .collect(),
             }
@@ -373,6 +374,7 @@ impl Pipeline {
                         },
                         compare: sampler.compare,
                         pixel: false,
+                        anisotropy: sampler.anisotropy as u32,
                     })
                     .collect(),
             }
@@ -422,6 +424,7 @@ impl Pipeline {
                             address: 1,
                             compare: false,
                             pixel: false,
+                            anisotropy: 1,
                         },
                         |sampler| makepad_hal::spirv::SpirvSampler {
                             filter: match sampler.filter {
@@ -436,6 +439,7 @@ impl Pipeline {
                             },
                             compare: sampler.compare,
                             pixel: sampler.coord == SamplerCoord::Pixel,
+                            anisotropy: sampler.anisotropy as u32,
                         },
                     ),
                 })

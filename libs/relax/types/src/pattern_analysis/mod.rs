@@ -1308,7 +1308,7 @@ impl<'a> Checker<'a> {
                     let c = crate::lit::strip_paren(ast, w.cond);
                     if let ExprKind::Let(..) = ast.expr(c).kind { let_source.insert(c.0, LetSource::WhileLet); }
                 }
-                ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => blocks.push(b),
+                ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => blocks.push(b),
                 ExprKind::For(row) => blocks.push(ast.row(row).body),
                 ExprKind::Match(_, arms) => {
                     for arm in ast.list(arms) {

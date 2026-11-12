@@ -16,8 +16,19 @@
 //! which the run loads by path before the program starts.
 //!
 //! The cargo step and the link are cached under `<relax dir>/native/<key>/`: the key covers the
-//! cargo flags, the resolved packages (versions, features, sources), the C compiler and
-//! the target. A run with an unchanged key starts no cargo.
+//! cargo flags, the resolved packages of the native closure (versions, features, sources; a path
+//! package's files), the C compiler and the target -- not the package the run is for, so two
+//! packages whose native closure is the same share one build. A run with an unchanged key starts
+//! no cargo. The scripts' OUT_DIRs live in cargo's target for the selection
+//! (`native/cargo-target/<selection>`), which builds under other keys share: the receipt notes
+//! each script run cargo's `output` file stood for, and a later run of the script under another
+//! key (a path package's source moved, and moved back) makes it no hit.
+//!
+//! Roots: each `--allow-c` build names itself in `native/roots/<slot>` before it starts, where a
+//! slot is the workspace, package, cargo flags and target of a run: the slot's key directory and
+//! cargo selection (both tiers' targets). The cache's prune (`prune`, cache.rs prune_root) keeps
+//! what a root names and drops everything else: a slot's superseded builds, selections no root
+//! uses, the roots of workspaces that are gone. No size cap: a slot's last build stays.
 //!
 //! A check without the flag starts no cargo either, but it reads a receipt the flag left behind:
 //! the same key, so the cfgs, rustc-env and OUT_DIR of that build are what its compile uses
@@ -186,8 +197,8 @@ fn hash_dir(dir: &std::path::Path, h: &mut u64) {
 
 /// The resolved package identities and feature sets, independent of lockfile formatting,
 /// unused patches, and the traversal order of Cargo's units. Include build dependencies.
-fn resolved_packages_key(raw: &[crate::unitgraph::RawUnit]) -> u64 {
-    let mut packages: Vec<_> = raw.iter().map(|unit| {
+fn resolved_packages_key<'a>(raw: impl IntoIterator<Item = &'a crate::unitgraph::RawUnit>) -> u64 {
+    let mut packages: Vec<_> = raw.into_iter().map(|unit| {
         let mut features = unit.features.clone();
         features.sort();
         features.dedup();
@@ -220,6 +231,8 @@ struct Plan {
     flags: Vec<String>,
     /// "name version" of each native package
     names: Vec<String>,
+    key: u64,
+    selection: u64,
     dir: String,
     messages_path: String,
     lib_path: String,
@@ -255,16 +268,18 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     // cargo flags without `--release` (cargo check runs the release profile below)
     let flags: Vec<String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").cloned().collect();
 
-    // ---- the key
-    let mut h = fnv(b"native-link-v13", 0xcbf29ce484222325);
+    // ---- the key: what the native scripts' outputs depend on. Not the package the run is for,
+    // and of the resolved graph only the native closure (the packages whose scripts or libs
+    // cargo builds for real): two packages whose closure resolves alike share the build.
+    let selection = selection_key(&script_pkgs, &lib_pkgs);
+    let mut h = fnv(b"native-link-v14", 0xcbf29ce484222325);
     h = fnv(req.triple.as_bytes(), h);
-    h = fnv(&selection_key(&script_pkgs, &lib_pkgs).to_le_bytes(), h);
+    h = fnv(&selection.to_le_bytes(), h);
     for f in &flags {
         h = fnv(f.as_bytes(), h);
         h = fnv(b"\0", h);
     }
-    h = fnv(req.package.as_bytes(), h);
-    h = fnv(&resolved_packages_key(&g.raw).to_le_bytes(), h);
+    h = fnv(&resolved_packages_key(g.raw.iter().filter(|u| script_pkgs.binary_search(&u.pkg.1).is_ok())).to_le_bytes(), h);
     let mut native_env: Vec<_> = std::env::vars().filter(|(k, _)| {
         ["CC", "CXX", "AR", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "PKG_CONFIG"]
             .iter().any(|prefix| k == prefix || k.starts_with(&format!("{prefix}_")))
@@ -283,15 +298,19 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
         let mut features = bs.features.clone();
         features.sort();
         features.dedup();
-        (pk(bs), features)
+        (pk(bs), features, g.crates[bs.krate].registry)
     }).collect();
     native_packages.sort();
     native_packages.dedup();
     let mut names: Vec<String> = Vec::new();
-    for ((dir, name, ver), features) in native_packages {
+    for ((dir, name, ver), features, registry) in native_packages {
         names.push(format!("{} {}", name, ver));
         h = fnv(format!("{} {} {:?}", name, ver, features).as_bytes(), h);
-        hash_dir(std::path::Path::new(&dir), &mut h);
+        // a registry or git package's source is its id (the resolved packages above); a path
+        // package's is its files
+        if !registry {
+            hash_dir(std::path::Path::new(&dir), &mut h);
+        }
     }
     names.sort();
     names.dedup();
@@ -300,7 +319,7 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
     let lib_path = format!("{}/libnative.{}", dir, ext);
     let fast_mark = format!("{}/fast", dir);
-    Plan { script_pkgs, lib_pkgs, flags, names, dir, messages_path, lib_path, fast_mark }
+    Plan { script_pkgs, lib_pkgs, flags, names, key: h, selection, dir, messages_path, lib_path, fast_mark }
 }
 
 /// Builds the native packages `seeds` (indices into `g.build_scripts`) with cargo, or finds the
@@ -308,6 +327,8 @@ fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
 pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String> {
     let exe = std::env::current_exe().map_err(|e| format!("this executable: {e}"))?;
     let plan = plan(g, seeds, req);
+    // named before anything is read or built under it: a prune from now on keeps it
+    write_root(req, &plan)?;
     let flags: Vec<&String> = plan.flags.iter().collect();
     let out = match std::fs::read_to_string(&plan.messages_path).ok().and_then(|m| cached(&g.pkg, &script_table(g), seeds, &m, &plan.lib_path)) {
         Some(out) => out,
@@ -373,6 +394,8 @@ fn dependency_packages(raw: &[crate::unitgraph::RawUnit], mut stack: Vec<usize>)
 /// What cargo's messages say the native scripts produced.
 struct Outputs {
     scripts: Vec<ScriptOut>,
+    /// (OUT_DIR, the script run the receipt saw there: `run_stamp`) of each script
+    runs: Vec<(String, String)>,
     statics: Vec<String>,
     archives: Vec<String>,
     search: Vec<String>,
@@ -391,14 +414,28 @@ fn outputs(g: &Graph, seeds: &[usize], messages: &str) -> Result<Outputs, String
 }
 
 /// The cargo run cached under this key (`messages`, written once that run succeeded) while what
-/// it names is still there: every script's OUT_DIR (generated sources the compile reads), and
-/// the linked library when the scripts link anything. Cargo writes `linked_libs` for every
-/// script, so a cfg/env-only script, which leaves no library, is reused on its OUT_DIR alone.
+/// it names is still there: every script's OUT_DIR (generated sources the compile reads), as
+/// that run left it, and the linked library when the scripts link anything. Cargo writes
+/// `linked_libs` for every script, so a cfg/env-only script, which leaves no library, is reused
+/// on its OUT_DIR alone. The OUT_DIRs are cargo's, in the selection's target that other keys'
+/// builds share: a script that ran again since (under another key) left other files there.
 fn cached(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str, lib_path: &str) -> Option<Outputs> {
     let out = outputs_with(pkg, scripts_of, seeds, messages).ok()?;
     let links = !(out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty());
     let there = out.scripts.iter().all(|s| std::path::Path::new(&s.out_dir).is_dir()) && (!links || std::path::Path::new(lib_path).is_file());
-    there.then_some(out)
+    let same_runs = out.runs.iter().all(|(dir, seen)| !seen.is_empty() && *seen == run_stamp(dir));
+    (there && same_runs).then_some(out)
+}
+
+/// The script run that left `out_dir` as it is: cargo's `output` file beside it (the script's
+/// stdout, which cargo writes after every run), by length and modification time. Empty when
+/// there is none.
+fn run_stamp(out_dir: &str) -> String {
+    let output = std::path::Path::new(out_dir).with_file_name("output");
+    std::fs::metadata(output).ok().and_then(|m| {
+        let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(format!("{}.{}", m.len(), t.as_nanos()))
+    }).unwrap_or_default()
 }
 
 fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str) -> Result<Outputs, String> {
@@ -411,6 +448,7 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
     let mut fw_search: Vec<String> = Vec::new();
     let mut dylibs: Vec<String> = Vec::new();
     let mut frameworks: Vec<String> = Vec::new();
+    let mut runs: Vec<(String, String)> = Vec::new();
     for line in messages.lines() {
         let j = crate::json::parse(line.as_bytes()).map_err(|e| format!("cargo message: {e}"))?;
         let (n, v) = id_name_version(j.get("package_id").map(|p| p.str()).unwrap_or(""));
@@ -420,6 +458,7 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
         }) else { continue };
         let strs = |k: &str| -> Vec<String> { j.get(k).map(|a| a.arr().iter().map(|x| x.str().to_string()).collect()).unwrap_or_default() };
         let mut out = ScriptOut { krate: scripts_of[s].0, host: matches!(j.get("relax_host"), Some(crate::json::Json::Bool(true))), cfgs: strs("cfgs"), env: Vec::new(), out_dir: j.get("out_dir").map(|o| o.str().to_string()).unwrap_or_default(), system: Vec::new() };
+        runs.push((out.out_dir.clone(), j.get("relax_run").map(|r| r.str().to_string()).unwrap_or_default()));
         if let Some(e) = j.get("env") {
             for kv in e.arr() {
                 if let [k, v] = kv.arr() {
@@ -469,7 +508,7 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
             None => return Err(format!("--allow-c: a native build script links static library `{}`, but {} is in none of its search paths ({})", name, file, search.join(", "))),
         }
     }
-    Ok(Outputs { scripts, statics, archives, search, fw_search, dylibs, frameworks })
+    Ok(Outputs { scripts, runs, statics, archives, search, fw_search, dylibs, frameworks })
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -565,6 +604,8 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
         eprintln!("makepad run: --allow-c: building native dependencies with cargo (opt-level 0 now, optimized in the background; cached afterwards): {}", script_pkgs.iter().take(8).cloned().collect::<Vec<_>>().join(", "));
     }
     let mut cmd = Command::new("cargo");
+    // cargo runs in the real workspace: nothing of this run crosses
+    crate::progenv::scrub_run_facts(&mut cmd);
     match tier {
         // the scripts see OPT_LEVEL=0 (cc and cmake compile the C unoptimized)
         Tier::Fast => { cmd.env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0"); }
@@ -589,7 +630,6 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
         .env("MAKEPAD_RUN_NATIVE_TARGET", triple)
         .env("MAKEPAD_RUN_NATIVE_BUILD_DIR", &build)
         .env_remove("MAKEPAD_RUN_AS_RUSTC")
-        .env_remove("MAKEPAD_RUN_SELF_EXEC")
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTC_WORKSPACE_WRAPPER")
         .stdout(Stdio::piped())
@@ -641,6 +681,10 @@ fn run_cargo_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<St
                 let host_output = !target_output && j.get("package_id").is_some_and(|id| target_scripts.iter().any(|p| p == id.str()));
                 let body = line.trim_start().strip_prefix('{').ok_or("cargo build-script message is not an object")?;
                 keep.push_str(if host_output { "{\"relax_host\":true," } else { "{\"relax_host\":false," });
+                // the script run this message reports (`cached`): its OUT_DIR is shared with
+                // other keys' builds of the selection
+                let stamp = j.get("out_dir").map(|out| run_stamp(out.str())).unwrap_or_default();
+                keep.push_str(&format!("\"relax_run\":\"{stamp}\","));
                 keep.push_str(body);
                 keep.push('\n');
             }
@@ -677,6 +721,103 @@ fn selection_key(scripts: &[String], libs: &[String]) -> u64 {
         for name in list { h = fnv(name.as_bytes(), h); h = fnv(b"\0", h); }
     }
     h
+}
+
+/// `native/lock`, held exclusively: a root is written, or a prune decides what goes. None when
+/// it cannot be opened or (`wait` false) another process holds it.
+fn native_lock(native: &std::path::Path, wait: bool) -> Option<std::fs::File> {
+    let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(native.join("lock")).ok()?;
+    let locked = if wait { f.lock().is_ok() } else { f.try_lock().is_ok() };
+    locked.then_some(f)
+}
+
+/// Names `plan`'s build as the one its slot (module doc: roots) uses now. Under the native lock:
+/// a prune either saw the root or was over before it was written, and then the build makes what
+/// it needs again.
+fn write_root(req: &Request, plan: &Plan) -> Result<(), String> {
+    let native = std::path::Path::new(req.relax_dir).join("native");
+    let roots = native.join("roots");
+    let mut slot = fnv(b"native-root-v1", 0xcbf29ce484222325);
+    for part in [req.workspace, req.package, req.triple].into_iter().chain(plan.flags.iter().map(String::as_str)) {
+        slot = fnv(part.as_bytes(), slot);
+        slot = fnv(b"\0", slot);
+    }
+    let path = roots.join(format!("{slot:016x}"));
+    let text = format!("{}\n{:016x}\n{:016x}\n", req.workspace, plan.key, plan.selection);
+    if std::fs::read_to_string(&path).is_ok_and(|t| t == text) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&roots).map_err(|e| format!("{}: {e}", roots.display()))?;
+    let _lock = native_lock(&native, true).ok_or_else(|| format!("{}: cannot lock", native.join("lock").display()))?;
+    let tmp = roots.join(format!(".{slot:016x}.{}", std::process::id()));
+    std::fs::write(&tmp, text).and_then(|_| std::fs::rename(&tmp, &path)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Keeps `native/` to what the roots name (module doc: roots): every other key's directory and
+/// cargo selection goes, unless it changed since `since` (a build of a Relax without roots may
+/// be in flight there), and so does the root of a workspace that is gone. Under the native lock,
+/// taken only if free (else the next start prunes): what goes is moved to `native/trash` there
+/// and deleted after it, so a run waiting to write its root waits for renames only. Names that
+/// are not a key or selection (16 hex digits) are not the cache's and stay. Returns how many
+/// directories went.
+pub fn prune(native: &std::path::Path, since: std::time::SystemTime) -> usize {
+    if !native.is_dir() {
+        return 0;
+    }
+    let ours = |name: &str| name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit());
+    let old = |p: &std::path::Path| std::fs::symlink_metadata(p).and_then(|m| m.modified()).is_ok_and(|t| t < since);
+    let trash = native.join("trash");
+    let mut gone = 0;
+    if let Some(_lock) = native_lock(native, false) {
+        let mut keys = std::collections::HashSet::new();
+        let mut selections = std::collections::HashSet::new();
+        for e in std::fs::read_dir(native.join("roots")).into_iter().flatten().flatten() {
+            let p = e.path();
+            // (`.<slot>.<pid>`: a root being written, or what a writer that ended midway left)
+            if e.file_name().to_string_lossy().starts_with('.') {
+                if old(&p) {
+                    let _ = std::fs::remove_file(&p);
+                }
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).unwrap_or_default();
+            match text.lines().collect::<Vec<_>>()[..] {
+                [workspace, key, selection] if std::path::Path::new(workspace).is_dir() => {
+                    keys.insert(key.to_string());
+                    selections.insert(selection.to_string());
+                }
+                // a workspace that is gone
+                _ => { let _ = std::fs::remove_file(&p); }
+            }
+        }
+        let mut doomed: Vec<(std::path::PathBuf, String)> = Vec::new();
+        for e in std::fs::read_dir(native).into_iter().flatten().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let p = e.path();
+            if name == "cargo-target" || name == "cargo-target-opt" {
+                for c in std::fs::read_dir(&p).into_iter().flatten().flatten() {
+                    let sel = c.file_name().to_string_lossy().into_owned();
+                    if ours(&sel) && !selections.contains(&sel) && old(&c.path()) {
+                        doomed.push((c.path(), format!("{name}.{sel}")));
+                    }
+                }
+            } else if ours(&name) && !keys.contains(&name) && old(&p) {
+                doomed.push((p, name));
+            }
+        }
+        if !doomed.is_empty() && std::fs::create_dir_all(&trash).is_ok() {
+            for (p, name) in doomed {
+                if std::fs::rename(&p, trash.join(format!("{name}.{}", std::process::id()))).is_ok() {
+                    gone += 1;
+                }
+            }
+        }
+    }
+    // (also what a prune that ended midway left)
+    for e in std::fs::read_dir(&trash).into_iter().flatten().flatten() {
+        let _ = std::fs::remove_dir_all(e.path());
+    }
+    gone
 }
 
 /// The run's cargo flags as `cargo check` takes them. A test selection (`makepad test`: `--lib`,
@@ -1088,7 +1229,12 @@ fn a_cached_cargo_run_stands_while_what_it_names_is_there() {
     let pkg = [(String::new(), "cfg_only".to_string(), "1.0.0".to_string())];
     let scripts = [(0, Vec::new())];
     let quoted = out_dir.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
-    let msg = |libs: &str| format!(r#"{{"relax_host":false,"reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":["native={quoted}"],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{quoted}"}}"#);
+    // cargo's record of the script's run, beside its OUT_DIR
+    std::fs::write(dir.join("output"), b"cargo:rustc-cfg=has_feature\n").unwrap();
+    let run = run_stamp(out_dir.to_str().unwrap());
+    assert!(!run.is_empty());
+    let msg_run = |libs: &str, run: &str| format!(r#"{{"relax_host":false,"relax_run":"{run}","reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":["native={quoted}"],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{quoted}"}}"#);
+    let msg = |libs: &str| msg_run(libs, &run);
     let hit = |m: &str| cached(&pkg, &scripts, &[0], m, lib).is_some();
     // a script that links nothing leaves no library to find: cargo is not run again
     assert!(hit(&msg("[]")), "a cfg/env-only script's run is reused without a library");
@@ -1101,9 +1247,74 @@ fn a_cached_cargo_run_stands_while_what_it_names_is_there() {
     assert!(hit(&msg(r#"["static=gen"]"#)) && hit(&msg(r#"["dylib=m"]"#)), "the linked library is there");
     let m = msg("[]");
     assert!(!hit(&m[..m.len() - 1]), "a cut-off message file is no hit");
+    // the OUT_DIR is shared with other keys' builds of the selection: a later run of the script
+    // (under another key) left it as that run wrote it, so the receipt is no hit
+    assert!(!hit(&msg_run("[]", "")), "a receipt that saw no run of the script");
+    std::fs::write(dir.join("output"), b"cargo:rustc-cfg=other_feature\n").unwrap();
+    assert!(!hit(&msg("[]")), "the script ran again since the receipt");
+    assert!(hit(&msg_run("[]", &run_stamp(out_dir.to_str().unwrap()))), "the receipt of that later run");
     // generated sources live in OUT_DIR: a run whose OUT_DIR is gone is no hit, library or not
     std::fs::remove_dir_all(&out_dir).unwrap();
     assert!(!hit(&msg("[]")) && !hit(&msg(r#"["dylib=m"]"#)), "a removed OUT_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// relax issue 46 (the prune's units, after makepad/relax#47): key directories and both tiers'
+/// cargo selections, kept by what the roots name, not by size.
+#[cfg(test)]
+#[test]
+fn the_native_prune_keeps_what_the_roots_name() {
+    let dir = std::env::temp_dir().join(format!("relax-native-prune-{}", std::process::id()));
+    let native = dir.join("native");
+    let unit = |rel: &str| -> std::path::PathBuf {
+        let p = native.join(rel);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("blob"), b"built").unwrap();
+        p
+    };
+    let workspace = dir.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(native.join("roots")).unwrap();
+    let root = |name: &str, workspace: &std::path::Path, key: &str, selection: &str| {
+        std::fs::write(native.join("roots").join(name), format!("{}\n{key}\n{selection}\n", workspace.display())).unwrap();
+    };
+    // two slots of a workspace (a run and a test of it: the second as a build writes it), and a
+    // slot of a workspace that is gone
+    root("00000000000000a1", &workspace, "aaaaaaaaaaaaaaaa", "1111111111111111");
+    let relax_dir = dir.to_str().unwrap();
+    let flags = vec!["--tests".to_string()];
+    let req = Request { workspace: workspace.to_str().unwrap(), package: "app", cargo_flags: &flags, relax_dir, triple: "x86_64-unknown-linux-gnu", resolvable: |names, _, _| vec![false; names.len()] };
+    let plan = Plan { script_pkgs: Vec::new(), lib_pkgs: Vec::new(), flags: flags.clone(), names: Vec::new(), key: 0xabababababababab, selection: 0x1111111111111111,
+        dir: String::new(), messages_path: String::new(), lib_path: String::new(), fast_mark: String::new() };
+    write_root(&req, &plan).unwrap();
+    assert_eq!(std::fs::read_dir(native.join("roots")).unwrap().count(), 2, "one root file per slot, no temporary left");
+    root("00000000000000b1", &dir.join("removed"), "bbbbbbbbbbbbbbbb", "2222222222222222");
+    let named = [unit("aaaaaaaaaaaaaaaa"), unit("abababababababab"), unit("cargo-target/1111111111111111"), unit("cargo-target-opt/1111111111111111")];
+    // a slot's superseded build, the gone workspace's build, a selection no root uses
+    let unnamed = [unit("cccccccccccccccc"), unit("bbbbbbbbbbbbbbbb"), unit("cargo-target/2222222222222222"), unit("cargo-target-opt/3333333333333333")];
+    // not the cache's: stays whatever its age
+    let foreign = unit("not-a-key");
+    // everything changed before `since`: what no root names goes
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    assert_eq!(prune(&native, later), unnamed.len());
+    for p in &named { assert!(p.join("blob").is_file(), "a root names {}", p.display()); }
+    for p in &unnamed { assert!(!p.exists(), "no root names {}", p.display()); }
+    assert!(foreign.is_dir(), "a directory that is not a key or a selection");
+    assert!(!native.join("roots/00000000000000b1").exists(), "the root of a workspace that is gone");
+    assert_eq!(std::fs::read_dir(native.join("roots")).unwrap().count(), 2, "the workspace's two roots stay");
+    assert_eq!(std::fs::read_dir(native.join("trash")).map_or(0, |d| d.count()), 0, "the trash is emptied");
+    // a directory no root names yet, changed after `since` (a build of a Relax without roots in
+    // flight): stays
+    let fresh = unit("cargo-target/4444444444444444");
+    let since = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    assert_eq!(prune(&native, since), 0);
+    assert!(fresh.join("blob").is_file(), "a fresh selection");
+    // the lock held (a root being written): the prune leaves everything for the next start
+    let held = native_lock(&native, false).unwrap();
+    assert_eq!(prune(&native, later), 0);
+    assert!(fresh.is_dir());
+    drop(held);
+    assert_eq!(prune(&native, later), 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

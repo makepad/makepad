@@ -145,3 +145,23 @@ fn a_proc_macro_hack_entry_resolves_and_proc_macros_see_cargo() {
     assert!(status.success(), "{stdout}\n{stderr}");
     assert_eq!(stdout.trim(), "hack entry ok, CARGO set: true", "{stderr}");
 }
+
+/// A dependency's `macro_rules!` macro named like the crate and like a private module of it,
+/// imported in a use group, expands in the importer's consts (relax issue 40: "macro `zerovec!` is
+/// not supported"): libs/relax/compiler/tests/macro_crate_named_xcrate.
+#[test]
+fn a_macro_named_like_its_crate_expands_in_the_importer() {
+    let (status, stdout, stderr) = run_fixture("macro_crate_named_xcrate", "xvec-app");
+    assert!(status.success(), "{stdout}\n{stderr}");
+    assert_eq!(stdout.trim(), "bmp 2 Some(65536) Some(0) all Some(1114112) empty 0", "{stderr}");
+}
+
+/// Importing a dependency's exported macro named like the crate does not import its private
+/// module of that name, so the crate's path still reaches its attribute macro, and so does a
+/// public module alias (relax PR 7): libs/relax/compiler/tests/attribute_macro_private_module.
+#[test]
+fn a_crate_named_macro_import_keeps_the_crate_for_its_attributes() {
+    let (status, stdout, stderr) = run_fixture("attribute_macro_private_module", "apm-app");
+    assert!(status.success(), "{stdout}\n{stderr}");
+    assert_eq!(stdout.trim(), "apm 17", "{stderr}");
+}

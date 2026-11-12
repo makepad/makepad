@@ -723,7 +723,7 @@ impl LifetimeResolver<'_> {
                 self.visit_expr(recv); self.visit_generic_args(turbofish); for e in self.prog.files[self.file as usize].ast.list(args) { self.visit_expr(*e); }
             }
             ast::ExprKind::Cast(e, t) => { self.visit_expr(e); self.visit_ty(t); }
-            ast::ExprKind::Block(b, _) | ast::ExprKind::Unsafe(b) | ast::ExprKind::Loop(b, _) => self.visit_block(b),
+            ast::ExprKind::Block(b, _) | ast::ExprKind::Unsafe(b) | ast::ExprKind::TryBlock(b) | ast::ExprKind::Loop(b, _) => self.visit_block(b),
             ast::ExprKind::If(e, b, other) => { self.visit_expr(e); self.visit_block(b); if let Some(e) = other.get() { self.visit_expr(e); } }
             ast::ExprKind::Let(p, e) => { self.visit_pat(p); self.visit_expr(e); }
             ast::ExprKind::Match(e, arms) => {

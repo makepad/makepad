@@ -441,7 +441,8 @@ impl Cache {
 }
 
 /// The startup image section of a manifest ("PLI9" after the slot list; its slots' pending lists
-/// are written empty, unused at the link; older images -- PLI8's slots carry no pending slots,
+/// are written empty, unused at the link, but O3 code's: the callees it kept as calls, registered
+/// at the link -- jit.rs cached_tier1; older images -- PLI8's slots carry no pending slots,
 /// PLI7's no payload checksum -- are not read: the manifest is written again with a new one).
 pub(super) const IMAGE_MAGIC: u32 = 0x3949_4c50;
 
@@ -685,9 +686,13 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
         inl.push(tab.keys.id(d.bytes()?));
     }
     // (provisional code's pending slots: recorded, not used at the link -- the image's list is
-    // written empty)
+    // written empty; O3 code's are the callees it kept as calls, registered at the link)
+    let mut kept = Vec::new();
     for _ in 0..d.u32()? {
-        d.bytes()?;
+        let b = d.bytes()?;
+        if tier == TIER_O3 {
+            kept.push(tab.keys.id(b));
+        }
     }
     let n = d.u32()?;
     for _ in 0..n {
@@ -746,7 +751,10 @@ fn image_slot(tab: &mut ImageTables, out: &mut E, blob: &mut Vec<u8>, entry_key:
     for k in inl {
         e.u32(k);
     }
-    e.u32(0);
+    e.u32(kept.len() as u32);
+    for k in kept {
+        e.u32(k);
+    }
     e.u32(crates.len() as u32);
     for &c in crates.iter() {
         let next = tab.crates.len() as u32;
@@ -1024,6 +1032,8 @@ pub(crate) struct PrelinkedSlot {
     /// the slots its code took in, at every tier: a live patch of one builds this code again
     /// (reload: `inlined_into`), which a copy inlined unguarded relies on (opt::unguard_prefix)
     pub inlined: Vec<u32>,
+    /// O3 code: the callees its build kept as calls for lack of a body (jit cached_tier1)
+    pub kept: Vec<u32>,
     /// tier-1 (O3) code (cache.rs TIER_O3)
     pub o3: bool,
     /// a live session: the patch flags and copy versions its code reads (jit note_guard_reads)
@@ -1062,6 +1072,8 @@ struct ImgSlot {
     key: u32,
     tier: u8,
     inl: (usize, usize),
+    /// O3 code: the callees it kept as calls for lack of a body
+    kept: (usize, usize),
     crates: (usize, usize),
     /// its code entry's bytes in the blob (offset, length), and the length of its code without
     /// the unwind trailer that ends them
@@ -1241,14 +1253,18 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
             flat.push(d.u32()?);
         }
         let inl = (a, flat.len());
-        // (a provisional code's pending slots: not used at the link)
+        // (a provisional code's pending slots: not used at the link; O3 code's kept calls are)
         for _ in 0..d.u32()? {
-            d.u32()?;
+            let k = d.u32()?;
+            if tier == TIER_O3 {
+                flat.push(k);
+            }
         }
+        let kept = (inl.1, flat.len());
         for _ in 0..d.u32()? {
             flat.push(d.u32()?);
         }
-        let crates = (inl.1, flat.len());
+        let crates = (kept.1, flat.len());
         let off = d.u32()? as usize;
         let len = d.u32()? as usize;
         let code_n = d.u32()? as usize;
@@ -1261,7 +1277,7 @@ fn parse_image(img: &'static [u8], store: std::sync::Arc<Store>, crate_ok: impl 
         let np = d.u32()? as usize;
         let pc = (d.p, d.p.checked_add(np)?);
         d.take(np)?;
-        slots.push(ImgSlot { entry, sum, key, tier, inl, crates, code: (off, len), code_n, rel, pc });
+        slots.push(ImgSlot { entry, sum, key, tier, inl, kept, crates, code: (off, len), code_n, rel, pc });
     }
     let blob = d.bytes()?;
     let [keys, syms, files] = tables;
@@ -1641,6 +1657,9 @@ impl Linker {
         if !mark(s.key) || !im.flat[s.inl.0..s.inl.1].iter().all(|&k| mark(k)) {
             return false;
         }
+        for &k in &im.flat[s.kept.0..s.kept.1] {
+            mark(k);
+        }
         for ri in (s.rel.0..s.rel.1).step_by(REL_SIZE) {
             match im.rel_at(ri) {
                 Some((_, _, IMG_SLOT | IMG_THUNK | IMG_CALL, ix)) => {
@@ -1816,9 +1835,10 @@ impl Linker {
             }
             let files = self.img_files(u, im);
             let s = &im.slots[si];
-            let (pcs, tier, inl, entry, key, sum) = (s.pc, s.tier, s.inl, s.entry, s.key, s.sum);
+            let (pcs, tier, inl, kept, entry, key, sum) = (s.pc, s.tier, s.inl, s.kept, s.entry, s.key, s.sum);
             let pc = crate::jit::PcMap::mapped(&im.bytes[pcs.0..pcs.1], files);
             let inlined: Vec<u32> = im.flat[inl.0..inl.1].iter().filter_map(|&k| im.slot_of(k)).collect();
+            let kept: Vec<u32> = im.flat[kept.0..kept.1].iter().filter_map(|&k| im.slot_of(k)).collect();
             if !u.aux { crate::harness::reach::note(id, inlined.iter().copied()); }
             let kind = im.keys[key as usize].first().copied().and_then(KeyKind::of);
             for &a in makes.get(k).map_or(&[][..], |v| v.as_slice()) {
@@ -1837,7 +1857,7 @@ impl Linker {
             let provisional = (tier & super::TIER_PROVISIONAL != 0).then(|| super::tier_level(tier));
             let level = tier & !super::TIER_PROVISIONAL;
             let refs = crate::jit::CodeRefs::new(refs);
-            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, refs, o2: level == TIER_O2, base: level == TIER_BASE, provisional, kind, verdict });
+            out.push(PrelinkedSlot { id, at: at + off as u64, len: n as u32, trailer, pc, inlined, kept, o3: tier == TIER_O3, guards: if live { std::mem::take(&mut guards[k]) } else { Vec::new() }, refs, o2: level == TIER_O2, base: level == TIER_BASE, provisional, kind, verdict });
         }
         out
     }

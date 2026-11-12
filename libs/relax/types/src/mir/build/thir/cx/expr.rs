@@ -450,6 +450,7 @@ impl Cx<'_> {
             A::While(row) => return self.while_expr(e, *ast.row(row), expr_ty),
             A::For(row) => return self.for_expr(e, *ast.row(row), expr_ty),
             A::Try(x) => return self.try_expr(e, x, expr_ty),
+            A::TryBlock(b) => return self.try_block_expr(e, b, expr_ty),
             A::Mac(m) => return self.mac_expr(e, *ast.row(m), expr_ty),
             A::Field(base, _) | A::TupleField(base, _) => {
                 let Some(&(_, index)) = tb.field_idx.get(&e.0) else { return self.unresolved(span, "field index") };

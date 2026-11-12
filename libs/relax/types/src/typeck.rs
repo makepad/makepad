@@ -187,7 +187,8 @@ pub struct Body {
     pub coercion_casts: SideTable<u32, ()>,
     /// type-relative value paths (`Ty::item`, `<Ty>::item`) that resolved to an item of a trait, not an inherent one; recorded only while the lint sink is on (prelude collision lints)
     pub trait_item_paths: SideTable<u32, DefId>,
-    /// The two lang-item calls of the `?` desugaring, with their inferred types.
+    /// The two lang-item calls of the `?` desugaring, with their inferred types. Under a `try`
+    /// block's id: its `Try::from_output`, `[Self]` and the `Output` its tail goes in as.
     pub try_branch: SideTable<u32, (DefId, crate::types::TyList, TyId)>,
     pub try_from_residual: SideTable<u32, (DefId, crate::types::TyList)>,
     pub locals: ThinVec<Local>,
@@ -470,6 +471,10 @@ pub struct Fcx<'a> {
     item_blocks: Vec<(u32, usize)>,
     diverges: bool,
     ret_stack: Vec<TyId>,
+    /// the `try` blocks being checked: (the block's type, `ret_stack.len()` in it, whether a `?`
+    /// left to it, the block's output type). A `?` goes to the innermost one of its own body (not
+    /// of a closure in it).
+    try_stack: Vec<(TyId, usize, bool, TyId)>,
     closure_depth: Vec<(u32, usize)>, // (closure expr, scope depth at entry)
     /// checking a const / static initializer or an anonymous constant (no `return` outside a closure)
     in_const: bool,
@@ -791,6 +796,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         item_blocks: Vec::new(),
         diverges: false,
         ret_stack: Vec::new(),
+        try_stack: Vec::new(),
         closure_depth: Vec::new(),
         in_const: false,
         inline_const_floor: Vec::new(),
@@ -3940,15 +3946,18 @@ impl<'a> Fcx<'a> {
                 }
             }
         }
-        // `T::item` with T a generic param (or `Self` in a trait body): resolved through the
-        // param's bounds only, as rustc does on the generic body; an inherent item of the type
-        // a given instance substitutes is never seen (`U::from(x)` with U: From<T> calls
-        // From::from even when the instance's U has an inherent `from`).
+        // `T::item` with T a generic param (or `Self` in a trait body, or in an impl whose self
+        // type is a param: `impl<T: Build<P>> Build<W<P>> for T`): resolved through the param's
+        // bounds first, as rustc's probe takes a param's where clauses as inherent candidates
+        // (assemble_inherent_candidates_from_param) ahead of the traits in scope; an inherent
+        // item of the type a given instance substitutes is never seen (`U::from(x)` with
+        // U: From<T> calls From::from even when the instance's U has an inherent `from`), and
+        // `Self::from` with T: Build<P> is Build's, not the prelude From's (relax issue 49).
         // rustc_hir_analysis hir_ty_lowering lower_assoc_path / probe_single_bound_for_assoc_item
         let prefix_is_param = n == 2
             && path.no_qself()
             && match self.ast().segs(path.segs)[0].kind() {
-                SegKind::SelfType => self.env.trait_def.is_some(),
+                SegKind::SelfType => self.env.trait_def.is_some() || matches!(self.tcx.tys.kind(self_ty), TyKind::Param(_)),
                 _ => {
                     let s0 = self.sym(self.ast().segs(path.segs)[0].name);
                     self.env.names.iter().take(self.b.args.len()).any(|nm| *nm == s0)
@@ -5295,6 +5304,7 @@ impl<'a> Fcx<'a> {
                 self.check_block_soft(*b, expected, soft)
             }
             ExprKind::Unsafe(b) => self.check_block_soft(*b, expected, soft),
+            ExprKind::TryBlock(b) => self.check_try_block(e, *b, if soft { None } else { expected }),
             ExprKind::ConstBlock(b) => {
                 self.inline_const_floor.push(self.b.locals.len() as u32);
                 let t = self.check_block(*b, expected);
@@ -6217,7 +6227,7 @@ impl<'a> Fcx<'a> {
             ExprKind::Loop(b, _) => self.block_has_break(*b, depth + 1, label),
             ExprKind::While(row) => self.block_has_break(self.ast().row(*row).body, depth + 1, label),
             ExprKind::For(row) => self.block_has_break(self.ast().row(*row).body, depth + 1, label),
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) => self.block_has_break(*b, depth, label),
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) => self.block_has_break(*b, depth, label),
             ExprKind::If(c, t, el) => {
                 self.expr_has_break(*c, depth, label) || self.block_has_break(*t, depth, label) || el.map_or(false, |x| self.expr_has_break(x, depth, label))
             }
@@ -6280,10 +6290,18 @@ impl<'a> Fcx<'a> {
             self.diverging.push(so);
         }
         let residual = self.tcx.instantiate_ty(self.prog, def, &flow_full, residual);
-        let ret = *self.ret_stack.last().unwrap_or(&self.tcx.tys.error);
+        // the innermost `try` block of this body takes the residual, else the body's return
+        let depth = self.ret_stack.len();
+        let block = self.try_stack.last_mut().filter(|t| t.1 == depth).map(|t| { t.2 = true; (t.0, t.3) });
+        let ret = block.map_or_else(|| *self.ret_stack.last().unwrap_or(&self.tcx.tys.error), |b| b.0);
         let full = self.infer_item_args(from_residual, &[ret, residual]);
-        self.register_method_obligation(from_residual, &full);
-        self.apply_fn_bounds(from_residual, &full, lo);
+        match block {
+            Some((_, block_output)) => self.try_block_residual(ret, residual, block_output, lo),
+            None => {
+                self.register_method_obligation(from_residual, &full);
+                self.apply_fn_bounds(from_residual, &full, lo);
+            }
+        }
         self.b.dependencies.push(branch);
         self.b.dependencies.push(from_residual);
         self.b.try_branch.insert(e.0, (branch, self.tcx.tys.mk_list(&[t]), flow));
@@ -6312,6 +6330,78 @@ impl<'a> Fcx<'a> {
             }
         }
         output
+    }
+
+    /// A `?` in a `try` block (rustc_ast_lowering lower_expr_try, a homogeneous block): it breaks
+    /// out with `residual_into_try_type::<R, O>(r)`, of type `<R as Residual<O>>::TryType` for the
+    /// block's output O. The residual decides the block's type, not the context: a `?` on a
+    /// `Result<_, E>` makes it `Result<O, E>`, and an expected `Result<O, F>` is a mismatch. That
+    /// fn only calls `FromResidual::from_residual` into the type, so the typed AST keeps the
+    /// `from_residual` call (check_try) for the lowering.
+    fn try_block_residual(&mut self, block: TyId, residual: TyId, block_output: TyId, lo: u32) {
+        use crate::lang_items::LangItem;
+        let Some(into) = self.tcx.lang_items.get(LangItem::ResidualIntoTryType) else {
+            self.err(lo, "missing `into_try_type` lang item".into()); return;
+        };
+        let full = self.infer_item_args(into, &[residual, block_output]);
+        let sig = self.tcx.fn_sig(self.prog, into).unwrap().clone();
+        let (_, try_type) = self.instantiate_call_signature(into, &full, &sig);
+        self.apply_fn_bounds(into, &full, lo);
+        let try_type = self.normalize_signature(try_type);
+        self.coerce_or_unify(try_type, block, None, lo);
+        self.b.dependencies.push(into);
+    }
+
+    /// `try { stmts; tail }` (feature `try_blocks`; rustc_ast_lowering lower_expr_try_block): a
+    /// block the `?`s inside break out of (check_try, try_block_residual), whose tail is
+    /// `Try::from_output(tail)` (`from_output(())` without one). Every exit has the block's type:
+    /// the expected one, or a variable the `?`s and the tail decide. The typed AST records the
+    /// `from_output` call in `try_branch` under the block's id.
+    fn check_try_block(&mut self, e: ExprId, b: BlockId, expected: Option<TyId>) -> TyId {
+        use crate::lang_items::LangItem;
+        let lo = self.ast().expr(e).lo;
+        let Some(from_output) = self.tcx.lang_items.get(LangItem::TryTraitFromOutput) else {
+            self.err(lo, "missing `from_output` lang item".into()); return self.tcx.tys.error;
+        };
+        let t = match expected {
+            Some(x) => x,
+            None => self.fresh(0),
+        };
+        let full = self.infer_item_args(from_output, &[t]);
+        let sig = self.tcx.fn_sig(self.prog, from_output).unwrap().clone();
+        let (ps, _) = self.instantiate_call_signature(from_output, &full, &sig);
+        let output = self.normalize_signature(ps[0]);
+        self.register_method_obligation(from_output, &full);
+        self.apply_fn_bounds(from_output, &full, lo);
+        self.b.dependencies.push(from_output);
+        let prev = self.diverges;
+        self.try_stack.push((t, self.ret_stack.len(), false, output));
+        // (no expectation: the output is not a coercion site for the tail, see below; even a
+        // soft one would deref-coerce `&s` to `&str`)
+        let bt = self.check_block(b, None);
+        let (_, _, left, _) = self.try_stack.pop().unwrap();
+        let blk = *self.ast().block(b);
+        // The tail is `from_output`'s argument, whose type is the projection `<T as Try>::Output`:
+        // rustc coerces it to that projection's variable, which only unifies, and the projection
+        // then has to hold (E0271). A `&String` tail is no `&str` output; a diverging one is any.
+        let (tail, x, pos) = match self.ast().stmts(b).last() {
+            Some(Stmt::Expr(false, x)) => (bt, Some(*x), self.ast().expr(*x).lo),
+            // (`()` at the block's end, reached or not)
+            _ => (self.tcx.tys.unit, None, blk.hi),
+        };
+        let tail_s = self.shallow(tail);
+        if matches!(self.tcx.tys.kind(tail_s), TyKind::Never) {
+            self.coerce_or_unify(tail, output, x, pos);
+        } else if !self.unify_raw(tail, output, false) {
+            let (ts, os) = (self.ty_str(t), self.ty_str(tail));
+            self.err(pos, format!("E0271: type mismatch resolving `<{} as Try>::Output == {}`", ts, os));
+        }
+        // a `?` that leaves the block makes its end reachable (rustc check_block: may_break)
+        if left {
+            self.diverges = prev;
+        }
+        self.b.try_branch.insert(e.0, (from_output, self.tcx.tys.mk_list(&[t]), output));
+        t
     }
 
     pub fn lang_item(&self, path: &[&str]) -> Option<DefId> {
@@ -6417,7 +6507,7 @@ impl<'a> Fcx<'a> {
         loop {
             match self.ast().expr(x).kind {
                 ExprKind::Paren(i) => x = i,
-                ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Block(..) | ExprKind::Unsafe(_) => return None,
+                ExprKind::Match(..) | ExprKind::If(..) | ExprKind::Block(..) | ExprKind::Unsafe(_) | ExprKind::TryBlock(_) => return None,
                 _ => return hint,
             }
         }

@@ -14,7 +14,7 @@ pub enum Node {
     Synthetic(u32, Synthetic),
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Synthetic { Iteration, ForMatch, ForArm, ForBody, ForIntoIter, ForNext, TryBranch, TryFromResidual, WhileElse, WhileElseBlock, WhileBreak, WhileBreakExpr, AwaitIntoFuture, AwaitPollCall, AwaitNewUnchecked, AwaitGetContext, AwaitArm, AwaitLoop, AwaitBody, AwaitPoll, AwaitReady, AwaitPending, AwaitYield, MacroArm, MacroBranch, MacroStatement, DebugBranch, AssignBlock, AssignLet, Assignment }
+pub enum Synthetic { Iteration, ForMatch, ForArm, ForBody, ForIntoIter, ForNext, TryBranch, TryFromResidual, TryFromOutput, WhileElse, WhileElseBlock, WhileBreak, WhileBreakExpr, AwaitIntoFuture, AwaitPollCall, AwaitNewUnchecked, AwaitGetContext, AwaitArm, AwaitLoop, AwaitBody, AwaitPoll, AwaitReady, AwaitPending, AwaitYield, MacroArm, MacroBranch, MacroStatement, DebugBranch, AssignBlock, AssignLet, Assignment }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScopeData { Node, CallSite, Arguments, Destruction, IfThen, IfThenRescope, MatchGuard, Remainder(u32) }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -165,6 +165,12 @@ impl Resolve<'_> {
     /// Remainders are nested in declaration order; let-else exits to the preceding context.
     /// rustc_hir_analysis/src/check/region.rs:56-167.
     fn block(&mut self, b: BlockId, terminating: bool) {
+        self.block_with(b, terminating, None)
+    }
+    /// `try_block`: the `try` expression whose block this is. Its tail is rustc's
+    /// `Try::from_output(tail)` (of `()` without one), a call node of its own around the tail
+    /// (rustc_ast_lowering lower_expr_try_block).
+    fn block_with(&mut self, b: BlockId, terminating: bool, try_block: Option<ExprId>) {
         let saved = self.cx;
         self.node(Node::Block(b.0), terminating);
         self.cx.var_parent = self.cx.parent;
@@ -174,11 +180,18 @@ impl Resolve<'_> {
             if i + 1 == statements.len() {
                 if let Some((e, false)) = ast.stmt_expr(stmt) {
                     let terminating = node_edition(self.file, Node::Block(b.0)) >= 2024;
+                    let tail = match try_block { Some(t) => Node::Synthetic(t.0, Synthetic::TryFromOutput), None => Node::Expr(e.0) };
                     if !terminating && crate::lint::enabled() {
-                        self.tree.backwards_incompatible_nodes.insert(Node::Expr(e.0));
+                        self.tree.backwards_incompatible_nodes.insert(tail);
                     }
-                    self.expr(e, terminating);
-                    break;
+                    if try_block.is_some() {
+                        self.node(tail, terminating);
+                        self.expr(e, false);
+                    } else {
+                        self.expr(e, terminating);
+                    }
+                    self.cx = saved;
+                    return;
                 }
             }
             if matches!(stmt, Stmt::Item(_)) { continue; }
@@ -208,6 +221,15 @@ impl Resolve<'_> {
                 self.block(els, true);
             }
             self.cx = remainder;
+        }
+        // a `try` block without a tail ends in `from_output(())`
+        if let Some(t) = try_block {
+            let tail = Node::Synthetic(t.0, Synthetic::TryFromOutput);
+            let terminating = node_edition(self.file, Node::Block(b.0)) >= 2024;
+            if !terminating && crate::lint::enabled() {
+                self.tree.backwards_incompatible_nodes.insert(tail);
+            }
+            self.node(tail, terminating);
         }
         self.cx = saved;
     }
@@ -317,6 +339,7 @@ impl Resolve<'_> {
             ExprKind::Call(f, args) => { self.expr(f, false); for x in ast.list(args) { self.expr(*x, false); } }
             ExprKind::MethodCall(recv, row) => { self.expr(recv, false); for x in ast.list(ast.row(row).args) { self.expr(*x, false); } }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => self.block(b, false),
+            ExprKind::TryBlock(b) => self.block_with(b, false, Some(e)),
             ExprKind::If(cond, then, els) => {
                 let cx = self.cx;
                 self.if_then(e, cond, then);

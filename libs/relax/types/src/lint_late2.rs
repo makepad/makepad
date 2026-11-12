@@ -790,7 +790,7 @@ impl<'a> L2<'a> {
             ExprKind::If(..) | ExprKind::Closure(_) | ExprKind::Async(..) | ExprKind::ConstBlock(_) | ExprKind::Lit(_) | ExprKind::Path(_)
             | ExprKind::Underscore | ExprKind::Continue(_) | ExprKind::While(_) => return false,
             ExprKind::Match(s, _) => return self.find_significant_dropper(s),
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => {
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Loop(b, _) => {
                 return block_tail(ast, b).is_some_and(|t| self.find_significant_dropper(t));
             }
             ExprKind::MethodCall(r, row) => {

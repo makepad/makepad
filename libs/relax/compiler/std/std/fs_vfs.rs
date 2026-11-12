@@ -67,12 +67,47 @@ pub(crate) enum Kind {
     Missing,
 }
 
-/// The program's virtual current folder: the workspace of a git run (MAKEPAD_RUN_WORKSPACE, when
-/// it is a virtual folder).
+/// The current folder the program changed to (set_current_dir): Some(Some(a virtual folder)), or
+/// Some(None) for a real one (the OS's). None: the one it started in.
+static CHOSEN: crate::sync::Mutex<Option<Option<PathBuf>>> = crate::sync::Mutex::new(None);
+
+/// The program's virtual current folder: the one it changed to, else the workspace of a git run
+/// (the host's MAKEPAD_RUN_WORKSPACE, when it is a virtual folder).
 pub(crate) fn cwd() -> Option<PathBuf> {
-    let w = crate::env::var_os("MAKEPAD_RUN_WORKSPACE")?;
+    if let Some(c) = chosen() {
+        return c;
+    }
+    let w = crate::env::host_var_os("MAKEPAD_RUN_WORKSPACE")?;
     let p = PathBuf::from(w);
     matches!(kind_abs(&p), Some(Kind::Dir)).then_some(p)
+}
+
+/// The folder set_current_dir changed to, if the program changed it: Some(None) for a real one.
+pub(crate) fn chosen() -> Option<Option<PathBuf>> {
+    CHOSEN.lock().unwrap().clone()
+}
+
+/// set_current_dir: a virtual folder becomes the program's current folder (Ok: the result). A
+/// real one is Err(the folder): the caller changes the OS's folder to it, then calls `chose_real`.
+pub(crate) fn set_cwd(path: &Path) -> Result<io::Result<()>, PathBuf> {
+    let Some((abs, k)) = kind(path) else {
+        // (a relative path is the virtual folder's while the program is in one)
+        return Err(absolute(path).unwrap_or_else(|| path.to_path_buf()));
+    };
+    Ok(match k {
+        Kind::Dir => {
+            let abs = abs.into_owned();
+            *CHOSEN.lock().unwrap() = Some(Some(abs));
+            Ok(())
+        }
+        Kind::File(_) => Err(io::Error::from(io::ErrorKind::NotADirectory)),
+        Kind::Missing => Err(io::Error::from(io::ErrorKind::NotFound)),
+    })
+}
+
+/// The program changed to a real folder: it is in no virtual one any more.
+pub(crate) fn chose_real() {
+    *CHOSEN.lock().unwrap() = Some(None);
 }
 
 /// `path` made absolute against the virtual current folder (a relative path of a git run).

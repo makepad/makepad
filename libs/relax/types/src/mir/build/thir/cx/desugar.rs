@@ -246,11 +246,47 @@ impl Cx<'_> {
         let from_call = self.push(self.mk(e, ExprKind::Call { ty: from_ty, fun: from_fun, args: Box::new([residual]), from_hir_call: true, fn_span: span }, from_ret));
         let from_scope = self.synthetic_scope(e, Synthetic::TryFromResidual, ScopeData::Node, span)?;
         let from_call = self.scope_wrap(e, from_scope, from_call);
-        let ret = self.push(self.mk(e, ExprKind::Return { value: Some(from_call) }, never));
+        // (`break` to the innermost `try` block, or `return`)
+        let exit = match self.breakables.iter().rev().find(|b| b.is_block && b.label.is_none()) {
+            Some(t) => ExprKind::Break { label: t.scope, value: Some(from_call) },
+            None => ExprKind::Return { value: Some(from_call) },
+        };
+        let ret = self.push(self.mk(e, exit, never));
         let ret_any = self.push(self.mk(e, ExprKind::NeverToAny { source: ret }, expr_ty));
         let break_arm = self.thir.alloc_arm(Arm { pattern: Box::new(break_pat), guard: None, body: ret_any, node: e.0, scope, span });
 
         Ok(self.mk(e, ExprKind::Match { scrutinee, arms: Box::new([break_arm, continue_arm]), match_source: MatchSource::TryDesugar }, expr_ty))
+    }
+
+    // ---------------------------------------------------------------- try blocks
+
+    /// `try { stmts; tail }` (rustc_ast_lowering lower_expr_try_block): the block, which the `?`s
+    /// inside break out of (try_expr), with `Try::from_output(tail)` as its tail
+    /// (`from_output(())` without one).
+    pub(super) fn try_block_expr(&mut self, e: ast::ExprId, b: ast::BlockId, expr_ty: TyId) -> BuildResult<Expr> {
+        let (tb, tcx) = (self.tb(), self.tcx());
+        let span = self.espan(e);
+        let Some(&(from_def, from_args, _)) = tb.try_branch.get(&e.0) else { return self.unresolved(span, "`try` block facts") };
+        let scope = self.node_scope(Node::Block(b.0), span)?;
+        self.breakables.push(Breakable { label: None, scope, is_block: true });
+        let block = self.mirror_block_with(b, BlockSafety::Safe, true);
+        self.breakables.pop();
+        let block = block?;
+        let tail = match self.thir.blocks[block.0 as usize].expr {
+            Some(t) => t,
+            None => {
+                let hi = self.ast().block(b).hi;
+                let end = self.span(hi.saturating_sub(1), hi);
+                self.push(self.mk_at(e, end, ExprKind::Tuple { fields: Box::new([]) }, self.unit_ty()))
+            }
+        };
+        let from_ty = self.fn_def_ty(from_def, tcx.tys.list(from_args));
+        let fun = self.push(self.mk(e, ExprKind::ZstLiteral { user_ty: None }, from_ty));
+        let call = self.push(self.mk(e, ExprKind::Call { ty: from_ty, fun, args: Box::new([tail]), from_hir_call: true, fn_span: span }, expr_ty));
+        let call_scope = self.synthetic_scope(e, Synthetic::TryFromOutput, ScopeData::Node, span)?;
+        let call = self.scope_wrap(e, call_scope, call);
+        self.thir.blocks[block.0 as usize].expr = Some(call);
+        Ok(self.mk(e, ExprKind::Block { block }, expr_ty))
     }
 
     // ---------------------------------------------------------------- destructuring assignment

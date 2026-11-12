@@ -1,7 +1,9 @@
-//! A dependency-free TOML 1.0 subset parser producing a hierarchical document.
+//! A dependency-free TOML 1.0 subset parser, with TOML 1.1's inline tables, producing a
+//! hierarchical document.
 //!
 //! Supported: bare, quoted and dotted keys; `[table]` and `[[array-of-tables]]`
-//! headers with the standard nesting rules; inline tables; arrays (mixed
+//! headers with the standard nesting rules; inline tables (TOML 1.1: over lines, with
+//! comments and a trailing comma); arrays (mixed
 //! element types, trailing comma, comments and newlines inside); basic and
 //! literal strings, single- and multi-line, with escapes; integers with
 //! underscores and `0x`/`0o`/`0b` radix prefixes; floats with fraction and
@@ -697,24 +699,25 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `{ key = value, key = value }` on one line: only horizontal whitespace
-    /// between the parts, no trailing comma, no comments; a value may itself
-    /// span lines (a multi-line string or an array).
+    /// `{ key = value, key = value }`, as TOML 1.1 has it (cargo reads manifests as TOML 1.1):
+    /// the entries may span lines, with comments between them and a comma after the last; a
+    /// key, its `=` and the start of its value stay on one line, and a comma separates two
+    /// entries.
     fn parse_inline_table(&mut self) -> Result<Node, TomlErr> {
         let start = self.pos;
         self.expect_byte(b'{', "expected `{`")?;
         let mut map: NodeTable = BTreeMap::new();
-        self.skip_ws();
-        if self.peek() == b'}' && !self.at_end() {
-            self.pos += 1;
-            return Ok(Node::Table {
-                map,
-                origin: Origin::Inline,
-            });
-        }
         loop {
+            self.skip_blank_lines();
             if self.at_end() {
                 return Err(self.err("unterminated inline table", start));
+            }
+            if self.peek() == b'}' {
+                self.pos += 1;
+                return Ok(Node::Table {
+                    map,
+                    origin: Origin::Inline,
+                });
             }
             let key = self.parse_key()?;
             self.skip_ws();
@@ -722,31 +725,14 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             let value = self.parse_value()?;
             insert_value(&mut map, &key, value)?;
-            self.skip_ws();
+            self.skip_blank_lines();
             match self.peek() {
-                b',' => {
-                    self.pos += 1;
-                    self.skip_ws();
-                    if self.peek() == b'}' {
-                        let here = self.pos;
-                        self.pos += 1;
-                        return Err(self.err("trailing comma in inline table", here));
-                    }
-                }
-                b'}' => {
-                    self.pos += 1;
-                    return Ok(Node::Table {
-                        map,
-                        origin: Origin::Inline,
-                    });
-                }
+                b',' => self.pos += 1,
+                b'}' => {}
                 _ => {
                     let here = self.pos;
                     self.pos = (self.pos + 1).min(self.bytes.len());
-                    return Err(self.err(
-                        "expected `,` or `}` in inline table (entries stay on one line)",
-                        here,
-                    ));
+                    return Err(self.err("expected `,` or `}` in inline table", here));
                 }
             }
         }
@@ -1377,11 +1363,22 @@ mod tests {
     }
 
     #[test]
-    fn inline_tables_are_single_line_without_trailing_comma() {
-        assert!(parse_toml("t = { a = 1, }\n").is_err());
-        assert!(parse_toml("t = { a = 1,\n b = 2 }\n").is_err());
-        assert!(parse_toml("t = { a = 1 # c\n }\n").is_err());
-        assert!(parse_toml("t = {\n}\n").is_err());
+    fn inline_tables_span_lines_with_comments_and_a_trailing_comma() {
+        // TOML 1.1: newlines and comments around the entries, a comma after the last
+        let doc = parse_toml("t = {\n    a = 1, # one\n    # between\n    b = { c = 2, },\n}\nu = {\r\n}\nv = { w = 3 # c\n }\n").unwrap();
+        assert_eq!(doc.get_path(&["t", "a"]).and_then(Toml::as_num), Some(1.0), "an entry on its own line");
+        assert_eq!(doc.get_path(&["t", "b", "c"]).and_then(Toml::as_num), Some(2.0), "a nested table with a trailing comma");
+        assert!(doc.get_path(&["u"]).and_then(Toml::as_table).is_some_and(|t| t.is_empty()), "an empty table over two lines");
+        assert_eq!(doc.get_path(&["v", "w"]).and_then(Toml::as_num), Some(3.0), "a comment before the closing brace");
+        // still errors: two entries without a comma, two commas, a lone comma, a key and its
+        // `=` on two lines, an unterminated table, a later extension of the table
+        assert!(parse_toml("t = { a = 1\n b = 2 }\n").is_err());
+        assert!(parse_toml("t = { a = 1,, }\n").is_err());
+        assert!(parse_toml("t = { , }\n").is_err());
+        assert!(parse_toml("t = { a\n = 1 }\n").is_err());
+        assert!(parse_toml("t = { a =\n 1 }\n").is_err());
+        assert!(parse_toml("t = { a = 1,\n").is_err());
+        assert!(parse_toml("t = {\n a = 1,\n}\n[t.b]\n").is_err());
         let doc = parse_toml("t = { a = 1, b = \"\"\"\nmulti\n\"\"\", c = [\n1,\n2\n] }\n").unwrap();
         assert_eq!(doc.get_path(&["t", "b"]).and_then(Toml::as_str), Some("multi\n"));
         assert_eq!(doc.get_path(&["t", "c"]).and_then(Toml::as_array).map(<[Toml]>::len), Some(2));

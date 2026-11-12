@@ -772,7 +772,7 @@ impl DefCollector<'_> {
                 self.visit_expr(recv); self.visit_args(turbofish, false); for e in self.ast.list(args) { self.visit_expr(*e); }
             }
             ExprKind::Cast(e, t) => { self.visit_expr(e); self.visit_ty(t, false); }
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => self.visit_block(b),
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Loop(b, _) => self.visit_block(b),
             // rustc_resolve/src/late.rs:4080-4097,4275,5365-5403: initializer
             // before bindings; condition bindings live in the then/body rib only.
             ExprKind::If(e, b, other) => {

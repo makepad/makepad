@@ -416,37 +416,49 @@ impl Command {
         (self.env_clear || self.env.iter().any(|(k, _)| k.as_encoded_bytes() == b"PATH")) && !self.program.as_encoded_bytes().contains(&b'/')
     }
 
-    fn envp(&self) -> io::Result<Option<Vec<CString>>> {
-        if !self.env_clear && self.env.is_empty() {
-            return Ok(None);
-        }
-        let mut map: Vec<(OsString, OsString)> = Vec::new();
-        if !self.env_clear {
-            for kv in crate::env::vars_os() {
-                map.push(kv);
-            }
-        }
+    /// The child's environment, as the host's policy gives it (relax-base progenv.rs `child_env`):
+    /// under `makepad run` a run of this program again (`self_exec`) gets the host's settings for
+    /// its host and the program's own values apart; any other child the program's view. `dir`: where
+    /// the child runs; `host`: this std's plumbing values for the child's host.
+    fn envp(&self, self_exec: bool, dir: &ChildDir, host: &[(OsString, OsString)]) -> io::Result<Vec<CString>> {
+        let mut edits: Vec<u8> = Vec::new();
         for (k, v) in &self.env {
-            let mut j = 0;
-            while j < map.len() {
-                if map[j].0 == *k {
-                    map.remove(j);
-                } else {
-                    j += 1;
-                }
-            }
-            if let Some(v) = v {
-                map.push((k.clone(), v.clone()));
-            }
+            wire_push(&mut edits, k.as_encoded_bytes(), v.as_ref().map(|v| v.as_encoded_bytes()));
         }
+        let mut plumbing: Vec<u8> = Vec::new();
+        for (k, v) in host {
+            wire_push(&mut plumbing, k.as_encoded_bytes(), Some(v.as_encoded_bytes()));
+        }
+        let mut flags: u32 = 0;
+        if self.env_clear {
+            flags |= 1;
+        }
+        if self_exec {
+            flags |= 2;
+        }
+        match dir {
+            ChildDir::Same => {}
+            ChildDir::Virtual(workspace, vfs) => {
+                flags |= 4;
+                wire_push(&mut plumbing, b"MAKEPAD_RUN_WORKSPACE", Some(workspace.as_encoded_bytes()));
+                wire_push(&mut plumbing, b"MAKEPAD_RUN_VFS", Some(vfs.as_encoded_bytes()));
+            }
+            ChildDir::Real => flags |= 8,
+        }
+        let mut p: *const u8 = core::ptr::null();
+        let mut n: usize = 0;
+        unsafe { __relax_spawn_env(edits.as_ptr(), edits.len(), plumbing.as_ptr(), plumbing.len(), flags, &mut p, &mut n) };
+        let mut s: &[u8] = if p.is_null() { &[] } else { unsafe { core::slice::from_raw_parts(p, n) } };
         let mut out = Vec::new();
-        for (k, v) in map {
-            let mut b = k.into_encoded_bytes();
-            b.push(b'=');
-            b.extend_from_slice(v.as_encoded_bytes());
-            out.push(cstring(b)?);
+        while let Some(colon) = s.iter().position(|&b| b == b':') {
+            let mut len: usize = 0;
+            for &d in &s[..colon] {
+                len = len * 10 + (d - b'0') as usize;
+            }
+            out.push(cstring(s[colon + 1..colon + 1 + len].to_vec())?);
+            s = &s[colon + 1 + len..];
         }
-        Ok(Some(out))
+        Ok(out)
     }
 
     /// Under `makepad run` the program's executable is Relax itself: spawning it runs this
@@ -456,13 +468,13 @@ impl Command {
     /// record), and one whose first argument is `export` asks the loader for a source tree (the
     /// runner's Install natively): those run as written.
     fn self_exec_args(&self) -> Option<Vec<OsString>> {
-        let pre = crate::env::var("MAKEPAD_RUN_SELF_EXEC").ok()?;
+        let pre = crate::env::host_var_os("MAKEPAD_RUN_SELF_EXEC")?.into_string().ok()?;
         if self.args.get(1).is_some_and(|a| matches!(a.as_encoded_bytes(), b"run" | b"app" | b"export")) {
             return None;
         }
         // inside a build script (MAKEPAD_RUN_AS_RUSTC): its spawns of this executable are RUSTC
         // questions, answered as written (relax_as_rustc); re-running the script would recurse
-        if crate::env::var_os("MAKEPAD_RUN_AS_RUSTC").is_some() {
+        if crate::env::host_var_os("MAKEPAD_RUN_AS_RUSTC").is_some() {
             return None;
         }
         let parts: Vec<&str> = pre.split('\u{1f}').collect();
@@ -505,29 +517,26 @@ impl Command {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "Android posix_spawn does not support cwd or pre_exec"));
         }
         let Some(dir) = self.cwd.clone() else {
-            return self.spawn_now(default, exec);
+            // the child runs in this program's folder: the one it changed to, if it did
+            let here = match crate::fs::vfs::chosen() {
+                None => ChildDir::Same,
+                Some(None) => ChildDir::Real,
+                Some(Some(v)) => ChildDir::Virtual(v.into_os_string(), OsString::from(crate::fs::vfs::mounts())),
+            };
+            return self.spawn_now(default, exec, &here);
         };
-        let saved_env = self.env.clone();
         let r = match crate::fs::vfs::kind(Path::new(&dir)) {
             Some((abs, _)) => {
                 self.cwd = None;
-                self.env("MAKEPAD_RUN_WORKSPACE", abs.as_os_str());
-                self.env("MAKEPAD_RUN_VFS", crate::fs::vfs::mounts());
-                self.spawn_now(default, exec)
+                self.spawn_now(default, exec, &ChildDir::Virtual(abs.as_os_str().to_os_string(), OsString::from(crate::fs::vfs::mounts())))
             }
-            None => {
-                if crate::env::var_os("MAKEPAD_RUN_WORKSPACE").is_some() {
-                    self.env_remove("MAKEPAD_RUN_WORKSPACE");
-                }
-                self.spawn_now(default, exec)
-            }
+            None => self.spawn_now(default, exec, &ChildDir::Real),
         };
         self.cwd = Some(dir);
-        self.env = saved_env;
         r
     }
 
-    fn spawn_now(&mut self, default: Stdio, exec: bool) -> io::Result<Child> {
+    fn spawn_now(&mut self, default: Stdio, exec: bool, dir: &ChildDir) -> io::Result<Child> {
         let mut self_exec = self.self_exec_args();
         // the program again: what this process compiled goes to the disk cache first, so the new
         // process starts from it (Relax run.rs relax_self_spawn)
@@ -536,15 +545,16 @@ impl Command {
         }
         // replacing this process with the program again (an exec, not a spawn) continues the
         // live session: the `--silent` Relax added for re-runs (it ends live editing) goes
-        if let Some(v) = self_exec.as_mut().filter(|_| exec && crate::env::var_os("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED").is_some()) {
+        if let Some(v) = self_exec.as_mut().filter(|_| exec && crate::env::host_var_os("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED").is_some()) {
             if v.get(2).is_some_and(|a| a.as_encoded_bytes() == b"--silent") {
                 v.remove(2);
             }
         }
         // ... and its clocks go on from this process's start (relax base clock.rs EXEC_ORIGIN_ENV)
+        let mut host: Vec<(OsString, OsString)> = Vec::new();
         if exec && self_exec.is_some() {
-            if let Some(t0) = crate::env::var_os("MAKEPAD_RUN_STARTUP_T0") {
-                self.env("MAKEPAD_RUN_EXEC_ORIGIN_EPOCH", &t0);
+            if let Some(t0) = crate::env::host_var_os("MAKEPAD_RUN_STARTUP_T0") {
+                host.push((OsString::from("MAKEPAD_RUN_EXEC_ORIGIN_EPOCH"), t0));
             }
         }
         let prog = match &self_exec {
@@ -560,18 +570,13 @@ impl Command {
             argv.push(a.as_ptr());
         }
         argv.push(core::ptr::null());
-        let envp_c = self.envp()?;
+        let envp_c = self.envp(self_exec.is_some(), dir, &host)?;
         let mut envp: Vec<*const c_char> = Vec::new();
-        let envp_ptr = match &envp_c {
-            Some(list) => {
-                for e in list {
-                    envp.push(e.as_ptr());
-                }
-                envp.push(core::ptr::null());
-                envp.as_ptr()
-            }
-            None => sys::os::environ(),
-        };
+        for e in &envp_c {
+            envp.push(e.as_ptr());
+        }
+        envp.push(core::ptr::null());
+        let envp_ptr = envp.as_ptr();
         let cwd = match &self.cwd {
             Some(d) => Some(cstring(d.as_encoded_bytes().to_vec())?),
             None => None,
@@ -908,6 +913,42 @@ unsafe fn exec_path_env(file: *const c_char, argv: *const *const c_char, envp: *
     sys::os::set_environ(envp);
     execvp(file, argv);
     sys::os::set_environ(was);
+}
+
+/// Where a child runs, for its environment (relax-base progenv.rs ChildDir): this process's folder,
+/// a virtual folder of a git run (the folder and the mount table), or a real folder.
+enum ChildDir {
+    Same,
+    Virtual(OsString, OsString),
+    Real,
+}
+
+/// One entry of the host's wire form (relax-base progenv.rs `encode`): its byte length, `:`,
+/// `NAME=value`, or `NAME` alone for a removal.
+fn wire_push(out: &mut Vec<u8>, k: &[u8], v: Option<&[u8]>) {
+    let n = k.len() + v.map_or(0, |v| v.len() + 1);
+    let mut digits = [0u8; 20];
+    let mut i = digits.len();
+    let mut m = n;
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (m % 10) as u8;
+        m /= 10;
+        if m == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&digits[i..]);
+    out.push(b':');
+    out.extend_from_slice(k);
+    if let Some(v) = v {
+        out.push(b'=');
+        out.extend_from_slice(v);
+    }
+}
+
+extern "C" {
+    fn __relax_spawn_env(edits: *const u8, edits_len: usize, host: *const u8, host_len: usize, flags: u32, out: *mut *const u8, out_len: *mut usize);
 }
 
 /// Iterator over a Command's arguments (Command::get_args).

@@ -2914,6 +2914,7 @@ impl Tcx {
                         args.extend(self.fill_trait_defaults(cx, prog, td, self_t, explicit));
                         let tr = if prog.def(ad).parent == td { tr } else { RegionArgsId::EMPTY };
                         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, p);
+                        self.infer_elided_assoc_lifetimes(cx, prog, ad, &mut own_regions, source_ty.is_none());
                         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, p, Some(ad));
                         self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
                         args.extend(own_args);
@@ -3361,6 +3362,21 @@ impl Tcx {
     /// An associated type path's own arguments are exactly the declared parameters of the
     /// associated type (hir_ty_lowering/generics.rs: missing ones are error terms, extra ones
     /// are dropped; E0107 reports either).
+    /// An expression path's prefix may leave out a generic associated type's lifetimes
+    /// (`<Res as MontyForm>::Multiplier::from(&params)` for `type Multiplier<'a>`): in a body
+    /// they are inferred, one region variable each, as rustc lowers an elided lifetime in a
+    /// value path (relax issue 43: they were error regions, which tainted the body without an
+    /// error of its own).
+    fn infer_elided_assoc_lifetimes(&self, cx: &EvalCx<'_>, prog: &Program, ad: DefId, regions: &mut Vec<RegionId>, infer_args: bool) {
+        let Some(infcx) = cx.infcx else { return };
+        if !infer_args || !regions.is_empty() { return; }
+        let def = prog.def(ad);
+        let ast = &prog.files[def.file as usize].ast;
+        let Some(generics) = ast.kind_generics(&ast.item(def.item).kind) else { return; };
+        let lifetimes = ast.list(generics.params).iter().filter(|p| matches!(p.kind, GenericParamKind::Lifetime(_))).count();
+        for _ in 0..lifetimes { regions.push(infcx.next_region_var()); }
+    }
+
     pub(crate) fn fit_assoc_own_args(&self, prog: &Program, ad: DefId, args: &mut Vec<TyId>, regions: &mut Vec<RegionId>) {
         let def = prog.def(ad);
         let ast = &prog.files[def.file as usize].ast;
@@ -3965,6 +3981,7 @@ impl Tcx {
         }
         let mut args = self.tys.list(alias.args).to_vec();
         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, path);
+        self.infer_elided_assoc_lifetimes(cx, prog, alias.kind.def_id(), &mut own_regions, source_ty.is_none());
         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, path, Some(alias.kind.def_id()));
         self.fit_assoc_own_args(prog, alias.kind.def_id(), &mut own_args, &mut own_regions);
         args.extend(own_args);

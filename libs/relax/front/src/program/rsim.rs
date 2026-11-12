@@ -141,6 +141,13 @@ struct Sim<'a> {
     busy: crate::fxhash::HashSet<(u32, Sym, usize)>,
     ext_names: crate::fxhash::HashMap<u32, std::rc::Rc<Vec<(Sym, usize)>>>,
     ext_decls: crate::fxhash::HashMap<(u32, Sym, usize), Option<DeclId>>,
+    /// the flattened type and value bindings of the unchecked modules a glob of a checked crate read
+    ext_tables: crate::fxhash::HashMap<u32, std::rc::Rc<ExtTable>>,
+    /// the registered proc macro names (None: not read yet), and per unchecked module the ones a
+    /// walk of its imports can find (`MacroScope::proc_macro_reach`)
+    proc_names: Option<crate::fxhash::HashSet<String>>,
+    ext_procs: crate::fxhash::HashMap<u32, std::rc::Rc<crate::fxhash::HashSet<String>>>,
+    proc_memo: crate::macros::ProcReach,
     amb: Vec<AmbErr>,
     cannot_determine: Vec<u32>,
     unresolved: Vec<u32>,
@@ -161,6 +168,28 @@ struct Sim<'a> {
 }
 
 fn ns_type(ns: usize) -> bool { ns == 0 }
+
+/// An unchecked module's bindings in the type (true) and value namespaces, flattened through its
+/// globs, as rustc reads an extern module's names from metadata: per name, what
+/// `Program::lookup_in_module_vis` answers for it (precise visibilities), computed for the whole
+/// module at once. Inside a glob cycle such a lookup can depend on the module it enters the cycle
+/// at -- when two definitions, or two visibilities neither of which is the wider, reach a name
+/// there --; those names are `contested` and are looked up one at a time, and every name of a
+/// cycle that did not settle is (`unsettled`).
+#[derive(Default)]
+struct ExtTable {
+    names: crate::fxhash::HashMap<(Sym, bool), (DefId, BindVis)>,
+    contested: crate::fxhash::HashSet<(Sym, bool)>,
+    unsettled: bool,
+}
+
+impl ExtTable {
+    /// The table's answer for a name, or None when the name is looked up one at a time.
+    fn answer(&self, key: (Sym, bool)) -> Option<Option<(DefId, BindVis)>> {
+        if self.unsettled || self.contested.contains(&key) { return None; }
+        Some(self.names.get(&key).copied())
+    }
+}
 
 /// The bang macros of the std family's modules as rustc's library defines them (Relax implements them
 /// by name, builtins.rs): core's prelude (library/core/src/prelude/v1.rs), std's (std/src/prelude/v1.rs),
@@ -314,6 +343,7 @@ impl<'a> Sim<'a> {
             res: Default::default(), order: Default::default(), imps: Vec::new(),
             all_globs: Default::default(), glob_importers: Default::default(), propagating: Default::default(),
             busy: Default::default(), ext_names: Default::default(), ext_decls: Default::default(),
+            ext_tables: Default::default(), proc_names: None, ext_procs: Default::default(), proc_memo: Default::default(),
             amb: Vec::new(), cannot_determine: Vec::new(), unresolved: Vec::new(), privacy_errors: 0, priv_list: Vec::new(), hack_applied: false, cur_imp: 0,
             no_prelude: Default::default(), extern_items: Default::default(), dummy: 0, unexpanded: Default::default(),
             indeterminate: Vec::new(), determined: Vec::new(), synthetic_macros: Vec::new(), proc_macros: Vec::new(),
@@ -401,13 +431,160 @@ impl<'a> Sim<'a> {
         let r = if ns == 2 {
             self.ext_macro(m, name).map(|d| self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 }))
         } else {
-            let mut q = GlobQuery { precise: true, ..Default::default() };
-            self.p.lookup_in_module_vis(m, name, ns_type(ns), &mut q).map(|(d, v)| {
-                self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: v, vis_max: None, vis_min: None, exp: 0 })
-            })
+            // a module a glob read answers from its flattened table; a single name of another
+            // module, and a contested one, is looked up as it is
+            let p = self.p;
+            let lookup = || p.lookup_in_module_vis(m, name, ns_type(ns), &mut GlobQuery { precise: true, ..Default::default() });
+            let found = match self.ext_tables.get(&m).and_then(|t| t.answer((name, ns_type(ns)))) {
+                Some(a) => {
+                    debug_assert_eq!(a, lookup(), "the flattened table of module {m} for `{}`", p.syms.str(name));
+                    a
+                }
+                None => lookup(),
+            };
+            found.map(|(d, v)| self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: v, vis_max: None, vis_min: None, exp: 0 }))
         };
         self.ext_decls.insert((m, name, ns), r);
         r
+    }
+
+    /// Builds the flattened table (ExtTable) of unchecked module `t` and of every module its globs
+    /// reach: Tarjan's components of the glob graph, each after the components it reads.
+    fn build_ext_table(&mut self, t: u32) {
+        if self.ext_tables.contains_key(&t) { return; }
+        let p = self.p;
+        let targets = |m: u32| -> Vec<u32> {
+            p.mods[m as usize].globs.iter().filter_map(|&(g, _)| { let gd = p.def(g); (gd.kind == DefKind::Mod).then_some(gd.sub) }).collect()
+        };
+        let mut index: crate::fxhash::HashMap<u32, u32> = Default::default();
+        let mut low: crate::fxhash::HashMap<u32, u32> = Default::default();
+        let mut on_stack: crate::fxhash::HashSet<u32> = Default::default();
+        let mut stack: Vec<u32> = Vec::new();
+        let mut comps: Vec<Vec<u32>> = Vec::new();
+        let mut walk: Vec<(u32, Vec<u32>, usize)> = vec![(t, targets(t), 0)];
+        index.insert(t, 0);
+        low.insert(t, 0);
+        stack.push(t);
+        on_stack.insert(t);
+        let mut next = 1;
+        while let Some(top) = walk.last_mut() {
+            let m = top.0;
+            if top.2 < top.1.len() {
+                let w = top.1[top.2];
+                top.2 += 1;
+                if self.ext_tables.contains_key(&w) { continue; }
+                match index.get(&w) {
+                    Some(&wi) => if on_stack.contains(&w) { low.insert(m, low[&m].min(wi)); },
+                    None => {
+                        index.insert(w, next);
+                        low.insert(w, next);
+                        next += 1;
+                        stack.push(w);
+                        on_stack.insert(w);
+                        walk.push((w, targets(w), 0));
+                    }
+                }
+                continue;
+            }
+            walk.pop();
+            if let Some(parent) = walk.last() { low.insert(parent.0, low[&parent.0].min(low[&m])); }
+            if low[&m] == index[&m] {
+                let mut comp = Vec::new();
+                while let Some(x) = stack.pop() {
+                    on_stack.remove(&x);
+                    comp.push(x);
+                    if x == m { break; }
+                }
+                comps.push(comp);
+            }
+        }
+        for comp in comps { self.table_component(&comp); }
+    }
+
+    /// The tables of one component of the glob graph. A cycle's start from nothing bound inside
+    /// it (what a lookup's first pass answers for a module it is still looking through) and are
+    /// folded again until they hold; then one more fold finds its contested names.
+    fn table_component(&mut self, comp: &[u32]) {
+        let p = self.p;
+        let cyclic = comp.len() > 1 || p.mods[comp[0] as usize].globs.iter().any(|&(g, _)| { let gd = p.def(g); gd.kind == DefKind::Mod && gd.sub == comp[0] });
+        let mut work: crate::fxhash::HashMap<u32, ExtTable> = comp.iter().map(|&m| (m, ExtTable::default())).collect();
+        if !cyclic {
+            let t = self.fold_ext(comp[0], &work, None);
+            self.ext_tables.insert(comp[0], std::rc::Rc::new(t));
+            return;
+        }
+        let mut settled = false;
+        for _ in 0..comp.len() + 2 {
+            let mut changed = false;
+            for &m in comp {
+                let t = self.fold_ext(m, &work, None);
+                changed |= t.names != work[&m].names || t.unsettled != work[&m].unsettled;
+                work.insert(m, t);
+            }
+            if !changed { settled = true; break; }
+        }
+        let mut contest = crate::fxhash::HashSet::default();
+        if settled {
+            for &m in comp { self.fold_ext(m, &work, Some(&mut contest)); }
+        }
+        for &m in comp {
+            let mut t = work.remove(&m).unwrap_or_default();
+            t.unsettled |= !settled;
+            let md = &p.mods[m as usize];
+            t.contested.extend(contest.iter().filter(|k| !(if k.1 { md.types.contains_key(&k.0) } else { md.values.contains_key(&k.0) })));
+            self.ext_tables.insert(m, std::rc::Rc::new(t));
+        }
+    }
+
+    /// Module `m`'s table from the tables of its glob targets (`work`: a cycle's tables so far; the
+    /// rest are built): its own bindings, then each glob's, as `lookup_in_module_globs` takes them
+    /// -- visible to `m`, at most as visible as the glob, the first one found unless the same
+    /// definition comes again more visible. `contest` collects the names two globs give different
+    /// definitions, or visibilities neither of which is the wider.
+    fn fold_ext(&self, m: u32, work: &crate::fxhash::HashMap<u32, ExtTable>, mut contest: Option<&mut crate::fxhash::HashSet<(Sym, bool)>>) -> ExtTable {
+        use std::collections::hash_map::Entry;
+        let p = self.p;
+        let md = &p.mods[m as usize];
+        let own = |k: &(Sym, bool)| if k.1 { md.types.contains_key(&k.0) } else { md.values.contains_key(&k.0) };
+        let mut t = ExtTable::default();
+        for (&n, &d) in &md.types { t.names.insert((n, true), (d, p.precise_vis(m, n, true, d))); }
+        for (&n, &d) in &md.values { t.names.insert((n, false), (d, p.precise_vis(m, n, false, d))); }
+        for &(g, gpub) in &md.globs {
+            let gd = p.def(g);
+            let gv = if gpub { None } else { Some(md.normal) };
+            let mut take = |t: &mut ExtTable, k: (Sym, bool), d: DefId, v: BindVis| {
+                if own(&k) || !p.vis_visible(v, m) { return; }
+                let v = p.vis_min(gv, v);
+                match t.names.entry(k) {
+                    Entry::Vacant(e) => { e.insert((d, v)); }
+                    Entry::Occupied(mut e) => {
+                        let (bd, bv) = *e.get();
+                        if bd == d && p.vis_wider(v, bv) {
+                            e.insert((d, v));
+                        } else if bd != d || (v != bv && !p.vis_wider(bv, v)) {
+                            if let Some(c) = contest.as_deref_mut() { c.insert(k); }
+                        }
+                    }
+                }
+            };
+            match gd.kind {
+                DefKind::Mod => {
+                    let src = work.get(&gd.sub).or_else(|| self.ext_tables.get(&gd.sub).map(|x| &**x)).expect("a glob target's table is built before its importer's");
+                    for (&k, &(d, v)) in &src.names { take(&mut t, k, d, v); }
+                    t.contested.extend(src.contested.iter().filter(|k| !own(k)));
+                    t.unsettled |= src.unsettled;
+                }
+                DefKind::Enum => {
+                    for &v in &p.variants[gd.sub as usize] {
+                        let n = p.def(v).name;
+                        take(&mut t, (n, true), v, None);
+                        take(&mut t, (n, false), v, None);
+                    }
+                }
+                _ => {}
+            }
+        }
+        t
     }
 
     /// Which std-family macro set module `m` holds: the roots of core / std / alloc and the modules of
@@ -457,6 +634,12 @@ impl<'a> Sim<'a> {
         if let Some(set) = self.std_macro_module(m) {
             if set.names().contains(&n) { return Some(self.builtin_macro(name, set == StdMacros::Std && n == "panic")); }
         }
+        // a registered proc macro name no import of the module's reach binds has no walk to find it
+        if self.proc_names.get_or_insert_with(|| crate::macro_reg::proc_macro_names().into_iter().collect()).contains(n) && !self.ext_procs(m).contains(n) {
+            #[cfg(debug_assertions)]
+            assert_eq!(self.ext_macro_walk(m, n), None, "the proc macro reach of module {m} for `{n}`");
+            return None;
+        }
         let md = &self.p.mods[m as usize];
         let krate = self.p.syms.str(self.p.crates[md.krate as usize].name);
         let module = self.p.def_path(md.def);
@@ -469,6 +652,33 @@ impl<'a> Sim<'a> {
             }
         }
         None
+    }
+
+    /// The registered proc macro names a walk of unchecked module `m`'s imports can find
+    /// (`MacroScope::proc_macro_reach`, as its own crate sees it), once per module.
+    fn ext_procs(&mut self, m: u32) -> std::rc::Rc<crate::fxhash::HashSet<String>> {
+        if let Some(x) = self.ext_procs.get(&m) { return x.clone(); }
+        let md = &self.p.mods[m as usize];
+        let krate = self.p.syms.str(self.p.crates[md.krate as usize].name);
+        let module = self.p.def_path(md.def);
+        let scope = crate::macros::MacroScope::new(self.p.macros.clone());
+        let names = self.proc_names.get_or_insert_with(|| crate::macro_reg::proc_macro_names().into_iter().collect());
+        let r = scope.proc_macro_reach(krate, &module, names, &mut self.proc_memo);
+        self.ext_procs.insert(m, r.clone());
+        r
+    }
+
+    /// The proc macro `name` of module `m` by a walk of its imports for that name alone (for the
+    /// debug check of the reach filter).
+    #[cfg(debug_assertions)]
+    fn ext_macro_walk(&self, m: u32, n: &str) -> Option<(usize, String)> {
+        let md = &self.p.mods[m as usize];
+        let krate = self.p.syms.str(self.p.crates[md.krate as usize].name);
+        let module = self.p.def_path(md.def);
+        let scope = crate::macros::MacroScope::new(self.p.macros.clone());
+        [crate::macro_reg::Kind::Bang, crate::macro_reg::Kind::Attr, crate::macro_reg::Kind::Derive].into_iter()
+            .find_map(|kind| scope.proc_macro_path(krate, &module, &[n.to_string()], kind, &mut Default::default()))
+            .map(|e| (e.unit, e.fname))
     }
 
     /// rustc's MacroRules scopes at import `i`: a `macro_rules! name` written before it in its file, in its
@@ -1385,6 +1595,7 @@ impl<'a> Sim<'a> {
                         self.plant_glob(i, here, name, ns, binding);
                     }
                 } else {
+                    self.build_ext_table(module);
                     for &(name, ns) in self.ext_names(module).iter() {
                         if let Some(binding) = self.ext_decl(module, name, ns) { self.plant_glob(i, here, name, ns, binding); }
                     }

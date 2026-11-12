@@ -1337,6 +1337,8 @@ impl<'a> Kp<'a> {
                 V::Unknown
             }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => self.block(b),
+            // a `?` inside may leave the block early: its end is reached either way
+            ExprKind::TryBlock(b) => { self.branch(|s| { s.block(b); }); V::Unknown }
             ExprKind::Async(..) | ExprKind::ConstBlock(_) => V::Unknown,
             ExprKind::Closure(row) => {
                 let c = *ast.row(row);

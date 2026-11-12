@@ -1064,6 +1064,10 @@ impl<'a> Gates<'a> {
                 for &a in ast.list(m.args).to_vec().iter() { self.expr(a) }
             }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => self.block(b),
+            ExprKind::TryBlock(b) => {
+                self.gate("try_blocks", ex.lo, "`try` expression is experimental");
+                self.block(b);
+            }
             ExprKind::If(c, b, el) => {
                 self.expr(c);
                 self.block(b);

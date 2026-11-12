@@ -469,7 +469,7 @@ impl V<'_> {
                 self.expr(count);
                 self.ctx = saved;
             }
-            ExprKind::Block(b, _) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => self.block(b),
+            ExprKind::Block(b, _) | ExprKind::TryBlock(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => self.block(b),
             ExprKind::If(c, then, els) => {
                 self.expr(c);
                 self.block(then);

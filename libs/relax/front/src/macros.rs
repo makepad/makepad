@@ -1001,6 +1001,10 @@ fn lookup_after_textual(table: &MacroTable, name: &str, cur: &str, module: &str)
     r.std_prelude(name)
 }
 
+/// The modules `MacroScope::proc_macro_reach` finished, by (crate, module).
+#[derive(Default)]
+pub(crate) struct ProcReach(HashMap<(String, String), std::rc::Rc<crate::fxhash::HashSet<String>>>);
+
 struct Res<'a> {
     table: &'a MacroTable,
 }
@@ -1902,6 +1906,71 @@ impl MacroScope {
             if let Some(e) = self.proc_macro_path(k, m, &path, kind, seen) { return Some(e); }
         }
         None
+    }
+
+    /// The names of `names` a `proc_macro_in` walk from module `m` of crate `k` can find a proc macro
+    /// for, or more, never fewer: the names the module's imports bind, those its crate's root
+    /// exports, and those of every module its glob imports read, through glob cycles. A name
+    /// outside it has no proc macro there, so it needs no walk. (Every import counts, `pub` or not:
+    /// the walk's visibility and its `seen` set only take names away.)
+    pub(crate) fn proc_macro_reach(&self, k: &str, m: &str, names: &crate::fxhash::HashSet<String>, memo: &mut ProcReach) -> std::rc::Rc<crate::fxhash::HashSet<String>> {
+        let first = (k.to_string(), m.to_string());
+        if let Some(x) = memo.0.get(&first) { return x.clone(); }
+        let r = Res { table: &self.table };
+        // the modules the globs reach that are not finished: each one's own names and glob targets
+        // (a module of this walk, or a finished set)
+        let mut keys: Vec<(String, String)> = vec![first.clone()];
+        let mut index: HashMap<(String, String), usize> = HashMap::default();
+        index.insert(first.clone(), 0);
+        let mut sets: Vec<crate::fxhash::HashSet<String>> = Vec::new();
+        let mut reads: Vec<Vec<Result<usize, std::rc::Rc<crate::fxhash::HashSet<String>>>>> = Vec::new();
+        let mut i = 0;
+        while i < keys.len() {
+            let (k, m) = keys[i].clone();
+            let mut own = crate::fxhash::HashSet::default();
+            if r.crate_root(&k).1 == m {
+                for (n, _) in crate::macro_reg::exported_proc_macros(krate_name(&k)) {
+                    if names.contains(&n) { own.insert(n); }
+                }
+            }
+            let mut read = Vec::new();
+            if let Some(uses) = self.table.crates.get(&k).and_then(|c| c.uses.get(&m)) {
+                for u in uses.iter() {
+                    if let Some(b) = u.bind.as_deref() {
+                        if names.contains(b) { own.insert(b.to_string()); }
+                        continue;
+                    }
+                    let target = if u.path.is_empty() { Some((k.as_str(), m.as_str())) } else { r.resolve_mod(&k, &m, &u.path) };
+                    let Some((k2, m2)) = target else { continue };
+                    let key = (k2.to_string(), m2.to_string());
+                    if let Some(x) = memo.0.get(&key) { read.push(Err(x.clone())); continue; }
+                    let j = match index.get(&key) {
+                        Some(&j) => j,
+                        None => { index.insert(key.clone(), keys.len()); keys.push(key); keys.len() - 1 }
+                    };
+                    read.push(Ok(j));
+                }
+            }
+            sets.push(own);
+            reads.push(read);
+            i += 1;
+        }
+        // each module's names grow by those of the modules it reads until none grows (the sets only
+        // grow, within `names`)
+        loop {
+            let mut grew = false;
+            for a in (0..keys.len()).rev() {
+                let mut add: Vec<String> = Vec::new();
+                for x in &reads[a] {
+                    let from = match x { Ok(j) => &sets[*j], Err(done) => &**done };
+                    add.extend(from.iter().filter(|n| !sets[a].contains(*n)).cloned());
+                }
+                if !add.is_empty() { grew = true; sets[a].extend(add); }
+            }
+            if !grew { break; }
+        }
+        for (key, set) in keys.into_iter().zip(sets) { memo.0.insert(key, std::rc::Rc::new(set)); }
+        memo.0[&first].clone()
     }
 
     pub(crate) fn proc_macro_use(&self, cur: &str, name: &str, kind: crate::macro_reg::Kind) -> Option<crate::macro_reg::Entry> {
@@ -3244,7 +3313,7 @@ impl<'a> Parser<'a> {
                     Frag::Expr => self.expr().map(|id| {
                         // rustc_ast classify::expr_requires_semi_to_be_stmt: such an expression
                         // is its own statement where the fragment starts one
-                        { use crate::ast::ExprKind as K; bare = matches!(self.ast.expr(id).kind, K::If(..) | K::Match(..) | K::Block(..) | K::Unsafe(..) | K::ConstBlock(..) | K::While(..) | K::Loop(..) | K::For(..)); }
+                        { use crate::ast::ExprKind as K; bare = matches!(self.ast.expr(id).kind, K::If(..) | K::Match(..) | K::Block(..) | K::Unsafe(..) | K::ConstBlock(..) | K::TryBlock(..) | K::While(..) | K::Loop(..) | K::For(..)); }
                     }),
                     // `...` is no type start (rustc Token::can_begin_type): only a C-variadic parameter
                     Frag::Ty if k == T::DotDotDot => Err(crate::parser::PErr { pos: self.toks.at(i).lo, msg: "expected a type".to_string() }),

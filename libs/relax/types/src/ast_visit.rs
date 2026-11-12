@@ -92,7 +92,7 @@ pub fn walk_expr<'a, V: Visitor<'a>>(v: &mut V, e: ExprId) {
             v.expr(recv);
             walk_exprs(v, ast.row(row).args);
         }
-        ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => v.block(b),
+        ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => v.block(b),
         ExprKind::If(c, then, els) => {
             v.expr(c);
             v.block(then);

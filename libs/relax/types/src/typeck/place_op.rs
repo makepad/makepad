@@ -49,7 +49,7 @@ impl Fcx<'_> {
                 _ => {}
             }
             match kind {
-                ExprKind::Block(block, _) | ExprKind::Unsafe(block) | ExprKind::Async(_, block)
+                ExprKind::Block(block, _) | ExprKind::Unsafe(block) | ExprKind::TryBlock(block) | ExprKind::Async(_, block)
                 | ExprKind::ConstBlock(block) | ExprKind::Loop(block, _) | ExprKind::If(_, block, _) => { blocks.insert(block.0); }
                 ExprKind::While(row) => { blocks.insert(self.ast().row(row).body.0); }
                 ExprKind::For(row) => { blocks.insert(self.ast().row(row).body.0); }

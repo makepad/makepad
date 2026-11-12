@@ -253,7 +253,7 @@ impl<D: Delegate> ExprUseVisitor<'_, '_, D> {
                 }
                 for x in self.ast().list(args).to_vec() { self.consume_expr(x); }
             }
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => self.walk_block(b),
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Loop(b, _) => self.walk_block(b),
             ExprKind::If(c, b, el) => { self.consume_expr(c); self.walk_block(b); if let Some(x) = el.get() { self.consume_expr(x); } }
             ExprKind::While(row) => { let crate::ast::WhileRow { cond: c, body: b, .. } = *self.ast().row(row); self.consume_expr(c); self.walk_block(b); }
             ExprKind::For(row) => { let crate::ast::ForRow { iter: x, body: b, .. } = *self.ast().row(row); self.consume_expr(x); self.walk_block(b); }

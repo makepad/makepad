@@ -198,8 +198,11 @@ struct ScrutTemp {
     path: Vec<(u32, u32)>,
 }
 
+/// The label name of a `try` block's LoopCx: no source label has it, so only `?` finds it.
+const TRY_SCOPE: u32 = u32::MAX;
+
 struct LoopCx {
-    /// (name, position of the label: hygiene)
+    /// (name, position of the label: hygiene); (TRY_SCOPE, 0) for a `try` block
     label: Option<(u32, u32)>,
     brk: u32,
     cont: u32,
@@ -1758,7 +1761,7 @@ impl<'a> Lcx<'a> {
                 _ => {}
             }
             match kind {
-                ExprKind::Block(bl, _) | ExprKind::Unsafe(bl) | ExprKind::Async(_, bl)
+                ExprKind::Block(bl, _) | ExprKind::Unsafe(bl) | ExprKind::TryBlock(bl) | ExprKind::Async(_, bl)
                 | ExprKind::ConstBlock(bl) | ExprKind::Loop(bl, _) | ExprKind::If(_, bl, _) => {
                     blocks.insert(bl.0);
                 }
@@ -5666,11 +5669,47 @@ impl<'a> Lcx<'a> {
         let (fd, args) = self.b.try_from_residual[&e.0].clone();
         let args = self.mono_list(args);
         let instance = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog, env, fd, &args);
-        let r = self.emit_instance(instance, vec![(ev, et)], self.ret_ty);
-        self.ret_val_early(r, self.ret_ty);
+        // the residual leaves the innermost `try` block (break with its value), or returns
+        match self.loops.iter().rposition(|l| l.label.is_some_and(|x| x.0 == TRY_SCOPE)) {
+            Some(i) => {
+                let (pl, pt) = self.loops[i].result.clone().unwrap();
+                let r = self.emit_instance(instance, vec![(ev, et)], pt);
+                self.write_place(&pl, pt, r);
+                let (depth, td, brk) = (self.loops[i].scope_depth, self.loops[i].temps_depth, self.loops[i].brk);
+                self.exit_scopes(depth, td);
+                self.goto(brk);
+            }
+            None => {
+                let r = self.emit_instance(instance, vec![(ev, et)], self.ret_ty);
+                self.ret_val_early(r, self.ret_ty);
+            }
+        }
         self.switch(ok_blk);
         let (pp, _) = self.project(&place, flow, vi_ok, 0);
         self.read_place(&pp, t)
+    }
+
+    /// `try { stmts; tail }` (rustc_ast_lowering lower_expr_try_block): a block the `?`s inside
+    /// leave with their residual's `FromResidual::from_residual` (lower_try), whose value is
+    /// `Try::from_output(tail)` (`from_output(())` without a tail).
+    fn lower_try_block(&mut self, e: ExprId, b: BlockId, t: TyId) -> Val {
+        let brk = self.f.block();
+        let res = self.result_place(t);
+        self.loops.push(LoopCx { label: Some((TRY_SCOPE, 0)), brk, cont: brk, result: Some((res.clone(), t)), scope_depth: self.scopes.len(), temps_depth: self.stmt_temps.len() });
+        let v = self.lower_block(b);
+        self.loops.pop();
+        if self.dead_blk != Some(self.cur) && !self.cur_unreachable() {
+            let (fd, args, output) = self.b.try_branch[&e.0].clone();
+            let args = self.mono_list(args);
+            let output = self.monomorphize(output);
+            let env = crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog);
+            let instance = crate::instance::Instance::expect_resolve(&self.u.tcx, &self.u.prog, env, fd, &args);
+            let r = self.emit_instance(instance, vec![(v, output)], t);
+            self.write_place(&res, t, r);
+        }
+        self.goto(brk);
+        self.switch(brk);
+        self.read_place(&res, t)
     }
 
     fn test_variant(&mut self, p: PatId, place: &Place, t: TyId, fail: u32) {
@@ -5945,6 +5984,11 @@ impl<'a> Lcx<'a> {
             // an inline const (`const { .. }`, `offset_of!`'s expansion) is a constant: rustc
             // promotes it (lowered here as code; promote_rvalue stores its value statically)
             ExprKind::ConstBlock(_) => true,
+            // rustc_mir_transform/src/promote_consts.rs: Validator::validate_rvalue: a closure is
+            // an aggregate of its captures, so one that captures nothing is a constant (`&VTable {
+            // f: |p| .., g: |p| .. }`, reified to `fn` pointers, outlives the fn that returns it)
+            ExprKind::Closure(_) => matches!(self.kind_ref(t), TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: captures, .. })
+                if matches!(self.kind_ref(*captures), TyKind::Tuple(ts) if ts.is_empty())),
             ExprKind::AddrOf(false, false, x) => self.promotable(x),
             ExprKind::Call(f, args) => {
                 let ctor = matches!(self.b.res.get(&strip_paren(ast, f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
@@ -7060,6 +7104,7 @@ impl<'a> Lcx<'a> {
                 self.lower_block(*b)
             }
             ExprKind::Unsafe(b) => self.lower_block(*b),
+            ExprKind::TryBlock(b) => self.lower_try_block(e, *b, t),
             ExprKind::ConstBlock(b) => {
                 // an integer SIMD vector (simd_shuffle's index, `const { .. }` in core::simd's
                 // swizzles): evaluated here, its lanes known to the SIMD intrinsics

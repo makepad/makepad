@@ -14,3 +14,5 @@ mod imp;
 pub use imp::*;
 #[cfg(unix)]
 pub(crate) use imp::env_read_lock;
+#[cfg(any(unix, windows))]
+pub(crate) use imp::host_var_os;

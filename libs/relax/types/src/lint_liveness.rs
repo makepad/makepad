@@ -72,6 +72,7 @@ struct Report {
     unit: u32,
 }
 
+/// A loop, a labeled block, or (no label, not a loop) a `try` block, which only `?` leaves to.
 struct LoopCx {
     label: Option<String>,
     break_to: u32,
@@ -513,10 +514,10 @@ impl<'c, 'a> Unit<'c, 'a> {
             | ExprKind::Field(x, _) | ExprKind::TupleField(x, _) | ExprKind::AddrOf(_, _, x) => self.expr(x),
             ExprKind::Try(x) => {
                 self.expr(x);
-                // the residual path returns
+                // the residual path leaves the innermost `try` block, or returns
                 if let Some(c) = self.cur {
-                    let ex = self.exit;
-                    self.link(c, ex);
+                    let to = self.loops.iter().rev().find(|l| !l.is_loop && l.label.is_none()).map_or(self.exit, |l| l.break_to);
+                    self.link(c, to);
                 }
             }
             ExprKind::Binary(op, a, b) => {
@@ -565,6 +566,13 @@ impl<'c, 'a> Unit<'c, 'a> {
                 }
             }
             ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::TryBlock(b) => {
+                let join = self.new_node();
+                self.loops.push(LoopCx { label: None, break_to: join, continue_to: join, is_loop: false });
+                self.block(b);
+                self.loops.pop();
+                self.merge(join);
+            }
             ExprKind::ConstBlock(_) => {}
             ExprKind::Async(_, b) => self.closure_like(e, None, Some(b)),
             ExprKind::If(c, then, els) => {

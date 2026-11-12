@@ -23,8 +23,6 @@ use crate::sys::os::{GetLastError, GetModuleFileNameW, GetModuleHandleW};
 extern "system" {
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, n: DWORD) -> DWORD;
     fn SetEnvironmentVariableW(name: *const u16, value: *const u16) -> BOOL;
-    fn GetEnvironmentStringsW() -> *mut u16;
-    fn FreeEnvironmentStringsW(env: *mut u16) -> BOOL;
     fn GetCurrentDirectoryW(n: DWORD, buf: *mut u16) -> DWORD;
     fn SetCurrentDirectoryW(path: *const u16) -> BOOL;
     fn GetTempPathW(n: DWORD, buf: *mut u16) -> DWORD;
@@ -61,6 +59,9 @@ impl Error for VarError {}
 
 extern "C" {
     fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32;
+    // the program's snapshot and std's host-only plumbing (relax-base progenv.rs)
+    fn __relax_env_snapshot(out: *mut *const u8, out_len: *mut usize);
+    fn __relax_host_getenv_w(name: *const u16, buf: *mut u16, size: u32) -> u32;
 }
 
 pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
@@ -82,6 +83,13 @@ pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
         Ok(v) => Some(OsString::from_wide(&v)),
         Err(_) => None,
     }
+}
+
+/// The host's value of `key`, for std's plumbing, apart from the program's own values.
+pub(crate) fn host_var_os(key: &str) -> Option<OsString> {
+    let k = to_wide(OsStr::new(key)).ok()?;
+    let v = fill_utf16_buf(|buf, n| unsafe { __relax_host_getenv_w(k.as_ptr(), buf, n) }).ok()?;
+    Some(OsString::from_wide(&v))
 }
 
 pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, VarError> {
@@ -135,32 +143,28 @@ pub struct Vars {
     inner: VarsOs,
 }
 
-/// A snapshot of GetEnvironmentStringsW: `KEY=VALUE\0...\0\0`; the first '=' after position 0
-/// splits (a leading '=' is part of the key, as in `=C:=C:\dir`); entries without one are skipped.
+/// The program's snapshot (relax-base progenv.rs): byte length, `:`, `NAME=value`, as WTF-8.
 pub fn vars_os() -> VarsOs {
+    let mut p: *const u8 = core::ptr::null();
+    let mut n: usize = 0;
+    unsafe { __relax_env_snapshot(&mut p, &mut n) };
+    let mut s: &[u8] = if p.is_null() { &[] } else { unsafe { core::slice::from_raw_parts(p, n) } };
     let mut out = Vec::new();
-    unsafe {
-        let base = GetEnvironmentStringsW();
-        if base.is_null() {
-            panic!("failure getting env string from OS: {}", io::Error::last_os_error());
+    while let Some(colon) = s.iter().position(|&b| b == b':') {
+        let mut len: usize = 0;
+        for &d in &s[..colon] {
+            len = len * 10 + (d - b'0') as usize;
         }
-        let mut p = base as *const u16;
-        while *p != 0 {
-            let mut len = 0;
-            while *p.add(len) != 0 {
-                len += 1;
-            }
-            let s = core::slice::from_raw_parts(p, len);
-            p = p.add(len + 1);
-            let mut i = 1;
-            while i < s.len() && s[i] != b'=' as u16 {
-                i += 1;
-            }
-            if i < s.len() {
-                out.push((OsString::from_wide(&s[..i]), OsString::from_wide(&s[i + 1..])));
-            }
+        let e = &s[colon + 1..colon + 1 + len];
+        // a leading '=' is part of the key, as in `=C:=C:\dir`
+        let mut i = 1;
+        while i < e.len() && e[i] != b'=' {
+            i += 1;
         }
-        FreeEnvironmentStringsW(base);
+        if i < e.len() {
+            out.push((OsString::from_bytes_vec(e[..i].to_vec()), OsString::from_bytes_vec(e[i + 1..].to_vec())));
+        }
+        s = &s[colon + 1 + len..];
     }
     VarsOs { inner: out.into_iter() }
 }
@@ -305,8 +309,13 @@ pub fn current_dir() -> io::Result<PathBuf> {
 }
 
 pub fn set_current_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    let w = to_wide(path.as_ref().as_os_str())?;
+    let target = match crate::fs::vfs::set_cwd(path.as_ref()) {
+        Ok(virtual_result) => return virtual_result,
+        Err(target) => target,
+    };
+    let w = to_wide(target.as_os_str())?;
     cvt(unsafe { SetCurrentDirectoryW(w.as_ptr()) })?;
+    crate::fs::vfs::chose_real();
     Ok(())
 }
 

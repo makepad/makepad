@@ -3821,6 +3821,32 @@ impl Program {
         }
     }
 
+    /// The skipped module whose file is `path`, if any (a file of a module the file selection
+    /// deferred, which nothing has loaded).
+    pub fn skipped_module_of(&self, path: &str) -> Option<u32> {
+        let want = crate::vfs::normalize_path(path);
+        self.skipped_files.iter().find(|(_, (p, ..))| crate::vfs::normalize_path(p) == want).map(|(m, _)| *m)
+    }
+
+    /// A save of `path`, the file of a skipped module: its crate reads the saved text from now
+    /// on, so the module's outline and its first load see the save, not the text the boot read.
+    /// False when no skipped module has `path`. (The caller holds the front's write lock.)
+    pub fn save_skipped_source(&mut self, path: &str, src: std::sync::Arc<[u8]>) -> bool {
+        let Some(m) = self.skipped_module_of(path) else { return false };
+        let own = self.skipped_files[&m].0.clone();
+        let krate = self.mods[m as usize].krate;
+        let c = &mut self.crates[krate as usize];
+        c.context = c.context.edited(&own, src.clone());
+        // (and the contexts a refused edit of another file of the crate goes back to: the
+        // skipped file has no versions of its own)
+        for (f, context) in self.source_versions.iter_mut() {
+            if self.file_crate.get(*f as usize) == Some(&krate) {
+                *context = context.edited(&own, src.clone());
+            }
+        }
+        true
+    }
+
     /// Whether the file of skipped module `m` may bind `name` for a lookup from outside it:
     /// an item, macro, child module or public import of that name, or a public glob import
     /// (unknown names). From the file's outline index (no parse); no index: true.
@@ -5556,7 +5582,7 @@ pub fn blocks_in_item_signature(ast: &Ast, kind: &ItemKind, out: &mut Vec<BlockI
 /// Blocks directly reachable from an expression (not through nested blocks' statements).
 pub fn blocks_in_expr(ast: &Ast, e: ExprId, out: &mut Vec<BlockId>) {
     match &ast.expr(e).kind {
-        ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => {
+        ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Async(_, b) | ExprKind::ConstBlock(b) | ExprKind::Loop(b, _) => {
             out.push(*b)
         }
         ExprKind::If(c, t, el) => {

@@ -343,20 +343,26 @@ impl<'a> Parser<'a> {
                 tg!(&mut g; , #caller_location() #close() #close_brace() #close_brace() #close_brace());
             }
             "vec" => {
+                // a false `#[cfg]` removes an element (Parser::vec_elem): from the array, or from
+                // `from_elem`'s arguments, which leaves that call short (E0061) as in rustc
                 if self.pos >= hi {
                     tg!(&mut g; #core() :: vec :: Vec :: new ());
                 } else {
-                    let first = self.mac_list_elem()?;
+                    let first = self.vec_elem()?;
                     if self.eat(T::Semi) {
-                        let n = self.mac_list_elem()?;
-                        tg!(&mut g; #core() :: vec :: from_elem (#expr(first), #expr(n)));
+                        let n = self.vec_elem()?;
+                        tg!(&mut g; #core() :: vec :: from_elem #open());
+                        for e in [first, n].into_iter().flatten() {
+                            tg!(&mut g; #expr(e) ,);
+                        }
+                        tg!(&mut g; #close());
                     } else {
-                        let mut v = vec![first];
+                        let mut v: Vec<ExprId> = first.into_iter().collect();
                         while self.eat(T::Comma) {
                             if self.pos >= hi {
                                 break;
                             }
-                            v.push(self.mac_list_elem()?);
+                            v.extend(self.vec_elem()?);
                         }
                         // rustc: `<[_]>::into_vec(box [a, b, ..])` -- the expected `Vec<T>`
                         // reaches the elements (each coerces to T: `vec![Box::new(|x| ..), ..]`
@@ -722,7 +728,7 @@ impl<'a> Parser<'a> {
             | ExprKind::Index(a, b) | ExprKind::Repeat(a, b) => self.expr_may_yield(a) || self.expr_may_yield(b),
             ExprKind::Call(f, args) => self.expr_may_yield(f) || self.ast.list(args).iter().any(|&x| self.expr_may_yield(x)),
             ExprKind::MethodCall(recv, row) => self.expr_may_yield(recv) || self.ast.list(self.ast.row(row).args).iter().any(|&x| self.expr_may_yield(x)),
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::Loop(b, _) => self.block_may_yield(b),
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::Loop(b, _) => self.block_may_yield(b),
             ExprKind::If(c, b, other) => self.expr_may_yield(c) || self.block_may_yield(b) || other.get().is_some_and(|x| self.expr_may_yield(x)),
             ExprKind::Let(_, x) => self.expr_may_yield(x),
             ExprKind::Match(x, arms) => self.expr_may_yield(x) || self.ast.list(arms).iter().any(|a| a.guard.get().is_some_and(|g| self.expr_may_yield(g)) || self.expr_may_yield(a.body)),

@@ -916,6 +916,8 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     }
     let chain = if chain.is_empty() { me } else { format!("{chain}>{me}") };
     let mut cmd = std::process::Command::new(&exe);
+    // a run of its own: nothing this run says of itself crosses; its folder's mount is set below
+    crate::progenv::scrub_run_facts(&mut cmd);
     cmd.args(["run", "--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
     cmd.env("OUT_DIR", &out_dir)
         // Build scripts may test this to skip work only rustc needs.
@@ -936,7 +938,6 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         .env("MAKEPAD_RUN_AS_RUSTC", "build-script")
         .env("MAKEPAD_RUN_SCRIPT_DEPTH", depth.to_string())
         .env("MAKEPAD_RUN_SCRIPT_CHAIN", &chain)
-        .env_remove("MAKEPAD_RUN_SELF_EXEC")
         // the script is compiled and run for the machine (cargo: build scripts are host
         // artifacts); the target it builds for reaches it only as TARGET / CARGO_CFG_TARGET_*
         .env_remove("MAKEPAD_RUN_CHECK_TARGET");
@@ -958,12 +959,15 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     // is handed over as the child's virtual workspace with the mount table
     if crate::vfs::is_virtual(dir) {
         cmd.env("MAKEPAD_RUN_WORKSPACE", dir).env("MAKEPAD_RUN_VFS", crate::vfs::mounts_text());
+        if let Some(e) = std::env::var_os("MAKEPAD_RUN_EDITS") {
+            cmd.env("MAKEPAD_RUN_EDITS", e);
+        }
     } else {
         // a package on disk (a registry crate of a store run): its folder is the current folder,
-        // not the run's virtual workspace (Relax's std resolves relative paths against
+        // and no virtual workspace crosses (Relax's std resolves relative paths against
         // MAKEPAD_RUN_WORKSPACE first: rustix's build.rs probed `src/backend/linux_raw/arch/x86_64.rs`
         // there, found nothing and chose its libc backend)
-        cmd.current_dir(dir).env_remove("MAKEPAD_RUN_WORKSPACE");
+        cmd.current_dir(dir);
     }
     // cargo's `[env]` configuration, after every variable set above (cargo apply_env_config)
     for (k, v) in crate::crates::config_env() {
@@ -976,7 +980,8 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     // script that names none: no file of its package changed)
     let mut env_key = format!("{:016x}", h);
     for (k, v) in cmd.get_envs() {
-        if k == "MAKEPAD_RUN_VFS" {
+        // (the mount's table and edits folder name where the sources are read, not what they are)
+        if k == "MAKEPAD_RUN_VFS" || k == "MAKEPAD_RUN_EDITS" {
             continue;
         }
         env_key.push_str(&format!("\n{}={}", k.to_string_lossy(), v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()));

@@ -26,7 +26,9 @@ fn child_reexport_resolves_type_and_value_independently() {
 }
 
 // `makepad test` itself loads single-file inputs eagerly. Exercise its lazy
-// package driver in a fresh process; rustc checks the same Rust semantics above.
+// package driver in a fresh loader; rustc checks the same Rust semantics above.
+// `$MAKEPAD_RUN_LOADER run ..` is a launch, so the variables below configure that
+// loader; a spawn of current_exe() would re-run this test program instead.
 #[cfg(relax)]
 #[test]
 fn lazy_package_check_retries_the_type_namespace() {
@@ -38,8 +40,9 @@ fn lazy_package_check_retries_the_type_namespace() {
     std::fs::write(dir.join("main.rs"), source).unwrap();
     std::fs::write(dir.join("lazy_reexport/child.rs"), include_str!("lazy_reexport/child.rs")).unwrap();
     std::fs::write(dir.join("lazy_reexport/other.rs"), include_str!("lazy_reexport/other.rs")).unwrap();
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["check", "lazy_reexport"])
+    let loader = std::env::var_os("MAKEPAD_RUN_LOADER").expect("makepad test names its loader");
+    let output = std::process::Command::new(loader)
+        .args(["run", "--check", "lazy_reexport"])
         .current_dir(&dir)
         .env("MAKEPAD_RUN_LAZY_DEFER", "lazy_reexport/child.rs,lazy_reexport/other.rs")
         .env("MAKEPAD_RUN_DEFERRED_TRACE", "1")

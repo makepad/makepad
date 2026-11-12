@@ -43,6 +43,19 @@ fn c_bytes(p: *const c_char) -> Vec<u8> {
 
 extern "C" {
     fn relax_pm_getenv(key: *const u8, len: usize, out: *mut *const u8, out_len: *mut usize) -> i32;
+    // the host (relax-base progenv.rs): the program's view of the environment; the host's value of
+    // a name std's own plumbing reads
+    fn __relax_env_snapshot(out: *mut *const u8, out_len: *mut usize);
+    fn __relax_host_getenv(name: *const c_char) -> *const c_char;
+}
+
+/// The host's value of `key`: what std's plumbing reads (the self-exec command line, the virtual
+/// folder), never the program's own value of that name.
+pub(crate) fn host_var_os(key: &str) -> Option<OsString> {
+    crate::fs::run_with_cstr(key.as_bytes(), &|key| {
+        let v = unsafe { __relax_host_getenv(key.as_ptr()) };
+        Ok(if v.is_null() { None } else { Some(OsString::from_bytes_vec(c_bytes(v))) })
+    }).ok().flatten()
 }
 
 // Build short keys on the stack like real std: no allocation for an absent variable.
@@ -115,30 +128,32 @@ pub struct Vars {
     inner: VarsOs,
 }
 
+/// The program's view of the environment: under `makepad run` a reserved name the program wrote
+/// is its own value, not its host's (relax-base progenv.rs). Entries as `encode` writes them: per
+/// entry its byte length, `:`, `NAME=value`.
 pub fn vars_os() -> VarsOs {
+    // (a set_var outside the reserved names changes `environ` under this lock, as real std's does)
     let _guard = ENV_LOCK.read();
+    let mut p: *const u8 = core::ptr::null();
+    let mut n: usize = 0;
+    unsafe { __relax_env_snapshot(&mut p, &mut n) };
+    let mut s: &[u8] = if p.is_null() { &[] } else { unsafe { core::slice::from_raw_parts(p, n) } };
     let mut out = Vec::new();
-    unsafe {
-        let mut p = sys::os::environ();
-        if !p.is_null() {
-            while !(*p).is_null() {
-                let entry = c_bytes(*p);
-                // the first '=' after position 0 splits key and value (a leading '=' is part
-                // of the key, as real std does)
-                if !entry.is_empty() {
-                    let mut i = 1;
-                    while i < entry.len() && entry[i] != b'=' {
-                        i += 1;
-                    }
-                    if i < entry.len() {
-                        let key = entry[..i].to_vec();
-                        let value = entry[i + 1..].to_vec();
-                        out.push((OsString::from_bytes_vec(key), OsString::from_bytes_vec(value)));
-                    }
-                }
-                p = p.add(1);
-            }
+    while let Some(colon) = s.iter().position(|&b| b == b':') {
+        let mut len: usize = 0;
+        for &d in &s[..colon] {
+            len = len * 10 + (d - b'0') as usize;
         }
+        let e = &s[colon + 1..colon + 1 + len];
+        // the first '=' after position 0 splits (a leading '=' is part of the key, as real std does)
+        let mut i = 1;
+        while i < e.len() && e[i] != b'=' {
+            i += 1;
+        }
+        if i < e.len() {
+            out.push((OsString::from_bytes_vec(e[..i].to_vec()), OsString::from_bytes_vec(e[i + 1..].to_vec())));
+        }
+        s = &s[colon + 1 + len..];
     }
     VarsOs { inner: out.into_iter() }
 }
@@ -286,13 +301,21 @@ pub fn current_dir() -> io::Result<PathBuf> {
     }
 }
 
+/// A git run's virtual folder is no folder the OS knows: it becomes the program's current folder
+/// in std (fs_vfs.rs `cwd`); a real one is the OS's, and the program is in no virtual one after it.
 pub fn set_current_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
-    crate::fs::run_path_with_cstr(path.as_ref(), &|c| {
+    let target = match crate::fs::vfs::set_cwd(path.as_ref()) {
+        Ok(virtual_result) => return virtual_result,
+        Err(target) => target,
+    };
+    crate::fs::run_path_with_cstr(&target, &|c| {
         if unsafe { sys::chdir(c.as_ptr()) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    })
+    })?;
+    crate::fs::vfs::chose_real();
+    Ok(())
 }
 
 pub fn current_exe() -> io::Result<PathBuf> {

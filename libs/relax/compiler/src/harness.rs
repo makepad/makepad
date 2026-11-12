@@ -106,7 +106,10 @@ fn find_fn(u: &Unit, path: &str) -> Option<DefId> {
 pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 {
     let (mut code, mut matched, mut unmatched) = (0, false, false);
     for (label, krate) in groups {
-        eprintln!("     Running {label}");
+        // a silent run's stderr is the program's (a test re-running itself reads it)
+        if !crate::run::silent() {
+            eprintln!("     Running {label}");
+        }
         let c = match run_crate(u, up, *krate) {
             Ok(c) => c,
             Err(e) => {

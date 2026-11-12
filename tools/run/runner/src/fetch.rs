@@ -353,11 +353,48 @@ pub fn split_args(args: &[String]) -> Option<Result<(Vec<String>, Spec, bool, Ve
     Some(Ok((opts, Spec { root, mounts }, cached, rest)))
 }
 
+/// Whether a mount this process inherited (`table`: MAKEPAD_RUN_VFS, a parent run's virtual
+/// workspace) serves this run, whose command line is `words` (after the executable): not when the
+/// run's workspace comes from elsewhere -- a launch record (`app <id>`, or no arguments), a git URL,
+/// or a --workspace-dir outside every root of the table. `export --mounted` exports it.
+pub fn inherited_mount_serves(words: &[String], table: &str) -> bool {
+    match words.first().map(String::as_str) {
+        None | Some("app") => return false,
+        Some("export") if words.get(1).is_some_and(|w| w == "--mounted") => return true,
+        Some("run" | "fetch" | "export") if split_args(&words[1..]).is_some() => return false,
+        _ => {}
+    }
+    let own: Vec<&String> = words.iter().take_while(|w| w.as_str() != "--").collect();
+    let Some(dir) = own.iter().position(|w| w.as_str() == "--workspace-dir").and_then(|i| own.get(i + 1)) else { return true };
+    use relax_compiler::vfs::normalize_path;
+    let dir = normalize_path(dir);
+    table.lines().filter_map(|l| l.split('\t').next()).filter(|r| !r.is_empty()).any(|root| {
+        let root = normalize_path(root);
+        dir.strip_prefix(root.trim_end_matches('/')).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// A child run keeps the mount it inherited only when its workspace lies in it.
+    #[test]
+    fn an_inherited_mount_serves_only_a_run_whose_workspace_lies_in_it() {
+        let table = "/v/ws\t/stores/a.store\t00\n/v/ws/apps/x\t/stores/b.store\t00\n";
+        let serves = |w: &[&str]| inherited_mount_serves(&s(w), table);
+        assert!(serves(&["run", "pkg"]), "a run in the parent's folder keeps the parent's mount");
+        assert!(serves(&["test", "--silent", "--workspace-dir", "/v/ws", "x.rs", "--", "--workspace-dir", "/elsewhere"]),
+            "a re-run of the program keeps the mount its --workspace-dir lies in (the program's own words do not count)");
+        assert!(serves(&["run", "--workspace-dir", "/v/ws/apps/x/sub", "pkg"]), "a --workspace-dir inside a mount root keeps it");
+        assert!(!serves(&["run", "--workspace-dir", "/v/wsx", "pkg"]), "a --workspace-dir beside a root is not in it");
+        assert!(!serves(&["run", "--workspace-dir", "/real/checkout", "pkg"]), "a --workspace-dir outside the mount drops it");
+        assert!(!serves(&["run", "https://example.com/org/repo", "pkg"]), "a git URL run mounts its own");
+        assert!(!serves(&["app", "calculator"]) && !serves(&[]), "a launch record names its own workspace");
+        assert!(serves(&["export", "--mounted", "out"]), "export --mounted writes the inherited mount out");
     }
     #[test]
     fn export_refuses_paths_outside_its_folder() {

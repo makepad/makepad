@@ -549,3 +549,47 @@ fn a_dependency_error_fails_the_check() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An app check reads the crates below it through globs from their flattened export tables (rsim.rs
+/// ExtTable): through a glob cycle (the root's `pub use inner::*` and inner's `use super::*`), an
+/// enum's variants, and past a name two globs of the cycle give different items (that one is looked
+/// up alone). Debug builds compare every answer of a table with the lookup of that one name (and
+/// every proc macro name the reach filter skips with the walk for it); the verdicts are rustc's:
+/// the names resolve, and a name the app's own two globs both provide is ambiguous where it is
+/// used (E0659).
+#[test]
+fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
+    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    // (the dependency lives outside the workspace: an app check does not check it)
+    let dir = package("appglobs", &[]);
+    let write = |f: &str, src: &str| {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, src).unwrap();
+    };
+    write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
+    write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
+    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\n");
+    write("dep/inner.rs", "use super::*;\nmod b { pub struct Dup; }\npub use b::*;\npub struct Inner;\npub fn inner_fn() -> u32 { root_fn() + 1 }\n");
+    write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
+    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\n{clash}");
+    let check = || {
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"))
+            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
+        (code, stderr.into_owned())
+    };
+    // the dep's names through the cycle and the enum glob: no diagnostic
+    write("ws/app/lib.rs", &app(""));
+    let clean = check();
+    assert!(clean.0 == Some(0) && !clean.1.contains(": error") && !clean.1.contains(": warning:"), "{}", clean.1);
+    // `Thing`: the dep's (its table) and the app's own module's, both through a glob
+    write("ws/app/lib.rs", &app("mod own { pub struct Thing; }\nuse own::*;\npub fn clash() -> u32 { let _ = Thing; 0 }\n"));
+    let clash = check();
+    assert!(clash.0.is_some_and(|c| c != 0) && clash.1.contains("E0659") && clash.1.contains("`Thing` is ambiguous"), "{}", clash.1);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

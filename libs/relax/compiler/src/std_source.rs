@@ -29,7 +29,10 @@ pub fn select(workspace: &str, fallback: &std::path::Path) {
         match result {
             Ok(()) => std::path::PathBuf::from(candidate),
             Err(reason) => {
-                eprintln!("makepad-run: using disk std {}: {reason}", fallback.display());
+                // (a silent run's stderr is the program's: its parent run said it already)
+                if !crate::run::silent() {
+                    eprintln!("makepad-run: using disk std {}: {reason}", fallback.display());
+                }
                 fallback.to_path_buf()
             }
         }

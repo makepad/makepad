@@ -134,6 +134,9 @@ fn plain(p: std::path::PathBuf) -> std::path::PathBuf {
 
 /// The runner on this process's command line, with `host` added.
 pub fn main(host: &'static Host) {
+    // a self-exec child: the program values its parent passed, before anything reads the
+    // environment (relax-base progenv.rs)
+    relax_compiler::progenv::init();
     set_host(host);
     relax_compiler::set_tool_name(help::command());
     relax_compiler::wasm_export::startup();
@@ -156,6 +159,7 @@ pub fn init_embedded(exe: &std::path::Path, host: &'static Host) {
 /// (the Android APK's executable dlopens it for build scripts) has no process arguments of its
 /// own; this names them for everything that reads them (relax_compiler::os::proc::args_bytes).
 pub fn run_with_args(args: Vec<Vec<u8>>) {
+    relax_compiler::progenv::init();
     relax_compiler::os::proc::set_args(args.clone());
     run(args)
 }
@@ -222,6 +226,15 @@ fn run(raw_args: Vec<Vec<u8>>) {
     // cargo's RUSTC_WRAPPER of an --allow-c native build, or a stubbed build script of it
     if let Some(code) = relax_compiler::native::wrapper() {
         std::process::exit(code);
+    }
+    // a parent run's mount (relax-base progenv.rs MOUNT: its virtual workspace, mount table and
+    // edits folder) serves this run only when this run's workspace lies in it; a launch record,
+    // a git URL or a --workspace-dir elsewhere name their own, before a record's environment applies
+    let words: Vec<String> = raw_args.iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    if !fetch::inherited_mount_serves(&words, &std::env::var("MAKEPAD_RUN_VFS").unwrap_or_default()) {
+        for n in relax_compiler::progenv::MOUNT {
+            std::env::remove_var(std::str::from_utf8(n).unwrap());
+        }
     }
     // `makepad app <id>` and `makepad` alone: the launch record's command line (launch.rs), with
     // its folder and environment applied before anything reads them
@@ -474,7 +487,7 @@ fn run_spec(opts: Vec<String>, spec: &fetch::Spec, cached: bool, rest: Vec<Strin
         // the process's: a write while another thread reads it is a race); what only its source
         // says follows the mount (`mount_vars`)
         std::env::set_var("MAKEPAD_RUN_SPEC", spec.args().join("\u{1f}"));
-        std::env::set_var("MAKEPAD_RUN_WORKSPACE", &workspace);
+        relax_compiler::progenv::set_run_fact("MAKEPAD_RUN_WORKSPACE", &workspace);
         let words: Vec<String> = opts.iter().chain(&rest).cloned().collect();
         let package = rest[0].clone();
         let (home, spec, opts, rest) = (home.clone(), spec.clone(), opts.clone(), rest.clone());
@@ -632,14 +645,14 @@ pub fn run_mounted(workspace: &str, opts: Vec<String>, rest: Vec<String>) -> i32
 /// What a run of the mounted workspace and the programs it starts see: the workspace and its
 /// mounts, its std, the package's run-env.
 fn mount_env(workspace: &str, package: &str) {
-    std::env::set_var("MAKEPAD_RUN_WORKSPACE", workspace);
+    relax_compiler::progenv::set_run_fact("MAKEPAD_RUN_WORKSPACE", workspace);
     mount_vars(workspace, package);
 }
 
 /// What only the mounted source says: its mounts, its std, the package's run-env.
 fn mount_vars(workspace: &str, package: &str) {
     // programs it starts that run on Relax (the runner's apps) mount the same repositories
-    std::env::set_var("MAKEPAD_RUN_VFS", relax_compiler::vfs::mounts_text());
+    relax_compiler::progenv::set_run_fact("MAKEPAD_RUN_VFS", relax_compiler::vfs::mounts_text());
     // Verify the mounted std against the compiler build before any std disk probes.
     let own = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../libs/relax/compiler/std");
     relax_compiler::std_source::select(workspace, &own);

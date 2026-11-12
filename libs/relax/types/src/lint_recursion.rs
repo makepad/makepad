@@ -29,7 +29,8 @@ pub const UNCONDITIONAL_RECURSION: Lint = lint::lint("unconditional_recursion");
 
 struct LoopCx {
     label: Option<String>,
-    /// `loop` / `while` / `for` (an unlabeled `break` targets it); false: a labeled block
+    /// `loop` / `while` / `for` (an unlabeled `break` targets it); false: a labeled block, or
+    /// without a label a `try` block (only its `?`s leave to it)
     is_loop: bool,
     brk: bool,
 }
@@ -335,6 +336,12 @@ impl<'a> Rec<'a> {
                 } else { self.block(b) }
             }
             ExprKind::Unsafe(b) => self.block(b),
+            ExprKind::TryBlock(b) => {
+                self.loops.push(LoopCx { label: None, is_loop: false, brk: false });
+                let ok = self.block(b);
+                let c = self.loops.pop().unwrap();
+                ok || c.brk
+            }
             ExprKind::If(c, then, els) => {
                 let (t, f) = self.cond(c);
                 let a = t && self.block(then);
@@ -404,8 +411,11 @@ impl<'a> Rec<'a> {
             }
             ExprKind::Try(x) => {
                 if !self.ev(x) { return false; }
-                // the residual arm returns
-                self.escape = true;
+                // the residual arm leaves the innermost `try` block, or returns
+                match self.loops.iter_mut().rev().find(|c| !c.is_loop && c.label.is_none()) {
+                    Some(c) => c.brk = true,
+                    None => self.escape = true,
+                }
                 true
             }
             ExprKind::Await(x) => self.ev(x),

@@ -80,10 +80,15 @@ impl TypeFolder for WfPredicates<'_, '_> {
             }
             TyKind::Adt(d, args, rs) | TyKind::FnDef(d, args, rs) => {
                 let args = tcx.complete_args(self.prog, *d, tys.list(*args), *rs);
+                // (a closure's or coroutine's parent marker is the FnDef of its owner item, which
+                // is a const or a static for one in a const's value: `const START: fn() -> _ =
+                // || Box::pin(async { 7 })` has no signature to walk, only the owner's predicates;
+                // relax issue 44)
                 if matches!(tys.kind(t), TyKind::FnDef(..)) {
-                    let sig = tcx.fn_item_sig(self.prog, *d).expect("function signature");
-                    let ret = tcx.instantiate_ty(self.prog, *d, &args, sig.ret);
-                    self.fold_ty(tys, ret, depth);
+                    if let Some(sig) = tcx.fn_item_sig(self.prog, *d) {
+                        let ret = tcx.instantiate_ty(self.prog, *d, &args, sig.ret);
+                        self.fold_ty(tys, ret, depth);
+                    }
                 }
                 self.nominal_obligations(*d, &args);
             }

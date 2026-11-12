@@ -176,6 +176,16 @@ pub(crate) fn proc_macro_names() -> Vec<String> {
     })
 }
 
+/// Every proc macro this crate itself exports, in the order `exported_proc_macro` searches them.
+pub(crate) fn exported_proc_macros(krate: &str) -> Vec<(String, Entry)> {
+    if in_world() { return Vec::new(); }
+    REG.with(|r| {
+        let r = r.borrow();
+        let Some(r) = r.as_ref() else { return Vec::new() };
+        r.derives.iter().chain(&r.macros).filter(|(_, e)| r.units[e.unit].name == krate).cloned().collect()
+    })
+}
+
 /// A proc macro exported by this crate itself, rather than by a dependency.
 pub(crate) fn exported_proc_macro(krate: &str, name: &str, kind: Kind) -> Option<Entry> {
     if in_world() { return None; }

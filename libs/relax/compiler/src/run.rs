@@ -1258,7 +1258,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             pre.insert(2, "--silent".to_string());
             // an exec replacing this process (the program exec'ing its own executable) is this
             // session going on, not a re-run: it drops the added flag and stays live
-            unsafe { std::env::set_var("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED", "1") };
+            crate::progenv::set_run_fact("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED", "1");
         }
         // the re-run is this workspace's program wherever the spawn puts its working folder
         // (a test that runs itself in a scratch folder); after the added `--silent`, which an
@@ -1281,7 +1281,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             pre.insert(at, "--self-exec".to_string());
         }
         pre.push("--".to_string());
-        unsafe { std::env::set_var("MAKEPAD_RUN_SELF_EXEC", pre.join("\u{1f}")) };
+        crate::progenv::set_run_fact("MAKEPAD_RUN_SELF_EXEC", pre.join("\u{1f}"));
         prog_args[0] = exe.display().to_string().into_bytes();
     }
     let workspace = workspace_dir();

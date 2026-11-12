@@ -41,7 +41,8 @@ pub(crate) mod tests;
 pub(super) struct Breakable {
     pub label: Option<ast::Ident>,
     pub scope: ScopeId,
-    /// A labeled block: only a labeled `break` reaches it.
+    /// A labeled block: only a labeled `break` reaches it. Without a label, a `try` block: only
+    /// its `?`s leave to it.
     pub is_block: bool,
 }
 

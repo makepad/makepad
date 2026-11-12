@@ -6,9 +6,11 @@ A path crate whose build script compiles C and writes an OUT_DIR file its lib in
 shape of a -sys crate's generated bindings. A `--allow-c` run writes the native build and its
 receipt; a later `makepad check` without the flag reads that receipt's cfgs, env and OUT_DIR, so
 the crate type-checks whole instead of losing the included type and every signature naming it.
+A second package with the same native closure shares that build, and a receipt whose OUT_DIR a
+later run of the script rewrote (under another key) is not read back.
 
 Uses the offline C fixture, cargo and the system C toolchain. Keeps outputs in scratch for
-inspection; no fixture source or workspace is rewritten.
+inspection; only the scratch copy of the fixture is edited.
 """
 import atexit
 import os
@@ -49,7 +51,7 @@ def run(label, args, success=True):
 
 run("lock", ["cargo", "generate-lockfile", "--offline"])
 baseline = run("cargo", ["cargo", "run", "--release", "--locked", "--quiet"])
-assert "answer=42 generated=7" in baseline.stdout, baseline.stdout
+assert "answer=42 generated=7 mark=1" in baseline.stdout, baseline.stdout
 
 # Cold: no native build yet, so the OUT_DIR file is unknown and the check says so. The
 # `include!` failure is the one a -sys crate's bindings report as dozens of unresolved imports.
@@ -72,6 +74,30 @@ assert "0 errors" in cached.stderr, cached.stderr
 assert "gen.rs" not in cached.stderr, "the check did not resolve the OUT_DIR include"
 assert "cannot find type `Generated`" not in cached.stderr, cached.stderr
 print("PASS cached check: a warm --allow-c build makes the flagless check type-check whole")
+
+# Another package whose native closure is the same shares the build: the key does not name the
+# package a run is for.
+second = run("run-second", [binary, "run", "--allow-c", "cached-check-second"])
+assert "mark=1" in second.stdout, second.stdout
+assert "building native dependencies with cargo" not in second.stderr, "the second package built the native closure again"
+print("PASS shared: a second package with the same native closure reuses the build")
+
+# The script's source moves (MARK 2) and back. The first package's run builds a new key, and
+# cargo runs the script again in the OUT_DIR every key of the selection shares; the second
+# package's slot still names the old key, so its receipt is still there. That receipt saw an
+# earlier run of the script: reading it now would compile the moved script's gen.rs.
+build_rs = fixture / "cnative" / "build.rs"
+source = build_rs.read_text()
+build_rs.write_text(source.replace("MARK: i32 = 1", "MARK: i32 = 2"))
+moved = run("run-moved", [binary, "run", "--allow-c", "cached-check-fixture"])
+assert "mark=2" in moved.stdout, moved.stdout
+build_rs.write_text(source)
+back = run("run-back", [binary, "run", "--allow-c", "cached-check-second"])
+assert "mark=1" in back.stdout, f"the old key's receipt was read over a later run of the script:\n{back.stdout}"
+assert "building native dependencies with cargo" in back.stderr, "the script did not run again"
+roots = sorted(p.name for p in (scratch / "jit" / "native" / "roots").iterdir())
+assert len(roots) == 2, f"expected a root per package, got {roots}"
+print("PASS moved back: a receipt whose OUT_DIR a later run of the script rewrote is no hit")
 
 # Dropping the cache returns the cold verdict: the check is reading the receipt, not guessing.
 shutil.rmtree(scratch / "jit")

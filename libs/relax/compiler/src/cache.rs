@@ -21,7 +21,9 @@
 //! MAKEPAD_RUN_CACHE=on (default) | off | verify | readonly;
 //! Stores live in `<cargo target dir>/makepad-run/cache` (dirs.rs); MAKEPAD_RUN_CACHE_DIR replaces
 //! the run dir for tests and measurement. MAKEPAD_RUN_CACHE_MAX (MB) caps them (default: twice
-//! what the run uses, at least 4096; prune_root).
+//! what the run uses, at least 4096; prune_root). The `--allow-c` builds beside them
+//! (`makepad-run/native`) have no cap: what the last build of each slot uses stays, the rest goes
+//! (native.rs, roots).
 
 use crate::borrowck::lazy::StoredVerdict;
 use crate::types::AliasTyKind;
@@ -622,6 +624,16 @@ impl std::ops::DerefMut for CacheCell {
 }
 
 /// The install-time inputs of a code entry that cannot be recovered later (`Cache::defer_record`).
+impl PendingRecord {
+    /// O3 code (defer_record_o3): the callees the build kept as calls for lack of a body (an
+    /// incomplete build's), stored with the entry; the launch that links it registers them (jit.rs
+    /// cached_tier1), so the code is built again once they come
+    pub(crate) fn with_kept(mut self, kept: Vec<u32>) -> Self {
+        self.pending = kept;
+        self
+    }
+}
+
 pub(crate) struct PendingRecord {
     id: u32,
     code: Vec<u8>,
@@ -633,7 +645,8 @@ pub(crate) struct PendingRecord {
     unverified: bool,
     deps: Vec<u32>,
     inlined: Vec<u32>,
-    /// the body's pending slots (rir::Func::pending; TIER_PROVISIONAL)
+    /// the body's pending slots (rir::Func::pending; TIER_PROVISIONAL); O3 code: the callees it
+    /// kept as calls for lack of a body (defer_record_o3)
     pending: Vec<u32>,
     /// jit::patch_epoch() at the install: a record is encoded only against the sources it was built from
     epoch: u64,
@@ -818,6 +831,8 @@ pub struct Cache {
     /// the hit just linked is O3 code; the slots its body inlined (live patches of those
     /// rebuild it)
     pub last_tier1: Option<Vec<u32>>,
+    /// ... and the callees that build kept as calls for lack of a body (jit.rs cached_tier1)
+    pub last_kept: Vec<u32>,
     /// the hit just linked is O2 code (a `#[relax(O2)]` slot's, or a slot an earlier run found
     /// hot): no O2 build for it this run
     pub last_o2: bool,
@@ -1169,6 +1184,7 @@ impl Cache {
             key_waits: false,
             last_callees: Vec::new(),
             last_tier1: None,
+            last_kept: Vec::new(),
             last_o2: false,
             last_provisional: None,
             last_base: false,
@@ -3592,9 +3608,10 @@ impl Cache {
 
     /// An entry's build inputs as encode_entry writes them: the code's level (TIER_O1 / TIER_O3 /
     /// TIER_O2 / TIER_BASE, TIER_PROVISIONAL on provisional code), the inlined slots and the pending
-    /// ones (each list by key, in key order: the same slots encode the same in every session), the
-    /// nounwind answers and the dependency certificate. Verify compares a cached entry's with the
-    /// fresh build's.
+    /// ones -- O3 code: the callees it kept as calls for lack of a body (PendingRecord::with_kept),
+    /// those without a key left out -- (each list by key, in key order: the same slots encode the
+    /// same in every session), the nounwind answers and the dependency certificate. Verify compares
+    /// a cached entry's with the fresh build's.
     fn encode_inputs(&mut self, u: &Unit, id: u32, o3: Option<(&[u32], &[(u32, bool)])>, kind: RecKind, pending: Option<&PendingRecord>, breaches: bool, e: &mut E) -> Option<()> {
         let o2 = kind == RecKind::O2;
         let base = o3.is_none() && kind == RecKind::First && match pending {
@@ -3607,12 +3624,12 @@ impl Cache {
         };
         // (O3 code is outside the rule: never provisional, never compared)
         let left: &[u32] = match pending {
-            _ if o3.is_some() => &[],
             Some(p) => &p.pending,
+            None if o3.is_some() => &[],
             None => u.fns[id as usize].rir.as_ref().map_or(&[][..], |r| r.pending.as_slice()),
         };
         let level = if o3.is_some() { TIER_O3 } else if o2 { TIER_O2 } else if base { TIER_BASE } else { TIER_O1 };
-        let provisional = unverified || !left.is_empty();
+        let provisional = o3.is_none() && (unverified || !left.is_empty());
         e.u8(if provisional { level | TIER_PROVISIONAL } else { level });
         let inlined;
         let inl = match pending {
@@ -3635,10 +3652,14 @@ impl Cache {
                 }
             }
         }
-        for (list, what) in [(inl.as_slice(), "inlined slot key"), (left, "pending slot key")] {
+        // (an O3 build's kept callee without a key is left out: no later launch could name it)
+        for (list, what, optional) in [(inl.as_slice(), "inlined slot key", false), (left, "pending slot key", o3.is_some())] {
             let mut keys = Vec::with_capacity(list.len());
             for &x in list {
                 let Some(b) = self.slot_bytes(u, x) else {
+                    if optional {
+                        continue;
+                    }
                     self.stats.unencodable += 1;
                     self.why(what);
                     return None;
@@ -4693,9 +4714,17 @@ const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 
 /// nor one of a build running right now (every running process holds its build's live lock). A
 /// build with no store left loses its sets and its lock file. Only checked store files are ever
 /// deleted. Returns (bytes before, after).
+/// `--allow-c` build outputs (`<root>/native`) are kept by reachability, not by size: what a
+/// slot's last build uses stays (native.rs prune).
 pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
     let cap = std::env::var("MAKEPAD_RUN_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20);
-    prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cap)
+    let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cap);
+    let since = std::time::SystemTime::now().checked_sub(IN_USE_BY_OTHERS).unwrap_or(std::time::UNIX_EPOCH);
+    let native = crate::native::prune(&root.join("native"), since);
+    if native > 0 && std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() {
+        eprintln!("makepad-run cache: pruned {native} native build director(ies) no root names");
+    }
+    sizes
 }
 
 /// At exit: every store's replaced generations go, including the ones this process itself
@@ -9322,10 +9351,15 @@ impl Linker {
             let b = d.bytes()?;
             inl.push(self.slot_of_bytes(u, b)?);
         }
-        // the pending slots (provisional code: recorded, not used at the link), the nounwind
-        // inputs and the dependency certificate (checked by cert_valid before)
+        // the pending slots (provisional code: recorded, not used at the link; O3 code: the
+        // callees it kept as calls, registered at its install), the nounwind inputs and the
+        // dependency certificate (checked by cert_valid before)
+        let mut kept = Vec::new();
         for _ in 0..d.u32()? {
-            d.bytes()?;
+            let b = d.bytes()?;
+            if is_o3 {
+                if let Some(c) = self.slot_of_bytes(u, b) { kept.push(c); }
+            }
         }
         skip_nounwind_and_cert(&mut d)?;
         let code = d.bytes()?.to_vec();
@@ -9424,6 +9458,7 @@ impl Linker {
             }
         }
         self.cache().last_tier1 = if is_o3 { Some(inl) } else { None };
+        self.cache().last_kept = kept;
         // (O2 code, provisional or not: no O2 build for it this run)
         self.cache().last_o2 = tier & !TIER_PROVISIONAL == TIER_O2;
         self.cache().last_base = tier & !TIER_PROVISIONAL == TIER_BASE;

@@ -1509,19 +1509,21 @@ fn find_root_in(dir: &str, ceiling: Option<&str>) -> Result<String, String> {
     while let Some(d) = cur {
         let path = format!("{}/Cargo.toml", d);
         if crate::vfs::is_file(&path) {
-            if let Ok(t) = read_toml(&path) {
-                if t.contains_key("workspace") {
-                    if d == current {
+            // a manifest on the way up that does not parse is the answer, as cargo's workspace
+            // search reads each one (find_workspace_root_with_loader): skipped, its members were
+            // resolved as standalone packages and named a missing [workspace.dependencies] entry
+            let t = read_toml(&path)?;
+            if t.contains_key("workspace") {
+                if d == current {
+                    return Ok(d);
+                }
+                if let Ok(ws) = Workspace::load(&d) {
+                    if !ws.excluded(&current) && ws.has_member(&current) {
                         return Ok(d);
                     }
-                    if let Ok(ws) = Workspace::load(&d) {
-                        if !ws.excluded(&current) && ws.has_member(&current) {
-                            return Ok(d);
-                        }
-                    }
-                    // a workspace that does not hold this package: keep looking above (cargo
-                    // would refuse; a standalone package is what is meant)
                 }
+                // a workspace that does not hold this package: keep looking above (cargo
+                // would refuse; a standalone package is what is meant)
             }
         }
         cur = up(&d);
@@ -2929,6 +2931,37 @@ required-features = ["b", "manual"]
         assert!(e.starts_with(&format!("{path}:7:1: duplicate key `sdf`\n")), "{e}");
         assert!(!e.contains("not a member"), "{e}");
         assert!(r.find_member("other").is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// TOML 1.1 inline tables in a manifest (relax issue 36): a [workspace.dependencies] entry
+    /// over several lines, with a comment and a trailing comma, is inherited by its member, from
+    /// the workspace itself and through another workspace's path dependency. A workspace
+    /// manifest that does not parse is named by its file, line and column, not as a missing entry.
+    #[test]
+    fn multiline_inline_tables_and_a_workspace_manifest_that_does_not_parse() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let ws = "[workspace]\nresolver = \"3\"\nmembers = [\"member\", \"helper\"]\n\n[workspace.dependencies]\nhelper = {\n    path = \"helper\", # the local copy\n    version = \"0.1.0\",\n}\n";
+        let root = tree("multiline-inline", &[
+            ("dependency/Cargo.toml", ws),
+            ("dependency/member/Cargo.toml", "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nhelper = { workspace = true }\n"),
+            ("dependency/member/src/lib.rs", ""),
+            ("dependency/helper/Cargo.toml", "[package]\nname = \"helper\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
+            ("dependency/helper/src/lib.rs", ""),
+            ("user/Cargo.toml", "[package]\nname = \"user\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nmember = {\n    path = \"../dependency/member\",\n}\n\n[workspace]\n"),
+            ("user/src/lib.rs", ""),
+        ]);
+        assert!(units(sess, &format!("{root}/dependency"), "member").iter().any(|n| n == "helper"), "the member inherits the entry");
+        let through = units(sess, &format!("{root}/user"), "user");
+        assert!(through.iter().any(|n| n == "member") && through.iter().any(|n| n == "helper"), "a path dependency on the member: {through:?}");
+        // two commas in the entry: the workspace's manifest is the error, from either side
+        let broken = ws.replace("\"helper\", #", "\"helper\",, #");
+        std::fs::write(format!("{root}/dependency/Cargo.toml"), &broken).unwrap();
+        let path = format!("{}/dependency/Cargo.toml", normalize(&root));
+        for (dir, pkg) in [("dependency", "member"), ("user", "user")] {
+            let e = unit_graph(sess, &format!("{root}/{dir}"), pkg, &[]).err().unwrap_or_else(|| panic!("{pkg}: resolved a workspace that does not parse"));
+            assert!(e.contains(&format!("{path}:7:21: ")) && !e.contains("no such entry"), "{pkg}: {e}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -682,6 +682,14 @@ pub trait Residual<O>: Sized {
     type TryType: Try<Output = O, Residual = Self>;
 }
 
+// ported from library/core/src/ops/try_trait.rs:371-385 (rustc 1.99): the type a `?` in a
+// `try {}` block breaks out with follows from its residual and the block's output, not from the
+// context.
+#[cfg_attr(not(relax_check), lang = "into_try_type")]
+pub fn residual_into_try_type<R: Residual<O>, O>(r: R) -> <R as Residual<O>>::TryType {
+    FromResidual::from_residual(r)
+}
+
 // ported from library/core/src/option.rs:2908-2910,
 // result.rs:2202-2204, ops/control_flow.rs:138-140 @8d1a764.
 impl<T> Residual<T> for crate::option::Option<crate::convert::Infallible> {

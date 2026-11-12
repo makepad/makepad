@@ -6,7 +6,7 @@
 # tools/run/fixture/check_platforms.sh`). Any lane before hand-in, from its worktree:
 # `makepad devhub run <lane> build --node mini -- bash tools/run/fixture/check_platforms.sh`.
 #   default packages: counter (the smallest app: platform + draw + widgets), calculator, clock (network + AI hub client),
-#   xr-stream (the XR stream: server natively, client per target), score-live (the Score composer: audio synth + score player)
+#   xr-stream (the XR stream's serving side), score-live (the Score composer: audio synth + score player)
 #   targets: CHECK_TARGETS, default every shipped one whose std is installed here (a missing one is reported, not failed)
 # From a lane worktree use check_platforms_all.sh: it runs the Apple targets on the mini and the rest on the Linux pool, in parallel.
 # Prints "PLATFORMS-OK <targets> (<s> s)" or "PLATFORMS-FAIL: <target: first error>..."; exit 0 / 1.

@@ -1711,7 +1711,7 @@ unsafe fn install_prelinked_slot(up: *mut Unit, s: crate::cache::PrelinkedSlot, 
     let tier1 = s.o3;
     let counted = s.counted();
     if tier1 {
-        cached_tier1(up, s.id, &s.inlined);
+        cached_tier1(up, s.id, &s.inlined, &s.kept);
     } else {
         // below O3 too (as a disk-cache link registers them): a live patch of a slot this code
         // took in builds it again (reload), which the copies it inlined unguarded rely on
@@ -9466,10 +9466,57 @@ unsafe fn compile_wall_add(up: *mut Unit, w0: u64) {
 
 /// Slot `id` gets O3 code from the disk cache (on the owner thread, before its install): no
 /// call counter (it is O3 already), and the slots its body inlined know it (a live patch of
-/// one rebuilds it).
-unsafe fn cached_tier1(up: *mut Unit, id: u32, inlined: &[u32]) {
+/// one rebuilds it). `kept`: the callees the build kept as calls for lack of a body, registered
+/// as that build registered them (compile_tier1's install), so this code is built again once
+/// they come: one without a verdict at its verdict (UNVERIFIED_LEFT, its check first), one at
+/// O3 already now, another once its own O3 build proves it hot (kept_users). Linked as it was,
+/// the cold run's incomplete code ran for good: a warm sort_by_key ran 2.3x slower than with
+/// the cache off (its quicksort kept the closure its cold build had no verdict for as a call).
+unsafe fn cached_tier1(up: *mut Unit, id: u32, inlined: &[u32], kept: &[u32]) {
     let u = &mut *up;
     u.fns[id as usize].o3.store(true, Ordering::Relaxed);
+    let mut wait = Vec::new();
+    let mut again = false;
+    for &c in kept {
+        if c == id || c as usize >= u.fns.len() {
+            continue;
+        }
+        match u.verdict_state(c) {
+            Verdict::Failed(_) => continue,
+            Verdict::Pending if u.verdict_owner(c).is_some() => wait.push(c),
+            _ if u.fns[c as usize].o3.load(Ordering::Relaxed) => {
+                again = true;
+                continue;
+            }
+            _ => {}
+        }
+        // (a callee waiting for its verdict too: one verified before its first build is never
+        // swept, its O3 build is)
+        crate::zone_alloc::kept_with(|| {
+            let v = u.kept_users.entry(c).or_default();
+            if !v.contains(&id) { v.push(id); }
+        });
+    }
+    if !wait.is_empty() {
+        {
+            let mut l = UNVERIFIED_LEFT.lock().unwrap_or_else(|e| e.into_inner());
+            crate::zone_alloc::kept_with(|| for &c in &wait { if !l.contains(&(up as usize, c, id)) { l.push((up as usize, c, id)); } });
+        }
+        prioritize_verdicts(up, &wait);
+    }
+    let u = &mut *up;
+    // ... and the O3 code that kept calls to this slot: linked O3 code is the proof that it is
+    // hot, as its own build is
+    if let Some(users) = u.kept_users.remove(&id) {
+        for t in users {
+            if t != id {
+                u.retier(t);
+            }
+        }
+    }
+    if again {
+        u.retier(id);
+    }
     // SPEC-V: a twin's stored O3 code may hold callees without a clean verdict (unverified-mode
     // code by kind): registered as a fresh build registers them (UNVERIFIED_IN), so a failed
     // verdict builds it again without them; one failed already: built again now
@@ -9554,8 +9601,9 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
         // linked from the cache: nothing to record; its cached callees get linked ahead
         let callees = (&mut *up).cache.as_mut().map(|c| std::mem::take(&mut c.last_callees)).unwrap_or_default();
         let t1 = (&mut *up).cache.as_mut().and_then(|c| c.last_tier1.take());
+        let kept = (&mut *up).cache.as_mut().map(|c| std::mem::take(&mut c.last_kept)).unwrap_or_default();
         if let Some(inl) = &t1 {
-            cached_tier1(up, id, inl);
+            cached_tier1(up, id, inl, &kept);
         }
         if (&mut *up).cache.as_mut().is_some_and(|c| std::mem::take(&mut c.last_o2)) {
             o2_cached(up, id);
@@ -14770,6 +14818,30 @@ pub fn start_completion(up: *mut Unit) {
         }
     });
     }
+}
+
+/// The skipped files of `mods` a live edit names (reload.rs apply_update), loaded: how many of
+/// them were still skipped and are loaded now.
+pub unsafe fn load_skipped(up: *mut Unit, mods: &[u32]) -> usize {
+    owner::call(owner::Class::Program, || {
+        let skipped = || mods.iter().filter(|m| (*up).prog.skipped_files.contains_key(m)).count();
+        let before = skipped();
+        load_modules(up, mods, "edit");
+        before.saturating_sub(skipped())
+    })
+}
+
+/// The saves among a live edit's `sources` (files no loaded version has) that are files of
+/// modules the file selection deferred: their crates read the saved texts from now on, so an
+/// outline lookup and the first load (an edit's or a build's) see them. Returns those paths.
+pub unsafe fn save_skipped_sources(up: *mut Unit, sources: &[(&str, &[u8])]) -> Vec<String> {
+    owner::call(owner::Class::Program, || {
+        if !sources.iter().any(|(p, _)| (*up).prog.skipped_module_of(p).is_some()) {
+            return Vec::new();
+        }
+        let _fw = front_write();
+        sources.iter().filter(|(p, s)| (*up).prog.save_skipped_source(p, std::sync::Arc::from(*s))).map(|(p, _)| p.to_string()).collect()
+    })
 }
 
 /// `makepad check` checks every body: the skipped files are loaded first (unit lock).
@@ -20828,6 +20900,11 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // candidates a round left out (their build needed fronts): tried once more after those fronts,
     // then left out of this snapshot (every round walks the whole frontier again)
     let left_out: std::cell::RefCell<HashMap<u32, u8>> = Default::default();
+    // the fronts a round could not make off the owner (prefront_slot), by why (AF_*): what a
+    // candidate left out for good still needed (o3_left_out)
+    let mut unmade: HashMap<u32, u8> = HashMap::new();
+    // the times each slot a candidate needed was fronted for it (up to FRONT_TRIES)
+    let mut refronted: HashMap<u32, u8> = HashMap::new();
     // a candidate's front could not be made off the owner: the take's later rounds leave the
     // candidates that need fronts out of the snapshot instead of bailing (FRONTS_DONE)
     let fronts_done = std::cell::Cell::new(false);
@@ -20856,10 +20933,24 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     splits.borrow_mut().clear();
     views.borrow_mut().clear();
     rounds += 1;
-    // the fronts the last round's left-out candidates needed, made here (each once)
+    // the fronts the last round's left-out candidates needed, made here: each slot up to
+    // FRONT_TRIES times. A lowering made for this build is not its own: another thread's build
+    // of the same callee takes it (a warm sort: sort_by_key, create_run, drift::sort and
+    // quicksort turn hot together and share their callees), another snapshot's end drops the
+    // ones it fronted, a front fails for a moment (a helper checking the body). Fronted once,
+    // the candidate needed it again every round and was left out for good.
     for s in std::mem::take(&mut needs) {
-        if fronted.insert(s) {
-            prefront_slot(&front, s);
+        let n = refronted.entry(s).or_insert(0);
+        if *n >= FRONT_TRIES {
+            continue;
+        }
+        *n += 1;
+        fronted.insert(s);
+        let _ = PREFRONT_WHY.try_with(|w| w.set(AF_OK));
+        if prefront_slot(&front, s) {
+            unmade.remove(&s);
+        } else {
+            unmade.insert(s, PREFRONT_WHY.try_with(|w| w.get()).unwrap_or(AF_OK));
         }
     }
     }
@@ -21179,7 +21270,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let _preemptible = crate::preempt::Preemptible::on();
         typeck_ahead(&front, d, args, 1, false, true);
         let _want = WantConsts::on();
-        lower_ahead(&front, c, true);
+        match lower_ahead(&front, c, true) {
+            AF_OK => unmade.remove(&c),
+            why => unmade.insert(c, why),
+        };
     }
     TIER1_SNAP_FRONTS[1].fetch_add(cpu_ns() - tf, Ordering::Relaxed);
     ids.extend(ups);
@@ -21189,7 +21283,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // snapshot as before, or left out of it.
     // (a take: a candidate needing a front bails alone, inside, and is left to the snapshot)
     // (CAND_TAKE candidates per take: a publish is bounded by its item count)
-    let (mut preps, mut gave): (Vec<(u32, Prep)>, Vec<u32>) = (Vec::new(), Vec::new());
+    let (mut preps, mut gave): (Vec<(u32, Prep)>, Vec<(u32, Vec<u32>)>) = (Vec::new(), Vec::new());
     for chunk in ids.chunks(CAND_TAKE) {
         match owner::publish_or_bail(|| {
             let (p, g) = o3_candidates_begin(up, chunk);
@@ -21200,27 +21294,32 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 gave.extend(g);
                 needs.extend(n);
             }
-            Err(_) => gave.extend(chunk.iter().map(|x| x.0)),
+            Err(_) => gave.extend(chunk.iter().map(|x| (x.0, Vec::new()))),
         }
     }
     {
         let mut so = split_out.borrow_mut();
         for x in &ids { so.insert(x.0, 3); }
         for p in &preps { so.insert(p.0, 2); }
-        for c in &gave { so.insert(*c, 1); }
+        for c in &gave { so.insert(c.0, 1); }
     }
-    // the fronts this round's builds asked for that no round made yet: the next round makes them
-    // (each slot once), so a candidate that gave back is tried again after them. One level of its
+    // the fronts this round's builds asked for: the next round makes them (each slot up to
+    // FRONT_TRIES times), so a candidate that gave back is tried again after them. One level of its
     // inline candidates per round, as deep as they go: a bound on the tries left the deeper ones
     // out, the build installed incomplete and was built again when their bodies came (Sandbox
     // warm: 277 incomplete O3 builds, the big ones built 3-5 times)
-    let progress = needs.iter().any(|s| !fronted.contains(s));
-    for c in gave {
+    let progress = needs.iter().any(|s| refronted.get(s).is_none_or(|n| *n < FRONT_TRIES));
+    for (c, wanted) in gave {
         let mut l = left_out.borrow_mut();
         let n = l.entry(c).or_insert(0);
         // (a try that made way for new fronts is not counted: SPLIT_TRIES bounds the tries that did not)
         if !progress {
             *n += 1;
+            // (the root's own O1 build is no inline candidate: its own front failing drops the build
+            // at the next take, counted in the own-slot fronts)
+            if *n == SPLIT_TRIES && !wanted.is_empty() && c != id {
+                o3_left_out(up, id, c, &wanted, &unmade);
+            }
         }
         // tried again after the fronts it needed, off the owner again: not built by the snapshot on
         // the owner because its split was tried
@@ -21547,8 +21646,11 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 // any other build. A stored O3 entry is valid iff its inputs are unchanged -- the
                 // key (its own body, the codegen identity) and the certificate of the slots it
                 // inlined (record_deps) -- so a warm launch installs it as it is, whatever that
-                // launch has loaded or run yet: a callee kept as a call stays a call.
+                // launch has loaded or run yet. The callees that made it incomplete (`kept_calls`)
+                // are stored with it: the launch that links it registers them as this build does
+                // (cached_tier1), so it is built again once they come.
                 let mut incomplete = !unverified_left.is_empty();
+                let mut kept_calls: Vec<u32> = unverified_left.clone();
                 let keep_user = |u: &mut Unit, c: u32| crate::zone_alloc::kept_with(|| {
                     let v = u.kept_users.entry(c).or_default();
                     if !v.contains(&id) { v.push(id); }
@@ -21564,6 +21666,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                         let f = &u.fns[c as usize];
                         if f.unverified.load(Ordering::Relaxed) {
                             incomplete = true;
+                            if !kept_calls.contains(&c) { kept_calls.push(c); }
                             notes.push((c, if unverified_left.contains(&c) { "unverified: again at its verdict" } else { "unverified: again only with the root's verdict" }));
                             continue;
                         }
@@ -21583,6 +21686,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                         if f.rir.is_some() || f.building {
                             let came = f.rir.is_some();
                             incomplete = true;
+                            kept_calls.push(c);
                             keep_user(u, c);
                             notes.push((c, if came { "RIR came meanwhile: again once it is hot" } else { "RIR building: again once it is hot" }));
                         } else {
@@ -21656,7 +21760,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                     if let Some(mut c) = u.cache.take() {
                         c.note_retier_over(u, id, crate::cache::warm_count::RETIER_O3_OVER);
                         let tr = cpu_ns();
-                        let p = c.defer_record_o3(u, id, &code, &relocs, &map, &inlined, &nounwind_used);
+                        let p = c.defer_record_o3(u, id, &code, &relocs, &map, &inlined, &nounwind_used).map(|p| p.with_kept(kept_calls));
                         u.cache = Some(c);
                         if let Some(p) = p {
                             u.pending_cache_records.push(Some(p));
@@ -22917,11 +23021,12 @@ pub static TIER1_SNAP_OFF: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0
 
 /// An O3 build's inline candidates (`ids`, their bodies checked and lowered ahead): the fronts of
 /// their O1 builds, deferring the optimisation (a publish; o2_begin's pattern). Returns the
-/// preparations, and the slots left out: they needed a front the take may not run (rule I-PURE),
-/// or the process ends on another thread.
-unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u32, Prep)>, Vec<u32>) {
+/// preparations, and the slots left out with the fronts they bailed on: they needed a front the
+/// take may not run (rule I-PURE), or the process ends on another thread.
+unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u32, Prep)>, Vec<(u32, Vec<u32>)>) {
     let mut preps = Vec::new();
     let mut gave = Vec::new();
+    let _kept = KeptCopies;
     // (instrument) owner cpu per candidate by outcome: prepared, gave back (bailed), skipped
     struct Outcome(u64, std::cell::Cell<usize>);
     impl Drop for Outcome {
@@ -22969,7 +23074,7 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
             if r.plain_calls || !f.d3_lowered.load(Ordering::Relaxed) && u.disjoint_checks(c).is_some() {
                 if tier1_trace() { eprintln!("O3 cand #{} {} gave back: relower (plain calls {})", c, short_name(&f.name), r.plain_calls); }
                 cand_skip(7);
-                gave.push(c);
+                gave.push((c, Vec::new()));
                 continue;
             }
             f.lowering.as_deref().cloned()
@@ -22986,6 +23091,12 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
             continue;
         }
         let depth0 = BUILD_STACK.try_with(|s| s.borrow().len()).unwrap_or(0);
+        // the lowerings ahead its preparation takes for its own inline candidates (the fronts of
+        // earlier rounds): given back when it gives back, so its next try -- or the next candidate
+        // of this take that inlines them too -- takes them again (their RIR is stored only by a
+        // finish). Lost, each was needed again and never fronted again: a warm launch's O3 builds
+        // left their deeper candidates out for good, the hot fn's code stayed calls
+        let back = TakenBack::start();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prepare_rir_from(up, c, true, lowered, mode)));
         if r.is_err() {
             let open: Vec<u32> = BUILD_STACK.try_with(|s| s.borrow()[depth0.min(s.borrow().len())..].to_vec()).unwrap_or_default();
@@ -22994,22 +23105,28 @@ unsafe fn o3_candidates_begin(up: *mut Unit, ids: &[(u32, RirMode)]) -> (Vec<(u3
             }
         }
         end_build(up, c);
+        if matches!(r, Ok(Ok(_))) {
+            TakenBack::keep_for_copies();
+        }
+        drop(back);
         match r {
             Ok(Ok((p, _))) => { cand_skip(13); outcome.1.set(8); count_preps(18); preps.push((c, p)) }
             Ok(Err(e)) if e == YIELDED || e == NEEDS_FRONT => {
                 if tier1_trace() { eprintln!("O3 cand #{} {} gave back: {}", c, short_name(&(&*up).fns[c as usize].name), if e == YIELDED { "yielded" } else { "needs a front" }); }
-                cand_skip(10); outcome.1.set(9); count_preps(17); gave.push(c)
+                cand_skip(10); outcome.1.set(9); count_preps(17); gave.push((c, Vec::new()))
             }
             // the fronts it needs go to the snapshot's next round (owner::take_needs)
             Err(p) if p.is::<crate::preempt::PublishBail>() => {
+                let mut slots = Vec::new();
                 if let Ok(b) = p.downcast::<crate::preempt::PublishBail>() {
                     if tier1_trace() { eprintln!("O3 cand #{} {} gave back: bail {} (slots {:?})", c, short_name(&(&*up).fns[c as usize].name), b.what, b.slots); }
+                    slots = b.slots.clone();
                     owner::note_needs(b.slots);
                 }
                 cand_skip(11);
                 outcome.1.set(9);
                 count_preps(17);
-                gave.push(c);
+                gave.push((c, slots));
             }
             Err(p) if p.is::<crate::preempt::OwnerBusy>() => std::panic::resume_unwind(p),
             _ => cand_skip(12),
@@ -23270,6 +23387,27 @@ const CAND_TAKE: usize = 8;
 /// fronts is tried again however deep its candidates go): then it is left out of the snapshot
 const SPLIT_TRIES: u8 = 2;
 
+/// An O3 snapshot leaves inline candidate `c` of root `id` out for good (SPLIT_TRIES tries that
+/// made no new front; `wanted`: the fronts its last try bailed on): said on every run, not only
+/// under a trace, unless it has RIR by now. Those fronts were made and it still needs them, or
+/// they cannot be made off the owner (`unmade`, by why): either way the hot fn keeps a call there
+/// for the rest of the run, which is a bug, not a policy (a warm launch kept quicksort's
+/// stable_partition a call this way: sort_by_key 2.8x slower than with the disk cache off).
+fn o3_left_out(up: *mut Unit, id: u32, c: u32, wanted: &[u32], unmade: &HashMap<u32, u8>) {
+    owner::publish(|| {
+        let u = unsafe { &*up };
+        if u.fns[c as usize].rir.is_some() {
+            return;
+        }
+        let name = |s: u32| format!("#{} {}", s, short_name(&u.fns[s as usize].name));
+        let why = wanted.iter().map(|&s| match unmade.get(&s) {
+            Some(&af) => format!("{} (its front is not made off the owner: {})", name(s), PREFRONT_FAIL_NAMES[af as usize]),
+            None => format!("{} (made, and needed again)", name(s)),
+        }).collect::<Vec<_>>().join(", ");
+        eprintln!("makepad-run: the O3 build of {} leaves inline candidate {} out, a call for this run: it needs {} -- makepad run bug, report it", name(id), name(c), why);
+    });
+}
+
 /// O1 builds of `ids` off the owner (their fronts made ahead): prepared in a take (a publish), optimised on
 /// this thread, stored by a finish (a publish). Rule I-PUB: a background build's O1 optimisation never
 /// runs on the owner. What the take left out is left to the caller's own take.
@@ -23298,7 +23436,7 @@ unsafe fn build_off_owner(up: *mut Unit, ids: &[(u32, RirMode)]) {
             }
             owner::publish(|| o3_candidates_finish(up, epoch0, done));
         }
-        todo.retain(|x| gave.contains(&x.0));
+        todo.retain(|x| gave.iter().any(|g| g.0 == x.0));
         if todo.is_empty() || needs.is_empty() || needs.iter().any(|s| fronted.contains(s)) {
             return;
         }
@@ -23954,6 +24092,13 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         // `"..".parse::<TokenStream>()` in JIT-run proc macros (std proc_macro; pmhost.rs)
         b"relax_pm_parse" => Some(crate::pmhost::relax_pm_parse as *const () as usize),
         b"relax_pm_getenv" => Some(crate::pmhost::relax_pm_getenv as *const () as usize),
+        // Relax std: the program's view of the environment, and the host's values for its plumbing
+        b"__relax_env_snapshot" => Some(relax_base::progenv::env_snapshot as *const () as usize),
+        b"__relax_spawn_env" => Some(relax_base::progenv::spawn_env as *const () as usize),
+        #[cfg(unix)]
+        b"__relax_host_getenv" => Some(relax_base::progenv::host_getenv as *const () as usize),
+        #[cfg(windows)]
+        b"__relax_host_getenv_w" => Some(relax_base::progenv::host_get_environment_variable_w as *const () as usize),
         b"__relax_exit" => Some(__relax_exit as *const () as usize),
         b"__relax_self_spawn" => Some(crate::run::relax_self_spawn as *const () as usize),
         // makepad inspect's timeline: makepad's UI phases (platform thread/ui_hang.rs), Relax std's
@@ -24196,6 +24341,27 @@ fn lookup_interposer(link: &str) -> Option<u64> {
         "pthread_create" => Some(crate::domain_threads::pthread_create as *const () as usize as u64),
         #[cfg(windows)]
         "CreateThread" => Some(crate::domain_threads::create_thread as *const () as usize as u64),
+        // the program's own environment values, apart from its host's (relax-base progenv.rs)
+        #[cfg(unix)]
+        "getenv" => Some(relax_base::progenv::program_getenv as *const () as usize as u64),
+        #[cfg(unix)]
+        "setenv" => Some(relax_base::progenv::program_setenv as *const () as usize as u64),
+        #[cfg(unix)]
+        "unsetenv" => Some(relax_base::progenv::program_unsetenv as *const () as usize as u64),
+        #[cfg(unix)]
+        "putenv" => Some(relax_base::progenv::program_putenv as *const () as usize as u64),
+        #[cfg(windows)]
+        "GetEnvironmentVariableW" => Some(relax_base::progenv::program_get_environment_variable_w as *const () as usize as u64),
+        #[cfg(windows)]
+        "GetEnvironmentVariableA" => Some(relax_base::progenv::program_get_environment_variable_a as *const () as usize as u64),
+        #[cfg(windows)]
+        "SetEnvironmentVariableW" => Some(relax_base::progenv::program_set_environment_variable_w as *const () as usize as u64),
+        #[cfg(windows)]
+        "SetEnvironmentVariableA" => Some(relax_base::progenv::program_set_environment_variable_a as *const () as usize as u64),
+        #[cfg(windows)]
+        "GetEnvironmentStringsW" => Some(relax_base::progenv::program_get_environment_strings_w as *const () as usize as u64),
+        #[cfg(windows)]
+        "FreeEnvironmentStringsW" => Some(relax_base::progenv::program_free_environment_strings_w as *const () as usize as u64),
         // the waits a run's end has to reach there
         #[cfg(windows)]
         "WaitOnAddress" => Some(crate::domain_threads::waits::wait_on_address as *const () as usize as u64),
@@ -24585,6 +24751,7 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
             let u = &mut *up;
             let callees = u.cache.as_mut().map(|c| std::mem::take(&mut c.last_callees)).unwrap_or_default();
             let t1 = u.cache.as_mut().and_then(|c| c.last_tier1.take());
+            let kept = u.cache.as_mut().map(|c| std::mem::take(&mut c.last_kept)).unwrap_or_default();
             if u.cache.as_mut().is_some_and(|c| std::mem::take(&mut c.last_o2)) {
                 o2_cached(up, id);
             }
@@ -24593,7 +24760,7 @@ unsafe fn split_begin(up: *mut Unit, id: u32, spec: bool) -> Begin {
             if !u.fns[id as usize].compiled && u.fns[id as usize].spec.is_none() {
                 // cached O3 code: no call counter once installed, inlined slots know it
                 if let Some(inl) = &t1 {
-                    cached_tier1(up, id, inl);
+                    cached_tier1(up, id, inl, &kept);
                 }
                 let u = &mut *up;
                 // a seeded slot (spec_seed: the previous run's manifest -- code that ran there)
@@ -25271,29 +25438,60 @@ thread_local! {
     /// candidate's, made by a front of an earlier round): a take that bails after them gives them
     /// back (give_back_lowered), so the next round takes them again instead of needing their fronts
     /// once more (warm race: 600 of 1000 O2 builds dropped per session on "fronted again")
-    /// (None: no take_prefronted take runs)
+    /// (None: no take_prefronted take, and no O3 candidate's preparation, runs)
     static TAKEN_BACK: std::cell::RefCell<Option<Vec<(*mut Unit, u32, relax_backend::rir::Func)>>> = const { std::cell::RefCell::new(None) };
+    /// (owner, inside an O3 snapshot's take of candidates, o3_candidates_begin) the lowerings ahead
+    /// the take's prepared candidates took: copies for the take's later candidates that inline
+    /// the same callees (TakenBack::copy); emptied when the take ends
+    static TAKEN_KEPT: std::cell::RefCell<Vec<(*mut Unit, u32, relax_backend::rir::Func)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// TAKEN_BACK for one take: what is left in it when the take ends gives back (a bail's unwind)
-struct TakenBack;
+/// TAKEN_BACK for one take (or one O3 candidate's preparation in it, o3_candidates_begin): what is
+/// left in it when it ends gives back (a bail's unwind). (A scope started inside another one --
+/// a request served while a take waits -- has its own list, and the outer one's comes back after it.)
+struct TakenBack(Option<Vec<(*mut Unit, u32, relax_backend::rir::Func)>>);
 impl TakenBack {
     fn start() -> TakenBack {
-        let _ = TAKEN_BACK.try_with(|t| *t.borrow_mut() = Some(Vec::new()));
-        TakenBack
+        TakenBack(TAKEN_BACK.try_with(|t| t.borrow_mut().replace(Vec::new())).ok().flatten())
     }
     /// the take ends without bailing: its lowerings stay taken
     fn keep() {
         let _ = TAKEN_BACK.try_with(|t| *t.borrow_mut() = None);
     }
+    /// (o3_candidates_begin) one candidate was prepared: its lowerings stay taken, and the take's
+    /// later candidates get copies of them (TAKEN_KEPT, until the take ends: KeptCopies)
+    fn keep_for_copies() {
+        let kept = TAKEN_BACK.try_with(|t| t.borrow_mut().as_mut().map(std::mem::take)).ok().flatten().unwrap_or_default();
+        let _ = TAKEN_KEPT.try_with(|k| k.borrow_mut().extend(kept));
+    }
     /// a preparation inside a take finished with lowering `func` of slot `id` (taken ahead)
     fn note(up: *mut Unit, id: u32, func: relax_backend::rir::Func) {
         let _ = TAKEN_BACK.try_with(|t| if let Some(v) = t.borrow_mut().as_mut() { v.push((up, id, func)) });
     }
+    /// slot `id`'s lowering, which a finished preparation of this take took already: a copy for
+    /// a second preparation of the slot in the same take (two inline candidates that both inline
+    /// it; their RIR is stored only by the finish), as a build outside a take lowers it again.
+    /// Without it the second one needed a front that was made already, every round: a warm
+    /// launch left sort's stable_partition and small_sort out of quicksort's O3 build for good.
+    fn copy(up: *const Unit, id: u32) -> Option<relax_backend::rir::Func> {
+        let find = |v: &[(*mut Unit, u32, relax_backend::rir::Func)]| v.iter().rev().find(|x| x.0 as *const Unit == up && x.1 == id).map(|x| x.2.clone());
+        TAKEN_BACK.try_with(|t| t.borrow().as_deref().and_then(find)).ok().flatten()
+            .or_else(|| TAKEN_KEPT.try_with(|k| find(&k.borrow())).ok().flatten())
+    }
+}
+
+/// (o3_candidates_begin) TAKEN_KEPT for one take of candidates: emptied when it ends
+struct KeptCopies;
+impl Drop for KeptCopies {
+    fn drop(&mut self) {
+        let kept = TAKEN_KEPT.try_with(|k| std::mem::take(&mut *k.borrow_mut())).unwrap_or_default();
+        drop(kept);
+    }
 }
 impl Drop for TakenBack {
     fn drop(&mut self) {
-        let back = TAKEN_BACK.try_with(|t| t.borrow_mut().take()).ok().flatten().unwrap_or_default();
+        let outer = self.0.take();
+        let back = TAKEN_BACK.try_with(|t| std::mem::replace(&mut *t.borrow_mut(), outer)).ok().flatten().unwrap_or_default();
         for (up, id, func) in back {
             // (a candidate whose RIR the take stored keeps that: nothing to take again)
             if unsafe { (&*up).fns[id as usize].rir.is_none() } {
@@ -25457,6 +25655,13 @@ pub fn front_write_unless(ms: u64, give_way: &dyn Fn() -> bool) -> Option<std::s
 }
 
 pub fn front_write() -> std::sync::RwLockWriteGuard<'static, ()> {
+    front_write_noted(None)
+}
+
+/// `front_write` whose wait says itself on the owner (a live edit's, which waits there for the
+/// front's readers): `said` hears None once the wait passes `after`, then Some(the whole wait)
+/// when the lock is taken. A wait that ends sooner says nothing.
+pub fn front_write_noted(mut said: Option<(std::time::Duration, &mut dyn FnMut(Option<std::time::Duration>))>) -> std::sync::RwLockWriteGuard<'static, ()> {
     owner::forbid_in_publish("a front write", u32::MAX);
     // background checks that opted in (Gandalf's type checks) stop at their next preemption
     // point instead of finishing first (relax_types::preempt)
@@ -25468,11 +25673,26 @@ pub fn front_write() -> std::sync::RwLockWriteGuard<'static, ()> {
     // so it serves them while it waits; a request served nested inside another's wait gives
     // way instead (that request's own readers may be what holds the front)
     owner::busy_if_nested();
+    let t0 = std::time::Instant::now();
+    let mut told = false;
     loop {
         match front_try_write() {
-            Some(g) => return g,
-            // (the wait names the longest-held read: makepad inspect `waits`)
-            None => owner::pump_wait_for(front_holders::oldest(), &|| FRONT_RW.try_write().is_ok()),
+            Some(g) => {
+                if let Some((_, say)) = said.as_mut().filter(|_| told) { say(Some(t0.elapsed())); }
+                return g;
+            }
+            None => {
+                if let Some((after, say)) = said.as_mut().filter(|_| !told) {
+                    if t0.elapsed() >= *after {
+                        told = true;
+                        say(None);
+                    }
+                }
+                // (a wait still to be said ends at its time to say it)
+                let due = said.as_ref().filter(|_| !told).map(|(after, _)| *after);
+                // (the wait names the longest-held read: makepad inspect `waits`)
+                owner::pump_wait_for(front_holders::oldest(), &|| FRONT_RW.try_write().is_ok() || due.is_some_and(|d| t0.elapsed() >= d));
+            }
         }
     }
 }
@@ -26357,7 +26577,13 @@ fn give_back_lowered(u: &Unit, id: u32, func: relax_backend::rir::Func) {
 /// Unit lock held. Never wait for lowering: taking an unfinished reservation cancels its
 /// publication, and this build uses the already checked body through the ordinary path.
 fn take_lowered_ahead(u: &mut Unit, id: u32) -> Option<relax_backend::rir::Func> {
-    let lowered = u.front.lowered.lock().unwrap_or_else(|e| e.into_inner()).remove(&id)?;
+    let Some(lowered) = u.front.lowered.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) else {
+        let copy = TakenBack::copy(u, id);
+        if copy.is_some() && ahead_trace() {
+            eprintln!("ahead-lower taken again (a copy): {}", u.fns[id as usize].name);
+        }
+        return copy;
+    };
     lowered_end();
     let LoweredState::Ready(mut lowered) = lowered else { return None };
     // (MAKEPAD_RUN_O2_TRACE: why a take could not use a lowering made ahead for it)

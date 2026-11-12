@@ -796,7 +796,7 @@ impl<'p, 'a> Walker<'p, 'a> {
                 self.expr(*x);
                 self.ty(*t, false);
             }
-            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::ConstBlock(b) => {
+            ExprKind::Block(b, _) | ExprKind::Unsafe(b) | ExprKind::TryBlock(b) | ExprKind::ConstBlock(b) => {
                 if let ExprKind::Unsafe(_) = &e.kind {
                     self.cen.c[C_UNSAFE] += 1;
                 }

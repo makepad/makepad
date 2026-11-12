@@ -279,6 +279,9 @@ pub struct Outcome {
     /// (compiled synchronously for the edit), of those taken from the disk cache, fns naming
     /// a removed/renamed field, of those the ones that use it]
     pub work: [usize; 5],
+    /// a refused edit: the modules the file selection deferred whose outlines declare names its
+    /// bodies did not resolve (apply_update loads them and applies the edit again)
+    pub deferred: Vec<u32>,
 }
 
 /// An installed patch group's undo record: the file versions it made current and the const
@@ -4249,7 +4252,30 @@ pub unsafe fn apply_update(up: *mut Unit, edits: Vec<Edit>) -> Outcome {
     let (sources, edits): (Vec<_>, Vec<_>) = edits.into_iter().partition(|e| e.file == u32::MAX);
     // A disk save/checkout is one transaction, including on retry. Never install
     // a parseable subset of a tree that is still being written.
-    let out = apply_mode(up, edits, &sources, 0, false);
+    // A save of a file of a module the file selection deferred, which nothing has loaded: its
+    // crate reads the saved text from now on, for the module's outline and its first load (else
+    // that load reads the text the boot read).
+    let saved = if sources.is_empty() { Vec::new() } else {
+        jit::save_skipped_sources(up, &sources.iter().map(|s| (s.path.as_str(), s.src.as_slice())).collect::<Vec<_>>())
+    };
+    let copy = |edits: &[Edit]| edits.iter().map(|e| Edit { file: e.file, path: e.path.clone(), src: e.src.clone() }).collect::<Vec<_>>();
+    let mut out = apply_mode(up, copy(&edits), &sources, 0, false);
+    // refused for names of modules the file selection deferred (`Outcome::deferred`): those load
+    // (their files as saved) and the edit applies again. Each round loads a module that was not
+    // loaded, so the rounds end.
+    while out.rung == Rung::Refuse && !out.deferred.is_empty() && jit::load_skipped(up, &out.deferred) > 0 {
+        out = apply_mode(up, copy(&edits), &sources, 0, false);
+    }
+    // A saved file whose module is still deferred: the program has its outline alone, so the
+    // edit changes nothing that runs now. Said by name: else it is an edit the session seems to
+    // ignore (relax#33).
+    if !saved.is_empty() {
+        let outlined = crate::owner::call(crate::owner::Class::Program, || saved.iter().filter(|p| (*up).prog.skipped_module_of(p).is_some()).cloned().collect::<Vec<_>>());
+        for path in outlined {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            out.lines.push(format!("{name}: loaded only as an outline (the file selection deferred its module): nothing of it runs yet, and its first use reads the file as saved"));
+        }
+    }
     crate::hot_failure::classified(&out.lines);
     if out.rung == Rung::Patch { crate::hot_failure::applied(out.group); }
     out
@@ -4284,7 +4310,7 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
     // an earlier transaction panicked: the program's tables may be half-way through it, and no
     // edit applies to them again -- the restart that recovery offers applies this one
     if let Some(why) = unit_suspect() {
-        return Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("not applied to a program an earlier edit left half-made ({why}): a process restart applies it")], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+        return Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("not applied to a program an earlier edit left half-made ({why}): a process restart applies it")], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() };
     }
     // an internal compiler panic in the transaction refuses the edit with its message. Nothing
     // undoes what the transaction had changed of the program by then (its file versions, defs,
@@ -4376,7 +4402,7 @@ unsafe fn apply_mode(up: *mut Unit, edits: Vec<Edit>, sources: &[Edit], partial:
             // the message and where the compiler panicked: the report names the spot
             let msg = crate::lifeline::panic_line(&*p);
             mark_unit_suspect(&format!("internal compiler error applying an edit: {msg}"));
-            Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; the app runs on with its code, and a restart applies the edit", msg)], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
+            Outcome { failure: Some(makepad_remote::hot::Outcome::Panic), kept: 0, pending: false, rung: Rung::Restart, files, lines: vec![format!("internal compiler error applying the edit: {} -- makepad run bug, report it; the app runs on with its code, and a restart applies the edit", msg)], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() }
         }
     };
     if r.rung != Rung::Patch { crate::sip::restore_late_files(&late); }
@@ -4414,6 +4440,26 @@ fn fv_session_keep(transaction: u64, cx: std::rc::Rc<crate::borrowck::field_view
     FV_SESSION.with(|s| *s.borrow_mut() = Some((transaction, cx)));
 }
 
+/// An edit's wait for the front end's write lock (its type checks and loads hold it for reading)
+/// is said once it is this long, and again when it ends: else the person sees an edit that does
+/// nothing (relax#33).
+const FRONT_WAIT_SAID: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn front_wait_said(paths: &[String], waited: Option<std::time::Duration>) {
+    let names: Vec<&str> = paths.iter().take(3).map(|p| p.rsplit('/').next().unwrap_or(p)).collect();
+    let what = format!("{}{}", names.join(", "), if paths.len() > 3 { ", ..." } else { "" });
+    match waited {
+        None => {
+            // the longest-held read: who the wait is for
+            let held = jit::front_holders::snapshot().into_iter().min_by_key(|r| r.2).map(|(tid, site, since)| {
+                format!(" (the longest read: {site} on thread {tid}, {:.1} s)", crate::clock::wall_ns().saturating_sub(since) as f64 / 1e9)
+            });
+            eprintln!("makepad live: {what}: waits for the front end's readers to finish{}", held.unwrap_or_default());
+        }
+        Some(w) => eprintln!("makepad live: {what}: the front end's wait ended after {:.1} s; the edit goes on", w.as_secs_f64()),
+    }
+}
+
 unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Result<crate::program::FileVersion, String>>>, t0: Instant, partial: u8, retries: usize, module: bool, base: &IncludeBase) -> Outcome {
     let transaction = TRANSACTIONS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let session = unsafe { crate::jit::unit_session(up) };
@@ -4426,7 +4472,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     u.flush_cache_records();
     note_edited_crates(u, &olds);
     let cache_ahead0 = jit::CACHE_AHEAD.load(std::sync::atomic::Ordering::Relaxed);
-    let mut out = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: olds.clone(), lines: Vec::new(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+    let mut out = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: olds.clone(), lines: Vec::new(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() };
     // 1-2: parse and classify every file; nothing changes yet
     let mut versions = Vec::new();
     let mut changes = Vec::new();
@@ -5432,7 +5478,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         // first drain; their entries are encoded against the sources they were built from
         u.flush_cache_records();
         let wait_from = jit::wall_ns();
-        let fw = jit::front_write();
+        let fw = jit::front_write_noted(Some((FRONT_WAIT_SAID, &mut |waited| front_wait_said(&edit_paths, waited))));
         if jit::front_trace() {
             let now = jit::wall_ns();
             eprintln!("reload-front-wait: {:.1} ms (t={:.0}..{:.0} ms)", (now - wait_from) as f64 / 1e6, wait_from as f64 / 1e6, now as f64 / 1e6);
@@ -6128,6 +6174,9 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     trace_sub("consts_errs");
     trace_stage("commit_collect");
     trace_bodies(&u.prog, &body_defs);
+    // (the names the checks below look up in modules the file selection deferred: a refusal's
+    // `deferred`)
+    let miss_mark = crate::program::missing_mark();
     let mut checked_bodies = Vec::new();
     {
         let mut todo: Vec<(DefId, Vec<TyId>)> = Vec::new();
@@ -6678,6 +6727,16 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
         }
         out.rung = if as_restart { Rung::Restart } else { Rung::Refuse };
         out.lines.extend(errs);
+        // A body that names an item of a module the file selection deferred (its outline
+        // declares the name, nothing has loaded it) fails to resolve it here, as a build of that
+        // body does; a build's outer compile loads the module and builds again (jit.rs
+        // load_deferred), and so does the edit (apply_update): the whole edit, not a part of it.
+        if !as_restart {
+            out.deferred = u.prog.misses_to_load(&crate::program::missing_since(miss_mark));
+            if !out.deferred.is_empty() {
+                return out;
+            }
+        }
         if as_restart && hold {
             if let Some(r) = hold_back(up, &edits, &out.lines, t0, retries, base) { return r; }
         }
@@ -8409,7 +8468,7 @@ enum StreamTarget {
 static STREAMS: relax_session::sync::Mutex<Vec<(usize, StreamTarget, StreamFile)>> = relax_session::sync::Mutex::new(Vec::new());
 
 fn idle_outcome(file: Option<u32>, line: &str) -> Outcome {
-    Outcome { failure: None, kept: 0, pending: false, rung: Rung::Patch, files: file.into_iter().collect(), lines: vec![line.to_string()], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] }
+    Outcome { failure: None, kept: 0, pending: false, rung: Rung::Patch, files: file.into_iter().collect(), lines: vec![line.to_string()], names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() }
 }
 
 unsafe fn stream_file(up: *mut Unit, path: &str) -> Option<u32> {
@@ -9043,6 +9102,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     let mut startup_scan = true;
     let mut restart_required = false;
     let mut restart_message = String::new();
+    // a failed edit's recovery held the watch: the round after it looks at every file. The saves
+    // said held meanwhile, by their stamp then (each save one line)
+    let mut recovered = false;
+    let mut held_saves: std::collections::HashMap<usize, Option<(std::time::SystemTime, u64)>> = std::collections::HashMap::new();
     // the files of the edit a rebuild of makepad is for (a live test session's restart names them)
     let mut host_edit: Vec<String> = Vec::new();
     let mut revision = 0;
@@ -9055,6 +9118,32 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
     while !crate::run_threads::ending() && !crate::run_threads::run_ending() {
         crate::hot_failure::pump();
         if crate::hot_failure::recovering() {
+            // A failed edit's recovery (the restart it offered, which may wait for the person)
+            // holds every edit until it ends. Each save meanwhile says so: held in silence, it
+            // looked like an edit the session ignored (relax#33). The notifications taken here
+            // named them; the round after the recovery looks at every file.
+            let named: Vec<usize> = match events.as_mut().map(|w| w.changed()) {
+                Some(Some(named)) => named,
+                // (events lost: every file once, and a new watch)
+                Some(None) => {
+                    events = LiveWatch::new(files.iter().map(|f| f.0.as_str()));
+                    (0..files.len()).collect()
+                }
+                // (no native watch: the polled hot set)
+                None => hot.clone(),
+            };
+            if !named.is_empty() {
+                if virt.is.len() != files.len() { virt = Virtual::of(&files); }
+                let look = Look::new();
+                for k in named.into_iter().filter(|&k| k < files.len()) {
+                    let now = look.stamp(&virt, k, &files[k].0);
+                    if now != files[k].2 && held_saves.get(&k) != Some(&now) {
+                        held_saves.insert(k, now);
+                        eprintln!("makepad live: {}: held: a failed edit's recovery (its restart) is under way; this edit applies once it ends", short(&files[k].0));
+                    }
+                }
+            }
+            recovered = true;
             std::thread::sleep(std::time::Duration::from_millis(100));
             continue;
         }
@@ -9156,6 +9245,9 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             if !changed.is_empty() {
                 let names: Vec<String> = changed.iter().take(3).map(|&(k, _)| short(&files[k].0)).collect();
                 let message = format!("{}{}: restart pending ({restart_message}); this edit applies with it", names.join(", "), if changed.len() > 3 { ", ..." } else { "" });
+                // said where the session's output is read too: the event alone left a save without a
+                // line (relax#33)
+                eprintln!("makepad live: {message}");
                 // (a live test session's restart would not apply it either: refused there)
                 patch_refused_event(&message, crate::harness::live::enabled(), std::slice::from_ref(&message));
                 for (k, current) in changed { files[k].2 = current; }
@@ -9225,7 +9317,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
                 }
                 if let Some(name) = old.0 {
                     let lines = vec![format!("`{name}` still runs the code from before the edit: a call made before the patch has not returned (a loop) -- restart the app")];
-                    log_edit(&what, &Outcome { failure: None, kept: 0, pending: false, rung: Rung::Restart, files: Vec::new(), lines: lines.clone(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: gen, ms: [0.0; 4], undo: None, work: [0; 5] }, None, Instant::now());
+                    log_edit(&what, &Outcome { failure: None, kept: 0, pending: false, rung: Rung::Restart, files: Vec::new(), lines: lines.clone(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: gen, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() }, None, Instant::now());
                     restart_for_edit(&what, &lines);
                     for l in &lines { eprintln!("makepad live:   {}", l); }
                     patch_refused_event(&what, false, &lines);
@@ -9245,7 +9337,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         let synced = dock.as_mut().is_some_and(DockGate::synced);
         let caught_up = CATCH_UP.swap(false, std::sync::atomic::Ordering::AcqRel);
         let retry_due = std::mem::take(&mut again) | RETRY_NOW.swap(false, std::sync::atomic::Ordering::AcqRel);
-        let all = lost || rewatched || synced || caught_up || retry_due
+        // (the saves a recovery held: their notifications were taken meanwhile)
+        let after_recovery = std::mem::take(&mut recovered);
+        if after_recovery { held_saves.clear(); }
+        let all = lost || rewatched || synced || caught_up || retry_due || after_recovery
             || (events.is_none() && last_scan.elapsed() >= LIVE_QUIET);
         if rewatched || synced || virt.is.len() != files.len() { virt = Virtual::of(&files); }
         let t_round = std::time::Instant::now();
@@ -9608,7 +9703,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
             for &k in &moved { stalled.insert(k, (Vec::new(), undeclared.clone())); }
             let what: Vec<String> = removed.iter().chain(&which).map(|&k| files[k].0.rsplit('/').next().unwrap_or("").to_string()).collect();
             let what = what.join(", ");
-            let o = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: Vec::new(), lines: undeclared.clone(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+            let o = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Refuse, files: Vec::new(), lines: undeclared.clone(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() };
             log_edit(&what, &o, saved, seen);
             eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", what);
             for l in &undeclared { eprintln!("makepad live:   {}", l); }
@@ -9639,7 +9734,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs) {
         if edits.is_empty() {
             // saved back to the running text (e.g. the fix after a refused edit): the program
             // already runs it -- an edit applied in place for the scoreboard
-            let mut o = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Patch, files: Vec::new(), lines: Vec::new(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5] };
+            let mut o = Outcome { failure: None, kept: 0, pending: false, rung: Rung::Patch, files: Vec::new(), lines: Vec::new(), names: Vec::new(), changed: 0, test_changes: None, bodies: Vec::new(), group: 0, ms: [0.0; 4], undo: None, work: [0; 5], deferred: Vec::new() };
             let what: Vec<String> = changed.iter().map(|&k| files[k].0.rsplit('/').next().unwrap_or("").to_string()).collect();
             log_edit(&what.join(", "), &o, saved, seen);
             if crate::harness::live::enabled() {

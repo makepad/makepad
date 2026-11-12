@@ -1215,6 +1215,9 @@ pub enum ExprKind {
     /// `async { }` / `async move { }` / an async closure's body (ASYNC_*)
     Async(u8, BlockId),
     ConstBlock(BlockId),
+    /// `try { }` (feature `try_blocks`): its `?`s go to it, and its value is `Try::from_output` of
+    /// the block's
+    TryBlock(BlockId),
     If(ExprId, BlockId, OptExprId),
     Let(PatId, ExprId),
     Match(ExprId, List<Arm>),

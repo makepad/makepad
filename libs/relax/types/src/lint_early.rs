@@ -737,7 +737,7 @@ impl<'a> W<'a> {
     /// rustc `classify::expr_requires_semi_to_be_stmt`.
     fn requires_semi(&self, e: ExprId) -> bool {
         !matches!(self.kind(e), ExprKind::If(..) | ExprKind::Match(..) | ExprKind::Block(..) | ExprKind::Unsafe(_)
-            | ExprKind::While(_) | ExprKind::Loop(..) | ExprKind::For(_) | ExprKind::ConstBlock(_))
+            | ExprKind::While(_) | ExprKind::Loop(..) | ExprKind::For(_) | ExprKind::ConstBlock(_) | ExprKind::TryBlock(_))
     }
 
     /// rustc `classify::expr_trailing_brace(e).is_some()`.
@@ -751,7 +751,7 @@ impl<'a> W<'a> {
                     None => return false,
                 },
                 ExprKind::Closure(r) => self.ast.row(r).body,
-                ExprKind::Block(..) | ExprKind::Unsafe(_) | ExprKind::Async(..) | ExprKind::ConstBlock(_) | ExprKind::For(_)
+                ExprKind::Block(..) | ExprKind::Unsafe(_) | ExprKind::Async(..) | ExprKind::ConstBlock(_) | ExprKind::TryBlock(_) | ExprKind::For(_)
                 | ExprKind::If(..) | ExprKind::Loop(..) | ExprKind::Match(..) | ExprKind::Struct(_) | ExprKind::While(_) => return true,
                 _ => return false,
             };
@@ -1010,7 +1010,7 @@ impl<'a> W<'a> {
             }
             ExprKind::Block(b, label) => self.labeled(label, |w| w.block(b)),
             ExprKind::Loop(b, label) => self.labeled(label, |w| w.block(b)),
-            ExprKind::Unsafe(b) | ExprKind::ConstBlock(b) => self.block(b),
+            ExprKind::Unsafe(b) | ExprKind::ConstBlock(b) | ExprKind::TryBlock(b) => self.block(b),
             ExprKind::Async(_, b) => {
                 self.labels.push(LabelScope { name: Vec::new(), pos: 0, used: true, barrier: true });
                 self.block(b);

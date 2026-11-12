@@ -8,5 +8,7 @@ description = "makepad check fixture: a path crate whose build script compiles C
 [dependencies]
 cnative = { path = "cnative" }
 
-# its own workspace (no registry dependencies: runs offline anywhere with cargo, cc and ar)
+# its own workspace (no registry dependencies: runs offline anywhere with cargo, cc and ar); a
+# second package with the same native closure
 [workspace]
+members = ["second"]
