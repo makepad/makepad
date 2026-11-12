@@ -7343,10 +7343,14 @@ mod cold_tests {
             prog
         };
         let images = FrontImages { dir: store.clone(), ..Default::default() };
-        // a run that loads with these sources and records its collected graph
-        let record = |images: &FrontImages| {
+        // a load that writes its crate records and its graph, not the collected image
+        let graph = |images: &FrontImages| {
             let mut prog = load(Some(images));
             ColdFront::default().finish_in(&mut prog, store.clone());
+        };
+        // a run that loads with these sources and records its collected graph
+        let record = |images: &FrontImages| {
+            graph(images);
             let prog = load(Some(images));
             let mut tcx = crate::tcx::Tcx::new();
             tcx.collect(&prog);
@@ -7367,6 +7371,16 @@ mod cold_tests {
         let (kept, _, proof) = images.restore_collected(sess, &pre).expect("prefix restore");
         assert_eq!(kept.crates.len(), 5, "crates below the edited one");
         assert!(proof.is_some_and(|p| p.kept.is_some_and(|(k, _)| k == 5)), "a partial restore keeps only the kept crates' definition tables");
+        // a check that restored that prefix writes its graph, not the image (run.rs
+        // CHECK_RECORDS_COLLECTED): the image certifies each crate by its fingerprint, so the next
+        // edit of `top` keeps the crates below it again, and an edit of a kept crate keeps only
+        // the crates below that one
+        graph(&images);
+        std::fs::write(&pre[5].root, "pub fn top() -> u32 { mid::mid() + 3 }").unwrap();
+        assert_eq!(images.restore_collected(sess, &pre).expect("prefix restore after the graph moved on").0.crates.len(), 5);
+        graph(&images);
+        std::fs::write(&pre[4].root, "pub fn mid() -> u32 { low::value() as u32 + 2 }").unwrap();
+        assert_eq!(images.restore_collected(sess, &pre).expect("prefix restore below the edited kept crate").0.crates.len(), 4);
         // the next run after recording the edited sources restores everything again
         record(&images);
         assert_eq!(images.restore_collected(sess, &pre).unwrap().0.crates.len(), names.len());

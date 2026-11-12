@@ -1,5 +1,6 @@
 //! A collected Program/Tcx above the immutable per-crate front images. Its certificate
-//! covers the ordered unit graph, all authored inputs, module probes and late inputs.
+//! covers the ordered unit graph, all authored inputs, module probes and late inputs; each
+//! crate's fingerprint certifies that crate, for a restore of the prefix of crates it still holds.
 use super::*;
 use crate::crate_image::{Codec, CrateImages, GraphRecipe};
 use crate::program::Program;
@@ -326,9 +327,13 @@ impl FrontImages {
         let mut plan = None;
         // the prefix whose contexts' prescans the plan worker releases once it is done
         let release_after: Arc<relax_session::sync::Mutex<Option<usize>>> = Arc::default();
+        // the stored graph validated whole (every crate restores), else its crate records, for the
+        // prefix once the image says which crates it holds as they are (no demand plan)
+        let mut validated = false;
+        let mut stale_records = None;
         // (crates to load again: the prefix before them, as for an edit)
         let (graph, mut prefix) = match cert.as_ref().filter(|_| !self.reloading()) {
-            Some(graph) => (graph, pre.len()),
+            Some(graph) => { validated = true; (graph, pre.len()) }
             None => {
                 why = "no stored graph of this crate set";
                 let (graph, b) = self.graph_for(pre)?;
@@ -359,12 +364,12 @@ impl FrontImages {
                         plan = Some(pending);
                     }
                 }
-                let prefix = if plan.is_some() { 0 } else {
+                if plan.is_none() {
                     why = "the graph's crate records";
                     let (rpre, common) = base.as_ref().map_or((pre, pre.len()), |(p, n): &(Vec<_>, usize)| (p.as_slice(), *n));
-                    Self::collected_prefix(rpre, &self.records_for(&stale, rpre, common, None)?, &|_| Some((0, Vec::new())), crate::preload::trace())?.0
-                };
-                (&stale, prefix)
+                    stale_records = Some(self.records_for(&stale, rpre, common, None)?);
+                }
+                (&stale, 0)
             }
         };
         let (rpre, common) = base.as_ref().map_or((pre, pre.len()), |(p, n)| (p.as_slice(), *n));
@@ -386,20 +391,44 @@ impl FrontImages {
         why = "collected image header";
         let image = crate::image::Reader::new(bytes)?;
         why = "collected image sections (format)";
-        if image.len() != 6 { return None; }
-        why = "certificate mismatch (the crate graph changed since the image)";
-        if image.bytes(0, 0)? != certificate(graph).to_le_bytes() { return None; }
+        if image.len() != 7 { return None; }
         why = "interface count differs from the graph's crates";
         let ifaces: &[MappedKey] = image.slice(5, 5)?;
         if ifaces.len() != graph.crates.len() { return None; }
+        why = "crate fingerprint count differs from the graph's crates";
+        let image_fps: &[MappedKey] = image.slice(6, 6)?;
+        if image_fps.len() != graph.crates.len() { return None; }
+        // The image certifies its crates one by one. With the stored graph as the image recorded
+        // it (section 0), every crate holds; else the graph moved on since (a check that restored
+        // a prefix writes its graph, not the image again): the crates whose fingerprint (name,
+        // root, edition, cfg with its features, files, demand selection and the dependencies'
+        // fingerprints) is still the graph's, up to the first one whose is not -- collected_prefix
+        // keeps them downward closed, and their records hold their inputs to the files now. The
+        // graph's identity, the image's key, covers every crate's cfg, edition and dependencies.
+        let whole = image.bytes(0, 0)? == certificate(graph).to_le_bytes();
+        let moved: Vec<bool> = graph.crates.iter().zip(image_fps).map(|((_, fp), k)| *fp != k.get()).collect();
+        why = "certificate mismatch (the crate graph changed since the image)";
+        if !whole && validated { return None; }
+        if !whole && crate::preload::trace() {
+            eprintln!("makepad-run collected: the graph moved on since the image: {} of {} crates changed ({})", moved.iter().filter(|m| **m).count(), moved.len(),
+                graph.crates.iter().zip(&moved).filter(|(_, m)| **m).map(|(((name, _, _), _), _)| name.as_str()).collect::<Vec<_>>().join(" "));
+        }
+        // (the records of the crates the image holds in another version do not describe it)
+        let unheld = |records: &mut PrefixRecords| for (r, _) in records.iter_mut().zip(&moved).filter(|(_, m)| **m) { *r = Err("changed since the collected image"); };
+        if let Some(mut records) = stale_records.take() {
+            why = "the graph's crate records";
+            unheld(&mut records);
+            prefix = Self::collected_prefix(rpre, &records, &|_| Some((0, Vec::new())), crate::preload::trace())?.0;
+        }
         why = "collected image sections (format)";
         let program = image.bytes(1, 1)?;
         let types = image.bytes(2, 2)?;
         let definitions = image.bytes(3, 3)?;
         phase("mapped");
         let options = crate::crate_image::parse_options(&session.options);
-        let store_paths: Vec<PathBuf> = graph.crates.iter()
-            .map(|((name, _, _), fp)| self.dir.join(front_store_name_with(options, name, *fp))).collect();
+        // the image's files are in the stores of the crate versions it holds
+        let store_paths: Vec<PathBuf> = graph.crates.iter().zip(image_fps)
+            .map(|(((name, _, _), _), fp)| self.dir.join(front_store_name_with(options, name, fp.get()))).collect();
         let indexes = MappedIndexes::read(image.bytes(4, 4)?, &self.dir).filter(|ix| {
             ix.stores.len() == graph.crates.len()
                 && ix.stores.iter().zip(&store_paths).all(|(s, path)| s.path.as_os_str() == path.as_os_str())
@@ -488,7 +517,8 @@ impl FrontImages {
         phase("Tcx");
         if let Some(plan) = plan.as_deref() {
             why = "demand selection";
-            let records = self.records_for(graph, rpre, common, Some(&stores))?;
+            let mut records = self.records_for(graph, rpre, common, Some(&stores))?;
+            unheld(&mut records);
             phase("prefix records");
             // the plan's selection where it is complete, else its early prefix (crates selected
             // in full: identity 0, nothing deferred; preload resolve_images reads it the same way)
@@ -511,6 +541,8 @@ impl FrontImages {
             detail.clear();
             phase("selection validated");
         }
+        why = "a kept crate changed since the collected image";
+        if moved.iter().take(prefix).any(|m| *m) { return None; }
         why = "front ledger replay";
         for (i, store) in stores.iter().take(prefix).enumerate() {
             detail = graph.crates[i].0 .0.clone();
@@ -833,6 +865,10 @@ impl Encoder<'_> {
         why = "index snapshot";
         image.add_bytes(4, MappedIndexes::record(self.crate_path, &boot.files)?);
         image.add_owned(5, &boot.interfaces);
+        // each crate's fingerprint: a restore after the graph moved on keeps the crates it holds
+        // as they are (restore_collected)
+        let fps: Vec<MappedKey> = graph.crates.iter().map(|(_, fp)| MappedKey::new(*fp)).collect();
+        image.add_owned(6, &fps);
         check()?;
         let payload = image;
         let dest = path(self.dir, recipe.identity);
@@ -889,7 +925,7 @@ impl Cache {
         pin_front(&st, Some(at));
         let bytes: &'static [u8] = unsafe { std::slice::from_raw_parts(bytes.as_ptr(), bytes.len()) };
         let image = crate::image::Reader::new(bytes)?;
-        if image.len() != 6 { return None; }
+        if image.len() != 7 { return None; }
         let (program, types) = (image.bytes(1, 1)?, image.bytes(2, 2)?);
         prog.adopt_collected(program, retired, &mut note)?;
         tcx.adopt_collected(types, retired, &mut note)?;
