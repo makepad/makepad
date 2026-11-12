@@ -100,8 +100,8 @@ impl Flow {
     }
 }
 
-/// A picture that goes no further: out of flight, its slot free, and then the app woken. No encoder
-/// or headset will answer for this one, and the app's next pose waits on such an answer.
+/// A picture that goes no further: out of flight, its slot free, and then the sink woken. No
+/// encoder or headset will answer for this one, and the app's next pose waits on such an answer.
 fn let_go(flow: &Flow, tiles: u32, held: Box<dyn Send + Sync>, wake: impl FnOnce()) {
     flow.no_eyes(tiles);
     drop(held);
@@ -469,7 +469,7 @@ impl Core {
                         log(&format!("xr host: eye {t}: encode: {e}"));
                         flow.lost.fetch_add(1, Ordering::AcqRel);
                         keyframe[t].store(true, Ordering::Release);
-                        shared.wake();
+                        shared.wake_sink();
                         return;
                     }
                 };
@@ -479,7 +479,7 @@ impl Core {
                 if packets.is_empty() {
                     flow.dropped.fetch_add(1, Ordering::AcqRel);
                     flow.decoded_tiles.fetch_add(1, Ordering::AcqRel);
-                    shared.wake();
+                    shared.wake_sink();
                     return;
                 }
                 // from the build: the wait for the frame's GPU work, the column's copy, its encode
@@ -495,7 +495,7 @@ impl Core {
                         return;
                     }
                 }
-                shared.wake();
+                shared.wake_sink();
             })
         };
         let encoders = Arc::new(TileEncoders::open("xr-host-encode", specs, sink)?);
@@ -541,7 +541,7 @@ impl Core {
                         }
                         let Some((seq, eyes, render_us)) = picture_eyes(p.rendered, pose.as_ref(), p.built_at) else {
                             // it and its hold on the slot go; the next pose draws what it showed
-                            let_go(&flow, tiles, p.held, || shared.wake());
+                            let_go(&flow, tiles, p.held, || shared.wake_sink());
                             continue;
                         };
                         if let Some(dir) = &dump {
@@ -582,11 +582,11 @@ impl Core {
     }
 
     /// Eye pictures out of flight (decoded by the headset, or dropped on the way): their slots
-    /// free, the app woken for them.
+    /// free, the sink woken for them.
     pub(crate) fn tiles_out(&self, n: u64) {
         if n > 0 {
             self.flow.decoded_tiles.fetch_add(n, Ordering::AcqRel);
-            self.shared.wake();
+            self.shared.wake_sink();
         }
     }
 

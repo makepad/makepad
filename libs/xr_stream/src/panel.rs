@@ -20,8 +20,8 @@
 
 use crate::auto::{Lever, XrAuto};
 #[cfg(not(target_arch = "wasm32"))]
-use crate::verdict::{Evidence, Stage};
-use crate::verdict::{StageTime, VerdictFilter};
+use crate::verdict::{Evidence, Stage, VerdictFilter};
+use crate::verdict::StageTime;
 use crate::settings_types::{StreamAa, StreamView, STREAM_AA_MODES};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::XrServer;
@@ -466,9 +466,11 @@ pub enum XrLinkState {
     Off,
     /// The headset paused it (its menu button): linked, nothing streamed.
     Paused,
-    /// The server listens; no headset is linked.
+    /// The server listens; no headset is linked (a server: not on the web).
+    #[cfg(not(target_arch = "wasm32"))]
     Waiting,
     /// A headset is linked but sends no frames (taken off, asleep): nothing is held for it.
+    #[cfg(not(target_arch = "wasm32"))]
     Idle,
     /// A headset streams.
     Live,
@@ -540,7 +542,10 @@ impl Widget for XrHeadsetIcon {
         self.icon.color = match self.state {
             // off: the meta ink, dimmed further so it reads as "nothing runs"
             XrLinkState::Off => vec4(self.color_off.x, self.color_off.y, self.color_off.z, self.color_off.w * 0.6),
-            XrLinkState::Paused | XrLinkState::Idle => self.color_paused,
+            XrLinkState::Paused => self.color_paused,
+            #[cfg(not(target_arch = "wasm32"))]
+            XrLinkState::Idle => self.color_paused,
+            #[cfg(not(target_arch = "wasm32"))]
             XrLinkState::Waiting => self.color_waiting,
             XrLinkState::Live => self.color_live,
         };
@@ -591,7 +596,10 @@ impl Widget for XrStateDot {
         let r = cx.walk_turtle(walk);
         self.draw_dot.color = match self.state {
             XrLinkState::Off => self.color_off,
-            XrLinkState::Paused | XrLinkState::Idle => self.color_paused,
+            XrLinkState::Paused => self.color_paused,
+            #[cfg(not(target_arch = "wasm32"))]
+            XrLinkState::Idle => self.color_paused,
+            #[cfg(not(target_arch = "wasm32"))]
             XrLinkState::Waiting => self.color_waiting,
             XrLinkState::Live => self.color_live,
         };
@@ -627,6 +635,7 @@ pub struct XrSparkline {
 }
 
 impl XrSparkline {
+    #[cfg(not(target_arch = "wasm32"))]
     fn set_points(&mut self, cx: &mut Cx, points: Vec<(f32, f32)>) {
         if points != self.points {
             self.points = points;
@@ -852,6 +861,7 @@ const STAGE_NAME_W: f64 = 84.0;
 const STAGE_VALUE_W: f64 = 48.0;
 
 impl XrStageBars {
+    #[cfg(not(target_arch = "wasm32"))]
     fn set_bars(&mut self, cx: &mut Cx, bars: Vec<StageTime>, budget_ms: f64, m2p: Vec<StageTime>, m2p_ms: f64, lead_ms: f64) {
         if bars != self.bars || budget_ms != self.budget_ms || m2p != self.m2p || m2p_ms != self.m2p_ms || lead_ms != self.lead_ms {
             self.bars = bars;
@@ -925,6 +935,7 @@ impl Widget for XrStageBars {
 
 /// Mbit/s for a tile: whole above 10, else a decimal or two (a still picture encodes to very
 /// little: 0.4 Mbit/s read "0").
+#[cfg(not(target_arch = "wasm32"))]
 fn mbit_text(mbps: f64) -> String {
     if mbps >= 10.0 {
         format!("{mbps:.0}")
@@ -1166,6 +1177,7 @@ pub struct XrCaptionButton {
     #[rust]
     auto: XrAuto,
     /// What limits the stream, over the last seconds (`crate::verdict`).
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     verdict: VerdictFilter,
     /// The once-a-second tick: only while the stream is on or the panel is open (off and
@@ -1185,6 +1197,7 @@ pub struct XrCaptionButton {
     #[rust]
     status: String,
     /// The pause's change count last seen (the headset's menu button flips it).
+    #[cfg(not(target_arch = "wasm32"))]
     #[rust]
     streaming_seen: u32,
 }
@@ -1262,7 +1275,9 @@ impl XrCaptionButton {
         match self.state {
             XrLinkState::Off => "Off · turn the switch on, then open the headset app (nothing listens until then)".to_string(),
             XrLinkState::Paused => "Paused from the headset · linked, nothing streamed".to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
             XrLinkState::Waiting => "Waiting for a headset · open XR Remote on it".to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
             XrLinkState::Idle => "Linked · the headset is idle (not worn or asleep)".to_string(),
             XrLinkState::Live => {
                 #[cfg(not(target_arch = "wasm32"))]

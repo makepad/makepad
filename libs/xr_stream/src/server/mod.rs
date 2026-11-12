@@ -30,7 +30,7 @@ mod sink;
 pub use pipeline::picture_size;
 pub use sink::DrawXrBand;
 pub(crate) use sink::script_mod;
-use crate::settings_types::{HeadsetSettings, StreamAa, StreamView, MIN_RENDER_SCALE_PCT, STREAM_AA_MODES};
+use crate::settings_types::{HeadsetSettings, StreamAa, StreamView, STREAM_AA_MODES};
 
 use makepad_desk_link::xr::WorldBrick;
 use makepad_desk_link::xr_capture::{CaptureAsk, CaptureRecord};
@@ -43,6 +43,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub type Log = Arc<dyn Fn(&str) + Send + Sync>;
+/// The lowest eye render scale (percent of the encoded eye size): the floor of
+/// [`XrServer::set_render_scale`] and of Auto's ladder.
+pub(crate) const MIN_RENDER_SCALE_PCT: u32 = 70;
 /// The headset's capture records (`XrServer::set_capture`) with the link's session id, on the
 /// session's thread. They hold the wearer's camera pictures: the sink keeps them for its app.
 pub type CaptureSink = Arc<dyn Fn(u64, CaptureRecord) + Send + Sync>;
@@ -229,8 +232,10 @@ pub(crate) struct ServerShared {
     /// (`Cx::take_pass_load`, taken by the frame sink).
     pub(crate) host_load: Mutex<VecDeque<PassLoadSample>>,
     pub(crate) app_line: Mutex<String>,
-    /// Told when there is room again (a picture slot freed, or the headset decoded one), the
-    /// stream switched, or a session ended: the sink's signal.
+    /// The sink's signal: raised for the app's side when it has news the app may poll for (the
+    /// stream switched, a session began or ended, the poses stopped, a pose for an external
+    /// renderer), and for the sink's hook alone when there is room again (a picture encoded or
+    /// let go, the headset decoded one).
     pub(crate) wake: Mutex<Option<SignalToUI>>,
 }
 
@@ -277,9 +282,18 @@ impl ServerShared {
         }
     }
 
+    /// News the app's side may poll for: an `Event::Signal`, which the sink hears first.
     pub(crate) fn wake(&self) {
         if let Some(s) = self.wake.lock().unwrap().as_ref() {
             s.set();
+        }
+    }
+
+    /// Room again for the sink, a few times each frame: its signal hook runs on the next beat,
+    /// and no widget hears an `Event::Signal`.
+    pub(crate) fn wake_sink(&self) {
+        if let Some(s) = self.wake.lock().unwrap().as_ref() {
+            s.set_for_hooks();
         }
     }
 

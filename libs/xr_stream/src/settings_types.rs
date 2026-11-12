@@ -69,9 +69,6 @@ impl StreamView {
 }
 
 
-/// The lowest eye render scale (percent of the encoded eye size).
-pub const MIN_RENDER_SCALE_PCT: u32 = 70;
-
 /// The server's settings for the headset's own per-frame mechanisms (`XrServerMsg::Headset`):
 /// the policy lives on the server, the headset executes it.
 #[derive(Clone, Copy, Debug, PartialEq)]

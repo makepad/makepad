@@ -610,7 +610,7 @@ impl XrPack {
             self.counts.packed += 1;
             self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
             if let Some(signal) = &self.signal {
-                signal.set();
+                signal.set_for_hooks();
             }
             return;
         }
@@ -666,7 +666,7 @@ impl XrPack {
         self.counts.packed += 1;
         self.packed = Some(Packed { slot, display_ns, built_at: Instant::now(), asked: self.asked_at, rendered, focus_m });
         if let Some(signal) = &self.signal {
-            signal.set();
+            signal.set_for_hooks();
         }
     }
 
@@ -772,7 +772,7 @@ impl XrPack {
         }
         self.owed = true;
         if let Some(signal) = &self.signal {
-            signal.set();
+            signal.set_for_hooks();
         }
     }
 
