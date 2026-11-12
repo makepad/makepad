@@ -402,6 +402,13 @@ fn arch() {
     b!(vmulq_p8, poly8x16_t, poly8x16_t);
     b!(vmull_p8, poly8x8_t, poly8x8_t);
     b!(vmull_high_p8, poly8x16_t, poly8x16_t);
+    // sha2's SHA-512 backend (FEAT_SHA512 is not on every aarch64 CPU)
+    if std::arch::is_aarch64_feature_detected!("sha3") {
+        t!(vsha512hq_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+        t!(vsha512h2q_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+        b!(vsha512su0q_u64, uint64x2_t, uint64x2_t);
+        t!(vsha512su1q_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+    }
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",

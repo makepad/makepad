@@ -7481,6 +7481,81 @@ fn vsetq_lane_u64() {
 }
 
 #[test]
+fn vsha512h2q_u64() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("sha3"),
+            "required native sha3 coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint64x2_t = neon_sample(&mut rng, case, 1, 0);
+            let p2: hr::uint64x2_t = neon_sample(&mut rng, case, 2, 0);
+            let got = hr::vsha512h2q_u64(p0, p1, p2);
+            let expected = real::vsha512h2q_u64(cast(p0), cast(p1), cast(p2));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vsha512hq_u64() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("sha3"),
+            "required native sha3 coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint64x2_t = neon_sample(&mut rng, case, 1, 0);
+            let p2: hr::uint64x2_t = neon_sample(&mut rng, case, 2, 0);
+            let got = hr::vsha512hq_u64(p0, p1, p2);
+            let expected = real::vsha512hq_u64(cast(p0), cast(p1), cast(p2));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vsha512su0q_u64() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("sha3"),
+            "required native sha3 coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint64x2_t = neon_sample(&mut rng, case, 1, 0);
+            let got = hr::vsha512su0q_u64(p0, p1);
+            let expected = real::vsha512su0q_u64(cast(p0), cast(p1));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vsha512su1q_u64() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("sha3"),
+            "required native sha3 coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint64x2_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint64x2_t = neon_sample(&mut rng, case, 1, 0);
+            let p2: hr::uint64x2_t = neon_sample(&mut rng, case, 2, 0);
+            let got = hr::vsha512su1q_u64(p0, p1, p2);
+            let expected = real::vsha512su1q_u64(cast(p0), cast(p1), cast(p2));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
 fn vshlq_n_s32() {
     unsafe fn compare<const N: i32>(p0: hr::int32x4_t, case: usize) {
         let got = hr::vshlq_n_s32::<N>(p0);

@@ -968,6 +968,59 @@ pub fn vsha256su1q_u32(tw0_3: uint32x4_t, w8_11: uint32x4_t, w12_15: uint32x4_t)
     }
 }
 
+// ---- SHA-512 (FEAT_SHA512), as the Arm ARM pseudocode defines SHA512H / SHA512H2 / SHA512SU0 /
+// SHA512SU1, with its names: W is Vd (`a`, the register the instruction overwrites), X is Vn (`b`)
+// and Y is Vm (`c`). Lane 0 is bits 63:0.
+
+/// The XOR of three right rotations: SHA-512's Sigma0 (28, 34, 39) and Sigma1 (14, 18, 41).
+#[inline(always)]
+fn sha512_sigma(x: u64, r: [u32; 3]) -> u64 {
+    x.rotate_right(r[0]) ^ x.rotate_right(r[1]) ^ x.rotate_right(r[2])
+}
+
+/// SHA512H: Sigma1 and Ch of two rounds added to `a`; the low lane's round takes the high lane's.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512hq_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    let ch = (y[1] & x[0]) ^ (!y[1] & x[1]);
+    let hi = ch.wrapping_add(sha512_sigma(y[1], [14, 18, 41])).wrapping_add(w[1]);
+    let t = hi.wrapping_add(y[0]);
+    let ch = (t & y[1]) ^ (!t & x[0]);
+    let lo = ch.wrapping_add(sha512_sigma(t, [14, 18, 41])).wrapping_add(w[0]);
+    uint64x2_t([lo, hi])
+}
+
+/// SHA512H2: Sigma0 and Maj of the same two rounds added to `a`.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512h2q_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    let maj = (x[0] & y[1]) ^ (x[0] & y[0]) ^ (y[1] & y[0]);
+    let hi = maj.wrapping_add(sha512_sigma(y[0], [28, 34, 39])).wrapping_add(w[1]);
+    let maj = (hi & y[0]) ^ (hi & y[1]) ^ (y[1] & y[0]);
+    let lo = maj.wrapping_add(sha512_sigma(hi, [28, 34, 39])).wrapping_add(w[0]);
+    uint64x2_t([lo, hi])
+}
+
+/// SHA512SU0: message schedule, first part (sigma0 of the next word added to each lane).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512su0q_u64(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+    let (w, x) = (a.0, b.0);
+    uint64x2_t([
+        w[0].wrapping_add(w[1].rotate_right(1) ^ w[1].rotate_right(8) ^ (w[1] >> 7)),
+        w[1].wrapping_add(x[0].rotate_right(1) ^ x[0].rotate_right(8) ^ (x[0] >> 7)),
+    ])
+}
+
+/// SHA512SU1: message schedule, second part (sigma1 of `b` and the words of `c` added to each lane).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512su1q_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    uint64x2_t([
+        w[0].wrapping_add(x[0].rotate_right(19) ^ x[0].rotate_right(61) ^ (x[0] >> 6)).wrapping_add(y[0]),
+        w[1].wrapping_add(x[1].rotate_right(19) ^ x[1].rotate_right(61) ^ (x[1] >> 6)).wrapping_add(y[1]),
+    ])
+}
+
 #[derive(Copy, Clone)]
 #[repr(C, align(8))]
 pub struct float32x2_t(pub [f32; 2]);
