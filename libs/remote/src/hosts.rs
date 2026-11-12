@@ -1,7 +1,7 @@
 //! The hosts registry, `~/.config/makepad/remote/hosts.toml` (0600):
 //!
 //! ```toml
-//! [host.149]
+//! [host.89]
 //! via = "ssh"
 //! ssh = "arch@192.0.2.73"
 //! makepad = "/home/me/bin/makepad" # optional: the makepad command on that host (a shell word list: `env TMPDIR=/x /path/makepad` sets the relay's TMPDIR, where it finds apps)

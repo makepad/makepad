@@ -347,7 +347,7 @@ impl Vulkan {
         };
         // An output that held its frames a while (a mode change, a slow flip) grew the pool;
         // the images it gave back are let go again, a few spares kept. Before, the pool only
-        // grew: 149's WM held 70 desktop-sized copies (3.9 GB).
+        // grew: a Linux node's WM held 70 desktop-sized copies (3.9 GB).
         trim_spares(pool, &image, SCANOUT_SPARES);
         self.copy_image("scanout copy", source, &image, batch);
         Ok(image)

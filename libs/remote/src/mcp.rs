@@ -221,7 +221,7 @@ impl Adapter {
         let mut content = vec![json::obj(vec![("type", json::s("text")), ("text", json::s(text))])];
         if let Some(images) = r.get("images").and_then(Value::as_arr) {
             for image in images.iter().filter_map(Value::as_str) {
-                content.push(json::obj(vec![("type", json::s("image")), ("data", json::s(image)), ("mimeType", json::s("image/png"))]));
+                content.push(json::obj(vec![("type", json::s("image")), ("data", json::s(image)), ("mimeType", json::s(picture_media_type(image)?))]));
             }
         }
         Ok(json::obj(vec![("content", Value::Arr(content)), ("isError", Value::Bool(outcome != "Ok"))]))
@@ -310,7 +310,9 @@ fn client_side(client: &Client, words: &str, args: &str) -> Result<Value, String
         };
         for p in paths.iter().take(4) {
             if let Ok(bytes) = std::fs::read(p) {
-                content.push(json::obj(vec![("type", json::s("image")), ("data", json::s(base64(&bytes))), ("mimeType", json::s("image/png"))]));
+                let data = base64(&bytes);
+                let media_type = picture_media_type(&data)?;
+                content.push(json::obj(vec![("type", json::s("image")), ("data", json::s(data)), ("mimeType", json::s(media_type))]));
             }
         }
     }
@@ -328,6 +330,21 @@ fn tool_json(t: &Tool) -> Value {
     };
     let description = if risk.is_empty() { t.description.clone() } else { format!("{} [{risk}]", t.description) };
     json::obj(vec![("name", json::s(format!("{}__{}", t.service, t.name))), ("description", json::s(description)), ("inputSchema", schema)])
+}
+
+// This adapter sits below the AI hub (platform depends on remote), so sniff
+// the wire prefix here without linking a provider or decoding any pixels.
+fn picture_media_type(data: &str) -> Result<&'static str, String> {
+    let head = data.get(..12).ok_or("tool picture is too short")?;
+    let bytes = makepad_base64::base64_decode(head.as_bytes())
+        .map_err(|_| "tool picture is not base64")?;
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Ok("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        Ok("image/jpeg")
+    } else {
+        Err("tool picture must be PNG or JPEG".into())
+    }
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -350,6 +367,8 @@ mod tests {
 
     #[test]
     fn base64_matches_the_standard_alphabet() {
+        assert_eq!(picture_media_type(&base64(b"\x89PNG\r\n\x1a\n")), Ok("image/png"), "PNG tool results keep their MIME type");
+        assert_eq!(picture_media_type(&base64(&[0xff, 0xd8, 0xff, 0xe0, 0, 4, 0, 0, 0xff])), Ok("image/jpeg"), "JPEG tool results use the JPEG MIME type");
         assert_eq!(base64(b""), "");
         assert_eq!(base64(b"f"), "Zg==");
         assert_eq!(base64(b"fo"), "Zm8=");

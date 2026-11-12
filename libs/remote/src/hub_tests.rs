@@ -359,9 +359,9 @@ fn dial_in_binds_the_key_to_its_host_and_reads_keys_live() {
 
 #[test]
 fn hosts_registry_round_trips() {
-    let text = "[host.149]\nvia = \"ssh\"\nssh = \"arch@10.77.0.73\"\nmakepad = \"/opt/makepad\"\n\n[host.phone]\nvia = \"dial\"\nkey = \"ab\"\nfingerprint = \"cd\"\n";
+    let text = "[host.89]\nvia = \"ssh\"\nssh = \"arch@10.77.0.73\"\nmakepad = \"/opt/makepad\"\n\n[host.phone]\nvia = \"dial\"\nkey = \"ab\"\nfingerprint = \"cd\"\n";
     let h = Hosts::parse(text).unwrap();
-    assert_eq!(h.names(), vec!["149", "phone"]);
+    assert_eq!(h.names(), vec!["89", "phone"]);
     assert_eq!(Hosts::parse(&h.to_text()).unwrap(), h);
     assert!(Hosts::parse("[host.x]\nvia = \"carrier-pigeon\"\n").unwrap_err().contains("via must be"));
     assert!(Hosts::parse("[host.x]\nvia = \"ssh\"\n").unwrap_err().contains("needs ssh"));

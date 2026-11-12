@@ -317,7 +317,7 @@ fn headless_reports_native_layers_unsupported_and_keeps_last_frame_geometry() {
 
 /// A texture the device cannot hold (no room, past its limits) is reported gone as an
 /// evicted one, so the app makes it again when it next needs it instead of drawing with an id
-/// that never got storage (149: a window maximised on a full GPU then showed only its outline).
+/// that never got storage (on a Linux node: a window maximised on a full GPU then showed only its outline).
 #[test]
 fn a_texture_the_device_cannot_hold_is_reported_evicted() {
     let hal = Hal::new();

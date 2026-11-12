@@ -267,7 +267,7 @@ pub(crate) fn rewrite_caps(file: &std::path::Path, caps: &[String]) {
 /// ([`crate::carrier::unix::socket_dir`]; its path is in the file).
 /// A makepad WM gives its JIT apps an on-disk TMPDIR (`~/.makepad/wm/jit.env`), and `makepad
 /// inspect` from a shell has another: with the files in the temp dir it found none of them
-/// (166, 2026-10-25). Linux (and other Unix with a session): `$XDG_RUNTIME_DIR`, the user's 0700
+/// (2026-10-25). Linux (and other Unix with a session): `$XDG_RUNTIME_DIR`, the user's 0700
 /// runtime dir; elsewhere the temp dir (macOS's is per user already). This crate's own tests use
 /// [`crate::carrier::unix::test_root`] instead.
 pub fn registry_dir() -> std::path::PathBuf {
