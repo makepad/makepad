@@ -1093,6 +1093,19 @@ impl Cx {
             HalEvent::PickResult { .. } => {},
 
             // ---- results
+            HalEvent::PrintResult { req, status, message } => {
+                use crate::print::{PrintResult, PrintResultEvent};
+                use makepad_hal::print_status;
+                let Some(id) = self.hal.prints.remove(&req) else { return true };
+                let result = match status {
+                    print_status::PRINTED => PrintResult::Printed,
+                    print_status::CANCELLED => PrintResult::Cancelled,
+                    print_status::UNSUPPORTED => PrintResult::Unsupported,
+                    print_status::FAILED => PrintResult::Failed(String::from_utf8_lossy(message).into_owned()),
+                    _ => PrintResult::Failed(format!("unknown print status {status}: {}", String::from_utf8_lossy(message))),
+                };
+                self.call_event_handler(&Event::PrintResult(PrintResultEvent { id, result }));
+            }
             HalEvent::DialogResult { req, count, paths } => {
                 use crate::file_dialogs::FileDialogAction as A;
                 use crate::os::DialogKind as K;
@@ -1300,6 +1313,7 @@ impl Cx {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::Signals);
         let internal_signal = SignalToUI::check_and_clear_internal_signal();
         let ui_signal = SignalToUI::check_and_clear_ui_signal();
+        let hook_signal = SignalToUI::check_and_clear_hook_signal();
         let mut did = false;
         if internal_signal || ui_signal {
             #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -1308,8 +1322,12 @@ impl Cx {
             did = true;
         }
         if ui_signal {
+            // the signal hooks run first in it
             self.call_event_handler(&Event::Signal);
+        } else if hook_signal {
+            self.run_signal_hooks();
         }
+        did |= hook_signal;
         // a headset linked to the app's XR server: the remote headset slot is there from now on
         // (an XR display), the app's next drawing finds it
         if !self.hal.xr_remote_seen && makepad_hal::xr_remote::hal_xr_remote_enabled() {

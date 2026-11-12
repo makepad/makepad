@@ -17,6 +17,7 @@ use {
         makepad_script::*,
         midi::MidiPortsEvent,
         permission::PermissionResult,
+        print::PrintResultEvent,
         storage::StorageResponsesEvent,
         video::VideoInputsEvent,
         window::WindowId,
@@ -282,6 +283,8 @@ pub enum Event {
     NetworkResponses(NetworkResponsesEvent),
     /// Results of asynchronous operations submitted through [`Cx::storage`].
     Storage(StorageResponsesEvent),
+    /// The system print UI completed a request from `Cx::print_pdf`.
+    PrintResult(PrintResultEvent),
 
     VideoPlaybackPrepared(VideoPlaybackPreparedEvent),
     VideoTextureUpdated(VideoTextureUpdatedEvent),
@@ -431,6 +434,7 @@ impl Event {
             43 => "VideoInputs",
             44 => "NetworkResponses",
             73 => "Storage",
+            96 => "PrintResult",
 
             45 => "VideoPlaybackPrepared",
             46 => "VideoTextureUpdated",
@@ -547,6 +551,7 @@ impl Event {
             Self::VideoInputs(_) => 43,
             Self::NetworkResponses(_) => 44,
             Self::Storage(_) => 73,
+            Self::PrintResult(_) => 96,
 
             Self::VideoPlaybackPrepared(_) => 45,
             Self::VideoTextureUpdated(_) => 46,

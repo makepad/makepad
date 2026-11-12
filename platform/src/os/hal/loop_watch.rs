@@ -70,7 +70,7 @@ pub fn report() -> String {
     let (verdict, kind, why) = if let Some(i) = pending.filter(|_| pump.is_some_and(|ms| ms >= 1000)) {
         ("STUCK", "undelivered signal", format!(
             "UI idle with a finished job not delivered: the {} signal was raised {} ms ago and the event loop has slept through it for {} ms (its wake did not reach the pump)",
-            ["ui", "internal", "action"][i], signals[i].unwrap(), pump.unwrap()))
+            ["ui", "internal", "action", "hooks"][i], signals[i].unwrap(), pump.unwrap()))
     } else if let Some(ms) = owed.filter(|ms| *ms >= 1000 && !beat) {
         ("STUCK", "frame owed", format!(
             "UI idle with a frame owed: it asked the window system for a frame {ms} ms ago ({asks} asks) and no FrameReady came"))

@@ -562,7 +562,10 @@ impl Cx {
                         self.handle_script_signals();
                     }
                     if tw.flags & 1 != 0 {
+                        // the signal hooks run first in it
                         self.call_event_handler(&Event::Signal);
+                    } else if tw.flags & 8 != 0 {
+                        self.run_signal_hooks();
                     }
                     if tw.flags & (1 | 4) != 0 {
                         self.dispatch_network_runtime_events();
@@ -1564,6 +1567,12 @@ impl Cx {
                         max_total_size: limits.max_total_size as f64,
                     });
                 }
+                CxOsOp::PrintPdf(id, _) => {
+                    self.call_event_handler(&Event::PrintResult(crate::print::PrintResultEvent {
+                        id,
+                        result: crate::print::PrintResult::Unsupported,
+                    }));
+                }
                 CxOsOp::SaveFileDialog(dialog) => {
                     crate::error!("web save file dialogs are not supported; download support is pending");
                     self.action(FileDialogAction::FileCancelled { id: dialog.id });
@@ -1962,6 +1971,9 @@ pub unsafe extern "C" fn wasm_check_signal() -> u32 {
     }
     if SignalToUI::check_and_clear_internal_signal() {
         x |= 4
+    }
+    if SignalToUI::check_and_clear_hook_signal() {
+        x |= 8
     }
     x
 }

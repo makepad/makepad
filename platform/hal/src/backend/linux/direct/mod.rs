@@ -415,6 +415,7 @@ impl Shell for App {
                     let bytes = if primary { &self.selection } else { &self.clipboard }.pack();
                     self.state.shared.push((sid,Id::NONE), |q,_| q.clipboard(req,true,&bytes));
                 }
+                OsCmd::PrintPdf { req, .. } => self.state.shared.push((sid,Id::NONE), |q,_| q.print_result(req, crate::print_status::UNSUPPORTED, &[])),
                 OsCmd::FileDialog { req, .. } => self.state.shared.push((sid,Id::NONE), |q,_| q.dialog_result(req,0,&[])),
                 // There are no native caption buttons to reposition on a direct display.
                 OsCmd::WindowDpiOverride { .. } | OsCmd::NativeAppearance { .. } => {}

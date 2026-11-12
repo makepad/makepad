@@ -24,6 +24,7 @@ pub struct Classes {
     pub menu_delegate: *const Class,
     pub app_delegate: *const Class,
     pub pulse: *const Class,
+    pub print_delegate: *const Class,
 }
 
 impl Classes {
@@ -39,6 +40,7 @@ impl Classes {
             menu_delegate: define_menu_delegate(),
             app_delegate: define_app_delegate(),
             pulse: define_pulse_class(),
+            print_delegate: define_print_delegate(),
         }
     }
 }
@@ -154,6 +156,19 @@ fn define_app_delegate() -> *const Class {
         decl.add_method(sel!(applicationShouldTerminate:), application_should_terminate as extern "C" fn(&Object, Sel, ObjcId) -> isize);
         decl.add_method(sel!(application:openURLs:), application_open_urls as extern "C" fn(&Object, Sel, ObjcId, ObjcId));
         decl.add_method(sel!(applicationShouldHandleReopen:hasVisibleWindows:), application_should_handle_reopen as extern "C" fn(&Object, Sel, ObjcId, BOOL) -> BOOL);
+    }
+    decl.register()
+}
+
+fn define_print_delegate() -> *const Class {
+    extern "C" fn print_operation_did_run(_: &Object, _: Sel, _: ObjcId, success: BOOL, context: *mut c_void) {
+        shielded("print", std::panic::AssertUnwindSafe(|| unsafe {
+            app::print_operation_did_run(success, context);
+        }));
+    }
+    let mut decl = ClassDecl::new("HalPrintDelegate", class!(NSObject)).unwrap();
+    unsafe {
+        decl.add_method(sel!(printOperationDidRun:success:contextInfo:), print_operation_did_run as extern "C" fn(&Object, Sel, ObjcId, BOOL, *mut c_void));
     }
     decl.register()
 }

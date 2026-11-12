@@ -154,3 +154,107 @@ fn a_relaunch_takes_the_compiled_pipelines_of_the_session_before_and_never_a_cha
     let (back, pixel) = draw_solid(&hal, &red);
     assert_eq!((back.pipelines_taken, pixel), (0, [255, 0, 0, 255]), "the red states went with the close of the session that did not take them");
 }
+
+/// An MSAA pass (`Pass::samples`: 4, which every Apple GPU has) draws four samples a pixel and
+/// resolves them into its attachments: a slanted edge leaves pixels a quarter, a half and three
+/// quarters covered, and no other shade. Two passes side by side, as the eyes of an XR frame, both
+/// with depth, the second loading what the first left: the first's half keeps its picture through
+/// the second's resolve. Until the pipeline's state for four samples is ready the passes draw
+/// single sampled; no draw is left out.
+#[test]
+fn an_msaa_pass_resolves_four_samples_and_a_loading_pass_continues_it() {
+    const TEX: Id = Id::new(1, 1);
+    const DEPTH: Id = Id::new(2, 1);
+    const TRI: Id = Id::new(1, 1);
+    const INDEX: Id = Id::new(2, 1);
+    const PIPE: Id = Id::new(1, 1);
+    let hal = Hal::new();
+    let info = hal.open(&OpenReq { backend: backend_id::METAL, flags: open_flags::OFFSCREEN_WINDOWS, ..Default::default() });
+    assert_eq!(info.backend, backend_id::METAL, "Metal HAL initialization failed");
+    assert!(info.msaa & 4 != 0, "the GPU has 4 samples a pixel, and the HAL says so (msaa {:#b})", info.msaa);
+    let sid = info.session;
+    let mut store = EventStore::new(sid, 64, 1 << 16);
+    let mut until = |accept: &mut dyn FnMut(HalEvent<'_>) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(Instant::now() < deadline, "Metal event deadline");
+            let mut buf = store.buf();
+            let n = hal.pump(10_000_000, &mut buf);
+            for (_, e) in store.reader(n, buf.arena_len) {
+                if let HalEvent::PipelineFailed { log, .. } = e {
+                    panic!("pipeline: {}", String::from_utf8_lossy(log));
+                }
+                if accept(e) {
+                    return;
+                }
+            }
+        }
+    };
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(TEX, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 8, [1, 1], Attr::default());
+    w.texture_create(DEPTH, usage::RENDER_TARGET, format::DEPTH32F, 16, 8, [1, 1], Attr::default());
+    // a triangle whose long edge is not at 45 degrees: its pixels are covered by every quarter
+    let tri: Vec<u8> = [0.0f32, 0.0, 1.0, 0.0, 0.0, 0.7].iter().flat_map(|f| f.to_le_bytes()).collect();
+    w.buffer_create(TRI, buffer_kind::VERTEX, tri.len() as u64, Attr::default());
+    w.buffer_update(TRI, 0, &tri);
+    let index: Vec<u8> = [0u16, 1, 2].iter().flat_map(|i| i.to_le_bytes()).collect();
+    w.buffer_create(INDEX, buffer_kind::INDEX, index.len() as u64, Attr::default());
+    w.buffer_update(INDEX, 0, &index);
+    let none = pipeline_binding::NONE;
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, instance_stride: 4, ..Default::default() }, solid_msl("1.0, 0.0, 0.0, 1.0").as_bytes(), &[none, none, none, none, none, 0], &[4]);
+    w.pipeline_create(PIPE, dialect::MSL, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    until(&mut |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == PIPE));
+    let frame = |w: &mut CmdWriter, n: u64| {
+        w.clear();
+        w.frame_begin(n, FrameMeta::default());
+        for eye in 0..2 {
+            let load = if eye == 0 { pass_load::CLEAR } else { pass_load::LOAD };
+            w.pass(Pass { color: [TEX, Id::NONE, Id::NONE, Id::NONE], depth: DEPTH, load: [load; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], clear_depth: 1.0, viewport: [8.0 * eye as f32, 0.0, 8.0, 8.0], dpi: 1.0, samples: 4, ..Default::default() });
+            let rect = [0.0f32, 0.0, 1.0, 1.0];
+            let inst = Inst::inline(w.keep(&rect[..]), 1);
+            w.draw(Draw { pipeline: PIPE, vb: TRI, ib: INDEX, index: [0, 3], inst, scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
+        }
+        w.frame_end(TEX, target::TEXTURE);
+    };
+    // the first frame asks for the four-sample state (drawn single sampled meanwhile); the second draws with it
+    frame(&mut w, 1);
+    hal.submit(&w.buf());
+    let (mut done, mut variant) = (false, false);
+    until(&mut |e| {
+        match e {
+            HalEvent::FrameDone { frame: 1, .. } => done = true,
+            HalEvent::PipelineReady { pipeline } if pipeline == PIPE => variant = true,
+            _ => {}
+        }
+        done && variant
+    });
+    frame(&mut w, 2);
+    hal.submit(&w.buf());
+    until(&mut |e| matches!(e, HalEvent::FrameDone { frame: 2, .. }));
+    w.clear();
+    w.texture_readback(TEX, 1, [0, 0, 16, 8]);
+    hal.submit(&w.buf());
+    let mut red = Vec::new();
+    until(&mut |e| match e {
+        HalEvent::Readback { req: 1, status, pixels, .. } => {
+            assert_eq!(status, readback::OK);
+            red = pixels.chunks(4).map(|p| p[0]).collect();
+            true
+        }
+        _ => false,
+    });
+    assert_eq!(red.len(), 16 * 8);
+    for (k, r) in red.iter().enumerate() {
+        let q = *r as f32 * 4.0 / 255.0;
+        assert!((q - q.round()).abs() * 255.0 / 4.0 <= 1.5, "pixel ({}, {}) red {r}: not a quarter's step of coverage, so not 4 samples a pixel", k % 16, k / 16);
+    }
+    for (eye, half) in ["the first", "the second"].iter().enumerate() {
+        let px = |x: usize, y: usize| red[y * 16 + eye * 8 + x];
+        let edge = (0..8).flat_map(|y| (0..8).map(move |x| (x, y))).filter(|&(x, y)| px(x, y) != 0 && px(x, y) != 255).count();
+        assert!(px(0, 0) == 255 && px(7, 7) == 0, "{half} pass's half holds its triangle (corner {} and {}): {red:?}", px(0, 0), px(7, 7));
+        assert!(edge >= 4, "{half} pass's edge is resolved from its samples: {edge} pixels part covered, {red:?}");
+    }
+    assert_eq!(hal.with_world(|wd| wd.session(sid).unwrap().stats.skipped_draws), 0, "no draw was left out while the four-sample state compiled");
+    assert!(hal.close(sid));
+}

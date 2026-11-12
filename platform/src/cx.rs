@@ -124,8 +124,9 @@ pub struct Cx {
     pub draw_shaders: CxDrawShaders,
 
     pub new_draw_event: DrawEvent,
-    /// Run on every Event::Signal before the app sees it: subsystems above the platform
-    /// (the text system's glyph workers) react to their workers' signals.
+    /// Run on every Event::Signal before the app sees it, and on a beat woken by a hook's own
+    /// signal alone (`SignalToUI::set_for_hooks`, no Event::Signal then): subsystems above the
+    /// platform (the text system's glyph workers, an XR frame sink) react to their workers' signals.
     pub signal_hooks: Vec<fn(&mut Cx)>,
     /// Run on every event before the app sees it, after the signal hooks: subsystems above the
     /// platform with timers of their own, or that react to the app going to the background.

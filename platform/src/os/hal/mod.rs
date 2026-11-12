@@ -224,6 +224,9 @@ pub struct HalClient {
     /// file dialogs the HAL was asked for and has not answered: request id -> what to post
     pub(crate) dialogs: HashMap<u32, PendingDialog>,
     pub(crate) next_dialog: u32,
+    /// PDF print requests awaiting a system result: wire request -> application's id.
+    pub(crate) prints: HashMap<u32, crate::print::PrintId>,
+    pub(crate) next_print: u32,
     /// request ids of `hal_start_domain` / `hal_list_domains`
     pub(crate) next_domain_request: u32,
     /// the application icon went to the HAL
@@ -320,6 +323,8 @@ impl Default for HalClient {
             gpu_prof: None,
             dialogs: HashMap::new(),
             next_dialog: 0,
+            prints: HashMap::new(),
+            next_print: 0,
             next_domain_request: 0,
             #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
             icon_sent: false,

@@ -367,4 +367,6 @@ hal_events! {
     /// headset linked) or the wearer recentered, so its origin may have moved. `generation`
     /// counts these. The `XrFrame`s that follow are in the new space.
     XrSpace = 159, xr_space { window: obj, generation: u32 };
+    /// A system print operation's outcome (`print_status`); `message` is UTF-8 on failure.
+    PrintResult = 160, print_result { req: u32, status: u32, message: rng };
 }

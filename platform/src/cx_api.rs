@@ -1,4 +1,5 @@
 use crate::file_dialogs::{FileDialog, VirtualFileLimits};
+use crate::print::{PrintId, PrintJob};
 
 use {
     crate::{
@@ -453,6 +454,7 @@ pub enum CxOsOp {
     SelectVideoTrack(LiveId, usize),
     SelectAudioTrack(LiveId, usize),
 
+    PrintPdf(PrintId, PrintJob),
     SaveFileDialog(FileDialog),
     SelectFileDialog(FileDialog),
     SaveFolderDialog(FileDialog),
@@ -577,6 +579,7 @@ impl CxOsOp {
             Self::SetVideoPlaybackRate(..) => "SetVideoPlaybackRate",
             Self::SelectVideoTrack(..) => "SelectVideoTrack",
             Self::SelectAudioTrack(..) => "SelectAudioTrack",
+            Self::PrintPdf(..) => "PrintPdf",
             Self::SaveFileDialog(..) => "SaveFileDialog",
             Self::SelectFileDialog(..) => "SelectFileDialog",
             Self::SaveFolderDialog(..) => "SaveFolderDialog",
@@ -3177,6 +3180,30 @@ impl Cx {
     pub fn open_save_file_dialog(&mut self, dialog: FileDialog) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::SaveFileDialog(dialog));
+    }
+
+    /// Queues a finished PDF for the system print UI without waiting for its completion.
+    /// The outcome arrives as [`Event::PrintResult`], including on unsupported backends.
+    pub fn print_pdf(&mut self, job: PrintJob) -> PrintId {
+        let id = PrintId::next();
+        self.platform_ops.push_back(CxOsOp::PrintPdf(id, job));
+        id
+    }
+
+    /// Whether the active backend offers a PDF print UI. Currently only macOS AppKit does;
+    /// applications can offer their own PDF export when this returns false.
+    pub fn can_print_pdf(&self) -> bool {
+        #[cfg(all(target_os = "macos", not(target_arch = "wasm32")))]
+        {
+            self.hal.info.is_some_and(|info| {
+                info.backend == makepad_hal::backend_id::METAL
+                    && info.flags & makepad_hal::info_flags::DISPLAY_CLOCK != 0
+            })
+        }
+        #[cfg(not(all(target_os = "macos", not(target_arch = "wasm32"))))]
+        {
+            false
+        }
     }
 
     pub fn open_system_savefolder_dialog(&mut self) {

@@ -252,26 +252,43 @@ pub(super) fn texture_obj(tex: &mut FastMap<(u32, u32), Tex>, device: ObjcId, s:
 /// store actions (else every attachment is stored for the encoder after). `sample`: stage-boundary
 /// timestamps of this encoder, at (buffer, group start).
 /// `depth_kept`: the depth is stored at the end of the pass (else it is tile memory only).
+/// `twins`: an MSAA pass's multisampled images (one per colour, and the depth's) it draws in, kept
+/// and at its end resolved into the attachments.
 #[allow(clippy::too_many_arguments)]
-fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<ObjcId>, depth_kept: bool, first: bool, last: bool, sample: Option<(ObjcId, usize)>) {
+fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<ObjcId>, depth_kept: bool, first: bool, last: bool, sample: Option<(ObjcId, usize)>, twins: Option<&Twins>) {
+    // what an attachment keeps at the encoder's end: the pass's last also resolves a twin
+    let stored = if !last { MTLStoreAction::Store } else if twins.is_some() { MTLStoreAction::StoreAndMultisampleResolve } else { MTLStoreAction::Store };
     unsafe {
         let attachments: ObjcId = msg_send![descriptor, colorAttachments];
         for i in 0..4u64 {
             let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: i];
             let _: () = msg_send![a, setTexture: nil];
+            let _: () = msg_send![a, setResolveTexture: nil];
             let _: () = msg_send![a, setLevel: 0u64];
             let _: () = msg_send![a, setSlice: 0u64];
+            let _: () = msg_send![a, setResolveSlice: 0u64];
             let _: () = msg_send![a, setLoadAction: MTLLoadAction::DontCare];
             let _: () = msg_send![a, setStoreAction: MTLStoreAction::Store];
         }
         let d: ObjcId = msg_send![descriptor, depthAttachment];
         let _: () = msg_send![d, setTexture: nil];
-        for (i, _, obj) in colors {
+        let _: () = msg_send![d, setResolveTexture: nil];
+        for (k, (i, _, obj)) in colors.iter().enumerate() {
             let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: *i as u64];
-            let _: () = msg_send![a, setTexture: *obj];
+            match twins {
+                Some(t) => {
+                    let _: () = msg_send![a, setTexture: t.colors[k]];
+                    let _: () = msg_send![a, setResolveTexture: *obj];
+                    let _: () = msg_send![a, setResolveSlice: pass.layer[*i] as u64];
+                }
+                None => {
+                    let _: () = msg_send![a, setTexture: *obj];
+                }
+            }
             if pass.layer[*i] != 0 {
                 let _: () = msg_send![a, setSlice: pass.layer[*i] as u64];
             }
+            let _: () = msg_send![a, setStoreAction: stored.clone()];
             let load = pass.load[*i];
             let _: () = msg_send![a, setLoadAction: if first { load_action(load) } else { MTLLoadAction::Load }];
             if first && load == pass_load::CLEAR {
@@ -284,8 +301,18 @@ fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)
             }
         }
         if let Some(obj) = depth {
-            let _: () = msg_send![d, setTexture: obj];
-            let _: () = msg_send![d, setStoreAction: if last && !depth_kept { MTLStoreAction::DontCare } else { MTLStoreAction::Store }];
+            match twins.and_then(|t| t.depth) {
+                Some(twin) => {
+                    let _: () = msg_send![d, setTexture: twin];
+                    let _: () = msg_send![d, setResolveTexture: obj];
+                    // MTLMultisampleDepthResolveFilterSample0: the depth of sample 0, as on Vulkan
+                    let _: () = msg_send![d, setDepthResolveFilter: 0u64];
+                }
+                None => {
+                    let _: () = msg_send![d, setTexture: obj];
+                }
+            }
+            let _: () = msg_send![d, setStoreAction: if last && !depth_kept { MTLStoreAction::DontCare } else { stored.clone() }];
             let _: () = msg_send![d, setLoadAction: if first { load_action(pass.load[4]) } else { MTLLoadAction::Load }];
             if first && pass.load[4] == pass_load::CLEAR {
                 let _: () = msg_send![d, setClearDepth: pass.clear_depth as f64];
@@ -306,6 +333,23 @@ fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)
             }
         }
     }
+}
+
+/// The storage record an attachment's twin is kept with ([`twin`]): a texture's own (or the
+/// child's that lends it), a window's (`window`: its record's key, `Metal::window_key`).
+fn twin_slot<'a>(tex: &'a mut FastMap<(u32, u32), Tex>, win: &'a mut FastMap<(u32, u32), super::Win>, s: &Session, sid: u32, window: (u32, Id), id: Id) -> Option<&'a mut Option<Twin>> {
+    if id.is_none() {
+        return win.get_mut(&(window.0, window.1.index)).map(|w| &mut w.tex.msaa);
+    }
+    let key = s.textures.get(sid, id).ok().and_then(|e| e.val.lent.as_ref().map(|l| (l.child, l.tex.index, l.tex.gen))).unwrap_or((sid, id.index, id.gen));
+    tex.get_mut(&(key.0, key.1)).filter(|t| t.gen == key.2).map(|t| &mut t.msaa)
+}
+
+/// An MSAA pass's multisampled images: one per colour attachment (in the pass's order of them),
+/// and the depth's.
+struct Twins {
+    colors: Vec<ObjcId>,
+    depth: Option<ObjcId>,
 }
 
 /// A render encoder with the pass's viewport and winding. `sample`: encoder timestamps (devices
@@ -1176,9 +1220,89 @@ impl Metal {
             self.depth_only_seen.push(key);
             let Some(pipe) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
             // every state is asked for (queued) even after one is found missing
-            ready &= pipe.state.ready_for(&self.dev, &[], key.1);
+            ready &= pipe.state.ready_for(&self.dev, &[], key.1, 1);
         }
         ready
+    }
+
+    /// An MSAA pass's samples per pixel (`Pass::samples`): a count the GPU has (`HalInfo::msaa`),
+    /// once every draw's state for it into `formats` is ready (they are queued here); until then
+    /// the pass draws single sampled, so no draw is ever left out. A pick draws single sampled.
+    fn pass_samples(&mut self, sid: u32, pick: bool, pass: &Pass, draws: &[Draw], formats: &[MTLPixelFormat]) -> u8 {
+        let n = pass.samples;
+        if pick || !matches!(n, 2 | 4 | 8) || self.info.msaa & n == 0 {
+            return 1;
+        }
+        self.depth_only_seen.clear();
+        let mut ready = true;
+        for d in draws {
+            let key = (d.pipeline.index, d.flags & Draw::BLEND != 0);
+            if self.depth_only_seen.contains(&key) {
+                continue;
+            }
+            self.depth_only_seen.push(key);
+            let Some(pipe) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
+            // every state is asked for (queued) even after one is found missing
+            ready &= pipe.state.ready_for(&self.dev, formats, key.1, n as u8);
+        }
+        if ready { n as u8 } else { 1 }
+    }
+
+    /// The twins an MSAA pass at `samples` draws in ([`twin`]), each kept with its attachment's
+    /// storage ([`twin_slot`]). None, and the pass draws single sampled, when an attachment has no
+    /// storage to keep one with (a window layer's segment, whose drawable is the layer's: said
+    /// once), or when the pass loads an attachment its twin does not hold the picture of (a pass
+    /// drawn single sampled into it since, as the frame a pipeline's state for the samples became
+    /// ready between the eyes): it continues the attachment then.
+    #[allow(clippy::too_many_arguments)]
+    fn twins(&mut self, s: &mut Session, sid: u32, target: Id, samples: u8, segment: bool, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<(Id, ObjcId)>, depth_kept: bool) -> Option<Twins> {
+        let device = self.dev.device;
+        let window = self.window_key(sid, target);
+        // (attachment, its storage, whether the pass loads it, whether the pass keeps it)
+        let attachments = colors.iter().map(|(i, id, obj)| (*id, *obj, pass.load[*i] == pass_load::LOAD, pass.load[*i] != pass_load::DONT_CARE))
+            .chain(depth.map(|(id, obj)| (id, obj, pass.load[4] == pass_load::LOAD, depth_kept)));
+        let mut made = Vec::with_capacity(colors.len() + 1);
+        for (id, obj, loads, _) in attachments.clone() {
+            let Some(slot) = twin_slot(&mut self.tex, &mut self.win, s, sid, window, id).filter(|_| !segment) else {
+                if !self.segment_msaa_said {
+                    self.segment_msaa_said = true;
+                    eprintln!("[metal] an MSAA pass into a window layer's segment (or an attachment with no storage of its own) draws single sampled");
+                }
+                return None;
+            };
+            let (ms, bytes) = twin(device, obj, samples, slot)?;
+            self.twinned = true;
+            if loads && !slot.as_ref().is_some_and(|t| t.kept) {
+                return None;
+            }
+            if bytes > 0 && !id.is_none() {
+                // the twin's memory is its attachment's
+                if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index) {
+                    l.bytes = allocated_size(obj) + bytes;
+                }
+            }
+            made.push(ms);
+        }
+        // once the pass ends its twins hold its picture (a scratch colour and an unkept depth go)
+        for (id, _, _, keeps) in attachments {
+            if let Some(t) = twin_slot(&mut self.tex, &mut self.win, s, sid, window, id).and_then(|slot| slot.as_mut()) {
+                t.kept = keeps;
+            }
+        }
+        let depth = depth.map(|_| made[colors.len()]);
+        made.truncate(colors.len());
+        Some(Twins { colors: made, depth })
+    }
+
+    /// A pass drawn single sampled into attachments an MSAA pass has twins of: the twins no longer
+    /// hold their pictures.
+    fn unkeep(&mut self, s: &Session, sid: u32, target: Id, colors: &[(usize, Id, ObjcId)], depth: Option<Id>) {
+        let window = self.window_key(sid, target);
+        for id in colors.iter().map(|(_, id, _)| *id).chain(depth) {
+            if let Some(t) = twin_slot(&mut self.tex, &mut self.win, s, sid, window, id).and_then(|slot| slot.as_mut()) {
+                t.kept = false;
+            }
+        }
     }
 
     /// One pass into one render encoder. `None` when the pass could not be encoded (a missing
@@ -1278,6 +1402,7 @@ impl Metal {
                 }
             })
             .collect();
+        // an MSAA pass draws in multisampled twins of its attachments, resolved into them at its end
 
         // ---- the encoders. Normally one. A split frame of the GPU profiler cuts the pass into
         // one encoder per run of draws of one pipeline, each timed alone, after an empty encoder
@@ -1289,12 +1414,21 @@ impl Metal {
         let stage = samples.as_ref().map_or(false, |x| x.clock.stage);
         let depth_obj = depth.as_ref().map(|(_, o)| *o);
         let depth_kept = depth.as_ref().is_some_and(|(id, _)| exec::depth_kept(s, sid, pass, view, *id));
+        // an MSAA pass draws in multisampled twins of its attachments, resolved into them at its end
+        let mut msaa = self.pass_samples(sid, pick, pass, draws, &formats);
+        let twins = if msaa > 1 { self.twins(s, sid, target, msaa, segment.is_some(), pass, &colors, depth.as_ref().map(|(id, o)| (*id, *o)), depth_kept) } else { None };
+        if twins.is_none() {
+            msaa = 1;
+            if self.twinned {
+                self.unkeep(s, sid, target, &colors, depth.as_ref().map(|(id, _)| *id));
+            }
+        }
         let buffer_of = |x: &Arc<PassSamples>| x.buffer.as_ref().map_or(nil, |b| b.as_id());
         let mut split_runs = gpu_prof::SplitRuns::<usize>::default();
         let first_sample: Option<(ObjcId, usize)> = match &split {
             Some(sp) => {
                 if let Some(i) = sp.reserve() {
-                    configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, false, Some((buffer_of(sp), i)).filter(|_| stage));
+                    configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, false, Some((buffer_of(sp), i)).filter(|_| stage), twins.as_ref());
                     let e = open_encoder(cb, descriptor, viewport, Some((buffer_of(sp), i)).filter(|_| !stage))?;
                     close_encoder(e, Some((buffer_of(sp), i)).filter(|_| !stage));
                     split_runs.baseline = Some(i);
@@ -1307,7 +1441,7 @@ impl Metal {
         if let (Some(_), Some((_, i))) = (&split, first_sample) {
             split_runs.run(run_shader(self, s, 0), i, 0);
         }
-        configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, true, runs.len() <= 1, first_sample.filter(|_| stage));
+        configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, true, runs.len() <= 1, first_sample.filter(|_| stage), twins.as_ref());
         let Some(encoder_id) = open_encoder(cb, descriptor, viewport, first_sample.filter(|_| !stage)) else {
             eprintln!("[metal] no render encoder for pass \"{}\"", s.string(pass.name).unwrap_or(""));
             return None;
@@ -1339,7 +1473,7 @@ impl Metal {
                 if let Some((_, i)) = cur_sample {
                     split_runs.run(run_shader(self, s, di), i, prof_draws.len() as u32);
                 }
-                configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, g == runs.len() - 1, cur_sample.filter(|_| stage));
+                configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, g == runs.len() - 1, cur_sample.filter(|_| stage), twins.as_ref());
                 let Some(id) = open_encoder(cb, descriptor, viewport, cur_sample.filter(|_| !stage)) else { return None };
                 enc = Encoder { id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
             }
@@ -1371,7 +1505,7 @@ impl Metal {
             if ablate.as_deref().is_some_and(|t| gpu_prof::ablates(s, &pipe.desc, d.owner, t)) {
                 continue;
             }
-            let pso = match pipe.state.select(&self.dev, &formats, d.flags & Draw::BLEND != 0) {
+            let pso = match pipe.state.select(&self.dev, &formats, d.flags & Draw::BLEND != 0, msaa) {
                 Select::State(pso) => pso,
                 // still compiling or failed: the draw is left out, the app paints again when the
                 // pipeline is ready

@@ -1321,6 +1321,7 @@ impl Shell for App {
                     self.clip_reads.insert(self.next_clip_read, (sid, req));
                     self.hub.send(vec![AppToStudio::Relay(ChildRelay::ReadClipboard { request_id: self.next_clip_read })]);
                 }
+                OsCmd::PrintPdf { req, .. } => self.state.shared.push((sid, Id::NONE), |q, _| q.print_result(req, crate::print_status::UNSUPPORTED, &[])),
                 OsCmd::FileDialog { req, .. } => self.state.shared.push((sid, Id::NONE), |q, _| q.dialog_result(req, 0, &[])),
                 OsCmd::DirectDisplay { req, command } => self.state.shared.push((sid, Id::NONE), |q, _| {
                     q.direct_display_result(req, command.tag() as u32, false, b"a WM-hosted window does not own direct displays");

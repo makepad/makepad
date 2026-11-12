@@ -465,6 +465,9 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
                 super::menu::selection_handles(win, op, start, end);
             }
         }
+        OsCmd::PrintPdf { req, .. } => {
+            Shared::global().push(sid, |q| q.print_result(req, print_status::UNSUPPORTED, &[]));
+        }
         #[cfg(target_os = "ios")]
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => super::dialog::open(sid, req, kind, &title, &location, &filename, &filters),
         #[cfg(target_os = "tvos")]

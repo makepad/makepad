@@ -119,8 +119,14 @@ pub struct Metal {
     /// the pool of capture buffers a recorder's frames are copied into, and when it was last used
     capture: Option<super::media::capture::Pool>,
     capture_ns: u64,
-    /// `frame::depth_only`'s scratch: the (pipeline, blend) pairs of a pass already asked
+    /// `frame::depth_only`'s and `frame::pass_samples`' scratch: the (pipeline, blend) pairs of a
+    /// pass already asked
     depth_only_seen: Vec<(u32, bool)>,
+    /// an MSAA pass into a window layer's segment drew single sampled, and said so
+    segment_msaa_said: bool,
+    /// an MSAA pass made a twin of an attachment (`frame::twins`): passes drawn single sampled
+    /// mark what they draw into as not held by its twin
+    twinned: bool,
     /// the GPU profiler's encoders of the frame being encoded (moved into its ticket)
     prof: Vec<frame::ProfPass>,
     /// the profiled frame being encoded
@@ -158,6 +164,11 @@ impl Metal {
             let astc: bool = if msg_send![dev.device, respondsToSelector: sel!(supportsFamily:)] { msg_send![dev.device, supportsFamily: 1002i64] } else { false };
             (bc, astc)
         };
+        // the sample counts an MSAA pass may ask for (`Pass::samples`), as the GPU has them
+        let msaa = [2u32, 4, 8].into_iter().fold(1, |m, n| {
+            let has: bool = unsafe { msg_send![dev.device, supportsTextureSampleCount: n as u64] };
+            if has { m | n } else { m }
+        });
         let mut formats = (1u64 << format::COUNT) - 1;
         if !texture_compression.0 {
             formats &= !(1 << format::BC7 | 1 << format::BC5);
@@ -174,7 +185,7 @@ impl Metal {
                 | if shell.is_some() { info_flags::DISPLAY_CLOCK } else { 0 }
                 | if shell.is_some() && cfg!(target_os = "macos") { info_flags::WINDOW_BADGES } else { 0 },
             formats,
-            msaa: 1,
+            msaa,
             dpi: shell.map_or(1.0, |s| s.dpi()),
             max_texture: 16384,
             max_window: [16384, 16384],
@@ -220,6 +231,8 @@ impl Metal {
             capture: None,
             capture_ns: 0,
             depth_only_seen: Vec::new(),
+            segment_msaa_said: false,
+            twinned: false,
             prof: Vec::new(),
             prof_key: None,
             pending_draws: 0,

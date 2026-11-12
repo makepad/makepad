@@ -81,26 +81,27 @@ pub fn take_signal_sources() -> Vec<(&'static std::panic::Location<'static>, u32
     SIGNAL_SOURCES.lock().ok().and_then(|mut sources| sources.take()).map(|m| m.into_iter().collect()).unwrap_or_default()
 }
 
-/// The UI thread's signals (`UI`, `INTERNAL`, `ACTION`) and when each was raised. The process
+/// The UI thread's signals (`UI`, `INTERNAL`, `ACTION`, `HOOKS`) and when each was raised. The process
 /// has one (`SIGNALS`), which every sender to the UI raises.
 struct UiSignals {
-    raised: [AtomicBool; 3],
+    raised: [AtomicBool; 4],
     #[cfg(not(target_arch = "wasm32"))]
-    raised_ns: [std::sync::atomic::AtomicU64; 3],
+    raised_ns: [std::sync::atomic::AtomicU64; 4],
 }
 
 const UI: usize = 0;
 const INTERNAL: usize = 1;
 const ACTION: usize = 2;
+const HOOKS: usize = 3;
 
 static SIGNALS: UiSignals = UiSignals::new();
 
 impl UiSignals {
     const fn new() -> Self {
         Self {
-            raised: [const { AtomicBool::new(false) }; 3],
+            raised: [const { AtomicBool::new(false) }; 4],
             #[cfg(not(target_arch = "wasm32"))]
-            raised_ns: [const { std::sync::atomic::AtomicU64::new(0) }; 3],
+            raised_ns: [const { std::sync::atomic::AtomicU64::new(0) }; 4],
         }
     }
 
@@ -123,7 +124,7 @@ impl UiSignals {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn ages_ms(&self) -> [Option<u64>; 3] {
+    fn ages_ms(&self) -> [Option<u64>; 4] {
         let now = signal_clock_ns();
         std::array::from_fn(|i| {
             self.raised[i]
@@ -174,13 +175,13 @@ impl SignalToUI {
     }
 
     /// Lets an inspector see a wake the event loop has slept through.
-    pub fn pending_signal_ages_ms() -> [Option<u64>; 3] {
+    pub fn pending_signal_ages_ms() -> [Option<u64>; 4] {
         #[cfg(not(target_arch = "wasm32"))]
         {
             SIGNALS.ages_ms()
         }
         #[cfg(target_arch = "wasm32")]
-        { [None; 3] }
+        { [None; 4] }
     }
 
     pub fn check_and_clear_ui_signal() -> bool {
@@ -195,6 +196,11 @@ impl SignalToUI {
         SIGNALS.check_and_clear(ACTION)
     }
 
+    /// A signal hook's own signal was raised (`set_for_hooks`): the loop runs the hooks.
+    pub fn check_and_clear_hook_signal() -> bool {
+        SIGNALS.check_and_clear(HOOKS)
+    }
+
     pub fn new() -> Self {
         Self(Arc::new(AtomicBool::new(false)))
     }
@@ -207,6 +213,19 @@ impl SignalToUI {
     pub fn set(&self) {
         self.0.store(true, Ordering::Release);
         Self::set_ui_signal();
+    }
+
+    /// Raises this signal for a signal hook that checks it (`Cx::signal_hooks`, a subsystem's
+    /// own service on the UI thread): the next beat runs the hooks, and no widget hears an
+    /// `Event::Signal`. For wakes no app polls on that event, such as a stream sink's picture
+    /// encoded or its room free again, a few times each frame.
+    #[track_caller]
+    pub fn set_for_hooks(&self) {
+        self.0.store(true, Ordering::Release);
+        note_signal_source();
+        if SIGNALS.raise(HOOKS) {
+            wake_ui_loop();
+        }
     }
 }
 
@@ -452,7 +471,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn internal_and_ui_signals_are_independent() {
+    fn the_ui_internal_and_hook_signals_are_independent() {
         // Signals of its own: the process's are raised by every test that sends to the UI.
         let signals = UiSignals::new();
         assert!(signals.raise(INTERNAL));
@@ -463,6 +482,9 @@ mod tests {
         assert!(!signals.raise(UI), "a raised signal wakes the loop once");
         assert!(!signals.check_and_clear(INTERNAL));
         assert!(signals.check_and_clear(UI));
+        assert!(signals.raise(HOOKS));
+        assert!(!signals.check_and_clear(UI), "a hook signal is no UI signal: the app hears no Event::Signal");
+        assert!(signals.check_and_clear(HOOKS));
         assert!(!signals.any_pending());
     }
 

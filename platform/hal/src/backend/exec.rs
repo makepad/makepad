@@ -76,6 +76,7 @@ pub enum OsCmd {
     /// `HalCmd::XrHaptic`.
     XrHaptic { id: Id, hand: u32, amplitude: f32, duration_us: u32 },
     FileDialog { req: u32, kind: u32, title: String, location: String, filename: String, filters: Vec<String> },
+    PrintPdf { req: u32, title: String, pdf: std::sync::Arc<[u8]> },
     ShareText { text: String },
     ClipboardActions { id: Id, show: bool, area: [f32; 4], selection: bool },
     AppIcon { w: u32, h: u32, rgba: Vec<u8> },
@@ -1566,6 +1567,13 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             if os_cmd(gpu, sid, OsCmd::DirectTapToClick { on }) { return; }
             let _ = on;
             s.bad();
+        }
+        HalCmd::PrintPdf { req, title, pdf } => {
+            let title = s.string(title).unwrap_or("").to_string();
+            let pdf = std::sync::Arc::from(pdf);
+            if !os_cmd(gpu, sid, OsCmd::PrintPdf { req, title, pdf }) {
+                s.events.print_result(req, print_status::UNSUPPORTED, &[]);
+            }
         }
         HalCmd::FileDialog { req, kind, title, location, filename, count, filters } => {
             let filters = read_strs(filters, count);

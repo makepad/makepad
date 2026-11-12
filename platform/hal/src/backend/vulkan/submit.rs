@@ -118,6 +118,10 @@ impl Drop for Slot {
 pub(super) struct Spare {
     slots: Mutex<Vec<Slot>>,
     arenas: Mutex<Arenas>,
+    /// readback staging (CPU-cached, `readback::STAGING`) whose readback was read: the next
+    /// readback takes one back instead of allocating on the submitting thread (a 3.9 MB one took
+    /// 1 to 4 ms there on NVIDIA, up to 44 ms on a loaded machine, every band of a page export)
+    readbacks: Mutex<Arenas>,
     /// batches made and not yet dropped (completed or abandoned)
     in_flight: AtomicUsize,
     /// the most batches in flight at once since the last sweep (`sweep_slots`), and in the sweep
@@ -168,23 +172,41 @@ impl Spare {
     /// Releases the free arenas no batch took for `ARENA_IDLE` (an idle app frees its uploads).
     pub fn trim(&self) {
         let released = lock(&self.arenas).give(std::iter::empty());
-        drop(released);
+        let staging = lock(&self.readbacks).give(std::iter::empty());
+        drop((released, staging));
     }
 
     /// When `trim` should look again (HAL clock ns): a free arena going idle, or the one a batch took
     /// last, since a batch with no frame gives its arenas back without waking any pump.
     pub fn trim_due(&self) -> Option<u64> {
-        let arenas = lock(&self.arenas);
         let now = crate::clock_ns();
-        arenas.free.iter().map(|(_, since)| now.saturating_sub(since.elapsed().as_nanos() as u64)).chain(arenas.lent).min()
-            .map(|since| since + ARENA_IDLE.as_nanos() as u64)
+        let due = |arenas: &Arenas| arenas.free.iter().map(|(_, since)| now.saturating_sub(since.elapsed().as_nanos() as u64)).chain(arenas.lent).min();
+        let (uploads, staging) = (due(&lock(&self.arenas)), due(&lock(&self.readbacks)));
+        uploads.into_iter().chain(staging).min().map(|since| since + ARENA_IDLE.as_nanos() as u64)
+    }
+
+    /// A readback's staging of at least `size` bytes: one a read readback gave back, else a new one.
+    pub fn readback_staging(&self, dev: &Arc<Device>, size: u64) -> Result<Arc<Buffer>, String> {
+        let kept = lock(&self.readbacks).take(size, size);
+        match kept {
+            Some(staging) => Ok(staging),
+            None => Buffer::scratch(dev.clone(), crate::ledger::Pool::Staging, size, super::readback::STAGING),
+        }
+    }
+
+    /// A readback's staging after its pixels were read: kept for the next readback (released once
+    /// idle for `ARENA_IDLE`, or beyond `ARENA_KEEP`).
+    fn readback_read(&self, staging: Arc<Buffer>) {
+        let released = lock(&self.readbacks).give(std::iter::once(staging));
+        drop(released);
     }
 
     /// Releases every free arena now (the app went to the background).
     #[cfg(target_os = "android")]
     pub fn release_all(&self) {
         let released = lock(&self.arenas).release_all();
-        drop(released);
+        let staging = lock(&self.readbacks).release_all();
+        drop((released, staging));
     }
 
     /// Makes a free arena of `size` on the arena thread, unless one is already on its way: the
@@ -493,6 +515,11 @@ impl Batch {
     /// Sixteen also satisfies the byte alignment of HAL's largest texel/compression block.
     fn align(&self) -> u64 {
         self.dev.properties.limits.min_uniform_buffer_offset_alignment.max(self.dev.properties.limits.min_storage_buffer_offset_alignment).max(16)
+    }
+
+    /// A readback's staging (`readback::record_read`): one a read readback gave back, else a new one.
+    pub fn readback_staging(&self, size: u64) -> Result<Arc<Buffer>, String> {
+        self.spares.readback_staging(&self.dev, size)
     }
 
     pub fn put(&mut self, bytes: &[u8]) -> Result<Placed, String> {
@@ -915,6 +942,7 @@ impl Batch {
                     let pixels = if failed { Err("GPU submission failed".into()) } else {
                         staging.read(format::level_bytes(fmt, rect[2], rect[3]) as usize)
                     };
+                    if !failed { self.spares.readback_read(staging); }
                     match pixels {
                         Ok(mut pixels) => {
                             if let Some(stencil) = stencil {

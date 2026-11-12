@@ -441,4 +441,6 @@ hal_commands! {
     FrameRateBoost = 165, frame_rate_boost {};
     /// Ask device clients to release reclaimable memory for foreground work.
     GpuReclaim = 166, gpu_reclaim { bytes: u64 };
+    /// A finished PDF for the system print UI; answered by `PrintResult` with the same `req`.
+    PrintPdf = 167, print_pdf { req: u32, title: sid, pdf: rng };
 }

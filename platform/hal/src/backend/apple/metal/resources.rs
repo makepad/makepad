@@ -41,6 +41,55 @@ pub struct Tex {
     pub last_bound: u64,
     /// CoreVideo objects the texture is a view of (a decoded video frame): released with it
     pub _keep: Option<Box<dyn std::any::Any + Send>>,
+    /// the multisampled image an MSAA pass into it draws in ([`twin`]): goes with it
+    pub msaa: Option<Twin>,
+}
+
+/// The multisampled image of an attachment an MSAA pass (`Pass::samples`) draws in and resolves
+/// into the attachment at its end. A pass that loads continues it (the second eye of a
+/// side-by-side target), not what another pass wrote into the attachment.
+pub struct Twin {
+    samples: u8,
+    /// the attachment's width, height, pixel format and slices it was made for
+    shape: [u64; 4],
+    obj: RcObjcId,
+    /// it holds what was last drawn into the attachment (an MSAA pass stored it); a pass drawn
+    /// single sampled into the attachment, or a new twin, does not
+    pub kept: bool,
+}
+
+/// The twin of attachment `of` at `samples` per pixel, kept in `slot`: made there when the slot
+/// has none of that shape (the attachment's size, format and slices, the samples). Answers the
+/// twin and, when it was made now, its bytes (else 0).
+pub fn twin(device: ObjcId, of: ObjcId, samples: u8, slot: &mut Option<Twin>) -> Option<(ObjcId, u64)> {
+    let (w, h, pixel, kind, layers): (u64, u64, u64, u64, u64) =
+        unsafe { (msg_send![of, width], msg_send![of, height], msg_send![of, pixelFormat], msg_send![of, textureType], msg_send![of, arrayLength]) };
+    // a cube's faces are the twin's slices; a pass draws in one slice and resolves into its own
+    let slices = if kind == MTLTextureType::Cube as u64 { 6 } else { layers.max(1) };
+    let shape = [w, h, pixel, slices];
+    if let Some(t) = slot.as_ref().filter(|t| t.samples == samples && t.shape == shape) {
+        return Some((t.obj.as_id(), 0));
+    }
+    *slot = None;
+    let descriptor = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![class!(MTLTextureDescriptor), new] })?);
+    let d = descriptor.as_id();
+    let texture_type = if slices > 1 { MTLTextureType::D2MultisampleArray } else { MTLTextureType::D2Multisample };
+    unsafe {
+        let _: () = msg_send![d, setTextureType: texture_type];
+        let _: () = msg_send![d, setSampleCount: samples as u64];
+        let _: () = msg_send![d, setWidth: w];
+        let _: () = msg_send![d, setHeight: h];
+        if slices > 1 {
+            let _: () = msg_send![d, setArrayLength: slices];
+        }
+        let _: () = msg_send![d, setPixelFormat: pixel];
+        let _: () = msg_send![d, setUsage: MTLTextureUsage::RenderTarget as u64];
+        let _: () = msg_send![d, setStorageMode: MTLStorageMode::Private];
+    }
+    let obj = RcObjcId::from_owned(NonNull::new(unsafe { msg_send![device, newTextureWithDescriptor: d] })?);
+    let made = (obj.as_id(), allocated_size(obj.as_id()));
+    *slot = Some(Twin { samples, shape, obj, kept: false });
+    Some(made)
 }
 
 // SAFETY: a Metal texture and a CF surface are usable from any thread
@@ -157,7 +206,7 @@ pub fn create_texture(device: ObjcId, t: &TextureObj, gen: u32, label: &str) -> 
     unsafe {
         let _: () = msg_send![texture, setLabel: str_to_nsstring(label)];
     }
-    Ok(Tex { gen, obj: RcObjcId::from_owned(NonNull::new(texture).expect("checked")), surface, surface_id, last_bound: 0, _keep: None })
+    Ok(Tex { gen, obj: RcObjcId::from_owned(NonNull::new(texture).expect("checked")), surface, surface_id, last_bound: 0, _keep: None, msaa: None })
 }
 
 /// A texture over an IOSurface another process (or the host) owns, found by its global id:
@@ -205,7 +254,7 @@ pub fn import_surface(device: ObjcId, id: IOSurfaceID, gen: u32, kind: u32) -> O
         unsafe { CFRelease(surface) };
         return None;
     };
-    Some((Tex { gen, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None }, w as u32, h as u32, fmt))
+    Some((Tex { gen, obj: RcObjcId::from_owned(texture), surface: Some(surface), surface_id: id, last_bound: 0, _keep: None, msaa: None }, w as u32, h as u32, fmt))
 }
 
 /// What the device holds for a texture.

@@ -14,7 +14,7 @@ use std::sync::Arc;
 /// in CPU-cached memory. Write-combined memory reads at a few hundred MB/s: copying out a window's
 /// 8.5 MB took 27-45 ms on the completion worker, and every later batch's completion waited behind
 /// it (the renderer then waited for room in flight).
-const STAGING: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_DST;
+pub(super) const STAGING: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_DST;
 
 fn region(mip: u32, layer: u32, rect: [u32; 4], aspect: vk::ImageAspectFlags) -> vk::BufferImageCopy {
     vk::BufferImageCopy::default().image_subresource(vk::ImageSubresourceLayers::default()
@@ -75,7 +75,7 @@ impl Vulkan {
         if !valid_rect(&image, 0, rect) { return Err("invalid readback region".into()); }
         batch.may_read(&image)?;
         let size = format::level_bytes(image.desc.format, rect[2], rect[3]);
-        let staging = Buffer::scratch(batch.dev.clone(), crate::ledger::Pool::Staging, size, STAGING)?;
+        let staging = batch.readback_staging(size)?;
         let packed_depth = image.desc.format == format::DEPTH24_STENCIL8;
         let stencil = if packed_depth { Some(Buffer::scratch(batch.dev.clone(), crate::ledger::Pool::Staging, rect[2] as u64 * rect[3] as u64, STAGING)?) } else { None };
         image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);

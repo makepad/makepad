@@ -1788,6 +1788,14 @@ impl Cx {
         self.call_event_handler_once(event)
     }
 
+    /// The signal hooks (`Cx::signal_hooks`): before the app hears an `Event::Signal`, and on a
+    /// beat whose wake was a hook's own signal (`SignalToUI::set_for_hooks`) alone.
+    pub(crate) fn run_signal_hooks(&mut self) {
+        for hook in self.signal_hooks.clone() {
+            hook(self);
+        }
+    }
+
     fn call_event_handler_once(&mut self, event: &Event) {
         let _phase = crate::thread::ui_event_phase(event);
         if self.event_dispatch_is_reentrant(event) {
@@ -1803,9 +1811,7 @@ impl Cx {
             _ => {}
         }
         if let Event::Signal = event {
-            for hook in self.signal_hooks.clone() {
-                hook(self);
-            }
+            self.run_signal_hooks();
         }
         for i in 0..self.event_hooks.len() {
             (self.event_hooks[i])(self, event);

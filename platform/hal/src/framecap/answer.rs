@@ -26,7 +26,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cap overdraw", "[png=<path>] [max=1000]", "per-pixel count of draws that changed it, as a heatmap PNG and numbers"),
     ("cap mesh", "D<k> [n=8]", "a draw's vertex and instance inputs, decoded"),
     ("cap tex", "X<k> [png=<path>] [max=1000]", "a texture as the frame found it"),
-    ("cap time", "[n=15] [repeat=16]", "per-draw GPU time measured in replay (each draw repeated in place)"),
+    ("cap time", "[n=15] [repeat=16]", "per-draw GPU time measured in replay (each draw repeated in place, against base runs beside it)"),
     ("cap save", "<path.mkcap>", "write the newest capture to a file"),
     ("cap list", "", "the captures this process keeps"),
     ("cap scanout", "[png=<path>] [timeout=3000]", "direct display only: the next image handed to the display plane, read back from the swapchain image, compared with the desktop frame it was copied from (1:1 or scaled, pixels that differ); writes both PNGs"),
@@ -1021,40 +1021,57 @@ fn time_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     session_for(c, |s| {
         let cap = s.cap.clone();
         let all = Cut::all(&cap);
-        // the frame's own time, best of three
-        let mut base = u64::MAX;
+        // the frame's own time, best of three after a warm-up run; their spread is the replay's noise
+        s.replayer.run(&cap, all, Opts::default())?;
+        let (mut base, mut worst) = (u64::MAX, 0u64);
         for _ in 0..3 {
             s.replayer.run(&cap, all, Opts::default())?;
             base = base.min(s.replayer.last_gpu_ns);
+            worst = worst.max(s.replayer.last_gpu_ns);
         }
         if base == 0 {
             return Err("this backend reports no GPU time for replayed frames".into());
         }
-        let mut per: Vec<(usize, u64)> = Vec::new();
+        let noise = (worst - base).max(1_000);
+        // Each draw's repeats are compared with base runs taken right beside them, never with the
+        // first base: the GPU's clocks drift over the series (a later run is faster), which read
+        // as zero for every small draw.
+        let mut per: Vec<(usize, Option<u64>)> = Vec::new();
         for d in 0..cap.draws.len() {
-            let mut best = u64::MAX;
+            let (mut near, mut best) = (u64::MAX, u64::MAX);
             for _ in 0..2 {
+                s.replayer.run(&cap, all, Opts::default())?;
+                near = near.min(s.replayer.last_gpu_ns);
                 s.replayer.run(&cap, all, Opts { repeat: Some((d, repeat)), ..Default::default() })?;
                 best = best.min(s.replayer.last_gpu_ns);
             }
-            per.push((d, best.saturating_sub(base) / (repeat as u64 - 1)));
+            let added = best.saturating_sub(near);
+            // under the noise: too small for this many repeats to show
+            per.push((d, (added > noise).then(|| added / (repeat as u64 - 1))));
         }
-        let sum: u64 = per.iter().map(|x| x.1).sum::<u64>().max(1);
+        let floor = noise / (repeat as u64 - 1);
+        let sum: u64 = per.iter().filter_map(|x| x.1).sum::<u64>().max(1);
         per.sort_by(|a, b| b.1.cmp(&a.1));
+        let time = |ns: Option<u64>| ns.map_or_else(|| format!("< {}", ms(floor)), ms);
+        let share = |ns: Option<u64>| ns.map_or_else(|| "-".to_string(), |ns| sig(100.0 * ns as f64 / sum as f64));
         let mut t = format!(
-            "replayed frame: {} GPU; the costliest draw is D{} ({}) at {} alone, {}% of the draws' summed cost\n\n| draw | owner | shader | GPU alone | % of sum |\n|---|---|---|---|---|\n",
-            ms(base), per.first().map_or(0, |x| x.0), per.first().map_or(String::new(), |x| owner_of(&cap, &cap.draws[x.0])), per.first().map_or("0".into(), |x| ms(x.1)),
-            per.first().map_or("0".into(), |x| sig(100.0 * x.1 as f64 / sum as f64))
+            "replayed frame: {} GPU (noise {}); the costliest draw is D{} ({}) at {} alone, {}% of the draws' summed cost\n\n| draw | owner | shader | GPU alone | % of sum |\n|---|---|---|---|---|\n",
+            ms(base), ms(noise), per.first().map_or(0, |x| x.0), per.first().map_or(String::new(), |x| owner_of(&cap, &cap.draws[x.0])),
+            per.first().map_or("0".into(), |x| time(x.1)), per.first().map_or("0".into(), |x| share(x.1))
         );
         for (d, ns) in per.iter().take(n) {
             let (si, name, _) = shader_of(&cap, &cap.draws[*d]);
-            t.push_str(&format!("| D{d} | {} | S{si} {} | {} | {} |\n", short(&owner_of(&cap, &cap.draws[*d]), 40), short(&name, 28), ms(*ns), sig(100.0 * *ns as f64 / sum as f64)));
+            t.push_str(&format!("| D{d} | {} | S{si} {} | {} | {} |\n", short(&owner_of(&cap, &cap.draws[*d]), 40), short(&name, 28), time(*ns), share(*ns)));
         }
         if per.len() > n {
-            let rest: u64 = per[n..].iter().map(|x| x.1).sum();
-            t.push_str(&format!("+{} more draws, {} total\n", per.len() - n, ms(rest)));
+            let rest: u64 = per[n..].iter().filter_map(|x| x.1).sum();
+            let below = per[n..].iter().filter(|x| x.1.is_none()).count();
+            t.push_str(&format!("+{} more draws, {} total{}\n", per.len() - n, ms(rest), if below > 0 { format!(" ({below} of them under {} each)", ms(floor)) } else { String::new() }));
         }
-        t.push_str(&format!("\nmethod: each draw repeated {repeat}x in place in the replayed frame, (frame - base) / {}; best of 2. A draw alone costs more than its share of the frame (the GPU overlaps draws; the sum is {} against a {} frame): rank by it, do not add it up. Replay timing, not the live frame's (live: gpu prof).\nmore: cap draw D<k>", repeat - 1, ms(sum), ms(base)));
+        t.push_str(&format!(
+            "\nmethod: each draw repeated {repeat}x in place in the replayed frame, (frame - base) / {}, against base runs taken beside it; best of 2. A draw whose repeats add less than the replay's noise ({}, the spread of 3 base runs) reads `< {}` (raise repeat= to resolve it). A draw alone costs more than its share of the frame (the GPU overlaps draws; the sum is {} against a {} frame): rank by it, do not add it up. Replay timing, not the live frame's (live: gpu prof).\nmore: cap draw D<k>",
+            repeat - 1, ms(noise), ms(floor), ms(sum), ms(base)
+        ));
         Ok(t)
     })
 }

@@ -5799,27 +5799,69 @@ mod tests {
     fn a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it() {
         in_own_budget!(a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it);
         let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        // The test needs a full machine until the job is raised where it waits. Under the JIT a
+        // thread asleep or paused lends its token (see `wait_for`), and work waiting for one comes
+        // in on it: a step that finds the app over the cores (`over_the_cores`) sets the test up
+        // again. Every other outcome is asserted.
+        let mut again = 0;
+        while let Err(what) = a_parked_strand_job_goes_on_for_a_more_urgent_one() {
+            again += 1;
+            use std::io::Write as _;
+            // (past libtest's capture: a log shows it when the test passed too)
+            let _ = writeln!(std::io::stderr(), "a_strand_job_parked_at_a_checkpoint_goes_on_for_a_more_urgent_one_behind_it: work came in on a lent token {what}; set up again ({again})");
+        }
+    }
+
+    /// Whether the app holds more permits than the machine has cores: none is admitted over a full
+    /// machine, so one came in while a sleeping or paused thread had lent its token.
+    fn over_the_cores() -> bool {
+        let app = makepad_cpu_budget::tokens().holders.iter().filter(|h| h.client == makepad_cpu_budget::APP).count();
+        app > makepad_cpu_budget::cores() as usize
+    }
+
+    /// One go of the test above: `Err` says when work came in on a lent token.
+    fn a_parked_strand_job_goes_on_for_a_more_urgent_one() -> Result<(), &'static str> {
         let pool = test_pool(2);
         let strand = Strand::new(&pool, "raised while parked");
         let (started, began) = mpsc::channel();
         // (the job and the person wait awake, see `wait_for`: asleep, each would lend its token)
         let go = Arc::new(AtomicBool::new(false));
+        // (the job holds its token until the test has looked at what it ran at)
+        let looked = Arc::new(AtomicBool::new(false));
         let (ran, order) = mpsc::channel();
         let first_ran = ran.clone();
-        let first_go = go.clone();
+        let (first_go, first_looked) = (go.clone(), looked.clone());
         let first = strand.submit(Class::Background, Ticket::none(), move |_| {
-            started.send(()).unwrap();
-            wait_for("the test's go", || first_go.load(Ordering::Acquire));
+            // Under the JIT a thread that waits for the build of code it runs for the first time
+            // lends its token, and the person would take it (never waiting) or the job would run
+            // its checkpoint lent (never parking): before it says it started, the job runs once
+            // all it runs while the machine is held, a checkpoint nothing waits behind, its report
+            // and a whole look of its wait.
+            let _ = checkpoint();
+            let (warm, warmed) = mpsc::channel();
+            warm.send(("background job", current_class())).unwrap();
+            let _ = warmed.recv();
+            let mut looks = 0;
+            wait_for("the test's go", || {
+                looks += 1;
+                if looks == 2 {
+                    started.send(()).unwrap();
+                }
+                first_go.load(Ordering::Acquire)
+            });
             let _ = checkpoint();
             first_ran.send(("background job", current_class())).unwrap();
+            wait_for("the test's look", || first_looked.load(Ordering::Acquire));
         });
         began.recv().unwrap();
         // every other token taken, and a person's work waiting: the job gives its token up at its checkpoint
         let held = HeldTokens::new(makepad_cpu_budget::cores() as usize - 1, "the rest of the machine");
         let end = Arc::new(AtomicBool::new(false));
-        let person_end = end.clone();
+        let person_in = Arc::new(AtomicBool::new(false));
+        let (person_end, admitted) = (end.clone(), person_in.clone());
         let person = std::thread::spawn(move || {
             let permit = makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::APP, "a person");
+            admitted.store(true, Ordering::Release);
             wait_for("the test's end", || person_end.load(Ordering::Acquire));
             makepad_cpu_budget::release(permit);
         });
@@ -5827,21 +5869,57 @@ mod tests {
         let waiting = |class: u8| {
             makepad_cpu_budget::tokens().waiting.iter().any(|w| w.class == class && w.client == makepad_cpu_budget::APP)
         };
-        wait_for("the person's work to wait", || waiting(makepad_cpu_budget::INTERACTIVE));
+        let mut second = None;
+        let outcome = 'go: {
+            wait_for("the person's work to wait", || person_in.load(Ordering::Acquire) || waiting(makepad_cpu_budget::INTERACTIVE));
+            if person_in.load(Ordering::Acquire) {
+                assert!(over_the_cores(), "the person's work came in with every token taken");
+                break 'go Err("before the job's checkpoint");
+            }
+            go.store(true, Ordering::Release);
+            // the job parks for Background's share, its token the person's
+            let mut report = None;
+            wait_for("the job to wait for Background's share", || {
+                report = report.take().or_else(|| order.try_recv().ok());
+                report.is_some() || (waiting(makepad_cpu_budget::BACKGROUND) && person_in.load(Ordering::Acquire))
+            });
+            if let Some(report) = report {
+                assert!(over_the_cores(), "the job ran on at its checkpoint with a person's work waiting: {report:?}");
+                break 'go Err("at the job's checkpoint");
+            }
+            let second_ran = ran;
+            second = Some(strand.submit(Class::Interactive, Ticket::none(), move |_| second_ran.send(("load", current_class())).unwrap()));
+            wait_for("the job to wait at the class of the job behind it", || {
+                report = report.take().or_else(|| order.try_recv().ok());
+                report.is_some() || waiting(makepad_cpu_budget::INTERACTIVE)
+            });
+            let report = match report {
+                Some(report) => report,
+                None => {
+                    // a token comes free that Background may not take, and Interactive may
+                    held.give_back_one();
+                    order.recv_timeout(NOTHING_MOVES).expect("the job's report")
+                }
+            };
+            if report.1 != Some(Class::Interactive) && over_the_cores() {
+                break 'go Err("before the job's raise");
+            }
+            assert_eq!(report, ("background job", Some(Class::Interactive)), "the job stayed at its class");
+            looked.store(true, Ordering::Release);
+            assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("load", Some(Class::Interactive))));
+            Ok(())
+        };
+        looked.store(true, Ordering::Release);
         go.store(true, Ordering::Release);
-        wait_for("the job to wait for Background's share", || waiting(makepad_cpu_budget::BACKGROUND));
-        let second_ran = ran;
-        let second = strand.submit(Class::Interactive, Ticket::none(), move |_| second_ran.send(("load", current_class())).unwrap());
-        // a token comes free that Background may not take, and Interactive may
-        held.give_back_one();
-        assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("background job", Some(Class::Interactive))), "the job stayed at its class");
-        assert_eq!(order.recv_timeout(NOTHING_MOVES), Ok(("load", Some(Class::Interactive))));
-        worker_join(first).unwrap();
-        worker_join(second).unwrap();
         end.store(true, Ordering::Release);
         person.join().unwrap();
         drop(held);
+        worker_join(first).unwrap();
+        if let Some(second) = second {
+            worker_join(second).unwrap();
+        }
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+        outcome
     }
 
     /// A job that has started and runs on takes the class at its next checkpoint: it holds its token

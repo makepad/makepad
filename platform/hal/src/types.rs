@@ -523,6 +523,14 @@ impl HalInfo {
     }
 }
 
+/// A PDF print operation's outcome (`PrintResult::status`).
+pub mod print_status {
+    pub const PRINTED: u32 = 0;
+    pub const CANCELLED: u32 = 1;
+    pub const UNSUPPORTED: u32 = 2;
+    pub const FAILED: u32 = 3;
+}
+
 /// Backend ids (`OpenReq::backend`, `HalInfo::backend`).
 pub mod backend_id {
     pub const HEADLESS: u32 = 0;

@@ -111,6 +111,8 @@ pub const GRAB_ID_BASE: u64 = 1 << 62;
 
 pub const MAX_PENDING_GRABS: usize = 64;
 
+/// Grab pixels waiting for the encoder above which a frame is halved before it queues, where
+/// its requested output size allows ([`submit_encode`]); also the largest scaled grab.
 pub const MAX_GRAB_BYTES: usize = 64 * 1024 * 1024;
 
 pub static PENDING_GRABS: AtomicUsize = AtomicUsize::new(0);
@@ -311,28 +313,31 @@ pub fn submit_encode(mut job: EncodeJob, raw: bool) {
     if job.sink.cancelled.load(Ordering::Relaxed) {
         return;
     }
-    // Over the pixel budget (a fast /gseq of a large window outruns the
-    // encoder): halve the frame until it fits instead of failing, so the
-    // sequence degrades to smaller frames. A requested scale <= 0.5
-    // loses nothing, since the encoder would have scaled down anyway.
-    let len = loop {
-        let len = job.pixels.len();
-        let fits = GRAB_BYTES
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
-                used.checked_add(len)
-                    .filter(|total| *total <= MAX_GRAB_BYTES)
-            })
-            .is_ok();
-        if fits {
-            break len;
-        }
-        if !raw || job.width < 2 || job.height < 2 || !halve_grab(&mut job) {
-            let _ = job.sink.tx.try_send(Err(
-                "grab pixel budget full; retry at a slower cadence".into()
-            ));
-            return;
-        }
-    };
+    // Over the pixel budget (a fast gseq of a large window outruns the encoder): halve the
+    // frame while its requested output size allows (a requested scale <= 0.5 loses nothing,
+    // the encoder would scale down anyway). Past that the frame queues as it is and the
+    // encoder catches up: a sequence slows down, but no frame shrinks below the size asked
+    // for and none is refused. The queue's depth (MAX_PENDING_GRABS) bounds what waits.
+    while raw
+        && job.sink.scale <= 0.5
+        && job.width >= 2
+        && job.height >= 2
+        && GRAB_BYTES.load(Ordering::Relaxed) + job.pixels.len() > MAX_GRAB_BYTES
+        && halve_grab(&mut job)
+    {}
+    let len = job.pixels.len();
+    let used = GRAB_BYTES.fetch_add(len, Ordering::Relaxed) + len;
+    static OVER_BUDGET: AtomicBool = AtomicBool::new(false);
+    let over = used > MAX_GRAB_BYTES;
+    if over && !OVER_BUDGET.swap(true, Ordering::Relaxed) {
+        crate::log!(
+            "[makepad-remote] grabs outrun the encoder: {} MiB of pixels wait (budget {} MiB); frames queue at their requested size",
+            used >> 20,
+            MAX_GRAB_BYTES >> 20
+        );
+    } else if !over {
+        OVER_BUDGET.store(false, Ordering::Relaxed);
+    }
     job.bytes = Some(GrabBytes(len));
     job.backend_png = !raw;
     let tx = encoder().lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -2168,5 +2173,49 @@ mod tests {
         for name in CLIENT_SIDE {
             assert!(COMMANDS.iter().any(|c| c.words == *name), "{name} is documented in help");
         }
+    }
+
+    /// A gseq of a 4K window outran the encoder and its frames came back halved again and again
+    /// (1920x1080 down to 7x4): over the pixel budget a frame is halved only while its requested
+    /// size allows, then it queues as it is.
+    #[test]
+    fn a_grab_over_the_pixel_budget_keeps_its_requested_size() {
+        start_encoder().unwrap();
+        // other grabs' pixels fill the budget
+        GRAB_BYTES.fetch_add(MAX_GRAB_BYTES, Ordering::Relaxed);
+        let mut sizes = Vec::new();
+        for (i, scale) in [0.5, 1.0].into_iter().enumerate() {
+            let (tx, rx) = sync_channel(1);
+            PENDING_GRABS.fetch_add(1, Ordering::Relaxed);
+            let sink = GrabSink {
+                id: GRAB_ID_BASE + (1 << 40) + i as u64,
+                window: None,
+                requested_at: Instant::now(),
+                scale,
+                raw_output: true,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                tx,
+            };
+            let pixels: Arc<[u8]> = Arc::from(vec![128u8; 64 * 32 * 4].into_boxed_slice());
+            submit_encode(
+                EncodeJob {
+                    sink,
+                    width: 64,
+                    height: 32,
+                    pixels,
+                    stride: 64 * 4,
+                    order: GrabOrder::Rgba,
+                    origin: GrabOrigin::TopLeft,
+                    capture_ms: 0.0,
+                    backend_png: false,
+                    bytes: None,
+                },
+                true,
+            );
+            let grabbed = rx.recv_timeout(Duration::from_secs(10)).expect("the grab is answered");
+            sizes.push(grabbed.map(|g| (g.width, g.height)));
+        }
+        GRAB_BYTES.fetch_sub(MAX_GRAB_BYTES, Ordering::Relaxed);
+        assert_eq!(sizes, vec![Ok((32, 16)), Ok((64, 32))], "each grab arrives at its requested size, none refused");
     }
 }

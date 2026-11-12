@@ -907,6 +907,7 @@ impl State {
                     }
                 }
             }
+            OsCmd::PrintPdf { req, .. } => self.shared.push((sid, crate::Id::NONE), |q, _| q.print_result(req, crate::print_status::UNSUPPORTED, &[])),
             OsCmd::FileDialog { req, .. } => self
                 .shared
                 .push((sid, crate::Id::NONE), |q, _| q.dialog_result(req, 0, &[])),

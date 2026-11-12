@@ -84,6 +84,7 @@ impl Sink for MetalSink<'_> {
             surface_id: 0,
             last_bound: 0,
             _keep: keep,
+            msaa: None,
         };
         if let Some(old) = self.tex.insert((s.id, id.index), tex) {
             self.dev.retire(Box::new(old));

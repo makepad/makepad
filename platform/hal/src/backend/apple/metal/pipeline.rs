@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 pub struct Variant {
     formats: Vec<MTLPixelFormat>,
     blend: bool,
+    /// samples per pixel of the pass it draws in (an MSAA pass's, `Pass::samples`; else 1)
+    samples: u8,
     queued: AtomicBool,
     pipeline: OnceLock<Result<RcObjcId, String>>,
 }
@@ -61,7 +63,7 @@ pub struct Compiled {
     functions: (RcObjcId, RcObjcId),
     solid: RcObjcId,
     blend: RcObjcId,
-    variants: Vec<(Vec<MTLPixelFormat>, bool, RcObjcId)>,
+    variants: Vec<(Vec<MTLPixelFormat>, bool, u8, RcObjcId)>,
 }
 
 impl Compiled {
@@ -145,7 +147,7 @@ impl PipeState {
     pub fn compiled(&self, desc: &PipelineDesc) -> Option<Compiled> {
         let (Some(functions), Some(Ok(solid)), Some(Ok(blend))) = (self.functions.get(), self.solid.get(), self.blend.get()) else { return None };
         let variants = self.variants.lock().unwrap_or_else(|e| e.into_inner()).iter()
-            .filter_map(|v| match v.pipeline.get() { Some(Ok(p)) => Some((v.formats.clone(), v.blend, p.clone())), _ => None })
+            .filter_map(|v| match v.pipeline.get() { Some(Ok(p)) => Some((v.formats.clone(), v.blend, v.samples, p.clone())), _ => None })
             .collect();
         Some(Compiled { source: self.source.clone(), desc: *desc, functions: functions.clone(), solid: solid.clone(), blend: blend.clone(), variants })
     }
@@ -170,11 +172,12 @@ impl PipeState {
         }
     }
 
-    /// The state for a draw into `formats`; never waits. A target layout of its own is built
-    /// from the retained functions on first use and the draw is skipped until it is ready.
-    pub fn select(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool) -> Select {
+    /// The state for a draw into `formats` with `samples` per pixel (an MSAA pass's; else 1);
+    /// never waits. A target layout of its own is built from the retained functions on first use
+    /// and the draw is skipped until it is ready.
+    pub fn select(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool, samples: u8) -> Select {
         let want_blend = blend && self.can_blend;
-        if formats == self.declared.as_slice() {
+        if samples <= 1 && formats == self.declared.as_slice() {
             return match if want_blend { self.blend.get() } else { self.solid.get() } {
                 Some(Ok(p)) => Select::State(p.as_id()),
                 Some(Err(_)) => Select::Failed,
@@ -184,7 +187,7 @@ impl PipeState {
         if matches!(self.blend.get(), Some(Err(_))) {
             return Select::Failed;
         }
-        let variant = self.variant(formats, want_blend);
+        let variant = self.variant(formats, want_blend, samples.max(1));
         if !variant.queued.load(Ordering::Relaxed) && self.enqueue_variant(dev, &variant) {
             variant.queued.store(true, Ordering::Relaxed);
         }
@@ -195,18 +198,18 @@ impl PipeState {
         }
     }
 
-    /// Whether the state for a draw into `formats` is ready; queues it when it is not (never
-    /// waits). False while it compiles, or when it failed.
-    pub fn ready_for(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool) -> bool {
-        matches!(self.select(dev, formats, blend), Select::State(_))
+    /// Whether the state for a draw into `formats` with `samples` per pixel is ready; queues it
+    /// when it is not (never waits). False while it compiles, or when it failed.
+    pub fn ready_for(self: &Arc<Self>, dev: &Device, formats: &[MTLPixelFormat], blend: bool, samples: u8) -> bool {
+        matches!(self.select(dev, formats, blend, samples), Select::State(_))
     }
 
-    fn variant(&self, formats: &[MTLPixelFormat], blend: bool) -> Arc<Variant> {
+    fn variant(&self, formats: &[MTLPixelFormat], blend: bool, samples: u8) -> Arc<Variant> {
         let mut variants = self.variants.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(v) = variants.iter().find(|v| v.blend == blend && v.formats == formats) {
+        if let Some(v) = variants.iter().find(|v| v.blend == blend && v.samples == samples && v.formats == formats) {
             return v.clone();
         }
-        let v = Arc::new(Variant { formats: formats.to_vec(), blend, queued: AtomicBool::new(false), pipeline: OnceLock::new() });
+        let v = Arc::new(Variant { formats: formats.to_vec(), blend, samples, queued: AtomicBool::new(false), pipeline: OnceLock::new() });
         variants.push(v.clone());
         v
     }
@@ -238,6 +241,9 @@ impl PipeState {
             }
             describe_attachments(descriptor.as_id(), &variant.formats, self.written, variant.blend, self.blend_max);
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
+            if variant.samples > 1 {
+                let () = msg_send![descriptor.as_id(), setRasterSampleCount: variant.samples as u64];
+            }
         }
         let state = self.clone();
         let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
@@ -246,7 +252,7 @@ impl PipeState {
                 None => Err(describe_error(error, "Metal returned no pipeline")),
             };
             if let Err(e) = &result {
-                eprintln!("[metal] pipeline variant {:?}: {e}", variant.formats);
+                eprintln!("[metal] pipeline variant {:?} at {} samples: {e}", variant.formats, variant.samples);
             }
             let _ = variant.pipeline.set(result);
             // a draw into this layout was skipped: the app paints again
@@ -296,8 +302,8 @@ pub(super) fn create(dev: &Device, sid: u32, id: Id, incarnation: Arc<crate::fon
         let _ = state.blend.set(Ok(c.blend));
         state.settled.store(2, Ordering::Release);
         let mut variants = state.variants.lock().unwrap_or_else(|e| e.into_inner());
-        for (formats, blend, p) in c.variants {
-            variants.push(Arc::new(Variant { formats, blend, queued: AtomicBool::new(true), pipeline: OnceLock::from(Ok(p)) }));
+        for (formats, blend, samples, p) in c.variants {
+            variants.push(Arc::new(Variant { formats, blend, samples, queued: AtomicBool::new(true), pipeline: OnceLock::from(Ok(p)) }));
         }
         drop(variants);
         return state;

@@ -131,6 +131,7 @@ pub mod web_socket;
 pub mod audio_stream;
 
 pub mod file_dialogs;
+pub mod print;
 pub mod hosted_relay;
 
 mod media_api;
@@ -376,6 +377,7 @@ pub use {
             FileDialog, FileDialogAction, VirtualFile, VirtualFileLimits,
             DEFAULT_VIRTUAL_FILE_SIZE_LIMIT,
         },
+        print::{PrintId, PrintJob, PrintResult, PrintResultEvent},
         game_input::*,
         geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
         draw_shader::{

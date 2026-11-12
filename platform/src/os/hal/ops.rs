@@ -250,6 +250,21 @@ impl Cx {
         fb.w.file_dialog(req, kind as u32 | (settings.multiple as u32) << 8, title, location, filename, strs.len() as u32, &bytes);
     }
 
+    fn hal_print_pdf(&mut self, id: crate::print::PrintId, job: crate::print::PrintJob) {
+        // Reuse wire ids only after the preceding request has completed.
+        loop {
+            self.hal.next_print = self.hal.next_print.wrapping_add(1);
+            if !self.hal.prints.contains_key(&self.hal.next_print) {
+                break;
+            }
+        }
+        let req = self.hal.next_print;
+        self.hal.prints.insert(req, id);
+        let fb = &mut self.hal.frames;
+        let title = fb.intern(&job.title);
+        fb.w.print_pdf(req, title, &job.pdf);
+    }
+
     /// Drains the platform ops into HAL commands. False when the app asked to quit.
     pub(crate) fn hal_handle_platform_ops(&mut self) -> bool {
         let _phase = crate::thread::ui_phase(crate::thread::UiPhase::PlatformOps);
@@ -685,6 +700,7 @@ impl Cx {
 
                 // the rest arrive as their own HAL modules (HAL.md phases 1b / 4 / 5)
                 CxOsOp::SelectFileDialog(settings) => self.hal_file_dialog(DialogKind::SelectFile, settings),
+                CxOsOp::PrintPdf(id, job) => self.hal_print_pdf(id, job),
                 CxOsOp::SaveFileDialog(settings) => self.hal_file_dialog(DialogKind::SaveFile, settings),
                 CxOsOp::SelectFolderDialog(settings) => self.hal_file_dialog(DialogKind::SelectFolder, settings),
                 CxOsOp::SaveFolderDialog(settings) => self.hal_file_dialog(DialogKind::SaveFolder, settings),

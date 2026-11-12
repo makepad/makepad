@@ -689,6 +689,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::TrayRemove { tray } => tray::remove(sid, tray),
+        OsCmd::PrintPdf { req, .. } => s.push((sid, Id::NONE), |q, _| q.print_result(req, print_status::UNSUPPORTED, &[])),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
             let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
             dialog::open(dialog::Request { sid, req, kind, title, location, filename, filters, owner });
@@ -780,6 +781,7 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::XrRefreshRate { .. }
             | OsCmd::XrHaptic { .. }
             | OsCmd::FileDialog { .. }
+            | OsCmd::PrintPdf { .. }
             | OsCmd::AppIcon { .. }
     )
 }

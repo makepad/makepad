@@ -21,6 +21,9 @@ extern "C" {
     fn CFRunLoopPerformBlock(rl: *mut c_void, mode: ObjcId, block: *const c_void);
 }
 
+#[link(name = "PDFKit", kind = "framework")]
+extern "C" {}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct CAFrameRateRange {
@@ -1260,6 +1263,7 @@ fn command(sid: u32, cmd: OsCmd) {
         // (no headset here)
         OsCmd::XrFrameEyes { .. } | OsCmd::XrPoseLead { .. } | OsCmd::XrRefreshRate { .. } | OsCmd::XrHaptic { .. } => {}
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),
+        OsCmd::PrintPdf { req, title, pdf } => print_pdf(sid, req, &title, &pdf),
         OsCmd::DragReply { id, to, answer, .. } => {
             if let Some(win) = window_of(id) {
                 match to {
@@ -1598,6 +1602,106 @@ pub fn dock_menu() -> ObjcId {
 // ------------------------------------------------------------------ dialogs
 
 const NS_MODAL_RESPONSE_OK: i64 = 1;
+
+// PDFKit's PDFPrintScalingMode (NSInteger): None = 0, ToFit = 1, DownToFit = 2.
+const PDF_PRINT_PAGE_SCALE_DOWN_TO_FIT: isize = 2;
+
+/// Owned until AppKit calls the sheet's completion delegate. All references are created and
+/// released on the main thread; neither the submitted byte buffer nor an autorelease pool
+/// needs to outlive the command that starts the sheet.
+struct PendingPrint {
+    sid: u32,
+    req: u32,
+    data: ObjcId,
+    document: ObjcId,
+    operation: ObjcId,
+    delegate: ObjcId,
+}
+
+impl Drop for PendingPrint {
+    fn drop(&mut self) {
+        unsafe {
+            let () = msg_send![self.operation, release];
+            let () = msg_send![self.document, release];
+            let () = msg_send![self.data, release];
+            let () = msg_send![self.delegate, release];
+        }
+    }
+}
+
+/// Called once by the print delegate with the context allocated by `print_pdf`.
+///
+/// # Safety
+/// `context` must be the live `PendingPrint` handed to AppKit, consumed once on the main thread.
+pub(super) unsafe fn print_operation_did_run(success: BOOL, context: *mut c_void) {
+    let pending = Box::from_raw(context as *mut PendingPrint);
+    let status = if success != NO { print_status::PRINTED } else { print_status::CANCELLED };
+    Shared::global().push(pending.sid, |q| q.print_result(pending.req, status, &[]));
+    // Dropping the context releases the operation, PDF, data and delegate even if posting panics.
+}
+
+/// Starts a document-modal print sheet and returns; completion is an event, never a wait on
+/// the UI thread or an application-modal print loop.
+fn print_pdf(sid: u32, req: u32, title: &str, pdf: &[u8]) {
+    let failed = |message: &str| Shared::global().push(sid, |q| q.print_result(req, print_status::FAILED, message.as_bytes()));
+    let mut pending = Box::new(PendingPrint { sid, req, data: nil, document: nil, operation: nil, delegate: nil });
+    unsafe {
+        let data: ObjcId = msg_send![class!(NSData), alloc];
+        pending.data = msg_send![data, initWithBytes: pdf.as_ptr() as *const c_void length: pdf.len()];
+        if pending.data == nil {
+            failed("could not create PDF data");
+            return;
+        }
+        let document: ObjcId = msg_send![class!(PDFDocument), alloc];
+        pending.document = msg_send![document, initWithData: pending.data];
+        if pending.document == nil {
+            failed("not a PDF");
+            return;
+        }
+
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let mut window: ObjcId = msg_send![ns_app, keyWindow];
+        if window == nil {
+            window = msg_send![ns_app, mainWindow];
+        }
+        if window == nil {
+            let windows: ObjcId = msg_send![ns_app, windows];
+            window = msg_send![windows, firstObject];
+        }
+        if window == nil {
+            failed("no window");
+            return;
+        }
+
+        let print_info: ObjcId = msg_send![class!(NSPrintInfo), sharedPrintInfo];
+        let operation: ObjcId = msg_send![pending.document,
+            printOperationForPrintInfo: print_info
+            scalingMode: PDF_PRINT_PAGE_SCALE_DOWN_TO_FIT
+            autoRotate: YES
+        ];
+        if operation == nil {
+            failed("could not create print operation");
+            return;
+        }
+        pending.operation = msg_send![operation, retain];
+        let () = msg_send![operation, setJobTitle: str_to_nsstring(title)];
+        let () = msg_send![operation, setShowsPrintPanel: YES];
+        let () = msg_send![operation, setShowsProgressPanel: YES];
+        pending.delegate = msg_send![app().classes().print_delegate, new];
+        if pending.delegate == nil {
+            failed("could not create print delegate");
+            return;
+        }
+        let delegate = pending.delegate;
+        let context = Box::into_raw(pending) as *mut c_void;
+        let () = msg_send![operation,
+            runOperationModalForWindow: window
+            delegate: delegate
+            didRunSelector: sel!(printOperationDidRun:success:contextInfo:)
+            contextInfo: context
+        ];
+    }
+}
 
 /// Every extension the dialog's filters name, flattened. A filter of `*` means "no restriction at
 /// all" and wins over every other filter. `filters` are (description, "ext,ext") pairs.
