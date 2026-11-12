@@ -994,7 +994,10 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
             skip_fnkey(d, depth + 1, v)
         }
         KeyKind::Glue => {
-            d.u8()?;
+            // its kind: one byte, or 255 and four (a constructor of a variant past the 239th)
+            if d.u8()? == 255 {
+                d.u32()?;
+            }
             skip_ty(d, 0, v)
         }
         KeyKind::Shim => {

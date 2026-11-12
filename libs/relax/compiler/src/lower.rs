@@ -7083,6 +7083,7 @@ impl<'a> Lcx<'a> {
                     // a coercion cast without a representation change (`Some(4) as Option<u32>`)
                     return self.lower_expr(*x);
                 }
+                if let Some(v) = self.variant_cast(*x, t) { return v; }
                 let v = self.lower_expr(*x);
                 self.cast(v, xt, t)
             }
@@ -9038,6 +9039,7 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Cast(x, _) => {
                 let xt = self.body_ty(*x);
+                if let Some(v) = self.variant_cast(*x, t) { return v; }
                 let v = self.lower_expr(*x);
                 if matches!(self.kind(xt), TyKind::Adt(..)) { return self.cast(v, xt, t); }
                 match (self.is_wide(xt), self.kind(t)) {
@@ -9360,6 +9362,37 @@ impl<'a> Lcx<'a> {
             self.term(Term::Unreachable);
             self.switch(ok2);
         }
+    }
+
+    /// `Enum::Variant as int` of a fieldless variant, written by any path (`Self::Variant` too):
+    /// the variant's discriminant as a constant, as rustc's THIR makes it a literal
+    /// (rustc_mir_build/src/thir/cx/expr.rs, the `hir::ExprKind::Cast` arm). Building the value
+    /// needs the enum's layout, which needs every discriminant of the enum: a discriminant that
+    /// names an earlier variant of its own enum (`B = match Self::A as u8 { .. }`) would ask for
+    /// itself (E0391). ctfe.rs `variant_cast` is the evaluator's half.
+    fn variant_cast(&mut self, x: ExprId, to: TyId) -> Option<Val> {
+        if !matches!(self.kind_ref(to), TyKind::Int(_)) { return None; }
+        let ast = self.ast();
+        let mut inner = x;
+        while let ExprKind::Paren(y) = ast.expr(inner).kind { inner = y; }
+        if !matches!(ast.expr(inner).kind, ExprKind::Path(_)) { return None; }
+        let Some(Res::Def(d)) = self.b.res.get(&inner.0).copied() else { return None };
+        let vd = self.u.prog.def(d);
+        if vd.kind != DefKind::Variant { return None; }
+        let vi = vd.sub;
+        // a tuple variant's path is its constructor function, not a value of the enum
+        let TyKind::Adt(adt, _, _) = self.kind(self.body_ty(inner)) else { return None };
+        let adt = self.u.tcx.adts.get(&adt)?;
+        if !adt.is_enum || adt.variants.iter().any(|v| !v.fields.is_empty()) { return None; }
+        let discr = adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi)?.signed_value();
+        let lo = self.iconst(discr as i64);
+        if self.is_wide(to) {
+            let hi = self.iconst((discr >> 64) as i64);
+            return Some(Val::L(vec![lo, hi]));
+        }
+        let result = self.f.vreg(Cls::I);
+        self.emit(Inst::Conv(Conv::IntToInt(self.int_ty(to)), result, lo));
+        Some(Val::L(vec![result]))
     }
 
     fn cast(&mut self, v: Val, from: TyId, to: TyId) -> Val {
@@ -12968,9 +13001,9 @@ pub fn forward_func(u: &Unit, ps: &[TyId], ret: TyId, name: String, callee: u32)
     f
 }
 
-pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
+pub fn glue_func(u: &mut Unit, kind: u32, t: TyId) -> Func {
     if kind >= crate::jit::GLUE_CTOR {
-        return ctor_fn(u, (kind - crate::jit::GLUE_CTOR) as u32, t);
+        return ctor_fn(u, kind - crate::jit::GLUE_CTOR, t);
     }
     if kind == crate::jit::GLUE_DROP
         && u.lay.is_unsized(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, t)
@@ -13032,7 +13065,7 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
 
 /// `fn(fields..) -> Adt` building variant `vi` (tuple structs: 0) of the fn type's return ADT.
 fn ctor_fn(u: &mut Unit, vi: u32, t: TyId) -> Func {
-    let name = fn_name(u, &FnKey::Glue(crate::jit::GLUE_CTOR + vi as u8, t));
+    let name = fn_name(u, &FnKey::Glue(crate::jit::GLUE_CTOR + vi, t));
     let mut f = Func::new(name, 0);
     let b = f.block();
     let (ps, ret) = match u.tcx.tys.kind(t).clone() {

@@ -2338,7 +2338,9 @@ impl Cache {
             }
             FnKey::Glue(g, t) => {
                 e.u8(KeyKind::Glue as u8);
-                e.u8(g);
+                // one byte for every kind but a constructor of a variant past the 239th: 255
+                // announces the kind in four bytes
+                if g < 255 { e.u8(g as u8); } else { e.u8(255); e.u32(g); }
                 self.enc_ty(u, t, e, crates, 0)
             }
         }
@@ -8990,7 +8992,7 @@ impl Linker {
                 FnKey::Closure(file, expr, parent)
             }
             KeyKind::Glue => {
-                let g = d.u8()?;
+                let g = match d.u8()? { 255 => d.u32()?, g => g as u32 };
                 FnKey::Glue(g, self.cache().dec_ty(u, d, 0)?)
             }
             KeyKind::Shim => {

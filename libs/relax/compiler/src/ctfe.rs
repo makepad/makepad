@@ -564,6 +564,7 @@ impl<'a> Ctx<'a> {
                 Some(Vec::new())
             }
             ExprKind::Cast(x, _) => {
+                if let Some(v) = self.variant_cast(b, x, t) { return Some(v); }
                 let v = self.eval(b, env, x)?;
                 self.cast(&v, b.ty(x), t)
             }
@@ -1265,6 +1266,31 @@ impl<'a> Ctx<'a> {
             return None;
         }
         Some(store_int(r, n))
+    }
+
+    /// `Enum::Variant as int` of a fieldless variant, written by any path (`Self::Variant` too):
+    /// the variant's discriminant, read without building the value. The value needs the enum's
+    /// layout, and the layout needs every discriminant of the enum, so an enum whose discriminant
+    /// names an earlier variant of itself (`B = Self::A as u8 | 1`) asked for the constant being
+    /// evaluated (E0391). rustc turns this cast into a literal the same way
+    /// (rustc_mir_build/src/thir/cx/expr.rs, the `hir::ExprKind::Cast` arm).
+    fn variant_cast(&mut self, b: &Body, x: ExprId, to: TyId) -> Option<Vec<u8>> {
+        if !matches!(self.kind(to), TyKind::Int(_)) { return None; }
+        let ast = &self.u.prog.files[b.file as usize].ast;
+        let mut inner = x;
+        while let ExprKind::Paren(i) = ast.expr(inner).kind { inner = i; }
+        if !matches!(ast.expr(inner).kind, ExprKind::Path(_)) { return None; }
+        let Some(Res::Def(d)) = b.res.get(&inner.0).copied() else { return None };
+        let vd = self.u.prog.def(d);
+        if vd.kind != DefKind::Variant { return None; }
+        let vi = vd.sub;
+        // a tuple variant's path is its constructor function, not a value of the enum
+        let TyKind::Adt(adt, _, _) = self.kind(b.ty(inner)) else { return None };
+        let adt = self.u.tcx.adts.get(&adt)?;
+        if !adt.is_enum || adt.variants.iter().any(|v| !v.fields.is_empty()) { return None; }
+        let discr = adt.discriminant_for_variant(&self.u.tcx, &self.u.prog, vi)?.signed_value();
+        let (n, _) = self.int_of(to)?;
+        Some(store_int(discr, n))
     }
 
     fn cast(&mut self, v: &[u8], from: TyId, to: TyId) -> Option<Vec<u8>> {
