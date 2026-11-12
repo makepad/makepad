@@ -2685,6 +2685,14 @@ impl TaskPool {
     /// helper can leave: for work the caller can split, one for each piece, however few workers
     /// it is to run on.
     pub fn fan_out_on<F: Fn(usize) + Sync>(&self, most: usize, len: usize, f: F) {
+        self.fan_out_as(Class::Background, most, len, f);
+    }
+
+    /// [`TaskPool::fan_out_on`] from a thread outside the pool's jobs at the class it names: a
+    /// long-lived thread of the app's own (one that steps a simulation the user watches, say)
+    /// spreads at the class of what it does for the user, where `fan_out_on` from it runs at
+    /// Background. A job's spread runs at its job's class whatever it names.
+    pub fn fan_out_as<F: Fn(usize) + Sync>(&self, class: Class, most: usize, len: usize, f: F) {
         if len == 0 {
             return;
         }
@@ -2695,7 +2703,7 @@ impl TaskPool {
             }
             return;
         }
-        let class = current_class().unwrap_or(Class::Background);
+        let class = current_class().unwrap_or(class);
         let (label, ticket, token) = JOB.with(|j| {
             j.borrow()
                 .as_ref()
@@ -3795,6 +3803,7 @@ mod tests {
         "fan_out_helpers_observe_the_callers_stale_ticket",
         "fan_out_runs_every_index_after_its_job_goes_stale",
         "fan_out_completes_with_a_saturated_pool_and_from_a_worker",
+        "a_fan_out_from_outside_the_pool_runs_at_the_class_it_names",
         "a_cx_that_ends_leaves_the_process_pool_to_the_others",
         "dropping_the_last_handle_closes_the_pool",
         "classes_are_prioritized_and_fifo_within_each_class",
@@ -4525,6 +4534,47 @@ mod tests {
             worker_join(pool.submit(Class::Visible, || 8).unwrap()).unwrap(),
             8
         );
+        worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
+    }
+
+    /// The class every item of a 64-item spread from the calling thread ran at: `fan_out`'s, or
+    /// `fan_out_as`'s naming `class`.
+    fn spread_classes(pool: &TaskPool, class: Option<Class>) -> Vec<Option<Class>> {
+        let seen = Mutex::new(Vec::new());
+        let item = |_: usize| seen.lock().unwrap().push(current_class());
+        match class {
+            Some(class) => pool.fan_out_as(class, usize::MAX, 64, item),
+            None => pool.fan_out(64, item),
+        }
+        seen.into_inner().unwrap()
+    }
+
+    #[test]
+    fn a_fan_out_from_outside_the_pool_runs_at_the_class_it_names() {
+        in_own_budget!(a_fan_out_from_outside_the_pool_runs_at_the_class_it_names);
+        let _serial = POOL_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        let pool = test_pool(2);
+        wait_for("workers to start", || {
+            pool.inner.started.load(Ordering::Acquire) == 2
+        });
+        let own_pool = pool.clone();
+        let spawner = ThreadSpawner::for_current_thread(1);
+        let own = spawner
+            .spawn_worker(ThreadOptions::default(), move || {
+                let plain = spread_classes(&own_pool, None);
+                let named = spread_classes(&own_pool, Some(Class::Visible));
+                (plain, named, current_class())
+            })
+            .unwrap();
+        let (plain, named, after) = worker_join(own).unwrap();
+        assert!(plain.len() == 64 && plain.iter().all(|c| *c == Some(Class::Background)), "a plain spread from the app's own thread runs at Background: {plain:?}");
+        assert!(named.len() == 64 && named.iter().all(|c| *c == Some(Class::Visible)), "a spread from the app's own thread that names Visible runs at Visible, its helpers too: {named:?}");
+        assert_eq!(after, None, "the thread is outside the pool's jobs once its spreads return");
+
+        let job_pool = pool.clone();
+        let job = pool.submit(Class::Background, move || spread_classes(&job_pool, Some(Class::Visible))).unwrap();
+        let in_job = worker_join(job).unwrap();
+        assert!(in_job.len() == 64 && in_job.iter().all(|c| *c == Some(Class::Background)), "a Background job's spread stays at its class whatever it names: {in_job:?}");
         worker_join(pool.shutdown_pool(ShutdownMode::Drain)).unwrap();
     }
 
