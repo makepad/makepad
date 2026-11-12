@@ -81,6 +81,8 @@ impl Raw {
 }
 
 pub use imp::{each_thread, list, regs_now, tid_of_handle};
+#[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
+pub(crate) use imp::capture_taken;
 
 thread_local! {
     static SELF_ID: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -806,6 +808,15 @@ mod imp {
         raw.handle = r(8);
         raw.sp = regs.rsp;
         walk(raw, &mut regs);
+    }
+
+    /// The program took signal `sig` for its own action (os/progsig.rs): when that is the capture
+    /// signal, the capture moves to the next real-time signal nobody handles. Async-signal-safe.
+    pub fn capture_taken(sig: i32) {
+        if SIGNAL.load(Relaxed) == sig {
+            SIGNAL.store(0, Relaxed);
+            install();
+        }
     }
 
     /// Installs the capture signal's handler (once, on the inspect thread's start): the first

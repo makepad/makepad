@@ -4142,6 +4142,14 @@ fn rt_compile_global(g: u64) -> u64 {
 /// rt_compile for the unit at `up`.
 fn rt_compile_in(up: usize, slot: u64) -> u64 {
     let _keep = os::proc::KeepLastError::new();
+    // JIT code made a lazy call inside a compile with no call_jit_in between: only an interruption
+    // (a signal handler the trampoline did not run) gets there, and it would wait for itself
+    if CompileInnermost::get() {
+        compile_reentered(slot as u32);
+    }
+    // a signal for a program handler waits for this call's compile (os/progsig.rs); a thread
+    // parked at a compile error takes them again (an outside SIGABRT ends a parked JIT)
+    let signals = compiling(slot as u32);
     // the run ended: nothing to build, the stub's jump to this address ends the thread
     unsafe {
         if (&*(up as *mut Unit)).code_ended.load(Ordering::Acquire) {
@@ -4165,7 +4173,10 @@ fn rt_compile_in(up: usize, slot: u64) -> u64 {
             compile_slot(up as *mut Unit, slot as u32)
         }));
         match r {
-            Ok(PARK_AT_ERROR) => return park_compile_error(up, slot as u32),
+            Ok(PARK_AT_ERROR) => {
+                drop(signals);
+                return park_compile_error(up, slot as u32);
+            }
             Ok(a) => return a,
             Err(p) if crate::preempt::is_cancelled(&*p) && cancelled < COMPILE_CANCEL_RETRIES => cancelled += 1,
             Err(p) => return compile_failed_stub(up, slot as u32, &*p),
@@ -8647,6 +8658,8 @@ unsafe fn call_jit_nested(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, Pan
 /// `call_jit` in the domain whose static block is at `domain` (domain.rs): the code runs on the
 /// calling thread, whose domain comes back after the call.
 pub unsafe fn call_jit_in(u: *mut Unit, domain: u64, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
+    // the innermost host activity of the thread is this call, not a compile around it
+    let _innermost = CompileInnermost::set(false);
     // JIT code and the runtime helpers it calls allocate in the program's heap (zone_alloc.rs)
     let _kept = crate::zone_alloc::kept();
     // the calling thread's unit for this call; the previous one comes back after it (a proc-macro
@@ -8801,6 +8814,12 @@ unsafe fn cost_name(up: *mut Unit, id: u32) {
 pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
     let _z = crate::zone_alloc::compiler();
     let _job = compile_job();
+    // a signal for a program handler that comes meanwhile waits for the compile's end (os/progsig.rs)
+    let _signals = compiling(id);
+    // JIT code that runs inside a compile comes through call_jit_in; a lazy call from anything
+    // else is an interruption (rt_compile_in)
+    let _innermost = CompileInnermost::set(true);
+    test_signal_in_compile(up, id);
     let code = ensure_sufficient_stack(|| compile_slot_on_stack(up, id));
     // a program thread compiles in bursts: its chunks go back between them (frees from other
     // threads into them are taken then; at most twice a second)
@@ -9268,6 +9287,120 @@ unsafe fn test_hot_compile_panic(up: *mut Unit, id: u32) {
             panic!("MAKEPAD_RUN_TEST_HOT_COMPILE_PANIC: forced compiler panic in the lazy call of `{name}`");
         }
     }
+}
+
+/// os/progsig.rs's compile guard: a signal for a program handler waits for the compile's end.
+#[cfg(unix)]
+use os::progsig::compiling;
+#[cfg(not(unix))]
+struct Compiling;
+#[cfg(not(unix))]
+fn compiling(_slot: u32) -> Compiling {
+    Compiling
+}
+
+thread_local! {
+    /// The innermost host activity of this thread is a compile (`compile_slot`); `call_jit_in`
+    /// clears it for the JIT code it runs.
+    static COMPILE_INNERMOST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets COMPILE_INNERMOST while it lives; the value before comes back after.
+struct CompileInnermost(bool);
+
+impl CompileInnermost {
+    fn set(v: bool) -> CompileInnermost {
+        CompileInnermost(COMPILE_INNERMOST.try_with(|c| c.replace(v)).unwrap_or(false))
+    }
+    fn get() -> bool {
+        COMPILE_INNERMOST.try_with(|c| c.get()).unwrap_or(false)
+    }
+}
+
+impl Drop for CompileInnermost {
+    fn drop(&mut self) {
+        let _ = COMPILE_INNERMOST.try_with(|c| c.set(self.0));
+    }
+}
+
+/// JIT code made a lazy call of `slot` inside a compile on this thread with no `call_jit_in`
+/// between: something interrupted the compile and ran program code (a handler installed around
+/// the trampoline of os/progsig.rs: a raw rt_sigaction, a JIT address a native library was given
+/// as its handler). That compile would wait for what the interrupted one holds, so the process
+/// ends now and says so. No allocation and no lock: the interrupted compile may hold them.
+#[cold]
+#[inline(never)]
+fn compile_reentered(slot: u32) -> ! {
+    #[cfg(unix)]
+    let sig = os::progsig::last_signal();
+    #[cfg(not(unix))]
+    let sig = 0;
+    let mut line = [0u8; 192];
+    let mut n = 0;
+    let mut put = |b: &[u8]| {
+        let k = b.len().min(line.len() - n);
+        line[n..n + k].copy_from_slice(&b[..k]);
+        n += k;
+    };
+    let dec = |mut v: u64| {
+        let mut d = [0u8; 20];
+        let mut i = d.len();
+        loop {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        (d, i)
+    };
+    put(b"makepad-run: internal compiler error: a lazy call (slot ");
+    let (d, i) = dec(slot as u64);
+    put(&d[i..]);
+    put(b") from JIT code that interrupted a compile on its thread (last signal ");
+    let (d, i) = dec(sig as u64);
+    put(&d[i..]);
+    put(b"): the process ends\n");
+    os::fault::raw_stderr(&line[..n]);
+    crate::inspect::flightrec::event("compile.reentry", "a lazy call inside a compile, from JIT code that interrupted it (a: slot, b: the last signal the trampoline took on this thread)", slot as u64, sig as u64);
+    #[cfg(unix)]
+    unsafe {
+        extern "C" {
+            fn _exit(code: i32) -> !;
+        }
+        _exit(101)
+    }
+    #[cfg(not(unix))]
+    std::process::abort()
+}
+
+/// MAKEPAD_RUN_TEST_SIGNAL_IN_COMPILE=<name part>,<signal>,<to>[,block]: the first compile on a
+/// program thread of a fn whose name contains <name part> sends <signal> from inside the compile
+/// (os/progsig.rs `test_send`: `self`, `process`, `raw-self`, `rt3-self`); with `block` that
+/// compile never ends. The signal tests' one hook, and a hand repro of a signal in a compile.
+unsafe fn test_signal_in_compile(up: *mut Unit, id: u32) {
+    #[cfg(unix)]
+    {
+        static WANT: std::sync::OnceLock<Option<(String, i32, String, bool)>> = std::sync::OnceLock::new();
+        static FIRED: AtomicBool = AtomicBool::new(false);
+        let want = WANT.get_or_init(|| crate::zone_alloc::kept_with(|| {
+            let v = std::env::var("MAKEPAD_RUN_TEST_SIGNAL_IN_COMPILE").ok()?;
+            let mut p = v.split(',');
+            let (part, sig, to) = (p.next()?.to_string(), p.next()?.parse().ok()?, p.next()?.to_string());
+            Some((part, sig, to, p.next() == Some("block")))
+        }));
+        let Some((part, sig, to, block)) = want else { return };
+        if FIRED.load(Ordering::Relaxed) || !os::progsig::on_program_thread() {
+            return;
+        }
+        let name = owner::call(owner::Class::Program, || (&*up).fns[id as usize].name.to_string());
+        if name.contains(part.as_str()) && !FIRED.swap(true, Ordering::AcqRel) {
+            os::progsig::test_send(*sig, to, *block, &name);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (up, id);
 }
 
 unsafe fn test_compile_panic(up: *mut Unit, id: u32) {

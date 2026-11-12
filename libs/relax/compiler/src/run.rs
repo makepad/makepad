@@ -2437,7 +2437,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             let id = u.fn_id(FnKey::Inst(*d, Vec::new()));
             u.entry(id)
         });
-        let r = unsafe { jit::call_jit(up, en, 0) };
+        let r = {
+            let _program = crate::os::program_thread();
+            unsafe { jit::call_jit(up, en, 0) }
+        };
         flush_errors(true);
         match r {
             Ok(v) => verbose!("makepad-run: entry {} returned {:#x} (t={:.0} ms)", entries[k], v, crate::clock::ms_since_start()),
@@ -2498,7 +2501,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     }
     if !domain_packages.is_empty() { crate::domain::run_vehicle(up, domain_packages); }
     let r = match main_call(u, main_def, entry) {
-        Ok((target, arg)) => unsafe { jit::call_jit(up, target, arg) },
+        Ok((target, arg)) => {
+            let _program = crate::os::program_thread();
+            unsafe { jit::call_jit(up, target, arg) }
+        }
         Err(e) => {
             eprintln!("makepad-run: {e}");
             return crate::check::finish_test_deps(1);

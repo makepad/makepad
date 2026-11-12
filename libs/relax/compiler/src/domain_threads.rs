@@ -218,6 +218,8 @@ fn thread_main(start: *mut Start) -> OsRet {
     };
     crate::jit::ensure_altstack();
     crate::domain::relax_domain_enter(s.base, s.token);
+    // a thread of the program: its signal handlers run here (os/progsig.rs)
+    let _program = crate::os::program_thread();
     let on_stack = |enter: u64, f: u64, arg: u64| {
         crate::stack::on_program_stack(crate::jit::program_stack_changed, || crate::jit::run_thread_body(enter, f, arg));
     };

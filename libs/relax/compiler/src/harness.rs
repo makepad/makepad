@@ -207,6 +207,7 @@ fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<i32, String> {
         Ok((tests, main_entry))
     })?;
     let tests: *mut Tests = tests;
+    let _program = crate::os::program_thread();
     match unsafe { jit::call_jit(up, main_entry, tests as u64) } {
         Ok(_) => Ok(unsafe { std::ptr::read_volatile(&(*tests).code) }),
         Err(p) => Err(format!("the test harness {}: {}", p.kind, p.message)),

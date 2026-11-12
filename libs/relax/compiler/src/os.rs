@@ -12,6 +12,7 @@
 //! - [`tls`]: the OS key holding each thread's thread-local block and the fast path JIT code
 //!   reads it through.
 //! - [`proc`]: foreign symbols and libraries, power state, process arguments, private files.
+//! - `progsig` (unix): the program's signal handlers, run on program threads outside compiles.
 
 // explicit paths: the file is also loaded through #[path] by the bring-up driver, where nested
 // modules would otherwise resolve next to it (the Win32 declarations are not here: relax_session::win32)
@@ -21,6 +22,9 @@ pub mod fault;
 pub mod mem;
 #[path = "os/proc.rs"]
 pub mod proc;
+#[cfg(unix)]
+#[path = "os/progsig.rs"]
+pub(crate) mod progsig;
 #[path = "os/sample.rs"]
 pub mod sample;
 #[path = "os/thread.rs"]
@@ -30,9 +34,22 @@ pub mod tls;
 #[cfg(windows)]
 pub(crate) use relax_session::win32;
 
+/// While it lives, the calling thread runs the program's code: its signal handlers run there
+/// (os/progsig.rs). Taken where a thread starts the program's main or a thread of it.
+#[cfg(unix)]
+pub(crate) use progsig::program_thread;
+#[cfg(windows)]
+pub(crate) struct ProgramThread;
+#[cfg(windows)]
+pub(crate) fn program_thread() -> ProgramThread {
+    ProgramThread
+}
+
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     fault::reset_statics();
+    #[cfg(unix)]
+    progsig::reset_statics();
     proc::reset_statics();
     tls::reset_statics();
 }

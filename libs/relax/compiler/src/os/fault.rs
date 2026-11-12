@@ -132,23 +132,17 @@ mod unix {
             fn thread_info(port: u32, flavor: u32, info: *mut u32, count: *mut u32) -> i32;
             #[cfg(target_vendor = "apple")]
             fn __ulock_wait(op: u32, addr: *mut u8, value: u64, timeout_us: u32) -> i32;
-            #[cfg(target_vendor = "apple")]
-            fn __ulock_wake(op: u32, addr: *mut u8, wake_value: u64) -> i32;
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         const SYS_FUTEX: i64 = 202;
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         const SYS_FUTEX: i64 = 98;
-        /// FUTEX_WAIT_PRIVATE, FUTEX_WAKE_PRIVATE
+        /// FUTEX_WAIT_PRIVATE
         #[cfg(target_os = "linux")]
         const FUTEX_WAIT: i32 = 128;
-        #[cfg(target_os = "linux")]
-        const FUTEX_WAKE: i32 = 129;
-        /// UL_COMPARE_AND_WAIT | ULF_NO_ERRNO, and | ULF_WAKE_ALL
+        /// UL_COMPARE_AND_WAIT | ULF_NO_ERRNO
         #[cfg(target_vendor = "apple")]
         const UL_WAIT: u32 = 0x0100_0001;
-        #[cfg(target_vendor = "apple")]
-        const UL_WAKE_ALL: u32 = 0x0100_0101;
 
         const FRAMES: usize = 64;
         /// How long an abort's report waits for the compiler's owner to start its lookups.
@@ -195,12 +189,7 @@ mod unix {
         static REPORTER: AtomicUsize = AtomicUsize::new(0);
         static REPORTER_PID: AtomicU32 = AtomicU32::new(0);
 
-        fn futex_wait(w: &AtomicU32, v: u32) {
-            #[cfg(target_os = "linux")]
-            unsafe { syscall(SYS_FUTEX, w.as_ptr(), FUTEX_WAIT, v, std::ptr::null::<u8>()) };
-            #[cfg(target_vendor = "apple")]
-            unsafe { __ulock_wait(UL_WAIT, w.as_ptr() as *mut u8, v as u64, 0) };
-        }
+        use crate::os::progsig::{futex_wait, futex_wake};
         /// `futex_wait` for at most `ms`.
         fn futex_wait_ms(w: &AtomicU32, v: u32, ms: u64) {
             #[cfg(target_os = "linux")]
@@ -241,12 +230,6 @@ mod unix {
                 }
                 (info[0] as u64 + info[2] as u64) * 1_000_000_000 + (info[1] as u64 + info[3] as u64) * 1000
             }
-        }
-        fn futex_wake(w: &AtomicU32) {
-            #[cfg(target_os = "linux")]
-            unsafe { syscall(SYS_FUTEX, w.as_ptr(), FUTEX_WAKE, i32::MAX) };
-            #[cfg(target_vendor = "apple")]
-            unsafe { __ulock_wake(UL_WAKE_ALL, w.as_ptr() as *mut u8, 0) };
         }
         fn wait_for(w: &AtomicU32, want: u32) {
             loop {
@@ -615,6 +598,12 @@ mod imp {
                 handler.store(0, Ordering::Relaxed);
             }
         }
+        // the program's handlers behind the trampoline are given back by progsig.rs
+        for row in CHAINED.iter() {
+            if row[0].load(Ordering::Relaxed) == crate::os::progsig::trampoline_addr() {
+                row[0].store(0, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
@@ -635,6 +624,16 @@ mod imp {
         }
     }
 
+    /// The host's fault handler (progsig.rs: where the kernel shows it, the trampoline may be chained behind it).
+    pub(crate) fn host_handler() -> usize {
+        on_signal as *const () as usize
+    }
+
+    /// The handler chained behind ours for `sig` (0: none).
+    pub(crate) fn chained_handler(sig: i32) -> usize {
+        CHAINED.get(sig as usize).map_or(0, |c| c[0].load(Ordering::SeqCst))
+    }
+
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
     unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
@@ -642,6 +641,10 @@ mod imp {
         if h <= 1 {
             // SIG_DFL / SIG_IGN
             return false;
+        }
+        // a program handler: the trampoline says whether it took the signal
+        if h == crate::os::progsig::trampoline_addr() {
+            return crate::os::progsig::chained(sig, info, uc);
         }
         unsafe {
             if flags & SA_SIGINFO != 0 {
@@ -828,6 +831,12 @@ mod imp {
                 handler.store(0, Ordering::Relaxed);
             }
         }
+        // the program's handlers behind the trampoline are given back by progsig.rs
+        for row in CHAINED.iter() {
+            if row[0].load(Ordering::Relaxed) == crate::os::progsig::trampoline_addr() {
+                row[0].store(0, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
@@ -848,6 +857,16 @@ mod imp {
         }
     }
 
+    /// The host's fault handler (progsig.rs: where the kernel shows it, the trampoline may be chained behind it).
+    pub(crate) fn host_handler() -> usize {
+        on_signal as *const () as usize
+    }
+
+    /// The handler chained behind ours for `sig` (0: none).
+    pub(crate) fn chained_handler(sig: i32) -> usize {
+        CHAINED.get(sig as usize).map_or(0, |c| c[0].load(Ordering::SeqCst))
+    }
+
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
     unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
@@ -855,6 +874,10 @@ mod imp {
         if h <= 1 {
             // SIG_DFL / SIG_IGN
             return false;
+        }
+        // a program handler: the trampoline says whether it took the signal
+        if h == crate::os::progsig::trampoline_addr() {
+            return crate::os::progsig::chained(sig, info, uc);
         }
         unsafe {
             if flags & SA_SIGINFO != 0 {
@@ -1105,6 +1128,12 @@ mod imp {
                 handler.store(0, Ordering::Relaxed);
             }
         }
+        // the program's handlers behind the trampoline are given back by progsig.rs
+        for row in CHAINED.iter() {
+            if row[0].load(Ordering::Relaxed) == crate::os::progsig::trampoline_addr() {
+                row[0].store(0, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Puts our handlers back on top where the program replaced them, keeping the replacement as
@@ -1124,6 +1153,16 @@ mod imp {
         }
     }
 
+    /// The host's fault handler (progsig.rs: where the kernel shows it, the trampoline may be chained behind it).
+    pub(crate) fn host_handler() -> usize {
+        on_signal as *const () as usize
+    }
+
+    /// The handler chained behind ours for `sig` (0: none).
+    pub(crate) fn chained_handler(sig: i32) -> usize {
+        CHAINED.get(sig as usize).map_or(0, |c| c[0].load(Ordering::SeqCst))
+    }
+
     /// Passes a signal that is not ours to the handler we replaced, if any. False: none.
     unsafe fn chain(sig: i32, info: *mut u8, uc: *mut u8) -> bool {
         let h = CHAINED[sig as usize][0].load(Ordering::SeqCst);
@@ -1131,6 +1170,10 @@ mod imp {
         if h <= 1 {
             // SIG_DFL / SIG_IGN
             return false;
+        }
+        // a program handler: the trampoline says whether it took the signal
+        if h == crate::os::progsig::trampoline_addr() {
+            return crate::os::progsig::chained(sig, info, uc);
         }
         unsafe {
             if flags & SA_SIGINFO != 0 {

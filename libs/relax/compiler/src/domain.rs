@@ -1633,6 +1633,8 @@ fn launch_main(upn: usize, id: DomainId, base: u64, target: u64, arg: u64, root:
         }
         let up = upn as *mut Unit;
         relax_domain_enter(base, token);
+        // the domain's main thread runs the program: its signal handlers run here (os/progsig.rs)
+        let _program = crate::os::program_thread();
         let mut run = || {
             // A stop between spawning and entry must never run app code.
             {

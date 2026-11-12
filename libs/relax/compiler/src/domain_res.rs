@@ -129,7 +129,6 @@ mod unix {
         Fd { fd: c_int, dev: u64, ino: u64, socket: bool },
         Dir(usize),
         Map { addr: usize, len: usize },
-        Signal { sig: c_int, old: [u64; 32] },
         Key(KeyT),
         Child { pid: i32, told: bool, detached: bool },
     }
@@ -211,8 +210,6 @@ mod unix {
             pub fn closedir(dir: *mut c_void) -> c_int;
             pub fn mmap(addr: *mut u8, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut u8;
             pub fn munmap(addr: *mut u8, len: usize) -> c_int;
-            pub fn signal(sig: c_int, handler: usize) -> usize;
-            pub fn sigaction(sig: c_int, act: *const crate::os::fault::SigAction, old: *mut crate::os::fault::SigAction) -> c_int;
             pub fn pthread_key_create(key: *mut usize, dtor: Option<extern "C" fn(*mut u8)>) -> c_int;
             pub fn pthread_key_delete(key: KeyT) -> c_int;
             pub fn posix_spawn(pid: *mut i32, path: *const c_char, actions: *const c_void, attr: *const c_void, argv: *const usize, envp: *const usize) -> c_int;
@@ -358,26 +355,13 @@ mod unix {
         forget_range(addr as usize, pages(len));
         unsafe { sys::munmap(addr, len) }
     }
-    fn save_handler(sig: c_int) {
-        let Some(domain) = owner() else { return };
-        let mut old = [0u64; 32];
-        with_table(|t| {
-            if !t.iter().any(|o| o.domain == domain && matches!(o.res, Res::Signal { sig: s, .. } if s == sig))
-                && unsafe { sys::sigaction(sig, std::ptr::null(), old.as_mut_ptr() as *mut _) } == 0
-            {
-                t.push(Owned { domain, res: Res::Signal { sig, old } });
-            }
-        });
-    }
+    // the program's handler goes in a table and the kernel runs a trampoline for it (os/progsig.rs:
+    // never inside a compile); the run's end gives back what its domain changed
     pub extern "C" fn signal(sig: c_int, handler: usize) -> usize {
-        save_handler(sig);
-        unsafe { sys::signal(sig, handler) }
+        unsafe { crate::os::progsig::signal(sig, handler, owner().unwrap_or(0)) }
     }
     pub extern "C" fn sigaction(sig: c_int, act: *const crate::os::fault::SigAction, old: *mut crate::os::fault::SigAction) -> c_int {
-        if !act.is_null() {
-            save_handler(sig);
-        }
-        unsafe { sys::sigaction(sig, act, old) }
+        unsafe { crate::os::progsig::sigaction(sig, act.cast(), old.cast(), owner().unwrap_or(0)) }
     }
     pub extern "C" fn pthread_key_create(key: *mut KeyT, dtor: Option<extern "C" fn(*mut u8)>) -> c_int {
         let mut k = 0usize;
@@ -590,10 +574,6 @@ mod unix {
 
     pub(super) fn give_back_callback(res: Res) -> bool {
         match res {
-            Res::Signal { sig, old } => {
-                unsafe { sys::sigaction(sig, old.as_ptr() as *const _, std::ptr::null_mut()) };
-                true
-            }
             // (a thread leaving the run finds no destructor to call)
             Res::Key(k) => {
                 unsafe { sys::pthread_key_delete(k) };
@@ -628,7 +608,7 @@ mod unix {
                 out.mappings += 1;
                 out.mapped_bytes += len as u64;
             }
-            Res::Signal { .. } | Res::Key(_) | Res::Child { .. } => {}
+            Res::Key(_) | Res::Child { .. } => {}
         }
     }
 
@@ -1017,9 +997,13 @@ const CHILD_KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(1
 /// Before a run's code ends: what would call it from threads not its own. Returns how many.
 pub(crate) fn take_back_callbacks(bases: &[u64]) -> u32 {
     let mut n = take_callbacks(bases);
+    #[cfg(unix)]
+    {
+        n += crate::os::progsig::give_back(bases);
+    }
     crate::os::proc::forget_program_atexit(bases);
     with_table(|t| {
-        // (last taken first: a handler saved twice over goes back to what it was before the run)
+        // (last taken first)
         for i in (0..t.len()).rev() {
             if bases.contains(&t[i].domain) && give_back_callback(t[i].res) {
                 t.remove(i);

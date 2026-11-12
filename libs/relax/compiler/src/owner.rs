@@ -990,6 +990,8 @@ pub fn start() {
     });
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     crate::os::fault::start_abort_reporter();
+    #[cfg(unix)]
+    crate::os::progsig::start();
 }
 
 /// The owner thread ends (`run_end`): every thread that asked it for something has ended. The next

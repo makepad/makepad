@@ -1205,7 +1205,10 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
         let r = if runtime.test_domains <= 1 {
             // the program's main on a program stack (large, lazily committed, guarded)
             let mut r = None;
-            crate::stack::on_program_stack(jit::program_stack_changed, || r = Some(unsafe { jit::call_jit(up, entry, 0) }));
+            crate::stack::on_program_stack(jit::program_stack_changed, || {
+                let _program = crate::os::program_thread();
+                r = Some(unsafe { jit::call_jit(up, entry, 0) })
+            });
             r.expect("program main returned")
         } else {
             // the same test at the same time in N domains of this unit (domain 0 + N-1 new
@@ -1220,7 +1223,10 @@ fn cmd_test(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
             }
             let upa = up as usize;
             let rs: Vec<_> = std::thread::scope(|sc| {
-                let hs: Vec<_> = bases.iter().map(|&b| sc.spawn(move || unsafe { jit::call_jit_in(upa as *mut jit::Unit, b, entry, 0) })).collect();
+                let hs: Vec<_> = bases.iter().map(|&b| sc.spawn(move || {
+                    let _program = crate::os::program_thread();
+                    unsafe { jit::call_jit_in(upa as *mut jit::Unit, b, entry, 0) }
+                })).collect();
                 hs.into_iter().map(|h| h.join().expect("domain test thread")).collect()
             });
             for &b in &bases[1..] {
@@ -1414,6 +1420,9 @@ mod reload_items_tests;
 
 #[cfg(test)]
 mod value_tests;
+
+#[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+mod progsig_tests;
 
 #[cfg(test)]
 mod check_lint_tests;
