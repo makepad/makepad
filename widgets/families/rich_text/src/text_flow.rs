@@ -749,6 +749,81 @@ impl SelectionTracker {
 
         rects
     }
+
+    /// The caret's line box at flat index `index`, zero wide, in draw-time
+    /// coordinates. On the boundary between two runs the left run's end is
+    /// taken; where a wrap separates them, `prefer_next_row` takes the next
+    /// run's start instead, as a cursor at a wrapped row's end does.
+    pub fn caret_rect(&self, index: usize, prefer_next_row: bool) -> Option<Rect> {
+        let mut left: Option<Rect> = None;
+        for segment in &self.segments {
+            let rect = match segment {
+                SelectionSegment::Text {
+                    laidout_text,
+                    origin,
+                    font_scale,
+                    text_start,
+                } => {
+                    let end = text_start + laidout_text.text.len();
+                    if index < *text_start || index > end || laidout_text.rows.is_empty() {
+                        continue;
+                    }
+                    let cursor = Cursor {
+                        index: index - text_start,
+                        prefer_next_row,
+                    };
+                    let position = laidout_text.cursor_to_position(cursor);
+                    let row = &laidout_text.rows[position.row_index];
+                    let scale = *font_scale as f64;
+                    let rect = Rect {
+                        pos: *origin
+                            + dvec2(
+                                position.x_in_lpxs as f64 * scale,
+                                (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64 * scale,
+                            ),
+                        size: dvec2(
+                            0.0,
+                            (row.ascender_in_lpxs - row.descender_in_lpxs) as f64 * scale,
+                        ),
+                    };
+                    if index < end {
+                        return Some(match left {
+                            Some(left) if !prefer_next_row || rect.pos.y <= left.pos.y + 0.5 => left,
+                            _ => rect,
+                        });
+                    }
+                    rect
+                }
+                SelectionSegment::Gap { rect, text_start } => {
+                    let end = text_start + '\u{FFFC}'.len_utf8();
+                    if index == *text_start {
+                        Rect { pos: rect.pos, size: dvec2(0.0, rect.size.y) }
+                    } else if index == end {
+                        Rect {
+                            pos: rect.pos + dvec2(rect.size.x, 0.0),
+                            size: dvec2(0.0, rect.size.y),
+                        }
+                    } else {
+                        continue;
+                    }
+                }
+                SelectionSegment::WidgetText { .. } => continue,
+            };
+            match left {
+                // Two runs meet at `index`: the left one, unless a wrap
+                // between them and the caret prefers the next row.
+                Some(previous) => {
+                    return Some(if prefer_next_row && rect.pos.y > previous.pos.y + 0.5 {
+                        rect
+                    } else {
+                        previous
+                    });
+                }
+                None => left = Some(rect),
+            }
+        }
+        left
+    }
 }
 
 // this widget has a retained and an immediate mode api
@@ -2249,6 +2324,34 @@ impl TextFlow {
             .collect()
     }
 
+    /// The caret's line box at flat index `index` of this flow's text, zero
+    /// wide, in the coordinates the flow was drawn at (see
+    /// [`SelectionTracker::caret_rect`]). Needs the flow to track its text.
+    pub fn caret_rect(&self, index: usize, prefer_next_row: bool) -> Option<Rect> {
+        self.selection_tracker.caret_rect(index, prefer_next_row)
+    }
+
+    /// How far the flow moved since it was drawn (a scroll that did not
+    /// redraw it); add it to a draw-time rect to get where it is now.
+    pub fn drawn_shift(&self, cx: &Cx) -> DVec2 {
+        self.shift(cx)
+    }
+
+    /// Takes a line of text's height where the next run would start and
+    /// returns that place as a zero-wide rect, in draw-time coordinates: where
+    /// a caret stands on a line with no text (an empty paragraph or item).
+    pub fn draw_caret_anchor(&mut self, cx: &mut Cx2d) -> Rect {
+        self.flush_block_margin(cx);
+        let (height_in_lpxs, _) = self.get_line_height_and_baseline_in_lpxs(cx);
+        let height = height_in_lpxs as f64 * self.draw_text.font_scale as f64;
+        let pos = cx.turtle().pos();
+        self.make_line_as_tall_as_text(cx);
+        Rect {
+            pos,
+            size: dvec2(0.0, height),
+        }
+    }
+
     /// Get the total text length
     pub fn text_len(&self) -> usize {
         self.selection_tracker.total_len()
@@ -2937,10 +3040,21 @@ impl TextFlow {
     }
 
     pub fn draw_text(&mut self, cx: &mut Cx2d, text: &str) {
+        self.draw_text_range(cx, text);
+    }
+
+    /// Draws a run of text as [`Self::draw_text`] does, and returns the part
+    /// of `text` the flow drew and added to its text (a line's leading white
+    /// space and a run's trailing line breaks are not content), or `None`
+    /// when it drew nothing. A host that maps the flow's text back to where
+    /// the run came from records this, not the text it passed.
+    pub fn draw_text_range(&mut self, cx: &mut Cx2d, text: &str) -> Option<std::ops::Range<usize>> {
+        let whole = text;
+        let mut drawn = None;
         if let Some(DrawState::Drawing) = self.draw_state.get() {
             // If we've already exceeded max_lines, skip all further text.
             if self.content_truncated {
-                return;
+                return None;
             }
 
             let is_at_line_start = self.first_thing_on_a_line || (self.collapse_block_margins && self.is_at_block_start);
@@ -2952,6 +3066,8 @@ impl TextFlow {
             } else {
                 text.trim_start()
             });
+            let drawn_start = text.as_ptr() as usize - whole.as_ptr() as usize;
+            let drawn_range = drawn_start..drawn_start + text.len();
             // Whitespace that starts a line or follows a list item's marker isn't content,
             // and neither is a run that was empty or only a line break.
             if text.is_empty() {
@@ -2959,12 +3075,12 @@ impl TextFlow {
                 if !is_at_line_start {
                     self.make_line_as_tall_as_text(cx);
                 }
-                return;
+                return None;
             }
             // A run that would start a new line past the budget is dropped before its margin applies.
             if self.collapse_block_margins && self.max_lines > 0 && self.lines_drawn >= self.max_lines && self.is_at_new_line_start(cx) {
                 self.content_truncated = true;
-                return;
+                return None;
             }
             if let Some(pending) = self.pending_text_after_run.take() {
                 pending.resolve(cx, self);
@@ -3042,7 +3158,7 @@ impl TextFlow {
                 if remaining_new_lines == 0 && !is_continuation {
                     // No visual lines left and this run would start a new one.
                     self.content_truncated = true;
-                    return;
+                    return None;
                 }
                 // Continuation runs get +1 because their first row doesn't
                 // consume a new visual line (it shares the current one).
@@ -3362,8 +3478,10 @@ impl TextFlow {
             // content opened in between.
             self.last_row_y = cx.turtle().pos().y;
             self.track_last_line_end(cx);
+            drawn = Some(drawn_range);
         }
         self.first_thing_on_a_line = false;
+        drawn
     }
 
     /// Lays out a run of `text` where the turtle is, since what follows it at `pending` may need room on its last row.

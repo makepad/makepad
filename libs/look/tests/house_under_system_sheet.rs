@@ -1,6 +1,6 @@
 //! Stage's house look under the window manager's sheet.
 //!
-//! Why (user, 149): "why are all the stage highlights blue on a node? I thought
+//! Why (user): "why are all the stage highlights blue on a node? I thought
 //! they were orange". The WM (look: macOS dark) hands every app its sheet as
 //! `MAKEPAD_WIDGET_STYLE`; Stage's accent is the house orange only with no
 //! sheet on, and picking "Stage (house)" took the sheet off just until the

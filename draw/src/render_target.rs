@@ -525,7 +525,7 @@ mod tests {
     /// A window's content drawn into a pass nested under a pixel-addressed target keeps the
     /// window's density. Desk Link draws the desktop (C) inside its dpi-1 picture target; C took
     /// the picture's dpi, so at display scale 2.0 it was half the screen's pixels and the window
-    /// showed it magnified: every pixel of the panel and of the stream blurred (WMSHARP, 166).
+    /// showed it magnified: every pixel of the panel and of the stream blurred.
     #[test]
     fn a_pass_under_a_pixel_target_draws_at_its_windows_dpi() {
         use crate::cx_draw::CxDraw;

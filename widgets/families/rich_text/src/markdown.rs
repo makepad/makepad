@@ -10,6 +10,7 @@ use crate::{
 };
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -346,8 +347,131 @@ impl Widget for Markdown {
     }
 }
 
+/// One run the flow drew while walking markdown events, mapped back to the
+/// source the events were parsed from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarkdownPiece {
+    /// Byte range in the source.
+    pub src: Range<usize>,
+    /// Byte range in the flow's text.
+    pub flat: Range<usize>,
+    /// The flow's text spells `src` byte for byte. Otherwise the run stands
+    /// for `src` as a whole (an entity, a line break, an image).
+    pub identity: bool,
+}
+
+/// Colours the text of a code block by its language.
+pub trait CodeHighlight {
+    /// Appends `(byte range in text, colour)` spans for `text` written in
+    /// `language`, ascending and disjoint. Text in no span keeps the code
+    /// colour.
+    fn highlight(&self, language: &str, text: &str, spans: &mut Vec<(Range<usize>, Vec4f)>);
+}
+
+/// A host's hooks into a markdown walk ([`Markdown::draw_events`]): what the
+/// flow drew, mapped back to the source; caret places where nothing is
+/// drawn; coloured code; and a drawing for every piece of source the plain
+/// widget leaves out (HTML shows as muted literal text, task markers and
+/// footnotes draw), so no source is hidden from an editor.
+#[derive(Default)]
+pub struct MarkdownHost<'a> {
+    /// Filled by the walk: every run the flow drew, in order. The flow must
+    /// track its text (`selectable`) for the flat ranges to mean anything.
+    pub pieces: Vec<MarkdownPiece>,
+    /// Source offsets that need a caret rect where no text is: an empty
+    /// paragraph, heading or item, or a blank line after the last block.
+    /// The walk fills in each rect, in draw-time coordinates; a place inside
+    /// no empty block gets an empty line after everything else.
+    pub anchors: Vec<(usize, Option<Rect>)>,
+    /// Colours code blocks.
+    pub highlight: Option<&'a dyn CodeHighlight>,
+    /// The number footnote references show.
+    pub footnote_number: Option<&'a dyn Fn(&str) -> Option<usize>>,
+    /// The number of the first item of the outermost ordered list, when the
+    /// events are items cut from a longer list.
+    pub list_start: Option<u64>,
+}
+
+impl MarkdownHost<'_> {
+    fn piece(&mut self, src: Range<usize>, flat: Range<usize>, identity: bool) {
+        if !flat.is_empty() {
+            self.pieces.push(MarkdownPiece {
+                src,
+                flat,
+                identity,
+            });
+        }
+    }
+}
+
+/// Draws `text` (whose source is `src`) and records what the flow drew.
+fn draw_mapped(
+    cx: &mut Cx2d,
+    tf: &mut TextFlow,
+    host: &mut Option<&mut MarkdownHost<'_>>,
+    source: &str,
+    text: &str,
+    src: Range<usize>,
+) {
+    let drawn = tf.draw_text_range(cx, text);
+    let (Some(host), Some(drawn)) = (host.as_deref_mut(), drawn) else {
+        return;
+    };
+    let after = tf.text_len();
+    let flat = after.saturating_sub(drawn.len())..after;
+    // The event's text sits in the source as it is, or the run stands for its
+    // whole source (an entity, text the parser made).
+    let identity = source.get(src.start..src.start + text.len()) == Some(text);
+    if identity {
+        host.piece(src.start + drawn.start..src.start + drawn.end, flat, true);
+    } else {
+        host.piece(src, flat, false);
+    }
+}
+
+/// The colour source shows in when the renderer has no drawing for it.
+fn muted(color: Vec4f) -> Vec4f {
+    vec4(color.x, color.y, color.z, color.w * 0.55)
+}
+
 impl Markdown {
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
+        let body = std::mem::take(&mut self.body);
+        let parser = Parser::new_ext(
+            body.as_ref(),
+            Options::ENABLE_TABLES | Options::ENABLE_MATH | Options::ENABLE_STRIKETHROUGH,
+        );
+        self.walk_events(cx, body.as_ref(), parser.into_offset_iter(), None);
+        self.body = body;
+    }
+
+    /// Draws markdown events the host parsed from `source` instead of the
+    /// widget's own `body`, with its hooks: the renderer of an editor that
+    /// draws a document in parts. Draws as `draw_walk` does.
+    pub fn draw_events<'e>(
+        &mut self,
+        cx: &mut Cx2d,
+        walk: Walk,
+        source: &str,
+        events: impl IntoIterator<Item = (MdEvent<'e>, Range<usize>)>,
+        host: &mut MarkdownHost<'_>,
+    ) {
+        self.auto_id = 0;
+        self.images_drawn.clear();
+        self.begin(cx, walk);
+        self.walk_events(cx, source, events, Some(host));
+        self.end(cx);
+        let drawn = &self.images_drawn;
+        self.image_requests.retain(|uid, _| drawn.contains(uid));
+    }
+
+    fn walk_events<'e>(
+        &mut self,
+        cx: &mut Cx2d,
+        source: &str,
+        events: impl IntoIterator<Item = (MdEvent<'e>, Range<usize>)>,
+        mut host: Option<&mut MarkdownHost<'_>>,
+    ) {
         let tf = &mut self.text_flow;
         // Track state for nested formatting
         let mut list_stack: Vec<ListState> = Vec::new();
@@ -361,16 +485,45 @@ impl Markdown {
         // cannot) the alt text stands in for it.
         let mut image_depth: usize = 0;
         let mut image_drawn = false;
+        // Where the flow's text stood when the open image started: the image
+        // (or its alt text) is one object for its whole source.
+        let mut image_flat_start = 0;
         let load_images = !cx.script_data.std.host_io_only();
         // What the open inline link pushed: (a colour, an underline).
         let mut inline_link: Option<bool> = None;
+        // A host's hooks see more of the source than the plain widget draws.
+        let hosted = host.is_some();
+        let highlight = host.as_deref().and_then(|host| host.highlight);
+        // A highlighted code block's language and text events, drawn at its end.
+        let mut code_language = String::new();
+        let mut code_runs: Vec<(Range<usize>, String)> = Vec::new();
+        let mut buffering_code = false;
+        // The flow's text length where each open block started, to tell an
+        // empty block a caret anchor goes in.
+        let mut block_text_starts: Vec<usize> = Vec::new();
 
-        let parser = Parser::new_ext(
-            self.body.as_ref(),
-            Options::ENABLE_TABLES | Options::ENABLE_MATH | Options::ENABLE_STRIKETHROUGH,
-        );
-
-        for event in parser.into_iter() {
+        for (event, range) in events {
+            // A block that drew nothing gets the caret places inside it.
+            let opens_block = hosted
+                && matches!(
+                    event,
+                    MdEvent::Start(Tag::Paragraph | Tag::Heading { .. } | Tag::Item | Tag::TableCell)
+                );
+            if let (
+                Some(host),
+                MdEvent::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::TableCell),
+            ) = (host.as_deref_mut(), &event)
+            {
+                let started = block_text_starts.pop().unwrap_or(0);
+                if tf.text_len() == started {
+                    let mut place = None;
+                    for (at, found) in &mut host.anchors {
+                        if found.is_none() && range.start <= *at && *at <= range.end {
+                            *found = Some(*place.get_or_insert_with(|| tf.draw_caret_anchor(cx)));
+                        }
+                    }
+                }
+            }
             match event {
                 MdEvent::Start(Tag::Heading { level, .. }) => {
                     if !is_first_block {
@@ -414,6 +567,14 @@ impl Markdown {
                     tf.end_quote(cx);
                 }
                 MdEvent::Start(Tag::List(first_number)) => {
+                    // Items cut from a longer list count on from where the
+                    // host says that list is.
+                    let first_number = match (list_stack.is_empty(), host.as_deref()) {
+                        (true, Some(MarkdownHost { list_start: Some(start), .. })) if first_number.is_some() => {
+                            Some(*start)
+                        }
+                        _ => first_number,
+                    };
                     list_stack.push(ListState {
                         start_number: first_number,
                         current_number: first_number.unwrap_or(1),
@@ -489,6 +650,7 @@ impl Markdown {
                 MdEvent::Start(Tag::Image { dest_url, .. }) => {
                     image_depth += 1;
                     if image_depth == 1 {
+                        image_flat_start = tf.text_len();
                         // A restricted Splash reads no files and makes no
                         // requests on the host's behalf.
                         image_drawn = load_images
@@ -506,6 +668,9 @@ impl Markdown {
                     image_depth = image_depth.saturating_sub(1);
                     if image_depth == 0 {
                         image_drawn = false;
+                        if let Some(host) = host.as_deref_mut() {
+                            host.piece(range, image_flat_start..tf.text_len(), false);
+                        }
                     }
                 }
                 MdEvent::Start(Tag::CodeBlock(kind)) => {
@@ -525,6 +690,14 @@ impl Markdown {
                         tf.push_size_rel_scale(tf.fixed_font_size_scale);
                         tf.fixed.push();
                         tf.begin_code(cx);
+                        if highlight.is_some() {
+                            buffering_code = true;
+                            code_runs.clear();
+                            code_language.clear();
+                            if let CodeBlockKind::Fenced(info) = &kind {
+                                code_language.push_str(info.split_whitespace().next().unwrap_or(""));
+                            }
+                        }
                     }
                 }
                 MdEvent::End(TagEnd::CodeBlock) => {
@@ -535,10 +708,6 @@ impl Markdown {
 
                         // Draw the splash block using the $splash_block template
                         tf.item_with(cx, entry_id, id!(splash_block), |cx, item, _tf| {
-                            //let tree = item.widget_tree();
-                            //cx.with_vm(|vm| {
-                            //    log!("$splash_block widget tree:\n{}", tree.display(vm.heap()));
-                            //});
                             item.widget(cx, ids!(splash_view)).set_text(cx, sbs);
                             item.draw_all_unscoped(cx);
                         });
@@ -559,6 +728,20 @@ impl Markdown {
                         // (its area will be queried at event time, not draw time)
                         tf.push_widget_text_for_selection(code_view_ref, &self.code_block_string);
                     } else {
+                        if buffering_code {
+                            buffering_code = false;
+                            if let Some(highlight) = highlight {
+                                draw_highlighted_code(
+                                    cx,
+                                    tf,
+                                    &mut host,
+                                    source,
+                                    highlight,
+                                    &code_language,
+                                    &code_runs,
+                                );
+                            }
+                        }
                         tf.font_sizes.pop();
                         tf.fixed.pop();
                         tf.end_code(cx);
@@ -569,13 +752,24 @@ impl Markdown {
                     tf.push_size_rel_scale(tf.fixed_font_size_scale);
                     tf.fixed.push();
                     tf.inline_code.push();
-                    tf.draw_text(cx, &text);
+                    if host.is_some() {
+                        // The content sits inside the backtick runs (and one
+                        // space of padding on each side when both are there).
+                        let span = source.get(range.clone()).unwrap_or("");
+                        let ticks = span.bytes().take_while(|&b| b == b'`').count();
+                        let pad = span.len().saturating_sub(ticks * 2).saturating_sub(text.len()) / 2;
+                        let start = range.start + ticks + pad;
+                        draw_mapped(cx, tf, &mut host, source, &text, start..start + text.len());
+                    } else {
+                        tf.draw_text(cx, &text);
+                    }
                     tf.font_sizes.pop();
                     tf.fixed.pop();
                     tf.inline_code.pop();
                 }
                 // Inline math ($...$)
                 MdEvent::InlineMath(text) => {
+                    let flat_start = tf.text_len();
                     if self.use_math_widget {
                         let entry_id = tf.new_counted_id();
                         tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
@@ -592,6 +786,9 @@ impl Markdown {
                         tf.fixed.pop();
                         tf.inline_code.pop();
                     }
+                    if let Some(host) = host.as_deref_mut() {
+                        host.piece(range, flat_start..tf.text_len(), false);
+                    }
                 }
                 // Display math ($$...$$)
                 MdEvent::DisplayMath(text) => {
@@ -599,6 +796,7 @@ impl Markdown {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
+                    let flat_start = tf.text_len();
 
                     if self.use_math_widget {
                         let entry_id = tf.new_counted_id();
@@ -614,13 +812,25 @@ impl Markdown {
                         tf.fixed.pop();
                         tf.end_code(cx);
                     }
+                    if let Some(host) = host.as_deref_mut() {
+                        host.piece(range, flat_start..tf.text_len(), false);
+                    }
                 }
                 MdEvent::Text(_) if image_drawn => {}
+                // The alt text of an image that is not drawn stands in for
+                // the image: one object, recorded at the image's end.
+                MdEvent::Text(text) if image_depth > 0 => {
+                    tf.draw_text(cx, text.trim_end_matches("\n"));
+                }
                 MdEvent::Text(text) => {
                     if self.in_splash_block {
                         self.splash_block_string.push_str(&text);
                     } else if self.in_code_block {
                         self.code_block_string.push_str(&text);
+                    } else if buffering_code {
+                        code_runs.push((range, text.to_string()));
+                    } else if host.is_some() {
+                        draw_mapped(cx, tf, &mut host, source, text.trim_end_matches("\n"), range);
                     } else {
                         tf.draw_text(cx, &text.trim_end_matches("\n"));
                     }
@@ -631,7 +841,11 @@ impl Markdown {
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
+                        let flat_start = tf.text_len();
                         tf.draw_text(cx, " ");
+                        if let Some(host) = host.as_deref_mut() {
+                            host.piece(range, flat_start..tf.text_len(), false);
+                        }
                     }
                 }
                 MdEvent::HardBreak => {
@@ -640,7 +854,11 @@ impl Markdown {
                     } else if self.in_code_block {
                         self.code_block_string.push('\n');
                     } else {
+                        let flat_start = tf.text_len();
                         tf.new_line_collapsed(cx);
+                        if let Some(host) = host.as_deref_mut() {
+                            host.piece(range, flat_start..tf.text_len(), false);
+                        }
                     }
                 }
                 MdEvent::Rule => {
@@ -651,8 +869,78 @@ impl Markdown {
                     tf.sep(cx);
                     tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                 }
-                MdEvent::TaskListMarker(_) => {
-                    // TODO: Implement task list markers
+                MdEvent::TaskListMarker(checked) => {
+                    if host.is_some() {
+                        // A ballot box the flow's fonts all have: the marker
+                        // as written, in the code face.
+                        let flat_start = tf.text_len();
+                        tf.fixed.push();
+                        tf.font_colors.push(muted(tf.font_color));
+                        tf.draw_text(cx, if checked { "[x] " } else { "[ ] " });
+                        tf.font_colors.pop();
+                        tf.fixed.pop();
+                        if let Some(host) = host.as_deref_mut() {
+                            host.piece(range, flat_start..tf.text_len(), false);
+                        }
+                    }
+                }
+                MdEvent::FootnoteReference(label) => {
+                    if let Some(host) = host.as_deref_mut() {
+                        let number = host
+                            .footnote_number
+                            .and_then(|number| number(&label))
+                            .map(|number| number.to_string())
+                            .unwrap_or_else(|| label.to_string());
+                        let flat_start = tf.text_len();
+                        tf.push_size_rel_scale(0.7);
+                        tf.y_shift_scales.push(-0.2);
+                        tf.font_colors.push(self.link_color);
+                        tf.draw_text(cx, &number);
+                        tf.font_colors.pop();
+                        tf.y_shift_scales.pop();
+                        tf.font_sizes.pop();
+                        host.piece(range, flat_start..tf.text_len(), false);
+                    }
+                }
+                MdEvent::Start(Tag::FootnoteDefinition(label)) if hosted => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                    let number = host
+                        .as_deref()
+                        .and_then(|host| host.footnote_number)
+                        .and_then(|number| number(&label))
+                        .map(|number| number.to_string())
+                        .unwrap_or_else(|| label.to_string());
+                    tf.push_size_rel_scale(0.7);
+                    tf.y_shift_scales.push(-0.2);
+                    tf.font_colors.push(muted(tf.font_color));
+                    tf.draw_text(cx, &format!("{number} "));
+                    tf.font_colors.pop();
+                    tf.y_shift_scales.pop();
+                    tf.font_sizes.pop();
+                }
+                MdEvent::Start(Tag::HtmlBlock) if hosted => {
+                    if !is_first_block {
+                        tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                    }
+                    is_first_block = false;
+                }
+                // Source the renderer has no drawing for shows as itself, muted.
+                MdEvent::Html(text) if hosted => {
+                    tf.font_colors.push(muted(tf.font_color));
+                    let line = text.trim_end_matches('\n');
+                    draw_mapped(cx, tf, &mut host, source, line, range.start..range.start + line.len());
+                    tf.font_colors.pop();
+                    if line.len() < text.len() {
+                        let flat_start = tf.text_len();
+                        tf.new_line_collapsed(cx);
+                        if let Some(host) = host.as_deref_mut() {
+                            let at = range.start + line.len();
+                            host.piece(at..at + 1, flat_start..tf.text_len(), true);
+                        }
+                    }
                 }
                 MdEvent::Start(Tag::Table(alignments)) => {
                     if !is_first_block {
@@ -704,7 +992,7 @@ impl Markdown {
                 MdEvent::InlineHtml(text) => {
                     // Support a handful of inline HTML tags that have no
                     // CommonMark equivalent. Anything not matched is ignored,
-                    // matching the pre-existing behavior.
+                    // matching the pre-existing behavior; a host sees it.
                     match text.trim().to_ascii_lowercase().as_str() {
                         "<sub>" => {
                             tf.push_size_rel_scale(0.7);
@@ -722,10 +1010,80 @@ impl Markdown {
                             tf.font_sizes.pop();
                             tf.y_shift_scales.pop();
                         }
+                        _ if hosted => {
+                            tf.font_colors.push(muted(tf.font_color));
+                            draw_mapped(cx, tf, &mut host, source, &text, range);
+                            tf.font_colors.pop();
+                        }
                         _ => {}
                     }
                 }
                 _ => {} // Unimplemented or unnecessary events
+            }
+            // Counted after the block's own marker (a list bullet) is drawn.
+            if opens_block {
+                block_text_starts.push(tf.text_len());
+            }
+        }
+        // Caret places in no empty block: a blank line after the last block.
+        if let Some(host) = host.as_deref_mut() {
+            if host.anchors.iter().any(|(_, rect)| rect.is_none()) {
+                if !is_first_block {
+                    tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
+                }
+                let place = tf.draw_caret_anchor(cx);
+                for (_, rect) in &mut host.anchors {
+                    rect.get_or_insert(place);
+                }
+            }
+        }
+    }
+}
+
+/// Draws a code block's text runs in the colours `highlight` gives them,
+/// recording what was drawn. A run never ends in a line break (the flow trims
+/// those): a colour change right after one moves before it.
+fn draw_highlighted_code(
+    cx: &mut Cx2d,
+    tf: &mut TextFlow,
+    host: &mut Option<&mut MarkdownHost<'_>>,
+    source: &str,
+    highlight: &dyn CodeHighlight,
+    language: &str,
+    runs: &[(Range<usize>, String)],
+) {
+    let mut spans = Vec::new();
+    for (src, text) in runs {
+        spans.clear();
+        highlight.highlight(language, text, &mut spans);
+        // Cut points: every span edge, moved off the end of a line break.
+        let mut cuts: Vec<usize> = spans
+            .iter()
+            .flat_map(|(range, _)| [range.start, range.end])
+            .filter(|&at| at > 0 && at < text.len())
+            .map(|at| if text.as_bytes()[at - 1] == b'\n' { at - 1 } else { at })
+            .filter(|&at| at > 0)
+            .collect();
+        cuts.push(0);
+        cuts.push(text.len());
+        cuts.sort_unstable();
+        cuts.dedup();
+        for pair in cuts.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            // A run's colour is its first character's, a leading line break aside.
+            let probe = if text[from..to].starts_with('\n') { from + 1 } else { from };
+            let color = spans
+                .iter()
+                .find(|(range, _)| range.start <= probe && probe < range.end)
+                .map(|(_, color)| *color);
+            if let Some(color) = color {
+                tf.font_colors.push(color);
+            }
+            let run = &text[from..to];
+            let run = if to == text.len() { run.trim_end_matches('\n') } else { run };
+            draw_mapped(cx, tf, host, source, run, src.start + from..src.start + to);
+            if color.is_some() {
+                tf.font_colors.pop();
             }
         }
     }
