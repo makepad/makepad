@@ -1164,7 +1164,7 @@ pub struct AiChatPanel {
     /// their small copy then.
     #[rust]
     pics_filled: HashMap<WidgetUid, (usize, usize)>,
-    /// Result PNGs read once per path, including missing files.
+    /// Result pictures read once per path, including missing files.
     #[rust]
     result_pics: HashMap<String, Option<Arc<[u8]>>>,
     /// The picture each recycled task row last loaded (input/result keys are distinct).
@@ -2020,7 +2020,7 @@ impl AiChatPanel {
         image.set_visible(cx, picture.is_some());
         if let Some((prefix, key, png)) = picture {
             if self.task_pics_filled.get(&uid).and_then(|last| last.strip_prefix(prefix)) != Some(key) {
-                let _ = image.load_png_from_data(cx, png);
+                let _ = image.load_image_from_data(cx, png);
                 self.task_pics_filled.insert(uid, format!("{prefix}{key}"));
             }
         } else {

@@ -51,7 +51,7 @@ pub struct ToolDefinition {
 
 /// A picture for the model to look at with its next input: a reference
 /// image the person dropped into the chat, or a capture a tool made.
-/// Always PNG, normalised by whoever attaches it (at most 1024 px a side).
+/// PNG or JPEG, normalised by whoever attaches it (at most 1024 px a side).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelImage {
     /// What it is, in a few words (`reference: keys.webp`, `screenshot`).

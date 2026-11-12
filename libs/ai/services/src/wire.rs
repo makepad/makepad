@@ -60,7 +60,7 @@ pub const MAX_FILTER_BYTES: usize = 1024;
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 /// Bytes of a result's model-facing text; the router truncates past this.
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
-/// Combined base64 bytes of a result's PNG images, separate from its text.
+/// Combined base64 bytes of a result's PNG or JPEG images, separate from its text.
 pub const MAX_RESULT_IMAGE_BYTES: usize = 900 * 1024;
 /// Bytes of a result's structured data (JSON).
 pub const MAX_DATA_BYTES: usize = 16 * 1024;
@@ -607,7 +607,7 @@ pub struct ToolResult {
     pub data: String,
     /// One dim transcript line: "planned Dam → Utrecht, 41 min".
     pub note: String,
-    /// PNG images encoded as base64. The app sizes them before replying;
+    /// PNG or JPEG images encoded as base64. The app sizes them before replying;
     /// their combined size is bounded at [`MAX_RESULT_IMAGE_BYTES`].
     pub images: Vec<String>,
     /// Show the service's live preview under this call's card.

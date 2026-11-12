@@ -21,19 +21,66 @@ use crate::chat_wire::{ChatMessage, ProviderAvailability, ProviderKind, ServingF
 #[derive(Clone, Debug)]
 pub struct ToolImage {
     pub label: String,
+    /// PNG or JPEG bytes. The historical field name is kept for callers.
     pub png: std::sync::Arc<[u8]>,
 }
 /// The most pixels a tool picture may have a side: a tool fits its pictures within it (and
 /// within its byte budget) before they come here.
 pub const MAX_TOOL_IMAGE_SIDE: u32 = 1024;
 
+/// Sniff the encoded picture without decoding its pixels.
+pub fn tool_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
+}
+
+fn tool_image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    match tool_image_media_type(bytes)? {
+        "image/png" => Some((
+            u32::from_be_bytes(bytes.get(16..20)?.try_into().ok()?),
+            u32::from_be_bytes(bytes.get(20..24)?.try_into().ok()?),
+        )),
+        "image/jpeg" => {
+            let mut offset = 2;
+            loop {
+                if *bytes.get(offset)? != 0xff { return None; }
+                while *bytes.get(offset)? == 0xff { offset += 1; }
+                let marker = *bytes.get(offset)?;
+                offset += 1;
+                match marker {
+                    0x00 | 0xd8 | 0xd9 | 0xda => return None,
+                    0x01 | 0xd0..=0xd7 => continue, // standalone markers
+                    _ => {}
+                }
+                let len = u16::from_be_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?) as usize;
+                if len < 2 { return None; }
+                let segment = bytes.get(offset..offset.checked_add(len)?)?;
+                if matches!(marker, 0xc0 | 0xc1 | 0xc2) {
+                    let height = u16::from_be_bytes(segment.get(3..5)?.try_into().ok()?);
+                    let width = u16::from_be_bytes(segment.get(5..7)?.try_into().ok()?);
+                    let components = *segment.get(7)? as usize;
+                    if components == 0 || len != 8 + 3 * components { return None; }
+                    return Some((width as u32, height as u32));
+                }
+                offset += len;
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn validate_tool_images(images:&[ToolImage])->Result<(),String>{
     if images.len()>4{return Err("too many tool images".into());}
     let mut bytes=0usize;
     for image in images {
         bytes=bytes.saturating_add(image.png.len());
-        if image.label.len()>128 || image.png.len()<24 || !image.png.starts_with(b"\x89PNG\r\n\x1a\n") {return Err("invalid tool image".into());}
-        let w=u32::from_be_bytes(image.png[16..20].try_into().unwrap());let h=u32::from_be_bytes(image.png[20..24].try_into().unwrap());
+        if image.label.len()>128 {return Err("invalid tool image".into());}
+        let (w,h) = tool_image_dimensions(&image.png).ok_or("invalid tool image: expected PNG or JPEG dimensions")?;
         if w==0 || h==0 || w>MAX_TOOL_IMAGE_SIDE || h>MAX_TOOL_IMAGE_SIDE {return Err(format!("tool image dimensions exceed {MAX_TOOL_IMAGE_SIDE}"));}
     }
     if bytes>8*1024*1024{return Err("tool image byte budget exceeded".into());}Ok(())
@@ -375,6 +422,42 @@ mod threaded_tests {
     use crate::chat_wire::ProviderAvailability;
     use std::sync::mpsc::{channel, Receiver, Sender};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn tool_pictures_accept_png_and_jpeg_and_check_dimensions() {
+        let encode = |width: u16, height: u16, progressive| {
+            let mut bytes = Vec::new();
+            let mut encoder = jpeg_encoder::Encoder::new(&mut bytes, 85);
+            encoder.set_progressive(progressive);
+            encoder.encode(&[20, 80, 140].repeat(width as usize * height as usize), width, height, jpeg_encoder::ColorType::Rgb).unwrap();
+            bytes
+        };
+        let png = crate::testpattern::encode_png_rgb8(&[20, 80, 140], 1, 1).unwrap();
+        assert_eq!(tool_image_media_type(&png), Some("image/png"), "PNG signature is recognised");
+        let png = ToolImage { label: "png".into(), png: png.into() };
+        assert!(validate_tool_images(&[png]).is_ok(), "existing PNG delivery remains valid");
+        for progressive in [false, true] {
+            let jpeg = encode(7, 3, progressive);
+            assert_eq!(tool_image_media_type(&jpeg), Some("image/jpeg"), "JPEG signature is recognised");
+            assert_eq!(tool_image_dimensions(&jpeg), Some((7, 3)), "SOF width and height are read in the right order");
+            let image = ToolImage { label: "jpeg".into(), png: jpeg.into() };
+            assert!(validate_tool_images(std::slice::from_ref(&image)).is_ok(), "baseline and progressive JPEG are accepted");
+            let message = super::super::claude::image_message("inspect", &[image]);
+            assert!(message.contains("image/jpeg"), "Claude labels the attached JPEG correctly");
+        }
+        let mut extended = encode(7, 3, false);
+        let sof = extended.windows(2).position(|p| p == [0xff, 0xc0]).unwrap();
+        extended[sof + 1] = 0xc1;
+        assert_eq!(tool_image_dimensions(&extended), Some((7, 3)), "extended sequential SOF1 is supported");
+        assert!(tool_image_dimensions(&extended[..sof + 5]).is_none(), "truncated SOF is rejected without a panic");
+        assert!(tool_image_dimensions(&[0xff, 0xd8, 0xff, 0xe0, 0, 0]).is_none(), "zero-length marker cannot loop");
+        for (width, height) in [(1025, 1), (1, 1025)] {
+            let image = ToolImage { label: "oversize".into(), png: encode(width, height, false).into() };
+            let error = validate_tool_images(&[image]).unwrap_err();
+            assert!(error.contains("dimensions"), "either side over the limit is rejected");
+        }
+        assert_eq!(tool_image_media_type(b"not a picture"), None, "unknown formats are rejected");
+    }
 
     /// A provider whose begin_turn BLOCKS like the fleet's flaky-LAN
     /// backoff, scripted through channels.

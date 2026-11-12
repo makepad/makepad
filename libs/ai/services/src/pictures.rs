@@ -61,6 +61,29 @@ pub fn encode_png(picture: &RgbaPicture) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Decode a tool picture as RGBA8, sniffing PNG or JPEG from its bytes.
+pub fn decode_picture(bytes: &[u8]) -> Result<RgbaPicture, String> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return decode_png(bytes);
+    }
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return Err("the picture is neither PNG nor JPEG".into());
+    }
+    let options = DecoderOptions::default()
+        .set_max_width(1 << 14)
+        .set_max_height(1 << 14)
+        .jpeg_set_out_colorspace(ColorSpace::RGB);
+    let mut decoder = makepad_zune_jpeg::JpegDecoder::new_with_options(ZCursor::new(bytes), options);
+    decoder.decode_headers().map_err(|e| format!("the JPEG does not read: {e:?}"))?;
+    let (width, height) = decoder.dimensions().ok_or("the JPEG has no size")?;
+    let rgb = decoder.decode().map_err(|e| format!("the JPEG does not read: {e:?}"))?;
+    if rgb.len() != width * height * 3 {
+        return Err("the JPEG's pixel format is not RGB".into());
+    }
+    let rgba = rgb.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect();
+    Ok(RgbaPicture { width: width as u32, height: height as u32, rgba })
+}
+
 /// The pixels of a PNG (8 or 16 bits, grey or colour, with or without alpha).
 pub fn decode_png(bytes: &[u8]) -> Result<RgbaPicture, String> {
     let options = DecoderOptions::default()

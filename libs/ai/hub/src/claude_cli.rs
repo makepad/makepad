@@ -390,13 +390,8 @@ pub enum Block {
 fn picture_media_type(b64: &str) -> Result<&'static str, String> {
     let head = b64.trim().get(..12).ok_or("claude-cli: a picture is too short")?;
     let bytes = makepad_base64::base64_decode(head.as_bytes()).map_err(|_| "claude-cli: a picture is not base64".to_string())?;
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        Ok("image/png")
-    } else if bytes.starts_with(&[0xff, 0xd8]) {
-        Ok("image/jpeg")
-    } else {
-        Err("claude-cli takes pictures as PNG or JPEG, not clips".to_string())
-    }
+    crate::providers::provider::tool_image_media_type(&bytes)
+        .ok_or_else(|| "claude-cli takes pictures as PNG or JPEG, not clips".into())
 }
 
 /// The whole conversation as one user message (every turn is a fresh CLI

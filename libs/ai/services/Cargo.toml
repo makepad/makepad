@@ -41,8 +41,9 @@ localai = ["engine", "makepad-ai-hub/localai"]
 makepad-platform = { path = "../../../platform", optional = true }
 makepad-micro-serde = { path = "../../micro_serde" }
 makepad-base64 = { path = "../../base64" }
-# The picture budget's PNGs (pictures.rs).
+# Picture encoding and PNG/JPEG decoding (pictures.rs).
 makepad-zune-png = { path = "../../zune/zune-png" }
+makepad-zune-jpeg = { path = "../../zune/zune-jpeg" }
 # A chat picture's file is named by its SHA-256 (engine/pictures.rs).
 makepad-core-util = { path = "../../core_util" }
 makepad-strict-json = { path = "../../strict_json" }

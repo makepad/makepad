@@ -158,6 +158,7 @@ makepad-video = { package = "makepad-platform-video", path = "../../../platform/
 makepad-video-flow = { path = "../../video_flow", default-features = false }
 
 [dev-dependencies]
+jpeg-encoder = { path = "../../jpeg-encoder" }
 # Test-only: tests/service_e2e.rs drives the realtime websocket endpoint
 # through the in-repo plain-TCP websocket client.
 makepad-live-id = { path = "../../live_id" }

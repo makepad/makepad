@@ -13,7 +13,7 @@ use crate::providers::claude::build_prompt_only;
 use crate::providers::cli::{
     categorize_cli_error, cli_command, find_cli, toml_basic_string, turn_dir, CliTurn,
 };
-use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput, ToolImage, validate_tool_images};
+use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput, ToolImage, tool_image_media_type, validate_tool_images};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
 
@@ -174,7 +174,8 @@ impl ChatProvider for CodexCliChatProvider {
         args.pop(); // Image flags apply to exec or exec resume before stdin '-'.
         let with_images = !self.images.is_empty();
         for (index,image) in std::mem::take(&mut self.images).into_iter().enumerate(){
-            let path=cwd.join(format!("tool-image-{index}.png"));
+            let ext = match tool_image_media_type(&image.png) { Some("image/jpeg") => "jpg", _ => "png" };
+            let path=cwd.join(format!("tool-image-{index}.{ext}"));
             if let Err(error)=std::fs::write(&path,&image.png){let _=std::fs::remove_dir_all(&cwd);return Err(format!("tool image staging failed: {error}"));}
             args.push("--image".into());args.push(path.to_string_lossy().into_owned());
             prompt.push_str(&format!("\nAttached reference image {}: {}. Inspect the image before judging the model.\n",index+1,image.label));

@@ -384,7 +384,7 @@ pub struct FleetQwenChatProvider<T: FleetTransport> {
 }
 
 /// A picture riding on one history row: what it shows (from the tool or
-/// the person) and the PNG as base64.
+/// the person) and the PNG or JPEG as base64.
 #[derive(Clone, Debug, PartialEq)]
 struct RowPicture {
     label: String,

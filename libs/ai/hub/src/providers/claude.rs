@@ -29,7 +29,7 @@
 
 use crate::chat_wire::{ChatRole, ProviderAvailability, ProviderKind};
 use crate::providers::cli::{categorize_cli_error, cli_command, turn_dir, CliTurn};
-use crate::providers::provider::{validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
+use crate::providers::provider::{tool_image_media_type, validate_tool_images, ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_strict_json::{self as json, Value};
 use std::path::PathBuf;
 
@@ -253,7 +253,7 @@ pub fn build_args_with_mcp(model: &Option<String>, resume: &Option<String>, syst
 
 /// The stdin line for a turn that carries images: one stream-json user
 /// message (`--input-format stream-json`) with the prompt as a text block
-/// and each PNG as a base64 image block.
+/// and each PNG or JPEG as a base64 image block.
 pub fn image_message(prompt: &str, images: &[ToolImage]) -> String {
     let mut content = vec![json::obj(vec![("type", json::s("text")), ("text", json::s(prompt))])];
     for image in images {
@@ -261,7 +261,7 @@ pub fn image_message(prompt: &str, images: &[ToolImage]) -> String {
         content.push(json::obj(vec![("type", json::s("text")), ("text", json::s(format!("[image: {}]", image.label)))]));
         content.push(json::obj(vec![
             ("type", json::s("image")),
-            ("source", json::obj(vec![("type", json::s("base64")), ("media_type", json::s("image/png")), ("data", json::s(data))])),
+            ("source", json::obj(vec![("type", json::s("base64")), ("media_type", json::s(tool_image_media_type(&image.png).expect("validated tool image"))), ("data", json::s(data))])),
         ]));
     }
     let message = json::obj(vec![

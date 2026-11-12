@@ -187,7 +187,7 @@ impl LlmMemory {
     /// What the load cost beyond the arena (CUDA context, cuBLAS workspace,
     /// allocator slack), at most [`LOAD_OVERHEAD_MAX_MB`]: the free-memory
     /// difference around a load also counts whatever the desktop allocated
-    /// meanwhile (149: 2129 MB 'overhead' at one load, 34 at another).
+    /// meanwhile (on one Linux node: 2129 MB 'overhead' at one load, 34 at another).
     pub fn overhead_mb(&self) -> u64 {
         self.load_cost_mb.map_or(0, |c| c.saturating_sub(self.arena_mb())).min(LOAD_OVERHEAD_MAX_MB)
     }
@@ -497,7 +497,7 @@ mod tests {
         assert_eq!(p.steps[0], Step::Unload { model: "whisper".into(), frees_mb: 1700 });
         assert_eq!(p.steps[1], Step::Unload { model: "kokoro".into(), frees_mb: 400 });
         let Step::ShrinkContext { to, .. } = &p.steps[2] else { panic!("{p:?}") };
-        assert_eq!(*to, YIELD_FLOOR, "never under 8192 (149 went to 2048)");
+        assert_eq!(*to, YIELD_FLOOR, "never under 8192 (one node went to 2048)");
         assert!(!p.steps.iter().any(|s| matches!(s, Step::Unload { model, .. } if model == "flux")), "busy models stay");
         // a cut from 12288 for 307 MB stays at the floor, it does not go to 2048
         let mut small = qwen();

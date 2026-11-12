@@ -4,7 +4,7 @@
 # ModularPipeline from a local cache dir (rewriting it into a
 # diffusers-loadable view) and writes numpy + wav + meta.json for a short seeded clip.
 #
-# Usage (169):
+# Usage (a Windows node):
 #   C:\ai\music3venv\Scripts\python.exe music3_oracle_dump.py \
 #     --model-dir C:\ai\asset_node_cache\music\MiniMax-Music3 \
 #     --out-dir C:\ai\music3_oracle\pine_5s_seed7 \
