@@ -180,6 +180,13 @@ it used (this one and any build or bench node):
   code written in this repository, using std and the workspace's own crates
   only. Review a pull request from its own diff; one that adds an external
   dependency waits for the user's approval.
+- Every pull request gets a full review of its whole diff before anything
+  lands: take what fits, fix or rewrite the rest in our own commit; "merged as
+  is" is a written verdict after that review, never the default. Nothing a
+  pull request brings (tests, fixtures, build scripts, CI or helper scripts,
+  benches) runs before it is reviewed and ported into our own commit, and
+  proofs run that commit, never the pull request's head. A dependency it adds
+  is never built or run without the user's approval.
 - NEVER install, upgrade, bootstrap, or download and run external software
   without the user's prior explicit approval for that software and installation.
   This includes tools, applications, runtimes, SDKs, plugins, package-manager
