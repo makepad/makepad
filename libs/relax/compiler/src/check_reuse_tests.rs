@@ -404,54 +404,16 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
 
 const APP_CHILD: &str = "RELAX_CHECK_APP_CHILD";
 
-/// In a child (APP_CHILD names the workspace folder): `makepad check app_pkg` there (with
-/// RELAX_CHECK_APP_WORKSPACE, `makepad check --workspace app_pkg`), as the command line runs it: the
-/// checked crates load again, the crates below them come from the collected image.
+/// In a child (APP_CHILD names the workspace folder): `makepad check app_pkg` there, as the command
+/// line runs it: the checked crates load again, the crates below them come from the collected image.
 #[test]
 fn app_check_child() {
     let Some(dir) = std::env::var_os(APP_CHILD).map(std::path::PathBuf::from) else { return };
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     std::env::set_current_dir(&dir).unwrap();
     let sess = std::sync::Arc::new(crate::Session::default());
-    let mut args = vec!["--check".to_string()];
-    if std::env::var_os("RELAX_CHECK_APP_WORKSPACE").is_some() { args.push("--workspace".to_string()); }
-    args.push("app_pkg".to_string());
-    let code = crate::run::cmd_run(&sess, &args);
+    let code = crate::run::cmd_run(&sess, &["--check".to_string(), "app_pkg".to_string()]);
     eprintln!("app child exit {code}");
-}
-
-/// The check of `app_pkg` in `dir` in a child (app_check_child; `workspace`: --workspace), its cache
-/// in `dir`: (exit code, diagnostic lines, restored from the collected image, stderr).
-fn app_check(dir: &std::path::Path, workspace: bool) -> (Option<i32>, Vec<String>, bool, String) {
-    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
-        .env(APP_CHILD, dir).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("MAKEPAD_RUN_BOOT_TRACE", "1")
-        .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE").env_remove("RELAX_CHECK_APP_WORKSPACE");
-    if workspace { cmd.env("RELAX_CHECK_APP_WORKSPACE", "1"); }
-    let out = crate::test_child::output(&mut cmd);
-    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
-    let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
-    let diags: Vec<String> = stderr.lines().filter(|l| l.contains(": warning: ") || l.contains(": error") || l.contains(": E0")).map(str::to_string).collect();
-    let restored = stderr.lines().any(|l| l.starts_with("makepad-run collected: restored at"));
-    (code, diags, restored, stderr.into_owned())
-}
-
-/// A workspace `dep` + `app_pkg` (depending on it) in a new folder: `dep_src` and `app_src` its
-/// libraries, `features` the app's dependency features (", features = [..]").
-fn app_workspace(name: &str, dep_src: &str, app_src: &str, features: &str) -> std::path::PathBuf {
-    let dir = package(name, &[("Cargo.toml", "[workspace]\nmembers = [\"dep\", \"app\"]\nresolver = \"2\"\n")]);
-    std::fs::create_dir_all(dir.join("dep")).unwrap();
-    std::fs::create_dir_all(dir.join("app")).unwrap();
-    std::fs::write(dir.join("dep/Cargo.toml"), "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[features]\nextra = []\n").unwrap();
-    std::fs::write(dir.join("dep/lib.rs"), dep_src).unwrap();
-    std::fs::write(dir.join("app/Cargo.toml"), app_toml(features)).unwrap();
-    std::fs::write(dir.join("app/lib.rs"), app_src).unwrap();
-    dir
-}
-
-fn app_toml(features: &str) -> String {
-    format!("[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = {{ path = \"../dep\"{features} }}\n")
 }
 
 /// The collected image certifies each crate it holds by its fingerprint: an app check restores the
@@ -461,11 +423,32 @@ fn app_toml(features: &str) -> String {
 #[test]
 fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
+    let dir = package("appimage", &[("Cargo.toml", "[workspace]\nmembers = [\"dep\", \"app\"]\nresolver = \"2\"\n")]);
+    let write = |f: &str, src: &str| {
+        let path = dir.join(f);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, src).unwrap();
+    };
     let dep = |ty: &str| format!("pub fn value() -> {ty} {{ 7 }}\n#[cfg(feature = \"extra\")]\npub fn extra() -> u32 {{ 1 }}\n");
+    let app_toml = |features: &str| format!("[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = {{ path = \"../dep\"{features} }}\n");
     let app = |unused: &str, body: &str| format!("pub fn top() -> u32 {{ {body} }}\nfn {unused}() {{}}\n");
-    let dir = app_workspace("appimage", &dep("u32"), &app("unused_a", "dep::value() + 1"), "");
-    let write = |f: &str, src: &str| std::fs::write(dir.join(f), src).unwrap();
-    let check = || app_check(&dir, false);
+    write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[features]\nextra = []\n");
+    write("dep/lib.rs", &dep("u32"));
+    write("app/Cargo.toml", &app_toml(""));
+    write("app/lib.rs", &app("unused_a", "dep::value() + 1"));
+    // (exit code, diagnostic lines, restored from the collected image, stderr)
+    let check = || {
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(APP_CHILD, &dir).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("MAKEPAD_RUN_BOOT_TRACE", "1")
+            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
+        let diags: Vec<String> = stderr.lines().filter(|l| l.contains(": warning: ") || l.contains(": error") || l.contains(": E0")).map(str::to_string).collect();
+        let restored = stderr.lines().any(|l| l.starts_with("makepad-run collected: restored at"));
+        (code, diags, restored, stderr.into_owned())
+    };
     let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
     let cold = check();
     assert!(cold.0 == Some(0) && named(&cold.1, "unused_a") && !cold.2, "{}", cold.3);
@@ -493,25 +476,5 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     write("app/Cargo.toml", &app_toml(""));
     let r = check();
     assert!(r.0.is_some_and(|c| c != 0) && r.2 && named(&r.1, "extra"), "{}", r.3);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-/// A workspace check loads every crate it checks again -- their lints read the uses their
-/// resolution records (a dependency's import used in a body is no unused import) -- and restores
-/// the others (std's) from the collected image.
-#[test]
-fn a_workspace_check_restores_the_crates_it_does_not_check() {
-    if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
-    let dep = |text: &str| format!("use std::fmt::Write;\nuse std::collections::HashMap;\npub fn value(s: &mut String) -> u32 {{ s.write_str(\"{text}\").unwrap(); 7 }}\n");
-    let app = |unused: &str| format!("pub fn top() -> u32 {{ dep::value(&mut String::new()) + 1 }}\nfn {unused}() {{}}\n");
-    let dir = app_workspace("wsimage", &dep("x"), &app("unused_a"), "");
-    let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
-    let cold = app_check(&dir, true);
-    assert!(cold.0 == Some(0) && !cold.2 && named(&cold.1, "HashMap") && named(&cold.1, "unused_a") && !named(&cold.1, "Write"), "{}", cold.3);
-    // both crates edited: they load again, std is restored from the image the cold check recorded
-    std::fs::write(dir.join("dep/lib.rs"), dep("y")).unwrap();
-    std::fs::write(dir.join("app/lib.rs"), app("unused_b")).unwrap();
-    let r = app_check(&dir, true);
-    assert!(r.0 == Some(0) && r.2 && named(&r.1, "HashMap") && named(&r.1, "unused_b") && !named(&r.1, "unused_a") && !named(&r.1, "Write"), "{}", r.3);
     std::fs::remove_dir_all(&dir).unwrap();
 }

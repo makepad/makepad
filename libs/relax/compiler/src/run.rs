@@ -1382,11 +1382,11 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         pre.push(crate::preload::PreCrate { name: c.name.clone(), root: c.src_path.clone(), edition: c.edition, cfg: cfgs[ci].clone(), deps,  proc_macro: c.proc_macro, image_deps, image_dep_names });
     }
     let front_images = crate::cache::FrontImages::open(options);
-    // `makepad check` (not a watch or warm session or a selftest): the crates it checks (an app's,
-    // or with --workspace the workspace's) load again, every crate before them comes from the
-    // collected image as a run's does -- their resolution and expansion record what the check's
-    // lints read (import and macro uses). The others parse every crate.
-    let check_restore = check && !watch && !root_only && !selftest && session.is_none();
+    // `makepad check` of an app (not a watch or warm session, a selftest or a workspace check):
+    // the crates it checks load again, every crate before them comes from the collected image
+    // as a run's does -- their resolution and expansion record what the check's lints read
+    // (import and macro uses). The others parse every crate.
+    let check_restore = check && !watch && !root_only && !selftest && !workspace_check && session.is_none();
     // `makepad test`: the crate under test loads again too, for the same uses. In a graph of
     // several test targets that is each of them, not only the graph's root: every process's
     // subject is one of them, and the one image they share keeps them last. A target restored
@@ -1396,17 +1396,10 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
     if check_restore || test_lints {
         let mut roots: Vec<String> = vec![crate::vfs::normalize_path(&g.crates[subject_ci].src_path)];
         if test_lints { roots.extend(g.bins.iter().map(|&ci| crate::vfs::normalize_path(&g.crates[ci].src_path))); }
-        if check_restore && workspace_check {
-            // every crate check.rs workspace_crates checks: std's, the registry's and proc-macro
-            // crates come from the image
-            let covers = crate::check::workspace_scope();
-            roots.extend(pre.iter().filter(|c| covers(&c.root, &c.name, c.proc_macro)).map(|c| crate::vfs::normalize_path(&c.root)));
-        } else if check_restore {
+        if check_restore {
             roots.extend(crate::reload::gandalf_app_roots(&units, &crate::unitgraph::manifest_dir_of(&g.crates[g.root].src_path)));
             let own_dir = &g.pkg[g.root].0;
             roots.extend((0..g.crates.len()).filter(|&c| g.pkg[c].0 == *own_dir).map(|c| crate::vfs::normalize_path(&g.crates[c].src_path)));
-        }
-        if check_restore {
             // These crates' lints need fresh import and macro uses too.
             roots.extend(also_graph.iter().map(|&c| crate::vfs::normalize_path(&g.crates[c].src_path)));
         }

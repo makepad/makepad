@@ -61,23 +61,18 @@ pub fn own_errors(prog: &crate::program::Program, root: u32, errs: &[String], ph
 /// is in the workspace, except std (MAKEPAD_RUN_STD may live inside it) and proc-macro crates (their
 /// code runs in the macro host, never in the program).
 pub fn workspace_crates(prog: &crate::program::Program, root: u32) -> Vec<u32> {
-    let covers = workspace_scope();
-    (0..prog.crates.len() as u32).filter(|&k| {
-        let c = &prog.crates[k as usize];
-        k == root || covers(c.root_path(), prog.syms.str(c.name), c.proc_macro)
-    }).collect()
-}
-
-/// workspace_crates's rule for a crate other than the root, by its root file, name and kind (the
-/// load of a workspace check takes it before there is a program: run.rs reloads these crates).
-pub fn workspace_scope() -> impl Fn(&str, &str, bool) -> bool {
     use crate::vfs::canonical as canon;
     let ws = format!("{}/", canon(&crate::run::workspace_dir()).trim_end_matches('/'));
     let std_dir = format!("{}/", canon(&crate::std_dir()).trim_end_matches('/'));
-    move |root, name, proc_macro| {
-        let path = canon(root);
-        path.starts_with(&ws) && !path.starts_with(&std_dir) && !proc_macro && !matches!(name, "core" | "alloc" | "std" | "proc_macro")
+    let mut out = Vec::new();
+    for (k, c) in prog.crates.iter().enumerate() {
+        let path = canon(c.root_path());
+        let inside = path.starts_with(&ws) && !path.starts_with(&std_dir);
+        if k as u32 == root || (inside && !c.proc_macro && !matches!(prog.syms.str(c.name), "core" | "alloc" | "std" | "proc_macro")) {
+            out.push(k as u32);
+        }
     }
+    out
 }
 
 /// The crates `makepad check` checks: the application's own -- the root and the crates of the
