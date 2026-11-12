@@ -545,6 +545,10 @@ impl ReorderList {
             }
             match event.hits(cx, handle.area()) {
                 Hit::FingerDown(e) if e.is_primary_hit() => {
+                    // A drag from the gripper carries the row, so no
+                    // scroller around the list takes it over (a page takes
+                    // a press over from a widget that claims no drag).
+                    cx.claim_finger_drag(e.digit_id);
                     // The row's own rect, not the gripper's: what is
                     // carried is the whole row, and it is carried by the
                     // point of it the press took hold of.

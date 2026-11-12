@@ -4489,6 +4489,10 @@ impl Widget for PortalList {
                     if self.selectable && fe.is_primary_hit() && !on_interactive && !held_elsewhere {
                         let hit = self.hit_test_selection(cx, fe.abs);
                         if let Some((item_id, char_idx)) = hit {
+                            // A mouse drag selects, so no scroller around us takes it over. A touch drag still scrolls.
+                            if !fe.device.is_touch() {
+                                cx.claim_finger_drag(fe.digit_id);
+                            }
                             cx.set_key_focus_from_user(self.area);
                             if fe.device.is_touch() {
                                 cx.hide_clipboard_actions();
