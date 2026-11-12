@@ -9,6 +9,8 @@ use crate::csharp_lex::{lex_line as csharp_lex_line, CSharpState, CSHARP_LEXER_V
 use crate::css_lex::{lex_line as css_lex_line, CssState, CSS_LEXER_VERSION};
 use crate::dart_lex::{lex_line as dart_lex_line, DartState, DART_LEXER_VERSION};
 use crate::detect::{detect_path, is_cpp_family, is_script_family};
+use crate::elixir_lex::{lex_line as elixir_lex_line, ElixirState, ELIXIR_LEXER_VERSION};
+use crate::erlang_lex::{lex_line as erlang_lex_line, ErlangState, ERLANG_LEXER_VERSION};
 use crate::fsharp_lex::{lex_line as fsharp_lex_line, FSharpState, FSHARP_LEXER_VERSION};
 use crate::go_lex::{lex_line as go_lex_line, GoState, GO_LEXER_VERSION};
 use crate::haskell_lex::{lex_line as haskell_lex_line, HaskellState, HASKELL_LEXER_VERSION};
@@ -68,6 +70,8 @@ pub enum LexContinuation {
     FSharp(FSharpState),
     Zig(ZigState),
     Haskell(HaskellState),
+    Elixir(ElixirState),
+    Erlang(ErlangState),
 }
 
 pub trait LexicalProvider: Send + Sync {
@@ -108,6 +112,8 @@ pub struct RubyLexicalProvider;
 pub struct FSharpLexicalProvider;
 pub struct ZigLexicalProvider;
 pub struct HaskellLexicalProvider;
+pub struct ElixirLexicalProvider;
+pub struct ErlangLexicalProvider;
 /// XML / SVG share the HTML tokeniser with a markup dialect in continuation state.
 pub struct MarkupLexicalProvider {
     pub language: LanguageId,
@@ -640,6 +646,56 @@ impl LexicalProvider for HaskellLexicalProvider {
     }
 }
 
+impl LexicalProvider for ElixirLexicalProvider {
+    fn language(&self) -> LanguageId {
+        LanguageId::Elixir
+    }
+    fn lexer_version(&self) -> u32 {
+        ELIXIR_LEXER_VERSION
+    }
+    fn initial(&self) -> LexContinuation {
+        LexContinuation::Elixir(ElixirState::default())
+    }
+    fn lex_line(&self, line: &str, state: &mut LexContinuation) -> Vec<TokenSpan> {
+        let incoming = match state {
+            LexContinuation::Elixir(s) => s.clone(),
+            _ => ElixirState::default(),
+        };
+        let (next, roles) = elixir_lex_line(line, incoming);
+        *state = LexContinuation::Elixir(next);
+        roles_to_spans(roles)
+    }
+}
+
+impl LexicalProvider for ErlangLexicalProvider {
+    fn language(&self) -> LanguageId {
+        LanguageId::Erlang
+    }
+    fn lexer_version(&self) -> u32 {
+        ERLANG_LEXER_VERSION
+    }
+    fn initial(&self) -> LexContinuation {
+        LexContinuation::Erlang(ErlangState::default())
+    }
+    /// An escript's first line is its `#!` line.
+    fn initial_for_dialect(&self, dialect: Dialect) -> LexContinuation {
+        if dialect.name == "escript" {
+            LexContinuation::Erlang(ErlangState::escript())
+        } else {
+            LexContinuation::Erlang(ErlangState::default())
+        }
+    }
+    fn lex_line(&self, line: &str, state: &mut LexContinuation) -> Vec<TokenSpan> {
+        let incoming = match state {
+            LexContinuation::Erlang(s) => s.clone(),
+            _ => ErlangState::default(),
+        };
+        let (next, roles) = erlang_lex_line(line, incoming);
+        *state = LexContinuation::Erlang(next);
+        roles_to_spans(roles)
+    }
+}
+
 impl LexicalProvider for MarkupLexicalProvider {
     fn language(&self) -> LanguageId {
         self.language
@@ -704,6 +760,8 @@ static RUBY: RubyLexicalProvider = RubyLexicalProvider;
 static FSHARP: FSharpLexicalProvider = FSharpLexicalProvider;
 static ZIG: ZigLexicalProvider = ZigLexicalProvider;
 static HASKELL: HaskellLexicalProvider = HaskellLexicalProvider;
+static ELIXIR: ElixirLexicalProvider = ElixirLexicalProvider;
+static ERLANG: ErlangLexicalProvider = ErlangLexicalProvider;
 static XML: MarkupLexicalProvider = MarkupLexicalProvider {
     language: LanguageId::Xml,
     dialect: MarkupDialect::Xml,
@@ -767,6 +825,10 @@ pub fn lexical_provider(language: LanguageId) -> &'static dyn LexicalProvider {
         &ZIG
     } else if language == LanguageId::Haskell {
         &HASKELL
+    } else if language == LanguageId::Elixir {
+        &ELIXIR
+    } else if language == LanguageId::Erlang {
+        &ERLANG
     } else {
         &PLAIN
     }
@@ -821,6 +883,10 @@ pub fn lexer_schema(language: LanguageId) -> u32 {
         ZIG_LEXER_VERSION
     } else if language == LanguageId::Haskell {
         HASKELL_LEXER_VERSION
+    } else if language == LanguageId::Elixir {
+        ELIXIR_LEXER_VERSION
+    } else if language == LanguageId::Erlang {
+        ERLANG_LEXER_VERSION
     } else if language == LanguageId::Rust {
         0
     } else {

@@ -13,7 +13,7 @@ pub fn inventory_extensions() -> &'static [&'static str] {
         "pkb", "json", "jsonl", "geojson", "jsonc", "json5", "sh", "ksh", "mksh", "bash", "bats",
         "zsh", "go", "php", "phtml", "kt", "kts", "dart", "swift", "rb", "rake", "gemspec", "ru",
         "fs", "fsi", "fsx", "zig", "zon", "hs", "lhs", "uasset", "umap", "uproject", "uplugin",
-        "ini",
+        "ini", "ex", "exs", "erl", "hrl", "escript",
     ]
 }
 
@@ -50,6 +50,7 @@ pub fn inventory_filenames() -> &'static [&'static str] {
         "Fastfile",
         "go.mod",
         "pubspec.yaml",
+        "rebar.config",
     ]
 }
 
@@ -88,6 +89,15 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
     }
     if let Some(detected) = detect_basename(path) {
         return detected;
+    }
+    // An OTP application resource template (`my_app.app.src`): Erlang terms.
+    if filename_ends_ignore(path, ".app.src") {
+        return Detection {
+            language: LanguageId::Erlang,
+            dialect: dialect(LanguageId::Erlang, "terms"),
+            source: DetectionSource::Extension,
+            note: "otp application resource",
+        };
     }
 
     if eq_ignore(ext, "rs") {
@@ -568,6 +578,46 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
             note: "ini configuration",
         };
     }
+    if eq_ignore(ext, "ex") {
+        return Detection {
+            language: LanguageId::Elixir,
+            dialect: Dialect::default_for(LanguageId::Elixir),
+            source: DetectionSource::Extension,
+            note: "elixir source",
+        };
+    }
+    if eq_ignore(ext, "exs") {
+        return Detection {
+            language: LanguageId::Elixir,
+            dialect: dialect(LanguageId::Elixir, "script"),
+            source: DetectionSource::Extension,
+            note: "elixir script",
+        };
+    }
+    if eq_ignore(ext, "erl") {
+        return Detection {
+            language: LanguageId::Erlang,
+            dialect: Dialect::default_for(LanguageId::Erlang),
+            source: DetectionSource::Extension,
+            note: "erlang source",
+        };
+    }
+    if eq_ignore(ext, "hrl") {
+        return Detection {
+            language: LanguageId::Erlang,
+            dialect: dialect(LanguageId::Erlang, "header"),
+            source: DetectionSource::Extension,
+            note: "erlang header",
+        };
+    }
+    if eq_ignore(ext, "escript") {
+        return Detection {
+            language: LanguageId::Erlang,
+            dialect: dialect(LanguageId::Erlang, "escript"),
+            source: DetectionSource::Extension,
+            note: "erlang escript",
+        };
+    }
     if eq_ignore(ext, "lhs") {
         return Detection {
             language: LanguageId::Haskell,
@@ -582,6 +632,49 @@ pub fn detect_path(path: &str, bytes: Option<&[u8]>) -> Detection {
         }
     }
     Detection::unknown()
+}
+
+/// Detects the language a label names, as a Markdown fence's info string
+/// does: an extension (`rs`, `py`, `sh`), a language name (`rust`, `python`,
+/// `splash`) or a common alias (`bash`, `javascript`, `c++`). Text after the
+/// first word or a comma (`rust,ignore`) is not part of the name. None for
+/// an empty or unknown label: nothing is guessed from content.
+pub fn detect_label(label: &str) -> Option<Detection> {
+    let name = label.trim().trim_start_matches(['.', '{']).split([',', ' ', '\t', '}']).next()?;
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    let ext = match lower.as_str() {
+        "rust" => "rs",
+        "python" | "python3" | "py3" => "py",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "shell" | "console" | "shellsession" => "sh",
+        "csharp" | "c#" => "cs",
+        "objc" | "objective-c" | "objectivec" => "m",
+        "objcpp" | "objective-c++" => "mm",
+        "kotlin" => "kt",
+        "ruby" => "rb",
+        "fsharp" | "f#" => "fs",
+        "haskell" => "hs",
+        "golang" => "go",
+        "elixir" | "iex" => "ex",
+        "erlang" => "erl",
+        other => other,
+    };
+    let detection = detect_path(&format!("label.{ext}"), None);
+    if detection.language != LanguageId::Unknown {
+        return Some(detection);
+    }
+    // A language's own name that is no extension (`markdown` is one).
+    let language = LanguageId::from_str(&lower).filter(|language| *language != LanguageId::Unknown)?;
+    Some(Detection {
+        language,
+        dialect: Dialect::default_for(language),
+        source: DetectionSource::Extension,
+        note: "named by a label",
+    })
 }
 
 fn eq_ignore(a: &str, b: &str) -> bool {
@@ -675,6 +768,12 @@ fn detect_basename(path: &str) -> Option<Detection> {
             source: DetectionSource::Extension,
             note: "dart pubspec",
         }),
+        "rebar.config" => Some(Detection {
+            language: LanguageId::Erlang,
+            dialect: dialect(LanguageId::Erlang, "terms"),
+            source: DetectionSource::Extension,
+            note: "rebar configuration",
+        }),
         _ => None,
     }
 }
@@ -705,33 +804,49 @@ fn detect_content(bytes: &[u8]) -> Option<Detection> {
         if let Some(detected) = detect_shell_shebang(t) {
             return Some(detected);
         }
+        let interpreter = shebang_interpreter(t);
+        if interpreter == Some("elixir") {
+            return Some(Detection {
+                language: LanguageId::Elixir,
+                dialect: dialect(LanguageId::Elixir, "script"),
+                source: DetectionSource::Content,
+                note: "elixir shebang",
+            });
+        }
+        if interpreter == Some("escript") {
+            return Some(Detection {
+                language: LanguageId::Erlang,
+                dialect: dialect(LanguageId::Erlang, "escript"),
+                source: DetectionSource::Content,
+                note: "escript shebang",
+            });
+        }
     }
     None
 }
 
-fn detect_shell_shebang(text: &str) -> Option<Detection> {
-    let line = text.lines().next()?;
-    let rest = line.strip_prefix("#!")?.trim_start();
-    if rest.is_empty() {
-        return None;
-    }
+/// The program a `#!` line runs, through `env` (and its options) when it
+/// names one.
+fn shebang_interpreter(text: &str) -> Option<&str> {
+    let rest = text.lines().next()?.strip_prefix("#!")?.trim_start();
     let mut parts = rest.split_whitespace();
-    let first = parts.next()?;
-    let interpreter = basename_of(first);
-    let name = if interpreter == "env" {
-        loop {
-            let arg = parts.next()?;
-            if arg == "--" {
-                break parts.next().map(basename_of)?;
-            }
-            if arg.starts_with('-') {
-                continue;
-            }
-            break basename_of(arg);
+    let interpreter = basename_of(parts.next()?);
+    if interpreter != "env" {
+        return Some(interpreter);
+    }
+    loop {
+        let arg = parts.next()?;
+        if arg == "--" {
+            return parts.next().map(basename_of);
         }
-    } else {
-        interpreter
-    };
+        if !arg.starts_with('-') {
+            return Some(basename_of(arg));
+        }
+    }
+}
+
+fn detect_shell_shebang(text: &str) -> Option<Detection> {
+    let name = shebang_interpreter(text)?;
     let (dialect_name, note_ok) = match name {
         "sh" | "dash" | "ash" | "ksh" | "mksh" => ("", true),
         "bash" => ("bash", true),
@@ -791,6 +906,8 @@ pub fn has_compiled_frontend(language: LanguageId) -> bool {
             | LanguageId::Zig
             | LanguageId::Haskell
             | LanguageId::Unreal
+            | LanguageId::Elixir
+            | LanguageId::Erlang
     )
 }
 
@@ -808,4 +925,36 @@ pub fn is_text_format(language: LanguageId) -> bool {
             | LanguageId::Shell
             | LanguageId::Ini
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::markdown_lex::fence_info;
+
+    /// A fence's label names its language by extension, name or alias, and
+    /// nothing is guessed for a label naming none.
+    #[test]
+    fn fence_labels_name_languages() {
+        use LanguageId::*;
+        let cases = [
+            ("rust", Rust), ("rs", Rust), ("rust,ignore", Rust), ("Rust", Rust), ("toml", Toml),
+            ("py", Python), ("python", Python), ("js", JavaScript), ("javascript", JavaScript),
+            ("ts", TypeScript), ("sh", Shell), ("bash", Shell), ("zsh", Shell), ("shell", Shell),
+            ("json", Json), ("splash", Splash), ("c", C), ("cpp", Cpp), ("c++", Cpp), ("html", Html),
+            ("css", Css), ("sql", Sql), ("go", Go), ("markdown", Markdown), ("{.python}", Python),
+            ("elixir", Elixir), ("ex", Elixir), ("exs", Elixir), ("iex", Elixir), ("erlang", Erlang),
+            ("erl", Erlang),
+        ];
+        for (label, language) in cases {
+            assert_eq!(detect_label(label).map(|d| d.language), Some(language), "label {label:?}");
+        }
+        for label in ["", "text", "plain", "mermaid", "../x.rs"] {
+            assert_eq!(detect_label(label).map(|d| d.language), None, "label {label:?} names no language");
+        }
+        assert_eq!(fence_info("```rust"), Some("rust"), "a fence's info word");
+        assert_eq!(fence_info("  ~~~ toml extra"), Some("toml"), "after spaces, the first word");
+        assert_eq!(fence_info("```"), None, "a fence that names nothing");
+        assert_eq!(fence_info("not a fence"), None, "no fence");
+    }
 }

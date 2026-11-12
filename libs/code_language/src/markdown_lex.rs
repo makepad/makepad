@@ -29,6 +29,22 @@ pub struct MarkdownState {
     started: bool,
 }
 
+impl MarkdownState {
+    /// The line lexed last opened a fenced code block or sits inside one
+    /// (its closing fence ends it).
+    pub fn in_fence(&self) -> bool {
+        self.fence.is_some()
+    }
+}
+
+/// The info string's first word on a fenced code block's opening line (the
+/// language a fence names, `rust` in ```` ```rust ````), None on any other
+/// line or a fence that names none.
+pub fn fence_info(line: &str) -> Option<&str> {
+    let (_, _, at) = scan_open_fence(line.as_bytes())?;
+    line.get(at..)?.split_whitespace().next()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkdownKind {
     Whitespace,

@@ -10,6 +10,8 @@ pub mod csharp_lex;
 pub mod css_lex;
 pub mod dart_lex;
 pub mod detect;
+pub mod elixir_lex;
+pub mod erlang_lex;
 pub mod fsharp_lex;
 pub mod go_lex;
 pub mod haskell_lex;
@@ -40,9 +42,11 @@ pub use csharp_lex::{CSharpState, CSHARP_LEXER_VERSION};
 pub use css_lex::{CssState, CSS_LEXER_VERSION};
 pub use dart_lex::{DartState, DART_LEXER_VERSION};
 pub use detect::{
-    cpp_family_extensions, detect_path, extension_of, has_compiled_frontend, inventory_extensions,
+    cpp_family_extensions, detect_label, detect_path, extension_of, has_compiled_frontend, inventory_extensions,
     inventory_filenames, is_cpp_family, is_script_family, is_text_format,
 };
+pub use elixir_lex::{ElixirState, ELIXIR_LEXER_VERSION};
+pub use erlang_lex::{ErlangState, ERLANG_LEXER_VERSION};
 pub use fsharp_lex::{FSharpState, FSHARP_LEXER_VERSION};
 pub use go_lex::{GoState, GO_LEXER_VERSION};
 pub use haskell_lex::{HaskellState, HASKELL_LEXER_VERSION};
@@ -54,6 +58,7 @@ pub use kotlin_lex::{KotlinState, KOTLIN_LEXER_VERSION};
 pub use lex::{
     lexical_provider, lexer_schema, provider_for_detection, provider_for_path,
     CSharpLexicalProvider, CppLexicalProvider, CssLexicalProvider, DartLexicalProvider,
+    ElixirLexicalProvider, ErlangLexicalProvider,
     FSharpLexicalProvider, GoLexicalProvider, HaskellLexicalProvider,
     HtmlLexicalProvider, JavaLexicalProvider, JsonLexicalProvider, KotlinLexicalProvider,
     LexContinuation, LexicalProvider, MarkdownLexicalProvider, MarkupLexicalProvider,
@@ -63,7 +68,7 @@ pub use lex::{
     SplashLexicalProvider, SqlLexicalProvider, SwiftLexicalProvider, TomlLexicalProvider,
     ZigLexicalProvider, PLAIN_LEXER_VERSION,
 };
-pub use markdown_lex::{MarkdownState, MARKDOWN_LEXER_VERSION};
+pub use markdown_lex::{fence_info, MarkdownState, MARKDOWN_LEXER_VERSION};
 pub use php_lex::{PhpState, PHP_LEXER_VERSION};
 pub use python_lex::{PythonState, PYTHON_LEXER_VERSION};
 pub use ruby_lex::{RubyState, RUBY_LEXER_VERSION};
