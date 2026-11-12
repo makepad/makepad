@@ -517,6 +517,20 @@ impl Markdown {
                     event,
                     MdEvent::Start(Tag::Paragraph | Tag::Heading { .. } | Tag::Item | Tag::TableCell)
                 );
+            // An empty table cell holds a caret place for a host, standing for
+            // the place typing would fill (after the space past its pipe), so
+            // a caret stands in it and a click lands in it. A cell a short row
+            // leaves out has no source and holds none.
+            if let (Some(host), MdEvent::End(TagEnd::TableCell)) = (host.as_deref_mut(), &event) {
+                let started = block_text_starts.last().copied().unwrap_or(0);
+                let missing = range.is_empty() && (range.start == 0 || source.as_bytes()[range.start - 1] == b'\n');
+                if tf.text_len() == started && !missing {
+                    let at = range.start + usize::from(source[range.clone()].starts_with(' '));
+                    let flat = tf.text_len();
+                    tf.draw_caret_place(cx);
+                    host.piece(at..at, flat..tf.text_len(), false);
+                }
+            }
             if let (
                 Some(host),
                 MdEvent::End(TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::TableCell),
@@ -568,11 +582,14 @@ impl Markdown {
                     if !is_first_block {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
-                    is_first_block = false;
                     tf.begin_quote(cx);
+                    // The quote's first block starts at the top of its box,
+                    // with no paragraph spacing above it.
+                    is_first_block = true;
                 }
                 MdEvent::End(TagEnd::BlockQuote(_quote_kind)) => {
                     tf.end_quote(cx);
+                    is_first_block = false;
                 }
                 MdEvent::Start(Tag::List(first_number)) => {
                     // Items cut from a longer list count on from where the
@@ -1050,8 +1067,10 @@ impl Markdown {
 }
 
 /// Draws a code block's text runs in the colours `highlight` gives them,
-/// recording what was drawn. A run never ends in a line break (the flow trims
-/// those): a colour change right after one moves before it.
+/// recording what was drawn. The block is highlighted as one text (its runs
+/// in order), so a lexer sees every line of it. A run never ends in a line
+/// break (the flow trims those): a colour change right after one moves
+/// before it.
 fn draw_highlighted_code(
     cx: &mut Cx2d,
     tf: &mut TextFlow,
@@ -1061,10 +1080,24 @@ fn draw_highlighted_code(
     language: &str,
     runs: &[(Range<usize>, String)],
 ) {
-    let mut spans = Vec::new();
+    let whole: std::borrow::Cow<str> = match runs {
+        [(_, text)] => text.as_str().into(),
+        _ => runs.iter().map(|(_, text)| text.as_str()).collect::<String>().into(),
+    };
+    let mut block_spans = Vec::new();
+    highlight.highlight(language, &whole, &mut block_spans);
+    let mut spans: Vec<(Range<usize>, Vec4f)> = Vec::new();
+    let mut base = 0;
     for (src, text) in runs {
+        let end = base + text.len();
         spans.clear();
-        highlight.highlight(language, text, &mut spans);
+        spans.extend(
+            block_spans
+                .iter()
+                .filter(|(range, _)| range.start < end && range.end > base)
+                .map(|(range, color)| (range.start.max(base) - base..range.end.min(end) - base, *color)),
+        );
+        base = end;
         // Cut points: every span edge, moved off the end of a line break.
         let mut cuts: Vec<usize> = spans
             .iter()

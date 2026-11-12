@@ -4,7 +4,8 @@ use crate::{
     Token,
 };
 use makepad_code_language::{
-    lexical_provider, provider_for_detection, Detection, LanguageId, LexContinuation, TokenRole,
+    detect_label, fence_info, lexical_provider, provider_for_detection, Detection, LanguageId,
+    LexContinuation, TokenRole, TokenSpan,
 };
 
 thread_local! {
@@ -28,6 +29,102 @@ fn lexed_a_line() {
 enum LineSlot {
     Rust((State, usize), (State, usize)),
     Generic(LexContinuation, LexContinuation),
+    Markdown(MarkdownLine, MarkdownLine),
+}
+
+/// A Markdown line's continuation: the Markdown lexer's, and inside a fenced
+/// block that names a language, that language's lexer's.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+struct MarkdownLine {
+    markdown: LexContinuation,
+    fenced: Option<Fenced>,
+}
+
+/// The lexer of a fenced block's language and where it stands.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum Fenced {
+    Rust((State, usize)),
+    Generic(LanguageId, LexContinuation),
+}
+
+impl Fenced {
+    /// The lexer for the language a fence's opening line names.
+    fn open(line: &str) -> Option<Self> {
+        let detection = detect_label(fence_info(line)?)?;
+        Some(match detection.language {
+            LanguageId::Rust => Fenced::Rust((State::default(), 0)),
+            language => Fenced::Generic(language, provider_for_detection(detection).1),
+        })
+    }
+
+    fn lex(&mut self, line: &str) -> Vec<Token> {
+        match self {
+            Fenced::Rust(state) => lex_rust_line(line, state),
+            Fenced::Generic(language, state) => {
+                tokens_from_spans(lexical_provider(*language).lex_line(line, state), line.len())
+            }
+        }
+    }
+}
+
+/// A line's tokens in the Rust editor lexer, from `state` (the lexer state
+/// and the depth of an attribute open across lines), which it advances.
+fn lex_rust_line(line: &str, state: &mut (State, usize)) -> Vec<Token> {
+    let (mut lexer, mut attribute_depth) = *state;
+    let mut new_tokens = Vec::new();
+    let mut cursor = Cursor::new(line);
+    loop {
+        let start = cursor.index;
+        let initial = matches!(lexer, State::Initial(_));
+        let (next_state, token) = lexer.next(&mut cursor);
+        lexer = next_state;
+        match token {
+            Some(mut token) => {
+                let source = &line[start..];
+                if initial && attribute_depth == 0 && (source.starts_with("#[") || source.starts_with("#![")) {
+                    attribute_depth = 1;
+                }
+                if attribute_depth > 0 {
+                    // Only lexical delimiters affect nesting: brackets in strings
+                    // and comments cannot terminate a multiline attribute.
+                    if token.kind == TokenKind::Delimiter {
+                        match source.as_bytes()[0] {
+                            b'[' => attribute_depth += 1,
+                            b']' => {
+                                attribute_depth -= 1;
+                                if attribute_depth == 1 {
+                                    attribute_depth = 0;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    token.kind = TokenKind::Attribute;
+                }
+                new_tokens.push(token);
+            }
+            None => break,
+        }
+    }
+    *state = (lexer, attribute_depth);
+    new_tokens
+}
+
+/// A provider's spans of a line as tokens covering the whole line.
+fn tokens_from_spans(spans: Vec<TokenSpan>, line_len: usize) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut prev = 0usize;
+    for span in spans {
+        let end = span.end as usize;
+        if end > prev {
+            tokens.push(Token { len: end - prev, kind: token_kind_from_role(span.role) });
+            prev = end;
+        }
+    }
+    if prev < line_len {
+        tokens.push(Token { len: line_len - prev, kind: TokenKind::Unknown });
+    }
+    tokens
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -117,6 +214,9 @@ impl Tokenizer {
         if self.language == LanguageId::Rust {
             return self.update_rust(text, tokens, cancel);
         }
+        if self.language == LanguageId::Markdown {
+            return self.update_markdown(text, tokens, cancel);
+        }
         self.update_provider(text, tokens, cancel)
     }
 
@@ -141,49 +241,10 @@ impl Tokenizer {
                 _ => {
                     lexed_a_line();
                     let start_state = (state, attribute_depth);
-                    let mut new_tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[line]);
-                    loop {
-                        let start = cursor.index;
-                        let initial = matches!(state, State::Initial(_));
-                        let (next_state, token) = state.next(&mut cursor);
-                        state = next_state;
-                        match token {
-                            Some(mut token) => {
-                                let source = &text.as_lines()[line][start..];
-                                if initial
-                                    && attribute_depth == 0
-                                    && (source.starts_with("#[") || source.starts_with("#!["))
-                                {
-                                    attribute_depth = 1;
-                                }
-                                if attribute_depth > 0 {
-                                    // Only lexical delimiters affect nesting: brackets in strings
-                                    // and comments cannot terminate a multiline attribute.
-                                    if token.kind == TokenKind::Delimiter {
-                                        match source.as_bytes()[0] {
-                                            b'[' => attribute_depth += 1,
-                                            b']' => {
-                                                attribute_depth -= 1;
-                                                if attribute_depth == 1 {
-                                                    attribute_depth = 0;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    token.kind = TokenKind::Attribute;
-                                }
-                                new_tokens.push(token);
-                            }
-                            None => break,
-                        }
-                    }
-                    self.lines[line] = Some(LineSlot::Rust(
-                        start_state,
-                        (state, attribute_depth),
-                    ));
-                    tokens[line] = new_tokens;
+                    let mut end_state = start_state;
+                    tokens[line] = lex_rust_line(&text.as_lines()[line], &mut end_state);
+                    (state, attribute_depth) = end_state;
+                    self.lines[line] = Some(LineSlot::Rust(start_state, end_state));
                 }
             }
         }
@@ -212,28 +273,10 @@ impl Tokenizer {
                 _ => {
                     lexed_a_line();
                     let start = state.clone();
-                    let spans = provider.lex_line(&text.as_lines()[line], &mut state);
-                    let mut new_tokens = Vec::new();
-                    let mut prev = 0usize;
-                    for span in spans {
-                        let end = span.end as usize;
-                        if end > prev {
-                            new_tokens.push(Token {
-                                len: end - prev,
-                                kind: token_kind_from_role(span.role),
-                            });
-                            prev = end;
-                        }
-                    }
-                    let line_len = text.as_lines()[line].len();
-                    if prev < line_len {
-                        new_tokens.push(Token {
-                            len: line_len - prev,
-                            kind: TokenKind::Unknown,
-                        });
-                    }
+                    let source = &text.as_lines()[line];
+                    let spans = provider.lex_line(source, &mut state);
                     self.lines[line] = Some(LineSlot::Generic(start, state.clone()));
-                    tokens[line] = new_tokens;
+                    tokens[line] = tokens_from_spans(spans, source.len());
                 }
             }
         }
@@ -242,6 +285,56 @@ impl Tokenizer {
         }
         Ok(())
     }
+}
+
+/// Markdown, each fenced block that names a language lexed in that
+/// language (its fences and a block naming none stay Markdown).
+impl Tokenizer {
+    fn update_markdown(
+        &mut self,
+        text: &Text,
+        tokens: &mut [Vec<Token>],
+        cancel: &impl Fn() -> bool,
+    ) -> Result<(), TokenizeCancelled> {
+        let provider = lexical_provider(LanguageId::Markdown);
+        let mut state = MarkdownLine { markdown: self.initial.clone(), fenced: None };
+        for line in 0..text.as_lines().len() {
+            if line % TOKENIZE_BATCH_LINES == 0 && cancel() {
+                return Err(TokenizeCancelled);
+            }
+            match &self.lines[line] {
+                Some(LineSlot::Markdown(start, end)) if *start == state => {
+                    state = end.clone();
+                }
+                _ => {
+                    lexed_a_line();
+                    let start = state.clone();
+                    let source = &text.as_lines()[line];
+                    let was_fenced = in_fence(&state.markdown);
+                    let spans = provider.lex_line(source, &mut state.markdown);
+                    let fenced = in_fence(&state.markdown);
+                    tokens[line] = match &mut state.fenced {
+                        Some(lexer) if was_fenced && fenced => lexer.lex(source),
+                        _ => tokens_from_spans(spans, source.len()),
+                    };
+                    if !was_fenced && fenced {
+                        state.fenced = Fenced::open(source);
+                    } else if !fenced {
+                        state.fenced = None;
+                    }
+                    self.lines[line] = Some(LineSlot::Markdown(start, state.clone()));
+                }
+            }
+        }
+        if cancel() {
+            return Err(TokenizeCancelled);
+        }
+        Ok(())
+    }
+}
+
+fn in_fence(state: &LexContinuation) -> bool {
+    matches!(state, LexContinuation::Markdown(markdown) if markdown.in_fence())
 }
 
 fn token_kind_from_role(role: TokenRole) -> TokenKind {
@@ -810,5 +903,27 @@ impl CharExt for char {
             '0'..='9' | 'A'..='Z' | '_' | 'a'..='z' => true,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Markdown lexes a fenced block in the language its fence names (the
+    /// Rust editor lexer for Rust); its fences, and a block naming no
+    /// language, stay Markdown code.
+    #[test]
+    fn markdown_fences_lex_in_their_language() {
+        let source = "# T\n```rust\nlet x = 1; // c\n```\n```\nlet y\n```\n~~~toml\na = \"b\"\n~~~\n";
+        let tokens = tokenize_cancellable_for_language(LanguageId::Markdown, &Text::from(source), &|| false)
+            .expect("not cancelled");
+        let kinds = |line: usize| tokens[line].iter().map(|token| token.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(1), [TokenKind::String], "an opening fence is Markdown code");
+        assert!(kinds(2).contains(&TokenKind::Comment), "a Rust comment in a rust block: {:?}", kinds(2));
+        assert!(kinds(2).contains(&TokenKind::Number), "a Rust number in a rust block: {:?}", kinds(2));
+        assert_eq!(kinds(3), [TokenKind::String], "the closing fence is Markdown code");
+        assert_eq!(kinds(5), [TokenKind::String], "a block naming no language is Markdown code");
+        assert!(kinds(8).contains(&TokenKind::String) && kinds(8).len() > 1, "toml in a tilde block: {:?}", kinds(8));
     }
 }

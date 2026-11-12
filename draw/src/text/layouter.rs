@@ -1735,10 +1735,13 @@ impl LaidoutText {
         (descender + cap_height - ascender) * 0.5
     }
 
+    /// Where `cursor` is: its row, and its x in the text's coordinates (the
+    /// row's alignment shift included, where the row draws). The positions,
+    /// points and selection spans of a laid-out text all share them.
     pub fn cursor_to_position(&self, cursor: Cursor) -> CursorPosition {
         let row_index = self.cursor_to_row_index(cursor);
         let row = &self.rows[row_index];
-        let x_in_lpxs = row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
+        let x_in_lpxs = row.origin_in_lpxs.x + row.index_to_x_in_lpxs(cursor.index - row.text.start_in_parent());
         CursorPosition {
             row_index,
             x_in_lpxs,
@@ -1793,7 +1796,7 @@ impl LaidoutText {
 
     pub fn position_to_cursor(&self, position: CursorPosition) -> Cursor {
         let row = &self.rows[position.row_index];
-        let index = row.x_in_lpxs_to_index(position.x_in_lpxs);
+        let index = row.x_in_lpxs_to_index(position.x_in_lpxs - row.origin_in_lpxs.x);
         Cursor {
             index: row.text.start_in_parent() + index,
             prefer_next_row: index == 0,
@@ -1809,13 +1812,20 @@ impl LaidoutText {
             row_index: end_row_index,
             x_in_lpxs: end_x_in_lpxs,
         } = self.cursor_to_position(selection.end());
+        // Both ends within their rows.
+        let start_x_in_lpxs = start_x_in_lpxs - self.rows[start_row_index].origin_in_lpxs.x;
+        let end_x_in_lpxs = end_x_in_lpxs - self.rows[end_row_index].origin_in_lpxs.x;
         let mut selection_rects = Vec::new();
         for row_index in start_row_index..=end_row_index {
             let row = &self.rows[row_index];
+            // Spans take x within the row, and sit where the row draws.
             let mut push_span = |x_in_lpxs: f32, width_in_lpxs: f32| {
                 selection_rects.push(SelectionRect {
                     rect_in_lpxs: Rect::new(
-                        Point::new(x_in_lpxs, row.origin_in_lpxs.y - row.ascender_in_lpxs),
+                        Point::new(
+                            row.origin_in_lpxs.x + x_in_lpxs,
+                            row.origin_in_lpxs.y - row.ascender_in_lpxs,
+                        ),
                         Size::new(width_in_lpxs, row.ascender_in_lpxs - row.descender_in_lpxs),
                     ),
                     ascender_in_lpxs: row.ascender_in_lpxs,
@@ -1824,7 +1834,7 @@ impl LaidoutText {
             let is_start_row = row_index == start_row_index;
             let is_end_row = row_index == end_row_index;
             if !is_start_row && !is_end_row {
-                push_span(row.origin_in_lpxs.x, row.width_in_lpxs);
+                push_span(0.0, row.width_in_lpxs);
                 continue;
             }
             let row_start = row.text.start_in_parent();
@@ -3005,6 +3015,41 @@ mod tests {
         assert_eq!(get_row_texts(&laidout), [text]);
         let width = measure_width(&mut layouter, LATIN_FAMILY, text);
         assert!((laidout.rows[0].width_in_lpxs - width).abs() < 0.01);
+    }
+
+    #[test]
+    fn aligned_rows_select_and_place_carets_where_they_draw() {
+        use super::{Cursor, CursorPosition, Point, Selection};
+        let mut layouter = real_font_layouter();
+        let text = "aa bbbb cc";
+        let max_width = measure_width(&mut layouter, LATIN_FAMILY, "bbbb ") + 1.0;
+        for align in [0.0, 0.5, 1.0] {
+            let laidout = layout_text(&mut layouter, LATIN_FAMILY, text, LayoutOptions { align, ..wrapping_options(max_width) });
+            assert_eq!(get_row_texts(&laidout), ["aa ", "bbbb ", "cc"]);
+            let shift = |row: usize| laidout.rows[row].origin_in_lpxs.x;
+            assert!(align == 0.0 || (shift(0) > 0.0 && shift(2) > 0.0), "align {align}: short rows shift");
+            // A selection over all three rows: first, middle and last row
+            // each start where their text does.
+            let rects = laidout.selection_rects(Selection {
+                anchor: Cursor { index: 0, prefer_next_row: false },
+                cursor: Cursor { index: text.len(), prefer_next_row: false },
+            });
+            assert_eq!(rects.len(), 3);
+            for (row, rect) in rects.iter().enumerate() {
+                assert!((rect.rect_in_lpxs.origin.x - shift(row)).abs() < 0.01, "align {align}: row {row}'s span starts at its text");
+            }
+            // A caret is where its row draws, and a point there finds it.
+            for index in [0, 3, 8, text.len()] {
+                let position = laidout.cursor_to_position(Cursor { index, prefer_next_row: index != 0 });
+                let row = &laidout.rows[position.row_index];
+                let at = row.origin_in_lpxs.x + row.index_to_x_in_lpxs(index - row.text.start_in_parent());
+                assert!((position.x_in_lpxs - at).abs() < 0.01, "align {align}: caret {index} sits on its text");
+                let back = laidout.point_in_lpxs_to_cursor(Point::new(position.x_in_lpxs, row.origin_in_lpxs.y));
+                assert_eq!(back.index, index, "align {align}: the point at caret {index} finds it");
+                let moved = laidout.position_to_cursor(CursorPosition { row_index: position.row_index, x_in_lpxs: position.x_in_lpxs });
+                assert_eq!(moved.index, index, "align {align}: its position finds it");
+            }
+        }
     }
 
     #[test]

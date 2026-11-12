@@ -398,6 +398,24 @@ pub enum SelectionSegment {
     },
 }
 
+/// A tracked run in an aligned table cell: its segment, and an aligned area
+/// at its first row with that row's draw-time position.
+struct CellAnchor {
+    segment: usize,
+    area: Area,
+    drawn: DVec2,
+}
+
+/// Notes a run's first row as an aligned area, which the cell's alignment
+/// moves with the run's text.
+fn anchor_run(cx: &mut Cx2d, anchor: &mut Option<(Area, DVec2)>, rect: Rect) {
+    if anchor.is_none() {
+        let mut area = Area::Empty;
+        cx.add_aligned_rect_area(&mut area, rect);
+        *anchor = Some((area, rect.pos));
+    }
+}
+
 /// Tracks all segments during drawing for selection support
 #[derive(Default)]
 pub struct SelectionTracker {
@@ -454,6 +472,11 @@ impl SelectionTracker {
 
     pub fn push_newline(&mut self) {
         self.text.push('\n');
+    }
+
+    /// Separates a table row's cells in the text, as copying a table gives them.
+    pub fn push_cell_break(&mut self) {
+        self.text.push('\t');
     }
 
     pub fn total_len(&self) -> usize {
@@ -535,7 +558,7 @@ impl SelectionTracker {
 
     /// Find the nearest character index when point is outside all segments
     fn nearest_index(&self, cx: &Cx, point: DVec2, live: DVec2) -> Option<usize> {
-        let mut best: Option<(usize, f64)> = None;
+        let mut best: Option<(usize, (f64, f64))> = None;
 
         for segment in &self.segments {
             match segment {
@@ -599,7 +622,10 @@ impl SelectionTracker {
         best.map(|(idx, _)| idx)
     }
 
-    fn point_to_rect_distance(point: DVec2, rect: Rect) -> f64 {
+    /// How far `point` is from `rect`, vertically then horizontally: the
+    /// nearest text is on the nearest line, then the nearest along it (a
+    /// point right of a table cell's text finds that cell's row).
+    fn point_to_rect_distance(point: DVec2, rect: Rect) -> (f64, f64) {
         let dx = if point.x < rect.pos.x {
             rect.pos.x - point.x
         } else if point.x > rect.pos.x + rect.size.x {
@@ -614,7 +640,7 @@ impl SelectionTracker {
         } else {
             0.0
         };
-        (dx * dx + dy * dy).sqrt()
+        (dy, dx)
     }
 
     /// Screen-space bands for one mark: one per row the mark touches, each
@@ -1006,11 +1032,19 @@ pub struct TextFlow {
     table_cell_layout: Layout,
     #[rust]
     pub table_num_columns: usize,
-    /// Horizontal text alignment applied by the layouter within the
-    /// currently active table cell. Set by `begin_table_cell`, cleared
+    /// Horizontal alignment of the currently active table cell, which its
+    /// turtle applies to each of its rows. Set by `begin_table_cell`, cleared
     /// by `end_table_cell`. Outside a cell it is always 0.0 (left).
     #[rust]
     pub cell_text_align_x: f64,
+    /// The tracked runs of the aligned cell being drawn, with where each
+    /// was drawn, until the cell aligns them.
+    #[rust]
+    cell_anchors: Vec<CellAnchor>,
+    /// The table rows drawn (top and bottom, draw-time), while the flow
+    /// tracks its text: a page break does not cut them.
+    #[rust]
+    table_rows: Vec<std::ops::Range<f64>>,
     #[rust]
     pub in_table_header: bool,
     #[rust]
@@ -1816,6 +1850,8 @@ impl TextFlow {
         self.table_is_first_row = false;
         self.open_table_rows.clear();
         self.cell_text_align_x = 0.0;
+        self.cell_anchors.clear();
+        self.table_rows.clear();
         self.pending_block_margin = 0.0;
         self.is_at_block_start = true;
     }
@@ -2359,6 +2395,45 @@ impl TextFlow {
         }
     }
 
+    /// Holds a place in the flow's text where it drew nothing (an empty
+    /// table cell): an object character a caret stands before and after, at
+    /// where the next run would start, which a press near it finds.
+    pub fn draw_caret_place(&mut self, cx: &mut Cx2d) {
+        let rect = self.draw_caret_anchor(cx);
+        if self.tracks_text() {
+            self.selection_tracker.push_gap(rect);
+        }
+    }
+
+    /// Bands across what the flow drew last that a page break must not cut:
+    /// each line of text, each object in the text (a picture, a widget, a
+    /// held place) and each table row, from the flow's top, in no particular
+    /// order. Empty unless the flow tracks its text.
+    pub fn break_hints(&self, cx: &Cx) -> Vec<std::ops::Range<f64>> {
+        let top = self.drawn_pos.y;
+        let mut bands = Vec::new();
+        for segment in &self.selection_tracker.segments {
+            match segment {
+                SelectionSegment::Text { laidout_text, origin, font_scale, .. } => {
+                    let scale = *font_scale as f64;
+                    for row in &laidout_text.rows {
+                        let y = origin.y + (row.origin_in_lpxs.y - row.ascender_in_lpxs) as f64 * scale - top;
+                        bands.push(y..y + (row.ascender_in_lpxs - row.descender_in_lpxs) as f64 * scale);
+                    }
+                }
+                SelectionSegment::Gap { rect, .. } => bands.push(rect.pos.y - top..rect.pos.y + rect.size.y - top),
+                SelectionSegment::WidgetText { area, .. } => {
+                    // Where the widget is now, less how far the flow moved.
+                    let rect = area.rect(cx);
+                    let y = rect.pos.y - self.shift(cx).y - top;
+                    bands.push(y..y + rect.size.y);
+                }
+            }
+        }
+        bands.extend(self.table_rows.iter().map(|row| row.start - top..row.end - top));
+        bands
+    }
+
     /// The text the flow tracks, as drawn (its flat indices index it), for a
     /// host that steps a caret through it. Empty unless the flow tracks text.
     pub fn tracked_text(&self) -> &str {
@@ -2707,6 +2782,10 @@ impl TextFlow {
         }
         self.table_row_is_header = is_header;
         self.table_row_cell_rects.clear();
+        // Rows after the first start a line of the text.
+        if !self.table_is_first_row && self.tracks_text() {
+            self.selection_tracker.push_newline();
+        }
         if let Some(row) = self.open_table_rows.last_mut() {
             *row = Some(TableRowLines { start_lines_drawn: self.lines_drawn, max_lines_drawn: self.lines_drawn });
         }
@@ -2746,6 +2825,7 @@ impl TextFlow {
         self.draw_row_cell_borders(cx, row_rect);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
+            self.table_rows.push(row_rect.pos.y..row_rect.pos.y + row_rect.size.y);
         }
     }
 
@@ -2811,6 +2891,11 @@ impl TextFlow {
         if !is_in_drawn_row && self.skip_block_if_cut() {
             return;
         }
+        // Cells stay apart in the text, so the end of one and the start of
+        // the next are different places.
+        if !self.table_row_cell_rects.is_empty() && self.tracks_text() {
+            self.selection_tracker.push_cell_break();
+        }
         let cell_width = if self.table_num_columns > 0 {
             cx.turtle().inner_width() / self.table_num_columns as f64
         } else {
@@ -2841,6 +2926,13 @@ impl TextFlow {
             return;
         }
         let cell_rect = cx.end_turtle();
+        // The cell aligned its rows as it ended: its runs' text positions,
+        // recorded as they were drawn, move with them.
+        for CellAnchor { segment, area, drawn } in self.cell_anchors.drain(..) {
+            if let Some(SelectionSegment::Text { origin, .. }) = self.selection_tracker.segments.get_mut(segment) {
+                *origin += area.rect(cx).pos - drawn;
+            }
+        }
         self.table_row_cell_rects.push(cell_rect);
         if let Some(Some(row)) = self.open_table_rows.last_mut() {
             row.max_lines_drawn = row.max_lines_drawn.max(self.lines_drawn);
@@ -3143,10 +3235,6 @@ impl TextFlow {
             self.draw_text.text_style.font_size = *font_size as _;
             self.draw_text.color = font_color;
             self.draw_text.temp_y_shift = top_drop + y_shift_scale + baseline_shift;
-            self.draw_text.layout_align = Align {
-                x: self.cell_text_align_x,
-                y: 0.0,
-            };
 
             // Widget-level max_lines: compute how many layouter rows this run is allowed. A "continuation"
             // run starts mid-line or on a row something already charged, so its first row shares that line.
@@ -3189,6 +3277,9 @@ impl TextFlow {
 
             // A code box's right margin sits between its text and the text glued to it.
             self.draw_text.trailing_glue_width_in_lpxs = self.add_code_margin_end(self.trailing_glue_width_in_lpxs);
+            // A run in an aligned cell notes where it was drawn; the cell's
+            // end moves its tracked position as far as it aligned it.
+            let anchored = self.cell_text_align_x != 0.0 && self.tracks_text();
             let dt = &mut self.draw_text;
             dt.line_break_before = self.line_break_before;
             dt.line_break_after = self.line_break_after;
@@ -3201,6 +3292,7 @@ impl TextFlow {
             let mut layout_origin = dvec2(cx.turtle().inner_rect().pos.x, cx.turtle().pos().y);
             // While we hold inline content, where the run starts and the edge it's laid out against.
             let mut held_run_bounds = self.is_holding_inline_content.then(|| (cx.turtle().pos(), Self::get_row_end(cx)));
+            let mut anchor = None;
             let laidout_text = if self.inline_code.value() > 0 {
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
@@ -3383,6 +3475,9 @@ impl TextFlow {
                 let laidout_text = self.pending_following_room.and_then(|pending| self.lay_out_run(cx, text, pending));
                 let (dt, db, areas_tracker) = (&mut self.draw_text, &mut self.draw_block, &mut self.areas_tracker);
                 let result = dt.draw_laidout_resumable_with_background(cx, text, laidout_text, |cx, mut rect, _| {
+                    if anchored {
+                        anchor_run(cx, &mut anchor, rect);
+                    }
                     let text_rect = rect;
                     rect.pos -= self.inline_code_padding.left_top();
                     rect.size += self.inline_code_padding.size();
@@ -3428,6 +3523,9 @@ impl TextFlow {
                     db.line_color = font_color;
                     db.block_type = FlowBlockType::Strikethrough;
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        if anchored {
+                            anchor_run(cx, &mut anchor, rect);
+                        }
                         db.draw_abs(cx, rect);
                         areas_tracker.track_rect(cx, rect);
                     })
@@ -3435,11 +3533,17 @@ impl TextFlow {
                     db.line_color = font_color;
                     db.block_type = FlowBlockType::Underline;
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        if anchored {
+                            anchor_run(cx, &mut anchor, rect);
+                        }
                         db.draw_abs(cx, rect);
                         areas_tracker.track_rect(cx, rect);
                     })
                 } else {
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        if anchored {
+                            anchor_run(cx, &mut anchor, rect);
+                        }
                         areas_tracker.track_rect(cx, rect);
                     })
                 }
@@ -3459,6 +3563,10 @@ impl TextFlow {
             if self.tracks_text() {
                 self.selection_tracker
                     .push_text(laidout_text.clone(), layout_origin, self.draw_text.font_scale, text);
+                if let Some((area, drawn)) = anchor {
+                    let segment = self.selection_tracker.segments.len() - 1;
+                    self.cell_anchors.push(CellAnchor { segment, area, drawn });
+                }
             }
             self.line_break_before = laidout_text.line_break_before_next_run;
             self.is_start_reserved = laidout_text.is_trailing_glue_reserved;

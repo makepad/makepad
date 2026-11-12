@@ -23,7 +23,7 @@ pub mod widgets;
 pub mod wrap;
 
 pub use self::{
-    code_editor::CodeEditor, document::CodeDocument, history::History, layout::Line,
+    code_editor::{CodeEditor, TokenColors}, document::CodeDocument, history::History, layout::Line,
     selection::Selection, session::CodeSession, settings::Settings, token::Token,
     tokenizer::Tokenizer,
 };

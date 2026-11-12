@@ -17,7 +17,13 @@ pub fn flat_of(pieces: &[MarkdownPiece], src: usize) -> usize {
         if src < piece.src.start {
             return piece.flat.start;
         }
-        if src < piece.src.end || (src == piece.src.end && !piece.identity && src > piece.src.start) {
+        // A run standing for no source (an empty table cell's holder) holds
+        // its place's caret after it, where reading the caret back finds it.
+        if piece.src.is_empty() && src == piece.src.start {
+            return piece.flat.end;
+        }
+        // A run's end is its own (a table cell's end is not the next cell's start).
+        if src < piece.src.end || (src == piece.src.end && (piece.identity || src > piece.src.start)) {
             return if piece.identity {
                 piece.flat.start + (src - piece.src.start).min(piece.flat.len())
             } else if src == piece.src.end {
@@ -56,15 +62,16 @@ pub fn src_of(pieces: &[MarkdownPiece], flat: usize) -> usize {
 }
 
 /// Where the caret stands at flow index `flat`, as a source offset. As
-/// [`src_of`], except on a boundary between two runs with only hidden source
-/// between them (markers), where it takes the left run's end, so typing there
-/// continues the text before it (a bold word stays bold), and at the end of a
-/// link's text, which it leaves: typing after a link does not extend it.
+/// [`src_of`], except at a run's end, where it takes that run's end: on a
+/// boundary with only hidden source after it (markers) typing there
+/// continues the text before it (a bold word stays bold), and a table
+/// cell's end stays in its cell. At the end of a link's text it leaves the
+/// link: typing after a link does not extend it.
 /// `links` are the source ranges of the row's links.
 pub fn caret_src(pieces: &[MarkdownPiece], flat: usize, links: &[Range<usize>]) -> usize {
     let i = pieces.partition_point(|piece| piece.flat.end < flat);
-    let mut src = match (pieces.get(i), pieces.get(i + 1)) {
-        (Some(left), Some(right)) if left.flat.end == flat && right.flat.start == flat => left.src.end,
+    let mut src = match pieces.get(i) {
+        Some(left) if left.flat.end == flat => left.src.end,
         _ => src_of(pieces, flat),
     };
     for link in links {
@@ -111,6 +118,46 @@ pub fn next_char(text: &str, at: usize) -> usize {
     text.get(at..).and_then(|rest| rest.chars().next()).map_or(text.len(), |c| at + c.len_utf8())
 }
 
+/// What a double click on the character at `at` selects: its run of word
+/// characters, or of spaces, or the one other character. Line breaks bound
+/// every run; on one (a line's end) the character before it counts.
+pub fn word_around(text: &str, at: usize) -> Range<usize> {
+    fn class(c: char) -> u8 {
+        if c.is_alphanumeric() || c == '_' {
+            0
+        } else if c == ' ' || c == '\t' {
+            1
+        } else {
+            2
+        }
+    }
+    let at = floor_boundary(text, at);
+    let (start, c) = match text[at..].chars().next().filter(|c| *c != '\n') {
+        Some(c) => (at, c),
+        None => match text[..at].chars().next_back().filter(|c| *c != '\n') {
+            Some(c) => (at - c.len_utf8(), c),
+            None => return at..at,
+        },
+    };
+    let kind = class(c);
+    if kind == 2 {
+        return start..start + c.len_utf8();
+    }
+    let same = |c: char| c != '\n' && class(c) == kind;
+    let from = text[..start].char_indices().rev().take_while(|(_, c)| same(*c)).last().map_or(start, |(i, _)| i);
+    let to = start + text[start..].char_indices().take_while(|(_, c)| same(*c)).last().map_or(0, |(i, c)| i + c.len_utf8());
+    from..to
+}
+
+/// What a triple click at `at` selects: its line of the flow's text (a
+/// paragraph, a heading, an item, up to a hard break), without the break.
+pub fn line_around(text: &str, at: usize) -> Range<usize> {
+    let at = floor_boundary(text, at);
+    let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
+    let end = text[at..].find('\n').map_or(text.len(), |i| at + i);
+    start..end
+}
+
 fn floor_boundary(text: &str, at: usize) -> usize {
     let mut at = at.min(text.len());
     while !text.is_char_boundary(at) {
@@ -152,6 +199,17 @@ mod tests {
         for flat in [2, 3, 4, 6, 7, 8] {
             assert_eq!(flat_of(&pieces, src_of(&pieces, flat)), flat, "flow {flat} -> source -> back");
         }
+
+        // `| a |  | c |` drawn as `a\t\u{FFFC}\tc`: the empty cell's place
+        // holder stands for its place (6), the caret there sits after it and
+        // reads back; a cell's end and the next cell's start are apart.
+        let cells = [piece(2..3, 0..1, true), piece(6..6, 2..5, false), piece(9..10, 6..7, true)];
+        assert_eq!(flat_of(&cells, 6), 5, "an empty cell's place is after its holder");
+        assert_eq!(caret_src(&cells, 5, &[]), 6, "and reads back as the place");
+        assert_eq!(caret_src(&cells, 2, &[]), 6, "before the holder is the place too");
+        assert_eq!(flat_of(&cells, 3), 1, "a cell's end stays in its cell");
+        assert_eq!(caret_src(&cells, 1, &[]), 3, "and reads back as its end");
+        assert_eq!(caret_src(&cells, 6, &[]), 9, "the next cell starts past the break");
     }
 
     /// `**ab**c [de](u) f` drawn as `abc de f`: the caret keeps to the left
@@ -178,5 +236,24 @@ mod tests {
         assert_eq!(prev_word(text, 3), 0, "inside the first word, its start");
         assert_eq!(next_char("aé", 1), 3, "a step covers the whole character");
         assert_eq!(prev_char("aé", 3), 1, "and back");
+    }
+
+    /// A double click takes a word (or a run of spaces, or one mark), a
+    /// triple click a line of the flow's text.
+    #[test]
+    fn double_and_triple_click_units() {
+        let text = "one  twö_3, x\nnext line";
+        assert_eq!(word_around(text, 0), 0..3, "a word from its first character");
+        assert_eq!(word_around(text, 6), 5..11, "a word from its middle, letters, digits and `_`");
+        assert_eq!(word_around(text, 3), 3..5, "a run of spaces");
+        assert_eq!(word_around(text, 11), 11..12, "a mark alone");
+        assert_eq!(word_around(text, 14), 13..14, "at a line's end, the character before");
+        assert_eq!(word_around(text, 15), 15..19, "a word after a line break");
+        assert_eq!(word_around(text, text.len()), 20..24, "at the text's end, the last word");
+        assert_eq!(word_around("", 0), 0..0, "an empty row");
+        assert_eq!(word_around("\n", 0), 0..0, "a break alone selects nothing");
+        assert_eq!(line_around(text, 6), 0..14, "a line up to its break");
+        assert_eq!(line_around(text, 17), 15..24, "the last line to the end");
+        assert_eq!(line_around(text, 14), 0..14, "at the break, the line before it");
     }
 }

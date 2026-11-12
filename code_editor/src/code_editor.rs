@@ -2046,26 +2046,7 @@ impl CodeEditor {
                                     };
                                     let (text_0, text_1) = text.split_at(token.len);
                                     text = text_1;
-                                    self.draw_text.color = match token.kind {
-                                        TokenKind::Unknown => self.token_colors.unknown,
-                                        TokenKind::BranchKeyword => {
-                                            self.token_colors.branch_keyword
-                                        }
-                                        TokenKind::Comment => self.token_colors.comment,
-                                        TokenKind::Constant => self.token_colors.constant,
-                                        TokenKind::Delimiter => self.token_colors.delimiter,
-                                        TokenKind::Identifier => self.token_colors.identifier,
-                                        TokenKind::Macro => self.token_colors.macro_identifier,
-                                        TokenKind::Attribute => self.token_colors.attribute,
-                                        TokenKind::LoopKeyword => self.token_colors.loop_keyword,
-                                        TokenKind::Number => self.token_colors.number,
-                                        TokenKind::OtherKeyword => self.token_colors.other_keyword,
-                                        TokenKind::Punctuator => self.token_colors.punctuator,
-                                        TokenKind::String => self.token_colors.string,
-                                        TokenKind::Function => self.token_colors.function,
-                                        TokenKind::Typename => self.token_colors.typename,
-                                        TokenKind::Whitespace => self.token_colors.whitespace,
-                                    };
+                                    self.draw_text.color = self.token_colors.color(token.kind);
                                     self.draw_text.outline = 0.0;
                                     if let TokenKind::Delimiter = token.kind {
                                         if highlighted_delimiter_positions.contains(&Position {
@@ -2968,8 +2949,10 @@ struct ActiveSelection {
     start_x: f64,
 }
 
+/// The colour of each kind of token, as the editor draws them; a view that
+/// shows code outside an editor colours it the same way.
 #[derive(Script, ScriptHook)]
-struct TokenColors {
+pub struct TokenColors {
     #[live]
     unknown: Vec4f,
     #[live]
@@ -3008,6 +2991,30 @@ struct TokenColors {
     error_decoration: Vec4f,
     #[live]
     warning_decoration: Vec4f,
+}
+
+impl TokenColors {
+    /// The colour a token of `kind` draws in.
+    pub fn color(&self, kind: TokenKind) -> Vec4f {
+        match kind {
+            TokenKind::Unknown => self.unknown,
+            TokenKind::BranchKeyword => self.branch_keyword,
+            TokenKind::Comment => self.comment,
+            TokenKind::Constant => self.constant,
+            TokenKind::Delimiter => self.delimiter,
+            TokenKind::Identifier => self.identifier,
+            TokenKind::Macro => self.macro_identifier,
+            TokenKind::Attribute => self.attribute,
+            TokenKind::LoopKeyword => self.loop_keyword,
+            TokenKind::Number => self.number,
+            TokenKind::OtherKeyword => self.other_keyword,
+            TokenKind::Punctuator => self.punctuator,
+            TokenKind::String => self.string,
+            TokenKind::Function => self.function,
+            TokenKind::Typename => self.typename,
+            TokenKind::Whitespace => self.whitespace,
+        }
+    }
 }
 
 #[derive(Script, ScriptHook)]

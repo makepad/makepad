@@ -6,6 +6,10 @@ publish = false
 description = "Change reports: what someone changed in a Makepad app, as concepts, checked before it is sent"
 license = "MIT OR Apache-2.0"
 
+# files outside this crate its tests read: the documented schema and example
+[package.metadata.commercial]
+include = ["../../docs/agents/change-report.schema.json", "../../docs/agents/change-report-example/report.json"]
+
 [dependencies]
 makepad-strict-json = { path = "../strict_json" }
 makepad-zip-file = { path = "../zip_file" }

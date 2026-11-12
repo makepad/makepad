@@ -7,9 +7,13 @@ pub use makepad_markdown_edit;
 use makepad_widgets_core::*;
 
 pub mod editor;
+mod highlight;
+mod print;
 mod rowmap;
 
-pub use editor::{MarkdownEditor, MarkdownEditorAction};
+pub use editor::{FormatState, MarkdownEditor, MarkdownEditorAction, TableEdit};
+pub use print::PrintUpdate;
+pub use makepad_markdown_edit::plan::{BlockStyle, Mark};
 
 /// Registers the final view. Call after the rich text family and the code
 /// editor are registered.

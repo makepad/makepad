@@ -12,4 +12,6 @@ repository = "https://github.com/makepad/makepad/"
 makepad-widgets-core = { path = "../../core", version = "2.0.0" }
 makepad-widgets-rich-text = { path = "../rich_text", version = "2.0.0" }
 makepad-code-editor = { path = "../../../code_editor", version = "2.0.0" }
+makepad-code-language = { path = "../../../libs/code_language" }
 makepad-markdown-edit = { path = "../../../libs/markdown_edit" }
+makepad-pdf-write = { path = "../../../libs/pdf_write" }

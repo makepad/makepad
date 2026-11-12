@@ -57,6 +57,9 @@ pub const DEFAULT_ENDPOINT: &str = "https://makepad.nl/api/feedback/changes";
 pub const FEEDBACK_HEADER: &str = "X-Makepad-Feedback";
 /// The sender's address, only when they chose to include it.
 pub const REPLY_TO_HEADER: &str = "X-Makepad-Reply-To";
+/// Set (to 1) in the Makepad Runner's coding agent tabs: there the Runner shows a report to the
+/// person, who sends it from the app's panel, so `makepad change-report send` refuses to.
+pub const RUNNER_AGENT_TAB: &str = "MAKEPAD_RUNNER_AGENT_TAB";
 
 /// The endpoint for a given `MAKEPAD_FEEDBACK_URL` value (None or empty:
 /// the default).
@@ -65,6 +68,24 @@ pub fn endpoint(feedback_url: Option<&str>) -> String {
         Some(url) => format!("{}/changes", url.trim_end_matches('/')),
         None => DEFAULT_ENDPOINT.to_owned(),
     }
+}
+
+/// What the endpoint answered, for the person who sent it: the report id,
+/// or why it was not stored (the server's reason when it gave one).
+pub fn answer(status: u16, body: &[u8]) -> Result<i64, String> {
+    if status == 200 {
+        return response_id(body);
+    }
+    let reason = json::parse(body).ok().and_then(|v| v.get("error").and_then(Value::as_str).map(str::to_owned));
+    Err(match (status, reason) {
+        (_, Some(reason)) => reason,
+        (403, None) => "makepad.nl refused the report (403)".to_owned(),
+        (404, None) => "makepad.nl does not take change reports at this address (404)".to_owned(),
+        (413, None) => format!("The report is larger than {} KB (413)", MAX_ZIP_BYTES / 1024),
+        (429, None) => "Too many reports and feedback from here; try again in an hour (429)".to_owned(),
+        (507, None) => "Makepad's feedback storage is full; try again later (507)".to_owned(),
+        (status, None) => format!("makepad.nl answered {status}"),
+    })
 }
 
 /// The report id from the server's answer, `{"ok":true,"id":N}`.
@@ -114,6 +135,9 @@ pub struct Report {
     pub redactions: Vec<Redaction>,
     /// Whether `changes.diff` is part of the report.
     pub diff: bool,
+    /// A suggestion: nothing in the app was changed; `changes` lists what the
+    /// person would like changed, and there is no diff.
+    pub suggestion: bool,
 }
 
 /// A checked report: its list, the text people read, the optional diff,
@@ -173,7 +197,7 @@ pub fn parse_report(bytes: &[u8]) -> Result<Report, String> {
         return problem("report.json is larger than 128 KB");
     }
     let value = json::parse(bytes).map_err(|error| format!("report.json is not valid JSON ({error})"))?;
-    known_keys(&value, "report.json", &["format", "version", "app", "base", "summary", "changes", "redactions", "diff"])?;
+    known_keys(&value, "report.json", &["format", "version", "app", "base", "summary", "changes", "redactions", "diff", "suggestion"])?;
     if value.get("format").and_then(Value::as_str) != Some(FORMAT) {
         return problem(format!("report.json: \"format\" must be \"{FORMAT}\""));
     }
@@ -268,7 +292,14 @@ pub fn parse_report(bytes: &[u8]) -> Result<Report, String> {
         redactions.push(Redaction { what, count });
     }
     let diff = value.get("diff").and_then(Value::as_bool).ok_or("report.json: \"diff\" must be true or false")?;
-    Ok(Report { app: id, release, base, summary, changes, redactions, diff })
+    let suggestion = match value.get("suggestion") {
+        None | Some(Value::Null) => false,
+        Some(flag) => flag.as_bool().ok_or("report.json: \"suggestion\" must be true or false")?,
+    };
+    if suggestion && diff {
+        return problem("A suggestion changes nothing, so it has no diff: \"diff\" must be false");
+    }
+    Ok(Report { app: id, release, base, summary, changes, redactions, diff, suggestion })
 }
 
 impl Report {
@@ -302,13 +333,20 @@ impl Report {
         pairs.push(("changes", Value::Arr(changes.collect())));
         pairs.push(("redactions", Value::Arr(self.redactions.iter().map(|r| json::obj(vec![("what", text(&r.what)), ("count", Value::Int(r.count))])).collect())));
         pairs.push(("diff", Value::Bool(self.diff)));
+        if self.suggestion {
+            pairs.push(("suggestion", Value::Bool(true)));
+        }
         json::obj(pairs).to_json()
     }
 
     /// The list as `REPORT.md`, in the layout the documentation shows. An
     /// agent may write its own; [`open`] only asks that every title is in it.
     pub fn to_markdown(&self) -> String {
-        let mut out = format!("# Changes to {} (release {})\n\n", self.app, self.release);
+        let mut out = if self.suggestion {
+            format!("# Suggestions for {} (release {})\n\n", self.app, self.release)
+        } else {
+            format!("# Changes to {} (release {})\n\n", self.app, self.release)
+        };
         if !self.summary.is_empty() {
             out.push_str(&format!("{}\n\n", self.summary));
         }
@@ -331,8 +369,35 @@ impl Report {
         for redaction in &self.redactions {
             out.push_str(&format!("- {} × {}\n", redaction.what, redaction.count));
         }
-        out.push_str(if self.diff { "\nThe trimmed diff (changes.diff) is included.\n" } else { "\nNo code diff is included.\n" });
+        out.push_str(match (self.suggestion, self.diff) {
+            (true, _) => SUGGESTION_LINE,
+            (false, true) => DIFF_LINE,
+            (false, false) => NO_DIFF_LINE,
+        });
         out
+    }
+}
+
+/// [`Report::to_markdown`]'s last line, by what the report holds.
+const DIFF_LINE: &str = "\nThe trimmed diff (changes.diff) is included.\n";
+const NO_DIFF_LINE: &str = "\nNo code diff is included.\n";
+const SUGGESTION_LINE: &str = "\nNothing in the app was changed: these are suggestions.\n";
+
+impl Package {
+    /// The same report without its diff: the person chose to send the
+    /// concepts only. `report.json` says `"diff": false`, and REPORT.md's
+    /// line about the diff (as [`Report::to_markdown`] writes it) says none
+    /// is included. Checked again like any report.
+    pub fn without_diff(&self) -> Result<Package, String> {
+        if self.diff.is_none() {
+            return Ok(self.clone());
+        }
+        let report = Report { diff: false, ..self.report.clone() };
+        let markdown = self.markdown.replace(DIFF_LINE.trim(), NO_DIFF_LINE.trim());
+        let mut zip = ZipWriter::new();
+        zip.add(REPORT_JSON, report.to_json().as_bytes(), ZipMethod::Deflate).map_err(|e| e.to_string())?;
+        zip.add(REPORT_MD, markdown.as_bytes(), ZipMethod::Deflate).map_err(|e| e.to_string())?;
+        open(&zip.finish().map_err(|e| e.to_string())?)
     }
 }
 

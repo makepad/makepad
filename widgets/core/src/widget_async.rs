@@ -5,7 +5,7 @@ use {
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_tree::CxWidgetExt,
-    crate::IsolateWidgets,
+    crate::{run_units, IsolateWidgets, UiUnit},
     std::cell::RefCell,
     std::collections::{HashMap, VecDeque},
     std::sync::atomic::{AtomicU64, Ordering},
@@ -107,22 +107,40 @@ pub(crate) fn style_isolate(
     host_io_only: bool,
     set: IsolateWidgets,
 ) {
-    // Set directly: evaluating the same `script!` again on a restyle errors in the VM.
-    let name = match theme {
-        SplashTheme::Dark => id!(dark),
-        SplashTheme::Light => id!(light),
-        SplashTheme::Skeleton => id!(skeleton),
-    };
-    let themes = vm.module(id!(themes));
-    let picked = vm.value(themes, name);
-    let modules = vm.modules();
-    vm.set_value_def(modules, id!(theme), picked);
+    let mut units = Vec::new();
+    style_isolate_units(vm, &mut units, theme, script.map(|script| std::rc::Rc::new(script.clone())), host_io_only, set);
+    run_units(vm, units);
+}
+
+pub(crate) fn style_isolate_units(
+    vm: &mut ScriptVm,
+    units: &mut Vec<UiUnit>,
+    theme: SplashTheme,
+    script: Option<std::rc::Rc<SplashThemeScript>>,
+    host_io_only: bool,
+    set: IsolateWidgets,
+) {
+    let theme_script = script.clone();
+    units.push(UiUnit::new("style: theme", move |vm| {
+        // Set directly: evaluating the same `script!` again on a restyle errors in the VM.
+        let name = match theme {
+            SplashTheme::Dark => id!(dark),
+            SplashTheme::Light => id!(light),
+            SplashTheme::Skeleton => id!(skeleton),
+        };
+        let themes = vm.module(id!(themes));
+        let picked = vm.value(themes, name);
+        let modules = vm.modules();
+        vm.set_value_def(modules, id!(theme), picked);
+        if let Some(script) = &theme_script {
+            eval_theme_script(vm, "theme", &script.theme);
+        }
+    }));
+    crate::widgets_mod_with_host_io_units(vm, units, host_io_only, set);
     if let Some(script) = script {
-        eval_theme_script(vm, "theme", &script.theme);
-    }
-    crate::widgets_mod_with_host_io(vm, host_io_only, set);
-    if let Some(script) = script {
-        eval_theme_script(vm, "widgets", &script.widgets);
+        units.push(UiUnit::new("style: widgets script", move |vm| {
+            eval_theme_script(vm, "widgets", &script.widgets);
+        }));
     }
 }
 
@@ -298,6 +316,7 @@ pub fn gc_dead_splash_isolates(cx: &mut Cx) {
         state.ui_handle_types.remove(&vm_id);
         state.vm_root_uids.remove(&vm_id);
         state.loaders.remove(&vm_id);
+        state.ui_in_progress.remove(&vm_id);
         state.done.retain(|d| d.vm_id != vm_id);
         state.widget_to_script_calls.retain(|r| r.vm_id != vm_id);
         state.script_to_widget_calls.retain(|r| r.vm_id != vm_id);
@@ -435,6 +454,11 @@ struct IsolateUi {
     custom: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
     /// the sheet was set by a restyle before the expansion: its widget half goes over the library
     apply_sheet_widgets: bool,
+    /// the registration under way a unit at a time, and its next unit: made at the first unit
+    /// from this record as it stands then (see [`step_isolate_ui_unit`])
+    units: Option<(Vec<UiUnit>, usize)>,
+    /// a `mod` key of the lazy group the registration is declared as, to step or finish it by
+    lazy_key: Option<LiveId>,
 }
 
 /// A Splash restyling an isolate whose UI modules are still lazy: the sheet is what the coming
@@ -463,65 +487,141 @@ thread_local! {
 
 /// Registers an isolate's UI modules: the parent's sheet, `theme_mod`, the Splash theme, the
 /// widget library (families as the host chose) and the host's isolate mods, with the isolate's
-/// resource loader on `mod.res` while it runs (fonts load through it). Eagerly for the first
-/// isolate of the process, otherwise on the first read of one of its modules.
-unsafe extern "C-unwind" fn expand_isolate_ui_lazily(vm: *mut ScriptVm) {
-    expand_isolate_ui(&mut *vm)
+/// resource loader on `mod.res` while each unit runs (fonts load through it). Eagerly, all at
+/// once, for the first isolate of the process; otherwise a lazy group, run on the first read of
+/// one of its modules, or a unit at a time by a host that steps it ([`CxSplashVmExt::step_isolate_ui`]).
+fn expand_isolate_ui(vm: &mut ScriptVm) {
+    while step_isolate_ui_unit(vm) {}
 }
 
-fn expand_isolate_ui(vm: &mut ScriptVm) {
+unsafe extern "C-unwind" fn step_isolate_ui_lazily(vm: *mut ScriptVm) -> bool {
+    step_isolate_ui_unit(&mut *vm)
+}
+
+/// Runs the next unit of the isolate's UI registration: true while units remain. The unit list
+/// is made at the first unit from the isolate's [`IsolateUi`]; a unit that panics leaves no list,
+/// so the next run starts it over (the whole registration again over what the heap has).
+fn step_isolate_ui_unit(vm: &mut ScriptVm) -> bool {
     let heap_key = vm.heap_key();
-    let (sheet, host_io_only, set, theme, script, loader, host_mods, custom, apply_sheet_widgets) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
-        Some(ui) => (ui.sheet.clone(), ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets),
-        None => (None, true, IsolateWidgets::Library, splash_theme(), None, None, Vec::new(), None, false),
-    };
-    // The registration is the host's own code: it loads the library's fonts like before the
-    // isolate was restricted, and the restriction is back before any guest code runs again.
+    match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| ui.units.is_some()) {
+        Some(true) => (),
+        Some(false) => {
+            let units = isolate_ui_units_of(vm).expect("the isolate's record");
+            if let Some(ui) = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
+                ui.units = Some((units, 0));
+            }
+        }
+        None => {
+            // No record to keep a cursor in: the registration with the defaults, at once.
+            for unit in isolate_ui_units(vm, None, true, IsolateWidgets::Library, splash_theme(), None, Vec::new(), None, false) {
+                run_isolate_ui_unit(vm, &unit, None);
+            }
+            return false;
+        }
+    }
+    let next = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key).and_then(|ui| {
+        let loader = ui.loader.clone();
+        let (units, next) = ui.units.as_mut()?;
+        let unit = units.get(*next).cloned();
+        *next += 1;
+        let more = *next < units.len();
+        if !more {
+            ui.units = None;
+        }
+        Some((unit?, loader, more))
+    });
+    let Some((unit, loader, more)) = next else { return false };
+    let start = Cx::monotonic_now();
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_isolate_ui_unit(vm, &unit, loader.as_ref())));
+    if let Err(payload) = out {
+        if let Some(ui) = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
+            ui.units = None;
+        }
+        std::panic::resume_unwind(payload);
+    }
+    if crate::makepad_script::makepad_error_log::trace_enabled("script.lazy") {
+        eprintln!("script.lazy: isolate ui unit `{}` in {:.1} ms", unit.name, (Cx::monotonic_now() - start) * 1000.0);
+    }
+    more
+}
+
+/// The unit list of the isolate's UI registration as its record stands now; None without one.
+fn isolate_ui_units_of(vm: &mut ScriptVm) -> Option<Vec<UiUnit>> {
+    let heap_key = vm.heap_key();
+    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key)?;
+    let (sheet, host_io_only, set, theme, script, host_mods, custom, apply_sheet_widgets) = (ui.sheet.clone(), ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets);
+    Some(isolate_ui_units(vm, sheet, host_io_only, set, theme, script, host_mods, custom, apply_sheet_widgets))
+}
+
+/// One unit of an isolate's UI registration. The registration is the host's own code: it loads
+/// the library's fonts through the isolate's loader like before the isolate was restricted, and
+/// the restriction is back before any guest code runs again.
+fn run_isolate_ui_unit(vm: &mut ScriptVm, unit: &UiUnit, loader: Option<&ScriptObjectRef>) {
     let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expand_isolate_ui_modules(vm, sheet, host_io_only, set, theme, script, loader, host_mods, custom, apply_sheet_widgets)));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| with_loader(vm, loader, |vm| (unit.run)(vm))));
     vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
     if let Err(payload) = out {
         std::panic::resume_unwind(payload);
     }
 }
 
-fn expand_isolate_ui_modules(
+/// An isolate entry's first step when the host left its UI registration part way
+/// ([`CxSplashVmExt::step_isolate_ui`]): the rest of it, so nothing but the host's own steps sees
+/// it half done. Before a live edit's reload pass, which then finds it registered.
+fn finish_isolate_ui(vm: &mut ScriptVm) {
+    let heap_key = vm.heap_key();
+    let key = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).and_then(|ui| ui.lazy_key);
+    if let Some(key) = key {
+        vm.expand_lazy_key(key);
+    }
+}
+
+/// Whether entering isolate `vm_id` must finish its UI registration first; it is out of the
+/// in-progress set from here on.
+fn take_isolate_ui_in_progress(cx: &mut Cx, vm_id: SplashVmId) -> bool {
+    let state = cx.global::<CxWidgetAsync>();
+    !state.ui_in_progress.is_empty() && state.ui_in_progress.remove(&vm_id)
+}
+
+fn isolate_ui_units(
     vm: &mut ScriptVm,
     sheet: Option<crate::desktop_style::StyleSheet>,
     host_io_only: bool,
     set: IsolateWidgets,
     theme: SplashTheme,
     script: Option<std::rc::Rc<SplashThemeScript>>,
-    loader: Option<ScriptObjectRef>,
     host_mods: Vec<fn(&mut ScriptVm)>,
     custom: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>,
     apply_sheet_widgets: bool,
-) {
-    with_loader(vm, loader.as_ref(), |vm| {
-        if let Some(custom) = custom {
-            custom(vm);
-            for install in host_mods {
-                install(vm);
-            }
-            return;
+) -> Vec<UiUnit> {
+    let mut units = Vec::new();
+    if let Some(custom) = custom {
+        units.push(UiUnit::new("ui: custom", move |vm| custom(vm)));
+        for install in host_mods {
+            units.push(UiUnit::new("ui: host mod", install));
         }
-        // The allocating VM's sheet, or its plain theme: never the
-        // environment's sheet over a VM that took it off.
-        match sheet {
-            Some(sheet) => crate::desktop_style::install(vm, sheet),
+        return units;
+    }
+    // The allocating VM's sheet, or its plain theme: never the
+    // environment's sheet over a VM that took it off.
+    let sheet = sheet.map(std::rc::Rc::new);
+    units.push(UiUnit::new("ui: sheet", move |vm| {
+        match &sheet {
+            Some(sheet) => crate::desktop_style::install(vm, sheet.as_ref().clone()),
             None => crate::desktop_style::uninstall(vm),
         }
-        crate::theme_mod(vm);
-        style_isolate(vm, theme, script.as_deref(), host_io_only, set);
-        if apply_sheet_widgets {
-            crate::desktop_style::apply_widgets(vm);
-        }
-        // Mods the embedding host registered through `register_splash_isolate_mod` by the
-        // isolate's allocation, last, so they see the final namespace.
-        for install in host_mods {
-            install(vm);
-        }
-    });
+    }));
+    crate::theme_mod_units(&mut units);
+    style_isolate_units(vm, &mut units, theme, script, host_io_only, set);
+    if apply_sheet_widgets {
+        units.push(UiUnit::new("ui: sheet widgets", crate::desktop_style::apply_widgets));
+    }
+    // Mods the embedding host registered through `register_splash_isolate_mod` by the
+    // isolate's allocation, last, so they see the final namespace.
+    for install in host_mods {
+        units.push(UiUnit::new("ui: host mod", install));
+    }
+    units
 }
 
 /// A live edit's reload pass in the installed isolate, as the main VM's runs its app's
@@ -621,6 +721,9 @@ struct CxWidgetAsync {
     gc_rr_last: u64,
     /// What each isolate's lazy UI expansion needs, by heap key (see `expand_isolate_ui`).
     isolate_ui: HashMap<usize, IsolateUi>,
+    /// Isolates whose host stepped their UI registration part way
+    /// ([`CxSplashVmExt::step_isolate_ui`]): any other entry finishes it first.
+    ui_in_progress: std::collections::HashSet<SplashVmId>,
     /// Heaps of isolates that have been reclaimed. A widget can outlive the
     /// isolate that minted it by a frame or two and still try to call back into
     /// it; this is what tells such a ref apart from an app-VM one, so it can be
@@ -672,6 +775,7 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     // The first entry after a live edit runs the isolate's reload pass before its work.
     let reload = isolated.reloaded_at != cx.reload_generation && !isolated.host_reloads;
     isolated.reloaded_at = cx.reload_generation;
+    let finish = take_isolate_ui_in_progress(cx, vm_id);
 
     let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
     let outer_vm = cx.script_vm.take();
@@ -683,6 +787,9 @@ fn with_isolate_installed<R>(cx: &mut Cx, vm_id: SplashVmId, f: impl FnOnce(&mut
     // app its VM and the table its isolate. Catch, restore, then let the
     // panic continue to the containment layer at the entry funnel.
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if finish {
+            cx.with_vm(finish_isolate_ui);
+        }
         if reload {
             contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
         }
@@ -773,6 +880,11 @@ pub trait CxSplashVmExt {
         host_io_only: bool,
         theme: Option<SplashTheme>,
     ) -> SplashVmId;
+    /// The next unit of isolate `vm_id`'s lazy UI registration (its theme, widgets and prelude),
+    /// for a host that spreads it over frames: true while units remain. Any other entry to the
+    /// isolate runs the rest first, so nothing but these steps sees it half done. False when there
+    /// is nothing to step: the main VM, or an isolate whose UI is registered.
+    fn step_isolate_ui(&mut self, vm_id: SplashVmId) -> bool;
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R;
     fn with_script_vm_id_thread<R>(
         &mut self,
@@ -847,7 +959,7 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
         // The first isolate of the process registers them eagerly to learn their `mod` keys.
         let heap_key = vm.heap_key();
         let script = if pin.is_none() { splash_theme_script() } else { None };
-        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { set, sheet: inherited, host_io_only, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), loader: None, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false });
+        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { set, sheet: inherited, host_io_only, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), loader: None, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false, units: None, lazy_key: None });
         let shape: Vec<usize> = {
             let families = vm.cx_mut().global::<crate::widget_hooks::IsolateFamilies>().0.clone();
             let mut shape: Vec<usize> = families.iter().map(|f| *f as usize).collect();
@@ -870,7 +982,10 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
             vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key).expect("just inserted").custom = Some(ui);
             expand_isolate_ui(&mut vm);
         } else { match known {
-            Some(keys) => vm.declare_lazy_modules("isolate ui (theme, widgets, prelude)", &keys, expand_isolate_ui_lazily),
+            Some(keys) => {
+                vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key).expect("just inserted").lazy_key = keys.first().copied();
+                vm.declare_lazy_modules_stepped("isolate ui (theme, widgets, prelude)", &keys, step_isolate_ui_lazily);
+            }
             None => {
                 let modules = vm.modules();
                 let before: Vec<LiveId> = vm.heap().map_entries(modules).iter().filter_map(|e| e.key.as_id()).collect();
@@ -1034,6 +1149,32 @@ impl CxSplashVmExt for Cx {
         theme: Option<SplashTheme>,
     ) -> SplashVmId {
         alloc_splash_vm_impl(self, network_enabled, host_io_only, IsolateWidgets::Library, None, theme)
+    }
+
+    fn step_isolate_ui(&mut self, vm_id: SplashVmId) -> bool {
+        if vm_id == MAIN_SPLASH_VM_ID {
+            return false;
+        }
+        // Out of the in-progress set while its own step enters, so the entry does not finish it;
+        // left in when a live edit is due, so the entry finishes it before the reload pass.
+        let generation = self.reload_generation;
+        let state = self.global::<CxWidgetAsync>();
+        let reload_due = state.isolated_vms.vms.get(&vm_id).is_some_and(|isolated| isolated.reloaded_at != generation && !isolated.host_reloads);
+        if !reload_due {
+            state.ui_in_progress.remove(&vm_id);
+        }
+        let more = self.with_script_vm_id(vm_id, |vm| {
+            let heap_key = vm.heap_key();
+            let key = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).and_then(|ui| ui.lazy_key);
+            key.is_some_and(|key| vm.step_lazy_key(key))
+        });
+        let state = self.global::<CxWidgetAsync>();
+        if more {
+            state.ui_in_progress.insert(vm_id);
+        } else {
+            state.ui_in_progress.remove(&vm_id);
+        }
+        more
     }
 
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
@@ -2147,7 +2288,11 @@ pub fn enter_isolate(cx: &mut Cx, vm_id: SplashVmId) -> IsolateEntry {
     let outer_std = std::mem::replace(&mut cx.script_data.std, isolated.std);
     let outer_vm = cx.script_vm.take();
     cx.script_vm = isolated.vm;
-    // The first entry after a live edit, as in `with_isolate_installed`.
+    // A UI registration the host left part way, then the first entry after a live edit, as in
+    // `with_isolate_installed`.
+    if take_isolate_ui_in_progress(cx, vm_id) {
+        cx.with_vm(finish_isolate_ui);
+    }
     let reloaded_at = cx.reload_generation;
     if isolated.reloaded_at != reloaded_at && !isolated.host_reloads {
         contain_isolate_panic("live edit reload", || cx.with_vm(reload_isolate));
@@ -3057,5 +3202,180 @@ mod lazy_isolate_type_tests {
         }
         cx.free_splash_vm(first);
         cx.free_splash_vm(second);
+    }
+}
+
+#[cfg(test)]
+mod isolate_ui_step_tests {
+    //! A host that registers an isolate's UI a unit at a time (`step_isolate_ui`) ends with the UI
+    //! a whole registration makes, however the steps are interrupted. Base is the game host's set;
+    //! Library is what Splash mini-apps and Stage slides allocate.
+
+    use super::*;
+    use crate::makepad_script::makepad_error_log::{set_log_tap, LogLevel};
+    use crate::makepad_script::vm_ctl::{ScriptCtlReq, CTL_GC};
+
+    thread_local! {
+        static ERRORS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn count_errors(_: &str, level: LogLevel) {
+        if matches!(level, LogLevel::Error | LogLevel::Panic) {
+            ERRORS.with(|errors| errors.set(errors.get() + 1));
+        }
+    }
+
+    /// What a registered isolate UI is made of.
+    #[derive(Debug, PartialEq)]
+    struct Ui {
+        mod_keys: Vec<LiveId>,
+        widgets: Vec<LiveId>,
+        prelude_widgets: Vec<LiveId>,
+        widgets_internal: Vec<LiveId>,
+        theme_keys: Vec<LiveId>,
+        /// the theme's colours and numbers
+        theme_values: Vec<(LiveId, Option<u32>, Option<u64>)>,
+        types: usize,
+    }
+
+    fn keys(vm: &mut ScriptVm, object: ScriptObject) -> Vec<LiveId> {
+        let mut keys: Vec<LiveId> = vm.heap().map_entries(object).iter().filter_map(|e| e.key.as_id()).collect();
+        keys.sort_unstable();
+        keys
+    }
+
+    /// The isolate's UI, read in it (an entry, so a lazy one registers on the read).
+    fn ui_of(cx: &mut Cx, vm_id: SplashVmId) -> Ui {
+        cx.with_script_vm_id(vm_id, |vm| {
+            let widgets = vm.module(id!(widgets));
+            let prelude = vm.module(id!(prelude));
+            let theme = vm.module(id!(theme));
+            let modules = vm.modules();
+            let prelude_widgets = vm.value(prelude, id!(widgets)).as_object().expect("mod.prelude.widgets");
+            let widgets_internal = vm.value(prelude, id!(widgets_internal)).as_object().expect("mod.prelude.widgets_internal");
+            let theme_values = vm.heap().map_entries(theme).iter().filter_map(|e| {
+                let (colour, number) = (e.value.as_color(), e.value.as_f64().map(f64::to_bits));
+                (colour.is_some() || number.is_some()).then(|| (e.key.as_id().unwrap_or_default(), colour, number))
+            }).collect();
+            assert!(!vm.has_lazy_modules(), "the UI is registered once read");
+            Ui {
+                mod_keys: keys(vm, modules),
+                widgets: keys(vm, widgets),
+                prelude_widgets: keys(vm, prelude_widgets),
+                widgets_internal: keys(vm, widgets_internal),
+                theme_keys: keys(vm, theme),
+                theme_values,
+                types: vm.heap().registered_type_count(),
+            }
+        })
+    }
+
+    /// A collection of the parked isolate, as the pump's round-robin makes between frames.
+    fn collect(cx: &mut Cx, vm_id: SplashVmId) {
+        let bx = cx.global::<CxWidgetAsync>().isolated_vms.vms.get_mut(&vm_id).and_then(|isolated| isolated.vm.as_mut()).expect("a parked isolate");
+        bx.vm_ctl(&mut ScriptCtlReq::new(CTL_GC));
+    }
+
+    fn unit_names(cx: &mut Cx, vm_id: SplashVmId) -> Vec<&'static str> {
+        cx.with_script_vm_id(vm_id, |vm| isolate_ui_units_of(vm).expect("an isolate's record").iter().map(|unit| unit.name).collect())
+    }
+
+    fn step(cx: &mut Cx, vm_id: SplashVmId, units: usize) {
+        for _ in 0..units {
+            assert!(cx.step_isolate_ui(vm_id), "units remain");
+            collect(cx, vm_id);
+        }
+    }
+
+    fn restyle(cx: &mut Cx, vm_id: SplashVmId, sheet: &crate::desktop_style::StyleSheet) {
+        // As a Splash restyles its isolate (`Splash::apply_source`).
+        if !restyle_lazy_isolate(cx, vm_id, sheet) {
+            let loader = isolate_loader(cx, vm_id);
+            cx.with_script_vm_id(vm_id, |vm| {
+                crate::desktop_style::install(vm, sheet.clone());
+                restyle_isolate(vm, splash_theme(), splash_theme_script(), loader.as_ref());
+            });
+        }
+    }
+
+    fn stepping_registers_the_whole_ui(set: IsolateWidgets) -> Vec<&'static str> {
+        set_log_tap(Some(count_errors));
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        // The first isolate of a shape registers eagerly and teaches the keys; the rest are lazy.
+        let first = cx.alloc_splash_vm_with_widgets(false, set);
+        let [whole, stepped, entered, type_miss, restyled] = std::array::from_fn(|_| cx.alloc_splash_vm_with_widgets(false, set));
+        let names = unit_names(&mut cx, stepped);
+        let errors_before = ERRORS.with(|errors| errors.get());
+
+        // Stepped to the end, with a collection after every unit, equals whole.
+        let ui = ui_of(&mut cx, whole);
+        let mut steps = 1;
+        while cx.step_isolate_ui(stepped) {
+            steps += 1;
+            collect(&mut cx, stepped);
+        }
+        assert_eq!(steps, names.len(), "one unit per step");
+        assert!(!cx.step_isolate_ui(stepped), "nothing left to step");
+        assert_eq!(ui_of(&mut cx, stepped), ui, "stepped equals whole");
+
+        // Interrupted: any other entry runs the rest first.
+        step(&mut cx, entered, 3);
+        let button = cx.with_script_vm_id(entered, |vm| {
+            let lazy = vm.has_lazy_modules();
+            let widgets = vm.module(id!(widgets));
+            (lazy, vm.value(widgets, id!(Button)).as_object().is_some())
+        });
+        assert_eq!(button, (false, true), "an entry finds the UI registered");
+        assert!(!cx.step_isolate_ui(entered), "nothing left to step after an entry");
+        assert_eq!(ui_of(&mut cx, entered), ui, "an entry completes it as whole");
+
+        // A Rust type miss in an entry that does not finish it (taken out of the set by hand)
+        // runs the rest from where the steps were.
+        step(&mut cx, type_miss, 3);
+        cx.global::<CxWidgetAsync>().ui_in_progress.remove(&type_miss);
+        assert!(cx.with_script_vm_id(type_miss, |vm| crate::makepad_script::expand_on_type_miss(vm)), "the miss finds the group");
+        assert!(!cx.step_isolate_ui(type_miss), "nothing left to step after a type miss");
+        assert_eq!(ui_of(&mut cx, type_miss), ui, "a type miss completes it as whole");
+
+        // A restyle half way equals the same restyle after a whole registration.
+        let sheet = crate::desktop_style::StyleSheet::named("macos").expect("the catalogue's sheet");
+        step(&mut cx, restyled, 3);
+        restyle(&mut cx, restyled, &sheet);
+        restyle(&mut cx, whole, &sheet);
+        let restyled_ui = ui_of(&mut cx, restyled);
+        assert_eq!(restyled_ui, ui_of(&mut cx, whole), "a restyle half way equals one after whole");
+        if let Some(colour) = sheet.theme_color("color_bg_app") {
+            let bg = restyled_ui.theme_values.iter().find(|(key, _, _)| *key == id!(color_bg_app)).and_then(|(_, colour, _)| *colour);
+            assert_eq!(bg, Some(colour), "the restyle wears the sheet");
+        }
+
+        assert_eq!(ERRORS.with(|errors| errors.get()), errors_before, "no errors");
+        for vm_id in [first, whole, stepped, entered, type_miss, restyled] {
+            cx.free_splash_vm(vm_id);
+        }
+        assert!(cx.global::<CxWidgetAsync>().ui_in_progress.is_empty());
+        names
+    }
+
+    /// The game host's set. Its unit list is a unit per base theme and per base widget module.
+    #[test]
+    fn a_stepped_base_isolate_ui_registers_as_whole_however_interrupted() {
+        let names = stepping_registers_the_whole_ui(IsolateWidgets::Base);
+        let widget_modules = names.iter().filter(|name| name.starts_with("widgets: ") && !matches!(**name, "widgets: head" | "widgets: insets and prelude")).count();
+        assert_eq!(widget_modules, 17, "a unit per base widget module: {names:?}");
+        for theme in ["theme: dark", "theme: light", "theme: skeleton"] {
+            assert_eq!(names.iter().filter(|name| **name == theme).count(), 1, "a unit for {theme}: {names:?}");
+        }
+        let mut once: Vec<&str> = names.iter().copied().filter(|name| *name != "ui: host mod").collect();
+        once.sort_unstable();
+        once.dedup();
+        assert_eq!(once.len(), names.iter().filter(|name| **name != "ui: host mod").count(), "no unit runs twice: {names:?}");
+    }
+
+    /// What Splash mini-apps and Stage slides allocate.
+    #[test]
+    fn a_stepped_library_isolate_ui_registers_as_whole_however_interrupted() {
+        stepping_registers_the_whole_ui(IsolateWidgets::Library);
     }
 }

@@ -7,7 +7,8 @@
 //! them ([`XrFrameSink::presented`]) in the same draw, and packs them for its encoder. A frame
 //! the app draws without content says so with [`xr_frame_empty`] (the sink asks for the next
 //! pose instead of streaming a picture of nothing). The sink also hears every `Signal`
-//! ([`XrFrameSink::signal`]): its own wakes (a picture submitted, room again).
+//! ([`XrFrameSink::signal`]): its own wakes (a picture submitted, room again), raised with
+//! `SignalToUI::set_for_hooks` so the app's widgets don't hear them.
 //!
 //! One sink per process ([`set_xr_frame_sink`]); none installed costs one global lookup per XR
 //! pass end.
@@ -29,7 +30,8 @@ pub trait XrFrameSink: 'static {
     fn presented(&mut self, cx: &mut Cx2d, frame: &XrPresented);
     /// The app drew this XR frame without content (`why`, counted).
     fn empty(&mut self, cx: &mut Cx, why: &'static str);
-    /// An `Event::Signal` (before the app's handler).
+    /// A signal: an `Event::Signal` (before the app's handler), or the sink's own hook signal
+    /// (`SignalToUI::set_for_hooks`) with none.
     fn signal(&mut self, cx: &mut Cx);
 }
 

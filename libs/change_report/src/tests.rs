@@ -57,6 +57,8 @@ fn schema_file_matches_the_checker() {
     assert_eq!(max(snippet, "maxLength"), MAX_SNIPPET);
     let required: Vec<&str> = schema.get("required").and_then(Value::as_arr).unwrap().iter().filter_map(Value::as_str).collect();
     assert_eq!(required, ["format", "version", "app", "changes", "redactions", "diff"]);
+    let suggestion = schema.get("properties").and_then(|p| p.get("suggestion")).and_then(|s| s.get("type")).and_then(Value::as_str);
+    assert_eq!(suggestion, Some("boolean"));
     assert_eq!(schema.get("properties").and_then(|p| p.get("format")).and_then(|f| f.get("const")).and_then(Value::as_str), Some(FORMAT));
 }
 
@@ -74,6 +76,8 @@ fn schema_rules_are_enforced() {
         (edited("\"diff\": false", "\"diff\": \"no\""), "\"diff\" must be true or false"),
         (edited("\"count\": 2", "\"count\": 0"), "count"),
         (edited("\"Larger result text\"", "\"Larger\\nresult\""), "one line"),
+        (edited("\"diff\": false", "\"diff\": false, \"suggestion\": \"yes\""), "\"suggestion\" must be true or false"),
+        (edited("\"diff\": false", "\"diff\": true, \"suggestion\": true"), "has no diff"),
     ];
     for (json, expected) in cases {
         let error = parse_report(json.as_bytes()).unwrap_err();
@@ -124,8 +128,30 @@ fn zip_contents_and_sizes_are_checked() {
     let patch = zip(&[(REPORT_JSON, with_diff.as_bytes()), (REPORT_MD, markdown.as_bytes()), (CHANGES_DIFF, b"diff --git a/i.png b/i.png\nGIT binary patch\nliteral 12\n")]);
     assert!(open(&patch).unwrap_err().contains("binary patch"));
     let diff = "--- a/makepad/apps/calculator/src/app.rs\n+++ b/makepad/apps/calculator/src/app.rs\n@@ -1 +1 @@\n-font_size: 20\n+font_size: 28\n";
-    let fine = zip(&[(REPORT_JSON, with_diff.as_bytes()), (REPORT_MD, markdown.as_bytes()), (CHANGES_DIFF, diff.as_bytes())]);
-    assert_eq!(open(&fine).unwrap().diff.as_deref(), Some(diff));
+    let diff_markdown = parse_report(with_diff.as_bytes()).unwrap().to_markdown();
+    let fine = zip(&[(REPORT_JSON, with_diff.as_bytes()), (REPORT_MD, diff_markdown.as_bytes()), (CHANGES_DIFF, diff.as_bytes())]);
+    let package = open(&fine).unwrap();
+    assert_eq!(package.diff.as_deref(), Some(diff));
+    // The person sends the concepts only: no diff, the flag and REPORT.md's line say so.
+    let concepts = package.without_diff().unwrap();
+    assert_eq!((concepts.diff.as_deref(), concepts.report.diff), (None, false));
+    assert!(concepts.markdown.ends_with("No code diff is included.\n") && !concepts.markdown.contains("changes.diff"), "{}", concepts.markdown);
+    assert_eq!(concepts.report.changes, package.report.changes);
+    assert_eq!(open(&concepts.zip).unwrap().report, concepts.report);
+}
+
+#[test]
+fn a_suggestion_changes_nothing() {
+    let json = edited("\"diff\": false", "\"diff\": false,\n  \"suggestion\": true");
+    let report = parse_report(json.as_bytes()).unwrap();
+    assert!(report.suggestion && !report.diff);
+    assert_eq!(parse_report(report.to_json().as_bytes()).unwrap(), report);
+    assert!(!example().to_json().contains("suggestion"), "an ordinary report carries no suggestion field");
+    let markdown = report.to_markdown();
+    assert!(markdown.starts_with("# Suggestions for calculator (release 2026-09-20)"), "{markdown}");
+    assert!(markdown.ends_with("Nothing in the app was changed: these are suggestions.\n"), "{markdown}");
+    let package = open(&zip(&[(REPORT_JSON, json.as_bytes()), (REPORT_MD, markdown.as_bytes())])).unwrap();
+    assert!(package.report.suggestion);
 }
 
 /// The anonymisation checklist of docs/agents/change-report.md, line by
@@ -218,6 +244,11 @@ fn endpoint_and_answer() {
     assert_eq!(endpoint(Some("  ")), DEFAULT_ENDPOINT);
     assert_eq!(endpoint(Some("http://127.0.0.1:9000/api/feedback/")), "http://127.0.0.1:9000/api/feedback/changes");
     assert_eq!(response_id(b"{\"ok\":true,\"id\":42}"), Ok(42));
+    assert_eq!(answer(200, b"{\"ok\":true,\"id\":7}"), Ok(7));
+    assert_eq!(answer(422, b"{\"error\":\"The report lists no changes\"}"), Err("The report lists no changes".into()));
+    assert!(answer(404, b"<html>Not found</html>").unwrap_err().contains("404"));
+    assert!(answer(429, b"").unwrap_err().contains("try again in an hour"));
+    assert!(answer(502, b"Bad gateway").unwrap_err().contains("502"));
     assert_eq!(response_id(b"{\"error\":\"Too much feedback\"}"), Err("Too much feedback".into()));
     assert!(response_id(b"<html>").is_err());
 }

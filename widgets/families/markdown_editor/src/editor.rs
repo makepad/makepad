@@ -12,25 +12,28 @@
 //! (`makepad_markdown_edit::plan`), applied as this view's own edit in the
 //! document's one history, so undo steps the same in both views.
 
-use crate::rowmap::{caret_src, flat_of, next_char, next_word, prev_char, prev_word};
+use crate::highlight::{Highlights, RowBlocks, RowHighlight, WholeBlock};
+use crate::print::{PrintJob, PrintUpdate};
+use crate::rowmap::{caret_src, flat_of, line_around, next_char, next_word, prev_char, prev_word, word_around};
 use makepad_code_editor::{
     history::EditKind,
     selection::{Cursor, Selection, SelectionSet},
     session::SessionId,
     text::{Change, Edit, Position, Text},
-    CodeDocument,
+    CodeDocument, TokenColors,
 };
 use makepad_markdown_edit::{
-    plan::{self, Plan},
+    plan::{self, BlockStyle, Mark, Plan},
     pulldown_cmark::{CodeBlockKind, CowStr, Event as MdEvent, Tag, TagEnd},
     BlockKind, Index, LineEdit, Row, RowPart, Slice,
 };
 use makepad_widgets_core::*;
 use makepad_widgets_rich_text::{
-    markdown::{Markdown, MarkdownHost, MarkdownPiece},
+    markdown::{Markdown, MarkdownHost, MarkdownPiece, MarkdownWidgetRefExt},
     text_flow::TextFlow,
 };
 use std::{
+    cell::{Cell, RefCell},
     collections::HashMap,
     ops::Range,
     sync::mpsc::{channel, Receiver},
@@ -47,6 +50,10 @@ script_mod! {
         height: Fill
         flow: Down
         draw_caret +: { color: theme.color_text }
+        draw_page_number +: {
+            color: #x707070
+            text_style: theme.font_regular{font_size: 8}
+        }
         list := PortalList{
             width: Fill
             height: Fill
@@ -63,6 +70,32 @@ script_mod! {
                 body: ""
             }
         }
+        // The rows as they print: drawn off screen by a print job, never here.
+        print_page := View{
+            visible: false
+            width: 0
+            height: 0
+            row := Markdown{
+                width: Fill
+                height: Fit
+                padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
+                host_selection: true
+                inline_links: true
+                body: ""
+                font_color: #x1a1a1a
+                draw_text +: { color: #x1a1a1a }
+                link_color: #x1a4fb8
+                draw_block +: {
+                    line_color: #x1a1a1a
+                    sep_color: #xb8b8b8
+                    quote_bg_color: #xf1f1f1
+                    quote_fg_color: #x4a4a4a
+                    code_color: #xf1f1f1
+                    table_header_bg_color: #xe9e9e9
+                    table_border_color: #xb8b8b8
+                }
+            }
+        }
     }
 }
 
@@ -75,8 +108,54 @@ pub enum MarkdownEditorAction {
     Changed,
     /// A key the view did not use (Cmd/Ctrl+S and the like), for the host.
     UnhandledKey(KeyEvent),
+    /// Cmd/Ctrl+K: the host asks for a URL (starting from the one of the
+    /// link the caret is in) and hands it to `set_link`.
+    EditLink(Option<String>),
+    /// Cmd/Ctrl+click on a link: the host follows its destination.
+    OpenLink(String),
     #[default]
     None,
+}
+
+/// What the caret stands in, for a format bar to light its keys.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FormatState {
+    /// The kind of the innermost block (None while the caret's row is not drawn).
+    pub block: Option<BlockStyle>,
+    /// The block sits in a quote.
+    pub quote: bool,
+    /// The marks the next typed text gets: those around the caret, with the
+    /// pending ones toggled.
+    pub marks: Vec<Mark>,
+    /// The caret is in a link.
+    pub link: bool,
+    /// The caret is in a table.
+    pub table: bool,
+}
+
+/// What a table command does, at the caret's cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableEdit {
+    /// A new table after the caret's block (on a blank line, in its place).
+    Insert,
+    RowAbove,
+    RowBelow,
+    DeleteRow,
+    ColumnLeft,
+    ColumnRight,
+    DeleteColumn,
+}
+
+/// Where the selection goes after a plan.
+#[derive(Clone, Copy, Debug)]
+enum After {
+    /// A caret at the plan's caret.
+    Caret,
+    /// A selection, from offsets of the new text.
+    Select { anchor: usize, caret: usize },
+    /// Where the edits moved the caret and the anchor (an edit away from
+    /// the caret, like a task box clicked).
+    Keep,
 }
 
 /// The document the view shows: its edit broadcast and its block index.
@@ -117,12 +196,14 @@ impl RowKey {
     }
 }
 
-struct RowCache {
-    slice: Slice,
-    events: Vec<(MdEvent<'static>, Range<usize>)>,
-    list_start: Option<u64>,
+pub(crate) struct RowCache {
+    pub(crate) slice: Slice,
+    pub(crate) events: Vec<(MdEvent<'static>, Range<usize>)>,
+    pub(crate) list_start: Option<u64>,
     /// The source ranges of the row's links (the caret leaves a link at its end).
     links: Vec<Range<usize>>,
+    /// The source ranges of the row's task boxes (a click flips one).
+    tasks: Vec<Range<usize>>,
     /// What the flow drew, from the row's last draw.
     pieces: Vec<MarkdownPiece>,
     /// Where the caret stood in the last draw when its line drew no text (a
@@ -133,7 +214,7 @@ struct RowCache {
 }
 
 impl RowCache {
-    fn build(index: &Index, lines: &[String], row: &Row) -> Self {
+    pub(crate) fn build(index: &Index, lines: &[String], row: &Row) -> Self {
         let slice = Slice::new(lines, row.lines.clone());
         let block = &index.blocks()[row.block];
         let events = match row.part {
@@ -153,11 +234,17 @@ impl RowCache {
             .filter(|(event, _)| matches!(event, MdEvent::Start(Tag::Link { .. })))
             .map(|(_, range)| range.clone())
             .collect();
+        let tasks = events
+            .iter()
+            .filter(|(event, _)| matches!(event, MdEvent::TaskListMarker(_)))
+            .map(|(_, range)| range.clone())
+            .collect();
         Self {
             slice,
             events,
             list_start,
             links,
+            tasks,
             pieces: Vec::new(),
             anchor: None,
             drawn_in: 0,
@@ -266,6 +353,17 @@ fn prefix_only(line: &str) -> bool {
 /// The events of a run of a long code block's lines, made here: a run cut
 /// from the middle of a block does not parse as code on its own. Each run
 /// is a code block of its lines; the fences show nowhere.
+/// A block keeps the spacing above it; the next item of a list or run of a
+/// code block continues the one above.
+pub(crate) fn follows_block(row_id: usize, row: &Row) -> bool {
+    row_id > 0
+        && match row.part {
+            RowPart::Whole => true,
+            RowPart::Item { index, .. } => index == 0,
+            RowPart::Code { chunk, .. } => chunk == 0,
+        }
+}
+
 fn code_events(
     lines: &[String],
     slice: &Slice,
@@ -296,6 +394,46 @@ fn code_events(
     events
 }
 
+/// Where `offset` of a plan's old text lands in its new text: an offset
+/// inside a replaced range at the replacement's end; at text inserted right
+/// there, after it, or with `before` in front of it.
+fn map_offset(plan: &Plan, offset: usize, before: bool) -> usize {
+    let mut edits: Vec<&(Range<usize>, String)> = plan.edits.iter().collect();
+    edits.sort_by_key(|(range, _)| (range.start, range.end));
+    let mut mapped = offset as isize;
+    for (range, text) in edits {
+        let grows = text.len() as isize - range.len() as isize;
+        if range.end < offset || (range.end == offset && !(before && range.is_empty())) {
+            mapped += grows;
+        } else if range.start < offset {
+            mapped += range.start as isize - offset as isize + text.len() as isize;
+        }
+    }
+    mapped.max(0) as usize
+}
+
+/// A heading's anchor: its text in lower case, letters, digits, `-` and
+/// `_` kept, spaces as `-`, inline markers and other punctuation dropped.
+fn slug(text: &str) -> String {
+    text.trim()
+        .chars()
+        .filter_map(|c| match c {
+            ' ' => Some('-'),
+            c if c.is_alphanumeric() || c == '-' || c == '_' => Some(c),
+            _ => None,
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// What a press hits besides text.
+enum Target {
+    /// A task box, at the position of its `[`.
+    Task(Position),
+    /// A link, to this destination.
+    Link(String),
+}
+
 /// Where a row drew, for hit tests between draws.
 struct DrawnRow {
     row: usize,
@@ -317,8 +455,17 @@ pub struct MarkdownEditor {
     view: View,
     #[live]
     draw_caret: DrawColor,
+    /// A printed page's number, under its text.
+    #[live]
+    draw_page_number: DrawText,
+    /// The colours of code blocks' tokens: those of the code editor.
+    #[live]
+    token_colors: TokenColors,
     #[rust]
     doc: Option<Attached>,
+    /// Code blocks' tokens, lexed once per version of a block.
+    #[rust]
+    highlights: Highlights,
     #[rust]
     rows: HashMap<RowKey, RowCache>,
     #[rust]
@@ -363,6 +510,16 @@ pub struct MarkdownEditor {
     /// A key moved the caret: the next draw scrolls it into view.
     #[rust]
     reveal: bool,
+    /// Marks toggled with no selection (Cmd+B and the like): the next text
+    /// typed takes them, or loses them.
+    #[rust]
+    pending: Vec<Mark>,
+    /// The link a Cmd/Ctrl+click would follow, underlined.
+    #[rust]
+    hovered_link: Option<String>,
+    /// The pages being made for print or export.
+    #[rust]
+    print: Option<PrintJob>,
 }
 
 impl MarkdownEditor {
@@ -371,6 +528,7 @@ impl MarkdownEditor {
     pub fn attach(&mut self, cx: &mut Cx, mut document: CodeDocument) {
         self.doc = None;
         self.rows.clear();
+        self.highlights.clear();
         let session = SessionId::new();
         let (sender, edits) = channel();
         document.add_session(session, sender);
@@ -385,7 +543,51 @@ impl MarkdownEditor {
     pub fn detach(&mut self, cx: &mut Cx) {
         self.doc = None;
         self.rows.clear();
+        self.highlights.clear();
         self.view.redraw(cx);
+    }
+
+    /// Starts making the document's pages as they read on paper, into a
+    /// PDF, from a copy of the document as it is now. The host drives the
+    /// job whether the view shows or not: `draw_print` in its draw and
+    /// `print_event` with its events, which answers the progress and the
+    /// PDF. The host redraws to start it. False with no document or a job
+    /// already running.
+    pub fn print(&mut self, cx: &mut Cx, title: &str) -> bool {
+        self.sync(cx);
+        if self.print.is_some() {
+            return false;
+        }
+        let Some(doc) = self.doc.as_ref() else { return false };
+        let lines = doc.document.as_text().as_lines().to_vec();
+        self.print = Some(PrintJob::new(cx, title, doc.index.clone(), lines));
+        true
+    }
+
+    /// The title of the job running, if one is.
+    pub fn printing(&self) -> Option<&str> {
+        self.print.as_ref().map(|job| job.title())
+    }
+
+    pub fn cancel_print(&mut self) {
+        self.print = None;
+    }
+
+    /// The print job's draw (see `print`).
+    pub fn draw_print(&mut self, cx: &mut Cx2d) {
+        let Some(job) = self.print.as_mut() else { return };
+        let row = self.view.widget(cx, ids!(print_page.row));
+        let Some(mut md) = row.borrow_mut::<Markdown>() else { return };
+        job.draw(cx, &mut md, &mut self.draw_page_number);
+    }
+
+    /// The print job's events (see `print`): where it stands, when that changed.
+    pub fn print_event(&mut self, cx: &mut Cx, event: &Event) -> Option<PrintUpdate> {
+        let update = self.print.as_mut()?.handle_event(cx, event)?;
+        if matches!(update, PrintUpdate::Done(_) | PrintUpdate::Failed(_)) {
+            self.print = None;
+        }
+        Some(update)
     }
 
     pub fn is_attached(&self) -> bool {
@@ -484,6 +686,31 @@ impl MarkdownEditor {
             let text = doc.document.as_text();
             doc.index.apply(text.as_lines(), &line_edits)
         };
+        // A row the edit did not reparse keeps its cache, and the lines
+        // added or removed above it move it.
+        for edit in &line_edits {
+            let delta = edit.added as isize - edit.removed as isize;
+            if delta != 0 {
+                for cache in self.rows.values_mut() {
+                    if cache.slice.first_line > edit.line {
+                        cache.slice.first_line = cache.slice.first_line.saturating_add_signed(delta);
+                    }
+                }
+            }
+        }
+        if let Some(splice) = &splice {
+            // The rows drawn after the edit renumber; the replaced ones are
+            // gone until the next draw.
+            let moved = splice.new_rows.len() as isize - splice.old_rows.len() as isize;
+            self.drawn.retain_mut(|drawn| {
+                if drawn.row >= splice.old_rows.end {
+                    drawn.row = drawn.row.saturating_add_signed(moved);
+                    true
+                } else {
+                    drawn.row < splice.old_rows.start
+                }
+            });
+        }
         if let Some(splice) = splice {
             let list = self.view.portal_list(cx, ids!(list));
             list.splice_items(
@@ -546,14 +773,7 @@ impl MarkdownEditor {
                 (0, 0)
             };
             md.text_flow.set_selection(a, b);
-            // A block keeps the spacing above it; the next item of a list or
-            // run of a code block continues the one above.
-            let follows_block = row_id > 0
-                && match row.part {
-                    RowPart::Whole => true,
-                    RowPart::Item { index, .. } => index == 0,
-                    RowPart::Code { chunk, .. } => chunk == 0,
-                };
+            let follows_block = follows_block(row_id, &row);
             // A caret on a line that draws no text gets a place made for it.
             let caret_line = self.caret.line_index;
             let anchors = if caret_line >= start.line_index && caret_line <= end.line_index && cache.line_is_blank(caret_line) {
@@ -561,11 +781,34 @@ impl MarkdownEditor {
             } else {
                 Vec::new()
             };
+            // Code blocks take the code editor's colours; a long one split in
+            // rows is lexed whole.
+            let whole = match row.part {
+                RowPart::Code { count, .. } if count > 1 => {
+                    let block = &index.blocks()[row.block];
+                    let code = block.code.clone().unwrap_or(0..0);
+                    let content = block.start + code.start as usize..block.start + code.end as usize;
+                    let first = cache.slice.first_line.max(content.start) - content.start;
+                    Some(WholeBlock { lines: &lines[content], first })
+                }
+                _ => None,
+            };
+            let highlight = RowHighlight {
+                blocks: RowBlocks {
+                    highlights: RefCell::new(&mut self.highlights),
+                    gen: key.gen,
+                    part: key.part,
+                    whole,
+                    calls: Cell::new(0),
+                },
+                colors: &self.token_colors,
+            };
             let mut host = MarkdownHost {
                 footnote_number: Some(&footnote),
                 list_start: cache.list_start,
                 follows_block,
                 anchors,
+                highlight: Some(&highlight),
                 ..Default::default()
             };
             md.draw_events(cx, walk, &cache.slice.text, cache.events.iter().cloned(), &mut host);
@@ -691,6 +934,82 @@ impl MarkdownEditor {
         Some(cache.caret_at(flat))
     }
 
+    /// The drawn row under `abs`.
+    fn row_at(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        self.drawn.iter().position(|drawn| drawn.item.area().rect(cx).contains(abs))
+    }
+
+    /// The flow index of the character under `abs` in drawn row `at`: the
+    /// one left of the nearest boundary when the pointer is left of it.
+    fn char_at(&self, cx: &Cx, at: usize, abs: DVec2) -> Option<usize> {
+        let md = self.drawn[at].item.borrow::<Markdown>()?;
+        let mut flat = md.text_flow.selection_point_to_char_index(cx, abs)?;
+        if let Some(rect) = md.text_flow.caret_rect(flat, false) {
+            if flat > 0 && abs.x < rect.pos.x + md.text_flow.drawn_shift(cx).x {
+                flat = prev_char(md.text_flow.tracked_text(), flat);
+            }
+        }
+        Some(flat)
+    }
+
+    /// A double click selects the word under the pointer, a triple click
+    /// its line of text; the ends map to the source as the caret does.
+    fn select_around(&mut self, cx: &mut Cx, abs: DVec2, line: bool) -> bool {
+        let Some(at) = self.row_at(cx, abs) else { return false };
+        let Some(flat) = self.char_at(cx, at, abs) else { return false };
+        let drawn = &self.drawn[at];
+        let Some(cache) = self.rows.get(&drawn.key) else { return false };
+        let Some(md) = drawn.item.borrow::<Markdown>() else { return false };
+        let text = md.text_flow.tracked_text();
+        let range = if line { line_around(text, flat) } else { word_around(text, flat) };
+        if range.is_empty() {
+            return false;
+        }
+        let (anchor, caret) = (cache.caret_at(range.start), cache.caret_at(range.end));
+        drop(md);
+        self.anchor = anchor;
+        self.caret = caret;
+        self.prefer_next_row = false;
+        self.preferred_x = None;
+        self.last_input = None;
+        if let Some(doc) = &self.doc {
+            doc.document.force_new_group();
+        }
+        self.moved(cx);
+        true
+    }
+
+    /// What a press at `abs` would hit besides text: a task box (the
+    /// position of its `[`) or a link (its destination).
+    fn target_at(&self, cx: &Cx, abs: DVec2) -> Option<Target> {
+        let at = self.row_at(cx, abs)?;
+        let cache = self.rows.get(&self.drawn[at].key)?;
+        if cache.tasks.is_empty() && cache.links.is_empty() {
+            return None;
+        }
+        let flat = self.char_at(cx, at, abs)?;
+        let piece = cache.pieces.iter().find(|piece| piece.flat.start <= flat && flat < piece.flat.end)?;
+        let offset = if piece.identity { piece.src.start + (flat - piece.flat.start) } else { piece.src.start };
+        if let Some(task) = cache.tasks.iter().find(|task| task.contains(&offset)) {
+            return Some(Target::Task(cache.position_of(task.start)));
+        }
+        if cache.links.iter().any(|link| link.contains(&offset)) {
+            return plan::link_at(&cache.slice.text, &cache.events, offset).map(Target::Link);
+        }
+        None
+    }
+
+    /// Underlines the link a Cmd/Ctrl+click would follow.
+    fn hover_link(&mut self, cx: &mut Cx, url: Option<String>) {
+        if self.hovered_link == url {
+            return;
+        }
+        self.hovered_link = url;
+        for drawn in &self.drawn {
+            drawn.item.as_markdown().set_hovered_link(cx, self.hovered_link.as_deref());
+        }
+    }
+
     /// The selection as markdown, repaired at its ends (markers open at the
     /// start and still open at the end closed), as the cut rules take it.
     fn selected_text(&self) -> String {
@@ -779,12 +1098,18 @@ impl MarkdownEditor {
 
     /// Applies `plan`, made over `slice`, as this view's edit of `kind`: one
     /// step in the document's history that remembers the selection before it.
-    fn apply_plan(&mut self, cx: &mut Cx, slice: &Slice, plan: &Plan, kind: EditKind) {
-        let after = plan.apply(&slice.text);
-        let head = &after[..plan.caret.min(after.len())];
-        let caret = Position {
-            line_index: slice.first_line + head.matches('\n').count(),
-            byte_index: head.len() - head.rfind('\n').map_or(0, |at| at + 1),
+    fn apply_plan(&mut self, cx: &mut Cx, slice: &Slice, plan: &Plan, kind: EditKind, after: After) {
+        let new_text = plan.apply(&slice.text);
+        let position = |offset: usize| {
+            let head = &new_text[..offset.min(new_text.len())];
+            Position {
+                line_index: slice.first_line + head.matches('\n').count(),
+                byte_index: head.len() - head.rfind('\n').map_or(0, |at| at + 1),
+            }
+        };
+        let (caret, anchor) = match after {
+            After::Select { anchor, caret } => (position(caret), position(anchor)),
+            After::Caret | After::Keep => (position(plan.caret), position(plan.caret)),
         };
         if !plan.edits.is_empty() {
             let ranges: Vec<(Position, Position, Text)> = plan
@@ -800,8 +1125,10 @@ impl MarkdownEditor {
             self.sync(cx);
             cx.widget_action(self.widget_uid(), MarkdownEditorAction::Changed);
         }
-        self.caret = self.clamp(caret);
-        self.anchor = self.caret;
+        if !matches!(after, After::Keep) {
+            self.caret = self.clamp(caret);
+            self.anchor = self.clamp(anchor);
+        }
         self.preferred_x = None;
         self.prefer_next_row = false;
         self.reveal = true;
@@ -828,15 +1155,23 @@ impl MarkdownEditor {
         let range = Self::slice_offset(&slice, start)..Self::slice_offset(&slice, end);
         let (plan, fragment) = plan::cut(&slice.text, &events, range);
         let kind = self.new_group();
-        self.apply_plan(cx, &slice, &plan, kind);
+        self.apply_plan(cx, &slice, &plan, kind, After::Caret);
         Some((kind, fragment))
     }
 
     /// Types `typed` at the caret, over the selection. Pasted text keeps the
     /// caret's container: each line after the first takes its prefix.
     fn type_text(&mut self, cx: &mut Cx, typed: &str, was_paste: bool) {
+        // Marks toggled with no selection take the first text typed after
+        // them that can carry a mark (not spaces, not a new line).
+        let pending = std::mem::take(&mut self.pending);
+        let wrap = !pending.is_empty() && !typed.contains('\n') && !typed.trim().is_empty();
+        if !wrap {
+            self.pending = pending.clone();
+        }
         let kind = match self.delete_selection(cx) {
             Some((group, _)) => group,
+            None if wrap => self.new_group(),
             None if was_paste => EditKind::Other,
             None if typed == " " => EditKind::InsertSpace,
             None => EditKind::Insert,
@@ -863,8 +1198,18 @@ impl MarkdownEditor {
             let at = Self::slice_offset(&slice, start);
             (slice, Plan::insert(at, typed))
         };
-        self.apply_plan(cx, &slice, &planned, kind);
+        self.apply_plan(cx, &slice, &planned, kind, After::Caret);
         self.last_input = Some((start, self.caret));
+        if wrap {
+            self.anchor = start;
+            for mark in pending {
+                self.format(cx, kind, true, |text, events, range| plan::toggle_inline(text, events, range, mark));
+            }
+            // The caret stays inside the new markers, so the text typed next
+            // carries the marks too.
+            self.anchor = self.caret;
+            self.last_input = None;
+        }
     }
 
     /// Enter (a new block, or one container level out), or with `hard` a
@@ -874,13 +1219,22 @@ impl MarkdownEditor {
         let Some(lines) = self.blocks_around(self.caret.line_index, self.caret.line_index, 0, 0) else { return };
         let Some((slice, events)) = self.parse(lines) else { return };
         let at = Self::slice_offset(&slice, self.caret);
+        // In a table Enter goes to the cell below; after a pipe row it makes
+        // the row a table's header.
+        if !hard {
+            let step = plan::cell_below(&slice.text, &events, at).or_else(|| plan::table_from_header(&slice.text, &events, at));
+            if let Some(step) = step {
+                self.apply_step(cx, &slice, step, kind);
+                return;
+            }
+        }
         let plan = if hard {
             plan::hard_break(&slice.text, &events, at)
         } else {
             plan::enter(&slice.text, &events, at)
         };
         if let Some(plan) = plan {
-            self.apply_plan(cx, &slice, &plan, kind);
+            self.apply_plan(cx, &slice, &plan, kind, After::Caret);
         }
     }
 
@@ -907,7 +1261,7 @@ impl MarkdownEditor {
             plan::backspace(&slice.text, &events, at)
         };
         if let Some(plan) = plan {
-            self.apply_plan(cx, &slice, &plan, EditKind::Delete);
+            self.apply_plan(cx, &slice, &plan, EditKind::Delete, After::Caret);
         }
     }
 
@@ -927,6 +1281,242 @@ impl MarkdownEditor {
         }
     }
 
+    // Formatting.
+
+    /// Runs a format command over the top-level blocks the selection
+    /// touches; a selection keeps covering the same text. With `inside`
+    /// the caret stays before markers the command put at the selection's
+    /// end (so text typed there takes the new mark). False when the command
+    /// had nothing to do.
+    fn format(
+        &mut self,
+        cx: &mut Cx,
+        kind: EditKind,
+        inside: bool,
+        command: impl FnOnce(&str, &[(MdEvent<'static>, Range<usize>)], Range<usize>) -> Option<Plan>,
+    ) -> bool {
+        let (start, end) = self.ordered_selection();
+        let Some((slice, events)) = self.blocks_around(start.line_index, end.line_index, 0, 0).and_then(|lines| self.parse(lines))
+        else {
+            return false;
+        };
+        let range = Self::slice_offset(&slice, start)..Self::slice_offset(&slice, end);
+        let Some(planned) = command(&slice.text, &events, range.clone()) else { return false };
+        let after = if range.is_empty() {
+            After::Caret
+        } else {
+            After::Select {
+                anchor: map_offset(&planned, range.start, false),
+                caret: if inside { map_offset(&planned, range.end, true) } else { planned.caret },
+            }
+        };
+        self.apply_plan(cx, &slice, &planned, kind, after);
+        true
+    }
+
+    /// Toggles `mark` over the selection. With no selection the mark is
+    /// pending: the next text typed takes it (or, inside the mark, loses it).
+    pub fn toggle_mark(&mut self, cx: &mut Cx, mark: Mark) {
+        if self.anchor == self.caret {
+            match self.pending.iter().position(|pending| *pending == mark) {
+                Some(at) => {
+                    self.pending.remove(at);
+                }
+                None => self.pending.push(mark),
+            }
+            cx.widget_action(self.widget_uid(), MarkdownEditorAction::Caret);
+            return;
+        }
+        self.format(cx, EditKind::Other, false, |text, events, range| plan::toggle_inline(text, events, range, mark));
+    }
+
+    /// Gives the blocks the selection touches `style` (Quote and Code
+    /// toggle).
+    pub fn set_block_style(&mut self, cx: &mut Cx, style: BlockStyle) {
+        self.format(cx, EditKind::Other, false, |text, events, range| plan::set_block(text, events, range, style));
+    }
+
+    /// Links the selection to `url`; a caret or selection in a link changes
+    /// its destination; None (or an empty URL) removes the link.
+    pub fn set_link(&mut self, cx: &mut Cx, url: Option<&str>) {
+        let url = url.map(str::trim).filter(|url| !url.is_empty());
+        self.format(cx, EditKind::Other, false, |text, events, range| plan::set_link(text, events, range, url));
+    }
+
+    /// The destination of the link the caret is in.
+    pub fn link_at_caret(&self) -> Option<String> {
+        self.link_at(self.caret)
+    }
+
+    fn link_at(&self, position: Position) -> Option<String> {
+        let line = position.line_index;
+        let (slice, events) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines))?;
+        plan::link_at(&slice.text, &events, Self::slice_offset(&slice, position))
+    }
+
+    /// Flips the task box of the item at `position`; the selection stays.
+    fn toggle_task(&mut self, cx: &mut Cx, position: Position) -> bool {
+        let line = position.line_index;
+        let Some((slice, events)) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines)) else {
+            return false;
+        };
+        let at = Self::slice_offset(&slice, position);
+        let Some(planned) = plan::toggle_task(&slice.text, &events, at) else { return false };
+        self.apply_plan(cx, &slice, &planned, EditKind::Other, After::Keep);
+        true
+    }
+
+    /// Runs a table command at the caret: its edits as one history step,
+    /// then its selection. False when it does not apply here.
+    fn table(
+        &mut self,
+        cx: &mut Cx,
+        command: impl FnOnce(&str, &[(MdEvent<'static>, Range<usize>)], usize) -> Option<plan::Step>,
+    ) -> bool {
+        let line = self.caret.line_index;
+        let Some((slice, events)) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines)) else {
+            return false;
+        };
+        let Some(step) = command(&slice.text, &events, Self::slice_offset(&slice, self.caret)) else { return false };
+        self.apply_step(cx, &slice, step, EditKind::Other);
+        true
+    }
+
+    /// Applies a table step made over `slice`: its plan, then its selection.
+    fn apply_step(&mut self, cx: &mut Cx, slice: &Slice, step: plan::Step, kind: EditKind) {
+        let (anchor, caret) = (step.select.start, step.select.end);
+        let planned = step.plan.unwrap_or(Plan { edits: Vec::new(), caret });
+        if !planned.edits.is_empty() {
+            self.pending.clear();
+        }
+        self.apply_plan(cx, slice, &planned, kind, After::Select { anchor, caret });
+    }
+
+    /// A table key: inserts a table, or adds or removes the caret's row or
+    /// column. False when it does not apply (a row key outside a table).
+    pub fn edit_table(&mut self, cx: &mut Cx, edit: TableEdit) -> bool {
+        self.table(cx, |text, events, at| match edit {
+            TableEdit::Insert => plan::insert_table(text, events, at, 3, 2),
+            TableEdit::RowAbove => plan::insert_row(text, events, at, true),
+            TableEdit::RowBelow => plan::insert_row(text, events, at, false),
+            TableEdit::DeleteRow => plan::delete_row(text, events, at),
+            TableEdit::ColumnLeft => plan::insert_column(text, events, at, true),
+            TableEdit::ColumnRight => plan::insert_column(text, events, at, false),
+            TableEdit::DeleteColumn => plan::delete_column(text, events, at),
+        })
+    }
+
+    /// Tab and Shift+Tab: the list items the selection touches move in or
+    /// out a level. Outside a list Tab types a tab (a code block keeps it;
+    /// elsewhere the leading-space rule drops it).
+    fn indent(&mut self, cx: &mut Cx, outdent: bool) {
+        if self.table(cx, |text, events, at| plan::table_step(text, events, at, outdent)) {
+            return;
+        }
+        let done =
+            self.format(cx, EditKind::Other, false, |text, events, range| plan::indent_items(text, events, range, outdent));
+        if !done && !outdent && self.anchor == self.caret && self.in_list().is_none() {
+            self.type_text(cx, "\t", false);
+        }
+    }
+
+    /// The caret is in a list item (Some(ordered)), as the caret's row parsed.
+    fn in_list(&self) -> Option<bool> {
+        match self.format_state().block? {
+            BlockStyle::Bullet | BlockStyle::Task => Some(false),
+            BlockStyle::Numbered => Some(true),
+            _ => None,
+        }
+    }
+
+    /// What the caret stands in, from its row's parse (empty while the row
+    /// is not drawn): for a format bar. Costs one walk over the row's events.
+    pub fn format_state(&self) -> FormatState {
+        let mut state = FormatState::default();
+        let Some((_, cache)) = self.caret_row() else { return state };
+        let at = cache.offset_of(self.caret);
+        let holds = |range: &Range<usize>| range.start <= at && at < range.end;
+        let inside = |range: &Range<usize>| range.start < at && at < range.end;
+        // The lists (ordered or not) and the items the walk is in.
+        let mut lists: Vec<bool> = Vec::new();
+        let mut items: Vec<Range<usize>> = Vec::new();
+        for (event, range) in &cache.events {
+            match event {
+                MdEvent::Start(Tag::List(start)) => lists.push(start.is_some()),
+                MdEvent::End(TagEnd::List(_)) => {
+                    lists.pop();
+                }
+                MdEvent::Start(Tag::Item) => {
+                    if holds(range) {
+                        let ordered = lists.last().copied().unwrap_or(false);
+                        state.block = Some(if ordered { BlockStyle::Numbered } else { BlockStyle::Bullet });
+                    }
+                    items.push(range.clone());
+                }
+                MdEvent::End(TagEnd::Item) => {
+                    items.pop();
+                }
+                MdEvent::TaskListMarker(_) if items.last().is_some_and(&holds) => {
+                    state.block = Some(BlockStyle::Task);
+                }
+                MdEvent::Start(Tag::BlockQuote(_)) if holds(range) => state.quote = true,
+                MdEvent::Start(Tag::Heading { level, .. }) if holds(range) => {
+                    state.block = Some(BlockStyle::Heading(*level as u8));
+                }
+                MdEvent::Start(Tag::CodeBlock(_)) if holds(range) => state.block = Some(BlockStyle::Code),
+                MdEvent::Start(Tag::Table(_)) if holds(range) => state.table = true,
+                MdEvent::Start(Tag::Paragraph) if holds(range) && state.block.is_none() => {
+                    state.block = Some(BlockStyle::Paragraph);
+                }
+                MdEvent::Start(Tag::Emphasis) if inside(range) => state.marks.push(Mark::Emphasis),
+                MdEvent::Start(Tag::Strong) if inside(range) => state.marks.push(Mark::Strong),
+                MdEvent::Start(Tag::Strikethrough) if inside(range) => state.marks.push(Mark::Strikethrough),
+                MdEvent::Code(_) if inside(range) => state.marks.push(Mark::Code),
+                MdEvent::Start(Tag::Link { .. }) if inside(range) || (range.start < at && at == range.end) => {
+                    state.link = true;
+                }
+                _ => {}
+            }
+        }
+        if state.block.is_none() && cache.line_is_blank(self.caret.line_index) {
+            state.block = Some(BlockStyle::Paragraph);
+        }
+        state.marks.dedup();
+        for mark in &self.pending {
+            match state.marks.iter().position(|have| have == mark) {
+                Some(at) => {
+                    state.marks.remove(at);
+                }
+                None => state.marks.push(*mark),
+            }
+        }
+        state
+    }
+
+    /// Scrolls the heading whose anchor (its text as a slug: lower case,
+    /// spaces as `-`, punctuation dropped) is `anchor` to the top, with the
+    /// caret at its start. False when no heading has it.
+    pub fn go_to_anchor(&mut self, cx: &mut Cx, anchor: &str) -> bool {
+        let want = slug(anchor);
+        let found = {
+            let Some(doc) = &self.doc else { return false };
+            let text = doc.document.as_text();
+            let lines = text.as_lines();
+            doc.index.blocks().iter().enumerate().find_map(|(at, block)| {
+                let BlockKind::Heading(_) = block.kind else { return None };
+                let first = doc.index.block_lines(at).start;
+                let line = lines.get(first)?;
+                let title = line.trim_start().trim_start_matches('#').trim_end().trim_end_matches('#');
+                (slug(title) == want).then_some(first)
+            })
+        };
+        let Some(line) = found else { return false };
+        self.set_caret(cx, Position { line_index: line, byte_index: 0 }, Some(0.0));
+        self.snap = true;
+        self.moved(cx);
+        true
+    }
+
     // Movement.
 
     /// The drawn row holding the caret's line, and its parse.
@@ -937,7 +1527,9 @@ impl MarkdownEditor {
         }
         let row = index.row_at_line(self.caret.line_index.min(index.line_count().saturating_sub(1)));
         let drawn = self.drawn.iter().find(|drawn| drawn.row == row)?;
-        Some((drawn, self.rows.get(&drawn.key)?))
+        let cache = self.rows.get(&drawn.key)?;
+        let (start, end) = cache.span();
+        (start.line_index..=end.line_index).contains(&self.caret.line_index).then_some((drawn, cache))
     }
 
     /// Moves the caret; `extend` keeps the anchor (Shift).
@@ -951,6 +1543,7 @@ impl MarkdownEditor {
             doc.document.force_new_group();
         }
         self.last_input = None;
+        self.pending.clear();
         self.reveal = true;
         self.moved(cx);
     }
@@ -1049,6 +1642,7 @@ impl MarkdownEditor {
         // Control+Home or End).
         let word = ke.modifiers.alt || ke.modifiers.control;
         let edge = ke.modifiers.logo;
+        let alt = ke.modifiers.alt;
         let (start, end) = self.ordered_selection();
         match ke.key_code {
             KeyCode::ArrowLeft | KeyCode::ArrowRight => {
@@ -1082,7 +1676,36 @@ impl MarkdownEditor {
                     self.move_to(cx, to, shift);
                 }
             }
+            KeyCode::ReturnKey if primary => {
+                let caret = self.caret;
+                self.toggle_task(cx, caret);
+            }
             KeyCode::ReturnKey => self.enter(cx, shift),
+            KeyCode::Tab => self.indent(cx, shift),
+            // Inline marks and links.
+            KeyCode::KeyB if primary && !shift && !alt => self.toggle_mark(cx, Mark::Strong),
+            KeyCode::KeyI if primary && !shift && !alt => self.toggle_mark(cx, Mark::Emphasis),
+            KeyCode::KeyX if primary && shift && !alt => self.toggle_mark(cx, Mark::Strikethrough),
+            KeyCode::KeyE if primary && !shift && !alt => self.toggle_mark(cx, Mark::Code),
+            KeyCode::KeyK if primary && !shift && !alt => {
+                let url = self.link_at_caret();
+                cx.widget_action(self.widget_uid(), MarkdownEditorAction::EditLink(url));
+            }
+            // Block styles: Cmd+Alt+0 to 6 a paragraph or a heading level;
+            // Cmd+Shift+7, 8, 9 numbered, bullet and task lists; Cmd+Shift+.
+            // a quote; Cmd+Shift+C a code block.
+            KeyCode::Key0 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Paragraph),
+            KeyCode::Key1 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(1)),
+            KeyCode::Key2 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(2)),
+            KeyCode::Key3 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(3)),
+            KeyCode::Key4 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(4)),
+            KeyCode::Key5 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(5)),
+            KeyCode::Key6 if primary && alt && !shift => self.set_block_style(cx, BlockStyle::Heading(6)),
+            KeyCode::Key7 if primary && shift && !alt => self.set_block_style(cx, BlockStyle::Numbered),
+            KeyCode::Key8 if primary && shift && !alt => self.set_block_style(cx, BlockStyle::Bullet),
+            KeyCode::Key9 if primary && shift && !alt => self.set_block_style(cx, BlockStyle::Task),
+            KeyCode::Period if primary && shift && !alt => self.set_block_style(cx, BlockStyle::Quote),
+            KeyCode::KeyC if primary && shift && !alt => self.set_block_style(cx, BlockStyle::Code),
             KeyCode::Backspace | KeyCode::Delete => {
                 let forward = ke.key_code == KeyCode::Delete;
                 let to = if start != end {
@@ -1109,14 +1732,45 @@ impl Widget for MarkdownEditor {
         self.sync(cx);
         self.view.handle_event(cx, event, scope);
         let area = self.view.area();
+        // The rows take the pointer's hover, so the view reads the moves
+        // itself: a hand over a task box (a click flips it) and over a link
+        // while Cmd/Ctrl is down (a click follows it, underlined).
+        if let Event::MouseMove(me) = event {
+            if !self.selecting && area.rect(cx).contains(me.abs) {
+                let target = self.target_at(cx, me.abs);
+                let link = match &target {
+                    Some(Target::Link(url)) if me.modifiers.is_primary() => Some(url.clone()),
+                    _ => None,
+                };
+                let hand = link.is_some() || matches!(target, Some(Target::Task(_)));
+                cx.set_cursor(if hand { MouseCursor::Hand } else { MouseCursor::Text });
+                self.hover_link(cx, link);
+            } else {
+                self.hover_link(cx, None);
+            }
+        }
         // The list under the rows takes the press first (for its scroll bar
         // and wheel); the view shares it.
         match event.hits_with_capture_overload(cx, area, true) {
-            Hit::FingerHoverIn(_) | Hit::FingerHoverOver(_) => {
-                cx.set_cursor(MouseCursor::Text);
-            }
+            Hit::FingerHoverOut(_) => self.hover_link(cx, None),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(area);
+                self.pending.clear();
+                match self.target_at(cx, fe.abs) {
+                    Some(Target::Task(at)) => {
+                        self.toggle_task(cx, at);
+                        return;
+                    }
+                    Some(Target::Link(url)) if fe.modifiers.is_primary() => {
+                        cx.widget_action(self.widget_uid(), MarkdownEditorAction::OpenLink(url));
+                        return;
+                    }
+                    _ => {}
+                }
+                if fe.tap_count >= 2 && !fe.modifiers.shift && self.select_around(cx, fe.abs, fe.tap_count >= 3) {
+                    self.selecting = false;
+                    return;
+                }
                 if let Some(position) = self.position_at(cx, fe.abs) {
                     self.caret = position;
                     if !fe.modifiers.shift {
@@ -1199,6 +1853,9 @@ impl Widget for MarkdownEditor {
         }
         let draws = self.draws;
         self.rows.retain(|_, cache| cache.drawn_in == draws);
+        if let Some(doc) = &self.doc {
+            self.highlights.sweep(doc.index.blocks().iter().map(|block| block.gen));
+        }
         self.snap_caret();
         self.draw_caret(cx);
         self.reveal_caret(cx);
