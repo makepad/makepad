@@ -11,4 +11,5 @@ makepad-box3d = { path = "../../../../libs/box3d" }
 relax-diffpkg-tables = { path = "tables" }
 ttf-parser = { path = "../../../../libs/ttf-parser" }
 makepad-fast-inflate = { path = "../../../../libs/fast_inflate" }
-smallvec = { path = "../../../../libs/smallvec" }
+smallvec = { path = "../../../../libs/smallvec", features = ["const_new"] }
+arrayvec = { path = "../../../../libs/vulkan/arrayvec" }

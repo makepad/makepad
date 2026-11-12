@@ -14,7 +14,8 @@
 # Package programs (library-backed, e.g. box3d): every package dir in DIFF_PKG_DIRS (default
 # tools/run/fixture/diffpkg, plus apps/commercial/relax_tests when the commercial checkout is there) is
 # built once with cargo --release (its default bin is named like the package); `<bin> --list` names its
-# programs, each runs natively and as `makepad run <package> -- <program>` at the same three tiers, and
+# programs, each runs natively and as `makepad run --unattended <package> -- <program>` at the same three
+# tiers (unattended: a panic the program catches unwinds at once instead of parking for a decision), and
 # its D lines and exit status must match. They show as `<package>~<program>`. DIFF_PKG_DIRS=none skips them.
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -95,7 +96,7 @@ pkgjob() {
         (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
             MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
             MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
-            nice -n 10 $M run --quiet "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
+            nice -n 10 $M run --quiet --unattended "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
         rm -r "$d" ;;
     esac

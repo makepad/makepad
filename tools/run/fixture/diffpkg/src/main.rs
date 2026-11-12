@@ -7,7 +7,7 @@ macro_rules! d { ($($a:tt)*) => { println!("D {}", format!($($a)*)) } }
 #[path = "../../../../../libs/relax/compiler/rwbench/src/box3d_scene.rs"]
 mod box3d_scene;
 
-const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files), ("smallvec_macro", smallvec_macro)];
+const PROGRAMS: &[(&str, fn())] = &[("box3d", box3d), ("static_tables", static_tables), ("font", font), ("late_tables", late_tables), ("inflate_files", inflate_files), ("smallvec_macro", smallvec_macro), ("substitutes", substitutes)];
 
 fn main() {
     let arg = std::env::args().nth(1).unwrap_or_default();
@@ -194,4 +194,86 @@ fn smallvec_macro() {
     let empty: smallvec::SmallVec<[u8; 1]> = smallvec::smallvec![];
     let rooted: smallvec::SmallVec<[u8; 1]> = ::smallvec::smallvec![7];
     d!("smallvec {:?} {:?} {:?} {:?} spilled {} {}", one, repeated, empty, rooted, one.spilled(), repeated.spilled());
+}
+
+/// Relax's own smallvec and arrayvec (std/substitutes.txt) against the real crates rustc builds:
+/// const SmallVecs (`const_new`), ArrayString's UTF-8 capacity rules, its traits and conversions,
+/// and the panics of its char-boundary and capacity checks.
+fn substitutes() {
+    use arrayvec::ArrayString;
+    use smallvec::{smallvec_inline, SmallVec};
+    use std::borrow::{Borrow, BorrowMut};
+    use std::fmt::Write;
+    use std::hash::{Hash, Hasher};
+    const LIST: SmallVec<[u8; 3]> = smallvec_inline![1, 2, 3,];
+    const REPEAT: SmallVec<[u8; 4]> = smallvec_inline![7; 4];
+    const EMPTY: SmallVec<[u8; 0]> = smallvec_inline![0; 0];
+    const PREFIX: SmallVec<[u8; 4]> = unsafe { SmallVec::from_const_with_len_unchecked([1, 2, 3, 4], 2) };
+    d!("inline {:?} {:?} {} {:?} spilled {} cap {} from_const {}", LIST.as_slice(), REPEAT.as_slice(), EMPTY.is_empty(), PREFIX.as_slice(),
+        LIST.spilled(), LIST.capacity(), SmallVec::from_const([1u8, 2]) == SmallVec::from_buf([1, 2]));
+    let calls = std::cell::Cell::new(0);
+    let next = || { calls.set(calls.get() + 1); calls.get() };
+    let list = smallvec_inline![next(), next()];
+    let after_list = calls.get();
+    let repeat = smallvec_inline![next(); 3];
+    let owned = smallvec_inline![String::from("a"), String::from("b")];
+    let zst = smallvec_inline![(); 3];
+    d!("inline calls {} {:?} {} {:?} owned {} {} zst {} {}", after_list, list.as_slice(), calls.get(), repeat.as_slice(), owned[0], owned.spilled(), zst.len(), zst.spilled());
+
+    const NEW: ArrayString<10> = ArrayString::new_const();
+    let mut s = NEW;
+    d!("arraystring new {} {}", s.is_empty(), s.capacity());
+    for c in ['a', 'é', '中', '🦀'] {
+        s.push(c);
+    }
+    d!("arraystring full {:?} len {} full {} left {}", s.as_str(), s.len(), s.is_full(), s.remaining_capacity());
+    let over = (s.try_push('x').unwrap_err().element(), s.try_push_str("xy").unwrap_err().element(), s.try_push_str("").is_ok());
+    d!("arraystring over {:?} {:?} {:?} {}", over.0, over.1, s.as_str(), over.2);
+    let popped = s.pop();
+    let removed = s.remove(1);
+    d!("arraystring pop {:?} remove {:?} {:?}", popped, removed, s.as_str());
+    s.truncate(99);
+    let kept = s.len();
+    s.truncate(1);
+    let one = s.as_str().to_string();
+    s.clear();
+    d!("arraystring truncate {} {:?} cleared {:?}", kept, one, s.pop());
+    let mut short = ArrayString::<3>::from("ab").unwrap();
+    d!("arraystring short {:?} {:?} {:?}", short.try_push('é').unwrap_err().element(), short.try_push_str("cd").unwrap_err().element(), short.as_str());
+    short.push('c');
+    let zero = ArrayString::<0>::new();
+    d!("arraystring short {:?} zero {} {} filled {:?} bytes {:?} {}", short.as_str(), zero.is_empty(), zero.is_full(), ArrayString::<3>::zero_filled().as_bytes(),
+        ArrayString::from_byte_string(b"a\xc3\xa9").unwrap().as_str(), ArrayString::from_byte_string(&[0xff]).is_err());
+
+    let mut s: ArrayString<16> = "abc".parse().unwrap();
+    let copied = s;
+    let mut cloned = ArrayString::<16>::default();
+    cloned.clone_from(&s);
+    d!("traits {} {} {} {:?} {} {}", copied == s.clone(), cloned == s, format!("{} {:?}", s, s), (s == *"abc", *"abc" == s), s < *"abd" && *"abb" < s, s < ArrayString::<16>::from("abd").unwrap());
+    d!("traits {} {:?} {}", <ArrayString<16> as AsRef<str>>::as_ref(&s), <ArrayString<16> as AsRef<std::path::Path>>::as_ref(&s), <ArrayString<16> as Borrow<str>>::borrow(&s));
+    <ArrayString<16> as BorrowMut<str>>::borrow_mut(&mut s).make_ascii_uppercase();
+    let upper = s.as_str().to_string();
+    s.as_mut_str().make_ascii_lowercase();
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h1);
+    s.as_str().hash(&mut h2);
+    d!("traits {} {} hash as str {}", upper, s.as_str(), h1.finish() == h2.finish());
+    write!(&mut s, " {}", 42).unwrap();
+    s.write_char('é').unwrap();
+    let formatted = ArrayString::<16>::try_from(format_args!("{}:{}", "x", 7)).unwrap();
+    d!("write {:?} {:?} {} {:?} {}", s.as_str(), formatted.as_str(), ArrayString::<1>::try_from(format_args!("{}", "abc")).is_err(),
+        ArrayString::<2>::try_from("abc").unwrap_err().element(), "abc".parse::<ArrayString<2>>().is_err());
+    let mut tiny = ArrayString::<1>::new();
+    d!("write tiny {} {} {}", tiny.write_char('é').is_err(), tiny.write_str("ab").is_err(), tiny.is_empty());
+    unsafe {
+        s.as_mut_ptr().write(b'A');
+        s.set_len(3);
+        d!("raw {} {:?}", s.as_ptr().read(), s.as_str());
+    }
+    let panics = |f: fn()| std::panic::catch_unwind(f).is_err();
+    d!("panics truncate {} remove {} push {}",
+        panics(|| ArrayString::<2>::from("é").unwrap().truncate(1)),
+        panics(|| { ArrayString::<2>::from("é").unwrap().remove(1); }),
+        panics(|| ArrayString::<0>::new().push('x')));
 }
