@@ -1206,6 +1206,20 @@ impl<'a> Lcx<'a> {
     fn is_wide(&self, t: TyId) -> bool {
         matches!(self.u.tcx.tys.kind(t), TyKind::Int(Prim::I128) | TyKind::Int(Prim::U128))
     }
+    fn is_prim_int(&self, t: TyId) -> bool {
+        matches!(self.u.tcx.tys.kind(t), TyKind::Int(_))
+    }
+    /// `&..&prim` as `prim`, the type prim_leaves loads such an operand as.
+    fn peel_prim_refs(&self, t: TyId) -> TyId {
+        let mut t = t;
+        while let TyKind::Ref(_, inner, _) = self.kind(t) {
+            if !matches!(self.kind_ref(inner), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Ref(..) | TyKind::FnPtr(..)) {
+                break;
+            }
+            t = inner;
+        }
+        t
+    }
     /// A placeholder value of type `t` after an error (keeps lowering going without panics).
     fn dummy_val(&mut self, t: TyId) -> Val {
         let l = self.layout(t);
@@ -6866,10 +6880,23 @@ impl<'a> Lcx<'a> {
         let ex = ast.expr(e);
         // Two-word integer operations need both halves of every operand.
         let wide = match &ex.kind {
-            ExprKind::Binary(_, a, b) | ExprKind::AssignOp(_, a, b) => self.is_wide(self.body_ty(*a)) || self.is_wide(self.body_ty(*b)),
+            // an operand may be a reference to the integer (`&a + &b`, `&a >> 3`, `&a != &b`:
+            // the built-in operation, read through the references by wide_parts)
+            ExprKind::Binary(_, a, b) | ExprKind::AssignOp(_, a, b) => self.is_wide(self.peel_prim_refs(self.body_ty(*a))) || self.is_wide(self.peel_prim_refs(self.body_ty(*b))),
             ExprKind::Unary(UnOp::Neg | UnOp::Not, x) | ExprKind::Cast(x, _) => self.is_wide(self.body_ty(*x)) || self.is_wide(t),
             _ => false,
         };
+        // An operator the checker resolved to its trait's method is the built-in operation only
+        // between integers (`T + T` at u128). With a struct or a reference for an operand
+        // (`W(a) + b`, `a + &b`, `-small` giving an i128) it is the call below, not the two-word
+        // arithmetic, which read the other operand's words as an integer's halves.
+        let wide = wide
+            && !(self.b.binops.contains_key(&e.0)
+                && match &ex.kind {
+                    ExprKind::Binary(_, a, b) | ExprKind::AssignOp(_, a, b) => !(self.is_prim_int(self.body_ty(*a)) && self.is_prim_int(self.body_ty(*b))),
+                    ExprKind::Unary(_, x) => !self.is_prim_int(self.body_ty(*x)),
+                    _ => false,
+                });
         if wide {
             return self.lower_wide(e, t);
         }
@@ -8968,7 +8995,8 @@ impl<'a> Lcx<'a> {
         match &ex.kind {
             ExprKind::Binary(op, a, b) if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge) => {
                 let at = self.body_ty(*a);
-                let signed = self.wide_signed(at) || (!self.is_wide(at) && self.int_ty(at).signed);
+                let pa = self.peel_prim_refs(at);
+                let signed = self.wide_signed(pa) || (!self.is_wide(pa) && self.int_ty(pa).signed);
                 let av = self.lower_expr(*a);
                 let x = self.wide_parts(av, at);
                 let bt = self.body_ty(*b);
