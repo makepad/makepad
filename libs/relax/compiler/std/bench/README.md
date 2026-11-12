@@ -1,9 +1,10 @@
 # Relax std comparison
 
-Run `./libs/relax/compiler/std/bench/run.sh mac` from this checkout. On a pool node,
-after the usual std_gate.sh source sync, run
-`~/fastrust-std/src/libs/relax/compiler/std/bench/run.sh 165` there. The runner does
-not sync, install software, build Relax, or alter its dependencies.
+Run `./libs/relax/compiler/std/bench/run.sh <label> [relax executable]` from a checkout:
+`run.sh mac` on the Mac, `run.sh linux` on a Linux node, from that node's checkout. The label
+names the results (logs-<label>/, results-<label>.md); the Relax executable defaults to the
+checkout's target/release/makepad. The runner does not sync, install software, build Relax, or
+alter its dependencies.
 It uses the existing release Relax executable and offline release rustc builds.
 Cargo uses four jobs. Every build and measured process is invoked with nice -n 10.
 
