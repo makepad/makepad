@@ -47,7 +47,9 @@ CALC = "makepad-app-calculator"
 # every test green. The target is `lib` (the package's library tests) or `test:<name>` (one of its test targets). The
 # hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its package
 # (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06); Fab's far wall face in the
-# headset, its layers even (11-11); the GI field, empty for weeks with every test green (11-12)
+# headset, its layers even (11-11); the GI field, empty for weeks with every test green (11-12). Every package
+# named in SMOKE, JIT_CHECKS and GUARDS needs a stub in the gate fixtures' workspaces (merge_break.sh, jit_break.sh,
+# guard_units.sh, tests_features.sh): main() refuses a workspace without one
 GUARDS = (
     ("makepad-scope", "lib", "gpu_guard"),
     ("makepad-fab", "test:xr_far_face", "a_far_wall_face_shows_no_darker_layers_in_the_headset"),

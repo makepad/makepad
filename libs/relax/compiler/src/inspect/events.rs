@@ -698,7 +698,10 @@ pub fn park_compile_error(message: &str, location: &str, frames: &[u64], mut reb
     list.push(p.clone());
     parked_changed();
     super::flightrec::panic(&super::short(message, 120), if location.is_empty() { "?" } else { location });
-    eprintln!("makepad: compile error parked on thread {} at its call of code that did not compile: edit the code (a live edit that makes it compile resumes the call), or stop: makepad inspect {} panics (resume P{} stop)", thread, std::process::id(), id);
+    // Unconditional, like a panic's park line: a run nobody attends (a script, CI) learns here why it
+    // waits and that --unattended ends it at the error instead.
+    let tool = crate::tool_name();
+    eprintln!("{tool}: compile error parked on thread {} at its call of code that did not compile: edit the code (a live edit that makes it compile resumes the call), or stop: {tool} inspect {} panics (resume P{} stop); rerun with --unattended to end the run at a compile error instead", thread, std::process::id(), id);
     let mut epoch = crate::jit::patch_epoch();
     let end = loop {
         match p.decision.load(SeqCst) {

@@ -8278,6 +8278,58 @@ fn vzip_u8() {
     }
 }
 
+/// vext / vextq of every element type, against the real intrinsic at every immediate.
+macro_rules! vext_cases {
+    ($($name:ident $t:ident [$($n:literal)*];)*) => {$(
+        #[test]
+        fn $name() {
+            unsafe fn compare<const N: i32>(p0: hr::$t, p1: hr::$t, case: usize) {
+                let got = hr::$name::<N>(p0, p1);
+                let expected = real::$name::<N>(cast(p0), cast(p1));
+                assert_eq!(bytes(&got), bytes(&expected), "case {case}, N {N}");
+            }
+            let mut rng = Rng(0x9e3779b97f4a7c15);
+            unsafe {
+                assert!(
+                    std::arch::is_aarch64_feature_detected!("neon"),
+                    "required native neon coverage unavailable"
+                );
+                for case in 0..RANDOM_CASES + 64 {
+                    let p0: hr::$t = neon_sample(&mut rng, case, 0, 0);
+                    let p1: hr::$t = neon_sample(&mut rng, case, 1, 0);
+                    $(compare::<$n>(p0, p1, case);)*
+                }
+            }
+        }
+    )*};
+}
+vext_cases! {
+    vext_s8 int8x8_t [0 1 2 3 4 5 6 7];
+    vextq_s8 int8x16_t [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15];
+    vext_u8 uint8x8_t [0 1 2 3 4 5 6 7];
+    vextq_u8 uint8x16_t [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15];
+    vext_p8 poly8x8_t [0 1 2 3 4 5 6 7];
+    vextq_p8 poly8x16_t [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15];
+    vext_s16 int16x4_t [0 1 2 3];
+    vextq_s16 int16x8_t [0 1 2 3 4 5 6 7];
+    vext_u16 uint16x4_t [0 1 2 3];
+    vextq_u16 uint16x8_t [0 1 2 3 4 5 6 7];
+    vext_p16 poly16x4_t [0 1 2 3];
+    vextq_p16 poly16x8_t [0 1 2 3 4 5 6 7];
+    vext_s32 int32x2_t [0 1];
+    vextq_s32 int32x4_t [0 1 2 3];
+    vext_u32 uint32x2_t [0 1];
+    vext_f32 float32x2_t [0 1];
+    vext_s64 int64x1_t [0];
+    vextq_s64 int64x2_t [0 1];
+    vext_u64 uint64x1_t [0];
+    vextq_u64 uint64x2_t [0 1];
+    vext_f64 float64x1_t [0];
+    vextq_f64 float64x2_t [0 1];
+    vext_p64 poly64x1_t [0];
+    vextq_p64 poly64x2_t [0 1];
+}
+
 #[allow(dead_code)]
 mod sha256_oracle {
     include!("common/sha256_oracle.rs");

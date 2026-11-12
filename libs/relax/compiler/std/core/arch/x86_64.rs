@@ -4725,6 +4725,7 @@ pub fn _mm_packus_epi32(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn _mm_srai_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 3, 16, IMM8)
@@ -4742,6 +4743,7 @@ pub fn _mm_cmpneq_ps(a: __m128, b: __m128) -> __m128 {
 // SSE has no arithmetic qword shift; the backend synthesizes its sign extension.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,avx512vl"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn _mm_srai_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 3, 64, IMM8)

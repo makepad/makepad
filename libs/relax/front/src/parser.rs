@@ -2310,13 +2310,27 @@ impl<'a> Parser<'a> {
                 if p.kind() == T::Eof {
                     return Err(PErr { pos: p.lo(), msg: "macro expansion ends with an incomplete expression: expected expression".to_string() });
                 }
-                let e = p.expr()?;
+                // the expression's outer attributes are configured as a statement's (rustc_expand
+                // flat_map_stmt -> filter_map_expr: a false `#[cfg]` removes the expression and the
+                // block has no tail; the attributes are not gated as expression attributes): parsed
+                // as `stmt` parses them, a disabled expression without expanding or resolving the
+                // macro calls in it, and kept as `Stmt::Attrs` for the cfg strip at load
+                let pend0 = p.pending_shape.len();
+                let attrs = if p.kind() == T::Pound && p.nth(1) == T::OpenBracket { p.outer_attrs()? } else { Vec::new() };
+                let active = attrs.is_empty() || p.cfg_active(&attrs);
+                if active && !p.pending_shape.is_empty() { p.check_pending_attrs()?; }
+                let e = p.with_cfg_active(active, pend0, |p| p.expr())?;
                 p.eat(T::Semi);
                 if p.kind() != T::Eof {
                     let t = String::from_utf8_lossy(p.tok_text(p.tok())).into_owned();
                     return Err(PErr { pos: p.lo(), msg: format!("macro expansion ignores `{t}` and any tokens following") });
                 }
-                return Ok(vec![Stmt::Expr(false, e)]);
+                if attrs.is_empty() {
+                    return Ok(vec![Stmt::Expr(false, e)]);
+                }
+                let attrs = p.ast.push_list(attrs);
+                let r = p.ast.push_row(AttrsStmt { attrs, expr: e, semi: false });
+                return Ok(vec![Stmt::Attrs(r)]);
             }
             // `include!` in statement position is an expression: its first one, the rest of the
             // file is ignored (rustc_expand base.rs `ExpandInclude::make_expr`, lint incomplete_include)
@@ -4833,6 +4847,14 @@ impl<'a> Parser<'a> {
             let real = self.macros.is_some();
             let attrs = self.outer_attrs()?;
             if !attrs.is_empty() && real { self.ast.gated_syntax.push(("stmt_expr_attributes", at)); }
+            // rustc_expand expand.rs (InvocationCollectorNode for P<Expr>, expand_cfg_false): only a
+            // statement or a list element (`list_elem`) can be configured away; anywhere else a false
+            // `#[cfg]` is RemoveExprNotSupported at the attribute
+            if real && !attrs.is_empty() && !self.cfg_present(&attrs) {
+                let a = attrs.iter().find(|a| a.toks.lo >= 2 && !self.cfg_present(std::slice::from_ref(*a))).unwrap_or(&attrs[0]);
+                let pos = if a.toks.lo >= 2 { self.toks.at(a.toks.lo as usize - 2).lo } else { at };
+                return Err(PErr { pos, msg: "removing an expression is not supported in this position".to_string() });
+            }
             self.closure_attrs(&attrs)?;
         }
         let lhs = self.unary(r)?;

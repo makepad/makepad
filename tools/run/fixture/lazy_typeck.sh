@@ -5,8 +5,9 @@
 #   app-error  : an error in the app's own crate refuses the run before main, as cargo's build would
 #   background : a run that never calls `broken` reports its error from the background check while
 #                main runs
-#   park       : a run that calls `broken` parks at the call with the compile error and stays up; a
-#                live edit that fixes `broken` resumes the call (it returns 20) and the program ends 0
+#   park       : a run that calls `broken` parks at the call with the compile error and stays up, its
+#                park line naming --unattended; a live edit that fixes `broken` resumes the call (it
+#                returns 20) and the program ends 0
 #   unattended : the same call under `run --unattended` (an app a test starts) parks nothing: the run
 #                ends at once, non-zero, with the compile error's text
 #   unwatched  : a hidden run with no observer or terminal parks a panic briefly, even under
@@ -85,6 +86,8 @@ pid=$!
 if wait_for "$dir/park.log" $pid "compile error parked"; then
   # (the error's own line comes from the report path: not ordered with the parked line)
   wait_for "$dir/park.log" $pid "compile error in lazy_typeck_dep::broken" || fail="$fail park-not-reported"
+  # the park line names the way out for a run nobody attends (relax issue 21)
+  grep "compile error parked" "$dir/park.log" | grep -q -- "--unattended" || fail="$fail park-line-no-unattended"
   sleep 1
   kill -0 $pid 2>/dev/null || fail="$fail park-run-ended"
   lib="$dir/fx/libs/dep/src/lib.rs"

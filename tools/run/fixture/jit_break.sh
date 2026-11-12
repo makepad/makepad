@@ -24,7 +24,7 @@ edition = \"2021\""
 # the smoke apps, the other JIT checks, and widgets-core, whose re-export the changed resolver refuses
 pkgs="apps/stage:makepad-stage apps/scope:makepad-scope apps/sandbox:makepad-sandbox apps/fab:makepad-fab
   apps/synth:makepad-app-synth apps/calculator:makepad-app-calculator platform:makepad-platform draw:makepad-draw
-  examples/counter:makepad-example-counter story/web_export:makepad-story-web-export"
+  examples/counter:makepad-example-counter story/web_export:makepad-story-web-export libs/render:makepad-render"
 members='"tools/run", "libs/relax/resolve", "widgets/core"'
 for p in $pkgs; do lib "${p%%:*}" "${p#*:}"; members="$members, \"${p%%:*}\""; done
 lib widgets/core makepad-widgets-core 'mod w { pub struct Widget; }

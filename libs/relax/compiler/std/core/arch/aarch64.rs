@@ -2286,38 +2286,6 @@ pub fn veorq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
     }
 }
 
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
-#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
-pub fn vextq_f32<const N: i32>(a: float32x4_t, b: float32x4_t) -> float32x4_t {
-    let mut r = [0.0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = if i + (N as usize) < 4 {
-            a.0[i + N as usize]
-        } else {
-            b.0[i + N as usize - 4]
-        };
-        i += 1;
-    }
-    float32x4_t(r)
-}
-
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
-#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
-pub fn vextq_u32<const N: i32>(a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
-    let mut r = [0; 4];
-    let mut i = 0;
-    while i < 4 {
-        r[i] = if i + (N as usize) < 4 {
-            a.0[i + N as usize]
-        } else {
-            b.0[i + N as usize - 4]
-        };
-        i += 1;
-    }
-    uint32x4_t(r)
-}
-
 // a + b * c: stdarch's full-vector FMLA operand order; indexed FMLA uses b, c.
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
@@ -4209,6 +4177,7 @@ pub fn vzip2q_s8(a: int8x16_t, b: int8x16_t) -> int8x16_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_s8<const N: i32>(a: int8x16_t) -> int8x16_t {
     unsafe {
         vx::vx_unary(a, 1, 8, N)
@@ -4217,6 +4186,7 @@ pub fn vshlq_n_s8<const N: i32>(a: int8x16_t) -> int8x16_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshrq_n_s8<const N: i32>(a: int8x16_t) -> int8x16_t {
     unsafe {
         vx::vx_unary(a, 3, 8, N)
@@ -4239,6 +4209,7 @@ pub fn vbicq_s16(a: int16x8_t, b: int16x8_t) -> int16x8_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_s16<const N: i32>(a: int16x8_t) -> int16x8_t {
     unsafe {
         vx::vx_unary(a, 1, 16, N)
@@ -4295,6 +4266,7 @@ pub fn vzip2q_s64(a: int64x2_t, b: int64x2_t) -> int64x2_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_s64<const N: i32>(a: int64x2_t) -> int64x2_t {
     unsafe {
         vx::vx_unary(a, 1, 64, N)
@@ -4303,6 +4275,7 @@ pub fn vshlq_n_s64<const N: i32>(a: int64x2_t) -> int64x2_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshrq_n_s64<const N: i32>(a: int64x2_t) -> int64x2_t {
     unsafe {
         vx::vx_unary(a, 3, 64, N)
@@ -4347,6 +4320,7 @@ pub fn vzip2q_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_u8<const N: i32>(a: uint8x16_t) -> uint8x16_t {
     unsafe {
         vx::vx_unary(a, 1, 8, N)
@@ -4355,6 +4329,7 @@ pub fn vshlq_n_u8<const N: i32>(a: uint8x16_t) -> uint8x16_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshrq_n_u8<const N: i32>(a: uint8x16_t) -> uint8x16_t {
     unsafe {
         vx::vx_unary(a, 2, 8, N)
@@ -4387,6 +4362,7 @@ pub fn vzip2q_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_u16<const N: i32>(a: uint16x8_t) -> uint16x8_t {
     unsafe {
         vx::vx_unary(a, 1, 16, N)
@@ -4395,6 +4371,7 @@ pub fn vshlq_n_u16<const N: i32>(a: uint16x8_t) -> uint16x8_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshrq_n_u16<const N: i32>(a: uint16x8_t) -> uint16x8_t {
     unsafe {
         vx::vx_unary(a, 2, 16, N)
@@ -4441,6 +4418,7 @@ pub fn vzip1q_u64(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshlq_n_u64<const N: i32>(a: uint64x2_t) -> uint64x2_t {
     unsafe {
         vx::vx_unary(a, 1, 64, N)
@@ -4449,6 +4427,7 @@ pub fn vshlq_n_u64<const N: i32>(a: uint64x2_t) -> uint64x2_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
 pub fn vshrq_n_u64<const N: i32>(a: uint64x2_t) -> uint64x2_t {
     unsafe {
         vx::vx_unary(a, 2, 64, N)
@@ -4560,6 +4539,25 @@ macro_rules! neon_reinterpret {
             unsafe {
                 crate::mem::transmute::<$from, $to>(a)
             }
+        }
+    )*};
+}
+
+/// vext / vextq: lanes N.. of `a`, then the low lanes of `b` (stdarch's `vext*`, any element type).
+macro_rules! neon_ext {
+    ($feat:literal: $($name:ident $v:ident $l:literal);* $(;)?) => {$(
+        #[inline]
+        #[cfg_attr(target_arch = "aarch64", target_feature(enable = $feat))]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+        pub fn $name<const N: i32>(a: $v, b: $v) -> $v {
+            let n = N as usize;
+            let mut r = a;
+            let mut i = 0;
+            while i < $l {
+                r.0[i] = if i + n < $l { a.0[i + n] } else { b.0[i + n - $l] };
+                i += 1;
+            }
+            r
         }
     )*};
 }
@@ -5286,6 +5284,15 @@ neon_reinterpret! { "neon,aes":
     vreinterpretq_p128_p64 poly64x2_t => p128; vreinterpretq_p64_p128 p128 => poly64x2_t;
 }
 // vld1 / vst1 and their _dup, _lane and _x2.._x4 forms; vld2..4 / vst2..4 (de)interleave
+neon_ext! { "neon":
+    vext_s8 int8x8_t 8; vextq_s8 int8x16_t 16; vext_s16 int16x4_t 4; vextq_s16 int16x8_t 8;
+    vext_s32 int32x2_t 2; vextq_s32 int32x4_t 4; vext_s64 int64x1_t 1; vextq_s64 int64x2_t 2;
+    vext_u8 uint8x8_t 8; vextq_u8 uint8x16_t 16; vext_u16 uint16x4_t 4; vextq_u16 uint16x8_t 8;
+    vext_u32 uint32x2_t 2; vextq_u32 uint32x4_t 4; vext_u64 uint64x1_t 1; vextq_u64 uint64x2_t 2;
+    vext_p8 poly8x8_t 8; vextq_p8 poly8x16_t 16; vext_p16 poly16x4_t 4; vextq_p16 poly16x8_t 8;
+    vext_f32 float32x2_t 2; vextq_f32 float32x4_t 4; vext_f64 float64x1_t 1; vextq_f64 float64x2_t 2;
+    vext_p64 poly64x1_t 1; vextq_p64 poly64x2_t 2;
+}
 neon_ld1! { "neon":
     vld1_s16 i16 int16x4_t; vld1_s32 i32 int32x2_t; vld1_s64 i64 int64x1_t; vld1_u32 u32 uint32x2_t;
     vld1_u64 u64 uint64x1_t; vld1_f32 f32 float32x2_t; vld1_f64 f64 float64x1_t;

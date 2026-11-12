@@ -14,10 +14,11 @@ trap 'rm -rf -- "$dir"' EXIT
 export CARGO_TARGET_DIR=$dir/target
 g() { git -C "$dir/repo" -c user.name=tests-features -c user.email= -c commit.gpgsign=false "$@" > /dev/null; }
 put() { mkdir -p "$dir/repo/$(dirname "$1")"; printf '%s\n' "$2" > "$dir/repo/$1"; }
-# the gate's packages affected.py looks up (the smoke apps and the other JIT checks): stubs no diff here reaches
+# the gate's packages affected.py looks up (the smoke apps, the other JIT checks, the guards): stubs no diff here reaches
 stubs="apps/stage:makepad-stage apps/scope:makepad-scope apps/sandbox:makepad-sandbox apps/fab:makepad-fab
   apps/synth:makepad-app-synth apps/calculator:makepad-app-calculator platform:makepad-platform draw:makepad-draw
-  examples/counter:makepad-example-counter story/web_export:makepad-story-web-export widgets/core:makepad-widgets-core"
+  examples/counter:makepad-example-counter story/web_export:makepad-story-web-export widgets/core:makepad-widgets-core
+  libs/render:makepad-render"
 members='"hub", "app", "other"'
 for p in $stubs; do
   put "${p%%:*}/Cargo.toml" "[package]

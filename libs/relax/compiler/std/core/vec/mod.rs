@@ -898,6 +898,15 @@ where
     }
 }
 
+impl<'a, T, U> PartialEq<Vec<U>> for &'a mut [T]
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Vec<U>) -> bool {
+        crate::slice::slice_eq(&**self, other.as_slice())
+    }
+}
+
 #[cfg(not(relax_check))]
 impl<'a, T: Clone, U> PartialEq<Vec<U>> for Cow<'a, [T]>
 where
@@ -905,6 +914,27 @@ where
 {
     fn eq(&self, other: &Vec<U>) -> bool {
         crate::slice::slice_eq(&**self, other.as_slice())
+    }
+}
+
+// alloc vec/partial_eq.rs: a borrowed or owned slice compares with slice references too
+#[cfg(not(relax_check))]
+impl<'a, 'b, T: Clone, U> PartialEq<&'b [U]> for Cow<'a, [T]>
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &&'b [U]) -> bool {
+        crate::slice::slice_eq(&**self, *other)
+    }
+}
+
+#[cfg(not(relax_check))]
+impl<'a, 'b, T: Clone, U> PartialEq<&'b mut [U]> for Cow<'a, [T]>
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &&'b mut [U]) -> bool {
+        crate::slice::slice_eq(&**self, &**other)
     }
 }
 

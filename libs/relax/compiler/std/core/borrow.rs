@@ -142,9 +142,14 @@ where
     }
 }
 
-impl<'a, B: ?Sized + ToOwned + PartialEq> PartialEq for Cow<'a, B> {
-    fn eq(&self, other: &Cow<'a, B>) -> bool {
-        **self == **other
+// alloc borrow.rs: two Cows of different lifetimes and borrowed types compare through their targets
+impl<'a, 'b, B: ?Sized, C: ?Sized> PartialEq<Cow<'b, C>> for Cow<'a, B>
+where
+    B: PartialEq<C> + ToOwned,
+    C: ToOwned,
+{
+    fn eq(&self, other: &Cow<'b, C>) -> bool {
+        PartialEq::eq(&**self, &**other)
     }
 }
 impl<'a, B: ?Sized + ToOwned + Eq> Eq for Cow<'a, B> {}

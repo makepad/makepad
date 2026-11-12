@@ -24,7 +24,8 @@ edition = \"2021\""
 pkgs="apps/stage:makepad-stage apps/scope:makepad-scope apps/sandbox:makepad-sandbox apps/fab:makepad-fab
   apps/synth:makepad-app-synth apps/calculator:makepad-app-calculator platform:makepad-platform draw:makepad-draw
   examples/counter:makepad-example-counter story/web_export:makepad-story-web-export widgets/core:makepad-widgets-core
-  widgets:makepad-widgets tools/run_android:makepad-run-android libs/relax/codegen:guard-units-codegen"
+  widgets:makepad-widgets tools/run_android:makepad-run-android libs/relax/codegen:guard-units-codegen
+  libs/render:makepad-render"
 members='"tools/run"'
 for p in $pkgs; do lib "${p%%:*}" "${p#*:}"; members="$members, \"${p%%:*}\""; done
 put Cargo.toml "[workspace]
@@ -96,7 +97,7 @@ guard() {
 }
 guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --lib -- gpu_guard|fail= guard-makepad-scope"
 guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab|GATEREPRO guard makepad-fab :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab"
-guard jit jit "makepad-fab@xr_far_face makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-scope|fail="
+guard jit jit "makepad-fab@xr_far_face makepad-render makepad-scope" "GATEUNIT ok guard makepad-fab|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-scope|fail="
 guard other other - "fail=" "GATEUNIT"
 GATE_RETRY="guard makepad-scope" guard retry other makepad-scope "GATEUNIT ok guard makepad-scope|fail="
 if [ -n "$fail" ]; then echo "guard_units FAILED:$fail"; exit 1; fi
