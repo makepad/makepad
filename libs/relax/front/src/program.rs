@@ -1804,10 +1804,16 @@ impl Program {
         while !self.cur_image {
             // (a name the crate defines already is one its textual scope does not reach here, one
             // a `use .. as` of the crate binds resolves through that import, and a built-in's is
-            // no macro_rules!: no outline changes those, and the load does not wait for the plan)
+            // no macro_rules!: no outline changes those, and the load does not wait for the plan.
+            // An import the scan kept under its own name because its first segment could be a
+            // crate, `pub use other::{Subtag, subtag};` beside `mod other;`, is none of another
+            // crate's when that segment names no crate: the name is still the outline's to find)
+            let through_import = |n: &String| parse_table.aliases.get(&kname).and_then(|a| a.get(n)).is_some_and(|(first, orig)| {
+                orig != n || parse_table.crates.contains_key(first) || parse_table.crates.get(&kname).is_some_and(|c| c.externs.contains_key(first))
+            });
             let mut missing = used.failed_lookups();
             missing.retain(|n| !parse_table.defs.get(n).is_some_and(|defs| defs.iter().any(|d| d.krate == kname)) && !used.local.iter().any(|d| &d.name == n)
-                && !parse_table.aliases.get(&kname).is_some_and(|a| a.contains_key(n))
+                && !through_import(n)
                 && !BUILTIN_MACROS.contains(&n.as_str()) && crate::builtins::macro_def_for(&kname, n).is_none());
             if missing.is_empty() { break; }
             let defs = outline.get_or_insert_with(|| self.pool.as_ref().and_then(|p| p.outline_macros(self.cur_ahead)));
@@ -1819,6 +1825,29 @@ impl Program {
             for d in defs.iter().filter(|d| missing.contains(&d.name) && d.def_file != path) {
                 if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
                     next.push(d.clone());
+                    added = true;
+                }
+            }
+            // A missing name may be one an expansion of another file binds: `pub use internal as
+            // name;` written beside the `macro_rules! internal` it generates (icu_locale_core's
+            // impl_tinystr_subtag!: `subtag!`, called in modules declared before `subtags`). The
+            // outline has those imports as well: take the ones of the missing names, and the
+            // definitions they name.
+            if let Some(uses) = self.pool.as_ref().and_then(|p| p.outline_expansions(self.cur_ahead)) {
+                let known = next.exp_uses.get(&kname).cloned().unwrap_or_default();
+                let renames: Vec<((String, String), Vec<String>)> = uses.iter()
+                    .filter(|(key, to)| missing.contains(&key.1) && known.get(*key) != Some(*to))
+                    .map(|(key, to)| (key.clone(), to.clone())).collect();
+                for (_, to) in &renames {
+                    let Some(target) = to.last() else { continue };
+                    for d in defs.iter().filter(|d| &d.name == target && d.def_file != path) {
+                        if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
+                            next.push(d.clone());
+                        }
+                    }
+                }
+                if !renames.is_empty() {
+                    next.add_exp_uses(&kname, renames);
                     added = true;
                 }
             }
