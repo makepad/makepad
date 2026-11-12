@@ -130,10 +130,10 @@ pub struct Parser<'a> {
     /// opaque macro fragments a transcription forwarded (start of the first token -> end of the
     /// last): a `$t:tt` matches one whole (rustc's interpolated nonterminal tokens)
     pub frag_groups: crate::fxhash::HashMap<u32, u32>,
-    /// `vis` fragments a transcription forwarded that matched nothing (where the next token
-    /// starts -> how many): rustc forwards each as an empty invisible group, which `$v:vis`
-    /// takes where it is matched again
-    pub(crate) empty_vis: std::collections::BTreeMap<u32, u32>,
+    /// `vis` fragments a transcription forwarded that matched nothing (the start of the token
+    /// they stand before -> how many): rustc forwards each as an empty invisible group, which
+    /// `$v:vis` takes where it is matched again
+    pub(crate) empty_vis: crate::fxhash::HashMap<u32, u32>,
     /// starts of the `$t:ty` substitutions of expansion text (not a trait where a bound is expected)
     pub(crate) ty_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$p:path` substitutions (type-mode arguments even in expressions/patterns)
@@ -2229,7 +2229,7 @@ impl<'a> Parser<'a> {
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
         let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
-            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), empty_vis);
+            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
         let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
         let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len());
         let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();

@@ -425,7 +425,7 @@ pub(crate) const PATH_FRAG: u32 = 1 << 26;
 /// delimiters): never a call's argument list (`!div $n / 2` with `$n` = `64 / 2` is no `div(..)`)
 pub(crate) const WRAP_PAREN: u32 = 1 << 25;
 /// a `vis` fragment that matched nothing, forwarded here (rustc's empty invisible group): no tokens,
-/// only the place (`Parser::empty_vis`)
+/// only the token it stands before (`Parser::empty_vis`)
 pub(crate) const EMPTY_VIS: u32 = 1 << 24;
 pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG | PATH_FRAG | WRAP_PAREN | EMPTY_VIS;
 
@@ -3540,30 +3540,18 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// The forwarded empty `vis` fragments right before token `i` that `mp` has not taken.
-    fn empty_vis_left(&self, mp: &MPos, i: usize) -> u32 {
+    /// The forwarded empty `vis` fragments before token `i` (Parser::empty_vis: by the token
+    /// they stand before, so a token list out of text order -- a call's desugared doc comments
+    /// among its tokens -- keeps them) that `mp` has not taken.
+    fn empty_vis_before(&self, i: usize) -> u32 {
         if self.empty_vis.is_empty() {
             return 0;
         }
-        let at = self.toks.at(i).lo;
-        let after = if i > 0 { self.toks.at(i - 1).hi } else { 0 };
-        let here: u32 = self.empty_vis.range(after..=at).map(|(_, n)| n).sum();
-        here.saturating_sub(if mp.vis_taken.0 == i { mp.vis_taken.1 } else { 0 })
+        self.empty_vis.get(&{ self.toks.at(i).lo }).copied().unwrap_or(0)
     }
 
-    /// Puts the forwarded empty `vis` fragments between the tokens `from` and `to` of a copied
-    /// range where the copy is: they go on with it (a group matched as one `tt`).
-    fn copy_empty_vis(&self, from: usize, to: usize, out: &mut Transcript) {
-        if self.empty_vis.is_empty() {
-            return;
-        }
-        let (after, at) = (self.toks.at(from).hi, self.toks.at(to).lo);
-        for (_, &n) in self.empty_vis.range(after..=at) {
-            for _ in 0..n {
-                let here = out.s.len() as u32;
-                out.groups.push((here, here | EMPTY_VIS | META_ONLY));
-            }
-        }
+    fn empty_vis_left(&self, mp: &MPos, i: usize) -> u32 {
+        self.empty_vis_before(i).saturating_sub(if mp.vis_taken.0 == i { mp.vis_taken.1 } else { 0 })
     }
 
     fn lookup_bind<'b>(binds: &'b HashMap<String, Bind>, name: &str, idx: &[usize]) -> Option<&'b Bind> {
@@ -3615,12 +3603,13 @@ impl<'a> Parser<'a> {
                         let mut groups = Vec::new();
                         if *f == Frag::Vis && lo == hi && taken.is_none() {
                             // an empty `vis` goes on as one (rustc: an empty invisible group)
-                            let here = out.s.len() as u32;
-                            out.groups.push((here, here | EMPTY_VIS | META_ONLY));
+                            out.empty_vis += 1;
                         }
                         for k in *lo..*hi {
+                            // the forwarded empty `vis` fragments inside go on with the copy (a
+                            // group matched as one `tt`)
                             if k > *lo {
-                                self.copy_empty_vis(k - 1, k, out);
+                                out.empty_vis += self.empty_vis_before(k);
                             }
                             let t = self.toks.at(k);
                             // A forwarded outer fragment must retain the invisible
@@ -3822,6 +3811,8 @@ pub struct Transcript {
     origins: Vec<(u32, u32, u32)>,
     bodies: Vec<(u32, u32, u32)>,
     groups: Vec<(u32, u32)>,
+    /// forwarded empty `vis` fragments waiting for the token they stand before (EMPTY_VIS)
+    empty_vis: u32,
 }
 
 impl Transcript {
@@ -3873,6 +3864,11 @@ impl Transcript {
             self.bodies.push((at, bp, t.len() as u32));
         }
         self.s.push_str(t);
+        // (before a doc comment they stand where no token starts: rustc's `vis` may not be
+        // followed by `#`, so nothing matches them there)
+        for _ in 0..std::mem::take(&mut self.empty_vis) {
+            self.groups.push((at, at | EMPTY_VIS | META_ONLY));
+        }
         // rustc_expand mbe/transcribe.rs: transcribe retains DocComment tokens.
         // Keep ours as lexer trivia until parser_from_cx desugars the next call;
         // a generated macro definition must still ignore docs in its matcher.
