@@ -63,6 +63,15 @@ pub struct Built {
 
 const BUILD_DEPS: [&str; 6] = ["cc", "cmake", "pkg_config", "bindgen", "vcpkg", "nasm_rs"];
 
+/// An exported accessor for a native symbol whose own visibility may be hidden.
+/// Hex keeps arbitrary assembler names out of the generated C identifiers.
+pub fn address_name(name: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::from("__relax_native_address_");
+    for byte in name { write!(out, "{byte:02x}").unwrap(); }
+    out
+}
+
 /// Why a package's build script is native, if it is.
 pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<String> {
     let (dir, name, _) = &g.pkg[bs.krate];
@@ -186,7 +195,8 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     let flags: Vec<&String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").collect();
 
     // ---- the key
-    let mut h = fnv(req.triple.as_bytes(), 0xcbf29ce484222325);
+    let mut h = fnv(b"native-addresses-v1", 0xcbf29ce484222325);
+    h = fnv(req.triple.as_bytes(), h);
     for f in &flags {
         h = fnv(f.as_bytes(), h);
         h = fnv(b"\0", h);
@@ -508,6 +518,48 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
         }
     } else {
         cmd.args(["-shared", "-fPIC", "-o", &tmp]);
+        if cfg!(target_os = "linux") {
+            let mut symbols = std::collections::BTreeMap::new();
+            for archive in archives {
+                let out = Command::new("nm").args(["-g", "--defined-only", "--format=sysv", archive])
+                    .output().map_err(|e| format!("--allow-c: cannot read archive symbols: {e}"))?;
+                if !out.status.success() {
+                    return Err(format!("--allow-c: nm failed for {archive}: {}", String::from_utf8_lossy(&out.stderr)));
+                }
+                for line in String::from_utf8_lossy(&out.stdout).lines() {
+                    let columns: Vec<_> = line.split('|').map(str::trim).collect();
+                    if columns.len() >= 4 && columns[2].len() == 1
+                        && columns[0].bytes().next().is_some_and(|b| b.is_ascii_alphabetic() || b"_.".contains(&b))
+                        && columns[0].bytes().all(|b| b.is_ascii_alphanumeric() || b"_.$".contains(&b))
+                    {
+                        symbols.insert(columns[0].to_string(), columns[3] == "TLS");
+                    }
+                }
+            }
+            // Rust's static link can refer to hidden archive symbols, whereas dlsym cannot.
+            // Export address accessors without changing the symbols' own visibility. The TLS
+            // declaration must match the definition for the accessor object to link. Versioned
+            // and other names that need assembler directives stay on the ordinary dlsym path.
+            let source_path = format!("{tmp}.addresses.c");
+            let object_path = format!("{tmp}.addresses.o");
+            let mut source = String::new();
+            for (i, (name, tls)) in symbols.iter().enumerate() {
+                use std::fmt::Write;
+                let escaped = name.bytes().map(|b| format!("\\{b:03o}")).collect::<String>();
+                let storage = if *tls { "__thread " } else { "" };
+                writeln!(source, "extern {storage}char s{i}[] __asm__(\"{escaped}\");").unwrap();
+                writeln!(source, "__attribute__((visibility(\"default\"))) void *{}(void) {{ return s{i}; }}", address_name(name.as_bytes())).unwrap();
+            }
+            std::fs::write(&source_path, source).map_err(|e| format!("{source_path}: {e}"))?;
+            let compile = Command::new(cc()).args(["-fPIC", "-c", &source_path, "-o", &object_path]).output();
+            let _ = std::fs::remove_file(&source_path);
+            let compile = compile.map_err(|e| format!("--allow-c: cannot compile native address accessors: {e}"))?;
+            if !compile.status.success() {
+                let _ = std::fs::remove_file(&object_path);
+                return Err(format!("--allow-c: compiling native address accessors failed: {}", String::from_utf8_lossy(&compile.stderr)));
+            }
+            cmd.arg(&object_path);
+        }
         cmd.arg("-Wl,--whole-archive");
         cmd.args(archives);
         cmd.arg("-Wl,--no-whole-archive");
@@ -526,7 +578,9 @@ fn link(lib_path: &str, archives: &[String], search: &[String], fw_search: &[Str
     for f in frameworks {
         cmd.args(["-framework", f]);
     }
-    let out = cmd.output().map_err(|e| format!("--allow-c: cannot run the C compiler to link the native library: {e}"))?;
+    let out = cmd.output();
+    let _ = std::fs::remove_file(format!("{tmp}.addresses.o"));
+    let out = out.map_err(|e| format!("--allow-c: cannot run the C compiler to link the native library: {e}"))?;
     if !out.status.success() {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!("--allow-c: linking the native library failed ({} archive(s): {}):\n{}", archives.len(), archives.join(" "), String::from_utf8_lossy(&out.stderr)));
