@@ -2642,7 +2642,10 @@ fn module_bodies_classify_by_item() {
 /// with makepad's inputs unchanged a use of it is the edit's own error, and once they changed it
 /// waits for the rebuilt makepad, the restart offered -- also where this process cannot build
 /// makepad and nothing on the ring builds (a dock app's sync, 11-10: E0425 on a new `makepad_hal`
-/// op stood as the edit's own error).
+/// op stood as the edit's own error). So does a new variant, associated fn or method of a provided
+/// crate's type (a dock app's sync, 11-12: E0599 on a new `HalEvent` variant and `HalInfo` fn,
+/// and E0425 on the binding of the variant's pattern, refused the landed edit); a missing item
+/// of a type another crate also names stays the edit's own error.
 #[test]
 fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
     const CHILD: &str = "MAKEPAD_RUN_CROSS_ITEM_TEST";
@@ -2666,7 +2669,7 @@ fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
         std::fs::write(&path, text).unwrap();
         path.to_string_lossy().into_owned()
     };
-    let parts_src = "pub fn base() -> u32 { 11 }\n";
+    let parts_src = "pub fn base() -> u32 { 11 }\npub enum Ev { Reset { n: u32 } }\npub struct Info(pub u32);\nimpl Info { pub fn new(n: u32) -> Info { Info(n) } }\n";
     let app_src = |call: &str| format!("pub fn value(out: &mut u32) {{ *out = parts::{call}(); }}\n");
     let (parts_path, app_path) = (src("parts", parts_src), src("app", &app_src("base")));
     let session = Arc::new(crate::Session::default());
@@ -2717,6 +2720,16 @@ fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
     assert!(crate::reload::host::route() == crate::reload::host::Route::Plain, "nothing builds: the ring has no rebuild to offer");
     let o = unsafe { apply(up, use_later()) };
     assert!(o.lines.iter().any(|l| l.contains("E0425") && l.contains("needs the rebuilt makepad: restart to apply")), "once makepad's inputs changed, the use waits for the rebuilt makepad: {:?} {:?}", o.rung, o.lines);
+    assert_eq!(run(), 29, "the running code stays until the restart");
+    let read = |local: &str| vec![Edit { file: app_file, path: app_path.clone(), src: format!("{}{local}pub fn read(e: parts::Ev) -> u32 {{ match e {{ parts::Ev::Reset {{ n }} => parts::Info::new(n).width(), parts::Ev::Changed {{ info }} => parts::Info::from_bytes(info).0 }} }}\n", app_src("fresh")).into_bytes() }];
+    let o = unsafe { apply(up, read("")) };
+    assert!(!o.lines.iter().any(|l| l.contains("E0425")), "the binding of a pattern whose variant is not found still exists: {:?}", o.lines);
+    for item in ["`Changed`", "`from_bytes`", "`width`"] {
+        assert!(o.lines.iter().any(|l| l.contains("E0599") && l.contains(item) && l.contains("needs the rebuilt makepad: restart to apply")), "{item}, new in the provided crate's type, waits for the rebuilt makepad: {:?}", o.lines);
+    }
+    assert_eq!(o.rung, Rung::Restart, "new items of a provided crate's types: {:?}", o.lines);
+    let o = unsafe { apply(up, read("pub struct Info;\nimpl Info { pub fn width(&self) -> u32 { 0 } }\n")) };
+    assert_eq!(o.rung, Rung::Refuse, "`Info` names a type of the app too: its missing item is the edit's own error: {:?}", o.lines);
     assert_eq!(run(), 29, "the running code stays until the restart");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();

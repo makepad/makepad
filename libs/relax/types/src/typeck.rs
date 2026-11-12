@@ -2689,6 +2689,12 @@ impl<'a> Fcx<'a> {
                             }
                         }
                     }
+                } else {
+                    // pat.rs check_pat_struct: a path that does not resolve still checks its field
+                    // patterns, against the error type, so their bindings exist (no E0425 on a use)
+                    for fp in self.ast().list(*fields) {
+                        self.check_pat(fp.pat, self.tcx.tys.error);
+                    }
                 }
             }
             Pat::Box(x) => self.check_pat(*x, expected),

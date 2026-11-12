@@ -6209,7 +6209,7 @@ unsafe fn apply_locked(up: *mut Unit, edits: Vec<Edit>, mut pre: Vec<Option<Resu
     // the errors are the edit's own. (A new op runs in the host, beside its state: no JIT copy of
     // it can stand in.)
     if !real.is_empty() && host::inputs_changed() {
-        if let Some(lines) = provided_lacks(&real) {
+        if let Some(lines) = provided_lacks(&u.prog, &real) {
             errs.retain(|e| !real.contains(e));
             errs.extend(lines);
             real.clear();
@@ -8141,18 +8141,63 @@ fn unresolved_path(e: &str) -> Option<&str> {
     Some(&e[at..at + e[at..].find('`')?])
 }
 
+/// The type whose item an E0599 does not find (`no method named `m` found for `&T``, `no function
+/// or associated item named `f` found for enum `T<u8>``): its name, without references or
+/// generic arguments, as the type checker prints it.
+fn missing_item_owner(e: &str) -> Option<&str> {
+    const FOR: &str = "` found for ";
+    let at = e.find("E0599: no ")?;
+    let rest = &e[at..];
+    let rest = &rest[rest.find(FOR)? + FOR.len()..];
+    let open = rest.find('`')?;
+    if !matches!(rest[..open].trim_end(), "" | "enum" | "struct" | "union") {
+        return None;
+    }
+    let ty = &rest[open + 1..];
+    let mut ty = &ty[..ty.find('`')?];
+    while let Some(t) = ty.strip_prefix('&') {
+        ty = t.strip_prefix("mut ").unwrap_or(t);
+    }
+    let ty = &ty[..ty.find('<').unwrap_or(ty.len())];
+    Some(ty.rsplit("::").next().unwrap_or(ty))
+}
+
+/// The provided crate that defines the struct, enum or union named `name`: None when no type of
+/// that name is a provided crate's, or one of another crate has it too (which one the error means
+/// is not known then).
+fn provided_type_crate(prog: &Program, name: &str) -> Option<String> {
+    let mut krate = None;
+    for (i, d) in prog.defs.iter().enumerate() {
+        if !matches!(d.kind, DefKind::Struct | DefKind::Enum | DefKind::Union) || prog.name(DefId(i as u32)) != name {
+            continue;
+        }
+        let k = prog.syms.str(prog.crates[d.krate as usize].name);
+        if !crate::provided::registered(k) || krate.as_deref().is_some_and(|c: &str| c != k) {
+            return None;
+        }
+        krate = Some(k.to_string());
+    }
+    krate
+}
+
 /// `errs`, said as the restart rung's lines, when every one is a path into a provided crate that
-/// does not resolve or a name such a path would have bound (a `use` of its re-export, a call
-/// through that): None when any is another error.
-fn provided_lacks(errs: &[String]) -> Option<Vec<String>> {
+/// does not resolve, a name such a path would have bound (a `use` of its re-export, a call
+/// through that), or an item a provided crate's type lacks (E0599: a new variant, associated fn
+/// or method of it): None when any is another error.
+fn provided_lacks(prog: &Program, errs: &[String]) -> Option<Vec<String>> {
     let last = |p: &str| p.rsplit("::").next().unwrap_or(p).to_string();
     let lacked: Vec<(String, String)> = errs.iter().filter_map(|e| unresolved_path(e)).filter_map(|p| {
         let (krate, rest) = p.trim_start_matches("::").split_once("::")?;
         (!rest.is_empty() && crate::provided::registered(krate)).then(|| (last(p), krate.to_string()))
     }).collect();
     errs.iter().map(|e| {
-        let name = last(unresolved_path(e)?);
-        let (_, krate) = lacked.iter().find(|(n, _)| *n == name)?;
+        let krate = match missing_item_owner(e) {
+            Some(owner) => provided_type_crate(prog, owner)?,
+            None => {
+                let name = last(unresolved_path(e)?);
+                lacked.iter().find(|(n, _)| *n == name)?.1.clone()
+            }
+        };
         Some(format!("{e} -- `{krate}` is built into makepad, and this one lacks it: needs the rebuilt makepad: restart to apply"))
     }).collect()
 }
