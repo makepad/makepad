@@ -2,16 +2,19 @@
 //!
 //! A page a `PageFlip` is not showing, and a `View` with `visible: false`,
 //! would otherwise walk all their widgets for every frame request of the
-//! whole app (a splitter drag sends one on every move). They skip those
-//! while hidden, unless they set `background_events: true` (a subtree whose
-//! frame-driven work must keep running out of sight).
+//! whole app (a splitter drag sends one on every move). While hidden they
+//! only get the frames they're waiting on, unless they set
+//! `background_events: true` (a subtree whose frame-driven work must keep
+//! running out of sight): whatever was running as the subtree got hidden
+//! (a fling, an animation) keeps getting frames until it stops asking, and
+//! so does anything that asks for one while handling an event out of sight.
 //!
 //! Signals, timers and actions still reach hidden subtrees as they happen:
 //! they carry the background work (a terminal reading its process's output,
 //! a chat receiving streamed tokens, timers, async results, image decodes,
-//! the actions an app's hidden pages wait on). Frame requests are not lost:
-//! the ones made while hidden are delivered as one frame event at the
-//! subtree's first event after it is shown again.
+//! the actions an app's hidden pages wait on). The other frame requests are
+//! not lost: the ones made while hidden are delivered as one frame event at
+//! the subtree's first event after it is shown again.
 //!
 //! A widget can tell with `in_hidden_subtree` that it's handling actions
 //! out of sight, like a menu layer that leaves a menu raised on the bus to
@@ -31,13 +34,20 @@ pub struct HeldEvents {
     frames: HashSet<NextFrame>,
     order: VecDeque<NextFrame>,
     last_frame: Option<(u64, f64)>,
+    /// The hidden subtree is waiting on a frame, so the next one goes through.
+    wants_frame: bool,
 }
 
 impl HeldEvents {
-    /// Whether a hidden subtree skips `event`; the ones it waits for are kept.
-    pub fn hold(&mut self, event: &Event) -> bool {
+    /// Whether a hidden subtree skips `event`, keeping the frames for when it's shown. A frame goes
+    /// through if `was_shown` (it was shown at its last event) or it asked for one since its last frame.
+    pub fn hold(&mut self, event: &Event, was_shown: bool) -> bool {
+        self.wants_frame |= was_shown;
         match event {
             Event::NextFrame(ne) => {
+                if std::mem::take(&mut self.wants_frame) {
+                    return false;
+                }
                 for frame in &ne.set {
                     if self.frames.insert(*frame) {
                         self.order.push_back(*frame);
@@ -53,6 +63,11 @@ impl HeldEvents {
             }
             event => event.requires_visibility(),
         }
+    }
+
+    /// The hidden subtree handled an event, and gets the next frame if it asked for one meanwhile.
+    pub fn note_handled(&mut self, asked_for_frame: bool) {
+        self.wants_frame |= asked_for_frame;
     }
 
     pub fn is_empty(&self) -> bool {

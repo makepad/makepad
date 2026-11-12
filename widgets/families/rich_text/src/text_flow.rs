@@ -1607,6 +1607,10 @@ impl Widget for TextFlow {
                         None
                     };
                     self.is_selecting = true;
+                    // A mouse drag selects text, so no scroller around us takes it over. A touch drag still scrolls.
+                    if !fe.device.is_touch() {
+                        cx.claim_finger_drag(fe.digit_id);
+                    }
                     self.redraw(cx);
                 }
             }
