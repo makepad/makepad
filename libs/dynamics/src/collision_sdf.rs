@@ -1232,10 +1232,11 @@ pub fn sdf(
     // stopped its walks then, from the centre of the boxes' overlap and from the reference's Halton starts in it
     // (sdf_initpoints in each cube of the thinner geom's thickness along the overlap's longest side), each walked
     // until it settles at the deepest point of the two fields' overlap on their midsurface (`walk_midsurface`:
-    // sdf_iterations bounds its steps, not its end); one touch per point where they overlap, at d1 + d2, points
-    // nearer than a hundredth of the overlap's size taken as one (the deeper kept); contacts at the touches and
-    // at the ends of their extent along the midsurface (`touch_extent`), and of more than the driver takes for
-    // the pair, the deepest and those farthest apart.
+    // sdf_iterations bounds its steps, not its end); one touch per point where they overlap, at d1 + d2 (a walk
+    // from a seed that finds none, the seed's own read where that overlaps), points nearer than a hundredth of the
+    // overlap's size taken as one (the deeper kept); contacts at the touches and at the ends of their extent
+    // along the midsurface (`touch_extent`), and of more than the driver takes for the pair, the deepest and
+    // those farthest apart.
     let to_g2 = |p: [f64; 3]| {
         let (mut y, mut x) = ([0.0; 3], [0.0; 3]);
         mul_mat_vec3(&mut y, &rotation2, &p);
@@ -1275,7 +1276,7 @@ pub fn sdf(
     // the ends of the walks the bound on their steps stopped, which the next collision carries on from there
     let mut carried = [[0.0; 3]; MAXCONPAIR];
     let mut ncarried = 0;
-    for x in seeds[..nseed].iter().copied().chain(std::iter::once(centre)).chain(halton_starts) {
+    for (k, x) in seeds[..nseed].iter().copied().chain(std::iter::once(centre)).chain(halton_starts).enumerate() {
         let walk = walk_midsurface(x, m, d, &sdf, m.opt.sdf_iterations, size);
         if walk.ended == Walked::Bounded {
             if d.sdf_walks_bounded == 0 {
@@ -1290,7 +1291,9 @@ pub fn sdf(
                 ncarried += 1;
             }
         }
-        if let Some(touch) = walk.best.filter(|b| b.1 < 0.0) {
+        // a walk from a seed that finds no overlap lists the seed's own read where that overlaps: the pair keeps
+        // the touch it had while its fields still read one there
+        if let Some(touch) = walk.best.filter(|b| b.1 < 0.0).or(walk.first.filter(|f| k < nseed && f.1 < 0.0)) {
             keep_touch(&mut touches, &mut ntouch, touch, size);
         }
     }
@@ -1467,6 +1470,8 @@ struct Walk {
     /// the deepest point it passed where the surfaces face each other, levelled: there, the fields' gap (their
     /// distances' sum, the depth where it is below zero) and the normal
     best: Option<([f64; 3], f64, [f64; 3])>,
+    /// its first read, where the surfaces face each other at its start, levelled the same way
+    first: Option<([f64; 3], f64, [f64; 3])>,
     /// where it stopped
     end: [f64; 3],
     ended: Walked,
@@ -1481,7 +1486,10 @@ struct Walk {
 /// surface. It ends where its step is shorter than a thousandth of `size` (settled), or after `bound` steps,
 /// still going (the caller carries it on in the next collision), or where a distance is not finite or has no
 /// gradient (lost). Its deepest point, levelled, is where the fields' gap is least: below zero, they overlap by
-/// it, the contact's depth, along the normal out of the first geom into the second.
+/// it, the contact's depth, along the normal out of the first geom into the second. The deepest is the point
+/// whose larger distance is least, and sampled fields are not exact distances: where the two surfaces just meet,
+/// its gap can read zero or a little over while its start reads an overlap of a fraction of a micron. Its first
+/// read is kept for that.
 fn walk_midsurface(start: [f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, bound: i32, size: f64) -> Walk {
     let tol = 1e-3 * size;
     let mut x = start;
@@ -1492,6 +1500,7 @@ fn walk_midsurface(start: [f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, bound
     let mut alpha = 1.0;
     let mut ended = Walked::Bounded;
     let mut steps = 0;
+    let mut first = None;
     while steps < bound.max(1) {
         steps += 1;
         let (a, ga, b, gb) = pair_fields(m, d, s, &x);
@@ -1556,6 +1565,11 @@ fn walk_midsurface(start: [f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, bound
             scl3(&mut step, &input, size / len);
         }
         best = Some((x, level, a + b, n, max(a, b), step));
+        if steps == 1 {
+            let mut p = x;
+            add_to_scl3(&mut p, &n, level);
+            first = Some((p, a + b, n));
+        }
         if len < tol {
             ended = Walked::Settled;
             break;
@@ -1567,7 +1581,7 @@ fn walk_midsurface(start: [f64; 3], m: &Model, d: &Data, s: &SdfQuery<'_>, bound
         add_to_scl3(&mut p, &n, level);
         (p, gap, n)
     });
-    Walk { best, end: x, ended }
+    Walk { best, first, end: x, ended }
 }
 
 // flexElemCallback and mjc_FlexSDF are left untranslated with flex.
