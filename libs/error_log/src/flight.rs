@@ -3,7 +3,8 @@
 //! writes them out). Apps and games add their own events so their logic leaves a trace a bug
 //! seen once can be read from afterwards:
 //!
-//! ```ignore
+//! ```
+//! # let (id, state) = (12u32, "follow");
 //! makepad_error_log::flight::mark("game.spawn", "follower 12 at (3, 4)");
 //! makepad_error_log::flight_mark!("ai.state", id, 0, "follower {} -> {:?}", id, state);
 //! ```
