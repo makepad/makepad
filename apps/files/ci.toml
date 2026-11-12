@@ -7,6 +7,13 @@ digest = "9a07fb555cd09466835dc47ac09970d135942f67324d0ec68a5c138a84917bc6"
 main = "bac634fd1103ed3453797a04fb1bdf0dd8a1ba9c"
 work = "7954fb8a65f663048b1ea7dfcbc6e4a8c5d65464"
 
+[app.macos]
+capture = ""
+date = "2026-11-12"
+digest = "78e7b4c258587d84ba344b211920f457f9639f34f9c322304ac52b238d6cbd8c"
+main = "7bd5b1e91a4a7e6249969879dee69d3e24346d0c"
+work = "a600b76871b2d76ddbcedec911cc10e9a5a009a8"
+
 [app.windows]
 capture = ""
 date = "2026-11-11"
