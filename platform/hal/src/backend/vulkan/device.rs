@@ -948,25 +948,63 @@ pub(crate) mod compile_rank {
     pub const SAVE: u8 = 3;
 }
 
-/// The pipeline compiles, on up to `Compilers::threads()` threads sharing one queue: Vulkan
+/// The pipeline compiles, on up to `Compilers::threads` threads sharing one queue: Vulkan
 /// creates pipelines on any thread at once, and the driver compiles on the calling thread
 /// (NVIDIA with a cold shader cache: a large app's cold first frame waited 19.8 s for 183 pipelines on
 /// one thread, 7.7 s on eight). Each job carries its rank (`compile_rank`), which a waiting frame lowers
 /// (`Compilers::waited`); a free thread takes the lowest-ranked job, the oldest first. A job runs
 /// inside the process CPU budget, so compiles and the JIT do not oversubscribe the cores, and in
 /// its interactive class: something waits for every compile (a frame for its draw programs, a
-/// held pass for its kernel), and none is made ahead of need.
+/// held pass for its kernel), and none is made ahead of need. A thread takes its slot of the budget
+/// before it takes a job: one waiting for the CPU holds no job, so when a slot frees, the job a
+/// frame waits for is the one that runs, whatever was queued before it.
 pub(crate) struct Compilers {
     shared: Arc<CompileShared>,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
 struct CompileShared {
+    budget: CompileBudget,
     queue: Mutex<CompileQueue>,
     /// a job was queued, or the pool closed
     work: std::sync::Condvar,
     /// a job ended (`settle`)
     ended: std::sync::Condvar,
+}
+
+/// The CPU budget a compile pool admits its jobs through.
+enum CompileBudget {
+    /// the process's: a device's compiles share the cores with the app's other work and the JIT
+    Process,
+    /// one of its own (a pool under test, sized for its test)
+    #[cfg(test)]
+    Own(Arc<tests::Slots>),
+}
+
+impl CompileBudget {
+    fn cores(&self) -> usize {
+        match self {
+            Self::Process => makepad_cpu_budget::cores() as usize,
+            #[cfg(test)]
+            Self::Own(slots) => slots.cores,
+        }
+    }
+
+    fn admit(&self) -> u32 {
+        match self {
+            Self::Process => makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::HAL, "pipeline compile"),
+            #[cfg(test)]
+            Self::Own(slots) => slots.admit(),
+        }
+    }
+
+    fn release(&self, permit: u32) {
+        match self {
+            Self::Process => makepad_cpu_budget::release(permit),
+            #[cfg(test)]
+            Self::Own(slots) => slots.release(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -982,13 +1020,20 @@ struct CompileQueue {
 
 impl Compilers {
     pub fn new() -> Self {
-        Self { shared: Arc::new(CompileShared { queue: Mutex::new(CompileQueue::default()), work: std::sync::Condvar::new(), ended: std::sync::Condvar::new() }),
+        Self::with_budget(CompileBudget::Process)
+    }
+
+    fn with_budget(budget: CompileBudget) -> Self {
+        Self { shared: Arc::new(CompileShared { budget, queue: Mutex::new(CompileQueue::default()), work: std::sync::Condvar::new(), ended: std::sync::Condvar::new() }),
             threads: Mutex::new(Vec::new()) }
     }
 
-    /// Half the cores, 2 to 8.
-    fn threads() -> usize {
-        std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(2, 8)
+    /// Half the budget's cores, 2 to 8, and never more than it has: a thread the budget cannot
+    /// admit would only wait. The budget's, not the machine's: a run granted part of the box
+    /// (`MAKEPAD_CPU_CORES`) started eight threads for a budget of two.
+    fn threads(&self) -> usize {
+        let cores = self.shared.budget.cores().max(1);
+        (cores / 2).clamp(2, 8).min(cores)
     }
 
     /// A rank a job is queued with and its waiters lower (`waited`).
@@ -1008,7 +1053,7 @@ impl Compilers {
         q.jobs.push_back((rank, Box::new(job)));
         // an idle thread takes one queued job: woken, it counts as idle until it takes it, so
         // the jobs queued past the idle threads are the ones without a thread
-        if q.jobs.len() > q.idle && q.started < Self::threads() {
+        if q.jobs.len() > q.idle && q.started < self.threads() {
             q.started += 1;
             let n = q.started;
             let shared = self.shared.clone();
@@ -1024,19 +1069,28 @@ impl Compilers {
     fn run(shared: &CompileShared) {
         let mut q = lock(&shared.queue);
         loop {
-            let at = q.jobs.iter().enumerate().min_by_key(|(_, (r, _))| r.load(Ordering::Relaxed)).map(|(i, _)| i);
-            let Some((_, job)) = at.and_then(|i| q.jobs.remove(i)) else {
+            if q.jobs.is_empty() {
                 if q.closed { return; }
                 q.idle += 1;
                 q = shared.work.wait(q).unwrap_or_else(|e| e.into_inner());
                 q.idle -= 1;
                 continue;
+            }
+            // a job is queued: the slot first, then the job, the best one when it can run (an idle
+            // thread holds no slot; one admitted to an emptied queue gives it back at once)
+            drop(q);
+            let permit = shared.budget.admit();
+            q = lock(&shared.queue);
+            let at = q.jobs.iter().enumerate().min_by_key(|(_, (r, _))| r.load(Ordering::Relaxed)).map(|(i, _)| i);
+            let Some((_, job)) = at.and_then(|i| q.jobs.remove(i)) else {
+                // another thread took the last one meanwhile
+                shared.budget.release(permit);
+                continue;
             };
             q.running += 1;
             drop(q);
-            let permit = makepad_cpu_budget::admit(makepad_cpu_budget::INTERACTIVE, makepad_cpu_budget::HAL, "pipeline compile");
             job();
-            makepad_cpu_budget::release(permit);
+            shared.budget.release(permit);
             q = lock(&shared.queue);
             q.running -= 1;
             shared.ended.notify_all();
@@ -1141,10 +1195,11 @@ mod tests {
     /// frame waits for first, then the draw programs, then the kernels made ahead.
     #[test]
     fn compiles_run_at_once_waited_first() {
-        use super::{compile_rank, Compilers};
+        use super::{compile_rank, CompileBudget, Compilers};
         use std::sync::mpsc::{channel, sync_channel};
-        let pool = Compilers::new();
-        let n = Compilers::threads();
+        // a budget of its own: the other tests of the process hold slots of its budget
+        let pool = Compilers::with_budget(CompileBudget::Own(Slots::new(8)));
+        let n = pool.threads();
         let (started_tx, started) = channel();
         let gates: Vec<_> = (0..n).map(|_| {
             let (gate, wait) = sync_channel::<()>(0);
@@ -1179,9 +1234,9 @@ mod tests {
     /// one, and the others each get a thread of their own instead of queueing behind it.
     #[test]
     fn pushes_past_an_idle_thread_start_threads() {
-        use super::{compile_rank, Compilers};
+        use super::{compile_rank, CompileBudget, Compilers};
         use std::sync::mpsc::{channel, sync_channel};
-        let pool = Compilers::new();
+        let pool = Compilers::with_budget(CompileBudget::Own(Slots::new(4)));
         pool.push(Compilers::rank(compile_rank::KERNEL), || {});
         assert!(pool.settle(std::time::Duration::from_secs(10)), "the first job ran");
         assert_eq!(super::lock(&pool.shared.queue).idle, 1, "its thread idles");
@@ -1197,5 +1252,80 @@ mod tests {
         }
         drop(gates);
         pool.stop();
+    }
+
+    /// A pool has as many threads as its budget admits, and a thread takes its slot before it
+    /// takes a job: while the app's other work holds every slot of a 2-core budget, both threads
+    /// wait holding no job, and when slots free the job a frame waits for runs first.
+    #[test]
+    fn a_compile_takes_its_cpu_slot_before_its_job() {
+        use super::{compile_rank, CompileBudget, Compilers};
+        let budget = Slots::new(2);
+        let pool = Compilers::with_budget(CompileBudget::Own(budget.clone()));
+        assert_eq!(pool.threads(), 2, "as many threads as the budget's cores");
+        // the app's other work holds both slots
+        for _ in 0..2 { budget.admit(); }
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let push = |name: &'static str, rank: u8| {
+            let (order, rank) = (order.clone(), Compilers::rank(rank));
+            pool.push(rank.clone(), move || order.lock().unwrap().push(name));
+            rank
+        };
+        push("kernel", compile_rank::KERNEL);
+        push("draw", compile_rank::DRAW);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while budget.waiting() < 2 && std::time::Instant::now() < end { std::thread::yield_now(); }
+        assert_eq!(budget.waiting(), 2, "both threads wait for a slot");
+        assert_eq!(super::lock(&pool.shared.queue).started, 2, "no thread past the budget's cores");
+        assert_eq!(super::lock(&pool.shared.queue).jobs.len(), 2, "a thread waiting for a slot holds no job");
+        Compilers::waited(&push("waited", compile_rank::KERNEL));
+        // one slot frees: the three run on it one by one, in rank order
+        budget.release();
+        while order.lock().unwrap().len() < 3 && std::time::Instant::now() < end { std::thread::yield_now(); }
+        assert_eq!(*order.lock().unwrap(), ["waited", "draw", "kernel"]);
+        budget.release();
+        assert!(pool.settle(std::time::Duration::from_secs(10)), "the queue ran out");
+        // an idle thread holds no slot: the app's other work has every core while nothing compiles
+        while super::lock(&pool.shared.queue).idle < 2 && std::time::Instant::now() < end { std::thread::yield_now(); }
+        assert_eq!(super::lock(&pool.shared.queue).idle, 2, "both threads idle");
+        assert_eq!(budget.held(), 0, "with no job queued the pool holds no slot");
+        pool.stop();
+    }
+
+    /// A CPU budget of a test's own, `cores` slots: the pool admits through it as through the
+    /// process budget (a slot before a job, given back when the job ends), and the slots the
+    /// process's other tests hold cannot starve it. Not a second `makepad_cpu_budget` budget: under
+    /// Relax that crate runs in the loader, where JIT-compiled code reaches only its ops (the
+    /// process budget's own rules are its tests).
+    pub(super) struct Slots {
+        pub(super) cores: usize,
+        /// held, waiting
+        state: std::sync::Mutex<[usize; 2]>,
+        freed: std::sync::Condvar,
+    }
+
+    impl Slots {
+        pub(super) fn new(cores: usize) -> Arc<Self> {
+            Arc::new(Self { cores, state: Default::default(), freed: Default::default() })
+        }
+
+        /// Waits for a slot (counted as waiting meanwhile).
+        pub(super) fn admit(&self) -> u32 {
+            let mut s = self.state.lock().unwrap();
+            s[1] += 1;
+            while s[0] == self.cores { s = self.freed.wait(s).unwrap(); }
+            s[1] -= 1;
+            s[0] += 1;
+            0
+        }
+
+        pub(super) fn release(&self) {
+            self.state.lock().unwrap()[0] -= 1;
+            self.freed.notify_all();
+        }
+
+        fn held(&self) -> usize { self.state.lock().unwrap()[0] }
+
+        fn waiting(&self) -> usize { self.state.lock().unwrap()[1] }
     }
 }
