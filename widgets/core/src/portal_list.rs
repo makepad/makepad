@@ -943,6 +943,10 @@ pub struct PortalList {
     /// Whether the list drew since a smooth scroll last moved it.
     #[rust]
     drawn_since_scroll_step: bool,
+    /// The list's size at its last draw. Scrolling goes by this since the area has no rect once
+    /// the list's draw list gets redrawn without it, like when it's out of sight.
+    #[rust]
+    drawn_size: Vec2d,
 
     #[live(false)]
     auto_tail: bool,
@@ -1554,7 +1558,7 @@ impl PortalList {
             cx.widget_tree_mark_dirty(self.uid);
         }
 
-        cx.end_turtle_with_area(&mut self.area);
+        self.drawn_size = cx.end_turtle_with_area(&mut self.area).size;
         self.visible_items = visible_items;
         self.last_visible_id = last_visible_id;
 
@@ -2461,7 +2465,7 @@ impl PortalList {
             self.user_scroll_travel += delta;
         }
         let fingers_down = !clip_top && !transition_to_pulldown;
-        let extent = self.area.rect(cx).size.index(self.vec_index);
+        let extent = self.drawn_size.index(self.vec_index);
 
         // A finger-driven gesture past the end edge stretches the rubber band
         // instead of scrolling. A finger on the screen follows the loose iOS
@@ -2525,7 +2529,11 @@ impl PortalList {
         // backlog into a first_id jump through the height tree first — the
         // same mapping a scroll-bar drag lands by — so the draw only ever
         // walks the rows around the viewport.
-        if extent > 0.0 && self.first_scroll < -extent {
+        // Scrolling up out of sight (a fling or a smooth scroll) leaves the same backlog above
+        // `first_id`, except at the start, where a gap is overscroll.
+        if extent > 0.0
+            && (self.first_scroll < -extent || (self.first_scroll > extent && self.first_id > self.range_start))
+        {
             if let Some(tree) = self.height_tree.as_ref() {
                 let first_idx = self.first_id.saturating_sub(self.range_start);
                 let height_before =
@@ -2779,9 +2787,9 @@ impl PortalList {
     /// Returns the viewport's length along the list, inside its padding.
     ///
     /// `end()` uses this same size when it moves the bottom of the list to the bottom of the viewport.
-    fn viewport_size(&self, cx: &Cx) -> f64 {
+    fn viewport_size(&self) -> f64 {
         let vi = self.vec_index;
-        (self.area.rect(cx).size.index(vi) - self.layout.padding.size().index(vi)).max(0.0)
+        (self.drawn_size.index(vi) - self.layout.padding.size().index(vi)).max(0.0)
     }
 
     /// Computes the top position of `target_id` relative to the viewport top
@@ -2847,7 +2855,7 @@ impl PortalList {
         // Compute the target's top position relative to viewport using first_id,
         // first_scroll, and the height_tree — this avoids relying on widget rects
         // which may be clipped for partially-visible items.
-        let viewport_size = self.viewport_size(cx);
+        let viewport_size = self.viewport_size();
         let item_top = self.item_top_from_height_tree(target_id);
         if viewport_size > 0.0 {
             if let Some(item_top) = item_top {
@@ -2950,7 +2958,7 @@ impl PortalList {
         // `speed` is a per-frame pixel delta. Scale it to the distance so the
         // animation takes the same time from anywhere in the list. Measure from the bottom
         // of the list to the bottom of the viewport, since that's where this scroll stops.
-        let viewport_size = self.viewport_size(cx);
+        let viewport_size = self.viewport_size();
         let speed = match self.item_top_from_height_tree(self.range_end) {
             Some(bottom) => ((bottom - viewport_size).abs() / SMOOTH_SCROLL_TO_END_FRAMES).max(speed),
             None => speed,
@@ -3824,7 +3832,7 @@ impl Widget for PortalList {
 
                     // Going to the end lines up the bottom of the list with the bottom of the viewport.
                     let (aligned_id, goal) = if to_end {
-                        (self.range_end, self.viewport_size(cx))
+                        (self.range_end, self.viewport_size())
                     } else {
                         (target_id, top_offset.max(0.0))
                     };
