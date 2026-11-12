@@ -7,6 +7,7 @@
 use crate::{
     data::Data,
     memory::Scratch,
+    sparse_pattern::PatternRef,
     types::MINVAL,
     util_blas::*,
     util_misc::{copy_int, max, min, scatter},
@@ -163,7 +164,10 @@ fn upper_start(colind: &[i32], start: usize, end: usize, r: usize) -> usize {
     start
 }
 
-/// With no pool, scratch has 2*n integers for counting or 3*n for filling.
+/// The pattern of L for the symmetric matrix whose checked transpose `ht` holds its rows (the upper part of
+/// each read), the C's mju_cholFactorSymbolic: the counts and addresses (no `l_colind`; returns the count),
+/// or the columns into them. With no pool, scratch has 2*n integers for counting or 3*n for filling. The
+/// walk up the elimination tree indexes its per-row arrays unchecked; its writes into L and L' are checked.
 pub fn chol_factor_symbolic(
     mut l_colind: Option<&mut [i32]>,
     l_rownnz: &mut [i32],
@@ -172,37 +176,48 @@ pub fn chol_factor_symbolic(
     lt_rownnz: &mut [i32],
     lt_rowadr: &mut [i32],
     lt_map: &mut [i32],
-    rownnz: &[i32],
-    rowadr: &[i32],
-    colind: &[i32],
-    n: usize,
+    ht: PatternRef,
     mut pool: Option<&mut Scratch>,
     scratch: &mut [i32],
 ) -> i32 {
+    let (n, rownnz, rowadr, colind) = (ht.nr(), ht.rownnz(), ht.rowadr(), ht.colind());
+    assert!(ht.nc() == n, "chol_factor_symbolic: the matrix is not square");
+    if n == 0 {
+        return 0;
+    }
     let size = if l_colind.is_some() { 3 * n } else { 2 * n };
     let mut owned = pool.as_deref_mut().map(|pool| pool.int(size));
     let work = owned.as_deref_mut().unwrap_or(scratch);
+    // every per-row array cut to n
     let (parent, rest) = work.split_at_mut(n);
-    let (flag, cursor) = rest.split_at_mut(n);
+    let (flag, rest) = rest.split_at_mut(n);
+    let cursor = &mut rest[..if l_colind.is_some() { n } else { 0 }];
+    let (l_rownnz, l_rowadr) = (&mut l_rownnz[..n], &mut l_rowadr[..n]);
+    let (lt_rownnz, lt_rowadr) = (&mut lt_rownnz[..n], &mut lt_rowadr[..n]);
+    // SAFETY (the walk's unchecked reads and writes below): i, the row the walk is at, is a column of the
+    // checked ht (below ht.nc() = n) or a parent the walk set (a row below n), and parent, flag, cursor and
+    // l_rownnz are cut to n.
     if l_colind.is_none() {
         for r in (0..n).rev() {
             parent[r] = -1;
             flag[r] = r as i32;
             l_rownnz[r] = 1;
             let mut lt_nnz = 1;
-            let end = (rowadr[r] + rownnz[r]) as usize;
-            for c in upper_start(colind, rowadr[r] as usize, end, r)..end {
-                let mut i = colind[c] as usize;
-                while flag[i] != r as i32 {
-                    l_rownnz[i] += 1;
-                    lt_nnz += 1;
-                    flag[i] = r as i32;
-                    let p = parent[i];
-                    if p == -1 {
-                        parent[i] = r as i32;
-                        break;
+            let (start, end) = (rowadr[r] as usize, (rowadr[r] + rownnz[r]) as usize);
+            for &c in &colind[upper_start(colind, start, end, r)..end] {
+                let mut i = c as usize;
+                unsafe {
+                    while *flag.get_unchecked(i) != r as i32 {
+                        *l_rownnz.get_unchecked_mut(i) += 1;
+                        lt_nnz += 1;
+                        *flag.get_unchecked_mut(i) = r as i32;
+                        let p = *parent.get_unchecked(i);
+                        if p == -1 {
+                            *parent.get_unchecked_mut(i) = r as i32;
+                            break;
+                        }
+                        i = p as usize;
                     }
-                    i = p as usize;
                 }
             }
             lt_rownnz[r] = lt_nnz;
@@ -231,32 +246,31 @@ pub fn chol_factor_symbolic(
         lt_colind[lt_write] = r as i32;
         lt_map[lt_write] = diag_idx;
         lt_write += 1;
-        let end = (rowadr[r] + rownnz[r]) as usize;
-        for c in upper_start(colind, rowadr[r] as usize, end, r)..end {
-            let mut i = colind[c] as usize;
-            while flag[i] != r as i32 {
-                let l_idx = cursor[i];
-                cursor[i] -= 1;
-                l_colind[l_idx as usize] = r as i32;
-                lt_colind[lt_write] = i as i32;
-                lt_map[lt_write] = l_idx;
-                lt_write += 1;
-                flag[i] = r as i32;
-                let p = parent[i];
-                if p == -1 {
-                    parent[i] = r as i32;
-                    break;
+        let (start, end) = (rowadr[r] as usize, (rowadr[r] + rownnz[r]) as usize);
+        for &c in &colind[upper_start(colind, start, end, r)..end] {
+            let mut i = c as usize;
+            unsafe {
+                while *flag.get_unchecked(i) != r as i32 {
+                    let l_idx = *cursor.get_unchecked(i);
+                    *cursor.get_unchecked_mut(i) -= 1;
+                    l_colind[l_idx as usize] = r as i32;
+                    lt_colind[lt_write] = i as i32;
+                    lt_map[lt_write] = l_idx;
+                    lt_write += 1;
+                    *flag.get_unchecked_mut(i) = r as i32;
+                    let p = *parent.get_unchecked(i);
+                    if p == -1 {
+                        *parent.get_unchecked_mut(i) = r as i32;
+                        break;
+                    }
+                    i = p as usize;
                 }
-                i = p as usize;
             }
         }
     }
     if let (Some(pool), Some(v)) = (pool, owned) {
         pool.put_int(v);
     }
-    // chol_factor_numeric indexes its dense accumulator by these columns unchecked: each is a row below n
-    // by construction, checked here once per pattern (over the whole slice, so no stale entry escapes).
-    assert!(l_colind.iter().all(|&c| (c as u32 as usize) < n), "chol_factor_symbolic: a column of L is not below n");
     0
 }
 
@@ -434,8 +448,8 @@ fn chol_suffix_update<const NS: usize, const BATCH: usize>(
 // The supernode's loops through the dense accumulator, each a small function of its own: inlined
 // into the supernode, these loops reloaded spilled pointers on every element. Those that index dense
 // by columns of L do so unchecked, as the C's loops do (a check per element was a fifth of the
-// factorization): the columns are below n (checked once per pattern by chol_factor_symbolic) and dense
-// is at least n long (checked by chol_factor_numeric).
+// factorization): the columns are below n (L's pattern is checked when it is built) and dense is at
+// least n long (checked by chol_factor_numeric).
 
 // Scatter the lower part of a row of H (its columns up to `row`) into dense.
 #[inline(never)]
@@ -764,18 +778,12 @@ unsafe fn chol_factor_supernode<const NS: usize>(
     rank_dec
 }
 
-/// Factor H into the pattern of L, the C's mju_cholFactorNumeric.
-/// # Safety
-/// Every entry of `l_colind` is below `n`: true of the pattern chol_factor_symbolic builds, which checks it
-/// once per pattern. The dense accumulator (`scratch`, at least n long, checked here) is indexed by those
-/// columns without checks.
-pub unsafe fn chol_factor_numeric(
+/// Factor H into the checked pattern of L (n x n, its rows one after another), the C's mju_cholFactorNumeric.
+/// The dense accumulator (`scratch`, at least n long) is indexed by L's columns without checks.
+pub fn chol_factor_numeric(
     l: &mut [f64],
-    n: usize,
     mindiag: f64,
-    l_rownnz: &[i32],
-    l_rowadr: &[i32],
-    l_colind: &[i32],
+    lp: PatternRef,
     lt_rownnz: &[i32],
     lt_rowadr: &[i32],
     lt_colind: &[i32],
@@ -786,8 +794,10 @@ pub unsafe fn chol_factor_numeric(
     h_colind: &[i32],
     scratch: &mut [f64],
 ) -> i32 {
+    let (n, l_rownnz, l_rowadr, l_colind) = (lp.nr(), lp.rownnz(), lp.rowadr(), lp.colind());
+    assert!(lp.nc() == n && lp.contiguous() && l.len() >= lp.end() && scratch.len() >= n,
+        "chol_factor_numeric: L is not square or not contiguous, or a slice is shorter than it");
     let mut rank = n as i32;
-    assert!(scratch.len() >= n, "chol_factor_numeric: the dense accumulator is shorter than n");
     let dense = scratch;
     zero(dense, n);
     let mut r = n as i32 - 1;
@@ -832,8 +842,9 @@ pub unsafe fn chol_factor_numeric(
         {
             ns += 1;
         }
+        // SAFETY (the three supernode calls): L's pattern is checked and contiguous, so every address of
+        // l_colind (cut to its end) holds a column of a row, below n <= dense.len() (asserted above).
         if ns == 3 {
-            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
             rank -= unsafe {
                 chol_factor_supernode::<3>(
                     row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
@@ -841,7 +852,6 @@ pub unsafe fn chol_factor_numeric(
                 )
             };
         } else if ns == 2 {
-            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
             rank -= unsafe {
                 chol_factor_supernode::<2>(
                     row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,
@@ -849,7 +859,6 @@ pub unsafe fn chol_factor_numeric(
                 )
             };
         } else {
-            // SAFETY: l_colind is below n (this function's contract), and n <= dense.len() (checked above).
             rank -= unsafe {
                 chol_factor_supernode::<1>(
                     row, mindiag, l, l_rownnz, l_rowadr, l_colind, lt_rownnz, lt_rowadr, lt_colind,

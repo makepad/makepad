@@ -5,11 +5,51 @@ use makepad_font_core::{
     font_face::{FontData, FontFace},
     geom::Size,
     glyph_outline::GlyphOutline,
+    image::{Bgra, Image},
     msdfer::Msdfer,
     raster::{render_msdf, Settings},
     rustybuzz::UnicodeBuffer,
 };
-use std::{cell::RefCell, collections::BTreeMap, rc::Rc};
+use std::{cell::RefCell, collections::{BTreeMap, HashMap, VecDeque}, rc::Rc};
+
+/// What a glyph's distance field depends on: the face and its variations,
+/// the glyph, the texels per em and the field's range (its padding and
+/// image size follow from these).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GlyphFieldKey {
+    font: String,
+    weight: Option<u32>,
+    width: Option<u32>,
+    glyph_id: u16,
+    resolution: u32,
+    radius: u32,
+    padding: usize,
+    size: (usize, usize),
+}
+
+/// Most glyph fields kept for later bakes (the oldest goes first).
+const GLYPH_FIELDS_KEPT: usize = 1024;
+
+thread_local! {
+    /// Distance fields of glyphs already rendered, shared by every bake: a
+    /// label, a plate's digit strip and the next sign reuse their letters.
+    /// Only a cache: eviction never refuses text or changes its bytes.
+    static GLYPH_FIELDS: RefCell<(HashMap<GlyphFieldKey, Rc<Image<Bgra>>>, VecDeque<GlyphFieldKey>)> = RefCell::new((HashMap::new(), VecDeque::new()));
+}
+
+fn glyph_field(key: GlyphFieldKey, render: impl FnOnce() -> Image<Bgra>) -> Rc<Image<Bgra>> {
+    if let Some(field) = GLYPH_FIELDS.with(|f| f.borrow().0.get(&key).cloned()) { return field; }
+    let field = Rc::new(render());
+    GLYPH_FIELDS.with(|f| {
+        let (fields, order) = &mut *f.borrow_mut();
+        fields.insert(key.clone(), field.clone());
+        order.push_back(key);
+        while order.len() > GLYPH_FIELDS_KEPT {
+            if let Some(old) = order.pop_front() { fields.remove(&old); }
+        }
+    });
+    field
+}
 
 /// The same embedded faces serve both material text and vector canvases.
 pub fn text_face(name: &str, weight: Option<f32>, width: Option<f32>) -> Result<FontFace, String> {
@@ -209,7 +249,8 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
         plate_cells: spec.plate.then_some([(ox + blank_x * res) / width, cell * res / width, ox / width, cell * res / width]) };
     let mut msdfer = Msdfer::new(settings);
     // Repeated glyphs (including prefix digits reused in the strip) render
-    // only once per bake. The cache affects neither order nor output bytes.
+    // only once, and a glyph an earlier bake rendered is not rendered again.
+    // The caches affect neither order nor output bytes.
     let mut fields = BTreeMap::new();
     for (glyphs, row) in [(&top.glyphs, 0), (&strip, rh)] {
         for glyph in glyphs {
@@ -217,7 +258,14 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
             let iw = (b.size.width * res).ceil() as usize;
             let ih = (b.size.height * res).ceil() as usize;
             let size = Size::new(iw + 2 * settings.padding, ih + 2 * settings.padding);
-            let field = fields.entry(glyph.glyph_id).or_insert_with(|| render_msdf(&mut msdfer, &glyph.outline, res, size));
+            let field = fields.entry(glyph.glyph_id).or_insert_with(|| {
+                let key = GlyphFieldKey {
+                    font: spec.font.clone(), weight: spec.weight.map(f32::to_bits), width: spec.width.map(f32::to_bits),
+                    glyph_id: glyph.glyph_id, resolution: spec.resolution, radius: settings.radius.to_bits(),
+                    padding: settings.padding, size: (size.width, size.height),
+                };
+                glyph_field(key, || render_msdf(&mut msdfer, &glyph.outline, res, size))
+            });
             let x0 = (ox + (glyph.x + b.origin.x) * res - guard).round() as i32;
             // font_core flips about inner_height - 1 (not the outline top).
             let y0 = (baseline - (glyph.y + b.origin.y) * res - (ih as f32 - 1.0) - guard).round() as i32 + row as i32;

@@ -45,6 +45,16 @@ pub fn star_map_path() -> Option<std::path::PathBuf> {
 }
 
 impl Renderer {
+    /// Detail factor on every view's LOD distances: above 1 coarser levels are drawn
+    /// nearer, below 1 detail is kept further; 1 is the screen-error rule (lod_view.rs).
+    pub fn set_lod_bias(&mut self, bias: f32) {
+        self.lod_bias = if bias.is_finite() && bias > 0.0 { bias } else { 1.0 };
+    }
+
+    pub fn lod_bias(&self) -> f32 {
+        self.lod_bias
+    }
+
     /// Opt into the linear HDR lighting convention. The HOST must then
     /// render the scene pass into an RGBA16F colour target
     /// (`TextureFormat::RenderRGBAf16`, see `GpuInfo::float16_blend_targets`)

@@ -22,6 +22,11 @@ script_mod! {
     mod.draw.DrawSceneFoliageLit = mod.std.set_type_default() do #(DrawSceneFoliageLit::script_shader(vm)){
         ..mod.draw.DrawScenePbr
 
+        // 1: the layer's normals are the crown's (kit trees: the direction
+        // from the lobe centre blended with the card's) and its vertex
+        // colour is crown occlusion (makepadShading.crown).
+        crown: uniform(0.0)
+
         pixel: fn() {
             // Chain levels and the mesh <-> stand-in switch dissolve.
             self.door_window()
@@ -31,14 +36,24 @@ script_mod! {
             let wp = self.v_csm.xyz
             let v = normalize(self.eye.xyz - wp)
             var n = normalize(self.v_csm_n)
-            // Cards are two-sided: light the side the camera sees.
-            if dot(n, v) < 0.0 { n = n * (0.0 - 1.0) }
+            // Cards are two-sided: light the side the camera sees. Crown
+            // normals stay as authored: the far half of a crown faces away
+            // from the camera and from the sun, and that is its volume.
+            if self.crown < 0.5 && dot(n, v) < 0.0 { n = n * (0.0 - 1.0) }
             let l = normalize(self.light_dir)
             let ndl = dot(n, l)
             let vis = self.csm_vis_fast(wp, n, max(ndl, 0.0))
             // The copy's own tint and adjust (a scatter varies its crowns).
-            let albedo = self.color_adjust(self.to_scene(tex.xyz) * self.to_lin(self.v_tint.xyz), self.tint, self.color_adjust_ctl)
-            let ao = clamp(mix(self.v_tint.w, 1.0, self.surface_on), 0.0, 1.0)
+            // A crown's vertex colour is its occlusion (inner and underside
+            // leaves darker), which shades the ambient and the light through
+            // the leaves rather than the leaf's own colour.
+            var vertex_color = self.to_lin(self.v_tint.xyz)
+            var ao = clamp(mix(self.v_tint.w, 1.0, self.surface_on), 0.0, 1.0)
+            if self.crown > 0.5 {
+                ao = clamp(self.v_tint.y, 0.0, 1.0)
+                vertex_color = vec3(1.0, 1.0, 1.0)
+            }
+            let albedo = self.color_adjust(self.to_scene(tex.xyz) * vertex_color, self.tint, self.color_adjust_ctl)
             var sao = 1.0
             if self.ssao_ctl.x > 0.001 {
                 let sp = self.v_spos.xy / max(self.v_spos.w, 0.000001)
@@ -46,9 +61,15 @@ script_mod! {
             }
             let wrap = clamp(ndl * 0.7 + 0.3, 0.0, 1.0)
             let back = max(dot(v * (0.0 - 1.0), l), 0.0)
-            let through = back * back * back * 0.5 * step(0.5, self.alpha_mode)
+            var through = vec3(1.0, 1.0, 1.0) * (back * back * back * 0.5 * step(0.5, self.alpha_mode))
+            if self.crown > 0.5 {
+                // Sunlight through a leaf comes out yellow-green (the leaf
+                // absorbs red and blue twice over), strongest through the
+                // outer leaves and fading toward the crown's heart.
+                through = vec3(1.1, 1.2, 0.45) * (back * back * back * 0.8 * ao)
+            }
             let ambient = mix(self.sun_ground, self.sun_sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * (ao * sao)
-            let lit = albedo * (ambient + self.sun_color * ((wrap + through) * vis * mix(1.0, ao, 0.5)))
+            let lit = albedo * (ambient + self.sun_color * ((vec3(wrap, wrap, wrap) + through) * vis * mix(1.0, ao, 0.5)))
                 + self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz) * self.emissive
             return self.csm_debug_view(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), self.cut_alpha(cut)), wp, n)
         }

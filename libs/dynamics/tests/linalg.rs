@@ -1,4 +1,10 @@
-use makepad_dynamics::{types::MINVAL, util_blas, util_solve::*, util_sparse};
+use makepad_dynamics::{
+    sparse_pattern::{PatternError, PatternRef},
+    types::MINVAL,
+    util_blas,
+    util_solve::*,
+    util_sparse,
+};
 
 #[test]
 fn seeded_linear_systems_and_constrained_quadratics() {
@@ -64,6 +70,30 @@ fn seeded_linear_systems_and_constrained_quadratics() {
         0,
         "sparse conversion fits"
     );
+    let a_pattern = PatternRef::check(&rownnz, &rowadr, &colind, None, 7, 7).expect("A's pattern is well formed");
+    // A malformed pattern is refused when it is built, before any kernel indexes by it.
+    let refused = |rownnz: &[i32], rowadr: &[i32], colind: &[i32], rowsuper: Option<&[i32]>, nr: usize, nc: usize| {
+        PatternRef::check(rownnz, rowadr, colind, rowsuper, nr, nc).err()
+    };
+    assert_eq!(refused(&rownnz[..6], &rowadr, &colind, None, 7, 7), Some(PatternError::Lengths), "short row arrays");
+    let mut bad = colind;
+    bad[rowadr[3] as usize] = 7;
+    assert_eq!(refused(&rownnz, &rowadr, &bad, None, 7, 7), Some(PatternError::Column(3)), "a column not below nc");
+    bad[rowadr[3] as usize] = -1;
+    assert_eq!(refused(&rownnz, &rowadr, &bad, None, 7, 7), Some(PatternError::Column(3)), "a negative column");
+    let mut back = rowadr;
+    back[4] = back[3] - 1;
+    assert_eq!(refused(&rownnz, &back, &colind, None, 7, 7), Some(PatternError::Row(4)), "a row address going back");
+    let mut long = rownnz;
+    long[6] = 49 - rowadr[6] + 1;
+    assert_eq!(refused(&long, &rowadr, &colind, None, 7, 7), Some(PatternError::Row(6)), "a row past the column list");
+    let mut supers = [0; 7];
+    supers[5] = 2;
+    assert_eq!(refused(&rownnz, &rowadr, &colind, Some(&supers), 7, 7), Some(PatternError::Supernode(5)), "a supernode past the last row");
+    supers[5] = 0;
+    let r = (0..6).find(|&r| rownnz[r] != rownnz[r + 1]).expect("A's rows differ in count");
+    supers[r] = 1;
+    assert_eq!(refused(&rownnz, &rowadr, &colind, Some(&supers), 7, 7), Some(PatternError::Supernode(r)), "a supernode whose rows differ in count");
     let mut l_rownnz = [0; 7];
     let mut l_rowadr = [0; 7];
     let mut l_colind = [0; 49];
@@ -80,10 +110,7 @@ fn seeded_linear_systems_and_constrained_quadratics() {
         &mut lt_rownnz,
         &mut lt_rowadr,
         &mut lt_map,
-        &rownnz,
-        &rowadr,
-        &colind,
-        7,
+        a_pattern,
         None,
         &mut symbolic_work,
     );
@@ -97,26 +124,21 @@ fn seeded_linear_systems_and_constrained_quadratics() {
             &mut lt_rownnz,
             &mut lt_rowadr,
             &mut lt_map,
-            &rownnz,
-            &rowadr,
-            &colind,
-            7,
+            a_pattern,
             None,
             &mut symbolic_work,
         ),
         0,
         "sparse symbolic fill"
     );
+    let l_pattern = PatternRef::check(&l_rownnz, &l_rowadr, &l_colind, None, 7, 7).expect("L's pattern is well formed");
     let mut l = [0.0; 49];
     let mut work = [0.0; 7];
     assert_eq!(
-        // SAFETY: l_colind is the pattern chol_factor_symbolic built and checked above.
-        unsafe {
-            chol_factor_numeric(
-                &mut l, 7, MINVAL, &l_rownnz, &l_rowadr, &l_colind, &lt_rownnz, &lt_rowadr, &lt_colind,
-                &lt_map, &values, &rownnz, &rowadr, &colind, &mut work,
-            )
-        },
+        chol_factor_numeric(
+            &mut l, MINVAL, l_pattern, &lt_rownnz, &lt_rowadr, &lt_colind, &lt_map, &values, &rownnz, &rowadr,
+            &colind, &mut work,
+        ),
         7,
         "sparse SPD rank"
     );

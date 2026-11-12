@@ -576,7 +576,7 @@ fn globals_from(skeleton: &Skeleton, local: &[Transform]) -> (Vec<Matrix4>, Vec<
 }
 
 #[test]
-fn morph_output_follows_links_and_refuses_collapse_or_lod() {
+fn morph_output_follows_links_refuses_collapse_and_preserves_lod() {
     let mut doc = Document::new(Limits::default()).unwrap();
     apply(&mut doc, "mesh", vec![cube("body", [2.; 3]), cube("prop", [1.; 3])]);
     apply(
@@ -731,11 +731,15 @@ fn morph_output_follows_links_and_refuses_collapse_or_lod() {
             }),
         ],
     );
-    let err = lod.compile(None).unwrap_err();
-    assert!(
-        matches!(err, Error::Invalid(_)),
-        "LOD over a live shape key must fail, got {err:?}"
-    );
+    let product = lod.compile(None).unwrap();
+    assert!(product.warnings.iter().any(|w| w.contains("ball") && w.contains("shape keys")),
+        "a live shape key keeps its geometry with a named warning");
+    let glb = makepad_gltf::parse_glb_bytes(&product.glb).unwrap();
+    let nodes = glb.document.nodes_slice();
+    let owner = nodes.iter().find(|n| n.extensions.as_ref().is_some_and(|e| e.key("MSFT_lod").is_some())).unwrap();
+    let ids = arr(field(field(owner.extensions.as_ref().unwrap(), "MSFT_lod"), "ids"));
+    let index = idx(&ids[0]);
+    assert_eq!(nodes[index].mesh, owner.mesh, "shape-key LOD reuses the morph mesh");
 }
 
 #[test]
@@ -1009,12 +1013,9 @@ fn budget_cancel_and_atomic_failures() {
             })],
         );
         let after_lod = snap(&lod_doc);
-        let compiled = lod_doc.compile(None);
-        assert!(
-            compiled.is_err(),
-            "LOD that cannot reduce a cube must fail at compile, got {:?}",
-            compiled.as_ref().map(|p| p.triangles)
-        );
+        let compiled = lod_doc.compile(None).unwrap();
+        assert_eq!(compiled.triangles, 12, "unreducible LOD stores only the base geometry");
+        assert!(compiled.warnings.is_empty(), "an unreducible LOD is data, not a warning");
         assert_unchanged(&lod_doc, &after_lod);
     }
 

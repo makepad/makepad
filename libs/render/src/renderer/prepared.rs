@@ -158,7 +158,7 @@ impl PreparedStaticPreview {
             Ok(())
         };
         check(&model.vertices,&model.indices)?;
-        if model.indices.len()<3 && model.anim_parts.is_empty() && model.driven_parts.is_empty() { return Err("prepared model has no triangles".into()); }
+        // Empty geometry is a valid distance level; its upload has no draw indices.
         let positions:Vec<Vec3f> = model.vertices.chunks_exact(stride).map(|v|vec3f(v[0],v[1],v[2])).collect();
         let mesh_indices = std::sync::Arc::new(model.indices.clone());
         let lm_source=ao.as_ref().map(|image|std::sync::Arc::new(crate::lightmap::LmMeshSource{
@@ -336,6 +336,7 @@ pub struct UploadedStaticPreview {
     pub(super) triangles: usize,
     pub(super) min: Vec3f,
     pub(super) max: Vec3f,
+    pub(super) stand_in: Option<Vec3f>,
     pub(super) authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
     pub(super) collider_parts: Colliders,
     pub(super) occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
@@ -422,6 +423,11 @@ pub(super) struct LoadedModel {
     /// world, it is painted on it.
     pub(super) min: Vec3f,
     pub(super) max: Vec3f,
+    /// The model-space centre of the model's far stand-in (impostor.rs), when
+    /// it has one: the stand-in casts at that centre's depth in the outer
+    /// cascades, and the model's own layers compare no deeper (shaders/csm.rs
+    /// `csm_own_limit`), so it never shadows the model it stands in for.
+    pub(super) stand_in: Option<Vec3f>,
     /// Physics collider boxes in model space — triangle-derived voxel boxes
     /// (model.rs voxel_collider_boxes): legs, decks, braces, openings.
     pub(super) authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
@@ -532,4 +538,16 @@ pub(super) struct LoadedSky {
     /// solid), even though it is never lit or shadowed.
     pub(super) positions: std::sync::Arc<Vec<Vec3f>>,
     pub(super) indices: std::sync::Arc<Vec<u32>>,
+}
+
+/// The model-space centre of a far stand-in's quad: its corners are the
+/// centre plus and minus the radius in the model's XY plane (impostor.rs),
+/// so the middle of its vertices' bounds.
+pub(super) fn stand_in_centre(vertices: &[f32]) -> Option<Vec3f> {
+    let mut points = vertices.chunks_exact(crate::model::MODEL_VERTEX_FLOATS).map(|v| vec3f(v[0], v[1], v[2]));
+    let first = points.next()?;
+    let (lo, hi) = points.fold((first, first), |(lo, hi), p| {
+        (vec3f(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), vec3f(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
+    });
+    Some((lo + hi) * 0.5)
 }

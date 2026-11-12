@@ -723,13 +723,13 @@ impl Renderer {
     /// list, taking only the models with a wind layer. Until its pipeline
     /// exists (Metal compiles asynchronously) they stay on the PBR lane.
     pub(super) fn draw_foliage_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
         if !self.foliage_ready { return; }
         let Some(mut draw) = self.foliage_draw.take() else { return };
-        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), LayerPhase::Opaque, eye, instances, lane, fog, sun, frustum, stats);
+        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), LayerPhase::Opaque, eye, lod_scale, instances, lane, fog, sun, frustum, stats);
         self.foliage_draw = Some(draw);
     }
 
@@ -737,13 +737,13 @@ impl Renderer {
     /// taking only the models with a painted layer. Until its pipeline
     /// exists they stay on the PBR lane (their main layer).
     pub(super) fn draw_splat_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
         if !self.splat_ready { return; }
         let Some(mut draw) = self.splat_draw.take() else { return };
-        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Opaque, eye, instances, lane, fog, sun, frustum, stats);
+        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Opaque, eye, lod_scale, instances, lane, fog, sun, frustum, stats);
         self.splat_draw = Some(draw);
     }
 
@@ -804,7 +804,7 @@ impl Renderer {
     }
 
     pub(super) fn draw_custom_models(
-        &mut self, cx: &mut Cx3d, eye: Vec3f, instances: &[ModelInstance],
+        &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
@@ -835,7 +835,7 @@ impl Renderer {
         let names = names.into_iter().map(|(_, name)| name);
         for name in names {
             let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
-            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Opaque, eye,
+            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Opaque, eye, lod_scale,
                 instances, lane, fog, sun, frustum, stats);
             self.custom_draws.insert(name, draw);
         }

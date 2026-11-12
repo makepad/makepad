@@ -471,12 +471,14 @@ impl ModelDraw<'_> {
             let (mut material_alpha, mut alpha_mode, mut alpha_cutoff) = (1.0f32, 0.0f32, 0.5f32);
             let (mut normal_scale, mut occlusion_strength) = (0.0f32, 0.0f32);
             let (mut emissive, mut double_sided, mut triplanar) = (vec3f(0.0, 0.0, 0.0), 0.0f32, 0.0f32);
+            let mut crown = 0.0f32;
             d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
                 fur = crate::material_surface::fur_params(definition.fur);
                 material_alpha=if definition.msdf.is_some(){1.0}else{definition.base_alpha};alpha_mode=definition.alpha_mode as f32;alpha_cutoff=definition.alpha_cutoff;
                 triplanar=definition.triplanar;
+                crown=if definition.crown{1.0}else{0.0};
                 // Race paint in the spare tex_mag lane (shaders.rs DrawSceneSkinned).
                 d.skinned.tex_mag.y=definition.packed_shading();
                 normal_scale=definition.normal_scale;occlusion_strength=definition.occlusion_strength;
@@ -496,6 +498,9 @@ impl ModelDraw<'_> {
             vars.set_uniform(cx, live_id!(emissive), &[emissive.x, emissive.y, emissive.z]);
             vars.set_uniform(cx, live_id!(double_sided), &[double_sided]);
             vars.set_uniform(cx, live_id!(triplanar), &[triplanar]);
+            // A crown layer keeps its normals and reads its vertex colour as
+            // occlusion (shaders/foliage.rs); the other lanes have no `crown`.
+            vars.set_uniform(cx, live_id!(crown), &[crown]);
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {
                 for (name,texture) in [(live_id!(normal_map),m.surface.as_ref().map(|s|&s.normal)),(live_id!(occlusion_map),m.surface.as_ref().map(|s|&s.occlusion)),(live_id!(emissive_map),m.surface.as_ref().map(|s|&s.emissive))] {
                     if let Some(slot)=cx.draw_shaders[id.index].mapping.textures.iter().position(|t|t.id==name).filter(|slot|*slot<d.skinned.draw_vars.texture_slots.len()){d.skinned.draw_vars.set_texture(slot,texture.unwrap_or(&m.orm));}
@@ -534,6 +539,8 @@ impl ModelDraw<'_> {
             for (i, id) in [live_id!(splat_m0), live_id!(splat_m1), live_id!(splat_m2), live_id!(splat_m3), live_id!(splat_m4), live_id!(splat_m5), live_id!(splat_m6), live_id!(splat_m7)].into_iter().enumerate() {
                 vars.set_uniform(cx, id, &p.macro_variation[i]);
             }
+            vars.set_uniform(cx, live_id!(splat_hex_a), &p.stochastic[0]);
+            vars.set_uniform(cx, live_id!(splat_hex_b), &p.stochastic[1]);
             if let Some(id) = vars.draw_shader_id {
                 for (name, texture) in [(live_id!(normal_map), &p.normal), (live_id!(occlusion_map), &p.weights)] {
                     if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name).filter(|slot| *slot < vars.texture_slots.len()) {

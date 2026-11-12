@@ -1478,7 +1478,11 @@ impl StaticModel {
             max.z = max.z.max(s.max.z);
         }
         if vertices.is_empty() && anim_parts.is_empty() && driven_parts.is_empty() && sky.is_none() {
-            return Err("no mesh primitives found".into());
+            // A distance variant can intentionally drop every visible owner.
+            let empty_lod = node_vals.iter().enumerate().any(|(i,n)| active_nodes[i]
+                && n.get("mesh").is_none() && n.get("extensions").and_then(|e|e.get("MSFT_lod")).is_some());
+            if !empty_lod || node_vals.iter().enumerate().any(|(i,n)| active_nodes[i] && n.get("mesh").is_some()) { return Err("no mesh primitives found".into()); }
+            min = vec3f(0.,0.,0.); max = min;
         }
 
         // Bake self-occlusion into the colour's alpha lane. This is the whole
@@ -1708,6 +1712,7 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
     let term=|key:&str|value(shading,key,0.0).clamp(0.0,1.0);
     Some(crate::material_surface::MaterialSurface {
         wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
+        crown:value(shading,"crown",0.0)>0.5,
         impostor:value(shading,"impostor",0.0).max(0.0),
         plate:value(shading,"plate",0.0)>0.5,
         msdf:shading.filter(|s|value(Some(s),"msdf",0.0)>0.5).and_then(|s| {
@@ -1746,7 +1751,8 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
 /// `weights` (a texture index), `map` [x, z, cell, width, rows] and per
 /// layer its `albedo` (or flat sRGB `color`), `normal` and `bump`, `scale`
 /// (1/metres), `roughness`, `metallic`, and `macro` [brightness, hue,
-/// roughness, size metres] (world macro variation; absent = none).
+/// roughness, size metres] (world macro variation; absent = none), plus
+/// `tiling` ("stochastic" for hex-tiled reads; absent or "repeat" = repeat).
 fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
     let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
     let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
@@ -1762,6 +1768,7 @@ fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::S
             let v=|i:usize|l.get("macro").and_then(|m|m.idx(i)).and_then(Val::f64).map_or(0.0,|v|v as f32);
             if v(3)>0.0 {[v(0).clamp(0.0,1.0),v(1).clamp(0.0,1.0),v(2).clamp(0.0,1.0),v(3)]} else {[0.0;4]}
         },
+        stochastic:l.get("tiling").and_then(Val::str)==Some("stochastic"),
     }).collect::<Vec<_>>();
     Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights")).unwrap_or_default(),origin:[m(0,0.0),m(1,0.0)],cell:m(2,1.0),width:m(3,1.0),rows:m(4,1.0)})
 }
@@ -2953,7 +2960,7 @@ fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u
     Some(vec![
         s.emissive[0].to_bits(), s.emissive[1].to_bits(), s.emissive[2].to_bits(), s.alpha_mode as u32, s.alpha_cutoff.to_bits(),
         s.base_alpha.to_bits(), s.double_sided as u32, s.triplanar.to_bits(), s.wind.to_bits(), s.clearcoat.to_bits(),
-        s.flake.to_bits(), s.rim.to_bits(), metallic.to_bits(), roughness.to_bits(),
+        s.flake.to_bits(), s.rim.to_bits(), s.crown as u32, metallic.to_bits(), roughness.to_bits(),
     ])
 }
 
@@ -3394,6 +3401,35 @@ mod sidecar_tests {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn crown_extras_keep_normal_modes_separate_when_layers_merge() {
+        let positions = [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+        let bin: Vec<u8> = positions.into_iter().flat_map(f32::to_le_bytes).collect();
+        let json = r#"{"asset":{"version":"2.0"},
+            "nodes":[{"mesh":0}],
+            "meshes":[{"primitives":[
+                {"attributes":{"POSITION":0},"material":0},
+                {"attributes":{"POSITION":0},"material":1},
+                {"attributes":{"POSITION":0},"material":2}]}],
+            "materials":[
+                {"extras":{"makepadSurface":true}},
+                {"extras":{"makepadSurface":true,"makepadShading":{"crown":0.5}}},
+                {"extras":{"makepadSurface":true,"makepadShading":{"crown":1.0}}}],
+            "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"}],
+            "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36}],
+            "buffers":[{"byteLength":36}]}"#;
+        let parsed = JsonParser::parse(json.as_bytes()).unwrap();
+        for (index, crown) in [(0, false), (1, false), (2, true)] {
+            assert_eq!(gltf_material_surface(&parsed, &bin, index).unwrap().crown, crown, "crown is enabled only above 0.5 on material {index}");
+        }
+        let model = StaticModel::parse_glb(&glb_from(json.into(), bin)).unwrap();
+        assert_eq!(model.draw_layers.len(), 2, "crown and card normals must keep separate draws");
+        for crown in [false, true] {
+            let layer = model.draw_layers.iter().find(|l| l.pbr.surface.as_ref().unwrap().crown == crown).unwrap();
+            assert_eq!(layer.indices.len(), if crown { 3 } else { 6 }, "only matching normal modes merge");
+        }
+    }
 
     #[test]
     fn msdf_extras_roundtrip_colours_and_plate_geometry() {
@@ -3912,8 +3948,13 @@ pub(crate) mod tests {
         let old = gltf_splat(&old, &[], &old).unwrap();
         assert_eq!((old.layers[0].relief, old.layers[0].wet, old.layers[0].puddles), (0.0, 0.0, 0.0));
         assert_eq!(old.layers[0].macro_variation, [0.0; 4], "no macro variation unless a layer asks");
+        assert!(!old.layers[0].stochastic, "legacy layers keep repeat tiling");
         let varied = JsonParser::parse(br#"{"layers":[{"macro":[0.2,0.05,0.1,14]}]}"#).unwrap();
         assert_eq!(gltf_splat(&varied, &[], &varied).unwrap().layers[0].macro_variation, [0.2, 0.05, 0.1, 14.0]);
+        let tiling = JsonParser::parse(br#"{"layers":[{"tiling":"stochastic"},{"tiling":"repeat"}]}"#).unwrap();
+        let tiling = gltf_splat(&tiling, &[], &tiling).unwrap();
+        assert!(tiling.layers[0].stochastic, "stochastic tiling enables hex-tiled reads");
+        assert!(!tiling.layers[1].stochastic, "explicit repeat keeps ordinary tiling");
     }
 
     #[test]

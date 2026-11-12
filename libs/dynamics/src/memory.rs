@@ -12,9 +12,9 @@ use crate::sensor::ContactInfo;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scratch {
-    nums: Vec<Vec<f64>>,
-    ints: Vec<Vec<i32>>,
-    bytes: Vec<Vec<u8>>,
+    nums: Classes<f64>,
+    ints: Classes<i32>,
+    bytes: Classes<u8>,
     pairs: Vec<Vec<Pair>>,
     packed_pairs: Vec<Vec<Packed32>>,
     saps: Vec<Vec<Sap>>,
@@ -26,30 +26,47 @@ pub struct Scratch {
     ccd_buffers: Vec<(usize, CcdBuffer)>,
 }
 
-/// A pooled vector of `n` elements. Like the reference's stack allocations it is not cleared: the
-/// elements it keeps hold what an earlier user left, and every caller writes before it reads.
-fn take<T: Copy + Default>(pool: &mut Vec<Vec<T>>, n: usize) -> Vec<T> {
+/// Pooled vectors by size class: class c holds the vectors of capacity 2^c up to 2^(c+1) - 1. Taking and
+/// giving back is a pop and a push, as the reference's stack allocations are a pointer bump: a search of the
+/// whole pool took about a tenth of the islands' solve on 100 humanoids (3500 takes a step).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Classes<T>(Vec<Vec<Vec<T>>>);
+
+/// A pooled vector of `n` elements: one of the class of `n` rounded up to a power of two, else of a larger class,
+/// else a new one of that capacity. Like the reference's stack allocations it is not cleared: the elements it
+/// keeps hold what an earlier user left, and every caller writes before it reads.
+#[inline]
+fn take<T: Copy + Default>(pool: &mut Classes<T>, n: usize) -> Vec<T> {
     if n == 0 {
         return Vec::new();
     }
-    let mut best = None;
-    let mut best_capacity = usize::MAX;
-    for (i, v) in pool.iter().enumerate() {
-        let capacity = v.capacity();
-        if capacity >= n && (best.is_none() || capacity < best_capacity) {
-            best = Some(i);
-            best_capacity = capacity;
-            // An exact fit is already the smallest eligible allocation.
-            if capacity == n {
-                break;
-            }
-        }
-    }
-    let mut v = best.map_or_else(Vec::new, |i| pool.swap_remove(i));
+    let class = (usize::BITS - (n - 1).leading_zeros()) as usize;
+    let found = pool.0.iter_mut().skip(class).find_map(|vs| vs.pop());
+    let mut v = found.unwrap_or_else(|| Vec::with_capacity(1 << class));
     // resize sets only the newly exposed tail
     v.truncate(n);
     v.resize(n, T::default());
     v
+}
+
+/// Gives `v` back to its class (by its capacity rounded down to a power of two).
+#[inline]
+fn put<T>(pool: &mut Classes<T>, v: Vec<T>) {
+    if v.capacity() == 0 {
+        return;
+    }
+    let class = (usize::BITS - 1 - v.capacity().leading_zeros()) as usize;
+    match pool.0.get_mut(class) {
+        Some(vs) => vs.push(v),
+        None => put_new_class(pool, class, v),
+    }
+}
+
+// The first vector of a class above every class so far.
+#[cold]
+fn put_new_class<T>(pool: &mut Classes<T>, class: usize, v: Vec<T>) {
+    pool.0.resize_with(class + 1, Vec::new);
+    pool.0[class].push(v);
 }
 
 /// `n` elements of a pooled vector that keeps its length. Like the reference's stack allocations,
@@ -213,9 +230,7 @@ impl Scratch {
     }
     #[inline]
     pub fn put_num(&mut self, v: Vec<f64>) {
-        if v.capacity() != 0 {
-            self.nums.push(v);
-        }
+        put(&mut self.nums, v);
     }
     #[inline]
     pub fn int(&mut self, n: usize) -> Vec<i32> {
@@ -223,9 +238,7 @@ impl Scratch {
     }
     #[inline]
     pub fn put_int(&mut self, v: Vec<i32>) {
-        if v.capacity() != 0 {
-            self.ints.push(v);
-        }
+        put(&mut self.ints, v);
     }
     #[inline]
     pub fn byte(&mut self, n: usize) -> Vec<u8> {
@@ -233,9 +246,7 @@ impl Scratch {
     }
     #[inline]
     pub fn put_byte(&mut self, v: Vec<u8>) {
-        if v.capacity() != 0 {
-            self.bytes.push(v);
-        }
+        put(&mut self.bytes, v);
     }
 }
 

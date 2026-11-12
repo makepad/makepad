@@ -75,6 +75,11 @@ script_mod! {
         splat_m6: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         splat_m7: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
+        // Hex tiling per layer (`tiling: "stochastic"`), 1 or 0: layers 0-3
+        // in a, 4-7 in b (splat_hex_texel).
+        splat_hex_a: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        splat_hex_b: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+
         splat_macro_param: fn(l: float) -> vec4 {
             if l < 0.5 { return self.splat_m0 }
             if l < 1.5 { return self.splat_m1 }
@@ -155,19 +160,129 @@ script_mod! {
             return tx * bw.x + ty * bw.y + tz * bw.z
         }
 
+        // Hex tiling (a layer with `tiling: "stochastic"`): the tile is read
+        // three times, at the corners of the triangle-grid cell around the
+        // pixel (cells about a third of a tile), each copy shifted by its
+        // corner's random offset, and blended by the barycentric weights to
+        // the 7th power (narrow seams) times each copy's height (the higher
+        // grain shows through), so the tile's repeat never lines up. Copies
+        // are not turned: a ground's grain often has a direction (grass
+        // strokes, a road's wear), and turned copies break it into visible
+        // cells. Gradients are the plain read's. Only the winning layer's
+        // reads (never splat_try's).
+        //
+        // Corner k (0..2) of the cell around st (uv x 2 sqrt 3): xy its
+        // lattice id, z its barycentric weight.
+        splat_hex_corner: fn(st: vec2, k: float) -> vec3 {
+            let skew = vec2(st.x - st.y * 0.57735027, st.y * 1.15470054)
+            let base = floor(skew)
+            let f = skew - base
+            let z = 1.0 - f.x - f.y
+            if z > 0.0 {
+                if k < 0.5 { return vec3(base.x, base.y, z) }
+                if k < 1.5 { return vec3(base.x, base.y + 1.0, f.y) }
+                return vec3(base.x + 1.0, base.y, f.x)
+            }
+            if k < 0.5 { return vec3(base.x + 1.0, base.y + 1.0, 0.0 - z) }
+            if k < 1.5 { return vec3(base.x + 1.0, base.y, 1.0 - f.y) }
+            return vec3(base.x, base.y + 1.0, 1.0 - f.x)
+        }
+
+        // Corner c's copy of uv: shifted by a random offset in tile units. A
+        // sine-free hash, exact for any lattice id a world reaches.
+        splat_hex_uv: fn(c: vec3, uv: vec2) -> vec2 {
+            var p3 = fract(vec3(c.x, c.y, c.x) * vec3(0.1031, 0.103, 0.0973))
+            let d = dot(p3, vec3(p3.y, p3.z, p3.x) + vec3(33.33, 33.33, 33.33))
+            p3 = p3 + vec3(d, d, d)
+            return uv + fract(vec2(p3.x + p3.y, p3.x + p3.z) * vec2(p3.z, p3.y))
+        }
+
+        // The corners' weights from their barycentric weights b and their
+        // copies' heights h (40..100 %), normalised.
+        splat_hex_weights: fn(b: vec3, h: vec3) -> vec3 {
+            let b2 = b * b
+            let w = b2 * b2 * b2 * b * (vec3(0.4, 0.4, 0.4) + h * 0.6)
+            return w / max(w.x + w.y + w.z, 0.000001)
+        }
+
+        // Layer l's hex-tiled texel (albedo, height in w) at uv, tile units.
+        splat_hex_texel: fn(l: float, uv: vec2, du1: vec2, du2: vec2) -> vec4 {
+            let st = uv * 3.4641016
+            let c0 = self.splat_hex_corner(st, 0.0)
+            let c1 = self.splat_hex_corner(st, 1.0)
+            let c2 = self.splat_hex_corner(st, 2.0)
+            let p0 = self.splat_hex_uv(c0, uv)
+            let p1 = self.splat_hex_uv(c1, uv)
+            let p2 = self.splat_hex_uv(c2, uv)
+            let t0 = self.tex.sample_grad_repeat(vec3(p0.x, p0.y, l), du1, du2)
+            let t1 = self.tex.sample_grad_repeat(vec3(p1.x, p1.y, l), du1, du2)
+            let t2 = self.tex.sample_grad_repeat(vec3(p2.x, p2.y, l), du1, du2)
+            let w = self.splat_hex_weights(vec3(c0.z, c1.z, c2.z), vec3(t0.w, t1.w, t2.w))
+            return t0 * w.x + t1 * w.y + t2 * w.z
+        }
+
+        // Its normal-map texel (encoded normal, roughness in w), weighted as
+        // the texel (the heights are the texel's reads again, from a warm
+        // cache).
+        splat_hex_normal: fn(l: float, uv: vec2, du1: vec2, du2: vec2) -> vec4 {
+            let st = uv * 3.4641016
+            let c0 = self.splat_hex_corner(st, 0.0)
+            let c1 = self.splat_hex_corner(st, 1.0)
+            let c2 = self.splat_hex_corner(st, 2.0)
+            let u0 = self.splat_hex_uv(c0, uv)
+            let p0 = vec3(u0.x, u0.y, l)
+            let u1 = self.splat_hex_uv(c1, uv)
+            let p1 = vec3(u1.x, u1.y, l)
+            let u2 = self.splat_hex_uv(c2, uv)
+            let p2 = vec3(u2.x, u2.y, l)
+            let w = self.splat_hex_weights(vec3(c0.z, c1.z, c2.z), vec3(
+                self.tex.sample_grad_repeat(p0, du1, du2).w,
+                self.tex.sample_grad_repeat(p1, du1, du2).w,
+                self.tex.sample_grad_repeat(p2, du1, du2).w))
+            return self.normal_map.sample_grad_repeat(p0, du1, du2) * w.x
+                + self.normal_map.sample_grad_repeat(p1, du1, du2) * w.y
+                + self.normal_map.sample_grad_repeat(p2, du1, du2) * w.z
+        }
+
+        // How far hex tiling is on for layer l at this pixel: fully where its
+        // tile spans 16 pixels or more, off below 8, where one read stands in
+        // (in those mips a ground's tile holds little but its mean, so the
+        // copies agree; between the two the reads cross-fade, never a step).
+        splat_hex_amount: fn(l: float, du1: vec2, du2: vec2) -> float {
+            if self.splat_weight(l, self.splat_hex_a, self.splat_hex_b) < 0.5 { return 0.0 }
+            return 1.0 - smoothstep(0.0625, 0.125, max(length(du1), length(du2)))
+        }
+
         // Mesh UVs for a single surface; the existing world projections for
         // terrain. Explicit gradients stay those of the undisplaced surface.
-        splat_relief_read: fn(l: float, wp: vec3, uv: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2) -> vec4 {
-            if self.triplanar == 0.0 {
-                return self.tex.sample_grad_repeat(vec3(uv.x, uv.y, l), du1, du2)
+        // hex: splat_hex_amount (terrain: on its top projection, where uv is
+        // that projection's; the side projections stay single reads).
+        splat_relief_read: fn(l: float, wp: vec3, uv: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, hex: float) -> vec4 {
+            var t = vec4(0.0, 0.0, 0.0, 0.0)
+            if hex < 1.0 {
+                if self.triplanar == 0.0 {
+                    t = self.tex.sample_grad_repeat(vec3(uv.x, uv.y, l), du1, du2)
+                } else {
+                    t = self.splat_texel(l, wp, bw, dx, dy)
+                }
             }
-            return self.splat_texel(l, wp, bw, dx, dy)
+            if hex > 0.0 {
+                var tiled = self.splat_hex_texel(l, uv, du1, du2)
+                if self.triplanar > 0.0 {
+                    let s = self.splat_param(l).x
+                    let tx = self.tex.sample_grad_repeat(vec3(wp.z * s, (0.0 - wp.y) * s, l), vec2(dx.z, 0.0 - dx.y) * s, vec2(dy.z, 0.0 - dy.y) * s)
+                    let tz = self.tex.sample_grad_repeat(vec3(wp.x * s, (0.0 - wp.y) * s, l), vec2(dx.x, 0.0 - dx.y) * s, vec2(dy.x, 0.0 - dy.y) * s)
+                    tiled = tx * bw.x + tiled * bw.y + tz * bw.z
+                }
+                t = mix(t, tiled, hex)
+            }
+            return t
         }
 
         // Linear POM in normalised depth (0 at the top, 1 at the bottom).
         // A fixed loop bound, 8..24 active steps, then one secant refinement
         // between the last two samples. The secant needs no texture read.
-        splat_relief_trace: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, height: float, nv: float) -> float {
+        splat_relief_trace: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, height: float, nv: float, hex: float) -> float {
             let steps = ceil(mix(24.0, 8.0, clamp((nv - 0.1391731) / 0.8608269, 0.0, 1.0)))
             var depth = 0.0
             var before_depth = 0.0
@@ -178,7 +293,7 @@ script_mod! {
                     before_depth = depth
                     before_error = error
                     depth = (float(i) + 1.0) / steps
-                    let h = self.splat_relief_read(l, wp - ray * depth, uv - uv_ray * depth, bw, dx, dy, du1, du2).w
+                    let h = self.splat_relief_read(l, wp - ray * depth, uv - uv_ray * depth, bw, dx, dy, du1, du2, hex).w
                     error = 1.0 - h - depth
                 }
             }
@@ -188,11 +303,11 @@ script_mod! {
 
         // Four height taps from the hit toward the sun; only direct sunlight
         // is attenuated. The ambient/IBL/GI paths retain their own occlusion.
-        splat_relief_shadow: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, hit: float, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2) -> float {
+        splat_relief_shadow: fn(l: float, wp: vec3, uv: vec2, ray: vec3, uv_ray: vec2, hit: float, bw: vec3, dx: vec3, dy: vec3, du1: vec2, du2: vec2, hex: float) -> float {
             var blocked = 0.0
             for i in 0..4 {
                 let rise = hit * ((float(i) + 1.0) * 0.25)
-                let h = self.splat_relief_read(l, wp + ray * rise, uv + uv_ray * rise, bw, dx, dy, du1, du2).w
+                let h = self.splat_relief_read(l, wp + ray * rise, uv + uv_ray * rise, bw, dx, dy, du1, du2, hex).w
                 blocked = max(blocked, smoothstep(0.015, 0.08, h - (1.0 - hit + rise)))
             }
             return 1.0 - 0.65 * blocked
@@ -302,7 +417,10 @@ script_mod! {
                 du1 = dFdx(self.v_uv)
                 du2 = dFdy(self.v_uv)
             }
-            var tex = self.splat_relief_read(l, wp, uv, bw, dx, dy, du1, du2)
+            // Hex tiling on the mesh-UV path and terrain's top projection.
+            var hex = 0.0
+            if self.triplanar == 0.0 || n.y >= 0.6 { hex = self.splat_hex_amount(l, du1, du2) }
+            var tex = self.splat_relief_read(l, wp, uv, bw, dx, dy, du1, du2, hex)
             var sun_visibility = 1.0
             // Uniform gate: no ray construction, march or shadow taps for
             // draws without relief. Only the visible winning layer marches.
@@ -332,10 +450,10 @@ script_mod! {
                         let depth_metres = surface_param.x * relief_fade
                         let ray = (tangent * view_ts.x + bitangent * view_ts.y) * (depth_metres / nv)
                         let uv_ray = vec2(dot(ray, grad_u), dot(ray, grad_v))
-                        let hit = self.splat_relief_trace(l, wp, uv, ray, uv_ray, bw, dx, dy, du1, du2, tex.w, nv)
+                        let hit = self.splat_relief_trace(l, wp, uv, ray, uv_ray, bw, dx, dy, du1, du2, tex.w, nv, hex)
                         let hit_wp = wp - ray * hit
                         uv = uv - uv_ray * hit
-                        tex = self.splat_relief_read(l, hit_wp, uv, bw, dx, dy, du1, du2)
+                        tex = self.splat_relief_read(l, hit_wp, uv, bw, dx, dy, du1, du2, hex)
                         if dist < 8.0 {
                             let light = normalize(self.light_dir)
                             let nl = dot(n, light)
@@ -343,7 +461,7 @@ script_mod! {
                                 let light_ts = vec3(dot(light, tangent), dot(light, bitangent), nl)
                                 let sun_ray = (tangent * light_ts.x + bitangent * light_ts.y) * (depth_metres / max(nl, 0.0001))
                                 let sun_uv = vec2(dot(sun_ray, grad_u), dot(sun_ray, grad_v))
-                                let visibility = self.splat_relief_shadow(l, hit_wp, uv, sun_ray, sun_uv, hit, bw, dx, dy, du1, du2)
+                                let visibility = self.splat_relief_shadow(l, hit_wp, uv, sun_ray, sun_uv, hit, bw, dx, dy, du1, du2, hex)
                                 sun_visibility = mix(1.0, visibility, relief_fade * (1.0 - smoothstep(6.0, 8.0, dist)))
                             }
                         }
@@ -351,16 +469,18 @@ script_mod! {
                 }
             }
             // Anti-tiling, as DrawScenePbr's triplanar path: with distance a
-            // second top-down read at an unrelated scale and offset.
+            // second top-down read at an unrelated scale and offset. Not for
+            // a layer with the macro term or hex tiling: those carry the far
+            // variation and the near.
+            let mv = self.splat_macro_param(l)
             let far = smoothstep(25.0, 140.0, dist)
-            if self.triplanar != 0.0 && far > 0.001 {
+            if self.triplanar != 0.0 && far > 0.001 && mv.w <= 0.0 && self.splat_weight(l, self.splat_hex_a, self.splat_hex_b) < 0.5 {
                 let s2 = s * 0.173
                 let t2 = self.tex.sample_grad_repeat(vec3(wp.x * s2 + 0.31, wp.z * s2 - 0.47, l), vec2(dx.x, dx.z) * s2, vec2(dy.x, dy.z) * s2)
                 tex = vec4(mix(tex.xyz, t2.xyz, 0.5 * far * bw.y), tex.w)
             }
             // World macro variation (the layer's own), else on terrain the
             // brightness drift over ~60 m.
-            let mv = self.splat_macro_param(l)
             var macro_field = vec3(0.0, 0.0, 0.0)
             if mv.w > 0.0 {
                 macro_field = self.splat_macro(mv, wp, max(length(dx), length(dy)))
@@ -392,7 +512,9 @@ script_mod! {
                 self.color_adjust_ctl
             ), 1.0))
             // One read for both the normal and roughness, at the same hit.
-            let normal_rough = self.normal_map.sample_grad_repeat(vec3(uv.x, uv.y, l), du1, du2)
+            var normal_rough = vec4(0.5, 0.5, 1.0, 0.5)
+            if hex < 1.0 { normal_rough = self.normal_map.sample_grad_repeat(vec3(uv.x, uv.y, l), du1, du2) }
+            if hex > 0.0 { normal_rough = mix(normal_rough, self.splat_hex_normal(l, uv, du1, du2), hex) }
             let determinant = du1.x * du2.y - du1.y * du2.x
             if p.w > 0.00001 && abs(determinant) > 0.00000001 {
                 let orientation = sign(determinant)

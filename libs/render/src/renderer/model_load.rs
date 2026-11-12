@@ -145,6 +145,9 @@ impl Renderer {
             (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture),shared(cx,cache,layer.detail),layer.detail_scale,material)
         };
         let wants_pbr=!prepared.prelit&&(prepared.main.orm_on||prepared.main.pbr.is_shiny()||prepared.extra.iter().any(|l|l.orm_on||l.pbr.is_shiny())||prepared.anim_parts.iter().flat_map(|p|&p.draws).chain(prepared.driven_parts.iter().flat_map(|p|&p.draws)).any(|l|l.orm_on||l.pbr.is_shiny()));
+        let stand_in=std::iter::once(&prepared.main).chain(&prepared.extra)
+            .filter(|l|l.surface.as_ref().is_some_and(|s|s.definition.impostor>0.0))
+            .find_map(|l|super::prepared::stand_in_centre(&l.vertices));
         let (geometry,texture,detail,detail_scale,material)=upload(prepared.main);
         let extra_draws=prepared.extra.into_iter().map(&mut upload).collect();
         let anim_parts=prepared.anim_parts.into_iter().map(|part|LoadedAnimPart{def:part.def,collider:part.collider,
@@ -161,14 +164,14 @@ impl Renderer {
         let morph=prepared.morph.map(|m|m.upload(cx));
         let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview(cx,model))).collect();
         UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
-            prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,
+            prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,stand_in,
             authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
             extra_draws,anim_parts,driven_parts,sky,liquids:prepared.liquids}
     }
     pub(super) fn uploaded_static_model(uploaded:UploadedStaticPreview)->LoadedModel {
         LoadedModel{lods:uploaded.lods.into_iter().map(|(distance,model)|(distance,Self::uploaded_static_model(model))).collect(),morph:uploaded.morph,prepared_sdf:Some(uploaded.sdf),emitters:uploaded.emitters,geometry:uploaded.geometry,texture:uploaded.texture,detail:uploaded.detail,detail_scale:uploaded.detail_scale,
             extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
-            min:uploaded.min,max:uploaded.max,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
+            min:uploaded.min,max:uploaded.max,stand_in:uploaded.stand_in,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
             anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:uploaded.liquids,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
             lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
     }
@@ -407,6 +410,9 @@ impl Renderer {
         // finished lighting.
         let wants_pbr = !model.prelit
             && (model.pbr.is_shiny() || model.draw_layers.iter().any(|l| l.pbr.is_shiny()));
+        let stand_in = model.draw_layers.iter()
+            .filter(|l| l.pbr.surface.as_ref().is_some_and(|s| s.impostor > 0.0))
+            .find_map(|l| super::prepared::stand_in_centre(&l.vertices));
         let extra_draws = if multi {
             let mut extra = Vec::with_capacity(model.draw_layers.len() - 1);
             for (i, layer) in model.draw_layers.iter().enumerate().skip(1) {
@@ -739,6 +745,7 @@ impl Renderer {
                 triangles,
                 min,
                 max,
+                stand_in,
                 authored_collisions: Default::default(),
                 collider_parts: super::prepared::Colliders::from_mesh(mesh_positions.clone(), mesh_indices.clone(), min, max, occluder_parts.clone()),
                 occluder_parts,

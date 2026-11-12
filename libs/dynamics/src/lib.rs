@@ -51,6 +51,7 @@ pub mod setconst;
 pub mod sleep;
 pub mod solver;
 pub mod sort;
+pub mod sparse_pattern;
 pub mod support;
 pub mod thread;
 pub mod types;

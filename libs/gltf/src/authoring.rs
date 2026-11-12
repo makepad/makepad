@@ -45,7 +45,7 @@ fn target(a:&GlbAttachment,objects:&[usize],joints:&[usize],root:usize)->Result<
 /// into authored object nodes. Skinned geometry is already in bind space and
 /// retains its common skin mesh; object nodes still carry attached emitters.
 pub fn augment_glb_authoring(input:&[u8],authoring:&GlbAuthoring)->Result<Vec<u8>,GltfError>{
-    if authoring.objects.len()>256||authoring.lights.len()>32||authoring.sockets.len()>128{return Err(validation("authoring attachment budget"));}
+    if authoring.lights.len()>32||authoring.sockets.len()>128{return Err(validation("authoring attachment budget"));}
     let mut rewrite=GlbRewrite::begin(input)?;
     let mut root_extensions=rewrite.document.extensions.clone().unwrap_or_else(||object([]));
     let mut nodes=rewrite.take_array("nodes")?;let mut scenes=rewrite.take_array("scenes")?;
@@ -75,27 +75,33 @@ pub fn augment_glb_authoring(input:&[u8],authoring:&GlbAuthoring)->Result<Vec<u8
         match mesh.get("primitives"){Some(JsonValue::Array(v))=>v.clone(),_=>return Err(validation("authoring mesh primitives"))}
     }else{Vec::new()};
     let object_nodes=(0..authoring.objects.len()).map(|i|nodes.len()+i).collect::<Vec<_>>();
-    let mut assigned=BTreeSet::new();
+    let mut assigned=BTreeSet::new();let mut shared_meshes=std::collections::BTreeMap::new();let mut object_meshes=Vec::new();
+    let lod_targets=authoring.objects.iter().flat_map(|o|o.lods.iter().copied()).collect::<BTreeSet<_>>();
     for (i,object_def) in authoring.objects.iter().enumerate(){
         let mut node=object([("name",string(&object_def.name))]);put_transform(fields(&mut node)?,&object_def.transform)?;
         if let Some(extras)=&object_def.extras {fields(&mut node)?.insert("extras".into(),extras.clone());}
-        if !object_def.primitives.is_empty(){
+        let mesh=if object_def.primitives.is_empty(){None}else if let Some(&mesh)=shared_meshes.get(&object_def.primitives){Some(mesh)}else{
             let mut primitives=Vec::new();for &p in &object_def.primitives{
-                if !assigned.insert(p){return Err(validation("primitive assigned to more than one authoring object"));}
+                if !assigned.insert(p){return Err(validation("overlapping primitive sets in authoring objects"));}
                 primitives.push(original_primitives.get(p).ok_or_else(||validation("authoring primitive out of range"))?.clone());
             }
             let mesh_id=meshes.len();meshes.push(object([("name",string(&object_def.name)),("primitives",JsonValue::Array(primitives))]));
-            if !skinned{fields(&mut node)?.insert("mesh".into(),number(mesh_id));}
-        }
+            shared_meshes.insert(object_def.primitives.clone(),mesh_id);Some(mesh_id)
+        };
+        if !skinned{if let Some(mesh)=mesh{fields(&mut node)?.insert("mesh".into(),number(mesh));}}
+        object_meshes.push(mesh);
         if let Some(parent)=object_def.parent {if parent>=authoring.objects.len()||parent==i{return Err(validation("object parent index"));}}
         nodes.push(node);
     }
     let mut geometry_nodes=object_nodes.clone();
     if skinned{
         for (i,definition) in authoring.objects.iter().enumerate(){
-            if definition.primitives.is_empty(){continue;}
-            let mesh=meshes.iter_mut().enumerate().skip(1).find_map(|(m,v)|fields(v).ok().and_then(|f|f.get("name")).is_some_and(|v|matches!(v,JsonValue::String(n)if n==&definition.name)).then_some(m)).ok_or_else(||validation("skin object mesh"))?;
-            let n=nodes.len();nodes.push(object([("name",string(&format!("{}__skin",definition.name))),("mesh",number(mesh)),("skin",number(0))]));geometry_nodes[i]=n;
+            if object_meshes[i].is_none()&&!lod_targets.contains(&i){continue;}
+            // Hidden empty levels still carry the owner's skin and bind-space
+            // transform. Repeats share its mesh index, without new geometry.
+            let mut node=object([("name",string(&format!("{}__skin",definition.name))),("skin",number(0))]);
+            if let Some(mesh)=object_meshes[i]{fields(&mut node)?.insert("mesh".into(),number(mesh));}
+            let n=nodes.len();nodes.push(node);geometry_nodes[i]=n;
         }
     }
     let mut lod_children=BTreeSet::new();

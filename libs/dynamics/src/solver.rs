@@ -15,6 +15,7 @@ use crate::data::{Contact, Data, SolverStat};
 use crate::memory::Scratch;
 use crate::metric::eff_solve;
 use crate::model::Model;
+use crate::sparse_pattern::{Pattern, PatternBuf};
 use crate::thread::{part_count, run_parts};
 use crate::types::*;
 use crate::util_blas::{add_to, copy, dot, mul_mat_vec, mul_vec_mat_vec, norm, sub, zero};
@@ -727,15 +728,9 @@ struct PrimalContext {
     m: Vec<f64>,
     q_ld: Vec<f64>,
     q_ldiag_inv: Vec<f64>,
-    j_rownnz: Vec<i32>,
-    j_rowadr: Vec<i32>,
-    j_rowsuper: Vec<i32>,
-    j_colind: Vec<i32>,
+    j_pat: Pattern,  // J's pattern, checked (the whole problem's copied into the context)
     j: Vec<f64>,
-    jt_rownnz: Vec<i32>,
-    jt_rowadr: Vec<i32>,
-    jt_rowsuper: Vec<i32>,
-    jt_colind: Vec<i32>,
+    jt_pat: Pattern,  // J' pattern, checked
     jt: Vec<f64>,
     jaref: Vec<f64>,  // Jac*qacc - aref                              (nefc x 1)
     jv: Vec<f64>,  // Jac*search                                   (nefc x 1)
@@ -754,31 +749,25 @@ struct PrimalContext {
     cholupd: Vec<f64>,  // scratch for rank-1 Cholesky updates          (nv x 1)
     cholscratch: Vec<f64>,  // dense accumulator for the sparse kernels     (nv x 1)
     ltj: Vec<f64>,  // L'*J for cone Cholesky updates               (6 x nv)
-    h_rowadr: Vec<i32>,  // Hessian row addresses                        (nv x 1)
-    h_rownnz: Vec<i32>,  // Hessian row nonzeros                         (nv x 1)
-    ht_rownnz: Vec<i32>,  // Hessian transpose row nonzeros               (nv x 1)
-    ht_rowadr: Vec<i32>,  // Hessian transpose row addresses              (nv x 1)
-    l_rownnz: Vec<i32>,  // Hessian factor row nonzeros                  (nv x 1)
-    l_rowadr: Vec<i32>,  // Hessian factor row addresses                 (nv x 1)
+    h_buf: PatternBuf,  // Hessian pattern while it is built            (nv x 1, nH x 1)
+    h_pat: Pattern,  // Hessian pattern, checked
+    ht_buf: PatternBuf,  // Hessian transpose pattern while it is built  (nv x 1, nH x 1)
+    ht_pat: Pattern,  // Hessian transpose pattern, checked
+    l_buf: PatternBuf,  // Cholesky factor pattern while it is built    (nv x 1, nL x 1)
+    l_pat: Pattern,  // Cholesky factor pattern, checked
     lt_rownnz: Vec<i32>,  // Hessian factor transpose row nonzeros        (nv x 1)
     lt_rowadr: Vec<i32>,  // Hessian factor transpose row addresses       (nv x 1)
     n_h: usize,  // number of nonzeros in Hessian H
-    h_colind: Vec<i32>,  // Hessian column indices                       (nH x 1)
-    ht_colind: Vec<i32>,  // Hessian transpose column indices             (nH x 1)
     h: Vec<f64>,  // Hessian                                      (nH x 1)
     n_l: usize,  // number of nonzeros in Cholesky factor L
-    l_colind: Vec<i32>,  // Cholesky factor column indices               (nL x 1)
     lt_colind: Vec<i32>,  // Cholesky factor transpose column indices     (nL x 1)
     lt_map: Vec<i32>,  // CSC-to-CSR index mapping                     (nL x 1)
     l: Vec<f64>,  // Cholesky factor                              (nL x 1)
     lcone: Vec<f64>,  // Cholesky factor with cone contributions      (nL x 1)
     perm: Vec<i32>,  // DOF permutation old -> new                   (nv x 1)
-    hj_colind: Vec<i32>,  // J column indices in Hessian order            (nJ x 1)
+    hj_pat: Pattern,  // J's pattern in Hessian order, checked         (nefc x 1, nJ x 1)
     hj: Vec<f64>,  // J values in Hessian order                    (nJ x 1)
-    hjt_rownnz: Vec<i32>,  // J' row nonzeros in Hessian order             (nv x 1)
-    hjt_rowadr: Vec<i32>,  // J' row addresses in Hessian order            (nv x 1)
-    hjt_rowsuper: Vec<i32>,  // J' supernodes in Hessian order               (nv x 1)
-    hjt_colind: Vec<i32>,  // J' column indices in Hessian order           (nJ x 1)
+    hjt_pat: Pattern,  // J' pattern in Hessian order, checked          (nv x 1, nJ x 1)
     hjt: Vec<f64>,  // J' values in Hessian order                   (nJ x 1)
     hm_rownnz: Vec<i32>,  // M lower-triangle row nonzeros, Hessian order (nv x 1)
     hm_rowadr: Vec<i32>,  // M lower-triangle row addresses, Hessian ord  (nv x 1)
@@ -823,15 +812,9 @@ impl PrimalContext {
         if self.m.capacity() != 0 { scratch.put_num(self.m); }
         if self.q_ld.capacity() != 0 { scratch.put_num(self.q_ld); }
         if self.q_ldiag_inv.capacity() != 0 { scratch.put_num(self.q_ldiag_inv); }
-        if self.j_rownnz.capacity() != 0 { scratch.put_int(self.j_rownnz); }
-        if self.j_rowadr.capacity() != 0 { scratch.put_int(self.j_rowadr); }
-        if self.j_rowsuper.capacity() != 0 { scratch.put_int(self.j_rowsuper); }
-        if self.j_colind.capacity() != 0 { scratch.put_int(self.j_colind); }
+        put_pattern(scratch, self.j_pat.into_buf());
         if self.j.capacity() != 0 { scratch.put_num(self.j); }
-        if self.jt_rownnz.capacity() != 0 { scratch.put_int(self.jt_rownnz); }
-        if self.jt_rowadr.capacity() != 0 { scratch.put_int(self.jt_rowadr); }
-        if self.jt_rowsuper.capacity() != 0 { scratch.put_int(self.jt_rowsuper); }
-        if self.jt_colind.capacity() != 0 { scratch.put_int(self.jt_colind); }
+        put_pattern(scratch, self.jt_pat.into_buf());
         if self.jt.capacity() != 0 { scratch.put_num(self.jt); }
         if self.jaref.capacity() != 0 { scratch.put_num(self.jaref); }
         if self.jv.capacity() != 0 { scratch.put_num(self.jv); }
@@ -850,29 +833,23 @@ impl PrimalContext {
         if self.cholupd.capacity() != 0 { scratch.put_num(self.cholupd); }
         if self.cholscratch.capacity() != 0 { scratch.put_num(self.cholscratch); }
         if self.ltj.capacity() != 0 { scratch.put_num(self.ltj); }
-        if self.h_rowadr.capacity() != 0 { scratch.put_int(self.h_rowadr); }
-        if self.h_rownnz.capacity() != 0 { scratch.put_int(self.h_rownnz); }
-        if self.ht_rownnz.capacity() != 0 { scratch.put_int(self.ht_rownnz); }
-        if self.ht_rowadr.capacity() != 0 { scratch.put_int(self.ht_rowadr); }
-        if self.l_rownnz.capacity() != 0 { scratch.put_int(self.l_rownnz); }
-        if self.l_rowadr.capacity() != 0 { scratch.put_int(self.l_rowadr); }
+        put_pattern(scratch, self.h_buf);
+        put_pattern(scratch, self.h_pat.into_buf());
+        put_pattern(scratch, self.ht_buf);
+        put_pattern(scratch, self.ht_pat.into_buf());
+        put_pattern(scratch, self.l_buf);
+        put_pattern(scratch, self.l_pat.into_buf());
         if self.lt_rownnz.capacity() != 0 { scratch.put_int(self.lt_rownnz); }
         if self.lt_rowadr.capacity() != 0 { scratch.put_int(self.lt_rowadr); }
-        if self.h_colind.capacity() != 0 { scratch.put_int(self.h_colind); }
-        if self.ht_colind.capacity() != 0 { scratch.put_int(self.ht_colind); }
         if self.h.capacity() != 0 { scratch.put_num(self.h); }
-        if self.l_colind.capacity() != 0 { scratch.put_int(self.l_colind); }
         if self.lt_colind.capacity() != 0 { scratch.put_int(self.lt_colind); }
         if self.lt_map.capacity() != 0 { scratch.put_int(self.lt_map); }
         if self.l.capacity() != 0 { scratch.put_num(self.l); }
         if self.lcone.capacity() != 0 { scratch.put_num(self.lcone); }
         if self.perm.capacity() != 0 { scratch.put_int(self.perm); }
-        if self.hj_colind.capacity() != 0 { scratch.put_int(self.hj_colind); }
+        put_pattern(scratch, self.hj_pat.into_buf());
         if self.hj.capacity() != 0 { scratch.put_num(self.hj); }
-        if self.hjt_rownnz.capacity() != 0 { scratch.put_int(self.hjt_rownnz); }
-        if self.hjt_rowadr.capacity() != 0 { scratch.put_int(self.hjt_rowadr); }
-        if self.hjt_rowsuper.capacity() != 0 { scratch.put_int(self.hjt_rowsuper); }
-        if self.hjt_colind.capacity() != 0 { scratch.put_int(self.hjt_colind); }
+        put_pattern(scratch, self.hjt_pat.into_buf());
         if self.hjt.capacity() != 0 { scratch.put_num(self.hjt); }
         if self.hm_rownnz.capacity() != 0 { scratch.put_int(self.hm_rownnz); }
         if self.hm_rowadr.capacity() != 0 { scratch.put_int(self.hm_rowadr); }
@@ -887,6 +864,25 @@ impl PrimalContext {
         if self.hcone.capacity() != 0 { scratch.put_num(self.hcone); }
         if self.qfrc_eff.capacity() != 0 { scratch.put_num(self.qfrc_eff); }
     }
+}
+
+// Gives a pattern's arrays back to the solve's scratch.
+fn put_pattern(scratch: &mut Scratch, buf: PatternBuf) {
+    for v in buf.into_parts() {
+        if v.capacity() != 0 { scratch.put_int(v); }
+    }
+}
+
+// Checks a pattern the solver built (`what` names it): a refusal is a bug in the code that built it.
+fn checked(buf: PatternBuf, nr: usize, nc: usize, has_super: bool, what: &str) -> Pattern {
+    Pattern::new(buf, nr, nc, has_super).unwrap_or_else(|(e, _)| panic!("solver: the {what} pattern is malformed: {e:?}"))
+}
+
+// The first n entries of src in a vector from the pool.
+fn copied(pool: &mut Scratch, src: &[i32], n: usize) -> Vec<i32> {
+    let mut v = pool.int(n);
+    v.copy_from_slice(&src[..n]);
+    v
 }
 
 /// What one CG or Newton solve writes: its island's part of the island-ordered outputs (the whole arrays for
@@ -1209,6 +1205,8 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
 
     // Keep C's two counting/carving passes and allocation order. Each carved
     // array is an owned scratch vector instead of a pointer into a single block.
+    let mut j_buf = PatternBuf::default();
+    let mut jt_buf = PatternBuf::default();
     let mut n_num = 0;
     let mut n_int = 0;
     let mut nep = if flg_newton == 0 { crate::metric::eff_fold_diag_size(m, d, ctx.island) } else { 0 };
@@ -1237,6 +1235,11 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
                 if pass != 0 { ctx.$field = io.scratch.int($count); } else { n_int += $count; }
             };
         }
+        macro_rules! carve_part {
+            ($place:expr, $count:expr) => {
+                if pass != 0 { $place = io.scratch.int($count); } else { n_int += $count; }
+            };
+        }
         if ctx.island >= 0 {
             carve_int!(m_rownnz, nv);
             carve_int!(m_rowadr, nv);
@@ -1246,10 +1249,10 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
             carve_num!(q_ldiag_inv, nv);
             carve_num!(j, n_j);
             if is_sparse != 0 {
-                carve_int!(j_rownnz, nefc);
-                carve_int!(j_rowadr, nefc);
-                carve_int!(j_rowsuper, nefc);
-                carve_int!(j_colind, n_j);
+                carve_part!(j_buf.rownnz, nefc);
+                carve_part!(j_buf.rowadr, nefc);
+                carve_part!(j_buf.rowsuper, nefc);
+                carve_part!(j_buf.colind, n_j);
             }
         }
         carve_num!(jaref, nefc);
@@ -1280,18 +1283,18 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
         }
         carve_int!(oldstate, nefc);
         if is_sparse != 0 {
-            carve_int!(jt_rownnz, nv);
-            carve_int!(jt_rowadr, nv);
-            carve_int!(jt_rowsuper, nv);
-            carve_int!(jt_colind, n_j);
+            carve_part!(jt_buf.rownnz, nv);
+            carve_part!(jt_buf.rowadr, nv);
+            carve_part!(jt_buf.rowsuper, nv);
+            carve_part!(jt_buf.colind, n_j);
         }
         if flg_newton != 0 && is_sparse != 0 {
-            carve_int!(h_rowadr, nv);
-            carve_int!(h_rownnz, nv);
-            carve_int!(ht_rownnz, nv);
-            carve_int!(ht_rowadr, nv);
-            carve_int!(l_rownnz, nv);
-            carve_int!(l_rowadr, nv);
+            carve_part!(ctx.h_buf.rowadr, nv);
+            carve_part!(ctx.h_buf.rownnz, nv);
+            carve_part!(ctx.ht_buf.rownnz, nv);
+            carve_part!(ctx.ht_buf.rowadr, nv);
+            carve_part!(ctx.l_buf.rownnz, nv);
+            carve_part!(ctx.l_buf.rowadr, nv);
             carve_int!(lt_rownnz, nv);
             carve_int!(lt_rowadr, nv);
         }
@@ -1325,27 +1328,25 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
                 &d.map_iefc2efc[iefcadr..], &d.map_idof2dof[idofadr..]);
         } else {
             crate::util_sparse::block_sparse(
-                &mut ctx.j, &mut ctx.j_rownnz, &mut ctx.j_rowadr, &mut ctx.j_colind,
+                &mut ctx.j, &mut j_buf.rownnz, &mut j_buf.rowadr, &mut j_buf.colind,
                 &d.efc_j, &d.efc_j_rownnz, &d.efc_j_rowadr, &d.efc_j_colind,
                 nefc, &d.map_iefc2efc[iefcadr..], &d.map_dof2idof,
                 d.island_idofadr[island], 0, None, None);
-            crate::util_sparse::super_sparse(nefc, &mut ctx.j_rowsuper, &ctx.j_rownnz, &ctx.j_rowadr, &ctx.j_colind);
+            crate::util_sparse::super_sparse(nefc, &mut j_buf.rowsuper, &j_buf.rownnz, &j_buf.rowadr, &j_buf.colind);
         }
+    } else if is_sparse != 0 {
+        // the whole problem's J pattern, copied into the context to be checked there (as an island's is)
+        j_buf = PatternBuf {
+            rownnz: copied(io.scratch, &d.efc_j_rownnz, nefc),
+            rowadr: copied(io.scratch, &d.efc_j_rowadr, nefc),
+            rowsuper: copied(io.scratch, &d.efc_j_rowsuper, nefc),
+            colind: copied(io.scratch, &d.efc_j_colind, ctx.n_j),
+        };
     }
     if is_sparse != 0 {
-        if nefc != 0 {
-            let (j, j_rownnz, j_rowadr, j_colind) = if ctx.island < 0 {
-                (&d.efc_j, &d.efc_j_rownnz, &d.efc_j_rowadr, &d.efc_j_colind)
-            } else { (&ctx.j, &ctx.j_rownnz, &ctx.j_rowadr, &ctx.j_colind) };
-            let offset = j_rowadr[0] as usize;
-            crate::util_sparse::transpose_sparse(Some(&mut ctx.jt), &j[offset..], nefc, nv,
-                &mut ctx.jt_rownnz, &mut ctx.jt_rowadr, &mut ctx.jt_colind, Some(&mut ctx.jt_rowsuper),
-                j_rownnz, j_rowadr, &j_colind[offset..]);
-        } else {
-            crate::util_misc::zero_int(&mut ctx.jt_rownnz, nv);
-            crate::util_misc::zero_int(&mut ctx.jt_rowadr, nv);
-            crate::util_misc::zero_int(&mut ctx.jt_rowsuper, nv);
-        }
+        ctx.j_pat = checked(j_buf, nefc, nv, true, "J");
+        let j = if ctx.island < 0 { &d.efc_j[..] } else { &ctx.j[..] };
+        ctx.jt_pat = crate::util_sparse::transpose_pat(Some(&mut ctx.jt), j, ctx.j_pat.view(), jt_buf, true);
     }
     if d.efm_active != 0 {
         ctx.flg_metric = 1;
@@ -1384,8 +1385,8 @@ fn primal_update_constraint(d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext,
     if ctx.is_sparse == 0 {
         crate::util_blas::mul_mat_tvec(qfrc_constraint, j, efc_force, nefc, nv);
     } else {
-        crate::util_sparse::mul_mat_vec_sparse(qfrc_constraint, &ctx.jt, efc_force, nv,
-            &ctx.jt_rownnz, &ctx.jt_rowadr, &ctx.jt_colind, Some(&ctx.jt_rowsuper));
+        let p = ctx.jt_pat.view();
+        crate::util_sparse::mul_mat_vec_sparse(qfrc_constraint, &ctx.jt, efc_force, p.nr(), p.rownnz(), p.rowadr(), p.colind(), p.rowsuper());
     }
     ctx.nactive = 0;
     ctx.ncone = 0;
@@ -1421,11 +1422,11 @@ fn primal_update_mgrad(m: &Model, d: &Data, ctx: &mut PrimalContext, flg_newton:
                 // unpermutation below, so use it for the required input copy.
                 copy(&mut ctx.mgrad, buf, nv);
                 crate::util_solve::chol_solve_sparse(buf, l, &ctx.mgrad, nv,
-                    &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind);
+                    ctx.l_pat.rownnz(), ctx.l_pat.rowadr(), ctx.l_pat.colind());
                 for i in 0..nv { ctx.mgrad[i] = buf[ctx.perm[i] as usize]; }
             } else {
                 crate::util_solve::chol_solve_sparse(&mut ctx.mgrad, l, &ctx.grad, nv,
-                    &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind);
+                    ctx.l_pat.rownnz(), ctx.l_pat.rowadr(), ctx.l_pat.colind());
             }
         } else {
             crate::util_solve::chol_solve(&mut ctx.mgrad, l, &ctx.grad, nv);
@@ -1757,14 +1758,12 @@ fn primal_search(m: &Model, d: &Data, ctx: &mut PrimalContext, tolerance: f64,
             crate::metric::eff_mul_add_island(m, d, &mut ctx.mv, &ctx.search, ctx.island as usize);
         }
     }
-    let (j, j_rownnz, j_rowadr, j_colind, j_rowsuper) = if ctx.island < 0 {
-        (&d.efc_j, &d.efc_j_rownnz, &d.efc_j_rowadr, &d.efc_j_colind, &d.efc_j_rowsuper)
-    } else { (&ctx.j, &ctx.j_rownnz, &ctx.j_rowadr, &ctx.j_colind, &ctx.j_rowsuper) };
+    let j = if ctx.island < 0 { &d.efc_j } else { &ctx.j };
     if ctx.is_sparse == 0 {
         mul_mat_vec(&mut ctx.jv, j, &ctx.search, nefc, nv);
     } else {
-        crate::util_sparse::mul_mat_vec_sparse(&mut ctx.jv, j, &ctx.search, nefc,
-            j_rownnz, j_rowadr, j_colind, Some(j_rowsuper));
+        let p = ctx.j_pat.view();
+        crate::util_sparse::mul_mat_vec_sparse(&mut ctx.jv, j, &ctx.search, p.nr(), p.rownnz(), p.rowadr(), p.colind(), p.rowsuper());
     }
     primal_prepare(d, ctx);
     p0.alpha = 0.0;
@@ -2104,15 +2103,15 @@ fn primal_seed_model_perm(m: &Model, d: &Data, ctx: &PrimalContext, nb: usize,
 // fill-reducing DOF permutation (ctx.perm, set by primal_try_reorder).
 macro_rules! hessian_j {
     ($d:expr, $ctx:expr) => {
-        if !$ctx.perm.is_empty() { (&$ctx.hj[..], &$ctx.hj_colind[..]) }
-        else if $ctx.island < 0 { (&$d.efc_j[..], &$d.efc_j_colind[..]) }
-        else { (&$ctx.j[..], &$ctx.j_colind[..]) }
+        if !$ctx.perm.is_empty() { (&$ctx.hj[..], $ctx.hj_pat.view()) }
+        else if $ctx.island < 0 { (&$d.efc_j[..], $ctx.j_pat.view()) }
+        else { (&$ctx.j[..], $ctx.j_pat.view()) }
     };
 }
 macro_rules! hessian_jt {
     ($ctx:expr) => {
-        if !$ctx.perm.is_empty() { (&$ctx.hjt[..], &$ctx.hjt_rownnz[..], &$ctx.hjt_rowadr[..], &$ctx.hjt_rowsuper[..], &$ctx.hjt_colind[..]) }
-        else { (&$ctx.jt[..], &$ctx.jt_rownnz[..], &$ctx.jt_rowadr[..], &$ctx.jt_rowsuper[..], &$ctx.jt_colind[..]) }
+        if !$ctx.perm.is_empty() { (&$ctx.hjt[..], $ctx.hjt_pat.view()) }
+        else { (&$ctx.jt[..], $ctx.jt_pat.view()) }
     };
 }
 macro_rules! hessian_m {
@@ -2194,11 +2193,11 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
             }
         }
         let mut has_dyn_edges = 0;
-        let (_, hj_colind) = hessian_j!(d, ctx);
+        let hj_colind = hessian_j!(d, ctx).1.colind();
         let mut i = 0;
         while i < nefc {
-            let adr = ctx.j_rowadr[i] as usize;
-            let nnz = ctx.j_rownnz[i] as usize;
+            let adr = ctx.j_pat.rowadr()[i] as usize;
+            let nnz = ctx.j_pat.rownnz()[i] as usize;
             let mut k = 0;
             let mut prev = -1;
             for j in 0..nnz {
@@ -2233,7 +2232,7 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
                     }
                 }
             }
-            if !ctx.j_rowsuper.is_empty() { i += ctx.j_rowsuper[i] as usize; }
+            if let Some(s) = ctx.j_pat.rowsuper() { i += s[i] as usize; }
             i += 1;
         }
         let mut fill_blks = 0;
@@ -2298,12 +2297,9 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
     }
     ctx.perm = perm;
     // the permuted copies the Hessian reads from here on
-    ctx.hj_colind = pool.int(n_j);
+    let mut hj_colind = pool.int(n_j);
     ctx.hj = pool.num(n_j);
-    ctx.hjt_rownnz = pool.int(nv);
-    ctx.hjt_rowadr = pool.int(nv);
-    ctx.hjt_rowsuper = pool.int(nv);
-    ctx.hjt_colind = pool.int(n_j);
+    let mut hjt = PatternBuf { rownnz: pool.int(nv), rowadr: pool.int(nv), rowsuper: pool.int(nv), colind: pool.int(n_j) };
     ctx.hjt = pool.num(n_j);
     ctx.hm_rownnz = pool.int(nv);
     ctx.hm_rowadr = pool.int(nv);
@@ -2313,17 +2309,19 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
         let mut scratch = pool.int(nv + nefc);
         let (invperm, hj_pos) = scratch.split_at_mut(nv);
         for r in 0..nv { invperm[ctx.perm[r] as usize] = r as i32; }
-        crate::util_misc::copy_int(hj_pos, &ctx.j_rowadr, nefc);
+        let (jt_rownnz, jt_rowadr, jt_colind) = (ctx.jt_pat.rownnz(), ctx.jt_pat.rowadr(), ctx.jt_pat.colind());
+        let jt_rowsuper = ctx.jt_pat.rowsuper().expect("solver: J' has supernodes");
+        crate::util_misc::copy_int(hj_pos, ctx.j_pat.rowadr(), nefc);
         let mut hjt_adr = 0;
         for r in 0..nv {
             let r_old = invperm[r] as usize;
-            let nnz = ctx.jt_rownnz[r_old] as usize;
-            let src_adr = ctx.jt_rowadr[r_old] as usize;
-            ctx.hjt_rownnz[r] = nnz as i32;
-            ctx.hjt_rowadr[r] = hjt_adr as i32;
-            let src_col = &ctx.jt_colind[src_adr..];
+            let nnz = jt_rownnz[r_old] as usize;
+            let src_adr = jt_rowadr[r_old] as usize;
+            hjt.rownnz[r] = nnz as i32;
+            hjt.rowadr[r] = hjt_adr as i32;
+            let src_col = &jt_colind[src_adr..];
             let src_val = &ctx.jt[src_adr..];
-            let dst_col = &mut ctx.hjt_colind[hjt_adr..];
+            let dst_col = &mut hjt.colind[hjt_adr..];
             let dst_val = &mut ctx.hjt[hjt_adr..];
             for k in 0..nnz {
                 let i = src_col[k] as usize;
@@ -2332,31 +2330,41 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
                 dst_val[k] = v;
                 let w = hj_pos[i] as usize;
                 hj_pos[i] += 1;
-                ctx.hj_colind[w] = r as i32;
+                hj_colind[w] = r as i32;
                 ctx.hj[w] = v;
             }
             hjt_adr += nnz;
         }
-        ctx.hjt_rowsuper[nv - 1] = 0;
+        hjt.rowsuper[nv - 1] = 0;
         for r in (0..nv - 1).rev() {
             let mut matches = 0; // C's match is a Rust keyword.
             let r_old = invperm[r] as usize;
-            if invperm[r + 1] == r_old as i32 + 1 { matches = (ctx.jt_rowsuper[r_old] > 0) as i32; }
-            else if ctx.hjt_rownnz[r] == ctx.hjt_rownnz[r + 1] {
-                let nnz = ctx.hjt_rownnz[r] as usize;
-                let c0 = &ctx.hjt_colind[ctx.hjt_rowadr[r] as usize..];
-                let c1 = &ctx.hjt_colind[ctx.hjt_rowadr[r + 1] as usize..];
+            if invperm[r + 1] == r_old as i32 + 1 { matches = (jt_rowsuper[r_old] > 0) as i32; }
+            else if hjt.rownnz[r] == hjt.rownnz[r + 1] {
+                let nnz = hjt.rownnz[r] as usize;
+                let c0 = &hjt.colind[hjt.rowadr[r] as usize..];
+                let c1 = &hjt.colind[hjt.rowadr[r + 1] as usize..];
                 matches = 1;
                 for k in 0..nnz { if c0[k] != c1[k] { matches = 0; break; } }
             }
-            ctx.hjt_rowsuper[r] = if matches != 0 { ctx.hjt_rowsuper[r + 1] + 1 } else { 0 };
+            hjt.rowsuper[r] = if matches != 0 { hjt.rowsuper[r + 1] + 1 } else { 0 };
         }
         pool.put_int(scratch);
     } else {
-        crate::util_misc::zero_int(&mut ctx.hjt_rownnz, nv);
-        crate::util_misc::zero_int(&mut ctx.hjt_rowadr, nv);
-        crate::util_misc::zero_int(&mut ctx.hjt_rowsuper, nv);
+        crate::util_misc::zero_int(&mut hjt.rownnz, nv);
+        crate::util_misc::zero_int(&mut hjt.rowadr, nv);
+        crate::util_misc::zero_int(&mut hjt.rowsuper, nv);
     }
+    ctx.hjt_pat = checked(hjt, nv, nefc, true, "J' in Hessian order");
+    // J's rows with their columns in Hessian order
+    let jp = &ctx.j_pat;
+    let hj = PatternBuf {
+        rownnz: copied(pool, jp.rownnz(), nefc),
+        rowadr: copied(pool, jp.rowadr(), nefc),
+        rowsuper: copied(pool, jp.rowsuper().expect("solver: J has supernodes"), nefc),
+        colind: hj_colind,
+    };
+    ctx.hj_pat = checked(hj, nefc, nv, true, "J in Hessian order");
     let (m_rownnz, m_rowadr, m_colind, m_mat) = if ctx.island < 0 {
         (&m.m_rownnz, &m.m_rowadr, &m.m_colind, &d.m)
     } else { (&ctx.m_rownnz, &ctx.m_rowadr, &ctx.m_colind, &ctx.m) };
@@ -2385,18 +2393,7 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
     let nv = ctx.nv;
     let nefc = ctx.nefc;
     // The Hessian reads J, J' and M where they are (hessian_j/jt/m, as C aliases HJ, HJT and HM to them);
-    // the whole problem's J row arrays are copied into the context, which an island's already owns.
-    if ctx.is_sparse != 0 && ctx.island < 0 {
-        macro_rules! copy_int_view {
-            ($field:ident, $src:expr, $n:expr) => {{
-                ctx.$field = io.scratch.int($n);
-                crate::util_misc::copy_int(&mut ctx.$field, $src, $n);
-            }};
-        }
-        copy_int_view!(j_rownnz, &d.efc_j_rownnz, nefc);
-        copy_int_view!(j_rowadr, &d.efc_j_rowadr, nefc);
-        copy_int_view!(j_rowsuper, &d.efc_j_rowsuper, nefc);
-    }
+    // J's pattern is the context's (primal_allocate copies the whole problem's).
     let cg_bytes = if !ctx.ltj.is_empty() { 0 } else { stack_bytes(2 * nv * size_of::<f64>(), align_of::<f64>()) };
     let loop_bytes = primal_loop_scratch_bytes(m, ctx, d);
     let efc_state = &io.efc_state[..];
@@ -2417,13 +2414,13 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
             io.warnings.push((WARN_CNSTRFULL, d.narena as i32)); return 0;
         }
         primal_try_reorder(m, d, io.scratch, ctx, cg_bytes, loop_bytes);
-        let (_, hj_colind) = hessian_j!(d, ctx);
-        let (_, hjt_rownnz, hjt_rowadr, hjt_rowsuper, hjt_colind) = hessian_jt!(ctx);
+        let (_, hjp) = hessian_j!(d, ctx);
+        let (_, hjtp) = hessian_jt!(ctx);
         let (_, hm_rownnz, hm_rowadr, _) = hessian_m!(m, d, ctx);
         ctx.n_h = crate::util_sparse::sqr_mat_tdsparse_symbolic(
-            &mut ctx.h_rownnz, &mut ctx.h_rowadr, None, None, nefc, nv,
-            &ctx.j_rownnz, &ctx.j_rowadr, hj_colind, Some(&ctx.j_rowsuper),
-            hjt_rownnz, hjt_rowadr, hjt_colind, Some(hjt_rowsuper), &mut *io.scratch) as usize;
+            &mut ctx.h_buf.rownnz, &mut ctx.h_buf.rowadr, None, None, nefc, nv,
+            hjp.rownnz(), hjp.rowadr(), hjp.colind(), hjp.rowsuper(),
+            hjtp.rownnz(), hjtp.rowadr(), hjtp.colind(), hjtp.rowsuper(), &mut *io.scratch) as usize;
         ctx.n_h += (hm_rowadr[nv - 1] + hm_rownnz[nv - 1]) as usize;
         ctx.n_h += ctx.n_s;
         let h_bytes = stack_bytes(ctx.n_h * size_of::<f64>(), align_of::<f64>()) + stack_bytes(2 * ctx.n_h * size_of::<i32>(), align_of::<i32>());
@@ -2432,34 +2429,34 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
             io.warnings.push((WARN_CNSTRFULL, d.narena as i32)); return 0;
         }
         ctx.h = io.scratch.num(ctx.n_h);
-        ctx.h_colind = io.scratch.int(ctx.n_h);
-        ctx.ht_colind = io.scratch.int(ctx.n_h);
-        let (hj, hj_colind) = hessian_j!(d, ctx);
-        let (hjt, hjt_rownnz, hjt_rowadr, hjt_rowsuper, hjt_colind) = hessian_jt!(ctx);
+        ctx.h_buf.colind = io.scratch.int(ctx.n_h);
+        ctx.ht_buf.colind = io.scratch.int(ctx.n_h);
+        let (hj, hjp) = hessian_j!(d, ctx);
+        let (hjt, hjtp) = hessian_jt!(ctx);
         let (hm, hm_rownnz, hm_rowadr, hm_colind) = hessian_m!(m, d, ctx);
         let mut shift = 0;
         for r in 0..nv - 1 {
             shift += hm_rownnz[r] + if ctx.n_s != 0 { ctx.s_rownnz[r] } else { 0 };
-            ctx.h_rowadr[r + 1] += shift;
+            ctx.h_buf.rowadr[r + 1] += shift;
         }
         crate::util_sparse::sqr_mat_tdsparse_symbolic(
-            &mut ctx.h_rownnz, &mut ctx.h_rowadr, Some(&mut ctx.h_colind), None, nefc, nv,
-            &ctx.j_rownnz, &ctx.j_rowadr, hj_colind, Some(&ctx.j_rowsuper),
-            hjt_rownnz, hjt_rowadr, hjt_colind, Some(hjt_rowsuper), &mut *io.scratch);
-        crate::util_sparse::sqr_mat_tdsparse_numeric(
-            &mut ctx.h, nv, &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind, None,
-            hj, &ctx.j_rownnz, &ctx.j_rowadr, hj_colind,
-            hjt, hjt_rownnz, hjt_rowadr, hjt_colind, Some(hjt_rowsuper), Some(&ctx.d), &mut *io.scratch);
-        crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut ctx.h_rownnz, &mut ctx.h_rowadr, &mut ctx.h_colind, nv,
+            &mut ctx.h_buf.rownnz, &mut ctx.h_buf.rowadr, Some(&mut ctx.h_buf.colind), None, nefc, nv,
+            hjp.rownnz(), hjp.rowadr(), hjp.colind(), hjp.rowsuper(),
+            hjtp.rownnz(), hjtp.rowadr(), hjtp.colind(), hjtp.rowsuper(), &mut *io.scratch);
+        // J'DJ into H's pattern (room left in each row for M's and the view's columns), then those merged in
+        ctx.h_pat = checked(std::mem::take(&mut ctx.h_buf), nv, nv, false, "Hessian");
+        crate::util_sparse::sqr_mat_tdsparse_numeric(&mut ctx.h, ctx.h_pat.view(), None, hj, hjp, hjt, hjtp, Some(&ctx.d), &mut *io.scratch);
+        let mut h_buf = std::mem::take(&mut ctx.h_pat).into_buf();
+        crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut h_buf.rownnz, &mut h_buf.rowadr, &mut h_buf.colind, nv,
             hm, hm_rownnz, hm_rowadr, hm_colind);
         if ctx.n_s != 0 {
-            crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut ctx.h_rownnz, &mut ctx.h_rowadr, &mut ctx.h_colind, nv,
+            crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut h_buf.rownnz, &mut h_buf.rowadr, &mut h_buf.colind, nv,
                 &ctx.s_val, &ctx.s_rownnz, &ctx.s_rowadr, &ctx.s_colind);
         }
-        crate::util_sparse::transpose_sparse(None, &[], nv, nv, &mut ctx.ht_rownnz, &mut ctx.ht_rowadr, &mut ctx.ht_colind, None,
-            &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind);
-        ctx.n_l = crate::util_solve::chol_factor_symbolic(None, &mut ctx.l_rownnz, &mut ctx.l_rowadr, &mut [],
-            &mut ctx.lt_rownnz, &mut ctx.lt_rowadr, &mut [], &ctx.ht_rownnz, &ctx.ht_rowadr, &ctx.ht_colind, nv, Some(&mut *io.scratch), &mut []) as usize;
+        ctx.h_pat = checked(h_buf, nv, nv, false, "Hessian");
+        ctx.ht_pat = crate::util_sparse::transpose_pat(None, &[], ctx.h_pat.view(), std::mem::take(&mut ctx.ht_buf), false);
+        ctx.n_l = crate::util_solve::chol_factor_symbolic(None, &mut ctx.l_buf.rownnz, &mut ctx.l_buf.rowadr, &mut [],
+            &mut ctx.lt_rownnz, &mut ctx.lt_rowadr, &mut [], ctx.ht_pat.view(), Some(&mut *io.scratch), &mut []) as usize;
         let n_l_int = 3 * ctx.n_l + nv;
         let n_l_num = if ctx.is_elliptic != 0 { 2 * ctx.n_l } else { ctx.n_l };
         let l_bytes = stack_bytes(n_l_int * size_of::<i32>(), align_of::<i32>()) + stack_bytes(n_l_num * size_of::<f64>(), align_of::<f64>());
@@ -2467,18 +2464,20 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
         if stack_bytes_available(d) < l_bytes + chol_fill_bytes.max(loop_bytes) {
             io.warnings.push((WARN_CNSTRFULL, d.narena as i32)); return 0;
         }
-        ctx.l_colind = io.scratch.int(ctx.n_l);
+        ctx.l_buf.colind = io.scratch.int(ctx.n_l);
         ctx.lt_colind = io.scratch.int(ctx.n_l);
         ctx.lt_map = io.scratch.int(ctx.n_l);
         ctx.pathcost = io.scratch.int(nv);
         ctx.l = io.scratch.num(ctx.n_l);
         if ctx.is_elliptic != 0 { ctx.lcone = io.scratch.num(ctx.n_l); }
-        crate::util_solve::chol_factor_symbolic(Some(&mut ctx.l_colind), &mut ctx.l_rownnz, &mut ctx.l_rowadr, &mut ctx.lt_colind,
-            &mut ctx.lt_rownnz, &mut ctx.lt_rowadr, &mut ctx.lt_map, &ctx.ht_rownnz, &ctx.ht_rowadr, &ctx.ht_colind, nv, Some(&mut *io.scratch), &mut []);
+        crate::util_solve::chol_factor_symbolic(Some(&mut ctx.l_buf.colind), &mut ctx.l_buf.rownnz, &mut ctx.l_buf.rowadr, &mut ctx.lt_colind,
+            &mut ctx.lt_rownnz, &mut ctx.lt_rowadr, &mut ctx.lt_map, ctx.ht_pat.view(), Some(&mut *io.scratch), &mut []);
+        ctx.l_pat = checked(std::mem::take(&mut ctx.l_buf), nv, nv, false, "Cholesky factor");
         ctx.lflops = 0;
+        let (l_rownnz, l_rowadr, l_colind) = (ctx.l_pat.rownnz(), ctx.l_pat.rowadr(), ctx.l_pat.colind());
         for r in 0..nv {
-            let nnz = ctx.l_rownnz[r];
-            let parent = if nnz >= 2 { ctx.l_colind[(ctx.l_rowadr[r] + nnz - 2) as usize] } else { -1 };
+            let nnz = l_rownnz[r];
+            let parent = if nnz >= 2 { l_colind[(l_rowadr[r] + nnz - 2) as usize] } else { -1 };
             ctx.pathcost[r] = nnz + if parent >= 0 { ctx.pathcost[parent as usize] } else { 0 };
             ctx.lflops += nnz as i64 * nnz as i64;
         }
@@ -2559,30 +2558,26 @@ fn factorize_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCont
     }
     if ctx.is_sparse != 0 {
         if flg_recompute != 0 {
-            let (hj, hj_colind) = hessian_j!(d, ctx);
-            let (hjt, hjt_rownnz, hjt_rowadr, hjt_rowsuper, hjt_colind) = hessian_jt!(ctx);
+            let (hj, hjp) = hessian_j!(d, ctx);
+            let (hjt, hjtp) = hessian_jt!(ctx);
             let (hm, hm_rownnz, hm_rowadr, hm_colind) = hessian_m!(m, d, ctx);
-            crate::util_sparse::sqr_mat_tdsparse_numeric(
-                &mut ctx.h, nv, &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind, None,
-                hj, &ctx.j_rownnz, &ctx.j_rowadr, hj_colind,
-                hjt, hjt_rownnz, hjt_rowadr, hjt_colind, Some(hjt_rowsuper), Some(&ctx.d), &mut *io.scratch);
-            crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut ctx.h_rownnz, &mut ctx.h_rowadr, &mut ctx.h_colind, nv,
+            crate::util_sparse::sqr_mat_tdsparse_numeric(&mut ctx.h, ctx.h_pat.view(), None, hj, hjp, hjt, hjtp, Some(&ctx.d), &mut *io.scratch);
+            let mut h_buf = std::mem::take(&mut ctx.h_pat).into_buf();
+            crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut h_buf.rownnz, &mut h_buf.rowadr, &mut h_buf.colind, nv,
                 hm, hm_rownnz, hm_rowadr, hm_colind);
             if ctx.n_s != 0 {
-                crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut ctx.h_rownnz, &mut ctx.h_rowadr, &mut ctx.h_colind, nv,
+                crate::util_sparse::add_to_mat_sparse(&mut ctx.h, &mut h_buf.rownnz, &mut h_buf.rowadr, &mut h_buf.colind, nv,
                     &ctx.s_val, &ctx.s_rownnz, &ctx.s_rowadr, &ctx.s_colind);
             }
+            ctx.h_pat = checked(h_buf, nv, nv, false, "Hessian");
             ctx.flg_hdirty = 0;
             ctx.ndowndate = 0;
         }
         ctx.cone_fold = -1;
         ctx.flg_lvalid = 0;
         if hessian_cone_fold(m, d, io, ctx, 0) == 0 {
-            // SAFETY: ctx.l_colind is the pattern chol_factor_symbolic built (and checked below nv) in make_hessian; nothing writes it after.
-            unsafe {
-                crate::util_solve::chol_factor_numeric(&mut ctx.l, nv, MINVAL, &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind,
-                    &ctx.lt_rownnz, &ctx.lt_rowadr, &ctx.lt_colind, &ctx.lt_map, &ctx.h, &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind, &mut ctx.cholscratch);
-            }
+            crate::util_solve::chol_factor_numeric(&mut ctx.l, MINVAL, ctx.l_pat.view(), &ctx.lt_rownnz, &ctx.lt_rowadr, &ctx.lt_colind,
+                &ctx.lt_map, &ctx.h, ctx.h_pat.rownnz(), ctx.h_pat.rowadr(), ctx.h_pat.colind(), &mut ctx.cholscratch);
             ctx.flg_lvalid = 1;
         }
     } else {
@@ -2613,26 +2608,24 @@ fn hessian_cone_folded(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCo
             let dim = d.contact[efc_id[i] as usize].dim as usize;
             copy(&mut local, &io.cone_h[36 * i..], dim * dim);
             crate::util_solve::chol_factor(&mut local, dim, MINVAL);
-            let nnz = ctx.j_rownnz[i] as usize;
-            let (hj, hj_colind) = hessian_j!(d, ctx);
+            let (j_rownnz, j_rowadr) = (ctx.j_pat.rownnz(), ctx.j_pat.rowadr());
+            let nnz = j_rownnz[i] as usize;
+            let (hj, hjp) = hessian_j!(d, ctx);
             zero(&mut ctx.ltj, dim * nnz);
             for r in 0..dim {
                 for c in 0..=r {
-                    crate::util_blas::add_to_scl(&mut ctx.ltj[c * nnz..], &hj[ctx.j_rowadr[i + r] as usize..], local[r * dim + c], nnz);
+                    crate::util_blas::add_to_scl(&mut ctx.ltj[c * nnz..], &hj[j_rowadr[i + r] as usize..], local[r * dim + c], nnz);
                 }
             }
-            primal_add_cone_outer_sparse(&mut ctx.hcone, &ctx.h_rowadr, &ctx.h_colind, dim, nnz,
-                &hj_colind[ctx.j_rowadr[i] as usize..], &ctx.ltj);
+            primal_add_cone_outer_sparse(&mut ctx.hcone, ctx.h_pat.rowadr(), ctx.h_pat.colind(), dim, nnz,
+                &hjp.colind()[j_rowadr[i] as usize..], &ctx.ltj);
             ctx.nupdate += dim as i32;
             i += dim - 1;
         }
         i += 1;
     }
-    // SAFETY: ctx.l_colind is the pattern chol_factor_symbolic built (and checked below nv) in make_hessian; nothing writes it after.
-    let rank = unsafe {
-        crate::util_solve::chol_factor_numeric(&mut ctx.lcone, nv, MINVAL, &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind,
-            &ctx.lt_rownnz, &ctx.lt_rowadr, &ctx.lt_colind, &ctx.lt_map, &ctx.hcone, &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind, &mut ctx.cholscratch)
-    };
+    let rank = crate::util_solve::chol_factor_numeric(&mut ctx.lcone, MINVAL, ctx.l_pat.view(), &ctx.lt_rownnz, &ctx.lt_rowadr,
+        &ctx.lt_colind, &ctx.lt_map, &ctx.hcone, ctx.h_pat.rownnz(), ctx.h_pat.rowadr(), ctx.h_pat.colind(), &mut ctx.cholscratch);
     if rank < nv as i32 && ctx.flg_hdirty != 0 { factorize_hessian(m, d, io, ctx, 1); }
 }
 
@@ -2651,17 +2644,18 @@ fn hessian_cone_update(d: &Data, io: &SolveIo, ctx: &mut PrimalContext) {
             copy(&mut local, &io.cone_h[36 * i..], dim * dim);
             crate::util_solve::chol_factor(&mut local, dim, MINVAL);
             if ctx.is_sparse != 0 {
-                let nnz = ctx.j_rownnz[i] as usize;
-                let (hj, hj_colind) = hessian_j!(d, ctx);
+                let (j_rownnz, j_rowadr) = (ctx.j_pat.rownnz(), ctx.j_pat.rowadr());
+                let nnz = j_rownnz[i] as usize;
+                let (hj, hjp) = hessian_j!(d, ctx);
                 zero(&mut ctx.ltj, dim * nnz);
                 for r in 0..dim {
                     for c in 0..=r {
-                        crate::util_blas::add_to_scl(&mut ctx.ltj[c * nnz..], &hj[ctx.j_rowadr[i + r] as usize..], local[r * dim + c], nnz);
+                        crate::util_blas::add_to_scl(&mut ctx.ltj[c * nnz..], &hj[j_rowadr[i + r] as usize..], local[r * dim + c], nnz);
                     }
                 }
                 for r in 0..dim {
                     crate::util_solve::chol_update_sparse(&mut ctx.lcone, &ctx.ltj[r * nnz..], nv, 1,
-                        &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind, nnz, &hj_colind[ctx.j_rowadr[i + r] as usize..], &mut ctx.cholscratch);
+                        ctx.l_pat.rownnz(), ctx.l_pat.rowadr(), ctx.l_pat.colind(), nnz, &hjp.colind()[j_rowadr[i + r] as usize..], &mut ctx.cholscratch);
                 }
             } else {
                 zero(&mut ctx.ltj, dim * nv);
@@ -2686,9 +2680,9 @@ fn hessian_cone_fold_faster(d: &Data, io: &SolveIo, ctx: &PrimalContext, cost_l:
     let mut i = 0;
     while i < nefc {
         if efc_state[i] == CNSTRSTATE_CONE {
-            let nnz = ctx.j_rownnz[i];
+            let nnz = ctx.j_pat.rownnz()[i];
             let dim = d.contact[efc_id[i] as usize].dim;
-            let lastcol = hessian_j!(d, ctx).1[(ctx.j_rowadr[i] + nnz - 1) as usize] as usize;
+            let lastcol = hessian_j!(d, ctx).1.colind()[(ctx.j_pat.rowadr()[i] + nnz - 1) as usize] as usize;
             u += dim as i64 * ctx.pathcost[lastcol] as i64;
             s += dim as i64 * nnz as i64 * nnz as i64;
             i += dim as usize - 1;
@@ -2733,9 +2727,9 @@ fn hessian_incremental(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCo
             ctx.cone_fold = -1;
             if ctx.is_sparse != 0 && ((oldstate[i] == CNSTRSTATE_QUADRATIC) != (efc_state[i] == CNSTRSTATE_QUADRATIC)) {
                 if oldstate[i] == CNSTRSTATE_QUADRATIC { ndowndate_step += 1; }
-                let nnz = ctx.j_rownnz[i];
+                let nnz = ctx.j_pat.rownnz()[i];
                 if nnz > 0 {
-                    let lastcol = hessian_j!(d, ctx).1[(ctx.j_rowadr[i] + nnz - 1) as usize] as usize;
+                    let lastcol = hessian_j!(d, ctx).1.colind()[(ctx.j_pat.rowadr()[i] + nnz - 1) as usize] as usize;
                     u_quad += ctx.pathcost[lastcol] as i64;
                 }
             }
@@ -2758,16 +2752,17 @@ fn hessian_incremental(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCo
         if flag_update != -1 {
             let rank;
             if ctx.is_sparse != 0 {
-                let nnz = ctx.j_rownnz[i] as usize;
-                let adr = ctx.j_rowadr[i] as usize;
+                let nnz = ctx.j_pat.rownnz()[i] as usize;
+                let adr = ctx.j_pat.rowadr()[i] as usize;
                 let scl = if flag_update != 0 { efc_d[i] } else { -efc_d[i] };
-                let (hj, hj_colind) = hessian_j!(d, ctx);
-                primal_add_row_outer_sparse(&mut ctx.h, &ctx.h_rowadr, &ctx.h_colind, nnz, &hj_colind[adr..], &hj[adr..], scl);
+                let (hj, hjp) = hessian_j!(d, ctx);
+                let hj_colind = hjp.colind();
+                primal_add_row_outer_sparse(&mut ctx.h, ctx.h_pat.rowadr(), ctx.h_pat.colind(), nnz, &hj_colind[adr..], &hj[adr..], scl);
                 if flag_update == 0 { ctx.flg_hdirty = 1; ctx.ndowndate += 1; }
                 if ctx.flg_lvalid == 0 { ctx.nupdate += 1; continue; }
                 crate::util_blas::scl(&mut ctx.cholupd, &hj[adr..], efc_d[i].sqrt(), nnz);
                 rank = crate::util_solve::chol_update_sparse(&mut ctx.l, &ctx.cholupd, nv, flag_update,
-                    &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind, nnz, &hj_colind[adr..], &mut ctx.cholscratch);
+                    ctx.l_pat.rownnz(), ctx.l_pat.rowadr(), ctx.l_pat.colind(), nnz, &hj_colind[adr..], &mut ctx.cholscratch);
             } else {
                 crate::util_blas::scl(&mut ctx.cholupd, &j[i * nv..], efc_d[i].sqrt(), nv);
                 rank = crate::util_solve::chol_update(&mut ctx.l, &mut ctx.cholupd, nv, flag_update);
@@ -2777,11 +2772,8 @@ fn hessian_incremental(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCo
         }
     }
     if use_fold == 0 && ctx.is_sparse != 0 && ctx.flg_lvalid == 0 {
-        // SAFETY: ctx.l_colind is the pattern chol_factor_symbolic built (and checked below nv) in make_hessian; nothing writes it after.
-        let rank = unsafe {
-            crate::util_solve::chol_factor_numeric(&mut ctx.l, nv, MINVAL, &ctx.l_rownnz, &ctx.l_rowadr, &ctx.l_colind,
-                &ctx.lt_rownnz, &ctx.lt_rowadr, &ctx.lt_colind, &ctx.lt_map, &ctx.h, &ctx.h_rownnz, &ctx.h_rowadr, &ctx.h_colind, &mut ctx.cholscratch)
-        };
+        let rank = crate::util_solve::chol_factor_numeric(&mut ctx.l, MINVAL, ctx.l_pat.view(), &ctx.lt_rownnz, &ctx.lt_rowadr,
+            &ctx.lt_colind, &ctx.lt_map, &ctx.h, ctx.h_pat.rownnz(), ctx.h_pat.rowadr(), ctx.h_pat.colind(), &mut ctx.cholscratch);
         ctx.flg_lvalid = 1;
         if rank < nv as i32 && ctx.flg_hdirty != 0 { factorize_hessian(m, d, io, ctx, 1); return; }
     }
@@ -2812,11 +2804,9 @@ fn sol_primal(m: &Model, d: &Data, io: &mut SolveIo, island: i32, maxiter: i32, 
         if ctx.island < 0 { crate::metric::eff_mul_add(m, d, &mut ctx.ma, &io.acc[..], 1); }
         else { crate::metric::eff_mul_add_island(m, d, &mut ctx.ma, &io.acc[..], ctx.island as usize); }
     }
-    let (j, j_rownnz, j_rowadr, j_colind, j_rowsuper, efc_aref) = if ctx.island < 0 {
-        (&d.efc_j, &d.efc_j_rownnz, &d.efc_j_rowadr, &d.efc_j_colind, &d.efc_j_rowsuper, &d.efc_aref[..])
-    } else { (&ctx.j, &ctx.j_rownnz, &ctx.j_rowadr, &ctx.j_colind, &ctx.j_rowsuper, &d.iefc_aref[ctx.iefcadr..]) };
+    let (j, efc_aref) = if ctx.island < 0 { (&d.efc_j, &d.efc_aref[..]) } else { (&ctx.j, &d.iefc_aref[ctx.iefcadr..]) };
     if ctx.is_sparse == 0 { mul_mat_vec(&mut ctx.jaref, j, &io.acc[..], nefc, nv); }
-    else { crate::util_sparse::mul_mat_vec_sparse(&mut ctx.jaref, j, &io.acc[..], nefc, j_rownnz, j_rowadr, j_colind, Some(j_rowsuper)); }
+    else { let p = ctx.j_pat.view(); crate::util_sparse::mul_mat_vec_sparse(&mut ctx.jaref, j, &io.acc[..], p.nr(), p.rownnz(), p.rowadr(), p.colind(), p.rowsuper()); }
     crate::util_blas::sub_from(&mut ctx.jaref, efc_aref, nefc);
     primal_update_constraint(d, io, &mut ctx, flg_newton & (m.opt.cone == CONE_ELLIPTIC) as i32);
     primal_update_grad(d, io, &mut ctx);
@@ -2824,8 +2814,8 @@ fn sol_primal(m: &Model, d: &Data, io: &mut SolveIo, island: i32, maxiter: i32, 
     ctx.scale = scale;
     if !ctx.ep_l.is_empty() {
         let (efc_d, j_in, nnz_in, adr_in, col_in) = if ctx.island < 0 {
-            (&d.efc_d[..], &d.efc_j, &d.efc_j_rownnz, &d.efc_j_rowadr, &d.efc_j_colind)
-        } else { (&d.iefc_d[ctx.iefcadr..], &ctx.j, &ctx.j_rownnz, &ctx.j_rowadr, &ctx.j_colind) };
+            (&d.efc_d[..], &d.efc_j, &d.efc_j_rownnz[..], &d.efc_j_rowadr[..], &d.efc_j_colind[..])
+        } else { (&d.iefc_d[ctx.iefcadr..], &ctx.j, ctx.j_pat.rownnz(), ctx.j_pat.rowadr(), ctx.j_pat.colind()) };
         let folded = crate::metric::eff_prec_fold(m, d, &mut ctx.ep_l, island, nefc, efc_d, ctx.is_sparse, j_in, nnz_in, adr_in, col_in);
         if folded == 0 { io.scratch.put_num(std::mem::take(&mut ctx.ep_l)); }
     }

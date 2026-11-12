@@ -20,6 +20,10 @@ script_mod! {
     // keep threshold, color = shape random, ao_uv = yaw random.
     mod.draw.DrawSceneGrass = mod.std.set_type_default() do #(DrawSceneGrass::script_shader(vm)){
         ..mod.draw.DrawScenePbr
+        // A blade is no model's own layer: every caster shadows it.
+        csm_own_limit: fn(ci: float) -> float {
+            return 2.0
+        }
         // The field rides the morph weight lanes (the blades never morph;
         // the PBR stream has no room for a new lane, its uniform block no
         // room for a uniform): 0 = origin x, z, 1 / width, 1 / depth;

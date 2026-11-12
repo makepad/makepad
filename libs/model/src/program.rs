@@ -391,7 +391,18 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
     let geometry_start = ProgramInstant::now();
     let texture_start = texture_time();
     let mut timings = ProgramTimings::default();
-    let names: Vec<String> = ops.iter().map(|op| op.name().to_string()).collect();
+    let names: Vec<String> = ops.iter().map(|op| {
+        let object = match op {
+            ProgramOp::Op(op) => op.object_name(),
+            ProgramOp::Mesh(mesh) => Some(crate::build_detail::primitive_kind(mesh).0),
+            ProgramOp::Bind { object, .. } => Some(object.as_str()),
+            _ => None,
+        };
+        match object {
+            Some(object) => format!("{}, object '{object}'", op.name()),
+            None => op.name().to_string(),
+        }
+    }).collect();
     let fail = |index: usize, message: String| ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message };
     if limits.max_materials == 0 || limits.max_receipts == 0 {
         return Err(fail(0, describe_error(&Error::Invalid("zero material or receipt limit"))));
@@ -574,6 +585,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
         Some(cache) => document.compile_with_cache(cache, cancelled),
         None => document.compile(cancelled),
     }.map_err(|e| ProgramFailure { index: ops.len(), op: "compile".into(), message: describe_error(&e) })?;
+    warnings.extend(compiled.warnings.iter().cloned());
     let compile_textures = texture_time() - texture_start;
     let compile_elapsed = compile_start.elapsed();
     timings.compile = compile_elapsed.saturating_sub(compile_textures);
@@ -596,7 +608,7 @@ mod tests {
         let positions = vec![[0., 0., 0.], [1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
         let polygons = vec![crate::mesh::Polygon::new(vec![0, 1, 2]), crate::mesh::Polygon::new(vec![0, 3, 1])];
         let normals = vec![[2., 0., 0.], [0., 3., 0.], [0., 0., 4.], [-2., 0., 0.]];
-        let colors = vec![[1., 1., 1., 0.], [1., 1., 1., 0.25], [1., 1., 1., 0.75], [1.; 4]];
+        let colors = vec![[0., 0., 0., 1.], [0.25, 0.25, 0.25, 1.], [0.75, 0.75, 0.75, 1.], [1.; 4]];
         let primitive = |normals: Vec<[f64; 3]>, colors: Vec<[f64; 4]>| MeshPrimitive::Polygons {
             object: "card".into(), positions: positions.clone(), polygons: polygons.clone(), normals, colors,
         };

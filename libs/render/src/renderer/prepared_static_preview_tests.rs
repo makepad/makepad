@@ -104,7 +104,7 @@ fn morph_shadow_casters_share_visible_weights_and_exclude_rest_duplicates() {
     renderer.set_world_attachments(vec![instance]);
     renderer.set_model_clip(ModelTarget::Instance(0),Some("pulse".into()),0.75,false).unwrap();
     renderer.set_model_clip_weighted(ModelTarget::Attachment(0),Some("pulse".into()),1.,false,0.5).unwrap();
-    let movers=renderer.collect_lm_movers(&World::default(),vec3f(0.,0.,0.),None);
+    let movers=renderer.collect_lm_movers(&World::default(),vec3f(0.,0.,0.),1.,None);
     assert_eq!(movers.len(),2);
     assert_eq!(movers[0].morph.as_ref().unwrap().weights[0].x,0.75);
     assert_eq!(movers[1].morph.as_ref().unwrap().weights[0].x,0.625);
@@ -123,9 +123,9 @@ fn entity_casters_keep_their_primitive_shape(){
     let body=|id:u64,shape:Shape|Entity{id,shape,kind:BodyKind::Rigid,half:vec3f(0.5,0.5,0.5),scale:vec3f(1.,1.,1.),..Default::default()};
     world.entities=vec![body(1,Shape::Sphere),body(2,Shape::Box),body(3,Shape::Cylinder)];
     // No geometry resident yet: nothing is drawn as the wrong shape.
-    assert!(renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),None).is_empty());
+    assert!(renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None).is_empty());
     renderer.ensure_entity_caster_geometries(&mut cx);
-    let movers=renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),None);
+    let movers=renderer.collect_lm_movers(&world,vec3f(0.,0.,0.),1.,None);
     assert_eq!(movers.len(),3);
     let id=|shape:Shape|renderer.shadow_shape_geometries[shape.index()].as_ref().unwrap().geometry_id();
     assert_eq!(movers[0].geometry,id(Shape::Sphere));

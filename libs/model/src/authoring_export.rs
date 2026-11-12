@@ -31,7 +31,7 @@ impl Document {
         self.compile_view(cancelled,true,None)
     }
     fn compile_view(&self,cancelled:Option<&dyn Fn()->bool>,preview:bool,cache:Option<&mut crate::CompileCache>)->Result<CompiledModel>{
-        if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled,cache);}
+        if !preview&&self.soft_body().is_none()&&self.scene().is_empty()&&self.rig().morphs.is_empty(){return self.compile_evaluated(cancelled,cache,None);}
         let evaluation_timer=crate::build_detail::CompileTimer::new(crate::build_detail::CompilePhase::Evaluation);
         let mut ctx=mesh::Context::new(self.limits().mesh.clone(),cancelled);
         ctx.checkpoint(1)?;
@@ -68,9 +68,9 @@ impl Document {
         evaluated.state.surface.reconcile(&self.state.objects,&objects,self.limits(),&mut ctx)?;
         evaluated.state.objects=objects;
         drop(cached);
-        crate::delivery::expand(&mut evaluated,&mut ctx)?;
+        let delivery=crate::delivery::expand(&mut evaluated,&mut ctx,cancelled)?;
         drop(evaluation_timer);
-        let mut product=evaluated.compile_evaluated(cancelled,cache)?;
+        let mut product=evaluated.compile_evaluated(cancelled,cache,Some(&delivery))?;
         let _assembly_timer=crate::build_detail::CompileTimer::new(crate::build_detail::CompilePhase::GlbAssembly);
         if !preview {if let Some(metadata)=self.soft_body(){
             product.glb=augment_glb_soft_body(&product.glb,metadata).map_err(|_|Error::Invalid("soft-body GLB metadata"))?;
@@ -105,7 +105,7 @@ fn prepare_preview_metadata(doc:&mut Document,ctx:&mut mesh::Context<'_>)->Resul
     Ok(())
 }
 
-pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],ctx:&mut mesh::Context<'_>)->Result<Vec<u8>>{
+pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],delivery:Option<&crate::delivery::LodDelivery>,ctx:&mut mesh::Context<'_>)->Result<Vec<u8>>{
     if doc.scene().is_empty()&&doc.rig().is_empty(){return Ok(glb);}
     let scene=doc.scene();let names=doc.objects().enumerate().map(|(i,(n,_))|(n.to_string(),i)).collect::<BTreeMap<_,_>>();
     let mut export=GlbAuthoring::default();
@@ -140,9 +140,23 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],ctx
         export.objects.push(GlbAuthoringObject{name:name.into(),parent:node.parent.as_ref().map(|n|names.get(n).copied().ok_or_else(||Error::MissingObject(n.clone()))).transpose()?,
             transform:trs(node.transform)?,primitives:primitives.iter().enumerate().filter_map(|(i,p)|(p.object==name).then_some(i)).collect(),extras:(!extras.is_empty()).then_some(JsonValue::Object(extras)),lods:Vec::new(),lod_distances:Vec::new()});
     }
-    let originals=doc.objects().filter(|(n,_)|!n.starts_with("__derived_lod_")).map(|(n,_)|n.to_owned()).collect::<Vec<_>>();
-    for (i,name) in originals.iter().enumerate(){if let Some(levels)=scene.lods.get(name){let base=*names.get(name).ok_or(Error::Invalid("LOD base object"))?;
-        for (level,options) in levels.iter().enumerate(){let derived=crate::delivery::lod_name(i,level);export.objects[base].lods.push(*names.get(&derived).ok_or(Error::Invalid("LOD geometry absent"))?);export.objects[base].lod_distances.push(f32_value(options.distance)?);}
+    if let Some(delivery)=delivery{for(name,outcomes)in &delivery.levels{
+        let base=*names.get(name).ok_or(Error::Invalid("LOD base object"))?;
+        for(level,(outcome,options))in outcomes.iter().zip(&scene.lods[name]).enumerate(){
+            let target=match outcome{
+                crate::delivery::LodGeometry::Derived(name)=>*names.get(name).ok_or(Error::Invalid("LOD geometry absent"))?,
+                crate::delivery::LodGeometry::Previous(name)=>{
+                    let source=*names.get(name).ok_or(Error::Invalid("LOD previous geometry absent"))?;
+                    let mut node=export.objects[base].clone();node.name=format!("{name}__repeat_{level}");node.parent=None;node.extras=None;node.lods.clear();node.lod_distances.clear();node.primitives=export.objects[source].primitives.clone();
+                    let target=export.objects.len();export.objects.push(node);target
+                },
+                crate::delivery::LodGeometry::Empty=>{
+                    let mut node=export.objects[base].clone();node.name=format!("{name}__empty_{level}");node.parent=None;node.extras=None;node.lods.clear();node.lod_distances.clear();node.primitives.clear();
+                    let target=export.objects.len();export.objects.push(node);target
+                },
+            };
+            export.objects[base].lods.push(target);export.objects[base].lod_distances.push(f32_value(options.distance)?);
+        }
     }}
     for light in scene.emitters.values(){
         ctx.checkpoint(1)?;export.lights.push(GlbPunctualLight{name:light.name.clone(),attachment:attachment(&light.attachment,&names)?,transform:trs(if light.attachment==Attachment::Root{face(light.transform)}else{light.transform})?,

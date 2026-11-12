@@ -8,21 +8,21 @@ pub const MAX_LOD_THRESHOLDS:usize=8;
 
 pub struct AssetLodPlan<'a>{
     json:&'a[u8],
-    mesh_spans:Vec<Range<usize>>,
+    mesh_spans:Vec<MeshSpan>,
     tail:&'a[u8],
     groups:Vec<AssetLod>,
-    meshes:Vec<usize>,
+    meshes:Vec<Option<usize>>,
     distances:Vec<f32>,
 }
 impl<'a> AssetLodPlan<'a>{
     pub fn parse(bytes:&'a[u8],byte_limit:usize)->Result<Option<Self>,String>{
         if bytes.len()>byte_limit{return Err("LOD source byte budget exceeded".into());}
         let parsed=makepad_gltf::parse_glb_bytes(bytes).map_err(|e|format!("LOD GLB: {e:?}"))?;
-        let groups=parse_asset_lods(&parsed.document)?;if groups.is_empty(){return Ok(None);}
+        let mut groups=parse_asset_lods(&parsed.document)?;if groups.is_empty(){return Ok(None);}
         let (json,_)=crate::asset_morph::chunks(bytes)?;
         if json.get("scenes").is_none(){return Err("LOD variants require an explicit default scene".into());}
         let active=crate::asset_morph::active_nodes(&json)?;let nodes=parsed.document.nodes_slice();
-        let mut distances=Vec::new();
+
         for group in &groups{
             if !active[group.node]{return Err("LOD owner is outside the default scene".into());}
             let base=&nodes[group.node];
@@ -31,10 +31,9 @@ impl<'a> AssetLodPlan<'a>{
                     return Err("LOD targets must be hidden leaf geometry with the owner's skin, local transform and weights".into());
                 }
             }
-            distances.extend_from_slice(&group.distances);
         }
-        distances.sort_by(f32::total_cmp);distances.dedup();if distances.len()>MAX_LOD_THRESHOLDS{return Err("asset exceeds eight distinct LOD distance thresholds".into());}
-        let meshes=nodes.iter().map(|n|n.mesh.unwrap_or(usize::MAX)).collect();
+        let distances=coalesce_distances(&mut groups);
+        let meshes=nodes.iter().map(|n|n.mesh).collect();
         let json_size=u32::from_le_bytes(bytes[12..16].try_into().unwrap())as usize;
         let json=&bytes[20..20+json_size];let mesh_spans=mesh_spans(json)?;
         if mesh_spans.len()!=nodes.len(){return Err("LOD node span count".into());}
@@ -47,8 +46,8 @@ impl<'a> AssetLodPlan<'a>{
         let distance=*self.distances.get(level).ok_or("LOD variant index")?;
         let mut changes=Vec::new();
         for group in &self.groups{
-            let selected=group.select(distance)?;let span=self.mesh_spans[group.node].clone();if span.is_empty(){return Err("LOD owner mesh span missing".into());}
-            changes.push((span,self.meshes[selected].to_string()));
+            let selected=group.select(distance)?;let span=&self.mesh_spans[group.node];if span.member.is_empty(){return Err("LOD owner mesh span missing".into());}
+            changes.push(match self.meshes[selected]{Some(mesh)=>(span.value.clone(),mesh.to_string()),None=>(span.member.clone(),String::new())});
         }
         changes.sort_by_key(|(span,_)|span.start);
         let estimate=self.json.len().saturating_add(changes.len()*20).saturating_add(self.tail.len()).saturating_add(23);if estimate>byte_limit{return Err("LOD variant byte budget exceeded".into());}
@@ -60,6 +59,33 @@ impl<'a> AssetLodPlan<'a>{
         let mut out=Vec::with_capacity(size);out.extend_from_slice(b"glTF");out.extend_from_slice(&2u32.to_le_bytes());out.extend_from_slice(&(size as u32).to_le_bytes());
         out.extend_from_slice(&(json.len()as u32).to_le_bytes());out.extend_from_slice(b"JSON");out.extend_from_slice(&json);out.extend_from_slice(self.tail);Ok(out)
     }
+}
+
+// Each group votes once per distance. Keep the most shared thresholds, then
+// snap the rest to their nearest retained distance (smaller wins a tie).
+fn coalesce_distances(groups:&mut [AssetLod])->Vec<f32>{
+    let mut counts=std::collections::BTreeMap::<u32,usize>::new();
+    for group in groups.iter(){for distance in &group.distances{*counts.entry(distance.to_bits()).or_default()+=1;}}
+    let mut ranked=counts.iter().map(|(&bits,&count)|(f32::from_bits(bits),count)).collect::<Vec<_>>();
+    ranked.sort_by(|a,b|b.1.cmp(&a.1).then(a.0.total_cmp(&b.0)));
+    let mut kept=ranked.iter().take(MAX_LOD_THRESHOLDS).map(|&(distance,_)|distance).collect::<Vec<_>>();kept.sort_by(f32::total_cmp);
+    if ranked.len()<=MAX_LOD_THRESHOLDS{return kept;}
+    let mut snapped=std::collections::BTreeMap::new();
+    for &(distance,_) in &ranked[MAX_LOD_THRESHOLDS..]{
+        let nearest=*kept.iter().min_by(|a,b|(**a-distance).abs().total_cmp(&(**b-distance).abs()).then(a.total_cmp(b))).unwrap();
+        snapped.insert(distance.to_bits(),nearest);
+    }
+    let changes=snapped.iter().map(|(&from,&to)|format!("{} -> {to}",f32::from_bits(from))).collect::<Vec<_>>().join(", ");
+    makepad_draw::log!("asset LOD distances snapped: {}",changes);
+    for group in groups{
+        let mut levels=Vec::new();let mut distances=Vec::new();
+        for (&level,&distance) in group.levels.iter().zip(&group.distances){
+            let distance=snapped.get(&distance.to_bits()).copied().unwrap_or(distance);
+            if distances.last()==Some(&distance){*levels.last_mut().unwrap()=level;}else{distances.push(distance);levels.push(level);}
+        }
+        group.levels=levels;group.distances=distances;
+    }
+    kept
 }
 
 /// Camera distance in world units, measured from the asset instance origin.
@@ -75,8 +101,9 @@ pub fn validate_distances(distances:impl IntoIterator<Item=f32>)->Result<(),Stri
     let mut previous=0.;let mut count=0;for distance in distances{count+=1;if count>MAX_LOD_THRESHOLDS||!distance.is_finite()||distance<=previous{return Err("LOD distances must be finite, positive, increasing and at most eight".into());}previous=distance;}Ok(())
 }
 
-// Locate only mesh-number token spans. Copy every other original JSON byte,
+// Locate mesh value and whole-member spans (including a separating comma). Copy every other original JSON byte,
 // including vendor metadata, large integers, Unicode and animation tracks.
+struct MeshSpan{value:Range<usize>,member:Range<usize>}
 struct Spans<'a>{bytes:&'a[u8],at:usize}
 impl Spans<'_>{
     fn ws(&mut self){while self.bytes.get(self.at).is_some_and(u8::is_ascii_whitespace){self.at+=1;}}
@@ -90,16 +117,18 @@ impl Spans<'_>{
             Some(_)=>{while self.bytes.get(self.at).is_some_and(|b|!b.is_ascii_whitespace()&&!b",]}".contains(b)){self.at+=1;}if self.at==start{return Err("LOD JSON value".into());}},None=>return Err("LOD JSON end".into()),
         }Ok(start..self.at)
     }
-    fn fields(&mut self,depth:usize)->Result<Vec<(String,Range<usize>)>,String>{
-        self.token(b'{')?;let mut fields=Vec::new();let mut names=std::collections::BTreeSet::new();self.ws();while self.bytes.get(self.at)!=Some(&b'}'){
-            let key=self.string()?;let parsed=crate::skin::JsonParser::parse(&self.bytes[key])?;let name=parsed.str().ok_or("LOD field name")?.to_owned();if !names.insert(name.clone()){return Err("duplicate LOD JSON field".into());}
-            self.token(b':')?;let span=self.value(depth+1)?;fields.push((name,span));self.ws();if self.bytes.get(self.at)==Some(&b','){self.at+=1;}else{break;}
+    fn fields(&mut self,depth:usize)->Result<Vec<(String,Range<usize>,Range<usize>)>,String>{
+        self.token(b'{')?;let mut fields=Vec::new();let mut names=std::collections::BTreeSet::new();let mut separator=None;self.ws();while self.bytes.get(self.at)!=Some(&b'}'){
+            let key=self.string()?;let start=key.start;let parsed=crate::skin::JsonParser::parse(&self.bytes[key])?;let name=parsed.str().ok_or("LOD field name")?.to_owned();if !names.insert(name.clone()){return Err("duplicate LOD JSON field".into());}
+            self.token(b':')?;let span=self.value(depth+1)?;self.ws();let comma=self.bytes.get(self.at)==Some(&b',');
+            let member=if comma{start..self.at+1}else{separator.unwrap_or(start)..self.at};fields.push((name,span,member));
+            if comma{separator=Some(self.at);self.at+=1;}else{break;}
         }self.token(b'}')?;Ok(fields)
     }
 }
-fn mesh_spans(json:&[u8])->Result<Vec<Range<usize>>,String>{
-    let mut reader=Spans{bytes:json,at:0};let root=reader.fields(0)?;reader.at=root.iter().find(|(k,_)|k=="nodes").ok_or("LOD JSON nodes")?.1.start;reader.token(b'[')?;let mut out=Vec::new();reader.ws();
-    while reader.bytes.get(reader.at)!=Some(&b']'){let fields=reader.fields(0)?;out.push(fields.into_iter().find(|(k,_)|k=="mesh").map(|(_,span)|span).unwrap_or(0..0));reader.ws();if reader.bytes.get(reader.at)==Some(&b','){reader.at+=1;}else{break;}}
+fn mesh_spans(json:&[u8])->Result<Vec<MeshSpan>,String>{
+    let mut reader=Spans{bytes:json,at:0};let root=reader.fields(0)?;reader.at=root.iter().find(|(k,_,_)|k=="nodes").ok_or("LOD JSON nodes")?.1.start;reader.token(b'[')?;let mut out=Vec::new();reader.ws();
+    while reader.bytes.get(reader.at)!=Some(&b']'){let fields=reader.fields(0)?;out.push(fields.into_iter().find(|(k,_,_)|k=="mesh").map(|(_,value,member)|MeshSpan{value,member}).unwrap_or(MeshSpan{value:0..0,member:0..0}));reader.ws();if reader.bytes.get(reader.at)==Some(&b','){reader.at+=1;}else{break;}}
     reader.token(b']')?;Ok(out)
 }
 
@@ -118,27 +147,51 @@ impl PreparedSkinLod{pub fn upload_bytes(&self)->usize{
 #[cfg(test)]
 mod tests{
     use super::*;
-    fn fixture(second:bool,bad_transform:bool)->Vec<u8>{
+    fn fixture(second:bool,bad_transform:bool,empty:bool)->Vec<u8>{
         let source=makepad_gltf::write_glb_mesh(&[[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]],&[0,1,2,0,2,3]);
         let (_,bin)=crate::asset_morph::chunks(&source).unwrap();
         let mut nodes=format!(r#"{{"name":"owner\"\\雪","mesh":0,"extensions":{{"MSFT_lod":{{"ids":[1]}}}},"extras":{{"MAKEPAD_lod_distances":[10]}}}},{{"mesh":1{}}}"#,if bad_transform{",\"translation\":[1,0,0]"}else{""});
         if second{nodes.push_str(r#",{"mesh":0,"translation":[3,0,0],"extensions":{"MSFT_lod":{"ids":[3]}},"extras":{"MAKEPAD_lod_distances":[20]}},{"mesh":1,"translation":[3,0,0]}"#);}
+        if empty{nodes=nodes.replace("\"mesh\":1", "\"extras\":{}");}
         let json=format!(r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[{}]}}],"nodes":[{}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":24}},{{"buffer":0,"byteOffset":24,"byteLength":48}},{{"buffer":0,"byteOffset":72,"byteLength":48}}],"accessors":[{{"bufferView":0,"componentType":5125,"count":6,"type":"SCALAR"}},{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}},{{"bufferView":2,"componentType":5126,"count":4,"type":"VEC3"}},{{"bufferView":0,"componentType":5125,"count":3,"type":"SCALAR"}}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":1,"NORMAL":2}},"indices":0}}]}},{{"primitives":[{{"attributes":{{"POSITION":1,"NORMAL":2}},"indices":3}}]}}]}}"#,if second{"0,2"}else{"0"},nodes,bin.len());
         let mut json=json.into_bytes();while json.len()%4!=0{json.push(b' ');}
         let mut out=b"glTF".to_vec();out.extend_from_slice(&2u32.to_le_bytes());out.extend_from_slice(&((28+json.len()+bin.len())as u32).to_le_bytes());out.extend_from_slice(&(json.len()as u32).to_le_bytes());out.extend_from_slice(b"JSON");out.extend_from_slice(&json);out.extend_from_slice(&(bin.len()as u32).to_le_bytes());out.extend_from_slice(b"BIN\0");out.extend_from_slice(bin);out
     }
     #[test]
     fn distance_union_changes_only_active_geometry_and_preserves_binary_and_ids(){
-        let source=fixture(true,false);let original=makepad_gltf::parse_glb_bytes(&source).unwrap();let high=crate::StaticModel::parse_glb(&source).unwrap();assert_eq!(high.indices.len()/3,4);
-        let mut plan=AssetLodPlan::parse(&source,1024*1024).unwrap().unwrap();assert_eq!(plan.distances(),&[10.,20.]);
-        for(index,triangles)in [(0,3),(1,2)]{let bytes=plan.variant_glb(index,1024*1024).unwrap();let parsed=makepad_gltf::parse_glb_bytes(&bytes).unwrap();
-            assert_eq!(parsed.bin_chunk,original.bin_chunk);assert_eq!(parsed.document.nodes_slice().len(),4);assert_eq!(parsed.document.nodes_slice()[0].name,original.document.nodes_slice()[0].name);
-            let (json,_)=crate::asset_morph::chunks(&bytes).unwrap();assert_eq!(crate::asset_morph::active_nodes(&json).unwrap(),vec![true,false,true,false]);assert_eq!(crate::StaticModel::parse_glb(&bytes).unwrap().indices.len()/3,triangles);
+        for empty in [false,true]{
+            let source=fixture(true,false,empty);let original=makepad_gltf::parse_glb_bytes(&source).unwrap();let high=crate::StaticModel::parse_glb(&source).unwrap();assert_eq!(high.indices.len()/3,4);
+            let mut plan=AssetLodPlan::parse(&source,1024*1024).unwrap().unwrap();assert_eq!(plan.distances(),&[10.,20.]);
+            for(index,triangles)in if empty{[(0,2),(1,0)]}else{[(0,3),(1,2)]}{let bytes=plan.variant_glb(index,1024*1024).unwrap();let parsed=makepad_gltf::parse_glb_bytes(&bytes).unwrap();
+                assert_eq!(parsed.bin_chunk,original.bin_chunk);assert_eq!(parsed.document.nodes_slice().len(),4);assert_eq!(parsed.document.nodes_slice()[0].name,original.document.nodes_slice()[0].name);
+                let (json,_)=crate::asset_morph::chunks(&bytes).unwrap();assert_eq!(crate::asset_morph::active_nodes(&json).unwrap(),vec![true,false,true,false]);assert_eq!(crate::StaticModel::parse_glb(&bytes).unwrap().indices.len()/3,triangles);
+            }
         }
     }
     #[test]
+    fn empty_mesh_members_remove_the_key_value_and_correct_comma(){
+        for node in [r#"{"mesh":0}"#,r#"{ "mesh" : 0, "name":"a" }"#,r#"{"name":"a", "mesh":0}"#,r#"{"name":"a","mesh":0,"extras":{"id":9007199254740993}}"#]{
+            let json=format!(r#"{{"nodes":[{node}]}}"#);let spans=mesh_spans(json.as_bytes()).unwrap();let span=&spans[0].member;
+            let edited=format!("{}{}",&json[..span.start],&json[span.end..]);
+            let parsed=crate::skin::JsonParser::parse(edited.as_bytes()).unwrap();let owner=parsed.get("nodes").unwrap().idx(0).unwrap();assert!(owner.get("mesh").is_none());
+            if node.contains("name"){assert_eq!(owner.get("name").unwrap().str(),Some("a"));}
+            if node.contains("extras"){assert!(edited.contains("9007199254740993"),"unrelated bytes remain exact");}
+        }
+    }
+    #[test]
+    fn frequent_thresholds_win_and_collapsed_levels_keep_lower_geometry(){
+        let mut groups=(1..=6).map(|i|AssetLod{node:i,levels:vec![i+10],distances:vec![i as f32*10.]}).collect::<Vec<_>>();
+        groups.extend([AssetLod{node:20,levels:vec![21,22],distances:vec![100.,200.]},AssetLod{node:30,levels:vec![31,32],distances:vec![100.,200.]},
+            AssetLod{node:40,levels:vec![41,42,43],distances:vec![70.,80.,90.]}]);
+        let mut reversed=groups.iter().cloned().rev().collect::<Vec<_>>();
+        let kept=coalesce_distances(&mut groups);assert_eq!(kept,vec![10.,20.,30.,40.,50.,60.,100.,200.]);
+        assert_eq!(coalesce_distances(&mut reversed),kept,"frequency ties prefer smaller distances independent of group order");
+        let override_=&groups[8];assert_eq!(override_.distances,vec![60.,100.]);assert_eq!(override_.levels,vec![42,43]);
+        assert_eq!(override_.select(60.).unwrap(),42,"equal-distance levels keep the lower one, and nearest ties snap downward");
+    }
+    #[test]
     fn unsupported_neighborhood_and_budget_are_explicit_errors(){
-        assert!(AssetLodPlan::parse(&fixture(false,true),1024*1024).is_err());let source=fixture(false,false);assert!(AssetLodPlan::parse(&source,source.len()-1).is_err());let mut plan=AssetLodPlan::parse(&source,1024*1024).unwrap().unwrap();assert!(plan.variant_glb(1,1024*1024).is_err());assert!(plan.variant_glb(0,16).is_err());
+        assert!(AssetLodPlan::parse(&fixture(false,true,false),1024*1024).is_err());let source=fixture(false,false,false);assert!(AssetLodPlan::parse(&source,source.len()-1).is_err());let mut plan=AssetLodPlan::parse(&source,1024*1024).unwrap().unwrap();assert!(plan.variant_glb(1,1024*1024).is_err());assert!(plan.variant_glb(0,16).is_err());
         assert!(validate_distances([10.,10.]).is_err());assert!(validate_distances((1..=9).map(|n|n as f32)).is_err());assert_eq!(selected_level(&[10.,30.],10.),1);assert_eq!(selected_level(&[10.,30.],30.),2);assert_eq!(selected_level(&[10.,30.],f32::NAN),0);
     }
 }

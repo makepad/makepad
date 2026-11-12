@@ -64,6 +64,8 @@ pub struct GlbShading {
     pub flake: f64,
     pub impostor: f64,
     pub rim: f64,
+    /// 1 = crown normals that the foliage lane must not flip toward the viewer.
+    pub crown: f64,
     /// 1 = a number plate with three blank cells and a digit strip: its digit
     /// cells show each copy's own number (the instance's plate number).
     pub plate: f64,
@@ -119,6 +121,7 @@ impl GlbShading {
     pub fn valid(self) -> bool {
         [self.wind, self.clearcoat, self.flake, self.rim, self.plate].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
             && self.impostor.is_finite() && (0.0..=100_000.0).contains(&self.impostor)
+            && (self.crown == 0.0 || self.crown == 1.0)
             && (self.msdf == 0.0 || self.msdf == 1.0)
             && self.msdf_fill.iter().chain(&self.msdf_border).all(|v| v.is_finite() && (0.0..=1.0).contains(v))
             && self.msdf_border_width.is_finite() && self.msdf_border_width >= 0.0
@@ -313,6 +316,9 @@ pub fn augment_glb_pbr(
             // its bytes.
             if let (JsonValue::Object(o), true) = (&mut shading, s.rim > 0.0) {
                 o.insert("rim".into(), JsonValue::F64(s.rim));
+            }
+            if let (JsonValue::Object(o), true) = (&mut shading, s.crown > 0.0) {
+                o.insert("crown".into(), JsonValue::F64(1.0));
             }
             if let (JsonValue::Object(o), true) = (&mut shading, s.plate > 0.0) {
                 o.insert("plate".into(), JsonValue::F64(s.plate));

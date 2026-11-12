@@ -305,6 +305,7 @@ impl Renderer {
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
         eye:Vec3f,
+        lod_scale:f32,
     ) {
         // The lane draws through the shader variant for this frame's
         // features, and parts that cut no pixel through the one without
@@ -439,8 +440,9 @@ impl Renderer {
             batch.skinned.ground_y = self.char_ground.get(i).copied().unwrap_or(0.0);
             batch.skinned.joint_base = base;
             let distance=crate::asset_lod::instance_distance(&item.transform,eye);
+            let lod_distance=distance*lod_scale;
             let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
-            let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=distance);n.checked_sub(1).map(|i|&levels[i].1)});
+            let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=lod_distance);n.checked_sub(1).map(|i|&levels[i].1)});
             batch.skinned.draw_vars.geometry_id =
                 Some(lod.map_or_else(||self.skin_rig_geometries[at].1.geometry_id(),|lod|lod.geometry.geometry_id()));
             batch.skinned.transform = item.transform;
@@ -495,6 +497,7 @@ impl Renderer {
                     // draw item can disagree about them.
                     let vars=&mut batch.skinned.draw_vars;
                     vars.set_uniform(cx.cx,live_id!(surface_on),&[1.0]);vars.set_uniform(cx.cx,live_id!(metallic),&[part.metallic]);vars.set_uniform(cx.cx,live_id!(roughness),&[part.roughness]);
+                    vars.set_uniform(cx.cx,live_id!(crown),&[if definition.crown{1.0}else{0.0}]);
                     // Toy gloss (clear coat and rim) in the spare lane.
                     batch.skinned.fur_layer.y=definition.packed_shading();
                     let vars=&mut batch.skinned.draw_vars;
@@ -531,6 +534,7 @@ impl Renderer {
                 batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(msdf_ctl),&[0.0;4]);
                 batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
                 batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(surface_on),&[0.0]);batch.skinned.fur_layer.y=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
+                batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(crown),&[0.0]);
             if batch.skinned.draw_vars.can_instance() {
                 // No material, no fur: nothing cuts a pixel.
                 batch.skinned.draw_vars.draw_shader_id = opaque.or(full);

@@ -1,6 +1,19 @@
 use crate::{context::invalid, *};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DerivedTriangle {
+    pub corners: [DerivedCorner; 3],
+    pub material: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DerivedCorner {
+    pub vertex: VertexId,
+    pub uv: [f64; 2],
+    pub normal: [f64; 3],
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
     pub(crate) vertices: Vec<Vertex>,
@@ -116,6 +129,56 @@ impl Mesh {
         m.check_structure(ctx)?;
         m.check_faces(ctx)?;
         Ok(m)
+    }
+
+    /// A mesh of `triangles` over vertices of `self`: each kept vertex keeps its
+    /// VertexId, position and weights; each corner gets the explicit UV and
+    /// normal given; no edge data or UV pins. For derived geometry (LOD levels)
+    /// that must keep skin and IDs.
+    pub fn derive_triangles(
+        &self,
+        triangles: &[DerivedTriangle],
+        ctx: &mut Context<'_>,
+    ) -> Result<Mesh> {
+        ctx.checkpoint(0)?;
+        let corner_count = triangles
+            .len()
+            .checked_mul(3)
+            .ok_or_else(|| invalid("derived corner count overflow"))?;
+        ctx.counts(0, triangles.len(), corner_count, 0)?;
+        let mut kept = BTreeSet::new();
+        let mut weights = 0usize;
+        for triangle in triangles {
+            ctx.checkpoint(1)?;
+            for corner in &triangle.corners {
+                let vertex = self
+                    .vertex(corner.vertex)
+                    .ok_or_else(|| invalid("derived triangle refers to missing vertex"))?;
+                if kept.insert(vertex.id) {
+                    weights = weights.saturating_add(vertex.weights.len());
+                }
+            }
+        }
+        ctx.counts(kept.len(), triangles.len(), corner_count, 0)?;
+        ctx.bytes(
+            storage_estimate(kept.len(), triangles.len(), corner_count, 0, weights)
+                .saturating_add(kept.len().saturating_mul(64)),
+        )?;
+        let mut derived = Self::new();
+        derived.next_id = self.next_id;
+        for vertex in &self.vertices {
+            ctx.checkpoint(1)?;
+            if kept.contains(&vertex.id) {
+                derived.vertices.push(vertex.clone());
+            }
+        }
+        for triangle in triangles {
+            ctx.checkpoint(1)?;
+            let corners = triangle.corners.map(|c| (c.vertex, c.uv, Some(c.normal)));
+            derived.push_face(&corners, triangle.material)?;
+        }
+        derived.check_structure(ctx)?;
+        Ok(derived)
     }
 
     /// Bulk import avoids one whole-mesh transaction per vertex. Each weight

@@ -249,6 +249,22 @@ impl Renderer {
         self.apply_model_lod_chains();
         self.placed_blocks.refresh(&self.static_models, &self.placed_models, self.placed_scene_signature);
         let camera_pos = scene_state.camera_pos;
+        // Target pixels, including this pass's DPI or offscreen render scale.
+        // XR records one model list for both eyes; like eye_pos below, use
+        // the left eye, with the runtime's actual projection and target size.
+        let pass_id = cx.current_pass_id();
+        let lod_scale = if matches!(cx.passes[pass_id].parent, CxDrawPassParent::Xr) {
+            cx.cx.xr_pass_eyes().map_or(1.0, |([(_, projection), _], size)| {
+                crate::lod_view::lod_projection_scale(&projection, size.y as f32)
+            })
+        } else {
+            // The recording stack may carry display DPI; the pass's own DPI
+            // is the raster density (also handles hosts changing it after begin).
+            let view_height_px = cx.passes[pass_id].dpi_factor.and_then(|dpi| {
+                cx.cx.get_pass_rect(pass_id, dpi).map(|rect| Cx::pass_pixel_size(rect.size, dpi).1 as f32)
+            }).unwrap_or(0.0);
+            crate::lod_view::lod_projection_scale(&scene_state.projection, view_height_px)
+        } * self.lod_bias;
         // The stage the scene draw list carries (identity on an MR box stage, whose stage
         // rides in the XR eye views instead: shaders then see world coordinates).
         let stage_matrix = self.draw_stage_matrix();
@@ -284,8 +300,9 @@ impl Renderer {
         let frustum = frustum_val.as_ref();
         // Where the eye really is in the world: the game camera, except on an MR box stage,
         // whose eye is the headset's, through the stage (far off at a small scale). Levels of
-        // detail, impostors and grass are picked, and shading views from, there; shadows,
-        // lights and streaming stay centred on the game camera (the followed subject).
+        // detail, impostors and grass are picked, and shading views from, there; shadow
+        // scheduling, lights and streaming stay centred on the game camera (the followed
+        // subject), while caster LODs share the drawn models' eye and scale.
         // (The left eye's view of the world: its view in the room times the stage.)
         let eye_view = match (self.stage.mode, cx.cx.xr_eye_matrices()) {
             (StageMode::MrBox, Some([(view, _), _])) => Some(Mat4f::mul(&view, &self.stage.matrix())),
@@ -380,7 +397,7 @@ impl Renderer {
         }
         let mut lm_movers = if tiers.csm || local_shadows {
             self.ensure_entity_caster_geometries(cx.cx);
-            self.collect_lm_movers(world, camera_pos, skinned.as_ref().map(|b| b.items.as_slice()))
+            self.collect_lm_movers(world, eye_pos, lod_scale, skinned.as_ref().map(|b| b.items.as_slice()))
         } else {
             Vec::new()
         };
@@ -1433,6 +1450,7 @@ impl Renderer {
                 frustum,
                 &mut stats,
                 eye_pos,
+                lod_scale,
             );
         }
 
@@ -1605,6 +1623,7 @@ impl Renderer {
                 ModelDraw::Diffuse(draw),
                 LayerPhase::Opaque,
                 eye_pos,
+                lod_scale,
                 &instances,
                 WorldModelLane::Placed,
                 (fog_color, fog_density),
@@ -1615,6 +1634,7 @@ impl Renderer {
             self.draw_pbr_models(
                 cx,
                 eye_pos,
+                lod_scale,
                 &instances,
                 WorldModelLane::Placed,
                 (fog_color, fog_density),
@@ -1622,11 +1642,11 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
-            self.draw_splat_models(cx, eye_pos, &instances, WorldModelLane::Placed,
+            self.draw_splat_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
-            self.draw_foliage_models(cx, eye_pos, &instances, WorldModelLane::Placed,
+            self.draw_foliage_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
-            self.draw_custom_models(cx, eye_pos, &instances, WorldModelLane::Placed,
+            self.draw_custom_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.placed_models = instances;
             let owner = cx.enter_draw_name("stream");
@@ -1664,6 +1684,7 @@ impl Renderer {
                 ModelDraw::Diffuse(draw),
                 LayerPhase::Opaque,
                 eye_pos,
+                lod_scale,
                 &attachments,
                 WorldModelLane::Attachment,
                 (fog_color, fog_density),
@@ -1674,6 +1695,7 @@ impl Renderer {
             self.draw_pbr_models(
                 cx,
                 eye_pos,
+                lod_scale,
                 &attachments,
                 WorldModelLane::Attachment,
                 (fog_color, fog_density),
@@ -1681,7 +1703,7 @@ impl Renderer {
                 frustum,
                 &mut stats,
             );
-            self.draw_custom_models(cx, eye_pos, &attachments, WorldModelLane::Attachment,
+            self.draw_custom_models(cx, eye_pos, lod_scale, &attachments, WorldModelLane::Attachment,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.world_attachments = attachments;
         }
@@ -1892,7 +1914,7 @@ impl Renderer {
         if !self.blended_models.is_empty() {
             if let Some(draw) = models_draw.as_deref_mut() {
                 let owner = cx.enter_draw_name("blended models");
-                self.draw_blended_models(cx, draw, eye_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
+                self.draw_blended_models(cx, draw, eye_pos, lod_scale, (fog_color, fog_density), &sun, frustum, &mut stats);
                 cx.exit_draw_label(owner);
             }
         }

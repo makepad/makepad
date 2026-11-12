@@ -80,6 +80,15 @@ script_mod! {
             let rz = self.csm_rz(ci)
             return vec3(dot(rx.xyz, p) + rx.w, dot(ry.xyz, p) + ry.w, dot(rz.xyz, p) + rz.w)
         }
+        // The deepest reference (z01) a receiver compares in cascade ci. A
+        // model's own layers override it (DrawSceneSkinned): in the cascades
+        // where the model casts through its far stand-in (gpu_lightmap
+        // CasterBand), they compare no deeper than just before that
+        // stand-in's plane, so the stand-in never shadows the model it stands
+        // in for. Everything nearer the sun than that plane still does.
+        csm_own_limit: fn(ci: float) -> float {
+            return 2.0
+        }
         // 1 when q lies inside a cascade's full XYZ window (xy within `m`).
         csm_inside: fn(q: vec3, m: float) -> float {
             if max(abs(q.x), abs(q.y)) > m || q.z < 0.0 || q.z > 1.0 { return 0.0 }
@@ -137,7 +146,7 @@ script_mod! {
             let q = self.csm_proj(ci, wp2)
             let r = clamp(0.025 / tw, 1.5, 3.0)
             let tan_t = min(sqrt(max(1.0 - nl * nl, 0.0)) / max(nl, 0.05), 4.0)
-            let ref01 = q.z - tw * (0.5 + 0.5 * r * tan_t) * self.csm_pick(self.csm_zw, ci)
+            let ref01 = min(q.z - tw * (0.5 + 0.5 * r * tan_t) * self.csm_pick(self.csm_zw, ci), self.csm_own_limit(ci))
             let depth = ref01 * self.csm_pick(self.csm_da, ci) + self.csm_pick(self.csm_db, ci)
             let u = q.x * 0.5 + 0.5
             let v = 0.5 - q.y * 0.5
@@ -264,7 +273,7 @@ script_mod! {
             let tw = self.csm_pick(self.csm_texel, ci)
             let nl = clamp(ndl, 0.0, 1.0)
             let q2 = self.csm_proj(ci, wp + normalize(n) * (tw * (1.0 + 1.5 * (1.0 - nl))))
-            let depth = (q2.z - tw * 2.0 * self.csm_pick(self.csm_zw, ci)) * self.csm_pick(self.csm_da, ci) + self.csm_pick(self.csm_db, ci)
+            let depth = min(q2.z - tw * 2.0 * self.csm_pick(self.csm_zw, ci), self.csm_own_limit(ci)) * self.csm_pick(self.csm_da, ci) + self.csm_pick(self.csm_db, ci)
             return self.csm_tap(q2.x * 0.5 + 0.5, 0.5 - q2.y * 0.5, ci, depth)
         }
 

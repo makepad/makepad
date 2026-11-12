@@ -18,6 +18,7 @@ pub mod asset_animation;
 pub mod asset_sockets;
 pub mod asset_metadata;
 pub mod asset_lod;
+pub mod lod_view;
 pub mod ao;
 pub mod custom_material;
 pub mod clustered;

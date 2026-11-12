@@ -10,6 +10,7 @@
 // structure: the rows of a supernode in threes, sharing the gathered vector.
 use crate::{
     data::Data,
+    sparse_pattern::{Pattern, PatternBuf, PatternRef},
     util_blas::*,
     util_misc::{copy_int, gather, zero_int},
 };
@@ -820,6 +821,101 @@ pub fn transpose_sparse(
     }
 }
 
+/// transpose_sparse of a checked pattern (with its values into `res` when given): the transpose's p.nc() rows
+/// over p.nr() columns are written into `out` (each array at least p.nc() long; the column list, and `res`,
+/// as long as the pattern's count) and checked as they are made; supernodes when `with_super`. Its writes,
+/// addressed by the pattern's columns and by the addresses counted from them, are unchecked.
+pub fn transpose_pat(mut res: Option<&mut [f64]>, mat: &[f64], p: PatternRef, out: PatternBuf, with_super: bool) -> Pattern {
+    let (nr, nc, rownnz, rowadr, colind) = (p.nr(), p.nc(), p.rownnz(), p.rowadr(), p.colind());
+    let mut out = out;
+    assert!(out.rownnz.len() >= nc && out.rowadr.len() >= nc && (!with_super || out.rowsuper.len() >= nc),
+        "transpose_pat: an output row array is shorter than the column count");
+    assert!(res.is_none() || mat.len() >= p.end(), "transpose_pat: the values are shorter than the pattern");
+    let res_rownnz = &mut out.rownnz[..nc];
+    let res_rowadr = &mut out.rowadr[..nc];
+    let mut res_rowsuper = with_super.then(|| &mut out.rowsuper[..nc]);
+    zero_int(res_rownnz, nc);
+    zero_int(res_rowadr, nc);
+    if let Some(s) = res_rowsuper.as_deref_mut() {
+        zero_int(s, nc);
+    }
+    if nr != 0 && nc != 0 {
+        // SAFETY: the pattern is checked, so every column c is below nc, the length of the row arrays; the
+        // fill writes row c of the transpose at the addresses the count gave it, from res_rowadr[c] up to
+        // res_rowadr[c] + res_rownnz[c] (the same walk of the same pattern), all below the total, which is
+        // checked against the column list and the values before the fill.
+        unsafe {
+            for r in 0..nr {
+                let adr = rowadr[r] as usize;
+                for &c in &colind[adr..adr + rownnz[r] as usize] {
+                    *res_rownnz.get_unchecked_mut(c as usize) += 1;
+                }
+            }
+            if let Some(s) = res_rowsuper.as_deref_mut() {
+                for i in 0..nc - 1 {
+                    s[i] = (res_rownnz[i] == res_rownnz[i + 1]) as i32;
+                }
+                s[nc - 1] = 0;
+            }
+            res_rowadr[0] = 0;
+            for i in 1..nc {
+                res_rowadr[i] = res_rowadr[i - 1] + res_rownnz[i - 1];
+            }
+            let total = (res_rowadr[nc - 1] + res_rownnz[nc - 1]) as usize;
+            assert!(out.colind.len() >= total && res.as_deref().is_none_or(|v| v.len() >= total),
+                "transpose_pat: the output column list or values are shorter than the pattern");
+            let res_colind = &mut out.colind[..total];
+            for r in 0..nr {
+                let mut c_prev = -1;
+                let start = rowadr[r] as usize;
+                let end = start + rownnz[r] as usize;
+                let cols = &colind[start..end];
+                let mut mark = |c: i32| {
+                    if let Some(s) = res_rowsuper.as_deref_mut() {
+                        if c > 0 && c != c_prev + 1 && s[c as usize - 1] != 0 {
+                            s[c as usize - 1] = 0;
+                        }
+                        c_prev = c;
+                    }
+                };
+                match res.as_deref_mut() {
+                    Some(v) => {
+                        for (&c, &x) in cols.iter().zip(&mat[start..end]) {
+                            let slot = res_rowadr.get_unchecked_mut(c as usize);
+                            let adr = *slot as usize;
+                            *slot += 1;
+                            *res_colind.get_unchecked_mut(adr) = r as i32;
+                            *v.get_unchecked_mut(adr) = x;
+                            mark(c);
+                        }
+                    }
+                    None => {
+                        for &c in cols {
+                            let slot = res_rowadr.get_unchecked_mut(c as usize);
+                            let adr = *slot as usize;
+                            *slot += 1;
+                            *res_colind.get_unchecked_mut(adr) = r as i32;
+                            mark(c);
+                        }
+                    }
+                }
+            }
+        }
+        for i in (1..nc).rev() {
+            res_rowadr[i] = res_rowadr[i - 1];
+        }
+        res_rowadr[0] = 0;
+        if let Some(s) = res_rowsuper {
+            for i in (0..nc - 1).rev() {
+                if s[i] != 0 {
+                    s[i] += s[i + 1];
+                }
+            }
+        }
+    }
+    Pattern::new(out, nc, nr, with_super).unwrap_or_else(|(e, _)| panic!("transpose_pat: the transpose was refused: {e:?}"))
+}
+
 pub fn super_sparse(
     nr: usize,
     rowsuper: &mut [i32],
@@ -1138,25 +1234,26 @@ fn accum_super_row<const W: usize>(
     }
 }
 
+/// res = mat_t * diag * mat' over checked patterns: each row r of `mat_t` (pattern `pt`) picks rows k of `mat`
+/// (pattern `p`) by its columns, into row r of `res` (pattern `res_p`, nc x nc with nc = res_p.nr()); with
+/// `res_diagind`, the lower triangle up to each row's diagonal entry, mirrored into the upper after.
 pub fn sqr_mat_tdsparse_numeric(
     res: &mut [f64],
-    nc: usize,
-    res_rownnz: &[i32],
-    res_rowadr: &[i32],
-    res_colind: &[i32],
+    res_p: PatternRef,
     res_diagind: Option<&[i32]>,
     mat: &[f64],
-    rownnz: &[i32],
-    rowadr: &[i32],
-    colind: &[i32],
+    p: PatternRef,
     mat_t: &[f64],
-    rownnz_t: &[i32],
-    rowadr_t: &[i32],
-    colind_t: &[i32],
-    rowsuper_t: Option<&[i32]>,
+    pt: PatternRef,
     diag: Option<&[f64]>,
     scratch: &mut crate::memory::Scratch,
 ) {
+    let nc = res_p.nr();
+    let (res_rownnz, res_rowadr, res_colind) = (res_p.rownnz(), res_p.rowadr(), res_p.colind());
+    let (rownnz, rowadr, colind) = (p.rownnz(), p.rowadr(), p.colind());
+    let (rownnz_t, rowadr_t, colind_t, rowsuper_t) = (pt.rownnz(), pt.rowadr(), pt.colind(), pt.rowsuper());
+    assert!(res_p.nc() == nc && pt.nr() == nc && p.nc() == nc && pt.nc() == p.nr(),
+        "sqr_mat_tdsparse_numeric: the patterns' shapes disagree");
     if nc == 0 {
         return;
     }

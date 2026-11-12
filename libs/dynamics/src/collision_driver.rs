@@ -76,6 +76,8 @@ pub struct CollisionTask {
     pub(crate) bvh_marks: Vec<usize>,
     /// the midphase's candidate geom pairs of the task's broadphase pairs, in order
     pub(crate) pairs: Vec<Pair>,
+    /// in the broadphase's sweep, the pairs of boxes its part found, joined in part order
+    pub(crate) box_pairs: Vec<Packed32>,
 }
 
 /// Moves what `tasks` recorded into `d`: the seeds of the field pairs they collided give way to the new
@@ -642,7 +644,8 @@ fn collide_tree(m: &Model, d: &Data, scratch: &mut Scratch, bvh_marks: &mut Vec<
     npair
 }
 
-fn make_aamm(m: &Model, d: &Data, x_min: &mut f64, y_min: &mut f64, z_min: &mut f64, x_max: &mut f64, y_max: &mut f64, z_max: &mut f64, bf: usize, frame: &[f64; 9]) {
+// The box of body or flex bf in `frame`: its least x, y and z, then its greatest.
+fn make_aamm(m: &Model, d: &Data, bf: usize, frame: &[f64; 9]) -> [f64; 6] {
     let mut aamm = [0.0; 6];
     let override_margin = if m.opt.enableflags & ENBL_OVERRIDE != 0 { 0.5*m.opt.o_margin } else { 0.0 };
     if bf < m.nbody {
@@ -673,8 +676,42 @@ fn make_aamm(m: &Model, d: &Data, x_min: &mut f64, y_min: &mut f64, z_min: &mut 
             else { for j in 0..3 { aamm[j] = min(aamm[j], geom_aamm[j]); aamm[j+3] = max(aamm[j+3], geom_aamm[j+3]); } }
         }
     } else { crate::unported!("mj_rodBoxSize"); }
-    *x_min = aamm[0]; *y_min = aamm[1]; *z_min = aamm[2];
-    *x_max = aamm[3]; *y_max = aamm[4]; *z_max = aamm[5];
+    aamm
+}
+
+// What a box's pairs are filtered by, BOX_INFO ints a box: its weld, the weld's parent's weld, the weld's dofs, its
+// contype and conaffinity (its geoms' together), and the BOX_* flags. Taken once a box, beside its box, where the
+// reference takes them for each pair.
+const BOX_INFO: usize = 6;
+const BOX_BODY: i32 = 1;
+const BOX_ASLEEP: i32 = 2;
+const BOX_STILL: i32 = 4;
+const BOX_AWAKE_DOFS: i32 = 8;
+
+fn box_info(m: &Model, d: &Data, bf: usize, sleep_filter: bool, info: &mut [i32]) {
+    let nbody = m.nbody;
+    let (mut contype, mut conaffinity) = (0, 0);
+    let mut flags = if has_awake_dofs(m, d, bf, sleep_filter) { BOX_AWAKE_DOFS } else { 0 };
+    let (mut weld, mut parent_weld, mut dofnum) = (0, 0, 0);
+    if bf < nbody {
+        let body_geomadr = m.body_geomadr[bf]; let body_geomnum = m.body_geomnum[bf];
+        for i in body_geomadr..body_geomadr+body_geomnum { contype |= m.geom_contype[i as usize]; conaffinity |= m.geom_conaffinity[i as usize]; }
+        weld = m.body_weldid[bf]; parent_weld = m.body_weldid[m.body_parentid[weld as usize] as usize]; dofnum = m.body_dofnum[weld as usize];
+        flags |= BOX_BODY;
+        if sleep_filter && d.body_awake[bf] as i32 == S_ASLEEP { flags |= BOX_ASLEEP; }
+        if still_weld(m, d, weld, sleep_filter) { flags |= BOX_STILL; }
+    } else { contype = m.flex_contype[bf-nbody]; conaffinity = m.flex_conaffinity[bf-nbody]; }
+    info.copy_from_slice(&[weld, parent_weld, dofnum, contype, conaffinity, flags]);
+}
+
+// Whether the boxes of `a` and `b` (box_info) make a broadphase pair: the reference's filter of its sweep's pairs
+// (mj_broadphase), then mj_addPair's contype and conaffinity test.
+fn keep_box_pair(a: &[i32], b: &[i32], dsbl_filterparent: bool) -> bool {
+    let (fa, fb) = (a[5], b[5]);
+    if fa & fb & BOX_BODY != 0 {
+        if filter_body_pair(a[0], a[1], fa & BOX_ASLEEP != 0, fa & BOX_STILL != 0, a[2], b[0], b[1], fb & BOX_ASLEEP != 0, fb & BOX_STILL != 0, b[2], dsbl_filterparent) { return false; }
+    } else if (fa | fb) & BOX_AWAKE_DOFS == 0 { return false; }
+    a[3] & b[4] != 0 || b[3] & a[4] != 0
 }
 
 fn add_pair(m: Option<&Model>, bf1: usize, bf2: usize, npair: &mut usize, pair: &mut [Packed32], maxpair: usize) {
@@ -706,47 +743,68 @@ fn sapcmp(obj1: &Sap, obj2: &Sap) -> i32 {
     else { 1 }
 }
 
-// Public for the driver integration test; C's mj_SAP is file-local.
-pub fn sap(d: &mut Data, aamm: &[f64], n: usize, axis_x: i32, pair: &mut [Packed32], maxpair: usize) -> i32 {
+// The serial work of the broadphase's parts for `thread::part_count`, in nanoseconds: a geom's box (make_aamm and
+// box_info), 22 ns; and the sweep, which grows with the square of the boxes (each box tests the boxes that start
+// within its x extent, more of them as a scene fills): 0.115 ns a pair of boxes. Measured at 1 thread on a 16-thread
+// Linux node: 100 humanoids (2000 geoms, 1300 boxes) 44 us of boxes and 194 us of sweep, 22 humanoids 9.7 and 8.0.
+const BOX_GEOM_NS: usize = 22;
+const SWEEP_PAIRS_A_NS: usize = 8;
+
+/// Sweep and prune along `axis_x` of the `n` boxes `aamm` (a row of 6 a box: least x, y and z, then greatest):
+/// writes the pairs of boxes that overlap on all three axes and that `keep` keeps, the box that starts first along
+/// x first, and returns how many, maxpair + 1 when they do not fit (the first maxpair written), or -1 for bad
+/// arguments. Bounds that touch overlap. The reference (mj_SAP) sweeps the sorted starts and ends with a list of
+/// the boxes it is in; here the starts alone are sorted (ties in box order, as the reference sorts them) and each
+/// box tests the boxes that start after it within its x extent: the same pairs, for boxes whose start is not past
+/// their end. The boxes are swept in parts on the pool bound to d, each part's pairs kept in its collision task
+/// and joined in part order. Public for the driver integration test; C's mj_SAP is file-local.
+pub fn sap(d: &mut Data, aamm: &[f64], n: usize, axis_x: i32, pair: &mut [Packed32], maxpair: usize, keep: impl Fn(usize, usize) -> bool + Sync) -> i32 {
     if n >= 0x10000 || axis_x < 0 || axis_x > 2 || maxpair < 1 { return -1; }
-    let mut sortbuf = d.scratch.sap(2*n); let mut activebuf = d.scratch.sap(2*n);
-    let x_min = &aamm[n*axis_x as usize..]; let x_max = &aamm[n*(axis_x as usize+3)..];
-    for i in 0..n {
-        sortbuf[2*i].id_ismax = i as i32; sortbuf[2*i].value = x_min[i] as f32;
-        sortbuf[2*i+1].id_ismax = i as i32 + 0x10000; sortbuf[2*i+1].value = x_max[i] as f32;
-    }
-    let mut buf = d.scratch.sap(2*n);
-    sort(&mut sortbuf, &mut buf, 2*n, &mut sapcmp);
+    if n < 2 { return 0; }
+    let axis_x = axis_x as usize;
     let (axis_y, axis_z) = if axis_x == 0 { (1,2) } else if axis_x == 1 { (0,2) } else { (0,1) };
-    let y_min = &aamm[n*axis_y..]; let y_max = &aamm[n*(axis_y+3)..];
-    let z_min = &aamm[n*axis_z..]; let z_max = &aamm[n*(axis_z+3)..];
-    // the active objects' y and z bounds (min y, max y, min z, max z) in a row beside them, in the same
-    // order: the sweep reads them in turn instead of through each object's id
+    let mut starts = d.scratch.sap(n); let mut ends = d.scratch.sap(n);
+    for i in 0..n { starts[i] = Sap { value: aamm[6*i+axis_x] as f32, id_ismax: i as i32 }; }
+    sort(&mut starts, &mut ends, n, &mut sapcmp);
+    // in the starts' order: each box's end along x, and its y and z bounds (least y, greatest y, least z, greatest
+    // z), which the sweep reads in turn
     let mut bounds = d.scratch.num(4*n);
-    let mut cnt = 0; let mut npair = 0;
-    'sweep: for i in 0..2*n {
-        if sortbuf[i].id_ismax & 0x10000 == 0 {
-            let id2 = sortbuf[i].id_ismax as usize;
-            let (y_min2, y_max2, z_min2, z_max2) = (y_min[id2], y_max[id2], z_min[id2], z_max[id2]);
-            for (active, b) in activebuf[..cnt].iter().zip(bounds[..4*cnt].chunks_exact(4)) {
-                if b[0] > y_max2 || y_min2 > b[1] || b[2] > z_max2 || z_min2 > b[3] { continue; }
-                if npair >= maxpair { npair = maxpair + 1; break 'sweep; }
-                pair[npair].hi = active.id_ismax as u16; pair[npair].lo = id2 as u16; npair += 1;
+    for (p, start) in starts[..n].iter().enumerate() {
+        let b = &aamm[6*start.id_ismax as usize..][..6];
+        ends[p].value = b[3+axis_x] as f32;
+        bounds[4*p..4*p+4].copy_from_slice(&[b[axis_y], b[3+axis_y], b[axis_z], b[3+axis_z]]);
+    }
+    let chunk = n.div_ceil(part_count(d, n, n * n / SWEEP_PAIRS_A_NS));
+    let nchunk = n.div_ceil(chunk);
+    let mut tasks = std::mem::take(&mut d.collision_tasks);
+    if tasks.len() < nchunk { tasks.resize_with(nchunk, CollisionTask::default); }
+    {
+        let (starts, ends, bounds) = (&starts[..n], &ends[..n], &bounds[..4*n]);
+        run_parts(&d.threadpool, tasks[..nchunk].iter_mut(), |k, t| {
+            t.box_pairs.clear();
+            for p in k*chunk..n.min((k+1)*chunk) {
+                let (end, a) = (ends[p].value, &bounds[4*p..4*p+4]);
+                let i = starts[p].id_ismax as usize;
+                for (start, b) in starts[p+1..].iter().zip(bounds[4*(p+1)..].chunks_exact(4)) {
+                    if start.value > end { break; }
+                    if a[0] > b[1] || b[0] > a[1] || a[2] > b[3] || b[2] > a[3] { continue; }
+                    let j = start.id_ismax as usize;
+                    if keep(i, j) { t.box_pairs.push(Packed32 { hi: i as u16, lo: j as u16 }); }
+                }
             }
-            activebuf[cnt] = sortbuf[i];
-            bounds[4*cnt..4*cnt+4].copy_from_slice(&[y_min2, y_max2, z_min2, z_max2]);
-            cnt += 1;
-        } else {
-            let toremove = sortbuf[i].id_ismax & 0xFFFF;
-            if let Some(j) = activebuf[..cnt].iter().position(|a| a.id_ismax == toremove) {
-                activebuf.copy_within(j+1..cnt, j);
-                bounds.copy_within(4*(j+1)..4*cnt, 4*j);
-                cnt -= 1;
-            }
+        });
+    }
+    let mut npair = 0;
+    'join: for t in &tasks[..nchunk] {
+        for &p in &t.box_pairs {
+            if npair >= maxpair { npair = maxpair + 1; break 'join; }
+            pair[npair] = p; npair += 1;
         }
     }
+    for t in &mut tasks[..nchunk] { t.box_pairs.clear(); }
+    d.collision_tasks = tasks;
     d.scratch.put_num(bounds);
-    d.scratch.put_sap(buf); d.scratch.put_sap(activebuf); d.scratch.put_sap(sortbuf);
+    d.scratch.put_sap(ends); d.scratch.put_sap(starts);
     npair as i32
 }
 fn update_cov(cov: &mut [f64; 9], vec: &[f64; 3], cen: &[f64; 3]) {
@@ -796,29 +854,28 @@ fn broadphase(m: &Model, d: &mut Data, bfpair: &mut [Packed32], maxpair: usize) 
     let mut bfid = d.scratch.int(nbodyflex); let mut ncollide = 0;
     for i in 1..nbodyflex { if can_collide(m, i) { bfid[ncollide] = i as i32; ncollide += 1; } }
     if ncollide > 1 {
-        let mut aamm = d.scratch.num(6*ncollide);
-        for i in 0..ncollide {
-            let (mut xmin, mut ymin, mut zmin, mut xmax, mut ymax, mut zmax) = (0.0,0.0,0.0,0.0,0.0,0.0);
-            make_aamm(m, d, &mut xmin, &mut ymin, &mut zmin, &mut xmax, &mut ymax, &mut zmax, bfid[i] as usize, &frame);
-            aamm[i] = xmin; aamm[ncollide+i] = ymin; aamm[2*ncollide+i] = zmin;
-            aamm[3*ncollide+i] = xmax; aamm[4*ncollide+i] = ymax; aamm[5*ncollide+i] = zmax;
+        // each box and what its pairs are filtered by, in parts on the pool bound to d
+        let mut aamm = d.scratch.num(6*ncollide); let mut info = d.scratch.int(BOX_INFO*ncollide);
+        let chunk = ncollide.div_ceil(part_count(d, ncollide, BOX_GEOM_NS * ngeom));
+        {
+            let d: &Data = d;
+            let parts = bfid[..ncollide].chunks(chunk).zip(aamm[..6*ncollide].chunks_mut(6*chunk)).zip(info[..BOX_INFO*ncollide].chunks_mut(BOX_INFO*chunk));
+            run_parts(&d.threadpool, parts, |_, ((ids, boxes), infos)| {
+                for ((&bf, b), inf) in ids.iter().zip(boxes.chunks_exact_mut(6)).zip(infos.chunks_exact_mut(BOX_INFO)) {
+                    b.copy_from_slice(&make_aamm(m, d, bf as usize, &frame));
+                    box_info(m, d, bf as usize, sleep_filter, inf);
+                }
+            });
         }
         let maxsappair = ncollide*(ncollide-1)/2; let mut sappair = d.scratch.packed_pair(maxsappair);
-        let mut nsappair = sap(d, &aamm, ncollide, 0, &mut sappair, maxsappair);
+        let keep = |i: usize, j: usize| keep_box_pair(&info[BOX_INFO*i..][..BOX_INFO], &info[BOX_INFO*j..][..BOX_INFO], dsbl_filterparent);
+        let mut nsappair = sap(d, &aamm, ncollide, 0, &mut sappair, maxsappair, keep);
         if nsappair < 0 { panic!("SAP failed"); }
         if nsappair as usize > maxsappair { warning(d, WARN_CONTACTFULL, maxsappair as i32); nsappair = maxsappair as i32; }
-        for i in 0..nsappair as usize {
-            let bf1 = bfid[sappair[i].hi as usize] as usize; let bf2 = bfid[sappair[i].lo as usize] as usize;
-            if bf1 < nbody && bf2 < nbody {
-                let weld1 = m.body_weldid[bf1]; let weld2 = m.body_weldid[bf2];
-                let parent_weld1 = m.body_weldid[m.body_parentid[weld1 as usize] as usize]; let parent_weld2 = m.body_weldid[m.body_parentid[weld2 as usize] as usize];
-                let asleep1 = sleep_filter && d.body_awake[bf1] as i32 == S_ASLEEP; let asleep2 = sleep_filter && d.body_awake[bf2] as i32 == S_ASLEEP;
-                let dofnum1 = m.body_dofnum[weld1 as usize]; let dofnum2 = m.body_dofnum[weld2 as usize];
-                if filter_body_pair(weld1, parent_weld1, asleep1, still_weld(m, d, weld1, sleep_filter), dofnum1, weld2, parent_weld2, asleep2, still_weld(m, d, weld2, sleep_filter), dofnum2, dsbl_filterparent) { continue; }
-            } else if !has_awake_dofs(m, d, bf1.min(bf2), sleep_filter) && !has_awake_dofs(m, d, bf1.max(bf2), sleep_filter) { continue; }
-            add_pair(Some(m), bf1, bf2, &mut npair, bfpair, maxpair);
+        for p in &sappair[..nsappair as usize] {
+            add_pair(None, bfid[p.hi as usize] as usize, bfid[p.lo as usize] as usize, &mut npair, bfpair, maxpair);
         }
-        d.scratch.put_packed_pair(sappair); d.scratch.put_num(aamm);
+        d.scratch.put_packed_pair(sappair); d.scratch.put_int(info); d.scratch.put_num(aamm);
     }
     if npair > 1 {
         let mut buf = d.scratch.packed_pair(npair);

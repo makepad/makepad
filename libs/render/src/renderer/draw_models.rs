@@ -141,7 +141,7 @@ impl DrawNames {
 /// LOD, and the copies grouped by (model, LOD).
 #[derive(Default)]
 pub(super) struct ModelOrder {
-    key: (usize, usize),
+    key: (usize, usize, u32),
     slots: Vec<Option<usize>>,
     lods: Vec<usize>,
     distances: Vec<f32>,
@@ -246,7 +246,7 @@ impl PlacedBlocks {
 }
 
 impl ModelOrder {
-    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>, blocks: Option<&PlacedBlocks>) -> u64 {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, lod_scale: f32, key: (usize, usize), chained: &dyn Fn(&str) -> bool, frustum: Option<&Frustum>, occluders: Option<&crate::stream::OcclusionRaster>, blocks: Option<&PlacedBlocks>) -> u64 {
         // Model slot per instance, resolved once through a map: a linear
         // search per instance is O(instances x models), which a streamed or
         // prop-heavy world turns into milliseconds.
@@ -266,7 +266,8 @@ impl ModelOrder {
                 let distance = crate::asset_lod::instance_distance(&instances[i].transform, eye);
                 slots[i] = slot;
                 distances[i] = distance;
-                lods[i] = slot.map_or(0, |at| models[at].1.lods.partition_point(|(threshold, _)| *threshold <= distance));
+                let lod_distance = distance * lod_scale;
+                lods[i] = slot.map_or(0, |at| models[at].1.lods.partition_point(|(threshold, _)| *threshold <= lod_distance));
             };
             // Copies of one model often follow each other: those skip the hash.
             let mut last: Option<(&str, Option<usize>)> = None;
@@ -311,7 +312,7 @@ impl ModelOrder {
             // (vehicles) are worth a second draw in the band; a decimated
             // prop's levels differ by less than the dither would show.
             let fade = slot.filter(|at| chained[*at]).and_then(|at| {
-                chain_fade_windows(models[at].1.lods.get(lod)?.0, distance)
+                chain_fade_windows(models[at].1.lods.get(lod)?.0, distance * lod_scale)
             });
             match fade {
                 Some((near, next)) => {
@@ -361,7 +362,7 @@ impl ModelOrder {
         self.order.sort_unstable_by_key(|&(i, lod, _)| (slots[i], lod, distances[i].to_bits(), i));
         self.ao.clear();
         self.ao.resize(models.len(), None);
-        self.key = key;
+        self.key = (key.0, key.1, lod_scale.to_bits());
         culled
     }
 }
@@ -371,7 +372,7 @@ impl Renderer {
     /// within each list. Both the queue storage and custom draw keys are reused.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_blended_models(
-        &mut self, cx: &mut Cx3d, diffuse: &mut DrawSceneSkinned, eye: Vec3f,
+        &mut self, cx: &mut Cx3d, diffuse: &mut DrawSceneSkinned, eye: Vec3f, lod_scale: f32,
         fog: (Vec3f, f32), sun: &SunLight, frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
         let active = std::mem::take(&mut self.blended_models.active);
@@ -385,30 +386,30 @@ impl Renderer {
                 match &self.blended_models.lanes[at].lane {
                     LayerLane::Diffuse => {
                         self.draw_models_inner(cx, ModelDraw::Diffuse(diffuse), LayerPhase::Blended,
-                            eye, &instances, list, fog, sun, frustum, stats);
+                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
                     }
                     LayerLane::Pbr => {
                         let Some(mut draw) = self.pbr_draw.take() else { continue };
                         self.draw_models_inner(cx, ModelDraw::Pbr(&mut draw), LayerPhase::Blended,
-                            eye, &instances, list, fog, sun, frustum, stats);
+                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
                         self.pbr_draw = Some(draw);
                     }
                     LayerLane::Splat => {
                         let Some(mut draw) = self.splat_draw.take() else { continue };
                         self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Blended,
-                            eye, &instances, list, fog, sun, frustum, stats);
+                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
                         self.splat_draw = Some(draw);
                     }
                     LayerLane::Foliage => {
                         let Some(mut draw) = self.foliage_draw.take() else { continue };
                         self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), LayerPhase::Blended,
-                            eye, &instances, list, fog, sun, frustum, stats);
+                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
                         self.foliage_draw = Some(draw);
                     }
                     LayerLane::Custom(name) => {
                         let Some((name, mut draw)) = self.custom_draws.remove_entry(name) else { continue };
                         self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Blended,
-                            eye, &instances, list, fog, sun, frustum, stats);
+                            eye, lod_scale, &instances, list, fog, sun, frustum, stats);
                         self.custom_draws.insert(name, draw);
                     }
                 }
@@ -431,6 +432,7 @@ impl Renderer {
         mut draw: ModelDraw<'_>,
         phase: LayerPhase,
         eye: Vec3f,
+        lod_scale: f32,
         instances: &[ModelInstance],
         lane: WorldModelLane,
         fog: (Vec3f, f32),
@@ -576,13 +578,14 @@ impl Renderer {
         // the diffuse lane builds it and the PBR, foliage and custom lanes
         // that walk the same list after it reuse it.
         let key = (instances.as_ptr() as usize, instances.len());
-        if phase == LayerPhase::Opaque && (matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key) {
+        // The same list can be drawn with a different projection or detail bias.
+        if phase == LayerPhase::Opaque && (matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != (key.0, key.1, lod_scale.to_bits())) {
             let mut built = std::mem::take(&mut self.model_orders[which]);
             let chains = &self.model_lod_chains;
             let occluders = self.stream.as_ref().map(|st| st.occluders());
             // Refreshed for this frame's placed list by draw_scene_inner.
             let blocks = matches!(lane, WorldModelLane::Placed).then_some(&self.placed_blocks);
-            let culled = built.build(&self.static_models, instances, eye, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
+            let culled = built.build(&self.static_models, instances, eye, lod_scale, key, &|id| chains.contains_key(id), frustum, occluders, blocks);
             match lane {
                 WorldModelLane::Placed => stats.model_culled += culled,
                 WorldModelLane::Attachment => stats.world_attachment_culled += culled,
@@ -926,6 +929,11 @@ impl Renderer {
                 draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
                 draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
                 draw.base().draw_vars.geometry_id = Some(geometry_id);
+                // A static copy's own layers take no shadow from its stand-in,
+                // which casts for it past the first cascade (shaders/csm.rs
+                // `csm_own_limit`); a mover casts its own layers everywhere.
+                let own = match root.stand_in { Some(c) if !stand_in && !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
                 draw.base().draw_vars.set_texture(0, texture);
                 // A painted tile's slot 0 is its layers' albedo array; a
                 // far one paints its heaviest layer only, beyond the
@@ -987,6 +995,9 @@ impl Renderer {
             }
             draw.base().draw_vars.draw_shader_id = lane_shader;
             draw.base().color_adjust_ctl.w = adjust.w;
+            if root.stand_in.is_some() {
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &[0.0; 4]);
+            }
             if phase == LayerPhase::Blended || layer_pass > 0 {
                 continue;
             }
@@ -1215,6 +1226,7 @@ impl Renderer {
         &mut self,
         cx: &mut Cx3d,
         eye: Vec3f,
+        lod_scale: f32,
         instances: &[ModelInstance],
         lane: WorldModelLane,
         fog: (Vec3f, f32),
@@ -1230,7 +1242,7 @@ impl Renderer {
         let which = matches!(lane, WorldModelLane::Attachment) as usize;
         let any = {
             let order = &self.model_orders[which];
-            if order.key == (instances.as_ptr() as usize, instances.len()) {
+            if order.key == (instances.as_ptr() as usize, instances.len(), lod_scale.to_bits()) {
                 order.slots.iter().any(|slot| slot.is_some_and(|at| self.static_models[at].1.wants_pbr))
             } else {
                 let shiny: std::collections::HashSet<&str> = self.static_models.iter()
@@ -1270,6 +1282,7 @@ impl Renderer {
             ModelDraw::Pbr(&mut draw),
             LayerPhase::Opaque,
             eye,
+            lod_scale,
             instances,
             lane,
             fog,
@@ -1532,7 +1545,92 @@ impl Renderer {
 
 #[cfg(test)]
 mod chain_fade_tests {
-    use super::chain_fade_windows;
+    use super::*;
+
+    #[test]
+    fn lod_bias_switches_model_and_caster_at_the_same_camera() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let model = StaticModel::parse_glb(&crate::asset_morph::tests::fixture(false, false)).unwrap();
+        let base = PreparedStaticPreview::prepare(model).unwrap();
+        let prepared = base.clone().with_lods(vec![(30.0, base)]).unwrap();
+        let mut renderer = Renderer::default();
+        assert_eq!(renderer.lod_bias(), 1.0);
+        let uploaded = renderer.upload_static_preview(&mut cx, prepared);
+        renderer.install_uploaded_static("lod", uploaded);
+        let mut transform = Mat4f::identity();
+        transform.v[14] = 30.0;
+        renderer.set_models(vec![ModelInstance {
+            model: "lod".into(), transform, tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0,
+            part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+        }]);
+        let eye = vec3f(0.0, 0.0, 0.0);
+        let view_scale = crate::lod_view::lod_projection_scale(
+            &Mat4f::perspective(62.0, 1.5, 0.1, 500.0), crate::lod_view::LOD_REFERENCE_HEIGHT_PX);
+        let key = (renderer.placed_models.as_ptr() as usize, renderer.placed_models.len());
+        let mut order = ModelOrder::default();
+        for (bias, expected) in [(0.995, 0), (1.005, 1), (0.995, 0)] {
+            renderer.set_lod_bias(bias);
+            let lod_scale = view_scale * renderer.lod_bias();
+            assert_ne!(order.key, (key.0, key.1, lod_scale.to_bits()), "bias invalidates the cached selection");
+            order.build(&renderer.static_models, &renderer.placed_models, eye, lod_scale,
+                key, &|_| false, None, None, None);
+            assert_eq!(order.lods, [expected], "LOD at bias {bias}");
+            assert_eq!(order.order, [(0, expected, 0.0)], "automatic LOD switches without a fade");
+            assert_eq!(order.distances, [30.0], "the camera and world distance stay fixed");
+            let root = &renderer.static_models[0].1;
+            let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
+            let casters = renderer.collect_lm_movers(&World::default(), eye, lod_scale, None);
+            assert_eq!(casters.len(), 1);
+            assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows bias {bias}");
+        }
+        for bias in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            renderer.set_lod_bias(bias);
+            assert_eq!(renderer.lod_bias(), 1.0, "invalid bias {bias} resets to the screen-error rule");
+        }
+    }
+
+    #[test]
+    fn a_narrower_view_keeps_the_model_and_caster_at_the_higher_lod() {
+        use crate::lod_view::{lod_projection_scale, LOD_REFERENCE_HEIGHT_PX};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let model = StaticModel::parse_glb(&crate::asset_morph::tests::fixture(false, false)).unwrap();
+        let base = PreparedStaticPreview::prepare(model).unwrap();
+        let prepared = base.clone().with_lods(vec![(30.0, base)]).unwrap();
+        let mut renderer = Renderer::default();
+        let uploaded = renderer.upload_static_preview(&mut cx, prepared);
+        renderer.install_uploaded_static("lod", uploaded);
+        let mut transform = Mat4f::identity();
+        transform.v[14] = 31.0;
+        renderer.set_models(vec![ModelInstance {
+            model: "lod".into(), transform, tint: vec4(1.0, 1.0, 1.0, 1.0),
+            color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0,
+            part_poses: Vec::new(), custom_material: None, lamps: Default::default(),
+        }]);
+        let scale = |fov| lod_projection_scale(&Mat4f::perspective(fov, 1.5, 0.1, 500.0), LOD_REFERENCE_HEIGHT_PX);
+        let eye = vec3f(0.0, 0.0, 0.0);
+        let mut order = ModelOrder::default();
+        // Reuse the same list and cache key across views, as split panes do.
+        for (fov, expected) in [(62.0, 1), (55.0, 0), (20.0, 0), (62.0, 1)] {
+            let lod_scale = scale(fov);
+            order.build(&renderer.static_models, &renderer.placed_models, eye, lod_scale,
+                (0, 1), &|_| true, None, None, None);
+            assert_eq!(order.lods, [expected], "LOD at FOV {fov}");
+            assert_eq!(order.order, [(0, expected, 0.0)], "no premature crossfade at FOV {fov}");
+            assert_eq!(order.distances, [31.0], "sorting and other distance consumers keep world units");
+            let root = &renderer.static_models[0].1;
+            let selected = if expected == 0 { root } else { &root.lods[expected - 1].1 };
+            let casters = renderer.collect_lm_movers(&World::default(), eye, lod_scale, None);
+            assert_eq!(casters.len(), 1);
+            assert_eq!(casters[0].geometry, selected.geometry.geometry_id(), "caster follows view at FOV {fov}");
+        }
+        // The dissolve band moves with the threshold, too.
+        renderer.placed_models[0].transform.v[14] = 28.5 / scale(55.0);
+        order.build(&renderer.static_models, &renderer.placed_models, eye, scale(55.0),
+            (0, 1), &|_| true, None, None, None);
+        assert_eq!(order.order.len(), 2, "both levels draw in the scaled crossfade band");
+        assert_eq!(order.order.iter().map(|entry| entry.1).collect::<Vec<_>>(), [0, 1]);
+    }
 
     /// The shader's test (skinned.rs / pbr.rs): shown while lo <= n*255 < hi.
     fn shows(window: f32, n: f32) -> bool {

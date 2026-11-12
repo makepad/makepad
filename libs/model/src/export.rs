@@ -59,6 +59,8 @@ pub struct PrimitiveSource {
 }
 #[derive(Clone, Debug)]
 pub struct CompiledModel {
+    /// Per-part delivery diagnostics; the remaining geometry still compiles.
+    pub warnings: Vec<String>,
     pub head: Head,
     pub glb: Vec<u8>,
     pub vertices: usize,
@@ -103,6 +105,7 @@ impl Document {
         &self,
         cancelled: Option<&dyn Fn() -> bool>,
         mut cache: Option<&mut CompileCache>,
+        delivery: Option<&crate::delivery::LodDelivery>,
     ) -> Result<CompiledModel> {
         let packing_timer = CompileTimer::new(CompilePhase::MeshPacking);
         let mut ctx = mesh::Context::new(self.limits().mesh.clone(), cancelled);
@@ -470,12 +473,13 @@ impl Document {
                     .map_err(|_| Error::Invalid("GLB animation augmentation"))?;
             }
         }
-        glb = crate::authoring_export::finish(self, glb, &primitives, &mut ctx)?;
+        glb = crate::authoring_export::finish(self, glb, &primitives, delivery, &mut ctx)?;
         if glb.len() > self.limits().max_source_bytes {
             return Err(Error::Budget("compiled GLB"));
         }
         ctx.checkpoint(glb.len() as u64)?;
         Ok(CompiledModel {
+            warnings: delivery.map_or_else(Vec::new, |d| d.warnings.clone()),
             head: self.head(),
             glb,
             vertices,
@@ -483,6 +487,23 @@ impl Document {
             bounds,
             primitives,
         })
+    }
+}
+
+/// Whether the material exports a UV-dependent texture. Surface materials
+/// override legacy slots; hidden or zero-opacity layers do not flatten to a
+/// texture. The exporter's neutral white image is not a UV constraint.
+pub(crate) fn material_samples_texture(doc: &Document, material: u32) -> bool {
+    if let Some(surface) = doc.surface().materials.get(&material) {
+        surface
+            .channels
+            .values()
+            .flatten()
+            .any(|layer| layer.visible && layer.opacity > 0.)
+    } else {
+        doc.materials()
+            .get(&material)
+            .is_some_and(|m| !m.base_color_png.is_empty())
     }
 }
 
@@ -520,7 +541,11 @@ fn export_surface(
                 &fallback
             };
             source.validate(doc.limits(), ctx)?;
+            let samples_texture = material_samples_texture(doc, *id);
             let mut map = |channel: SurfaceChannel| -> Result<Option<GlbPbrTexture>> {
+                if !samples_texture {
+                    return Ok(None);
+                }
                 let layers = source.channels.get(&channel).map(Vec::as_slice).unwrap_or(&[]);
                 let msdf = channel == SurfaceChannel::BaseColor && source.shading.is_some_and(|s| s.msdf > 0.0);
                 let limits = (doc.limits().max_texture_dimension, doc.limits().max_texture_bytes,

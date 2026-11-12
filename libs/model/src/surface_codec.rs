@@ -152,6 +152,9 @@ fn layer_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceLayer> {
     })
 }
 fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
+    if m.shading.is_some_and(|s| s.msdf > 0.0 && s.crown > 0.0) {
+        return Err(Error::Invalid("surface shading: msdf and crown never combine"));
+    }
     write_array(w, &m.base_color)?;
     for v in [
         m.metallic,
@@ -173,17 +176,22 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
     let plate = m.shading.is_some_and(|s| s.plate > 0.0);
     // Bit 5: a vehicle lamp role (only when set).
     let lamp = m.shading.and_then(|s| s.lamp);
-    // Bit 6 adds the distance-field block; bit 7 adds its plate cells.
-    // Without MSDF, neither a flag nor a payload byte changes.
+    // Bit 6: the shading block carries distance-field terms.
     let msdf = m.shading.is_some_and(|s| s.msdf > 0.0);
+    // Bit 7: with bit 6, the MSDF block carries plate cells (bit 4 is required).
+    // With bit 6 clear, an extension byte follows wind, clearcoat, flake and
+    // impostor, before rim. Its bit 0 marks crown normals; all other bits are
+    // reserved. This unused flag combination preserves existing material bytes.
     let cells = m.shading.and_then(|s| s.msdf_plate_cells);
-    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5) | ((msdf as u8) << 6) | ((cells.is_some() as u8) << 7))?;
+    let crown = m.shading.is_some_and(|s| s.crown > 0.0);
+    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5) | ((msdf as u8) << 6) | (((cells.is_some() || crown) as u8) << 7))?;
     if let Some(fur) = m.fur {
         for value in [fur.length, fur.density, fur.scale] { w.f64(value)?; }
         w.u32(fur.seed)?;
     }
     if let Some(s) = m.shading {
         for value in [s.wind, s.clearcoat, s.flake, s.impostor] { w.f64(value)?; }
+        if crown { w.u8(1)?; }
         if rim { w.f64(s.rim)?; }
         if plate { w.f64(s.plate)?; }
         if let Some(lamp) = lamp { w.u8(lamp_code(lamp))?; }
@@ -236,7 +244,7 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     };
     let alpha_cutoff = r.f64()?;
     let flags = r.u8()?;
-    if (flags & 248 != 0 && flags & 4 == 0) || (flags & 128 != 0 && flags & 80 != 80) { return Err(Error::Corrupt("surface material flags")); }
+    if (flags & 248 != 0 && flags & 4 == 0) || (flags & 192 == 192 && flags & 16 == 0) { return Err(Error::Corrupt("surface material flags")); }
     let double_sided = flags & 1 != 0;
     let fur = if flags & 2 != 0 {
         Some(makepad_gltf::GlbFurMaterial {
@@ -245,10 +253,15 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     } else { None };
     let shading = if flags & 4 != 0 {
         let (wind, clearcoat, flake, impostor) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?);
+        let crown = if flags & 192 == 128 {
+            let extension = r.u8()?;
+            if extension & !1 != 0 { return Err(Error::Corrupt("surface shading extension flags")); }
+            (extension & 1) as f64
+        } else { 0.0 };
         let rim = if flags & 8 != 0 { r.f64()? } else { 0.0 };
         let plate = if flags & 16 != 0 { r.f64()? } else { 0.0 };
         let lamp = if flags & 32 != 0 { Some(lamp_from_code(r.u8()?)?) } else { None };
-        let mut shading = makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate, lamp, ..Default::default() };
+        let mut shading = makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, crown, plate, lamp, ..Default::default() };
         if flags & 64 != 0 {
             shading.msdf = 1.0;
             shading.msdf_fill = read_array(r)?;
@@ -716,6 +729,17 @@ mod compatibility_tests {
         let hex = "000000000000f03f000000000000f03f000000000000f03f000000000000f03f0000000000000000000000000000f03f000000000000f03f000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f00000000000000e03f0000000000";
         let legacy: Vec<u8> = hex.as_bytes().chunks_exact(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap()).collect();
         assert_eq!(encode(&SurfaceMaterial::default()), legacy, "ordinary materials retain their wire bytes");
+        // The old shading block follows the flags and precedes the channel count.
+        // Crown being off must preserve that layout, including an optional rim.
+        let flags_at = legacy.len() - 5;
+        let mut shaded_legacy = legacy.clone();
+        shaded_legacy[flags_at] = 4 | 8;
+        let terms = [0.25f64, 1.0, 0.5, 12.0, 0.6];
+        shaded_legacy.splice(flags_at + 1..flags_at + 1, terms.into_iter().flat_map(f64::to_le_bytes));
+        let shaded = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading {
+            wind: 0.25, clearcoat: 1.0, flake: 0.5, impostor: 12.0, rim: 0.6, ..Default::default()
+        }), ..Default::default() };
+        assert_eq!(encode(&shaded), shaded_legacy, "shading without crown retains its wire bytes");
         let mut material = SurfaceMaterial {
             shading: Some(makepad_gltf::GlbShading {
                 plate: 1.0, msdf: 1.0, msdf_fill: [0.2, 0.4, 0.6, 0.8],
@@ -733,6 +757,47 @@ mod compatibility_tests {
         assert_eq!(flat, data, "zero badge distance must not erase RGB text distance");
         let mips = flat.mip_chain(ImageEncoding::Linear, &Limits::default(), &mut mesh::Context::default()).unwrap();
         assert_eq!(mips[0].pixels, [128, 96, 96, 128], "data mips average all four distances independently");
+    }
+
+    #[test]
+    fn crown_roundtrips_in_the_shading_extension_and_rejects_invalid_flags() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        // The default material ends with its flags and the four-byte channel count.
+        let flags_at = encode(&SurfaceMaterial::default()).len() - 5;
+        let extension_at = flags_at + 1 + 4 * 8;
+        for shading in [
+            makepad_gltf::GlbShading::default(),
+            makepad_gltf::GlbShading { wind: 0.25, clearcoat: 1.0, flake: 0.5, impostor: 12.0, rim: 0.6, plate: 1.0, lamp: Some(makepad_gltf::GlbLamp::Tail), ..Default::default() },
+        ] {
+            let plain = SurfaceMaterial { shading: Some(shading), ..Default::default() };
+            let material = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading { crown: 1.0, ..shading }), ..Default::default() };
+            let bytes = encode(&material);
+            let mut expected = encode(&plain);
+            expected[flags_at] |= 128;
+            expected.insert(extension_at, 1);
+            assert_eq!(bytes, expected, "crown adds only bit 7 and an extension byte before rim");
+            let mut reader = Reader::new(&bytes);
+            let back = material_read(&mut reader, &Limits::default()).unwrap();
+            reader.end().unwrap();
+            assert_eq!(back, material, "crown and following optional terms survive checkpointing");
+            assert_eq!(encode(&back), bytes);
+            let mut corrupt = bytes.clone();
+            for bit in 1..8 {
+                corrupt[extension_at] = 1 | (1 << bit);
+                assert!(matches!(material_read(&mut Reader::new(&corrupt), &Limits::default()), Err(Error::Corrupt(_))), "reserved extension bit {bit} must be rejected");
+            }
+            let mut absent = bytes.clone();
+            absent[extension_at] = 0;
+            assert_eq!(material_read(&mut Reader::new(&absent), &Limits::default()).unwrap(), plain, "a clear crown bit means off");
+            corrupt[flags_at] &= !4;
+            assert!(matches!(material_read(&mut Reader::new(&corrupt), &Limits::default()), Err(Error::Corrupt(_))), "extensions require a shading block");
+        }
+        let material = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading {
+            crown: 1.0, msdf: 1.0, msdf_range: 8.0, ..Default::default()
+        }), ..Default::default() };
+        let mut writer = Writer::new(4096);
+        assert_eq!(material_write(&mut writer, &material), Err(Error::Invalid("surface shading: msdf and crown never combine")));
+        assert!(writer.bytes.is_empty(), "incompatible shading is rejected before writing");
     }
 
     #[test]

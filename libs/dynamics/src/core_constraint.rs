@@ -11,6 +11,7 @@ use crate::{
     inline, memory,
     model::{disabled, enabled, Model},
     sleep,
+    sparse_pattern::PatternRef,
     types::*,
     util_blas,
     util_misc::{max, min},
@@ -3096,25 +3097,14 @@ fn make_arnumeric(m: &Model, d: &mut Data) {
         let y_rowadr = std::mem::take(&mut d.efc_y_rowadr);
         let y_colind = std::mem::take(&mut d.efc_y_colind);
         let y_rowsuper = std::mem::take(&mut d.efc_j_rowsuper);
-        util_sparse::sqr_mat_tdsparse_numeric(
-            &mut ar,
-            nefc,
-            &ar_rownnz,
-            &ar_rowadr,
-            &ar_colind,
-            Some(&diagind),
-            &yt,
-            &yt_rownnz,
-            &yt_rowadr,
-            &yt_colind,
-            &y,
-            &y_rownnz,
-            &y_rowadr,
-            &y_colind,
-            Some(&y_rowsuper),
-            None,
-            &mut d.scratch,
-        );
+        // the product's three patterns, checked where they are taken
+        let ar_p = PatternRef::check(&ar_rownnz, &ar_rowadr, &ar_colind, None, nefc, nefc)
+            .expect("make_arnumeric: the AR pattern is malformed");
+        let yt_p = PatternRef::check(&yt_rownnz, &yt_rowadr, &yt_colind, None, nv, nefc)
+            .expect("make_arnumeric: the Y' pattern is malformed");
+        let y_p = PatternRef::check(&y_rownnz, &y_rowadr, &y_colind, Some(&y_rowsuper), nefc, nv)
+            .expect("make_arnumeric: the Y pattern is malformed");
+        util_sparse::sqr_mat_tdsparse_numeric(&mut ar, ar_p, Some(&diagind), &yt, yt_p, &y, y_p, None, &mut d.scratch);
         d.efc_ar = ar;
         d.efc_ar_rownnz = ar_rownnz;
         d.efc_ar_rowadr = ar_rowadr;

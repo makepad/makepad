@@ -361,6 +361,8 @@ pub struct Renderer {
     /// Applied as the scene draw list's view transform, so it costs one
     /// uniform and never invalidates the static slabs. See stage.rs.
     stage: Stage,
+    /// Detail factor applied to each view's model LOD scale.
+    lod_bias: f32,
     /// The box an `MrBox` stage shows the world in (`set_clip_box`).
     clip_box: Option<crate::stage::ClipBox>,
     /// How many casters get a projected silhouette before the rest fall
@@ -767,6 +769,7 @@ impl Default for Renderer {
             placed_scene_signature: None,
             placed_prefix: None,
             stage: Stage::default(),
+            lod_bias: 1.0,
             clip_box: None,
             shadow_budget: DEFAULT_SHADOW_BUDGET,
             vfx: Default::default(),

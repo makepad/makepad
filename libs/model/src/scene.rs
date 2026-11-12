@@ -33,7 +33,15 @@ pub const VEHICLE_WHEEL_CONNECTIONS:[&str;4]=["wheel_front_left","wheel_front_ri
 /// How many generic driven parts (non-wheel connections) one model may bind.
 pub const MAX_DRIVEN_PARTS:usize=48;
 #[derive(Clone,Debug,PartialEq)]
-pub struct LodLevel {pub target_faces:usize,pub max_error:f64,pub distance:f64}
+/// A zero face target drops the part from this distance and must be last.
+pub struct LodLevel {
+    pub target_faces: usize,
+    /// Maximum sampled two-sided surface deviation in world-space metres,
+    /// including authored LOD levels.
+    pub max_error: f64,
+    pub distance: f64,
+}
+
 #[derive(Clone,Debug,PartialEq)]
 /// Hull and capsule are fitted to the object's own vertices at compile and
 /// delivered as compact triangle proxies.
@@ -124,9 +132,10 @@ impl SceneState {
         }
         for (object,levels) in &self.lods {
             if !state.objects.contains_key(object)||levels.is_empty()||levels.len()>4 {return Err(Error::Invalid("LOD object/levels"));}
+            check_lods(levels)?;
             let mut prev=(usize::MAX,0.);
             for level in levels {
-                if level.target_faces==0||level.target_faces>=prev.0||!level.distance.is_finite()||level.distance<=prev.1||level.distance>1e6||!level.max_error.is_finite()||level.max_error<0. {return Err(Error::Invalid("LOD order or error"));}
+                if level.target_faces>prev.0||!level.distance.is_finite()||level.distance<=prev.1||level.distance>1e6||!level.max_error.is_finite()||level.max_error<0. {return Err(Error::Invalid("LOD order or error"));}
                 prev=(level.target_faces,level.distance);
             }
         }
@@ -534,7 +543,8 @@ fn check_light(light:&LightEmitter)->Result<()>{
     light.transform.validate()?;finite(&light.color)?;finite(&[light.intensity,light.range])?;
     if let LightKind::Spot{inner,outer}=light.kind{finite(&[inner,outer])?;}Ok(())
 }
-fn check_lods(levels:&[LodLevel])->Result<()>{check_count(levels.len(),4)?;for l in levels{
+fn check_lods(levels:&[LodLevel])->Result<()>{check_count(levels.len(),4)?;for (i,l) in levels.iter().enumerate(){
+    if l.target_faces==0&&i+1!=levels.len(){return Err(Error::Invalid("empty LOD must be last"));}
     if l.target_faces>u32::MAX as usize{return Err(Error::Invalid("expected u32 integer"));}finite(&[l.max_error,l.distance])?;
 }Ok(())}
 fn check_modifier(object:&str,m:&NamedModifier,limits:&Limits)->Result<()>{
@@ -670,7 +680,7 @@ mod typed_tests {
     }
     #[test]
     fn literal_operations_cover_every_tag(){
-        let l=Limits::default();let m=modifier();let levels=vec![LodLevel{target_faces:20,max_error:0.1,distance:5.}];
+        let l=Limits::default();let m=modifier();let levels=vec![LodLevel{target_faces:20,max_error:0.1,distance:5.},LodLevel{target_faces:0,max_error:0.,distance:10.}];
         let ops=vec![
             SceneOperation::Node{object:"body".into(),node:SceneNode{parent:Some("root".into()),linked_to:Some("source".into()),transform:Transform::default()}},
             SceneOperation::Instance{object:"body".into(),source:"source".into(),transform:Transform{translation:[1.,2.,3.],..Default::default()}},
@@ -713,6 +723,7 @@ mod typed_tests {
             SceneOperation::Pivot{object:"body".into(),position:[f64::NAN,0.,0.]},
             SceneOperation::Node{object:"body".into(),node:SceneNode{transform:Transform{rotation:[0.;4],..Default::default()},..Default::default()}},
             SceneOperation::Lods{object:"body".into(),levels:vec![LodLevel{target_faces:1,max_error:0.,distance:1.};5]},
+            SceneOperation::Lods{object:"body".into(),levels:vec![LodLevel{target_faces:0,max_error:0.,distance:1.};2]},
             SceneOperation::ModifierOrder{object:"body".into(),names:vec!["m".into();17]},
             SceneOperation::Modifier{object:"other".into(),modifier:modifier()},
         ]{assert!(op.check(&l).is_err());}

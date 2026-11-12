@@ -30,8 +30,14 @@ pub use makepad_strict_json as json;
 /// cache built products by program hash mix it into the key, so a change to
 /// generated geometry rebuilds them once. 2: portable transcendentals (the
 /// same bits on every platform, so a product built on one machine is the
-/// one every other machine would build).
-pub const MODEL_GENERATOR_VERSION: u32 = 2;
+/// one every other machine would build). 3: model-wide automatic LODs with
+/// world-space screen error, per-part overrides, mesh reuse and empty levels.
+/// 4: script-authored rounded boxes choose their recorded segments from the
+/// radius and chord-error target. 5: LOD levels keep the part's own vertices,
+/// bounded by sampled world-space surface deviation. 6: automatic LODs add a
+/// third level at 100 radii, and an authored empty level alone hides a part
+/// from its distance while keeping nearer automatic levels.
+pub const MODEL_GENERATOR_VERSION: u32 = 6;
 pub use makepad_mesh_edit as mesh;
 
 mod schema;

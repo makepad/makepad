@@ -120,6 +120,7 @@ impl Renderer {
         &self,
         world: &World,
         eye:Vec3f,
+        lod_scale:f32,
         skinned_items: Option<&[SkinnedDraw]>,
     ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
         let mut out = Vec::new();
@@ -149,7 +150,7 @@ impl Renderer {
             };
             if self.model_casts_shadow.get(&inst.model)==Some(&false){continue;}
             let root=&self.static_models[at].1;
-            let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
+            let distance=crate::asset_lod::instance_distance(&inst.transform,eye)*lod_scale;
             // A chained base (hand-built LOD models) casts from its last,
             // cheapest level: a car's shadow is its silhouette on the road.
             let lod=if self.is_lod_chain_base(&inst.model)&&!root.lods.is_empty(){root.lods.len()}else{root.lods.partition_point(|(threshold,_)|*threshold<=distance)};
@@ -239,7 +240,7 @@ impl Renderer {
                 let (min, max) = item
                     .bounds
                     .unwrap_or((vec3f(-1.0, 0.0, -1.0), vec3f(1.0, 2.2, 1.0)));
-                let distance=crate::asset_lod::instance_distance(&item.transform,eye);
+                let distance=crate::asset_lod::instance_distance(&item.transform,eye)*lod_scale;
                 let lod=self.skin_lods.get(&item.rig).and_then(|levels|{let n=levels.partition_point(|(threshold,_)|*threshold<=distance);n.checked_sub(1).map(|i|&levels[i].1)});
                 let morph=if let Some(lod)=lod{lod.morph.as_ref()}else{self.skin_morphs.get(&item.rig)};
                 let morph=morph.map(|m|m.depth(m.source.sample_playback(item.morph_clip.as_deref(),item.morph_time,item.morph_looping)));

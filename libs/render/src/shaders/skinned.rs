@@ -259,8 +259,24 @@ script_mod! {
         display: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         v_csm: varying(vec4f)
         v_csm_n: varying(vec3f),
+        // The model's far stand-in (impostor.rs): xyz its centre in model
+        // space, w 1 when this layer is the model's own and the stand-in
+        // casts for it in the outer cascades (draw_models.rs). v_csm_own is
+        // how far that centre lies past this point along the sun's depth
+        // axis, in world units (every cascade shares the axis; one float, so
+        // the varyings keep their room).
+        csm_own: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        v_csm_own: varying(float),
 
         ..mod.draw.SunCascades,
+
+        // The stand-in casts at its centre's depth (lm_depth.rs
+        // DrawLmSunDepthImpostor), in every cascade past the first: this
+        // layer compares no deeper than two texels before it there.
+        csm_own_limit: fn(ci: float) -> float {
+            if self.csm_own.w < 0.5 || ci < 0.5 { return 2.0 }
+            return self.csm_proj(ci, self.v_csm.xyz).z + (self.v_csm_own - 2.0 * self.csm_pick(self.csm_texel, ci)) * self.csm_pick(self.csm_zw, ci)
+        }
 
         // One dynamic light at world point `wp`, world normal `n`.
         // Attenuation (1 - d/r)^2; the spot factor mirrors lightmap.rs's
@@ -575,6 +591,8 @@ script_mod! {
             self.v_lmg = vec4(lg_uv.x, lg_uv.y, lg_in, dl_wp.y)
             self.v_csm = vec4(dl_wp.x, dl_wp.y, dl_wp.z, dp)
             self.v_csm_n = dl_n
+            let own_wp = (self.transform * vec4(self.csm_own.x, self.csm_own.y, self.csm_own.z, 1.0)).xyz
+            self.v_csm_own = dot(self.csm_rz0.xyz, own_wp - dl_wp) / max(self.csm_zw.x, 0.000001)
             self.v_uv = unpack2f16(self.geom.uv)
             // RGB is the material tint. Instance tint/hue is applied once the
             // complete texture × vertex albedo exists in the pixel stage.

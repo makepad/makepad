@@ -280,6 +280,50 @@ pub fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lod_view_scale_tracks_fov_and_target_pixels() {
+        use crate::lod_view::{lod_view_scale, LOD_REFERENCE_FOV_DEG, LOD_REFERENCE_HEIGHT_PX};
+        let tan = |fov: f32| (fov.to_radians() * 0.5).tan();
+        let reference = tan(LOD_REFERENCE_FOV_DEG);
+        let height = LOD_REFERENCE_HEIGHT_PX;
+        assert_eq!(lod_view_scale(reference, height), 1.0, "reference view");
+        let narrow = lod_view_scale(tan(55.0), height);
+        let zoom = lod_view_scale(tan(20.0), height);
+        assert!(0.0 < zoom && zoom < narrow && narrow < 1.0, "zoom retains detail longer");
+        assert!(lod_view_scale(tan(90.0), height) > 1.0, "wide lens switches sooner");
+        assert_eq!(lod_view_scale(reference, height * 0.5), 2.0, "half-height target");
+        assert_eq!(lod_view_scale(reference, height * 2.0), 0.5, "double-height target");
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(lod_view_scale(invalid, height), 1.0, "invalid FOV tangent {invalid}");
+            assert_eq!(lod_view_scale(reference, invalid), 1.0, "invalid height {invalid}");
+        }
+        assert_eq!(lod_view_scale(f32::MAX, f32::MIN_POSITIVE), 1.0, "unrepresentable scale");
+    }
+
+    #[test]
+    fn lod_view_scale_uses_perspective_and_physical_target_height() {
+        use crate::lod_view::{lod_projection_scale, LOD_REFERENCE_FOV_DEG, LOD_REFERENCE_HEIGHT_PX};
+        let mut projection = Mat4f::perspective(LOD_REFERENCE_FOV_DEG, 1.5, 0.1, 500.0);
+        let height = LOD_REFERENCE_HEIGHT_PX;
+        assert!((lod_projection_scale(&projection, height) - 1.0).abs() < 1.0e-6);
+        // The same physical target expressed in layout points at two DPIs.
+        for dpi in [1.0, 2.0] {
+            let (_, pixels) = Cx::pass_pixel_size(dvec2(1500.0, height as f64 / dpi), dpi);
+            assert!((lod_projection_scale(&projection, pixels as f32) - 1.0).abs() < 1.0e-6);
+        }
+        projection.v[8] = 0.01;
+        projection.v[9] = -0.01;
+        assert!((lod_projection_scale(&projection, height) - 1.0).abs() < 1.0e-6, "off-axis and jitter keep the vertical scale");
+        assert_eq!(lod_projection_scale(&projection, 0.0), 1.0, "empty target");
+        let ortho = Mat4f::ortho(-1.0, 1.0, 1.0, -1.0, 0.1, 500.0, 1.0, 1.0);
+        assert_eq!(lod_projection_scale(&ortho, height), 1.0, "orthographic view");
+        for (at, value) in [(0, 0.0), (5, -1.0), (5, 0.0), (5, f32::INFINITY), (10, f32::NAN), (14, 0.0)] {
+            let mut invalid = projection;
+            invalid.v[at] = value;
+            assert_eq!(lod_projection_scale(&invalid, height), 1.0, "invalid projection term {at}: {value}");
+        }
+    }
+
     /// The wobble test: a point 2 m in front of a camera 10 km out, moved
     /// through 50 camera positions a millimetre apart. Absolute f32 (the
     /// old path) jitters the projected point by a pixel-scale amount;

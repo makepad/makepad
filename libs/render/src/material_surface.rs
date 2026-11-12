@@ -28,6 +28,9 @@ pub struct MaterialSurface {
     pub flake: f32,
     /// A soft Fresnel rim of sky and back-lit sun (toy plastic, felt).
     pub rim: f32,
+    /// `makepadShading.crown`: the layer's normals are crown normals, so the
+    /// foliage lane does not flip them toward the viewer.
+    pub crown: bool,
     /// This layer is the model's far stand-in from this distance (metres,
     /// 0 = an ordinary layer): the other layers stop there (impostor.rs).
     pub impostor: f32,
@@ -90,6 +93,8 @@ pub struct SplatLayer {
     /// hue, roughness] amplitudes (0..1) and the size in metres of its middle
     /// octave; size 0 = none (shaders/splat.rs).
     pub macro_variation: [f32; 4],
+    /// Hex-tiled reads (makepadSplat `tiling: "stochastic"`, shaders/splat.rs).
+    pub stochastic: bool,
 }
 
 /// How lit a signal lamp of `role` is on a copy whose vehicle shows
@@ -122,7 +127,7 @@ impl MaterialSurface {
     }
 }
 impl Default for MaterialSurface {
-    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,msdf:None,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
+    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,crown:false,impostor:0.0,plate:false,msdf:None,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
         emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0,splat:None}}
 }
 
@@ -348,18 +353,32 @@ pub fn prepared_texture_upload_stats() -> [usize; 5] {
 
 /// A texture from an encoded source image in the form this device samples:
 /// with a compression target, a stored Basis form keyed by the source bytes
-/// is used without decoding at all; otherwise `make` decodes and mips it
-/// (and a large result is encoded to Basis through `encode` for next time).
-/// Runs on a preparation worker and returns after encoding finishes.
-pub fn device_texture_from_source(source: &[u8], semantic: PixelSemantic, make: impl FnOnce() -> Result<PreparedTexture, String>, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) -> Result<PreparedTexture, String> {
-    let (Some(target), Some(store)) = (compressed_texture_target(), prepared_texture_store()) else { return make() };
+/// is used without decoding at all; otherwise `make` decodes and mips it, and
+/// a large result comes with its [`StoreBasis`], the encode that lets the next
+/// load skip the decode. The caller runs that once nothing waits for the pool
+/// (a level's models and surfaces): a 4k image fans out over every worker for
+/// seconds (26 s under the JIT), and a load that encoded first waited that long
+/// for a form it does not use.
+pub fn device_texture_from_source(source: &[u8], semantic: PixelSemantic, make: impl FnOnce() -> Result<PreparedTexture, String>) -> Result<(PreparedTexture, Option<StoreBasis>), String> {
+    let (Some(target), Some(store)) = (compressed_texture_target(), prepared_texture_store()) else { return make().map(|texture| (texture, None)) };
     // Small images are not compressed: no store lookup for them.
-    if source.len() < PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES { return make(); }
+    if source.len() < PREPARED_TEXTURE_CACHE_MIN_SOURCE_BYTES { return make().map(|texture| (texture, None)); }
     let key = basis_texture_key(source, semantic);
-    if let Some(texture) = PreparedTexture::from_store(store, key, target, key) { return Ok(texture); }
+    if let Some(texture) = PreparedTexture::from_store(store, key, target, key) { return Ok((texture, None)); }
     let texture = make()?;
-    if texture.width * texture.height >= COMPRESS_MIN_TEXELS { encode_basis_later(key, &texture, encode); }
-    Ok(texture)
+    let later = (texture.width * texture.height >= COMPRESS_MIN_TEXELS).then(|| StoreBasis { key, texture: texture.clone() });
+    Ok((texture, later))
+}
+
+/// A decoded source image's Basis form, to encode and store for later loads
+/// ([`device_texture_from_source`]): it holds a copy of the mip chain until it runs.
+pub struct StoreBasis { key: u64, texture: PreparedTexture }
+
+impl StoreBasis {
+    /// Encode it through `encode` (a pool executor: it fans out) and store it.
+    pub fn run(self, encode: &(dyn Fn(usize, &(dyn Fn(usize) + Sync)) + Sync)) {
+        encode_basis_later(self.key, &self.texture, encode);
+    }
 }
 
 /// Encode and store a Basis image for later loads using the supplied executor.
@@ -575,6 +594,9 @@ pub struct PreparedSplat {
     pub surface: [[f32; 4]; SPLAT_LAYERS],
     /// Per-layer world macro variation (SplatLayer::macro_variation).
     pub macro_variation: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer hex tiling, 1 or 0: layer i at [i / 4][i % 4]
+    /// (uniforms splat_hex_a, splat_hex_b).
+    pub stochastic: [[f32; 4]; 2],
     pub map: [f32; 4],
     pub size: [f32; 4],
 }
@@ -592,6 +614,9 @@ pub struct UploadedSplat {
     pub surface: [[f32; 4]; SPLAT_LAYERS],
     /// Per-layer world macro variation (SplatLayer::macro_variation).
     pub macro_variation: [[f32; 4]; SPLAT_LAYERS],
+    /// Per-layer hex tiling, 1 or 0: layer i at [i / 4][i % 4]
+    /// (uniforms splat_hex_a, splat_hex_b).
+    pub stochastic: [[f32; 4]; 2],
     /// Weight map: world x, z of texel 0, texels per metre.
     pub map: [f32; 4],
     /// Weight map: texels per row, rows per page, pages, layers.
@@ -688,8 +713,10 @@ impl PreparedSplat {
         }
         let mut macro_variation = [[0.0f32; 4]; SPLAT_LAYERS];
         for (m, l) in macro_variation.iter_mut().zip(layers) { *m = l.macro_variation; }
+        let mut stochastic = [[0.0f32; 4]; 2];
+        for (i, l) in layers.iter().enumerate() { stochastic[i / 4][i % 4] = if l.stochastic { 1.0 } else { 0.0 }; }
         let pages = layers.len().div_ceil(4) as f32;
-        Ok(Self { albedo, normal, weights, params, surface, macro_variation, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
+        Ok(Self { albedo, normal, weights, params, surface, macro_variation, stochastic, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
     }
 
     /// Upload, sharing the arrays (by their layers' content) and the
@@ -715,7 +742,7 @@ impl PreparedSplat {
         let albedo = array(cx, cache, &self.albedo);
         let normal = array(cx, cache, &self.normal);
         let weights = self.weights.upload_cached(cx, cache);
-        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, macro_variation: self.macro_variation, map: self.map, size: self.size }
+        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, macro_variation: self.macro_variation, stochastic: self.stochastic, map: self.map, size: self.size }
     }
 
     pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
@@ -763,7 +790,7 @@ mod tests{
         let layer = SplatLayer {
             albedo_png: Some(Cx::encode_rgba_as_png(2, 2, &albedo).unwrap()), color: [0.5; 3],
             normal_png: Some(Cx::encode_rgba_as_png(2, 2, &normal).unwrap()),
-            scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25, macro_variation: [0.2, 0.05, 0.1, 14.0],
+            scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25, macro_variation: [0.2, 0.05, 0.1, 14.0], stochastic: true,
         };
         let source = SplatSurface { layers: vec![layer], weights_png: Vec::new(), origin: [0.0; 2], cell: 1.0, width: 1.0, rows: 1.0 };
         let prepared = PreparedSplat::prepare(&source, &mut 4096).unwrap();
@@ -773,6 +800,7 @@ mod tests{
         assert_eq!(prepared.normal[0].data[4] >> 24, 128, "mip alpha averages linearly");
         assert_eq!(prepared.size[3], 1.0, "single mesh surface needs no weight map read");
         assert_eq!(prepared.macro_variation[0], [0.2, 0.05, 0.1, 14.0], "the layer's macro variation reaches its uniform");
+        assert_eq!(prepared.stochastic, [[1.0, 0.0, 0.0, 0.0], [0.0; 4]], "the layer's hex tiling reaches its uniform and unused layers stay off");
     }
 
     #[test]
