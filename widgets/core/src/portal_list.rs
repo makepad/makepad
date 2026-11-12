@@ -2591,6 +2591,17 @@ impl PortalList {
         }
     }
 
+    /// Whether something else holds the mouse, so our drag scroll leaves the press to it. A widget inside us
+    /// that didn't claim its drag, like a button, doesn't count, since we take its press over once it's a drag.
+    fn is_mouse_held_outside_drag_scroll(&self, cx: &Cx) -> bool {
+        let mouse: DigitId = live_id!(mouse).into();
+        if cx.fingers.is_drag_claimed(mouse) || cx.fingers.is_press_held_outside(mouse, self.area) {
+            cx.fingers.is_mouse_held_outside_scrollers(&[self.area])
+        } else {
+            cx.fingers.is_mouse_held_outside_drag_scroller(self.area)
+        }
+    }
+
     /// Enables or disables auto-tracking the last item in the list.
     pub fn set_tail_range(&mut self, tail_range: bool) {
         self.tail_range = tail_range;
@@ -3482,6 +3493,13 @@ impl Widget for PortalList {
             }
         }
 
+        // A mouse press that something outside us already holds (like an overlay drawn over us) is never ours to take over.
+        if let Event::MouseDown(e) = event {
+            if self.drag_scrolling && !e.handled.get().is_empty() {
+                cx.fingers.mark_press_as_held_outside(live_id!(mouse).into(), self.area);
+            }
+        }
+
         let mut scroll_to = None;
         let bar_pos_before = self.scroll_bar.get_scroll_pos();
         self.scroll_bar
@@ -4252,7 +4270,8 @@ impl Widget for PortalList {
                         cx.is_scrolling_allowed_within(&self.area),
                         fe.device.is_touch(),
                         // Another drag scroller holding the press doesn't count: nested scrollers split a drag by axis.
-                        cx.fingers.is_mouse_held_outside_scrollers(&[self.area]),
+                        // Nor does a widget inside us like a button, since we take the press from it once it's a drag.
+                        self.is_mouse_held_outside_drag_scroll(cx),
                     ) {
                         // So a scroller around us can share this drag along an axis we don't take.
                         cx.hold_scroll_drag(fe.digit_id, self.area);
@@ -4261,10 +4280,10 @@ impl Widget for PortalList {
                             // too — that is how a finger scrolls a list of buttons —
                             // and the threshold below keeps a tap from micro-scrolling;
                             // children use `was_tap()` to tell a tap from a drag on
-                            // FingerUp. A mouse press a control holds never gets here:
-                            // dragging a slider's thumb must not also scroll the list
-                            // the slider sits in. A nested scrollable that took the
-                            // drag keeps it.
+                            // FingerUp. So does a mouse press, unless a control that
+                            // claimed its drag holds it: dragging a slider's thumb must
+                            // not also scroll the list the slider sits in. A nested
+                            // scrollable that took the drag keeps it.
                             let initial = fe.abs.index(vi);
                             self.scroll_state = ScrollState::Drag {
                                 samples: vec![ScrollSample {
@@ -4330,7 +4349,7 @@ impl Widget for PortalList {
                         if matches!(self.scroll_state, ScrollState::Drag { .. })
                             && drag_scroll_stands_down(
                                 e.device.is_touch(),
-                                cx.fingers.is_mouse_held_outside_scrollers(&[self.area]),
+                                self.is_mouse_held_outside_drag_scroll(cx),
                             )
                         {
                             self.scroll_state = ScrollState::Stopped;
@@ -4370,13 +4389,12 @@ impl Widget for PortalList {
                         let travel = e.abs - e.abs_start;
                         let across_axis = if vi == Vec2Index::X { Vec2Index::Y } else { Vec2Index::X };
                         let (along, across) = (travel.index(vi).abs(), travel.index(across_axis).abs());
-                        // Touch only: a mouse drag keeps its desktop behaviour —
-                        // it takes the pointer on its first move over bare
-                        // content, past the threshold over an interactive row.
+                        // A mouse drag takes the pointer on its first move over bare content, and over an
+                        // interactive row once it goes past the threshold, mostly along us like a touch.
                         let intent = direction.is_some()
                             && match &self.scroll_state {
                                 ScrollState::Drag { committed, .. } if !e.device.is_touch() => {
-                                    *committed || along >= self.drag_scroll_threshold
+                                    *committed || (along >= self.drag_scroll_threshold && (along >= across || is_shared))
                                 }
                                 ScrollState::Drag { .. } => {
                                     along >= touch_drag_slop(self.drag_scroll_threshold, true)
@@ -5038,9 +5056,10 @@ type ItemsWithActions = Vec<(usize, WidgetRef)>;
 /// continuously locks the pointer, and any other gesture that would start from
 /// the same press stands down until the release.
 ///
-/// `mouse_held_outside` is `CxFingers::is_mouse_held_outside` asked with this
-/// list's own area: true means a slider, fader, scroll bar or resizer owns the
-/// mouse right now. A mouse press it holds may not scroll the list; a TOUCH
+/// `mouse_held_outside` is `PortalList::is_mouse_held_outside_drag_scroll`:
+/// true means a slider, fader, scroll bar or resizer owns the mouse right now,
+/// not a button inside the list, whose press the list takes over once it's a
+/// drag. A mouse press it holds may not scroll the list; a TOUCH
 /// still may, because a finger that lands on a control and drags is scrolling
 /// the list in every native toolkit, and `is_mouse_held_outside` deliberately
 /// ignores touch captures so `is_touch` is the only exemption needed here.
