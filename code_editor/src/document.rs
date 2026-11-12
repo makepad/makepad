@@ -254,26 +254,14 @@ impl CodeDocument {
     /// putting an outside change into the text, where typing's indent rules
     /// would rewrite what it was given.
     pub fn replace_range(&self, start: Position, end: Position, new_text: Text) {
-        if self.is_read_only() { return; }
-        let mut history = self.0.history.borrow_mut();
-        let delete_edit = Edit {
-            change: Change::Delete(start, end - start),
-            drift: Drift::Before,
-        };
-        let insert_edit = Edit {
-            change: Change::Insert(start, new_text),
-            drift: Drift::Before,
-        };
-        history.force_new_group();
-        history.push_or_extend_group(
+        self.apply_ranges_with(
+            true,
             SessionId::default(),
             EditKind::Other,
             &SelectionSet::default(),
+            &[(start, end, new_text)],
+            None,
         );
-        history.apply_edit(delete_edit.clone());
-        history.apply_edit(insert_edit.clone());
-        drop(history);
-        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
     }
 
     /// As `replace_range`, but joined to the undo step of the edit before
@@ -301,14 +289,46 @@ impl CodeDocument {
     /// range at another's start comes before it. For a host writing one
     /// gesture's several value changes.
     pub fn replace_ranges(&self, ranges: &[(Position, Position, Text)]) {
-        if self.is_read_only() || ranges.is_empty() { return; }
-        let mut history = self.0.history.borrow_mut();
-        history.force_new_group();
-        history.push_or_extend_group(
+        self.apply_ranges_with(
+            true,
             SessionId::default(),
             EditKind::Other,
             &SelectionSet::default(),
+            ranges,
+            None,
         );
+    }
+
+    /// Applies `ranges` (disjoint, ascending by start; an empty range at another's start comes
+    /// first) as `session_id`'s edit of `kind`, recording `selections_before` with the group:
+    /// the group merges with the session's previous one of the same mergeable kind (typing
+    /// coalesces as it does in a code view), never with another session's. No autoindent, no
+    /// delimiter injection. The edits reach every session; `session_id` is their origin.
+    pub fn apply_ranges(
+        &self,
+        session_id: SessionId,
+        kind: EditKind,
+        selections_before: &SelectionSet,
+        ranges: &[(Position, Position, Text)],
+    ) {
+        self.apply_ranges_with(false, session_id, kind, selections_before, ranges, Some(session_id));
+    }
+
+    fn apply_ranges_with(
+        &self,
+        new_group: bool,
+        group_session: SessionId,
+        kind: EditKind,
+        selections_before: &SelectionSet,
+        ranges: &[(Position, Position, Text)],
+        origin: Option<SessionId>,
+    ) {
+        if self.is_read_only() || ranges.is_empty() { return; }
+        let mut history = self.0.history.borrow_mut();
+        if new_group {
+            history.force_new_group();
+        }
+        history.push_or_extend_group(group_session, kind, selections_before);
         // Back to front: an edit never moves the ones still to apply.
         let mut edits = Vec::with_capacity(ranges.len() * 2);
         for (start, end, text) in ranges.iter().rev() {
@@ -320,7 +340,7 @@ impl CodeDocument {
             edits.push(insert_edit);
         }
         drop(history);
-        self.update_after_edit(None, None, &edits);
+        self.update_after_edit(origin, None, &edits);
     }
 
     /// Highlight as the file at `path` (a rename that changed the
@@ -1122,6 +1142,138 @@ fn update_indent_state(text: &Text, indent_state: &mut [Option<IndentState>]) {
                     None => IndentState::Empty(current_indent_column_count),
                 })
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use {
+        super::*,
+        crate::selection::{Cursor, Selection},
+        std::sync::mpsc,
+    };
+
+    #[test]
+    fn two_sessions_share_one_history() {
+        let position = |byte_index| Position { line_index: 0, byte_index };
+        let selection_at = |byte_index| {
+            let mut selections = SelectionSet::new();
+            selections.set_selection(Selection::from(Cursor {
+                position: position(byte_index),
+                ..Cursor::default()
+            }));
+            selections
+        };
+        let receive = |receiver: &mpsc::Receiver<(Option<SelectionSet>, Vec<Edit>)>,
+                       selections: Option<&SelectionSet>, property: &str| {
+            let messages: Vec<_> = iter::from_fn(|| receiver.try_recv().ok()).collect();
+            assert_eq!(messages.len(), 1, "{property}: exactly one broadcast");
+            let (received_selections, edits) = messages.into_iter().next().unwrap();
+            assert_eq!(received_selections.as_ref(), selections, "{property}: selections");
+            assert!(!edits.is_empty(), "{property}: edits are broadcast");
+            edits
+        };
+        let mut document = CodeDocument::new("hi".into(), DecorationSet::default());
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        assert_ne!(session_a, session_b, "sessions have fresh, distinct ids");
+        let (sender_a, receiver_a) = mpsc::channel();
+        let (sender_b, receiver_b) = mpsc::channel();
+        document.add_session(session_a, sender_a);
+        document.add_session(session_b, sender_b);
+
+        let before_typing = selection_at(2);
+        let before_second_char = selection_at(3);
+        let before_other_session = selection_at(0);
+        let before_delete = selection_at(5);
+        for (session, kind, selections, start, end, text, expected, property) in [
+            (session_a, EditKind::Insert, &before_typing, 2, 2, "a", "hia", "first typed character"),
+            (session_a, EditKind::Insert, &before_second_char, 3, 3, "b", "hiab", "second typed character"),
+            (session_b, EditKind::Insert, &before_other_session, 0, 0, "X", "Xhiab", "other session insert"),
+            (session_a, EditKind::Delete, &before_delete, 4, 5, "", "Xhia", "different edit kind"),
+        ] {
+            let start = position(start);
+            let end = position(end);
+            document.apply_ranges(session, kind, selections, &[(start, end, text.into())]);
+            assert_eq!(document.as_text().to_string(), expected, "{property}: text");
+            let expected_edits = vec![
+                Edit { change: Change::Delete(start, end - start), drift: Drift::Before },
+                Edit { change: Change::Insert(start, text.into()), drift: Drift::Before },
+            ];
+            for (name, receiver) in [("A", &receiver_a), ("B", &receiver_b)] {
+                let edits = receive(receiver, None, &format!("{property}: session {name}"));
+                assert_eq!(edits, expected_edits, "{property}: session {name} receives both edits in order");
+            }
+        }
+
+        let final_selection = selection_at(4);
+        let mut sel = final_selection.clone();
+        for (expected, restored, property) in [
+            ("Xhiab", &before_delete, "delete has its own group"),
+            ("hiab", &before_other_session, "another session never merges"),
+            ("hi", &before_typing, "typing coalesces with the first selection"),
+        ] {
+            assert!(document.undo(session_a, &sel), "{property}: undo succeeds");
+            assert_eq!(document.as_text().to_string(), expected, "{property}: undo text");
+            let edits_a = receive(&receiver_a, Some(restored), property);
+            let edits_b = receive(&receiver_b, None, "undo observer B receives no selections");
+            assert_eq!(edits_a, edits_b, "{property}: undo reaches both sessions");
+            sel = restored.clone();
+        }
+        assert!(!document.undo(session_a, &sel), "three groups exhaust undo history");
+        assert!(receiver_a.try_recv().is_err(), "empty undo does not broadcast to A");
+        assert!(receiver_b.try_recv().is_err(), "empty undo does not broadcast to B");
+        for (expected, restored) in [
+            ("hiab", &before_other_session),
+            ("Xhiab", &before_delete),
+            ("Xhia", &final_selection),
+        ] {
+            assert!(document.redo(session_b, &sel), "redo from session B succeeds: {expected}");
+            assert_eq!(document.as_text().to_string(), expected, "redo restores group text");
+            let edits_a = receive(&receiver_a, None, "redo observer A receives no selections");
+            let edits_b = receive(&receiver_b, Some(restored), "redo origin B restores selections");
+            assert_eq!(edits_a, edits_b, "redo reaches both sessions");
+            sel = restored.clone();
+        }
+
+        let before_c = selection_at(4);
+        let before_d = selection_at(5);
+        for (force_new, selections, at, text, expected) in [
+            (false, &before_c, 4, "c", "Xhiac"),
+            (true, &before_d, 5, "d", "Xhiacd"),
+        ] {
+            if force_new {
+                document.force_new_group();
+            }
+            document.apply_ranges(
+                session_a, EditKind::Insert, selections,
+                &[(position(at), position(at), text.into())],
+            );
+            assert_eq!(document.as_text().to_string(), expected, "forced group insert text");
+            let edits_a = receive(&receiver_a, None, "forced group origin A receives no selections");
+            let edits_b = receive(&receiver_b, None, "forced group observer B receives no selections");
+            assert_eq!(edits_a, edits_b, "forced group insert reaches both sessions");
+        }
+
+        document.replace_range(position(0), position(1), "Y".into());
+        assert_eq!(document.as_text().to_string(), "Yhiacd", "replace_range replaces only its range");
+        let edits_a = receive(&receiver_a, None, "replace_range sends no selections to A");
+        let edits_b = receive(&receiver_b, None, "replace_range sends no selections to B");
+        assert_eq!(edits_a, edits_b, "replace_range reaches both sessions");
+        let replacement_selection = SelectionSet::default();
+        sel = selection_at(6);
+        for (expected, restored, property) in [
+            ("Xhiacd", &replacement_selection, "replace_range opens its own group"),
+            ("Xhiac", &before_d, "force_new_group separates the second insert"),
+            ("Xhia", &before_c, "the first insert takes one more undo step"),
+        ] {
+            assert!(document.undo(session_a, &sel), "{property}: undo succeeds");
+            assert_eq!(document.as_text().to_string(), expected, "{property}: undo text");
+            let edits_a = receive(&receiver_a, Some(restored), property);
+            let edits_b = receive(&receiver_b, None, "undo observer B receives no selections");
+            assert_eq!(edits_a, edits_b, "{property}: undo reaches both sessions");
+            sel = restored.clone();
         }
     }
 }

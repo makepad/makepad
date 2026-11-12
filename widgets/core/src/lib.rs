@@ -610,6 +610,20 @@ pub fn theme_mod(vm: &mut ScriptVm) {
     }
 }
 
+/// The widget registration an isolate carries in its own heap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum IsolateWidgets {
+    #[default]
+    Library,
+    /// The theme, draw modules, core widget modules `scroll_bar` through `icon`
+    /// in registration order (`scroll_bar`, `scroll_bars`, `view`, `view_ui`,
+    /// `relief`, `grid`, `rubber_view`, `label`, `link_label`, `button`,
+    /// `divider`, `check_box`, `radio_button`, `image`, `animated_image_gif`,
+    /// `image_blend`, `icon`), safe-area inset values and preludes.
+    /// No window, no families, and no core widget modules after `icon`.
+    Base,
+}
+
 /// The core's widgets alone. `makepad_widgets::widgets_mod` is the one an
 /// app calls: it passes the families its features picked.
 pub fn widgets_mod(vm: &mut ScriptVm) {
@@ -625,7 +639,7 @@ pub fn widgets_mod_with(
 ) {
     *vm.cx_mut().global::<Registration>() = Registration { window, families: families.to_vec() };
     let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_io(vm, window, families, host_io_only, true);
+    widgets_mod_with_io(vm, window, families, host_io_only, true, IsolateWidgets::Library);
 }
 
 /// The library for a Splash isolate whose host registers it itself
@@ -634,7 +648,7 @@ pub fn widgets_mod_with(
 /// carries none of the host's chrome). Leaves the app's `Registration` alone.
 pub fn isolate_widgets_mod_with(vm: &mut ScriptVm, families: &[fn(&mut ScriptVm)]) {
     let host_io_only = vm.cx().script_data.std.host_io_only();
-    widgets_mod_with_io(vm, WindowFamilies::default(), families, host_io_only, false);
+    widgets_mod_with_io(vm, WindowFamilies::default(), families, host_io_only, false, IsolateWidgets::Library);
 }
 
 /// The families the last `widgets_mod_with` registered. A module rebuild the
@@ -657,9 +671,9 @@ pub(crate) fn script_mod_as_registered(vm: &mut ScriptVm) {
 
 /// The core's widgets for a Splash isolate being built: `host_io_only` is
 /// the restriction it will run under (its std is restricted only after this).
-pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
+pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool, set: IsolateWidgets) {
     let families = vm.cx_mut().global::<widget_hooks::IsolateFamilies>().0.clone();
-    widgets_mod_with_io(vm, WindowFamilies::default(), &families, host_io_only, false);
+    widgets_mod_with_io(vm, WindowFamilies::default(), &families, host_io_only, false, set);
 }
 
 /// With `host_io_only` (a guest held to the host service bridge) the modules
@@ -675,6 +689,7 @@ fn widgets_mod_with_io(
     families: &[fn(&mut ScriptVm)],
     host_io_only: bool,
     stock_apart: bool,
+    set: IsolateWidgets,
 ) {
     // With a sheet installed the library is registered twice. First as it
     // stands without the sheet, which is kept (`desktop_style::keep_stock`)
@@ -687,11 +702,11 @@ fn widgets_mod_with_io(
     // and a second pass would be wasted work. Its stock names are the sheet's library.
     let sheet = crate::desktop_style::current_name(vm).is_some();
     if sheet && stock_apart {
-        register_widgets(vm, window, families, host_io_only, false, true);
+        register_widgets(vm, window, families, host_io_only, false, true, set);
         build_base_themes(vm);
-        register_widgets(vm, window, families, host_io_only, true, false);
+        register_widgets(vm, window, families, host_io_only, true, false, set);
     } else {
-        register_widgets(vm, window, families, host_io_only, sheet, true);
+        register_widgets(vm, window, families, host_io_only, sheet, true, set);
     }
 }
 
@@ -706,6 +721,7 @@ fn register_widgets(
     host_io_only: bool,
     with_sheet: bool,
     keep: bool,
+    set: IsolateWidgets,
 ) {
     vm.expand_all_lazy();
     if with_sheet {
@@ -750,6 +766,49 @@ true
         crate::desktop_style::keep_stock(vm);
     }
 
+    register_base_widgets(vm);
+    if set == IsolateWidgets::Library {
+        register_library_widgets(vm, window, families, host_io_only);
+    }
+
+    // Safe area inset values (in Makepad layout points). Populated from the platform's
+    // display_context which is set before Startup on iOS/Android. On desktop
+    // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
+    {
+        let insets = vm.cx().display_context.safe_area_insets;
+        let widgets = vm.module(id!(widgets));
+        vm.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_TOP),
+            insets.top,
+        );
+        vm.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_BOTTOM),
+            insets.bottom,
+        );
+        vm.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_LEFT),
+            insets.left,
+        );
+        vm.set_value(
+            widgets,
+            id!(SAFE_INSET_PAD_RIGHT),
+            insets.right,
+        );
+    }
+
+    script_eval!(vm, {
+        mod.prelude.widgets = {
+            ..mod.prelude.widgets_header,
+            theme:mod.theme,
+            ..mod.widgets,
+        }
+    });
+}
+
+fn register_base_widgets(vm: &mut ScriptVm) {
     crate::scroll_bar::script_mod(vm);
     crate::scroll_bars::script_mod(vm);
     crate::view::script_mod(vm);
@@ -768,7 +827,14 @@ true
     crate::animated_image_gif::script_mod(vm);
     crate::image_blend::script_mod(vm);
     crate::icon::script_mod(vm);
+}
 
+fn register_library_widgets(
+    vm: &mut ScriptVm,
+    window: WindowFamilies,
+    families: &[fn(&mut ScriptVm)],
+    host_io_only: bool,
+) {
     crate::adaptive_view::script_mod(vm);
     crate::desktop_button::script_mod(vm);
     crate::keyboard_view::script_mod(vm);
@@ -909,42 +975,6 @@ true
     for register in families {
         register(vm);
     }
-
-    // Safe area inset values (in Makepad layout points). Populated from the platform's
-    // display_context which is set before Startup on iOS/Android. On desktop
-    // platforms these remain 0.0. Updated at runtime on WindowGeomChange events.
-    {
-        let insets = vm.cx().display_context.safe_area_insets;
-        let widgets = vm.module(id!(widgets));
-        vm.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_TOP),
-            insets.top,
-        );
-        vm.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_BOTTOM),
-            insets.bottom,
-        );
-        vm.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_LEFT),
-            insets.left,
-        );
-        vm.set_value(
-            widgets,
-            id!(SAFE_INSET_PAD_RIGHT),
-            insets.right,
-        );
-    }
-
-    script_eval!(vm, {
-        mod.prelude.widgets = {
-            ..mod.prelude.widgets_header,
-            theme:mod.theme,
-            ..mod.widgets,
-        }
-    });
 }
 
 pub fn script_mod(vm: &mut ScriptVm) {

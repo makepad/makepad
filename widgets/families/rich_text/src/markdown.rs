@@ -390,6 +390,9 @@ pub struct MarkdownHost<'a> {
     /// The number of the first item of the outermost ordered list, when the
     /// events are items cut from a longer list.
     pub list_start: Option<u64>,
+    /// The events continue a document drawn above them (the next part of
+    /// it): their first block keeps the spacing above it.
+    pub follows_block: bool,
 }
 
 impl MarkdownHost<'_> {
@@ -475,7 +478,10 @@ impl Markdown {
         let tf = &mut self.text_flow;
         // Track state for nested formatting
         let mut list_stack: Vec<ListState> = Vec::new();
-        let mut is_first_block = true;
+        let mut is_first_block = !host.as_ref().is_some_and(|host| host.follows_block);
+        // Right after a list item's marker: the item's first paragraph (a
+        // loose list wraps its text in one) stays on the marker's line.
+        let mut at_item_start = false;
         // Per-column alignments for the current table, and the current cell's
         // column index within its row. Both are reset when a new table starts.
         let mut table_alignments: Vec<Alignment> = Vec::new();
@@ -503,6 +509,8 @@ impl Markdown {
         let mut block_text_starts: Vec<usize> = Vec::new();
 
         for (event, range) in events {
+            // Only the event right after a marker is at the item's start.
+            let after_marker = std::mem::take(&mut at_item_start);
             // A block that drew nothing gets the caret places inside it.
             let opens_block = hosted
                 && matches!(
@@ -548,7 +556,7 @@ impl Markdown {
                     tf.new_line_collapsed(cx);
                 }
                 MdEvent::Start(Tag::Paragraph) => {
-                    if !is_first_block {
+                    if !is_first_block && !after_marker {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
@@ -602,6 +610,7 @@ impl Markdown {
                         "•".to_string()
                     };
                     tf.begin_list_item(cx, &marker, 2.5);
+                    at_item_start = true;
                 }
                 MdEvent::End(TagEnd::Item) => {
                     tf.end_list_item(cx);

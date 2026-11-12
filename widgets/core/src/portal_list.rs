@@ -429,6 +429,29 @@ impl HeightTree {
         self.sum_up();
     }
 
+    /// Splices plain heights in O(n), keeping surviving measurements and estimating new items.
+    fn splice(&mut self, at: usize, removed: usize, added: usize) {
+        let at = at.min(self.size);
+        let removed = removed.min(self.size - at);
+        if removed == 0 && added == 0 {
+            return;
+        }
+        // Undo the sums in place, just as `edit_heights` does.
+        for i in (1..=self.size).rev() {
+            let parent = i + (i & i.wrapping_neg());
+            if parent <= self.size {
+                self.tree[parent] -= self.tree[i];
+            }
+        }
+        if self.tree.is_empty() {
+            self.tree.push(0.0);
+        }
+        drop(self.tree.splice(at + 1..at + removed + 1, std::iter::repeat_n(self.default_height, added)));
+        drop(self.measured.splice(at..at + removed, std::iter::repeat_n(false, added)));
+        self.size = self.measured.len();
+        self.sum_up();
+    }
+
     /// Starts the tree over with `size` unmeasured items at the default height, which `edit` can then change.
     ///
     /// Unlike [`Self::new()`], this reuses the tree's memory.
@@ -634,6 +657,29 @@ impl HeightTree {
 struct SkippedRanges(Vec<Range<usize>>);
 
 impl SkippedRanges {
+    /// Shifts surviving skipped items, clipping removed portions and leaving new items unskipped.
+    fn splice(&mut self, at: usize, removed: usize, added: usize) {
+        if removed == 0 && added == 0 {
+            return;
+        }
+        let mut ranges = Vec::with_capacity(self.0.len() + 1);
+        for range in &self.0 {
+            let before_end = range.end.min(at);
+            if range.start < before_end {
+                ranges.push(range.start..before_end);
+            }
+            let after_start = range.start.max(at.saturating_add(removed));
+            if after_start < range.end {
+                let start = spliced_id(after_start, at, removed, added).unwrap();
+                let end = spliced_id(range.end, at, removed, added).unwrap();
+                if start < end {
+                    ranges.push(start..end);
+                }
+            }
+        }
+        self.0 = ranges;
+    }
+
     /// Returns the skipped range that item `id` is in, if any.
     fn range_containing(&self, id: usize) -> Option<&Range<usize>> {
         let i = self.0.partition_point(|range| range.end <= id);
@@ -742,6 +788,18 @@ impl SkippedRanges {
 /// Returns the indices of `ids` in a height tree of `size` items whose first item is `range_start`.
 fn tree_indices(ids: Range<usize>, range_start: usize, size: usize) -> Range<usize> {
     ids.start.saturating_sub(range_start)..ids.end.saturating_sub(range_start).min(size)
+}
+
+/// Where id `id` went in a splice: unchanged before `at`, `None` inside the removed range,
+/// shifted after it.
+fn spliced_id(id: usize, at: usize, removed: usize, added: usize) -> Option<usize> {
+    if id < at {
+        Some(id)
+    } else if id - at < removed {
+        None
+    } else {
+        Some((id - removed).saturating_add(added))
+    }
 }
 
 /// Returns the parts of `ranges` that aren't in `minus`.
@@ -2297,6 +2355,98 @@ impl PortalList {
             }
             self.update_scroll_bar(cx);
         }
+    }
+
+    /// The host's items changed places from `at` on: the `removed` items at `at` are gone, `added`
+    /// new ones stand there now, and every item after them is the same item under an id shifted by
+    /// `added - removed`. For a list over a document whose edits insert and remove rows in its
+    /// middle. Keeps each other item's measured height (a new item is estimated with the average
+    /// until it is drawn), the widgets of the items before and after the splice (those after are
+    /// re-keyed; the removed items' widgets are dropped, or parked for reuse where `reuse_items`
+    /// says so, the way items leaving the list already are), the viewport anchor (`first_id`
+    /// shifts with its item; inside the removed range it becomes `at`, keeping `first_scroll`),
+    /// the skipped ranges and the selection (shifted; a part inside the removed range is clipped
+    /// to `at`), and the range end (`range_end` moves by `added - removed`). Nothing is drawn;
+    /// the next draw lays the list out from the new state.
+    pub fn splice_items(&mut self, cx: &mut Cx, at: usize, removed: usize, added: usize) {
+        let at = at.clamp(self.range_start, self.range_end);
+        let removed = removed.min(self.range_end - at);
+        let added = added.min(usize::MAX - (self.range_end - removed));
+        if removed == 0 && added == 0 {
+            return;
+        }
+        let remap = |id| spliced_id(id, at, removed, added);
+        let remap_position = |(id, character)| {
+            remap(id).map_or((at, 0), |id| (id, character))
+        };
+
+        if let Some(tree) = &mut self.height_tree {
+            tree.splice(at - self.range_start, removed, added);
+        }
+        self.range_end = remap(self.range_end).unwrap();
+        self.first_id = remap(self.first_id).unwrap_or(at);
+        self.last_notified_pos.0 = remap(self.last_notified_pos.0).unwrap_or(at);
+        self.last_visible_id = self.last_visible_id.and_then(remap);
+        self.keep_visible_in_draw = self.keep_visible_in_draw.and_then(remap);
+        self.skipped.splice(at, removed, added);
+        self.selection_anchor = self.selection_anchor.map(remap_position);
+        self.selection_cursor = self.selection_cursor.map(remap_position);
+        self.select_unit = self.select_unit.map(|(start, end)| (remap_position(start), remap_position(end)));
+        if let ScrollState::ScrollingTo { target_id, .. } = &mut self.scroll_state {
+            *target_id = remap(*target_id).unwrap_or(at);
+        }
+        match self.draw_state.as_mut() {
+            Some(ListDrawState::Down { index, .. }
+                | ListDrawState::Up { index, .. }
+                | ListDrawState::DownAgain { index, .. }) => {
+                *index = remap(*index).unwrap_or(at);
+            }
+            _ => {}
+        }
+        // These slots still describe the surviving widgets' last drawn geometry.
+        self.draw_align_list.retain_mut(|item| {
+            let Some(id) = remap(item.index) else { return false };
+            item.index = id;
+            true
+        });
+        self.parked_items.retain_mut(|item| {
+            let Some(id) = remap(item.item_id) else { return false };
+            item.item_id = id;
+            true
+        });
+        self.event_item_ids.retain_mut(|id| {
+            let Some(new_id) = remap(*id) else { return false };
+            *id = new_id;
+            true
+        });
+        self.pressed_rows.retain_mut(|(id, digit)| {
+            if let Some(new_id) = remap(*id) {
+                *id = new_id;
+                true
+            } else {
+                cx.fingers.cancel_digit_except(*digit, self.area);
+                false
+            }
+        });
+
+        // Rebuild both the keys and ComponentMap's visible set, without collisions between old and new ids.
+        let mut old_items = std::mem::take(&mut self.items);
+        let ids: Vec<_> = old_items.keys().copied().collect();
+        for id in ids {
+            let visible = old_items.is_visible(&id);
+            let item = old_items.remove(&id).unwrap();
+            if let Some(new_id) = remap(id) {
+                if visible {
+                    self.items.entry(new_id).or_insert(item);
+                } else {
+                    self.items.insert(new_id, item);
+                }
+            } else if self.reuse_items {
+                self.reusable_items.entry(item.template).or_default().push(item);
+            }
+        }
+        cx.widget_tree_mark_dirty(self.uid);
+        self.update_scroll_bar(cx);
     }
 
     /// Every area this list owns for the question "whose press is this": its
@@ -4976,6 +5126,13 @@ impl PortalListRef {
         }
     }
 
+    /// See [`PortalList::splice_items()`].
+    pub fn splice_items(&self, cx: &mut Cx, at: usize, removed: usize, added: usize) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.splice_items(cx, at, removed, added);
+        }
+    }
+
     /// Stops any fling or smooth scroll, e.g., before jumping somewhere with `set_first_id_and_scroll()`.
     pub fn stop_scrolling(&self) {
         if let Some(mut inner) = self.borrow_mut() {
@@ -5559,6 +5716,64 @@ mod tests {
     // Deltas are positive toward the start: a wheel rolled up.
     const UP: f64 = 60.0;
     const DOWN: f64 = -60.0;
+
+    /// A splice preserves surviving ids and heights, estimates new rows, and clips skipped ranges.
+    #[test]
+    fn a_splice_keeps_heights_and_ids_around_it() {
+        for (kind, removed, added, expected) in [
+            ("insert", 0, 3, [Some(1), Some(5), Some(6), Some(7)]),
+            ("removal", 2, 0, [Some(1), None, None, Some(2)]),
+            ("replacement", 2, 3, [Some(1), None, None, Some(5)]),
+        ] {
+            for (id, expected) in (1..=4).zip(expected) {
+                assert_eq!(spliced_id(id, 2, removed, added), expected, "{kind}: remap id {id} before, inside or after the cut");
+            }
+        }
+
+        let mut tree = HeightTree::new(6, 30.0);
+        for (i, height) in [11.0, 22.0, 33.0, 44.0, 55.0, 66.0].into_iter().enumerate() {
+            tree.update(i, height);
+        }
+        tree.splice(2, 1, 3);
+        assert_eq!(tree.size, 8, "replacement size");
+        let heights = [11.0, 22.0, 30.0, 30.0, 30.0, 44.0, 55.0, 66.0];
+        for (i, height) in heights.into_iter().enumerate() {
+            assert_eq!(tree.point_query(i), height, "replacement height at {i}: survivors keep heights and new rows use the default");
+            assert_eq!(tree.measured[i], !(2..5).contains(&i), "replacement measured flag at {i}");
+            assert_eq!(tree.prefix_sum(i), heights[..=i].iter().sum::<f64>(), "replacement prefix sum at {i}");
+        }
+        assert_eq!(tree.total(), heights.iter().sum::<f64>(), "replacement total");
+        tree.splice(1, 6, 0);
+        assert_eq!(tree.size, 2, "middle removal size");
+        for (i, height) in [11.0, 66.0].into_iter().enumerate() {
+            assert_eq!(tree.point_query(i), height, "middle removal survivor height at {i}");
+            assert!(tree.measured[i], "middle removal survivor measured flag at {i}");
+        }
+        assert_eq!(tree.prefix_sum(0), 11.0, "middle removal first prefix");
+        assert_eq!(tree.prefix_sum(1), 77.0, "middle removal last prefix");
+        assert_eq!(tree.total(), 77.0, "middle removal total");
+
+        let mut empty = HeightTree::new(0, 30.0);
+        empty.splice(0, 0, 2);
+        assert_eq!(empty.size, 2, "empty tree insertion size");
+        for i in 0..2 {
+            assert_eq!(empty.point_query(i), empty.default_height, "empty tree inserted height at {i}");
+            assert!(!empty.measured[i], "empty tree inserted measured flag at {i}");
+            assert_eq!(empty.prefix_sum(i), (i + 1) as f64 * empty.default_height, "empty tree inserted prefix at {i}");
+        }
+        assert_eq!(empty.total(), 60.0, "empty tree inserted total");
+
+        let mut skipped = SkippedRanges(vec![1..3, 4..7, 8..9, 10..12, 14..16]);
+        skipped.splice(5, 6, 2);
+        assert_eq!(skipped.0[0], 1..3, "skipped range before splice stays");
+        assert_eq!(skipped.0[1], 4..5, "skipped overlap clips to the cut");
+        assert_eq!(skipped.0[2], 7..8, "skipped surviving suffix shifts past new rows");
+        assert_eq!(skipped.0[3], 10..12, "skipped range after splice shifts");
+        assert_eq!(skipped.0.len(), 4, "wholly removed skipped range disappears");
+        let mut spanning = SkippedRanges(vec![1..8]);
+        spanning.splice(3, 2, 2);
+        assert_eq!(spanning.0, vec![1..3, 5..8], "new rows inside a skipped range remain unskipped");
+    }
 
     /// Between its edges a list keeps every wheel, whichever way it rolls, so
     /// the page around it stays put.

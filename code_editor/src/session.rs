@@ -137,10 +137,9 @@ impl CodeSession {
     }
 
     fn attach(document: CodeDocument, layout: SessionLayout) -> Self {
-        static ID: AtomicUsize = AtomicUsize::new(0);
         let (edit_sender, edit_receiver) = mpsc::channel();
         let mut session = Self {
-            id: SessionId(ID.fetch_add(1, atomic::Ordering::AcqRel)),
+            id: SessionId::new(),
             settings: Rc::new(Settings::default()),
             document,
             layout: RefCell::new(layout),
@@ -1401,6 +1400,15 @@ impl Drop for CodeSession {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Default, PartialEq)]
 pub struct SessionId(usize);
+
+impl SessionId {
+    /// A fresh id, for a view that joins a document's edit broadcast
+    /// (`CodeDocument::add_session`) without being a `CodeSession`.
+    pub fn new() -> Self {
+        static ID: AtomicUsize = AtomicUsize::new(0);
+        Self(ID.fetch_add(1, atomic::Ordering::AcqRel))
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SessionLayout {

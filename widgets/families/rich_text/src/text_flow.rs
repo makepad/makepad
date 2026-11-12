@@ -1068,6 +1068,13 @@ pub struct TextFlow {
     #[live(false)]
     pub selectable: bool,
 
+    /// The host owns the selection: the flow tracks its text and draws the
+    /// selection the host sets ([`TextFlow::set_selection`]) as `selectable`
+    /// does, but takes no presses or key focus for it. For an editor that
+    /// hit-tests the flow and keeps its own caret.
+    #[live(false)]
+    pub host_selection: bool,
+
     /// Selection anchor (start) character index
     #[rust]
     selection_anchor: usize,
@@ -2118,7 +2125,7 @@ impl TextFlow {
     /// after the glyphs are placed, and neither can do that from the drawn
     /// glyphs alone. A flow with neither pays for none of it.
     fn tracks_text(&self) -> bool {
-        self.selectable || !self.marks.is_empty()
+        self.selectable || self.host_selection || !self.marks.is_empty()
     }
 
     /// Mark a stretch of this flow's text as wrong, doubtful or noteworthy,
@@ -2173,7 +2180,7 @@ impl TextFlow {
 
     /// Draw selection highlight rectangles
     fn draw_selection_rects(&mut self, cx: &mut Cx2d) {
-        if !self.selectable {
+        if !self.selectable && !self.host_selection {
             return;
         }
 
@@ -2278,7 +2285,7 @@ impl TextFlow {
     /// Set selection range (for external control, e.g., cross-TextFlow selection).
     /// Propagates sub-ranges to child WidgetText widgets so they draw their own selection.
     pub fn set_selection(&mut self, anchor: usize, cursor: usize) {
-        if self.selectable {
+        if self.selectable || self.host_selection {
             self.selection_anchor = anchor;
             self.selection_cursor = cursor;
             self.propagate_selection_to_children();
@@ -2350,6 +2357,12 @@ impl TextFlow {
             pos,
             size: dvec2(0.0, height),
         }
+    }
+
+    /// The text the flow tracks, as drawn (its flat indices index it), for a
+    /// host that steps a caret through it. Empty unless the flow tracks text.
+    pub fn tracked_text(&self) -> &str {
+        &self.selection_tracker.text
     }
 
     /// Get the total text length

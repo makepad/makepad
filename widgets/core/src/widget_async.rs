@@ -5,6 +5,7 @@ use {
     crate::makepad_script::{script_err_not_found, ScriptFnRef, ScriptThreadId},
     crate::widget::{WidgetRef, WidgetUid},
     crate::widget_tree::CxWidgetExt,
+    crate::IsolateWidgets,
     std::cell::RefCell,
     std::collections::{HashMap, VecDeque},
     std::sync::atomic::{AtomicU64, Ordering},
@@ -104,6 +105,7 @@ pub(crate) fn style_isolate(
     theme: SplashTheme,
     script: Option<&SplashThemeScript>,
     host_io_only: bool,
+    set: IsolateWidgets,
 ) {
     // Set directly: evaluating the same `script!` again on a restyle errors in the VM.
     let name = match theme {
@@ -118,7 +120,7 @@ pub(crate) fn style_isolate(
     if let Some(script) = script {
         eval_theme_script(vm, "theme", &script.theme);
     }
-    crate::widgets_mod_with_host_io(vm, host_io_only);
+    crate::widgets_mod_with_host_io(vm, host_io_only, set);
     if let Some(script) = script {
         eval_theme_script(vm, "widgets", &script.widgets);
     }
@@ -137,13 +139,13 @@ pub(crate) fn restyle_isolate(
 ) {
     let heap_key = vm.heap_key();
     let lazy = vm.has_lazy_modules();
-    let (host_io_only, host_mods) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
+    let (host_io_only, set, host_mods) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
         Some(ui) => {
             ui.theme = theme;
             ui.script = script.clone();
-            (ui.host_io_only, ui.host_mods.clone())
+            (ui.host_io_only, ui.set, ui.host_mods.clone())
         }
-        None => (vm.cx_mut().script_data.std.host_io_only(), Vec::new()),
+        None => (vm.cx_mut().script_data.std.host_io_only(), IsolateWidgets::Library, Vec::new()),
     };
     if lazy {
         return;
@@ -154,7 +156,7 @@ pub(crate) fn restyle_isolate(
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.with_reload(|vm| {
             with_loader(vm, loader, |vm| {
-                style_isolate(vm, theme, script.as_deref(), host_io_only);
+                style_isolate(vm, theme, script.as_deref(), host_io_only, set);
                 crate::desktop_style::apply_widgets(vm);
                 // Widget registration replaces mod.widgets: put this isolate's own host mods back.
                 for install in host_mods {
@@ -419,6 +421,7 @@ struct WidgetToScriptCallRequest {
 
 /// An isolate's UI registration, as it was asked for at allocation.
 struct IsolateUi {
+    set: IsolateWidgets,
     sheet: Option<crate::desktop_style::StyleSheet>,
     host_io_only: bool,
     theme: SplashTheme,
@@ -454,7 +457,7 @@ pub(crate) fn restyle_lazy_isolate(cx: &mut Cx, vm_id: SplashVmId, sheet: &crate
 
 thread_local! {
     // The `mod` keys an isolate's UI registration makes, learned from the first isolate
-    // by the registration's shape: the families and host mods it runs, host-io, sheet or not
+    // by the registration's shape: widget set, families and host mods, host-io, sheet or not
     static ISOLATE_UI_KEYS: RefCell<Vec<(Vec<usize>, Vec<LiveId>)>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -468,14 +471,14 @@ unsafe extern "C-unwind" fn expand_isolate_ui_lazily(vm: *mut ScriptVm) {
 
 fn expand_isolate_ui(vm: &mut ScriptVm) {
     let heap_key = vm.heap_key();
-    let (sheet, host_io_only, theme, script, loader, host_mods, custom, apply_sheet_widgets) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
-        Some(ui) => (ui.sheet.clone(), ui.host_io_only, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets),
-        None => (None, true, splash_theme(), None, None, Vec::new(), None, false),
+    let (sheet, host_io_only, set, theme, script, loader, host_mods, custom, apply_sheet_widgets) = match vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get_mut(&heap_key) {
+        Some(ui) => (ui.sheet.clone(), ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone(), ui.apply_sheet_widgets),
+        None => (None, true, IsolateWidgets::Library, splash_theme(), None, None, Vec::new(), None, false),
     };
     // The registration is the host's own code: it loads the library's fonts like before the
     // isolate was restricted, and the restriction is back before any guest code runs again.
     let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
-    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expand_isolate_ui_modules(vm, sheet, host_io_only, theme, script, loader, host_mods, custom, apply_sheet_widgets)));
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| expand_isolate_ui_modules(vm, sheet, host_io_only, set, theme, script, loader, host_mods, custom, apply_sheet_widgets)));
     vm.cx_mut().script_data.std.set_host_io_only_for_host_code(restricted);
     if let Err(payload) = out {
         std::panic::resume_unwind(payload);
@@ -486,6 +489,7 @@ fn expand_isolate_ui_modules(
     vm: &mut ScriptVm,
     sheet: Option<crate::desktop_style::StyleSheet>,
     host_io_only: bool,
+    set: IsolateWidgets,
     theme: SplashTheme,
     script: Option<std::rc::Rc<SplashThemeScript>>,
     loader: Option<ScriptObjectRef>,
@@ -508,7 +512,7 @@ fn expand_isolate_ui_modules(
             None => crate::desktop_style::uninstall(vm),
         }
         crate::theme_mod(vm);
-        style_isolate(vm, theme, script.as_deref(), host_io_only);
+        style_isolate(vm, theme, script.as_deref(), host_io_only, set);
         if apply_sheet_widgets {
             crate::desktop_style::apply_widgets(vm);
         }
@@ -532,17 +536,17 @@ fn expand_isolate_ui_modules(
 fn reload_isolate(vm: &mut ScriptVm) {
     let heap_key = vm.heap_key();
     let lazy = vm.has_lazy_modules();
-    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| (ui.host_io_only, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone()));
+    let ui = vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.get(&heap_key).map(|ui| (ui.host_io_only, ui.set, ui.theme, ui.script.clone(), ui.loader.clone(), ui.host_mods.clone(), ui.custom.clone()));
     let restricted = vm.cx_mut().script_data.std.set_host_io_only_for_host_code(false);
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.with_reload(|vm| {
-            if let Some((host_io_only, theme, script, loader, host_mods, custom)) = ui.filter(|_| !lazy) {
+            if let Some((host_io_only, set, theme, script, loader, host_mods, custom)) = ui.filter(|_| !lazy) {
                 with_loader(vm, loader.as_ref(), |vm| {
                     match custom {
                         Some(custom) => custom(vm),
                         None => {
                             crate::theme_mod(vm);
-                            style_isolate(vm, theme, script.as_deref(), host_io_only);
+                            style_isolate(vm, theme, script.as_deref(), host_io_only, set);
                             crate::desktop_style::apply_widgets(vm);
                         }
                     }
@@ -746,6 +750,10 @@ pub fn contain_isolate_panic(what: &str, f: impl FnOnce()) -> bool {
 pub trait CxSplashVmExt {
     fn alloc_splash_vm(&mut self) -> SplashVmId;
     fn alloc_splash_vm_with_network(&mut self, network_enabled: bool) -> SplashVmId;
+    /// Allocate an isolate with the chosen widget set, using the host's theme and script.
+    /// A smaller set reduces UI registration and the isolate's live heap; a name outside
+    /// that set is an ordinary unknown name, with no fallback registration.
+    fn alloc_splash_vm_with_widgets(&mut self, network_enabled: bool, set: IsolateWidgets) -> SplashVmId;
     /// Allocate an isolate whose external I/O must use the host service bridge.
     fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId;
     fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId;
@@ -795,7 +803,7 @@ pub trait CxSplashVmExt {
 /// The body of `alloc_splash_vm_with_io` / `alloc_splash_vm_with_ui`.
 /// `pin`: a stock theme the isolate keeps, without the host's [`SplashThemeScript`];
 /// `None` takes the host's theme and script.
-fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, custom_ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>, pin: Option<SplashTheme>) -> SplashVmId {
+fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, set: IsolateWidgets, custom_ui: Option<std::rc::Rc<dyn Fn(&mut ScriptVm)>>, pin: Option<SplashTheme>) -> SplashVmId {
 
     // A nested Splash cannot acquire authority its parent does not have.
     let host_io_only = host_io_only || cx.script_data.std.host_io_only();
@@ -839,11 +847,12 @@ fn alloc_splash_vm_impl(cx: &mut Cx, network_enabled: bool, host_io_only: bool, 
         // The first isolate of the process registers them eagerly to learn their `mod` keys.
         let heap_key = vm.heap_key();
         let script = if pin.is_none() { splash_theme_script() } else { None };
-        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { sheet: inherited, host_io_only, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), loader: None, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false });
+        vm.cx_mut().global::<CxWidgetAsync>().isolate_ui.insert(heap_key, IsolateUi { set, sheet: inherited, host_io_only, theme: pin.unwrap_or_else(splash_theme), script: script.clone(), loader: None, host_mods: HOST_ISOLATE_MODS.with(|g| g.borrow().clone()), custom: None, apply_sheet_widgets: false });
         let shape: Vec<usize> = {
             let families = vm.cx_mut().global::<crate::widget_hooks::IsolateFamilies>().0.clone();
             let mut shape: Vec<usize> = families.iter().map(|f| *f as usize).collect();
             HOST_ISOLATE_MODS.with(|g| shape.extend(g.borrow().iter().map(|f| *f as usize)));
+            shape.push(set as usize);
             shape.push(host_io_only as usize);
             shape.push(script.as_ref().map_or(0, |script| {
                 use std::hash::{Hash, Hasher};
@@ -1002,16 +1011,20 @@ impl CxSplashVmExt for Cx {
         self.alloc_splash_vm_with_io(network_enabled, false)
     }
 
+    fn alloc_splash_vm_with_widgets(&mut self, network_enabled: bool, set: IsolateWidgets) -> SplashVmId {
+        alloc_splash_vm_impl(self, network_enabled, false, set, None, None)
+    }
+
     fn alloc_splash_vm_with_host_io(&mut self) -> SplashVmId {
         self.alloc_splash_vm_with_io(false, true)
     }
 
     fn alloc_splash_vm_with_io(&mut self, network_enabled: bool, host_io_only: bool) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, host_io_only, None, None)
+        alloc_splash_vm_impl(self, network_enabled, host_io_only, IsolateWidgets::Library, None, None)
     }
 
     fn alloc_splash_vm_with_ui(&mut self, network_enabled: bool, ui: std::rc::Rc<dyn Fn(&mut ScriptVm)>) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, false, Some(ui), None)
+        alloc_splash_vm_impl(self, network_enabled, false, IsolateWidgets::Library, Some(ui), None)
     }
 
     fn alloc_splash_vm_with_theme(
@@ -1020,7 +1033,7 @@ impl CxSplashVmExt for Cx {
         host_io_only: bool,
         theme: Option<SplashTheme>,
     ) -> SplashVmId {
-        alloc_splash_vm_impl(self, network_enabled, host_io_only, None, theme)
+        alloc_splash_vm_impl(self, network_enabled, host_io_only, IsolateWidgets::Library, None, theme)
     }
 
     fn with_script_vm_id<R>(&mut self, vm_id: SplashVmId, f: impl FnOnce(&mut ScriptVm) -> R) -> R {
@@ -2688,6 +2701,106 @@ mod host_io_tests {
         cx.with_vm(crate::script_mod);
         let id = cx.alloc_splash_vm_with_host_io();
         (Box::new(cx), id)
+    }
+
+    #[test]
+    fn base_widgets_are_the_library_prefix_in_a_smaller_isolate() {
+        fn family(vm: &mut ScriptVm) {
+            crate::script_eval!(vm, {
+                mod.widgets.TestFamilyWidget = mod.widgets.View {}
+            });
+        }
+
+        let (mut cx, initial) = context();
+        cx.free_splash_vm(initial);
+        // Exercise the family hook without making the core depend on a family crate.
+        cx.global::<crate::widget_hooks::IsolateFamilies>()
+            .0
+            .push(family);
+        // Learn this shape first, so the measured base expands under the error sink.
+        let warm = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Base);
+        cx.free_splash_vm(warm);
+        let base = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Base);
+        let library = cx.alloc_splash_vm_with_widgets(false, IsolateWidgets::Library);
+        let inspect = |cx: &mut Cx, id, set| {
+            with_isolate(cx, id, |cx| {
+                cx.with_vm(|vm| {
+                    vm.capture_errors();
+                    let widgets = vm.module(id!(widgets));
+                    for name in [id!(View), id!(Label), id!(Button), id!(Image), id!(Icon)] {
+                        assert!(
+                            vm.value(widgets, name).as_object().is_some(),
+                            "{set:?}: {name} resolves"
+                        );
+                    }
+                    let errors = vm.take_errors();
+                    assert!(
+                        errors.is_empty(),
+                        "{set:?}: registration has zero script errors: {errors:?}"
+                    );
+                    let names: Vec<_> = vm
+                        .heap()
+                        .map_entries(widgets)
+                        .iter()
+                        .map(|e| e.key)
+                        .collect();
+                    for name in [id!(TestFamilyWidget), id!(TextInput), id!(Slider)] {
+                        assert_eq!(
+                            names.contains(&name.into()),
+                            set == IsolateWidgets::Library,
+                            "{set:?}: {name} belongs only to the library"
+                        );
+                    }
+                    let button = vm
+                        .value(widgets, id!(Button))
+                        .as_object()
+                        .expect("Button template");
+                    let mut keys: Vec<_> = vm
+                        .heap()
+                        .proto_map_entries(button)
+                        .iter()
+                        .filter_map(|e| e.key.as_id())
+                        .collect();
+                    keys.sort_by_key(|key| key.0);
+                    keys.dedup();
+                    assert!(
+                        !keys.is_empty(),
+                        "{set:?}: Button has property keys to compare"
+                    );
+                    vm.gc();
+                    (keys, vm.heap().alloced_object_ids().len())
+                })
+            })
+        };
+        let (base_keys, base_live) = inspect(&mut cx, base, IsolateWidgets::Base);
+        let (library_keys, library_live) = inspect(&mut cx, library, IsolateWidgets::Library);
+        assert_eq!(
+            base_keys, library_keys,
+            "Button uses the same definition in both sets"
+        );
+        assert!(
+            base_live < library_live,
+            "base live objects ({base_live}) are fewer than library ({library_live})"
+        );
+        cx.with_script_vm_id(base, |vm| {
+            vm.capture_errors();
+            let value = vm.eval(script! { mod.widgets.Slider });
+            let errors = vm.take_errors();
+            assert!(
+                value.is_err() && errors.iter().any(|e| e.contains("not found")),
+                "an excluded widget is an ordinary unknown name: {errors:?}"
+            );
+            let widgets = vm.module(id!(widgets));
+            assert!(
+                !vm.heap()
+                    .map_entries(widgets)
+                    .iter()
+                    .any(|e| e.key == id!(Slider).into()),
+                "unknown names never expand the library"
+            );
+        });
+        cx.free_splash_vm(base);
+        cx.free_splash_vm(library);
     }
 
     #[test]

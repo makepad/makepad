@@ -2894,6 +2894,13 @@ impl WindowRef {
             false
         }
     }
+    pub fn is_maximized(&self, cx: &Cx) -> bool {
+        if let Some(inner) = self.borrow() {
+            inner.window.handle.is_maximized(cx)
+        } else {
+            false
+        }
+    }
     /// OS-native maximize (Windows: `ShowWindow(SW_MAXIMIZE)`; macOS: `toggleFullScreen:`).
     /// Unlike `fullscreen()`/`disable_fullscreen()` (which push
     /// `FullscreenWindow`/`NormalizeWindow` — not handled by every

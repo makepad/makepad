@@ -269,6 +269,10 @@ pub struct CodeEditor {
     /// A line to scroll to the middle of the view (caret untouched).
     #[rust]
     center_line: Option<usize>,
+    /// A line to scroll to a height in the view: its top that far below the
+    /// view's top (caret untouched).
+    #[rust]
+    place_line: Option<(usize, f64)>,
     /// Find matches, sorted, each within one line; drawn behind the text.
     #[rust]
     pub find_matches: Vec<(Position, Position)>,
@@ -835,6 +839,19 @@ impl CodeEditor {
             }
             KeepCursorInView::Off => {}
         }
+        if let Some((line, view_y)) = self.place_line {
+            if self.viewport_rect.size.y > 0.0 {
+                let line = line.min(session.document().as_text().as_lines().len().saturating_sub(1));
+                let (_, y) = session.layout().logical_to_normalized_position(
+                    Position { line_index: line, byte_index: 0 },
+                    Affinity::Before,
+                );
+                let y = (y * self.cell_size.y - view_y).max(0.0);
+                let x = self.scroll_bars.get_scroll_pos().x;
+                self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(x, y));
+                self.place_line = None;
+            }
+        }
         if let Some(line) = self.center_line {
             if self.viewport_rect.size.y > 0.0 {
                 let line = line.min(session.document().as_text().as_lines().len().saturating_sub(1));
@@ -1044,6 +1061,27 @@ impl CodeEditor {
     pub fn center_line(&mut self, cx: &mut Cx, line: usize) {
         self.center_line = Some(line);
         self.redraw(cx);
+    }
+
+    /// Scroll `line` (0-based) so its top is `view_y` below the view's top,
+    /// leaving the caret: a host keeping a line where another view showed it.
+    pub fn place_line(&mut self, cx: &mut Cx, line: usize, view_y: f64) {
+        self.place_line = Some((line, view_y));
+        self.redraw(cx);
+    }
+
+    /// How far below the view's top `line`'s top is, as last scrolled
+    /// (negative above the view). None before the first draw.
+    pub fn line_view_y(&self, session: &CodeSession, line: usize) -> Option<f64> {
+        if self.viewport_rect.size.y <= 0.0 {
+            return None;
+        }
+        let line = line.min(session.document().as_text().as_lines().len().saturating_sub(1));
+        let (_, y) = session.layout().logical_to_normalized_position(
+            Position { line_index: line, byte_index: 0 },
+            Affinity::Before,
+        );
+        Some(y * self.cell_size.y - self.scroll_bars.get_scroll_pos().y)
     }
 
     /// The lines drawn last frame (0-based, half-open); empty before the
