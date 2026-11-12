@@ -5,13 +5,18 @@
 //! follow=1` streams them (one line each), and `makepad run --agent` prints them on stderr too.
 //! Repeats of the same event (kind + key) within 30 s are counted, not sent again.
 //!
-//! Panic parking: a panic in JIT code on a program thread waits at the panic point (its stack
-//! intact for `stacks`) while a watcher is attached or under `--agent`, until a client resumes it
-//! or the wait times out; then it unwinds as usual. With nobody watching, the first panic at a site
-//! parks briefly (MAKEPAD_RUN_PANIC_PARK seconds, default 2) and says how to attach.
+//! Panic parking: a panic in JIT code on a program thread parks with its stack intact for up to
+//! 600 s when someone can decide it: an inspect watcher, `--agent`, devhub, the visible Run panel
+//! in a live session, or an interactive terminal. Otherwise it parks briefly
+//! (MAKEPAD_RUN_PANIC_PARK seconds, default 2), once per site. Someone attaching extends a short
+//! park to 600 s from its start; a long park never shortens. Resuming or timing out unwinds as
+//! usual. `--unattended` never parks. Every park always prints one line, even under --quiet or
+//! --silent, naming who can decide, the limit, how to inspect it and how --unattended avoids it;
+//! an extension prints one more line naming who attached and the new limit.
 
 use super::{json_str, now_ms, Out, Req};
 use std::collections::VecDeque;
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::{Relaxed, SeqCst}};
 use relax_session::sync::{Condvar, Mutex};
 
@@ -32,6 +37,8 @@ static NEW: Condvar = Condvar::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 /// sessions in `watch` / `events follow=1` now
 pub static WATCHERS: AtomicU32 = AtomicU32::new(0);
+/// `observe` followers (devhub): can decide a park without arming costly detectors.
+static OBSERVERS: AtomicU32 = AtomicU32::new(0);
 static RUN_STATE_AVAILABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static RUN_STATE_OBSERVER: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
 
@@ -136,9 +143,19 @@ pub fn remote_watcher_closed() {
     retry_update();
 }
 
+pub fn observer_opened() {
+    OBSERVERS.fetch_add(1, SeqCst);
+    retry_update();
+}
+
+pub fn observer_closed() {
+    OBSERVERS.fetch_sub(1, SeqCst);
+    retry_update();
+}
+
 /// Retry boundaries are worth setting while someone may resume a panic with `retry`.
 fn retry_update() {
-    MAKEPAD_RUN_RETRY_ON.store(watched() || RUN_STATE_AVAILABLE.load(Relaxed), Relaxed);
+    MAKEPAD_RUN_RETRY_ON.store(watched() || OBSERVERS.load(Relaxed) > 0 || RUN_STATE_AVAILABLE.load(Relaxed), Relaxed);
 }
 
 fn wanted(on: &Option<Vec<String>>, kind: &str) -> bool {
@@ -352,6 +369,25 @@ fn park_secs_unwatched() -> u64 {
     std::env::var("MAKEPAD_RUN_PANIC_PARK").ok().and_then(|v| v.parse().ok()).unwrap_or(2)
 }
 
+/// Who can decide a panic now, including a person reading an interactive terminal.
+fn decider(domain: Option<crate::domain::DomainId>) -> Option<&'static str> {
+    if WATCHERS.load(SeqCst) > 0 {
+        Some("an inspect watcher")
+    } else if super::AGENT.load(Relaxed) {
+        Some("an agent")
+    } else if OBSERVERS.load(SeqCst) > 0 {
+        Some("devhub")
+    } else if RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some()
+        && domain == crate::run::app_domain() && crate::run::live_session()
+    {
+        Some("the Run panel")
+    } else if std::io::stdin().is_terminal() && crate::tui::stderr_is_terminal() {
+        Some("this terminal")
+    } else {
+        None
+    }
+}
+
 /// A panic is about to unwind on this (program) thread: park it if someone may want to look
 /// (jit.rs raise_with; not on the owner, not without a recovery point).
 /// The program frames of thread `os_id` when it is parked at a stale access (pc first, then
@@ -414,10 +450,8 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
         // reported as the JIT's failure (a restarted run's): the call unwinds, no program panic parks
         return;
     }
-    // the run window shows the app's parked panic (resume, restart) in a live session; a run that
-    // is none (a test's child) ends as its panic ends it
-    let watched = WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed)
-        || (RUN_STATE_AVAILABLE.load(SeqCst) && domain.is_some() && domain == crate::run::app_domain() && crate::run::live_session());
+    let deciding = decider(domain);
+    let mut watched = deciding.is_some();
     let key = format!("{}|{}|{}", info.site, info.location, info.message);
     super::flightrec::panic(&super::short(&info.message, 120), if info.location.is_empty() { "?" } else { &info.location });
     if !watched {
@@ -438,7 +472,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let fr: Vec<String> = frames.iter().map(super::frame_json).collect();
     let me = crate::os::thread::current();
     let thread = if me == crate::jit::MAIN_TID.load(Relaxed) { "main".to_string() } else { crate::os::thread::name(me) };
-    let wait_s = if watched { 600 } else { park_secs_unwatched() };
+    let mut wait_s = if watched { 600 } else { park_secs_unwatched() };
     let primary = domain.is_some() && domain == crate::run::app_domain();
     let boundary = innermost_boundary();
     // a restartable frame (`restartable <fn>`) on the stack: restart / return are offered
@@ -482,18 +516,31 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()), frames: info.frames.iter().copied().take(64).collect(), regs: if unwinds { unsafe { std::slice::from_raw_parts(regs, crate::jit::REG_WORDS) }.to_vec() } else { Vec::new() }, kind: ParkKind::Panic });
     list.push(p.clone());
     parked_changed();
-    // said watched or not: what reads the app's output (a CI smoke) is no watcher of the event stream
-    eprintln!(
-        "makepad: panic parked on thread {} ({}) for {} s -- attach: makepad inspect {} panics (resume P{} panic)",
-        thread,
-        super::short(&info.message, 120),
-        wait_s,
-        std::process::id(),
-        id
-    );
+    // Unconditional: --quiet/--silent do not filter stderr, and the session-log tee forwards
+    // every complete line to its saved real stderr even when the progress bar is disabled.
+    let tool = crate::tool_name();
+    let pid = std::process::id();
+    let thread_line = thread.replace(['\n', '\r'], " ");
+    let message = super::short(&info.message, 120).replace(['\n', '\r'], " ");
+    if let Some(who) = deciding {
+        eprintln!("{tool}: panic parked on thread {thread_line} ({message}) for {wait_s} s ({who} can decide): {tool} inspect {pid} panics, then resume P{id} panic; rerun with --unattended to never park");
+    } else {
+        eprintln!("{tool}: panic parked on thread {thread_line} ({message}) for {wait_s} s (nothing attached): {tool} inspect {pid} panics within that time, or rerun with --unattended");
+    }
     let t0 = std::time::Instant::now();
-    while p.decision.load(SeqCst) == 0 && t0.elapsed().as_secs() < wait_s && !crate::run_threads::run_ending() {
-        // an unwatched park ends early once nobody could still attach in time
+    loop {
+        // Check before expiry so an attachment during the last wait can still decide. Once
+        // someone could decide, detaching never shortens the park or clears the watched state.
+        if !watched {
+            if let Some(who) = decider(domain) {
+                watched = true;
+                wait_s = 600;
+                eprintln!("{tool}: panic P{id} on thread {thread_line}: {who} attached; park extended to {wait_s} s from its start");
+            }
+        }
+        if p.decision.load(SeqCst) != 0 || t0.elapsed().as_secs() >= wait_s || crate::run_threads::run_ending() {
+            break;
+        }
         list = RESUME.wait_timeout(list, std::time::Duration::from_millis(200)).unwrap_or_else(|e| e.into_inner()).0;
     }
     list.retain(|x| x.id != id);
@@ -515,9 +562,10 @@ pub fn on_panic(info: &crate::jit::PanicInfo, regs: *const u64) {
     }
 }
 
-/// Somebody could answer a parked stop now: the Run panel, an inspect watcher, an agent.
+/// Somebody could answer a parked stop now: the Run panel, an inspect watcher, an agent, devhub.
+/// A terminal alone cannot justify a stale access's park, which has no timeout.
 pub fn can_decide() -> bool {
-    super::STARTED.load(Relaxed) && (WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed) || RUN_STATE_AVAILABLE.load(SeqCst))
+    super::STARTED.load(Relaxed) && (WATCHERS.load(SeqCst) > 0 || super::AGENT.load(Relaxed) || OBSERVERS.load(SeqCst) > 0 || RUN_STATE_AVAILABLE.load(SeqCst))
 }
 
 /// What the user decided for a parked stale access.

@@ -238,11 +238,16 @@ pub fn finish(_summary: bool) {}
 pub(crate) fn flush() {}
 #[cfg(not(unix))]
 pub(crate) fn log_only(_line: &str) {}
+#[cfg(not(unix))]
+pub(crate) fn stderr_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stderr().is_terminal()
+}
 
 #[cfg(unix)]
 pub use unix::{finish, start};
 #[cfg(unix)]
-pub(crate) use unix::{flush, fault_fd, log_only};
+pub(crate) use unix::{flush, fault_fd, log_only, stderr_is_terminal};
 // (os/fault.rs's abort report: the pipe drained as after the panic hook)
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
 pub(crate) use unix::{fatal_drain, hold_tee};
@@ -298,6 +303,17 @@ mod unix {
     static TEE: Mutex<Vec<u8>> = Mutex::new(Vec::new());
     /// The real stderr, kept for process lifetime so a signal never races its close.
     static OUT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+    /// Test the real stderr, not the session-log pipe installed on fd 2.
+    pub(crate) fn stderr_is_terminal() -> bool {
+        let fd = OUT.load(Ordering::Acquire);
+        if fd < 0 {
+            std::io::stderr().is_terminal()
+        } else {
+            // OUT stays open for the process lifetime; borrowing it must not close it.
+            unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) }.is_terminal()
+        }
+    }
 
     /// Fault reports bypass the tee: a fatal signal kills its forwarding threads.
     pub(crate) fn fault_fd() -> i32 {

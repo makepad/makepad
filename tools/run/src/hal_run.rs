@@ -867,7 +867,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     relax_compiler::tui::track_for_host();
     relax_compiler::inspect::events::set_run_state_observer(panic_changed);
     relax_compiler::inspect::events::run_state_available(
-        info.dialect != makepad_hal::dialect::NONE,
+        info.dialect != makepad_hal::dialect::NONE && !unseen(),
     );
     let (app, icon) = if unnamed {
         (std::env::var("MAKEPAD_APP_TITLE").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| package.to_owned()), None)

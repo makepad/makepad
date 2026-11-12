@@ -3,6 +3,9 @@
 // (libs/dep: outside the app scope) has a type error in `broken`.
 fn main() {
     println!("lazy-typeck: main runs");
+    if std::env::args().nth(1).as_deref() == Some("panic") {
+        panic!("lazy-typeck: unwatched panic");
+    }
     if std::env::args().nth(1).as_deref() == Some("call") {
         // parks at the call until a live edit fixes `broken`, then goes on
         println!("lazy-typeck: broken(2) = {}", lazy_typeck_dep::broken(2));

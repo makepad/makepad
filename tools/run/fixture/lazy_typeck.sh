@@ -9,6 +9,8 @@
 #                live edit that fixes `broken` resumes the call (it returns 20) and the program ends 0
 #   unattended : the same call under `run --unattended` (an app a test starts) parks nothing: the run
 #                ends at once, non-zero, with the compile error's text
+#   unwatched  : a hidden run with no observer or terminal parks a panic briefly, even under
+#                --quiet; it ends by itself within 60 s and explains how --unattended avoids the park
 #   check/test : `makepad check` and `makepad test` of the dependency report the error
 #   test verdict: a clean test check's verdict is reused by the next run of the same code; an edit is
 #                checked again
@@ -66,6 +68,15 @@ kill $pid 2>/dev/null; wait $pid 2>/dev/null
 # shellcheck disable=SC2086
 out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-unattended" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run --unattended lazy-typeck-app -- call 2>&1); rc=$?
 { [ $rc != 0 ] && echo "$out" | grep -q "compile error in lazy_typeck_dep::broken" && ! echo "$out" | grep -q "parked"; } || { fail="$fail unattended-parked:$rc"; echo "$out" | tail -8; }
+
+# unwatched: no visible Run panel, devhub observer or terminal can decide this panic. It parks
+# briefly, says why even under --quiet, then unwinds and ends the run without an inspect client.
+started=$SECONDS
+# shellcheck disable=SC2086
+out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-unwatched" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_REMOTE_REGISTRY="$dir/reg-unwatched" perl -e "$IN" "$dir/fx" $J run --quiet lazy-typeck-app -- panic < /dev/null 2>&1); rc=$?
+elapsed=$((SECONDS - started))
+echo "$out" > "$dir/unwatched.log"
+{ [ "$elapsed" -lt 60 ] && [ $rc != 0 ] && echo "$out" | grep -q "panic parked" && echo "$out" | grep -q -- "--unattended"; } || { fail="$fail unwatched:$rc:${elapsed}s"; echo "$out" | tail -8; }
 
 # park: the call of `broken` parks and reports; fixing it resumes the call
 # shellcheck disable=SC2086
