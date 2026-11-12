@@ -1,5 +1,6 @@
 use super::{shell::{lock, Shared}, state};
 use crate::Id;
+use crate::backend::gl::surface as egl;
 use crate::backend::vulkan::surface::{NativeSurface, SurfaceState, VkSurfaceSource};
 use makepad_vulkan::{vk, Instance};
 use std::{ffi::{c_void, CStr}, sync::Arc};
@@ -65,5 +66,24 @@ impl VkSurfaceSource for AndroidSurfaces {
         let handle = instance.create_android_surface(&vk::AndroidSurfaceCreateInfoKHR::default().window(lease.0 as _), None)
             .map_err(|e| format!("vkCreateAndroidSurfaceKHR: {e:?}"))?;
         Ok(NativeSurface { handle, keep: Arc::new(lease) })
+    }
+}
+
+/// The GLES core's view of the Activity's window: a lease on the same `ANativeWindow`, and only
+/// render targets when the windows are offscreen.
+pub struct AndroidEglSurfaces { pub offscreen: bool }
+impl egl::EglSurfaceSource for AndroidEglSurfaces {
+    fn display(&self) -> Result<egl::Display, String> {
+        Ok(egl::Display { platform: egl::PLATFORM_ANDROID, native: 0, visual: 0 })
+    }
+    fn state(&mut self, sid: u32, id: Id) -> egl::SurfaceState {
+        if self.offscreen { return egl::SurfaceState::Offscreen; }
+        let r = lock(&Shared::global().registry);
+        if sid != crate::session::HOST || r.host != Some(id) { return egl::SurfaceState::Lost; }
+        match (&r.window, r.state.status()) {
+            (Some(window), state::SurfaceStatus::Native { generation, size }) =>
+                egl::SurfaceState::Native(egl::NativeSurface { generation, window: window.0, size, keep: Arc::new(window.clone()) }),
+            _ => egl::SurfaceState::Lost,
+        }
     }
 }

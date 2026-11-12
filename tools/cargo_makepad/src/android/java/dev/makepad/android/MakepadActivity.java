@@ -1503,6 +1503,9 @@ public class MakepadActivity
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
         mVideoPlayerRunnables = new HashMap<Long, VideoPlayerRunnable>();
 
+        // The app starts as soon as it sees this activity, so its params have to be there first.
+        sendAndroidParams();
+        sendDisplayRotation();
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
 
@@ -1580,8 +1583,6 @@ public class MakepadActivity
         }
 
         int sdkVersion = Build.VERSION.SDK_INT;
-        sendAndroidParams();
-        sendDisplayRotation();
         // Landscape to reverse landscape (a half turn) changes no configuration,
         // so onConfigurationChanged never hears of it: the display listener does.
         android.hardware.display.DisplayManager displays =
@@ -1709,6 +1710,7 @@ public class MakepadActivity
         return Math.max(24, (int) (getResources().getDisplayMetrics().density * 24.0f));
     }
 
+    @SuppressWarnings("deprecation")
     private void sendAndroidParams() {
         String cache_path = this.getCacheDir().getAbsolutePath();
         String data_path = this.getFilesDir().getAbsolutePath();
@@ -1717,10 +1719,16 @@ public class MakepadActivity
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
 
-        // Makepad ignores the kernel version, but the slot stays so the native
-        // signature doesn't change.
+        // Every new or reinstalled APK changes this, so the HAL starts a fresh pipeline cache for it.
+        String appBuild = "";
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            appBuild = info.versionName + " (" + info.versionCode + ") " + info.lastUpdateTime;
+        } catch (PackageManager.NameNotFoundException e) {
+            Log.e(LOG_TAG, "No package info for the app build: " + e);
+        }
         boolean nightMode = isNightMode(getResources().getConfiguration());
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "", nightMode);
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, appBuild, nightMode);
     }
 
     @Override

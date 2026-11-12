@@ -359,7 +359,13 @@ impl GlBackend {
         for i in 0..program.code.textures.len() {
             let id = id_at(arena, d.tex, i);
             if id.is_none() { textures.push(None); continue; }
-            let tex = self.resolve(s, id).ok_or("missing sampled texture")?;
+            let tex = match self.resolve(s, id) {
+                Some(tex) => tex,
+                // a video or camera target before its first frame samples the fallback, as on
+                // Vulkan and Metal: failing the draw blanked the whole video
+                None if s.textures.get(s.id, id).is_ok_and(|t| t.val.imported && t.val.lent.is_none()) => { textures.push(None); continue; }
+                None => return Err("missing sampled texture".into()),
+            };
             if attached(&tex) { return Err("a texture sampled by the pass it renders into".into()); }
             s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now);
             textures.push(Some(tex));
@@ -445,6 +451,7 @@ fn draw_buffer_list(mask: u32) -> ([GLenum; 4], i32) {
 
 impl Renderer {
     pub fn run_frame(&mut self, job: FrameJob) {
+        let timing = self.timer.as_mut().and_then(|timer| timer.begin(&self.ctx.gl));
         let gl = &self.ctx.gl;
         unsafe {
             // fresh storage each frame: the driver keeps the previous frame's bytes for its draws
@@ -461,14 +468,20 @@ impl Renderer {
         for pass in &job.passes {
             if let Err(e) = self.run_pass(pass) { eprintln!("[hal-gl] pass: {e}"); }
         }
+        // the frame's own work, without the blit to the window and the swap
+        if let (Some(timer), Some(_)) = (&self.timer, timing) { timer.end(&self.ctx.gl); }
         let mut window = job.window;
         if let Some((key, image)) = &job.present {
             match self.present(*key, image.key) {
-                Ok(shown) => window = shown,
+                Ok(shown) => {
+                    window = shown;
+                    #[cfg(target_os = "android")]
+                    { self.presented |= shown; }
+                }
                 Err(e) => { eprintln!("[hal-gl] present: {e}"); window = false; }
             }
         }
-        self.after_gpu(Then::Frame { token: job.token, target: job.target, kind: job.kind, frame: job.frame, window });
+        self.after_gpu(Then::Frame { token: job.token, target: job.target, kind: job.kind, frame: job.frame, window, timing });
     }
 
     fn run_pass(&mut self, p: &PassJob) -> Result<(), String> {
@@ -578,12 +591,14 @@ impl Renderer {
                 (gl.glBindBufferBase)(sys::UNIFORM_BUFFER, *binding, buffer(b));
             }
             for (unit, target) in program.targets.iter().enumerate() {
-                let tex = d.textures.get(unit).and_then(|t| t.as_ref()).and_then(|t| self.textures.get(&t.key))
-                    .filter(|g| g.target == *target && (program.shapes[unit] != 3 || format::is_depth(g.desc.format)))
-                    .map_or(self.fallback[program.shapes[unit] as usize], |g| g.name);
+                let shape = program.shapes[unit];
+                let (tex, format) = d.textures.get(unit).and_then(|t| t.as_ref()).and_then(|t| self.textures.get(&t.key))
+                    .filter(|g| g.target == *target && (shape != 3 || format::is_depth(g.desc.format)))
+                    .map_or((self.fallback[shape as usize], if shape >= 3 { format::DEPTH32F } else { format::RGBA8 }), |g| (g.name, g.desc.format));
                 (gl.glActiveTexture)(sys::TEXTURE0 + unit as u32);
                 (gl.glBindTexture)(*target, tex);
-                (gl.glBindSampler)(unit as u32, program.samplers[unit]);
+                let filterable = super::render::filterable(&self.caps, format, program.compare[unit]);
+                (gl.glBindSampler)(unit as u32, if filterable { program.samplers[unit] } else { program.nearest[unit] });
             }
             if let Some([id, mask]) = d.pick {
                 let base = program.targets.len() as u32;

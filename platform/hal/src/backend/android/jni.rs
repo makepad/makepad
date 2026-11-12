@@ -144,8 +144,8 @@ unsafe extern "system" fn focus(_: *mut JNIEnv, _: jclass, on: jboolean) {
     lock(&Shared::global().state).focused = on != 0;
     Shared::global().emit(clock_ns(), |q, id| { q.focus(id, on != 0); q.lifecycle(if on != 0 { lifecycle::FOCUS_GAINED } else { lifecycle::FOCUS_LOST }); });
 }
-unsafe extern "system" fn params(env: *mut JNIEnv, _: jclass, cache: jstring, data: jstring, density: jfloat, emulator: jboolean, version: jstring, build: jstring, kernel: jstring, night: jboolean) {
-    let params = AndroidParams { cache_path: reg::string(env, cache), data_path: reg::string(env, data), density: if density.is_finite() && density > 0. { density } else { 1. }, emulator: emulator != 0, android_version: reg::string(env, version), build_number: reg::string(env, build), kernel_version: reg::string(env, kernel), night_mode: night != 0, rotation: 0 };
+unsafe extern "system" fn params(env: *mut JNIEnv, _: jclass, cache: jstring, data: jstring, density: jfloat, emulator: jboolean, version: jstring, build: jstring, app_build: jstring, night: jboolean) {
+    let params = AndroidParams { cache_path: reg::string(env, cache), data_path: reg::string(env, data), density: if density.is_finite() && density > 0. { density } else { 1. }, emulator: emulator != 0, android_version: reg::string(env, version), build_number: reg::string(env, build), app_build: reg::string(env, app_build), night_mode: night != 0, rotation: 0 };
     // sent again on every configuration change (a new density after a fold or a display
     // change); the rotation comes on its own (onDisplayRotation), so keep the last one
     let mut state = lock(&Shared::global().state);
@@ -191,6 +191,7 @@ unsafe extern "system" fn surface_destroyed(_: *mut JNIEnv, _: jclass, _: jobjec
     if super::xr::active() { return; }
     let shared = Shared::global();
     let old = { let mut r = lock(&shared.registry); r.state.destroyed(); r.window.take() };
+    if let Some(release) = &*lock(&shared.release_window) { release(); }
     drop(old);
     emit_lifecycle(lifecycle::SURFACE_LOST); shared.display();
 }

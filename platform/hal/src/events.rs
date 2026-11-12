@@ -209,6 +209,9 @@ hal_events! {
     /// the font atlases are restored by the HAL, a shared texture answers with a new
     /// `TextureShared` handle and an imported one with `TextureImported { ok: false }`.
     DeviceReset = 66, device_reset { generation: u32 };
+    /// The HAL draws with another backend now (Android's GLES fallback): `info` is its `HalInfo` bytes.
+    /// The app makes its pipelines again in that dialect, since the `DeviceReset` after it rebuilds none.
+    BackendChanged = 69, backend_changed { info: rng };
     /// The device is short of memory for the UI: free memory fell under the reserve, or a
     /// create failed for lack of room (`failed`). `wanted_mb` brings the free memory back to
     /// the reserve (plus the failed allocation); 0 = the shortage is over. Sent to every

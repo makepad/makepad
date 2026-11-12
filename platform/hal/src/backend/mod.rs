@@ -6,7 +6,7 @@ pub mod main_lag;
 pub mod headless;
 #[cfg(target_os = "linux")]
 pub mod linux;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod gl;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub mod vulkan;
@@ -16,6 +16,14 @@ pub mod apple;
 pub mod windows;
 
 use crate::buffers::CmdView;
+
+/// Native window-system work stays outside the GPU core (Vulkan's and GLES's).
+#[cfg(target_os = "android")]
+pub trait Shell: Send {
+    fn command(&mut self, session: u32, cmd: exec::OsCmd) -> bool;
+    fn lent(&mut self, session: u32, alias: crate::types::Id, host: crate::types::Id, attach: bool);
+    fn auto_adopt(&self) -> bool { false }
+}
 
 /// Makes one session's pump look: what a GPU completion calls for the session that owns it
 /// (the pump that steps drains every completion; others' pumps sleep on).
@@ -108,6 +116,9 @@ pub trait Backend: Send {
     /// driver's exit handlers, which fault a thread still inside it. The last call a backend
     /// gets; no wait with a time limit (a thread that is gone is the only proof).
     fn before_exit(&mut self) {}
+    /// The HAL drops this backend for another one while the process goes on (Android moves to
+    /// GLES): like [`Backend::before_exit`], and what it still owed its sessions is delivered.
+    fn retire(&mut self, _world: &mut World) { self.before_exit(); }
     /// Tests and automation: the next step handles the device as lost (removed by the OS) and
     /// replaces it as a real loss does (`exec::device_reset`). Backends without a device reset
     /// ignore it.

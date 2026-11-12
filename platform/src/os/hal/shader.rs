@@ -143,20 +143,7 @@ impl DrawVars {
             mapping.hal_pick_code = output.pick_code().map(payload);
         }
         if gl {
-            let view = output.view();
-            let Some(sources) = view.glsl else { return };
-            let payload = |sources: &crate::makepad_script::shader_ir_glsl::GlslDrawSources, pick| {
-                gl_payload(&mapping, sources, pick)
-            };
-            mapping.hal_code = Some(match payload(sources, false) {
-                Ok(bytes) => bytes, Err(e) => { crate::error!("GL shader: {e}"); return; }
-            });
-            mapping.hal_pick_code = match view.pick_glsl {
-                Some(sources) => match gl_payload(&mapping, sources, true) {
-                    Ok(bytes) => Some(bytes), Err(e) => { crate::error!("GL pick shader: {e}"); return; }
-                },
-                None => None,
-            };
+            if let Err(e) = set_gl_payloads(&mut mapping, &output) { crate::error!("{e}"); return; }
         }
         mapping.fill_scope_uniforms_buffer(vm.heap(), &vm.trap());
         if !self.bind_dyn_instances(vm, io_self, &mapping) {
@@ -176,6 +163,78 @@ impl DrawVars {
         self.draw_shader_id = Some(shader_id);
         self.geometry_id = geometry_id;
     }
+}
+
+impl crate::cx::Cx {
+    /// The HAL draws with GLES now (`BackendChanged`): every draw shader is compiled for it under
+    /// the same index, so the draws using it don't change, and makes its pipeline again.
+    pub(crate) fn hal_recompile_shaders(&mut self) {
+        // a shader that doesn't compile again has no pipeline, so its draws are left out
+        for shader in self.draw_shaders.shaders.iter_mut() {
+            shader.pipeline_id = None;
+        }
+        self.draw_shaders.compile_set.clear();
+        self.draw_shaders.cache_code_to_shader.clear();
+        if self.hal.info.is_none_or(|i| i.dialect != makepad_hal::dialect::GLSL) {
+            crate::error!("hal: the HAL moved to a backend shaders can't be compiled for again");
+            return;
+        }
+        // a Splash isolate's shader keeps its source in the isolate's heap, so it compiles there
+        let mut heaps: Vec<usize> = self.draw_shaders.shaders.iter().map(|s| s.mapping.source.heap_key()).collect();
+        heaps.sort_unstable();
+        heaps.dedup();
+        let app_heap = self.with_vm(|vm| vm.heap_key());
+        for heap in heaps {
+            let mut compile = |vm: &mut ScriptVm| for index in 0..vm.host.cx().draw_shaders.shaders.len() {
+                let old = &vm.host.cx().draw_shaders.shaders[index].mapping;
+                if old.source.heap_key() != heap { continue; }
+                let (source, geometry_id) = (old.source.clone(), old.geometry_id);
+                let io_self = source.as_object();
+                let mut opts = crate::makepad_script::shader_compile::ShaderCompileOptions::new(
+                    ShaderBackend::Glsl, vm.host.cx().shader_const_table_mode(), false, false, true);
+                opts.gles_complete = true;
+                opts.pick = vm.host.cx().pick_variants();
+                let output = crate::makepad_script::shader_compile::compile_shader(vm, io_self, &opts);
+                if output.has_errors() {
+                    DrawVars::log_shader_compile_failure(vm, io_self, &output);
+                    continue;
+                }
+                let view = output.view();
+                let code = CxDrawShaderCode::Separate { vertex: view.glsl_vertex.to_owned(), fragment: view.glsl_fragment.to_owned() };
+                let mut mapping = CxDrawShaderMapping::from_shader_output(source, code.clone(), vm, &output, geometry_id);
+                mapping.pick_code = output.pick_code().map(str::to_owned);
+                if let Err(e) = set_gl_payloads(&mut mapping, &output) {
+                    crate::error!("{e}");
+                    continue;
+                }
+                mapping.fill_scope_uniforms_buffer(vm.heap(), &vm.trap());
+                let pipe = DrawVars::pipeline_state_hash(vm.heap(), io_self);
+                let cx = vm.host.cx_mut();
+                mapping.scope_uniforms_gen = cx.next_uniform_gen();
+                cx.draw_shaders.cache_code_to_shader.insert((code, pipe), DrawShaderId { index });
+                cx.draw_shaders.shaders[index].mapping = mapping;
+                cx.draw_shaders.compile_set.insert(index);
+            };
+            if heap == app_heap {
+                self.with_vm(compile);
+            } else if let Some(hook) = self.script_data.heap_vm_hook {
+                // a heap no live isolate owns compiles nothing: nothing draws with its shaders
+                hook(self, heap, &mut compile);
+            }
+        }
+    }
+}
+
+/// GLES's `PipelineCreate` payloads of a compiled shader: its own and its pick variant's.
+fn set_gl_payloads(mapping: &mut CxDrawShaderMapping, output: &crate::makepad_script::shader_compile::CompiledShader) -> Result<(), String> {
+    let view = output.view();
+    let sources = view.glsl.ok_or("GL shader: no GLSL was generated")?;
+    mapping.hal_code = Some(gl_payload(mapping, sources, false).map_err(|e| format!("GL shader: {e}"))?);
+    mapping.hal_pick_code = match view.pick_glsl {
+        Some(sources) => Some(gl_payload(mapping, sources, true).map_err(|e| format!("GL pick shader: {e}"))?),
+        None => None,
+    };
+    Ok(())
 }
 
 fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::shader_ir_glsl::GlslDrawSources, pick: bool) -> Result<Vec<u8>, String> {

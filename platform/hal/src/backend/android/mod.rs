@@ -4,6 +4,8 @@ pub mod state;
 #[cfg(target_os = "android")]
 mod shell;
 #[cfg(target_os = "android")]
+mod gles_fallback;
+#[cfg(target_os = "android")]
 mod surface;
 #[cfg(target_os = "android")]
 pub(crate) mod xr;
@@ -12,9 +14,9 @@ pub mod jni;
 #[cfg(target_os = "android")]
 pub mod inject;
 #[cfg(target_os = "android")]
-pub use shell::{AndroidBackend, AndroidParams};
+pub use shell::{open, AndroidBackend, AndroidParams};
 #[cfg(target_os = "android")]
-pub use surface::AndroidSurfaces;
+pub use surface::{AndroidEglSurfaces, AndroidSurfaces};
 #[cfg(target_os = "android")]
 pub use jni::register_natives;
 

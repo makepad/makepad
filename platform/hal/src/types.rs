@@ -358,12 +358,15 @@ impl OpenReq {
             Ok("offscreen") => (backend_id::HEADLESS, 0),
             Ok("metal") => (backend_id::METAL, window_flags),
             Ok("gl") if cfg!(target_os = "linux") => (backend_id::GL, window_flags | if hidden { open_flags::OFFSCREEN_WINDOWS } else { 0 }),
+            Ok("gl") if cfg!(target_os = "android") => (backend_id::GL, window_flags),
             Ok("vulkan") if cfg!(target_os = "linux") && !hidden => (backend_id::VULKAN, window_flags),
+            Ok("vulkan") if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
             Ok("vulkan") => (backend_id::VULKAN, window_flags | open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") && hidden => (backend_id::METAL, open_flags::OFFSCREEN_WINDOWS),
             _ if cfg!(target_vendor = "apple") => (backend_id::METAL, window_flags),
             _ if cfg!(target_os = "linux") => (backend_id::AUTO, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
-            _ if cfg!(target_os = "android") => (backend_id::VULKAN, window_flags),
+            // Vulkan where the device has 1.1, else GLES (`backend::android::open`)
+            _ if cfg!(target_os = "android") => (backend_id::AUTO, window_flags),
             _ if cfg!(windows) => (backend_id::D3D11, if hidden { window_flags | open_flags::OFFSCREEN_WINDOWS } else { window_flags }),
             _ => (backend_id::HEADLESS, 0),
         };
@@ -428,6 +431,23 @@ impl HalInfo {
         for (i, w) in self.device_name.iter_mut().enumerate() {
             *w = u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
         }
+    }
+
+    /// Field by field, little-endian, for an event payload (`BackendChanged`).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let words = [self.session, self.backend, self.dialect, self.flags, self.msaa, self.dpi.to_bits(), self.max_texture,
+            self.max_window[0], self.max_window[1], self.vendor_id, self.device_kind];
+        let longs = [self.formats, self.max_buffer, self.working_set].into_iter().chain(self.device_name);
+        words.iter().flat_map(|w| w.to_le_bytes()).chain(longs.flat_map(u64::to_le_bytes)).collect()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 11 * 4 + 11 * 8 { return None; }
+        let w = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        let l = |i: usize| u64::from_le_bytes(bytes[44 + i * 8..52 + i * 8].try_into().unwrap());
+        Some(Self { session: w(0), backend: w(1), dialect: w(2), flags: w(3), msaa: w(4), dpi: f32::from_bits(w(5)), max_texture: w(6),
+            max_window: [w(7), w(8)], vendor_id: w(9), device_kind: w(10), formats: l(0), max_buffer: l(1), working_set: l(2),
+            device_name: std::array::from_fn(|i| l(3 + i)) })
     }
 }
 
