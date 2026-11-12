@@ -2,6 +2,95 @@
 
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum LayerPhase {
+    Opaque,
+    Blended,
+}
+
+/// Only the world-model kinds visit draw_models_inner; City and Grass use
+/// ModelDraw for lane binding alone.
+enum LayerLane {
+    Diffuse,
+    Pbr,
+    Splat,
+    Foliage,
+    Custom(String),
+}
+
+impl LayerLane {
+    fn matches(&self, draw: &ModelDraw<'_>) -> bool {
+        match (self, draw) {
+            (Self::Diffuse, ModelDraw::Diffuse(_))
+            | (Self::Pbr, ModelDraw::Pbr(_))
+            | (Self::Splat, ModelDraw::Splat(_))
+            | (Self::Foliage, ModelDraw::Foliage(_)) => true,
+            (Self::Custom(name), ModelDraw::Custom(other, _)) => name.as_str() == *other,
+            _ => false,
+        }
+    }
+
+    fn of(draw: &ModelDraw<'_>) -> Self {
+        match draw {
+            ModelDraw::Diffuse(_) => Self::Diffuse,
+            ModelDraw::Pbr(_) => Self::Pbr,
+            ModelDraw::Splat(_) => Self::Splat,
+            ModelDraw::Foliage(_) => Self::Foliage,
+            ModelDraw::Custom(name, _) => Self::Custom((*name).to_string()),
+            ModelDraw::City(_) | ModelDraw::Grass(_) => unreachable!("not a world-model lane"),
+        }
+    }
+}
+
+struct BlendedLayer {
+    entry: (usize, usize, f32),
+    layer_pass: usize,
+    sequence: usize,
+}
+
+struct BlendedLane {
+    list: WorldModelLane,
+    lane: LayerLane,
+    layers: Vec<BlendedLayer>,
+}
+
+/// Buckets and their strings/entry storage survive frames. Active indices
+/// retain the opaque calls' order, including custom programs' name order.
+#[derive(Default)]
+pub(super) struct BlendedModels {
+    lanes: Vec<BlendedLane>,
+    active: Vec<usize>,
+}
+
+impl BlendedModels {
+    pub(super) fn clear(&mut self) {
+        for &at in &self.active {
+            self.lanes[at].layers.clear();
+        }
+        self.active.clear();
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.active.is_empty()
+    }
+
+    fn find(&self, list: WorldModelLane, draw: &ModelDraw<'_>) -> Option<usize> {
+        self.lanes.iter().position(|lane| lane.list == list && lane.lane.matches(draw))
+    }
+
+    fn record(&mut self, at: &mut Option<usize>, list: WorldModelLane, draw: &ModelDraw<'_>, entry: (usize, usize, f32), layer_pass: usize) {
+        let at = *at.get_or_insert_with(|| self.find(list, draw).unwrap_or_else(|| {
+            self.lanes.push(BlendedLane { list, lane: LayerLane::of(draw), layers: Vec::new() });
+            self.lanes.len() - 1
+        }));
+        let layers = &mut self.lanes[at].layers;
+        if layers.is_empty() {
+            self.active.push(at);
+        }
+        layers.push(BlendedLayer { entry, layer_pass, sequence: layers.len() });
+    }
+}
+
 /// How much of a model LOD chain's switch distance its two levels crossfade
 /// over, just before it: a copy in the band draws both levels through
 /// complementary screen-door windows, so a car that drives away changes
@@ -56,6 +145,8 @@ pub(super) struct ModelOrder {
     slots: Vec<Option<usize>>,
     lods: Vec<usize>,
     distances: Vec<f32>,
+    /// The opaque phase's shared transient-light anchor, reused by deferred layers.
+    anchor_all: Vec3f,
     /// Draw entries: (copy, LOD, screen-door window). A copy crossfading
     /// between two chain levels has an entry for each, their windows
     /// complementary (the shader's `color_adjust_ctl.w` dither code); 0 is
@@ -276,6 +367,60 @@ impl ModelOrder {
 }
 
 impl Renderer {
+    /// Replay only lanes that deferred a layer, in the opaque phase's order
+    /// within each list. Both the queue storage and custom draw keys are reused.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_blended_models(
+        &mut self, cx: &mut Cx3d, diffuse: &mut DrawSceneSkinned, eye: Vec3f,
+        fog: (Vec3f, f32), sun: &SunLight, frustum: Option<&Frustum>, stats: &mut RenderStats,
+    ) {
+        let active = std::mem::take(&mut self.blended_models.active);
+        for list in [WorldModelLane::Placed, WorldModelLane::Attachment] {
+            let instances = match list {
+                WorldModelLane::Placed => std::mem::take(&mut self.placed_models),
+                WorldModelLane::Attachment => std::mem::take(&mut self.world_attachments),
+            };
+            for &at in &active {
+                if self.blended_models.lanes[at].list != list { continue; }
+                match &self.blended_models.lanes[at].lane {
+                    LayerLane::Diffuse => {
+                        self.draw_models_inner(cx, ModelDraw::Diffuse(diffuse), LayerPhase::Blended,
+                            eye, &instances, list, fog, sun, frustum, stats);
+                    }
+                    LayerLane::Pbr => {
+                        let Some(mut draw) = self.pbr_draw.take() else { continue };
+                        self.draw_models_inner(cx, ModelDraw::Pbr(&mut draw), LayerPhase::Blended,
+                            eye, &instances, list, fog, sun, frustum, stats);
+                        self.pbr_draw = Some(draw);
+                    }
+                    LayerLane::Splat => {
+                        let Some(mut draw) = self.splat_draw.take() else { continue };
+                        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Blended,
+                            eye, &instances, list, fog, sun, frustum, stats);
+                        self.splat_draw = Some(draw);
+                    }
+                    LayerLane::Foliage => {
+                        let Some(mut draw) = self.foliage_draw.take() else { continue };
+                        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), LayerPhase::Blended,
+                            eye, &instances, list, fog, sun, frustum, stats);
+                        self.foliage_draw = Some(draw);
+                    }
+                    LayerLane::Custom(name) => {
+                        let Some((name, mut draw)) = self.custom_draws.remove_entry(name) else { continue };
+                        self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Blended,
+                            eye, &instances, list, fog, sun, frustum, stats);
+                        self.custom_draws.insert(name, draw);
+                    }
+                }
+            }
+            match list {
+                WorldModelLane::Placed => self.placed_models = instances,
+                WorldModelLane::Attachment => self.world_attachments = instances,
+            }
+        }
+        self.blended_models.active = active;
+    }
+
     /// Draw one world-model lane. Instances are grouped by model, so N
     /// copies of one prop cost ONE draw item with N instances rather than N
     /// draws — which is what makes a scene full of stock trees affordable.
@@ -284,6 +429,7 @@ impl Renderer {
         &mut self,
         cx: &mut Cx3d,
         mut draw: ModelDraw<'_>,
+        phase: LayerPhase,
         eye: Vec3f,
         instances: &[ModelInstance],
         lane: WorldModelLane,
@@ -292,7 +438,9 @@ impl Renderer {
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
     ) {
-        self.apply_model_lod_chains();
+        if phase == LayerPhase::Opaque {
+            self.apply_model_lod_chains();
+        }
         if instances.is_empty() {
             return;
         }
@@ -300,7 +448,7 @@ impl Renderer {
         // Shiny models draw matte until the PBR pipeline exists (Metal
         // compiles asynchronously), rather than vanishing. Decided in the
         // diffuse pass; the PBR pass that follows reads the same answer.
-        if !pbr_lane {
+        if phase == LayerPhase::Opaque && !pbr_lane {
             let hdr = self.hdr_output;
             // The PBR lane's shader for this frame's features (variants.rs).
             if let Some(d) = self.pbr_draw.as_deref_mut() {
@@ -315,7 +463,7 @@ impl Renderer {
             self.confirm_stock_ibl(cx.cx);
         }
         let custom_name = match &draw {
-            ModelDraw::Custom(name, _) => Some((*name).to_string()),
+            ModelDraw::Custom(name, _) => Some(*name),
             _ => None,
         };
         // Shiny stock models under an environment leave the PBR lane for
@@ -323,7 +471,7 @@ impl Renderer {
         // diffuse pass above, read here by every lane so exactly one of
         // them draws them.
         let stock_ibl_on = self.stock_ibl_active();
-        let stock_ibl_lane = custom_name.as_deref() == Some(stock_ibl::STOCK_IBL_MATERIAL);
+        let stock_ibl_lane = custom_name == Some(stock_ibl::STOCK_IBL_MATERIAL);
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);
         // The lane draws through the shader variant for this frame's
         // features, and draws that cut no pixel through the one without
@@ -388,17 +536,24 @@ impl Renderer {
         // block frame after frame — the no-flicker contract. Different
         // blocks split draw items on purpose (the append test compares
         // uniforms); a handful of extra items beats a light popping.
-        let (mut anch_x, mut anch_z, mut anch_n) = (0.0f64, 0.0f64, 0u32);
-        for inst in instances {
-            anch_x += inst.transform.v[12] as f64;
-            anch_z += inst.transform.v[14] as f64;
-            anch_n += 1;
-        }
-        let anchor_all = vec3f(
-            (anch_x / anch_n.max(1) as f64) as f32,
-            1.0,
-            (anch_z / anch_n.max(1) as f64) as f32,
-        );
+        let which = matches!(lane, WorldModelLane::Attachment) as usize;
+        let anchor_all = if phase == LayerPhase::Opaque {
+            let (mut anch_x, mut anch_z, mut anch_n) = (0.0f64, 0.0f64, 0u32);
+            for inst in instances {
+                anch_x += inst.transform.v[12] as f64;
+                anch_z += inst.transform.v[14] as f64;
+                anch_n += 1;
+            }
+            let anchor = vec3f(
+                (anch_x / anch_n.max(1) as f64) as f32,
+                1.0,
+                (anch_z / anch_n.max(1) as f64) as f32,
+            );
+            self.model_orders[which].anchor_all = anchor;
+            anchor
+        } else {
+            self.model_orders[which].anchor_all
+        };
         let empty_block = LightBlock::default();
         let mut static_block = [0.0f32; LIGHT_BLOCK_FLOATS];
         let static_split = if self.clustered_enabled { 0 } else { merge_transients_into_block(
@@ -420,9 +575,8 @@ impl Renderer {
         // thousands of draws a frame). Resolved once per list per frame:
         // the diffuse lane builds it and the PBR, foliage and custom lanes
         // that walk the same list after it reuse it.
-        let which = matches!(lane, WorldModelLane::Attachment) as usize;
         let key = (instances.as_ptr() as usize, instances.len());
-        if matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key {
+        if phase == LayerPhase::Opaque && (matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key) {
             let mut built = std::mem::take(&mut self.model_orders[which]);
             let chains = &self.model_lod_chains;
             let occluders = self.stream.as_ref().map(|st| st.occluders());
@@ -442,10 +596,10 @@ impl Renderer {
         // copy alternates geometry, and the batcher only appends to the
         // previous item of the same geometry: thousands of scattered trees
         // were thousands of draws. Stats and rigid parts count on pass 0.
-        let layer_passes = order.iter().filter_map(|(i, _, _)| slots[*i]).map(|at| {
+        let layer_passes = if phase == LayerPhase::Opaque { order.iter().filter_map(|(i, _, _)| slots[*i]).map(|at| {
             let root = &self.static_models[at].1;
             std::iter::once(root).chain(root.lods.iter().map(|(_, m)| m)).map(|m| (m.triangles > 0) as usize + m.extra_draws.len()).max().unwrap_or(1)
-        }).max().unwrap_or(1).max(1);
+        }).max().unwrap_or(1).max(1) } else { 0 };
         // Pass 0 walks every entry; later passes only the drawn entries that
         // have that many layers (entry, layer count).
         // The models are read, not cloned, per copy: set aside for the walk
@@ -459,37 +613,66 @@ impl Renderer {
         // after it (an item's glow, a fur shell) forces the next write; the
         // per-copy lamp gain is written for every copy anyway.
         let mut held_material: *const LayerMaterial = std::ptr::null();
-        layered.clear();
-        for layer_pass in 0..layer_passes {
-            let mut last: Option<(usize, usize)> = None;
-            let pass_order: &[(usize, usize, f32)] = if layer_pass == 0 {
-                &order[..]
-            } else {
-                pass_buf.clear();
-                pass_buf.extend(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(e, _)| *e));
-                &pass_buf[..]
+        let mut record_lane = None;
+        let blended_lane = if phase == LayerPhase::Blended {
+            self.blended_models.find(lane, &draw)
+        } else {
+            None
+        };
+        let mut blended = blended_lane.map(|at| std::mem::take(&mut self.blended_models.lanes[at].layers)).unwrap_or_default();
+        // A sequence key preserves the recorded order at equal distances
+        // while the in-place sort needs no temporary allocation.
+        blended.sort_unstable_by_key(|layer| (std::cmp::Reverse(distances[layer.entry.0].to_bits()), layer.sequence));
+        if phase == LayerPhase::Opaque {
+            layered.clear();
+        }
+        let (mut layer_pass, mut entry_index) = (0, 0);
+        let mut last: Option<(usize, usize)> = None;
+        // One body for the layer-major opaque walk and the distance-major
+        // recorded walk. Advancing an opaque pass keeps the old entry order.
+        loop {
+            let (i, lod_index, window) = match phase {
+                LayerPhase::Opaque => {
+                    let pass_order = if layer_pass == 0 { &order[..] } else { &pass_buf[..] };
+                    if let Some(&entry) = pass_order.get(entry_index) {
+                        entry
+                    } else {
+                        layer_pass += 1;
+                        if layer_pass >= layer_passes { break; }
+                        pass_buf.clear();
+                        pass_buf.extend(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(e, _)| *e));
+                        if pass_buf.is_empty() { break; }
+                        entry_index = 0;
+                        last = None;
+                        continue;
+                    }
+                }
+                LayerPhase::Blended => {
+                    let Some(layer) = blended.get(entry_index) else { break };
+                    layer_pass = layer.layer_pass;
+                    layer.entry
+                }
             };
-            if pass_order.is_empty() {
-                break;
-            }
-            for &(i, lod_index, window) in pass_order.iter() {
-                let inst = &instances[i];
-                let dynamic = lane.is_dynamic(inst);
-                let Some(at) = slots[i] else {
-                    continue;
-                };
-                let root = &static_models[at].1;
-                let inv_height = 1.0 / root.max.y.max(0.5);
+            entry_index += 1;
+            let count_copy = phase == LayerPhase::Opaque && layer_pass == 0;
+            let inst = &instances[i];
+            let dynamic = lane.is_dynamic(inst);
+            let Some(at) = slots[i] else {
+                continue;
+            };
+            let root = &static_models[at].1;
+            let inv_height = 1.0 / root.max.y.max(0.5);
+            let distance=distances[i];
+            let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
+            let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
+            if phase == LayerPhase::Opaque {
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
-                let distance=distances[i];
-                let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
-                let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
                 // Paint belongs to a layer: an opaque surface can share a
                 // model with an ordinary decal or an untextured LOD.
                 let primary = (loaded.triangles > 0) as usize;
                 let layer_count = primary + loaded.extra_draws.len();
-                if layer_pass == 0 && layer_count > 1 {
+                if count_copy && layer_count > 1 {
                     layered.push(((i, lod_index, window), layer_count));
                 }
                 let layer_material = if primary == 1 && layer_pass == 0 {
@@ -504,7 +687,7 @@ impl Renderer {
                 // its shader owns.
                 let uses_pbr_lane = self.pbr_materials_enabled && loaded.wants_pbr && self.pbr_ready;
                 let wanted_custom = inst.custom_material.as_ref().filter(|m| {
-                    custom_name.as_deref() == Some(m.name.as_str())
+                    custom_name == Some(m.name.as_str())
                         || self.custom_draws.get(&m.name).is_some_and(|d| d.draw.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, self.hdr_output)))
                 });
                 // A shiny stock model with no material of its own, while an
@@ -512,19 +695,16 @@ impl Renderer {
                 // the PBR lane leaves it (renderer/stock_ibl.rs). A material
                 // it names is its own only while that one is installed: a
                 // name that is not draws through the stock lanes anyway.
-                let own_material = self.has_own_material(inst, custom_name.as_deref());
+                let own_material = self.has_own_material(inst, custom_name);
                 // A painted terrain tile stays with the splat lane (its layers).
                 let takes_stock_ibl = !paints && stock_ibl::takes_stock_ibl(stock_ibl_on, uses_pbr_lane, own_material, sways);
-                if let Some(name) = custom_name.as_deref() {
+                if let Some(name) = custom_name {
                     if stock_ibl_lane {
                         // Its own instances, plus any that name the program
                         // outright (an engine name, but never a vanished model).
                         if !(takes_stock_ibl || wanted_custom.map(|m| m.name.as_str()) == Some(name)) { continue; }
                     } else {
                         if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
-                        if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
-                            d.draw.set_params(cx.cx, material.params);
-                        }
                     }
                 } else if paints != splat_lane || if splat_lane {
                     // A painted terrain tile draws in the splat lane only.
@@ -534,363 +714,375 @@ impl Renderer {
                 } {
                     continue;
                 }
-                // Hoisted: `loaded` borrows self, and the per-instance light
-                // block below needs `&mut self` (cell hysteresis).
-                // Per draw item: the morph source belongs to this model LOD, the
-                // same `loaded` that picks the geometry and binds `morph_map`.
-                // The per-instance weights stay on the instance stream.
-                draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[0.0,0.0,0.0,0.0]);
-                // The host's element lookup, bound by name in whatever shader (lane, variant) this item draws
-                // through: a slot-index bind into a shader whose slot 6 is another map reads garbage.
-                if let Some((map, ctl)) = &self.element_lookup {
-                    if let Some(shader) = draw.base().draw_vars.draw_shader_id {
-                        if let Some(slot) = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(elem_map)) {
-                            draw.base().draw_vars.set_texture(slot, map);
-                            draw.base().draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), ctl);
-                        }
+            }
+            if !stock_ibl_lane {
+                if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, inst.custom_material.as_ref()) {
+                    d.draw.set_params(cx.cx, material.params);
+                }
+            }
+            // Hoisted: `loaded` borrows self, and the per-instance light
+            // block below needs `&mut self` (cell hysteresis).
+            // Per draw item: the morph source belongs to this model LOD, the
+            // same `loaded` that picks the geometry and binds `morph_map`.
+            // The per-instance weights stay on the instance stream.
+            draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[0.0,0.0,0.0,0.0]);
+            // The host's element lookup, bound by name in whatever shader (lane, variant) this item draws
+            // through: a slot-index bind into a shader whose slot 6 is another map reads garbage.
+            if let Some((map, ctl)) = &self.element_lookup {
+                if let Some(shader) = draw.base().draw_vars.draw_shader_id {
+                    if let Some(slot) = cx.draw_shaders[shader.index].mapping.textures.iter().position(|t| t.id == live_id!(elem_map)) {
+                        draw.base().draw_vars.set_texture(slot, map);
+                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(elem_ctl), ctl);
                     }
                 }
-                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_clip), &self.clip_plane.unwrap_or([0.0; 4]));
-                let host_box = self.host_box.unwrap_or([[0.0; 4]; 3]);
-                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box0), &host_box[0]);
-                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box1), &host_box[1]);
-                draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box2), &host_box[2]);
-                if let Some(morph)=&loaded.morph{
-                    let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
-                    let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
-                    draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32]);
-                    draw.base().morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
-                    draw.base().morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
-                    draw.base().morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
-                    draw.base().morph_weights3=vec4(weights[12],weights[13],weights[14],weights[15]);
-                    draw.base().morph_weights4=vec4(weights[16],weights[17],weights[18],weights[19]);
-                    draw.base().morph_weights5=vec4(weights[20],weights[21],weights[22],weights[23]);
-                    draw.base().morph_weights6=vec4(weights[24],weights[25],weights[26],weights[27]);
-                    draw.base().morph_weights7=vec4(weights[28],weights[29],weights[30],weights[31]);
-                    if let Some(shader)=draw.base().draw_vars.draw_shader_id{if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==live_id!(morph_map)){draw.base().draw_vars.set_texture(slot,&morph.texture);}}
-                }
-                let tri_count = loaded.triangles;
-                // Offscreen copies are skipped BEFORE packing, and a model whose
-                // copies all fall outside never opens a draw item at all. The
-                // shadow a prop casts is not affected: prop shadows live in the
-                // merged static shadow mesh, which is drawn whole regardless.
-                if let Some(frustum) = frustum.filter(|_| inst.custom_material.is_some()) {
-                    // Generic node clips can leave the authored rest bounds.
-                    // Their small, bounded part sets remain visible until posed
-                    // bounds are available; a rest-only cull would hide motion.
-                    // Fur can extend beyond the authored base geometry. The
-                    // validated recipe is bounded to 5 cm in model space.
-                    // A Splash material's vertex hook may move geometry up to
-                    // its declared bounds_pad.
-                    let pad = match &draw { ModelDraw::Custom(_, m) => m.bounds_pad, _ => 0.0 };
-                    let fur_margin = vec3f(0.05 + pad, 0.05 + pad, 0.05 + pad);
-                    if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min-fur_margin, root.max+fur_margin, &inst.transform) {
-                        if layer_pass == 0 {
-                            match lane {
-                                WorldModelLane::Placed => stats.model_culled += 1,
-                                WorldModelLane::Attachment => stats.world_attachment_culled += 1,
-                            }
+            }
+            draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_clip), &self.clip_plane.unwrap_or([0.0; 4]));
+            let host_box = self.host_box.unwrap_or([[0.0; 4]; 3]);
+            draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box0), &host_box[0]);
+            draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box1), &host_box[1]);
+            draw.base().draw_vars.set_uniform(cx.cx, live_id!(host_box2), &host_box[2]);
+            if let Some(morph)=&loaded.morph{
+                let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
+                let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32]);
+                draw.base().morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
+                draw.base().morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
+                draw.base().morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
+                draw.base().morph_weights3=vec4(weights[12],weights[13],weights[14],weights[15]);
+                draw.base().morph_weights4=vec4(weights[16],weights[17],weights[18],weights[19]);
+                draw.base().morph_weights5=vec4(weights[20],weights[21],weights[22],weights[23]);
+                draw.base().morph_weights6=vec4(weights[24],weights[25],weights[26],weights[27]);
+                draw.base().morph_weights7=vec4(weights[28],weights[29],weights[30],weights[31]);
+                if let Some(shader)=draw.base().draw_vars.draw_shader_id{if let Some(slot)=cx.draw_shaders[shader.index].mapping.textures.iter().position(|t|t.id==live_id!(morph_map)){draw.base().draw_vars.set_texture(slot,&morph.texture);}}
+            }
+            let tri_count = loaded.triangles;
+            // Offscreen copies are skipped BEFORE packing, and a model whose
+            // copies all fall outside never opens a draw item at all. The
+            // shadow a prop casts is not affected: prop shadows live in the
+            // merged static shadow mesh, which is drawn whole regardless.
+            if let Some(frustum) = frustum.filter(|_| phase == LayerPhase::Opaque && inst.custom_material.is_some()) {
+                // Generic node clips can leave the authored rest bounds.
+                // Their small, bounded part sets remain visible until posed
+                // bounds are available; a rest-only cull would hide motion.
+                // Fur can extend beyond the authored base geometry. The
+                // validated recipe is bounded to 5 cm in model space.
+                // A Splash material's vertex hook may move geometry up to
+                // its declared bounds_pad.
+                let pad = match &draw { ModelDraw::Custom(_, m) => m.bounds_pad, _ => 0.0 };
+                let fur_margin = vec3f(0.05 + pad, 0.05 + pad, 0.05 + pad);
+                if loaded.anim_parts.is_empty() && !frustum.intersects_obb(root.min-fur_margin, root.max+fur_margin, &inst.transform) {
+                    if count_copy {
+                        match lane {
+                            WorldModelLane::Placed => stats.model_culled += 1,
+                            WorldModelLane::Attachment => stats.world_attachment_culled += 1,
                         }
-                        continue;
                     }
+                    continue;
                 }
-                // The model's layers, walked in place (this runs per copy per
-                // frame): a model that is ALL anim parts (a lone door asset)
-                // has an empty static stream and nothing to draw for layer 0.
-                let m = loaded;
-                let layer_draws = || {
-                    (m.triangles > 0)
-                        .then(|| (m.geometry.geometry_id(), &m.texture, &m.detail, m.detail_scale, &m.material))
-                        .into_iter()
-                        .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g.geometry_id(), t, d, *s, mat)))
-                };
-                let prelit = m.prelit;
-                // Rigid parts ride the PARENT's material: a door is cut from the
-                // level tile it sits in, so its metal/roughness is the model's.
-                let has_lightmap_source = loaded.lm_source.is_some();
-                // The pack's baked occlusion, on slot 1. Packs share atlases;
-                // a model's copies are adjacent (the order above), so the
-                // binding changes at most once per model group. Resolved once
-                // per model and frame, not searched per copy.
-                let ao_at = *model_ao[at].get_or_insert_with(|| self
-                    .model_pack
-                    .iter()
-                    .find(|(m, _)| *m == inst.model)
-                    .and_then(|(_, pack)| self.ao_textures.iter().position(|(k, _)| k == pack)));
-                let ao_tex = ao_at.map(|k| &self.ao_textures[k].1);
-                if let Some(t) = ao_tex.filter(|_|lod_index==0) {
-                    draw.base().draw_vars.set_texture(1, t);
-                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[1.0]);
-                    stats.ao_bound += (layer_pass == 0) as u64;
-                } else {
-                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
-                    stats.ao_missing += (layer_pass == 0) as u64;
-                }
-                draw.base().transform = inst.transform;
-                draw.base().tint = inst.tint;
-                // A crossfading copy's window replaces its w (a plate's
-                // number blanks for the few frames of the dissolve).
-                let adjust = if window > 0.0 { vec4(inst.color_adjust.x, inst.color_adjust.y, inst.color_adjust.z, window) } else { inst.color_adjust };
-                draw.base().color_adjust_ctl = adjust;
-                // Screen-door cuts: the streamed-LOD dither, and the occluder
-                // fade wherever its cone can reach this copy.
-                // The level's ground (terrain tiles, road ribbons) never
-                // fades: a dithered hole in the ground shows the void under
-                // it, and a tile's bounding sphere (hundreds of metres) is
-                // always inside the fade cone, which kept every ground tile
-                // on the discarding pipeline: hidden ground under a city
-                // then shaded in full (gpuperf lane, citydrive).
-                let terrain = inst.model.starts_with("gen/surface/level-terrain");
-                // A terrain tile's own distance: its vertices are in world
-                // space under an identity transform, so the copy's origin
-                // says nothing; the nearest point of its bounding sphere does.
-                let tile_distance = if terrain {
+            }
+            // The model's layers, walked in place (this runs per copy per
+            // frame): a model that is ALL anim parts (a lone door asset)
+            // has an empty static stream and nothing to draw for layer 0.
+            let m = loaded;
+            let layer_draws = || {
+                (m.triangles > 0)
+                    .then(|| (m.geometry.geometry_id(), &m.texture, &m.detail, m.detail_scale, &m.material))
+                    .into_iter()
+                    .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g.geometry_id(), t, d, *s, mat)))
+            };
+            let prelit = m.prelit;
+            // Rigid parts ride the PARENT's material: a door is cut from the
+            // level tile it sits in, so its metal/roughness is the model's.
+            let has_lightmap_source = loaded.lm_source.is_some();
+            // The pack's baked occlusion, on slot 1. Packs share atlases;
+            // a model's copies are adjacent (the order above), so the
+            // binding changes at most once per model group. Resolved once
+            // per model and frame, not searched per copy.
+            let ao_at = *model_ao[at].get_or_insert_with(|| self
+                .model_pack
+                .iter()
+                .find(|(m, _)| *m == inst.model)
+                .and_then(|(_, pack)| self.ao_textures.iter().position(|(k, _)| k == pack)));
+            let ao_tex = ao_at.map(|k| &self.ao_textures[k].1);
+            if let Some(t) = ao_tex.filter(|_|lod_index==0) {
+                draw.base().draw_vars.set_texture(1, t);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[1.0]);
+                stats.ao_bound += count_copy as u64;
+            } else {
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
+                stats.ao_missing += count_copy as u64;
+            }
+            draw.base().transform = inst.transform;
+            draw.base().tint = inst.tint;
+            // A crossfading copy's window replaces its w (a plate's
+            // number blanks for the few frames of the dissolve).
+            let adjust = if window > 0.0 { vec4(inst.color_adjust.x, inst.color_adjust.y, inst.color_adjust.z, window) } else { inst.color_adjust };
+            draw.base().color_adjust_ctl = adjust;
+            // Screen-door cuts: the streamed-LOD dither, and the occluder
+            // fade wherever its cone can reach this copy.
+            // The level's ground (terrain tiles, road ribbons) never
+            // fades: a dithered hole in the ground shows the void under
+            // it, and a tile's bounding sphere (hundreds of metres) is
+            // always inside the fade cone, which kept every ground tile
+            // on the discarding pipeline: hidden ground under a city
+            // then shaded in full (gpuperf lane, citydrive).
+            let terrain = inst.model.starts_with("gen/surface/level-terrain");
+            // A terrain tile's own distance: its vertices are in world
+            // space under an identity transform, so the copy's origin
+            // says nothing; the nearest point of its bounding sphere does.
+            let tile_distance = if terrain {
+                let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
+                ((center - eye).length() - radius).max(0.0)
+            } else { distance };
+            let ground = terrain || inst.model.starts_with("gen/surface/level-road");
+            let screen_clip = adjust.w > 0.5
+                || !ground && occluder_focus.is_some_and(|focus| {
                     let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
-                    ((center - eye).length() - radius).max(0.0)
-                } else { distance };
-                let ground = terrain || inst.model.starts_with("gen/surface/level-road");
-                let screen_clip = adjust.w > 0.5
-                    || !ground && occluder_focus.is_some_and(|focus| {
-                        let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
-                        variants::in_occluder_fade(eye, focus, center, radius)
-                    });
-                // This copy's window into the light atlas; zero disables — a
-                // dynamic prop or an unbaked model lights analytically as before.
-                draw.base().lm_rect = if dynamic || !has_lightmap_source {
-                    Vec4f::default()
-                } else {
-                    self.lm_remaps.get(i).copied().unwrap_or_default()
+                    variants::in_occluder_fade(eye, focus, center, radius)
+                });
+            // This copy's window into the light atlas; zero disables — a
+            // dynamic prop or an unbaked model lights analytically as before.
+            draw.base().lm_rect = if dynamic || !has_lightmap_source {
+                Vec4f::default()
+            } else {
+                self.lm_remaps.get(i).copied().unwrap_or_default()
+            };
+            // Dynamic-light gate: dynamics sum every uniform slot (lamps
+            // included), statics only the transient prefix — their lamp
+            // light is already in the atlas RGB.
+            draw.base().dl_apply = if dynamic { 1.0 } else { 0.0 };
+            draw.base().depth_bias = inst.depth_order * 1.0e-3;
+            if dynamic && !self.clustered_enabled {
+                // This instance's OWN cell block + transients, and its
+                // ground plane for the sun-ray-projected shadow sample.
+                let (x, z) = (inst.transform.v[12], inst.transform.v[14]);
+                let cell = self.stable_light_cell(lane.light_key(i), x, z);
+                let block = match cell {
+                    Some(c) => self.light_grid.block_of(c),
+                    None => &empty_block,
                 };
-                // Dynamic-light gate: dynamics sum every uniform slot (lamps
-                // included), statics only the transient prefix — their lamp
-                // light is already in the atlas RGB.
-                draw.base().dl_apply = if dynamic { 1.0 } else { 0.0 };
-                draw.base().depth_bias = inst.depth_order * 1.0e-3;
-                if dynamic && !self.clustered_enabled {
-                    // This instance's OWN cell block + transients, and its
-                    // ground plane for the sun-ray-projected shadow sample.
-                    let (x, z) = (inst.transform.v[12], inst.transform.v[14]);
-                    let cell = self.stable_light_cell(lane.light_key(i), x, z);
-                    let block = match cell {
-                        Some(c) => self.light_grid.block_of(c),
-                        None => &empty_block,
+                let split = merge_transients_into_block(
+                    block,
+                    &self.frame_lights,
+                    self.frame_baked_count..self.frame_lights.len(),
+                    vec3f(x, inst.transform.v[13], z),
+                    &mut self.light_rank,
+                    &mut self.light_block_scratch,
+                );
+                write_light_block(cx.cx, &mut draw.base().draw_vars, &self.light_block_scratch, split);
+                draw.base().ground_y = match lane {
+                    WorldModelLane::Placed => self.model_ground.get(i),
+                    WorldModelLane::Attachment => self.world_attachment_ground.get(i),
+                }
+                .copied()
+                .unwrap_or(0.0);
+                dynamic_block_active = true;
+            } else if dynamic_block_active {
+                write_light_block(cx.cx, &mut draw.base().draw_vars, &static_block, static_split);
+                draw.base().ground_y = 0.0;
+                dynamic_block_active = false;
+            }
+            if dynamic && self.clustered_enabled {
+                draw.base().ground_y = match lane {
+                    WorldModelLane::Placed => self.model_ground.get(i),
+                    WorldModelLane::Attachment => self.world_attachment_ground.get(i),
+                }.copied().unwrap_or(0.0);
+            }
+            if count_copy && last.is_none_or(|(slot, level)| slot != at || level != lod_index) {
+                match lane {
+                    WorldModelLane::Placed => stats.model_draws += 1,
+                    WorldModelLane::Attachment => stats.world_attachment_draws += 1,
+                }
+                last = Some((at, lod_index));
+            }
+            if count_copy { match lane {
+                WorldModelLane::Placed => {
+                    stats.model_instances += 1;
+                    stats.model_triangles += tri_count;
+                }
+                WorldModelLane::Attachment => {
+                    stats.world_attachment_instances += 1;
+                    stats.world_attachment_triangles += tri_count;
+                }
+            } }
+            // A model with a far stand-in (impostor.rs) draws that layer
+            // from its distance on (scaled by the quality tier) and every
+            // other layer before it, the two crossfading through
+            // complementary screen-door windows over the band before the
+            // switch (no pop). A copy already crossfading between chain
+            // levels keeps its own window and switches hard.
+            let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
+            for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
+                let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
+                let mut layer_window = 0.0f32;
+                if impostor_at > 0.0 {
+                    match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
+                        Some((near, next)) => layer_window = if stand_in { next } else { near },
+                        None => if stand_in != (distance >= impostor_at) { continue; },
+                    }
+                } else if stand_in {
+                    continue;
+                }
+                draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
+                draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
+                draw.base().draw_vars.geometry_id = Some(geometry_id);
+                draw.base().draw_vars.set_texture(0, texture);
+                // A painted tile's slot 0 is its layers' albedo array; a
+                // far one paints its heaviest layer only, beyond the
+                // tier's reach.
+                if let Some(p) = material.surface.as_ref().and_then(|s| s.splat.as_ref()).filter(|_| splat_lane) {
+                    draw.base().draw_vars.set_texture(0, &p.albedo);
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_blend), &[if tile_distance > terrain_blend_reach { 0.0 } else { 1.0 }]);
+                }
+                draw.base().draw_vars.set_texture(5, detail);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
+                // An IBL material reads its environment on the detail slot.
+                if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
+                draw.base().prelit = if prelit { 1.0 } else { 0.0 };
+                if !std::ptr::eq(held_material, material) || matches!(draw, ModelDraw::Custom(..)) {
+                    draw.set_material(cx.cx, material);
+                    held_material = material;
+                }
+                draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
+                if phase == LayerPhase::Opaque && draw.base().draw_vars.options.alpha_blend {
+                    self.blended_models.record(&mut record_lane, lane, &draw, (i, lod_index, window), layer_pass);
+                    continue;
+                }
+                // A world item's copy may glow on its own (items.rs).
+                if matches!(lane, WorldModelLane::Placed) {
+                    if let Some(e) = i.checked_sub(instances.len().saturating_sub(self.items.appended)).and_then(|k| self.items.glow.get(k)).filter(|e| e.x + e.y + e.z > 0.0) {
+                        draw.add_emission(cx.cx, *e);
+                        held_material = std::ptr::null();
+                    }
+                }
+                if material.surface.as_ref().is_some_and(|s| s.definition.fur.is_some()) {
+                    held_material = std::ptr::null();
+                }
+                if let Some(s) = material.surface.as_ref().filter(|s| s.definition.wind > 0.0) {
+                    // Sway in metres at the top at wind 1; leaves (cut-out
+                    // layers) flutter on top of the sway.
+                    let d = &s.definition;
+                    let flutter = if d.alpha_mode == 1 { d.wind * 0.035 } else { 0.0 };
+                    // A morphing model never sways (the lanes are shared).
+                    let morph_ctl = draw.base().uniform_value(cx.cx, live_id!(morph_ctl));
+                    if morph_ctl[3] < 0.5 {
+                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[morph_ctl[0], morph_ctl[1], morph_ctl[2], -1.0]);
+                        draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
+                    }
+                }
+                let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || self.host_box.is_some() || match &material.surface {
+                    // Masked layers discard; deferred blended layers keep
+                    // the stock pipeline (the no-discard variant is opaque).
+                    Some(surface) if pbr_lane => surface.definition.alpha_mode != 0,
+                    _ => material.cutout,
+                };
+                let owner = if cx.draw_owners_armed() {
+                    let label = self.draw_names.model(cx.cx, &inst.model, lod_index, layer_pass, stand_in);
+                    cx.enter_draw_label(label)
+                } else {
+                    0
+                };
+                stats.fur_triangles += draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut));
+                cx.exit_draw_label(owner);
+            }
+            draw.base().draw_vars.draw_shader_id = lane_shader;
+            draw.base().color_adjust_ctl.w = adjust.w;
+            if phase == LayerPhase::Blended || layer_pass > 0 {
+                continue;
+            }
+            // Rigid parts (doors, lifts). Each is one extra draw on the
+            // PARENT's material — same shader, same textures, usually the
+            // level tile it was cut from — placed at the instance transform
+            // times where the part's state machine has it right now.
+            //
+            // A part carries no baked chart (lm_rect zeroed): it moves, so
+            // the static atlas never had a window for it. Its shadow comes
+            // from the realtime cascades, which see it as a mover.
+            let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2],LayerMaterial)>)> = {
+                let root=&static_models[at].1;
+                let m = if lod_index==0{root}else{&root.lods[lod_index-1].1};
+                let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
+                if !m.anim_parts.is_empty() {
+                    let key = match lane {
+                        WorldModelLane::Placed => ModelTarget::Instance(i),
+                        // Attachments are not placed slots — a slot index
+                        // would address someone else's instance — so their
+                        // parts follow the per-MODEL command only.
+                        WorldModelLane::Attachment => ModelTarget::Attachment(i),
                     };
-                    let split = merge_transients_into_block(
-                        block,
-                        &self.frame_lights,
-                        self.frame_baked_count..self.frame_lights.len(),
-                        vec3f(x, inst.transform.v[13], z),
-                        &mut self.light_rank,
-                        &mut self.light_block_scratch,
-                    );
-                    write_light_block(cx.cx, &mut draw.base().draw_vars, &self.light_block_scratch, split);
-                    draw.base().ground_y = match lane {
-                        WorldModelLane::Placed => self.model_ground.get(i),
-                        WorldModelLane::Attachment => self.world_attachment_ground.get(i),
-                    }
-                    .copied()
-                    .unwrap_or(0.0);
-                    dynamic_block_active = true;
-                } else if dynamic_block_active {
-                    write_light_block(cx.cx, &mut draw.base().draw_vars, &static_block, static_split);
-                    draw.base().ground_y = 0.0;
-                    dynamic_block_active = false;
+                    parts.extend(m.anim_parts.iter().map(|p| {
+                            let (_, _, _) =
+                                self.model_anim_state.clock(&key, &inst.model, &p.def);
+                            (
+                                self.model_anim_state.transform(&key,&inst.model,&p.def),
+                                p.def.indices.len() / 3,
+                                p.draws
+                                    .iter()
+                                    .map(|(g, t, d, s,m)| {
+                                        (g.geometry_id(), t.clone(), d.clone(), *s,m.clone())
+                                    })
+                                    .collect(),
+                            )
+                        }));
                 }
-                if dynamic && self.clustered_enabled {
-                    draw.base().ground_y = match lane {
-                        WorldModelLane::Placed => self.model_ground.get(i),
-                        WorldModelLane::Attachment => self.world_attachment_ground.get(i),
-                    }.copied().unwrap_or(0.0);
-                }
-                if layer_pass == 0 && last.is_none_or(|(slot, level)| slot != at || level != lod_index) {
-                    match lane {
-                        WorldModelLane::Placed => stats.model_draws += 1,
-                        WorldModelLane::Attachment => stats.world_attachment_draws += 1,
-                    }
-                    last = Some((at, lod_index));
-                }
-                if layer_pass == 0 { match lane {
-                    WorldModelLane::Placed => {
-                        stats.model_instances += 1;
-                        stats.model_triangles += tri_count;
-                    }
-                    WorldModelLane::Attachment => {
-                        stats.world_attachment_instances += 1;
-                        stats.world_attachment_triangles += tri_count;
-                    }
-                } }
-                // A model with a far stand-in (impostor.rs) draws that layer
-                // from its distance on (scaled by the quality tier) and every
-                // other layer before it, the two crossfading through
-                // complementary screen-door windows over the band before the
-                // switch (no pop). A copy already crossfading between chain
-                // levels keeps its own window and switches hard.
-                let impostor_at = impostor_shader.map_or(0.0, |_| layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max) * impostor_scale);
-                for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
-                    let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
-                    let mut layer_window = 0.0f32;
-                    if impostor_at > 0.0 {
-                        match chain_fade_windows(impostor_at, distance).filter(|_| window <= 0.0) {
-                            Some((near, next)) => layer_window = if stand_in { next } else { near },
-                            None => if stand_in != (distance >= impostor_at) { continue; },
-                        }
-                    } else if stand_in {
-                        continue;
-                    }
-                    draw.base().color_adjust_ctl.w = if layer_window > 0.0 { layer_window } else { adjust.w };
-                    draw.base().draw_vars.draw_shader_id = if stand_in { impostor_shader } else { lane_shader };
-                    draw.base().draw_vars.geometry_id = Some(geometry_id);
+                parts.extend(m.driven_parts.iter().map(|part| {
+                    let pose = inst
+                        .part_poses
+                        .iter()
+                        .find(|pose| pose.connection == part.def.connection)
+                        .map(|pose| pose.transform)
+                        .unwrap_or_else(|| part.def.rest_transform());
+                    (
+                        pose,
+                        part.def.indices.len() / 3,
+                        part
+                            .draws
+                            .iter()
+                            .map(|(g, t, d, s,m)| (g.geometry_id(), t.clone(), d.clone(), *s,m.clone()))
+                            .collect(),
+                    )
+                }));
+                parts
+            };
+            let owner = if cx.draw_owners_armed() && !parts.is_empty() {
+                let label = self.draw_names.model(cx.cx, &inst.model, lod_index, 0, false);
+                cx.enter_draw_label(label)
+            } else {
+                0
+            };
+            for (pose, part_tris, part_draws) in &parts {
+                draw.base().transform = Mat4f::mul(&inst.transform, pose);
+                draw.base().lm_rect = Vec4f::default();
+                for (geometry_id, texture, detail, dscale,material) in part_draws {
+                    draw.base().draw_vars.geometry_id = Some(*geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
-                    // A painted tile's slot 0 is its layers' albedo array; a
-                    // far one paints its heaviest layer only, beyond the
-                    // tier's reach.
-                    if let Some(p) = material.surface.as_ref().and_then(|s| s.splat.as_ref()).filter(|_| splat_lane) {
-                        draw.base().draw_vars.set_texture(0, &p.albedo);
-                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(splat_blend), &[if tile_distance > terrain_blend_reach { 0.0 } else { 1.0 }]);
-                    }
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
                     // An IBL material reads its environment on the detail slot.
                     if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                    if !std::ptr::eq(held_material, material) || matches!(draw, ModelDraw::Custom(..)) {
-                        draw.set_material(cx.cx, material);
-                        held_material = material;
-                    }
+                    draw.set_material(cx.cx, material);
                     draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
-                    // A world item's copy may glow on its own (items.rs).
-                    if matches!(lane, WorldModelLane::Placed) {
-                        if let Some(e) = i.checked_sub(instances.len().saturating_sub(self.items.appended)).and_then(|k| self.items.glow.get(k)).filter(|e| e.x + e.y + e.z > 0.0) {
-                            draw.add_emission(cx.cx, *e);
-                            held_material = std::ptr::null();
-                        }
-                    }
-                    if material.surface.as_ref().is_some_and(|s| s.definition.fur.is_some()) {
-                        held_material = std::ptr::null();
-                    }
-                    if let Some(s) = material.surface.as_ref().filter(|s| s.definition.wind > 0.0) {
-                        // Sway in metres at the top at wind 1; leaves (cut-out
-                        // layers) flutter on top of the sway.
-                        let d = &s.definition;
-                        let flutter = if d.alpha_mode == 1 { d.wind * 0.035 } else { 0.0 };
-                        // A morphing model never sways (the lanes are shared).
-                        let morph_ctl = draw.base().uniform_value(cx.cx, live_id!(morph_ctl));
-                        if morph_ctl[3] < 0.5 {
-                            draw.base().draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[morph_ctl[0], morph_ctl[1], morph_ctl[2], -1.0]);
-                            draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
-                        }
-                    }
-                    let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || self.host_box.is_some() || match &material.surface {
-                        // Masked layers discard; blended ones need the stock
-                        // pipeline too (the no-discard variant draws opaque).
-                        Some(surface) if pbr_lane => surface.definition.alpha_mode != 0,
-                        _ => material.cutout,
-                    };
-                    let owner = if cx.draw_owners_armed() {
-                        let label = self.draw_names.model(cx.cx, &inst.model, lod_index, layer_pass, stand_in);
-                        cx.enter_draw_label(label)
-                    } else {
-                        0
-                    };
-                    stats.fur_triangles += draw.submit_as(cx, distance, &mut fur_budget, opaque.filter(|_| !cut));
-                    cx.exit_draw_label(owner);
+                    stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
                 }
-                draw.base().draw_vars.draw_shader_id = lane_shader;
-                draw.base().color_adjust_ctl.w = adjust.w;
-                if layer_pass > 0 {
-                    continue;
-                }
-                // Rigid parts (doors, lifts). Each is one extra draw on the
-                // PARENT's material — same shader, same textures, usually the
-                // level tile it was cut from — placed at the instance transform
-                // times where the part's state machine has it right now.
-                //
-                // A part carries no baked chart (lm_rect zeroed): it moves, so
-                // the static atlas never had a window for it. Its shadow comes
-                // from the realtime cascades, which see it as a mover.
-                let parts: Vec<(Mat4f, usize, Vec<(GeometryId, Texture, Texture, [f32; 2],LayerMaterial)>)> = {
-                    let root=&static_models[at].1;
-                    let m = if lod_index==0{root}else{&root.lods[lod_index-1].1};
-                    let mut parts = Vec::with_capacity(m.anim_parts.len() + m.driven_parts.len());
-                    if !m.anim_parts.is_empty() {
-                        let key = match lane {
-                            WorldModelLane::Placed => ModelTarget::Instance(i),
-                            // Attachments are not placed slots — a slot index
-                            // would address someone else's instance — so their
-                            // parts follow the per-MODEL command only.
-                            WorldModelLane::Attachment => ModelTarget::Attachment(i),
-                        };
-                        parts.extend(m.anim_parts.iter().map(|p| {
-                                let (_, _, _) =
-                                    self.model_anim_state.clock(&key, &inst.model, &p.def);
-                                (
-                                    self.model_anim_state.transform(&key,&inst.model,&p.def),
-                                    p.def.indices.len() / 3,
-                                    p.draws
-                                        .iter()
-                                        .map(|(g, t, d, s,m)| {
-                                            (g.geometry_id(), t.clone(), d.clone(), *s,m.clone())
-                                        })
-                                        .collect(),
-                                )
-                            }));
+                held_material = std::ptr::null();
+                match lane {
+                    WorldModelLane::Placed => stats.model_triangles += part_tris,
+                    WorldModelLane::Attachment => {
+                        stats.world_attachment_triangles += part_tris
                     }
-                    parts.extend(m.driven_parts.iter().map(|part| {
-                        let pose = inst
-                            .part_poses
-                            .iter()
-                            .find(|pose| pose.connection == part.def.connection)
-                            .map(|pose| pose.transform)
-                            .unwrap_or_else(|| part.def.rest_transform());
-                        (
-                            pose,
-                            part.def.indices.len() / 3,
-                            part
-                                .draws
-                                .iter()
-                                .map(|(g, t, d, s,m)| (g.geometry_id(), t.clone(), d.clone(), *s,m.clone()))
-                                .collect(),
-                        )
-                    }));
-                    parts
-                };
-                let owner = if cx.draw_owners_armed() && !parts.is_empty() {
-                    let label = self.draw_names.model(cx.cx, &inst.model, lod_index, 0, false);
-                    cx.enter_draw_label(label)
-                } else {
-                    0
-                };
-                for (pose, part_tris, part_draws) in &parts {
-                    draw.base().transform = Mat4f::mul(&inst.transform, pose);
-                    draw.base().lm_rect = Vec4f::default();
-                    for (geometry_id, texture, detail, dscale,material) in part_draws {
-                        draw.base().draw_vars.geometry_id = Some(*geometry_id);
-                        draw.base().draw_vars.set_texture(0, texture);
-                        draw.base().draw_vars.set_texture(5, detail);
-                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
-                        // An IBL material reads its environment on the detail slot.
-                        if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
-                        draw.base().prelit = if prelit { 1.0 } else { 0.0 };
-                        draw.set_material(cx.cx, material);
-                        draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
-                        stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);
-                    }
-                    held_material = std::ptr::null();
-                    match lane {
-                        WorldModelLane::Placed => stats.model_triangles += part_tris,
-                        WorldModelLane::Attachment => {
-                            stats.world_attachment_triangles += part_tris
-                        }
-                    }
-                }
-                cx.exit_draw_label(owner);
-                // A part opened its own draw item; the next instance of the same
-                // model must re-bind its own transform rather than accumulate
-                // into the part's.
-                if !parts.is_empty() {
-                    last = None;
                 }
             }
+            cx.exit_draw_label(owner);
+            // A part opened its own draw item; the next instance of the same
+            // model must re-bind its own transform rather than accumulate
+            // into the part's.
+            if !parts.is_empty() {
+                last = None;
+            }
+        }
+        if let Some(at) = blended_lane {
+            self.blended_models.lanes[at].layers = blended;
         }
         self.static_models = static_models;
         self.model_orders[which] = model_order;
@@ -1076,6 +1268,7 @@ impl Renderer {
         self.draw_models_inner(
             cx,
             ModelDraw::Pbr(&mut draw),
+            LayerPhase::Opaque,
             eye,
             instances,
             lane,

@@ -114,10 +114,14 @@ impl TaskPool for Saturable {
 }
 
 /// A pile of every primitive kind dropped on a plane, two dumbbells of three geoms falling on it (their
-/// pairs found through the bodies' BVHs), and a field torus resting on a fixed one.
-fn pile() -> Model {
+/// pairs found through the bodies' BVHs), a field torus resting on a fixed one and `lone` spheres resting on
+/// the plane apart (an island each), solved by `solver` on `cone` friction cones with the `enable` flags.
+fn pile(solver: i32, cone: i32, enable: i32, lone: usize) -> Model {
     let mut s = ModelSpec::default();
     s.option.timestep = 0.005;
+    s.option.solver = solver;
+    s.option.cone = cone;
+    s.option.enableflags |= enable;
     s.bodies[0].geoms.push(GeomSpec { r#type: GEOM_PLANE, size: [0.0, 0.0, 1.0], ..GeomSpec::default() });
     let kinds = [
         GeomSpec { r#type: GEOM_SPHERE, size: [0.15, 0.0, 0.0], ..GeomSpec::default() },
@@ -143,6 +147,14 @@ fn pile() -> Model {
             pos: [x, 0.16, 0.9 + 0.3 * i as f64], mass: 1.0, ipos: [0.0; 3], inertia: [0.01; 3],
             joints: vec![JointSpec { r#type: JNT_FREE, ..JointSpec::default() }],
             geoms: vec![ball(-0.15), GeomSpec { r#type: GEOM_CAPSULE, size: [0.03, 0.15, 0.0], quat: [0.7071067811865476, 0.0, 0.7071067811865476, 0.0], ..GeomSpec::default() }, ball(0.15)],
+            ..BodySpec::default()
+        });
+    }
+    for k in 0..lone {
+        s.bodies.push(BodySpec {
+            pos: [3.0 + 0.5 * k as f64, 0.0, 0.1], mass: 1.0, ipos: [0.0; 3], inertia: [0.004; 3],
+            joints: vec![JointSpec { r#type: JNT_FREE, ..JointSpec::default() }],
+            geoms: vec![GeomSpec { r#type: GEOM_SPHERE, size: [0.1, 0.0, 0.0], ..GeomSpec::default() }],
             ..BodySpec::default()
         });
     }
@@ -208,16 +220,39 @@ fn a_humanoid_steps_on_its_caller_alone() {
     assert_eq!(pool.fan_outs.load(Ordering::Relaxed), 0, "a humanoid's collision phases are too small to pay for a fan-out");
 }
 
+// The Data a step leaves, without what a pool changes by design: the pool, the scratch pools and the tasks'
+// own vectors.
+fn state(d: &Data) -> Data {
+    let mut d = d.clone();
+    d.threadpool = Default::default();
+    d.scratch = Default::default();
+    d.collision_tasks.clear();
+    d.solve_scratch.clear();
+    d.solve_warnings.clear();
+    d
+}
+
+// Asserts that a Data holds the `state` `a`, naming the first field that differs.
+fn assert_same(a: &Data, b: &Data, what: &str) {
+    let b = state(b);
+    if *a != b {
+        let (a, b) = (format!("{a:#?}"), format!("{b:#?}"));
+        let line = a.lines().zip(b.lines()).position(|(x, y)| x != y).unwrap_or(0);
+        let field = a.lines().take(line + 1).filter(|l| l.starts_with("    ") && !l.starts_with("     ")).last().unwrap_or("");
+        panic!("{what}: the Data differs in {} ({:?} against {:?})", field.trim(), a.lines().nth(line), b.lines().nth(line));
+    }
+}
+
 #[test]
-fn a_bound_pool_spreads_the_narrowphase_with_the_same_results() {
-    let m = pile();
+fn a_bound_pool_spreads_collision_and_the_island_solves_with_the_same_results() {
+    let m = pile(SOL_NEWTON, CONE_PYRAMIDAL, 0, 0);
     let mut serial = make_data(&m);
     let mut pooled = make_data(&m);
     let mut reversed = make_data(&m);
     let pool = Arc::new(Striped { threads: 4, fan_outs: AtomicUsize::new(0) });
     bind_thread_pool(&mut pooled, Some(pool.clone()));
     bind_thread_pool(&mut reversed, Some(Arc::new(Reverse)));
-    let (mut contacts, mut seeds) = (0, 0);
+    let (mut contacts, mut seeds, mut solved) = (0, 0, 0);
     let mut at_40 = None;
     for s in 0..120 {
         step(&m, &mut serial);
@@ -231,12 +266,15 @@ fn a_bound_pool_spreads_the_narrowphase_with_the_same_results() {
         assert_eq!(serial.sdf_seeds, pooled.sdf_seeds, "the field pairs' seeds at step {s}");
         assert_eq!(serial.bvh_active, pooled.bvh_active, "the BVH nodes found active at step {s}");
         assert!(serial.qpos == pooled.qpos && serial.qvel == pooled.qvel, "state at step {s}");
-        assert!(serial.qpos == reversed.qpos && serial.qvel == reversed.qvel && serial.contact[..serial.ncon as usize] == reversed.contact[..reversed.ncon as usize], "state at step {s} with a pool that calls its indexes last first");
+        let want = state(&serial);
+        assert_same(&want, &pooled, &format!("step {s}"));
+        assert_same(&want, &reversed, &format!("step {s} with a pool that calls its indexes last first"));
         contacts = contacts.max(serial.ncon);
         seeds = seeds.max(serial.sdf_seeds.len());
+        solved += (serial.nisland > 1 && serial.nefc > 0) as usize;
     }
     assert!(contacts > 20 && seeds > 0, "the pile touches ({contacts} contacts) and the tori keep seeds ({seeds})");
-    assert!(pool.fan_outs.load(Ordering::Relaxed) >= 2 * 120, "a midphase and a narrowphase on the pool every step");
+    assert!(pool.fan_outs.load(Ordering::Relaxed) >= 2 * 120 + solved, "a midphase and a narrowphase on the pool every step, and the island solves ({solved} steps)");
     assert!(pooled.collision_tasks.len() > 4, "the pairs in chunks of a fifth of a thread's share: {}", pooled.collision_tasks.len());
 
     // worlds stepped as the tasks of a fan-out that holds every worker: their own fan-outs find the pool full,
@@ -259,4 +297,34 @@ fn a_bound_pool_spreads_the_narrowphase_with_the_same_results() {
         assert!(d.qpos == want.qpos && d.qvel == want.qvel && d.sdf_seeds == want.sdf_seeds, "world {k} in a full pool");
     }
     assert!(full.alone.load(Ordering::Relaxed) >= 4 * 40, "the inner fan-outs ran on their callers alone");
+
+    // the island solves of Newton on elliptic cones (their Hessians in the contacts) with islands asleep, and
+    // of CG, with more islands than their statistics, on pools of 1, 2, 3 and 16 threads and one that calls
+    // its indexes last first
+    for (solver, cone, enable, steps) in [(SOL_NEWTON, CONE_ELLIPTIC, ENBL_SLEEP, 60), (SOL_CG, CONE_PYRAMIDAL, 0, 40)] {
+        let m = pile(solver, cone, enable, 16);
+        let mut serial = make_data(&m);
+        let striped: Vec<Arc<Striped>> = [1, 2, 3, 16].into_iter().map(|threads| Arc::new(Striped { threads, fan_outs: AtomicUsize::new(0) })).collect();
+        let mut worlds: Vec<Data> = striped.iter().map(|p| p.clone() as Arc<dyn TaskPool>).chain([Arc::new(Reverse) as Arc<dyn TaskPool>]).map(|p| {
+            let mut d = make_data(&m);
+            bind_thread_pool(&mut d, Some(p));
+            d
+        }).collect();
+        let (mut islands, mut asleep, mut solved) = (0, false, 0);
+        for s in 0..steps {
+            step(&m, &mut serial);
+            let want = state(&serial);
+            for (k, d) in worlds.iter_mut().enumerate() {
+                step(&m, d);
+                assert_same(&want, d, &format!("solver {solver}, cone {cone}, pool {k}, step {s}"));
+            }
+            islands = islands.max(serial.nisland as usize);
+            asleep |= (serial.ntree_awake as usize) < m.ntree;
+            solved += (serial.nisland > 1 && serial.nefc > 0) as usize;
+        }
+        assert!(islands > NISLAND, "solver {solver}: more islands ({islands}) than their statistics");
+        assert!(asleep || enable & ENBL_SLEEP == 0, "solver {solver}: some islands fall asleep");
+        assert_eq!(striped[0].fan_outs.load(Ordering::Relaxed), 0, "solver {solver}: a pool of one thread runs every phase on its caller");
+        assert!(striped[2].fan_outs.load(Ordering::Relaxed) >= 2 * steps + solved, "solver {solver}: the island solves on the pool ({solved} steps)");
+    }
 }

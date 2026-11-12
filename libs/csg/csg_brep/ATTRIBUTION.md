@@ -90,3 +90,16 @@ These are fetched at run time (never committed) and used only by difftest's
 - Use: the unmodified `dist/*.min.js` files, concatenated into
   `site/assets/vendor/d3-force.bundle.min.js`, lay out the dependency graph on the
   progress site (`graph.html`). They are served with the site and not loaded from a CDN.
+
+## References in comments
+
+This crate is a copy of solidcore's source. Its comments cite material that lives in
+solidcore's repository and is not part of this crate:
+
+- `plan/modules.toml`, `plan/findings.md`, `plan/findings/`, `plan/upstream-issues.md` and
+  `plan/upstream-issues/` (the port plan, findings and records of upstream defects);
+- issue and pull request numbers (`#1023`, `#1440`) of solidcore's issue tracker;
+- record ids (`WR-`, `UB-`, `HANG-`, `DOC-`) of those upstream-defect records;
+- difftest, the C++ harness and the corpora named above.
+
+The tables above describe solidcore's repository, not the files shipped here.

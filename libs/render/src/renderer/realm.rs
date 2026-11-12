@@ -1,6 +1,7 @@
 //! Realm lifecycle, stage/quality, effects, placed models and custom materials.
 
 use super::*;
+use super::draw_models::LayerPhase;
 
 impl Renderer {
     /// Begin rendering a different realm into this view.
@@ -727,7 +728,7 @@ impl Renderer {
     ) {
         if !self.foliage_ready { return; }
         let Some(mut draw) = self.foliage_draw.take() else { return };
-        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.draw_models_inner(cx, ModelDraw::Foliage(&mut draw), LayerPhase::Opaque, eye, instances, lane, fog, sun, frustum, stats);
         self.foliage_draw = Some(draw);
     }
 
@@ -741,7 +742,7 @@ impl Renderer {
     ) {
         if !self.splat_ready { return; }
         let Some(mut draw) = self.splat_draw.take() else { return };
-        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), eye, instances, lane, fog, sun, frustum, stats);
+        self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Opaque, eye, instances, lane, fog, sun, frustum, stats);
         self.splat_draw = Some(draw);
     }
 
@@ -816,15 +817,16 @@ impl Renderer {
         // While the frame does not route (no environment) nothing is
         // scanned.
         let stock_ibl_on = self.stock_ibl_active() && self.lists_a_stock_ibl_model(instances);
-        // Blended programs after every opaque one (they neither write depth
-        // nor hide what is behind them), each group in name order.
+        // Keep opaque programs before blended ones, each group in name
+        // order; their deferred layers replay the same program order.
         let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {
             (stock_ibl_on && name.as_str() == stock_ibl::STOCK_IBL_MATERIAL)
                 || instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
         }).map(|(name, m)| {
-            // The stock IBL program stands in for the PBR lane: opaque models, their blended
-            // layers drawn inside it, before every blended program. set_material leaves the
-            // last layer's blend state on its draw, so that state must not sort it.
+            // The stock IBL program stands in for the PBR lane: its opaque layers draw
+            // here, and its blended layers are deferred until after the opaque world.
+            // set_material leaves the last layer's blend state on its draw, so that
+            // state must not sort the program.
             let blended = m.draw.draw_vars.options.alpha_blend && name.as_str() != stock_ibl::STOCK_IBL_MATERIAL;
             (blended, name.clone())
         }).collect();
@@ -832,7 +834,7 @@ impl Renderer {
         let names = names.into_iter().map(|(_, name)| name);
         for name in names {
             let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
-            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), eye,
+            self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), LayerPhase::Opaque, eye,
                 instances, lane, fog, sun, frustum, stats);
             self.custom_draws.insert(name, draw);
         }

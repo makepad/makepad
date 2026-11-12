@@ -198,14 +198,16 @@ script_mod! {
             // shadow, before N.L) and its specular lobe per unit N.L.
             let sun_rad = self.sun_color * (ao_direct * sun_lit)
             let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
+            let spec_sun = sun_spec * f
             let added_env = amb_spec * occlusion
+            let spec_local = local_pbr * ao_direct
             self.ssr_surface(n, rough, self.fur_shade(added_env, n, te), f_env)
-            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, sun_spec*f, added_env, local_pbr*ao_direct, n, l, v, sun_rad, f, lobe), n, te) + emission
+            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, spec_sun, added_env, spec_local, n, l, v, sun_rad, f, lobe), n, te) + emission
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ)
             }
             lit = max(lit, least)
-            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
+            let fin = self.finish_lit(lit, spec_sun + added_env + spec_local, surf_w, f_env)
             self.ssr_finish(lit, least, fin)
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
@@ -291,6 +293,16 @@ script_mod! {
         mat_ambient: fn(n: vec3, a: vec3) -> vec3 { return a }
         mat_lighting: fn(direct: vec3, ambient: vec3) -> vec3 { return direct + ambient }
         mat_finish: fn(c: vec4) -> vec4 { return c }
+        finish_lit: fn(lit: vec3, spec: vec3, surf_w: float, f_env: vec3) -> vec4 {
+            if self.alpha_mode > 1.5 {
+                // Coverage attenuates diffuse/emission, not reflection; Fresnel
+                // also attenuates the background transmitted through the surface.
+                let alpha_out = surf_w + (1.0 - surf_w) * max(f_env.x, max(f_env.y, f_env.z))
+                let rgb = (max(lit - spec, vec3(0.0, 0.0, 0.0)) * surf_w + spec) / max(alpha_out, 0.0001)
+                return self.mat_finish(vec4(self.to_display(rgb), alpha_out))
+            }
+            return self.mat_finish(vec4(self.to_display(lit), 1.0))
+        }
         // The lit colour from its parts (see mat_compose_hooked in
         // render-material for what a light or lighting hook swaps in): the
         // ambient, sun and lamp diffuse (a, s, l) under the diffuse albedo,
@@ -704,12 +716,15 @@ script_mod! {
             // shadow, before N.L) and its specular lobe per unit N.L.
             let sun_rad = self.sun_color * (ao_direct * sun_lit)
             let lobe = (dist * geo / max(4.0 * ndv * ndl, 0.0001)) * mix(1.0, 3.14159265, self.lin_ctl.x)
-            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, sun_spec*f, amb_spec*occlusion, local_pbr*ao_direct, n, l, v, sun_rad, f, lobe), n, te) + emission
+            let spec_sun = sun_spec * f
+            let added_env = amb_spec * occlusion
+            let spec_local = local_pbr * ao_direct
+            var lit = self.fur_shade(self.mat_compose(albedo, metal, surface_ambient*(ao*sao*occlusion), surface_direct*(ao_direct*sun_lit), local*ao_direct, spec_sun, added_env, spec_local, n, l, v, sun_rad, f, lobe), n, te) + emission
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao, spec_occ)
             }
             lit = max(lit, least)
-            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
+            let fin = self.finish_lit(lit, spec_sun + added_env + spec_local, surf_w, f_env)
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }

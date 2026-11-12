@@ -21,7 +21,6 @@ use crate::sensor;
 use crate::sleep;
 use crate::solver;
 use crate::support;
-use crate::thread;
 use crate::types::*;
 use crate::util_blas as blas;
 use crate::util_errmem::warning;
@@ -621,10 +620,6 @@ fn warmstart(m: &Model, d: &mut Data) {
     }
 }
 
-fn solve_island_task(m: &Model, d: &mut Data, _arg: &mut (), _thread_id: usize, island: usize) {
-    solver::sol_pgs_island(m, d, island, m.opt.iterations);
-}
-
 fn discrete_gyro(m: &Model, d: &mut Data) {
     if m.opt.integrator != INT_DISCRETE || d.efm_active == 0 { return; }
     crate::unported!("mj_discreteGyro");
@@ -652,7 +647,7 @@ fn fwd_constraint_impl(m: &Model, d: &mut Data, solver: i32, flg_island: bool) {
         && metric::eff_cgmonolithic(m, d, solver) == 0;
     if islands_supported {
         match solver {
-            SOL_PGS => { thread::dispatch(m, d, &mut solve_island_task, &mut (), nisland); }
+            SOL_PGS => { for island in 0..nisland { solver::sol_pgs_island(m, d, island, m.opt.iterations); } }
             SOL_CG | SOL_NEWTON => {
                 let nidof = d.nidof as usize;
                 misc::gather(&mut d.ifrc_smooth, &d.qfrc_smooth, Some(&d.map_idof2dof), nidof);

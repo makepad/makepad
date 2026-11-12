@@ -955,7 +955,7 @@ impl Strokes {
             return Err("not a strokes file".into());
         }
         if u32_at(8)? != VERSION {
-            return Err(format!("strokes file version {} (this Fab reads {VERSION})", u32_at(8)?));
+            return Err(format!("strokes file version {} (this build reads {VERSION})", u32_at(8)?));
         }
         let header = u32_at(12)? as usize;
         let quant_mm = f32_at(20)? as f64;

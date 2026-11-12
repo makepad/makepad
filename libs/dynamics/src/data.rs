@@ -343,6 +343,10 @@ macro_rules! define_data {
             /// Ours: each narrowphase task's pooled vectors and the SDF collider's records, apart so that
             /// tasks share Data read-only; merged into Data after the phase (`collision_driver`).
             pub collision_tasks: Vec<crate::collision_driver::CollisionTask>,
+            /// The scratch each running part of the islands' solve takes (as many as ran at once), and each
+            /// part's warnings until the caller raises them in island order.
+            pub solve_scratch: Vec<crate::memory::Scratch>,
+            pub solve_warnings: Vec<Vec<(i32, i32)>>,
         }
 
         impl Data {
@@ -481,6 +485,8 @@ macro_rules! define_data {
                     signature: 0,
                     scratch: crate::memory::Scratch::default(),
                     collision_tasks: Vec::new(),
+                    solve_scratch: Vec::new(),
+                    solve_warnings: Vec::new(),
                 }
             }
 

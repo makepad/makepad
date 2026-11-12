@@ -3,6 +3,7 @@
 
 use super::ibl::EnvScope;
 use super::*;
+use super::draw_models::LayerPhase;
 
 /// HDR lane: the analytic dome's radiance relative to the lit world. The
 /// Preetham luminance at the legacy 0.1 exposure sits near a sunlit white
@@ -241,6 +242,7 @@ impl Renderer {
         skinned: Option<SkinnedBatch>,
         mut models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
+        self.blended_models.clear();
         let mut stats = RenderStats::default();
         // The placed list's static blocks for this frame (draw_models.rs):
         // the cascades' mover collection and the model lanes' cull read them.
@@ -1601,6 +1603,7 @@ impl Renderer {
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
+                LayerPhase::Opaque,
                 eye_pos,
                 &instances,
                 WorldModelLane::Placed,
@@ -1633,8 +1636,8 @@ impl Renderer {
             self.draw_grass(cx, eye_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
             cx.exit_draw_label(owner);
 
-            // Actor-attached props share the world material/depth pass, but
-            // this is their ONLY renderer traversal. In particular they
+            // Actor-attached props share the world material/depth pass;
+            // their blended layers join the deferred model stage. They
             // were absent from the lightmap/CSM mover and shadow-building
             // stages above. A receiver sample gives their shader the same
             // projected baked-shadow lookup as other moving geometry
@@ -1659,6 +1662,7 @@ impl Renderer {
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),
+                LayerPhase::Opaque,
                 eye_pos,
                 &attachments,
                 WorldModelLane::Attachment,
@@ -1882,6 +1886,14 @@ impl Renderer {
                 if let Some(mi) = draw_alpha.cube.cube.many_instances.take() {
                     cx.end_many_instances(mi);
                 }
+            }
+        }
+
+        if !self.blended_models.is_empty() {
+            if let Some(draw) = models_draw.as_deref_mut() {
+                let owner = cx.enter_draw_name("blended models");
+                self.draw_blended_models(cx, draw, eye_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
+                cx.exit_draw_label(owner);
             }
         }
 

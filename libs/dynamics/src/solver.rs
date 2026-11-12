@@ -6,6 +6,7 @@
 //! Hessians and warnings through its own `SolveIo`.
 
 use std::cell::Cell;
+use std::sync::Mutex;
 use std::mem::{align_of, size_of};
 
 use crate::core_constraint::{mul_jac_tvec, ConeHessians};
@@ -14,6 +15,7 @@ use crate::data::{Contact, Data, SolverStat};
 use crate::memory::Scratch;
 use crate::metric::eff_solve;
 use crate::model::Model;
+use crate::thread::{part_count, run_parts};
 use crate::types::*;
 use crate::util_blas::{add_to, copy, dot, mul_mat_vec, mul_vec_mat_vec, norm, sub, zero};
 use crate::util_misc::{clip, fill_int, gather, max};
@@ -1023,6 +1025,7 @@ impl SolveOutputs {
 
 /// What an island's solve writes, cut from the island-ordered outputs in island order.
 pub(crate) struct IslandOut<'a> {
+    island: usize,
     acc: &'a mut [f64],
     frc_constraint: &'a mut [f64],
     efc_force: &'a mut [f64],
@@ -1031,32 +1034,62 @@ pub(crate) struct IslandOut<'a> {
     cone_h: &'a mut [f64],
 }
 
-/// The islands' parts of the outputs, in island order. Each island's dofs and rows follow the last one's:
-/// the cut checks it, as a solve that wrote another island's part would be wrong.
+/// The islands' parts of the outputs, islands `island..end` in order. Each island's dofs and rows follow the
+/// last one's: the cut checks it, as a solve that wrote another island's part would be wrong.
 pub(crate) struct IslandOuts<'d, 'a> {
     d: &'d Data,
     island: usize,
+    end: usize,
     dof: usize,
     efc: usize,
     acc: &'a mut [f64],
     frc_constraint: &'a mut [f64],
     efc_force: &'a mut [f64],
     efc_state: &'a mut [i32],
-    solver: std::slice::ChunksMut<'a, SolverStat>,
-    niter: std::slice::IterMut<'a, i32>,
-    nnz: std::slice::IterMut<'a, i32>,
+    solver: &'a mut [SolverStat],
+    niter: &'a mut [i32],
+    nnz: &'a mut [i32],
     cone_h: &'a mut [f64],
+}
+
+// The first `n` of a slice, the slice keeping the rest.
+fn front<'a, T>(s: &mut &'a mut [T], n: usize) -> &'a mut [T] {
+    let (a, b) = std::mem::take(s).split_at_mut(n);
+    *s = b;
+    a
 }
 
 impl<'d, 'a> IslandOuts<'d, 'a> {
     fn new(d: &'d Data, out: &'a mut SolveOutputs) -> Self {
         IslandOuts {
-            d, island: 0, dof: 0, efc: 0,
+            d, island: 0, end: d.nisland as usize, dof: 0, efc: 0,
             acc: &mut out.acc[..], frc_constraint: &mut out.frc_constraint[..],
             efc_force: &mut out.efc_force[..], efc_state: &mut out.efc_state[..],
-            solver: out.solver.chunks_mut(NSOLVER), niter: out.niter.iter_mut(), nnz: out.nnz.iter_mut(),
+            solver: &mut out.solver[..], niter: &mut out.niter[..], nnz: &mut out.nnz[..],
             cone_h: &mut out.cone_h[..],
         }
+    }
+
+    // The next `n` islands' parts, which these outputs then go on after.
+    fn split(&mut self, n: usize) -> IslandOuts<'d, 'a> {
+        let d = self.d;
+        let (island, end) = (self.island, self.island + n);
+        assert!(end <= self.end, "islands {island}..{end} past the outputs' {}", self.end);
+        let nv: usize = (island..end).map(|k| d.island_nv[k] as usize).sum();
+        let nefc: usize = (island..end).map(|k| d.island_nefc[k] as usize).sum();
+        let nstat = n.min(self.niter.len());
+        let ncone_h = if self.cone_h.is_empty() { 0 } else { 36 * nefc };
+        let part = IslandOuts {
+            d, island, end, dof: self.dof, efc: self.efc,
+            acc: front(&mut self.acc, nv), frc_constraint: front(&mut self.frc_constraint, nv),
+            efc_force: front(&mut self.efc_force, nefc), efc_state: front(&mut self.efc_state, nefc),
+            solver: front(&mut self.solver, nstat * NSOLVER), niter: front(&mut self.niter, nstat), nnz: front(&mut self.nnz, nstat),
+            cone_h: front(&mut self.cone_h, ncone_h),
+        };
+        self.island = end;
+        self.dof += nv;
+        self.efc += nefc;
+        part
     }
 }
 
@@ -1064,7 +1097,7 @@ impl<'a> Iterator for IslandOuts<'_, 'a> {
     type Item = IslandOut<'a>;
     fn next(&mut self) -> Option<IslandOut<'a>> {
         let d = self.d;
-        if self.island >= d.nisland as usize {
+        if self.island >= self.end {
             return None;
         }
         let island = self.island;
@@ -1074,25 +1107,19 @@ impl<'a> Iterator for IslandOuts<'_, 'a> {
         self.island += 1;
         self.dof += nv;
         self.efc += nefc;
-        let (acc, rest) = std::mem::take(&mut self.acc).split_at_mut(nv);
-        self.acc = rest;
-        let (frc_constraint, rest) = std::mem::take(&mut self.frc_constraint).split_at_mut(nv);
-        self.frc_constraint = rest;
-        let (efc_force, rest) = std::mem::take(&mut self.efc_force).split_at_mut(nefc);
-        self.efc_force = rest;
-        let (efc_state, rest) = std::mem::take(&mut self.efc_state).split_at_mut(nefc);
-        self.efc_state = rest;
+        let acc = front(&mut self.acc, nv);
+        let frc_constraint = front(&mut self.frc_constraint, nv);
+        let efc_force = front(&mut self.efc_force, nefc);
+        let efc_state = front(&mut self.efc_state, nefc);
         let ncone_h = if self.cone_h.is_empty() { 0 } else { 36 * nefc };
-        let (cone_h, rest) = std::mem::take(&mut self.cone_h).split_at_mut(ncone_h);
-        self.cone_h = rest;
-        let stats = match (self.solver.next(), self.niter.next(), self.nnz.next()) {
-            (Some(solver), Some(niter), Some(nnz)) => Some(SolveStats { solver, niter, nnz }),
-            _ => None,
+        let cone_h = front(&mut self.cone_h, ncone_h);
+        let stats = if self.niter.is_empty() { None } else {
+            Some(SolveStats { solver: front(&mut self.solver, NSOLVER), niter: &mut front(&mut self.niter, 1)[0], nnz: &mut front(&mut self.nnz, 1)[0] })
         };
-        Some(IslandOut { acc, frc_constraint, efc_force, efc_state, stats, cone_h })
+        Some(IslandOut { island, acc, frc_constraint, efc_force, efc_state, stats, cone_h })
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let n = self.d.nisland as usize - self.island;
+        let n = self.end - self.island;
         (n, Some(n))
     }
 }
@@ -2908,23 +2935,94 @@ pub fn sol_newton(m: &Model, d: &mut Data, maxiter: i32) {
     sol_primal_whole(m, d, maxiter, 1);
 }
 
-/// CG (flg_newton 0) or Newton on every island, in island order. Each island's solve reads Data and writes
-/// its own part of the island-ordered outputs (`d.iacc`, `ifrc_constraint`, `iefc_force`, `iefc_state`), its
-/// statistics and its contacts' cone Hessians.
+// The serial work of an island's solve for `thread::part_count`, in nanoseconds per row and dof of the
+// island, on the node that measured the pool's fan-out cost: Newton's constraint stage took 1093 us on 100
+// humanoids (6300 rows and dofs over 100 islands), 238 us on 22 and 8.2 us on one (63). CG and elliptic cones
+// take 1.5 to 5 times as long a row, so their solves split a little less than they could.
+const ISLAND_SIZE_NS: usize = 170;
+
+// An island's size, for the work estimate and to balance the parts: its rows and dofs.
+fn island_size(d: &Data, island: usize) -> usize {
+    (d.island_nefc[island] + d.island_nv[island]) as usize
+}
+
+// The islands of the next run from `start`: islands join a run until it holds `share` of rows and dofs, and an
+// island of a share or more is a run alone.
+fn island_run(d: &Data, start: usize, share: usize) -> usize {
+    let nisland = d.nisland as usize;
+    let (mut k, mut size) = (start, 0);
+    while k < nisland {
+        let s = island_size(d, k);
+        if k > start && (size >= share || s >= share) {
+            break;
+        }
+        size += s;
+        k += 1;
+    }
+    k - start
+}
+
+/// Runs of consecutive islands (`island_run`), each a part of the islands' solve.
+struct IslandRuns<'d, 'a> {
+    outs: IslandOuts<'d, 'a>,
+    share: usize,
+    left: usize,
+}
+
+impl<'d, 'a> Iterator for IslandRuns<'d, 'a> {
+    type Item = IslandOuts<'d, 'a>;
+    fn next(&mut self) -> Option<IslandOuts<'d, 'a>> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let n = island_run(self.outs.d, self.outs.island, self.share);
+        Some(self.outs.split(n))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left, Some(self.left))
+    }
+}
+
+impl ExactSizeIterator for IslandRuns<'_, '_> {}
+
+/// CG (flg_newton 0) or Newton on every island. Runs of consecutive islands of about equal rows and dofs are
+/// the parts of one fan-out on the pool bound to d (a phase too small to pay for one runs whole on the caller,
+/// `thread::part_count`). Each island's solve reads Data and writes its own part of the island-ordered
+/// outputs (`d.iacc`, `ifrc_constraint`, `iefc_force`, `iefc_state`), its statistics and its contacts' cone
+/// Hessians; a running part takes a scratch of its own from `d.solve_scratch`, and the caller raises the
+/// parts' warnings after, in island order.
 pub fn sol_primal_islands(m: &Model, d: &mut Data, maxiter: i32, flg_newton: i32) {
+    let nisland = d.nisland as usize;
+    let work: usize = (0..nisland).map(|k| island_size(d, k)).sum();
+    let share = work.div_ceil(part_count(d, nisland, ISLAND_SIZE_NS * work)).max(1);
+    let mut nrun = 0;
+    let mut k = 0;
+    while k < nisland {
+        k += island_run(d, k, share);
+        nrun += 1;
+    }
     let mut out = SolveOutputs::take(m, d, true, flg_newton);
+    let mut warnings = std::mem::take(&mut d.solve_warnings);
+    if warnings.len() < nrun { warnings.resize_with(nrun, Vec::new); }
+    let scratch = Mutex::new(std::mem::take(&mut d.solve_scratch));
     {
         let d: &Data = d;
-        let mut scratch = std::mem::take(&mut out.scratch);
-        let mut warnings = std::mem::take(&mut out.warnings);
-        for (island, part) in IslandOuts::new(d, &mut out).enumerate() {
-            let IslandOut { acc, frc_constraint, efc_force, efc_state, stats, cone_h } = part;
-            let mut io = SolveIo { acc, frc_constraint, efc_force, efc_state, stats, cone_h, scratch: &mut scratch, warnings: &mut warnings };
-            sol_primal(m, d, &mut io, island as i32, maxiter, flg_newton);
-        }
-        out.scratch = scratch;
-        out.warnings = warnings;
+        let runs = IslandRuns { outs: IslandOuts::new(d, &mut out), share, left: nrun };
+        run_parts(&d.threadpool, runs.zip(warnings.iter_mut()), |_, (run, warnings)| {
+            let mut own = scratch.lock().unwrap_or_else(|e| e.into_inner()).pop().unwrap_or_default();
+            for IslandOut { island, acc, frc_constraint, efc_force, efc_state, stats, cone_h } in run {
+                let mut io = SolveIo { acc, frc_constraint, efc_force, efc_state, stats, cone_h, scratch: &mut own, warnings: &mut *warnings };
+                sol_primal(m, d, &mut io, island as i32, maxiter, flg_newton);
+            }
+            scratch.lock().unwrap_or_else(|e| e.into_inner()).push(own);
+        });
     }
+    for w in &mut warnings[..nrun] {
+        out.warnings.append(w);
+    }
+    d.solve_warnings = warnings;
+    d.solve_scratch = scratch.into_inner().unwrap_or_else(|e| e.into_inner());
     out.put(m, d, true, flg_newton);
 }
 

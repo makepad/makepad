@@ -6,7 +6,6 @@
 //! parallel phase hands each task its own part of the outputs instead of sharing one Data.
 
 use crate::data::Data;
-use crate::model::Model;
 use std::sync::{Arc, Mutex};
 
 /// A pool of threads the engine spreads independent tasks over: the app's workpool, bound to a Data with
@@ -103,10 +102,5 @@ pub fn run_parts<P: Send>(pool: &ThreadPool, parts: impl ExactSizeIterator<Item 
     }
 }
 
-// CpuPause, ThreadPoolContext and mju_threadpool are the reference's own pool, replaced by TaskPool. The
-// island solves share Data's outputs and run in order on the calling thread.
-pub fn dispatch<A>(m: &Model, d: &mut Data, func: &mut impl FnMut(&Model, &mut Data, &mut A, usize, usize), arg: &mut A, ntask: usize) {
-    for i in 0..ntask {
-        func(m, d, arg, 0, i);
-    }
-}
+// CpuPause, ThreadPoolContext and mju_threadpool are the reference's own pool, replaced by TaskPool; its
+// per-thread stack shards, threadlock and thread ids are not needed: a task owns its part and its scratch.

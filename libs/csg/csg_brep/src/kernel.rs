@@ -141,7 +141,7 @@ impl Caches {
 
 /// Opt-in fixes of upstream SMLib defects (`plan/upstream-issues/`), all off by default
 /// (upstream behaviour). Set them on [`Kernel::fixes`] before running operations; each
-/// field names its record (`WR-…`) and the `tangency-labs/csg_brep` issue.
+/// field names its record (`WR-…`) and the issue number in solidcore's tracker (see ATTRIBUTION.md, "References in comments").
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 #[non_exhaustive]
