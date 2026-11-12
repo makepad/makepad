@@ -280,6 +280,24 @@ impl DrawPass {
         cxpass.parent = CxDrawPassParent::Xr;
     }
 
+    /// Whether this pass's colour target holds linear light (`DrawPassUniforms::linear_light`).
+    /// Every shader still writes display colour (gamma 2.2); in such a pass each draw's colour
+    /// is decoded to linear as it is written (the shaders' shared output epilogue), so the
+    /// target blends and its MSAA resolve averages in linear light, and whatever shows the
+    /// target encodes it once. Give it a float target (RGBA16F): 8 bits of linear light band in
+    /// the darks. Off by default: a pass without it is drawn as ever.
+    pub fn set_linear_light(&self, cx: &mut Cx, on: bool) {
+        let uniforms_gen = cx.next_uniform_gen();
+        let cxpass = &mut cx.passes[self.draw_pass_id()];
+        cxpass.pass_uniforms.linear_light = if on { 1.0 } else { 0.0 };
+        cxpass.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    /// Whether this pass holds linear light ([`Self::set_linear_light`]).
+    pub fn linear_light(&self, cx: &Cx) -> bool {
+        cx.passes[self.draw_pass_id()].holds_linear_light()
+    }
+
     /// Paint this pass before `parent` (which samples its output), without
     /// changing what attached it ([`Cx::set_pass_parent`]).
     pub fn set_pass_parent(&self, cx: &mut Cx, parent: DrawPassId) {
@@ -642,9 +660,11 @@ pub struct DrawPassUniforms {
     /// coverage; 0 or 1: single sampled).
     #[live]
     pub msaa_samples: f32,
-    // std140: the block ends on a vec4 boundary
+    /// 1: the pass's colour target holds linear light (`DrawPass::set_linear_light`): the
+    /// shaders' output epilogue decodes each draw's display colour as it is written. 0: as ever.
     #[live]
-    pub pad1: f32,
+    pub linear_light: f32,
+    // std140: the block ends on a vec4 boundary
     #[live]
     pub pad2: f32,
 }
@@ -666,7 +686,7 @@ crate::makepad_math::impl_gpu_pod!(DrawPassUniforms,
     time: f32,
     shiny_time: f32,
     msaa_samples: f32,
-    pad1: f32,
+    linear_light: f32,
     pad2: f32,
 );
 
@@ -988,6 +1008,11 @@ pub enum CxDrawPassParent {
 }
 
 impl CxDrawPass {
+    /// Whether the pass's colour target holds linear light (`DrawPass::set_linear_light`).
+    pub fn holds_linear_light(&self) -> bool {
+        self.pass_uniforms.linear_light > 0.5
+    }
+
     #[inline]
     pub fn mark_pass_uniforms_dirty(&mut self, uniforms_gen: u64) {
         debug_assert_ne!(uniforms_gen, 0);

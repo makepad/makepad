@@ -4,7 +4,7 @@ use crate::recording_buffer::{CpuReservation, RecordingBudget, RecordingBuffer};
 use crate::{
     cx::Cx,
     draw_pass::DrawPassId,
-    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
+    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderBlendOp, DrawShaderColorFormat, DrawShaderId},
     draw_vars::{
         DrawVars, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
     },
@@ -1419,8 +1419,12 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 pub struct DrawCallUniforms {
     #[live]
     pub zbias: f32,
+    /// 1: the call writes premultiplied colour (it blends over, `alpha_blend`); 0: its colour as
+    /// it is (no blending, a raw or max-blend shader; in an MSAA pass its alpha is coverage).
+    /// What a linear-light pass's output epilogue undoes before it decodes
+    /// (`DrawPassUniforms::linear_light`).
     #[live]
-    pub pad1: f32,
+    pub premultiplied: f32,
     #[live]
     pub pad2: f32,
     #[live]
@@ -1429,12 +1433,24 @@ pub struct DrawCallUniforms {
 
 crate::makepad_math::impl_gpu_pod!(DrawCallUniforms,
     zbias: f32,
-    pad1: f32,
+    premultiplied: f32,
     pad2: f32,
     pad3: f32,
 );
 
 impl DrawCallUniforms {
+    /// A call's block: its zbias comes with its paint order; `premultiplied` from how it blends.
+    pub fn for_call(mapping: &CxDrawShaderMapping, options: &CxDrawShaderOptions) -> Self {
+        let raw = matches!(mapping.color_format, DrawShaderColorFormat::Bgra8NoBlend | DrawShaderColorFormat::Rf16 | DrawShaderColorFormat::Ru8);
+        // The declared rule, which every backend applies to an 8-bit or RGBA16F target, except
+        // one edge: Metal blends only a shader that declares the default BGRA8 colour format, so a
+        // shader declaring a float format with `alpha_blend` on would decode as blended there
+        // while it writes raw. No shader is declared that way (the float-declared ones turn
+        // `alpha_blend` off).
+        let over = options.alpha_blend && !raw && mapping.blend_op == DrawShaderBlendOp::Over;
+        Self { premultiplied: if over { 1.0 } else { 0.0 }, ..Self::default() }
+    }
+
     // The array length is in f32 elements, not bytes, hence the >> 2.
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawCallUniforms>() >> 2] {
         crate::makepad_math::bytemuck::cast_ref(self)
@@ -1817,7 +1833,7 @@ impl CxDrawCall {
         self.append_group_id = draw_vars.append_group_id;
         self.draw_shader_id = draw_vars.draw_shader_id.unwrap();
         self.total_instance_slots = mapping.instances.total_slots;
-        self.draw_call_uniforms = DrawCallUniforms::default();
+        self.draw_call_uniforms = DrawCallUniforms::for_call(mapping, &draw_vars.options);
         sized_dyn_uniforms(&mut self.dyn_uniforms, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
         self.texture_slots.clone_from(&draw_vars.texture_slots);
         #[cfg(not(target_arch = "wasm32"))]
@@ -1843,7 +1859,7 @@ impl CxDrawCall {
             append_group_id: draw_vars.append_group_id,
             draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
-            draw_call_uniforms: DrawCallUniforms::default(),
+            draw_call_uniforms: DrawCallUniforms::for_call(mapping, &draw_vars.options),
             dyn_uniforms: {
                 let mut u = Vec::new();
                 sized_dyn_uniforms(&mut u, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
