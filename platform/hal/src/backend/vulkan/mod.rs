@@ -28,7 +28,8 @@ pub(crate) mod tap;
 #[cfg(target_os = "linux")]
 pub(crate) mod video_encode;
 
-pub use device::Device;
+pub use device::{first_gpu_driver, Device};
+pub use pipeline::refused_pipeline;
 pub use resources::Image;
 pub use share::{NativeHandle, NativeImages, VkExternalImages};
 #[cfg(target_os = "android")]
@@ -447,6 +448,12 @@ impl Vulkan {
         self.dev.properties.device_type == makepad_vulkan::vk::PhysicalDeviceType::CPU
     }
 
+    /// The GPU's vendor and device ids and its driver's version.
+    pub fn driver(&self) -> [u32; 3] {
+        let p = &self.dev.properties;
+        [p.vendor_id, p.device_id, p.driver_version]
+    }
+
     /// One look at the device's memory (`crate::gpu_pressure`): creates that waited for room
     /// go back to their apps once it is there; while free memory is under the UI's reserve the
     /// HAL first gives back what it holds for nothing (idle transient targets, evictable
@@ -723,6 +730,15 @@ impl Backend for Vulkan {
         self.compiler.stop();
         if let Some(queue) = self.queue.as_ref() { queue.stop(); }
         self.complete.stop();
+    }
+    fn retire(&mut self, world: &mut World) {
+        // the compiles still queued find their pipelines gone and skip
+        self.pipe.clear();
+        self.programs.clear();
+        self.before_exit();
+        self.drain(world);
+        // the device goes with this core instead of staying the process's
+        Device::release_shared();
     }
 }
 

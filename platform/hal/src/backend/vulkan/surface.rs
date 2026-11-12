@@ -13,6 +13,17 @@ use std::sync::{Arc, Mutex};
 /// Longest wait for a swapchain image (see `Swapchain::show`).
 const ACQUIRE_WAIT_NS: u64 = 1_000_000;
 
+/// The acquire's wait: forever below Android 11, whose loader waits forever whatever we pass
+/// and logs a warning on every acquire with any other timeout.
+fn acquire_wait_ns() -> u64 {
+    #[cfg(target_os = "android")]
+    {
+        static FOREVER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *FOREVER.get_or_init(|| crate::backend::android::native_layer::api_level() < 30) { return u64::MAX; }
+    }
+    ACQUIRE_WAIT_NS
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SurfaceState {
     Offscreen,
@@ -216,7 +227,7 @@ impl Swapchain {
         if self.retired.load(Ordering::Acquire) || self.dirty.load(Ordering::Acquire) { return Ok(Shown::Dropped); }
         let _host = lock(&self.host);
         let available = Semaphore::new(self.dev.clone()).map_err(|e| format!("acquire semaphore key={:?}: {e}", self.key))?;
-        let result = unsafe { self.dev.raw.acquire_next_image(self.raw, ACQUIRE_WAIT_NS, available.raw, vk::Fence::null()) };
+        let result = unsafe { self.dev.raw.acquire_next_image(self.raw, acquire_wait_ns(), available.raw, vk::Fence::null()) };
         if log_enabled() && !self.logged_acquire.load(Ordering::Relaxed) && !self.logged_acquire.swap(true, Ordering::Relaxed) {
             eprintln!("[hal-vulkan] first vkAcquireNextImageKHR key={:?} swapchain={:?}: {result:?}", self.key, self.raw);
         }

@@ -419,11 +419,16 @@ unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) { boo
     if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
 unsafe extern "system" fn resize_ime(_: *mut JNIEnv, _: jclass, height: jint, open: jboolean) {
-    let ime = Some((height.max(0), open != 0));
-    // Every layout pass reports the keyboard again, a boost's own window update too, so only its slide boosts.
-    let changed = std::mem::replace(&mut lock(&Shared::global().state).ime, ime) != ime;
-    if changed && open != 0 { boost_frame_rate(); }
+    // Every layout pass (onGlobalLayout) reports the IME state again, a boost's own window update
+    // too. An unchanged open report is no news, and only an open keyboard's slide boosts. A closed
+    // report always goes on: it clears LAST_IME here and the app's record of its last show
+    // (`ImeResize` in hal_intake), repeated or not, so the next ImeShow is sent.
     if open == 0 { *lock(&LAST_IME) = None; }
+    let changed = state::report_changed(&mut lock(&Shared::global().state).ime, Some((height.max(0), open != 0)));
+    if open != 0 {
+        if !changed { return; }
+        boost_frame_rate();
+    }
     let height = height.max(0) as f64 / Shared::global().dpi() as f64;
     Shared::global().emit(clock_ns(), |q, id| q.ime_resize(id, height, open != 0));
 }
@@ -432,7 +437,9 @@ unsafe extern "system" fn physical_keyboard(_: *mut JNIEnv, _: jclass, connected
     Shared::global().emit(clock_ns(), |q, id| q.physical_keyboard(id, connected != 0));
 }
 unsafe extern "system" fn insets(_: *mut JNIEnv, _: jclass, top: jfloat, right: jfloat, bottom: jfloat, left: jfloat) {
-    lock(&Shared::global().state).insets = [top, right, bottom, left]; Shared::global().display();
+    // an unchanged report would emit an unchanged geometry
+    if !state::report_changed(&mut lock(&Shared::global().state).insets, [top, right, bottom, left]) { return; }
+    Shared::global().display();
 }
 unsafe extern "system" fn ime_state(env: *mut JNIEnv, _: jclass, text: jstring, ss: jint, se: jint, cs: jint, ce: jint) { boost_frame_rate();
     let text = reg::string(env, text);
@@ -668,6 +675,7 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onAndroidParams", "(Ljava/lang/String;Ljava/lang/String;FZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Z)V", params as *mut c_void),
         ("onNightModeChanged", "(Z)V", night_mode as *mut c_void),
         ("onDisplayRotation", "(I)V", display_rotation as *mut c_void),
+        ("onAppHalBackend", "(Ljava/lang/String;)V", super::shell::app_hal_backend as *mut c_void),
         ("initChoreographer", "(FI)V", choreographer as *mut c_void),
         ("onBackPressed", "()V", back as *mut c_void),
         ("onBackGesture", "(IFFFIJ)V", back_gesture as *mut c_void),

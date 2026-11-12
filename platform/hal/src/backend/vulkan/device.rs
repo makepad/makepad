@@ -212,6 +212,12 @@ impl Device {
         Ok(device)
     }
 
+    /// The process is done with Vulkan (Android's GLES fallback), so its device goes with the
+    /// last backend holding it.
+    pub(crate) fn release_shared() {
+        lock(&SHARED).take();
+    }
+
     fn new(instance_extensions: &[&CStr], optional: &[&CStr], source: &mut dyn super::surface::VkSurfaceSource) -> Result<Arc<Self>, String> {
         if log_enabled() { eprintln!("[hal-vulkan] opening loader; required instance extensions={instance_extensions:?}"); }
         let entry = loader().map_err(|e| format!("Vulkan loader: {e}"))?;
@@ -1073,6 +1079,21 @@ impl Drop for Compilers {
 /// The Vulkan loader. makepad-vulkan opens it once per process and never closes it (ICDs register
 /// process-exit and thread-exit handlers that must not outlive their library).
 fn loader() -> Result<Entry, String> { unsafe { Entry::load() } }
+
+/// The vendor and device ids and driver version of the Vulkan 1.1 GPU a backend would open, read
+/// from an instance that's dropped right away, without making a device.
+pub fn first_gpu_driver() -> Option<[u32; 3]> {
+    let entry = loader().ok()?;
+    let app = vk::ApplicationInfo::default().application_name(c"Makepad HAL").api_version(vk::API_VERSION_1_1);
+    let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None) }.ok()?;
+    let life = InstanceLife(instance.clone(), None);
+    let mut gpus: Vec<_> = unsafe { instance.enumerate_physical_devices() }.ok()?.into_iter()
+        .map(|p| unsafe { instance.get_physical_device_properties(p) })
+        .filter(|p| p.api_version >= vk::API_VERSION_1_1).collect();
+    drop(life);
+    gpus.sort_by_key(|p| match p.device_type { vk::PhysicalDeviceType::DISCRETE_GPU => 0, vk::PhysicalDeviceType::INTEGRATED_GPU => 1, _ => 2 });
+    gpus.first().map(|p| [p.vendor_id, p.device_id, p.driver_version])
+}
 
 #[cfg(test)]
 mod tests {

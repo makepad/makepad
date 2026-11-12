@@ -215,9 +215,12 @@ mod imp {
                 reply_to_answer(ask(move |tx| Cmd::Resize { window, size: dvec2(w, h), tx }, 6))
             }
             // `window k=maximize`: the window's own maximise, answered after the
-            // next drawn frame with `wait` (the maximise/occlusion proof).
+            // next drawn frame with `wait` (the maximise/occlusion proof);
+            // `k=fullscreen`: the whole screen at its own size (a window
+            // manager's maximise keeps its bar and dock).
             "window" => match p.get(&["k", "kind"]) {
                 Some("maximize") | Some("max") => send_input(p.window(), vec![Input::Maximize], p.flag(&["wait"])),
+                Some("fullscreen") => send_input(p.window(), vec![Input::Fullscreen], p.flag(&["wait"])),
                 Some("dragquery") => match (p.get(&["x"]).and_then(|v| v.parse::<f64>().ok()), p.get(&["y"]).and_then(|v| v.parse::<f64>().ok())) {
                     (Some(x), Some(y)) => send_input(p.window(), vec![Input::DragQuery(x, y)], p.flag(&["wait"])),
                     _ => err("dragquery needs x= and y= (window points)"),
@@ -226,7 +229,7 @@ mod imp {
                     (Some(w), Some(h)) if w >= 1.0 && h >= 1.0 => send_input(p.window(), vec![Input::Resize(w, h)], p.flag(&["wait"])),
                     _ => err("resize needs width= and height= (points)"),
                 },
-                other => err(&format!("unknown window op {other:?}; k=maximize|resize|dragquery")),
+                other => err(&format!("unknown window op {other:?}; k=maximize|fullscreen|resize|dragquery")),
             },
             // The AI chat overlay (apps/aichat, seated in every Window on F10):
             // `ai on=1|0` toggles, `ai say=TEXT` types a line, `ai transcript`
@@ -2178,6 +2181,12 @@ mod imp {
                             cx.redraw_all();
                             continue;
                         }
+                        Input::Fullscreen => {
+                            cx.push_unique_platform_op(crate::cx_api::CxOsOp::FullscreenWindow(window_id));
+                            input_result = Some("{\"ok\":1,\"fullscreen\":1}".to_string());
+                            cx.redraw_all();
+                            continue;
+                        }
                         Input::DragQuery(x, y) => {
                             let response = std::rc::Rc::new(std::cell::Cell::new(crate::event::WindowDragQueryResponse::NoAnswer));
                             cx.call_event_handler(&crate::event::Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
@@ -3115,13 +3124,41 @@ mod imp {
             assert!(answered("shader const", &[]).contains("need shader="));
             assert!(answered("shader const", &[("shader", "1"), ("i", "0")]).contains("need v="));
             assert!(answered("tweak op", &[]).contains("need op="));
-            assert!(answered("window", &[("k", "nope")]).contains("unknown window op"));
+            assert!(answered("window", &[("k", "nope")]).contains("k=maximize|fullscreen|resize|dragquery"));
             assert!(answered("cap start", &[]).contains("needs path="));
             assert!(answered("cursor", &[("style", "x")]).contains("cursor style"));
             assert!(answered("midi", &[("k", "bogus")]).contains("bad kind"));
             assert!(answered("status", &[("if_user_seq", "x")]).contains("if_user_seq"));
             assert!(answered("handsoff", &[("on", "0")]).contains("\"handsoff\":0"));
             assert!(answered("trace", &[("off", "1")]).contains("topics"));
+        }
+
+        /// `window k=...` reaches the platform as that window's own op, for the window it names.
+        #[test]
+        fn window_ops_reach_the_platform_for_the_window() {
+            use crate::cx_api::CxOsOp;
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let window_id = crate::window::WindowHandle::new(&mut cx).window_id();
+            cx.windows[window_id].is_created = true;
+            for (input, op, answer) in [
+                (Input::Maximize, CxOsOp::MaximizeWindow(window_id), "\"maximize\":1"),
+                (Input::Fullscreen, CxOsOp::FullscreenWindow(window_id), "\"fullscreen\":1"),
+                (Input::Resize(640.0, 360.0), CxOsOp::ResizeWindow(window_id, dvec2(640.0, 360.0)), "\"resize\":[640,360]"),
+            ] {
+                let (tx, rx) = std::sync::mpsc::channel();
+                cx.platform_ops.clear();
+                apply(&mut cx, QueuedCmd {
+                    cmd: Cmd::Input { window: Some(window_id.id()), inputs: vec![input], wait: false, tx },
+                    user_seq: None,
+                    deadline: CommandDeadline::at(std::time::Instant::now() + std::time::Duration::from_secs(60)),
+                    by: String::new(),
+                });
+                assert!(cx.platform_ops.contains(&op), "{answer}: the op reaches the platform");
+                match rx.try_recv() {
+                    Ok(Reply::Text(text)) => assert!(text.contains(answer), "{answer}: answered {text}"),
+                    _ => panic!("{answer}: no answer"),
+                }
+            }
         }
 
         /// `dispatch` is the `cmd` service: it answers help with every command, resolves words

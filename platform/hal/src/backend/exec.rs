@@ -625,6 +625,29 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
         eprintln!("[hal] device reset: {e}; trying again");
         return false;
     }
+    make_objects_again(b, world);
+    b.rebuild_pipelines(world);
+    restored(b, world, None);
+    true
+}
+
+/// Android's GLES fallback: `gpu` makes every texture and buffer again and takes the lent windows.
+/// Sessions hear `BackendChanged`, so they make their pipelines in its dialect, then `DeviceReset`.
+pub fn backend_changed(gpu: &mut dyn Gpu, world: &mut World, info: HalInfo) {
+    make_objects_again(gpu, world);
+    for sid in world.session_ids() {
+        let Some(s) = world.session_mut(sid) else { continue };
+        s.pipelines_pending = 0;
+        let lent: Vec<(Id, Id)> = s.windows.keys_of(sid).into_iter()
+            .filter_map(|id| Some((id, s.windows.get(sid, id).ok()?.val.alias_of?))).collect();
+        for (id, host) in lent { gpu.window_lent(sid, id, host, true); }
+    }
+    restored(gpu, world, Some(info));
+}
+
+/// Every texture and buffer gets new storage under its id (contents are the app's to upload
+/// again), shared textures answer with their new handle and imported ones as not imported.
+fn make_objects_again(b: &mut dyn Gpu, world: &mut World) {
     for sid in world.session_ids() {
         let Some(s) = world.session_mut(sid) else { continue };
         for id in s.textures.keys_of(sid) {
@@ -657,7 +680,11 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
             }
         }
     }
-    b.rebuild_pipelines(world);
+}
+
+/// The font atlases come back from the font service's own copy and every session hears
+/// `DeviceReset`, after `BackendChanged` when the device is another backend's (`info`).
+fn restored(b: &mut dyn Gpu, world: &mut World, info: Option<HalInfo>) {
     if let Some(mut fonts) = world.fonts.take() {
         fonts.device_reset(b, world);
         world.fonts = Some(fonts);
@@ -679,10 +706,12 @@ pub fn device_reset(b: &mut dyn DeviceReset, world: &mut World) -> bool {
             for (d_target, d_frame, d_now) in pending {
                 q.frame_done(d_target, d_frame, 0, d_now, 0.0, 0.0);
             }
+            if let Some(info) = info {
+                q.backend_changed(&HalInfo { session: sid, ..info }.to_bytes());
+            }
             q.device_reset(generation);
         });
     }
-    true
 }
 
 /// Frees a session's table entries and ledger rows (device objects are the backend's).

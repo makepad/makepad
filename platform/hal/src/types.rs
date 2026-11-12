@@ -498,6 +498,29 @@ impl HalInfo {
             *w = u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
         }
     }
+
+    /// Field by field, little-endian, for an event payload (`BackendChanged`).
+    /// Every field is named, so a new one can't be left out of the payload.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let Self { session, backend, dialect, flags, formats, storage_formats, max_workgroup_size, max_workgroup_invocations,
+            msaa, dpi, max_texture, max_window, max_buffer, working_set, vendor_id, device_kind, device_name } = *self;
+        let words = [session, backend, dialect, flags, max_workgroup_size[0], max_workgroup_size[1], max_workgroup_size[2],
+            max_workgroup_invocations, msaa, dpi.to_bits(), max_texture, max_window[0], max_window[1], vendor_id, device_kind];
+        let longs = [formats, storage_formats, max_buffer, working_set].into_iter().chain(device_name);
+        words.iter().flat_map(|w| w.to_le_bytes()).chain(longs.flat_map(u64::to_le_bytes)).collect()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        // 15 u32 words, then 12 u64s (4 fields and the 8 of `device_name`), as `to_bytes` writes them
+        const WORDS: usize = 15;
+        if bytes.len() != WORDS * 4 + 12 * 8 { return None; }
+        let w = |i: usize| u32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        let l = |i: usize| u64::from_le_bytes(bytes[WORDS * 4 + i * 8..WORDS * 4 + i * 8 + 8].try_into().unwrap());
+        Some(Self { session: w(0), backend: w(1), dialect: w(2), flags: w(3), max_workgroup_size: [w(4), w(5), w(6)],
+            max_workgroup_invocations: w(7), msaa: w(8), dpi: f32::from_bits(w(9)), max_texture: w(10), max_window: [w(11), w(12)],
+            vendor_id: w(13), device_kind: w(14), formats: l(0), storage_formats: l(1), max_buffer: l(2), working_set: l(3),
+            device_name: std::array::from_fn(|i| l(4 + i)) })
+    }
 }
 
 /// Backend ids (`OpenReq::backend`, `HalInfo::backend`).

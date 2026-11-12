@@ -1060,6 +1060,10 @@ impl Cx {
                 }
             }
             HalEvent::DeviceReset { generation } => self.hal_device_reset(generation),
+            HalEvent::BackendChanged { info } => match makepad_hal::HalInfo::from_bytes(info) {
+                Some(info) => self.hal_backend_changed(info),
+                None => crate::error!("hal: BackendChanged came without the new backend's info"),
+            },
             HalEvent::GpuPressure { wanted_mb, free_mb, budget_mb, reserve_mb, failed } => {
                 self.call_event_handler(&Event::GpuPressure(GpuPressureEvent { wanted_mb, free_mb, budget_mb, reserve_mb, failed }));
             }
@@ -1160,6 +1164,16 @@ impl Cx {
         // what only the GPU held is the app's to redo (`Event::GpuReset`)
         self.call_event_handler(&Event::GpuReset);
         self.redraw_all();
+    }
+
+    /// The HAL draws with another backend now (Android's GLES fallback): we take its info and
+    /// compile every shader for its dialect. The `DeviceReset` right after repaints everything.
+    pub(crate) fn hal_backend_changed(&mut self, info: makepad_hal::HalInfo) {
+        let info = makepad_hal::HalInfo { session: self.hal.info.map_or(info.session, |i| i.session), ..info };
+        crate::log!("hal: the HAL moved to another backend ({}), compiling every shader for it", info.device_name());
+        self.hal_take_info(info);
+        self.hal.frames.backend_changed(info);
+        self.hal_recompile_shaders();
     }
 
     pub(crate) fn hal_repaint_all(&mut self) {

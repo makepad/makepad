@@ -27,6 +27,14 @@ impl SurfaceState {
     pub fn destroyed(&mut self) { self.window = None; }
 }
 
+/// Android reports some state again on every layout pass (onGlobalLayout): the insets, the IME.
+/// Keeps `value` in `last` and says whether it differs; an unchanged report is not passed on.
+pub fn report_changed<T: PartialEq>(last: &mut T, value: T) -> bool {
+    if *last == value { return false; }
+    *last = value;
+    true
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Pointer {
     pub id: u32,
@@ -95,5 +103,17 @@ mod tests {
         assert_eq!(current.points[1].phase, input::touch::START);
         assert!(touches(8, 0, &p, 2.).is_empty());
         assert!(touches(0, 0, &[], 2.).is_empty());
+    }
+    #[test]
+    fn a_report_repeated_by_a_layout_pass_is_not_news() {
+        let mut insets = [0f32; 4];
+        assert!(report_changed(&mut insets, [24., 0., 16., 0.]));
+        assert!(!report_changed(&mut insets, [24., 0., 16., 0.]));
+        assert!(report_changed(&mut insets, [0., 0., 0., 0.]));
+        let mut ime = None;
+        assert!(report_changed(&mut ime, Some((0, false))));
+        assert!(!report_changed(&mut ime, Some((0, false))));
+        assert!(report_changed(&mut ime, Some((300, true))));
+        assert_eq!(ime, Some((300, true)));
     }
 }

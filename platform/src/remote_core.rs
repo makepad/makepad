@@ -396,7 +396,7 @@ pub struct CommandDeadline {
 }
 
 impl CommandDeadline {
-    fn at(at: Instant) -> Self {
+    pub(crate) fn at(at: Instant) -> Self {
         Self {
             at,
             #[cfg(relax)]
@@ -614,6 +614,9 @@ pub enum Input {
     /// The window's own maximise (macOS: toggleFullScreen) — the test
     /// hook for the maximise/occlusion proof.
     Maximize,
+    /// The window's fullscreen (`CxOsOp::FullscreenWindow`): under a window manager the whole
+    /// screen at its own size, where a maximise keeps the bar and the dock.
+    Fullscreen,
     /// Resize the window's inner size (points): responsive-layout checks
     /// without relaunching.
     Resize(f64, f64),
@@ -853,7 +856,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["t"], positional: &[] },
     Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
-    Command { words: "window", args: "k=maximize | k=resize width= height= | k=dragquery x= y= [w=ID] [wait=1]", answers: "window operations (the maximise/occlusion proof, the caption hit test)", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"maximize\",\"resize\",\"dragquery\"]},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["k"], positional: &[] },
+    Command { words: "window", args: "k=maximize | k=fullscreen | k=resize width= height= | k=dragquery x= y= [w=ID] [wait=1]", answers: "window operations (the maximise/occlusion proof, fullscreen at the screen's size, the caption hit test)", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"maximize\",\"fullscreen\",\"resize\",\"dragquery\"]},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["k"], positional: &[] },
     Command { words: "cpu", args: "", answers: "shared CPU budget and app pool summary", service: "platform", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "log", args: "[n=50] [since=N]", answers: "{\"n\":lastseq,\"l\":[lines]}", service: "logs", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"since\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "net", args: "", answers: "the app's HTTP requests and network event queue, answered off the UI thread: a verdict per runtime first (STUCK: an answer waits unread in the app's queue, with when the app last read it / WAITING: in flight with nothing from the backend / OK), then per request: id, method and URL, the backend's answer and when, whether the app read it", service: "logs", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
