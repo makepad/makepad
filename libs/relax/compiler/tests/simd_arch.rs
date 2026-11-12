@@ -424,6 +424,32 @@ fn arch() {
     // tiny-skia's 1 / sqrt(x): the estimate and its Newton step
     u!(vrsqrteq_f32, float32x4_t);
     b!(vrsqrtsq_f32, float32x4_t, float32x4_t);
+    // fearless_simd's NEON level (vello_cpu). vfmsq_f64 is in std/core_arch_neon_fearless_simd.rs:
+    // which operand's NaN rustc negates depends on its optimisation level
+    t!(vbslq_f64, uint64x2_t, float64x2_t, float64x2_t);
+    u!(vcvtq_f32_u32, uint32x4_t);
+    u!(vcvtq_s64_f64, float64x2_t);
+    u!(vcvtq_u32_f32, float32x4_t);
+    u!(vrndnq_f64, float64x2_t);
+    u!(vrndq_f64, float64x2_t);
+    b!(vshlq_s8, int8x16_t, int8x16_t);
+    b!(vshlq_u8, uint8x16_t, int8x16_t);
+    b!(vuzp1q_f64, float64x2_t, float64x2_t);
+    b!(vuzp1q_s8, int8x16_t, int8x16_t);
+    b!(vuzp1q_s16, int16x8_t, int16x8_t);
+    b!(vuzp1q_s32, int32x4_t, int32x4_t);
+    b!(vuzp1q_u8, uint8x16_t, uint8x16_t);
+    b!(vuzp1q_u16, uint16x8_t, uint16x8_t);
+    b!(vuzp1q_u32, uint32x4_t, uint32x4_t);
+    b!(vuzp2q_f64, float64x2_t, float64x2_t);
+    b!(vuzp2q_s8, int8x16_t, int8x16_t);
+    b!(vuzp2q_s16, int16x8_t, int16x8_t);
+    b!(vuzp2q_s32, int32x4_t, int32x4_t);
+    b!(vuzp2q_u8, uint8x16_t, uint8x16_t);
+    b!(vuzp2q_u16, uint16x8_t, uint16x8_t);
+    b!(vuzp2q_u32, uint32x4_t, uint32x4_t);
+    b!(vzip1q_f64, float64x2_t, float64x2_t);
+    b!(vzip2q_f64, float64x2_t, float64x2_t);
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
