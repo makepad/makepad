@@ -424,7 +424,10 @@ pub(crate) const PATH_FRAG: u32 = 1 << 26;
 /// the `(` a transcription puts around an expression fragment of several tokens (rustc's invisible
 /// delimiters): never a call's argument list (`!div $n / 2` with `$n` = `64 / 2` is no `div(..)`)
 pub(crate) const WRAP_PAREN: u32 = 1 << 25;
-pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG | PATH_FRAG | WRAP_PAREN;
+/// a `vis` fragment that matched nothing, forwarded here (rustc's empty invisible group): no tokens,
+/// only the place (`Parser::empty_vis`)
+pub(crate) const EMPTY_VIS: u32 = 1 << 24;
+pub(crate) const FRAG_FLAGS: u32 = TY_FRAG | EXPR_FRAG | LIT_FRAG | META_ONLY | BLOCK_FRAG | PATH_FRAG | WRAP_PAREN | EMPTY_VIS;
 
 const GLOB_ID: Name = Name(0);
 const GLOB_SEP_ID: Name = Name(1);
@@ -3073,6 +3076,8 @@ fn compute_locs<'m>(nodes: &'m [MNode], locs: &mut Vec<MLoc<'m>>, next_var: &mut
 struct MPos {
     idx: usize,
     matches: std::rc::Rc<Vec<Bind>>,
+    /// the forwarded empty `vis` fragments it took before a token: (the token, how many)
+    vis_taken: (usize, u32),
 }
 
 impl MPos {
@@ -3413,7 +3418,7 @@ impl<'a> Parser<'a> {
     /// fragment and no position wants a token. Ok(Some): the bindings; Ok(None): no match
     /// (the next arm is tried); Err: a fragment that did not parse, or an ambiguity.
     fn parse_tt(&mut self, locs: &[MLoc], name: &str, edition: u16, lo: usize, hi: usize) -> Result<Option<HashMap<String, Bind>>, String> {
-        let mut cur = vec![MPos { idx: 0, matches: std::rc::Rc::new(Vec::new()) }];
+        let mut cur = vec![MPos { idx: 0, matches: std::rc::Rc::new(Vec::new()), vis_taken: (usize::MAX, 0) }];
         let mut next: Vec<MPos> = Vec::new();
         let mut bb: Vec<MPos> = Vec::new();
         let mut i = lo;
@@ -3439,7 +3444,7 @@ impl<'a> Parser<'a> {
                         }
                         if op != b'+' {
                             // zero repetitions: skip it
-                            cur.push(MPos { idx: after, matches: mp.matches.clone() });
+                            cur.push(MPos { idx: after, matches: mp.matches.clone(), vis_taken: mp.vis_taken });
                         }
                         // one or more: enter it
                         mp.idx += 1;
@@ -3447,7 +3452,7 @@ impl<'a> Parser<'a> {
                     }
                     &MLoc::KleeneNoSep { op, first } => {
                         // end the repetition (fails quietly next round when it cannot)
-                        cur.push(MPos { idx: mp.idx + 1, matches: mp.matches.clone() });
+                        cur.push(MPos { idx: mp.idx + 1, matches: mp.matches.clone(), vis_taken: mp.vis_taken });
                         if op != b'?' {
                             mp.idx = first;
                             cur.push(mp);
@@ -3455,7 +3460,7 @@ impl<'a> Parser<'a> {
                     }
                     &MLoc::Sep(sep) => {
                         // end the repetition, or take the separator and repeat
-                        cur.push(MPos { idx: mp.idx + 2, matches: mp.matches.clone() });
+                        cur.push(MPos { idx: mp.idx + 2, matches: mp.matches.clone(), vis_taken: mp.vis_taken });
                         if !eof && self.mtok_eq(i, sep) {
                             mp.idx += 1;
                             next.push(mp);
@@ -3466,7 +3471,9 @@ impl<'a> Parser<'a> {
                         cur.push(mp);
                     }
                     &MLoc::Var { frag, .. } => {
-                        if !eof && self.may_begin(frag, i, edition) {
+                        // a forwarded empty `vis` is a token of its own for rustc (an invisible
+                        // group), before a closing delimiter and at the end of the input too
+                        if (!eof && self.may_begin(frag, i, edition)) || (frag == Frag::Vis && self.empty_vis_left(&mp, i) > 0) {
                             bb.push(mp);
                         }
                     }
@@ -3477,8 +3484,9 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
-            // at the end of the input exactly one position must be past the matcher's end
-            if eof {
+            // at the end of the input exactly one position must be past the matcher's end (one
+            // that waits for a forwarded empty `vis` first takes it)
+            if eof && bb.is_empty() {
                 return match eof_mps.len() {
                     0 => Ok(None),
                     1 => {
@@ -3505,7 +3513,13 @@ impl<'a> Parser<'a> {
                     // the black-box parser: one fragment
                     let mut mp = bb.pop().unwrap();
                     let MLoc::Var { frag, var, depth, .. } = locs[mp.idx] else { unreachable!() };
-                    let (e, taken, bare) = self.match_frag(frag, i, hi).map_err(|m| format!("{m} (while parsing argument for this `{}` macro fragment)", frag_name(frag)))?;
+                    let (e, taken, bare) = if frag == Frag::Vis && self.empty_vis_left(&mp, i) > 0 {
+                        // the forwarded empty fragment itself, not the tokens after it
+                        mp.vis_taken = (i, if mp.vis_taken.0 == i { mp.vis_taken.1 + 1 } else { 1 });
+                        (i, None, false)
+                    } else {
+                        self.match_frag(frag, i, hi).map_err(|m| format!("{m} (while parsing argument for this `{}` macro fragment)", frag_name(frag)))?
+                    };
                     mp.push_match(var, depth, Bind::One(i, e, frag, taken, bare));
                     mp.idx += 1;
                     i = e;
@@ -3522,6 +3536,32 @@ impl<'a> Parser<'a> {
                         n => format!("local ambiguity when calling macro `{name}`: multiple parsing options: built-in NTs {nts} or {n} other option{}.", if n == 1 { "" } else { "s" }),
                     });
                 }
+            }
+        }
+    }
+
+    /// The forwarded empty `vis` fragments right before token `i` that `mp` has not taken.
+    fn empty_vis_left(&self, mp: &MPos, i: usize) -> u32 {
+        if self.empty_vis.is_empty() {
+            return 0;
+        }
+        let at = self.toks.at(i).lo;
+        let after = if i > 0 { self.toks.at(i - 1).hi } else { 0 };
+        let here: u32 = self.empty_vis.range(after..=at).map(|(_, n)| n).sum();
+        here.saturating_sub(if mp.vis_taken.0 == i { mp.vis_taken.1 } else { 0 })
+    }
+
+    /// Puts the forwarded empty `vis` fragments between the tokens `from` and `to` of a copied
+    /// range where the copy is: they go on with it (a group matched as one `tt`).
+    fn copy_empty_vis(&self, from: usize, to: usize, out: &mut Transcript) {
+        if self.empty_vis.is_empty() {
+            return;
+        }
+        let (after, at) = (self.toks.at(from).hi, self.toks.at(to).lo);
+        for (_, &n) in self.empty_vis.range(after..=at) {
+            for _ in 0..n {
+                let here = out.s.len() as u32;
+                out.groups.push((here, here | EMPTY_VIS | META_ONLY));
             }
         }
     }
@@ -3573,7 +3613,15 @@ impl<'a> Parser<'a> {
                             out.s.len() as u32 + 1
                         } as usize;
                         let mut groups = Vec::new();
+                        if *f == Frag::Vis && lo == hi && taken.is_none() {
+                            // an empty `vis` goes on as one (rustc: an empty invisible group)
+                            let here = out.s.len() as u32;
+                            out.groups.push((here, here | EMPTY_VIS | META_ONLY));
+                        }
                         for k in *lo..*hi {
+                            if k > *lo {
+                                self.copy_empty_vis(k - 1, k, out);
+                            }
                             let t = self.toks.at(k);
                             // A forwarded outer fragment must retain the invisible
                             // expression groups nested inside it. Their synthetic

@@ -130,6 +130,10 @@ pub struct Parser<'a> {
     /// opaque macro fragments a transcription forwarded (start of the first token -> end of the
     /// last): a `$t:tt` matches one whole (rustc's interpolated nonterminal tokens)
     pub frag_groups: crate::fxhash::HashMap<u32, u32>,
+    /// `vis` fragments a transcription forwarded that matched nothing (where the next token
+    /// starts -> how many): rustc forwards each as an empty invisible group, which `$v:vis`
+    /// takes where it is matched again
+    pub(crate) empty_vis: std::collections::BTreeMap<u32, u32>,
     /// starts of the `$t:ty` substitutions of expansion text (not a trait where a bound is expected)
     pub(crate) ty_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$p:path` substitutions (type-mode arguments even in expressions/patterns)
@@ -232,6 +236,7 @@ impl<'a> Parser<'a> {
             pm_editions: Default::default(),
             tok_undo: Vec::new(),
             frag_groups: Default::default(),
+            empty_vis: Default::default(),
             ty_frags: Default::default(),
             path_frags: Default::default(),
             meta_frags: Default::default(),
@@ -2009,6 +2014,10 @@ impl<'a> Parser<'a> {
             self.tok_origin.push((base + off, o, n));
         }
         for (a, b) in groups {
+            if b & crate::macros::EMPTY_VIS != 0 {
+                *self.empty_vis.entry(base + a).or_insert(0) += 1;
+                continue;
+            }
             // Nested groups with the same start are emitted inner first; keep the outer kind.
             if b & crate::macros::TY_FRAG != 0 {
                 self.ty_frags.insert(base + a);
@@ -2212,7 +2221,7 @@ impl<'a> Parser<'a> {
             rec_limit: _, import_summary: _,
             toks, pos, edition, ast, item_start, lazy_bodies, lazy_auto, lazy_part, lazy_mods, macros, krate,
             ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin,
-            pm_editions, tok_undo, frag_groups, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
+            pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
             include_as_expr, foreign_abi, cfg_out, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape,
@@ -2220,7 +2229,7 @@ impl<'a> Parser<'a> {
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
         let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
-            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()));
+            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), empty_vis);
         let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
         let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len());
         let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();
@@ -2320,31 +2329,7 @@ impl<'a> Parser<'a> {
         let r = self.try_expand_rules(|p, include, tail_expr| {
             let mut v = Vec::new();
             if tail_expr {
-                // rustc_expand `ParserAnyMacro::make` / `ensure_complete_parse`: one expression, and a `;` after it
-                if p.kind() == T::Eof {
-                    return Err(PErr { pos: p.lo(), msg: "macro expansion ends with an incomplete expression: expected expression".to_string() });
-                }
-                // the expression's outer attributes are configured as a statement's (rustc_expand
-                // flat_map_stmt -> filter_map_expr: a false `#[cfg]` removes the expression and the
-                // block has no tail; the attributes are not gated as expression attributes): parsed
-                // as `stmt` parses them, a disabled expression without expanding or resolving the
-                // macro calls in it, and kept as `Stmt::Attrs` for the cfg strip at load
-                let pend0 = p.pending_shape.len();
-                let attrs = if p.kind() == T::Pound && p.nth(1) == T::OpenBracket { p.outer_attrs()? } else { Vec::new() };
-                let active = attrs.is_empty() || p.cfg_active(&attrs);
-                if active && !p.pending_shape.is_empty() { p.check_pending_attrs()?; }
-                let e = p.with_cfg_active(active, pend0, |p| p.expr())?;
-                p.eat(T::Semi);
-                if p.kind() != T::Eof {
-                    let t = String::from_utf8_lossy(p.tok_text(p.tok())).into_owned();
-                    return Err(PErr { pos: p.lo(), msg: format!("macro expansion ignores `{t}` and any tokens following") });
-                }
-                if attrs.is_empty() {
-                    return Ok(vec![Stmt::Expr(false, e)]);
-                }
-                let attrs = p.ast.push_list(attrs);
-                let r = p.ast.push_row(AttrsStmt { attrs, expr: e, semi: false });
-                return Ok(vec![Stmt::Attrs(r)]);
+                return p.tail_expansion();
             }
             // `include!` in statement position is an expression: its first one, the rest of the
             // file is ignored (rustc_expand base.rs `ExpandInclude::make_expr`, lint incomplete_include)
@@ -2378,6 +2363,55 @@ impl<'a> Parser<'a> {
             }
             None => Ok(false),
         }
+    }
+
+    /// The expansion of a macro call that ends a block without `;`: one expression, and a `;`
+    /// after it (rustc_expand `ParserAnyMacro::make` / `ensure_complete_parse`).
+    fn tail_expansion(&mut self) -> PResult<Vec<Stmt>> {
+        if self.kind() == T::Eof {
+            return Err(PErr { pos: self.lo(), msg: "macro expansion ends with an incomplete expression: expected expression".to_string() });
+        }
+        // the expression's outer attributes are configured as a statement's (rustc_expand
+        // flat_map_stmt -> filter_map_expr: a false `#[cfg]` removes the expression and the
+        // block has no tail; the attributes are not gated as expression attributes): parsed
+        // as `stmt` parses them, a disabled expression without expanding or resolving the
+        // macro calls in it, and kept as `Stmt::Attrs` for the cfg strip at load
+        let pend0 = self.pending_shape.len();
+        let attrs = if self.kind() == T::Pound && self.nth(1) == T::OpenBracket { self.outer_attrs()? } else { Vec::new() };
+        // an expansion that is one `macro_rules` call: that call's expression can be configured
+        // away too (filter_map_expr gives its invocation the OptExpr kind of this one), so it
+        // expands as this call did (`warn!(..)` -> `log!(..)` -> `#[cfg(..)] { .. }`)
+        if attrs.is_empty() && self.rules_call_to_end() {
+            self.stmt_ctx = true;
+            if let Some(v) = self.try_expand_rules(|p, _, _| p.tail_expansion())? {
+                return Ok(v);
+            }
+        }
+        let active = attrs.is_empty() || self.cfg_active(&attrs);
+        if active && !self.pending_shape.is_empty() { self.check_pending_attrs()?; }
+        let e = self.with_cfg_active(active, pend0, |p| p.expr())?;
+        self.eat(T::Semi);
+        if self.kind() != T::Eof {
+            let t = String::from_utf8_lossy(self.tok_text(self.tok())).into_owned();
+            return Err(PErr { pos: self.lo(), msg: format!("macro expansion ignores `{t}` and any tokens following") });
+        }
+        if attrs.is_empty() {
+            return Ok(vec![Stmt::Expr(false, e)]);
+        }
+        let attrs = self.ast.push_list(attrs);
+        let r = self.ast.push_row(AttrsStmt { attrs, expr: e, semi: false });
+        Ok(vec![Stmt::Attrs(r)])
+    }
+
+    /// At a `macro_rules` macro's call that is the rest of the expansion, a `;` after it at most.
+    fn rules_call_to_end(&mut self) -> bool {
+        self.mac_ahead() && self.look_ahead(|p| {
+            let Ok(path) = p.path(true) else { return false };
+            if !p.rules_macro(&path).is_some_and(|d| d.builtin == 0) || !p.eat(T::Not) || p.delim_tt().is_err() {
+                return false;
+            }
+            p.kind() == T::Eof || p.kind() == T::Semi && p.nth(1) == T::Eof
+        })
     }
 
     /// rustc_parse parser/stmt.rs: parse_stmt_nonterminal/parse_stmt_without_recovery:
