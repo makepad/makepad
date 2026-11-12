@@ -1038,6 +1038,10 @@ mod tests {
             assert_eq!(multi.len(), 2, "one output per resident weight");
             assert_eq!(bits(&multi[0]), bits(&first), "first multi output preserves single output bits");
             assert_eq!(bits(&multi[1]), bits(&single2), "second multi output preserves single output bits");
+            let bt: Vec<f32> = (0..3 * k).map(|i| (i as i32 % 13 - 6) as f32 * 0.0523).collect();
+            let left = shim::try_matmul_nt_f32_weight_left(&w, &bt, n, k, 3).unwrap();
+            let left_legacy = shim::try_matmul_nt_f32(w.as_slice(), &bt, n, k, 3).unwrap();
+            assert_eq!(bits(&left), bits(&left_legacy), "resident left operand preserves legacy output bits");
             drop(w);
             drop(w2);
             drop(owner);

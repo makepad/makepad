@@ -21,7 +21,7 @@ pub use metal::{
     try_add_f32, try_attention_softmax_weighted_sum_f32, try_conv2d_planar_f32,
     try_flash_attn_f32_packed, try_gelu_f32, try_group_norm_planar_f32,
     try_layer_norm_mul_add_f32, try_matmul_nn_f32, try_matmul_nt_f32, try_matmul_nt_f32_weight,
-    try_matmul_nt_f32_weight_multi, try_mul_f32,
+    try_matmul_nt_f32_weight_left, try_matmul_nt_f32_weight_multi, try_mul_f32,
     try_rms_norm_mul_f32, try_silu_f32, BufferStorageMode,
     MetalGraphTensorWrite as GraphTensorWrite, MetalRuntime as Runtime,
 };

@@ -18,10 +18,9 @@ use makepad_ai_common::{
     UnaryOp, GGML_MEM_ALIGN, GGML_TYPE_F8_E4M3,
 };
 use makepad_ai_loader::{MlxDType, MlxSafetensorsHeader, MlxTensorEntry};
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const T5_LAYER_NORM_EPSILON: f32 = 1.0e-6;
 const T5_RELATIVE_MAX_DISTANCE: u32 = 128;
@@ -65,6 +64,20 @@ pub struct LoadedT5xxlWeights {
     /// The combined-checkpoint component these weights were read from.
     prefix: Option<String>,
     graph_extra_bytes: usize,
+    /// f32 expansions of the matrices no device multiplies in their stored type, decoded once.
+    decoded_f32: DecodedF32Matrices,
+}
+
+/// Decoded f32 matrices of one loaded T5, keyed by this context's tensor ids and freed with it. Clones of the
+/// weights share it (same context contents).
+#[derive(Clone, Default)]
+struct DecodedF32Matrices(Arc<Mutex<HashMap<TensorId, Arc<Vec<f32>>>>>);
+
+impl std::fmt::Debug for DecodedF32Matrices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let count = self.0.lock().map(|map| map.len()).unwrap_or(0);
+        write!(f, "DecodedF32Matrices({count})")
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +222,7 @@ impl LoadedT5xxlWeights {
             relative_attention_bias,
             prefix: prefix.map(str::to_owned),
             graph_extra_bytes: extra_bytes,
+            decoded_f32: DecodedF32Matrices::default(),
         })
     }
 
@@ -665,7 +679,7 @@ fn linear_rows_ggml(
             Some(Err(_)) | None => {}
         }
     }
-    linear_rows_ggml_matrix(input, weight, input_scale)
+    linear_rows_ggml_matrix(weights, input, weight, input_scale)
 }
 
 /// Device weight-cache namespace of this loaded component's owner.
@@ -680,6 +694,7 @@ pub(crate) fn evict_device_weight_cache(weights: &LoadedT5xxlWeights) -> usize {
 }
 
 fn linear_rows_ggml_matrix(
+    weights: &LoadedT5xxlWeights,
     input: &RowsTensor,
     weight: ResidentMatrix<'_>,
     input_scale: f32,
@@ -705,7 +720,7 @@ fn linear_rows_ggml_matrix(
         &scaled_input
     };
     let mut output = {
-        let dequantized = decoded_matrix_f32_cached(weight)?;
+        let dequantized = decoded_matrix_f32_cached(weights, weight)?;
         if let Some(output) = try_matmul_nt_f32(
             input_values,
             dequantized.as_slice(),
@@ -1692,21 +1707,24 @@ fn decode_ggml_matrix_to_f32(matrix: ResidentMatrix<'_>) -> Result<Vec<f32>> {
     .ok_or_else(|| DiffusionError::model("t5xxl matrix decode fallback failed"))
 }
 
-fn decoded_matrix_f32_cached(matrix: ResidentMatrix<'_>) -> Result<Arc<Vec<f32>>> {
-    thread_local! {
-        static DECODED_F32_MATRIX_CACHE: RefCell<HashMap<TensorId, Arc<Vec<f32>>>> =
-            RefCell::new(HashMap::new());
+/// The matrix decoded to f32 once per loaded T5: the cache lives in `weights`, so another load (another file, or
+/// the same tensor ids over other bytes) never sees these values. Decoding runs outside the lock.
+fn decoded_matrix_f32_cached(
+    weights: &LoadedT5xxlWeights,
+    matrix: ResidentMatrix<'_>,
+) -> Result<Arc<Vec<f32>>> {
+    let lock = || {
+        weights
+            .decoded_f32
+            .0
+            .lock()
+            .map_err(|_| DiffusionError::model("t5xxl decoded matrix cache poisoned"))
+    };
+    if let Some(decoded) = lock()?.get(&matrix.cache_key) {
+        return Ok(decoded.clone());
     }
-
-    DECODED_F32_MATRIX_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some(decoded) = cache.get(&matrix.cache_key) {
-            return Ok(decoded.clone());
-        }
-        let decoded = Arc::new(decode_ggml_matrix_to_f32(matrix)?);
-        cache.insert(matrix.cache_key, decoded.clone());
-        Ok(decoded)
-    })
+    let decoded = Arc::new(decode_ggml_matrix_to_f32(matrix)?);
+    Ok(lock()?.entry(matrix.cache_key).or_insert(decoded).clone())
 }
 
 fn matmul_nt_f32_cpu(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Result<Vec<f32>> {
@@ -1916,9 +1934,9 @@ fn shape_dim(entry: &MlxTensorEntry, index: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        attention_bias_f32_bytes, relative_position_bucket, t5_model_config_from_tensors,
-        t5_target_extents, t5_target_tensor_type, LoadedT5xxlWeights, T5ModelConfig,
-        T5_RELATIVE_ATTENTION_BIAS_NAME,
+        attention_bias_f32_bytes, linear_rows_ggml, relative_position_bucket,
+        t5_model_config_from_tensors, t5_target_extents, t5_target_tensor_type, LoadedT5xxlWeights,
+        RowsTensor, T5ModelConfig, T5_RELATIVE_ATTENTION_BIAS_NAME,
     };
     use crate::flux::T5TextEncoderConfig;
     use makepad_ai_common::TensorType;
@@ -2000,6 +2018,56 @@ mod tests {
     }
 
     #[test]
+    fn decoded_matrices_belong_to_their_load() {
+        // Two loads of a [2, 4] FP8 matrix under the same tensor id with different bytes, used in one thread.
+        // No device multiplies FP8 here, so both go through the decoded-f32 path.
+        let load = |byte: u8| {
+            let mut ctx = makepad_ai_common::Context::new(makepad_ai_common::InitParams {
+                mem_size: 1024,
+                mem_buffer: None,
+                no_alloc: false,
+            });
+            let id = ctx
+                .new_named_tensor("w", TensorType::F8E4M3, 2, &[4, 2], makepad_ai_common::BufferUsage::Weights)
+                .unwrap();
+            ctx.write_tensor_data(id, &[byte; 8]).unwrap();
+            LoadedT5xxlWeights {
+                owner: std::sync::Arc::new(crate::backend::WeightOwner::new("t5xxl")),
+                ctx,
+                tensor_ids: BTreeMap::from([("w".to_string(), id)]),
+                config: T5ModelConfig {
+                    vocab_size: 8,
+                    model_dim: 4,
+                    feedforward_dim: 16,
+                    layer_count: 1,
+                    attention_head_count: 2,
+                    relative_attention_bucket_count: 4,
+                    relative_attention_max_distance: 8,
+                    layer_norm_epsilon_bits: (1.0e-6f32).to_bits(),
+                },
+                path: PathBuf::from("unit-test.safetensors"),
+                relative_attention_bias: Vec::new(),
+                prefix: None,
+                graph_extra_bytes: 0,
+                decoded_f32: Default::default(),
+            }
+        };
+        let input = RowsTensor::new(1, 4, vec![1.0; 4]).unwrap();
+        let ones = load(0x38); // E4M3 1.0
+        let twos = load(0x40); // E4M3 2.0
+        let first = linear_rows_ggml(&ones, &input, "w", 1.0).unwrap();
+        let second = linear_rows_ggml(&twos, &input, "w", 1.0).unwrap();
+        assert_eq!(first.data, vec![4.0; 2], "first load multiplies its own matrix");
+        assert_eq!(second.data, vec![8.0; 2], "second load multiplies its own matrix, not the first load's decode");
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            crate::backend::gpu_weight_cache_evict_owner(&twos.owner),
+            Ok(0),
+            "an FP8 matrix Metal cannot multiply leaves no copy in the device store"
+        );
+    }
+
+    #[test]
     fn attention_bias_uses_relative_bias_without_padding_mask() {
         let weights = LoadedT5xxlWeights {
             owner: std::sync::Arc::new(crate::backend::WeightOwner::new("t5xxl")),
@@ -2028,6 +2096,7 @@ mod tests {
             ],
             prefix: None,
             graph_extra_bytes: 0,
+            decoded_f32: Default::default(),
         };
         let bytes = attention_bias_f32_bytes(&weights, 2).unwrap();
         let values = bytes

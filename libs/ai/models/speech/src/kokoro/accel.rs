@@ -10,6 +10,7 @@
 //! with their blocks so intermediate activations stay on the device.
 
 use super::ops::{LstmLayer, Mat};
+use super::weights::WeightData;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Below this many multiply-accumulates the dispatch overhead wins.
@@ -71,6 +72,89 @@ pub fn matmul_nt(a: &[f32], bt: &[f32], m: usize, k: usize, n: usize) -> Option<
         return None;
     }
     makepad_ai_common::backend::metal::try_matmul_nt_f32(a, bt, m, k, n)
+}
+
+/// Linear product with a resident right-hand weight on Metal.
+pub fn linear_w(x: &[f32], w: &WeightData, m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        if !worth_it(m, k, n) {
+            return None;
+        }
+        if let Some(weight) = w.resident() {
+            return makepad_ai_common::backend::metal::try_matmul_nt_f32_weight(x, weight, m, k, n);
+        }
+    }
+    matmul_nt(x, w, m, k, n)
+}
+
+/// Convolution patches keep the weight in the left operand's existing role.
+pub fn conv_patches_w(
+    w: &WeightData,
+    patches: &[f32],
+    out_channels: usize,
+    width: usize,
+    out_time: usize,
+) -> Option<Vec<f32>> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        if !worth_it(out_channels, width, out_time) {
+            return None;
+        }
+        if let Some(weight) = w.resident() {
+            return makepad_ai_common::backend::metal::try_matmul_nt_f32_weight_left(
+                weight,
+                patches,
+                out_channels,
+                width,
+                out_time,
+            );
+        }
+    }
+    matmul_nt(w, patches, out_channels, width, out_time)
+}
+
+/// Products of the transposed-convolution taps, `[out * kernel, time]`.
+pub fn conv_transpose_taps_w(
+    w: &WeightData,
+    x: &Mat,
+    in_channels: usize,
+    out_channels: usize,
+    kernel: usize,
+) -> Option<Vec<f32>> {
+    let time = x.cols;
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        if !worth_it(out_channels * kernel, in_channels, time) {
+            return None;
+        }
+        if let Some(taps) = w.resident_taps(in_channels, out_channels, kernel) {
+            let mut bt = vec![0.0f32; time * in_channels];
+            for i in 0..in_channels {
+                for j in 0..time {
+                    bt[j * in_channels + i] = x.data[i * time + j];
+                }
+            }
+            return makepad_ai_common::backend::metal::try_matmul_nt_f32_weight_left(
+                taps,
+                &bt,
+                out_channels * kernel,
+                in_channels,
+                time,
+            );
+        }
+    }
+    let w = &**w;
+    let mut reordered = vec![0f32; w.len()];
+    for ic in 0..in_channels {
+        for oc in 0..out_channels {
+            for k in 0..kernel {
+                reordered[(oc * kernel + k) * in_channels + ic] =
+                    w[(ic * out_channels + oc) * kernel + k];
+            }
+        }
+    }
+    matmul_nn(&reordered, &x.data, out_channels * kernel, in_channels, time)
 }
 
 // ---------------------------------------------------------------- CUDA
@@ -244,7 +328,7 @@ mod cuda {
 /// CUDA direct convolution; other backends retain the existing matmul/CPU paths.
 pub fn conv1d(
     x: &Mat,
-    weight: &[f32],
+    weight: &WeightData,
     bias: &[f32],
     out_channels: usize,
     pad: usize,

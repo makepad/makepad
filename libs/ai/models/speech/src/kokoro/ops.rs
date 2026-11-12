@@ -103,7 +103,7 @@ pub fn embed(tokens: &[u16], table: &[f32], embed_dim: usize) -> Mat {
 /// 1-D convolution, stride 1, dilation 1, zero padding.
 ///
 /// `weight` is `[out_channels, in_channels, kernel]` flattened.
-pub fn conv1d(x: &Mat, weight: &[f32], bias: &[f32], out_channels: usize, pad: usize) -> Mat {
+pub fn conv1d(x: &Mat, weight: &WeightData, bias: &[f32], out_channels: usize, pad: usize) -> Mat {
     conv1d_general(x, weight, bias, out_channels, pad, 1, 1)
 }
 
@@ -211,7 +211,7 @@ pub fn conv_transpose1d_depthwise(
 /// channel axis, which is also the axis PyTorch's weight-norm uses here.
 pub fn conv_transpose1d(
     x: &Mat,
-    weight: &[f32],
+    weight: &WeightData,
     bias: &[f32],
     out_channels: usize,
     stride: usize,
@@ -231,21 +231,8 @@ pub fn conv_transpose1d(
     // matmul, then overlap-add the taps into place — the same split the iSTFT
     // uses, and the scatter is a rounding error next to the matmul.
     if out_channels * kernel * in_channels * time >= 4 * 1024 * 1024 {
-        let mut reordered = vec![0f32; weight.len()];
-        for ic in 0..in_channels {
-            for oc in 0..out_channels {
-                for k in 0..kernel {
-                    reordered[(oc * kernel + k) * in_channels + ic] =
-                        weight[(ic * out_channels + oc) * kernel + k];
-                }
-            }
-        }
-        if let Some(taps) = super::accel::matmul_nn(
-            &reordered,
-            &x.data,
-            out_channels * kernel,
-            in_channels,
-            time,
+        if let Some(taps) = super::accel::conv_transpose_taps_w(
+            weight, x, in_channels, out_channels, kernel,
         ) {
             let mut out = Mat::zeros(out_channels, out_time);
             for_each_channel(&mut out, |oc, row| {
@@ -269,6 +256,7 @@ pub fn conv_transpose1d(
         }
     }
 
+    let weight = &**weight;
     let mut out = Mat::zeros(out_channels, out_time);
     for ic in 0..in_channels {
         let input = x.row(ic);
@@ -338,11 +326,11 @@ fn sigmoid(x: f32) -> f32 {
 }
 
 /// `y = x W^T + b`, with `x` `[n, in]` and `weight` `[out, in]`.
-pub fn linear(x: &Mat, weight: &[f32], bias: &[f32], out_dim: usize) -> Mat {
+pub fn linear(x: &Mat, weight: &WeightData, bias: &[f32], out_dim: usize) -> Mat {
     let _t = op_timer("linear");
     let in_dim = x.cols;
 
-    if let Some(mut data) = super::accel::matmul_nt(&x.data, weight, x.rows, in_dim, out_dim) {
+    if let Some(mut data) = super::accel::linear_w(&x.data, weight, x.rows, in_dim, out_dim) {
         for row in data.chunks_mut(out_dim) {
             for (value, b) in row.iter_mut().zip(bias) {
                 *value += b;
@@ -351,6 +339,7 @@ pub fn linear(x: &Mat, weight: &[f32], bias: &[f32], out_dim: usize) -> Mat {
         return Mat::from_vec(x.rows, out_dim, data);
     }
 
+    let weight = &**weight;
     let mut out = Mat::zeros(x.rows, out_dim);
     for_each_channel(&mut out, |row, target| {
         let input = x.row(row);
@@ -507,7 +496,7 @@ where
 /// — written this way so it vectorizes.
 pub fn conv1d_general(
     x: &Mat,
-    weight: &[f32],
+    weight: &WeightData,
     bias: &[f32],
     out_channels: usize,
     pad: usize,
@@ -551,7 +540,7 @@ pub fn conv1d_general(
             }
         });
         if let Some(mut data) =
-            super::accel::matmul_nt(weight, &patches.data, out_channels, width, out_time)
+            super::accel::conv_patches_w(weight, &patches.data, out_channels, width, out_time)
         {
             for (oc, row) in data.chunks_mut(out_time).enumerate() {
                 let b = bias[oc];
@@ -563,6 +552,7 @@ pub fn conv1d_general(
         }
     }
 
+    let weight = &**weight;
     let mut out = Mat::zeros(out_channels, out_time);
     for_each_channel(&mut out, |oc, row| {
         row.fill(bias[oc]);

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
-use makepad_ai_loader::MappedRegion;
+use makepad_ai_loader::{F32Weight, MappedRegion, WeightOwner};
 
 use crate::TtsError;
 
@@ -29,11 +29,25 @@ impl TensorInfo {
 pub enum WeightData {
     Owned(Vec<f32>),
     /// `offset` and `len` are in `f32` units.
-    Mapped { map: Arc<MappedRegion>, offset: usize, len: usize },
+    Mapped { map: Arc<MappedRegion>, offset: usize, len: usize, resident: Box<Resident> },
     /// A weight-normed kernel `g * v / ‖v‖` over mapped `g` and `v`. The folded
     /// array is computed on first access and cached; [`WeightData::drop_host_copy`]
     /// frees it (a device holds its own copy) and the next access recomputes it.
     Normed(Box<Normed>),
+}
+
+/// The GPU-resident f32 form of a weight, built on first GPU use (Metal shares its host pages).
+pub struct Resident {
+    owner: Arc<WeightOwner>,
+    name: String,
+    weight: OnceLock<F32Weight>,
+    taps: OnceLock<F32Weight>,
+}
+
+impl Resident {
+    fn new(owner: &Arc<WeightOwner>, name: &str) -> Self {
+        Self { owner: owner.clone(), name: name.to_owned(), weight: OnceLock::new(), taps: OnceLock::new() }
+    }
 }
 
 pub struct Normed {
@@ -41,6 +55,7 @@ pub struct Normed {
     v: WeightData,
     out_channels: usize,
     folded: OnceLock<Vec<f32>>,
+    resident: Resident,
 }
 
 impl WeightData {
@@ -55,6 +70,64 @@ impl WeightData {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Materialize page-aligned f32 storage only when a GPU gateway requests it.
+    pub fn resident(&self) -> Option<&F32Weight> {
+        let resident = match self {
+            WeightData::Owned(_) => return None,
+            WeightData::Mapped { resident, .. } => &**resident,
+            WeightData::Normed(n) => &n.resident,
+        };
+        Some(resident.weight.get_or_init(|| {
+            match F32Weight::new(&resident.owner, &resident.name, self.len(), |out| {
+                match self {
+                    WeightData::Normed(n) => fold_weight_norm(&n.g, &n.v, n.out_channels, out),
+                    _ => out.copy_from_slice(self),
+                }
+                Ok::<(), std::convert::Infallible>(())
+            }) {
+                Ok(weight) => weight,
+                Err(never) => match never {},
+            }
+        }))
+    }
+
+    /// Cache the `[out * kernel, in]` tap matrix for transposed convolution.
+    pub fn resident_taps(&self, in_channels: usize, out_channels: usize, kernel: usize) -> Option<&F32Weight> {
+        let resident = match self {
+            WeightData::Owned(_) => return None,
+            WeightData::Mapped { resident, .. } => &**resident,
+            WeightData::Normed(n) => &n.resident,
+        };
+        Some(resident.taps.get_or_init(|| {
+            // A weight-normed kernel nothing has folded yet is folded into a scratch copy, so neither the
+            // resident weight nor the folded cache is kept beside the taps.
+            let scratch;
+            let values: &[f32] = match self {
+                WeightData::Normed(n) if n.resident.weight.get().is_none() && n.folded.get().is_none() => {
+                    let mut folded = vec![0.0; n.v.len()];
+                    fold_weight_norm(&n.g, &n.v, n.out_channels, &mut folded);
+                    scratch = folded;
+                    &scratch[..]
+                }
+                _ => &**self,
+            };
+            match F32Weight::new(&resident.owner, &format!("{}.taps", resident.name), self.len(), |out| {
+                for ic in 0..in_channels {
+                    for oc in 0..out_channels {
+                        for k in 0..kernel {
+                            out[(oc * kernel + k) * in_channels + ic] =
+                                values[(ic * out_channels + oc) * kernel + k];
+                        }
+                    }
+                }
+                Ok::<(), std::convert::Infallible>(())
+            }) {
+                Ok(weight) => weight,
+                Err(never) => match never {},
+            }
+        }))
     }
 
     /// A stable identity for device-side caches: it does not change when a
@@ -76,18 +149,18 @@ impl WeightData {
     }
 }
 
-fn fold_weight_norm(g: &[f32], v: &[f32], out_channels: usize) -> Vec<f32> {
+fn fold_weight_norm(g: &[f32], v: &[f32], out_channels: usize, weight: &mut [f32]) {
     let per_channel = v.len() / out_channels;
-    let mut weight = Vec::with_capacity(v.len());
     for channel in 0..out_channels {
         let row = &v[channel * per_channel..(channel + 1) * per_channel];
         let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt();
         // A zero row would divide by zero; upstream never has one, but a
         // silent NaN here would be very hard to trace later.
         let scale = if norm > 0.0 { g[channel] / norm } else { 0.0 };
-        weight.extend(row.iter().map(|x| x * scale));
+        for (out, x) in weight[channel * per_channel..(channel + 1) * per_channel].iter_mut().zip(row) {
+            *out = x * scale;
+        }
     }
-    weight
 }
 
 /// Hands freed heap pages back to the OS. glibc keeps freed blocks of this size
@@ -137,8 +210,17 @@ impl std::ops::Deref for WeightData {
     fn deref(&self) -> &[f32] {
         match self {
             WeightData::Owned(v) => v,
-            WeightData::Mapped { map, offset, len } => mapped_f32(map, *offset, *len),
-            WeightData::Normed(n) => n.folded.get_or_init(|| fold_weight_norm(&n.g, &n.v, n.out_channels)),
+            WeightData::Mapped { map, offset, len, .. } => mapped_f32(map, *offset, *len),
+            WeightData::Normed(n) => {
+                if let Some(weight) = n.resident.weight.get() {
+                    return weight.as_slice();
+                }
+                n.folded.get_or_init(|| {
+                    let mut weight = vec![0.0; n.v.len()];
+                    fold_weight_norm(&n.g, &n.v, n.out_channels, &mut weight);
+                    weight
+                })
+            }
         }
     }
 }
@@ -162,6 +244,7 @@ pub struct Weights {
     /// The whole file, mapped read-only.
     map: Arc<MappedRegion>,
     tensors: HashMap<String, TensorInfo>,
+    owner: Arc<WeightOwner>,
 }
 
 fn bad(message: impl Into<String>) -> TtsError {
@@ -172,7 +255,7 @@ impl Weights {
     pub fn load(path: &str) -> Result<Self, TtsError> {
         let map = Arc::new(MappedRegion::map(path).map_err(|err| bad(format!("{path}: {err}")))?);
         let tensors = parse_index(map.as_slice())?;
-        Ok(Self { map, tensors })
+        Ok(Self { map, tensors, owner: Arc::new(WeightOwner::new("kokoro-f32")) })
     }
 
     /// The mapping of the whole file, to drop its pages once a device holds
@@ -210,6 +293,7 @@ impl Weights {
             map: self.map.clone(),
             offset: info.byte_offset / 4,
             len: info.byte_len / 4,
+            resident: Box::new(Resident::new(&self.owner, name)),
         })
     }
 
@@ -247,6 +331,7 @@ impl Weights {
             v: self.take(&v_name).unwrap(),
             out_channels,
             folded: OnceLock::new(),
+            resident: Resident::new(&self.owner, prefix),
         })))
     }
 }

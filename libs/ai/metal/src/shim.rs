@@ -112,6 +112,16 @@ pub fn try_matmul_nt_f32_weight(a: &[f32], w: &F32Weight, m: usize, k: usize, n:
     out
 }
 
+/// `C[m, n] = W[m, k] * Bt[n, k]^T`, with a resident left operand.
+pub fn try_matmul_nt_f32_weight_left(w: &F32Weight, bt: &[f32], m: usize, k: usize, n: usize) -> Option<Vec<f32>> {
+    let t = std::time::Instant::now();
+    let out = imp::try_matmul_nt_f32_weight_left(w, bt, m, k, n);
+    if let Some(v) = &out {
+        prof_rec(prof::CAT_MATMUL_UNCACHED, t, bt.len() + v.len());
+    }
+    out
+}
+
 pub fn try_matmul_nt_f32_weight_multi(
     a: &[f32],
     m: usize,
@@ -953,6 +963,12 @@ mod imp {
         try_matmul_nt_f32(a, w.as_slice(), m, k, n)
     }
 
+    pub(super) fn try_matmul_nt_f32_weight_left(
+        w: &F32Weight, bt: &[f32], m: usize, k: usize, n: usize,
+    ) -> Option<Vec<f32>> {
+        try_matmul_nt_f32(w.as_slice(), bt, m, k, n)
+    }
+
     pub(super) fn try_matmul_nt_f32_weight_multi(
         a: &[f32],
         m: usize,
@@ -1507,6 +1523,12 @@ mod imp {
 
     pub(super) fn try_matmul_nt_f32_weight(
         a: &[f32], w: &F32Weight, m: usize, k: usize, n: usize,
+    ) -> Option<Vec<f32>> {
+        None
+    }
+
+    pub(super) fn try_matmul_nt_f32_weight_left(
+        w: &F32Weight, bt: &[f32], m: usize, k: usize, n: usize,
     ) -> Option<Vec<f32>> {
         None
     }
@@ -8299,6 +8321,24 @@ mod imp {
         })
     }
 
+    pub(super) fn try_matmul_nt_f32_weight_left(
+        w: &F32Weight, bt: &[f32], m: usize, k: usize, n: usize,
+    ) -> Option<Vec<f32>> {
+        if w.len() != m.checked_mul(k)? || bt.len() != n.checked_mul(k)?
+            || m == 0 || k == 0 || n == 0 {
+            return None;
+        }
+        tensor_try(|| {
+            let bt_shape = shape4_from_row_major(&[n, k], 4)?;
+            let out_shape = shape4_from_row_major(&[m, n], 4)?;
+            let weight = tensor_f32_weight(w)?;
+            let bt = tensor_upload_f32(bt, &bt_shape)?;
+            tensor_host_result(&out_shape, |out| {
+                tensor_matmul(&weight, 0, &bt, 0, out, m, k, n, GGML_TYPE_F32)
+            })
+        })
+    }
+
     pub(super) fn try_matmul_nt_f32_weight_multi(
         a: &[f32],
         m: usize,
@@ -8403,6 +8443,8 @@ mod imp {
         if a.len() != m.checked_mul(k)? || m == 0 || k == 0 || n == 0 {
             return None;
         }
+        // A type no kernel multiplies is declined before its bytes are copied into the store.
+        src0_type_from_ggml(bt_ggml_type)?;
         tensor_try(|| {
             let a_shape = shape4_from_row_major(&[m, k], 4)?;
             let out_shape = shape4_from_row_major(&[m, n], 4)?;
@@ -8426,6 +8468,10 @@ mod imp {
     {
         if matrices.is_empty() { return Some(Vec::new()); }
         if a.len() != m.checked_mul(k)? || m == 0 || k == 0 || matrices.iter().any(|matrix| matrix.n == 0) {
+            return None;
+        }
+        // A type no kernel multiplies is declined before any bytes are copied into the store.
+        if matrices.iter().any(|matrix| src0_type_from_ggml(matrix.bt_ggml_type).is_none()) {
             return None;
         }
         let mut load = load;

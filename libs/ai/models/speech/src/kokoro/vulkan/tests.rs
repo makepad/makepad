@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::kokoro::ops;
+use crate::kokoro::weights::WeightData;
 
 static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -88,7 +89,7 @@ fn matrices_and_convolutions() {
         close("GEMM NN", &matmul(&a.data, &b.data, m, k, n, false).unwrap(), &expected.data, 2e-5);
         close("GEMM NT", &matmul(&a.data, &b.transpose().data, m, k, n, true).unwrap(), &expected.data, 2e-5);
         let bias = values(n, 3);
-        let weights = b.transpose().data;
+        let weights = WeightData::from(b.transpose().data);
         let want = cpu(|| ops::linear(&a, &weights, &bias, n));
         let actual = run("linear test", |ctx| {
             let mut g = Graph::new(ctx, None);
@@ -103,7 +104,7 @@ fn matrices_and_convolutions() {
         (8, 37, 33, 5, 2, 1, 2), (5, 67, 9, 7, 1, 3, 9), (3, 17, 5, 3, 2, 2, 2),
     ] {
         let x = mat(ic, time, 11);
-        let w = values(ic * oc * kernel, 12);
+        let w = WeightData::from(values(ic * oc * kernel, 12));
         let b = values(oc, 13);
         let want = cpu(|| ops::conv1d_general(&x, &w, &b, oc, pad, stride, dilation));
         let got = conv(&x, &w, &b, oc, pad, stride, dilation, false).unwrap();
@@ -117,7 +118,7 @@ fn matrices_and_convolutions() {
     // Actual upsampling strides, with partial tiles on both axes.
     for (stride, kernel, pad) in [(10, 20, 5), (6, 12, 3)] {
         let x = mat(7, 13, 19);
-        let w = values(7 * 5 * kernel, 23);
+        let w = WeightData::from(values(7 * 5 * kernel, 23));
         let b = values(5, 29);
         let want = cpu(|| ops::conv_transpose1d(&x, &w, &b, 5, stride, pad));
         close("generator upsample", &conv(&x, &w, &b, 5, pad, stride, 1, true).unwrap().data, &want.data, 3e-5);
