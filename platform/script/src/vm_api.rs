@@ -425,6 +425,14 @@ impl ScriptVm<'_> {
         self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_PAUSED)) != 0
     }
 
+    /// Whether the current thread's run stopped at a sliced run's soft deadline
+    /// ([`ScriptRunBudget::slice`]): it is paused between two instructions, the entry that ran
+    /// it returned nil, and [`ScriptVm::resume`] continues it (and finishes that entry's work).
+    #[inline(always)]
+    pub fn run_yielded(&self) -> bool {
+        self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_RUN_YIELDED)) != 0
+    }
+
     /// Pauses the current thread (a native waiting on something); its id resumes it.
     #[inline(always)]
     pub fn pause(&mut self) -> ScriptThreadId {

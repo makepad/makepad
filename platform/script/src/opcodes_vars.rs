@@ -350,7 +350,9 @@ impl<'a> ScriptVm<'a> {
                 let type_index = object.value_type().to_redux();
                 let getter = self.bx.code.native.borrow().getters[type_index.to_index()].view();
                 // SAFETY: as in the plain read below
-                unsafe { getter.call(self, object, field) }
+                let value = unsafe { getter.call(self, object, field) };
+                self.sample_budget_now();
+                value
             };
             let value = if value.is_err() { NIL } else { value };
             self.bx.threads.cur().push_stack_unchecked(value);
@@ -390,6 +392,7 @@ impl<'a> ScriptVm<'a> {
             let getter = self.bx.code.native.borrow().getters[type_index.to_index()].view();
             // SAFETY: The getter pointer is valid as long as native getters aren't removed during execution
             let ret = unsafe { getter.call(self, object, field) };
+            self.sample_budget_now();
             self.bx.threads.cur().push_stack_unchecked(ret);
         }
         self.bx.threads.cur().trap.goto_next();

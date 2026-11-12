@@ -103,6 +103,7 @@ impl<'a> ScriptVm<'a> {
                 };
                 // SAFETY: The call pointer is valid as long as native calls aren't removed during execution
                 let ret = unsafe { call.call(self, args, method) };
+                self.sample_budget_now();
                 if let Some(verb) = traced {
                     crate::inspect_query::trace_record(&self.bx, verb, ip, args, ret);
                 }
@@ -158,6 +159,7 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
                     let ret = unsafe { func.call(self, args) };
+                    self.sample_budget_now();
 
                     // Check if native explicitly paused (via pause() which sets trap.on to Pause)
                     if matches!(

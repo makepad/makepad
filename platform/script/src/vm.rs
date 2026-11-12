@@ -1653,6 +1653,15 @@ pub struct ScriptRunBudget {
 }
 
 impl ScriptRunBudget {
+    /// A sliced run's budget: the run stops at `soft` from now between two instructions (a
+    /// yield: the caller gets nil, [`ScriptVm::run_yielded`] is true and [`ScriptVm::resume`]
+    /// continues it under the budget then installed) and is never cut off: no hard deadline.
+    /// Only the outermost run yields; a script call a native makes runs to its end. The clock
+    /// is read every `sample_interval_instructions` and right after a native returns.
+    pub fn slice(soft: Duration, sample_interval_instructions: u32) -> Self {
+        Self { hard_deadline: f64::INFINITY, ..Self::from_durations(soft, Duration::ZERO, sample_interval_instructions) }
+    }
+
     pub fn from_durations(soft: Duration, hard: Duration, sample_interval_instructions: u32) -> Self {
         let now = crate::clock::monotonic_now();
         let sample_interval_instructions = sample_interval_instructions.max(1);
@@ -1993,6 +2002,7 @@ impl<'a> ScriptVm<'a> {
                     self.bx.threads.cur().is_paused = true;
                     // SAFETY: The function pointer is valid as long as native functions aren't removed during execution
                     let result = unsafe { func.call(self, scope) };
+                    self.sample_budget_now();
                     // Only unpause if native didn't explicitly pause (via pause() which sets trap.on to Pause)
                     if !matches!(
                         self.bx.threads.cur().trap.get_on(),
@@ -2071,8 +2081,13 @@ impl<'a> ScriptVm<'a> {
                 }
             },
             CALL_RESUME => {
-                self.bx.threads.cur().is_paused = false;
-                self.run_core()
+                let thread = self.bx.threads.cur();
+                thread.is_paused = false;
+                if std::mem::take(&mut thread.yielded) {
+                    self.resume_yielded()
+                } else {
+                    self.run_core()
+                }
             }
             mode => panic!("vm_call: unknown mode {mode}"),
         }
@@ -2300,6 +2315,15 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
+    /// A native returned: a run under a budget reads the clock before its next instruction, so
+    /// one long native call ends a sliced run's slice.
+    #[inline(always)]
+    pub(crate) fn sample_budget_now(&mut self) {
+        if let Some(budget) = self.bx.run_budget.as_mut() {
+            budget.instructions_until_sample = 1;
+        }
+    }
+
     fn check_run_budget(&mut self) -> Option<ScriptRunBudgetHit> {
         let budget = self.bx.run_budget.as_mut()?;
         budget.instructions_until_sample = budget.instructions_until_sample.saturating_sub(1);
@@ -2399,6 +2423,16 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn run_core(&mut self) -> ScriptValue {
+        // How many interpreter loops are live on the Rust stack: a sliced run yields only the
+        // outermost (`check_run_budget`). A panic unwinding through leaves it raised, which only
+        // stops this VM's runs from yielding.
+        self.bx.run_depth += 1;
+        let value = self.run_core_loop();
+        self.bx.run_depth -= 1;
+        value
+    }
+
+    fn run_core_loop(&mut self) -> ScriptValue {
         // Cached pointer into the active body's opcode buffer, so the loop
         // pays no RefCell borrow per instruction. It is only trusted while
         // `bodies.epoch()` is unchanged: see `ScriptBodies`.
@@ -2479,13 +2513,15 @@ impl<'a> ScriptVm<'a> {
 
             if let Some(hit) = self.check_run_budget() {
                 match hit {
+                    // Only the outermost run yields: a deeper one is a script call a native made
+                    // (on this thread, `array.retain(fn)`), and the native needs its real value.
+                    // The outer run samples again as soon as the native returns.
+                    ScriptRunBudgetHit::Soft if self.bx.run_depth != 1 => {}
                     ScriptRunBudgetHit::Soft => {
-                        self.bx.threads.cur().is_paused = true;
-                        self.bx
-                            .threads
-                            .cur()
-                            .trap
-                            .set_on(Some(ScriptTrapOn::TimeBudgetYield));
+                        let thread = self.bx.threads.cur();
+                        thread.is_paused = true;
+                        thread.yielded = true;
+                        thread.trap.set_on(Some(ScriptTrapOn::TimeBudgetYield));
                     }
                     ScriptRunBudgetHit::Hard => {
                         let err = script_err_limit!(
@@ -2637,10 +2673,65 @@ impl<'a> ScriptVm<'a> {
         // the main interpreter loop
         self.drain_stale_errors();
         let value = self.run_core();
+        if self.bx.threads.cur_ref().yielded {
+            self.bx.threads.cur().completions.push(RunCompletion::RootEnd { body_id });
+            return value;
+        }
+        self.finish_root(body_id);
+        value
+    }
+
+    /// `run_root`'s end: the body keeps the scope its root frame ended in.
+    fn finish_root(&mut self, body_id: u16) {
         if let Some(end) = self.bx.threads.cur().root_end_scope.take() {
             let mut bodies = self.bx.code.bodies.borrow_mut();
             let body = &mut bodies[body_id as usize];
             body.end_scope = Some(if body.transient { ScriptObjectRef::unrooted(end.as_object()) } else { end });
+        }
+    }
+
+    /// `eval_body`'s end.
+    fn finish_eval_body(&mut self, body_id: u16, result: ScriptValue) {
+        self.bx.heap.touch_evaluated_body(body_id);
+        self.bx.heap.touch_map(&self.bx.code);
+        // Mark the result object with FROM_EVAL flag
+        if let Some(result_obj) = result.as_object() {
+            self.bx.heap.set_from_eval(result_obj);
+        }
+    }
+
+    /// `eval_with_append_source`'s end.
+    fn finish_streaming(&mut self, result: ScriptValue) {
+        if let Some(result_obj) = result.as_object() {
+            self.bx.heap.set_from_eval(result_obj);
+        }
+    }
+
+    /// `resume` of a run that yielded (a sliced run): runs on under the budget installed now,
+    /// as silenced as the entry that started it; when it ends, what those entries left owed.
+    fn resume_yielded(&mut self) -> ScriptValue {
+        let streaming = self.bx.threads.cur_ref().completions.iter().any(|c| matches!(c, RunCompletion::Streaming));
+        if streaming {
+            self.bx.silence_errors = true;
+        }
+        // Every resume runs at least one instruction: a budget already past its deadline (or a
+        // fresh one sampling every instruction) would otherwise yield again before any.
+        if let Some(budget) = self.bx.run_budget.as_mut() {
+            budget.instructions_until_sample = budget.instructions_until_sample.max(2);
+        }
+        let value = self.run_core();
+        if streaming {
+            self.bx.silence_errors = false;
+        }
+        if self.bx.threads.cur_ref().yielded {
+            return value;
+        }
+        for completion in std::mem::take(&mut self.bx.threads.cur().completions) {
+            match completion {
+                RunCompletion::RootEnd { body_id } => self.finish_root(body_id),
+                RunCompletion::EvalBody { body_id } => self.finish_eval_body(body_id, value),
+                RunCompletion::Streaming => self.finish_streaming(value),
+            }
         }
         value
     }
@@ -2661,6 +2752,7 @@ impl<'a> ScriptVm<'a> {
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
                 let result = unsafe { func.call(self, obj) };
+                self.sample_budget_now();
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
                     self.bx.threads.cur().trap.get_on(),
@@ -2681,6 +2773,7 @@ impl<'a> ScriptVm<'a> {
                 // Pause thread before native call so re-entrant calls get a different thread
                 self.bx.threads.cur().is_paused = true;
                 let result = unsafe { func.call(self, args_obj) };
+                self.sample_budget_now();
                 // Only unpause if native didn't explicitly pause
                 if !matches!(
                     self.bx.threads.cur().trap.get_on(),
@@ -3391,13 +3484,11 @@ impl<'a> ScriptVm<'a> {
             }
             // lets point our thread to it
             let result = self.run_root(body_id);
-            self.bx.heap.touch_evaluated_body(body_id);
-            self.bx.heap.touch_map(&self.bx.code);
-            // Mark the result object with FROM_EVAL flag
-            if let Some(result_obj) = result.as_object() {
-                self.bx.heap.set_from_eval(result_obj);
+            if self.bx.threads.cur_ref().yielded {
+                self.bx.threads.cur().completions.push(RunCompletion::EvalBody { body_id });
+                return result;
             }
-
+            self.finish_eval_body(body_id, result);
             result
         } else {
             NIL
@@ -3544,9 +3635,11 @@ impl<'a> ScriptVm<'a> {
             self.bx.silence_errors = true;
             let result = self.run_root(body_id);
             self.bx.silence_errors = false;
-            if let Some(result_obj) = result.as_object() {
-                self.bx.heap.set_from_eval(result_obj);
+            if self.bx.threads.cur_ref().yielded {
+                self.bx.threads.cur().completions.push(RunCompletion::Streaming);
+                return result;
             }
+            self.finish_streaming(result);
             result
         } else {
             NIL
@@ -3638,6 +3731,8 @@ pub struct ScriptVmBase {
     /// the captures capture_errors_nested put aside
     pub captured_stash: Vec<Option<Vec<ScriptErrorRecord>>>,
     pub run_budget: Option<ScriptRunBudget>,
+    /// Interpreter loops live on the Rust stack (`run_core`): a sliced run yields only at 1.
+    pub(crate) run_depth: u32,
     /// Instructions charged by the most recent with_instruction_limit call
     /// (see ScriptVm::last_limit_consumed).
     pub last_limit_consumed: u64,
@@ -3739,6 +3834,7 @@ impl ScriptVmBase {
             captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
+            run_depth: 0,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
@@ -3792,6 +3888,7 @@ impl ScriptVmBase {
             captured_warnings: Vec::new(),
             captured_stash: Vec::new(),
             run_budget: None,
+            run_depth: 0,
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,

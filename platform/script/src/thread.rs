@@ -144,6 +144,24 @@ pub struct ScriptThread {
     /// Edit mode, while a program loads: the names read and where (see
     /// `crate::literal::LoadTrace::name_reads`). None otherwise.
     pub(crate) name_reads: Option<Box<crate::literal::NameReads>>,
+    /// A sliced run ([`crate::vm::ScriptRunBudget::slice`]) stopped here at its soft deadline,
+    /// between two instructions; `resume` continues it.
+    pub(crate) yielded: bool,
+    /// What the entries a yielded run returned through still owe its end, innermost first:
+    /// done by the `resume` that completes the run.
+    pub(crate) completions: Vec<RunCompletion>,
+}
+
+/// An entry's work after its run, owed by a sliced run that yielded through it
+/// ([`ScriptThread::completions`]).
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RunCompletion {
+    /// `run_root`: the body keeps the scope its root frame ended in.
+    RootEnd { body_id: u16 },
+    /// `eval_body`: the body counts as evaluated and its result as an eval's.
+    EvalBody { body_id: u16 },
+    /// `eval_with_append_source`: the run is silenced like a streaming one and its result is an eval's.
+    Streaming,
 }
 
 impl ScriptThread {
@@ -171,6 +189,8 @@ impl ScriptThread {
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
             name_reads: None,
+            yielded: false,
+            completions: Vec::new(),
         }
     }
 

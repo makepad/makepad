@@ -75,6 +75,8 @@ pub const STAT_HAS_CAPTURED_ERRORS: u32 = 12;
 pub const STAT_HAS_LET_HOOK: u32 = 13;
 /// Whether a capture is on (`take_errors` has a list to take).
 pub const STAT_CAPTURING: u32 = 14;
+/// Whether the current thread's sliced run yielded ([`crate::vm::ScriptRunBudget::slice`]).
+pub const STAT_RUN_YIELDED: u32 = 15;
 
 // ---- vm_ctl
 
@@ -384,6 +386,7 @@ impl ScriptVmBase {
             STAT_HAS_CAPTURED_ERRORS => self.captured_errors.as_ref().is_some_and(|e| !e.is_empty()) as u64,
             STAT_HAS_LET_HOOK => self.let_hook.is_some() as u64,
             STAT_CAPTURING => self.captured_errors.is_some() as u64,
+            STAT_RUN_YIELDED => self.threads.cur_ref().yielded as u64,
             op => panic!("vm_stat: unknown op {op}"),
         }
     }
