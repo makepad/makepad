@@ -156,6 +156,10 @@ const C_FREE_WITH_FEATURE: [(&str, &str); 1] = [("blake3", "pure")];
 pub enum NativeReason {
     /// a build-dependency on one of [`BUILD_DEPS`] (its extern name)
     CompilesC(String),
+    /// the script links a static archive it builds itself with another toolchain (a `swiftc`
+    /// or `ar` it runs directly, no `cc` crate): a run cannot load an archive, so cargo builds
+    /// the package like a `cc` one and the archive joins the native library
+    StaticArchive,
     /// `links =` in the manifest
     Links,
     /// the script reads another package's `DEP_*` metadata
@@ -166,13 +170,14 @@ impl NativeReason {
     /// The script runs a C compiler (or a native build tool): it cannot run without one, so
     /// without `--allow-c` a run refuses it and a check skips it.
     pub fn compiles_c(&self) -> bool {
-        matches!(self, NativeReason::CompilesC(_))
+        matches!(self, NativeReason::CompilesC(_) | NativeReason::StaticArchive)
     }
 
     /// `<package>: <reason>`, as the C gate's messages print it.
     pub fn describe(&self, pkg: &str) -> String {
         match self {
             NativeReason::CompilesC(dep) => format!("{}: build-dependency {}", pkg, dep),
+            NativeReason::StaticArchive => format!("{}: links a static archive its script builds", pkg),
             NativeReason::Links => format!("{}: links =", pkg),
             NativeReason::DepMetadata => format!("{}: reads DEP_ metadata", pkg),
         }
@@ -188,6 +193,10 @@ pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<NativeReason> {
             return Some(NativeReason::CompilesC(ext.clone()));
         }
     }
+    let src = crate::vfs::read_to_string(&bs.src_path).unwrap_or_default();
+    if links_static_archive(&src) {
+        return Some(NativeReason::StaticArchive);
+    }
     let manifest = crate::vfs::read_to_string(format!("{}/Cargo.toml", dir)).unwrap_or_default();
     let links = manifest.lines().any(|l| {
         let l = l.trim();
@@ -196,11 +205,33 @@ pub fn native_reason(g: &Graph, bs: &BuildScript) -> Option<NativeReason> {
     if links {
         return Some(NativeReason::Links);
     }
-    let src = crate::vfs::read_to_string(&bs.src_path).unwrap_or_default();
     if src.contains("DEP_") {
         return Some(NativeReason::DepMetadata);
     }
     None
+}
+
+/// Whether a build script's source prints a plain `rustc-link-lib=static=` (or `static:+mods=`)
+/// directive. A `-bundle` static link names a library the toolchain already has, not one the
+/// script built.
+fn links_static_archive(src: &str) -> bool {
+    src.match_indices("rustc-link-lib=static").any(|(i, m)| {
+        let rest = &src[i + m.len()..];
+        rest.starts_with('=') || (rest.starts_with(':') && !rest[1..].starts_with("-bundle"))
+    })
+}
+
+#[cfg(test)]
+mod static_archive_tests {
+    use super::links_static_archive;
+
+    #[test]
+    fn a_script_built_archive_is_native_and_a_toolchain_runtime_is_not() {
+        assert!(links_static_archive(r#"println!("cargo:rustc-link-lib=static=speech_bridge");"#));
+        assert!(links_static_archive(r#"println!("cargo::rustc-link-lib=static:+whole-archive=foo");"#));
+        assert!(!links_static_archive(r#"println!("cargo:rustc-link-lib=static:-bundle={rt}");"#));
+        assert!(!links_static_archive(r#"println!("cargo:rustc-link-lib=framework=Speech");"#));
+    }
 }
 
 fn fnv(data: &[u8], mut h: u64) -> u64 {

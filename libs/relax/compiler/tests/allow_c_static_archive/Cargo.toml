@@ -1,0 +1,10 @@
+[package]
+name = "allow-c-static-archive-fixture"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+description = "makepad run --allow-c fixture: a build script that builds a static archive with the tools it runs itself (no cc crate) and links it"
+
+# its own workspace (no dependencies: runs offline anywhere with cargo, cc and ar)
+[workspace]
