@@ -455,6 +455,9 @@ pub struct Stats {
     /// upload arenas (uniforms, inline instances, texture upload staging) the backend had to
     /// allocate for this session's frames and uploads; steady frames reuse theirs and add none
     pub arena_allocs: u64,
+    /// framebuffers the backend made for this session's passes; a pass drawn again into the same
+    /// attachments at the same size reuses its framebuffer, so steady frames add none (Vulkan)
+    pub framebuffers_made: u64,
     /// media commands a backend without media received
     pub media_unsupported: u64,
     /// WindowOverlay requests a backend could not draw

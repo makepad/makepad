@@ -576,6 +576,40 @@ fn steady_upload_frames_allocate_no_arenas() {
     assert!(hal.close(sid));
 }
 
+/// Every pass keeps its framebuffer for the frames after it, however many passes a frame has: a
+/// frame of 40 passes into 40 targets makes their framebuffers once, and the same frame drawn
+/// again makes none. (A cache capped at 32 made every one of them again on every frame: a 3D
+/// view's shadow, AO and bloom chains are more passes than that.)
+#[test]
+fn a_frame_of_many_passes_makes_no_framebuffers_the_second_time() {
+    let (hal, info) = open();
+    let sid = info.session;
+    resources(&hal, sid);
+    let targets: Vec<Id> = (0..40).map(|i| Id::new(100 + i, 1)).collect();
+    let mut w = CmdWriter::new(sid);
+    for &t in &targets { w.texture_create(t, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 16, [1, 1], Attr::default()); }
+    hal.submit(&w.buf());
+    let stats = |hal: &Hal| hal.with_world(|w| w.session(sid).unwrap().stats);
+    let frame = |hal: &Hal, f: u64| {
+        let mut w = CmdWriter::new(sid);
+        w.frame_begin(f, FrameMeta::default());
+        for &t in &targets { w.pass(pass(t, 16, 16, [0.0, 0.0, 0.0, 1.0])); w.draw(draw()); }
+        w.frame_end(targets[0], target::TEXTURE);
+        hal.submit(&w.buf());
+        frame_done(hal, sid, f);
+    };
+    let before = stats(&hal).framebuffers_made;
+    frame(&hal, 1);
+    let first = stats(&hal);
+    assert_eq!(first.bad_args, 0);
+    assert!(first.framebuffers_made - before >= targets.len() as u64, "the first frame makes a framebuffer per target");
+    frame(&hal, 2);
+    let second = stats(&hal);
+    assert_eq!(second.passes - first.passes, targets.len() as u64, "the second frame drew every pass");
+    assert_eq!(second.framebuffers_made, first.framebuffers_made, "the second frame made framebuffers again");
+    assert!(hal.close(sid));
+}
+
 /// A frame whose uploads exceed what the pool keeps (and the largest arena a batch asks for)
 /// spreads them over several arenas and still lands every byte; the steady frames after it
 /// allocate nothing again.

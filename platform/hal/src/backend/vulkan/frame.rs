@@ -33,8 +33,9 @@ impl Fb {
     /// handles, so the framebuffer is never used again.
     pub(super) fn stale(&self) -> bool { self.images.iter().any(|image| image.strong_count() == 0) }
 }
-/// How many framebuffers stay cached, and how long an unused one stays.
-const FB_CACHE: usize = 32;
+/// How long an unused framebuffer stays cached. Nothing else bounds the cache: it holds what the
+/// frames of the last seconds used, and a count cap under a frame's passes (a 3D view's shadow,
+/// AO and bloom chains are dozens) made every frame make its framebuffers again.
 const FB_IDLE_NS: u64 = 3_000_000_000;
 
 /// A badge layer's composed images (`Vulkan::badged`): the free and held ones of the window's
@@ -869,15 +870,11 @@ impl Vulkan {
                 let raw = unsafe { self.dev.raw.create_framebuffer(&vk::FramebufferCreateInfo::default().render_pass(render_pass.raw)
                     .attachments(&attachment_views).width(target_size[0]).height(target_size[1]).layers(1), None) }.map_err(error)?;
                 crate::profile::count("vk framebuffer made");
+                s.stats.framebuffers_made += 1;
                 let idle: Vec<FbKey> = self.fbs.iter().filter(|(_, f)| f.idle(now) || f.stale()).map(|(k, _)| k.clone()).collect();
                 for k in idle { if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); } }
                 // what the sweep let go waits no longer than this batch
                 batch.framebuffers.append(&mut self.dead_fbs);
-                if self.fbs.len() >= FB_CACHE {
-                    if let Some(k) = self.fbs.iter().min_by_key(|(_, f)| f.used).map(|(k, _)| k.clone()) {
-                        if let Some(f) = self.fbs.remove(&k) { batch.framebuffers.push(f.raw); }
-                    }
-                }
                 self.fbs.insert(fb_key, Fb { raw, images: named, used: now });
                 raw
             }
