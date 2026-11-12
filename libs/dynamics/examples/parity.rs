@@ -276,9 +276,9 @@ fn step_record(m: &Model, d: &Data, out: &mut Vec<u8>) {
     }
 }
 
-/// The reference driver's start state: reset, then qvel[i] = scale * sin(1 + i).
 /// A pool of threads for `parity threads <n> ...`, each thread taking every n-th task: results with it
-/// must equal the reference's single-threaded ones. It starts its threads at each fan-out, so it is not for timing.
+/// must equal the reference's single-threaded ones. It starts its threads at each fan-out, so it is not for timing,
+/// and it asks for no floor on parts, so parity covers phases cut at any size.
 struct Striped(usize);
 
 impl TaskPool for Striped {
@@ -292,10 +292,14 @@ impl TaskPool for Striped {
     fn threads(&self) -> usize {
         self.0
     }
+    fn fan_out_ns(&self) -> usize {
+        0
+    }
 }
 
 static POOL: OnceLock<Arc<dyn TaskPool>> = OnceLock::new();
 
+/// The reference driver's start state: reset, then qvel[i] = scale * sin(1 + i).
 fn start(m: &Model, scale: f64) -> Data {
     let mut d = make_data(m);
     if let Some(pool) = POOL.get() {

@@ -94,7 +94,7 @@ fn efm_general_csr(d: &Data) -> bool {
 }
 
 // res += B*vec; empty metric classes leave res unchanged.
-pub fn eff_mul_add(m: &Model, d: &mut Data, res: &mut [f64], vec: &[f64], flg_contact: i32) {
+pub fn eff_mul_add(m: &Model, d: &Data, res: &mut [f64], vec: &[f64], flg_contact: i32) {
     let h = m.opt.timestep;
     if !d.efm_diag.is_empty() {
         unported!("mj_effMulAdd (active metric)");
@@ -197,7 +197,7 @@ pub fn eff_fold_diag_size(m: &Model, d: &Data, _island: i32) -> usize {
 }
 
 // None represents C's x == b, as in core_smooth::solve_m.
-pub fn eff_solve(m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>) {
+pub fn eff_solve(m: &Model, d: &Data, x: &mut [f64], b: Option<&[f64]>) {
     if d.efm_active == 0 {
         eff_prec(m, d, x, b);
         return;
@@ -209,7 +209,7 @@ pub fn eff_solve(m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>) {
     unported!("mj_effSolve (active metric)");
 }
 
-pub fn eff_prec(m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>) {
+pub fn eff_prec(m: &Model, d: &Data, x: &mut [f64], b: Option<&[f64]>) {
     let nv = m.nv;
     if d.efm_active != 0 {
         unported!("mj_effPrec (active metric)");
@@ -221,7 +221,7 @@ pub fn eff_prec(m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>) {
 }
 
 pub fn eff_prec_fold(
-    m: &Model, d: &mut Data, _l: &mut [f64], island: i32, _nefc: usize,
+    m: &Model, d: &Data, _l: &mut [f64], island: i32, _nefc: usize,
     _efc_d: &[f64], _is_sparse: i32, _j: &[f64], _j_rownnz: &[i32],
     _j_rowadr: &[i32], _j_colind: &[i32],
 ) -> i32 {
@@ -233,7 +233,7 @@ pub fn eff_prec_fold(
     unported!("mj_effPrecFold (active metric)");
 }
 
-pub fn eff_prec_blocks(m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>, _l: Option<&[f64]>) {
+pub fn eff_prec_blocks(m: &Model, d: &Data, x: &mut [f64], b: Option<&[f64]>, _l: Option<&[f64]>) {
     if d.efm_active != 0 {
         unported!("mj_effPrecBlocks (active metric)");
     }
@@ -307,7 +307,7 @@ fn flex_matrix_free(m: &Model, _d: &Data, f: usize, interp_asm: bool, gen_csr: b
     unported!("mjd_flexStiff_activeGen");
 }
 
-pub fn eff_mul_add_island(m: &Model, d: &mut Data, _res: &mut [f64], _vec: &[f64], island: usize) {
+pub fn eff_mul_add_island(m: &Model, d: &Data, _res: &mut [f64], _vec: &[f64], island: usize) {
     let _nv = d.island_nv[island];
     let idofadr = d.island_idofadr[island] as usize;
     let _idof2dof = &d.map_idof2dof[idofadr..];
@@ -339,7 +339,7 @@ pub fn eff_mul_add_island(m: &Model, d: &mut Data, _res: &mut [f64], _vec: &[f64
 }
 
 pub fn eff_prec_island(
-    m: &Model, d: &mut Data, x: &mut [f64], b: Option<&[f64]>, island: usize,
+    m: &Model, d: &Data, x: &mut [f64], b: Option<&[f64]>, island: usize,
     l: Option<&[f64]>, q_ld: &[f64], q_ldiag_inv: &[f64], m_rownnz: &[i32],
     m_rowadr: &[i32], m_colind: &[i32],
 ) {

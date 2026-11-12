@@ -30,6 +30,9 @@ impl TaskPool for Striped {
     fn threads(&self) -> usize {
         self.threads
     }
+    fn fan_out_ns(&self) -> usize {
+        0
+    }
 }
 
 /// A pool that says it has 4 threads and runs a fan-out's indexes on its caller, last first: the parts
@@ -42,6 +45,25 @@ impl TaskPool for Reverse {
     }
     fn threads(&self) -> usize {
         4
+    }
+    fn fan_out_ns(&self) -> usize {
+        0
+    }
+}
+
+/// A pool of 16 threads at the apps' workpool's cost per fan-out (the default) that counts its fan-outs and
+/// runs their tasks on the caller.
+struct Counting {
+    fan_outs: AtomicUsize,
+}
+
+impl TaskPool for Counting {
+    fn fan_out(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.fan_outs.fetch_add(1, Ordering::Relaxed);
+        (0..n).for_each(f);
+    }
+    fn threads(&self) -> usize {
+        16
     }
 }
 
@@ -85,6 +107,9 @@ impl TaskPool for Saturable {
     }
     fn threads(&self) -> usize {
         self.threads
+    }
+    fn fan_out_ns(&self) -> usize {
+        0
     }
 }
 
@@ -136,6 +161,51 @@ fn pile() -> Model {
         attach(&mut m, g, Arc::new(Torus { radius: torus }));
     }
     m
+}
+
+fn add_body(s: &mut ModelSpec, parent: usize, pos: [f64; 3], joints: Vec<JointSpec>, geoms: Vec<GeomSpec>) -> usize {
+    s.bodies.push(BodySpec { parent, pos, joints, geoms, mass: 2.0, ipos: [0.0; 3], inertia: [0.02; 3], ..BodySpec::default() });
+    s.bodies.len() - 1
+}
+
+/// A figure the size of the reference's humanoid, 13 bodies and 19 geoms of capsules and spheres on hinge
+/// and ball joints under a free torso, falling onto a plane.
+fn figure() -> Model {
+    let mut s = ModelSpec::default();
+    s.option.timestep = 0.005;
+    s.bodies[0].geoms.push(GeomSpec { r#type: GEOM_PLANE, size: [0.0, 0.0, 1.0], ..GeomSpec::default() });
+    let cap = |r: f64, a: [f64; 3], b: [f64; 3]| GeomSpec { r#type: GEOM_CAPSULE, size: [r, 0.0, 0.0], fromto: [a[0], a[1], a[2], b[0], b[1], b[2]], ..GeomSpec::default() };
+    let ball = |r: f64, pos: [f64; 3]| GeomSpec { r#type: GEOM_SPHERE, size: [r, 0.0, 0.0], pos, ..GeomSpec::default() };
+    let hinge = |axis: [f64; 3]| JointSpec { r#type: JNT_HINGE, axis, ..JointSpec::default() };
+    let socket = || JointSpec { r#type: JNT_BALL, ..JointSpec::default() };
+    let torso = add_body(&mut s, 0, [0.0, 0.0, 1.4], vec![JointSpec { r#type: JNT_FREE, ..JointSpec::default() }],
+        vec![cap(0.07, [0.0, -0.07, 0.0], [0.0, 0.07, 0.0]), ball(0.09, [0.0, 0.0, 0.19]), cap(0.06, [-0.01, -0.06, -0.12], [-0.01, 0.06, -0.12])]);
+    let waist = add_body(&mut s, torso, [-0.01, 0.0, -0.26], vec![hinge([0.0, 0.0, 1.0]), hinge([0.0, 1.0, 0.0])], vec![cap(0.06, [0.0, -0.06, 0.0], [0.0, 0.06, 0.0])]);
+    let pelvis = add_body(&mut s, waist, [0.0, 0.0, -0.165], vec![hinge([1.0, 0.0, 0.0])], vec![cap(0.09, [-0.02, -0.07, 0.0], [-0.02, 0.07, 0.0])]);
+    for side in [-1.0, 1.0] {
+        let thigh = add_body(&mut s, pelvis, [0.0, 0.1 * side, -0.04], vec![socket()], vec![cap(0.06, [0.0; 3], [0.0, 0.01 * side, -0.34])]);
+        let shin = add_body(&mut s, thigh, [0.0, 0.01 * side, -0.403], vec![hinge([0.0, -1.0, 0.0])], vec![cap(0.049, [0.0; 3], [0.0, 0.0, -0.3])]);
+        add_body(&mut s, shin, [0.0, 0.0, -0.45], vec![hinge([0.0, 1.0, 0.0])], vec![ball(0.04, [0.07, 0.0, 0.03]), ball(0.04, [-0.05, 0.0, 0.03])]);
+        let upper = add_body(&mut s, torso, [0.0, 0.17 * side, 0.06], vec![socket()], vec![cap(0.04, [0.0; 3], [0.16, 0.16 * side, -0.16])]);
+        add_body(&mut s, upper, [0.18, 0.18 * side, -0.18], vec![hinge([0.0, -1.0, 1.0])], vec![cap(0.031, [0.01; 3], [0.17, 0.17 * side, 0.17]), ball(0.04, [0.18, 0.18 * side, 0.18])]);
+    }
+    compile(&s).expect("compile the figure")
+}
+
+#[test]
+fn a_humanoid_steps_on_its_caller_alone() {
+    let m = figure();
+    assert!(m.nbody == 14 && m.ngeom == 20, "the figure's size: {} bodies, {} geoms", m.nbody, m.ngeom);
+    let pool = Arc::new(Counting { fan_outs: AtomicUsize::new(0) });
+    let mut d = make_data(&m);
+    bind_thread_pool(&mut d, Some(pool.clone()));
+    let mut contacts = 0;
+    for _ in 0..300 {
+        step(&m, &mut d);
+        contacts = contacts.max(d.ncon);
+    }
+    assert!(contacts >= 4, "the figure lands: {contacts} contacts");
+    assert_eq!(pool.fan_outs.load(Ordering::Relaxed), 0, "a humanoid's collision phases are too small to pay for a fan-out");
 }
 
 #[test]

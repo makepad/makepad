@@ -622,9 +622,7 @@ fn warmstart(m: &Model, d: &mut Data) {
 }
 
 fn solve_island_task(m: &Model, d: &mut Data, _arg: &mut (), _thread_id: usize, island: usize) {
-    if m.opt.solver == SOL_NEWTON { solver::sol_newton_island(m, d, island, m.opt.iterations); }
-    else if m.opt.solver == SOL_CG { solver::sol_cg_island(m, d, island, m.opt.iterations); }
-    else { solver::sol_pgs_island(m, d, island, m.opt.iterations); }
+    solver::sol_pgs_island(m, d, island, m.opt.iterations);
 }
 
 fn discrete_gyro(m: &Model, d: &mut Data) {
@@ -663,7 +661,7 @@ fn fwd_constraint_impl(m: &Model, d: &mut Data, solver: i32, flg_island: bool) {
                 misc::gather(&mut d.iacc, &d.qacc, Some(&d.map_idof2dof), nidof);
                 misc::gather(&mut d.iefc_force, &d.efc_force, Some(&d.map_iefc2efc), nefc);
                 misc::gather(&mut d.iefc_aref, &d.efc_aref, Some(&d.map_iefc2efc), nefc);
-                thread::dispatch(m, d, &mut solve_island_task, &mut (), nisland);
+                solver::sol_primal_islands(m, d, m.opt.iterations, (solver == SOL_NEWTON) as i32);
                 misc::scatter(&mut d.qacc, &d.iacc, Some(&d.map_idof2dof), nidof);
                 misc::scatter(&mut d.qfrc_constraint, &d.ifrc_constraint, Some(&d.map_idof2dof), nidof);
                 misc::gather(&mut d.efc_force, &d.iefc_force, Some(&d.map_efc2iefc), nefc);

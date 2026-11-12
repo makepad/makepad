@@ -3274,7 +3274,25 @@ pub fn reference_constraint(m: &Model, d: &mut Data) {
     adhesion_ref(m, d);
 }
 
-pub fn constraint_update_impl(
+/// Where an elliptic solve keeps the cone Hessians (`Contact::h`) it computes: in the contacts themselves, or
+/// in a solve's own buffer (`solver::ConeBuf`). A cone is the contact `id` whose rows start at `row`.
+pub trait ConeHessians {
+    /// The contact a cone belongs to.
+    fn contact(&self, id: usize) -> &Contact;
+    /// The 36 values the cone's Hessian goes in.
+    fn h(&mut self, row: usize, id: usize) -> &mut [f64; 36];
+}
+
+impl ConeHessians for [Contact] {
+    fn contact(&self, id: usize) -> &Contact {
+        &self[id]
+    }
+    fn h(&mut self, _row: usize, id: usize) -> &mut [f64; 36] {
+        &mut self[id].h
+    }
+}
+
+pub fn constraint_update_impl<C: ConeHessians + ?Sized>(
     ne: usize,
     nf: usize,
     nefc: usize,
@@ -3284,7 +3302,7 @@ pub fn constraint_update_impl(
     jar: &[f64],
     r#type: &[i32],
     id: &[i32],
-    contact: &mut [Contact],
+    cones: &mut C,
     state: &mut [i32],
     force: &mut [f64],
     cost: Option<&mut f64>,
@@ -3343,9 +3361,9 @@ pub fn constraint_update_impl(
                 state[i] = CNSTRSTATE_QUADRATIC;
             }
         } else {
-            let con = &mut contact[id[i] as usize];
+            let con = cones.contact(id[i] as usize);
             let mu = con.mu;
-            let friction = &con.friction;
+            let friction = con.friction;
             let dim = con.dim as usize;
             let mut u = [0.0; 6];
             u[0] = jar[i] * mu;
@@ -3380,7 +3398,7 @@ pub fn constraint_update_impl(
                 }
                 state[i] = CNSTRSTATE_CONE;
                 if flg_cone_hessian != 0 {
-                    let h = &mut con.h;
+                    let h = cones.h(i, id[i] as usize);
                     h[0] = 1.0;
                     for j in 1..dim {
                         h[j] = -mu * uhat[j - 1];
@@ -3437,7 +3455,7 @@ pub fn constraint_update(
         jar,
         &d.efc_type,
         &d.efc_id,
-        &mut d.contact,
+        &mut d.contact[..],
         &mut d.efc_state,
         &mut d.efc_force,
         cost,

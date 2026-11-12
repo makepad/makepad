@@ -22,7 +22,7 @@ use crate::model::Model;
 use crate::sleep::sleep_state;
 use crate::sort::sort;
 use crate::memory::Scratch;
-use crate::thread::{num_thread, run_parts};
+use crate::thread::{part_count, run_parts};
 use crate::types::*;
 use crate::util_blas as u;
 use crate::util_errmem::warning;
@@ -381,6 +381,7 @@ pub fn collision(m: &Model, d: &mut Data) {
     let mut last_signature = u32::MAX;
     let (mut pairadr, mut exadr) = (0, 0);
     let mut items = d.scratch.mid_items();
+    let mut work = 0;
     for i in 0..nbfpair {
         let bf1 = broadphasepair[i].hi as usize; let bf2 = broadphasepair[i].lo as usize;
         let signature = ((bf1 as u32) << 16) + bf2 as u32;
@@ -398,14 +399,14 @@ pub fn collision(m: &Model, d: &mut Data) {
                 if exadr < nexclude && m.exclude_signature[exadr] as u32 == signature { bodies = false; }
             }
         }
+        work += mid_item_ns(m, bf1, bf2, pairadr - startadr, bodies);
         items.push(MidItem { bf1, bf2, merged, startadr, pairadr, bodies });
     }
     d.scratch.put_packed_pair(broadphasepair);
     // Typed arena storage, retained in Scratch after the collision call.
     let mut pairs = d.scratch.pair(0);
     if !items.is_empty() {
-        let nthread = num_thread(d);
-        let chunksize = if nthread == 1 { items.len() } else { 1.max(items.len()/(5*nthread)) };
+        let chunksize = items.len().div_ceil(part_count(d, items.len(), work));
         let nchunk = items.len().div_ceil(chunksize);
         let mut tasks = std::mem::take(&mut d.collision_tasks);
         if tasks.len() < nchunk { tasks.resize_with(nchunk, CollisionTask::default); }
@@ -495,6 +496,33 @@ pub fn collide_obb(aabb1: &[f64; 6], aabb2: &[f64; 6], xpos1: Option<&[f64; 3]>,
 /// (those the walk reached at its signature), then, when `bodies`, its two bodies' geom pairs.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct MidItem { bf1: usize, bf2: usize, merged: bool, startadr: usize, pairadr: usize, bodies: bool }
+
+// The serial work of a midphase item and a narrowphase pair, estimated for `part_count` in nanoseconds on
+// the node that measured the pool's fan-out cost. Each phase's serial time per step against its counts:
+// the midphase of 100 humanoids 94 us over 2492 items and 3278 geom pairs, the 100-body humanoid 14 us over
+// 124 and 1173, one humanoid 0.86 us over 22 and 28, the big mail 537 us over 81 pairs of interlocked links
+// (63 thousand geom pairs: its BVH walks reach about every pair); the narrowphase of 100 humanoids 56 us
+// over 1230 primitive pairs, the big mail 87 us over 1244 pairs for the convex collider (most end at their
+// bounds), the field torus 200 us over 5 field pairs.
+const MID_ITEM_NS: usize = 25; // a broadphase pair's own walk
+const MID_GEOM_PAIR_NS: usize = 9; // a pair of the two bodies' geoms
+const NARROW_PAIR_NS: usize = 50; // a pair of primitives
+const NARROW_CCD_PAIR_NS: usize = 70; // a pair the convex collider takes
+const NARROW_SDF_PAIR_NS: usize = 40000; // a pair with a field
+
+fn mid_item_ns(m: &Model, bf1: usize, bf2: usize, npair: usize, bodies: bool) -> usize {
+    let mut tests = npair;
+    if bodies && bf1 < m.nbody && bf2 < m.nbody {
+        tests += m.body_geomnum[bf1] as usize * m.body_geomnum[bf2] as usize;
+    }
+    MID_ITEM_NS + MID_GEOM_PAIR_NS * tests
+}
+
+fn narrow_pair_ns(m: &Model, pair: &Pair, ccd: bool) -> usize {
+    let type1 = m.geom_type[pair.g1 as usize]; let type2 = m.geom_type[pair.g2 as usize];
+    if matches!(COLLISIONFUNC[type1 as usize][type2 as usize], Some(CollisionFn::Sdf | CollisionFn::HfieldSdf | CollisionFn::MeshSdf)) { NARROW_SDF_PAIR_NS }
+    else if ccd { NARROW_CCD_PAIR_NS } else { NARROW_PAIR_NS }
+}
 
 /// A chunk of the midphase's broadphase pairs: their candidate geom pairs into the task's `pairs`, in
 /// order, and the BVH nodes found active into its marks.
@@ -930,16 +958,17 @@ fn add_pair_contacts(m: &Model, d: &mut Data, precon: &[PreContact], ncon: usize
 // filterPreContacts is omitted: only untranslated flex pairs create filter groups.
 fn narrowphase(m: &Model, d: &mut Data, pairs: &mut [Pair]) {
     let npair = pairs.len();
-    let nthread = num_thread(d);
-    let chunksize = if nthread == 1 { npair } else { 1.max(npair/(5*nthread)) };
-    let nchunk = (npair+chunksize-1)/chunksize;
     let mut pairbuffer = d.scratch.pair(npair);
-    let mut maxcon = 0; let mut has_ccd = false;
+    let mut maxcon = 0; let mut has_ccd = false; let mut work = 0;
     for i in 0..npair {
         pairbuffer[i] = pairs[i]; pairbuffer[i].conpos = maxcon;
         maxcon += pair_max_contact(m, &pairs[i]);
-        if !has_ccd && pair_needs_ccd(m, &pairs[i]) { has_ccd = true; }
+        let ccd = pair_needs_ccd(m, &pairs[i]);
+        has_ccd |= ccd;
+        work += narrow_pair_ns(m, &pairs[i], ccd);
     }
+    let chunksize = npair.div_ceil(part_count(d, npair, work));
+    let nchunk = npair.div_ceil(chunksize);
     let mut ccd_size_ = 0; // C's ccd_size local, distinct from the callee.
     if has_ccd {
         let npolygonmax = if m.opt.disableflags & DSBL_MULTICCD != 0 { 0 } else { m.npolygonmax };

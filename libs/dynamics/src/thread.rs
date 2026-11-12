@@ -17,6 +17,13 @@ pub trait TaskPool: Send + Sync {
     fn fan_out(&self, n: usize, f: &(dyn Fn(usize) + Sync));
     /// How many threads run tasks at once, the caller included.
     fn threads(&self) -> usize;
+    /// What one fan-out costs its caller beyond the tasks' own work, in nanoseconds. The default is the
+    /// workpool the apps bind, measured on a 16-thread Linux node: one humanoid's collision took 2.7 us on
+    /// the caller and 10.9 us with its midphase and narrowphase each fanned out, so about 4 us a fan-out
+    /// (the same at 4 and 16 threads). [`part_count`] keeps every part above twice this.
+    fn fan_out_ns(&self) -> usize {
+        4000
+    }
 }
 
 /// The pool bound to a Data, if any. Copies of the Data share it.
@@ -50,6 +57,21 @@ pub fn bind_thread_pool(d: &mut Data, pool: Option<Arc<dyn TaskPool>>) {
 
 pub fn num_thread(d: &Data) -> usize {
     d.threadpool.0.as_ref().map_or(1, |pool| pool.threads().max(1))
+}
+
+/// How many parts to cut `n` items into when they hold about `work_ns` nanoseconds of serial work: five a
+/// thread, as the reference chunks, but each with at least twice the work a fan-out costs on the bound pool,
+/// so a phase that cannot pay for one is a single part and runs on the caller. Nothing is refused or capped:
+/// a small phase just stays serial.
+pub(crate) fn part_count(d: &Data, n: usize, work_ns: usize) -> usize {
+    match &d.threadpool.0 {
+        Some(pool) if pool.threads() > 1 && n > 1 => {
+            let floor = 2 * pool.fan_out_ns();
+            let by_work = if floor == 0 { n } else { work_ns / floor };
+            by_work.clamp(1, (5 * pool.threads()).min(n))
+        }
+        _ => 1,
+    }
 }
 
 /// Runs `f(i, part)` once for each part: on the pool bound to `pool` when there is one and more than one

@@ -6,6 +6,7 @@
 
 use crate::{
     data::Data,
+    memory::Scratch,
     types::MINVAL,
     util_blas::*,
     util_misc::{copy_int, max, min, scatter},
@@ -162,7 +163,7 @@ fn upper_start(colind: &[i32], start: usize, end: usize, r: usize) -> usize {
     start
 }
 
-/// With no Data, scratch has 2*n integers for counting or 3*n for filling.
+/// With no pool, scratch has 2*n integers for counting or 3*n for filling.
 pub fn chol_factor_symbolic(
     mut l_colind: Option<&mut [i32]>,
     l_rownnz: &mut [i32],
@@ -175,11 +176,11 @@ pub fn chol_factor_symbolic(
     rowadr: &[i32],
     colind: &[i32],
     n: usize,
-    mut d: Option<&mut Data>,
+    mut pool: Option<&mut Scratch>,
     scratch: &mut [i32],
 ) -> i32 {
     let size = if l_colind.is_some() { 3 * n } else { 2 * n };
-    let mut owned = d.as_deref_mut().map(|d| d.scratch.int(size));
+    let mut owned = pool.as_deref_mut().map(|pool| pool.int(size));
     let work = owned.as_deref_mut().unwrap_or(scratch);
     let (parent, rest) = work.split_at_mut(n);
     let (flag, cursor) = rest.split_at_mut(n);
@@ -206,8 +207,8 @@ pub fn chol_factor_symbolic(
             }
             lt_rownnz[r] = lt_nnz;
         }
-        if let (Some(d), Some(v)) = (d, owned) {
-            d.scratch.put_int(v);
+        if let (Some(pool), Some(v)) = (pool, owned) {
+            pool.put_int(v);
         }
         let mut nnz = l_rownnz[0];
         l_rowadr[0] = 0;
@@ -250,8 +251,8 @@ pub fn chol_factor_symbolic(
             }
         }
     }
-    if let (Some(d), Some(v)) = (d, owned) {
-        d.scratch.put_int(v);
+    if let (Some(pool), Some(v)) = (pool, owned) {
+        pool.put_int(v);
     }
     // chol_factor_numeric indexes its dense accumulator by these columns unchecked: each is a row below n
     // by construction, checked here once per pattern (over the whole slice, so no stale entry escapes).
