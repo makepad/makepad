@@ -64,9 +64,19 @@ pub struct GlbShading {
     pub flake: f64,
     pub impostor: f64,
     pub rim: f64,
-    /// 1 = a number plate laid out by `stencil::stencil_plate`: its digit
+    /// 1 = a number plate with three blank cells and a digit strip: its digit
     /// cells show each copy's own number (the instance's plate number).
     pub plate: f64,
+    /// 1 = RGB MSDF text and an independent badge SDF in alpha.
+    pub msdf: f64,
+    /// Linear RGBA badge fill and border; base_color is the ink.
+    pub msdf_fill: [f64; 4],
+    pub msdf_border: [f64; 4],
+    /// Border thickness and full encoded distance range, both in texels.
+    pub msdf_border_width: f64,
+    pub msdf_range: f64,
+    /// First blank U, cell width U, first strip U, strip cell width U.
+    pub msdf_plate_cells: Option<[f64; 4]>,
     /// A vehicle's signal lamp: the layer's emission follows the copy's
     /// brake and reverse state instead of shining all the time.
     pub lamp: Option<GlbLamp>,
@@ -109,6 +119,14 @@ impl GlbShading {
     pub fn valid(self) -> bool {
         [self.wind, self.clearcoat, self.flake, self.rim, self.plate].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
             && self.impostor.is_finite() && (0.0..=100_000.0).contains(&self.impostor)
+            && (self.msdf == 0.0 || self.msdf == 1.0)
+            && self.msdf_fill.iter().chain(&self.msdf_border).all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+            && self.msdf_border_width.is_finite() && self.msdf_border_width >= 0.0
+            && self.msdf_range.is_finite() && self.msdf_range >= 0.0
+            && (self.msdf == 0.0 || self.msdf_range > 0.0)
+            && self.msdf_plate_cells.is_none_or(|c| self.msdf == 1.0 && self.plate > 0.0
+                && c.iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+                && c[1] > 0.0 && c[3] > 0.0 && c[0] + 3.0 * c[1] <= 1.00001 && c[2] + 10.0 * c[3] <= 1.00001)
     }
 }
 #[derive(Clone, Debug)]
@@ -301,6 +319,14 @@ pub fn augment_glb_pbr(
             }
             if let (JsonValue::Object(o), Some(lamp)) = (&mut shading, s.lamp) {
                 o.insert("lamp".into(), string(lamp.name()));
+            }
+            if let (JsonValue::Object(o), true) = (&mut shading, s.msdf > 0.0) {
+                o.insert("msdf".into(), JsonValue::F64(s.msdf));
+                o.insert("msdf_fill".into(), floats(&s.msdf_fill));
+                o.insert("msdf_border".into(), floats(&s.msdf_border));
+                o.insert("msdf_border_width".into(), JsonValue::F64(s.msdf_border_width));
+                o.insert("msdf_range".into(), JsonValue::F64(s.msdf_range));
+                if let Some(cells) = s.msdf_plate_cells { o.insert("msdf_plate_cells".into(), floats(&cells)); }
             }
             extras.insert("makepadShading".into(), shading);
         }

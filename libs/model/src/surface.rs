@@ -471,6 +471,15 @@ impl SurfaceMaterial {
         if visible.is_empty() {
             return Ok(None);
         }
+        // A distance texture is one data plane, not alpha-composited paint.
+        // In particular, A=0 must not clear the independent RGB distances.
+        if channel == SurfaceChannel::BaseColor && self.shading.is_some_and(|s| s.msdf > 0.0) {
+            if visible.len() != 1 || visible[0].opacity != 1.0 || visible[0].mask.is_some()
+                || visible[0].blend != SurfaceBlend::Over {
+                return Err(Error::Invalid("MSDF base colour needs one unmodified data layer"));
+            }
+            return Ok(Some(visible[0].image.clone()));
+        }
         let width = visible.iter().map(|l| l.image.width).max().unwrap();
         let height = visible.iter().map(|l| l.image.height).max().unwrap();
         let mut image = RgbaImage::new(width, height, [0; 4], limits)?;
@@ -897,8 +906,10 @@ impl SurfaceState {
                 channel,
                 layer,
             } => {
+                let msdf = *channel == SurfaceChannel::BaseColor && self.materials.get(material)
+                    .and_then(|m|m.shading).is_some_and(|s|s.msdf > 0.0);
                 let target = self.layer(*material, *channel, layer)?;
-                target.mips = target.image.mip_chain(channel.encoding(), limits, ctx)?;
+                target.mips = target.image.mip_chain(if msdf { ImageEncoding::Linear } else { channel.encoding() }, limits, ctx)?;
             }
         }
         Ok(())

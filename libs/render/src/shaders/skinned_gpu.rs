@@ -25,6 +25,7 @@ script_mod! {
     // below).
     mod.draw.DrawSceneSkinnedGpu = mod.std.set_type_default() do #(DrawSceneSkinnedGpu::script_shader(vm)){
         ..mod.draw.SceneFurSurface,
+        ..mod.draw.SceneMsdfText,
         ..mod.draw.SceneColorAdjust,
         alpha_blend: false
         backface_culling: true
@@ -382,10 +383,21 @@ script_mod! {
         clip: fn() { discard() }
         pixel: fn() {
             if self.fur_mask() < 0.5 { self.clip() }
-            let tex = self.tex.sample_repeat(self.v_uv)
+            var tex = vec4(1.0, 1.0, 1.0, 1.0)
+            var tint_color = self.v_color.xyz
+            if self.msdf_ctl.y > 0.0 {
+                tex = self.msdf_texel(self.v_uv, self.v_color.xyz, self.color_adjust_ctl.w, step(0.000001, self.msdf_plate_cells.y))
+                tint_color = vec3(1.0, 1.0, 1.0)
+            } else { tex = self.tex.sample_repeat(self.v_uv) }
             let alpha=tex.w*self.v_color.w*self.material_alpha
-            if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{self.clip()}
-            let albedo = self.color_adjust(self.to_lin(tex.xyz)*self.to_lin(self.v_color.xyz), self.tint, self.color_adjust_ctl)
+            var text_coverage = 1.0
+            if self.msdf_ctl.y > 0.0 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && self.draw_pass.msaa_samples > 1.5 {
+                text_coverage = clamp((alpha - self.alpha_cutoff) / max(abs(dFdx(alpha)) + abs(dFdy(alpha)), 0.0001) + 0.5, 0.0, 1.0)
+                if text_coverage <= 0.0 { self.clip() }
+            } else {
+                if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{self.clip()}
+            }
+            let albedo = self.color_adjust(self.to_lin(tex.xyz)*self.to_lin(tint_color), self.tint, self.color_adjust_ctl)
             // Same occlusion idiom as DrawSceneSkinned: per-fragment atlas
             // sample, world-anchored hash dither against 8-bit banding,
             // ambient scaled fully and direct partially — a crease should
@@ -430,7 +442,7 @@ script_mod! {
                         * ao_direct
             )
             if self.surface_on>0.5 {
-                let base=self.color_adjust(srgb_to_linear(tex.xyz)*self.v_color.xyz,self.tint,self.color_adjust_ctl)
+                let base=self.color_adjust(srgb_to_linear(tex.xyz)*tint_color,self.tint,self.color_adjust_ctl)
                 var n=normalize(self.v_csm_n)
                 let view=normalize(self.eye-self.v_csm.xyz)
                 if self.double_sided>0.5 && dot(n,view)<0.0{n=n*(-1.0)}
@@ -495,8 +507,10 @@ script_mod! {
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao,spec_occ)}
-                let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
-                return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+                let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode)) * text_coverage
+                var colour_coverage = coverage
+                if self.msdf_ctl.y > 0.0 && self.alpha_mode < 1.5 { colour_coverage = 1.0 }
+                return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*colour_coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }
             return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(lit, self.v_fog, self.v_csm.xyz, self.fog_density), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }

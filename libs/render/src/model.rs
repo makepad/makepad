@@ -1666,7 +1666,7 @@ pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
         ||material.get("emissiveFactor").is_some_and(|v|v.arr().iter().any(|v|v.f64().unwrap_or(0.0)>0.0))
         ||matches!(material.get("alphaMode").and_then(Val::str),Some("MASK"|"BLEND"))
         ||matches!(material.get("doubleSided"),Some(Val::Bool(true)))
-        ||material.get("extras").is_some_and(|e|e.get("makepadMips").is_some()||matches!(e.get("makepadSurface"),Some(Val::Bool(true))))
+        ||material.get("extras").is_some_and(|e|e.get("makepadMips").is_some()||e.get("makepadShading").and_then(|s|s.get("msdf")).and_then(Val::f64).is_some_and(|v|v>0.5)||matches!(e.get("makepadSurface"),Some(Val::Bool(true))))
 }
 
 /// Does material `index`'s base-colour texture sample with `magFilter:
@@ -1710,6 +1710,22 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
         impostor:value(shading,"impostor",0.0).max(0.0),
         plate:value(shading,"plate",0.0)>0.5,
+        msdf:shading.filter(|s|value(Some(s),"msdf",0.0)>0.5).and_then(|s| {
+            let rgba = |key: &str| -> Option<[f32; 4]> {
+                let a = s.get(key)?;
+                let mut c = [0.0; 4];
+                for (i, v) in c.iter_mut().enumerate() {
+                    *v = a.idx(i)?.f64()? as f32;
+                    if !v.is_finite() { return None; }
+                }
+                Some(c)
+            };
+            let range = value(Some(s), "msdf_range", 0.0);
+            let border_width = value(Some(s), "msdf_border_width", 0.0);
+            if !range.is_finite() || range <= 0.0 || !border_width.is_finite() || border_width < 0.0 { return None; }
+            let plate_cells = rgba("msdf_plate_cells").filter(|c| c[1] > 0.0 && c[3] > 0.0);
+            Some(crate::material_surface::MsdfText { fill: rgba("msdf_fill")?, border: rgba("msdf_border")?, border_width, range, plate_cells })
+        }),
         lamp:shading.and_then(|s|s.get("lamp")).and_then(Val::str).and_then(makepad_gltf::GlbLamp::from_name),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
@@ -2924,7 +2940,7 @@ fn plain_surface_signature(json: &Val, bin: &[u8], index: usize) -> Option<Vec<u
     let textured = material.get("pbrMetallicRoughness").is_some_and(|p| p.get("baseColorTexture").is_some() || p.get("metallicRoughnessTexture").is_some())
         || material.get("extras").is_some_and(|e| e.get("makepadMips").is_some());
     // A lamp keeps its own layer too: its emission changes per copy.
-    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate || s.lamp.is_some() {
+    if textured || s.fur.is_some() || s.normal_png.is_some() || s.occlusion_png.is_some() || s.emissive_png.is_some() || s.impostor > 0.0 || s.plate || s.msdf.is_some() || s.lamp.is_some() {
         return None;
     }
     let factor = |key: &str| material.get("pbrMetallicRoughness").and_then(|p| p.get(key)).and_then(Val::f64).unwrap_or(1.0) as f32;
@@ -3373,6 +3389,43 @@ mod sidecar_tests {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn msdf_extras_roundtrip_colours_and_plate_geometry() {
+        let shading = makepad_gltf::GlbShading {
+            msdf: 1.0, plate: 1.0, msdf_fill: [0.25, 0.5, 0.75, 0.5],
+            msdf_border: [0.75, 0.125, 0.25, 1.0], msdf_border_width: 3.0, msdf_range: 8.0,
+            msdf_plate_cells: Some([0.5, 0.1, 0.0, 0.1]), ..Default::default()
+        };
+        let material = makepad_gltf::GlbPbrMaterial {
+            fur: None, shading: Some(shading), base_color: [0.1, 0.1, 0.1, 1.0], metallic: 0.0, roughness: 0.6,
+            normal_scale: 1.0, occlusion_strength: 1.0, emissive: [0.0; 3], emissive_strength: 1.0,
+            alpha_mode: "MASK".into(), alpha_cutoff: 0.5, double_sided: false,
+            base_color_texture: None, metallic_roughness_texture: None, normal_texture: None,
+            occlusion_texture: None, emissive_texture: None,
+        };
+        let mesh = makepad_gltf::write_glb_mesh(&[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], &[0, 1, 2]);
+        let glb = makepad_gltf::augment_glb_pbr(&mesh, &[material], &[makepad_gltf::GlbPbrPrimitive {
+            mesh: 0, primitive: 0, material: 0, colors: Vec::new(), tangents: Vec::new(),
+        }]).unwrap();
+        let len = u32::from_le_bytes(glb[12..16].try_into().unwrap()) as usize;
+        let json = JsonParser::parse(&glb[20..20 + len]).unwrap();
+        let index = json.get("meshes").unwrap().idx(0).unwrap().get("primitives").unwrap().idx(0).unwrap().get("material").unwrap().usize().unwrap();
+        let surface = gltf_material_surface(&json, &[], index).unwrap();
+        let msdf = surface.msdf.unwrap();
+        assert_eq!(msdf.fill, shading.msdf_fill.map(|v|v as f32));
+        assert_eq!(msdf.border, shading.msdf_border.map(|v|v as f32));
+        assert_eq!((msdf.border_width, msdf.range), (3.0, 8.0));
+        assert_eq!(msdf.plate_cells, shading.msdf_plate_cells.map(|c|c.map(|v|v as f32)));
+        assert!(matches!(surface.base_semantic(), crate::material_surface::PixelSemantic::Data));
+        assert_eq!((surface.alpha_mode, surface.alpha_cutoff), (1, 0.5));
+        for (mode, expected) in [("OPAQUE", 0), ("MASK", 1), ("BLEND", 2)] {
+            let json = JsonParser::parse(format!(r#"{{"materials":[{{"alphaMode":"{mode}","extras":{{"makepadSurface":true}}}}]}}"#).as_bytes()).unwrap();
+            let old = gltf_material_surface(&json, &[], 0).unwrap();
+            assert!(old.msdf.is_none());
+            assert_eq!(old.alpha_mode, expected);
+        }
+    }
 
     #[test]
     fn driven_wheel_visual_metadata_is_optional_and_validated() {

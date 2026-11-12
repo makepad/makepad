@@ -173,7 +173,11 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
     let plate = m.shading.is_some_and(|s| s.plate > 0.0);
     // Bit 5: a vehicle lamp role (only when set).
     let lamp = m.shading.and_then(|s| s.lamp);
-    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5))?;
+    // Bit 6 adds the distance-field block; bit 7 adds its plate cells.
+    // Without MSDF, neither a flag nor a payload byte changes.
+    let msdf = m.shading.is_some_and(|s| s.msdf > 0.0);
+    let cells = m.shading.and_then(|s| s.msdf_plate_cells);
+    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4) | ((lamp.is_some() as u8) << 5) | ((msdf as u8) << 6) | ((cells.is_some() as u8) << 7))?;
     if let Some(fur) = m.fur {
         for value in [fur.length, fur.density, fur.scale] { w.f64(value)?; }
         w.u32(fur.seed)?;
@@ -183,6 +187,13 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
         if rim { w.f64(s.rim)?; }
         if plate { w.f64(s.plate)?; }
         if let Some(lamp) = lamp { w.u8(lamp_code(lamp))?; }
+        if msdf {
+            write_array(w, &s.msdf_fill)?;
+            write_array(w, &s.msdf_border)?;
+            w.f64(s.msdf_border_width)?;
+            w.f64(s.msdf_range)?;
+            if let Some(cells) = cells { write_array(w, &cells)?; }
+        }
     }
     w.count(m.channels.len())?;
     for (ch, layers) in &m.channels {
@@ -225,7 +236,7 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     };
     let alpha_cutoff = r.f64()?;
     let flags = r.u8()?;
-    if flags > 63 || (flags & 56 != 0 && flags & 4 == 0) { return Err(Error::Corrupt("surface material flags")); }
+    if (flags & 248 != 0 && flags & 4 == 0) || (flags & 128 != 0 && flags & 80 != 80) { return Err(Error::Corrupt("surface material flags")); }
     let double_sided = flags & 1 != 0;
     let fur = if flags & 2 != 0 {
         Some(makepad_gltf::GlbFurMaterial {
@@ -237,7 +248,16 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
         let rim = if flags & 8 != 0 { r.f64()? } else { 0.0 };
         let plate = if flags & 16 != 0 { r.f64()? } else { 0.0 };
         let lamp = if flags & 32 != 0 { Some(lamp_from_code(r.u8()?)?) } else { None };
-        Some(makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate, lamp })
+        let mut shading = makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate, lamp, ..Default::default() };
+        if flags & 64 != 0 {
+            shading.msdf = 1.0;
+            shading.msdf_fill = read_array(r)?;
+            shading.msdf_border = read_array(r)?;
+            shading.msdf_border_width = r.f64()?;
+            shading.msdf_range = r.f64()?;
+            if flags & 128 != 0 { shading.msdf_plate_cells = Some(read_array(r)?); }
+        }
+        Some(shading)
     } else { None };
     let mut channels = BTreeMap::new();
     for _ in 0..r.count(5)? {
@@ -687,6 +707,32 @@ mod compatibility_tests {
         }
         let back = material_read(&mut Reader::new(&encode(&toy)), &Limits::default()).unwrap();
         assert_eq!(back.shading.unwrap().rim, 0.6);
+    }
+
+    #[test]
+    fn msdf_roundtrips_without_changing_legacy_material_bytes() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        // Legacy default material layout, independent of the optional MSDF block.
+        let hex = "000000000000f03f000000000000f03f000000000000f03f000000000000f03f0000000000000000000000000000f03f000000000000f03f000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f00000000000000e03f0000000000";
+        let legacy: Vec<u8> = hex.as_bytes().chunks_exact(2).map(|p| u8::from_str_radix(std::str::from_utf8(p).unwrap(), 16).unwrap()).collect();
+        assert_eq!(encode(&SurfaceMaterial::default()), legacy, "ordinary materials retain their wire bytes");
+        let mut material = SurfaceMaterial {
+            shading: Some(makepad_gltf::GlbShading {
+                plate: 1.0, msdf: 1.0, msdf_fill: [0.2, 0.4, 0.6, 0.8],
+                msdf_border: [0.9, 0.1, 0.3, 1.0], msdf_border_width: 2.0, msdf_range: 8.0,
+                msdf_plate_cells: Some([0.5, 0.1, 0.0, 0.1]), ..Default::default()
+            }), ..Default::default()
+        };
+        let data = RgbaImage { width: 2, height: 1, pixels: vec![64, 128, 192, 0, 192, 64, 0, 255] };
+        material.channels.insert(SurfaceChannel::BaseColor, vec![SurfaceLayer::new("text", data.clone())]);
+        let bytes = encode(&material);
+        let back = material_read(&mut Reader::new(&bytes), &Limits::default()).unwrap();
+        assert_eq!(back, material, "colours, texel range and plate cells survive checkpointing");
+        assert_eq!(encode(&back), bytes);
+        let flat = back.flatten(SurfaceChannel::BaseColor, &Limits::default(), &mut mesh::Context::default()).unwrap().unwrap();
+        assert_eq!(flat, data, "zero badge distance must not erase RGB text distance");
+        let mips = flat.mip_chain(ImageEncoding::Linear, &Limits::default(), &mut mesh::Context::default()).unwrap();
+        assert_eq!(mips[0].pixels, [128, 96, 96, 128], "data mips average all four distances independently");
     }
 
     #[test]

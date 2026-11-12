@@ -6,11 +6,71 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     use mod.geom
+    use mod.shared.*
+
+    // Shared by static/CPU-skinned models and the GPU skin lane. All text
+    // state is per material; no fields are added to the instance stream.
+    mod.draw.SceneMsdfText = {
+        msdf_fill: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        msdf_border: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // Border thickness, encoded distance range (texels), texture size.
+        msdf_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        msdf_plate_cells: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        msdf_ink_alpha: uniform(1.0)
+        msdf_texel: fn(uv: vec2, ink_color: vec3, number: float, plate: float) -> vec4 {
+            var top_uv = uv
+            if plate > 0.5 { top_uv = vec2(uv.x, uv.y * 0.5) }
+            // Derivatives before digit remapping: adjacent digits must
+            // not select a coarse mip at the atlas discontinuity.
+            let dx = dFdx(top_uv)
+            let dy = dFdy(top_uv)
+            var ink_uv = top_uv
+            var ink_dx = dx
+            var ink_dy = dy
+            if plate > 0.5 {
+                let cells = self.msdf_plate_cells
+                let cell = (top_uv.x - cells.x) / cells.y
+                let n = max(0.0 - number - 1.0, 0.0)
+                if cell >= 0.0 && cell < 3.0 && number < -0.5 {
+                    let k = floor(cell)
+                    let digit = floor(n / pow(10.0, 2.0 - k)) - floor(n / pow(10.0, 3.0 - k)) * 10.0
+                    ink_uv = vec2(cells.z + cells.w * (digit + fract(cell)), 0.5 + top_uv.y)
+                    ink_dx = vec2(dx.x * cells.w / cells.y, dx.y)
+                    ink_dy = vec2(dy.x * cells.w / cells.y, dy.y)
+                }
+            }
+            let sample = self.tex.sample_grad(ink_uv, ink_dx, ink_dy)
+            // Badge geometry always comes from the top, including under
+            // remapped digits. It is independent of the RGB lettering.
+            var badge = sample.w
+            if plate > 0.5 { badge = self.tex.sample_grad(top_uv, dx, dy).w }
+            let d = max(min(sample.x, sample.y), min(max(sample.x, sample.y), sample.z))
+            let range = self.msdf_ctl.y
+            var tsz = self.msdf_ctl.zw
+            if tsz.x < 1.0 { tsz = self.tex.size() }
+            let footprint = max(abs(ink_dx) + abs(ink_dy), vec2(0.000001, 0.000001))
+            let screen_range = max(0.5 * dot(vec2(range, range) / tsz, vec2(1.0, 1.0) / footprint), 1.0)
+            let sd = (d - 0.5) * range
+            let w = max(abs(dFdx(sd)) + abs(dFdy(sd)), range / screen_range)
+            let ink = clamp(sd / max(w, 0.00001) + 0.5, 0.0, 1.0) * self.msdf_ink_alpha
+            let shape_sd = (badge - 0.5) * range
+            let shape_w = max(abs(dFdx(shape_sd)) + abs(dFdy(shape_sd)), range / screen_range)
+            let shape = clamp(shape_sd / max(shape_w, 0.00001) + 0.5, 0.0, 1.0)
+            let inner = clamp((shape_sd - self.msdf_ctl.x) / max(shape_w, 0.00001) + 0.5, 0.0, 1.0)
+            let ring = max(shape - inner, 0.0)
+            let bg = mix(self.msdf_fill, self.msdf_border, ring * self.msdf_border.w)
+            let rgb = mix(bg.xyz, ink_color, ink)
+            // base_texel's callers consume encoded colour, and apply
+            // their existing scene transfer and MASK coverage once.
+            return vec4(linear_to_srgb(rgb), max(max(shape * self.msdf_fill.w, ring * self.msdf_border.w), ink))
+        }
+    }
 
     // Skinned character mesh: PbrVertex stream (CPU-skinned per frame, uv in
     // ny_nz_uv.zw), textured, lit and fogged like the terrain.
     mod.draw.DrawSceneSkinned = mod.std.set_type_default() do #(DrawSceneSkinned::script_shader(vm)){
         ..mod.draw.SceneFurSurface,
+        ..mod.draw.SceneMsdfText,
         ..mod.draw.SceneColorAdjust,
         alpha_blend: false
         // Imported model layers may be deliberate sheets (roof soffits,
@@ -554,24 +614,8 @@ script_mod! {
         // branch, so the sampler's own derivatives stay well defined.
         base_texel: fn() -> vec4 {
             var suv = self.v_uv
-            if self.tex_mag.x > 1.5 {
-                // A number plate (libs/model stencil_plate): the top half is
-                // a 7-glyph plate (6-dot glyph pitch from dot 2 of 45), the
-                // last three glyphs left blank for the number; the bottom
-                // half is "0123456789" on the same plate (from dot 2 of 63).
-                // Each copy's number rides color_adjust_ctl.w = -(1 + n); a
-                // blank glyph cell reads its digit from the strip.
-                let pu = clamp(self.v_uv.x, 0.0, 0.9999)
-                let pv = clamp(self.v_uv.y, 0.0, 0.9999)
-                suv = vec2(pu, pv * 0.5)
-                let cell = (pu * 45.0 - 1.5) / 6.0
-                let n = max(0.0 - self.color_adjust_ctl.w - 1.0, 0.0)
-                if cell >= 4.0 && cell < 7.0 && self.color_adjust_ctl.w < -0.5 {
-                    let k = floor(cell) - 4.0
-                    let digit = floor(n / pow(10.0, 2.0 - k)) - floor(n / pow(10.0, 3.0 - k)) * 10.0
-                    suv = vec2((1.5 + 6.0 * digit + 6.0 * fract(cell)) / 63.0, 0.5 + pv * 0.5)
-                }
-                return self.tex.sample(suv)
+            if self.tex_mag.x > 2.5 {
+                return self.msdf_texel(self.v_uv, srgb_to_linear(self.v_tint.xyz), self.color_adjust_ctl.w, self.tex_mag.x - 3.0)
             }
             if self.tex_mag.x > 0.5 {
                 let tsz = self.tex.size()
@@ -639,13 +683,15 @@ script_mod! {
             let tex = self.base_texel()
             // BUILD punch-through: palette 255 / magenta is the overlay key.
             let magenta = (tex.x > 0.75) && (tex.z > 0.75) && (tex.y < 0.22)
-            if tex.w < 0.5 || magenta {
+            if tex.w < 0.5 || (magenta && self.tex_mag.x < 2.5) {
                 self.clip()
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
+            var material_tint = self.to_scene(self.v_tint.xyz)
+            if self.tex_mag.x > 2.5 { material_tint = vec3(1.0, 1.0, 1.0) }
             var albedo = self.color_adjust(
                 // the vertex tint is encoded like a texel: both scene-referred lanes decode it
-                base * self.to_scene(self.v_tint.xyz),
+                base * material_tint,
                 self.tint,
                 self.color_adjust_ctl
             )

@@ -113,9 +113,11 @@ fn image_semantics(doc: &makepad_gltf::GltfDocument) -> HashMap<usize, PixelSema
     let mut out = HashMap::new();
     for material in doc.materials.as_deref().unwrap_or(&[]) {
         let masked = material.alpha_mode.as_deref() == Some("MASK");
+        let msdf = material.extras.as_ref().and_then(|e| e.key("makepadShading")).and_then(|s| s.key("msdf"))
+            .and_then(|v| v.as_f64()).is_some_and(|v| v > 0.5);
         let pbr = material.pbr_metallic_roughness.as_ref();
         let uses = [
-            (source(pbr.and_then(|p| p.base_color_texture.as_ref()).map(|t| t.index)), if masked { PixelSemantic::MaskedColor } else { PixelSemantic::Color }),
+            (source(pbr.and_then(|p| p.base_color_texture.as_ref()).map(|t| t.index)), if msdf { PixelSemantic::Data } else if masked { PixelSemantic::MaskedColor } else { PixelSemantic::Color }),
             (source(pbr.and_then(|p| p.metallic_roughness_texture.as_ref()).map(|t| t.index)), PixelSemantic::Data),
             (source(material.normal_texture.as_ref().map(|t| t.index)), PixelSemantic::Normal),
             (source(material.occlusion_texture.as_ref().map(|t| t.index)), PixelSemantic::Data),
@@ -353,6 +355,20 @@ mod tests {
     /// PNG they came from. A second pass changes nothing.
     /// The memo returns exactly what a fresh encode produces, for every
     /// semantic, on a first and on a repeated call.
+    #[test]
+    fn msdf_base_images_use_data_mips() {
+        let document = makepad_gltf::parse_gltf_json(r#"{
+            "asset":{"version":"2.0"}, "images":[{"uri":"text.png"}], "textures":[{"source":0}],
+            "materials":[{"alphaMode":"MASK","pbrMetallicRoughness":{"baseColorTexture":{"index":0}},
+                "extras":{"makepadShading":{"msdf":1}}}]
+        }"#).unwrap();
+        assert!(matches!(image_semantics(&document).get(&0), Some(PixelSemantic::Data)), "build-time compression must treat RGB and alpha as four distances");
+        let mut image = ImageBuffer::default();
+        image.width=2; image.height=1; image.data=vec![0x0040_80c0,0xffc0_4000];
+        let prepared = PreparedTexture::prepare(image, PixelSemantic::Data);
+        assert_eq!(prepared.data[2], 0x8080_6060, "mips neither apply sRGB nor premultiply by badge alpha");
+    }
+
     #[test]
     fn load_ready_memo_matches_a_fresh_encode() {
         let rgba: Vec<u8> = (0..128 * 128).flat_map(|i| [(i % 128 * 2) as u8, (i / 128 * 2) as u8, (i * 7 % 251) as u8, 255]).collect();

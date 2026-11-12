@@ -15,7 +15,7 @@ impl Renderer {
             if model.morph.is_some(){continue;}
             let (min,max) = crate::lightmap::world_bounds(&inst.transform,(model.min,model.max));
             for geometry in std::iter::once(model.geometry.as_ref()).chain(model.extra_draws.iter().map(|(g,..)|g.as_ref())) {
-                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, cutout: None, band: Default::default() });
+                out.push(GpuBakeMesh {geometry:geometry.geometry_id(),transform:inst.transform,min,max, cutout: None, msdf: None, band: Default::default() });
             }
         }
         fn shadow_geometry(cx:&mut Cx,source:&Geometry,cached:&mut Option<Geometry>)->Option<GeometryId> {
@@ -37,14 +37,14 @@ impl Renderer {
                 self.ensure_terrain_tiles(cx,terrain,world.terrain_materials.as_deref());
                 for tile in &mut self.terrain_tiles {
                     if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, band: Default::default() });
+                        out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, msdf: None, band: Default::default() });
                     }
                 }
             }
             self.ensure_voxel_tiles(cx,world.voxel.as_deref());
             for tile in &mut self.voxel_tiles {
                 if let Some(geometry)=shadow_geometry(cx,&tile.geometry,&mut tile.shadow_geometry) {
-                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, band: Default::default() });
+                    out.push(GpuBakeMesh{geometry,transform:Mat4f::identity(),min:tile.min,max:tile.max, cutout: None, msdf: None, band: Default::default() });
                 }
             }
         }

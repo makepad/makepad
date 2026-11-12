@@ -301,6 +301,9 @@ pub struct GpuBakeMesh {
     /// A cut-out layer (leaf cards): its base-colour texture, alpha-tested
     /// in the cascades (DrawLmSunDepthCutout).
     pub cutout: Option<Texture>,
+    /// Text distance fields need material coverage, not the raw badge SDF.
+    /// The two scalars are ink alpha and the per-copy digit selector.
+    pub msdf: Option<(crate::material_surface::MsdfText, f32, f32)>,
     /// Which cascades draw it (foliage LOD for shadows).
     pub band: CasterBand,
 }
@@ -1670,7 +1673,7 @@ impl GpuLightmapBaker {
                 geometry: job.mesh_geometry[i],
                 transform: m.transform,
                 min: lo,
-                max: hi, cutout: None, band: Default::default() });
+                max: hi, cutout: None, msdf: None, band: Default::default() });
         }
         // Caster-only statics come AFTER the regioned meshes, so the
         // `RegionKind::Mesh(i)` indices above stay valid; every depth loop
@@ -1682,7 +1685,7 @@ impl GpuLightmapBaker {
                 geometry: m.geometry,
                 transform: m.transform,
                 min: m.min,
-                max: m.max, cutout: None, band: Default::default() });
+                max: m.max, cutout: None, msdf: None, band: Default::default() });
         }
         for (bmin, bmax) in &job.scene.boxes {
             scene_min = min3(scene_min, *bmin);
@@ -3090,6 +3093,15 @@ impl GpuLightmapBaker {
                 d.depth.transform = m.transform;
                 d.depth.draw_vars.geometry_id = Some(m.geometry);
                 if let (Some(t), Some(slot)) = (&m.cutout, slot) { d.depth.draw_vars.set_texture(slot, t); }
+                let vars = &mut d.depth.draw_vars;
+                if let Some((text, ink_alpha, number)) = m.msdf {
+                    vars.set_uniform(cx.cx, live_id!(msdf_fill), &text.fill);
+                    vars.set_uniform(cx.cx, live_id!(msdf_border), &text.border);
+                    vars.set_uniform(cx.cx, live_id!(msdf_ctl), &[text.border_width, text.range, 0.0, 0.0]);
+                    vars.set_uniform(cx.cx, live_id!(msdf_plate_cells), &text.plate_cells.unwrap_or([0.0;4]));
+                    vars.set_uniform(cx.cx, live_id!(msdf_ink_alpha), &[ink_alpha]);
+                    vars.set_uniform(cx.cx, live_id!(msdf_number), &[number]);
+                } else { vars.set_uniform(cx.cx, live_id!(msdf_ctl), &[0.0;4]); }
                 if d.depth.draw_vars.can_instance() {
                     cx.add_instance(&mut d.depth.draw_vars);
                 }

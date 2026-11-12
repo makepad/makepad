@@ -509,13 +509,17 @@ script_mod! {
                 tex = vec4(tex.xyz * (0.86 + 0.28 * drift), tex.w)
             }
             let base = self.to_scene(vec3(tex.x, tex.y, tex.z))
+            var material_tint = self.to_scene(self.v_tint.xyz)
+            // The text decoder already used the material factor as ink;
+            // multiplying it again would tint the badge fill and border.
+            if self.tex_mag.x > 2.5 { material_tint = vec3(1.0, 1.0, 1.0) }
             // `surface` is the game.material hook (DrawSceneCustom overrides
             // it; stock PBR keeps the identity). A custom surface that cuts
             // alpha under 0.5 discards; on the stock lane that case was
             // already discarded above (tex.w < 0.5), so output is unchanged.
             let surf = self.surface(vec4(self.color_adjust(
                 // the vertex tint is encoded like a texel: both scene-referred lanes decode it
-                base * self.to_scene(self.v_tint.xyz),
+                base * material_tint,
                 self.tint,
                 self.color_adjust_ctl
             ), alpha))

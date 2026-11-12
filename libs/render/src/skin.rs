@@ -1567,9 +1567,9 @@ impl SkinnedModel {
                 let image=if let Some(bytes)=bytes{crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::renderer::decode_generated_png(&bytes,4096,budget))?}else{let mut image=makepad_draw::ImageBuffer::default();image.width=1;image.height=1;image.data=vec![0xffff_ffff];image};
                 let texture=crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||PreparedTexture::prepare(image,semantic));budget=budget.checked_sub(texture.bytes()).ok_or("skin textures exceed upload budget")?;Ok(texture)
             };
-            let base=image(texture("baseColorTexture"),PixelSemantic::Color)?;
-            let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
             let definition=primitive.material.and_then(|i|crate::model::gltf_material_surface(&json,bin,i)).unwrap_or_else(MaterialSurface::default);
+            let base=image(texture("baseColorTexture"),if definition.msdf.is_some(){PixelSemantic::Data}else{PixelSemantic::Color})?;
+            let orm=image(texture("metallicRoughnessTexture"),PixelSemantic::Data)?;
             let surface=PreparedSurface::prepare(definition,&mut budget)?;
             let metallic=pbr.and_then(|m|m.get("metallicFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;
             let roughness=pbr.and_then(|m|m.get("roughnessFactor")).and_then(Val::f64).unwrap_or(1.0)as f32;

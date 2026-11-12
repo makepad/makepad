@@ -286,7 +286,9 @@ script_mod! {
     // fixture itself) clips out of the map instead of eclipsing the light.
     // DrawLmSunDepth plus the layer's alpha: a leaf card casts leaves.
     mod.draw.DrawLmSunDepthCutout = mod.std.set_type_default() do #(DrawLmSunDepthCutout::script_shader(vm)){
-        ..mod.draw.DrawLmSunDepth
+        ..mod.draw.DrawLmSunDepth,
+        ..mod.draw.SceneMsdfText,
+        msdf_number: uniform(0.0)
         tex: texture_2d(float)
         v_uv: varying(vec2f)
 
@@ -312,9 +314,11 @@ script_mod! {
             if abs(self.v_clip.x) > 1.001 || abs(self.v_clip.y) > 1.001 {
                 discard()
             }
-            if self.tex.sample_repeat(self.v_uv).w < 0.5 {
-                discard()
-            }
+            var alpha = 1.0
+            if self.msdf_ctl.y > 0.0 {
+                alpha = self.msdf_texel(self.v_uv, vec3(0.0, 0.0, 0.0), self.msdf_number, step(0.000001, self.msdf_plate_cells.y)).w
+            } else { alpha = self.tex.sample_repeat(self.v_uv).w }
+            if alpha < 0.5 { discard() }
             return vec4(self.v_d, 0.0, 0.0, 1.0)
         }
     }

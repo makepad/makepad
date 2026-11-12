@@ -69,7 +69,7 @@ impl Default for Limits {
             max_source_bytes: 256 * 1024 * 1024,
             max_transaction_bytes: 64 * 1024 * 1024,
             max_texture_bytes: 64 * 1024 * 1024,
-            max_texture_dimension: 2048,
+            max_texture_dimension: 4096,
             max_joints: 64,
             max_clips: 64,
             max_keyframes: 65_536,

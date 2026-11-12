@@ -217,13 +217,14 @@ impl PreparedStaticPreview {
         let layer = |vertices:Vec<f32>,indices:Vec<u32>,png:Option<Vec<u8>>,detail:Option<Vec<u8>>,detail_scale:[f32;2],mut pbr:crate::model::PbrMaterial| -> Result<PreparedStaticLayer,String> {
             check(&vertices,&indices)?;
             // An alpha-tested layer keeps its cutout coverage down the mips.
-            let masked=pbr.surface.as_ref().is_some_and(|s|s.alpha_mode==1);
-            let texture=image(png.as_deref(),0xffff_ffff,if masked{crate::material_surface::PixelSemantic::MaskedColor}else{crate::material_surface::PixelSemantic::Color})?;
+            let msdf=pbr.surface.as_ref().is_some_and(|s|s.msdf.is_some());
+            let semantic=pbr.surface.as_ref().map_or(crate::material_surface::PixelSemantic::Color, |s|s.base_semantic());
+            let texture=image(png.as_deref(),0xffff_ffff,semantic)?;
             let detail_on=detail.is_some();let detail=image(detail.as_deref(),0xff80_8080,crate::material_surface::PixelSemantic::Color)?;
             let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff,crate::material_surface::PixelSemantic::Data)?;
             let surface=pbr.surface.as_ref().map(|surface|{let mut budget=remaining.get();let prepared=crate::material_surface::PreparedSurface::prepare(surface.as_ref().clone(),&mut budget)?;remaining.set(budget);Ok::<_,String>(prepared)}).transpose()?;
             pbr.orm_png=None;
-            let cutout=texture.cutout();
+            let cutout=msdf || texture.cutout();
             Ok(PreparedStaticLayer { vertices,indices,texture,detail,detail_scale:if detail_on{detail_scale}else{[0.0,0.0]},orm,orm_on,surface,pbr,cutout })
         };
         let mut layers=std::mem::take(&mut model.draw_layers).into_iter();

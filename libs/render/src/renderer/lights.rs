@@ -321,7 +321,7 @@ impl Renderer {
                         geometry: m.geometry.geometry_id(),
                         transform: inst.transform,
                         min: lo,
-                        max: hi, cutout: None, band: Default::default() });
+                        max: hi, cutout: None, msdf: None, band: Default::default() });
                 }
                 continue;
             };

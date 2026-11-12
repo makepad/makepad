@@ -323,9 +323,9 @@ pub struct DrawSceneSkinned {
     pub prelit: f32,
     /// x = 1: the base-colour texture's glTF sampler asks for NEAREST
     /// magnification, so a texel larger than a pixel draws as a hard square
-    /// (the classic games' look); minified texels stay filtered. y unused
-    /// (keeps the payload a multiple of eight bytes). Set per draw from the
-    /// layer's material; 0 everywhere else draws exactly as before.
+    /// (the classic games' look); minified texels stay filtered.
+    /// x = 3: MSDF text; x = 4: MSDF text with per-copy plate digits.
+    /// Set per draw from the layer's material; 0 draws exactly as before.
     /// y = the PBR lane's shading terms (`makepadShading`), packed as
     /// rim * 255 * 65536 + clearcoat * 255 * 256 + flake * 255 (0 = plain;
     /// `MaterialSurface::packed_shading`).

@@ -452,6 +452,20 @@ impl ModelDraw<'_> {
             self.base().draw_vars.set_uniform(cx, live_id!(morph_ctl), &[0.0, 0.0, 0.0, 0.0]);
         }
         self.base().tex_mag = vec2f(if m.mag_nearest { 1.0 } else { 0.0 }, 0.0);
+        let msdf = m.surface.as_ref().and_then(|s| s.definition.msdf);
+        let base = self.base();
+        // Read the bound texture when it has an allocation; on the first
+        // upload the shader obtains the same dimensions with texture.size().
+        let size = base.draw_vars.texture_slots[0].as_ref().and_then(|t|t.allocated_size(cx)).unwrap_or((0, 0));
+        let (fill, border, ctl, cells, ink_alpha) = if let Some(text) = msdf {
+            base.tex_mag.x = if text.plate_cells.is_some() { 4.0 } else { 3.0 };
+            (text.fill, text.border, [text.border_width, text.range, size.0 as f32, size.1 as f32], text.plate_cells.unwrap_or([0.0; 4]), m.surface.as_ref().unwrap().definition.base_alpha)
+        } else { ([0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4], 1.0) };
+        base.draw_vars.set_uniform(cx, live_id!(msdf_fill), &fill);
+        base.draw_vars.set_uniform(cx, live_id!(msdf_border), &border);
+        base.draw_vars.set_uniform(cx, live_id!(msdf_ctl), &ctl);
+        base.draw_vars.set_uniform(cx, live_id!(msdf_plate_cells), &cells);
+        base.draw_vars.set_uniform(cx, live_id!(msdf_ink_alpha), &[ink_alpha]);
         if let Some(d) = self.pbr() {
             let surface_on = if m.surface.is_some() { 1.0 } else { 0.0 };
             let (mut material_alpha, mut alpha_mode, mut alpha_cutoff) = (1.0f32, 0.0f32, 0.5f32);
@@ -461,12 +475,10 @@ impl ModelDraw<'_> {
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
                 fur = crate::material_surface::fur_params(definition.fur);
-                material_alpha=definition.base_alpha;alpha_mode=definition.alpha_mode as f32;alpha_cutoff=definition.alpha_cutoff;
+                material_alpha=if definition.msdf.is_some(){1.0}else{definition.base_alpha};alpha_mode=definition.alpha_mode as f32;alpha_cutoff=definition.alpha_cutoff;
                 triplanar=definition.triplanar;
                 // Race paint in the spare tex_mag lane (shaders.rs DrawSceneSkinned).
                 d.skinned.tex_mag.y=definition.packed_shading();
-                // A number plate: tex_mag.x = 2 selects the per-copy digit remap.
-                if definition.plate { d.skinned.tex_mag.x = 2.0; }
                 normal_scale=definition.normal_scale;occlusion_strength=definition.occlusion_strength;
                 emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;

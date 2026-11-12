@@ -31,9 +31,10 @@ pub struct MaterialSurface {
     /// This layer is the model's far stand-in from this distance (metres,
     /// 0 = an ordinary layer): the other layers stop there (impostor.rs).
     pub impostor: f32,
-    /// A number plate (`stencil_plate` layout): its digit cells show each
+    /// A number plate: its digit cells show each
     /// copy's own number (`color_adjust.w` = -(1 + number)).
     pub plate: bool,
+    pub msdf: Option<MsdfText>,
     /// A vehicle signal lamp (`makepadShading.lamp`): the emission above is
     /// the lamp fully lit, and each copy scales it by its own vehicle's
     /// brake and reverse state ([`lamp_gain`]).
@@ -41,6 +42,16 @@ pub struct MaterialSurface {
     /// A generated terrain tile's paint (glTF extras `makepadSplat`): the
     /// layers it blends per pixel, drawn by the splat lane (shaders/splat.rs).
     pub splat: Option<std::sync::Arc<SplatSurface>>,
+}
+
+/// Linear colours and texel distances for an MSDF base layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MsdfText {
+    pub fill: [f32; 4],
+    pub border: [f32; 4],
+    pub border_width: f32,
+    pub range: f32,
+    pub plate_cells: Option<[f32; 4]>,
 }
 
 /// The most layers a terrain tile blends (gen level mesh.rs SPLAT_LAYERS).
@@ -92,6 +103,11 @@ pub fn lamp_gain(role: makepad_gltf::GlbLamp, signals: makepad_scene::light::Lam
     }
 }
 impl MaterialSurface {
+    pub fn base_semantic(&self) -> PixelSemantic {
+        if self.msdf.is_some() { PixelSemantic::Data }
+        else if self.alpha_mode == 1 { PixelSemantic::MaskedColor }
+        else { PixelSemantic::Color }
+    }
     /// The shading terms packed for a spare float lane (`tex_mag.y` on the
     /// PBR lane, `fur_layer.y` on the skinned one): rim * 255 * 65536 +
     /// clearcoat * 255 * 256 + flake * 255, exact in an f32 (24 bits).
@@ -102,7 +118,7 @@ impl MaterialSurface {
     }
 }
 impl Default for MaterialSurface {
-    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
+    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,msdf:None,lamp:None,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
         emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0,splat:None}}
 }
 

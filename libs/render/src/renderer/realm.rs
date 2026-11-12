@@ -403,6 +403,7 @@ impl Renderer {
                     min,
                     max,
                     cutout: masked(material).then(|| texture.clone()),
+                    msdf: material.surface.as_ref().and_then(|s|s.definition.msdf.map(|text|(text, s.definition.base_alpha, inst.color_adjust.w))),
                     band,
                 });
             }

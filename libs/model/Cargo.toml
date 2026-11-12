@@ -5,7 +5,11 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Worker-owned editable model documents and transactional polygon operations"
 
+[package.metadata.commercial]
+include = ["../../widgets/resources/IBMPlexSans-Text.ttf", "../../widgets/resources/IBMPlexSans-SemiBold.ttf", "../../widgets/resources/IBMPlexSans-Italic.ttf", "../../widgets/resources/IBMPlexSans-BoldItalic.ttf", "../../widgets/resources/Inter.ttf", "../../widgets/resources/RobotoFlex.ttf"]
+
 [dependencies]
+makepad-font-core = { path = "../font_core" }
 makepad-mesh-edit = { path = "../mesh_edit" }
 makepad-core-util = { path = "../core_util" }
 makepad-gltf = { path = "../gltf" }

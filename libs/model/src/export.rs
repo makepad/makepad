@@ -26,6 +26,7 @@ struct CachedObject {
 }
 
 struct CachedTexture {
+    msdf: bool,
     layers: Vec<crate::SurfaceLayer>,
     limits: (u32, usize, usize, usize),
     texture: Option<makepad_gltf::GlbPbrTexture>,
@@ -521,10 +522,11 @@ fn export_surface(
             source.validate(doc.limits(), ctx)?;
             let mut map = |channel: SurfaceChannel| -> Result<Option<GlbPbrTexture>> {
                 let layers = source.channels.get(&channel).map(Vec::as_slice).unwrap_or(&[]);
+                let msdf = channel == SurfaceChannel::BaseColor && source.shading.is_some_and(|s| s.msdf > 0.0);
                 let limits = (doc.limits().max_texture_dimension, doc.limits().max_texture_bytes,
                     doc.limits().mesh.max_bytes, doc.limits().max_source_bytes);
                 let hit = cache.as_deref().and_then(|c| c.textures.get(&(*id, channel)))
-                    .filter(|c| c.limits == limits && c.layers == layers
+                    .filter(|c| c.msdf == msdf && c.limits == limits && c.layers == layers
                         && c.layers.iter().zip(layers).all(|(a, b)| a.opacity.to_bits() == b.opacity.to_bits()));
                 let texture = if let Some(hit) = hit {
                     hit.texture.clone()
@@ -536,7 +538,7 @@ fn export_surface(
                             return Ok(None);
                         };
                         let png_before = crate::build_detail::png_time();
-                        let mips = image.mip_chain(channel.encoding(), doc.limits(), ctx)?;
+                        let mips = image.mip_chain(if msdf { crate::ImageEncoding::Linear } else { channel.encoding() }, doc.limits(), ctx)?;
                         let png = image.to_png(doc.limits())?;
                         let mut mip_pngs = Vec::new();
                         for mip in mips {
@@ -553,7 +555,7 @@ fn export_surface(
                     crate::program::record_texture_time(started.elapsed());
                     let texture = texture?;
                     if let Some(cache) = cache.as_deref_mut() {
-                        cache.textures.insert((*id, channel), CachedTexture { layers: layers.to_vec(), limits, texture: texture.clone() });
+                        cache.textures.insert((*id, channel), CachedTexture { msdf, layers: layers.to_vec(), limits, texture: texture.clone() });
                     }
                     texture
                 };
