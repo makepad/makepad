@@ -363,4 +363,8 @@ hal_events! {
     HostedNativeOut = 156, hosted_native_out { bytes: rng };
     /// The answer to `GpuProfQuery`: a recording (`makepad_gpu_trace::Recording::encode`).
     GpuProfRecording = 157, gpu_prof_recording { bytes: rng };
+    /// An XR window's tracking space was set up again: a headset session began (a remote
+    /// headset linked) or the wearer recentered, so its origin may have moved. `generation`
+    /// counts these. The `XrFrame`s that follow are in the new space.
+    XrSpace = 159, xr_space { window: obj, generation: u32 };
 }

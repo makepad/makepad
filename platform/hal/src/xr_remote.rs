@@ -58,6 +58,15 @@ pub fn hal_xr_remote_drawn() {
     drawn();
 }
 
+/// The headset's tracking space was set up again: it linked (a session of its own, whose origin
+/// need not be the last one's) or its wearer recentered. The XR window learns it (`XrSpace`, the
+/// generation counted up) ahead of the poses that follow; a pose still waiting from before goes
+/// (it is in the old space).
+#[makepad_relax_api::relax_api]
+pub fn hal_xr_remote_space_reset() {
+    space_reset();
+}
+
 use crate::lock;
 use crate::buffers::EventQueue;
 use crate::backend::exec::OsCmd;
@@ -104,6 +113,8 @@ struct State {
     /// Poses that came, and those that replaced one still waiting (a frame not drawn).
     poses: u64,
     replaced: u64,
+    /// The tracking space's generation (`hal_xr_remote_space_reset`).
+    space: u32,
 }
 
 struct Remote {
@@ -177,10 +188,11 @@ fn create_window(key: Key) {
         eprintln!("[hal-xr-remote] a second XR window {key:?} replaces {old:?}");
     }
     s.asked = None;
-    let (e, refresh) = (eye(&s), s.refresh);
+    let (e, refresh, space) = (eye(&s), s.refresh, s.space);
     push(&mut s, key, |q, id| {
         q.display(id, 1., refresh);
         q.geom(id, 0., 0., 2. * e[0] as f64, e[1] as f64, 1., window_state::RESTORE);
+        q.xr_space(id, space);
     });
     eprintln!("[hal-xr-remote] XR window {key:?}: {}x{} px", 2 * e[0], e[1]);
 }
@@ -242,6 +254,18 @@ fn ask(s: &mut State, key: Key, seq: u64, display_ns: u64, frame: &[u8]) {
     });
 }
 
+/// A new tracking space: the XR window is told before the poses in it; the pose that waited is
+/// in the old one.
+fn space_reset() {
+    let mut s = lock(&remote().state);
+    s.space = s.space.wrapping_add(1);
+    s.waiting = None;
+    let (window, space) = (s.window, s.space);
+    if let Some(key) = window {
+        push(&mut s, key, |q, id| q.xr_space(id, space));
+    }
+}
+
 /// The app built the frame of the pose it was asked for and can take another: the newest pose
 /// that waited is asked for now (else the next one that comes is).
 fn drawn() {
@@ -261,7 +285,8 @@ mod tests {
     }
 
     /// One frame asked at a time: a pose while one is built waits (the newest wins) and is
-    /// asked once the app drew; poses without an XR window are refused.
+    /// asked once the app drew; a new tracking space is told at once and drops the pose that
+    /// waited; poses without an XR window are refused.
     #[test]
     fn a_remote_headset_asks_one_frame_at_a_time() {
         let key = (7, Id::new(3, 1));
@@ -278,6 +303,15 @@ mod tests {
         drawn();
         assert_eq!(inbox_len(7), 4, "drawn: the waiting pose is asked");
         assert_eq!(lock(&remote().state).asked.map(|a| a.0), Some(3));
+        // a new tracking space: told at once, and the pose that waited from the old one goes
+        assert!(pose(4, 400, &[4]));
+        let before = lock(&remote().state).space;
+        space_reset();
+        assert_eq!(inbox_len(7), 5, "a new space is told at once");
+        assert_eq!(lock(&remote().state).space, before.wrapping_add(1), "its generation counts up");
+        assert!(lock(&remote().state).waiting.is_none(), "the pose of the old space goes");
+        drawn();
+        assert_eq!(inbox_len(7), 5, "nothing of the old space is asked");
         assert!(close_window(key));
         assert!(!pose(4, 400, &[]));
     }

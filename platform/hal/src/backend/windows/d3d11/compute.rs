@@ -40,7 +40,7 @@ impl D3d11 {
             let t0 = std::time::Instant::now();
             let result = super::pipeline::build_compute(&dev, &source, layout.desc.precise_math != 0, &name).and_then(|shader| {
                 let samplers = layout.samplers.iter().map(|s| super::pipeline::sampler_state(&dev,
-                    &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false })).collect::<Result<Vec<_>, _>>()?;
+                    &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false, anisotropy: 1 })).collect::<Result<Vec<_>, _>>()?;
                 Ok(Program { layout, shader, samplers })
             });
             // as a draw pipeline's: a slow FXC compile is named with its time

@@ -893,6 +893,9 @@ impl Cx {
             HalEvent::XrDepth { window: _, display_ns, depth } => {
                 self.hal_xr_depth(display_ns, depth);
             }
+            HalEvent::XrSpace { window: _, generation } => {
+                self.hal_xr_space(generation);
+            }
             HalEvent::FrameReady { window, next_ns } => {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {

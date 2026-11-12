@@ -56,6 +56,8 @@ pub(super) struct Caps {
     pub float_blend: bool,
     /// OES_texture_float_linear: RGBA32F and R32F textures can be filtered
     pub float_linear: bool,
+    /// The anisotropy limit, or 1 when the context has no anisotropic filtering.
+    pub max_anisotropy: f32,
     /// KHR_parallel_shader_compile: links finish on the driver's threads. EGL may hand out its
     /// entry point on a driver without the extension, so the extension list decides.
     pub parallel_compile: bool,
@@ -290,6 +292,12 @@ impl Renderer {
         }
         let ext = gl.extensions();
         let has = |name: &str| ext.iter().any(|e| e == name);
+        let mut max_anisotropy = 1.0;
+        let core_anisotropy = !version.starts_with("OpenGL ES")
+            && (gl.integer(sys::MAJOR_VERSION), gl.integer(sys::MINOR_VERSION)) >= (4, 6);
+        if core_anisotropy || has("GL_EXT_texture_filter_anisotropic") || has("GL_ARB_texture_filter_anisotropic") {
+            unsafe { (gl.glGetFloatv)(sys::MAX_TEXTURE_MAX_ANISOTROPY, &mut max_anisotropy); }
+        }
         let mut formats = [format::RGBA8, format::BGRA8, format::R8, format::RG8, format::RGBA16F, format::RGBA32F,
             format::DEPTH32F, format::DEPTH24_STENCIL8, format::R32F, format::RG16F, format::R16F, format::R32UINT].iter().fold(0u64, |b, f| b | 1 << f);
         if has("GL_EXT_texture_compression_bptc") { formats |= 1 << format::BC7; }
@@ -314,6 +322,7 @@ impl Renderer {
             border_clamp: has("GL_EXT_texture_border_clamp") || has("GL_OES_texture_border_clamp"),
             float_blend: has("GL_EXT_float_blend"),
             float_linear: has("GL_OES_texture_float_linear"),
+            max_anisotropy,
             parallel_compile,
             renderer: format!("{} ({version})", gl.string(sys::RENDERER)),
             software: ctx.software(),

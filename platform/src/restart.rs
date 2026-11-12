@@ -13,10 +13,56 @@
 
 use crate::{cx::Cx, makepad_math::Vec2d};
 
+/// How a kept window was shown: it reopens so (a maximized window maximized, not as a plain
+/// window at its maximized frame).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum RestartWindowState {
+    #[default]
+    Normal,
+    Fullscreen,
+    Maximized,
+}
+
+impl RestartWindowState {
+    /// As the window system reports it; maximized first, as a display change re-sends it
+    /// (a host can show a maximized window fullscreen).
+    fn of(geom: &crate::event::WindowGeom) -> Self {
+        if geom.is_maximized {
+            Self::Maximized
+        } else if geom.is_fullscreen {
+            Self::Fullscreen
+        } else {
+            Self::Normal
+        }
+    }
+
+    /// The restart text's last window field.
+    fn code(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Fullscreen => 1,
+            Self::Maximized => 2,
+        }
+    }
+
+    fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "0" => Some(Self::Normal),
+            "1" => Some(Self::Fullscreen),
+            "2" => Some(Self::Maximized),
+            _ => None,
+        }
+    }
+}
+
+/// A kept window: its index, position, inner size in the window system's points, and how it
+/// was shown.
+pub type RestartWindow = (usize, Vec2d, Vec2d, RestartWindowState);
+
 /// What crosses a restart: window frames (by index), the restart reason and the app's own text.
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct RestartState {
-    pub windows: Vec<(usize, Vec2d, Vec2d, bool)>,
+    pub windows: Vec<RestartWindow>,
     /// why the previous run restarted (Relax's classifier), for the kept/lost report
     pub reason: String,
     pub app: Option<String>,
@@ -30,8 +76,8 @@ impl RestartState {
         if !self.reason.is_empty() {
             s.push_str(&format!("reason {}\n{}\n", self.reason.len(), self.reason));
         }
-        for (i, p, z, f) in &self.windows {
-            s.push_str(&format!("window {} {} {} {} {} {}\n", i, p.x, p.y, z.x, z.y, *f as u8));
+        for (i, p, z, shown) in &self.windows {
+            s.push_str(&format!("window {} {} {} {} {} {}\n", i, p.x, p.y, z.x, z.y, shown.code()));
         }
 
         if let Some(a) = &self.app {
@@ -52,9 +98,9 @@ impl RestartState {
             let w: Vec<&str> = t[at..eol].split_whitespace().collect();
             at = (eol + 1).min(t.len());
             match w.as_slice() {
-                ["window", i, x, y, ww, h, f] => {
+                ["window", i, x, y, ww, h, shown] => {
                     let n = |v: &str| v.parse::<f64>().unwrap_or(0.0);
-                    st.windows.push((i.parse().ok()?, Vec2d { x: n(x), y: n(y) }, Vec2d { x: n(ww), y: n(h) }, *f == "1"));
+                    st.windows.push((i.parse().ok()?, Vec2d { x: n(x), y: n(y) }, Vec2d { x: n(ww), y: n(h) }, RestartWindowState::from_code(shown)?));
                 }
                 ["reason", len] => {
                     let len: usize = len.parse().ok()?;
@@ -150,28 +196,29 @@ impl Cx {
     /// The created windows' frames (a restart reopens them there), as a window is created: its
     /// size in the window system's points (a `dpi_override` lays out in points of its own). A
     /// headset's XR window is no frame of the desktop's: the HAL sizes it.
-    pub fn restart_window_frames(&self) -> Vec<(usize, Vec2d, Vec2d, bool)> {
+    pub fn restart_window_frames(&self) -> Vec<RestartWindow> {
         let mut out = Vec::new();
         for id in self.windows.id_iter() {
             let i = id.id();
             let w = &self.windows[id];
             if w.is_created && !w.is_popup && !w.window_geom.xr_is_presenting {
-                out.push((i, w.get_position(), w.layout_vec2d_to_native_points(w.get_inner_size()), w.window_geom.is_fullscreen));
+                out.push((i, w.get_position(), w.layout_vec2d_to_native_points(w.get_inner_size()), RestartWindowState::of(&w.window_geom)));
             }
         }
         out
     }
 
     /// Seeds the windows not created yet with the frames a restart carried over.
-    pub fn restart_apply_window_frames(&mut self, frames: &[(usize, Vec2d, Vec2d, bool)]) {
+    pub fn restart_apply_window_frames(&mut self, frames: &[RestartWindow]) {
         let ids: Vec<_> = self.windows.id_iter().collect();
-        for &(i, pos, size, full) in frames {
+        for &(i, pos, size, shown) in frames {
             if let Some(&id) = ids.iter().find(|id| id.id() == i) {
                 let w = &mut self.windows[id];
                 if !w.is_created && !w.is_popup {
                     w.create_position = Some(pos);
                     w.create_inner_size = Some(size);
-                    w.is_fullscreen = full;
+                    w.is_fullscreen = shown == RestartWindowState::Fullscreen;
+                    w.create_maximized = shown == RestartWindowState::Maximized;
                 }
             }
         }
@@ -402,7 +449,11 @@ mod tests {
     #[test]
     fn text_round_trip() {
         let st = RestartState {
-            windows: vec![(0, Vec2d { x: 10.0, y: 20.5 }, Vec2d { x: 800.0, y: 600.0 }, false)],
+            windows: vec![
+                (0, Vec2d { x: 10.0, y: 20.5 }, Vec2d { x: 800.0, y: 600.0 }, RestartWindowState::Normal),
+                (1, Vec2d { x: 0.0, y: 0.0 }, Vec2d { x: 1920.0, y: 1080.0 }, RestartWindowState::Fullscreen),
+                (2, Vec2d { x: 0.0, y: 25.0 }, Vec2d { x: 1512.0, y: 900.0 }, RestartWindowState::Maximized),
+            ],
             reason: "struct `App` changed:\nits layout".to_string(),
             app: Some("a b\nc".to_string()),
         };

@@ -79,7 +79,7 @@ fn draw_pipeline(vm: &mut ScriptVm, dialect: u32) -> (Vec<u8>, Vec<Id>, Vec<Id>)
     let textures = reflection.io().iter().filter(|io| io.kind().as_texture().is_some()).map(|io| match io.name().to_string().as_str() {
         "half_image" => HALF, "byte_image" => BYTE, name => panic!("unexpected draw texture {name}"),
     }).collect();
-    let sampler = spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false };
+    let sampler = spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 };
     let code = if dialect == dialect::SPIRV {
         let spirv = view.spirv.unwrap().view(); let stage = &spirv.stages[0];
         spirv::SpirvPipeline { vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(), xr_vertex: vec![], xr_fragment: vec![],

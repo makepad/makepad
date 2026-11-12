@@ -69,6 +69,8 @@ pub(crate) struct HalXr {
     pub(crate) supersample: f32,
     /// `Cx::xr_set_msaa`: the XR passes' samples per pixel (1: none)
     pub(crate) msaa: u32,
+    /// The tracking space's generation (the newest `XrSpace`): `XrState::space` of the frames
+    pub(crate) space: u32,
 }
 
 /// A local-space point seen by eye 0's environment depth camera: its depth along that camera's
@@ -143,7 +145,7 @@ impl Cx {
         self.hal.windows.insert(window.0, super::HalWindow::default());
         // the HAL sizes it (its first Geom confirms it)
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::XR, Id::NONE, [0.0; 4], false);
-        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()) });
+        self.hal.xr = Some(HalXr { window, frame: None, display_ns: 0, clock_offset_ns: 0, last: Rc::new(XrState::default()), eye_uniforms: Default::default(), depth_writer: None, env_depth: None, hand_check_at: None, env_images: Vec::new(), env_depth_ns: 0, scene_to_room: Mat4f::identity(), supersample: SUPERSAMPLE.with(|s| s.get()), msaa: MSAA.with(|m| m.get()), space: 0 });
         if SEE_THROUGH.with(|s| s.get()) { self.hal_xr_see_through(true); }
         let refresh = REFRESH_MHZ.with(|r| r.get());
         if refresh != 0 { self.hal_xr_refresh_rate(refresh); }
@@ -284,6 +286,7 @@ impl Cx {
         let state = Rc::new(XrState {
             time,
             head_pose: pose(&frame.head),
+            space: xr.space,
             order_counter: last.order_counter.wrapping_add(1),
             left_controller: controller(&frame.controllers[0]),
             right_controller: controller(&frame.controllers[1]),
@@ -300,6 +303,14 @@ impl Cx {
         for pass in passes { self.redraw_pass_and_child_passes(pass); }
         self.call_event_handler(&Event::XrUpdate(XrUpdateEvent { state, last }));
         self.in_xr_update = in_xr;
+    }
+
+    /// An `XrSpace`: the tracking space was set up again; the frames from here on carry its
+    /// generation (`XrState::space`).
+    pub(crate) fn hal_xr_space(&mut self, generation: u32) {
+        if let Some(xr) = self.hal.xr.as_mut() {
+            xr.space = generation;
+        }
     }
 
     /// An `XrDepth`: the headset's environment depth. A header alone announces a newly

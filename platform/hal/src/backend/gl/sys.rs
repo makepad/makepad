@@ -48,6 +48,7 @@ gl_functions! {
     glGetString(GLenum) -> *const u8;
     glGetStringi(GLenum, GLuint) -> *const u8;
     glGetIntegerv(GLenum, *mut GLint);
+    glGetFloatv(GLenum, *mut GLfloat);
     glGenTextures(GLsizei, *mut GLuint);
     glDeleteTextures(GLsizei, *const GLuint);
     glBindTexture(GLenum, GLuint);
@@ -108,6 +109,7 @@ gl_functions! {
     glDeleteSamplers(GLsizei, *const GLuint);
     glBindSampler(GLuint, GLuint);
     glSamplerParameteri(GLuint, GLenum, GLint);
+    glSamplerParameterf(GLuint, GLenum, GLfloat);
     glGenFramebuffers(GLsizei, *mut GLuint);
     glDeleteFramebuffers(GLsizei, *const GLuint);
     glBindFramebuffer(GLenum, GLuint);
@@ -200,6 +202,11 @@ pub const MAX: GLenum = 0x8008;
 pub const VENDOR: GLenum = 0x1F00;
 pub const RENDERER: GLenum = 0x1F01;
 pub const VERSION: GLenum = 0x1F02;
+pub const MAJOR_VERSION: GLenum = 0x821B;
+pub const MINOR_VERSION: GLenum = 0x821C;
+// Core and EXT anisotropic filtering use the same parameter values.
+pub const TEXTURE_MAX_ANISOTROPY: GLenum = 0x84FE;
+pub const MAX_TEXTURE_MAX_ANISOTROPY: GLenum = 0x84FF;
 pub const EXTENSIONS: GLenum = 0x1F03;
 pub const NUM_EXTENSIONS: GLenum = 0x821D;
 pub const MAX_TEXTURE_SIZE: GLenum = 0x0D33;

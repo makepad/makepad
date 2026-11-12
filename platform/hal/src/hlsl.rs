@@ -17,14 +17,14 @@ pub struct HlslPipeline {
     pub samplers: Vec<SpirvSampler>,
 }
 
-const MAGIC: u32 = 0x4c53_4c48; // "HLSL"
+const MAGIC: u32 = 0x3253_4c48; // "HLS2": sampler anisotropy is included.
 
 impl HlslPipeline {
     pub fn encode(&self) -> Vec<u8> {
         let mut words = vec![MAGIC, self.textures.len() as u32, self.samplers.len() as u32, self.source.len() as u32];
         words.extend_from_slice(&self.textures);
         for s in &self.samplers {
-            words.extend([s.filter, s.address, u32::from(s.compare), u32::from(s.pixel)]);
+            words.extend([s.filter, s.address, u32::from(s.compare), u32::from(s.pixel), s.anisotropy]);
         }
         let mut bytes: Vec<u8> = words.into_iter().flat_map(u32::to_le_bytes).collect();
         bytes.extend_from_slice(self.source.as_bytes());
@@ -37,7 +37,7 @@ impl HlslPipeline {
             return Err("invalid HAL HLSL payload header".into());
         }
         let (nt, ns, nsrc) = (word(1).unwrap_or(0) as usize, word(2).unwrap_or(0) as usize, word(3).unwrap_or(0) as usize);
-        let head = ns.checked_mul(4).and_then(|n| n.checked_add(4 + nt)).ok_or("invalid HAL HLSL payload lengths")?;
+        let head = ns.checked_mul(5).and_then(|n| n.checked_add(4 + nt)).ok_or("invalid HAL HLSL payload lengths")?;
         if head.checked_mul(4).and_then(|n| n.checked_add(nsrc)) != Some(bytes.len()) {
             return Err("invalid HAL HLSL payload lengths".into());
         }
@@ -47,12 +47,12 @@ impl HlslPipeline {
         }
         let mut samplers = Vec::with_capacity(ns);
         for k in 0..ns {
-            let at = 4 + nt + k * 4;
-            let s = [word(at).unwrap(), word(at + 1).unwrap(), word(at + 2).unwrap(), word(at + 3).unwrap()];
-            if s[0] > 1 || s[1] > 3 || s[2] > 1 || s[3] > 1 {
+            let at = 4 + nt + k * 5;
+            let s = [word(at).unwrap(), word(at + 1).unwrap(), word(at + 2).unwrap(), word(at + 3).unwrap(), word(at + 4).unwrap()];
+            if s[0] > 1 || s[1] > 3 || s[2] > 1 || s[3] > 1 || s[4] == 0 {
                 return Err("invalid HLSL sampler".into());
             }
-            samplers.push(SpirvSampler { filter: s[0], address: s[1], compare: s[2] != 0, pixel: s[3] != 0 });
+            samplers.push(SpirvSampler { filter: s[0], address: s[1], compare: s[2] != 0, pixel: s[3] != 0, anisotropy: s[4] });
         }
         let source = std::str::from_utf8(&bytes[head * 4..]).map_err(|_| "HLSL source is not UTF-8")?.to_owned();
         Ok(Self { source, textures, samplers })
@@ -68,7 +68,10 @@ mod tests {
         let p = HlslPipeline {
             source: "float4 pixel_main() : SV_TARGET0 { return 1; }".into(),
             textures: vec![0, 1, 2, 3],
-            samplers: vec![SpirvSampler { filter: 1, address: 1, compare: true, pixel: false }],
+            samplers: vec![
+                SpirvSampler { filter: 1, address: 1, compare: true, pixel: false, anisotropy: 1 },
+                SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 16 },
+            ],
         };
         assert_eq!(HlslPipeline::decode(&p.encode()).unwrap(), p);
         assert!(HlslPipeline::decode(&p.encode()[..10]).is_err());

@@ -231,6 +231,9 @@ impl Renderer {
                 (gl.glGenSamplers)(1, &mut sampler);
                 (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MAG_FILTER, if linear { sys::LINEAR } else { sys::NEAREST } as GLint);
                 (gl.glSamplerParameteri)(sampler, sys::TEXTURE_MIN_FILTER, if linear { sys::LINEAR_MIPMAP_LINEAR } else { sys::NEAREST_MIPMAP_LINEAR } as GLint);
+                if s.anisotropy > 1 && self.caps.max_anisotropy > 1.0 {
+                    (gl.glSamplerParameterf)(sampler, sys::TEXTURE_MAX_ANISOTROPY, (s.anisotropy as f32).min(self.caps.max_anisotropy));
+                }
                 for p in [sys::TEXTURE_WRAP_S, sys::TEXTURE_WRAP_T, sys::TEXTURE_WRAP_R] { (gl.glSamplerParameteri)(sampler, p, wrap as GLint) }
                 if compare {
                     (gl.glSamplerParameteri)(sampler, sys::TEXTURE_COMPARE_MODE, sys::COMPARE_REF_TO_TEXTURE as GLint);

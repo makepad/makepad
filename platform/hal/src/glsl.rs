@@ -40,7 +40,7 @@ impl GlslPipeline {
         fn word(out: &mut Vec<u8>, n: u32) { out.extend(n.to_le_bytes()); }
         fn string(out: &mut Vec<u8>, s: &str) { word(out, s.len() as u32); out.extend(s.as_bytes()); }
         let mut out = Vec::new();
-        for n in [0x474c_0001, self.vertex_stride, self.instance_stride, self.instance_texture as u32,
+        for n in [0x474c_0002, self.vertex_stride, self.instance_stride, self.instance_texture as u32,
             self.pick as u32, self.blocks.len() as u32, self.attributes.len() as u32, self.textures.len() as u32] { word(&mut out, n); }
         string(&mut out, &self.vertex); string(&mut out, &self.fragment);
         for b in &self.blocks { string(&mut out, b); }
@@ -50,7 +50,7 @@ impl GlslPipeline {
         }
         for t in &self.textures {
             string(&mut out, &t.name);
-            for n in [t.shape, t.sampler.filter, t.sampler.address, t.sampler.compare as u32, t.sampler.pixel as u32] { word(&mut out, n); }
+            for n in [t.shape, t.sampler.filter, t.sampler.address, t.sampler.compare as u32, t.sampler.pixel as u32, t.sampler.anisotropy] { word(&mut out, n); }
         }
         out
     }
@@ -66,7 +66,7 @@ impl GlslPipeline {
             if s.contains('\0') { return Err("NUL in GLSL payload".into()); }
             let s = s.to_owned(); *b = &b[n..]; Ok(s)
         }
-        if word(&mut bytes)? != 0x474c_0001 { return Err("invalid GLSL payload version".into()); }
+        if word(&mut bytes)? != 0x474c_0002 { return Err("invalid GLSL payload version".into()); }
         let vertex_stride = word(&mut bytes)?;
         let instance_stride = word(&mut bytes)?;
         let instance_texture = word(&mut bytes)?;
@@ -86,9 +86,9 @@ impl GlslPipeline {
         for _ in 0..nt {
             let name = string(&mut bytes)?;
             let shape = word(&mut bytes)?; let filter = word(&mut bytes)?; let address = word(&mut bytes)?;
-            let compare = word(&mut bytes)?; let pixel = word(&mut bytes)?;
-            if shape > 4 || filter > 1 || address > 3 || compare > 1 || pixel > 1 { return Err("invalid GL texture/sampler".into()); }
-            textures.push(Texture { name, shape, sampler: SpirvSampler { filter, address, compare: compare != 0, pixel: pixel != 0 } });
+            let compare = word(&mut bytes)?; let pixel = word(&mut bytes)?; let anisotropy = word(&mut bytes)?;
+            if shape > 4 || filter > 1 || address > 3 || compare > 1 || pixel > 1 || anisotropy == 0 { return Err("invalid GL texture/sampler".into()); }
+            textures.push(Texture { name, shape, sampler: SpirvSampler { filter, address, compare: compare != 0, pixel: pixel != 0, anisotropy } });
         }
         if !bytes.is_empty() { return Err("trailing GLSL payload bytes".into()); }
         Ok(Self { vertex, fragment, blocks, attributes, textures, vertex_stride, instance_stride,
@@ -107,7 +107,10 @@ mod tests {
             fragment: "void main() {}".into(),
             blocks: ["draw_callUniforms", "passUniforms", "draw_listUniforms", "userUniforms", "liveUniforms", "my_Uniforms"].map(String::from).to_vec(),
             attributes: vec![Attribute { name: "geom_pos".into(), offset: 8, format: 4, lanes: 1, instance: false }],
-            textures: vec![Texture { name: "tex_image".into(), shape: 2, sampler: SpirvSampler { filter: 1, address: 3, compare: false, pixel: false } }],
+            textures: vec![
+                Texture { name: "tex_image".into(), shape: 2, sampler: SpirvSampler { filter: 1, address: 3, compare: false, pixel: false, anisotropy: 1 } },
+                Texture { name: "tex_aniso".into(), shape: 0, sampler: SpirvSampler { filter: 1, address: 0, compare: false, pixel: false, anisotropy: 16 } },
+            ],
             vertex_stride: 12,
             instance_stride: 64,
             instance_texture: true,

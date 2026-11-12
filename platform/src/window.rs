@@ -936,6 +936,9 @@ pub struct CxWindow {
     pub(crate) paint_paused: bool,
     pub(crate) paint_once: bool,
     pub is_fullscreen: bool,
+    /// Startup-only, beside `is_fullscreen`: the window opens maximized (a restart in place
+    /// reopens a maximized window so).
+    pub(crate) create_maximized: bool,
     pub is_popup: bool,
     /// a tray app's dropdown (`WindowHandle::configure_dropdown`)
     pub dropdown: bool,
@@ -987,6 +990,7 @@ impl Default for CxWindow {
             paint_paused: false,
             paint_once: false,
             is_fullscreen: false,
+            create_maximized: false,
             is_popup: false,
             dropdown: false,
             shown: false,

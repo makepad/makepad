@@ -998,6 +998,10 @@ pub struct XrHapticPulse {
 pub struct XrState {
     pub time: f64,
     pub head_pose: Pose,
+    /// The tracking space's generation: it changes when the space is set up again (a headset
+    /// session began, the wearer recentered), when its origin may have moved. Content placed in
+    /// front of the head is placed again ([`XrUpdateEvent::space_changed`]).
+    pub space: u32,
     pub order_counter: u8,
     pub anchor: Option<XrAnchor>,
     pub anchor_persisted: bool,
@@ -1014,6 +1018,7 @@ impl XrState {
             order_counter: b.order_counter,
             time: (b.time - a.time) * f as f64 + a.time,
             head_pose: Pose::from_lerp(a.head_pose, b.head_pose, f),
+            space: b.space,
             anchor: b.anchor,
             anchor_persisted: b.anchor_persisted,
             floor_y: b.floor_y,
@@ -1080,6 +1085,11 @@ impl XrUpdateEvent {
     /// The frame the menu became a hold ([`XrController::HOLD_MENU`]).
     pub fn held_menu(&self) -> bool {
         self.state.left_controller.hold_menu() && !self.last.left_controller.hold_menu()
+    }
+    /// The first frame in a tracking space set up again ([`XrState::space`]): the head's pose
+    /// jumped with the origin, not with the head.
+    pub fn space_changed(&self) -> bool {
+        self.state.space != self.last.space
     }
 }
 

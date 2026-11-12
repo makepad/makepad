@@ -277,12 +277,16 @@ pub(super) fn sampler(dev: &Device, s: &crate::spirv::SpirvSampler) -> Result<vk
     let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
         2 => vk::SamplerAddressMode::CLAMP_TO_BORDER, _ => vk::SamplerAddressMode::MIRRORED_REPEAT };
     if s.pixel && (s.compare || !matches!(s.address, 1 | 2)) { return Err("invalid unnormalized sampler".into()); }
-    unsafe { dev.raw.create_sampler(&vk::SamplerCreateInfo::default().mag_filter(filter).min_filter(filter)
+    let mut info = vk::SamplerCreateInfo::default().mag_filter(filter).min_filter(filter)
         .mipmap_mode(if s.pixel { vk::SamplerMipmapMode::NEAREST } else { vk::SamplerMipmapMode::LINEAR })
         .address_mode_u(address).address_mode_v(address).address_mode_w(address)
         .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK).unnormalized_coordinates(s.pixel)
         .compare_enable(s.compare).compare_op(vk::CompareOp::LESS_OR_EQUAL).min_lod(0.0)
-        .max_lod(if s.pixel { 0.0 } else { vk::LOD_CLAMP_NONE }), None) }.map_err(error)
+        .max_lod(if s.pixel { 0.0 } else { vk::LOD_CLAMP_NONE });
+    if s.anisotropy > 1 && dev.features.sampler_anisotropy == vk::TRUE {
+        info = info.anisotropy_enable(true).max_anisotropy((s.anisotropy as f32).min(dev.properties.limits.max_sampler_anisotropy));
+    }
+    unsafe { dev.raw.create_sampler(&info, None) }.map_err(error)
 }
 
 impl Drop for Program {

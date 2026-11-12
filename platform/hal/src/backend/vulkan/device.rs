@@ -424,6 +424,7 @@ impl Device {
         let mut ycbcr = vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default().sampler_ycbcr_conversion(has_ycbcr);
 
         let features = vk::PhysicalDeviceFeatures::default()
+            .sampler_anisotropy(supported_features.sampler_anisotropy == vk::TRUE)
             .independent_blend(supported_features.independent_blend == vk::TRUE)
             .shader_storage_image_extended_formats(supported_features.shader_storage_image_extended_formats == vk::TRUE)
             .shader_int64(compute && supported_features.shader_int64 == vk::TRUE)

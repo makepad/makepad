@@ -165,7 +165,13 @@ impl Cx {
         let title = window.create_title.clone();
         let visuals = window.window_visuals();
         let kind = kind | exact | macos_window_style(&window.macos);
-        let fullscreen = window.is_fullscreen;
+        let state = if window.is_fullscreen {
+            Some(window_state::FULLSCREEN)
+        } else if window.create_maximized {
+            Some(window_state::MAXIMIZE)
+        } else {
+            None
+        };
         // a dropdown never takes the host's window (`makepad run`'s load screen): the app's
         // first regular window does
         let adopt = kind & 0xff != window_kind::DROPDOWN && !std::mem::replace(&mut self.hal.window_created, true);
@@ -179,8 +185,8 @@ impl Cx {
         if cfg!(target_os = "macos") {
             fb.w.window_dpi_override(id, window.dpi_override.and_then(crate::window::CxWindow::valid_dpi_factor).unwrap_or(0.0));
         }
-        if fullscreen {
-            fb.w.window_state(id, window_state::FULLSCREEN);
+        if let Some(state) = state {
+            fb.w.window_state(id, state);
         }
         fb.w.window_visuals(id, visuals.transparent as u32 | (visuals.backdrop as u32) << 8, [visuals.backdrop_intensity, 0.0, 0.0, 0.0]);
         self.hal.windows.insert(window_id.0, super::HalWindow::default());
@@ -795,5 +801,46 @@ fn cursor_index(c: MouseCursor) -> u32 {
         MouseCursor::NwseResize => cursor::NWSE_RESIZE,
         MouseCursor::ColResize => cursor::COL_RESIZE,
         MouseCursor::RowResize => cursor::ROW_RESIZE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{cx::Cx, event::Event, makepad_math::dvec2, restart::RestartState, window::WindowHandle};
+    use makepad_hal::{window_state, HalCmd};
+
+    /// A restart in place reopens a window as the window system showed it, through the restart
+    /// text the next run reads: a maximized window maximized (it came back as a plain window at
+    /// its maximized frame), a fullscreen one fullscreen, a plain one with no state.
+    #[test]
+    fn a_restart_reopens_a_window_as_it_was_shown() {
+        for (shown, sent) in [
+            (window_state::MAXIMIZE, vec![window_state::MAXIMIZE]),
+            (window_state::FULLSCREEN, vec![window_state::FULLSCREEN]),
+            (window_state::RESTORE, vec![]),
+        ] {
+            let kept = {
+                let mut old = Cx::new(Box::new(|_: &mut Cx, _: &Event| {}));
+                let window = WindowHandle::new(&mut old);
+                old.windows[window.window_id()].is_created = true;
+                old.hal_window_geom(window.window_id(), dvec2(0.0, 25.0), dvec2(1512.0, 900.0), 1.0, shown);
+                RestartState { windows: old.restart_window_frames(), ..Default::default() }.to_text()
+            };
+            let restored = RestartState::from_text(&kept).expect("the kept state reads back");
+            let mut cx = Cx::new(Box::new(|_: &mut Cx, _: &Event| {}));
+            let window = WindowHandle::new(&mut cx);
+            cx.restart_apply_window_frames(&restored.windows);
+            cx.hal_create_window(window.window_id(), None);
+            let w = &cx.hal.frames.w;
+            let states: Vec<u32> = w
+                .cmds()
+                .iter()
+                .filter_map(|c| match c.decode(w.arena()) {
+                    Some(HalCmd::WindowState { state, .. }) => Some(state),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(states, sent, "a window shown in state {shown} reopens with these window states");
+        }
     }
 }

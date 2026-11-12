@@ -99,7 +99,7 @@ impl DrawVars {
                 let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                     filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
                     address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
-                    compare: s.compare, pixel: s.coord == SamplerCoord::Pixel,
+                    compare: s.compare, pixel: s.coord == SamplerCoord::Pixel, anisotropy: s.anisotropy as u32,
                 }).collect();
                 // the XR variant: the multiview stages, when its bindings are the window variant's
                 // (the HAL binds one descriptor layout for both)
@@ -147,7 +147,7 @@ impl DrawVars {
             let samplers: Vec<_> = mapping.samplers.iter().map(|s| makepad_hal::spirv::SpirvSampler {
                 filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
                 address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
-                compare: s.compare, pixel: false,
+                compare: s.compare, pixel: false, anisotropy: s.anisotropy as u32,
             }).collect();
             let payload = |source: &str| makepad_hal::hlsl::HlslPipeline { source: source.to_owned(), textures: textures.clone(), samplers: samplers.clone() }.encode();
             mapping.hal_code = Some(payload(source));
@@ -284,11 +284,11 @@ fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::sh
             _ => return Err("unsupported GLES texture shape".to_owned()),
         };
         let sampler = mapping.texture_sampler_indices.get(i).and_then(|i| mapping.samplers.get(*i)).map_or(
-            makepad_hal::spirv::SpirvSampler { filter: 1, address: 1, compare: shape >= 3, pixel: false },
+            makepad_hal::spirv::SpirvSampler { filter: 1, address: 1, compare: shape >= 3, pixel: false, anisotropy: 1 },
             |s| makepad_hal::spirv::SpirvSampler {
                 filter: if s.filter == SamplerFilter::Nearest { 0 } else { 1 },
                 address: match s.address { SamplerAddress::Repeat => 0, SamplerAddress::ClampToEdge => 1, SamplerAddress::ClampToZero => 2, SamplerAddress::MirroredRepeat => 3 },
-                compare: s.compare, pixel: s.coord == SamplerCoord::Pixel,
+                compare: s.compare, pixel: s.coord == SamplerCoord::Pixel, anisotropy: s.anisotropy as u32,
             });
         Ok(Texture { name: format!("tex_{}", t.id), shape, sampler })
     }).collect::<Result<Vec<_>, String>>()?;

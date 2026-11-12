@@ -44,7 +44,7 @@ impl Program {
             .descriptor_type(*ty).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
         let mut p = Self { dev, layout, pipeline: vk::Pipeline::null(), pipeline_layout: vk::PipelineLayout::null(), descriptors: vk::DescriptorSetLayout::null(), bindings, samplers: Vec::new() };
         for s in &p.layout.samplers {
-            p.samplers.push(super::pipeline::sampler(&p.dev, &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false })?);
+            p.samplers.push(super::pipeline::sampler(&p.dev, &crate::spirv::SpirvSampler { filter: s.filter, address: s.address, compare: false, pixel: false, anisotropy: 1 })?);
         }
         unsafe {
             p.descriptors = p.dev.raw.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&set), None).map_err(error)?;

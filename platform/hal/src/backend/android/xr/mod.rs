@@ -1064,6 +1064,8 @@ struct CxOpenXrSession {
     /// deadline)
     frame_us: Vec<[u32; 4]>,
     stereo_asked_ns: u64,
+    /// The local space's generation: counted up at each reference space change (a recenter).
+    space: u32,
     /// the refresh rate last requested (mHz; 0 none)
     requested_refresh_mhz: u32,
     /// stereo frames taken this window with eyes of their own (`HalCmd::XrFrameEyes`), and
@@ -1327,7 +1329,7 @@ impl CxOpenXrSession {
             inputs: inputs.clone(), tracker: None, active: false, focused: false, active_display_refresh_rate_hz: None, panel, cursor, stereo: Some(stereo),
             pointer: Pointer { hand: 1, ..Default::default() }, controllers: Default::default(), hands: Default::default(),
             panel_shown: None, panel_visible: true, panel_over_stereo: false, panel_follow: None, cursor_ready: false, stereo_asked: None, stereo_shown: None, stereo_focus: 0.0, depth_layer, stereo_asked_at: Instant::now(),
-            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
+            stats: [0; 4], frame_us: Vec::new(), stereo_asked_ns: 0, space: 0, requested_refresh_mhz: 0, eyes_own: 0, eyes_asked: 0, paths: [0; 3], phases: [0; 7], stats_at: Instant::now(), stereo_b: Some(stereo_b), stereo_shown_chain: None,
             stereo_base_format: format, stereo_blit: blit, linear_ok, foveation_applied: u32::MAX, eye_scale: EyeScale::new(xr, rt.instance, handle), chain_spare: Vec::new(), chain_build: None, hands_and_controllers: true, environment_depth: true };
         let _ = session.update_active_display_refresh_rate();
         let stop = Arc::new(AtomicBool::new(false));
@@ -1418,9 +1420,16 @@ impl CxOpenXrSession {
                     }
                 }
                 XrStructureType::EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING => {
-                    // the old backend reset its depth (TSDF) store here; the app sees the new
-                    // poses in the next frames
-                    xr_log!("OpenXR reference space changed");
+                    // a recenter: the XR window learns it (`XrSpace`); the poses in the next
+                    // frames are in the moved space
+                    self.space = self.space.wrapping_add(1);
+                    xr_log!("OpenXR reference space changed (generation {})", self.space);
+                    let shared = Shared::global();
+                    let xr_window = lock(&shared.registry).xr_window;
+                    if let Some((sid, id)) = xr_window {
+                        let space = self.space;
+                        shared.emit_to(sid, id, clock_ns(), |q, id| q.xr_space(id, space));
+                    }
                 }
                 XrStructureType::EVENT_DATA_INSTANCE_LOSS_PENDING => { xr_log!("instance loss pending"); return false; }
                 _ => {}

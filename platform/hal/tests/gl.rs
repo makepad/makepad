@@ -244,7 +244,7 @@ fn sampled_bgra_upload_round_trips() {
     let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
     w.buffer_create(QUAD_INDEX, buffer_kind::INDEX, indices.len() as u64, Attr::default());
     w.buffer_update(QUAD_INDEX, 0, &indices);
-    let nearest = SpirvSampler { filter: 0, address: 1, compare: false, pixel: false };
+    let nearest = SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 };
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() },
         &payload(SAMPLED_VERTEX_GLSL, SAMPLED_GLSL, vec![Texture { name: "tex_image".into(), shape: 0, sampler: nearest }], false),
         &[NONE, NONE, NONE, NONE, NONE, 1], &LAYOUT);
@@ -396,7 +396,7 @@ fn adopted_app_texture_is_sampled_after_its_fence() {
     let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
     w.buffer_create(QUAD_INDEX, buffer_kind::INDEX, indices.len() as u64, Attr::default());
     w.buffer_update(QUAD_INDEX, 0, &indices);
-    let linear = SpirvSampler { filter: 1, address: 1, compare: false, pixel: false };
+    let linear = SpirvSampler { filter: 1, address: 1, compare: false, pixel: false, anisotropy: 1 };
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() },
         &payload(SAMPLED_VERTEX_GLSL, SAMPLED_GLSL, vec![Texture { name: "tex_image".into(), shape: 0, sampler: linear }], false),
         &[NONE, NONE, NONE, NONE, NONE, 1], &LAYOUT);
@@ -480,7 +480,7 @@ fn a_window_layer_samples_the_apps_newest_frame_and_goes() {
     let indices: Vec<u8> = [0u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()).collect();
     w.buffer_create(QUAD_INDEX, buffer_kind::INDEX, indices.len() as u64, Attr::default());
     w.buffer_update(QUAD_INDEX, 0, &indices);
-    let nearest = SpirvSampler { filter: 0, address: 1, compare: false, pixel: false };
+    let nearest = SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 };
     let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() },
         &payload(SAMPLED_VERTEX_GLSL, SAMPLED_GLSL, vec![Texture { name: "tex_image".into(), shape: 0, sampler: nearest }], false),
         &[NONE, NONE, NONE, NONE, NONE, 1], &LAYOUT);

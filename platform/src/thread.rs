@@ -3835,14 +3835,36 @@ mod tests {
         "draining_a_strand_runs_accepted_successors_and_refuses_new_submits",
     ];
 
+    /// A pool test failed in this process. Its threads may hold CPU permits they never give back
+    /// (a helper waiting for the test's end, a holder still waiting for its last token), and every
+    /// test after it shares the budget: one that wants the whole budget waits for good. So the first
+    /// failure ends the run: the tests after it do not run, and the runner reports that failure. (A
+    /// failed strand test left its person's permit held; the next one's holder waited for its eighth
+    /// token for good with the other seven, and the pool tests' process hung 25 min, 11-12.)
+    static POOL_TEST_FAILED: AtomicBool = AtomicBool::new(false);
+    struct MarksAFailure;
+    impl Drop for MarksAFailure {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                POOL_TEST_FAILED.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     /// A pool test's first line: in the pool tests' own process it goes on, elsewhere it returns
-    /// (the runner runs it there), and a test missing from [`IN_OWN_BUDGET`] fails.
+    /// (the runner runs it there), and a test missing from [`IN_OWN_BUDGET`] fails. After a pool
+    /// test failed there it returns too ([`POOL_TEST_FAILED`]).
     macro_rules! in_own_budget {
         ($name:ident) => {
             if std::env::var_os(POOL_CHILD).is_none() {
                 assert!(IN_OWN_BUDGET.contains(&stringify!($name)), "{} runs in the pool tests' process: list it in IN_OWN_BUDGET", stringify!($name));
                 return;
             }
+            if POOL_TEST_FAILED.load(Ordering::SeqCst) {
+                println!("{}: not run, a pool test before it failed", stringify!($name));
+                return;
+            }
+            let _marks_a_failure = MarksAFailure;
         };
     }
 

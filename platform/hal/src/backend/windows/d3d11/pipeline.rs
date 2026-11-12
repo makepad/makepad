@@ -417,6 +417,9 @@ pub(super) fn sampler_state(dev: &Device, s: &crate::spirv::SpirvSampler) -> Res
         2 => D3D11_TEXTURE_ADDRESS_BORDER,
         _ => D3D11_TEXTURE_ADDRESS_MIRROR,
     };
+    // `s.anisotropy` is not applied here yet: D3D11_FILTER_ANISOTROPIC is not among the generated
+    // bindings (libs/windows/sys, tools/winbind/apis.txt), so an anisotropic request filters
+    // trilinearly on D3D11, as on a device without anisotropy.
     let filter = match (s.filter, s.compare) {
         (0, false) => D3D11_FILTER_MIN_MAG_MIP_POINT,
         (_, false) => D3D11_FILTER_MIN_MAG_MIP_LINEAR,
