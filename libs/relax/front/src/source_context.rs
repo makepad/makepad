@@ -50,6 +50,11 @@ impl Context {
     pub(crate) fn set_outline_reuse(&self, path: &str, reuse: Arc<crate::parse_work::Reuse>) {
         self.outline_reuse.lock().unwrap().insert(path.into(), reuse);
     }
+    /// Whether a demand load's outline reuse for `path` is still on this context (its plan has not
+    /// completed, release_prescan): a parse of `path` in this context opens it as its session.
+    pub(crate) fn holds_outline_reuse(&self, path: &str) -> bool {
+        self.outline_reuse.lock().unwrap().contains_key(path)
+    }
     pub fn rust_outline(&self, path: &str, src: &[u8], edition: u16, cfg: &crate::cfg::CfgSet) -> Option<Arc<crate::rs_outline::Outline>> {
         let key = (crate::vfs::normalize_path(path), edition);
         let cell = self.rust_outlines.lock().unwrap().entry(key).or_default().clone();

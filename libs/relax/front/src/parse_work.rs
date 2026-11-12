@@ -316,4 +316,43 @@ mod tests {
         drop(outer.finish());
         assert!(super::REUSE.with(|s| s.borrow().is_none()));
     }
+
+    /// An edit whose text is what the crate's context already holds for the file (an app that
+    /// started on the saved text and then got that save as an edit) is parsed in that context
+    /// (ParseSnapshot::parse_full). A demand load leaves its outline expansion's reuse on the
+    /// context until its plan completes. The reload holds its own session (the file's previous
+    /// version's expansions), and the context's parse opened the load's as a second one: the
+    /// edit was refused with "nested reload parse".
+    #[test]
+    fn a_reload_of_the_loaded_text_never_opens_the_loads_outline_session() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let path = "/tmp/relax-reload-loaded-text.rs";
+        let mut table = crate::macros::MacroTable::default();
+        table.s2_fmt = true;
+        let mut s = crate::program::ParseSnapshot {
+            old: 0, path: path.into(), edition: 2021,
+            kname: "test".into(), mod_path: "test".into(), dir: "/tmp".into(), root: path.into(), together: Vec::new(),
+            cfg: crate::cfg::CfgSet::host(sess, &[]), macros: std::sync::Arc::new(table),
+            reuse: Default::default(), previous: None,
+            context: crate::source_context::Context::new(path, Default::default(), sess),
+        };
+        let text = "#[derive(Debug, Clone, Copy, PartialEq)] struct S { x: u32 }\nmacro_rules! m { ($x:literal) => { $x + 1 }; }\nfn f() -> u32 { m!(2) }";
+        // the load: the crate's context holds the file's text, and the demand load's outline
+        // reuse for it is still there
+        let loaded = s.parse(text.as_bytes().to_vec()).unwrap();
+        assert!(!loaded.reuse.expansions.is_empty() || !loaded.reuse.rules.is_empty());
+        loaded.context.set_outline_reuse(path, loaded.reuse.clone());
+        s.context = loaded.context.clone();
+        s.reuse = loaded.reuse.clone();
+        // the edit with that text: parsed on the reload's session alone, in a context of its own
+        let again = s.parse(text.as_bytes().to_vec()).expect("a reload of the loaded text parses");
+        assert!(!std::sync::Arc::ptr_eq(&again.context, &loaded.context), "a context still holding the load's outline reuse is not reused");
+        assert_eq!(format!("{:?}", again.pf.ast), format!("{:?}", loaded.pf.ast), "the same text parses to the same tree");
+        assert!(!again.reuse.expansions.is_empty() || !again.reuse.rules.is_empty(), "the reload's session records its expansions");
+        assert!(super::REUSE.with(|s| s.borrow().is_none()), "no session is left open");
+        // once the load's plan completed (its prescan released) the same edit keeps the context
+        loaded.context.release_prescan();
+        let kept = s.parse(text.as_bytes().to_vec()).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&kept.context, &loaded.context), "the loaded text keeps the crate's context");
+    }
 }

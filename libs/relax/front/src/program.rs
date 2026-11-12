@@ -6020,7 +6020,13 @@ impl ParseSnapshot {
             let table = std::sync::Arc::make_mut(&mut macros);
             for e in self.together.iter().chain(&imports) { table.apply_import_edit(e); }
         }
-        let context = if self.context.sources().find(path).and_then(|id| self.context.sources().get(id).ok()).is_some_and(|old| old.src.as_ref() == src) { self.context.clone() } else { self.context.edited(path, src.clone().into()) };
+        // The text the crate's context holds keeps that context, unless a demand load's outline
+        // reuse for this file is still on it (the load's plan has not completed): parse (the
+        // reload) holds its own session over this parse, and the context would open the load's
+        // as a second one ("nested reload parse": an app that started on the saved text and then
+        // got that save as an edit).
+        let unchanged = self.context.sources().find(path).and_then(|id| self.context.sources().get(id).ok()).is_some_and(|old| old.src.as_ref() == src);
+        let context = if unchanged && !self.context.holds_outline_reuse(path) { self.context.clone() } else { self.context.edited(path, src.clone().into()) };
         let (mut pf, used) = context.parse(src, None, *edition,
             Some(crate::macros::MacroScope::new(macros)), bctx, false)?;
         let used = used.unwrap();
