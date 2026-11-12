@@ -21,6 +21,9 @@ script_mod! {
         split: 1.0
         // the sub-pixel blend's strength (0: edges only, 1: the softest)
         subpix: 0.5
+        // 1: the image holds linear light (a linear-light pass's): the edges are found in its
+        // encoded luma (gamma 2.2), the blend stays linear
+        linear: 0.0
         // the column of pixel position `p` (its x range)
         column: fn(p: vec2) -> vec2 {
             let cols = max(self.split, 1.0)
@@ -34,7 +37,11 @@ script_mod! {
             return self.image.sample(q / self.extent)
         }
         luma: fn(c: vec4) -> float {
-            return dot(c.xyz, vec3(0.299, 0.587, 0.114))
+            let l = dot(c.xyz, vec3(0.299, 0.587, 0.114))
+            if self.linear > 0.5 {
+                return pow(max(l, 0.0), 1.0 / 2.2)
+            }
+            return l
         }
         lum: fn(p: vec2, col: vec2) -> float {
             return self.luma(self.tap(p, col))
@@ -139,4 +146,7 @@ pub struct DrawFxaa {
     /// The sub-pixel blend's strength (0..1).
     #[live]
     pub subpix: f32,
+    /// 1: the image holds linear light (its edges found in its encoded luma).
+    #[live]
+    pub linear: f32,
 }

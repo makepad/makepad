@@ -20,6 +20,8 @@ pub struct XrPresented<'a> {
     /// Both eyes side by side (premultiplied colour; the room shows where alpha is 0).
     pub color: &'a Texture,
     pub depth: &'a Texture,
+    /// The colour holds linear light (`DrawPass::set_linear_light`): whoever shows it encodes it.
+    pub linear_light: bool,
 }
 
 pub trait XrFrameSink: 'static {
@@ -83,8 +85,9 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             return;
         }
         let (Some(color), Some(depth)) = (self.passes[id].color_textures.first().map(|c| c.texture.clone()), self.passes[id].depth_texture.clone()) else { return };
+        let linear_light = self.passes[id].holds_linear_light();
         let Some(mut sink) = self.cx.cx.global::<XrSinkSlot>().sink.take() else { return };
-        sink.presented(self, &XrPresented { color: &color, depth: &depth });
+        sink.presented(self, &XrPresented { color: &color, depth: &depth, linear_light });
         let slot = self.cx.cx.global::<XrSinkSlot>();
         if slot.sink.is_none() {
             slot.sink = Some(sink);
