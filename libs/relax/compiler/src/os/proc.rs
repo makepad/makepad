@@ -15,6 +15,23 @@
 
 pub use imp::*;
 
+/// Resolve ordinary exports first. Linux native bundles also expose address
+/// accessors for archive symbols that the shared link keeps hidden.
+#[cfg(target_os = "linux")]
+pub unsafe fn find(name: *const u8) -> *mut u8 {
+    let address = imp::find(name);
+    if address.is_null() {
+        let name = std::ffi::CStr::from_ptr(name.cast()).to_bytes();
+        let accessor = std::ffi::CString::new(relax_front::native::address_name(name)).unwrap();
+        let entry = imp::find(accessor.as_ptr().cast());
+        if !entry.is_null() {
+            let get: unsafe extern "C" fn() -> *mut u8 = std::mem::transmute(entry);
+            return get();
+        }
+    }
+    address
+}
+
 /// The status an embedded run (the Android host) ended with when it failed; 0: it has not.
 pub static EMBEDDED_FAILURE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 /// Whether a host owns this process (it named its library): a failed run then must not exit().
