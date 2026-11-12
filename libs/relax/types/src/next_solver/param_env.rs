@@ -216,7 +216,7 @@ pub fn normalize_param_env_or_error(tcx: &Tcx, prog: &Program, env: ParamEnv, ca
     let mut clauses = Vec::new();
     let mut seen = crate::fxhash::HashSet::default();
     for p in &*env.clauses {
-        for p in tcx.supertraits(prog, p.clone()) { if seen.insert(p.clone()) { clauses.push(p); } }
+        for p in tcx.elaborate(prog, p.clone()) { if seen.insert(p.clone()) { clauses.push(p); } }
     }
     struct HasAliases(bool);
     impl TypeFolder for HasAliases {

@@ -1125,7 +1125,10 @@ impl<'c, 'a> Unit<'c, 'a> {
         let mut reports: Vec<Report> = Vec::new();
         let file = self.cx.body.file;
         let prog = self.cx.prog;
-        let env = crate::tcx::TypingEnv::fully_monomorphized(prog);
+        // the body's own predicates: a generic local's drop glue normalizes in them (a field
+        // `T::A` of a `W<S<N>>` needs `N: usize` to select `impl<const N: usize> Tr for S<N>`)
+        let body = self.cx.body;
+        let env = crate::tcx::TypingEnv { limit: crate::tcx::RecursionLimit::for_item(prog, body.def), param_env: body.param_env.unwrap_or_default(), mode: crate::tcx::TypingMode::PostAnalysis };
         for v in 0..nv {
             let var = &self.vars[v];
             if Self::ignored(&var.name) { continue; }

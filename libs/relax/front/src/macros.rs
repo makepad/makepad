@@ -1140,11 +1140,11 @@ impl<'a> Res<'a> {
 
     /// `type_in` through glob sources (each module once per query); `partial`: the crate whose
     /// scope is being computed and its tables so far.
-    fn type_in_seen<'b>(&self, k: &'b str, m: &'b str, n: &str, seen: &mut Seen<'b>, partial: Option<(&str, &'b CrateScope)>) -> Option<(&'b str, &'b str)>
+    fn type_in_seen<'b>(&self, from: &str, k: &'b str, m: &'b str, n: &str, seen: &mut Seen<'b>, partial: Option<(&str, &'b CrateScope)>) -> Option<(&'b str, &'b str)>
     where
         'a: 'b,
     {
-        self.glob_find(k, k, m, n, seen, partial).map(|(_, _, t)| (t.0.as_str(), t.1.as_str()))
+        self.glob_find(from, k, m, n, seen, partial).map(|(_, _, t)| (t.0.as_str(), t.1.as_str()))
     }
 
     /// `type_in_seen`, with the (crate, module) whose non-glob bindings had the name. `from`: the
@@ -1383,7 +1383,10 @@ impl CrateScope {
     /// The module a name denotes in module `mm` of crate `kk`: this crate's partial tables, a
     /// dependency's finished ones.
     fn lookup_type<'b>(&'b self, r: &Res<'b>, k: &str, kk: &'b str, mm: &'b str, n: &str) -> Option<(&'b str, &'b str)> {
-        r.type_in_seen(kk, mm, n, &mut Seen::new(), Some((k, self)))
+        // Retain the importing crate across qualified paths. A private module
+        // beside a public macro (zerovec::zerovec) must not be imported into the
+        // type namespace and shadow the extern crate used by attribute macros.
+        r.type_in_seen(k, kk, mm, n, &mut Seen::new(), Some((k, self)))
     }
 
     fn lookup_macro(&self, r: &Res, k: &str, kk: &str, mm: &str, n: &str) -> Option<MacroRef> {
@@ -1770,7 +1773,7 @@ impl MacroScope {
 
     /// `builtin_macro_path` of a lookup of its own (no walk in progress): the answer reads only
     /// the table, so each (crate, module, path) is walked once per table.
-    pub(crate) fn builtin_macro(&self, cur: &str, module: &str, path: &[String]) -> Option<String> {
+    pub fn builtin_macro(&self, cur: &str, module: &str, path: &[String]) -> Option<String> {
         let key = (cur.to_string(), module.to_string(), path.to_vec());
         if let Some((table, known)) = self.builtin_paths.borrow().as_ref() {
             if std::sync::Arc::ptr_eq(table, &self.table) {
@@ -3250,24 +3253,33 @@ impl<'a> Parser<'a> {
                             out.groups.push((at, at | WRAP_PAREN | META_ONLY));
                             out.push(T::OpenParen, "(", None, u32::MAX);
                         }
-                        let group_start = out.s.len() + 1;
+                        let group_start = if lo < hi {
+                            let t = self.toks.at(*lo);
+                            out.start(t.kind, &String::from_utf8_lossy(self.tok_text(t)), Some(t.lo))
+                        } else if let Some((a, b)) = *taken {
+                            let part = self.bytes(a, b);
+                            out.start(lexed_kind(part), &String::from_utf8_lossy(part), Some(a))
+                        } else {
+                            out.s.len() as u32 + 1
+                        } as usize;
                         let mut groups = Vec::new();
                         for k in *lo..*hi {
                             let t = self.toks.at(k);
                             // A forwarded outer fragment must retain the invisible
                             // expression groups nested inside it. Their synthetic
                             // parentheses have no ordinary frag_groups entry.
+                            let text = String::from_utf8_lossy(self.tok_text(t));
                             if self.synth_parens.contains(&{ t.lo }) {
-                                let at = out.s.len() as u32 + 1;
+                                let at = out.start(t.kind, &text, Some(t.lo));
                                 out.groups.push((at, at | WRAP_PAREN | META_ONLY));
                             }
                             // rustc_expand mbe/transcribe.rs: transcribe_pnr preserves
                             // invisible groups inside every captured fragment, including
                             // a path inside a type-macro call subsequently matched as tt.
                             if let Some((end, flags)) = self.fragment_group(t.lo) {
-                                groups.push((end, out.s.len() as u32 + 1, flags));
+                                groups.push((end, out.start(t.kind, &text, Some(t.lo)), flags));
                             }
-                            out.push(t.kind, &String::from_utf8_lossy(self.tok_text(t)), Some(t.lo), u32::MAX);
+                            out.push(t.kind, &text, Some(t.lo), u32::MAX);
                             while groups.last().is_some_and(|&(end, _, _)| end == t.hi) {
                                 let (_, start, flags) = groups.pop().unwrap();
                                 out.groups.push((start, out.s.len() as u32 | flags));
@@ -3423,14 +3435,17 @@ impl<'a> Parser<'a> {
     }
 }
 
-/// A transcription being written: the text (each token preceded by a space) with the tokens
-/// over it (kind and position as the definition's and the call's tokens have them, no lexing),
-/// per token substituted from a fragment (offset, its position), per token of the definition
-/// body (offset, its position in the definition).
+/// A transcription being written: the text (each token preceded by a space, unless it is a
+/// fragment token that followed the previous one with nothing between at the call) with the tokens
+/// over it (kind and position as the definition's and the call's tokens have them, no lexing), per
+/// token substituted from a fragment (offset, its position), per token of the definition body
+/// (offset, its position in the definition).
 #[derive(Default)]
 pub struct Transcript {
     /// the edition the text is read in: the expanding parser's, whichever edition a token was lexed in
     edition: u16,
+    /// where the last token, a fragment token, ended at the call
+    last: Option<u32>,
     s: String,
     toks: Vec<Tok>,
     origins: Vec<(u32, u32, u32)>,
@@ -3439,13 +3454,47 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    fn push(&mut self, kind: T, t: &str, origin: Option<u32>, bp: u32) {
-        // an identifier or keyword is classified by the edition of the expansion (`dyn`, `async`,
-        // `try` are keywords from 2018), as lexing the text would
-        let kind = if kind == T::Ident || (kind as u8 >= T::KwAs as u8 && kind as u8 <= T::KwTry as u8) {
+    /// rustc_expand mbe/transcribe.rs: a token substituted from a fragment keeps the spacing it
+    /// was lexed with, and a proc macro reads it (`Spacing::Joint` before adjacent punctuation:
+    /// `::<`, `!-`, `&&!` passed on through `$($t:tt)*`); a token of the body is `Alone`. A
+    /// fragment token that followed the previous one with nothing between at the call follows it
+    /// so here too: the text is then a copy of the call's, which lexes to the same tokens. A token
+    /// a match split from one the lexer read whole (`>>`, the `0.1` of `x.0.1`) is spelled apart
+    /// from its other part, as before.
+    fn joins(&self, kind: T, text: &str, origin: Option<u32>) -> bool {
+        let adjacent = origin.is_some() && self.last == origin;
+        let op = |k: T| !k.is_ident_like() && !k.is_number() && !k.is_literal() && !k.is_trivia()
+            && !matches!(k, T::Eof | T::Lifetime | T::RawBody | T::OpenParen | T::CloseParen | T::OpenBracket | T::CloseBracket | T::OpenBrace | T::CloseBrace);
+        adjacent && self.toks.last().is_none_or(|prev| {
+            let splittable = (op(prev.kind) && op(kind)) || (prev.kind.is_number() && (kind == T::Dot || kind.is_ident_like()));
+            !splittable || {
+                let joined = format!("{}{}", &self.s[prev.lo as usize..prev.hi as usize], text);
+                let mut lexed = Vec::new();
+                crate::lexer::lex(joined.as_bytes(), self.edition, &mut lexed).is_ok()
+                    && matches!(&lexed[..], [a, b, ..] if a.kind == prev.kind && a.hi == prev.hi - prev.lo && b.kind == kind && b.hi as usize == joined.len())
+            }
+        })
+    }
+
+    /// Where a fragment token pushed next starts.
+    fn start(&self, kind: T, text: &str, origin: Option<u32>) -> u32 {
+        self.s.len() as u32 + u32::from(!self.joins(self.classify(kind, text), text, origin))
+    }
+
+    /// An identifier or keyword is classified by the edition of the expansion (`dyn`, `async`,
+    /// `try` are keywords from 2018), as lexing the text would.
+    fn classify(&self, kind: T, t: &str) -> T {
+        if kind == T::Ident || (kind as u8 >= T::KwAs as u8 && kind as u8 <= T::KwTry as u8) {
             crate::lexer::keyword(t.as_bytes(), self.edition).unwrap_or(T::Ident)
-        } else { kind };
-        self.s.push(' ');
+        } else { kind }
+    }
+
+    fn push(&mut self, kind: T, t: &str, origin: Option<u32>, bp: u32) {
+        let kind = self.classify(kind, t);
+        if !self.joins(kind, t, origin) {
+            self.s.push(' ');
+        }
+        self.last = origin.map(|o| o + t.len() as u32);
         let at = self.s.len() as u32;
         if let Some(o) = origin {
             self.origins.push((at, o, t.len() as u32));
@@ -3458,6 +3507,7 @@ impl Transcript {
         // a generated macro definition must still ignore docs in its matcher.
         if kind == T::DocComment {
             self.s.push('\n');
+            self.last = None;
         } else {
             self.toks.push(Tok { kind, lo: at, hi: at + t.len() as u32 });
         }
@@ -3654,6 +3704,73 @@ mod replay_tests {
         assert!(cm.in_textual_scope(&d1, "c", Some(61)) && cm.in_textual_scope(&d1, "c::m::sib", None));
         let s1 = def("c::m::sib", 32);
         assert!(!cm.in_textual_scope(&s1, "c::m", None) && !cm.in_textual_scope(&s1, "c", None));
+    }
+}
+
+#[cfg(test)]
+mod spacing_tests {
+    use super::*;
+    use crate::pm_tokens::TokenTree;
+
+    /// The expansion of the last call `name!(..)` in `src` of the `macro_rules! name` written there:
+    /// its text, and the punctuation inside the group after its `m!`, with the spacing a proc macro
+    /// reads (pm_tokens::from_toks, as a call's input is built).
+    fn expand(src: &str, name: &str) -> (String, String) {
+        let mut toks = Vec::new();
+        crate::lexer::lex(src.as_bytes(), 2021, &mut toks).unwrap_or_else(|e| panic!("{}", e.msg));
+        let text = |i: usize| &src[toks[i].lo as usize..toks[i].hi as usize];
+        let close = |open: usize| {
+            let mut depth = 0;
+            (open..toks.len()).find(|&i| {
+                match toks[i].kind {
+                    T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                    T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                    _ => {}
+                }
+                depth == 0
+            }).unwrap()
+        };
+        let at = (2..toks.len()).find(|&i| text(i) == name && text(i - 2) == "macro_rules").unwrap();
+        let end = close(at + 1);
+        let rules = definition_tokens(&toks[at + 2..end], |lo, hi| &src.as_bytes()[lo as usize..hi as usize]);
+        let def = parse_def(name, "c", 2021, &rules).unwrap();
+        let call = (end..toks.len()).rev().find(|&i| text(i) == name).unwrap();
+        let session = std::sync::Arc::new(crate::Session::default());
+        let mut p = Parser::new(&session, src.as_bytes(), toks.clone(), 2021);
+        let (s, etoks, ..) = p.expand_rules(&def, call + 3, close(call + 2)).unwrap();
+        // the transcription's text lexes back to its tokens (MAKEPAD_RUN_VERIFY_TOKENS)
+        let mut lexed = Vec::new();
+        crate::lexer::lex(s.as_bytes(), 2021, &mut lexed).unwrap_or_else(|e| panic!("{}", e.msg));
+        lexed.retain(|t| t.kind != T::Eof);
+        assert_eq!(lexed.iter().map(|t| (t.kind, t.lo, t.hi)).collect::<Vec<_>>(), etoks.iter().map(|t| (t.kind, t.lo, t.hi)).collect::<Vec<_>>(), "{s}");
+        let m = etoks.iter().position(|t| &s[t.lo as usize..t.hi as usize] == "m").unwrap();
+        let stream = crate::pm_tokens::from_toks(s.as_bytes(), &etoks[m..], &|_, _| crate::pm_tokens::Span::DUMMY).unwrap();
+        let Some(TokenTree::Group(g)) = stream.trees.get(2) else { panic!("no group after m! in {s}") };
+        let puncts = g.stream().trees.iter().filter_map(|t| match t {
+            TokenTree::Punct(p) => Some(format!("'{}' {:?}", p.as_char(), p.spacing())),
+            _ => None,
+        }).collect::<Vec<_>>().join(", ");
+        (s, puncts)
+    }
+
+    /// rustc keeps the spacing a fragment token was lexed with through a transcription, and a proc
+    /// macro reads it (relax issue 9: equator's `assert!` passes `$($tokens:tt)*` on to a proc macro that
+    /// tells a turbofish `::<` from a comparison by the spacing of the second `:`).
+    #[test]
+    fn transcribed_tokens_keep_the_spacing_they_were_lexed_with() {
+        let rustc = "':' Joint, ':' Joint, '<' Alone, '>' Alone, '!' Joint, '-' Alone, '&' Joint, '&' Joint, '!' Alone";
+        let defs = "macro_rules! fwd { ($($t:tt)*) => { m!($($t)*) } }\nmacro_rules! body { () => { m!(f::<u32>() !-x &&!x) } }\n";
+        assert_eq!(expand(&format!("{defs}fwd!(f::<u32>() !-x &&!x)"), "fwd").1, rustc, "forwarded through a tt repetition");
+        // rustc transcribes a body token `Alone` (only a multi-char token's inner chars are Joint)
+        assert_eq!(expand(&format!("{defs}body!()"), "body").1,
+            "':' Joint, ':' Alone, '<' Alone, '>' Alone, '!' Alone, '-' Alone, '&' Joint, '&' Alone, '!' Alone", "written in the definition's body");
+        // tokens apart where they were lexed stay apart
+        assert_eq!(expand(&format!("{defs}fwd!(f :: < u32 > () ! - x & & ! x)"), "fwd").1,
+            "':' Joint, ':' Alone, '<' Alone, '>' Alone, '!' Alone, '-' Alone, '&' Alone, '&' Alone, '!' Alone");
+        // a match that split a token the lexer read whole (the float `0.1` of `x.0.1`) leaves its
+        // parts apart in the text: it still lexes to the transcribed tokens (checked in `expand`)
+        let (s, _) = expand("macro_rules! fld { ($e:expr) => { m!($e) } }\nfld!(x.0.1)", "fld");
+        assert!(s.contains("x.0"), "{s}");
     }
 }
 

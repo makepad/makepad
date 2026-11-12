@@ -573,11 +573,13 @@ watched() {
   wait "$pid"
 }
 # hung_tests <run log> <--list log>: the tests the unit's last target started and did not finish: that target's
-# tests (its --list section: the run's targets in the same order) less those it reported
+# tests (its --list section: the run's targets in the same order) less those it reported. A child's own run of a
+# test inside its target's (the harness's self-exec: its `running 1 test` to `test result:`) is no target of its
+# own (unit_watch_body.sh out_state)
 hung_tests() {
   awk -v run="$1" 'BEGIN { while ((getline l < run) > 0) {
-        if (l ~ /^running [0-9]+ tests?$/) { k++; delete done; open = 1 }
-        else if (l ~ /^test result:/) open = 0
+        if (l ~ /^running [0-9]+ tests?$/) { if (!d++) { k++; delete done; open = 1 } }
+        else if (l ~ /^test result:/) { if (d && !--d) open = 0 }
         else if (match(l, /^test .* \.\.\. /)) done[substr(l, 6, RLENGTH - 10)] = 1 } }
     open && /^[0-9]+ tests, [0-9]+ benchmarks$/ { s++; next }
     open && s == k - 1 && /: test$/ { name = substr($0, 1, length($0) - 6); if (!(name in done)) print name }' "$2"
@@ -668,11 +670,12 @@ testrun_one() {
       awk -v u="$unit" -v a="$pk" -v b="$was" 'BEGIN { printf "%s: peaked %.1f GB, %.1fx the %.1f GB of its last run\n", u, a / 1024, a / b, b / 1024 }'
     fi
   fi
-  r=$(grep -E '^test result:' "$log/testrun-$name" | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }')
+  # (its targets' own results: a child's run of a test inside its target's is counted there)
+  r=$(awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ && d && !--d { for (i = 1; i <= NF; i++) if ($i ~ /^(passed|failed);?$/) s[$i] += $(i - 1) } END { printf "%d passed, %d failed", s["passed;"], s["failed;"] }' "$log/testrun-$name")
   # (a unit that ended by itself as its watch said HUNG: it ended)
   if [ "$code" != 0 ] && [ -s "$log/testrun-$name.hung" ]; then
     # inside a target: its tests, listed (watched too), less those it reported
-    if awk '/^running [0-9]+ tests?$/ { o = 1 } /^test result:/ { o = 0 } END { exit !o }' "$log/testrun-$name"; then
+    if awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ { if (d) d-- } END { exit !d }' "$log/testrun-$name"; then
       watched "$log/testrun-$name.list" "${run[@]}" -- --list
       hung=$(hung_tests "$log/testrun-$name" "$log/testrun-$name.list" | paste -sd' ' -)
     fi
@@ -791,7 +794,14 @@ next_told() {
   wants=$((wants + 1)); echo "GATEWANT ${DEVHUB_LEASE:-none} $wants"
   until said=$(grep -m1 "^$wants " "$DEVHUB_TOLD" 2>/dev/null); do sleep 0.2; done
   set -- $said
-  [ "$2" != - ] || return 1
+  if [ "$2" = - ]; then
+    # (said: a shard whose last line was its last want read as one waiting for its answer, while a unit it still
+    # ran hung, 11-12)
+    local units
+    units=$(printf '; %s' "${running[@]}"); units=${units#; }
+    echo "testrun: the run's queue is dealt out; this shard's last units run on: ${units:-none}"
+    return 1
+  fi
   if [ "$3" != "$queue_digest" ]; then
     echo "testrun: the dealer's queue $3 is not this shard's $queue_digest"; fail="$fail queue"; return 1
   fi

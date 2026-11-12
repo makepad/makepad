@@ -1,0 +1,3 @@
+[workspace]
+members = ["spacing-macro", "forward", "app"]
+resolver = "2"

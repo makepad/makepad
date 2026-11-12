@@ -1557,7 +1557,18 @@ impl<'a> Parser<'a> {
     /// rustc legacy scope: is the written `macro_rules!` `d` of this file in scope at the cursor
     /// (its enclosing block / module without `#[macro_use]` still open)? Anything not known to be
     /// out of scope counts as in scope.
-    fn rules_in_textual_scope(&self, d: &crate::macros::MacroDef, at: u32) -> bool {
+    fn rules_in_textual_scope(&self, d: &crate::macros::MacroDef, mut at: u32) -> bool {
+        // Expansion text is appended after the source, not after every written
+        // definition in lexical scope. Compare a written definition against the
+        // expansion's invocation (following nested expansions), otherwise a later
+        // block-local macro can capture an earlier expanded call of the same name.
+        // Definitions made by expansions retain their synthetic ordering below.
+        if (d.def_pos as usize) < self.src.len() {
+            while at as usize >= self.src.len() {
+                let Some(call) = region_of(self.exp_map.view(), at).filter(|&call| call < at) else { break; };
+                at = call;
+            }
+        }
         let pos = if (at as usize) < self.src.len() { d.scope_pos.unwrap_or(d.def_pos) } else { d.def_pos };
         if d.builtin != 0 || d.exported || (pos as usize) >= self.src.len() || !self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) {
             return true;

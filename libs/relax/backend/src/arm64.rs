@@ -4602,15 +4602,16 @@ impl<'a> Gen<'a> {
     }
     /// `ext`: re-extend a narrow result (false: nobody reads its upper bits, passes::low_bits_only)
     fn ibin_rr(&mut self, op: IOp, it: IntTy, rd: u8, ra: u8, rb: u8, ext: bool) {
-        if let Some(n) = op.crc32_bits() {
-            // crc32b/h/w wd, wn, wm and crc32x wd, wn, xm: the W result zero-extends
+        if let Some((n, castagnoli)) = op.crc32() {
+            // crc32{,c}b/h/w wd, wn, wm and crc32{,c}x wd, wn, xm (C, bit 12: Castagnoli): the W
+            // result zero-extends
             let base = match n {
                 8 => 0x1AC0_4000u32,
                 16 => 0x1AC0_4400,
                 32 => 0x1AC0_4800,
                 _ => 0x9AC0_4C00,
             };
-            self.a.rrr(base, rd, ra, rb);
+            self.a.rrr(base | (castagnoli as u32) << 12, rd, ra, rb);
             return;
         }
         if op == IOp::Bzhi {
@@ -4657,7 +4658,7 @@ impl<'a> Gen<'a> {
             // smulh / umulh
             IOp::MulHi => self.a.rrr(if it.signed { 0x9B40_7C00 } else { 0x9BC0_7C00 }, rd, ra, rb),
             // handled at the top
-            IOp::Rotl | IOp::Bzhi | IOp::Crc32B | IOp::Crc32H | IOp::Crc32W | IOp::Crc32X => {}
+            IOp::Rotl | IOp::Bzhi | IOp::Crc32B | IOp::Crc32H | IOp::Crc32W | IOp::Crc32X | IOp::Crc32CB | IOp::Crc32CH | IOp::Crc32CW | IOp::Crc32CX => {}
             IOp::Rem => {
                 // q = a / b; d = a - q * b  (rd may alias ra or rb: compute q in IP0)
                 self.a.rrr(if it.signed { 0x9AC0_0C00 } else { 0x9AC0_0800 }, IP0, ra, rb);

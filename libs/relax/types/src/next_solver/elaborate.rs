@@ -51,10 +51,23 @@ impl Tcx {
         Predicate { kind, bound_vars: bound_vars.into() }
     }
 
+    /// rustc_type_ir/src/elaborate.rs with filter_only_self: a trait clause adds its supertraits
+    /// (explicit_super_predicates_of) only.
+    pub fn supertraits(&self, prog: &Program, initial: Predicate) -> Vec<Predicate> {
+        self.elaborate_with(prog, initial, false)
+    }
+
+    /// rustc_type_ir/src/elaborate.rs (Filter::All, a param env's and an item's bounds): a trait
+    /// clause adds what its trait implies (explicit_implied_predicates_of), the bounds of the
+    /// supertraits' associated item constraints too.
+    pub fn elaborate(&self, prog: &Program, initial: Predicate) -> Vec<Predicate> {
+        self.elaborate_with(prog, initial, true)
+    }
+
     /// rustc_type_ir/src/elaborate.rs:101-112 (extend_deduped): a predicate is pushed only if its
     /// kind with anonymized bound variables (anonymize_bound_vars) was not seen before; :140-249
     /// pops, elaborates and yields.
-    pub fn supertraits(&self, prog: &Program, initial: Predicate) -> Vec<Predicate> {
+    fn elaborate_with(&self, prog: &Program, initial: Predicate, all: bool) -> Vec<Predicate> {
         let mut visited = crate::fxhash::HashSet::default();
         let mut stack = Vec::new();
         let mut push = |stack: &mut Vec<Predicate>, pred: Predicate| { if visited.insert(pred.anonymized()) { stack.push(pred); } };
@@ -63,7 +76,8 @@ impl Tcx {
         while let Some(pred) = stack.pop() {
             if let PredicateKind::Clause(ClauseKind::Trait(tr)) = &pred.kind {
                 if tr.polarity == ClausePolarity::Positive {
-                for bound in self.explicit_super_predicates_of(prog, tr.trait_ref.def_id) {
+                let implied = if all { self.explicit_implied_predicates_of(prog, tr.trait_ref.def_id) } else { self.explicit_super_predicates_of(prog, tr.trait_ref.def_id) };
+                for bound in implied {
                     push(&mut stack, self.instantiate_supertrait(prog, &bound, &pred));
                 }
                 }

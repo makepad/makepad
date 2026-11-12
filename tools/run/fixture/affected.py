@@ -47,10 +47,11 @@ CALC = "makepad-app-calculator"
 # every test green. The target is `lib` (the package's library tests) or `test:<name>` (one of its test targets). The
 # hot bucket runs one on its node's real GPU under the JIT after every landing that reaches its package
 # (land_gate.sh step_guards): the map's zoom into text, its phosphor lens (11-06); Fab's far wall face in the
-# headset, its layers even (11-11)
+# headset, its layers even (11-11); the GI field, empty for weeks with every test green (11-12)
 GUARDS = (
     ("makepad-scope", "lib", "gpu_guard"),
     ("makepad-fab", "test:xr_far_face", "a_far_wall_face_shows_no_darker_layers_in_the_headset"),
+    ("makepad-render", "lib", "gpu_guard"),
 )
 # the JIT binary; devhub's binary
 JIT_PACKAGE = "makepad-run"

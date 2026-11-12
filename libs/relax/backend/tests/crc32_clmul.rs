@@ -1,4 +1,5 @@
-//! IOp::Crc32B/H/W/X (Arm `crc32b/h/w/x`, what std's aarch64 `__crc32b/d` lower to) and VX::Clmul (x64
+//! IOp::Crc32B/H/W/X (Arm `crc32b/h/w/x`, what std's aarch64 `__crc32b/d` lower to), IOp::Crc32CB/H/W/X
+//! (Arm `crc32cb/h/w/x`, x64 SSE4.2 `crc32`: std's `__crc32c*` and `_mm_crc32_*`) and VX::Clmul (x64
 //! `pclmulqdq`, arm64 `pmull .1q`, what std's x86_64 `_mm_clmulepi64_si128` lowers to): the host
 //! backend's code equals the folder / a bitwise reference, every payload width and lane selector,
 //! register and constant operands, a result sharing a register with an operand.
@@ -28,30 +29,30 @@ fn push(f: &mut Func, i: Inst) {
 
 const VALS: [u64; 8] = [0, 1, u64::MAX, 0x8000_0000_0000_0001, 0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210, 0xffff_ffff, 0xdead_beef_0000_00ff];
 
-/// The folder (`passes::crc32`, every backend's meaning): CRC-32's check value over "123456789"
-/// (pre/post inversion around the per-byte steps) and the wide steps equal to byte steps.
+/// The folder (`passes::crc32`, every backend's meaning): CRC-32's and CRC-32C's check values over
+/// "123456789" (pre/post inversion around the per-byte steps) and the wide steps equal to byte steps.
 #[test]
 fn crc32_folder_is_crc32() {
-    let mut r = 0xffff_ffffu64;
-    for &c in b"123456789" {
-        r = passes::crc32(8, r, c as u64);
-    }
-    assert_eq!(r ^ 0xffff_ffff, 0xcbf4_3926);
-    for &a in &VALS {
-        for &b in &VALS {
-            let bytes = (0..8).fold(a & 0xffff_ffff, |r, i| passes::crc32(8, r, (b >> (8 * i)) & 0xff));
-            assert_eq!(passes::crc32(64, a, b), bytes, "a {a:#x} b {b:#x}");
-            assert_eq!(passes::crc32(16, a, b), passes::crc32(8, passes::crc32(8, a, b), b >> 8));
-            assert_eq!(passes::crc32(32, a, b), passes::crc32(16, passes::crc32(16, a, b), b >> 16));
+    for (c, check) in [(false, 0xcbf4_3926), (true, 0xe306_9283)] {
+        let mut r = 0xffff_ffffu64;
+        for &x in b"123456789" {
+            r = passes::crc32(8, c, r, x as u64);
+        }
+        assert_eq!(r ^ 0xffff_ffff, check, "castagnoli {c}");
+        for &a in &VALS {
+            for &b in &VALS {
+                let bytes = (0..8).fold(a & 0xffff_ffff, |r, i| passes::crc32(8, c, r, (b >> (8 * i)) & 0xff));
+                assert_eq!(passes::crc32(64, c, a, b), bytes, "castagnoli {c} a {a:#x} b {b:#x}");
+                assert_eq!(passes::crc32(16, c, a, b), passes::crc32(8, c, passes::crc32(8, c, a, b), b >> 8));
+                assert_eq!(passes::crc32(32, c, a, b), passes::crc32(16, c, passes::crc32(16, c, a, b), b >> 16));
+            }
         }
     }
 }
 
 /// f(a, b) = crc8(a, b) ^ crc16(b, a) << 1 ^ crc32(crc64(a, b), a) ^ crc64(a, 0x1234_5678_9abc_def0)
-/// [constant data], each width once, the second with its operands swapped.
-#[cfg(target_arch = "aarch64")]
-#[test]
-fn crc32_matches_the_folder() {
+/// [constant data], each width once, the second with its operands swapped; `ops`: the 8/16/32/64-bit ops.
+fn crc_matches_the_folder(ops: [IOp; 4]) {
     let u64t = IntTy { bits: 64, signed: false };
     let mut f = Func::new("crc32".into(), 0);
     let (a, b) = (f.vreg(Cls::I), f.vreg(Cls::I));
@@ -59,12 +60,12 @@ fn crc32_matches_the_folder() {
     f.rets = vec![Cls::I];
     f.block();
     let v: Vec<VReg> = (0..9).map(|_| f.vreg(Cls::I)).collect();
-    push(&mut f, Inst::IBin(IOp::Crc32B, u64t, v[0], a, b));
-    push(&mut f, Inst::IBin(IOp::Crc32H, u64t, v[1], b, a));
+    push(&mut f, Inst::IBin(ops[0], u64t, v[0], a, b));
+    push(&mut f, Inst::IBin(ops[1], u64t, v[1], b, a));
     push(&mut f, Inst::IBinI(IOp::Shl, u64t, v[2], v[1], 1));
-    push(&mut f, Inst::IBin(IOp::Crc32X, u64t, v[3], a, b));
-    push(&mut f, Inst::IBin(IOp::Crc32W, u64t, v[8], v[3], a));
-    push(&mut f, Inst::IBinI(IOp::Crc32X, u64t, v[4], a, 0x1234_5678_9abc_def0));
+    push(&mut f, Inst::IBin(ops[3], u64t, v[3], a, b));
+    push(&mut f, Inst::IBin(ops[2], u64t, v[8], v[3], a));
+    push(&mut f, Inst::IBinI(ops[3], u64t, v[4], a, 0x1234_5678_9abc_def0));
     push(&mut f, Inst::IBin(IOp::Xor, u64t, v[5], v[0], v[2]));
     push(&mut f, Inst::IBin(IOp::Xor, u64t, v[6], v[5], v[8]));
     push(&mut f, Inst::IBin(IOp::Xor, u64t, v[7], v[6], v[4]));
@@ -75,10 +76,21 @@ fn crc32_matches_the_folder() {
     let c = |op: IOp, x: u64, y: u64| passes::fold_ibin(op, u64t, x as i64, y as i64).unwrap() as u64;
     for &x in &VALS {
         for &y in &VALS {
-            let want = c(IOp::Crc32B, x, y) ^ c(IOp::Crc32H, y, x) << 1 ^ c(IOp::Crc32W, c(IOp::Crc32X, x, y), x) ^ c(IOp::Crc32X, x, 0x1234_5678_9abc_def0);
-            assert_eq!(run(x, y), want, "a {x:#x} b {y:#x}");
+            let want = c(ops[0], x, y) ^ c(ops[1], y, x) << 1 ^ c(ops[2], c(ops[3], x, y), x) ^ c(ops[3], x, 0x1234_5678_9abc_def0);
+            assert_eq!(run(x, y), want, "{ops:?} a {x:#x} b {y:#x}");
         }
     }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn crc32_matches_the_folder() {
+    crc_matches_the_folder([IOp::Crc32B, IOp::Crc32H, IOp::Crc32W, IOp::Crc32X]);
+}
+
+#[test]
+fn crc32c_matches_the_folder() {
+    crc_matches_the_folder([IOp::Crc32CB, IOp::Crc32CH, IOp::Crc32CW, IOp::Crc32CX]);
 }
 
 /// carry-less product of a's lane k & 1 and b's lane k >> 1

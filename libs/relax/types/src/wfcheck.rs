@@ -1056,7 +1056,9 @@ pub mod obligations {
             let PredicateKind::Clause(ClauseKind::Trait(tc)) = &p.kind else { unreachable!() };
             let def = trait_ref.def_id;
             for q in w.tcx.clauses_of(w.prog, def) {
-                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if matches!(u.trait_ref.args.first(), Some(GenericArg::Type(t)) if matches!(w.tcx.tys.kind(*t), TyKind::Alias(..)))) { continue; }
+                // a clause on a projection is left out, except a supertrait's associated type bound
+                // (`trait B: A<X: Copy>`), which the impl meets as in rustc
+                if matches!(&q.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if matches!(u.trait_ref.args.first(), Some(GenericArg::Type(t)) if matches!(w.tcx.tys.kind(*t), TyKind::Alias(_, a) if !matches!(a.kind, crate::types::AliasTyKind::Projection { def_id } if w.prog.def(def_id).parent != def)))) { continue; }
                 let q = w.tcx.instantiate_predicate(w.prog, def, &tc.trait_ref.args, &q);
                 if crate::next_solver::wf::predicate_has_escaping_bound_vars(&w.tcx.tys, &q) { continue; }
                 // rustc predicates_of adds `Self: Trait` to a trait's predicates: the impl's own trait
@@ -1067,7 +1069,7 @@ pub mod obligations {
                     continue;
                 }
                 // Elaborate::All: what the trait's bounds imply holds too
-                for e in w.tcx.supertraits(w.prog, q) {
+                for e in w.tcx.elaborate(w.prog, q) {
                     if matches!(&e.kind, PredicateKind::Clause(ClauseKind::Trait(u)) if u.trait_ref.def_id == def) { continue; }
                     w.register(Goal { param_env: w.env.clone(), predicate: e }, self_pos);
                 }

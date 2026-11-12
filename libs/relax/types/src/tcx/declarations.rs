@@ -15,6 +15,7 @@ pub(crate) struct DefQueries {
     krate: u32,
     pub own_clauses: DeclarationCell<(Vec<Predicate>, Vec<String>)>,
     pub super_predicates: DeclarationCell<Vec<Predicate>>,
+    pub implied_predicates: DeclarationCell<Vec<Predicate>>,
     filtered_supers: Mutex<crate::fxhash::HashMap<Sym, Arc<DeclarationCell<Vec<Predicate>>>>>,
     pub explicit_item_bounds: DeclarationCell<Vec<Predicate>>,
     /// an opaque type's bound-lowering errors (E0412 ..), set by its explicit_item_bounds
@@ -79,6 +80,7 @@ impl DefQueries {
             .retain(|_, cell| !cell.0.get().is_some_and(|d| !d.misses.is_empty()));
         self.own_clauses.reset_with_misses();
         self.super_predicates.reset_with_misses();
+        self.implied_predicates.reset_with_misses();
         self.explicit_item_bounds.reset_with_misses();
         self.item_bounds.reset_with_misses();
         self.impl_super_outlives.reset_with_misses();

@@ -12,7 +12,7 @@ use crate::consts::{ConstKind, IsRigid};
 use crate::tcx::resolve_bound_vars::BinderId;
 
 #[derive(Clone, Copy)]
-pub(crate) enum PredicateFilter { All, SelfOnly, SelfTraitThatDefines(crate::program::Sym) }
+pub(crate) enum PredicateFilter { All, SelfOnly, SelfTraitThatDefines(crate::program::Sym), SelfAndAssociatedTypeBounds }
 
 pub fn trait_predicate(def_id: DefId, args: Vec<GenericArg>) -> Predicate {
     Predicate::dummy(PredicateKind::Clause(ClauseKind::Trait(TraitClause { trait_ref: TraitRef { def_id, args }, polarity: ClausePolarity::Positive })))
@@ -94,6 +94,14 @@ impl Tcx {
     pub fn explicit_super_predicates_of(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
         self.declaration_queries(prog, def_id).super_predicates.get_or_init_cyclic(||
             self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfOnly))
+    }
+
+    /// predicates_of.rs explicit_implied_predicates_of: the supertraits and the bounds their
+    /// associated item constraints put on Self's projections (`trait B: A<X: Copy>` implies
+    /// `<Self as A>::X: Copy`); what elaboration (Filter::All) adds for a `T: B`
+    pub fn explicit_implied_predicates_of(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
+        self.declaration_queries(prog, def_id).implied_predicates.get_or_init_cyclic(||
+            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfAndAssociatedTypeBounds))
     }
 
     pub(crate) fn explicit_supertraits_containing_assoc_item(&self, prog: &Program, def_id: DefId, name: crate::program::Sym) -> Vec<Predicate> {
@@ -490,7 +498,7 @@ impl Tcx {
                             out.push(Predicate { kind: PredicateKind::Clause(ClauseKind::Projection(ProjectionClause { projection_term: AliasTerm::Ty(alias), term: Term::Ty(value) })), bound_vars: vars.clone() });
                         }
                         ast::GenericArg::Constraint(_, _, bounds) => {
-                            if matches!(filter, PredicateFilter::All) { self.lower_bounds(cx, owner, &env, alias, bounds, false, filter, out); }
+                            if matches!(filter, PredicateFilter::All | PredicateFilter::SelfAndAssociatedTypeBounds) { self.lower_bounds(cx, owner, &env, alias, bounds, false, filter, out); }
                         }
                         _ => unreachable!(),
                     }

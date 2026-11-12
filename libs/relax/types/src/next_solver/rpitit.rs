@@ -122,7 +122,7 @@ impl Tcx {
     fn item_bounds_uncached(&self, prog: &Program, def_id: DefId) -> Vec<Predicate> {
         let mut out = Vec::new();
         for bound in self.explicit_item_bounds(prog, def_id) {
-            for predicate in self.supertraits(prog, bound.clone()) {
+            for predicate in self.elaborate(prog, bound.clone()) {
                 if !out.contains(&predicate) { out.push(predicate); }
             }
         }

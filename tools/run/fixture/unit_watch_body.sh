@@ -6,7 +6,7 @@
 #   A unit runs unattended, so nobody resumes it; it fails HUNG at the next look with the park's text. An app a
 #   test started parked at a compile error and held its unit 64 min, until its lease ended (11-07). A panic
 #   that parks for less than a look (an unwatched one's brief wait) goes on by itself and is no hang.
-# - or, while a test target's tests run (from its `running N tests` to its `test result:`), it makes no progress
+# - or, while a target's tests run (its `running N tests` to its own `test result:`), it makes no progress
 #   for HUNG_QUIET s: no new test result, and its processes do nothing by the node's own idle look (devhub
 #   lease/exec.rs `busy`: under IDLE_PCT % of a core, past 0.2 s, and under 1 MB of storage I/O since the quiet
 #   began, or a process gone with what it had done). Storage I/O is `io`'s read_bytes and write_bytes, as the
@@ -121,9 +121,13 @@ parked_line() {
   done
 }
 # out_state: from the unit's output, the test results it reported (out_results) and whether a target's tests run
-# now (out_in 1: its last `running N tests` has no `test result:` after it)
+# now (out_in 1: a `running N tests` has no `test result:` of its own after it). A test that runs one of its
+# target's tests again in a child process whose output is the unit's (the harness's self-exec) adds the child's own
+# `running 1 test` to `test result:` inside its target's: nested, not its target's end. Read as its end, it made
+# the rest of relax-compiler's tests a build here, and one idle in a test that waited on such a child held its
+# shard 28 min to 1h38m, never HUNG, and its run ended with no verdict, three times (11-11, 11-12)
 out_state() {
-  read -r out_results out_in < <(awk '/^running [0-9]+ tests?$/ { o = 1 } /^test result:/ { o = 0 } /^test .* \.\.\. / { n++ } END { print n + 0, o + 0 }' "$out" 2>/dev/null)
+  read -r out_results out_in < <(awk '/^running [0-9]+ tests?$/ { d++ } /^test result:/ { if (d) d-- } /^test .* \.\.\. / { n++ } END { print n + 0, (d > 0) }' "$out" 2>/dev/null)
 }
 # threads <pid>...: each thread of them: its state, its CPU in % of a core over a second, its kernel wait channel
 threads() {

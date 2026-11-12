@@ -693,3 +693,29 @@ fn neon_decimal_digits() {
     }
     println!("neon decimal digits: ok");
 }
+
+// relax known gap 7: inside a function with the target features, the NEON, CRC32 and PMULL
+// intrinsics are safe to call (no `unsafe` block), as rustc's are
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon,aes,crc")]
+fn safe_in_target_feature_fn(x: u8, c: u32) -> (u64, u32, u128, u32) {
+    let a = vdup_n_u8(x);
+    let b = vadd_u8(a, vshl_n_u8::<1>(a));
+    let q = vaddq_u32(vdupq_n_u32(c), vdupq_n_u32(1));
+    (vget_lane_u64::<0>(vreinterpret_u64_u8(b)), __crc32b(c, x), vmull_p64(c as u64, 3), vgetq_lane_u32::<2>(q))
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_safe_in_target_feature_fn() {
+    if !(std::arch::is_aarch64_feature_detected!("aes") && std::arch::is_aarch64_feature_detected!("crc")) {
+        return;
+    }
+    let (lanes, crc, product, lane) = unsafe { safe_in_target_feature_fn(core::hint::black_box(3), 7) };
+    let mut r = 7u32 ^ 3;
+    for _ in 0..8 {
+        r = (r >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(r & 1));
+    }
+    assert_eq!((lanes, crc, product, lane), (0x0909_0909_0909_0909, r, 9, 8), "vdup/vshl/vadd, __crc32b, vmull_p64, vaddq/vgetq_lane");
+    println!("neon safe in target_feature fn: ok");
+}

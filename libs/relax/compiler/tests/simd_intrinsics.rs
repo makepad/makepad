@@ -7008,3 +7008,32 @@ mod aarch64 {
         }
     }
 }
+
+// Inside a function with their target features the safe x86 intrinsics (stdarch's) are called
+// without `unsafe`, as rustc's are; the implied features count (avx2 implies avx, ssse3, sse2).
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,sse4.1,sse4.2")]
+fn x86_safe_in_target_feature_fn(x: i32, c: u32) -> (i64, i32, u32, i32) {
+    use core::arch::x86_64::*;
+    let a = _mm_set1_epi32(x);
+    let b = _mm_add_epi32(a, _mm_slli_epi32::<1>(a));
+    let s = _mm_shuffle_epi8(b, _mm_setzero_si128());
+    let w = _mm256_add_epi32(_mm256_set1_epi32(x), _mm256_set1_epi32(1));
+    (_mm_cvtsi128_si64(b), _mm_extract_epi32::<2>(s), _mm_crc32_u32(c, 1), _mm256_extract_epi32::<7>(w))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn x86_safe_in_target_feature() {
+    if !(is_x86_feature_detected!("avx2") && is_x86_feature_detected!("sse4.1") && is_x86_feature_detected!("sse4.2")) {
+        return;
+    }
+    let (lo, s, crc, w) = unsafe { x86_safe_in_target_feature_fn(core::hint::black_box(3), 7) };
+    let mut r = 7u32;
+    for i in 0..32 {
+        r ^= (1u32 >> i) & 1;
+        r = (r >> 1) ^ (0x82f6_3b78 & 0u32.wrapping_sub(r & 1));
+    }
+    assert_eq!((lo, s, crc, w), (0x0000_0009_0000_0009, 0x0909_0909, r, 4), "set1/slli/add, shuffle_epi8/extract, crc32_u32, avx2 add/extract");
+    println!("x86 safe in target_feature fn: ok");
+}

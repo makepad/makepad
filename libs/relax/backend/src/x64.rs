@@ -5601,8 +5601,32 @@ impl<'a> Gen<'a> {
         self.a.roundf(w, xd, 0, 3); // trunc
     }
 
+    /// rd = CRC-32C of rb's low `bits` into the crc in ra: SSE4.2 `crc32 eax, r/m8/16/32` (F2
+    /// [66] [REX] 0F 38 F0/F1 /r) or `crc32 rax, r/m64` (REX.W), accumulated in rax (rb may be rd);
+    /// the result zero-extends
+    fn crc32c(&mut self, bits: u8, rd: u8, ra: u8, rb: u8) {
+        let rb = if rb == RAX {
+            self.a.mov_rr(R11, rb);
+            R11
+        } else {
+            rb
+        };
+        self.a.mov_rr(RAX, ra);
+        if bits == 16 {
+            self.a.byte(0x66);
+        }
+        self.a.byte(0xf2);
+        // an 8-bit source in spl..dil needs a REX (without one, 4..7 name ah..bh)
+        self.a.rex(bits == 64, RAX, 0, rb, bits == 8 && (4..8).contains(&rb));
+        self.a.byte(0x0f);
+        self.a.byte(0x38);
+        self.a.byte(if bits == 8 { 0xf0 } else { 0xf1 });
+        self.a.modrm_rr(RAX, rb);
+        self.a.mov_rr(rd, RAX);
+    }
+
     fn ibin(&mut self, options: &relax_session::Options, op: IOp, it: IntTy, d: VReg, a: VReg, b: VReg) {
-        assert!(op.crc32_bits().is_none(), "crc32 is lowered for aarch64 targets only");
+        assert!(!matches!(op.crc32(), Some((_, false))), "crc32 (IEEE) is lowered for aarch64 targets only");
         // a spilled first operand of a register result loads straight into it, unless b lives there
         // (uloc covers a spilled b's window; a rematerialised b's window register counts too: b's
         // last read can share d's register, and the load would overwrite b before the operation
@@ -5647,6 +5671,11 @@ impl<'a> Gen<'a> {
         }
         let rb = self.use_i(options, b, R11);
         let rd = self.def_i(d, R10);
+        if let Some((bits, _)) = op.crc32() {
+            self.crc32c(bits, rd, ra, rb);
+            self.fin_i(d, rd);
+            return;
+        }
         match op {
             IOp::MulHi => {
                 // rdx:rax = rax * rb (mul / imul r/m64)
@@ -6298,6 +6327,16 @@ impl<'a> Gen<'a> {
     }
 
     fn ibin_imm(&mut self, options: &relax_session::Options, op: IOp, it: IntTy, d: VReg, a: VReg, k: i64) {
+        if let Some((bits, castagnoli)) = op.crc32() {
+            // constant data: in r11
+            assert!(castagnoli, "crc32 (IEEE) is lowered for aarch64 targets only");
+            let ra = self.use_i(options, a, R10);
+            let rd = self.def_i(d, R10);
+            self.a.mov_ri(R11, k);
+            self.crc32c(bits, rd, ra, R11);
+            self.fin_i(d, rd);
+            return;
+        }
         if op == IOp::Bzhi {
             // a constant count is a constant mask
             let n = (k & 63) as u32;

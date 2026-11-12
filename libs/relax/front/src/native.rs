@@ -241,19 +241,18 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     let lib_path = format!("{}/libnative.{}", dir, ext);
 
     let fast_mark = format!("{}/fast", dir);
-    let messages = match std::fs::read_to_string(&messages_path) {
-        Ok(m) if std::fs::metadata(&lib_path).is_ok() || !m.contains("\"linked_libs\"") => m,
-        _ => {
+    let out = match std::fs::read_to_string(&messages_path).ok().and_then(|m| cached(&g.pkg, &script_table(g), seeds, &m, &lib_path)) {
+        Some(out) => out,
+        None => {
             let m = run_cargo(g, req, &exe, &flags, &script_pkgs, &lib_pkgs, seeds, Tier::Fast)?;
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir, e))?;
             std::fs::write(&fast_mark, b"").map_err(|e| format!("{}: {}", fast_mark, e))?;
             std::fs::write(&messages_path, &m).map_err(|e| format!("{}: {}", messages_path, e))?;
             // a stale library of an earlier link under this key is not trusted
             let _ = std::fs::remove_file(&lib_path);
-            m
+            outputs(g, seeds, &m)?
         }
     };
-    let out = outputs(g, seeds, &messages)?;
     if out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty() {
         return Ok(Built { scripts: out.scripts, lib: None });
     }
@@ -303,6 +302,17 @@ fn script_table(g: &Graph) -> Vec<(usize, Vec<String>)> {
 
 fn outputs(g: &Graph, seeds: &[usize], messages: &str) -> Result<Outputs, String> {
     outputs_with(&g.pkg, &script_table(g), seeds, messages)
+}
+
+/// The cargo run cached under this key (`messages`, written once that run succeeded) while what
+/// it names is still there: every script's OUT_DIR (generated sources the compile reads), and
+/// the linked library when the scripts link anything. Cargo writes `linked_libs` for every
+/// script, so a cfg/env-only script, which leaves no library, is reused on its OUT_DIR alone.
+fn cached(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str, lib_path: &str) -> Option<Outputs> {
+    let out = outputs_with(pkg, scripts_of, seeds, messages).ok()?;
+    let links = !(out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty());
+    let there = out.scripts.iter().all(|s| std::path::Path::new(&s.out_dir).is_dir()) && (!links || std::path::Path::new(lib_path).is_file());
+    there.then_some(out)
 }
 
 fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str) -> Result<Outputs, String> {
@@ -942,6 +952,36 @@ fn native_key_uses_sorted_resolved_packages() {
     other_source.pkg.0 = "other/a".into();
     assert_ne!(key, resolved_packages_key(&[other_source, b]),
         "a resolved source change must invalidate native artifacts");
+}
+
+#[cfg(test)]
+#[test]
+fn a_cached_cargo_run_stands_while_what_it_names_is_there() {
+    let dir = std::env::temp_dir().join(format!("relax-native-cached-{}", std::process::id()));
+    let out_dir = dir.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    let lib = dir.join("libnative.so");
+    let lib = lib.to_str().unwrap();
+    let pkg = [(String::new(), "cfg_only".to_string(), "1.0.0".to_string())];
+    let scripts = [(0, Vec::new())];
+    let quoted = out_dir.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
+    let msg = |libs: &str| format!(r#"{{"relax_host":false,"reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":["native={quoted}"],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{quoted}"}}"#);
+    let hit = |m: &str| cached(&pkg, &scripts, &[0], m, lib).is_some();
+    // a script that links nothing leaves no library to find: cargo is not run again
+    assert!(hit(&msg("[]")), "a cfg/env-only script's run is reused without a library");
+    // one that links something needs the linked library
+    assert!(!hit(&msg(r#"["dylib=m"]"#)), "a system library to link, no library yet");
+    assert!(!hit(&msg(r#"["static=gen"]"#)), "an archive missing from its search path");
+    std::fs::write(out_dir.join("libgen.a"), b"!<arch>\n").unwrap();
+    assert!(!hit(&msg(r#"["static=gen"]"#)), "an archive to link, no library yet");
+    std::fs::write(lib, b"").unwrap();
+    assert!(hit(&msg(r#"["static=gen"]"#)) && hit(&msg(r#"["dylib=m"]"#)), "the linked library is there");
+    let m = msg("[]");
+    assert!(!hit(&m[..m.len() - 1]), "a cut-off message file is no hit");
+    // generated sources live in OUT_DIR: a run whose OUT_DIR is gone is no hit, library or not
+    std::fs::remove_dir_all(&out_dir).unwrap();
+    assert!(!hit(&msg("[]")) && !hit(&msg(r#"["dylib=m"]"#)), "a removed OUT_DIR");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.

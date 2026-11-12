@@ -878,11 +878,15 @@ const OP_REM: u8 = 9;
 const OP_MULHI: u8 = 10;
 const OP_ROTL: u8 = 11;
 const OP_BZHI: u8 = 12;
-/// IOp::Crc32B/H/W/X: 8 << (op - OP_CRC8) payload bits
+/// IOp::Crc32B/H/W/X: 8 << (op - OP_CRC8) payload bits; Crc32CB/H/W/X: 8 << (op - OP_CRCC8)
 const OP_CRC8: u8 = 13;
 const OP_CRC16: u8 = 14;
 const OP_CRC32: u8 = 15;
 const OP_CRC64: u8 = 16;
+const OP_CRCC8: u8 = 17;
+const OP_CRCC16: u8 = 18;
+const OP_CRCC32: u8 = 19;
+const OP_CRCC64: u8 = 20;
 
 fn iop_code(op: IOp) -> u8 {
     match op {
@@ -903,6 +907,10 @@ fn iop_code(op: IOp) -> u8 {
         IOp::Crc32H => OP_CRC16,
         IOp::Crc32W => OP_CRC32,
         IOp::Crc32X => OP_CRC64,
+        IOp::Crc32CB => OP_CRCC8,
+        IOp::Crc32CH => OP_CRCC16,
+        IOp::Crc32CW => OP_CRCC32,
+        IOp::Crc32CX => OP_CRCC64,
     }
 }
 
@@ -910,8 +918,11 @@ fn iop_code(op: IOp) -> u8 {
 /// u32: shift amounts mod 32), division by zero gives 0, remainder by zero the dividend.
 #[inline(always)]
 fn ibin(op: u8, bits: u8, s: bool, a: u64, b: u64) -> u64 {
+    if op >= OP_CRCC8 {
+        return relax_backend::passes::crc32(8 << (op - OP_CRCC8), true, a, b);
+    }
     if op >= OP_CRC8 {
-        return relax_backend::passes::crc32(8 << (op - OP_CRC8), a, b);
+        return relax_backend::passes::crc32(8 << (op - OP_CRC8), false, a, b);
     }
     if op == OP_BZHI {
         let n = (b & 63) as u32;
@@ -1022,6 +1033,10 @@ fn pick_ibin<const B: u8, const S: bool>(op: u8, imm: bool) -> H {
         OP_CRC16 => p!(OP_CRC16),
         OP_CRC32 => p!(OP_CRC32),
         OP_CRC64 => p!(OP_CRC64),
+        OP_CRCC8 => p!(OP_CRCC8),
+        OP_CRCC16 => p!(OP_CRCC16),
+        OP_CRCC32 => p!(OP_CRCC32),
+        OP_CRCC64 => p!(OP_CRCC64),
         _ => p!(OP_ROTL),
     }
 }

@@ -11,7 +11,8 @@
 # measured yet at the median; a package measured past GATE_SPLIT_S runs a unit per test target. With GATE_QUEUE=1 a
 # shard takes them from its run's one queue a unit per free slot (a stub of the master's dealer here), and runs none
 # of a queue not its own. A unit whose processes do nothing (HUNG_QUIET, short here) is stopped and
-# fails HUNG, naming the test it still ran, while the other units go on; one that works past it is no hang (a
+# fails HUNG, naming the test it still ran (after a child's own run of a test inside its target's), while the
+# other units go on; one that works past it is no hang (a
 # makepad-app-amp test sat in a GStreamer pipeline and its lease idled with hundreds of packages to go, 11-07). The
 # gate's own shell sleeps while its units run (it spun a core through every run, 11-07). A
 # workspace of stub crates in a temporary git repo, its JIT a stub whose `makepad test` fails a package whose
@@ -65,7 +66,9 @@ edition = "2021"
 name = "makepad"
 path = "src/main.rs"'
 put tools/run/src/main.rs '// `makepad test <package> [<target>] [-- --list]` from the workspace root: one test, failing when its source says BROKEN,
-// two, the second never ending, when it says HANGS (its pid in TEST_RUN_LOG.pids), working 6 s when it says BUSY;
+// two, the second never ending, when it says HANGS (the first run again in a child of its own before it, as the
+// harness self-exec says it: its own `running 1 test` to `test result:` inside the target; its pid in
+// TEST_RUN_LOG.pids), working 6 s when it says BUSY;
 // each run is said in TEST_RUN_LOG. `makepad inspect <pid> <question>`: a stub answer.
 use std::io::Write;
 fn main() {
@@ -101,7 +104,7 @@ fn main() {
         std::process::exit(101);
     }
     if src.contains("HANGS") {
-        println!("running 2 tests\ntest tests::it ... ok");
+        println!("running 2 tests\n\nrunning 1 test\ntest tests::it ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out\n\ntest tests::it ... ok");
         if let Some(log) = &log {
             let line = format!("{}\n", std::process::id());
             std::fs::OpenOptions::new().create(true).append(true).open(format!("{log}.pids")).unwrap().write_all(line.as_bytes()).unwrap();

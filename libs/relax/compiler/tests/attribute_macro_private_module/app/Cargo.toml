@@ -1,0 +1,6 @@
+[package]
+name = "apm-app"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+apm-dep = { path = "../dep" }

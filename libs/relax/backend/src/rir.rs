@@ -311,16 +311,26 @@ pub enum IOp {
     Crc32H,
     Crc32W,
     Crc32X,
+    /// CRC-32C (Castagnoli, reflected polynomial 0x82F63B78), otherwise as Crc32B/H/W/X: Arm's
+    /// `__crc32cb/h/w/d` (`crc32cb/h/w/x`), x86's `_mm_crc32_u8/16/32/64` (SSE4.2 `crc32`)
+    Crc32CB,
+    Crc32CH,
+    Crc32CW,
+    Crc32CX,
 }
 
 impl IOp {
-    /// the payload bits of a Crc32 op (8, 16, 32, 64)
-    pub fn crc32_bits(self) -> Option<u8> {
+    /// a Crc32 / Crc32C op: its payload bits (8, 16, 32, 64) and whether it is CRC-32C
+    pub fn crc32(self) -> Option<(u8, bool)> {
         match self {
-            IOp::Crc32B => Some(8),
-            IOp::Crc32H => Some(16),
-            IOp::Crc32W => Some(32),
-            IOp::Crc32X => Some(64),
+            IOp::Crc32B => Some((8, false)),
+            IOp::Crc32H => Some((16, false)),
+            IOp::Crc32W => Some((32, false)),
+            IOp::Crc32X => Some((64, false)),
+            IOp::Crc32CB => Some((8, true)),
+            IOp::Crc32CH => Some((16, true)),
+            IOp::Crc32CW => Some((32, true)),
+            IOp::Crc32CX => Some((64, true)),
             _ => None,
         }
     }

@@ -11463,7 +11463,7 @@ impl<'a> Lcx<'a> {
             "vx_binary" | "vx_unary" | "vx_ternary" => 4,
             "vx_splat" | "vx_store" | "vx_narrow" | "vx_table" | "vx_mask" => 2,
             "vx_load" | "vx_sha1h" => 1,
-            "vx_blend" | "vx_sha1rnds4" | "vx_crc32" => 3,
+            "vx_blend" | "vx_sha1rnds4" | "vx_crc32" | "vx_crc32c" => 3,
             _ => {
                 self.err(self.pos, "unknown SIMD intrinsic".into());
                 return self.dummy_val(t);
@@ -11498,22 +11498,31 @@ impl<'a> Lcx<'a> {
             let a = vector(self, 0);
             let b = vector(self, 1);
             self.emit(Inst::VX(VX::X86Sha1Rnds4(func as u8), d, a, b));
-        } else if name == "vx_crc32" {
-            // Arm __crc32{b,h,w,d}(crc, data): crc32{b,h,w,x} of the data's low `bytes` bytes;
-            // std's aarch64 module asks for it only on aarch64 targets
+        } else if name == "vx_crc32" || name == "vx_crc32c" {
+            // Arm __crc32{b,h,w,d}(crc, data): crc32{b,h,w,x} of the data's low `bytes` bytes,
+            // std's aarch64 module asks for it only on aarch64 targets; vx_crc32c: CRC-32C, Arm
+            // __crc32c{b,h,w,d} (crc32c{b,h,w,x}) and x86 _mm_crc32_u8/16/32/64 (SSE4.2 crc32),
+            // on aarch64 and x86_64 targets
+            let castagnoli = name == "vx_crc32c";
             let bytes = constant(self, 2);
-            if !matches!(bytes, 1 | 2 | 4 | 8) || !self.u.prog.session.options.target.starts_with("aarch64") {
-                self.err(self.pos, "vx_crc32: (crc, data, bytes 1/2/4/8) on an aarch64 target".into());
+            let target = &self.u.prog.session.options.target;
+            if !matches!(bytes, 1 | 2 | 4 | 8) || !(target.starts_with("aarch64") || castagnoli && target.starts_with("x86_64")) {
+                let msg = if castagnoli { "vx_crc32c: (crc, data, bytes 1/2/4/8) on an aarch64 or x86_64 target" } else { "vx_crc32: (crc, data, bytes 1/2/4/8) on an aarch64 target" };
+                self.err(self.pos, msg.into());
                 return self.dummy_val(t);
             }
             let crc = scalar(self, 0);
             let data = scalar(self, 1);
             let r = self.f.vreg(Cls::I);
-            let op = match bytes {
-                1 => IOp::Crc32B,
-                2 => IOp::Crc32H,
-                4 => IOp::Crc32W,
-                _ => IOp::Crc32X,
+            let op = match (bytes, castagnoli) {
+                (1, false) => IOp::Crc32B,
+                (2, false) => IOp::Crc32H,
+                (4, false) => IOp::Crc32W,
+                (_, false) => IOp::Crc32X,
+                (1, true) => IOp::Crc32CB,
+                (2, true) => IOp::Crc32CH,
+                (4, true) => IOp::Crc32CW,
+                (_, true) => IOp::Crc32CX,
             };
             self.emit(Inst::IBin(op, IntTy { bits: 64, signed: false }, r, crc, data));
             return Val::L(vec![r]);

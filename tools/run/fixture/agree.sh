@@ -46,10 +46,13 @@ case_of() { # case_of <file> <expected 0|1>
 }
 T=libs/relax/compiler/tests
 named="$T/n01_round34_mcg.rs $T/n01_round34_literals_allow.rs $T/borrowck/raw_ptr_capture_accept.rs tools/run/fixture/diff/pr1330_fixes.rs
-  $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs"
+  $T/impl_header_assoc_const.rs $T/n01_const_provider.rs $T/n01_round35_asm_goto.rs $T/coerce_unsized_pointers.rs $T/derive_gat_hrtb.rs $T/asm_goto_label.rs
+  $T/supertrait_assoc_type_bounds.rs $T/const_param_projection_field.rs"
 [ "$(uname -m)" = x86_64 ] && named="$named $T/n01_round35_target_feature_main_reject.rs"
 for f in "$fx"/accept/*.rs $named "$@"; do case_of "$f" 0; done
-for f in "$fx"/reject/*.rs; do case_of "$f" 1; done
+for f in "$fx"/reject/*.rs $T/supertrait_assoc_bound_unmet_reject.rs; do case_of "$f" 1; done
+# an x86_64-only reject (the file is empty elsewhere): a load stays unsafe beside the safe SSE2 intrinsics
+[ "$(uname -m)" = x86_64 ] && case_of "$T/sse2_load_requires_unsafe_reject.rs" 1
 for f in "$fx"/reject_bin/*.rs; do
   n=q_$(basename "$f" .rs)
   text=$(sed -n 's,^// rejects: ,,p' "$f" | head -1)

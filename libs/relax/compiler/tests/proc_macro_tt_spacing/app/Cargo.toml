@@ -1,0 +1,7 @@
+[package]
+name = "tt-spacing-app"
+version = "0.0.0"
+edition = "2021"
+[dependencies]
+spacing-macro = { path = "../spacing-macro" }
+forward = { path = "../forward" }

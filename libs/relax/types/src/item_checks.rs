@@ -89,6 +89,7 @@ pub fn duplicate_items(prog: &Program, own: &[bool]) -> Vec<String> {
 /// source order, is reported; a macro the definition of which another crate wrote is not ours.
 pub fn duplicate_exported_macros(prog: &Program, own: &[bool]) -> Vec<String> {
     let mut errors = Vec::new();
+    let scope = relax_front::macros::MacroScope::new(prog.macros.clone());
     for (name, defs) in prog.macros.defs.iter() {
         let mut seen: Vec<(u32, u32, u32)> = Vec::new(); // (krate, file, pos)
         let mut mine: Vec<&crate::macros::MacroDef> = defs.iter().map(|d| &**d).filter(|d| d.exported && d.builtin == 0 && !d.def_file.is_empty()).collect();
@@ -114,9 +115,18 @@ pub fn duplicate_exported_macros(prog: &Program, own: &[bool]) -> Vec<String> {
             let krate = prog.file_crate.get(file).copied().unwrap_or(u32::MAX);
             if !own.get(krate as usize).copied().unwrap_or(false) || d.def_pos >= prog.files[file].src_len { continue; }
             let root = prog.crates[krate as usize].root_mod;
+            let krate_name = prog.syms.str(prog.crates[krate as usize].name);
+            let module_name = prog.def_path(prog.mods[root as usize].def);
             let clash = prog.imports_iter().any(|im| im.module == root && !im.glob && !im.ext && im.bind == sym && sym.is_some()
                 && im.segs.len() > 1 && im.segs.last().map(|s| s.1) == sym
-                && (crate::program::BUILTIN_MACROS.contains(&name.as_str()) || relax_front::builtins::is_macro_name(name)));
+                // A value named `column` does not import the built-in `column!`.
+                // Resolve the import's macro path, including public re-exports,
+                // rather than inferring its namespace from the final spelling.
+                && scope.builtin_macro(krate_name, &module_name, &{
+                    let mut path: Vec<_> = im.segs.iter().map(|s| prog.syms.str(s.1).to_string()).collect();
+                    if im.global { path.insert(0, String::new()); }
+                    path
+                }).is_some());
             if clash {
                 errors.push(prog.record_error(file as u32, d.def_pos, "resolve", format!(
                     "E0255: the name `{}` is defined multiple times -- note: `{}` must be defined only once in the macro namespace of this module", name, name)));
