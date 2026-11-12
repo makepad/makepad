@@ -22,14 +22,6 @@ pub const HOLD_SECONDS: f64 = 1.0;
 /// echoes can be that long.
 pub const ECHO_HOLD_SECONDS: f64 = 5.0;
 
-static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
-
-/// Resting is on unless a host turns it off (to compare against an engine
-/// that always runs its graph).
-pub fn set_enabled(on: bool) {
-    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
 /// One schedule's resting state, made when the schedule is prepared.
 pub struct Rest {
     /// Frames the outputs have been silent for, in a row.
@@ -59,9 +51,6 @@ impl Rest {
     /// `quiescent` says no source runs; `snapshot` fills the control values
     /// it will be woken by.
     pub fn after_pass(&mut self, peak: f32, frames: usize, hold: impl FnOnce() -> u64, quiescent: impl FnOnce() -> bool, snapshot: impl FnOnce(&mut [u32])) -> bool {
-        if !ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
-            return false;
-        }
         if !(peak < SILENCE) {
             // (a NaN is not silence either)
             self.quiet = 0;
