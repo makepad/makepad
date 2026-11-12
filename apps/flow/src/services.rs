@@ -991,10 +991,7 @@ fn definition_manifest_from_schema(
         }
         manifest = manifest.with_tool(tool(
             &flow_tool.name,
-            &bounded(
-                nonempty(&flow_tool.description, "Run this flow projection.").to_string(),
-                makepad_ai_services::wire::MAX_DESCRIPTION_BYTES,
-            ),
+            nonempty(&flow_tool.description, "Run this flow projection."),
             &schema_with_instance(&flow_tool.parameters),
             Risk::Act,
         ));
