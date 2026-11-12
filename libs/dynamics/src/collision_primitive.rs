@@ -40,7 +40,7 @@ fn raw_plane_sphere(
 
 pub fn plane_sphere(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -57,7 +57,7 @@ pub fn plane_sphere(
 
 pub fn plane_capsule(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -96,7 +96,7 @@ pub fn plane_capsule(
 
 pub fn plane_cylinder(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -188,7 +188,7 @@ pub fn plane_cylinder(
 
 pub fn plane_box(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -263,7 +263,7 @@ fn raw_sphere_sphere(
 
 pub fn sphere_sphere(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -299,7 +299,7 @@ pub fn raw_sphere_capsule(
 
 pub fn sphere_capsule(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -316,7 +316,7 @@ pub fn sphere_capsule(
 
 pub fn sphere_cylinder(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -428,7 +428,7 @@ pub fn raw_capsule_capsule(
 
 pub fn capsule_capsule(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,

@@ -577,7 +577,184 @@ pub fn dcmotor_slots(dynprm: &[f64], gainprm: &[f64]) -> DCMotorSlots {
 }
 
 // Skipped base64: _decode, mju_encodeBase64, mju_isValidBase64, mju_decodeBase64.
-// Skipped history: historyPhysicalIndex, historyFindIndex, mju_historyInit, mju_historyInsert, mju_historyRead.
+// History buffers: [user value, cursor, times(n), values(n*dim)]; the cursor is the physical index of
+// the newest sample, the oldest follows it.
+
+// physical index of logical index `logical` (0 the oldest, n-1 the newest)
+fn history_physical_index(cursor: i32, n: i32, logical: i32) -> i32 {
+    (cursor + 1 + logical) % n
+}
+
+// the logical index i with times[i-1] < t <= times[i] by a circular binary search: 0 if t is at or before the
+// oldest time, n if after the newest
+fn history_find_index(times: &[f64], n: i32, cursor: i32, t: f64) -> i32 {
+    let t_oldest = times[history_physical_index(cursor, n, 0) as usize];
+    let t_newest = times[history_physical_index(cursor, n, n-1) as usize];
+    if t <= t_oldest {
+        return 0;
+    }
+    if t > t_newest {
+        return n;
+    }
+    // the smallest logical i with times[i] >= t
+    let mut lo = 0;
+    let mut hi = n - 1;
+    while hi - lo > 1 {
+        let mid = (lo + hi) / 2;
+        if times[history_physical_index(cursor, n, mid) as usize] < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+
+/// mju_historyInit: set a history buffer's user value and its times and values, given oldest first.
+/// `times` None keeps the buffer's own times, read through its cursor; `values` None keeps its values.
+/// Times must increase strictly.
+pub fn history_init(buf: &mut [f64], n: i32, dim: usize, times: Option<&[f64]>, values: Option<&[f64]>, user: f64) {
+    let own = times.is_none();
+    let mut cursor = if own { buf[1] as i32 } else { n - 1 };
+    if cursor < 0 || cursor >= n {
+        cursor = n - 1;
+    }
+    {
+        let t = times.unwrap_or(&buf[2..2 + n as usize]);
+        for i in 0..n-1 {
+            let idx0 = if own { history_physical_index(cursor, n, i) } else { i } as usize;
+            let idx1 = if own { history_physical_index(cursor, n, i+1) } else { i+1 } as usize;
+            if t[idx1] - t[idx0] < MINVAL {
+                crate::util_errmem::error(&format!("times must be strictly increasing, got times[{}]={} >= times[{}]={}",
+                    i, t[idx0], i+1, t[idx1]));
+            }
+        }
+    }
+    buf[0] = user;
+    buf[1] = cursor as f64;
+    let nu = n as usize;
+    if let Some(times) = times {
+        copy(&mut buf[2..], times, nu);
+        if let Some(values) = values {
+            copy(&mut buf[2 + nu..], values, nu*dim);
+        }
+    } else if let Some(values) = values {
+        for i in 0..n {
+            let phys = history_physical_index(cursor, n, i) as usize;
+            copy(&mut buf[2 + nu + phys*dim..], &values[i as usize*dim..], dim);
+        }
+    }
+}
+
+/// mju_historyInsert: the slot for a sample at time `t`, kept in time order, as an index into `buf` where
+/// the caller writes its `dim` values: an existing sample's at the same time, else a new one that drops
+/// the oldest.
+pub fn history_insert(buf: &mut [f64], n: i32, dim: usize, t: f64) -> usize {
+    let mut cursor = buf[1] as i32;
+    let values = 2 + n as usize;
+    let (times, _) = buf[2..].split_at_mut(n as usize);
+    let i = history_find_index(times, n, cursor, t);
+
+    // the same time as a sample's: its slot
+    if i < n {
+        let phys_i = history_physical_index(cursor, n, i) as usize;
+        if (t - times[phys_i]).abs() < MINVAL {
+            return values + phys_i*dim;
+        }
+    }
+
+    // older than the oldest: replace it
+    if i == 0 {
+        let oldest_phys = history_physical_index(cursor, n, 0) as usize;
+        times[oldest_phys] = t;
+        return values + oldest_phys*dim;
+    }
+
+    // newer than the newest: the cursor moves onto the oldest slot
+    if i == n {
+        cursor = (cursor + 1) % n;
+        times[cursor as usize] = t;
+        buf[1] = cursor as f64;
+        return values + cursor as usize*dim;
+    }
+
+    // out of order: shift logical 1..i-1 down one, dropping the oldest, and insert at i-1
+    for j in 0..i-1 {
+        let src_phys = history_physical_index(cursor, n, j+1) as usize;
+        let dst_phys = history_physical_index(cursor, n, j) as usize;
+        buf[2 + dst_phys] = buf[2 + src_phys];
+        buf.copy_within(values + src_phys*dim..values + (src_phys+1)*dim, values + dst_phys*dim);
+    }
+    let insert_phys = history_physical_index(cursor, n, i-1) as usize;
+    buf[2 + insert_phys] = t;
+    values + insert_phys*dim
+}
+
+/// mju_historyRead: a history buffer's value at time `t`, by zero-order hold (`interp` 0), linear (1) or
+/// cubic (2) interpolation, held at the ends. A sample read as it is is returned as its index into
+/// `buf` (`res` untouched); an interpolated value is written to `res` and None returned.
+pub fn history_read(buf: &[f64], n: i32, dim: usize, res: &mut [f64], t: f64, interp: i32) -> Option<usize> {
+    let cursor = buf[1] as i32;
+    let times = &buf[2..2 + n as usize];
+    let v0 = 2 + n as usize;
+    let values = &buf[v0..];
+    let oldest_phys = history_physical_index(cursor, n, 0) as usize;
+    let newest_phys = history_physical_index(cursor, n, n-1) as usize;
+
+    // held before the oldest and after the newest
+    if t <= times[oldest_phys] + MINVAL {
+        return Some(v0 + oldest_phys*dim);
+    }
+    if t >= times[newest_phys] - MINVAL {
+        return Some(v0 + newest_phys*dim);
+    }
+
+    // the bracket times[i-1] < t <= times[i], i > 0
+    let i = history_find_index(times, n, cursor, t);
+    let phys_i = history_physical_index(cursor, n, i) as usize;
+    if (t - times[phys_i]).abs() < MINVAL {
+        return Some(v0 + phys_i*dim);
+    }
+    let phys_lo = history_physical_index(cursor, n, i-1) as usize;
+    let phys_hi = phys_i;
+
+    // zero-order hold: the latest sample at or before t
+    if interp == 0 {
+        return Some(v0 + phys_lo*dim);
+    }
+
+    let dt = times[phys_hi] - times[phys_lo];
+    let alpha = (t - times[phys_lo]) / dt;
+    if interp == 1 {
+        for d in 0..dim {
+            res[d] = values[phys_lo*dim+d] + alpha * (values[phys_hi*dim+d] - values[phys_lo*dim+d]);
+        }
+    } else {
+        // cubic Hermite with finite-differenced Catmull-Rom slopes, zero at the ends
+        let alpha2 = alpha * alpha;
+        let alpha3 = alpha2 * alpha;
+        let h00 = 2.0*alpha3 - 3.0*alpha2 + 1.0;
+        let h10 = alpha3 - 2.0*alpha2 + alpha;
+        let h01 = -2.0*alpha3 + 3.0*alpha2;
+        let h11 = alpha3 - alpha2;
+        for d in 0..dim {
+            let mut m_lo = 0.0;
+            if i > 1 {
+                let phys_lo_prev = history_physical_index(cursor, n, i-2) as usize;
+                let dt_lo = times[phys_hi] - times[phys_lo_prev];
+                m_lo = (values[phys_hi*dim+d] - values[phys_lo_prev*dim+d]) / dt_lo;
+            }
+            let mut m_hi = 0.0;
+            if i < n - 1 {
+                let phys_hi_next = history_physical_index(cursor, n, i+1) as usize;
+                let dt_hi = times[phys_hi_next] - times[phys_lo];
+                m_hi = (values[phys_hi_next*dim+d] - values[phys_lo*dim+d]) / dt_hi;
+            }
+            res[d] = h00 * values[phys_lo*dim+d] + h10 * dt * m_lo + h01 * values[phys_hi*dim+d] + h11 * dt * m_hi;
+        }
+    }
+    None
+}
 
 // Convert contact force to pyramid representation.
 pub fn encode_pyramid(pyramid: &mut [f64], force: &[f64], mu: &[f64], dim: usize) {

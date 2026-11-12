@@ -1121,9 +1121,6 @@ pub fn check_supported(m: &Model) -> Result<(), String> {
             return refuse("non-SDF or unattached geom plugins");
         }
     }
-    if m.nhistory != 0 {
-        return refuse("actuator or sensor delays");
-    }
     for (geom, &geom_type) in m.geom_type.iter().enumerate() {
         if geom_type == GEOM_SDF && m.geom_plugin[geom] < 0 {
             let mesh = m.geom_dataid[geom];

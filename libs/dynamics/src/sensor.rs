@@ -15,8 +15,8 @@ use crate::model::Model;
 use crate::ray;
 use crate::sleep::sleep_state;
 use crate::sort::partial_sort;
-use crate::support::{cam_intrinsics, condata_size, geom_distance, inside_site, mul_m, CONDATA_SIZE};
-use crate::thread::{dispatch, num_thread};
+use crate::support::{cam_intrinsics, condata_size, geom_distance, inside_site, mul_m, read_sensor, CONDATA_SIZE};
+use crate::thread::{num_thread, run_parts};
 use crate::types::*;
 use crate::util_blas::*;
 use crate::util_misc::{cam_pixel_ray, clip, is_zero, max, min, poly_potential};
@@ -47,14 +47,17 @@ struct TactileTaskArgs<'a> {
     contact_geom_ids: &'a [i32],
     start_taxel: usize,
     end_taxel: usize,
-    sensordata: &'a mut [f64],
+    // the batch's taxels of the sensor's channels: the penetration, then the two tangential slips (empty
+    // without taxel frames); C's sensordata at j, nvert + j and 2 nvert + j
+    depth: &'a mut [f64],
+    slip1: &'a mut [f64],
+    slip2: &'a mut [f64],
 }
 
-fn tactile_taxel_batch(m: &Model, d: &mut Data, t: &mut TactileTaskArgs<'_>) {
+fn tactile_taxel_batch(m: &Model, d: &Data, t: &mut TactileTaskArgs<'_>) {
     let mesh_id = t.mesh_id;
     let geom_id = t.geom_id;
     let parent_weld = t.parent_weld;
-    let ncon = m.mesh_vertnum[mesh_id] as usize;
     let geom_pos = at3(&d.geom_xpos, 3 * geom_id);
     let geom_mat = at9(&d.geom_xmat, 9 * geom_id);
     let mesh_vert = &m.mesh_vert[3 * m.mesh_vertadr[mesh_id] as usize..];
@@ -113,7 +116,8 @@ fn tactile_taxel_batch(m: &Model, d: &mut Data, t: &mut TactileTaskArgs<'_>) {
             transform_spatial(&mut vel_other, at6(&d.cvel, 6*body), 0, &xpos,
                 at3(&d.subtree_com, 3*m.body_rootid[body] as usize), None);
             sub3(&mut vel_rel, at3(&vel_sensor, 3), at3(&vel_other, 3));
-            t.sensordata[j] = max(t.sensordata[j], -depth);
+            let k = j - t.start_taxel;
+            t.depth[k] = max(t.depth[k], -depth);
             if has_frame {
                 let mut vel_rel_geom = [0.0; 3];
                 mul_mat_tvec3(&mut vel_rel_geom, geom_mat, &vel_rel);
@@ -121,15 +125,11 @@ fn tactile_taxel_batch(m: &Model, d: &mut Data, t: &mut TactileTaskArgs<'_>) {
                     mesh_normal[normal_stride*j+4] as f64, mesh_normal[normal_stride*j+5] as f64];
                 let tang2 = [mesh_normal[normal_stride*j+6] as f64,
                     mesh_normal[normal_stride*j+7] as f64, mesh_normal[normal_stride*j+8] as f64];
-                t.sensordata[ncon+j] += dot3(&vel_rel_geom, &tang1).abs();
-                t.sensordata[2*ncon+j] += dot3(&vel_rel_geom, &tang2).abs();
+                t.slip1[k] += dot3(&vel_rel_geom, &tang1).abs();
+                t.slip2[k] += dot3(&vel_rel_geom, &tang2).abs();
             }
         }
     }
-}
-
-fn tactile_task(m: &Model, d: &mut Data, args: &mut [TactileTaskArgs<'_>; 1], _thread_id: usize, task_id: usize) {
-    tactile_taxel_batch(m, d, &mut args[task_id]);
 }
 
 // Public so the integration test can exercise C's static helper directly.
@@ -766,19 +766,21 @@ fn compute_sensor_vel(m: &Model, d: &mut Data, i: usize, sensordata: &mut [f64])
             let ncon = m.mesh_vertnum[mesh_id] as usize;
             let k_tactile_parallel_threshold = 1000;
             let nthread = num_thread(d);
-            if nthread > 0 && ncon >= k_tactile_parallel_threshold {
-                let batch_size = (ncon + nthread - 1) / nthread;
-                let ntask = (ncon + batch_size - 1) / batch_size;
-                // thread.rs has one calling thread: ntask is exactly one. The
-                // task descriptor stays on the Rust stack instead of an arena.
-                let mut task_args = [TactileTaskArgs { mesh_id, geom_id, parent_weld, ncontact,
-                    contact_geom_ids: &contact_geom_ids, start_taxel: 0,
-                    end_taxel: batch_size.min(ncon), sensordata }];
-                dispatch(m, d, &mut tactile_task, &mut task_args, ntask);
-            } else {
-                let mut args = TactileTaskArgs { mesh_id, geom_id, parent_weld, ncontact,
-                    contact_geom_ids: &contact_geom_ids, start_taxel: 0, end_taxel: ncon, sensordata };
-                tactile_taxel_batch(m, d, &mut args);
+            // batches of taxels, one per thread on a large mesh; each writes its own taxels of each channel
+            let batch_size = if nthread > 0 && ncon >= k_tactile_parallel_threshold { (ncon + nthread - 1) / nthread } else { ncon }.max(1);
+            let has_frame = m.mesh_normalnum[mesh_id] == 3 * m.mesh_vertnum[mesh_id];
+            let (depth, slips) = sensordata.split_at_mut(ncon);
+            let (slip1, slip2) = if has_frame { slips[..2 * ncon].split_at_mut(ncon) } else { (&mut [][..], &mut [][..]) };
+            let mut slip1 = slip1.chunks_mut(batch_size);
+            let mut slip2 = slip2.chunks_mut(batch_size);
+            let parts = depth.chunks_mut(batch_size).enumerate().map(|(k, depth)| TactileTaskArgs {
+                mesh_id, geom_id, parent_weld, ncontact, contact_geom_ids: &contact_geom_ids,
+                start_taxel: k * batch_size, end_taxel: k * batch_size + depth.len(), depth,
+                slip1: slip1.next().unwrap_or_default(), slip2: slip2.next().unwrap_or_default(),
+            });
+            {
+                let d: &Data = d;
+                run_parts(&d.threadpool, parts, |_, mut args| tactile_taxel_batch(m, d, &mut args));
             }
             d.scratch.put_byte(seen_geom);
             d.scratch.put_int(contact_geom_ids);
@@ -894,14 +896,24 @@ fn compute_or_read_sensor(m: &Model, d: &mut Data, i: usize, sensordata: &mut [f
     let nsample = m.sensor_history[2*i];
     if nsample <= 0 { compute_sensor(m, d, i, sensordata); return; }
     let delay = m.sensor_delay[i];
-    if delay > 0.0 { crate::unported!("mj_readSensor"); }
+    let dim = m.sensor_dim[i] as usize;
+    // delayed: the value from the history buffer
+    if delay > 0.0 {
+        let interp = m.sensor_history[2*i+1];
+        if let Some(p) = read_sensor(m, d, i, d.time, sensordata, interp) { copy(sensordata, p, dim); }
+        return;
+    }
+    // sampled: computed when its interval has passed, else read from the buffer
     let interval = m.sensor_interval[2*i];
     if interval > 0.0 {
         let historyadr = m.sensor_historyadr[i] as usize;
-        let buf = &d.history[historyadr..];
-        let time_prev = buf[0];
-        if time_prev + interval <= d.time { compute_sensor(m, d, i, sensordata); }
-        else { crate::unported!("mj_readSensor"); }
+        let time_prev = d.history[historyadr];
+        if time_prev + interval <= d.time {
+            compute_sensor(m, d, i, sensordata);
+        } else {
+            let interp = m.sensor_history[2*i+1];
+            if let Some(p) = read_sensor(m, d, i, d.time, sensordata, interp) { copy(sensordata, p, dim); }
+        }
         return;
     }
     compute_sensor(m, d, i, sensordata);

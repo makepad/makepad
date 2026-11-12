@@ -2,6 +2,7 @@ use makepad_dynamics::collision_convex::{box_support, convex, ellipsoid_support,
 use makepad_dynamics::collision_gjk::CcdObj;
 use makepad_dynamics::data::PreContact;
 use makepad_dynamics::io::make_data;
+use makepad_dynamics::memory::Scratch;
 use makepad_dynamics::model::{make_model, MODEL_SIZES};
 use makepad_dynamics::types::{GEOM_BOX, GEOM_CAPSULE, GEOM_ELLIPSOID, MAXCONPAIR};
 
@@ -45,9 +46,10 @@ fn axis_supports_and_capsule_box_overlap() {
         }
     }
     let mut contacts = [PreContact::default(); MAXCONPAIR];
-    // Repeat with the same Data to exercise the returned CCD scratch buffer.
+    // Repeat with the same scratch to exercise the returned CCD buffer.
+    let mut scratch = Scratch::default();
     for pass in 0..2 {
-        let ncon = convex(&m, &mut d, &mut contacts, 2, 0, 0.0);
+        let ncon = convex(&m, &d, &mut scratch, &mut contacts, 2, 0, 0.0);
         assert!(ncon > 0, "capsule-box overlap on pass {pass}");
         for contact in &contacts[..ncon] {
             assert!((contact.dist + 0.25).abs() < 1e-9,

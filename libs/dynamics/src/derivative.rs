@@ -826,7 +826,9 @@ fn dcmotor_inputs(m: &Model, d: &Data, i: usize, u4: &mut [f64; 4]) {
     if ctrlnum > 0 {
         let uadr = m.actuator_ctrladr[i] as usize;
         if m.actuator_delay[i] != 0.0 {
-            crate::unported!("mj_readCtrl");
+            if let Some(p) = support::read_ctrl(m, d, i, d.time, &mut u, -1) {
+                blas::copy(&mut u, p, ctrlnum);
+            }
         } else {
             blas::copy(&mut u, &d.ctrl[uadr..], ctrlnum);
         }
@@ -977,8 +979,12 @@ fn actuator_input(m: &Model, d: &Data, i: usize) -> f64 {
     if m.actuator_dyntype[i] == DYN_NONE {
         let adr = m.actuator_ctrladr[i] as usize;
         let mut ctrl;
-        if m.actuator_delay[i] != 0.0 { crate::unported!("mj_readCtrl"); }
-        else { ctrl = d.ctrl[adr]; }
+        if m.actuator_delay[i] != 0.0 {
+            let mut ctrl_buf = [0.0; 4];
+            ctrl = match support::read_ctrl(m, d, i, d.time, &mut ctrl_buf, -1) { Some(p) => p[0], None => ctrl_buf[0] };
+        } else {
+            ctrl = d.ctrl[adr];
+        }
         if m.opt.disableflags & DSBL_CLAMPCTRL == 0 && m.actuator_ctrllimited[adr] != 0 {
             ctrl = clip(ctrl, m.actuator_ctrlrange[2*adr], m.actuator_ctrlrange[2*adr+1]);
         }

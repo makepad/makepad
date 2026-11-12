@@ -361,7 +361,6 @@ fn input(gaintype: i32, ctrlspec: i32) -> String {
 
 // Every actuator is written as <general>: the shortcut setters have already filled its rows.
 fn actuator(x: &mut Xml, a: &ActuatorSpec) {
-    assert!(a.nsample == 0 && a.interp == 0 && a.delay == 0.0, "a control history is outside the builder subset");
     x.start("general");
     x.name("name", &a.name);
     let target = &a.target;
@@ -404,6 +403,9 @@ fn actuator(x: &mut Xml, a: &ActuatorSpec) {
     x.array("biasprm", &a.biasprm);
     x.text("actearly", if a.actearly { "true" } else { "false" });
     if a.ctrlspec != 0 { x.text("input", &input(a.gaintype, a.ctrlspec)); }
+    x.number("nsample", a.nsample);
+    x.text("interp", keyword(a.interp, &["zoh", "linear", "cubic"]));
+    x.number("delay", a.delay);
     x.array("user", &a.userdata);
     x.end();
 }

@@ -452,11 +452,8 @@ fn max_contacts(m: &Model, obj1: &CcdObj<'_>, obj2: &CcdObj<'_>) -> usize {
     1
 }
 
-pub fn convex(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
-    // Move the scratch pool out while CCD objects borrow Data's geometry.
-    // The closure keeps every C early return inside the pool's return scope.
-    let mut scratch = std::mem::take(&mut d.scratch);
-    let result = (|| {
+pub fn convex(m: &Model, d: &Data, scratch: &mut Scratch, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
+    (|| {
         let mut obj1 = CcdObj::default();
         let mut obj2 = CcdObj::default();
         init_ccd_obj(&mut obj1, m, Some(d), g1, margin);
@@ -464,7 +461,7 @@ pub fn convex(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32,
         let max_contacts = max_contacts(m, &obj1, &obj2);
         let isellipsoid1 = obj1.geom_type == GEOM_ELLIPSOID || obj1.geom_type == GEOM_SPHERE;
         let isellipsoid2 = obj2.geom_type == GEOM_ELLIPSOID || obj2.geom_type == GEOM_SPHERE;
-        let mut ncon = penetration(m, &mut scratch, &mut obj1, &mut obj2, con, max_contacts, margin);
+        let mut ncon = penetration(m, scratch, &mut obj1, &mut obj2, con, max_contacts, margin);
         if disabled(m, DSBL_NATIVECCD) && ncon != 0 && g1 >= 0 && g2 >= 0 { fix_normal(m, d, &mut con[0], g1, g2); }
         if max_contacts > 1 || isellipsoid1 || isellipsoid2 { return ncon; }
         if ncon == 1 && !disabled(m, DSBL_MULTICCD) && !isellipsoid1 && !isellipsoid2 {
@@ -489,7 +486,7 @@ pub fn convex(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32,
                     let mut invrot = [0.0; 9];
                     u::transpose(&mut invrot, &rot, 3, 3);
                     rotate_frame(&con[0].pos, &invrot, &mut obj2.mat, &mut obj2.pos);
-                    let n = penetration(m, &mut scratch, &mut obj1, &mut obj2, &mut con[ncon..], 1, margin);
+                    let n = penetration(m, scratch, &mut obj1, &mut obj2, &mut con[ncon..], 1, margin);
                     if disabled(m, DSBL_NATIVECCD) && n != 0 && g1 >= 0 && g2 >= 0 { fix_normal(m, d, &mut con[ncon], g1, g2); }
                     if n != 0 && is_distinct_contact(con, ncon+1, tolerance) { con[ncon].dist = con[0].dist; ncon += 1; }
                     inl::copy3(&mut obj1.pos, at3(&d.geom_xpos, 3*g1 as usize));
@@ -500,9 +497,7 @@ pub fn convex(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32,
             }
         }
         ncon
-    })();
-    d.scratch = scratch;
-    result
+    })()
 }
 
 fn sub3f(res: &mut [f64; 3], a: &[f32], b: &[f32]) {
@@ -553,7 +548,7 @@ fn hull4f(res: &mut [usize; 4], hull: &[f32], idx: &[i32], nhull: usize, a: usiz
     4
 }
 
-pub fn plane_convex(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
+pub fn plane_convex(m: &Model, d: &Data, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
     let pos1 = at3(&d.geom_xpos, 3*g1 as usize);
     let mat1 = at9(&d.geom_xmat, 9*g1 as usize);
     let pos2 = at3(&d.geom_xpos, 3*g2 as usize);
@@ -644,9 +639,8 @@ fn add_prism_vert(obj: &mut CcdObj<'_>, r: i32, c: i32, i: i32, dx: f64, dy: f64
     prism[5][2] = obj.data.hfield.hfield_data[(r+dr) as usize*obj.data.hfield.hfield_ncol+c as usize] as f64*obj.size[2];
 }
 
-pub fn convex_hfield(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
-    let mut scratch = std::mem::take(&mut d.scratch);
-    let result = (|| {
+pub fn convex_hfield(m: &Model, d: &Data, scratch: &mut Scratch, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
+    (|| {
         let pos1 = at3(&d.geom_xpos, 3*g1 as usize);
         let mat1 = at9(&d.geom_xmat, 9*g1 as usize);
         let pos2 = at3(&d.geom_xpos, 3*g2 as usize);
@@ -725,7 +719,7 @@ pub fn convex_hfield(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g
                     add_prism_vert(&mut obj1, r, c, i, dx, dy);
                     let prism = &obj1.data.hfield.prism;
                     if prism[3][2] < zmin && prism[4][2] < zmin && prism[5][2] < zmin { continue; }
-                    if penetration(m, &mut scratch, &mut obj1, &mut obj2, &mut con[ncon..], 1, margin) != 0 {
+                    if penetration(m, scratch, &mut obj1, &mut obj2, &mut con[ncon..], 1, margin) != 0 {
                         inl::copy3(&mut local_dir, &con[ncon].normal);
                         inl::copy3(&mut local_pos, &con[ncon].pos);
                         inl::mul_mat_vec3(&mut con[ncon].normal, mat1, &local_dir);
@@ -741,9 +735,7 @@ pub fn convex_hfield(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g
             for i in 0..ncon { fix_normal(m, d, &mut con[i], g1, g2); }
         }
         ncon
-    })();
-    d.scratch = scratch;
-    result
+    })()
 }
 
 // compute normal for point outside ellipsoid, using ray-projection SQP
@@ -859,16 +851,15 @@ pub fn fix_normal(m: &Model, d: &Data, con: &mut PreContact, g1: i32, g2: i32) {
     else if processed[1] != 0 { inl::scl3(&mut con.normal, &normal[1], -1.0); }
 }
 
-pub fn convex_elem(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, f1: i32, e1: i32, v1: i32, f2: i32, e2: i32, margin: f64) -> usize {
-    let mut scratch = std::mem::take(&mut d.scratch);
-    let result = (|| {
+pub fn convex_elem(m: &Model, d: &Data, scratch: &mut Scratch, con: &mut [PreContact], g1: i32, f1: i32, e1: i32, v1: i32, f2: i32, e2: i32, margin: f64) -> usize {
+    (|| {
         let mut obj1 = CcdObj::default();
         let mut obj2 = CcdObj::default();
         init_ccd_obj(&mut obj1, m, Some(d), g1, margin);
         init_ccd_obj(&mut obj2, m, Some(d), -1, margin);
         set_ccd_obj_flex(&mut obj1, f1, e1, v1);
         set_ccd_obj_flex(&mut obj2, f2, e2, -1);
-        let ncon = penetration(m, &mut scratch, &mut obj1, &mut obj2, con, 1, margin);
+        let ncon = penetration(m, scratch, &mut obj1, &mut obj2, con, 1, margin);
         if ncon != 0 && !disabled(m, DSBL_NATIVECCD) {
             let mut isflex2d = false;
             if f1 >= 0 && m.flex_dim[f1 as usize] == 2 { isflex2d = true; }
@@ -878,14 +869,11 @@ pub fn convex_elem(m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, f1:
             }
         }
         ncon
-    })();
-    d.scratch = scratch;
-    result
+    })()
 }
 
-pub fn hfield_elem(m: &Model, d: &mut Data, con: &mut [PreContact], g: i32, f: i32, e: i32, margin: f64) -> usize {
-    let mut scratch = std::mem::take(&mut d.scratch);
-    let result = (|| {
+pub fn hfield_elem(m: &Model, d: &Data, scratch: &mut Scratch, con: &mut [PreContact], g: i32, f: i32, e: i32, margin: f64) -> usize {
+    (|| {
         let mut vec = [0.0; 3];
         let mut obj1 = CcdObj::default();
         init_ccd_obj(&mut obj1, m, Some(d), g, margin);
@@ -960,7 +948,7 @@ pub fn hfield_elem(m: &Model, d: &mut Data, con: &mut [PreContact], g: i32, f: i
                     if nvert > 2 {
                         let prism = &obj1.data.hfield.prism;
                         if prism[3][2] < zmin && prism[4][2] < zmin && prism[5][2] < zmin { continue; }
-                        if penetration(m, &mut scratch, &mut obj1, &mut obj2, &mut con[cnt..], 1, margin) != 0 {
+                        if penetration(m, scratch, &mut obj1, &mut obj2, &mut con[cnt..], 1, margin) != 0 {
                             inl::zero3(&mut con[cnt].tangent);
                             let old = con[cnt].normal;
                             u::mul_mat_vec3(&mut con[cnt].normal, hmat, &old);
@@ -975,9 +963,7 @@ pub fn hfield_elem(m: &Model, d: &mut Data, con: &mut [PreContact], g: i32, f: i
             }
         }
         cnt
-    })();
-    d.scratch = scratch;
-    result
+    })()
 }
 
 // Approximate lower bound of the directed Hausdorff distance between compact convex geoms.

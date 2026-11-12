@@ -234,7 +234,7 @@ fn actuator_blocks_and_refusals() {
         assert!(err.contains(expected), "expected a refusal with '{expected}', got '{err}'");
     };
     refuse(&|s| s.actuators[1].gaintype = GAIN_MUSCLE, "muscles are outside the builder subset");
-    refuse(&|s| s.actuators[1].nsample = 4, "control history");
+    refuse(&|s| s.actuators[1].nsample = (1 << 24) + 1, "at most 2^24 samples");
     refuse(&|s| s.actuators[0].target = Some("nowhere".into()), "unknown transmission target 'nowhere'");
     refuse(&|s| s.actuators[1].target = Some("bar_joint".into()), "has no range defined");
     refuse(&|s| s.actuators[2].refsite = None, "so3 site transmission requires refsite");

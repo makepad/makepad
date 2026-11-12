@@ -382,7 +382,7 @@ fn geom_distance_ccd(m: &Model, d: &mut Data, g1: i32, g2: i32, distmax: f64,
 
 pub fn geom_distance(m: &Model, d: &mut Data, geom1: i32, geom2: i32, distmax: f64,
     mut fromto: Option<&mut [f64; 6]>) -> f64 {
-    use crate::collision_driver::{CollisionFn, COLLISIONFUNC};
+    use crate::collision_driver::{merge_collision_tasks, CollisionFn, CollisionTask, COLLISIONFUNC};
 
     let mut con = d.scratch.pre_contact(MAXCONPAIR);
     let mut dist = distmax;
@@ -403,7 +403,12 @@ pub fn geom_distance(m: &Model, d: &mut Data, geom1: i32, geom2: i32, distmax: f
             return dist;
         }
     }
-    let num = func.call(m, d, &mut con, g1, g2, distmax);
+    // the collider runs as a narrowphase task does, its records merged after
+    let mut tasks = std::mem::take(&mut d.collision_tasks);
+    if tasks.is_empty() { tasks.push(CollisionTask::default()); }
+    let num = func.call(m, d, &mut tasks[0], &mut con, g1, g2, distmax);
+    merge_collision_tasks(m, d, &mut tasks[..1]);
+    d.collision_tasks = tasks;
     let mut smallest = -1;
     for i in 0..num {
         let dist_i = con[i].dist;
@@ -657,7 +662,67 @@ pub fn cam_intrinsics(m: &Model, camid: usize) -> (f64, f64, f64, f64, f64) {
     };
     (fx, fy, cx, cy, m.cam_fovy[camid])
 }
-// mj_readCtrl: omitted as requested (history).
-// mj_readSensor: omitted as requested (history).
-// mj_initCtrlHistory: omitted as requested (history).
-// mj_initSensorHistory: omitted as requested (history).
+/// mj_readCtrl: actuator `id`'s controls at `time` less its delay, read from its history buffer
+/// (`interp` -1: the actuator's own interpolation), or its current controls without a history. A value
+/// read as it is is returned; an interpolated one is written to `result` and None returned.
+pub fn read_ctrl<'a>(m: &Model, d: &'a Data, id: usize, time: f64, result: &mut [f64], interp: i32) -> Option<&'a [f64]> {
+    if id >= m.nactuator {
+        crate::util_errmem::error(&format!("invalid actuator id {id}"));
+    }
+    let nsample = m.actuator_history[2*id];
+    let dim = m.actuator_ctrlnum[id] as usize;
+    if nsample == 0 {
+        let adr = m.actuator_ctrladr[id] as usize;
+        return Some(&d.ctrl[adr..adr + dim]);
+    }
+    let interp = if interp < 0 { m.actuator_history[2*id+1] } else { interp };
+    let buf = &d.history[m.actuator_historyadr[id] as usize..];
+    util_misc::history_read(buf, nsample, dim, result, time - m.actuator_delay[id], interp).map(|k| &buf[k..k + dim])
+}
+
+/// mj_readSensor: sensor `id`'s values at `time` less its delay, read from its history buffer
+/// (`interp` -1: the sensor's own interpolation), or its current values without a history. A value read
+/// as it is is returned; an interpolated one is written to `result` and None returned.
+pub fn read_sensor<'a>(m: &Model, d: &'a Data, id: usize, time: f64, result: &mut [f64], interp: i32) -> Option<&'a [f64]> {
+    if id >= m.nsensor {
+        crate::util_errmem::error(&format!("invalid sensor id {id}"));
+    }
+    let nsample = m.sensor_history[2*id];
+    let dim = m.sensor_dim[id] as usize;
+    if nsample == 0 {
+        let adr = m.sensor_adr[id] as usize;
+        return Some(&d.sensordata[adr..adr + dim]);
+    }
+    let interp = if interp < 0 { m.sensor_history[2*id+1] } else { interp };
+    let buf = &d.history[m.sensor_historyadr[id] as usize..];
+    util_misc::history_read(buf, nsample, dim, result, time - m.sensor_delay[id], interp).map(|k| &buf[k..k + dim])
+}
+
+/// mj_initCtrlHistory: set actuator `id`'s history: its times (None keeps the buffer's) and values,
+/// oldest first; its user value is kept.
+pub fn init_ctrl_history(m: &Model, d: &mut Data, id: usize, times: Option<&[f64]>, values: Option<&[f64]>) {
+    if id >= m.nactuator {
+        crate::util_errmem::error(&format!("invalid actuator id {id}"));
+    }
+    let nsample = m.actuator_history[2*id];
+    if nsample == 0 {
+        crate::util_errmem::error(&format!("actuator {id} has no history buffer"));
+    }
+    let buf = &mut d.history[m.actuator_historyadr[id] as usize..];
+    let user = buf[0];
+    util_misc::history_init(buf, nsample, m.actuator_ctrlnum[id] as usize, times, values, user);
+}
+
+/// mj_initSensorHistory: set sensor `id`'s history: its times (None keeps the buffer's) and values,
+/// oldest first, and its user value, the sampling phase.
+pub fn init_sensor_history(m: &Model, d: &mut Data, id: usize, times: Option<&[f64]>, values: Option<&[f64]>, phase: f64) {
+    if id >= m.nsensor {
+        crate::util_errmem::error(&format!("invalid sensor id {id}"));
+    }
+    let nsample = m.sensor_history[2*id];
+    if nsample == 0 {
+        crate::util_errmem::error(&format!("sensor {id} has no history buffer"));
+    }
+    let buf = &mut d.history[m.sensor_historyadr[id] as usize..];
+    util_misc::history_init(buf, nsample, m.sensor_dim[id] as usize, times, values, phase);
+}

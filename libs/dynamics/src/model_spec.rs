@@ -531,7 +531,8 @@ pub const ACTUATOR_DCMOTOR: i32 = 11;
 /// mjsActuator / mjs_defaultActuator, without a plugin. `target` names the transmission's joint,
 /// tendon, site or body (a slider-crank's crank site), `refsite` a site transmission's reference
 /// and `slidersite` a slider-crank's base. The `set_to_*` setters give a shortcut's control model.
-/// A history (`nsample`, `delay`) and muscles are outside the subset.
+/// Muscles are outside the subset. A delay (`delay`) reads the controls from a history buffer of
+/// `nsample` samples, interpolated by `interp` (0 zero-order hold, 1 linear, 2 cubic).
 #[derive(Clone, Debug)]
 pub struct ActuatorSpec {
     pub name: Option<String>,

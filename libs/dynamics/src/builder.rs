@@ -2021,17 +2021,13 @@ struct Actuator {
     ctrlranges: [[f64; 2]; 4],
 }
 
-// mjCActuator::Compile and ResolveReferences. A plugin and a control history are outside the
-// subset, and so are muscles: their length range needs the compiler's own simulation. The gauge
+// mjCActuator::Compile and ResolveReferences. A plugin is outside the subset, and so are muscles: their length range needs the compiler's own simulation. The gauge
 // is the identity. With autolimits fixed on, checklimited never refuses.
 fn compile_actuator(spec: &ActuatorSpec, id: usize, tree: &Tree, tendons: &[Tendon]) -> Result<Actuator, String> {
     let mut a = spec.clone();
     let name = a.name.clone().unwrap_or_default();
     if a.gaintype == GAIN_MUSCLE || a.biastype == BIAS_MUSCLE || a.dyntype == DYN_MUSCLE || a.r#type == ACTUATOR_MUSCLE {
         return Err(format!("actuator '{name}' (id = {id}): muscles are outside the builder subset (their length range needs the compiler's own simulation)"));
-    }
-    if a.nsample != 0 || a.interp != 0 || a.delay != 0.0 {
-        return Err(format!("actuator '{name}' (id = {id}): a control history (nsample, interp, delay) is outside the builder subset"));
     }
     // reset input/output block widths, resolved below
     let mut ctrlnum = 1;
@@ -2219,6 +2215,12 @@ fn compile_actuator(spec: &ActuatorSpec, id: usize, tree: &Tree, tendons: &[Tend
 
     // DC motor always uses actearly
     if a.dyntype == DYN_DCMOTOR && !a.actearly { return Err(format!("actearly cannot be false for DC motor actuator '{name}' (id = {id})")); }
+
+    // a delay reads a history buffer, which records the inputs
+    if a.delay > 0.0 && a.nsample <= 0 { return Err(format!("actuator '{name}' (id = {id}): setting delay > 0 without a history buffer")); }
+    if (a.delay > 0.0 || a.nsample > 0) && ctrlnum == 0 { return Err(format!("history and delay require an input in actuator '{name}' (id = {id})")); }
+    // the cursor is stored as a double: at most 2^24 samples keep it exact in single precision too
+    if a.nsample > 16777216 { return Err(format!("at most 2^24 samples in history buffer, got {}", a.nsample)); }
 
     // resolve per-input control ranges: broadcast ctrlrange, pid overrides vel and ff
     let mut ctrllimiteds = [false; 4];
@@ -2820,7 +2822,8 @@ fn copy_objects(m: &mut Model, meshes: &[Mesh], pairs: &[Pair], excludes: &[Excl
         adr += ten.wraps.len();
     }
 
-    // actuators: no control history (nhistory is zero) and no plugin
+    // actuators: no plugin; a history buffer holds [user, cursor, times(n), values(n*ctrlnum)]
+    let mut delay_adr = 0;
     let mut adr = 0;
     let mut ctrladr = 0;
     let mut outadr = 0;
@@ -2847,7 +2850,12 @@ fn copy_objects(m: &mut Model, meshes: &[Mesh], pairs: &[Pair], excludes: &[Excl
         m.actuator_delay[i] = a.delay;
         m.actuator_history[2*i] = a.nsample;
         m.actuator_history[2*i+1] = a.interp;
-        m.actuator_historyadr[i] = -1;
+        if a.nsample > 0 {
+            m.actuator_historyadr[i] = delay_adr;
+            delay_adr += 2 + a.nsample + a.nsample * pac.ctrlnum as i32;
+        } else {
+            m.actuator_historyadr[i] = -1;
+        }
         m.actuator_actlimited[i] = islimited(a.actlimited, &a.actrange) as u8;
         m.actuator_actearly[i] = a.actearly as u8;
         m.actuator_cranklength[i] = a.cranklength;
@@ -3148,6 +3156,8 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
     let nu = actuators.iter().map(|a| a.ctrlnum).sum::<usize>();
     let nout = actuators.iter().map(|a| a.outnum).sum::<usize>();
     let na = actuators.iter().map(|a| a.spec.actdim as usize).sum::<usize>();
+    // history buffers: [user, cursor, times(n), values(n*dim)]
+    let nhistory = actuators.iter().filter(|a| a.spec.nsample > 0).map(|a| 2 + a.spec.nsample as usize * (1 + a.ctrlnum)).sum::<usize>();
     for (name, value) in [("nbody", nbody), ("nq", nq), ("nv", nv), ("njnt", njnt), ("ngeom", ngeom), ("nsite", nsite), ("ntree", ntree), ("nmocap", nmocap), ("nplastic", nplastic), ("npair", pairs.len()), ("nexclude", excludes.len()), ("neq", equalities.len()), ("ntendon", tendons.len()), ("nwrap", nwrap), ("nactuator", actuators.len()), ("nu", nu), ("nout", nout), ("na", na), ("nnames", nnames), ("npaths", 1),
         ("nmesh", meshes.len()),
         ("nmeshvert", meshes.iter().map(|mesh| mesh.nvert()).sum::<usize>()),
@@ -3169,6 +3179,8 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
         if !tree.bodies[i].joints.is_empty() && !check_body_mass_inertia(&tree, i) { return Err("mass and inertia of moving bodies must be larger than mjMINVAL".into()); }
     }
     let mut m = make_model(&sizes)?;
+    // a data size, past the model's construction sizes
+    m.nhistory = nhistory;
     m.opt = spec.option.clone();
     copy_names(&mut m, modelname, &tree, &meshes, &pairs, &excludes, &equalities, &tendons, &actuators);
     // CopyPaths: no assets; the one-byte empty paths buffer is already zero.
@@ -3209,6 +3221,9 @@ pub fn compile(spec: &ModelSpec) -> Result<Model, String> {
         crate::io::make_dof_dof_maps(m.nv, m.n_m, m.n_c, m.n_d, &m.dof_madr, &m.dof_simplenum, &m.dof_parentid,
             &m.d_rownnz, &m.d_rowadr, &m.d_colind, &m.m_rownnz, &m.m_rowadr, &m.m_colind,
             &mut m.map_m2d, &mut m.map_d2m, &mut m.map_m2m, &mut m_mat, &mut scratch);
+    }
+    if m.nhistory != 0 && m.opt.timestep <= 0.0 {
+        return Err(format!("history buffers require positive timestep, got {}", m.opt.timestep));
     }
     check_supported(&m)?;
     let disableflags = m.opt.disableflags;

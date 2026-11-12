@@ -6,6 +6,7 @@
 //!   parity speed <model file> <steps> <qvel scale> <runs>
 //!   parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags>
 //!
+//! `parity threads <n> <mode> ...` runs a mode with a pool of n threads bound to its Data.
 //! The start state: reset, then qvel[i] = qvel_scale * sin(1 + i); every step is one `step`. With a
 //! ctrl scale, before step s: ctrl[i] = ctrl_scale * sin(0.01 s + 1 + i); an integrator replaces the model's.
 //! Trace file, little-endian, version 1:
@@ -28,10 +29,11 @@ use makepad_dynamics::model::Model;
 use makepad_dynamics::model_file::load_model_with;
 use makepad_dynamics::sdf::SdfPlugin;
 use makepad_dynamics::sdf_torus::Torus;
+use makepad_dynamics::thread::{bind_thread_pool, TaskPool};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 struct Reader<'a> {
     b: &'a [u8],
@@ -275,8 +277,30 @@ fn step_record(m: &Model, d: &Data, out: &mut Vec<u8>) {
 }
 
 /// The reference driver's start state: reset, then qvel[i] = scale * sin(1 + i).
+/// A pool of threads for `parity threads <n> ...`, each thread taking every n-th task: results with it
+/// must equal the reference's single-threaded ones. It starts its threads at each fan-out, so it is not for timing.
+struct Striped(usize);
+
+impl TaskPool for Striped {
+    fn fan_out(&self, n: usize, f: &(dyn Fn(usize) + Sync)) {
+        std::thread::scope(|s| {
+            for k in 0..self.0 {
+                s.spawn(move || (k..n).step_by(self.0).for_each(f));
+            }
+        });
+    }
+    fn threads(&self) -> usize {
+        self.0
+    }
+}
+
+static POOL: OnceLock<Arc<dyn TaskPool>> = OnceLock::new();
+
 fn start(m: &Model, scale: f64) -> Data {
     let mut d = make_data(m);
+    if let Some(pool) = POOL.get() {
+        bind_thread_pool(&mut d, Some(pool.clone()));
+    }
     for i in 0..m.nv {
         d.qvel[i] = scale * (1.0 + i as f64).sin();
     }
@@ -412,6 +436,56 @@ fn run_rays(model: &str, steps: usize, every: usize, scale: f64, out_path: &str)
     Ok(true)
 }
 
+/// Delays and histories: controls sin(0.05 s + 1 + i) at step s; after each step the state, the actuator
+/// forces, the sensors and the history buffers, then each history read 0.37 steps back by each
+/// interpolation.
+fn run_history(model: &str, steps: usize, scale: f64, out_path: &str, integrator: i32) -> Result<bool, String> {
+    use makepad_dynamics::support::{read_ctrl, read_sensor};
+    let mut m = load_model_with(Path::new(model), attach)?;
+    m.opt.integrator = integrator;
+    let mut d = start(&m, scale);
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MPHI");
+    for v in [1, m.nq as i32, m.nv as i32, m.na as i32, m.nout as i32, m.nsensordata as i32, m.nhistory as i32, steps as i32] {
+        put_i32(&mut out, v);
+    }
+    for s in 0..steps {
+        for i in 0..m.nu {
+            d.ctrl[i] = (0.05 * s as f64 + 1.0 + i as f64).sin();
+        }
+        forward::step(&m, &mut d);
+        put(&mut out, &[d.time]);
+        put(&mut out, &d.qpos[..m.nq]);
+        put(&mut out, &d.qvel[..m.nv]);
+        put(&mut out, &d.act[..m.na]);
+        put(&mut out, &d.actuator_force[..m.nout]);
+        put(&mut out, &d.sensordata[..m.nsensordata]);
+        put(&mut out, &d.history[..m.nhistory]);
+        let t = d.time - 0.37 * m.opt.timestep;
+        for i in 0..m.nactuator {
+            if m.actuator_history[2 * i] == 0 { continue; }
+            let dim = m.actuator_ctrlnum[i] as usize;
+            for interp in 0..3 {
+                let mut res = [0.0; 64];
+                let p = read_ctrl(&m, &d, i, t, &mut res, interp);
+                put(&mut out, p.unwrap_or(&res[..dim]));
+            }
+        }
+        for i in 0..m.nsensor {
+            if m.sensor_history[2 * i] == 0 { continue; }
+            let dim = m.sensor_dim[i] as usize;
+            for interp in 0..3 {
+                let mut res = [0.0; 64];
+                let p = read_sensor(&m, &d, i, t, &mut res, interp);
+                put(&mut out, p.unwrap_or(&res[..dim]));
+            }
+        }
+    }
+    std::fs::File::create(out_path).and_then(|mut f| f.write_all(&out)).map_err(|e| format!("{out_path}: {e}"))?;
+    println!("{model}: {steps} steps, nhistory {}, integrator {integrator} -> {out_path}", m.nhistory);
+    Ok(true)
+}
+
 /// Step rate: 100 warm-up steps, then `steps` timed, `runs` times, as the reference driver does.
 fn run_speed(model: &str, steps: usize, scale: f64, runs: usize) -> Result<bool, String> {
     let m = load_model_with(Path::new(model), attach)?;
@@ -511,7 +585,19 @@ fn run_kernel_speed(model: &str, steps: usize, scale: f64) -> Result<bool, Strin
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() > 2 && args[0] == "threads" {
+        match args[1].parse::<usize>() {
+            Ok(n) if n > 0 => {
+                let _ = POOL.set(Arc::new(Striped(n)));
+                args.drain(..2);
+            }
+            _ => {
+                eprintln!("threads: a positive number of threads");
+                std::process::exit(2);
+            }
+        }
+    }
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["diff", a, b] => run_diff(a, b),
         ["trace", model, steps, scale, out] => match (steps.parse(), scale.parse()) {
@@ -534,6 +620,10 @@ fn main() {
             (Ok(n), Ok(k), Ok(q)) if k > 0 => run_rays(model, n, k, q, out),
             _ => Err("rays: steps, a positive ray interval and qvel scale are numbers".to_string()),
         },
+        ["history", model, steps, scale, out, integrator] => match (steps.parse(), scale.parse(), integrator.parse()) {
+            (Ok(n), Ok(q), Ok(i)) => run_history(model, n, q, out, i),
+            _ => Err("history: steps, qvel scale and integrator are numbers".to_string()),
+        },
         ["speed", model, steps, scale, runs] => match (steps.parse(), scale.parse(), runs.parse()) {
             (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r),
             _ => Err("speed: steps, qvel scale and runs are numbers".to_string()),
@@ -546,7 +636,7 @@ fn main() {
             (Ok(n), Ok(q)) => run_stage_speed(model, n, q),
             _ => Err("stagespeed: steps and qvel scale are numbers".to_string()),
         },
-        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity rays <model file> <steps> <ray interval> <qvel scale> <out> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
+        _ => Err("usage: parity [threads <n>] trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity rays <model file> <steps> <ray interval> <qvel scale> <out> | parity history <model file> <steps> <qvel scale> <out> <integrator> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
     };
     match result {
         Ok(true) => {}

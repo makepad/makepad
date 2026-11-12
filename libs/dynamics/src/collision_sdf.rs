@@ -9,6 +9,7 @@
 //! overlap's rim or tips, scattered from step to step, and report `max(d1, d2)` there (at most half the
 //! overlap): a resting part never settled and a part held hard against another slipped into it.
 
+use crate::collision_driver::CollisionTask;
 use crate::data::{Data, PreContact};
 use crate::inline::{at3, at3_mut, at4, at6};
 use crate::model::Model;
@@ -924,7 +925,8 @@ fn traverse_bvh(
     bvh: &[f64],
     nodeid: &[i32],
     child: &[i32],
-    mut bvh_active: Option<&mut [u8]>,
+    // the BVH's address and the list of active nodes to add to
+    mut bvh_marks: Option<(usize, &mut Vec<usize>)>,
     offset: &[f64; 3],
     rotation: &[f64; 9],
     m: &Model,
@@ -942,9 +944,9 @@ fn traverse_bvh(
         if nodeid[node] != -1 {
             if box_intersect(at6(bvh, 6 * node), offset, rotation, m, sdf, d) {
                 let active = callback(nodeid[node], node);
-                if let Some(bvh_active) = bvh_active.as_deref_mut() {
+                if let Some((bvhadr, marks)) = bvh_marks.as_mut() {
                     if active {
-                        bvh_active[node] = 1;
+                        marks.push(*bvhadr + node);
                     }
                 }
             }
@@ -953,8 +955,8 @@ fn traverse_bvh(
         if !box_intersect(at6(bvh, 6 * node), offset, rotation, m, sdf, d) {
             continue;
         }
-        if let Some(bvh_active) = bvh_active.as_deref_mut() {
-            bvh_active[node] = 1;
+        if let Some((bvhadr, marks)) = bvh_marks.as_mut() {
+            marks.push(*bvhadr + node);
         }
         for i in 0..2 {
             if child[2 * node + i] != -1 {
@@ -974,7 +976,7 @@ fn mesh_face_callback(face_id: i32, node: usize, ctx: &mut MeshSdfContext<'_, '_
 
 pub fn hfield_sdf(
     _m: &Model,
-    _d: &mut Data,
+    _d: &Data,
     _con: &mut [PreContact],
     _g1: i32,
     _g2: i32,
@@ -986,7 +988,8 @@ pub fn hfield_sdf(
 
 pub fn mesh_sdf(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
+    t: &mut CollisionTask,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -1019,8 +1022,6 @@ pub fn mesh_sdf(
         relmat: &[0.0; 9],
     };
     map_pose(&pos1, &quat1, &pos2, &sdf_quat, &mut offset, &mut rotation);
-    // Detach the visualization array while callbacks borrow Data, then restore it unchanged in size.
-    let mut active = std::mem::take(&mut d.bvh_active);
     {
         let mut ctx = MeshSdfContext {
             m,
@@ -1042,16 +1043,13 @@ pub fn mesh_sdf(
             let child = &m.bvh_child[2 * bvhadr..];
             // mjVisual.global.bvactive is the i32 at byte offset 48 in the stored C record.
             let bvactive = i32::from_le_bytes(m.vis[48..52].try_into().unwrap()) != 0;
-            let bvh_active = if bvactive {
-                Some(&mut active[bvhadr..])
-            } else {
-                None
-            };
+            // the active nodes are visualisation, marked in Data when the task's records merge
+            let bvh_marks = if bvactive { Some((bvhadr, &mut t.bvh_marks)) } else { None };
             traverse_bvh(
                 bvh,
                 nodeid,
                 child,
-                bvh_active,
+                bvh_marks,
                 &offset,
                 &rotation,
                 m,
@@ -1061,7 +1059,6 @@ pub fn mesh_sdf(
             );
         }
     }
-    d.bvh_active = active;
     if ncandidate <= MAXCONPAIR {
         for i in 0..ncandidate {
             cnt = add_pre_contact(
@@ -1109,7 +1106,8 @@ pub fn mesh_sdf(
 
 pub fn sdf(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
+    t: &mut CollisionTask,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -1279,13 +1277,11 @@ pub fn sdf(
     for (k, x) in seeds[..nseed].iter().copied().chain(std::iter::once(centre)).chain(halton_starts).enumerate() {
         let walk = walk_midsurface(x, m, d, &sdf, m.opt.sdf_iterations, size);
         if walk.ended == Walked::Bounded {
-            if d.sdf_walks_bounded == 0 {
-                crate::util_errmem::warning_text(&format!(
-                    "SDF collision: a walk of geoms {g1} and {g2} took sdf_iterations ({}) steps without settling; it carries on in the next collision. Time = {:.4}.",
-                    m.opt.sdf_iterations, d.time
-                ));
+            // logged at the first ever when the task's records merge
+            if t.sdf_first_bounded.is_none() {
+                t.sdf_first_bounded = Some((g1, g2));
             }
-            d.sdf_walks_bounded += 1;
+            t.sdf_walks_bounded += 1;
             if ncarried < MAXCONPAIR && !carried[..ncarried].iter().any(|c| dist3(c, &walk.end) < 1e-2 * size) {
                 carried[ncarried] = walk.end;
                 ncarried += 1;
@@ -1364,9 +1360,10 @@ pub fn sdf(
         }
         cnt = cap;
     }
-    d.sdf_seeds.retain(|&(a, b, _)| a != g1 || b != g2);
-    d.sdf_seeds.extend(touches[..ntouch].iter().map(|f| (g1, g2, f.0)));
-    d.sdf_seeds.extend(carried[..ncarried].iter().filter(|c| !touches[..ntouch].iter().any(|f| dist3(&f.0, c) < 1e-2 * size)).map(|&c| (g1, g2, c)));
+    // the pair's seeds for its next collision, which replace its last ones when the task's records merge
+    t.sdf_ran.push((g1, g2));
+    t.sdf_seeds.extend(touches[..ntouch].iter().map(|f| (g1, g2, f.0)));
+    t.sdf_seeds.extend(carried[..ncarried].iter().filter(|c| !touches[..ntouch].iter().any(|f| dist3(&f.0, c) < 1e-2 * size)).map(|&c| (g1, g2, c)));
     for (k, &(x, dist, normal)) in found[..cnt].iter().enumerate() {
         let c = &mut con[k];
         c.dist = dist;

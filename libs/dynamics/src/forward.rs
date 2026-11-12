@@ -222,8 +222,15 @@ pub fn fwd_actuation(m: &Model, d: &mut Data) {
     let mut tendon_frclimited = false;
     let mut ctrl = d.scratch.num(nu);
     blas::copy(&mut ctrl, &d.ctrl, nu);
+    // delayed actuators read their controls from their history buffers
     for i in 0..nactuator {
-        if m.actuator_delay[i] != 0.0 { crate::unported!("mj_readCtrl"); }
+        if m.actuator_delay[i] != 0.0 {
+            let adr = m.actuator_ctrladr[i] as usize;
+            let num = m.actuator_ctrlnum[i] as usize;
+            if let Some(p) = support::read_ctrl(m, d, i, d.time, &mut ctrl[adr..adr + num], -1) {
+                blas::copy(&mut ctrl[adr..], p, num);
+            }
+        }
     }
     if !disabled(m, DSBL_CLAMPCTRL) {
         clamp_vec(&mut ctrl, &m.actuator_ctrlrange, &m.actuator_ctrllimited, nu, None);
@@ -686,9 +693,82 @@ pub fn fwd_constraint(m: &Model, d: &mut Data) {
     fwd_constraint_impl(m, d, m.opt.solver, !disabled(m, DSBL_ISLAND));
 }
 
-// isDelayedSensorDue is omitted with delayed history insertion and RK sensor pre-evaluation.
-fn advance_start(m: &Model, d: &mut Data, act_dot: &[f64], _sensordata_delay: Option<&[f64]>) {
-    if m.nhistory > 0 { crate::unported!("mju_historyInsert"); }
+// whether sensor i, delayed, takes a history sample at d.time
+fn is_delayed_sensor_due(m: &Model, d: &Data, i: usize) -> bool {
+    if m.sensor_history[2*i] == 0 || m.sensor_delay[i] <= 0.0 {
+        return false;
+    }
+    let interval = m.sensor_interval[2*i];
+    interval <= 0.0 || d.history[m.sensor_historyadr[i] as usize] + interval <= d.time
+}
+
+// sensor i computed into its history slot at `slot`, which keeps the values the sensor leaves unwritten
+fn compute_sensor_into_history(m: &Model, d: &mut Data, i: usize, slot: usize, dim: usize) {
+    let mut value = d.scratch.num(dim);
+    blas::copy(&mut value, &d.history[slot..], dim);
+    sensor::compute_sensor(m, d, i, &mut value);
+    blas::copy(&mut d.history[slot..], &value, dim);
+    d.scratch.put_num(value);
+}
+
+// The work every integrator does at the pre-step state before it writes the new one: history buffers,
+// activations, sleep. `sensordata_delay` holds the due delayed sensors' values when the integrator
+// evaluated them before its stages (None: computed here).
+fn advance_start(m: &Model, d: &mut Data, act_dot: &[f64], sensordata_delay: Option<&[f64]>) {
+    if m.nhistory > 0 {
+        // the controls at the current time
+        for i in 0..m.nactuator {
+            let nsample = m.actuator_history[2*i];
+            if nsample == 0 { continue; }
+            let dim = m.actuator_ctrlnum[i] as usize;
+            let adr = m.actuator_historyadr[i] as usize;
+            let slot = adr + misc::history_insert(&mut d.history[adr..], nsample, dim, d.time);
+            let ctrladr = m.actuator_ctrladr[i] as usize;
+            blas::copy(&mut d.history[slot..], &d.ctrl[ctrladr..], dim);
+        }
+        // the sensors: sampled on their interval, delayed, or kept as they are
+        let mut delay_k = 0;
+        for i in 0..m.nsensor {
+            let nsample = m.sensor_history[2*i];
+            if nsample == 0 { continue; }
+            let dim = m.sensor_dim[i] as usize;
+            let adr = m.sensor_historyadr[i] as usize;
+            let delay = m.sensor_delay[i];
+            let interval = m.sensor_interval[2*i];
+            let sensor_adr = m.sensor_adr[i] as usize;
+            if interval > 0.0 {
+                // the first slot holds the previous tick
+                let time_prev = d.history[adr];
+                if time_prev + interval <= d.time {
+                    // advance by the exact interval
+                    d.history[adr] += interval;
+                    let slot = adr + misc::history_insert(&mut d.history[adr..], nsample, dim, d.time);
+                    if delay > 0.0 {
+                        if let Some(pre) = sensordata_delay {
+                            blas::copy(&mut d.history[slot..], &pre[delay_k..], dim);
+                            delay_k += dim;
+                        } else {
+                            compute_sensor_into_history(m, d, i, slot, dim);
+                        }
+                    } else {
+                        // undelayed: the sensor data already computed
+                        blas::copy(&mut d.history[slot..], &d.sensordata[sensor_adr..], dim);
+                    }
+                }
+            } else if delay > 0.0 {
+                let slot = adr + misc::history_insert(&mut d.history[adr..], nsample, dim, d.time);
+                if let Some(pre) = sensordata_delay {
+                    blas::copy(&mut d.history[slot..], &pre[delay_k..], dim);
+                    delay_k += dim;
+                } else {
+                    compute_sensor_into_history(m, d, i, slot, dim);
+                }
+            } else {
+                let slot = adr + misc::history_insert(&mut d.history[adr..], nsample, dim, d.time);
+                blas::copy(&mut d.history[slot..], &d.sensordata[sensor_adr..], dim);
+            }
+        }
+    }
     if m.na != 0 && !disabled(m, DSBL_ACTUATION) {
         for i in 0..m.nactuator {
             let actadr = m.actuator_actadr[i];
@@ -963,8 +1043,23 @@ pub fn runge_kutta(m: &Model, d: &mut Data, n: i32) {
     }
     // Flex plasticity and its stage-zero kinematic snapshots are untranslated together.
     if m.nplastic != 0 && m.nflexvert != 0 { crate::unported!("mj_RungeKutta flex plasticity"); }
-    // isDelayedSensorDue and pre-evaluation are omitted with history buffers.
-    if m.nhistory > 0 { crate::unported!("mj_RungeKutta delayed sensors"); }
+    // the due delayed sensors evaluated at stage 0, before the stages overwrite the data
+    let mut sensordata_delay0 = None;
+    if m.nhistory > 0 {
+        let ndelaydata: usize = (0..m.nsensor).filter(|&i| is_delayed_sensor_due(m, d, i)).map(|i| m.sensor_dim[i] as usize).sum();
+        if ndelaydata > 0 {
+            let mut values = d.scratch.num(ndelaydata);
+            let mut k = 0;
+            for i in 0..m.nsensor {
+                if is_delayed_sensor_due(m, d, i) {
+                    let dim = m.sensor_dim[i] as usize;
+                    sensor::compute_sensor(m, d, i, &mut values[k..k + dim]);
+                    k += dim;
+                }
+            }
+            sensordata_delay0 = Some(values);
+        }
+    }
     for i in 1..n {
         blas::zero(&mut dx, 2*nv+na);
         for j in 0..i {
@@ -999,9 +1094,10 @@ pub fn runge_kutta(m: &Model, d: &mut Data, n: i32) {
         blas::copy(&mut d.ten_length, saved, m.ntendon);
         if let Some(saved) = &ten_j0 { blas::copy(&mut d.ten_j, saved, m.n_jten); }
     }
-    advance_impl(m, d, &dx[2*nv..], &dx[nv..], Some(&dx), None);
+    advance_impl(m, d, &dx[2*nv..], &dx[nv..], Some(&dx), sensordata_delay0.as_deref());
     blas::copy(&mut d.qacc, &dx[nv..], nv);
     blas::copy(&mut d.qacc_warmstart, &f[n-1], nv);
+    if let Some(values) = sensordata_delay0 { d.scratch.put_num(values); }
     if let Some(saved) = ten_j0 { d.scratch.put_num(saved); }
     if let Some(saved) = ten_length0 { d.scratch.put_num(saved); }
     if let Some(saved) = actuator_velocity0 { d.scratch.put_num(saved); }

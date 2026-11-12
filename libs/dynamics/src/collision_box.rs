@@ -79,7 +79,7 @@ pub fn raw_sphere_box(
 
 pub fn sphere_box(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -451,7 +451,7 @@ pub fn raw_capsule_box(
 
 pub fn capsule_box(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,
@@ -853,7 +853,7 @@ pub fn raw_box_box(
 
 pub fn box_box(
     m: &Model,
-    d: &mut Data,
+    d: &Data,
     con: &mut [PreContact],
     g1: i32,
     g2: i32,

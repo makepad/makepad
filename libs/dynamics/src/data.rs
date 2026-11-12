@@ -211,7 +211,8 @@ macro_rules! define_data {
             pub pstack: usize,
             pub pbase: usize,
             pub parena: usize,
-            pub threadpool: u64,
+            /// The thread pool the app bound (`thread::bind_thread_pool`); none runs every task on the caller.
+            pub threadpool: crate::thread::ThreadPool,
             pub threadlock: u8,
             pub maxuse_stack: usize,
             pub maxuse_arena: usize,
@@ -338,6 +339,9 @@ macro_rules! define_data {
             pub ifrc_constraint: Vec<f64>,
             pub signature: u64,
             pub scratch: crate::memory::Scratch,
+            /// Ours: each narrowphase task's pooled vectors and the SDF collider's records, apart so that
+            /// tasks share Data read-only; merged into Data after the phase (`collision_driver`).
+            pub collision_tasks: Vec<crate::collision_driver::CollisionTask>,
         }
 
         impl Data {
@@ -353,7 +357,7 @@ macro_rules! define_data {
                     pstack: 0,
                     pbase: 0,
                     parena: 0,
-                    threadpool: 0,
+                    threadpool: crate::thread::ThreadPool::default(),
                     threadlock: 0,
                     maxuse_stack: 0,
                     maxuse_arena: 0,
@@ -475,6 +479,7 @@ macro_rules! define_data {
                     ifrc_constraint: Vec::new(),
                     signature: 0,
                     scratch: crate::memory::Scratch::default(),
+                    collision_tasks: Vec::new(),
                 }
             }
 

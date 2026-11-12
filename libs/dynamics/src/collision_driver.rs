@@ -20,7 +20,8 @@ use crate::memory::clear_efc;
 use crate::model::Model;
 use crate::sleep::sleep_state;
 use crate::sort::sort;
-use crate::thread::{dispatch, num_thread};
+use crate::memory::Scratch;
+use crate::thread::{num_thread, run_parts};
 use crate::types::*;
 use crate::util_blas as u;
 use crate::util_errmem::warning;
@@ -33,26 +34,72 @@ use crate::util_spatial::{eig3tol, make_frame};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CollisionFn { PlaneSphere, PlaneCapsule, PlaneConvex, PlaneCylinder, PlaneBox, ConvexHfield, HfieldSdf, SphereSphere, SphereCapsule, Convex, SphereCylinder, SphereBox, Sdf, CapsuleCapsule, CapsuleBox, BoxBox, MeshSdf }
 impl CollisionFn {
-    pub fn call(self, m: &Model, d: &mut Data, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
+    /// Collides geoms g1 and g2 into `con`, returning the number of contacts; `t` is the calling task's.
+    pub fn call(self, m: &Model, d: &Data, t: &mut CollisionTask, con: &mut [PreContact], g1: i32, g2: i32, margin: f64) -> usize {
         match self {
             CollisionFn::PlaneSphere => plane_sphere(m, d, con, g1, g2, margin),
             CollisionFn::PlaneCapsule => plane_capsule(m, d, con, g1, g2, margin),
             CollisionFn::PlaneConvex => plane_convex(m, d, con, g1, g2, margin),
             CollisionFn::PlaneCylinder => plane_cylinder(m, d, con, g1, g2, margin),
             CollisionFn::PlaneBox => plane_box(m, d, con, g1, g2, margin),
-            CollisionFn::ConvexHfield => convex_hfield(m, d, con, g1, g2, margin),
+            CollisionFn::ConvexHfield => convex_hfield(m, d, &mut t.scratch, con, g1, g2, margin),
             CollisionFn::HfieldSdf => hfield_sdf(m, d, con, g1, g2, margin),
             CollisionFn::SphereSphere => sphere_sphere(m, d, con, g1, g2, margin),
             CollisionFn::SphereCapsule => sphere_capsule(m, d, con, g1, g2, margin),
-            CollisionFn::Convex => convex(m, d, con, g1, g2, margin),
+            CollisionFn::Convex => convex(m, d, &mut t.scratch, con, g1, g2, margin),
             CollisionFn::SphereCylinder => sphere_cylinder(m, d, con, g1, g2, margin),
             CollisionFn::SphereBox => sphere_box(m, d, con, g1, g2, margin),
-            CollisionFn::Sdf => sdf(m, d, con, g1, g2, margin),
+            CollisionFn::Sdf => sdf(m, d, t, con, g1, g2, margin),
             CollisionFn::CapsuleCapsule => capsule_capsule(m, d, con, g1, g2, margin),
             CollisionFn::CapsuleBox => capsule_box(m, d, con, g1, g2, margin),
             CollisionFn::BoxBox => box_box(m, d, con, g1, g2, margin),
-            CollisionFn::MeshSdf => mesh_sdf(m, d, con, g1, g2, margin),
+            CollisionFn::MeshSdf => mesh_sdf(m, d, t, con, g1, g2, margin),
         }
+    }
+}
+
+/// What one narrowphase task changes besides its pairs' contacts (the reference's per-thread stack and
+/// the Data its colliders share): its pooled vectors, and what the SDF colliders record, which
+/// [`merge_collision_tasks`] moves into Data after the phase in pair order, as one task in order leaves it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CollisionTask {
+    pub scratch: Scratch,
+    /// the field pairs the task collided, and the seeds each leaves for its next collision (Data.sdf_seeds)
+    pub(crate) sdf_ran: Vec<(i32, i32)>,
+    pub(crate) sdf_seeds: Vec<(i32, i32, [f64; 3])>,
+    /// walks the bound on their steps stopped (Data.sdf_walks_bounded), and the first one's geoms
+    pub(crate) sdf_walks_bounded: u64,
+    pub(crate) sdf_first_bounded: Option<(i32, i32)>,
+    /// BVH nodes the mesh-field collider found active (Data.bvh_active)
+    pub(crate) bvh_marks: Vec<usize>,
+}
+
+/// Moves what `tasks` recorded into `d`: the seeds of the field pairs they collided give way to the new
+/// ones, appended in task order; the bounded walks add up, logged at the first ever; the marked BVH nodes.
+pub(crate) fn merge_collision_tasks(m: &Model, d: &mut Data, tasks: &mut [CollisionTask]) {
+    if tasks.iter().any(|t| !t.sdf_ran.is_empty()) {
+        d.sdf_seeds.retain(|&(a, b, _)| !tasks.iter().any(|t| t.sdf_ran.contains(&(a, b))));
+        for t in tasks.iter_mut() {
+            d.sdf_seeds.extend_from_slice(&t.sdf_seeds);
+            t.sdf_ran.clear();
+            t.sdf_seeds.clear();
+        }
+    }
+    for t in tasks.iter_mut() {
+        if let Some((g1, g2)) = t.sdf_first_bounded.take() {
+            if d.sdf_walks_bounded == 0 {
+                crate::util_errmem::warning_text(&format!(
+                    "SDF collision: a walk of geoms {g1} and {g2} took sdf_iterations ({}) steps without settling; it carries on in the next collision. Time = {:.4}.",
+                    m.opt.sdf_iterations, d.time
+                ));
+            }
+        }
+        d.sdf_walks_bounded += t.sdf_walks_bounded;
+        t.sdf_walks_bounded = 0;
+        for &node in &t.bvh_marks {
+            d.bvh_active[node] = 1;
+        }
+        t.bvh_marks.clear();
     }
 }
 
@@ -739,15 +786,6 @@ fn set_contact_surfacevel(m: &Model, d: &mut Data, i: usize) {
     }
 }
 
-struct ContactArg<'a> {
-    conbuffer: &'a mut [PreContact],
-    nconbuffer: &'a mut [i32],
-    ccd_size: usize,
-    pairbuffer: &'a mut [Pair],
-    npair: usize,
-    chunksize: usize,
-    maxcon: usize,
-}
 fn pair_max_contact(m: &Model, pair: &Pair) -> usize {
     let g1 = pair.g1; let g2 = pair.g2; let ipair = pair.ipair;
     let margin = get_margin(m, g1, g2, ipair); let gap = get_gap(m, g1, g2, ipair);
@@ -763,33 +801,45 @@ fn pair_needs_ccd(m: &Model, pair: &Pair) -> bool {
         | SphereCylinder | SphereBox | CapsuleCapsule | CapsuleBox | BoxBox | Sdf | HfieldSdf | MeshSdf) { return false; }
     true
 }
-fn collision_task(m: &Model, d: &mut Data, conargs: &mut ContactArg<'_>, _thread_id: usize, idx: usize) {
-    let chunksize = conargs.chunksize; let globalidx = chunksize*idx;
-    let npair = conargs.npair; let n = chunksize.min(npair-globalidx);
-    // mjc_setCCDBuffer binds Scratch's retained pool in this port. Convex
+// One task's chunk of pairs: the pairs, their contact counts, and the contact buffer from the first pair's
+// conpos (`conbase`) to the next chunk's.
+struct ContactChunk<'a> {
+    pairs: &'a mut [Pair],
+    ncon: &'a mut [i32],
+    con: &'a mut [PreContact],
+    conbase: usize,
+    task: &'a mut CollisionTask,
+}
+fn collision_task(m: &Model, d: &Data, c: ContactChunk<'_>, ccd_size: usize) {
+    let ContactChunk { pairs, ncon, con, conbase, task } = c;
+    // mjc_setCCDBuffer binds the task's retained pool in this port. Convex
     // colliders take/return it themselves; continuous collision borrows it below.
+    if ccd_size > 0 {
+        let buffer = task.scratch.ccd_buffer(ccd_size);
+        task.scratch.put_ccd_buffer(buffer, ccd_size);
+    }
+    let n = pairs.len();
     for i in 0..n {
-        let p = globalidx+i;
-        let conpos = conargs.pairbuffer[p].conpos;
-        let g1 = conargs.pairbuffer[p].g1; let g2 = conargs.pairbuffer[p].g2; let ipair = conargs.pairbuffer[p].ipair;
+        let conpos = pairs[i].conpos - conbase;
+        let g1 = pairs[i].g1; let g2 = pairs[i].g2; let ipair = pairs[i].ipair;
         let collision_func = COLLISIONFUNC[m.geom_type[g1 as usize] as usize][m.geom_type[g2 as usize] as usize].unwrap();
         let margin = get_margin(m, g1, g2, ipair); let gap = get_gap(m, g1, g2, ipair);
-        conargs.nconbuffer[p] = collision_func.call(m, d, &mut conargs.conbuffer[conpos..], g1, g2, margin+gap) as i32;
+        ncon[i] = collision_func.call(m, d, task, &mut con[conpos..], g1, g2, margin+gap) as i32;
         if speculative_enabled(m) {
             let mut active = false;
-            for k in 0..conargs.nconbuffer[p] as usize {
-                if conargs.conbuffer[conpos+k].dist < margin { active = true; break; }
+            for k in 0..ncon[i] as usize {
+                if con[conpos+k].dist < margin { active = true; break; }
             }
             let min_size = pair_min_size(m, g1, g2);
             if !active && (geom_step_sweep(m, d, g1, min_size, None, None) > 0.0 || geom_step_sweep(m, d, g2, min_size, None, None) > 0.0) {
-                let mut buffer = d.scratch.ccd_buffer(conargs.ccd_size);
-                let nccd = advance_geom_pair(m, d, g1, g2, margin, Some(&mut conargs.conbuffer[conpos..]), Some(&mut buffer));
-                d.scratch.put_ccd_buffer(buffer, conargs.ccd_size);
-                if nccd > 0 { conargs.nconbuffer[p] = nccd as i32; conargs.pairbuffer[p].spec = 1; }
+                let mut buffer = task.scratch.ccd_buffer(ccd_size);
+                let nccd = advance_geom_pair(m, d, g1, g2, margin, Some(&mut con[conpos..]), Some(&mut buffer));
+                task.scratch.put_ccd_buffer(buffer, ccd_size);
+                if nccd > 0 { ncon[i] = nccd as i32; pairs[i].spec = 1; }
             }
         }
-        let expected_max = (if p+1 < npair { conargs.pairbuffer[p+1].conpos } else { conargs.maxcon }) - conpos;
-        if conargs.nconbuffer[p] as usize > expected_max { panic!("collision function returned {} contacts, expected at most {} from pairMaxContact", conargs.nconbuffer[p], expected_max); }
+        let expected_max = (if i+1 < n { pairs[i+1].conpos - conbase } else { con.len() }) - conpos;
+        if ncon[i] as usize > expected_max { panic!("collision function returned {} contacts, expected at most {} from pairMaxContact", ncon[i], expected_max); }
     }
 }
 fn add_pair_contacts(m: &Model, d: &mut Data, precon: &[PreContact], ncon: usize, pair: &Pair, _total_demand: i32) -> bool {
@@ -848,13 +898,25 @@ fn narrowphase(m: &Model, d: &mut Data, pairs: &mut [Pair]) {
     reset_arena(d);
     let mut nconbuffer = d.scratch.contact_count(npair);
     let mut conbuffer = d.scratch.pre_contact(maxcon);
-    let mut arg = ContactArg { ccd_size: ccd_size_, pairbuffer: &mut pairbuffer, nconbuffer: &mut nconbuffer, conbuffer: &mut conbuffer, npair, chunksize, maxcon };
-    if has_ccd {
-        // Serial dispatch needs one retained native CCD buffer.
-        let buffer = d.scratch.ccd_buffer(ccd_size_);
-        d.scratch.put_ccd_buffer(buffer, ccd_size_);
+    // each chunk of pairs is a task with its own contacts and records, Data shared read-only
+    let mut tasks = std::mem::take(&mut d.collision_tasks);
+    if tasks.len() < nchunk { tasks.resize_with(nchunk, CollisionTask::default); }
+    {
+        let mut con_rest = &mut conbuffer[..];
+        let mut conbase = 0;
+        let chunks = pairbuffer.chunks_mut(chunksize).zip(nconbuffer.chunks_mut(chunksize)).zip(tasks.iter_mut()).map(|((pairs, ncon), task)| {
+            let conend = pairs.last().map_or(conbase, |p| p.conpos + pair_max_contact(m, p));
+            let (con, rest) = std::mem::take(&mut con_rest).split_at_mut(conend - conbase);
+            con_rest = rest;
+            let chunk = ContactChunk { pairs, ncon, con, conbase, task };
+            conbase = conend;
+            chunk
+        });
+        let d: &Data = d;
+        run_parts(&d.threadpool, chunks, |_, chunk| collision_task(m, d, chunk, ccd_size_));
     }
-    dispatch(m, d, &mut collision_task, &mut arg, nchunk);
+    merge_collision_tasks(m, d, &mut tasks[..nchunk]);
+    d.collision_tasks = tasks;
     let mut total_demand = d.ncon;
     for i in 0..npair {
         if pairbuffer[i].group >= 0 { crate::unported!("filterPreContacts: flex groups"); }
