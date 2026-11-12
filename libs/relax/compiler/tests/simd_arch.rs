@@ -284,6 +284,119 @@ fn arch() {
             o
         },
     );
+    // relax issue 1: one or two rows of each NEON family
+    u!(vreinterpret_s8_f32, float32x2_t);
+    u!(vreinterpretq_f64_u8, uint8x16_t);
+    u!(vreinterpretq_p128_p64, poly64x2_t);
+    u!(vreinterpretq_p64_p128, u128);
+    un("vld2q_u8", |p: [u8; 33]| unsafe { vld2q_u8(p.as_ptr().add(1)) }, |p: [u8; 33]| unsafe { vld2q_u8(p.as_ptr().add(1)) });
+    un("vld3_s16", |p: [i16; 12]| unsafe { vld3_s16(p.as_ptr()) }, |p: [i16; 12]| unsafe { vld3_s16(p.as_ptr()) });
+    un("vld4q_u32", |p: [u32; 16]| unsafe { vld4q_u32(p.as_ptr()) }, |p: [u32; 16]| unsafe { vld4q_u32(p.as_ptr()) });
+    un("vld1q_u8_x4", |p: [u8; 64]| unsafe { vld1q_u8_x4(p.as_ptr()) }, |p: [u8; 64]| unsafe { vld1q_u8_x4(p.as_ptr()) });
+    un("vld1q_dup_u16", |p: u16| unsafe { vld1q_dup_u16(&p) }, |p: u16| unsafe { vld1q_dup_u16(&p) });
+    un("vld1q_lane_u8::<5>", |(x, v): (u8, uint8x16_t)| unsafe { vld1q_lane_u8::<5>(&x, v) }, |(x, v): (u8, uint8x16_t)| unsafe { vld1q_lane_u8::<5>(&x, v) });
+    un(
+        "vst3q_u8",
+        |a: uint8x16x3_t| {
+            let mut o = [0u8; 50];
+            unsafe { vst3q_u8(o.as_mut_ptr().add(1), a) };
+            o
+        },
+        |a: uint8x16x3_t| {
+            let mut o = [0u8; 50];
+            unsafe { vst3q_u8(o.as_mut_ptr().add(1), a) };
+            o
+        },
+    );
+    un(
+        "vst1_lane_s32::<1>",
+        |a: int32x2_t| {
+            let mut o = 0i32;
+            unsafe { vst1_lane_s32::<1>(&mut o, a) };
+            o
+        },
+        |a: int32x2_t| {
+            let mut o = 0i32;
+            unsafe { vst1_lane_s32::<1>(&mut o, a) };
+            o
+        },
+    );
+    u!(vdup_n_s16, i16);
+    u!(vmovq_n_u8, u8);
+    u!(vcreate_u16, u64);
+    b!(vcombine_f32, float32x2_t, float32x2_t);
+    u!(vget_high_p64, poly64x2_t);
+    u!(vget_low_f32, float32x4_t);
+    u!(vgetq_lane_p8::<15>, poly8x16_t);
+    u!(vget_lane_f64::<0>, float64x1_t);
+    b!(vsetq_lane_p64::<1>, u64, poly64x2_t);
+    u!(vrev64q_u8, uint8x16_t);
+    u!(vrev32_u16, uint16x4_t);
+    u!(vrev16q_u8, uint8x16_t);
+    b!(vadd_u8, uint8x8_t, uint8x8_t);
+    b!(vaddq_p64, poly64x2_t, poly64x2_t);
+    b!(vsub_s64, int64x1_t, int64x1_t);
+    b!(vmul_f32, float32x2_t, float32x2_t);
+    b!(vmulq_u8, uint8x16_t, uint8x16_t);
+    b!(vand_u64, uint64x1_t, uint64x1_t);
+    b!(vorr_u16, uint16x4_t, uint16x4_t);
+    b!(veor_s8, int8x8_t, int8x8_t);
+    b!(vqadd_s8, int8x8_t, int8x8_t);
+    b!(vqaddq_u64, uint64x2_t, uint64x2_t);
+    b!(vqsub_u16, uint16x4_t, uint16x4_t);
+    b!(vqsubq_s64, int64x2_t, int64x2_t);
+    b!(vmax_s8, int8x8_t, int8x8_t);
+    b!(vmin_u32, uint32x2_t, uint32x2_t);
+    b!(vbic_u8, uint8x8_t, uint8x8_t);
+    b!(vornq_s32, int32x4_t, int32x4_t);
+    u!(vmvnq_p8, poly8x16_t);
+    u!(vneg_s8, int8x8_t);
+    u!(vnegq_f64, float64x2_t);
+    u!(vabs_s16, int16x4_t);
+    u!(vabs_f32, float32x2_t);
+    t!(vmla_s8, int8x8_t, int8x8_t, int8x8_t);
+    t!(vmlsq_u32, uint32x4_t, uint32x4_t, uint32x4_t);
+    t!(vmla_f32, float32x2_t, float32x2_t, float32x2_t);
+    b!(vmul_n_u16, uint16x4_t, u16);
+    b!(vmul_n_f64, float64x1_t, f64);
+    t!(vmlaq_n_u32, uint32x4_t, uint32x4_t, u32);
+    t!(vmls_n_f32, float32x2_t, float32x2_t, f32);
+    b!(vqdmulh_s16, int16x4_t, int16x4_t);
+    b!(vqdmulhq_s32, int32x4_t, int32x4_t);
+    b!(vqrdmulh_s16, int16x4_t, int16x4_t);
+    b!(vqrdmulhq_s32, int32x4_t, int32x4_t);
+    b!(vqdmulhq_n_s16, int16x8_t, i16);
+    b!(vqrdmulh_n_s32, int32x2_t, i32);
+    u!(vshl_n_u8::<3>, uint8x8_t);
+    u!(vshr_n_s16::<16>, int16x4_t);
+    u!(vshr_n_u32::<32>, uint32x2_t);
+    u!(vshr_n_u64::<1>, uint64x1_t);
+    u!(vshll_n_s8::<8>, int8x8_t);
+    u!(vshll_n_u16::<3>, uint16x4_t);
+    u!(vshrn_n_s16::<8>, int16x8_t);
+    u!(vshrn_n_u32::<16>, uint32x4_t);
+    u!(vmovn_u64, uint64x2_t);
+    u!(vmovn_s16, int16x8_t);
+    b!(vceq_f32, float32x2_t, float32x2_t);
+    b!(vcge_s64, int64x1_t, int64x1_t);
+    b!(vcgt_u8, uint8x8_t, uint8x8_t);
+    b!(vcle_f64, float64x1_t, float64x1_t);
+    b!(vclt_s16, int16x4_t, int16x4_t);
+    u!(vceqzq_f64, float64x2_t);
+    u!(vcgezq_s8, int8x16_t);
+    u!(vcgtz_s32, int32x2_t);
+    u!(vclezq_f32, float32x4_t);
+    u!(vcltzq_s64, int64x2_t);
+    b!(vtst_u16, uint16x4_t, uint16x4_t);
+    b!(vtstq_p64, poly64x2_t, poly64x2_t);
+    b!(__crc32h, u32, u16);
+    b!(__crc32w, u32, u32);
+    b!(vmull_p64, u64, u64);
+    b!(vmull_high_p64, poly64x2_t, poly64x2_t);
+    b!(vmul_p8, poly8x8_t, poly8x8_t);
+    b!(vmulq_p8, poly8x16_t, poly8x16_t);
+    b!(vmull_p8, poly8x8_t, poly8x8_t);
+    b!(vmull_high_p8, poly8x16_t, poly8x16_t);
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
@@ -537,4 +650,46 @@ fn arch() {
 #[test]
 fn simd_arch() {
     arch();
+}
+
+// relax issue 1: sixteen decimal digits of a u64 with NEON lane arithmetic, as a float formatter
+// splits its digits (multiply-high instead of division, interleaving stores), against format!
+#[cfg(target_arch = "aarch64")]
+fn digits16(v: u64) -> [u8; 16] {
+    unsafe {
+        let (hi, lo) = ((v / 100_000_000) as u32, (v % 100_000_000) as u32);
+        let groups = [(hi / 10_000) as u16, (hi % 10_000) as u16, (lo / 10_000) as u16, (lo % 10_000) as u16];
+        let g = vld1_u16(groups.as_ptr());
+        // 4 digits -> 2 + 2: g / 100 is (g * 5243) >> 19, as a doubling multiply-high then >> 4, and
+        // widened to 32 bits, narrowed by >> 16, then >> 3
+        let q = vreinterpret_u16_s16(vshr_n_s16::<4>(vqdmulh_n_s16(vreinterpret_s16_u16(g), 5243)));
+        let q32 = vshr_n_u16::<3>(vshrn_n_u32::<16>(vmulq_n_u32(vshll_n_u16::<0>(g), 5243)));
+        assert_eq!(vget_lane_u64::<0>(vreinterpret_u64_u16(vceq_u16(q, q32))), u64::MAX, "two ways to g / 100 differ for {v}");
+        let r = vmls_n_u16(g, q, 100);
+        let mut pairs = [0u16; 8];
+        vst2_u16(pairs.as_mut_ptr(), uint16x4x2_t(q, r));
+        // 2 digits -> tens and units: p / 10 is (p * 103) >> 10
+        let p = vld1q_u16(pairs.as_ptr());
+        let tens = vshrq_n_u16::<10>(vmulq_n_u16(p, 103));
+        let units = vmlsq_n_u16(p, tens, 10);
+        let zero = vdup_n_u8(b'0');
+        let mut out = [0u8; 16];
+        vst2_u8(out.as_mut_ptr(), uint8x8x2_t(vadd_u8(vmovn_u16(tens), zero), vadd_u8(vmovn_u16(units), zero)));
+        out
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn neon_decimal_digits() {
+    let mut s = 0x9e37_79b9_7f4a_7c15u64;
+    let mut values = vec![0, 1, 9, 10, 99, 100, 9_999, 10_000, 99_999_999, 100_000_000, 1_000_000_000_000_000, 9_999_999_999_999_999];
+    for _ in 0..200 {
+        values.push(next(&mut s) % 10_000_000_000_000_000);
+    }
+    for v in values {
+        let d = digits16(core::hint::black_box(v));
+        assert_eq!(core::str::from_utf8(&d).unwrap(), format!("{v:016}"), "digits of {v}");
+    }
+    println!("neon decimal digits: ok");
 }

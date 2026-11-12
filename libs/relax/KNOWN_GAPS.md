@@ -76,3 +76,44 @@ fn main() { make_wo(); }
 - Relax: the same warning at 2:31.
 
 Start in types/src/lint_liveness.rs (the span of the binding it reports).
+
+## 6. CRC-32C intrinsics are missing: Arm `__crc32cb/h/w/d`, x86 `_mm_crc32_u8/16/32/64`
+
+```rust
+fn main() {
+    #[cfg(target_arch = "aarch64")]
+    println!("{:#x}", unsafe { core::arch::aarch64::__crc32cb(!0, b'1') });
+    #[cfg(target_arch = "x86_64")]
+    println!("{:#x}", unsafe { core::arch::x86_64::_mm_crc32_u8(!0, b'1') });
+}
+```
+
+- rustc: prints one CRC-32C (Castagnoli, reflected 0x82F63B78) step.
+- Relax: E0425, the function is not found in `core::arch`.
+
+The IEEE ones (`__crc32b/h/w/d`) are backend ops: IOp::Crc32B/H/W/X in backend/src/rir.rs, encoded
+in arm64.rs, folded in passes.rs, run by codegen/src/interp.rs, refused by wasm.rs, lowered from
+`vx_crc32` in compiler/src/lower.rs. Add the Castagnoli four the same way (arm64's CRC32C* set
+bit 12 of the CRC32* encoding; x64 has them as SSE4.2 `crc32`), then the std wrappers in
+compiler/std/core/arch/aarch64.rs and x86_64.rs, and a check in
+compiler/tests/crc32_clmul_intrinsics.rs.
+
+## 7. NEON intrinsics are `unsafe fn`; rustc's are safe
+
+```rust
+#[cfg(target_arch = "aarch64")]
+fn main() {
+    use core::arch::aarch64::*;
+    let a = unsafe { vdup_n_u8(3) };
+    println!("{:?}", vadd_u8(a, a));
+}
+```
+
+- rustc (1.87 and later): compiles; the NEON intrinsics without pointer arguments are safe
+  `#[target_feature(enable = "neon")]` functions, and NEON is on for every aarch64 target.
+- Relax: E0133, call to unsafe function `vadd_u8`.
+
+compiler/std/core/arch/aarch64.rs declares every intrinsic `pub unsafe fn`. The ones stdarch
+declares safe (all but the loads, stores and those that need a feature beyond NEON, such as crc
+and aes) should be `pub fn` with their bodies in `unsafe` blocks; the families at the end of the
+file change in their macros.

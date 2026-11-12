@@ -1,6 +1,7 @@
-// Arm's __crc32b / __crc32d and Intel's _mm_clmulepi64_si128 (a CRC's hardware steps: Arm's crc32
-// instructions, x86's carry-less multiply for folding) against bitwise references, on the host's
-// own architecture; called often enough to tier up. Run with `makepad test` and rustc -O --test.
+// Arm's __crc32b/h/w/d, Arm's vmull_p64 / vmull_p8 family and Intel's _mm_clmulepi64_si128 (a
+// CRC's hardware steps: the crc32 instructions, the carry-less multiplies for folding) against
+// bitwise references, on the host's own architecture; called often enough to tier up. Run with
+// `makepad test` and rustc -O --test.
 #![allow(unused)]
 use std::hint::black_box;
 
@@ -37,7 +38,7 @@ fn inputs() -> Vec<u64> {
 #[cfg(target_arch = "aarch64")]
 #[test]
 fn crc32_intrinsics() {
-    use core::arch::aarch64::{__crc32b, __crc32d};
+    use core::arch::aarch64::{__crc32b, __crc32d, __crc32h, __crc32w};
     if !std::arch::is_aarch64_feature_detected!("crc") {
         return;
     }
@@ -49,15 +50,45 @@ fn crc32_intrinsics() {
     assert_eq!(!r, 0xcbf4_3926);
     let w = u64::from_le_bytes(*b"12345678");
     assert_eq!(!unsafe { __crc32b(__crc32d(!0, black_box(w)), b'9') }, 0xcbf4_3926);
+    let (w4, h2) = (u32::from_le_bytes(*b"1234"), u16::from_le_bytes(*b"56"));
+    assert_eq!(!unsafe { __crc32b(__crc32h(__crc32h(__crc32w(!0, black_box(w4)), h2), u16::from_le_bytes(*b"78")), b'9') }, 0xcbf4_3926);
     let v = inputs();
     for round in 0..300 {
         for (k, &a) in v.iter().enumerate() {
             let b = v[(k + round) % v.len()];
             assert_eq!(unsafe { __crc32d(a as u32, b) }, crc32_bits(a as u32, b, 64), "a {a:#x} b {b:#x}");
             assert_eq!(unsafe { __crc32b(a as u32, b as u8) }, crc32_bits(a as u32, b & 0xff, 8), "a {a:#x} b {b:#x}");
+            assert_eq!(unsafe { __crc32h(a as u32, b as u16) }, crc32_bits(a as u32, b & 0xffff, 16), "h: a {a:#x} b {b:#x}");
+            assert_eq!(unsafe { __crc32w(a as u32, b as u32) }, crc32_bits(a as u32, b & 0xffff_ffff, 32), "w: a {a:#x} b {b:#x}");
         }
     }
     println!("crc32 intrinsics: ok");
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn pmull_intrinsics() {
+    use core::arch::aarch64::{vcombine_p64, vcreate_p64, vcreate_p8, vmul_p8, vmull_high_p64, vmull_p64, vmull_p8};
+    if !std::arch::is_aarch64_feature_detected!("aes") {
+        return;
+    }
+    let v = inputs();
+    for round in 0..100 {
+        for (k, &a) in v.iter().enumerate() {
+            let b = v[(k * 7 + round) % v.len()];
+            assert_eq!(unsafe { vmull_p64(black_box(a), b) }, clmul_ref(a, b), "vmull_p64 a {a:#x} b {b:#x}");
+            let (va, vb) = unsafe { (vcombine_p64(vcreate_p64(b), vcreate_p64(a)), vcombine_p64(vcreate_p64(a), vcreate_p64(b))) };
+            assert_eq!(unsafe { vmull_high_p64(black_box(va), vb) }, clmul_ref(a, b), "vmull_high_p64 a {a:#x} b {b:#x}");
+            let (x, y) = unsafe { (vcreate_p8(black_box(a)), vcreate_p8(b)) };
+            let wide: [u16; 8] = unsafe { core::mem::transmute(vmull_p8(x, y)) };
+            let low: [u8; 8] = unsafe { core::mem::transmute(vmul_p8(x, y)) };
+            for i in 0..8 {
+                let r = clmul_ref((a >> (8 * i)) & 0xff, (b >> (8 * i)) & 0xff) as u16;
+                assert_eq!((wide[i], low[i]), (r, r as u8), "vmull_p8 / vmul_p8 lane {i} a {a:#x} b {b:#x}");
+            }
+        }
+    }
+    println!("pmull intrinsics: ok");
 }
 
 #[cfg(target_arch = "x86_64")]

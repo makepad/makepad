@@ -5,6 +5,9 @@
 //! CRC32 uses the reflected IEEE polynomial, without initial/final complements.
 //! SHA-1 follows Arm's four-round and message-schedule pseudocode.
 //!
+//! The families (load/store, lane moves, arithmetic, shifts, compares, reinterpret) are tables
+//! at the end of this file, one row per intrinsic.
+//!
 //! Unsafe entry points retain stdarch's pointer and immediate contracts: pointers
 //! must cover the full load/store and lane/shift constants must be in range.
 //! These functions emulate result bits, not architectural status flags.
@@ -573,34 +576,6 @@ pub unsafe fn vqshrun_n_s32<const N: i32>(a: int32x4_t) -> uint16x4_t {
         i += 1;
     }
     uint16x4_t(r)
-}
-
-pub unsafe fn vreinterpret_s8_u8(a: uint8x8_t) -> int8x8_t {
-    crate::ptr::read_unaligned((&a as *const uint8x8_t).cast())
-}
-
-pub unsafe fn vreinterpret_u64_u8(a: uint8x8_t) -> uint64x1_t {
-    crate::ptr::read_unaligned((&a as *const uint8x8_t).cast())
-}
-
-pub unsafe fn vreinterpretq_s32_s64(a: int64x2_t) -> int32x4_t {
-    crate::ptr::read_unaligned(&a as *const int64x2_t as *const int32x4_t)
-}
-
-pub unsafe fn vreinterpretq_s32_u32(a: uint32x4_t) -> int32x4_t {
-    crate::ptr::read_unaligned(&a as *const uint32x4_t as *const int32x4_t)
-}
-
-pub unsafe fn vreinterpretq_s64_s32(a: int32x4_t) -> int64x2_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const int64x2_t)
-}
-
-pub unsafe fn vreinterpretq_u32_s32(a: int32x4_t) -> uint32x4_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const uint32x4_t)
-}
-
-pub unsafe fn vreinterpretq_u32_u8(a: uint8x16_t) -> uint32x4_t {
-    crate::ptr::read_unaligned(&a as *const uint8x16_t as *const uint32x4_t)
 }
 
 pub unsafe fn vrev32q_u8(a: uint8x16_t) -> uint8x16_t {
@@ -2740,102 +2715,6 @@ pub unsafe fn vqtbl4q_u8(a: uint8x16x4_t, b: uint8x16_t) -> uint8x16_t {
     uint8x16_t(r)
 }
 
-pub unsafe fn vreinterpretq_f32_s32(a: int32x4_t) -> float32x4_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const float32x4_t)
-}
-
-pub unsafe fn vreinterpretq_f32_u32(a: uint32x4_t) -> float32x4_t {
-    crate::ptr::read_unaligned(&a as *const uint32x4_t as *const float32x4_t)
-}
-
-pub unsafe fn vreinterpretq_f32_u64(a: uint64x2_t) -> float32x4_t {
-    crate::ptr::read_unaligned(&a as *const uint64x2_t as *const float32x4_t)
-}
-
-pub unsafe fn vreinterpretq_f32_u8(a: uint8x16_t) -> float32x4_t {
-    crate::ptr::read_unaligned(&a as *const uint8x16_t as *const float32x4_t)
-}
-
-pub unsafe fn vreinterpretq_f64_u32(a: uint32x4_t) -> float64x2_t {
-    crate::ptr::read_unaligned(&a as *const uint32x4_t as *const float64x2_t)
-}
-
-pub unsafe fn vreinterpretq_f64_u64(a: uint64x2_t) -> float64x2_t {
-    crate::ptr::read_unaligned(&a as *const uint64x2_t as *const float64x2_t)
-}
-
-pub unsafe fn vreinterpretq_s16_s32(a: int32x4_t) -> int16x8_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const int16x8_t)
-}
-
-pub unsafe fn vreinterpretq_s16_u16(a: uint16x8_t) -> int16x8_t {
-    crate::ptr::read_unaligned(&a as *const uint16x8_t as *const int16x8_t)
-}
-
-pub unsafe fn vreinterpretq_s32_f32(a: float32x4_t) -> int32x4_t {
-    crate::ptr::read_unaligned(&a as *const float32x4_t as *const int32x4_t)
-}
-
-pub unsafe fn vreinterpretq_s32_s16(a: int16x8_t) -> int32x4_t {
-    crate::ptr::read_unaligned(&a as *const int16x8_t as *const int32x4_t)
-}
-
-pub unsafe fn vreinterpretq_s64_u64(a: uint64x2_t) -> int64x2_t {
-    crate::ptr::read_unaligned(&a as *const uint64x2_t as *const int64x2_t)
-}
-
-pub unsafe fn vreinterpretq_s8_u8(a: uint8x16_t) -> int8x16_t {
-    crate::ptr::read_unaligned(&a as *const uint8x16_t as *const int8x16_t)
-}
-
-pub unsafe fn vreinterpretq_u16_s16(a: int16x8_t) -> uint16x8_t {
-    crate::ptr::read_unaligned(&a as *const int16x8_t as *const uint16x8_t)
-}
-
-pub unsafe fn vreinterpretq_u16_s32(a: int32x4_t) -> uint16x8_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const uint16x8_t)
-}
-
-pub unsafe fn vreinterpretq_u16_u32(a: uint32x4_t) -> uint16x8_t {
-    crate::ptr::read_unaligned(&a as *const uint32x4_t as *const uint16x8_t)
-}
-
-pub unsafe fn vreinterpretq_u16_u8(a: uint8x16_t) -> uint16x8_t {
-    crate::ptr::read_unaligned(&a as *const uint8x16_t as *const uint16x8_t)
-}
-
-pub unsafe fn vreinterpretq_u32_f32(a: float32x4_t) -> uint32x4_t {
-    crate::ptr::read_unaligned(&a as *const float32x4_t as *const uint32x4_t)
-}
-
-pub unsafe fn vreinterpretq_u32_f64(a: float64x2_t) -> uint32x4_t {
-    crate::ptr::read_unaligned(&a as *const float64x2_t as *const uint32x4_t)
-}
-
-pub unsafe fn vreinterpretq_u64_f32(a: float32x4_t) -> uint64x2_t {
-    crate::ptr::read_unaligned(&a as *const float32x4_t as *const uint64x2_t)
-}
-
-pub unsafe fn vreinterpretq_u64_f64(a: float64x2_t) -> uint64x2_t {
-    crate::ptr::read_unaligned(&a as *const float64x2_t as *const uint64x2_t)
-}
-
-pub unsafe fn vreinterpretq_u64_s64(a: int64x2_t) -> uint64x2_t {
-    crate::ptr::read_unaligned(&a as *const int64x2_t as *const uint64x2_t)
-}
-
-pub unsafe fn vreinterpretq_u64_u8(a: uint8x16_t) -> uint64x2_t {
-    crate::ptr::read_unaligned(&a as *const uint8x16_t as *const uint64x2_t)
-}
-
-pub unsafe fn vreinterpretq_u8_s32(a: int32x4_t) -> uint8x16_t {
-    crate::ptr::read_unaligned(&a as *const int32x4_t as *const uint8x16_t)
-}
-
-pub unsafe fn vreinterpretq_u8_s8(a: int8x16_t) -> uint8x16_t {
-    crate::ptr::read_unaligned(&a as *const int8x16_t as *const uint8x16_t)
-}
-
 pub unsafe fn vrev64q_f32(a: float32x4_t) -> float32x4_t {
     let mut r = [0.0; 4];
     let mut i = 0;
@@ -3777,4 +3656,1181 @@ pub unsafe fn vst1q_u64(a: *mut u64, b: uint64x2_t) {
 #[inline(always)]
 pub unsafe fn vmaxq_s32(a: int32x4_t, b: int32x4_t) -> int32x4_t {
     vx::vx_binary(a, b, 14, 32)
+}
+
+// ---- Intrinsic families ----------------------------------------------------------------------
+// One table row per intrinsic, one macro per shape. The lane-wise ones go through the generic SIMD
+// intrinsics (lowered to the vector IR where the target has the operation, per lane elsewhere), the
+// rest move bytes. Polynomial addition is XOR. Loads and stores accept any alignment.
+
+// stdarch keeps these aliases crate-private: the signatures show u8, u16, u64, u128
+pub(crate) type p8 = u8;
+pub(crate) type p16 = u16;
+pub(crate) type p64 = u64;
+pub(crate) type p128 = u128;
+
+use crate::intrinsics::simd;
+
+/// All bits set: the operand of NOT.
+#[inline(always)]
+unsafe fn ones<T>() -> T {
+    let mut v = crate::mem::MaybeUninit::<T>::uninit();
+    crate::ptr::write_bytes(v.as_mut_ptr(), 0xff, 1);
+    v.assume_init()
+}
+
+/// vld2..vld4: element k of vector j is p[k * N + j].
+#[inline(always)]
+unsafe fn ld_n<E: Copy, const L: usize, const N: usize>(p: *const E) -> [[E; L]; N] {
+    let mut r: [[E; L]; N] = crate::mem::zeroed();
+    let mut k = 0;
+    while k < L {
+        let mut j = 0;
+        while j < N {
+            r[j][k] = p.add(k * N + j).read_unaligned();
+            j += 1;
+        }
+        k += 1;
+    }
+    r
+}
+
+/// vst2..vst4: the inverse of ld_n.
+#[inline(always)]
+unsafe fn st_n<E: Copy, const L: usize, const N: usize>(p: *mut E, v: [[E; L]; N]) {
+    let mut k = 0;
+    while k < L {
+        let mut j = 0;
+        while j < N {
+            p.add(k * N + j).write_unaligned(v[j][k]);
+            j += 1;
+        }
+        k += 1;
+    }
+}
+
+/// vrev16/32/64: the lanes of each group of `group` lanes in reverse order.
+#[inline(always)]
+fn rev_groups<E: Copy, const L: usize>(a: [E; L], group: usize) -> [E; L] {
+    let mut r = a;
+    let mut i = 0;
+    while i < L {
+        r[i] = a[i - i % group + group - 1 - i % group];
+        i += 1;
+    }
+    r
+}
+
+/// Carry-less product of two bytes (polynomial multiplication over GF(2)).
+#[inline(always)]
+fn clmul8(a: u8, b: u8) -> u16 {
+    let mut r = 0u16;
+    let mut i = 0;
+    while i < 8 {
+        if (b >> i) & 1 != 0 {
+            r ^= (a as u16) << i;
+        }
+        i += 1;
+    }
+    r
+}
+
+macro_rules! neon_reinterpret {
+    ($($name:ident $from:ident => $to:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $from) -> $to {
+            crate::mem::transmute::<$from, $to>(a)
+        }
+    )*};
+}
+
+macro_rules! neon_ld1 {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *const $e) -> $v {
+            crate::ptr::read_unaligned(ptr as *const $v)
+        }
+    )*};
+}
+
+macro_rules! neon_st1 {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *mut $e, a: $v) {
+            crate::ptr::write_unaligned(ptr as *mut $v, a)
+        }
+    )*};
+}
+
+macro_rules! neon_ld1_dup {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *const $e) -> $v {
+            simd::simd_splat::<$v, $e>(ptr.read_unaligned())
+        }
+    )*};
+}
+
+macro_rules! neon_ld1_lane {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+        pub unsafe fn $name<const LANE: i32>(ptr: *const $e, src: $v) -> $v {
+            let mut r = src;
+            r.0[LANE as usize] = ptr.read_unaligned();
+            r
+        }
+    )*};
+}
+
+macro_rules! neon_st1_lane {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+        pub unsafe fn $name<const LANE: i32>(ptr: *mut $e, a: $v) {
+            ptr.write_unaligned(a.0[LANE as usize])
+        }
+    )*};
+}
+
+/// vld1_x2..x4 / vst1_x2..x4: consecutive whole vectors.
+macro_rules! neon_ld1_x {
+    ($($name:ident $e:ident $t:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *const $e) -> $t {
+            crate::ptr::read_unaligned(ptr as *const $t)
+        }
+    )*};
+}
+
+macro_rules! neon_st1_x {
+    ($($name:ident $e:ident $t:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *mut $e, a: $t) {
+            crate::ptr::write_unaligned(ptr as *mut $t, a)
+        }
+    )*};
+}
+
+macro_rules! neon_ld_n {
+    ($($name:ident $e:ident $t:ident $l:literal $n:literal);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *const $e) -> $t {
+            crate::mem::transmute::<[[$e; $l]; $n], $t>(ld_n::<$e, $l, $n>(ptr))
+        }
+    )*};
+}
+
+macro_rules! neon_st_n {
+    ($($name:ident $e:ident $t:ident $l:literal $n:literal);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(ptr: *mut $e, a: $t) {
+            st_n::<$e, $l, $n>(ptr, crate::mem::transmute::<$t, [[$e; $l]; $n]>(a))
+        }
+    )*};
+}
+
+macro_rules! neon_dup_n {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(value: $e) -> $v {
+            simd::simd_splat::<$v, $e>(value)
+        }
+    )*};
+}
+
+macro_rules! neon_create {
+    ($($name:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: u64) -> $v {
+            crate::mem::transmute::<u64, $v>(a)
+        }
+    )*};
+}
+
+macro_rules! neon_combine {
+    ($($name:ident $h:ident $q:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(low: $h, high: $h) -> $q {
+            crate::mem::transmute::<[$h; 2], $q>([low, high])
+        }
+    )*};
+}
+
+macro_rules! neon_get_half {
+    ($($name:ident $i:literal $h:ident $q:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $q) -> $h {
+            crate::mem::transmute::<$q, [$h; 2]>(a)[$i]
+        }
+    )*};
+}
+
+macro_rules! neon_get_lane {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const IMM5: i32>(v: $v) -> $e {
+            v.0[IMM5 as usize]
+        }
+    )*};
+}
+
+macro_rules! neon_set_lane {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+        pub unsafe fn $name<const LANE: i32>(a: $e, b: $v) -> $v {
+            let mut r = b;
+            r.0[LANE as usize] = a;
+            r
+        }
+    )*};
+}
+
+macro_rules! neon_rev {
+    ($($name:ident $v:ident $group:literal);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $v {
+            $v(rev_groups(a.0, $group))
+        }
+    )*};
+}
+
+macro_rules! neon_binary {
+    ($op:ident: $($name:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $v {
+            simd::$op(a, b)
+        }
+    )*};
+}
+
+/// vmax / vmin: the lane the compare picks.
+macro_rules! neon_max_min {
+    ($($name:ident $cmp:ident $v:ident $m:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $v {
+            simd::simd_select(simd::$cmp::<$v, $m>(a, b), a, b)
+        }
+    )*};
+}
+
+/// vbic (a AND NOT b) / vorn (a OR NOT b).
+macro_rules! neon_with_not {
+    ($($name:ident $op:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $v {
+            simd::$op(a, simd::simd_xor(b, ones::<$v>()))
+        }
+    )*};
+}
+
+macro_rules! neon_not {
+    ($($name:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $v {
+            simd::simd_xor(a, ones::<$v>())
+        }
+    )*};
+}
+
+/// Wrapping negation: the most negative lane stays as it is.
+macro_rules! neon_neg {
+    ($($name:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $v {
+            simd::simd_neg(a)
+        }
+    )*};
+}
+
+/// Wrapping absolute value: the most negative lane stays as it is.
+macro_rules! neon_abs {
+    ($($name:ident $v:ident $m:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $v {
+            simd::simd_select(simd::simd_lt::<$v, $m>(a, crate::mem::zeroed()), simd::simd_neg(a), a)
+        }
+    )*};
+}
+
+macro_rules! neon_fabs {
+    ($($name:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $v {
+            simd::simd_fabs(a)
+        }
+    )*};
+}
+
+/// vmla (a + b * c) / vmls (a - b * c), not fused.
+macro_rules! neon_mul_acc {
+    ($($name:ident $op:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v, c: $v) -> $v {
+            simd::$op(a, simd::simd_mul(b, c))
+        }
+    )*};
+}
+
+macro_rules! neon_mul_n {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $e) -> $v {
+            simd::simd_mul(a, simd::simd_splat::<$v, $e>(b))
+        }
+    )*};
+}
+
+macro_rules! neon_mul_acc_n {
+    ($($name:ident $op:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v, c: $e) -> $v {
+            simd::$op(a, simd::simd_mul(b, simd::simd_splat::<$v, $e>(c)))
+        }
+    )*};
+}
+
+/// vqdmulh / vqrdmulh: the high half of 2 * a * b (plus half an ulp of that half when rounding),
+/// saturated; computed in a type twice as wide.
+macro_rules! neon_sat_doubling_mul_high {
+    ($($name:ident $e:ident $w:ident $v:ident $round:literal);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $v {
+            let mut r = a;
+            let mut i = 0;
+            while i < r.0.len() {
+                let mut p = 2 * (a.0[i] as $w) * (b.0[i] as $w);
+                if $round {
+                    p += (1 as $w) << ($e::BITS - 1);
+                }
+                r.0[i] = (p >> $e::BITS).clamp($e::MIN as $w, $e::MAX as $w) as $e;
+                i += 1;
+            }
+            r
+        }
+    )*};
+}
+
+macro_rules! neon_sat_doubling_mul_high_n {
+    ($($name:ident $base:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $e) -> $v {
+            $base(a, simd::simd_splat::<$v, $e>(b))
+        }
+    )*};
+}
+
+macro_rules! neon_shl_n {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const N: i32>(a: $v) -> $v {
+            simd::simd_shl(a, simd::simd_splat::<$v, $e>(N as $e))
+        }
+    )*};
+}
+
+/// Arithmetic right shift by 1..=bits; a shift by the lane width fills the lane with its sign.
+macro_rules! neon_shr_n_signed {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const N: i32>(a: $v) -> $v {
+            let n = if N as u32 >= $e::BITS { $e::BITS - 1 } else { N as u32 };
+            simd::simd_shr(a, simd::simd_splat::<$v, $e>(n as $e))
+        }
+    )*};
+}
+
+/// Logical right shift by 1..=bits; a shift by the lane width gives zero.
+macro_rules! neon_shr_n_unsigned {
+    ($($name:ident $e:ident $v:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const N: i32>(a: $v) -> $v {
+            if N as u32 >= $e::BITS {
+                return crate::mem::zeroed();
+            }
+            simd::simd_shr(a, simd::simd_splat::<$v, $e>(N as $e))
+        }
+    )*};
+}
+
+/// vshll_n: widen each lane, then shift it left.
+macro_rules! neon_shll_n {
+    ($($name:ident $v:ident $we:ident $w:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const N: i32>(a: $v) -> $w {
+            simd::simd_shl(simd::simd_cast::<$v, $w>(a), simd::simd_splat::<$w, $we>(N as $we))
+        }
+    )*};
+}
+
+/// vshrn_n: shift each lane right, then keep its low half.
+macro_rules! neon_shrn_n {
+    ($($name:ident $e:ident $v:ident $n:ident);* $(;)?) => {$(
+        #[inline(always)]
+        #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+        pub unsafe fn $name<const N: i32>(a: $v) -> $n {
+            simd::simd_cast::<$v, $n>(simd::simd_shr(a, simd::simd_splat::<$v, $e>(N as $e)))
+        }
+    )*};
+}
+
+macro_rules! neon_movn {
+    ($($name:ident $v:ident $n:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $n {
+            simd::simd_cast::<$v, $n>(a)
+        }
+    )*};
+}
+
+/// Compares give all ones in each lane where they hold.
+macro_rules! neon_compare {
+    ($op:ident: $($name:ident $v:ident $m:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $m {
+            simd::$op::<$v, $m>(a, b)
+        }
+    )*};
+}
+
+macro_rules! neon_compare_zero {
+    ($op:ident: $($name:ident $v:ident $m:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v) -> $m {
+            simd::$op::<$v, $m>(a, crate::mem::zeroed())
+        }
+    )*};
+}
+
+/// vtst: all ones where a AND b is not zero.
+macro_rules! neon_test_bits {
+    ($($name:ident $v:ident $m:ident);* $(;)?) => {$(
+        #[inline(always)]
+        pub unsafe fn $name(a: $v, b: $v) -> $m {
+            simd::simd_ne::<$v, $m>(simd::simd_and(a, b), crate::mem::zeroed())
+        }
+    )*};
+}
+
+// ---- CRC32 halves and words, polynomial multiplication ----------------------------------------
+
+#[inline(always)]
+pub unsafe fn __crc32h(crc: u32, data: u16) -> u32 {
+    crc32::<2>(crc, data as u64)
+}
+
+#[inline(always)]
+pub unsafe fn __crc32w(crc: u32, data: u32) -> u32 {
+    crc32::<4>(crc, data as u64)
+}
+
+/// 64 x 64 -> 128-bit carry-less product (PMULL).
+#[inline(always)]
+pub unsafe fn vmull_p64(a: p64, b: p64) -> p128 {
+    crate::mem::transmute::<uint64x2_t, p128>(vx::vx_binary(uint64x2_t([a, 0]), uint64x2_t([b, 0]), 90, 64))
+}
+
+/// The carry-less product of the high lanes (PMULL2).
+#[inline(always)]
+pub unsafe fn vmull_high_p64(a: poly64x2_t, b: poly64x2_t) -> p128 {
+    crate::mem::transmute::<uint64x2_t, p128>(vx::vx_binary(uint64x2_t(a.0), uint64x2_t(b.0), 93, 64))
+}
+
+#[inline(always)]
+pub unsafe fn vmul_p8(a: poly8x8_t, b: poly8x8_t) -> poly8x8_t {
+    let mut r = a;
+    let mut i = 0;
+    while i < 8 {
+        r.0[i] = clmul8(a.0[i], b.0[i]) as u8;
+        i += 1;
+    }
+    r
+}
+
+#[inline(always)]
+pub unsafe fn vmulq_p8(a: poly8x16_t, b: poly8x16_t) -> poly8x16_t {
+    let mut r = a;
+    let mut i = 0;
+    while i < 16 {
+        r.0[i] = clmul8(a.0[i], b.0[i]) as u8;
+        i += 1;
+    }
+    r
+}
+
+#[inline(always)]
+pub unsafe fn vmull_p8(a: poly8x8_t, b: poly8x8_t) -> poly16x8_t {
+    let mut r = [0u16; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = clmul8(a.0[i], b.0[i]);
+        i += 1;
+    }
+    poly16x8_t(r)
+}
+
+#[inline(always)]
+pub unsafe fn vmull_high_p8(a: poly8x16_t, b: poly8x16_t) -> poly16x8_t {
+    let mut r = [0u16; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = clmul8(a.0[i + 8], b.0[i + 8]);
+        i += 1;
+    }
+    poly16x8_t(r)
+}
+
+// every vreinterpret: the same bits as another type
+neon_reinterpret! {
+    vreinterpret_s8_s16 int16x4_t => int8x8_t; vreinterpret_s8_s32 int32x2_t => int8x8_t;
+    vreinterpret_s8_s64 int64x1_t => int8x8_t; vreinterpret_s8_u8 uint8x8_t => int8x8_t;
+    vreinterpret_s8_u16 uint16x4_t => int8x8_t; vreinterpret_s8_u32 uint32x2_t => int8x8_t;
+    vreinterpret_s8_u64 uint64x1_t => int8x8_t; vreinterpret_s8_f32 float32x2_t => int8x8_t;
+    vreinterpret_s8_f64 float64x1_t => int8x8_t; vreinterpret_s8_p8 poly8x8_t => int8x8_t;
+    vreinterpret_s8_p16 poly16x4_t => int8x8_t; vreinterpret_s8_p64 poly64x1_t => int8x8_t;
+    vreinterpret_s16_s8 int8x8_t => int16x4_t; vreinterpret_s16_s32 int32x2_t => int16x4_t;
+    vreinterpret_s16_s64 int64x1_t => int16x4_t; vreinterpret_s16_u8 uint8x8_t => int16x4_t;
+    vreinterpret_s16_u16 uint16x4_t => int16x4_t; vreinterpret_s16_u32 uint32x2_t => int16x4_t;
+    vreinterpret_s16_u64 uint64x1_t => int16x4_t; vreinterpret_s16_f32 float32x2_t => int16x4_t;
+    vreinterpret_s16_f64 float64x1_t => int16x4_t; vreinterpret_s16_p8 poly8x8_t => int16x4_t;
+    vreinterpret_s16_p16 poly16x4_t => int16x4_t; vreinterpret_s16_p64 poly64x1_t => int16x4_t;
+    vreinterpret_s32_s8 int8x8_t => int32x2_t; vreinterpret_s32_s16 int16x4_t => int32x2_t;
+    vreinterpret_s32_s64 int64x1_t => int32x2_t; vreinterpret_s32_u8 uint8x8_t => int32x2_t;
+    vreinterpret_s32_u16 uint16x4_t => int32x2_t; vreinterpret_s32_u32 uint32x2_t => int32x2_t;
+    vreinterpret_s32_u64 uint64x1_t => int32x2_t; vreinterpret_s32_f32 float32x2_t => int32x2_t;
+    vreinterpret_s32_f64 float64x1_t => int32x2_t; vreinterpret_s32_p8 poly8x8_t => int32x2_t;
+    vreinterpret_s32_p16 poly16x4_t => int32x2_t; vreinterpret_s32_p64 poly64x1_t => int32x2_t;
+    vreinterpret_s64_s8 int8x8_t => int64x1_t; vreinterpret_s64_s16 int16x4_t => int64x1_t;
+    vreinterpret_s64_s32 int32x2_t => int64x1_t; vreinterpret_s64_u8 uint8x8_t => int64x1_t;
+    vreinterpret_s64_u16 uint16x4_t => int64x1_t; vreinterpret_s64_u32 uint32x2_t => int64x1_t;
+    vreinterpret_s64_u64 uint64x1_t => int64x1_t; vreinterpret_s64_f32 float32x2_t => int64x1_t;
+    vreinterpret_s64_f64 float64x1_t => int64x1_t; vreinterpret_s64_p8 poly8x8_t => int64x1_t;
+    vreinterpret_s64_p16 poly16x4_t => int64x1_t; vreinterpret_s64_p64 poly64x1_t => int64x1_t;
+    vreinterpret_u8_s8 int8x8_t => uint8x8_t; vreinterpret_u8_s16 int16x4_t => uint8x8_t;
+    vreinterpret_u8_s32 int32x2_t => uint8x8_t; vreinterpret_u8_s64 int64x1_t => uint8x8_t;
+    vreinterpret_u8_u16 uint16x4_t => uint8x8_t; vreinterpret_u8_u32 uint32x2_t => uint8x8_t;
+    vreinterpret_u8_u64 uint64x1_t => uint8x8_t; vreinterpret_u8_f32 float32x2_t => uint8x8_t;
+    vreinterpret_u8_f64 float64x1_t => uint8x8_t; vreinterpret_u8_p8 poly8x8_t => uint8x8_t;
+    vreinterpret_u8_p16 poly16x4_t => uint8x8_t; vreinterpret_u8_p64 poly64x1_t => uint8x8_t;
+    vreinterpret_u16_s8 int8x8_t => uint16x4_t; vreinterpret_u16_s16 int16x4_t => uint16x4_t;
+    vreinterpret_u16_s32 int32x2_t => uint16x4_t; vreinterpret_u16_s64 int64x1_t => uint16x4_t;
+    vreinterpret_u16_u8 uint8x8_t => uint16x4_t; vreinterpret_u16_u32 uint32x2_t => uint16x4_t;
+    vreinterpret_u16_u64 uint64x1_t => uint16x4_t; vreinterpret_u16_f32 float32x2_t => uint16x4_t;
+    vreinterpret_u16_f64 float64x1_t => uint16x4_t; vreinterpret_u16_p8 poly8x8_t => uint16x4_t;
+    vreinterpret_u16_p16 poly16x4_t => uint16x4_t; vreinterpret_u16_p64 poly64x1_t => uint16x4_t;
+    vreinterpret_u32_s8 int8x8_t => uint32x2_t; vreinterpret_u32_s16 int16x4_t => uint32x2_t;
+    vreinterpret_u32_s32 int32x2_t => uint32x2_t; vreinterpret_u32_s64 int64x1_t => uint32x2_t;
+    vreinterpret_u32_u8 uint8x8_t => uint32x2_t; vreinterpret_u32_u16 uint16x4_t => uint32x2_t;
+    vreinterpret_u32_u64 uint64x1_t => uint32x2_t; vreinterpret_u32_f32 float32x2_t => uint32x2_t;
+    vreinterpret_u32_f64 float64x1_t => uint32x2_t; vreinterpret_u32_p8 poly8x8_t => uint32x2_t;
+    vreinterpret_u32_p16 poly16x4_t => uint32x2_t; vreinterpret_u32_p64 poly64x1_t => uint32x2_t;
+    vreinterpret_u64_s8 int8x8_t => uint64x1_t; vreinterpret_u64_s16 int16x4_t => uint64x1_t;
+    vreinterpret_u64_s32 int32x2_t => uint64x1_t; vreinterpret_u64_s64 int64x1_t => uint64x1_t;
+    vreinterpret_u64_u8 uint8x8_t => uint64x1_t; vreinterpret_u64_u16 uint16x4_t => uint64x1_t;
+    vreinterpret_u64_u32 uint32x2_t => uint64x1_t; vreinterpret_u64_f32 float32x2_t => uint64x1_t;
+    vreinterpret_u64_f64 float64x1_t => uint64x1_t; vreinterpret_u64_p8 poly8x8_t => uint64x1_t;
+    vreinterpret_u64_p16 poly16x4_t => uint64x1_t; vreinterpret_u64_p64 poly64x1_t => uint64x1_t;
+    vreinterpret_f32_s8 int8x8_t => float32x2_t; vreinterpret_f32_s16 int16x4_t => float32x2_t;
+    vreinterpret_f32_s32 int32x2_t => float32x2_t; vreinterpret_f32_s64 int64x1_t => float32x2_t;
+    vreinterpret_f32_u8 uint8x8_t => float32x2_t; vreinterpret_f32_u16 uint16x4_t => float32x2_t;
+    vreinterpret_f32_u32 uint32x2_t => float32x2_t; vreinterpret_f32_u64 uint64x1_t => float32x2_t;
+    vreinterpret_f32_f64 float64x1_t => float32x2_t; vreinterpret_f32_p8 poly8x8_t => float32x2_t;
+    vreinterpret_f32_p16 poly16x4_t => float32x2_t; vreinterpret_f32_p64 poly64x1_t => float32x2_t;
+    vreinterpret_f64_s8 int8x8_t => float64x1_t; vreinterpret_f64_s16 int16x4_t => float64x1_t;
+    vreinterpret_f64_s32 int32x2_t => float64x1_t; vreinterpret_f64_s64 int64x1_t => float64x1_t;
+    vreinterpret_f64_u8 uint8x8_t => float64x1_t; vreinterpret_f64_u16 uint16x4_t => float64x1_t;
+    vreinterpret_f64_u32 uint32x2_t => float64x1_t; vreinterpret_f64_u64 uint64x1_t => float64x1_t;
+    vreinterpret_f64_f32 float32x2_t => float64x1_t; vreinterpret_f64_p8 poly8x8_t => float64x1_t;
+    vreinterpret_f64_p16 poly16x4_t => float64x1_t; vreinterpret_f64_p64 poly64x1_t => float64x1_t;
+    vreinterpret_p8_s8 int8x8_t => poly8x8_t; vreinterpret_p8_s16 int16x4_t => poly8x8_t;
+    vreinterpret_p8_s32 int32x2_t => poly8x8_t; vreinterpret_p8_s64 int64x1_t => poly8x8_t;
+    vreinterpret_p8_u8 uint8x8_t => poly8x8_t; vreinterpret_p8_u16 uint16x4_t => poly8x8_t;
+    vreinterpret_p8_u32 uint32x2_t => poly8x8_t; vreinterpret_p8_u64 uint64x1_t => poly8x8_t;
+    vreinterpret_p8_f32 float32x2_t => poly8x8_t; vreinterpret_p8_f64 float64x1_t => poly8x8_t;
+    vreinterpret_p8_p16 poly16x4_t => poly8x8_t; vreinterpret_p8_p64 poly64x1_t => poly8x8_t;
+    vreinterpret_p16_s8 int8x8_t => poly16x4_t; vreinterpret_p16_s16 int16x4_t => poly16x4_t;
+    vreinterpret_p16_s32 int32x2_t => poly16x4_t; vreinterpret_p16_s64 int64x1_t => poly16x4_t;
+    vreinterpret_p16_u8 uint8x8_t => poly16x4_t; vreinterpret_p16_u16 uint16x4_t => poly16x4_t;
+    vreinterpret_p16_u32 uint32x2_t => poly16x4_t; vreinterpret_p16_u64 uint64x1_t => poly16x4_t;
+    vreinterpret_p16_f32 float32x2_t => poly16x4_t; vreinterpret_p16_f64 float64x1_t => poly16x4_t;
+    vreinterpret_p16_p8 poly8x8_t => poly16x4_t; vreinterpret_p16_p64 poly64x1_t => poly16x4_t;
+    vreinterpret_p64_s8 int8x8_t => poly64x1_t; vreinterpret_p64_s16 int16x4_t => poly64x1_t;
+    vreinterpret_p64_s32 int32x2_t => poly64x1_t; vreinterpret_p64_s64 int64x1_t => poly64x1_t;
+    vreinterpret_p64_u8 uint8x8_t => poly64x1_t; vreinterpret_p64_u16 uint16x4_t => poly64x1_t;
+    vreinterpret_p64_u32 uint32x2_t => poly64x1_t; vreinterpret_p64_u64 uint64x1_t => poly64x1_t;
+    vreinterpret_p64_f32 float32x2_t => poly64x1_t; vreinterpret_p64_f64 float64x1_t => poly64x1_t;
+    vreinterpret_p64_p8 poly8x8_t => poly64x1_t; vreinterpret_p64_p16 poly16x4_t => poly64x1_t;
+    vreinterpretq_s8_s16 int16x8_t => int8x16_t; vreinterpretq_s8_s32 int32x4_t => int8x16_t;
+    vreinterpretq_s8_s64 int64x2_t => int8x16_t; vreinterpretq_s8_u8 uint8x16_t => int8x16_t;
+    vreinterpretq_s8_u16 uint16x8_t => int8x16_t; vreinterpretq_s8_u32 uint32x4_t => int8x16_t;
+    vreinterpretq_s8_u64 uint64x2_t => int8x16_t; vreinterpretq_s8_f32 float32x4_t => int8x16_t;
+    vreinterpretq_s8_f64 float64x2_t => int8x16_t; vreinterpretq_s8_p8 poly8x16_t => int8x16_t;
+    vreinterpretq_s8_p16 poly16x8_t => int8x16_t; vreinterpretq_s8_p64 poly64x2_t => int8x16_t;
+    vreinterpretq_s16_s8 int8x16_t => int16x8_t; vreinterpretq_s16_s32 int32x4_t => int16x8_t;
+    vreinterpretq_s16_s64 int64x2_t => int16x8_t; vreinterpretq_s16_u8 uint8x16_t => int16x8_t;
+    vreinterpretq_s16_u16 uint16x8_t => int16x8_t; vreinterpretq_s16_u32 uint32x4_t => int16x8_t;
+    vreinterpretq_s16_u64 uint64x2_t => int16x8_t; vreinterpretq_s16_f32 float32x4_t => int16x8_t;
+    vreinterpretq_s16_f64 float64x2_t => int16x8_t; vreinterpretq_s16_p8 poly8x16_t => int16x8_t;
+    vreinterpretq_s16_p16 poly16x8_t => int16x8_t; vreinterpretq_s16_p64 poly64x2_t => int16x8_t;
+    vreinterpretq_s32_s8 int8x16_t => int32x4_t; vreinterpretq_s32_s16 int16x8_t => int32x4_t;
+    vreinterpretq_s32_s64 int64x2_t => int32x4_t; vreinterpretq_s32_u8 uint8x16_t => int32x4_t;
+    vreinterpretq_s32_u16 uint16x8_t => int32x4_t; vreinterpretq_s32_u32 uint32x4_t => int32x4_t;
+    vreinterpretq_s32_u64 uint64x2_t => int32x4_t; vreinterpretq_s32_f32 float32x4_t => int32x4_t;
+    vreinterpretq_s32_f64 float64x2_t => int32x4_t; vreinterpretq_s32_p8 poly8x16_t => int32x4_t;
+    vreinterpretq_s32_p16 poly16x8_t => int32x4_t; vreinterpretq_s32_p64 poly64x2_t => int32x4_t;
+    vreinterpretq_s64_s8 int8x16_t => int64x2_t; vreinterpretq_s64_s16 int16x8_t => int64x2_t;
+    vreinterpretq_s64_s32 int32x4_t => int64x2_t; vreinterpretq_s64_u8 uint8x16_t => int64x2_t;
+    vreinterpretq_s64_u16 uint16x8_t => int64x2_t; vreinterpretq_s64_u32 uint32x4_t => int64x2_t;
+    vreinterpretq_s64_u64 uint64x2_t => int64x2_t; vreinterpretq_s64_f32 float32x4_t => int64x2_t;
+    vreinterpretq_s64_f64 float64x2_t => int64x2_t; vreinterpretq_s64_p8 poly8x16_t => int64x2_t;
+    vreinterpretq_s64_p16 poly16x8_t => int64x2_t; vreinterpretq_s64_p64 poly64x2_t => int64x2_t;
+    vreinterpretq_u8_s8 int8x16_t => uint8x16_t; vreinterpretq_u8_s16 int16x8_t => uint8x16_t;
+    vreinterpretq_u8_s32 int32x4_t => uint8x16_t; vreinterpretq_u8_s64 int64x2_t => uint8x16_t;
+    vreinterpretq_u8_u16 uint16x8_t => uint8x16_t; vreinterpretq_u8_u32 uint32x4_t => uint8x16_t;
+    vreinterpretq_u8_u64 uint64x2_t => uint8x16_t; vreinterpretq_u8_f32 float32x4_t => uint8x16_t;
+    vreinterpretq_u8_f64 float64x2_t => uint8x16_t; vreinterpretq_u8_p8 poly8x16_t => uint8x16_t;
+    vreinterpretq_u8_p16 poly16x8_t => uint8x16_t; vreinterpretq_u8_p64 poly64x2_t => uint8x16_t;
+    vreinterpretq_u16_s8 int8x16_t => uint16x8_t; vreinterpretq_u16_s16 int16x8_t => uint16x8_t;
+    vreinterpretq_u16_s32 int32x4_t => uint16x8_t; vreinterpretq_u16_s64 int64x2_t => uint16x8_t;
+    vreinterpretq_u16_u8 uint8x16_t => uint16x8_t; vreinterpretq_u16_u32 uint32x4_t => uint16x8_t;
+    vreinterpretq_u16_u64 uint64x2_t => uint16x8_t; vreinterpretq_u16_f32 float32x4_t => uint16x8_t;
+    vreinterpretq_u16_f64 float64x2_t => uint16x8_t; vreinterpretq_u16_p8 poly8x16_t => uint16x8_t;
+    vreinterpretq_u16_p16 poly16x8_t => uint16x8_t; vreinterpretq_u16_p64 poly64x2_t => uint16x8_t;
+    vreinterpretq_u32_s8 int8x16_t => uint32x4_t; vreinterpretq_u32_s16 int16x8_t => uint32x4_t;
+    vreinterpretq_u32_s32 int32x4_t => uint32x4_t; vreinterpretq_u32_s64 int64x2_t => uint32x4_t;
+    vreinterpretq_u32_u8 uint8x16_t => uint32x4_t; vreinterpretq_u32_u16 uint16x8_t => uint32x4_t;
+    vreinterpretq_u32_u64 uint64x2_t => uint32x4_t; vreinterpretq_u32_f32 float32x4_t => uint32x4_t;
+    vreinterpretq_u32_f64 float64x2_t => uint32x4_t; vreinterpretq_u32_p8 poly8x16_t => uint32x4_t;
+    vreinterpretq_u32_p16 poly16x8_t => uint32x4_t; vreinterpretq_u32_p64 poly64x2_t => uint32x4_t;
+    vreinterpretq_u64_s8 int8x16_t => uint64x2_t; vreinterpretq_u64_s16 int16x8_t => uint64x2_t;
+    vreinterpretq_u64_s32 int32x4_t => uint64x2_t; vreinterpretq_u64_s64 int64x2_t => uint64x2_t;
+    vreinterpretq_u64_u8 uint8x16_t => uint64x2_t; vreinterpretq_u64_u16 uint16x8_t => uint64x2_t;
+    vreinterpretq_u64_u32 uint32x4_t => uint64x2_t; vreinterpretq_u64_f32 float32x4_t => uint64x2_t;
+    vreinterpretq_u64_f64 float64x2_t => uint64x2_t; vreinterpretq_u64_p8 poly8x16_t => uint64x2_t;
+    vreinterpretq_u64_p16 poly16x8_t => uint64x2_t; vreinterpretq_u64_p64 poly64x2_t => uint64x2_t;
+    vreinterpretq_f32_s8 int8x16_t => float32x4_t; vreinterpretq_f32_s16 int16x8_t => float32x4_t;
+    vreinterpretq_f32_s32 int32x4_t => float32x4_t; vreinterpretq_f32_s64 int64x2_t => float32x4_t;
+    vreinterpretq_f32_u8 uint8x16_t => float32x4_t; vreinterpretq_f32_u16 uint16x8_t => float32x4_t;
+    vreinterpretq_f32_u32 uint32x4_t => float32x4_t; vreinterpretq_f32_u64 uint64x2_t => float32x4_t;
+    vreinterpretq_f32_f64 float64x2_t => float32x4_t; vreinterpretq_f32_p8 poly8x16_t => float32x4_t;
+    vreinterpretq_f32_p16 poly16x8_t => float32x4_t; vreinterpretq_f32_p64 poly64x2_t => float32x4_t;
+    vreinterpretq_f64_s8 int8x16_t => float64x2_t; vreinterpretq_f64_s16 int16x8_t => float64x2_t;
+    vreinterpretq_f64_s32 int32x4_t => float64x2_t; vreinterpretq_f64_s64 int64x2_t => float64x2_t;
+    vreinterpretq_f64_u8 uint8x16_t => float64x2_t; vreinterpretq_f64_u16 uint16x8_t => float64x2_t;
+    vreinterpretq_f64_u32 uint32x4_t => float64x2_t; vreinterpretq_f64_u64 uint64x2_t => float64x2_t;
+    vreinterpretq_f64_f32 float32x4_t => float64x2_t; vreinterpretq_f64_p8 poly8x16_t => float64x2_t;
+    vreinterpretq_f64_p16 poly16x8_t => float64x2_t; vreinterpretq_f64_p64 poly64x2_t => float64x2_t;
+    vreinterpretq_p8_s8 int8x16_t => poly8x16_t; vreinterpretq_p8_s16 int16x8_t => poly8x16_t;
+    vreinterpretq_p8_s32 int32x4_t => poly8x16_t; vreinterpretq_p8_s64 int64x2_t => poly8x16_t;
+    vreinterpretq_p8_u8 uint8x16_t => poly8x16_t; vreinterpretq_p8_u16 uint16x8_t => poly8x16_t;
+    vreinterpretq_p8_u32 uint32x4_t => poly8x16_t; vreinterpretq_p8_u64 uint64x2_t => poly8x16_t;
+    vreinterpretq_p8_f32 float32x4_t => poly8x16_t; vreinterpretq_p8_f64 float64x2_t => poly8x16_t;
+    vreinterpretq_p8_p16 poly16x8_t => poly8x16_t; vreinterpretq_p8_p64 poly64x2_t => poly8x16_t;
+    vreinterpretq_p16_s8 int8x16_t => poly16x8_t; vreinterpretq_p16_s16 int16x8_t => poly16x8_t;
+    vreinterpretq_p16_s32 int32x4_t => poly16x8_t; vreinterpretq_p16_s64 int64x2_t => poly16x8_t;
+    vreinterpretq_p16_u8 uint8x16_t => poly16x8_t; vreinterpretq_p16_u16 uint16x8_t => poly16x8_t;
+    vreinterpretq_p16_u32 uint32x4_t => poly16x8_t; vreinterpretq_p16_u64 uint64x2_t => poly16x8_t;
+    vreinterpretq_p16_f32 float32x4_t => poly16x8_t; vreinterpretq_p16_f64 float64x2_t => poly16x8_t;
+    vreinterpretq_p16_p8 poly8x16_t => poly16x8_t; vreinterpretq_p16_p64 poly64x2_t => poly16x8_t;
+    vreinterpretq_p64_s8 int8x16_t => poly64x2_t; vreinterpretq_p64_s16 int16x8_t => poly64x2_t;
+    vreinterpretq_p64_s32 int32x4_t => poly64x2_t; vreinterpretq_p64_s64 int64x2_t => poly64x2_t;
+    vreinterpretq_p64_u8 uint8x16_t => poly64x2_t; vreinterpretq_p64_u16 uint16x8_t => poly64x2_t;
+    vreinterpretq_p64_u32 uint32x4_t => poly64x2_t; vreinterpretq_p64_u64 uint64x2_t => poly64x2_t;
+    vreinterpretq_p64_f32 float32x4_t => poly64x2_t; vreinterpretq_p64_f64 float64x2_t => poly64x2_t;
+    vreinterpretq_p64_p8 poly8x16_t => poly64x2_t; vreinterpretq_p64_p16 poly16x8_t => poly64x2_t;
+    vreinterpretq_p128_s8 int8x16_t => p128; vreinterpretq_s8_p128 p128 => int8x16_t;
+    vreinterpretq_p128_s16 int16x8_t => p128; vreinterpretq_s16_p128 p128 => int16x8_t;
+    vreinterpretq_p128_s32 int32x4_t => p128; vreinterpretq_s32_p128 p128 => int32x4_t;
+    vreinterpretq_p128_s64 int64x2_t => p128; vreinterpretq_s64_p128 p128 => int64x2_t;
+    vreinterpretq_p128_u8 uint8x16_t => p128; vreinterpretq_u8_p128 p128 => uint8x16_t;
+    vreinterpretq_p128_u16 uint16x8_t => p128; vreinterpretq_u16_p128 p128 => uint16x8_t;
+    vreinterpretq_p128_u32 uint32x4_t => p128; vreinterpretq_u32_p128 p128 => uint32x4_t;
+    vreinterpretq_p128_u64 uint64x2_t => p128; vreinterpretq_u64_p128 p128 => uint64x2_t;
+    vreinterpretq_p128_f32 float32x4_t => p128; vreinterpretq_f32_p128 p128 => float32x4_t;
+    vreinterpretq_p128_f64 float64x2_t => p128; vreinterpretq_f64_p128 p128 => float64x2_t;
+    vreinterpretq_p128_p8 poly8x16_t => p128; vreinterpretq_p8_p128 p128 => poly8x16_t;
+    vreinterpretq_p128_p16 poly16x8_t => p128; vreinterpretq_p16_p128 p128 => poly16x8_t;
+    vreinterpretq_p128_p64 poly64x2_t => p128; vreinterpretq_p64_p128 p128 => poly64x2_t;
+}
+// vld1 / vst1 and their _dup, _lane and _x2.._x4 forms; vld2..4 / vst2..4 (de)interleave
+neon_ld1! {
+    vld1_s16 i16 int16x4_t; vld1_s32 i32 int32x2_t; vld1_s64 i64 int64x1_t;
+    vld1_u32 u32 uint32x2_t; vld1_u64 u64 uint64x1_t; vld1_f32 f32 float32x2_t;
+    vld1_f64 f64 float64x1_t; vld1_p8 p8 poly8x8_t; vld1q_p8 p8 poly8x16_t;
+    vld1_p16 p16 poly16x4_t; vld1q_p16 p16 poly16x8_t; vld1_p64 p64 poly64x1_t;
+    vld1q_p64 p64 poly64x2_t;
+}
+neon_st1! {
+    vst1_s8 i8 int8x8_t; vst1_s16 i16 int16x4_t; vst1_s32 i32 int32x2_t;
+    vst1_s64 i64 int64x1_t; vst1_u16 u16 uint16x4_t; vst1_u32 u32 uint32x2_t;
+    vst1_u64 u64 uint64x1_t; vst1_f32 f32 float32x2_t; vst1_f64 f64 float64x1_t;
+    vst1_p8 p8 poly8x8_t; vst1q_p8 p8 poly8x16_t; vst1_p16 p16 poly16x4_t;
+    vst1q_p16 p16 poly16x8_t; vst1_p64 p64 poly64x1_t; vst1q_p64 p64 poly64x2_t;
+}
+neon_ld1_dup! {
+    vld1_dup_s8 i8 int8x8_t; vld1q_dup_s8 i8 int8x16_t; vld1_dup_s16 i16 int16x4_t;
+    vld1q_dup_s16 i16 int16x8_t; vld1_dup_s32 i32 int32x2_t; vld1q_dup_s32 i32 int32x4_t;
+    vld1_dup_s64 i64 int64x1_t; vld1q_dup_s64 i64 int64x2_t; vld1_dup_u8 u8 uint8x8_t;
+    vld1q_dup_u8 u8 uint8x16_t; vld1_dup_u16 u16 uint16x4_t; vld1q_dup_u16 u16 uint16x8_t;
+    vld1_dup_u32 u32 uint32x2_t; vld1q_dup_u32 u32 uint32x4_t; vld1_dup_u64 u64 uint64x1_t;
+    vld1q_dup_u64 u64 uint64x2_t; vld1_dup_f32 f32 float32x2_t; vld1_dup_f64 f64 float64x1_t;
+    vld1_dup_p8 p8 poly8x8_t; vld1q_dup_p8 p8 poly8x16_t; vld1_dup_p16 p16 poly16x4_t;
+    vld1q_dup_p16 p16 poly16x8_t; vld1_dup_p64 p64 poly64x1_t; vld1q_dup_p64 p64 poly64x2_t;
+}
+neon_ld1_lane! {
+    vld1_lane_s8 i8 int8x8_t; vld1q_lane_s8 i8 int8x16_t; vld1_lane_s16 i16 int16x4_t;
+    vld1q_lane_s16 i16 int16x8_t; vld1_lane_s32 i32 int32x2_t; vld1q_lane_s32 i32 int32x4_t;
+    vld1_lane_s64 i64 int64x1_t; vld1q_lane_s64 i64 int64x2_t; vld1_lane_u8 u8 uint8x8_t;
+    vld1q_lane_u8 u8 uint8x16_t; vld1_lane_u16 u16 uint16x4_t; vld1q_lane_u16 u16 uint16x8_t;
+    vld1_lane_u32 u32 uint32x2_t; vld1q_lane_u32 u32 uint32x4_t; vld1_lane_u64 u64 uint64x1_t;
+    vld1q_lane_u64 u64 uint64x2_t; vld1_lane_f32 f32 float32x2_t; vld1_lane_f64 f64 float64x1_t;
+    vld1_lane_p8 p8 poly8x8_t; vld1q_lane_p8 p8 poly8x16_t; vld1_lane_p16 p16 poly16x4_t;
+    vld1q_lane_p16 p16 poly16x8_t; vld1_lane_p64 p64 poly64x1_t; vld1q_lane_p64 p64 poly64x2_t;
+}
+neon_st1_lane! {
+    vst1_lane_s8 i8 int8x8_t; vst1q_lane_s8 i8 int8x16_t; vst1_lane_s16 i16 int16x4_t;
+    vst1q_lane_s16 i16 int16x8_t; vst1_lane_s32 i32 int32x2_t; vst1q_lane_s32 i32 int32x4_t;
+    vst1_lane_s64 i64 int64x1_t; vst1q_lane_s64 i64 int64x2_t; vst1_lane_u8 u8 uint8x8_t;
+    vst1q_lane_u8 u8 uint8x16_t; vst1_lane_u16 u16 uint16x4_t; vst1q_lane_u16 u16 uint16x8_t;
+    vst1_lane_u32 u32 uint32x2_t; vst1q_lane_u32 u32 uint32x4_t; vst1_lane_u64 u64 uint64x1_t;
+    vst1q_lane_u64 u64 uint64x2_t; vst1_lane_f32 f32 float32x2_t; vst1_lane_f64 f64 float64x1_t;
+    vst1_lane_p8 p8 poly8x8_t; vst1q_lane_p8 p8 poly8x16_t; vst1_lane_p16 p16 poly16x4_t;
+    vst1q_lane_p16 p16 poly16x8_t; vst1_lane_p64 p64 poly64x1_t; vst1q_lane_p64 p64 poly64x2_t;
+}
+neon_ld1_x! {
+    vld1_s8_x2 i8 int8x8x2_t; vld1q_s8_x2 i8 int8x16x2_t; vld1_s16_x2 i16 int16x4x2_t;
+    vld1_s32_x2 i32 int32x2x2_t; vld1_s64_x2 i64 int64x1x2_t; vld1q_s64_x2 i64 int64x2x2_t;
+    vld1_u8_x2 u8 uint8x8x2_t; vld1q_u8_x2 u8 uint8x16x2_t; vld1_u16_x2 u16 uint16x4x2_t;
+    vld1q_u16_x2 u16 uint16x8x2_t; vld1_u32_x2 u32 uint32x2x2_t; vld1q_u32_x2 u32 uint32x4x2_t;
+    vld1_u64_x2 u64 uint64x1x2_t; vld1q_u64_x2 u64 uint64x2x2_t; vld1_f32_x2 f32 float32x2x2_t;
+    vld1q_f32_x2 f32 float32x4x2_t; vld1_f64_x2 f64 float64x1x2_t; vld1q_f64_x2 f64 float64x2x2_t;
+    vld1_p8_x2 p8 poly8x8x2_t; vld1q_p8_x2 p8 poly8x16x2_t; vld1_p16_x2 p16 poly16x4x2_t;
+    vld1q_p16_x2 p16 poly16x8x2_t; vld1_p64_x2 p64 poly64x1x2_t; vld1q_p64_x2 p64 poly64x2x2_t;
+}
+neon_st1_x! {
+    vst1_s8_x2 i8 int8x8x2_t; vst1q_s8_x2 i8 int8x16x2_t; vst1_s16_x2 i16 int16x4x2_t;
+    vst1_s32_x2 i32 int32x2x2_t; vst1q_s32_x2 i32 int32x4x2_t; vst1_s64_x2 i64 int64x1x2_t;
+    vst1q_s64_x2 i64 int64x2x2_t; vst1_u8_x2 u8 uint8x8x2_t; vst1q_u8_x2 u8 uint8x16x2_t;
+    vst1_u16_x2 u16 uint16x4x2_t; vst1q_u16_x2 u16 uint16x8x2_t; vst1_u32_x2 u32 uint32x2x2_t;
+    vst1q_u32_x2 u32 uint32x4x2_t; vst1_u64_x2 u64 uint64x1x2_t; vst1q_u64_x2 u64 uint64x2x2_t;
+    vst1_f32_x2 f32 float32x2x2_t; vst1q_f32_x2 f32 float32x4x2_t; vst1_f64_x2 f64 float64x1x2_t;
+    vst1q_f64_x2 f64 float64x2x2_t; vst1_p8_x2 p8 poly8x8x2_t; vst1q_p8_x2 p8 poly8x16x2_t;
+    vst1_p16_x2 p16 poly16x4x2_t; vst1q_p16_x2 p16 poly16x8x2_t; vst1_p64_x2 p64 poly64x1x2_t;
+    vst1q_p64_x2 p64 poly64x2x2_t;
+}
+neon_ld1_x! {
+    vld1_s8_x3 i8 int8x8x3_t; vld1q_s8_x3 i8 int8x16x3_t; vld1_s16_x3 i16 int16x4x3_t;
+    vld1q_s16_x3 i16 int16x8x3_t; vld1_s32_x3 i32 int32x2x3_t; vld1q_s32_x3 i32 int32x4x3_t;
+    vld1_s64_x3 i64 int64x1x3_t; vld1q_s64_x3 i64 int64x2x3_t; vld1_u8_x3 u8 uint8x8x3_t;
+    vld1q_u8_x3 u8 uint8x16x3_t; vld1_u16_x3 u16 uint16x4x3_t; vld1q_u16_x3 u16 uint16x8x3_t;
+    vld1_u32_x3 u32 uint32x2x3_t; vld1q_u32_x3 u32 uint32x4x3_t; vld1_u64_x3 u64 uint64x1x3_t;
+    vld1q_u64_x3 u64 uint64x2x3_t; vld1_f32_x3 f32 float32x2x3_t; vld1q_f32_x3 f32 float32x4x3_t;
+    vld1_f64_x3 f64 float64x1x3_t; vld1q_f64_x3 f64 float64x2x3_t; vld1_p8_x3 p8 poly8x8x3_t;
+    vld1q_p8_x3 p8 poly8x16x3_t; vld1_p16_x3 p16 poly16x4x3_t; vld1q_p16_x3 p16 poly16x8x3_t;
+    vld1_p64_x3 p64 poly64x1x3_t; vld1q_p64_x3 p64 poly64x2x3_t;
+}
+neon_st1_x! {
+    vst1_s8_x3 i8 int8x8x3_t; vst1q_s8_x3 i8 int8x16x3_t; vst1_s16_x3 i16 int16x4x3_t;
+    vst1q_s16_x3 i16 int16x8x3_t; vst1_s32_x3 i32 int32x2x3_t; vst1q_s32_x3 i32 int32x4x3_t;
+    vst1_s64_x3 i64 int64x1x3_t; vst1q_s64_x3 i64 int64x2x3_t; vst1_u8_x3 u8 uint8x8x3_t;
+    vst1q_u8_x3 u8 uint8x16x3_t; vst1_u16_x3 u16 uint16x4x3_t; vst1q_u16_x3 u16 uint16x8x3_t;
+    vst1_u32_x3 u32 uint32x2x3_t; vst1q_u32_x3 u32 uint32x4x3_t; vst1_u64_x3 u64 uint64x1x3_t;
+    vst1q_u64_x3 u64 uint64x2x3_t; vst1_f32_x3 f32 float32x2x3_t; vst1q_f32_x3 f32 float32x4x3_t;
+    vst1_f64_x3 f64 float64x1x3_t; vst1q_f64_x3 f64 float64x2x3_t; vst1_p8_x3 p8 poly8x8x3_t;
+    vst1q_p8_x3 p8 poly8x16x3_t; vst1_p16_x3 p16 poly16x4x3_t; vst1q_p16_x3 p16 poly16x8x3_t;
+    vst1_p64_x3 p64 poly64x1x3_t; vst1q_p64_x3 p64 poly64x2x3_t;
+}
+neon_ld1_x! {
+    vld1_s8_x4 i8 int8x8x4_t; vld1q_s8_x4 i8 int8x16x4_t; vld1_s16_x4 i16 int16x4x4_t;
+    vld1q_s16_x4 i16 int16x8x4_t; vld1_s32_x4 i32 int32x2x4_t; vld1q_s32_x4 i32 int32x4x4_t;
+    vld1_s64_x4 i64 int64x1x4_t; vld1q_s64_x4 i64 int64x2x4_t; vld1_u8_x4 u8 uint8x8x4_t;
+    vld1q_u8_x4 u8 uint8x16x4_t; vld1_u16_x4 u16 uint16x4x4_t; vld1q_u16_x4 u16 uint16x8x4_t;
+    vld1_u32_x4 u32 uint32x2x4_t; vld1q_u32_x4 u32 uint32x4x4_t; vld1_u64_x4 u64 uint64x1x4_t;
+    vld1q_u64_x4 u64 uint64x2x4_t; vld1_f32_x4 f32 float32x2x4_t; vld1q_f32_x4 f32 float32x4x4_t;
+    vld1_f64_x4 f64 float64x1x4_t; vld1q_f64_x4 f64 float64x2x4_t; vld1_p8_x4 p8 poly8x8x4_t;
+    vld1q_p8_x4 p8 poly8x16x4_t; vld1_p16_x4 p16 poly16x4x4_t; vld1q_p16_x4 p16 poly16x8x4_t;
+    vld1_p64_x4 p64 poly64x1x4_t; vld1q_p64_x4 p64 poly64x2x4_t;
+}
+neon_st1_x! {
+    vst1_s8_x4 i8 int8x8x4_t; vst1q_s8_x4 i8 int8x16x4_t; vst1_s16_x4 i16 int16x4x4_t;
+    vst1q_s16_x4 i16 int16x8x4_t; vst1_s32_x4 i32 int32x2x4_t; vst1q_s32_x4 i32 int32x4x4_t;
+    vst1_s64_x4 i64 int64x1x4_t; vst1q_s64_x4 i64 int64x2x4_t; vst1_u8_x4 u8 uint8x8x4_t;
+    vst1q_u8_x4 u8 uint8x16x4_t; vst1_u16_x4 u16 uint16x4x4_t; vst1q_u16_x4 u16 uint16x8x4_t;
+    vst1_u32_x4 u32 uint32x2x4_t; vst1q_u32_x4 u32 uint32x4x4_t; vst1_u64_x4 u64 uint64x1x4_t;
+    vst1q_u64_x4 u64 uint64x2x4_t; vst1_f32_x4 f32 float32x2x4_t; vst1q_f32_x4 f32 float32x4x4_t;
+    vst1_f64_x4 f64 float64x1x4_t; vst1q_f64_x4 f64 float64x2x4_t; vst1_p8_x4 p8 poly8x8x4_t;
+    vst1q_p8_x4 p8 poly8x16x4_t; vst1_p16_x4 p16 poly16x4x4_t; vst1q_p16_x4 p16 poly16x8x4_t;
+    vst1_p64_x4 p64 poly64x1x4_t; vst1q_p64_x4 p64 poly64x2x4_t;
+}
+neon_ld_n! {
+    vld2_s8 i8 int8x8x2_t 8 2; vld2q_s8 i8 int8x16x2_t 16 2; vld2_s16 i16 int16x4x2_t 4 2;
+    vld2q_s16 i16 int16x8x2_t 8 2; vld2_s32 i32 int32x2x2_t 2 2; vld2q_s32 i32 int32x4x2_t 4 2;
+    vld2_s64 i64 int64x1x2_t 1 2; vld2q_s64 i64 int64x2x2_t 2 2; vld2_u8 u8 uint8x8x2_t 8 2;
+    vld2q_u8 u8 uint8x16x2_t 16 2; vld2_u16 u16 uint16x4x2_t 4 2; vld2q_u16 u16 uint16x8x2_t 8 2;
+    vld2_u32 u32 uint32x2x2_t 2 2; vld2q_u32 u32 uint32x4x2_t 4 2; vld2_u64 u64 uint64x1x2_t 1 2;
+    vld2q_u64 u64 uint64x2x2_t 2 2; vld2_f32 f32 float32x2x2_t 2 2; vld2q_f32 f32 float32x4x2_t 4 2;
+    vld2_f64 f64 float64x1x2_t 1 2; vld2q_f64 f64 float64x2x2_t 2 2; vld2_p8 p8 poly8x8x2_t 8 2;
+    vld2q_p8 p8 poly8x16x2_t 16 2; vld2_p16 p16 poly16x4x2_t 4 2; vld2q_p16 p16 poly16x8x2_t 8 2;
+    vld2_p64 p64 poly64x1x2_t 1 2; vld2q_p64 p64 poly64x2x2_t 2 2;
+}
+neon_st_n! {
+    vst2_s8 i8 int8x8x2_t 8 2; vst2q_s8 i8 int8x16x2_t 16 2; vst2_s16 i16 int16x4x2_t 4 2;
+    vst2q_s16 i16 int16x8x2_t 8 2; vst2_s32 i32 int32x2x2_t 2 2; vst2q_s32 i32 int32x4x2_t 4 2;
+    vst2_s64 i64 int64x1x2_t 1 2; vst2q_s64 i64 int64x2x2_t 2 2; vst2_u8 u8 uint8x8x2_t 8 2;
+    vst2q_u8 u8 uint8x16x2_t 16 2; vst2_u16 u16 uint16x4x2_t 4 2; vst2q_u16 u16 uint16x8x2_t 8 2;
+    vst2_u32 u32 uint32x2x2_t 2 2; vst2q_u32 u32 uint32x4x2_t 4 2; vst2_u64 u64 uint64x1x2_t 1 2;
+    vst2q_u64 u64 uint64x2x2_t 2 2; vst2_f32 f32 float32x2x2_t 2 2; vst2q_f32 f32 float32x4x2_t 4 2;
+    vst2_f64 f64 float64x1x2_t 1 2; vst2q_f64 f64 float64x2x2_t 2 2; vst2_p8 p8 poly8x8x2_t 8 2;
+    vst2q_p8 p8 poly8x16x2_t 16 2; vst2_p16 p16 poly16x4x2_t 4 2; vst2q_p16 p16 poly16x8x2_t 8 2;
+    vst2_p64 p64 poly64x1x2_t 1 2; vst2q_p64 p64 poly64x2x2_t 2 2;
+}
+neon_ld_n! {
+    vld3_s8 i8 int8x8x3_t 8 3; vld3q_s8 i8 int8x16x3_t 16 3; vld3_s16 i16 int16x4x3_t 4 3;
+    vld3q_s16 i16 int16x8x3_t 8 3; vld3_s32 i32 int32x2x3_t 2 3; vld3q_s32 i32 int32x4x3_t 4 3;
+    vld3_s64 i64 int64x1x3_t 1 3; vld3q_s64 i64 int64x2x3_t 2 3; vld3_u8 u8 uint8x8x3_t 8 3;
+    vld3q_u8 u8 uint8x16x3_t 16 3; vld3_u16 u16 uint16x4x3_t 4 3; vld3q_u16 u16 uint16x8x3_t 8 3;
+    vld3_u32 u32 uint32x2x3_t 2 3; vld3q_u32 u32 uint32x4x3_t 4 3; vld3_u64 u64 uint64x1x3_t 1 3;
+    vld3q_u64 u64 uint64x2x3_t 2 3; vld3_f32 f32 float32x2x3_t 2 3; vld3q_f32 f32 float32x4x3_t 4 3;
+    vld3_f64 f64 float64x1x3_t 1 3; vld3q_f64 f64 float64x2x3_t 2 3; vld3_p8 p8 poly8x8x3_t 8 3;
+    vld3q_p8 p8 poly8x16x3_t 16 3; vld3_p16 p16 poly16x4x3_t 4 3; vld3q_p16 p16 poly16x8x3_t 8 3;
+    vld3_p64 p64 poly64x1x3_t 1 3; vld3q_p64 p64 poly64x2x3_t 2 3;
+}
+neon_st_n! {
+    vst3_s8 i8 int8x8x3_t 8 3; vst3q_s8 i8 int8x16x3_t 16 3; vst3_s16 i16 int16x4x3_t 4 3;
+    vst3q_s16 i16 int16x8x3_t 8 3; vst3_s32 i32 int32x2x3_t 2 3; vst3q_s32 i32 int32x4x3_t 4 3;
+    vst3_s64 i64 int64x1x3_t 1 3; vst3q_s64 i64 int64x2x3_t 2 3; vst3_u8 u8 uint8x8x3_t 8 3;
+    vst3_u16 u16 uint16x4x3_t 4 3; vst3q_u16 u16 uint16x8x3_t 8 3; vst3_u32 u32 uint32x2x3_t 2 3;
+    vst3q_u32 u32 uint32x4x3_t 4 3; vst3_u64 u64 uint64x1x3_t 1 3; vst3q_u64 u64 uint64x2x3_t 2 3;
+    vst3_f32 f32 float32x2x3_t 2 3; vst3_f64 f64 float64x1x3_t 1 3; vst3q_f64 f64 float64x2x3_t 2 3;
+    vst3_p8 p8 poly8x8x3_t 8 3; vst3q_p8 p8 poly8x16x3_t 16 3; vst3_p16 p16 poly16x4x3_t 4 3;
+    vst3q_p16 p16 poly16x8x3_t 8 3; vst3_p64 p64 poly64x1x3_t 1 3; vst3q_p64 p64 poly64x2x3_t 2 3;
+}
+neon_ld_n! {
+    vld4_s8 i8 int8x8x4_t 8 4; vld4q_s8 i8 int8x16x4_t 16 4; vld4_s16 i16 int16x4x4_t 4 4;
+    vld4q_s16 i16 int16x8x4_t 8 4; vld4_s32 i32 int32x2x4_t 2 4; vld4q_s32 i32 int32x4x4_t 4 4;
+    vld4_s64 i64 int64x1x4_t 1 4; vld4q_s64 i64 int64x2x4_t 2 4; vld4_u8 u8 uint8x8x4_t 8 4;
+    vld4q_u8 u8 uint8x16x4_t 16 4; vld4_u16 u16 uint16x4x4_t 4 4; vld4q_u16 u16 uint16x8x4_t 8 4;
+    vld4_u32 u32 uint32x2x4_t 2 4; vld4q_u32 u32 uint32x4x4_t 4 4; vld4_u64 u64 uint64x1x4_t 1 4;
+    vld4q_u64 u64 uint64x2x4_t 2 4; vld4_f32 f32 float32x2x4_t 2 4; vld4q_f32 f32 float32x4x4_t 4 4;
+    vld4_f64 f64 float64x1x4_t 1 4; vld4q_f64 f64 float64x2x4_t 2 4; vld4_p8 p8 poly8x8x4_t 8 4;
+    vld4q_p8 p8 poly8x16x4_t 16 4; vld4_p16 p16 poly16x4x4_t 4 4; vld4q_p16 p16 poly16x8x4_t 8 4;
+    vld4_p64 p64 poly64x1x4_t 1 4; vld4q_p64 p64 poly64x2x4_t 2 4;
+}
+neon_st_n! {
+    vst4_s8 i8 int8x8x4_t 8 4; vst4q_s8 i8 int8x16x4_t 16 4; vst4_s16 i16 int16x4x4_t 4 4;
+    vst4q_s16 i16 int16x8x4_t 8 4; vst4_s32 i32 int32x2x4_t 2 4; vst4q_s32 i32 int32x4x4_t 4 4;
+    vst4_s64 i64 int64x1x4_t 1 4; vst4q_s64 i64 int64x2x4_t 2 4; vst4_u8 u8 uint8x8x4_t 8 4;
+    vst4_u16 u16 uint16x4x4_t 4 4; vst4q_u16 u16 uint16x8x4_t 8 4; vst4_u32 u32 uint32x2x4_t 2 4;
+    vst4q_u32 u32 uint32x4x4_t 4 4; vst4_u64 u64 uint64x1x4_t 1 4; vst4q_u64 u64 uint64x2x4_t 2 4;
+    vst4_f32 f32 float32x2x4_t 2 4; vst4q_f32 f32 float32x4x4_t 4 4; vst4_f64 f64 float64x1x4_t 1 4;
+    vst4q_f64 f64 float64x2x4_t 2 4; vst4_p8 p8 poly8x8x4_t 8 4; vst4q_p8 p8 poly8x16x4_t 16 4;
+    vst4_p16 p16 poly16x4x4_t 4 4; vst4q_p16 p16 poly16x8x4_t 8 4; vst4_p64 p64 poly64x1x4_t 1 4;
+    vst4q_p64 p64 poly64x2x4_t 2 4;
+}
+// vector from lanes and lanes from vectors
+neon_dup_n! {
+    vdup_n_s8 i8 int8x8_t; vdup_n_s16 i16 int16x4_t; vdup_n_s32 i32 int32x2_t;
+    vdup_n_s64 i64 int64x1_t; vdup_n_u16 u16 uint16x4_t; vdup_n_u32 u32 uint32x2_t;
+    vdup_n_u64 u64 uint64x1_t; vdup_n_f32 f32 float32x2_t; vdup_n_f64 f64 float64x1_t;
+    vdup_n_p8 p8 poly8x8_t; vdupq_n_p8 p8 poly8x16_t; vdup_n_p16 p16 poly16x4_t;
+    vdupq_n_p16 p16 poly16x8_t; vdup_n_p64 p64 poly64x1_t; vdupq_n_p64 p64 poly64x2_t;
+}
+neon_dup_n! {
+    vmov_n_s8 i8 int8x8_t; vmovq_n_s8 i8 int8x16_t; vmov_n_s16 i16 int16x4_t;
+    vmov_n_s32 i32 int32x2_t; vmov_n_s64 i64 int64x1_t; vmov_n_u8 u8 uint8x8_t;
+    vmovq_n_u8 u8 uint8x16_t; vmov_n_u16 u16 uint16x4_t; vmovq_n_u16 u16 uint16x8_t;
+    vmov_n_u32 u32 uint32x2_t; vmov_n_u64 u64 uint64x1_t; vmovq_n_u64 u64 uint64x2_t;
+    vmov_n_f32 f32 float32x2_t; vmov_n_f64 f64 float64x1_t; vmov_n_p8 p8 poly8x8_t;
+    vmovq_n_p8 p8 poly8x16_t; vmov_n_p16 p16 poly16x4_t; vmovq_n_p16 p16 poly16x8_t;
+}
+neon_create! {
+    vcreate_s8 int8x8_t; vcreate_s32 int32x2_t; vcreate_s64 int64x1_t; vcreate_u8 uint8x8_t;
+    vcreate_u16 uint16x4_t; vcreate_u32 uint32x2_t; vcreate_u64 uint64x1_t; vcreate_f32 float32x2_t;
+    vcreate_f64 float64x1_t; vcreate_p8 poly8x8_t; vcreate_p16 poly16x4_t; vcreate_p64 poly64x1_t;
+}
+neon_combine! {
+    vcombine_s32 int32x2_t int32x4_t; vcombine_s64 int64x1_t int64x2_t; vcombine_u64 uint64x1_t uint64x2_t;
+    vcombine_f32 float32x2_t float32x4_t; vcombine_f64 float64x1_t float64x2_t; vcombine_p8 poly8x8_t poly8x16_t;
+    vcombine_p16 poly16x4_t poly16x8_t; vcombine_p64 poly64x1_t poly64x2_t;
+}
+neon_get_half! {
+    vget_low_s64 0 int64x1_t int64x2_t; vget_low_u64 0 uint64x1_t uint64x2_t; vget_low_f32 0 float32x2_t float32x4_t;
+    vget_low_f64 0 float64x1_t float64x2_t; vget_low_p8 0 poly8x8_t poly8x16_t; vget_low_p16 0 poly16x4_t poly16x8_t;
+    vget_low_p64 0 poly64x1_t poly64x2_t;
+}
+neon_get_half! {
+    vget_high_s64 1 int64x1_t int64x2_t; vget_high_u64 1 uint64x1_t uint64x2_t; vget_high_f32 1 float32x2_t float32x4_t;
+    vget_high_f64 1 float64x1_t float64x2_t; vget_high_p8 1 poly8x8_t poly8x16_t; vget_high_p16 1 poly16x4_t poly16x8_t;
+    vget_high_p64 1 poly64x1_t poly64x2_t;
+}
+neon_get_lane! {
+    vget_lane_s8 i8 int8x8_t; vgetq_lane_s8 i8 int8x16_t; vget_lane_s16 i16 int16x4_t;
+    vgetq_lane_s16 i16 int16x8_t; vget_lane_s32 i32 int32x2_t; vgetq_lane_s32 i32 int32x4_t;
+    vget_lane_s64 i64 int64x1_t; vget_lane_u8 u8 uint8x8_t; vgetq_lane_u8 u8 uint8x16_t;
+    vget_lane_u16 u16 uint16x4_t; vgetq_lane_u16 u16 uint16x8_t; vget_lane_f32 f32 float32x2_t;
+    vget_lane_f64 f64 float64x1_t; vget_lane_p8 p8 poly8x8_t; vgetq_lane_p8 p8 poly8x16_t;
+    vget_lane_p16 p16 poly16x4_t; vgetq_lane_p16 p16 poly16x8_t; vget_lane_p64 p64 poly64x1_t;
+    vgetq_lane_p64 p64 poly64x2_t;
+}
+neon_set_lane! {
+    vset_lane_s8 i8 int8x8_t; vsetq_lane_s8 i8 int8x16_t; vset_lane_s16 i16 int16x4_t;
+    vsetq_lane_s16 i16 int16x8_t; vset_lane_s32 i32 int32x2_t; vsetq_lane_s32 i32 int32x4_t;
+    vset_lane_s64 i64 int64x1_t; vsetq_lane_s64 i64 int64x2_t; vset_lane_u8 u8 uint8x8_t;
+    vsetq_lane_u8 u8 uint8x16_t; vset_lane_u16 u16 uint16x4_t; vsetq_lane_u16 u16 uint16x8_t;
+    vset_lane_u32 u32 uint32x2_t; vset_lane_u64 u64 uint64x1_t; vset_lane_f32 f32 float32x2_t;
+    vset_lane_f64 f64 float64x1_t; vsetq_lane_f64 f64 float64x2_t; vset_lane_p8 p8 poly8x8_t;
+    vsetq_lane_p8 p8 poly8x16_t; vset_lane_p16 p16 poly16x4_t; vsetq_lane_p16 p16 poly16x8_t;
+    vset_lane_p64 p64 poly64x1_t; vsetq_lane_p64 p64 poly64x2_t;
+}
+neon_rev! {
+    vrev16_s8 int8x8_t 2; vrev16q_s8 int8x16_t 2; vrev16_u8 uint8x8_t 2;
+    vrev16q_u8 uint8x16_t 2; vrev16_p8 poly8x8_t 2; vrev16q_p8 poly8x16_t 2;
+    vrev32_s8 int8x8_t 4; vrev32q_s8 int8x16_t 4; vrev32_s16 int16x4_t 2;
+    vrev32q_s16 int16x8_t 2; vrev32_u8 uint8x8_t 4; vrev32_u16 uint16x4_t 2;
+    vrev32q_u16 uint16x8_t 2; vrev32_p8 poly8x8_t 4; vrev32q_p8 poly8x16_t 4;
+    vrev32_p16 poly16x4_t 2; vrev32q_p16 poly16x8_t 2; vrev64_s8 int8x8_t 8;
+    vrev64q_s8 int8x16_t 8; vrev64_s16 int16x4_t 4; vrev64q_s16 int16x8_t 4;
+    vrev64_s32 int32x2_t 2; vrev64q_s32 int32x4_t 2; vrev64_u8 uint8x8_t 8;
+    vrev64q_u8 uint8x16_t 8; vrev64_u16 uint16x4_t 4; vrev64q_u16 uint16x8_t 4;
+    vrev64_u32 uint32x2_t 2; vrev64q_u32 uint32x4_t 2; vrev64_f32 float32x2_t 2;
+    vrev64_p8 poly8x8_t 8; vrev64q_p8 poly8x16_t 8; vrev64_p16 poly16x4_t 4;
+    vrev64q_p16 poly16x8_t 4;
+}
+// lane-wise arithmetic and bitwise operations
+neon_binary! { simd_add:
+    vadd_s8 int8x8_t; vadd_s16 int16x4_t; vadd_s32 int32x2_t; vadd_s64 int64x1_t;
+    vadd_u8 uint8x8_t; vadd_u16 uint16x4_t; vadd_u32 uint32x2_t; vadd_u64 uint64x1_t;
+    vadd_f32 float32x2_t; vadd_f64 float64x1_t;
+}
+neon_binary! { simd_xor:
+    vadd_p8 poly8x8_t; vaddq_p8 poly8x16_t; vadd_p16 poly16x4_t; vaddq_p16 poly16x8_t;
+    vadd_p64 poly64x1_t; vaddq_p64 poly64x2_t;
+}
+neon_binary! { simd_sub:
+    vsub_s8 int8x8_t; vsub_s16 int16x4_t; vsub_s32 int32x2_t; vsub_s64 int64x1_t;
+    vsub_u8 uint8x8_t; vsub_u16 uint16x4_t; vsub_u32 uint32x2_t; vsub_u64 uint64x1_t;
+    vsub_f32 float32x2_t; vsub_f64 float64x1_t;
+}
+neon_binary! { simd_mul:
+    vmul_s8 int8x8_t; vmulq_s8 int8x16_t; vmul_s16 int16x4_t; vmul_s32 int32x2_t;
+    vmul_u8 uint8x8_t; vmulq_u8 uint8x16_t; vmul_u16 uint16x4_t; vmul_u32 uint32x2_t;
+    vmul_f32 float32x2_t; vmul_f64 float64x1_t;
+}
+neon_binary! { simd_and:
+    vand_s8 int8x8_t; vand_s16 int16x4_t; vand_s32 int32x2_t; vand_s64 int64x1_t;
+    vand_u8 uint8x8_t; vand_u16 uint16x4_t; vand_u32 uint32x2_t; vand_u64 uint64x1_t;
+}
+neon_binary! { simd_or:
+    vorr_s8 int8x8_t; vorr_s16 int16x4_t; vorr_s32 int32x2_t; vorr_s64 int64x1_t;
+    vorr_u16 uint16x4_t; vorr_u32 uint32x2_t; vorr_u64 uint64x1_t;
+}
+neon_binary! { simd_xor:
+    veor_s8 int8x8_t; veor_s16 int16x4_t; veor_s32 int32x2_t; veor_s64 int64x1_t;
+    veor_u8 uint8x8_t; veor_u16 uint16x4_t; veor_u32 uint32x2_t; veor_u64 uint64x1_t;
+}
+neon_binary! { simd_saturating_add:
+    vqadd_s8 int8x8_t; vqadd_s16 int16x4_t; vqadd_s32 int32x2_t; vqaddq_s32 int32x4_t;
+    vqadd_s64 int64x1_t; vqaddq_s64 int64x2_t; vqadd_u8 uint8x8_t; vqadd_u16 uint16x4_t;
+    vqadd_u32 uint32x2_t; vqaddq_u32 uint32x4_t; vqadd_u64 uint64x1_t; vqaddq_u64 uint64x2_t;
+}
+neon_binary! { simd_saturating_sub:
+    vqsub_s8 int8x8_t; vqsub_s16 int16x4_t; vqsub_s32 int32x2_t; vqsubq_s32 int32x4_t;
+    vqsub_s64 int64x1_t; vqsubq_s64 int64x2_t; vqsub_u8 uint8x8_t; vqsub_u16 uint16x4_t;
+    vqsub_u32 uint32x2_t; vqsubq_u32 uint32x4_t; vqsub_u64 uint64x1_t; vqsubq_u64 uint64x2_t;
+}
+neon_max_min! {
+    vmax_s8 simd_gt int8x8_t uint8x8_t; vmax_s16 simd_gt int16x4_t uint16x4_t; vmax_s32 simd_gt int32x2_t uint32x2_t;
+    vmax_u8 simd_gt uint8x8_t uint8x8_t; vmax_u16 simd_gt uint16x4_t uint16x4_t; vmax_u32 simd_gt uint32x2_t uint32x2_t;
+}
+neon_max_min! {
+    vmin_s8 simd_lt int8x8_t uint8x8_t; vmin_s16 simd_lt int16x4_t uint16x4_t; vmin_s32 simd_lt int32x2_t uint32x2_t;
+    vmin_u8 simd_lt uint8x8_t uint8x8_t; vmin_u16 simd_lt uint16x4_t uint16x4_t; vmin_u32 simd_lt uint32x2_t uint32x2_t;
+}
+neon_with_not! {
+    vbic_s8 simd_and int8x8_t; vbic_s16 simd_and int16x4_t; vbic_s32 simd_and int32x2_t;
+    vbic_s64 simd_and int64x1_t; vbic_u8 simd_and uint8x8_t; vbic_u16 simd_and uint16x4_t;
+    vbic_u32 simd_and uint32x2_t; vbic_u64 simd_and uint64x1_t;
+}
+neon_with_not! {
+    vorn_s8 simd_or int8x8_t; vornq_s8 simd_or int8x16_t; vorn_s16 simd_or int16x4_t;
+    vornq_s16 simd_or int16x8_t; vorn_s32 simd_or int32x2_t; vornq_s32 simd_or int32x4_t;
+    vorn_s64 simd_or int64x1_t; vornq_s64 simd_or int64x2_t; vorn_u8 simd_or uint8x8_t;
+    vornq_u8 simd_or uint8x16_t; vorn_u16 simd_or uint16x4_t; vornq_u16 simd_or uint16x8_t;
+    vorn_u32 simd_or uint32x2_t; vornq_u32 simd_or uint32x4_t; vorn_u64 simd_or uint64x1_t;
+    vornq_u64 simd_or uint64x2_t;
+}
+neon_not! {
+    vmvn_s8 int8x8_t; vmvnq_s8 int8x16_t; vmvn_s16 int16x4_t; vmvnq_s16 int16x8_t;
+    vmvn_s32 int32x2_t; vmvnq_s32 int32x4_t; vmvn_u8 uint8x8_t; vmvnq_u8 uint8x16_t;
+    vmvn_u16 uint16x4_t; vmvnq_u16 uint16x8_t; vmvn_u32 uint32x2_t; vmvn_p8 poly8x8_t;
+    vmvnq_p8 poly8x16_t;
+}
+neon_neg! {
+    vneg_s8 int8x8_t; vnegq_s8 int8x16_t; vneg_s16 int16x4_t; vnegq_s16 int16x8_t;
+    vneg_s32 int32x2_t; vneg_s64 int64x1_t; vnegq_s64 int64x2_t; vneg_f32 float32x2_t;
+    vneg_f64 float64x1_t; vnegq_f64 float64x2_t;
+}
+neon_abs! {
+    vabs_s8 int8x8_t uint8x8_t; vabs_s16 int16x4_t uint16x4_t; vabs_s32 int32x2_t uint32x2_t;
+    vabs_s64 int64x1_t uint64x1_t;
+}
+neon_fabs! {
+    vabs_f32 float32x2_t; vabs_f64 float64x1_t;
+}
+neon_mul_acc! {
+    vmla_s8 simd_add int8x8_t; vmlaq_s8 simd_add int8x16_t; vmla_s16 simd_add int16x4_t;
+    vmlaq_s16 simd_add int16x8_t; vmla_s32 simd_add int32x2_t; vmla_u8 simd_add uint8x8_t;
+    vmlaq_u8 simd_add uint8x16_t; vmla_u16 simd_add uint16x4_t; vmlaq_u16 simd_add uint16x8_t;
+    vmla_u32 simd_add uint32x2_t; vmlaq_u32 simd_add uint32x4_t; vmla_f32 simd_add float32x2_t;
+    vmlaq_f32 simd_add float32x4_t; vmla_f64 simd_add float64x1_t; vmlaq_f64 simd_add float64x2_t;
+}
+neon_mul_acc! {
+    vmls_s8 simd_sub int8x8_t; vmlsq_s8 simd_sub int8x16_t; vmls_s16 simd_sub int16x4_t;
+    vmlsq_s16 simd_sub int16x8_t; vmls_s32 simd_sub int32x2_t; vmlsq_s32 simd_sub int32x4_t;
+    vmls_u8 simd_sub uint8x8_t; vmlsq_u8 simd_sub uint8x16_t; vmls_u16 simd_sub uint16x4_t;
+    vmlsq_u16 simd_sub uint16x8_t; vmls_u32 simd_sub uint32x2_t; vmlsq_u32 simd_sub uint32x4_t;
+    vmls_f32 simd_sub float32x2_t; vmls_f64 simd_sub float64x1_t; vmlsq_f64 simd_sub float64x2_t;
+}
+neon_mul_n! {
+    vmul_n_s16 i16 int16x4_t; vmulq_n_s16 i16 int16x8_t; vmul_n_s32 i32 int32x2_t;
+    vmulq_n_s32 i32 int32x4_t; vmul_n_u16 u16 uint16x4_t; vmulq_n_u16 u16 uint16x8_t;
+    vmul_n_u32 u32 uint32x2_t; vmulq_n_u32 u32 uint32x4_t; vmul_n_f32 f32 float32x2_t;
+    vmul_n_f64 f64 float64x1_t;
+}
+neon_mul_acc_n! {
+    vmla_n_s16 simd_add i16 int16x4_t; vmlaq_n_s16 simd_add i16 int16x8_t; vmla_n_s32 simd_add i32 int32x2_t;
+    vmlaq_n_s32 simd_add i32 int32x4_t; vmla_n_u16 simd_add u16 uint16x4_t; vmlaq_n_u16 simd_add u16 uint16x8_t;
+    vmla_n_u32 simd_add u32 uint32x2_t; vmlaq_n_u32 simd_add u32 uint32x4_t; vmla_n_f32 simd_add f32 float32x2_t;
+    vmlaq_n_f32 simd_add f32 float32x4_t;
+}
+neon_mul_acc_n! {
+    vmls_n_s16 simd_sub i16 int16x4_t; vmlsq_n_s16 simd_sub i16 int16x8_t; vmls_n_s32 simd_sub i32 int32x2_t;
+    vmlsq_n_s32 simd_sub i32 int32x4_t; vmls_n_u16 simd_sub u16 uint16x4_t; vmlsq_n_u16 simd_sub u16 uint16x8_t;
+    vmls_n_u32 simd_sub u32 uint32x2_t; vmlsq_n_u32 simd_sub u32 uint32x4_t; vmls_n_f32 simd_sub f32 float32x2_t;
+    vmlsq_n_f32 simd_sub f32 float32x4_t;
+}
+neon_sat_doubling_mul_high! {
+    vqdmulh_s16 i16 i64 int16x4_t false; vqdmulhq_s16 i16 i64 int16x8_t false;
+    vqdmulh_s32 i32 i128 int32x2_t false; vqdmulhq_s32 i32 i128 int32x4_t false;
+}
+neon_sat_doubling_mul_high_n! {
+    vqdmulh_n_s16 vqdmulh_s16 i16 int16x4_t; vqdmulhq_n_s16 vqdmulhq_s16 i16 int16x8_t;
+    vqdmulh_n_s32 vqdmulh_s32 i32 int32x2_t; vqdmulhq_n_s32 vqdmulhq_s32 i32 int32x4_t;
+}
+neon_sat_doubling_mul_high! {
+    vqrdmulh_s16 i16 i64 int16x4_t true; vqrdmulh_s32 i32 i128 int32x2_t true;
+    vqrdmulhq_s32 i32 i128 int32x4_t true;
+}
+neon_sat_doubling_mul_high_n! {
+    vqrdmulh_n_s16 vqrdmulh_s16 i16 int16x4_t; vqrdmulh_n_s32 vqrdmulh_s32 i32 int32x2_t;
+    vqrdmulhq_n_s32 vqrdmulhq_s32 i32 int32x4_t;
+}
+// shifts by a constant, widening and narrowing
+neon_shl_n! {
+    vshl_n_s8 i8 int8x8_t; vshl_n_s16 i16 int16x4_t; vshl_n_s32 i32 int32x2_t;
+    vshl_n_s64 i64 int64x1_t; vshl_n_u8 u8 uint8x8_t; vshl_n_u16 u16 uint16x4_t;
+    vshl_n_u32 u32 uint32x2_t; vshl_n_u64 u64 uint64x1_t;
+}
+neon_shr_n_signed! {
+    vshr_n_s8 i8 int8x8_t; vshr_n_s16 i16 int16x4_t; vshr_n_s32 i32 int32x2_t;
+    vshr_n_s64 i64 int64x1_t;
+}
+neon_shr_n_unsigned! {
+    vshr_n_u8 u8 uint8x8_t; vshr_n_u16 u16 uint16x4_t; vshr_n_u32 u32 uint32x2_t;
+    vshr_n_u64 u64 uint64x1_t;
+}
+neon_shll_n! {
+    vshll_n_s8 int8x8_t i16 int16x8_t; vshll_n_s16 int16x4_t i32 int32x4_t;
+    vshll_n_s32 int32x2_t i64 int64x2_t; vshll_n_u8 uint8x8_t u16 uint16x8_t;
+    vshll_n_u16 uint16x4_t u32 uint32x4_t; vshll_n_u32 uint32x2_t u64 uint64x2_t;
+}
+neon_shrn_n! {
+    vshrn_n_s16 i16 int16x8_t int8x8_t; vshrn_n_s32 i32 int32x4_t int16x4_t;
+    vshrn_n_s64 i64 int64x2_t int32x2_t; vshrn_n_u32 u32 uint32x4_t uint16x4_t;
+}
+neon_movn! {
+    vmovn_s16 int16x8_t int8x8_t; vmovn_s32 int32x4_t int16x4_t; vmovn_s64 int64x2_t int32x2_t;
+    vmovn_u16 uint16x8_t uint8x8_t; vmovn_u32 uint32x4_t uint16x4_t; vmovn_u64 uint64x2_t uint32x2_t;
+}
+// compares: all ones where true
+neon_compare! { simd_eq:
+    vceq_s8 int8x8_t uint8x8_t; vceq_s16 int16x4_t uint16x4_t; vceq_s32 int32x2_t uint32x2_t;
+    vceq_s64 int64x1_t uint64x1_t; vceq_u16 uint16x4_t uint16x4_t; vceq_u32 uint32x2_t uint32x2_t;
+    vceq_u64 uint64x1_t uint64x1_t; vceq_f32 float32x2_t uint32x2_t; vceq_f64 float64x1_t uint64x1_t;
+    vceq_p8 poly8x8_t uint8x8_t; vceqq_p8 poly8x16_t uint8x16_t; vceq_p64 poly64x1_t uint64x1_t;
+    vceqq_p64 poly64x2_t uint64x2_t;
+}
+neon_compare! { simd_ge:
+    vcge_s8 int8x8_t uint8x8_t; vcge_s16 int16x4_t uint16x4_t; vcge_s32 int32x2_t uint32x2_t;
+    vcge_s64 int64x1_t uint64x1_t; vcge_u8 uint8x8_t uint8x8_t; vcge_u16 uint16x4_t uint16x4_t;
+    vcge_u32 uint32x2_t uint32x2_t; vcge_u64 uint64x1_t uint64x1_t; vcge_f32 float32x2_t uint32x2_t;
+    vcge_f64 float64x1_t uint64x1_t;
+}
+neon_compare! { simd_gt:
+    vcgt_s8 int8x8_t uint8x8_t; vcgt_s16 int16x4_t uint16x4_t; vcgt_s32 int32x2_t uint32x2_t;
+    vcgt_s64 int64x1_t uint64x1_t; vcgt_u8 uint8x8_t uint8x8_t; vcgt_u16 uint16x4_t uint16x4_t;
+    vcgt_u32 uint32x2_t uint32x2_t; vcgt_u64 uint64x1_t uint64x1_t; vcgt_f32 float32x2_t uint32x2_t;
+    vcgt_f64 float64x1_t uint64x1_t;
+}
+neon_compare! { simd_le:
+    vcle_s8 int8x8_t uint8x8_t; vcle_s16 int16x4_t uint16x4_t; vcle_s32 int32x2_t uint32x2_t;
+    vcle_s64 int64x1_t uint64x1_t; vcle_u8 uint8x8_t uint8x8_t; vcle_u16 uint16x4_t uint16x4_t;
+    vcle_u32 uint32x2_t uint32x2_t; vcle_u64 uint64x1_t uint64x1_t; vcle_f32 float32x2_t uint32x2_t;
+    vcle_f64 float64x1_t uint64x1_t;
+}
+neon_compare! { simd_lt:
+    vclt_s8 int8x8_t uint8x8_t; vclt_s16 int16x4_t uint16x4_t; vclt_s32 int32x2_t uint32x2_t;
+    vclt_s64 int64x1_t uint64x1_t; vclt_u8 uint8x8_t uint8x8_t; vclt_u16 uint16x4_t uint16x4_t;
+    vclt_u32 uint32x2_t uint32x2_t; vclt_u64 uint64x1_t uint64x1_t; vclt_f32 float32x2_t uint32x2_t;
+    vclt_f64 float64x1_t uint64x1_t;
+}
+neon_compare_zero! { simd_eq:
+    vceqz_s8 int8x8_t uint8x8_t; vceqzq_s8 int8x16_t uint8x16_t; vceqz_s16 int16x4_t uint16x4_t;
+    vceqzq_s16 int16x8_t uint16x8_t; vceqz_s32 int32x2_t uint32x2_t; vceqzq_s32 int32x4_t uint32x4_t;
+    vceqz_s64 int64x1_t uint64x1_t; vceqzq_s64 int64x2_t uint64x2_t; vceqz_u8 uint8x8_t uint8x8_t;
+    vceqzq_u8 uint8x16_t uint8x16_t; vceqz_u16 uint16x4_t uint16x4_t; vceqzq_u16 uint16x8_t uint16x8_t;
+    vceqz_u32 uint32x2_t uint32x2_t; vceqzq_u32 uint32x4_t uint32x4_t; vceqz_u64 uint64x1_t uint64x1_t;
+    vceqzq_u64 uint64x2_t uint64x2_t; vceqz_f32 float32x2_t uint32x2_t; vceqzq_f32 float32x4_t uint32x4_t;
+    vceqz_f64 float64x1_t uint64x1_t; vceqzq_f64 float64x2_t uint64x2_t; vceqz_p8 poly8x8_t uint8x8_t;
+    vceqzq_p8 poly8x16_t uint8x16_t; vceqz_p64 poly64x1_t uint64x1_t; vceqzq_p64 poly64x2_t uint64x2_t;
+}
+neon_compare_zero! { simd_ge:
+    vcgezq_s8 int8x16_t uint8x16_t; vcgez_s16 int16x4_t uint16x4_t; vcgezq_s16 int16x8_t uint16x8_t;
+    vcgez_s32 int32x2_t uint32x2_t; vcgezq_s32 int32x4_t uint32x4_t; vcgez_s64 int64x1_t uint64x1_t;
+    vcgezq_s64 int64x2_t uint64x2_t; vcgez_f32 float32x2_t uint32x2_t; vcgezq_f32 float32x4_t uint32x4_t;
+    vcgez_f64 float64x1_t uint64x1_t; vcgezq_f64 float64x2_t uint64x2_t;
+}
+neon_compare_zero! { simd_gt:
+    vcgtz_s8 int8x8_t uint8x8_t; vcgtzq_s8 int8x16_t uint8x16_t; vcgtz_s16 int16x4_t uint16x4_t;
+    vcgtzq_s16 int16x8_t uint16x8_t; vcgtz_s32 int32x2_t uint32x2_t; vcgtzq_s32 int32x4_t uint32x4_t;
+    vcgtz_s64 int64x1_t uint64x1_t; vcgtzq_s64 int64x2_t uint64x2_t; vcgtz_f32 float32x2_t uint32x2_t;
+    vcgtzq_f32 float32x4_t uint32x4_t; vcgtz_f64 float64x1_t uint64x1_t; vcgtzq_f64 float64x2_t uint64x2_t;
+}
+neon_compare_zero! { simd_le:
+    vclez_s8 int8x8_t uint8x8_t; vclezq_s8 int8x16_t uint8x16_t; vclez_s16 int16x4_t uint16x4_t;
+    vclezq_s16 int16x8_t uint16x8_t; vclez_s32 int32x2_t uint32x2_t; vclezq_s32 int32x4_t uint32x4_t;
+    vclez_s64 int64x1_t uint64x1_t; vclezq_s64 int64x2_t uint64x2_t; vclez_f32 float32x2_t uint32x2_t;
+    vclezq_f32 float32x4_t uint32x4_t; vclez_f64 float64x1_t uint64x1_t; vclezq_f64 float64x2_t uint64x2_t;
+}
+neon_compare_zero! { simd_lt:
+    vcltzq_s8 int8x16_t uint8x16_t; vcltz_s16 int16x4_t uint16x4_t; vcltzq_s16 int16x8_t uint16x8_t;
+    vcltz_s32 int32x2_t uint32x2_t; vcltzq_s32 int32x4_t uint32x4_t; vcltz_s64 int64x1_t uint64x1_t;
+    vcltzq_s64 int64x2_t uint64x2_t; vcltz_f32 float32x2_t uint32x2_t; vcltzq_f32 float32x4_t uint32x4_t;
+    vcltz_f64 float64x1_t uint64x1_t; vcltzq_f64 float64x2_t uint64x2_t;
+}
+neon_test_bits! {
+    vtst_s8 int8x8_t uint8x8_t; vtstq_s8 int8x16_t uint8x16_t; vtst_s16 int16x4_t uint16x4_t;
+    vtstq_s16 int16x8_t uint16x8_t; vtst_s32 int32x2_t uint32x2_t; vtstq_s32 int32x4_t uint32x4_t;
+    vtst_s64 int64x1_t uint64x1_t; vtstq_s64 int64x2_t uint64x2_t; vtst_u8 uint8x8_t uint8x8_t;
+    vtstq_u8 uint8x16_t uint8x16_t; vtst_u16 uint16x4_t uint16x4_t; vtstq_u16 uint16x8_t uint16x8_t;
+    vtst_u32 uint32x2_t uint32x2_t; vtstq_u32 uint32x4_t uint32x4_t; vtst_u64 uint64x1_t uint64x1_t;
+    vtstq_u64 uint64x2_t uint64x2_t; vtst_p8 poly8x8_t uint8x8_t; vtstq_p8 poly8x16_t uint8x16_t;
+    vtst_p16 poly16x4_t uint16x4_t; vtstq_p16 poly16x8_t uint16x8_t; vtst_p64 poly64x1_t uint64x1_t;
+    vtstq_p64 poly64x2_t uint64x2_t;
 }
