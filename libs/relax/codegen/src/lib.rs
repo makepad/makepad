@@ -34,6 +34,7 @@ pub mod interp;
 pub mod exec_census;
 pub mod warm;
 pub mod loops;
+pub mod vectorize;
 pub mod native;
 pub mod opt;
 pub mod patched;
