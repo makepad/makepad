@@ -43,6 +43,7 @@
 //! keeps the existing f32-weight fallback available for parity comparisons.
 
 use crate::whisper::model::{DecoderLayer, EncoderLayer};
+use makepad_ai_loader::WeightOwner;
 
 /// True when the CUDA kernels were compiled into this build *and* the driver
 /// reports at least one device. Probed once; never panics.
@@ -108,62 +109,6 @@ enum WeightSrc<'a> {
     Ggml { bytes: &'a [u8], ggml_type: u32 },
     /// Values the caller already holds as f32.
     F32(&'a [f32]),
-}
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-#[allow(dead_code)]
-fn fnv_mix(h: &mut u64, v: u64) {
-    for b in v.to_le_bytes() {
-        *h ^= b as u64;
-        *h = h.wrapping_mul(FNV_PRIME);
-    }
-}
-
-/// FNV-1a over the byte length plus a bounded, evenly spaced sample of the
-/// contents (always including the last word).
-///
-/// Used to disambiguate device weight-cache entries. `src/metal/backend.rs`
-/// keys its cached weight buffers on `(host pointer, length)` alone; a freed
-/// tensor whose allocation is reused by a different tensor of the same size
-/// would hit a stale entry and silently compute with the wrong weights.
-/// Sampling the contents is O(1) and removes that class of bug outright.
-#[allow(dead_code)]
-fn fingerprint_words(n: usize, byte_len: usize, word: impl Fn(usize) -> u64) -> u64 {
-    let mut h = FNV_OFFSET;
-    fnv_mix(&mut h, byte_len as u64);
-    if n == 0 {
-        return h;
-    }
-    const SAMPLES: usize = 64;
-    let step = (n / SAMPLES).max(1);
-    let mut i = 0;
-    while i < n {
-        fnv_mix(&mut h, word(i));
-        i += step;
-    }
-    fnv_mix(&mut h, word(n - 1));
-    h
-}
-
-#[allow(dead_code)]
-fn fingerprint(bytes: &[u8]) -> u64 {
-    let n = bytes.len().div_ceil(8);
-    fingerprint_words(n, bytes.len(), |i| {
-        let off = i * 8;
-        let end = (off + 8).min(bytes.len());
-        let mut w = [0u8; 8];
-        w[..end - off].copy_from_slice(&bytes[off..end]);
-        u64::from_le_bytes(w)
-    })
-}
-
-#[allow(dead_code)]
-fn fingerprint_f32(values: &[f32]) -> u64 {
-    fingerprint_words(values.len(), std::mem::size_of_val(values), |i| {
-        values[i].to_bits() as u64
-    })
 }
 
 /// Dequantize a whole ggml weight blob to f32 in the same element order.
@@ -289,6 +234,7 @@ pub(crate) fn try_matmul_nt_f32(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !ready() || k.saturating_mul(n) < MIN_MATMUL_WEIGHT_ELEMS {
         return None;
@@ -301,7 +247,7 @@ pub(crate) fn try_matmul_nt_f32(
     // dequantize-into-a-new-Vec step would spike host memory by that much.
     ok(
         "matmul_nt_f32",
-        imp::matmul_nt(a, WeightSrc::F32(bt), m, k, n, None),
+        imp::matmul_nt(a, WeightSrc::F32(bt), m, k, n, None, owner),
     )
 }
 
@@ -311,8 +257,9 @@ pub(crate) fn try_matmul_nt_f32_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    matmul_nt_bytes(a, bt_bytes, crate::whisper::quant::GGML_TYPE_F32, m, k, n, None)
+    matmul_nt_bytes(a, bt_bytes, crate::whisper::quant::GGML_TYPE_F32, m, k, n, None, owner)
 }
 
 pub(crate) fn try_matmul_nt_f16_bytes(
@@ -321,8 +268,9 @@ pub(crate) fn try_matmul_nt_f16_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    matmul_nt_bytes(a, bt_f16_bytes, crate::whisper::quant::GGML_TYPE_F16, m, k, n, None)
+    matmul_nt_bytes(a, bt_f16_bytes, crate::whisper::quant::GGML_TYPE_F16, m, k, n, None, owner)
 }
 
 pub(crate) fn try_matmul_nt_ggml_bytes(
@@ -332,8 +280,9 @@ pub(crate) fn try_matmul_nt_ggml_bytes(
     m: usize,
     k: usize,
     n: usize,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    matmul_nt_bytes(a, bt_bytes, bt_ggml_type, m, k, n, None)
+    matmul_nt_bytes(a, bt_bytes, bt_ggml_type, m, k, n, None, owner)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -345,11 +294,12 @@ pub(crate) fn try_matmul_nt_ggml_bytes_add_bias(
     k: usize,
     n: usize,
     bias: &[f32],
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if bias.len() != n {
         return None;
     }
-    matmul_nt_bytes(a, bt_bytes, bt_ggml_type, m, k, n, Some(bias))
+    matmul_nt_bytes(a, bt_bytes, bt_ggml_type, m, k, n, Some(bias), owner)
 }
 
 fn matmul_nt_bytes(
@@ -360,6 +310,7 @@ fn matmul_nt_bytes(
     k: usize,
     n: usize,
     bias: Option<&[f32]>,
+    owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
     if !ready() || k.saturating_mul(n) < MIN_MATMUL_WEIGHT_ELEMS {
         return None;
@@ -379,6 +330,7 @@ fn matmul_nt_bytes(
             k,
             n,
             bias,
+            owner,
         ),
     )
 }
@@ -556,6 +508,7 @@ pub(crate) fn try_encoder_attn_block_f32(
     _out_w_bytes: &[u8],
     _out_w_ggml_type: u32,
     _out_b: &[f32],
+    _owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     None
 }
@@ -573,6 +526,7 @@ pub(crate) fn try_encoder_ffn_block_f32(
     _w1_bytes: &[u8],
     _w1_ggml_type: u32,
     _b1: &[f32],
+    _owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     None
 }
@@ -604,6 +558,7 @@ pub(crate) fn try_encoder_layer_f32(
     _w1_bytes: &[u8],
     _w1_ggml_type: u32,
     _b1: &[f32],
+    _owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     None
 }
@@ -616,6 +571,7 @@ pub(crate) fn try_encoder_stack_f32(
     layers: &[EncoderLayer],
     final_ln_w: &[f32],
     final_ln_b: &[f32],
+    owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     if f32_weights_forced()
         || layers.iter().any(|layer| {
@@ -636,7 +592,7 @@ pub(crate) fn try_encoder_stack_f32(
     }
     ok(
         "encoder stack",
-        imp::encoder_stack(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b),
+        imp::encoder_stack(x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b, owner),
     )
 }
 
@@ -654,6 +610,7 @@ pub(crate) fn try_decoder_self_qkv_step_f32(
     _v_w_bytes: &[u8],
     _v_w_ggml_type: u32,
     _v_b: &[f32],
+    _owner: &WeightOwner,
 ) -> Option<(Vec<f32>, Vec<f32>, Vec<f32>)> {
     None
 }
@@ -668,6 +625,7 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
     _v_cross: &[f32],
     _n_audio_ctx: usize,
     _layer: &DecoderLayer,
+    _owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     None
 }
@@ -686,6 +644,7 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
     _v_cross: &[f32],
     _n_audio_ctx: usize,
     _layer: &DecoderLayer,
+    _owner: &WeightOwner,
 ) -> Option<Vec<f32>> {
     None
 }
@@ -704,11 +663,8 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
     makepad_ai_cuda_kernels
 ))]
 mod imp {
-    use super::{
-        dequant_to_f32, f32_weights_forced, fingerprint, fingerprint_f32, fnv_mix, EncoderLayer,
-        WeightSrc, FNV_OFFSET,
-    };
-    use makepad_ai_common::backend::WeightOwner;
+    use super::{dequant_to_f32, f32_weights_forced, EncoderLayer, WeightOwner, WeightSrc};
+    use makepad_ai_loader::DeadOwnerInbox;
     use makepad_ai_cuda::launch::{
         gpu_attention_packed_cross_f32, gpu_device_available, gpu_download, gpu_linear_f32_resident,
         gpu_upload, try_matmul_nt_ggml_bytes_cached, try_matmul_nt_q8_0_cached,
@@ -721,43 +677,23 @@ mod imp {
         gpu_device_available()
     }
 
-    /// Identity of a device-resident host blob: address, byte length, a
-    /// content fingerprint, and the shape it was uploaded for.
+    /// Immutable weight identity within its live model owner, including upload shape.
     #[derive(Clone, Copy, PartialEq, Eq, Hash)]
     struct ResidentKey {
+        owner: u64,
         ptr: usize,
         len: usize,
-        fp: u64,
         rows: usize,
         cols: usize,
     }
 
     impl ResidentKey {
-        fn of(bytes: &[u8], rows: usize, cols: usize) -> Self {
-            Self {
-                ptr: bytes.as_ptr() as usize,
-                len: bytes.len(),
-                fp: fingerprint(bytes),
-                rows,
-                cols,
-            }
-        }
-
-        fn of_f32(values: &[f32], rows: usize, cols: usize) -> Self {
-            Self {
-                ptr: values.as_ptr() as usize,
-                len: std::mem::size_of_val(values),
-                fp: fingerprint_f32(values),
-                rows,
-                cols,
-            }
-        }
-
-        fn of_src(src: &WeightSrc<'_>, rows: usize, cols: usize) -> Self {
-            match src {
-                WeightSrc::Ggml { bytes, .. } => Self::of(bytes, rows, cols),
-                WeightSrc::F32(values) => Self::of_f32(values, rows, cols),
-            }
+        fn of_src(src: &WeightSrc<'_>, rows: usize, cols: usize, owner: &WeightOwner) -> Self {
+            let (ptr, len) = match src {
+                WeightSrc::Ggml { bytes, .. } => (bytes.as_ptr() as usize, bytes.len()),
+                WeightSrc::F32(values) => (values.as_ptr() as usize, std::mem::size_of_val(*values)),
+            };
+            Self { owner: owner.id(), ptr, len, rows, cols }
         }
     }
 
@@ -770,68 +706,70 @@ mod imp {
         static WEIGHTS: RefCell<HashMap<ResidentKey, GpuTensor>> =
             RefCell::new(HashMap::new());
         static CROSS_KV: RefCell<HashMap<usize, CrossEntry>> = RefCell::new(HashMap::new());
-        /// Owner of this thread's keyed Q8/F16 matmul weights (`matmul_nt`).
-        static MATMUL_OWNER: RefCell<WeightOwner> = RefCell::new(WeightOwner::new("whisper"));
-        /// Owners of the fused encoder stacks, one per encoder identity.
-        static ENCODER_OWNERS: RefCell<HashMap<u64, WeightOwner>> = RefCell::new(HashMap::new());
+        static DEAD_OWNERS: RefCell<DeadOwnerInbox> = RefCell::new(DeadOwnerInbox::register());
+        static OWNER_IDS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
     }
 
+    // Entries remain valid until compute_cross_kv invalidates the cache.
     struct CrossEntry {
-        k_key: ResidentKey,
         k: GpuTensor,
         v: GpuTensor,
     }
 
-    /// Guard against unbounded growth if a caller ever hands us a temporary
-    /// weight (the `Tensor::conv1d` fallback can). Whisper large-v3 has 1220
-    /// weight tensors; 4096 leaves generous headroom while still bounding a
-    /// pathological loop.
-    const MAX_RESIDENT_WEIGHTS: usize = 4096;
+    fn upload_weight(src: WeightSrc<'_>, n: usize, k: usize) -> Result<GpuTensor, String> {
+        let elems = n.checked_mul(k).ok_or_else(|| "weight size overflow".to_string())?;
+        match src {
+            WeightSrc::F32(values) if values.len() == elems => gpu_upload(values, n, k),
+            WeightSrc::F32(values) => Err(format!(
+                "f32 weight length {} does not match n={n} k={k}", values.len()
+            )),
+            WeightSrc::Ggml { bytes, ggml_type } => {
+                let values = dequant_to_f32(bytes, ggml_type, elems).ok_or_else(|| {
+                    format!("unsupported ggml weight type {ggml_type} for n={n} k={k}")
+                })?;
+                gpu_upload(&values, n, k)
+            }
+        }
+    }
 
-    /// Run `f` with the device-resident f32 copy of `src` (uploading it the
-    /// first time it is seen).
+    /// Reuse an immutable owner's f32 copy; unowned weights live for this call only.
     fn with_weight<R>(
         src: WeightSrc<'_>,
         n: usize,
         k: usize,
+        owner: Option<&WeightOwner>,
         f: impl FnOnce(&GpuTensor) -> Result<R, String>,
     ) -> Result<R, String> {
-        let key = ResidentKey::of_src(&src, n, k);
+        DEAD_OWNERS.with(|inbox| {
+            inbox.borrow_mut().take(|namespace| {
+                if let Some(id) = OWNER_IDS.with(|ids| ids.borrow_mut().remove(namespace)) {
+                    WEIGHTS.with(|cache| cache.borrow_mut().retain(|key, _| key.owner != id));
+                }
+            });
+        });
+        let Some(owner) = owner else {
+            return f(&upload_weight(src, n, k)?);
+        };
+        let key = ResidentKey::of_src(&src, n, k, owner);
         WEIGHTS.with(|cache| {
             let mut cache = cache.borrow_mut();
             if !cache.contains_key(&key) {
-                let elems = n
-                    .checked_mul(k)
-                    .ok_or_else(|| "weight size overflow".to_string())?;
-                if cache.len() >= MAX_RESIDENT_WEIGHTS {
-                    cache.clear();
-                }
-                let uploaded = match src {
-                    WeightSrc::F32(values) if values.len() == elems => {
-                        gpu_upload(values, n, k)?
-                    }
-                    WeightSrc::F32(values) => {
-                        return Err(format!(
-                            "f32 weight length {} does not match n={n} k={k}",
-                            values.len()
-                        ))
-                    }
-                    WeightSrc::Ggml { bytes, ggml_type } => {
-                        let values =
-                            dequant_to_f32(bytes, ggml_type, elems).ok_or_else(|| {
-                                format!(
-                                    "unsupported ggml weight type {ggml_type} for n={n} k={k}"
-                                )
-                            })?;
-                        gpu_upload(&values, n, k)?
-                    }
-                };
+                let uploaded = upload_weight(src, n, k)?;
+                DEAD_OWNERS.with(|inbox| inbox.borrow_mut().holds(owner.namespace()));
+                OWNER_IDS.with(|ids| ids.borrow_mut().insert(owner.namespace().to_owned(), owner.id()));
                 cache.insert(key, uploaded);
             }
             let tensor = cache
                 .get(&key)
                 .ok_or_else(|| "weight was just inserted".to_string())?;
             f(tensor)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn cached_weight_count(owner: Option<u64>) -> usize {
+        WEIGHTS.with(|cache| {
+            cache.borrow().keys().filter(|key| owner.is_none_or(|id| key.owner == id)).count()
         })
     }
 
@@ -843,27 +781,20 @@ mod imp {
         k: usize,
         n: usize,
         bias: Option<&[f32]>,
+        owner: Option<&WeightOwner>,
     ) -> Result<Vec<f32>, String> {
         // Q8_0 weights stay 8-bit on the device (dequantized in registers by the
         // q8_dense kernel, f32 accumulate); F16 weights stay F16 (cuBLAS GemmEx,
         // f32 accumulate). Either is a quarter / half of the f32 copy.
-        if let WeightSrc::Ggml { bytes, ggml_type } = &weight {
+        if let (WeightSrc::Ggml { bytes, ggml_type }, Some(owner)) = (&weight, owner) {
             if (*ggml_type == 1 || *ggml_type == 8) && !f32_weights_forced() {
-                let key = format!("{:016x}-{n}x{k}", fingerprint(bytes));
-                let ty = *ggml_type;
-                let mut out = MATMUL_OWNER.with(|owner| {
-                    let owner = owner.borrow();
-                    if ty == 8 {
-                        // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
-                        try_matmul_nt_q8_0_cached(a, m, k, n, &owner, &key, || {
-                            Ok(bytes.to_vec())
-                        })
-                    } else {
-                        try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, &owner, &key, || {
-                            Ok(bytes.to_vec())
-                        })
-                    }
-                })?;
+                let key = format!("{:x}-{}-{n}x{k}", bytes.as_ptr() as usize, bytes.len());
+                let mut out = if *ggml_type == 8 {
+                    // Q8_0 stays 8-bit on the device; the kernel dequantizes in registers.
+                    try_matmul_nt_q8_0_cached(a, m, k, n, owner, &key, || Ok(bytes.to_vec()))
+                } else {
+                    try_matmul_nt_ggml_bytes_cached(a, 1, m, k, n, owner, &key, || Ok(bytes.to_vec()))
+                }?;
                 if let Some(b) = bias {
                     for row in out.chunks_mut(n) {
                         for (o, bv) in row.iter_mut().zip(b) {
@@ -879,7 +810,7 @@ mod imp {
             Some(b) => Some(gpu_upload(b, 1, n)?),
             None => None,
         };
-        with_weight(weight, n, k, |w| {
+        with_weight(weight, n, k, owner, |w| {
             let out = gpu_linear_f32_resident(&x, w, bias_dev.as_ref())?;
             gpu_download(&out)
         })
@@ -893,14 +824,8 @@ mod imp {
         layers: &[EncoderLayer],
         final_ln_w: &[f32],
         final_ln_b: &[f32],
+        owner: &WeightOwner,
     ) -> Result<Vec<f32>, String> {
-        // Include every matrix's identity: layer indices alone alias when a
-        // different model is loaded on the same inference thread. The identity
-        // picks the encoder's owner; release_all drops the owners.
-        let mut identity = FNV_OFFSET;
-        fnv_mix(&mut identity, n_state as u64);
-        fnv_mix(&mut identity, n_head as u64);
-        fnv_mix(&mut identity, layers.len() as u64);
         let mut resident_layers = Vec::with_capacity(layers.len());
         for layer in layers {
             for weight in [
@@ -914,8 +839,6 @@ mod imp {
                 if weight.ggml_type != 8 {
                     return Err("CUDA Whisper encoder requires Q8_0 weights".to_string());
                 }
-                fnv_mix(&mut identity, weight.data.as_ptr() as u64);
-                fnv_mix(&mut identity, fingerprint(&weight.data));
             }
             resident_layers.push(WhisperEncLayerQ8 {
                 attn_ln_w: &layer.attn_ln_0_w.data,
@@ -935,22 +858,16 @@ mod imp {
                 fc2_b: &layer.mlp_1_b.data,
             });
         }
-        ENCODER_OWNERS.with(|owners| {
-            let mut owners = owners.borrow_mut();
-            let owner = owners
-                .entry(identity)
-                .or_insert_with(|| WeightOwner::new("whisper-encoder"));
-            whisper_encoder_stack_q8(
-                x,
-                seq_len,
-                n_state,
-                n_head,
-                &resident_layers,
-                final_ln_w,
-                final_ln_b,
-                &owner,
-            )
-        })
+        whisper_encoder_stack_q8(
+            x,
+            seq_len,
+            n_state,
+            n_head,
+            &resident_layers,
+            final_ln_w,
+            final_ln_b,
+            owner,
+        )
     }
 
     /// Non-causal, maskless multi-head attention on token-major packed q/k/v
@@ -987,19 +904,13 @@ mod imp {
         scale: f32,
     ) -> Result<Vec<f32>, String> {
         let hidden = n_head * d;
-        let k_key = ResidentKey::of_f32(k_cross, n_kv, hidden);
         let qd = gpu_upload(q, n_q, hidden)?;
         CROSS_KV.with(|cache| {
             let mut cache = cache.borrow_mut();
-            let stale = cache
-                .get(&layer)
-                .map(|entry| entry.k_key != k_key)
-                .unwrap_or(true);
-            if stale {
+            if !cache.contains_key(&layer) {
                 cache.insert(
                     layer,
                     CrossEntry {
-                        k_key,
                         k: gpu_upload(k_cross, n_kv, hidden)?,
                         v: gpu_upload(v_cross, n_kv, hidden)?,
                     },
@@ -1022,8 +933,7 @@ mod imp {
     pub(super) fn release_all() {
         CROSS_KV.with(|cache| cache.borrow_mut().clear());
         WEIGHTS.with(|cache| cache.borrow_mut().clear());
-        ENCODER_OWNERS.with(|owners| owners.borrow_mut().clear());
-        MATMUL_OWNER.with(|owner| *owner.borrow_mut() = WeightOwner::new("whisper"));
+        OWNER_IDS.with(|ids| ids.borrow_mut().clear());
         let _ = makepad_ai_cuda::launch::gpu_release_cached();
     }
 
@@ -1045,6 +955,7 @@ mod imp {
         _k: usize,
         _n: usize,
         _bias: Option<&[f32]>,
+        _owner: Option<&super::WeightOwner>,
     ) -> Result<Vec<f32>, String> {
         Err("CUDA kernels are not compiled into this build".to_string())
     }
@@ -1057,6 +968,7 @@ mod imp {
         _layers: &[super::EncoderLayer],
         _final_ln_w: &[f32],
         _final_ln_b: &[f32],
+        _owner: &super::WeightOwner,
     ) -> Result<Vec<f32>, String> {
         Err("CUDA kernels are not compiled into this build".to_string())
     }
@@ -1191,27 +1103,6 @@ mod tests {
         assert_eq!(got, reference.data);
     }
 
-    #[test]
-    fn fingerprint_separates_same_length_blobs() {
-        let a = vec![7u8; 4096];
-        let mut b = a.clone();
-        assert_eq!(fingerprint(&a), fingerprint(&b));
-        *b.last_mut().unwrap() = 9;
-        assert_ne!(fingerprint(&a), fingerprint(&b));
-        b = a.clone();
-        b[0] = 9;
-        assert_ne!(fingerprint(&a), fingerprint(&b));
-
-        let x = vec![0.5f32; 1024];
-        let mut y = x.clone();
-        assert_eq!(fingerprint_f32(&x), fingerprint_f32(&y));
-        *y.last_mut().unwrap() = 0.25;
-        assert_ne!(fingerprint_f32(&x), fingerprint_f32(&y));
-        y = x.clone();
-        y[0] = 0.25;
-        assert_ne!(fingerprint_f32(&x), fingerprint_f32(&y));
-    }
-
     /// Without CUDA compiled in, every entry point must be a clean `None` (the
     /// CPU path), never a zero-filled buffer.
     #[test]
@@ -1219,7 +1110,7 @@ mod tests {
         if is_available() {
             return;
         }
-        assert!(try_matmul_nt_f32(&[1.0; 512], &[1.0; 512 * 512], 1, 512, 512).is_none());
+        assert!(try_matmul_nt_f32(&[1.0; 512], &[1.0; 512 * 512], 1, 512, 512, None).is_none());
         assert!(try_im2col_1d_f32(&[0.0; 30], 3, 10, 3, 1, 1).is_none());
         assert!(try_gelu_f32(&[1.0, 2.0], &[2]).is_none());
         assert!(try_flash_attn_f32_packed(
@@ -1233,5 +1124,113 @@ mod tests {
             0.125
         )
         .is_none());
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
+mod cuda_guards {
+    use super::*;
+    use crate::whisper::quant::{quantize_f32_to_q8_0, GGML_TYPE_F32, GGML_TYPE_Q8_0};
+
+    fn cpu_product(a: &[f32], weights: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+        let mut out = vec![0.0; m * n];
+        for row in 0..m {
+            for col in 0..n {
+                for inner in 0..k {
+                    out[row * n + col] += a[row * k + inner] * weights[col * k + inner];
+                }
+            }
+        }
+        out
+    }
+
+    fn assert_product(actual: &[f32], expected: &[f32], property: &str) {
+        assert_eq!(actual.len(), expected.len(), "{property}: output shape");
+        for (i, (&actual, &expected)) in actual.iter().zip(expected).enumerate() {
+            assert!((actual - expected).abs() <= 1e-3 * expected.abs().max(1e-6),
+                "{property}: element {i}: CUDA {actual}, CPU {expected}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_owner_never_serves_reused_memory() {
+        assert!(is_available(), "the CUDA guards need a device");
+        assert!(std::env::var_os("MAKEPAD_WHISPER_F32").is_none(),
+            "the F32 bytes guard exercises the default weight path");
+        release_device_state();
+        let (m, k, n) = (2, 256, 256);
+        let mut x = vec![0.0; m * k];
+        x[2] = 1.0;
+        x[k + 2] = 2.0;
+        let mut bytes: Vec<u8> = (0..n * k).flat_map(|_| 1.0f32.to_le_bytes()).collect();
+        let address = bytes.as_ptr();
+        let original = bytes.clone();
+        let a = WeightOwner::new("whisper-f32-guard-a");
+        let a_id = a.id();
+        let first = try_matmul_nt_f32_bytes(&x, &bytes, m, k, n, Some(&a))
+            .expect("owner A's F32 bytes use CUDA");
+        let reference = dequant_to_f32(&bytes, GGML_TYPE_F32, n * k).expect("valid F32 bytes");
+        assert_product(&first, &cpu_product(&x, &reference, m, k, n), "owner A's weights");
+        drop(a);
+
+        bytes[9] = 0x40;
+        assert_eq!(bytes.as_ptr(), address, "owner B reuses the exact allocation");
+        assert_eq!(original.iter().zip(&bytes).enumerate().filter_map(|(i, (a, b))| (a != b).then_some(i)).collect::<Vec<_>>(),
+            [9], "only the unsampled interior byte changes");
+        let b = WeightOwner::new("whisper-f32-guard-b");
+        let second = try_matmul_nt_f32_bytes(&x, &bytes, m, k, n, Some(&b))
+            .expect("owner B's F32 bytes use CUDA");
+        let reference = dequant_to_f32(&bytes, GGML_TYPE_F32, n * k).expect("valid changed F32 bytes");
+        assert_product(&second, &cpu_product(&x, &reference, m, k, n), "owner B's changed weights");
+        assert_ne!(first[0], second[0], "the reused allocation changes row zero's output");
+        assert_eq!(imp::cached_weight_count(Some(a_id)), 0, "owner A's entry was retired");
+        assert_eq!(imp::cached_weight_count(Some(b.id())), 1, "owner B has its own entry");
+        assert_eq!(imp::cached_weight_count(None), 1, "only owner B remains cached");
+        drop(b);
+
+        let mut previous = second[0];
+        for byte in [0x80, 0xc0] {
+            bytes[9] = byte;
+            let actual = try_matmul_nt_f32_bytes(&x, &bytes, m, k, n, None)
+                .expect("unowned F32 bytes use CUDA");
+            let reference = dequant_to_f32(&bytes, GGML_TYPE_F32, n * k).expect("valid unowned F32 bytes");
+            assert_product(&actual, &cpu_product(&x, &reference, m, k, n), "unowned call sees current bytes");
+            assert_ne!(actual[0], previous, "each unowned call sees its in-place change");
+            assert_eq!(imp::cached_weight_count(None), 0, "unowned calls leave no cached weights");
+            previous = actual[0];
+        }
+        release_device_state();
+    }
+
+    #[test]
+    fn two_live_weights_of_one_shape_never_share_a_copy() {
+        assert!(is_available(), "the CUDA guards need a device");
+        assert!(!f32_weights_forced(), "the Q8_0 guard exercises the keyed Q8_0 store");
+        release_device_state();
+        let (m, k, n) = (2, 256, 256);
+        let values: Vec<f32> = (0..n * k).map(|i| (i % 31 + 1) as f32 * 0.125).collect();
+        let first = quantize_f32_to_q8_0(&values);
+        let mut second = first.clone();
+        second[9] ^= 0x40;
+        assert_eq!(first.iter().zip(&second).enumerate().filter_map(|(i, (a, b))| (a != b).then_some(i)).collect::<Vec<_>>(),
+            [9], "live Q8_0 weights differ only in the unsampled interior byte");
+        let mut x = vec![0.0; m * k];
+        x[7] = 1.0;
+        x[k + 7] = 2.0;
+        let owner = WeightOwner::new("whisper-q8-guard");
+        let mut outputs = Vec::new();
+        for bytes in [&first, &second] {
+            let actual = try_matmul_nt_ggml_bytes(&x, bytes, GGML_TYPE_Q8_0, m, k, n, Some(&owner))
+                .expect("owned Q8_0 weights use CUDA");
+            let reference = dequant_to_f32(bytes, GGML_TYPE_Q8_0, n * k).expect("valid Q8_0 bytes");
+            assert_product(&actual, &cpu_product(&x, &reference, m, k, n), "each live weight uses its own bytes");
+            outputs.push(actual);
+        }
+        for row in 0..m {
+            assert_ne!(outputs[0][row * n], outputs[1][row * n],
+                "weight row zero changes output for activation row {row}");
+        }
+        drop(owner);
+        release_device_state();
     }
 }

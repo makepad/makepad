@@ -76,7 +76,7 @@ pub(crate) fn is_requested() -> bool {
 /// An explicitly selected Vulkan path falls back to CPU, never to a different
 /// GPU backend. The established ordering is unchanged otherwise.
 macro_rules! dispatch {
-    ($name:ident ( $($arg:expr),* $(,)? ) metal($owner:expr)) => {{
+    ($name:ident ( $($arg:expr),* $(,)? ) owner($owner:expr)) => {{
         if cpu_selected() { return None; }
         #[cfg(any(target_os = "linux", target_os = "android"))]
         if vulkan_selected() {
@@ -85,7 +85,7 @@ macro_rules! dispatch {
         if let Some(out) = crate::whisper::metal_backend::$name($($arg),*, $owner) {
             return Some(out);
         }
-        crate::whisper::cuda_backend::$name($($arg),*)
+        crate::whisper::cuda_backend::$name($($arg),*, $owner)
     }};
     ($name:ident ( $($arg:expr),* $(,)? )) => {{
         if cpu_selected() { return None; }
@@ -118,7 +118,7 @@ pub(crate) fn try_matmul_nt_f32(
     n: usize,
     owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    dispatch!(try_matmul_nt_f32(a, bt, m, k, n) metal(owner))
+    dispatch!(try_matmul_nt_f32(a, bt, m, k, n) owner(owner))
 }
 
 pub(crate) fn try_matmul_nt_f32_weight(
@@ -138,7 +138,7 @@ pub(crate) fn try_matmul_nt_f32_weight(
             return Some(out);
         }
     }
-    crate::whisper::cuda_backend::try_matmul_nt_f32(a, w.as_slice(), m, k, n)
+    crate::whisper::cuda_backend::try_matmul_nt_f32(a, w.as_slice(), m, k, n, Some(w.owner()))
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -180,7 +180,7 @@ pub(crate) fn try_matmul_nt_f32_bytes(
     n: usize,
     owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    dispatch!(try_matmul_nt_f32_bytes(a, bt_bytes, m, k, n) metal(owner))
+    dispatch!(try_matmul_nt_f32_bytes(a, bt_bytes, m, k, n) owner(owner))
 }
 
 pub(crate) fn try_matmul_nt_f16_bytes(
@@ -191,7 +191,7 @@ pub(crate) fn try_matmul_nt_f16_bytes(
     n: usize,
     owner: Option<&WeightOwner>,
 ) -> Option<Vec<f32>> {
-    dispatch!(try_matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n) metal(owner))
+    dispatch!(try_matmul_nt_f16_bytes(a, bt_f16_bytes, m, k, n) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,7 +211,7 @@ pub(crate) fn try_matmul_nt_ggml_bytes(
         m,
         k,
         n
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -233,7 +233,7 @@ pub(crate) fn try_matmul_nt_ggml_bytes_add_bias(
         k,
         n,
         bias
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,6 +258,11 @@ pub(crate) fn try_flash_attn_f32_packed(
 /// Free this thread's device-resident Whisper state (see the CUDA backend).
 pub fn release_device_state() {
     crate::whisper::cuda_backend::release_device_state();
+}
+
+/// Cross K/V was recomputed, so CUDA must upload the new values on its next use.
+pub(crate) fn cross_kv_changed() {
+    crate::whisper::cuda_backend::clear_decoder_kv_cache();
 }
 
 pub(crate) fn clear_decoder_kv_cache() {
@@ -411,7 +416,7 @@ pub(crate) fn try_encoder_attn_block_f32(
         out_w_bytes,
         out_w_ggml_type,
         out_b
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -441,7 +446,7 @@ pub(crate) fn try_encoder_ffn_block_f32(
         w1_bytes,
         w1_ggml_type,
         b1
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,7 +504,7 @@ pub(crate) fn try_encoder_layer_f32(
         w1_bytes,
         w1_ggml_type,
         b1
-    ) metal(owner))
+    ) owner(owner))
 }
 
 pub(crate) fn try_encoder_stack_f32(
@@ -514,7 +519,7 @@ pub(crate) fn try_encoder_stack_f32(
 ) -> Option<Vec<f32>> {
     dispatch!(try_encoder_stack_f32(
         x, seq_len, n_state, n_head, layers, final_ln_w, final_ln_b
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -546,7 +551,7 @@ pub(crate) fn try_decoder_self_qkv_step_f32(
         v_w_bytes,
         v_w_ggml_type,
         v_b
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -570,7 +575,7 @@ pub(crate) fn try_decoder_cross_ffn_step_f32(
         v_cross,
         n_audio_ctx,
         layer
-    ) metal(owner))
+    ) owner(owner))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -602,5 +607,5 @@ pub(crate) fn try_decoder_self_cross_ffn_step_f32(
         v_cross,
         n_audio_ctx,
         layer
-    ) metal(owner))
+    ) owner(owner))
 }

@@ -368,6 +368,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
 /// Returns: Vec of (K, V) pairs, one per decoder layer.
 /// K: [n_ctx, n_state], V: [n_ctx, n_state]
 pub fn compute_cross_kv(model: &WhisperModel, encoder_out: &Tensor) -> Vec<(Tensor, Tensor)> {
+    crate::whisper::accel::cross_kv_changed();
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Some(cross) = crate::whisper::accel::try_cross_kv(model, encoder_out) {
         return cross;
