@@ -25861,6 +25861,11 @@ pub use import_GetCapture::call as GetCapture_raw;
 #[inline]
 pub unsafe fn GetCapture() -> crate::Win32::Foundation::HWND {
 import_GetCapture::call()}
+mod import_GetDoubleClickTime { #[link(name = "USER32", kind = "raw-dylib")] extern "system" { #[link_name = "GetDoubleClickTime"] pub fn call() -> u32; } }
+pub use import_GetDoubleClickTime::call as GetDoubleClickTime_raw;
+#[inline]
+pub unsafe fn GetDoubleClickTime() -> u32 {
+import_GetDoubleClickTime::call()}
 mod import_GetKeyState { #[link(name = "USER32", kind = "raw-dylib")] extern "system" { #[link_name = "GetKeyState"] pub fn call(nVirtKey: i32) -> i16; } }
 pub use import_GetKeyState::call as GetKeyState_raw;
 #[inline]
@@ -28250,9 +28255,11 @@ impl ::core::ops::BitAnd for SHOW_WINDOW_CMD { type Output = Self; fn bitand(sel
 impl ::core::ops::BitXor for SHOW_WINDOW_CMD { type Output = Self; fn bitxor(self, rhs: Self) -> Self { Self(self.0 ^ rhs.0) } }
 impl ::core::ops::Not for SHOW_WINDOW_CMD { type Output = Self; fn not(self) -> Self { Self(!self.0) } }
 pub const SIZE_MINIMIZED: u32 = 1;
+pub const SM_CXDOUBLECLK: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(36i64 as _);
 pub const SM_CXICON: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(11i64 as _);
 pub const SM_CXSMICON: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(49i64 as _);
 pub const SM_CXVIRTUALSCREEN: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(78i64 as _);
+pub const SM_CYDOUBLECLK: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(37i64 as _);
 pub const SM_CYICON: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(12i64 as _);
 pub const SM_CYSMICON: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(50i64 as _);
 pub const SM_CYVIRTUALSCREEN: crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX = crate::Win32::UI::WindowsAndMessaging::SYSTEM_METRICS_INDEX(79i64 as _);
@@ -28510,6 +28517,7 @@ pub const WM_NCCALCSIZE: u32 = 131;
 pub const WM_NCCREATE: u32 = 129;
 pub const WM_NCDESTROY: u32 = 130;
 pub const WM_NCHITTEST: u32 = 132;
+pub const WM_NCLBUTTONDBLCLK: u32 = 163;
 pub const WM_NCLBUTTONDOWN: u32 = 161;
 pub const WM_NCMOUSELEAVE: u32 = 674;
 pub const WM_NCRBUTTONDOWN: u32 = 164;
