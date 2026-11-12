@@ -861,6 +861,24 @@ impl Extend<String> for String {
     }
 }
 
+// alloc/src/string.rs (Rust 1.45; compact_str's iterators)
+impl Extend<crate::boxed::Box<str>> for String {
+    fn extend<I: IntoIterator<Item = crate::boxed::Box<str>>>(&mut self, iter: I) {
+        let mut it = iter.into_iter();
+        while let Some(s) = it.next() {
+            self.push_str(&s);
+        }
+    }
+}
+
+impl FromIterator<crate::boxed::Box<str>> for String {
+    fn from_iter<I: IntoIterator<Item = crate::boxed::Box<str>>>(iter: I) -> String {
+        let mut buf = String::new();
+        buf.extend(iter);
+        buf
+    }
+}
+
 impl<'a, 'b> Pattern<'a> for &'b String {
     type Searcher = StrSearcher<'a, 'b>;
     fn into_searcher(self, haystack: &'a str) -> StrSearcher<'a, 'b> {
@@ -1144,6 +1162,25 @@ mod borrow_impls {
             let mut buf = String::new();
             buf.extend(iter);
             buf
+        }
+    }
+
+    // alloc/src/string.rs (Rust 1.12 / 1.19): a collected Cow<str> is an owned String
+    impl<'a> FromIterator<char> for Cow<'a, str> {
+        fn from_iter<I: IntoIterator<Item = char>>(it: I) -> Cow<'a, str> {
+            Cow::Owned(FromIterator::from_iter(it))
+        }
+    }
+
+    impl<'a, 'b> FromIterator<&'b str> for Cow<'a, str> {
+        fn from_iter<I: IntoIterator<Item = &'b str>>(it: I) -> Cow<'a, str> {
+            Cow::Owned(FromIterator::from_iter(it))
+        }
+    }
+
+    impl<'a> FromIterator<String> for Cow<'a, str> {
+        fn from_iter<I: IntoIterator<Item = String>>(it: I) -> Cow<'a, str> {
+            Cow::Owned(FromIterator::from_iter(it))
         }
     }
 

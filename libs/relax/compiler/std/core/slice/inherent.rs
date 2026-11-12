@@ -244,6 +244,14 @@ impl<T> [T] {
     pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         super::split_at_mut(self, mid)
     }
+    // core/src/slice/mod.rs (stable 1.79; zerovec's VarZeroVec components): `mid <= len` is
+    // the caller's to keep
+    pub const unsafe fn split_at_unchecked(&self, mid: usize) -> (&[T], &[T]) {
+        unsafe { super::split_at_unchecked(self, mid) }
+    }
+    pub const unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
+        unsafe { super::split_at_mut_unchecked(self, mid) }
+    }
     pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
         if mid > self.len() {
             None

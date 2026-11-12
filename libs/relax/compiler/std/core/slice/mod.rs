@@ -280,6 +280,26 @@ pub fn split_at_mut<T>(s: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
     }
 }
 
+/// rustc library/core/src/slice/mod.rs `split_at_unchecked` (stable 1.79): the caller
+/// guarantees `mid <= len`.
+pub unsafe fn split_at_unchecked<T>(s: &[T], mid: usize) -> (&[T], &[T]) {
+    let len = s.len();
+    unsafe {
+        let p = s as *const [T] as *const T;
+        (im::slice_from_raw(p, mid), im::slice_from_raw(im::ptr_add(p, mid), len - mid))
+    }
+}
+
+/// rustc library/core/src/slice/mod.rs `split_at_mut_unchecked` (stable 1.79): the caller
+/// guarantees `mid <= len`.
+pub unsafe fn split_at_mut_unchecked<T>(s: &mut [T], mid: usize) -> (&mut [T], &mut [T]) {
+    let len = s.len();
+    unsafe {
+        let p = s as *mut [T] as *mut T;
+        (im::slice_from_raw_mut(p, mid), im::slice_from_raw_mut(im::ptr_add_mut(p, mid), len - mid))
+    }
+}
+
 /// rustc library/core/src/slice/mod.rs (1.97.1) `get_disjoint_unchecked_mut`: the elements (or
 /// sub-slices) at `indices`, which the caller guarantees are in bounds and pairwise disjoint.
 #[track_caller]

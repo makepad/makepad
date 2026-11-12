@@ -715,6 +715,24 @@ pub trait DoubleEndedIterator: Iterator {
         self.next_back()
     }
 
+    /// real core iter/traits/double_ended.rs try_rfold: try_fold from the back.
+    fn try_rfold<B, F, R>(&mut self, init: B, f: F) -> R
+    where
+        Self: Sized,
+        F: FnMut(B, Self::Item) -> R,
+        R: crate::ops::Try<Output = B>,
+    {
+        let mut f = f;
+        let mut acc = init;
+        while let Some(x) = self.next_back() {
+            match f(acc, x).branch() {
+                crate::ops::ControlFlow::Continue(c) => acc = c,
+                crate::ops::ControlFlow::Break(r) => return R::from_residual(r),
+            }
+        }
+        R::from_output(acc)
+    }
+
     fn rfold<B, F: FnMut(B, Self::Item) -> B>(self, init: B, f: F) -> B
     where
         Self: Sized,
