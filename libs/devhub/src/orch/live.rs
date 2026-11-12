@@ -927,7 +927,24 @@ fn whole_lines_end(end: u64, bytes: &[u8]) -> u64 {
     end.saturating_sub(partial as u64)
 }
 
+/// The JIT's own crates and their sources: a panic located there is the JIT's.
+const JIT_SOURCES: [(&str, &str); 3] = [("relax-compiler", "/relax/compiler/src/"), ("relax-front", "/relax/front/src/"), ("relax-backend", "/relax/backend/src/")];
+
+/// A fault of the JIT itself in what it reported (a refused patch's reasons).
 fn jit_fault(line: &str) -> bool {
+    jit_fault_of("", line)
+}
+
+/// A fault of the JIT itself in a line of package `app`'s output. A test program of one of the
+/// JIT's own crates is the JIT: its tests panic in those sources on purpose and print every line
+/// the JIT prints (the ice-scope test's panic, lifeline's "JIT thread .. panicked" of its restart
+/// test), so its output says nothing about the session's JIT, whose fault there shows as a run
+/// that ended without a verdict. Every live run of relax-compiler --lib was stopped at the first
+/// such line and restarted, then failed as a JIT error (11-12).
+fn jit_fault_of(app: &str, line: &str) -> bool {
+    if JIT_SOURCES.iter().any(|(package, _)| *package == app) {
+        return false;
+    }
     let l = line.to_ascii_lowercase();
     // This diagnostic invites a cargo comparison; its "makepad run bug" explanation is not
     // an internal compiler fault. Let devhub test check the same target with cargo.
@@ -936,14 +953,14 @@ fn jit_fault(line: &str) -> bool {
         l.contains("internal compiler error") || l.contains("makepad run bug") || l.starts_with("internal:")
             || l.contains("jit panic") || l.contains("jit ice") || l.contains("restart failed:")
             || (l.contains("jit thread") && l.contains("panicked"))
-            || (l.contains("panicked at") && (l.contains("/relax/compiler/src/") || l.contains("/relax/front/src/") || l.contains("/relax/backend/src/")))
+            || (l.contains("panicked at") && JIT_SOURCES.iter().any(|(_, dir)| l.contains(dir)))
     })
 }
 
-fn fault_line(line: &str, captured: &mut bool) -> bool {
+fn fault_line(app: &str, line: &str, captured: &mut bool) -> bool {
     if line.starts_with("---- ") && line.ends_with(" stdout ----") { *captured = true; }
     if line == "failures:" || line.starts_with("test result:") { *captured = false; }
-    !*captured && jit_fault(line)
+    !*captured && jit_fault_of(app, line)
 }
 
 fn terminal(p: &LivePatch) -> bool {
@@ -1172,7 +1189,7 @@ fn finish_tests(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
         Ok((end, log)) => {
             p.log_end = end;
             let mut captured = false;
-            if let Some(reason) = log.lines().find(|l| fault_line(l, &mut captured)).filter(|_| p.outcome != "refused" && p.reason != "patched after refusal" && !p.tests.as_ref().is_some_and(|t| t.restarted)) {
+            if let Some(reason) = log.lines().find(|l| fault_line(&x.app, l, &mut captured)).filter(|_| p.outcome != "refused" && p.reason != "patched after refusal" && !p.tests.as_ref().is_some_and(|t| t.restarted)) {
                 p.tests = None;
                 p.reason = reason.to_string();
                 recover(ctx, id, x, p, true);
@@ -1791,7 +1808,7 @@ impl std::io::Write for RunOut {
                 let pid = words.next().and_then(|n| n.parse().ok());
                 if words.next() == Some("app") && words.next() == Some(self.app.as_str()) { self.pid = pid; }
             }
-            if fault_line(&line, &mut self.captured) { *self.r.fault.lock().unwrap() = Some(line.into_owned()); }
+            if fault_line(&self.app, &line, &mut self.captured) { *self.r.fault.lock().unwrap() = Some(line.into_owned()); }
             consumed = end + 1;
         }
         self.buf.drain(..consumed);
@@ -2054,7 +2071,7 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
             let mut p = x.patch.clone().unwrap_or_default();
             let log = run_log(r, x.run_n, p.log_start).map(|(_, log)| log).unwrap_or_default();
             let mut captured = false;
-            let fault = r.fault.lock().unwrap().take().or_else(|| log.lines().find(|l| fault_line(l, &mut captured)).map(str::to_string));
+            let fault = r.fault.lock().unwrap().take().or_else(|| log.lines().find(|l| fault_line(&x.app, l, &mut captured)).map(str::to_string));
             if let Some(verdict) = makepad_remote::hot::Verdict::from_output(makepad_remote::hot::JIT_ERROR_EXIT, &log) {
                 p.tests = None;
                 p.reason = verdict.line();
@@ -2103,7 +2120,7 @@ pub fn on_record(ctx: &Ctx, r: &Record) {
     let Some(x) = ctx.store.read(|d| d.lives.iter().find(|x| x.state == "running" && x.node == r.machine && x.pid == r.pid).cloned()) else { return };
     let d = makepad_strict_json::parse(r.detail.as_bytes()).ok();
     let f = |k: &str| d.as_ref().and_then(|d| d.get(k)).and_then(|v| v.as_str()).map(str::to_string).unwrap_or_default();
-    if x.test && jit_fault(&format!("{} panicked at {}", f("message"), f("location"))) {
+    if x.test && jit_fault_of(&x.app, &format!("{} panicked at {}", f("message"), f("location"))) {
         if let Some(r) = running(&x.id) { *r.fault.lock().unwrap() = Some(format!("{}: {}", f("location"), f("message"))); }
         return;
     }
@@ -3057,5 +3074,23 @@ mod person_tests {
         assert!(super::a_lanes_call("cmd", "observe") && super::a_lanes_call("app", "devhub"), "a lane's inspect and tool call");
         assert!(!super::a_lanes_call("watch", "observe") && !super::a_lanes_call("stream", "observe"), "a watch only follows");
         assert!(!super::a_lanes_call("cmd", "devhub-live"), "devhub's own look at the app");
+    }
+}
+
+#[cfg(test)]
+mod fault_tests {
+    /// In an app's output a panic in the JIT's sources and the JIT's own lines are the JIT's
+    /// faults. A test program of the JIT's own crates is the JIT and prints both on purpose: its
+    /// live runs were stopped at the first one and failed as JIT errors (11-12).
+    #[test]
+    fn the_jits_own_crates_tests_print_the_jits_lines_as_their_own() {
+        let panic = "thread '<unnamed>' (2729363) panicked at libs/relax/compiler/src/jit.rs:2200:49:";
+        let restart = "makepad-run: JIT thread `lifeline-test-restart` panicked: lifeline test panic (at libs/relax/compiler/src/lifeline.rs:271) -- restarted (1 of 16)";
+        for line in [panic, restart] {
+            assert!(super::fault_line("makepad-fab", line, &mut false), "an app's run: the JIT's fault: {line}");
+            assert!(!super::fault_line("relax-compiler", line, &mut false), "relax-compiler's tests: its own line: {line}");
+        }
+        assert!(!super::fault_line("relax-front", "thread 't' panicked at libs/relax/front/src/parse.rs:1:1:", &mut false), "relax-front's tests: its own panic");
+        assert!(super::jit_fault(panic), "a refused patch's reasons are the JIT's");
     }
 }
