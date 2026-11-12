@@ -45,8 +45,8 @@
 //! (`WF`). Only a check with no error, and nothing accepted only in relaxed Rust, stores verdicts.
 //! A check replays the hits' diagnostics among its own (the sort merges them, one of each text)
 //! and runs the per-crate passes on the other crates only (check.rs); the cross-crate checks
-//! (duplicate symbols, the allocator and lang items, the entry point, monomorphization) and the
-//! check-wide gates still see every crate.
+//! (duplicate symbols, the allocator and lang items, the entry point, and in the check of a build
+//! monomorphization) and the check-wide gates still see every crate.
 //!
 //! When every crate hits and a passing check of the same keys stored its run record (`KIND_RUN`:
 //! it printed no signature error, of any crate), the check prints the stored diagnostics right

@@ -1358,8 +1358,9 @@ fn check_crate_impl(u: &mut Unit, root: u32, crates: &[u32], front: Vec<String>,
         && unsafe { (&*up).errors.iter().all(|e| e.starts_with("compile error in ")) };
     relax_types::lint_dead::finish(&u.prog, &u.tcx, &own, root, analyses_ok, &erroneous_imports); st.mark("lint_dead::finish");
     // rustc_monomorphize: a program's `main` and what it reaches, instantiated -- the constants
-    // generic code evaluates there (post-monomorphization E0080) -- in a check of a program
-    let mono = options.const_fuel && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() };
+    // generic code evaluates there (post-monomorphization E0080) -- in the check of a build only
+    // (Options::post_mono): cargo check runs no collector, its errors appear at the build
+    let mono = options.post_mono && !compile && errors.is_empty() && borrow_diagnostics.is_empty() && unsafe { (&*up).errors.is_empty() };
     // what the unit records from here on is the instances' when nothing was recorded before:
     // rustc's collector runs after the analysis, its errors are none of the required analyses'
     let mono_only = mono && !unsafe { (&*up).query_errors.has_errors() };
@@ -1837,7 +1838,7 @@ fn eval_items(up: *mut Unit, own: &[bool], tainted: &std::collections::HashSet<c
 /// (E0080) as rustc's codegen reports it. An instance more than `recursion_limit` instances of the same
 /// definition deep (polymorphic recursion that grows its types) is "reached the recursion limit while
 /// instantiating" (rustc_monomorphize collector `check_recursion_limit`). Library code is not entered:
-/// its constants are not the program's diagnostics.
+/// its constants are not the program's diagnostics. Only the check of a build runs it (Options::post_mono).
 fn mono_check(up: *mut Unit, own: &[bool], root: u32) {
     let u = unsafe { &mut *up };
     let main = (0..u.prog.defs.len()).map(|i| crate::program::DefId(i as u32)).find(|&d| {

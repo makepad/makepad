@@ -65,11 +65,17 @@ enum Uses {
 
 /// `check_code`, the import uses recorded as `uses` says.
 fn check_code_uses(lib: &str, bins: &[&str], harness: bool, uses: Uses) -> i32 {
+    check_code_as(lib, bins, harness, uses, false)
+}
+
+/// `check_code_uses`; `post_mono`: the check of a build (Options::post_mono, MAKEPAD_RUN_CHECK_BUILD).
+fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono: bool) -> i32 {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
     std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     // `makepad check`'s session (run.rs): constants go through the check-mode interpreter first
     let mut sess = crate::Session::default();
     sess.options.const_fuel = true;
+    sess.options.post_mono = post_mono;
     let sess = std::sync::Arc::new(sess);
     // as run.rs sets up a check: import and macro uses are recorded, every crate keeps the
     // user types its borrow check reads (the mutable-place fixups included)
@@ -335,6 +341,41 @@ fn a_const_reads_cfg_as_the_crate_sets_it() {
         "#, &[]);
     };
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// `makepad check` is cargo check: a constant that fails only for the type arguments an instance
+/// gives it is a post-monomorphization error, reported when the program is built (rustc's
+/// collector), not by the check. The check of a build (MAKEPAD_RUN_CHECK_BUILD=1, the UI suite's
+/// build-fail cases) reports it: E0080.
+#[test]
+fn a_post_monomorphization_error_is_the_builds_not_the_checks() {
+    const NAME: &str = "check_lint_tests::a_post_monomorphization_error_is_the_builds_not_the_checks";
+    const LIB: &str = r#"
+        pub struct Check<T>(T);
+        impl<T> Check<T> { pub const ZERO_SIZED: () = assert!(core::mem::size_of::<T>() == 0, "not zero-sized"); }
+        pub fn needs_zst<T>() { let () = Check::<T>::ZERO_SIZED; }
+        pub fn caller() { needs_zst::<u32>(); }
+    "#;
+    if std::env::var_os(CHILD).is_some() {
+        let build = std::env::var_os("RELAX_CHECK_LINT_BUILD").is_some();
+        let code = check_code_as(LIB, &[], false, Uses::Recorded, build);
+        assert_eq!(code != 0, build, "the check of a build fails, the check passes");
+        return;
+    }
+    let child = |env: &[(&str, &str)]| {
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1")
+            .env_remove("MAKEPAD_RUN_LINT_FLAGS")
+            .envs(env.iter().copied()));
+        let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned());
+        assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
+        stderr
+    };
+    let check = child(&[]);
+    assert!(!check.contains("E0080"), "the check reported the build's error:\n{check}");
+    let build = child(&[("RELAX_CHECK_LINT_BUILD", "1")]);
+    assert!(build.lines().any(|l| l.contains("E0080") && l.contains("ZERO_SIZED")), "the check of a build did not report E0080:\n{build}");
 }
 
 /// WARNZERO class 3: `std::env::set_var` and `remove_var` are unsafe fns marked
