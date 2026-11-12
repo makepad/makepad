@@ -221,6 +221,17 @@ pub fn parse_query(q: &str) -> (&str, Option<u32>, Option<u32>) {
     }
 }
 
+/// The workspace file a typed path names (relative to the root, or absolute
+/// inside it), as its root-relative path.
+fn typed_file(ws: &Workspace, typed: &str) -> Option<String> {
+    let typed = std::path::Path::new(typed.trim());
+    let file = if typed.is_absolute() { typed.to_path_buf() } else { ws.root.join(typed) };
+    if !file.is_file() {
+        return None;
+    }
+    ws.relative(&file.canonicalize().ok()?)
+}
+
 impl QuickOpen {
     pub fn open(&mut self, cx: &mut Cx) {
         self.query.clear();
@@ -277,6 +288,12 @@ impl QuickOpen {
                 }
             }
             found.sort_by(|a, b| b.score.cmp(&a.score));
+            // A typed path to a file of the workspace opens that file, also one the
+            // index leaves out (a git-ignored one): it is the first row.
+            if let Some(typed) = typed_file(ws, path) {
+                found.retain(|m| m.path != typed);
+                found.insert(0, FileMatch { path: typed, score: 0, hits: Vec::new() });
+            }
             self.matches = found;
         }
         self.sel = self.sel.min(self.matches.len().saturating_sub(1));

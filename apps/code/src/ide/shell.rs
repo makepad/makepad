@@ -428,6 +428,11 @@ impl IdeShell {
         if let Some(path) = selected {
             self.open_file(cx, &path, None, None);
         }
+        // Files named on the command line open last, so the last one is in front.
+        let named = Workspace::of(cx).map(|w| w.open_at_start.clone()).unwrap_or_default();
+        for path in &named {
+            self.open_file(cx, path, None, None);
+        }
     }
 
     pub fn open_file(&mut self, cx: &mut Cx, path: &str, line: Option<u32>, col: Option<u32>) {

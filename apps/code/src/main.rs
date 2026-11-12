@@ -37,19 +37,22 @@ pub struct App {
     ui: WidgetRef,
 }
 
-/// `makepad-app-code [FOLDER] [--approve ask|allowlist|auto] [--context N]`:
-/// the folder defaults to the home folder.
-fn config_from_args() -> AgentConfig {
+/// `makepad-app-code [FOLDER] [FILE ...] [--approve ask|allowlist|auto] [--context N]`:
+/// the folder defaults to the first file's folder, or the home folder without
+/// files. The files open as tabs; one outside the folder is left out.
+fn config_from_args() -> (AgentConfig, Vec<String>) {
     if makepad_code_agent::mock::presentation() {
-        return AgentConfig {
+        let config = AgentConfig {
             root: PathBuf::from("demo"),
             context_tokens: 16384,
             model: None,
             approval: ApprovalMode::Allowlist,
             session_dir: None,
         };
+        return (config, Vec::new());
     }
     let mut root: Option<PathBuf> = None;
+    let mut files: Vec<PathBuf> = Vec::new();
     let mut approval = ApprovalMode::Allowlist;
     let mut context_tokens = 16384u32;
     let mut args = std::env::args().skip(1);
@@ -63,23 +66,31 @@ fn config_from_args() -> AgentConfig {
                 }
             }
             "--context" => context_tokens = args.next().and_then(|v| v.parse().ok()).unwrap_or(context_tokens),
-            other if !other.starts_with("--") => root = Some(other.into()),
+            other if !other.starts_with("--") => {
+                let path = PathBuf::from(other);
+                if path.is_file() {
+                    files.push(path.canonicalize().unwrap_or(path));
+                } else {
+                    root = Some(path);
+                }
+            }
             _ => {}
         }
     }
     // run from git stores (makepad run), a relative folder is one of the virtual workspace
     let root = match (root, std::env::var_os("MAKEPAD_RUN_WORKSPACE").filter(|w| !w.is_empty())) {
         (Some(r), Some(ws)) if r.is_relative() => PathBuf::from(ws).join(r),
-        (root, _) => root.unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into())),
+        (Some(root), _) => root,
+        (None, _) => match files.first().and_then(|f| f.parent()) {
+            Some(folder) => folder.to_path_buf(),
+            None => std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| ".".into()),
+        },
     };
+    let root = root.canonicalize().unwrap_or(root);
+    let files = files.iter().filter_map(|f| f.strip_prefix(&root).ok()).map(|f| f.to_string_lossy().replace('\\', "/")).collect();
     let session_dir = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".makepad/code/sessions"));
-    AgentConfig {
-        root: root.canonicalize().unwrap_or(root),
-        context_tokens,
-        model: None,
-        approval,
-        session_dir,
-    }
+    let config = AgentConfig { root, context_tokens, model: None, approval, session_dir };
+    (config, files)
 }
 
 impl MatchEvent for App {
@@ -87,7 +98,8 @@ impl MatchEvent for App {
         pictures::install();
         // The chat tab starts the agent from the workspace when it is first
         // drawn; the panels read the root and the file index from it.
-        ide::Workspace::install(cx, config_from_args());
+        let (config, files) = config_from_args();
+        ide::Workspace::install(cx, config, files);
     }
 }
 

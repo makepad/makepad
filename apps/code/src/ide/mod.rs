@@ -73,12 +73,14 @@ pub struct Workspace {
     pub root: PathBuf,
     pub config: AgentConfig,
     pub index: index::FileIndex,
+    /// Files named on the command line, root-relative: opened as tabs at startup.
+    pub open_at_start: Vec<String>,
 }
 
 impl Workspace {
-    pub fn install(cx: &mut Cx, config: AgentConfig) {
+    pub fn install(cx: &mut Cx, config: AgentConfig, open_at_start: Vec<String>) {
         let index = index::FileIndex::start(&config.root, std::sync::Arc::new(|| SignalToUI::set_ui_signal()));
-        cx.set_global(Workspace { root: config.root.clone(), config, index });
+        cx.set_global(Workspace { root: config.root.clone(), config, index, open_at_start });
     }
 
     /// The workspace, once `install` ran.
