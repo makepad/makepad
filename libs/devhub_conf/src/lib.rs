@@ -36,7 +36,7 @@ pub fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
     }
 }
 
-/// The default machine name: a node is called by the last octet of its LAN address (`217`), the
+/// The default machine name: a node is called by the last octet of its LAN address (`89`), the
 /// way the fleet is spoken of; a machine without one by its host name.
 pub fn default_machine_name() -> String {
     if let Some(ip) = lan_ipv4() {
@@ -79,7 +79,7 @@ pub const NODE_CONF_ENV: &str = "MAKEPAD_DEVHUB_NODE_CONF";
 /// `key = value` lines, all optional:
 /// ```text
 /// enabled = on            # off: the WM leaves the hub stopped
-/// name = 217              # default: the last octet of the LAN address
+/// name = 89               # default: the last octet of the LAN address
 /// host = 192.0.2.89       # the LAN address to listen on (default: this machine's private IPv4)
 /// port = 8797
 /// hitch_ms = 500          # shorter hitches are not reported
@@ -220,8 +220,8 @@ mod tests {
 
     #[test]
     fn conf_defaults_and_overrides() {
-        let c = super::NodeConf::parse("name = 217\nport = 9001\nhitch_ms = 250\nlaunch = /home/me/bin/makepad run\nbogus = 1\n");
-        assert_eq!(c.name, "217");
+        let c = super::NodeConf::parse("name = 89\nport = 9001\nhitch_ms = 250\nlaunch = /home/me/bin/makepad run\nbogus = 1\n");
+        assert_eq!(c.name, "89");
         assert_eq!(c.port, 9001);
         assert_eq!(c.hitch_ms, 250.0);
         assert_eq!(c.launch, vec!["/home/me/bin/makepad", "run"]);

@@ -1,0 +1,9 @@
+[package]
+name = "makepad-markdown-edit"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Markdown editing without a window: a block index over a document's lines that reparses incrementally, the visible-text projection of a block, and edit plans as source range replacements"
+
+[dependencies]
+pulldown-cmark = { path = "../pulldown-cmark", default-features = false }

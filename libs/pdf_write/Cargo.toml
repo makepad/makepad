@@ -1,0 +1,12 @@
+[package]
+name = "makepad-pdf-write"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "A streaming in-memory PDF writer for raster images, glyph runs, and links"
+
+[dependencies]
+makepad-fast-inflate = { path = "../fast_inflate" }
+
+[dev-dependencies]
+makepad-pdf-parse = { path = "../pdf_parse" }

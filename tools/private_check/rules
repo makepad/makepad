@@ -53,3 +53,20 @@ node-number (^|[^a-z0-9_])(held|holds|holding|hold|on|onto|to|from|beside|behind
 node-number (^|[^0-9a-z.#_:/=-])[a-z][a-z][a-z]+-@node-number@([^0-9a-z_.]|$|\.([^0-9]|$))
 except node-number (.*[^a-z])?(field|issue|line|page|item|step|frame|test|case|version|port)-@node-number@.*
 except node-number (.*[^a-z])?(exit|code|codes|status|signal|errno|rc|returns|returned|error|errors|line|lines|col|column|row|page|item|items|step|steps|frame|frames|byte|bytes|seq|id|pid|port|lease|job|issue|pr|version|test|tests|case|cases|count|took|value|len|size|width|height|offset|index|slot|round|rounds|attempt|tries) +@node-number@.*
+
+# the same numbers in the shapes a machine name takes in scripts, confs, usage lines and tests (several of
+# them reached work because only the prose shapes above were scanned): a shell case arm
+# (`<N>)`, `a|<N>)`, `<N>|a)`), a quoted name beside node, host, name or server, `name = <N>`,
+# `[host.<N>]`, `-Name <N>`, `--node <N>`, `node=<N>`, `usage (<N>)`, and the notes "(<N>, the ...",
+# "(lane ..., <N>)". A bare number is none: it would flag every constant.
+node-number ^[ 	]*(@node-number@\|)*@node-number@\)
+node-number (^|[^0-9a-z_.-])@node-number@\|[a-z*]
+node-number [a-z*]\|@node-number@\)
+node-number (node|nodes|host|hosts|name|names|server|box|machine|--node)[^"']?[^"']?[^"']?[^"']?[^"']?[^"']?["']@node-number@["']
+node-number (^|[^a-z0-9_])(name|node) *[=:] *["']?@node-number@([^0-9.]|$)
+node-number \[host\.@node-number@\]
+node-number (^|[^a-z0-9_])-name +@node-number@([^0-9]|$)
+node-number (--node[ =]+|node=)@node-number@([^0-9.]|$)
+node-number usage *\(@node-number@\)
+node-number \(@node-number@, +(the|a|an|lane|user|node|when|after|before|on|with)([^a-z]|$)
+node-number (lane|trace|user|session|run|bench|measured)[a-z ]*, @node-number@\)

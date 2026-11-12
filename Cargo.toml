@@ -130,6 +130,8 @@ workspace.members = [
     "libs/web_pack",
     "libs/web_manifest",
     "libs/font_subset",
+    "libs/pdf_write",
+    "libs/markdown_edit",
     "libs/kinetic_type",
     "libs/raytrace",
     "libs/scene",
