@@ -263,6 +263,103 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A coroutine is still one after a settle rebuild. The slots keep their keys across the replace
+/// (the new interner is topped up from the live one, so a key's types keep their ids), but which
+/// closure types are coroutines is not in the collected image: Tcx::coroutines is filled by the
+/// type check of the body that holds the async block and by a decoded cache key (dec_ty 28), and
+/// neither comes again for a slot that exists. The restored context had no marks, so every such
+/// type became a plain closure with no `Future` impl: an instance over it built after the
+/// rebuild (a first call, a tier-up, the poll function lowered again for a coroutine's layout)
+/// stopped with "failed to normalize body for codegen: NoSolution", and the slot's cache key
+/// changed (enc_ty wrote 17 for 28), so its stored code was not found either.
+#[test]
+fn settle_rebuild_keeps_coroutines() {
+    isolated_test!(settle_rebuild_keeps_coroutines);
+    use crate::types::{ClosureArgs, FnHeader, List, RegionArgsId};
+    std::env::set_var("MAKEPAD_RUN_CACHE", "on");
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::env::temp_dir().join(format!("relax-settle-coroutines-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::dirs::set_relax_dir(dir.join("run"));
+    let path = dir.join("lib.rs");
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"settle_coroutines\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    std::fs::write(&path, "#![no_std]\nfn method<T>() {}\nfn owner() { let _ = || 1u32; let _ = async { 2u32 }; }\n").unwrap();
+    let mut session = crate::Session::default();
+    session.options.ctfe = crate::options::Ctfe::Off;
+    let session = std::sync::Arc::new(session);
+    let cfg = crate::cfg::CfgSet::host(&session, &[]);
+    let root = path.to_string_lossy().into_owned();
+    let pre = vec![crate::preload::PreCrate {
+        name: "settle_coroutines".into(), root: root.clone(), edition: 2021,
+        cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![],
+    }];
+    settle_rebuild::remember_boot(&pre);
+    let _compiler = crate::zone_alloc::compiler();
+    let mut prog = Program::new(&session);
+    prog.record_front = true;
+    prog.front_sink = Some(crate::cache::FrontSink::for_dir(&crate::dirs::cache_dir()));
+    prog.preload(pre.clone());
+    prog.load_crate("settle_coroutines", &root, 2021, cfg, vec![]).unwrap();
+    prog.resolve_imports();
+    assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+    crate::cache::ColdFront::default().finish_in(&mut prog, crate::dirs::cache_dir());
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let named = |u: &Unit, name: &str| (0..u.prog.defs.len()).map(|d| DefId(d as u32)).find(|&d| u.prog.name(d) == name).unwrap();
+    let (method, owner) = (named(&u, "method"), named(&u, "owner"));
+    let file = u.prog.def(owner).file;
+    // the two types as the type check of `owner` makes them
+    let closure_ty = |tcx: &Tcx, expr: u32| {
+        let tys = &tcx.tys;
+        let sig = tys.intern(TyKind::FnPtr(List::EMPTY, tys.u32_, FnHeader::RUST, 0));
+        let parent = tys.intern(TyKind::FnDef(owner, List::EMPTY, RegionArgsId::EMPTY));
+        tys.intern(TyKind::Closure(file, expr, ClosureArgs {
+            parent_args: parent, closure_kind_ty: tys.prim(crate::program::Prim::I8), closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tys.unit,
+        }))
+    };
+    let (exprs, types, slots) = crate::owner::call(crate::owner::Class::Program, || {
+        let cache = crate::cache::Cache::open(&u, crate::cache::Mode::On).unwrap();
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let exprs = crate::program::closure_exprs(&u.prog, owner);
+        assert_eq!(exprs.len(), 2, "the closure, then the async block");
+        // ... the async block's marked a coroutine, as that type check (typeck coroutine_type) and
+        // a decoded cache key (dec_ty 28) do
+        u.tcx.coroutines.insert((file, exprs[1]), ());
+        let types = [closure_ty(&u.tcx, exprs[0]), closure_ty(&u.tcx, exprs[1])];
+        // an instance over each, made before the rebuild and not built yet: its slot outlives the
+        // context that knew what its type argument is
+        let slots = types.map(|ty| u.fn_id(FnKey::Inst(method, vec![ty])));
+        assert!(!u.tcx.is_coroutine(types[0]) && u.tcx.is_coroutine(types[1]));
+        (exprs, types, slots)
+    });
+    FIRST_PRESENT.store(true, Ordering::Release);
+    // the first rebuild records the image and restores it; the second restores the stored one (a
+    // warm launch's rebuild): each replaces the type context
+    for round in ["first", "second"] {
+        match settle_rebuild::run(up, false) {
+            settle_rebuild::Outcome::Done => {}
+            settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the {round} settle rebuild did not replace: {why}"),
+        }
+        crate::owner::call(crate::owner::Class::Program, || {
+            let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+            for ((&ty, &slot), coroutine) in types.iter().zip(&slots).zip([false, true]) {
+                assert_eq!(u.fns[slot as usize].key, FnKey::Inst(method, vec![ty]), "the slot keeps its key");
+                assert_eq!(ty, closure_ty(&u.tcx, exprs[coroutine as usize]), "the key's type keeps its id in the new interner");
+                assert_eq!(u.tcx.is_coroutine(ty), coroutine, "after the {round} rebuild: the {} type of a slot made before it", if coroutine { "coroutine's" } else { "closure's" });
+                // a query that asks (Tcx::needs_drop: a coroutine always has its state to drop)
+                assert_eq!(u.tcx.needs_drop(&u.prog, env, ty), coroutine, "after the {round} rebuild");
+            }
+        });
+    }
+    assert_eq!(settle_rebuild::rebuilds(), 2);
+    // The isolated process owns the runtime globals; no workers survive the child.
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 // Rounds 49-50: restarting leaves the running solver answers and native code intact.
 #[test]
 fn round47_const_fn_body_invalidates_solver_answer() {

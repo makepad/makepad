@@ -2673,6 +2673,20 @@ impl Tcx {
         matches!(self.tys.kind(t), TyKind::Closure(f, e, ..) if self.coroutines.contains(&(*f, *e)))
     }
 
+    /// Takes over which closure types are coroutines from `old`, the context this one replaces
+    /// for the same program (a settle rebuild: the same files, the same parses, type ids kept).
+    /// `coroutines` is no declaration state, so a context restored from the collected image has
+    /// none of it, and nothing fills it in again for a type that already exists: the body that
+    /// holds the block is not checked again while its code runs, and a cache key is decoded
+    /// once, when its slot is made. A type left unmarked is a plain closure to the solver, with
+    /// no `Future` impl.
+    pub fn inherit_coroutines(&self, old: &Tcx) {
+        for (coroutine, ()) in old.coroutines.snapshot() {
+            // (looked up first: an insert adds a node each time)
+            if !self.coroutines.contains(&coroutine) { self.coroutines.insert(coroutine, ()); }
+        }
+    }
+
     /// Does `t` mention a generic parameter?
     pub fn has_param(&self, t: TyId) -> bool {
         // rustc_type_ir/src/visit.rs: has_non_region_param includes rigid

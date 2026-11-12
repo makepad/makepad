@@ -520,6 +520,11 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let Fresh { mut prog, mut tcx, collected: _, cache: fresh_cache, added } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
+    // ... and which of those closure types are coroutines. The image holds declarations only, and
+    // the slots that stay (their keys name these types) are the only users left: without the mark
+    // an async block's type is a plain closure with no `Future` impl, and the next instance built
+    // from source over it stops at "failed to normalize body for codegen".
+    tcx.inherit_coroutines(&u.tcx);
     lap("top up", &mut laps);
     if yielded() { return Err(gave_way("top up", t_r)); }
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
