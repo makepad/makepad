@@ -634,7 +634,29 @@ pub fn raydata_size(dataspec: i32) -> i32 {
     size
 }
 
-// mju_camIntrinsics: omitted as requested (camera support).
+/// mju_camIntrinsics: camera `camid`'s focal lengths and principal point in pixels, `(fx, fy, cx, cy)`,
+/// and its orthographic extent (the camera's fovy, used only by orthographic cameras).
+pub fn cam_intrinsics(m: &Model, camid: usize) -> (f64, f64, f64, f64, f64) {
+    let width = m.cam_resolution[2*camid];
+    let height = m.cam_resolution[2*camid+1];
+    let sensorsize = &m.cam_sensorsize[2*camid..2*camid+2];
+    let intrinsic = &m.cam_intrinsic[4*camid..4*camid+4];
+    let (fx, fy, cx, cy) = if m.cam_projection[camid] == PROJ_ORTHOGRAPHIC {
+        // the pixel offset normalized to [-1, 1]
+        let fx = width as f64 / 2.0;
+        let fy = height as f64 / 2.0;
+        (fx, fy, fx, fy)
+    } else if sensorsize[0] != 0.0 && sensorsize[1] != 0.0 {
+        // from the intrinsics, in single precision as the reference computes them
+        ((intrinsic[0] / sensorsize[0] * width as f32) as f64, (intrinsic[1] / sensorsize[1] * height as f32) as f64,
+         (intrinsic[2] / sensorsize[0] * width as f32) as f64, (intrinsic[3] / sensorsize[1] * height as f32) as f64)
+    } else {
+        // from the vertical field of view
+        let f = 0.5 / (m.cam_fovy[camid] * PI / 360.0).tan() * height as f64;
+        (f, f, width as f64 / 2.0, height as f64 / 2.0)
+    };
+    (fx, fy, cx, cy, m.cam_fovy[camid])
+}
 // mj_readCtrl: omitted as requested (history).
 // mj_readSensor: omitted as requested (history).
 // mj_initCtrlHistory: omitted as requested (history).

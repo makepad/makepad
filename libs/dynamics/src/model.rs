@@ -1135,8 +1135,5 @@ pub fn check_supported(m: &Model) -> Result<(), String> {
             }
         }
     }
-    if m.sensor_type.iter().any(|&t| t == SENS_RANGEFINDER) {
-        return refuse("rangefinder sensors");
-    }
     Ok(())
 }

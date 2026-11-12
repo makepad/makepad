@@ -337,6 +337,81 @@ fn run_inverse(model: &str, steps: usize, scale: f64, out_path: &str, integrator
     Ok(true)
 }
 
+/// The ray casts after each step: the sensors every step, and every `every` steps, from three points
+/// (two about the model's centre, one beside its first body), a lattice of 342 directions cast one by
+/// one (all geoms with normals; a group, static and body filter without) and all at once (the same,
+/// the filtered cast within the model's extent).
+fn run_rays(model: &str, steps: usize, every: usize, scale: f64, out_path: &str) -> Result<bool, String> {
+    use makepad_dynamics::ray::{multi_ray, ray, NGROUP};
+    use makepad_dynamics::types::MAXVAL;
+    let m = load_model_with(Path::new(model), attach)?;
+    let mut d = start(&m, scale);
+    let mut vec = Vec::new();
+    for a in -3..=3 {
+        for b in -3..=3 {
+            for c in -3..=3 {
+                if (a, b, c) != (0, 0, 0) {
+                    vec.extend([a as f64, b as f64, c as f64]);
+                }
+            }
+        }
+    }
+    let nray = vec.len() / 3;
+    let groups: [u8; NGROUP] = [1, 0, 1, 1, 0, 1];
+    let body = if m.nbody > 1 { 1 } else { 0 };
+    let bodyexclude = if m.nbody > 1 { 1 } else { -1 };
+    let mut out = Vec::new();
+    out.extend_from_slice(b"MPRY");
+    for v in [1, m.nq as i32, m.nv as i32, m.ngeom as i32, m.nsensordata as i32, steps as i32, every as i32, nray as i32] {
+        put_i32(&mut out, v);
+    }
+    let (mut dist, mut geomid, mut normal) = (vec![0.0; nray], vec![0; nray], vec![0.0; 3 * nray]);
+    for s in 0..steps {
+        forward::step(&m, &mut d);
+        forward::forward(&m, &mut d);
+        put(&mut out, &[d.time]);
+        put(&mut out, &d.sensordata[..m.nsensordata]);
+        if s % every != 0 {
+            continue;
+        }
+        let (c, e) = (m.stat.center, m.stat.extent);
+        let x = &d.xpos[3 * body..3 * body + 3];
+        let origins = [
+            [c[0] + e * 0.05, c[1] - e * 1.5, c[2] + e * 0.8],
+            [c[0] + e * 0.7, c[1] + e * 0.3, c[2] + e * 1.2],
+            [x[0] + e * 0.01, x[1] + e * 0.02, x[2] + e * 0.03],
+        ];
+        for pnt in &origins {
+            put(&mut out, pnt);
+            for k in 0..nray {
+                let v: &[f64; 3] = vec[3 * k..3 * k + 3].try_into().unwrap();
+                let (mut g, mut n) = (0, [0.0; 3]);
+                let x = ray(&m, &d, pnt, v, None, true, -1, Some(&mut g), Some(&mut n));
+                put(&mut out, &[x]);
+                put_i32(&mut out, g);
+                put(&mut out, &n);
+            }
+            for k in 0..nray {
+                let v: &[f64; 3] = vec[3 * k..3 * k + 3].try_into().unwrap();
+                let mut g = 0;
+                let x = ray(&m, &d, pnt, v, Some(&groups), false, bodyexclude, Some(&mut g), None);
+                put(&mut out, &[x]);
+                put_i32(&mut out, g);
+            }
+            multi_ray(&m, &mut d, pnt, &vec, None, true, -1, Some(&mut geomid), &mut dist, Some(&mut normal), nray, MAXVAL);
+            put(&mut out, &dist);
+            geomid.iter().for_each(|&g| put_i32(&mut out, g));
+            put(&mut out, &normal);
+            multi_ray(&m, &mut d, pnt, &vec, Some(&groups), false, bodyexclude, Some(&mut geomid), &mut dist, None, nray, e);
+            put(&mut out, &dist);
+            geomid.iter().for_each(|&g| put_i32(&mut out, g));
+        }
+    }
+    std::fs::File::create(out_path).and_then(|mut f| f.write_all(&out)).map_err(|e| format!("{out_path}: {e}"))?;
+    println!("{model}: {steps} steps, {nray} rays from 3 points every {every} steps -> {out_path}");
+    Ok(true)
+}
+
 /// Step rate: 100 warm-up steps, then `steps` timed, `runs` times, as the reference driver does.
 fn run_speed(model: &str, steps: usize, scale: f64, runs: usize) -> Result<bool, String> {
     let m = load_model_with(Path::new(model), attach)?;
@@ -455,6 +530,10 @@ fn main() {
             (Ok(n), Ok(q), Ok(i), Ok(f)) => run_inverse(model, n, q, out, i, f),
             _ => Err("inverse: steps, qvel scale, integrator and enable flags are numbers".to_string()),
         },
+        ["rays", model, steps, every, scale, out] => match (steps.parse(), every.parse(), scale.parse()) {
+            (Ok(n), Ok(k), Ok(q)) if k > 0 => run_rays(model, n, k, q, out),
+            _ => Err("rays: steps, a positive ray interval and qvel scale are numbers".to_string()),
+        },
         ["speed", model, steps, scale, runs] => match (steps.parse(), scale.parse(), runs.parse()) {
             (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r),
             _ => Err("speed: steps, qvel scale and runs are numbers".to_string()),
@@ -467,7 +546,7 @@ fn main() {
             (Ok(n), Ok(q)) => run_stage_speed(model, n, q),
             _ => Err("stagespeed: steps and qvel scale are numbers".to_string()),
         },
-        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
+        _ => Err("usage: parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity rays <model file> <steps> <ray interval> <qvel scale> <out> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
     };
     match result {
         Ok(true) => {}

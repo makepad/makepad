@@ -12,13 +12,14 @@ use crate::core_util::{contact_force, object_acceleration, object_velocity};
 use crate::data::Data;
 use crate::inline::{at3, at3_mut, at4, at4_mut, at6, at6_mut, at9, at9_mut};
 use crate::model::Model;
+use crate::ray;
 use crate::sleep::sleep_state;
 use crate::sort::partial_sort;
-use crate::support::{condata_size, geom_distance, inside_site, mul_m, CONDATA_SIZE};
+use crate::support::{cam_intrinsics, condata_size, geom_distance, inside_site, mul_m, CONDATA_SIZE};
 use crate::thread::{dispatch, num_thread};
 use crate::types::*;
 use crate::util_blas::*;
-use crate::util_misc::{clip, is_zero, max, min, poly_potential};
+use crate::util_misc::{cam_pixel_ray, clip, is_zero, max, min, poly_potential};
 use crate::util_spatial::{cross, quat2mat, sub_quat, transform_spatial};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -399,7 +400,53 @@ fn compute_contact_sensor(m: &Model, d: &mut Data, i: usize, sensordata: &mut [f
     d.scratch.put_contact_info(r#match);
 }
 
-// fill_raydata is omitted with its only callers, the rangefinder paths.
+// One ray's rangefinder data, the fields `dataspec` selects in order, written from `k` on; returns the
+// index after them. A missed ray (`dist` < 0) reads zero direction, point and normal and depth -1. Depth
+// is the hit's depth along the camera's view axis for a camera (`cam`: its position and z axis), the
+// distance for a site.
+fn fill_raydata(out: &mut [f64], mut k: usize, dataspec: i32, dist: f64, origin: &[f64; 3], direction: &[f64; 3],
+    normal: &[f64; 3], cam: Option<(&[f64; 3], &[f64; 3])>) -> usize {
+    let hit = dist >= 0.0;
+    let has = |field: i32| dataspec & (1 << field) != 0;
+    if has(RAYDATA_DIST) {
+        out[k] = dist;
+        k += 1;
+    }
+    if has(RAYDATA_DIR) {
+        if hit { copy3(at3_mut(out, k), direction); } else { zero3(at3_mut(out, k)); }
+        k += 3;
+    }
+    if has(RAYDATA_ORIGIN) {
+        copy3(at3_mut(out, k), origin);
+        k += 3;
+    }
+    // the hit point, for the point and depth fields
+    let mut point = [0.0; 3];
+    if (has(RAYDATA_POINT) || has(RAYDATA_DEPTH)) && hit {
+        add_scl3(&mut point, origin, direction, dist);
+    }
+    if has(RAYDATA_POINT) {
+        copy3(at3_mut(out, k), &point);
+        k += 3;
+    }
+    if has(RAYDATA_NORMAL) {
+        if hit { copy3(at3_mut(out, k), normal); } else { zero3(at3_mut(out, k)); }
+        k += 3;
+    }
+    if has(RAYDATA_DEPTH) {
+        out[k] = if !hit {
+            -1.0
+        } else if let Some((cam_xpos, cam_z)) = cam {
+            let mut delta = [0.0; 3];
+            sub3(&mut delta, &point, cam_xpos);
+            -dot3(&delta, cam_z)
+        } else {
+            dist
+        };
+        k += 1;
+    }
+    k
+}
 
 fn compute_sensor_pos(m: &Model, d: &mut Data, i: usize, sensordata: &mut [f64]) {
     let ne = d.ne as usize;
@@ -424,9 +471,67 @@ fn compute_sensor_pos(m: &Model, d: &mut Data, i: usize, sensordata: &mut [f64])
                 &m.cam_intrinsic[4*refid..], &m.cam_sensorsize[2*refid..]);
         }
         SENS_RANGEFINDER => {
-            if objtype == OBJ_SITE { crate::unported!("mj_ray"); }
-            // Camera paths also require mj_multiRay / mj_ray and mju_camPixelRay.
-            crate::unported!("mju_camIntrinsics");
+            let dataspec = m.sensor_intprm[i*NSENS];
+            let want_normal = dataspec & (1 << RAYDATA_NORMAL) != 0;
+            if objtype == OBJ_SITE {
+                // one ray along the site's z axis
+                rvec = [d.site_xmat[9*objid+2], d.site_xmat[9*objid+5], d.site_xmat[9*objid+8]];
+                let origin = *at3(&d.site_xpos, 3*objid);
+                let mut normal = [0.0; 3];
+                let dist = ray::ray(m, d, &origin, &rvec, None, true, m.site_bodyid[objid], None,
+                    if want_normal { Some(&mut normal) } else { None });
+                fill_raydata(sensordata, 0, dataspec, dist, &origin, &rvec, &normal, None);
+            } else {
+                // a depth image: one ray per pixel, row by row
+                let width = m.cam_resolution[2*objid] as usize;
+                let height = m.cam_resolution[2*objid+1] as usize;
+                let bodyexclude = m.cam_bodyid[objid];
+                let cam_xpos = *at3(&d.cam_xpos, 3*objid);
+                let cam_xmat = *at9(&d.cam_xmat, 9*objid);
+                let projection = m.cam_projection[objid];
+                // the camera's z axis, against its view direction
+                let cam_z = [cam_xmat[2], cam_xmat[5], cam_xmat[8]];
+                let cam = Some((&cam_xpos, &cam_z));
+                let (fx, fy, cx, cy, ortho_extent) = cam_intrinsics(m, objid);
+                let mut k = 0;
+                if projection == PROJ_PERSPECTIVE {
+                    // the rays share the camera position as their origin
+                    let npixel = width * height;
+                    let mut vec = d.scratch.num(3*npixel);
+                    let mut dist = d.scratch.num(npixel);
+                    let mut normals = if want_normal { Some(d.scratch.num(3*npixel)) } else { None };
+                    let mut origin = [0.0; 3];
+                    for row in 0..height {
+                        for col in 0..width {
+                            let idx = row*width + col;
+                            cam_pixel_ray(&mut origin, at3_mut(&mut vec, 3*idx), &cam_xpos, &cam_xmat,
+                                col as i32, row as i32, fx, fy, cx, cy, projection, ortho_extent);
+                        }
+                    }
+                    ray::multi_ray(m, d, &cam_xpos, &vec, None, true, bodyexclude, None, &mut dist,
+                        normals.as_deref_mut(), npixel, MAXVAL);
+                    for idx in 0..npixel {
+                        let normal = normals.as_deref().map_or([0.0; 3], |n| *at3(n, 3*idx));
+                        k = fill_raydata(sensordata, k, dataspec, dist[idx], &cam_xpos, at3(&vec, 3*idx), &normal, cam);
+                    }
+                    d.scratch.put_num(vec);
+                    d.scratch.put_num(dist);
+                    if let Some(normals) = normals { d.scratch.put_num(normals); }
+                } else {
+                    // parallel rays from points on the image plane
+                    for row in 0..height {
+                        for col in 0..width {
+                            let mut origin = [0.0; 3];
+                            let mut direction = [0.0; 3];
+                            cam_pixel_ray(&mut origin, &mut direction, &cam_xpos, &cam_xmat,
+                                col as i32, row as i32, fx, fy, cx, cy, projection, ortho_extent);
+                            let mut normal = [0.0; 3];
+                            let dist = ray::ray(m, d, &origin, &direction, None, true, bodyexclude, None, Some(&mut normal));
+                            k = fill_raydata(sensordata, k, dataspec, dist, &origin, &direction, &normal, cam);
+                        }
+                    }
+                }
+            }
         }
         SENS_JOINTPOS => sensordata[0] = d.qpos[m.jnt_qposadr[objid] as usize],
         SENS_TENDONPOS => sensordata[0] = d.ten_length[objid],

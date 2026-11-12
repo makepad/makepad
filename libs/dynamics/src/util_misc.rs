@@ -7,10 +7,10 @@
 use crate::inline::{at3, at3_mut};
 use crate::types::{
     GEOM_BOX, GEOM_CAPSULE, GEOM_CYLINDER, GEOM_ELLIPSOID, GEOM_PLANE, GEOM_SPHERE, MAXVAL, MINVAL,
-    PI, WRAP_CYLINDER, WRAP_SPHERE,
+    PI, PROJ_PERSPECTIVE, WRAP_CYLINDER, WRAP_SPHERE,
 };
 use crate::util_blas::{
-    add_scl, add_to3, copy, copy3, dot, dot3, mul_mat_tvec3, mul_mat_vec3, norm, norm3, normalize,
+    add3, add_scl, add_to3, copy, copy3, dot, dot3, mul_mat_tvec3, mul_mat_vec3, norm, norm3, normalize,
     normalize3, scl, scl3, sub, sub3,
 };
 use crate::util_spatial::cross;
@@ -379,7 +379,32 @@ pub fn inside_primitive(
     })
 }
 
-// Skipped camera ray: mju_camPixelRay.
+// The ray through a camera pixel's centre (row 0 at the top of the image), from the intrinsics
+// support::cam_intrinsics gives: from the camera position along a unit direction for a perspective
+// camera; along the camera's view axis from a point on the image plane for an orthographic one.
+pub fn cam_pixel_ray(origin: &mut [f64; 3], direction: &mut [f64; 3], cam_xpos: &[f64; 3], cam_xmat: &[f64; 9],
+    col: i32, row: i32, fx: f64, fy: f64, cx: f64, cy: f64, projection: i32, ortho_extent: f64) {
+    let px = col as f64 + 0.5 - cx;
+    let py = row as f64 + 0.5 - cy;
+    if projection == PROJ_PERSPECTIVE {
+        copy3(origin, cam_xpos);
+        // (x/fx, -y/fy, -1) in the camera frame, normalized
+        let dir_cam = [px / fx, -py / fy, -1.0];
+        mul_mat_vec3(direction, cam_xmat, &dir_cam);
+        normalize3(direction);
+    } else {
+        direction[0] = -cam_xmat[2];
+        direction[1] = -cam_xmat[5];
+        direction[2] = -cam_xmat[8];
+        // the extent is the image's full height
+        let half_extent = ortho_extent / 2.0;
+        let offset_cam = [px / fx * half_extent, -py / fy * half_extent, 0.0];
+        let mut offset_world = [0.0; 3];
+        mul_mat_vec3(&mut offset_world, cam_xmat, &offset_cam);
+        add3(origin, cam_xpos, &offset_world);
+    }
+}
+
 // Skipped flex: mju_defGradient, mju_evalBasis, mju_evalBasisArray, mju_cellLookup, flexInterpRotation, mju_flexGatherCellState, mju_flexInterpRotation2D, mju_flexGatherFaceState, mju_flexFaceNormal2D.
 
 // Normalized muscle length-gain curve.
