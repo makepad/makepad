@@ -22,3 +22,5 @@ pub use core::{intrinsics_rt, intrinsics_vx};
 pub mod hr_aarch64;
 #[path = "../../core/arch/x86_64.rs"]
 pub mod hr_x86;
+// aarch64.rs takes the AES tables from its sibling by the name it has in core::arch.
+pub use hr_x86 as x86_64;

@@ -409,6 +409,14 @@ fn arch() {
         b!(vsha512su0q_u64, uint64x2_t, uint64x2_t);
         t!(vsha512su1q_u64, uint64x2_t, uint64x2_t, uint64x2_t);
     }
+    // the aes crate's aarch64 backend, and one full round each way as it chains them
+    b!(vaeseq_u8, uint8x16_t, uint8x16_t);
+    b!(vaesdq_u8, uint8x16_t, uint8x16_t);
+    u!(vaesmcq_u8, uint8x16_t);
+    u!(vaesimcq_u8, uint8x16_t);
+    bin("chain_aes", |a: uint8x16_t, k: uint8x16_t| unsafe { [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))] }, |a: uint8x16_t, k: uint8x16_t| unsafe {
+        [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))]
+    });
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",

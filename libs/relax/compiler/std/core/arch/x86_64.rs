@@ -5435,9 +5435,9 @@ const fn aes_sboxes() -> [[u8; 256]; 2] {
     tables
 }
 
-const AES_SBOXES: [[u8; 256]; 2] = aes_sboxes();
+pub(super) const AES_SBOXES: [[u8; 256]; 2] = aes_sboxes();
 
-fn aes_mix_columns(a: [u8; 16], inverse: bool) -> [u8; 16] {
+pub(super) fn aes_mix_columns(a: [u8; 16], inverse: bool) -> [u8; 16] {
     let coefficients = if inverse { [14, 11, 13, 9] } else { [2, 3, 1, 1] };
     let mut r = [0u8; 16];
     let mut column = 0;

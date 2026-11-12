@@ -1021,6 +1021,48 @@ pub fn vsha512su1q_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_
     ])
 }
 
+// ---- AES (FEAT_AES), as the Arm ARM pseudocode defines AESE / AESD / AESMC / AESIMC. A state is
+// FIPS-197's in column-major memory order: byte i is row i % 4 of column i / 4. The S-boxes and
+// MixColumns are x86_64.rs's (both modules compile on every target).
+
+/// SubBytes(ShiftRows(data ^ key)), or their inverses.
+fn neon_aes_sub_shift(data: uint8x16_t, key: uint8x16_t, inverse: bool) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        let row = i % 4;
+        let column = if inverse { (i / 4 + 4 - row) % 4 } else { (i / 4 + row) % 4 };
+        let from = column * 4 + row;
+        r[i] = super::x86_64::AES_SBOXES[inverse as usize][(data.0[from] ^ key.0[from]) as usize];
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+/// AESE: SubBytes(ShiftRows(data ^ key)). The round's MixColumns is AESMC.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaeseq_u8(data: uint8x16_t, key: uint8x16_t) -> uint8x16_t {
+    neon_aes_sub_shift(data, key, false)
+}
+
+/// AESD: InvSubBytes(InvShiftRows(data ^ key)). The round's InvMixColumns is AESIMC.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesdq_u8(data: uint8x16_t, key: uint8x16_t) -> uint8x16_t {
+    neon_aes_sub_shift(data, key, true)
+}
+
+/// AESMC: MixColumns.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesmcq_u8(data: uint8x16_t) -> uint8x16_t {
+    uint8x16_t(super::x86_64::aes_mix_columns(data.0, false))
+}
+
+/// AESIMC: InvMixColumns.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesimcq_u8(data: uint8x16_t) -> uint8x16_t {
+    uint8x16_t(super::x86_64::aes_mix_columns(data.0, true))
+}
+
 #[derive(Copy, Clone)]
 #[repr(C, align(8))]
 pub struct float32x2_t(pub [f32; 2]);

@@ -3689,6 +3689,76 @@ fn vaddvq_u16() {
 }
 
 #[test]
+fn vaesdq_u8() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("aes"),
+            "required native aes coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint8x16_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint8x16_t = neon_sample(&mut rng, case, 1, 0);
+            let got = hr::vaesdq_u8(p0, p1);
+            let expected = real::vaesdq_u8(cast(p0), cast(p1));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vaeseq_u8() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("aes"),
+            "required native aes coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint8x16_t = neon_sample(&mut rng, case, 0, 0);
+            let p1: hr::uint8x16_t = neon_sample(&mut rng, case, 1, 0);
+            let got = hr::vaeseq_u8(p0, p1);
+            let expected = real::vaeseq_u8(cast(p0), cast(p1));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vaesimcq_u8() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("aes"),
+            "required native aes coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint8x16_t = neon_sample(&mut rng, case, 0, 0);
+            let got = hr::vaesimcq_u8(p0);
+            let expected = real::vaesimcq_u8(cast(p0));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
+fn vaesmcq_u8() {
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        assert!(
+            std::arch::is_aarch64_feature_detected!("aes"),
+            "required native aes coverage unavailable"
+        );
+        for case in 0..RANDOM_CASES + 64 + 24 * 24 * 24 {
+            let p0: hr::uint8x16_t = neon_sample(&mut rng, case, 0, 0);
+            let got = hr::vaesmcq_u8(p0);
+            let expected = real::vaesmcq_u8(cast(p0));
+            assert_eq!(bytes(&got), bytes(&expected), "case {case}");
+        }
+    }
+}
+
+#[test]
 fn vandq_s16() {
     let mut rng = Rng(0x9e3779b97f4a7c15);
     unsafe {
