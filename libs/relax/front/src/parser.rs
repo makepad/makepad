@@ -125,13 +125,13 @@ pub struct Parser<'a> {
     /// last): a `$t:tt` matches one whole (rustc's interpolated nonterminal tokens)
     pub frag_groups: crate::fxhash::HashMap<u32, u32>,
     /// starts of the `$t:ty` substitutions of expansion text (not a trait where a bound is expected)
-    ty_frags: crate::fxhash::HashSet<u32>,
+    pub(crate) ty_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$p:path` substitutions (type-mode arguments even in expressions/patterns)
-    path_frags: crate::fxhash::HashSet<u32>,
+    pub(crate) path_frags: crate::fxhash::HashSet<u32>,
     /// starts of the `$e:expr` / `$l:literal` substitutions of expansion text (check only): the kind
-    meta_frags: crate::fxhash::HashMap<u32, &'static str>,
+    pub(crate) meta_frags: crate::fxhash::HashMap<u32, &'static str>,
     /// starts of the `$b:block` substitutions of expansion text (check only)
-    block_frags: crate::fxhash::HashSet<u32>,
+    pub(crate) block_frags: crate::fxhash::HashSet<u32>,
     /// Offsets of the parens a transcription added around multi-token `$e:expr` fragments.
     pub(super) synth_parens: crate::fxhash::HashSet<u32>,
     /// file context for built-in macros (file!, module_path!, env!, cfg of derive inputs)

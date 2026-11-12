@@ -2712,6 +2712,9 @@ fn parse_matcher(toks: &[MTok], edition: u16) -> Result<Vec<MNode>, String> {
             let n = &toks[i + 1];
             if n.kind == T::OpenParen {
                 let (lo, hi, sep, op, next) = rep_at(toks, i).ok_or("bad repetition in macro matcher")?;
+                if sep.is_some() && op == b'?' {
+                    return Err("the `?` macro repetition operator does not take a separator".to_string());
+                }
                 let inner = parse_matcher(&toks[lo..hi], edition)?;
                 // mbe/macro_rules.rs check_lhs_no_empty_seq: a repetition without separator must not match nothing
                 if sep.is_none()
@@ -3003,6 +3006,127 @@ fn tvars_of(nodes: &[TNode], out: &mut Vec<String>) {
     }
 }
 
+/// A matcher flattened into locations (rustc_expand mbe/macro_parser.rs `MatcherLoc`, made by
+/// `compute_locs`); a matcher position is an index into them.
+enum MLoc<'m> {
+    /// a token to match; `true`: a group's opening delimiter (a synthetic parenthesis around
+    /// an interpolated expression does not match one)
+    Token(&'m MTok, bool),
+    /// `$(`: the `vars` metavariables declared inside are numbered from `first_var`; `after`
+    /// is the location past the repetition, `depth` the number of repetitions around it
+    Sequence { op: u8, vars: usize, after: usize, first_var: usize, depth: usize },
+    /// the end of a repetition without a separator: repeat (from `first`) or leave
+    KleeneNoSep { op: u8, first: usize },
+    /// the end of a repetition with a separator, before it: take it and repeat, or leave
+    Sep(&'m MTok),
+    /// past a separator: repeat
+    KleeneAfterSep { first: usize },
+    /// `$name:frag`
+    Var { name: &'m str, frag: Frag, var: usize, depth: usize },
+    /// past the matcher's end
+    Eof,
+}
+
+/// rustc `compute_locs`; the caller pushes the final `Eof`.
+fn compute_locs<'m>(nodes: &'m [MNode], locs: &mut Vec<MLoc<'m>>, next_var: &mut usize, depth: usize) {
+    for n in nodes {
+        match n {
+            MNode::Tok(t) => locs.push(MLoc::Token(t, false)),
+            MNode::Group(open, close, inner) => {
+                locs.push(MLoc::Token(open, true));
+                compute_locs(inner, locs, next_var, depth);
+                locs.push(MLoc::Token(close, false));
+            }
+            MNode::Rep(inner, sep, op) => {
+                let at = locs.len();
+                // overwritten once the repetition's end is known
+                locs.push(MLoc::Eof);
+                let first_var = *next_var;
+                let first = locs.len();
+                compute_locs(inner, locs, next_var, depth + 1);
+                match sep {
+                    Some(s) => {
+                        locs.push(MLoc::Sep(s));
+                        locs.push(MLoc::KleeneAfterSep { first });
+                    }
+                    None => locs.push(MLoc::KleeneNoSep { op: *op, first }),
+                }
+                locs[at] = MLoc::Sequence { op: *op, vars: *next_var - first_var, after: locs.len(), first_var, depth };
+            }
+            MNode::Var(name, frag) => {
+                locs.push(MLoc::Var { name, frag: *frag, var: *next_var, depth });
+                *next_var += 1;
+            }
+        }
+    }
+}
+
+/// A matcher position: a location and the fragments matched on the way to it, one entry per
+/// metavariable in declaration order (rustc `MatcherPos`); positions that split share them
+/// until one adds to them.
+struct MPos {
+    idx: usize,
+    matches: std::rc::Rc<Vec<Bind>>,
+}
+
+impl MPos {
+    /// rustc `MatcherPos::push_match`: outside a repetition the next metavariable's entry; inside
+    /// `depth` repetitions an element of the innermost sequence being built.
+    fn push_match(&mut self, var: usize, depth: usize, m: Bind) {
+        let matches = std::rc::Rc::make_mut(&mut self.matches);
+        if depth == 0 {
+            debug_assert_eq!(var, matches.len());
+            matches.push(m);
+            return;
+        }
+        let mut cur = &mut matches[var];
+        for _ in 0..depth - 1 {
+            match cur {
+                Bind::Seq(v) => cur = v.last_mut().unwrap(),
+                Bind::One(..) => unreachable!(),
+            }
+        }
+        match cur {
+            Bind::Seq(v) => v.push(m),
+            Bind::One(..) => unreachable!(),
+        }
+    }
+}
+
+fn is_kw(k: T) -> bool {
+    (T::KwAs as u8..=T::KwTry as u8).contains(&(k as u8))
+}
+
+fn is_lit(k: T) -> bool {
+    matches!(k, T::Int | T::Float | T::Str | T::ByteStr | T::CStr | T::RawStr | T::Char | T::Byte)
+}
+
+/// The reserved words the lexer gives as identifiers (rustc `Ident::is_reserved`: the unused
+/// keywords, `gen` from edition 2024).
+fn is_reserved_word(s: &[u8], edition: u16) -> bool {
+    matches!(s, b"abstract" | b"become" | b"do" | b"final" | b"macro" | b"override" | b"priv" | b"typeof" | b"unsized" | b"virtual")
+        || (edition >= 2024 && s == b"gen")
+}
+
+/// What a fragment parse failure names.
+fn frag_desc(f: Frag) -> &'static str {
+    match f {
+        Frag::Expr => "expression",
+        Frag::Ident => "identifier",
+        Frag::Ty => "type",
+        Frag::Tt => "token tree",
+        Frag::Pat | Frag::PatParam => "pattern",
+        Frag::Path => "path",
+        Frag::Literal => "literal",
+        Frag::Block => "`{`",
+        Frag::Item => "item",
+        Frag::Stmt => "statement",
+        Frag::Vis => "visibility",
+        Frag::Lifetime => "lifetime",
+        Frag::Meta => "meta item",
+    }
+}
+
 impl<'a> Parser<'a> {
     fn mtok_eq(&self, i: usize, m: &MTok) -> bool {
         let t = self.toks.at(i);
@@ -3034,67 +3158,69 @@ impl<'a> Parser<'a> {
         None
     }
 
-    /// One fragment at token `i` (ending by `end`): its end index.
-    fn match_frag(&mut self, f: Frag, i: usize, end: usize) -> Option<(usize, Option<(u32, u32)>, bool)> {
+    /// One fragment at token `i` (ending by `end`): its end index, or the fragment parser's error
+    /// (rustc parse_nonterminal).
+    fn match_frag(&mut self, f: Frag, i: usize, end: usize) -> Result<(usize, Option<(u32, u32)>, bool), String> {
+        let expected = || -> Result<(usize, Option<(u32, u32)>, bool), String> { Err(format!("expected {}", frag_desc(f))) };
         if i > end {
-            return None;
+            return expected();
         }
         let k = if i < end { self.toks.at(i).kind } else { T::Eof };
         match f {
             Frag::Ident => {
                 if i < end && (matches!(k, T::Ident | T::RawIdent) || (T::KwAs as u8..=T::KwTry as u8).contains(&(k as u8))) && self.tok_text(self.toks.at(i)) != b"_" {
-                    Some((i + 1, None, false))
+                    Ok((i + 1, None, false))
                 } else {
-                    None
+                    expected()
                 }
             }
-            Frag::Lifetime => (i < end && k == T::Lifetime).then_some((i + 1, None, false)),
+            Frag::Lifetime => if i < end && k == T::Lifetime { Ok((i + 1, None, false)) } else { expected() },
             Frag::Literal => {
                 let mut j = i;
                 if j < end && self.toks.at(j).kind == T::Minus {
                     j += 1;
                 }
                 if j < end && matches!(self.toks.at(j).kind, T::Int | T::Float | T::Str | T::ByteStr | T::CStr | T::RawStr | T::Char | T::Byte | T::KwTrue | T::KwFalse) {
-                    Some((j + 1, None, false))
+                    Ok((j + 1, None, false))
                 } else {
-                    None
+                    expected()
                 }
             }
             Frag::Tt => {
                 if i >= end {
-                    return None;
+                    return expected();
                 }
                 let tok_lo = self.toks.at(i).lo;
                 if let Some(&group_end) = self.frag_groups.get(&tok_lo) {
-                    return (i..end).find(|&j| self.toks.at(j).hi == group_end).map(|j| (j + 1, None, false));
+                    return (i..end).find(|&j| self.toks.at(j).hi == group_end).map(|j| (j + 1, None, false)).ok_or_else(|| format!("expected {}", frag_desc(f)));
                 }
                 if is_open(k) {
-                    self.tok_close_of(i, end).map(|c| (c + 1, None, false))
+                    self.tok_close_of(i, end).map(|c| (c + 1, None, false)).ok_or_else(|| format!("expected {}", frag_desc(f)))
                 } else if is_close(k) {
-                    None
+                    expected()
                 } else {
-                    Some((i + 1, None, false))
+                    Ok((i + 1, None, false))
                 }
             }
             Frag::Block => {
                 if i < end && k == T::OpenBrace {
-                    self.tok_close_of(i, end).map(|c| (c + 1, None, false))
+                    self.tok_close_of(i, end).map(|c| (c + 1, None, false)).ok_or_else(|| format!("expected {}", frag_desc(f)))
                 } else {
-                    None
+                    expected()
                 }
             }
             Frag::Vis => {
                 if i < end && k == T::KwPub {
                     if i + 1 < end && self.toks.at(i + 1).kind == T::OpenParen {
-                        return self.tok_close_of(i + 1, end).map(|c| (c + 1, None, false));
+                        return self.tok_close_of(i + 1, end).map(|c| (c + 1, None, false)).ok_or_else(|| format!("expected {}", frag_desc(f)));
                     }
-                    return Some((i + 1, None, false));
+                    return Ok((i + 1, None, false));
                 }
-                Some((i, None, false))
+                Ok((i, None, false))
             }
             _ => {
                 if i >= end {
-                    return None;
+                    return expected();
                 }
                 let save = self.pos;
                 let undo = self.tok_undo.len();
@@ -3142,7 +3268,11 @@ impl<'a> Parser<'a> {
                 }
                 // Keep the remainder for this matcher, but restore it if the arm fails.
                 if let Some(s) = split { self.tok_undo.push(s); }
-                if ok { Some((e, taken, bare)) } else { None }
+                if ok {
+                    Ok((e, taken, bare))
+                } else {
+                    Err(match r { Err(err) => err.msg, Ok(()) => format!("expected {}", frag_desc(f)) })
+                }
             }
         }
     }
@@ -3158,13 +3288,6 @@ impl<'a> Parser<'a> {
         i < hi && self.toks.at(i).kind == T::Not && i + 1 < hi && is_open(self.toks.at(i + 1).kind) && self.tok_close_of(i + 1, hi) == Some(hi - 1)
     }
 
-    fn match_seq(&mut self, nodes: &[MNode], i: &mut usize, end: usize, binds: &mut HashMap<String, Bind>) -> bool {
-        let undo = self.tok_undo.len();
-        let matched = self.match_seq_inner(nodes, i, end, binds);
-        if !matched { self.restore_match_tokens(undo); }
-        matched
-    }
-
     fn restore_match_tokens(&mut self, undo: usize) {
         while self.tok_undo.len() > undo {
             let (k, t) = self.tok_undo.pop().unwrap();
@@ -3172,75 +3295,229 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn match_seq_inner(&mut self, nodes: &[MNode], i: &mut usize, end: usize, binds: &mut HashMap<String, Bind>) -> bool {
-        for n in nodes {
-            match n {
-                MNode::Tok(m) => {
-                    if *i >= end || !self.mtok_eq(*i, m) {
-                        return false;
-                    }
-                    *i += 1;
-                }
-                MNode::Group(open, _, inner) => {
-                    // rustc_expand mbe/macro_parser.rs: an interpolated expression
-                    // is an opaque nonterminal, not a written parenthesis group.
-                    if *i >= end || self.toks.at(*i).kind != open.kind
-                        || self.synth_parens.contains(&{ self.toks.at(*i).lo }) {
-                        return false;
-                    }
-                    let c = match self.tok_close_of(*i, end) {
-                        Some(c) => c,
-                        None => return false,
-                    };
-                    let mut j = *i + 1;
-                    if !self.match_seq(inner, &mut j, c, binds) || j != c {
-                        return false;
-                    }
-                    *i = c + 1;
-                }
-                MNode::Var(name, f) => match self.match_frag(*f, *i, end) {
-                    Some((e, taken, bare)) => {
-                        binds.insert(name.clone(), Bind::One(*i, e, *f, taken, bare));
-                        *i = e;
-                    }
-                    None => return false,
-                },
-                MNode::Rep(inner, sep, op) => {
-                    let mut names = Vec::new();
-                    vars_of(inner, &mut names);
-                    let mut iters: Vec<HashMap<String, Bind>> = Vec::new();
-                    loop {
-                        let start = *i;
-                        let mut j = *i;
-                        if !iters.is_empty() {
-                            if let Some(s) = sep {
-                                if j >= end || !self.mtok_eq(j, s) {
-                                    break;
-                                }
-                                j += 1;
-                            }
+    /// What the token at `i` begins when it starts a forwarded fragment: rustc forwards a
+    /// matched fragment as one invisible group of its kind (`OpenInvisible(MetaVar(kind))`),
+    /// whatever its first token; None for written tokens and the kinds that forward as their
+    /// tokens (ident, lifetime, tt).
+    fn forwarded_kind(&self, lo: u32) -> Option<Frag> {
+        if self.synth_parens.contains(&lo) {
+            return Some(Frag::Expr);
+        }
+        if self.ty_frags.contains(&lo) {
+            return Some(Frag::Ty);
+        }
+        if self.path_frags.contains(&lo) {
+            return Some(Frag::Path);
+        }
+        if self.block_frags.contains(&lo) {
+            return Some(Frag::Block);
+        }
+        match self.meta_frags.get(&lo) {
+            Some(&"expr") => Some(Frag::Expr),
+            Some(_) => Some(Frag::Literal),
+            None => None,
+        }
+    }
+
+    /// rustc_parse nonterminal.rs `nonterminal_may_begin_with`: can a fragment of kind `f`
+    /// begin with the token at `i`? A matcher position waits for the fragment parser only
+    /// where it can.
+    fn may_begin(&self, f: Frag, i: usize, edition: u16) -> bool {
+        let t = self.toks.at(i);
+        let k = t.kind;
+        if is_close(k) {
+            return false;
+        }
+        if let Some(fk) = self.forwarded_kind(t.lo) {
+            return match f {
+                Frag::Tt | Frag::Item | Frag::Stmt | Frag::Vis => true,
+                Frag::Ident | Frag::Lifetime => false,
+                Frag::Expr => matches!(fk, Frag::Block | Frag::Expr | Frag::Literal | Frag::Path),
+                Frag::Ty => matches!(fk, Frag::Ty | Frag::Path),
+                // an expression that is a literal (a forwarded one-token expression)
+                Frag::Literal => fk == Frag::Literal || (fk == Frag::Expr && !self.synth_parens.contains(&{ t.lo }) && is_lit(k)),
+                Frag::Block => matches!(fk, Frag::Block | Frag::Expr | Frag::Literal),
+                Frag::Path | Frag::Meta | Frag::Pat | Frag::PatParam => fk != Frag::Block,
+            };
+        }
+        let any_ident = matches!(k, T::Ident | T::RawIdent) || is_kw(k);
+        match f {
+            Frag::Tt | Frag::Item | Frag::Stmt => true,
+            Frag::Ident => any_ident && self.tok_text(t) != b"_",
+            Frag::Lifetime => k == T::Lifetime,
+            Frag::Literal => is_lit(k) || matches!(k, T::Minus | T::KwTrue | T::KwFalse),
+            Frag::Block => k == T::OpenBrace,
+            Frag::Path | Frag::Meta => any_ident || k == T::PathSep,
+            Frag::Vis => any_ident || k == T::Comma || self.can_begin_type(i, edition),
+            Frag::Ty => self.can_begin_type(i, edition),
+            Frag::Pat | Frag::PatParam => {
+                any_ident || is_lit(k)
+                    || matches!(k, T::OpenParen | T::OpenBracket | T::And | T::Minus | T::AndAnd | T::DotDot | T::DotDotDot | T::PathSep | T::Lt | T::Shl | T::Interp)
+                    || (k == T::Or && f == Frag::Pat)
+            }
+            // `let` never begins one, `const` not before edition 2024 (`expr_2021`); `_` does
+            // from edition 2024 on
+            Frag::Expr => {
+                k != T::KwLet
+                    && (edition >= 2024 || k != T::KwConst)
+                    && (self.can_begin_expr_tok(i, edition) || (edition >= 2024 && k == T::Ident && self.tok_text(t) == b"_"))
+            }
+        }
+    }
+
+    /// rustc_ast token.rs `Token::can_begin_expr`.
+    fn can_begin_expr_tok(&self, i: usize, edition: u16) -> bool {
+        let t = self.toks.at(i);
+        match t.kind {
+            T::Ident => {
+                let s = self.tok_text(t);
+                s != b"_" && (!is_reserved_word(s, edition) || s == b"do" || s == b"gen")
+            }
+            T::RawIdent | T::Lifetime | T::OpenParen | T::OpenBrace | T::OpenBracket | T::Not | T::Minus | T::Star | T::Or | T::OrOr
+            | T::And | T::AndAnd | T::DotDot | T::DotDotDot | T::DotDotEq | T::Lt | T::Shl | T::PathSep | T::Pound | T::Interp => true,
+            k if is_lit(k) => true,
+            // the keywords that begin an expression, and the path-segment keywords
+            T::KwAsync | T::KwBox | T::KwBreak | T::KwConst | T::KwContinue | T::KwFalse | T::KwFor | T::KwIf | T::KwLet | T::KwLoop
+            | T::KwMatch | T::KwMove | T::KwReturn | T::KwTrue | T::KwTry | T::KwUnsafe | T::KwWhile | T::KwYield | T::KwStatic
+            | T::KwSelfValue | T::KwSelfType | T::KwSuper | T::KwCrate => true,
+            _ => false,
+        }
+    }
+
+    /// rustc_ast token.rs `Token::can_begin_type`.
+    fn can_begin_type(&self, i: usize, edition: u16) -> bool {
+        let t = self.toks.at(i);
+        match t.kind {
+            T::Ident => {
+                let s = self.tok_text(t);
+                s == b"_" || s == b"typeof" || !is_reserved_word(s, edition)
+            }
+            T::RawIdent | T::OpenParen | T::OpenBracket | T::Not | T::Star | T::And | T::AndAnd | T::Question | T::Lifetime | T::Lt
+            | T::Shl | T::PathSep => true,
+            T::KwSelfValue | T::KwSelfType | T::KwSuper | T::KwCrate | T::KwFor | T::KwImpl | T::KwFn | T::KwUnsafe | T::KwExtern
+            | T::KwDyn => true,
+            _ => false,
+        }
+    }
+
+    /// rustc_expand mbe/macro_parser.rs `TtParser::parse_tt`: tokens `[lo, hi)` against one
+    /// arm's matcher locations. Every matcher position is advanced over a token at once (a
+    /// repetition's end splits a position: one leaves the repetition, one repeats it), with
+    /// no backtracking; the fragment parser runs only when exactly one position waits for a
+    /// fragment and no position wants a token. Ok(Some): the bindings; Ok(None): no match
+    /// (the next arm is tried); Err: a fragment that did not parse, or an ambiguity.
+    fn parse_tt(&mut self, locs: &[MLoc], name: &str, edition: u16, lo: usize, hi: usize) -> Result<Option<HashMap<String, Bind>>, String> {
+        let mut cur = vec![MPos { idx: 0, matches: std::rc::Rc::new(Vec::new()) }];
+        let mut next: Vec<MPos> = Vec::new();
+        let mut bb: Vec<MPos> = Vec::new();
+        let mut i = lo;
+        loop {
+            next.clear();
+            bb.clear();
+            let eof = i >= hi;
+            let mut eof_mps: Vec<MPos> = Vec::new();
+            // parse_tt_inner
+            while let Some(mut mp) = cur.pop() {
+                match &locs[mp.idx] {
+                    &MLoc::Token(t, open) => {
+                        // an interpolated expression's synthetic parenthesis is no written group
+                        if !eof && self.mtok_eq(i, t) && !(open && self.synth_parens.contains(&{ self.toks.at(i).lo })) {
+                            mp.idx += 1;
+                            next.push(mp);
                         }
-                        let mut b = HashMap::default();
-                        if !self.match_seq(inner, &mut j, end, &mut b) || j == start {
-                            break;
+                    }
+                    &MLoc::Sequence { op, vars, after, first_var, depth } => {
+                        // an empty sequence for each metavariable inside
+                        for v in first_var..first_var + vars {
+                            mp.push_match(v, depth, Bind::Seq(Vec::new()));
                         }
-                        *i = j;
-                        iters.push(b);
-                        if *op == b'?' {
-                            break;
+                        if op != b'+' {
+                            // zero repetitions: skip it
+                            cur.push(MPos { idx: after, matches: mp.matches.clone() });
+                        }
+                        // one or more: enter it
+                        mp.idx += 1;
+                        cur.push(mp);
+                    }
+                    &MLoc::KleeneNoSep { op, first } => {
+                        // end the repetition (fails quietly next round when it cannot)
+                        cur.push(MPos { idx: mp.idx + 1, matches: mp.matches.clone() });
+                        if op != b'?' {
+                            mp.idx = first;
+                            cur.push(mp);
                         }
                     }
-                    if *op == b'+' && iters.is_empty() {
-                        return false;
+                    &MLoc::Sep(sep) => {
+                        // end the repetition, or take the separator and repeat
+                        cur.push(MPos { idx: mp.idx + 2, matches: mp.matches.clone() });
+                        if !eof && self.mtok_eq(i, sep) {
+                            mp.idx += 1;
+                            next.push(mp);
+                        }
                     }
-                    for nm in names {
-                        let seq: Vec<Bind> = iters.iter().map(|b| b.get(&nm).cloned().unwrap_or(Bind::Seq(Vec::new()))).collect();
-                        binds.insert(nm, Bind::Seq(seq));
+                    &MLoc::KleeneAfterSep { first } => {
+                        mp.idx = first;
+                        cur.push(mp);
+                    }
+                    &MLoc::Var { frag, .. } => {
+                        if !eof && self.may_begin(frag, i, edition) {
+                            bb.push(mp);
+                        }
+                    }
+                    MLoc::Eof => {
+                        if eof {
+                            eof_mps.push(mp);
+                        }
                     }
                 }
             }
+            // at the end of the input exactly one position must be past the matcher's end
+            if eof {
+                return match eof_mps.len() {
+                    0 => Ok(None),
+                    1 => {
+                        let mp = eof_mps.pop().unwrap();
+                        let matches = std::rc::Rc::try_unwrap(mp.matches).unwrap_or_else(|m| (*m).clone());
+                        let mut binds = HashMap::default();
+                        for loc in locs {
+                            if let &MLoc::Var { name, var, .. } = loc {
+                                binds.insert(name.to_string(), matches[var].clone());
+                            }
+                        }
+                        Ok(Some(binds))
+                    }
+                    _ => Err("ambiguity: multiple successful parses".to_string()),
+                };
+            }
+            match (next.len(), bb.len()) {
+                (0, 0) => return Ok(None),
+                (_, 0) => {
+                    std::mem::swap(&mut cur, &mut next);
+                    i += 1;
+                }
+                (0, 1) => {
+                    // the black-box parser: one fragment
+                    let mut mp = bb.pop().unwrap();
+                    let MLoc::Var { frag, var, depth, .. } = locs[mp.idx] else { unreachable!() };
+                    let (e, taken, bare) = self.match_frag(frag, i, hi).map_err(|m| format!("{m} (while parsing argument for this `{}` macro fragment)", frag_name(frag)))?;
+                    mp.push_match(var, depth, Bind::One(i, e, frag, taken, bare));
+                    mp.idx += 1;
+                    i = e;
+                    cur.push(mp);
+                }
+                (n, _) => {
+                    let nts: Vec<String> = bb.iter().map(|mp| match locs[mp.idx] {
+                        MLoc::Var { name, frag, .. } => format!("{} ('{}')", frag_name(frag), name),
+                        _ => unreachable!(),
+                    }).collect();
+                    let nts = nts.join(" or ");
+                    return Err(match n {
+                        0 => format!("local ambiguity when calling macro `{name}`: multiple parsing options: built-in NTs {nts}."),
+                        n => format!("local ambiguity when calling macro `{name}`: multiple parsing options: built-in NTs {nts} or {n} other option{}.", if n == 1 { "" } else { "s" }),
+                    });
+                }
+            }
         }
-        true
     }
 
     fn lookup_bind<'b>(binds: &'b HashMap<String, Bind>, name: &str, idx: &[usize]) -> Option<&'b Bind> {
@@ -3434,13 +3711,26 @@ impl<'a> Parser<'a> {
         let _profile = crate::load_profile::span(self.session.runtime.profile, "macro-rules", &def.name);
         let (lo, hi) = self.desugar_doc_comments(lo, hi);
         uses::used(def, uses::RESOLVED);
+        // the definition's edition decides which tokens can begin an `expr` (rustc: the
+        // metavariable's span edition)
+        let edition = if def.edition == 0 { self.edition } else { def.edition };
         for (arm, (matcher, body)) in def.arms.iter().enumerate() {
-            let mut binds = HashMap::default();
-            let mut i = lo;
             // rustc_expand mbe/macro_rules.rs: try_match_macro starts each arm with
             // a fresh parser. A failed arm must not leave grammar-split tokens behind.
             let undo = self.tok_undo.len();
-            if self.match_seq(matcher, &mut i, hi, &mut binds) && i == hi {
+            let mut locs = Vec::new();
+            compute_locs(matcher, &mut locs, &mut 0, 0);
+            locs.push(MLoc::Eof);
+            // Failure: the next arm; an error (a fragment that did not parse, an ambiguity)
+            // ends the call, as rustc's ErrorReported / Error do
+            let binds = match self.parse_tt(&locs, &def.name, edition, lo, hi) {
+                Ok(b) => b,
+                Err(m) => {
+                    self.restore_match_tokens(undo);
+                    return Err(m);
+                }
+            };
+            if let Some(binds) = binds {
                 uses::used(def, arm as u32);
                 // `$crate` names the defining crate by identity (rustc: the `$crate` token keeps the
                 // definition's hygiene), wherever the transcribed tokens end up: a caller that reaches
