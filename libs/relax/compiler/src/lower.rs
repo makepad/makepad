@@ -5891,7 +5891,7 @@ impl<'a> Lcx<'a> {
         if self.unsized_ty(t) { return false; }
         if self.u.tcx.needs_drop(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t)
             || !self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t) {
-            return self.const_promotable(e);
+            return self.const_promotable(e) || self.drop_free_ctor_promotable(e, t);
         }
         let ast = self.ast();
         match ast.expr(e).kind.clone() {
@@ -5962,6 +5962,28 @@ impl<'a> Lcx<'a> {
         }
     }
 
+
+    /// rustc qualifies a promotion candidate by its value, not its type
+    /// (rustc_const_eval/src/check_consts/qualifs.rs, in_rvalue for an Aggregate): a unit
+    /// variant, or a variant or struct built from operands that are themselves promotable,
+    /// of an ADT without a Drop impl, needs no drop even when its type does. So
+    /// `&E::B` with `enum E { B, S(String) }` is a 'static, not a stack temporary.
+    /// The type must still be Freeze: interior mutability stays type-based here.
+    fn drop_free_ctor_promotable(&mut self, e: ExprId, t: TyId) -> bool {
+        if self.u.tcx.has_drop_impl(t)
+            || !self.u.tcx.is_freeze(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), t) {
+            return false;
+        }
+        let ast = self.ast();
+        let is_ctor = |s: &Self, x: ExprId| matches!(s.b.res.get(&strip_paren(s.ast(), x).0), Some(Res::Def(d)) if matches!(s.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
+        match ast.expr(e).kind.clone() {
+            ExprKind::Paren(x) => self.promotable(x),
+            ExprKind::Path(_) => is_ctor(self, e),
+            ExprKind::Call(f, args) => is_ctor(self, f) && ast.list(args).iter().all(|x| self.promotable(*x)),
+            ExprKind::Struct(row) if ast.row(row).base == crate::ast::OptExprId::NONE && !ast.row(row).rest => ast.list(ast.row(row).fields).iter().all(|f| self.promotable(f.expr)),
+            _ => false,
+        }
+    }
 
     /// The value of the promotable integer operand `x` (rustc promote_consts: try_eval_scalar
     /// of a division's constant operand), sign-extended; None when it cannot be evaluated here.

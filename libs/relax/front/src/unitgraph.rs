@@ -914,6 +914,10 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     for (k, v) in crate::cfg::CfgSet::host(sess, &[]).build_script_env() {
         cmd.env(k, v);
     }
+    match crate::resolve::package_links(dir) {
+        Some(l) => cmd.env("CARGO_MANIFEST_LINKS", l),
+        None => cmd.env_remove("CARGO_MANIFEST_LINKS"),
+    };
     for (k, v) in cenv {
         cmd.env(k, v);
     }

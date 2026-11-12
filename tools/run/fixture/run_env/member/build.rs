@@ -1,6 +1,7 @@
-// cargo's build-script environment holds its package's variables as its crates get them
+// cargo's build-script environment holds its package's variables as its crates get them, and the
+// package's `links` value (CARGO_MANIFEST_LINKS), which its crates do not get
 fn main() {
-    for k in ["CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_PRE", "CARGO_PKG_AUTHORS"] {
+    for k in ["CARGO_MANIFEST_DIR", "CARGO_MANIFEST_PATH", "CARGO_PKG_NAME", "CARGO_PKG_VERSION_MAJOR", "CARGO_PKG_VERSION_PRE", "CARGO_PKG_AUTHORS", "CARGO_MANIFEST_LINKS"] {
         let v = std::env::var(k).unwrap_or_else(|_| panic!("the build script's environment has no {k}"));
         println!("cargo:rustc-env=RUN_ENV_SCRIPT_{k}={v}");
     }

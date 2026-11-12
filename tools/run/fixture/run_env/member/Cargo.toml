@@ -8,4 +8,5 @@ license = "MIT"
 repository = "https://example.com/run-env"
 homepage = "https://example.com"
 rust-version = "1.70"
+links = "relax_run_env"
 publish = false

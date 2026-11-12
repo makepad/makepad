@@ -34,8 +34,12 @@ pub fn check(test: bool) -> Vec<String> {
     same("RUN_ENV_CONFIG", Some("from-config"));
     same("RUN_ENV_CONFIG_KEPT", Some("outer"));
     same("RUN_ENV_CONFIG_FORCED", Some("forced"));
-    for k in ["CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR"] {
+    for k in ["CARGO_CRATE_NAME", "CARGO_BIN_NAME", "CARGO_PRIMARY_PACKAGE", "CARGO_TARGET_TMPDIR", "CARGO_MANIFEST_LINKS"] {
         same(k, None);
+    }
+    // nor did its crates get the package's `links` at compile time: cargo gives it to the build script alone
+    if let Some(v) = option_env!("CARGO_MANIFEST_LINKS") {
+        bad.push(format!("CARGO_MANIFEST_LINKS at compile time: {v:?}, want none"));
     }
     // the build script saw the package's variables as its crates do
     let script = [
@@ -45,6 +49,7 @@ pub fn check(test: bool) -> Vec<String> {
         (env!("RUN_ENV_SCRIPT_CARGO_PKG_VERSION_MAJOR"), env!("CARGO_PKG_VERSION_MAJOR")),
         (env!("RUN_ENV_SCRIPT_CARGO_PKG_VERSION_PRE"), env!("CARGO_PKG_VERSION_PRE")),
         (env!("RUN_ENV_SCRIPT_CARGO_PKG_AUTHORS"), env!("CARGO_PKG_AUTHORS")),
+        (env!("RUN_ENV_SCRIPT_CARGO_MANIFEST_LINKS"), "relax_run_env"),
     ];
     for (seen, want) in script {
         if seen != want {

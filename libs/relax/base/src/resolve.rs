@@ -2096,6 +2096,16 @@ pub fn package_meta_env(dir: &str) -> Vec<(String, String)> {
     out
 }
 
+/// The package's `links` value: cargo gives it to the package's build script alone, as
+/// CARGO_MANIFEST_LINKS (custom_build.rs; its crates and targets do not see it).
+pub fn package_links(dir: &str) -> Option<String> {
+    let t = read_toml(&format!("{}/Cargo.toml", dir)).ok()?;
+    match table(&t, "package")?.get("links")? {
+        Toml::Str(l, _) => Some(l.clone()),
+        _ => None,
+    }
+}
+
 /// The cargo metadata subset used by build scripts, from the same manifests and VFS as the
 /// unit graph. No script is run and Cargo.lock is never written. `dir` is the caller's virtual cwd.
 pub fn cargo_metadata(sess: &std::sync::Arc<crate::Session>, dir: &str, flags: &[String]) -> Result<String, String> {
