@@ -282,6 +282,8 @@ impl Session {
         // the app's XR display from now on (it presents on it at its next drawing)
         hal::hal_xr_remote_enable();
         hal::hal_xr_remote_attach(eye[0], eye[1], refresh_mhz);
+        // a session of its own: the headset's origin need not be the last session's
+        self.shared.new_space("the headset linked");
         let server_instance = self.pairing.lock().unwrap().instance;
         *self.shared.live_headset.lock().unwrap() = Some(LiveHeadset { instance, name: name.to_string(), session });
         let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea };
@@ -515,6 +517,7 @@ impl Session {
                             self.shared.mic_event(session, MicEvent::State { state, text });
                         }
                     }
+                    XrClientMsg::Recenter => self.shared.new_space("the wearer recentered"),
                     XrClientMsg::Hello { .. } => return "a second hello".into(),
                 }
             }

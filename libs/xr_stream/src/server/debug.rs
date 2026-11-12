@@ -29,7 +29,11 @@ use std::time::{Duration, Instant};
 /// (as its menu button does) and drops the pictures that still reach it (never reported); it
 /// resumes the stream when the file goes. Words in the file: `sleep`, its poses stop meanwhile
 /// (power save), and an id of `STREAM_AA_MODES`, the anti-aliasing the stream takes meanwhile
-/// (as Auto steps it while a headset is paused).
+/// (as Auto steps it while a headset is paused). Its tracking space, for tests: when the file
+/// `MAKEPAD_XR_REMOTE_SELFTEST_SPACE_FILE=<path>` names appears, the headset takes its words and
+/// removes it: `head=<x>,<y>,<z>,<yaw>` puts the head there in the tracking space from then on
+/// (turned `yaw` radians about y; it starts at 1.6 m over the origin), `session` links it again
+/// (a session of its own) and `recenter` is its wearer recentering, each a new tracking space.
 pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>) {
     let log = shared.log.clone();
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
@@ -42,6 +46,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
     log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
     hal::hal_xr_remote_enable();
     hal::hal_xr_remote_attach(eye[0], eye[1], hz * 1000);
+    shared.new_space("the headset linked");
     *shared.live_headset.lock().unwrap() = Some(super::LiveHeadset { instance: 0, name: "Selftest headset".into(), session: 0 });
     let secs = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).map(Duration::from_secs_f64);
     let (poses_for, link_for) = (secs("MAKEPAD_XR_REMOTE_SELFTEST_POSES_S"), secs("MAKEPAD_XR_REMOTE_SELFTEST_LINK_S"));
@@ -50,6 +55,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         (a.len() == 4).then(|| [a[0], a[1], a[2], a[3]])
     });
     let pause_file = std::env::var_os("MAKEPAD_XR_REMOTE_SELFTEST_PAUSE_FILE").map(std::path::PathBuf::from);
+    let space_file = std::env::var_os("MAKEPAD_XR_REMOTE_SELFTEST_SPACE_FILE").map(std::path::PathBuf::from);
     let fov_l = fov.unwrap_or([-0.785, 0.785, 0.785, -0.785]);
     let fov_r = [-fov_l[1], -fov_l[0], fov_l[2], fov_l[3]];
     let still = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_STILL").as_deref() == Ok("1");
@@ -67,6 +73,8 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         let mut stats = PumpStats::new();
         let mut idle_told = false;
         let (mut paused, mut asleep) = (false, false);
+        // where the head stands in the tracking space, and its turn about y (`SPACE_FILE`)
+        let (mut head_at, mut head_yaw) = ([0.0f32, 1.6, 0.0], 0.0f32);
         // the tiles that reached the headset and are not reported yet: it reports a link trip
         // after they arrived (decoded meanwhile), and drops them while it has paused the stream
         let mut arrived = std::collections::VecDeque::<(u64, Instant)>::new();
@@ -84,6 +92,26 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
                         shared.aa.store(i as u8, Ordering::Release);
                         log(&format!("xr selftest: anti-aliasing {} while paused", crate::settings_types::STREAM_AA_MODES[i].name));
                     }
+                }
+            }
+            // its tracking space (tests): the file's words once it appears, and it goes
+            let says = space_file.as_ref().and_then(|f| std::fs::read_to_string(f).ok().inspect(|_| {
+                let _ = std::fs::remove_file(f);
+            }));
+            if let Some(says) = says {
+                let words: Vec<&str> = says.split_whitespace().collect();
+                for w in &words {
+                    let a: Vec<f32> = w.strip_prefix("head=").map_or(Vec::new(), |v| v.split(',').filter_map(|x| x.trim().parse().ok()).collect());
+                    if a.len() == 4 {
+                        (head_at, head_yaw) = ([a[0], a[1], a[2]], a[3]);
+                        log(&format!("xr selftest: the head at ({:.3}, {:.3}, {:.3}) turned {:.3}", a[0], a[1], a[2], a[3]));
+                    }
+                }
+                if words.contains(&"session") {
+                    shared.new_space("the headset linked again");
+                }
+                if words.contains(&"recenter") {
+                    shared.new_space("the wearer recentered");
                 }
             }
             if link_for.is_some_and(|d| start.elapsed() >= d) {
@@ -112,12 +140,12 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
             }
             seq += 1;
             let t = start.elapsed().as_secs_f32();
-            let yaw = if still { 0.0 } else { (t * 0.5).sin() * 0.6 };
+            let yaw = head_yaw + if still { 0.0 } else { (t * 0.5).sin() * 0.6 };
             // the turn about y after the tilt about x
             let (sy, cy, sx, cx) = ((yaw * 0.5).sin(), (yaw * 0.5).cos(), (pitch * 0.5).sin(), (pitch * 0.5).cos());
             let q = [cy * sx, sy * cx, -sy * sx, cy * cx];
             let right = [yaw.cos(), 0.0, -yaw.sin()];
-            let at = |s: f32| XrPose { orientation: q, position: [right[0] * s * 0.032, 1.6, right[2] * s * 0.032] };
+            let at = |s: f32| XrPose { orientation: q, position: [head_at[0] + right[0] * s * 0.032, head_at[1], head_at[2] + right[2] * s * 0.032] };
             let frame = XrFrame { head: at(0.0), eyes: [XrEye { pose: at(-1.0), fov: fov_l }, XrEye { pose: at(1.0), fov: fov_r }], ..Default::default() };
             let mut wire = Vec::with_capacity(<XrFrame as Wire>::SIZE);
             frame.write(&mut wire);

@@ -343,6 +343,14 @@ impl ServerShared {
         }
     }
 
+    /// The headset's tracking space was set up again (a session began, its wearer recentered):
+    /// the app's XR window learns it ahead of the poses in it (`XrState::space`), so what it
+    /// placed in front of the head can be placed again.
+    pub(crate) fn new_space(&self, why: &str) {
+        (self.log)(&format!("xr host: a new tracking space: {why}"));
+        makepad_widgets::makepad_platform::makepad_hal::xr_remote::hal_xr_remote_space_reset();
+    }
+
     pub(crate) fn set_streaming(&self, on: bool) {
         if self.streaming.swap(on, Ordering::AcqRel) != on {
             self.streaming_changes.fetch_add(1, Ordering::AcqRel);

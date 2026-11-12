@@ -12,12 +12,12 @@ wrist menu, cards, pointing, haptic ticks and grab-to-edit.
    - `makepad-xr-nav`: move, turn and scale the scene with the grips and sticks.
    - `makepad-xr-ui`: this crate.
 
-   The headset runs the `apps/xr_remote` viewer. The app itself never builds for the headset.
+   The headset runs the companion app, which shows the stream. The app itself never builds for
+   the headset.
 
 2. **Register the script modules** in `AppMain::script_mod`:
 
    ```rust
-   makepad_xr_stream::script_mod(vm);
    makepad_xr_stream::serve_script_mod(vm);
    makepad_xr_ui::script_mod(vm);
    ```

@@ -530,7 +530,6 @@ impl AppMain for App {
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
         // the caption control, the server's frame sink and the mirror
-        makepad_xr_stream::script_mod(vm);
         makepad_xr_stream::serve_script_mod(vm);
         // the wrist menu, the panels and the card shader
         makepad_xr_ui::script_mod(vm);
