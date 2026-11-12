@@ -185,6 +185,8 @@ pub struct Parser<'a> {
     /// where the name of the last macro call stands that names an import of the crate out of the
     /// calling module's scope (rules_macro_inner; u32::MAX: none): rustc's "cannot find macro"
     macro_scope_miss: std::cell::Cell<u32>,
+    /// the unbraced arms (`pred => expr,`) of the `cfg_select!` about to be expanded: (first token, end)
+    pub cfg_select_ends: std::cell::RefCell<Vec<(usize, usize)>>,
     /// the `include!` being expanded is an expression or statement: its file keeps a leading `#!`
     pub include_as_expr: bool,
     foreign_abi: Option<Option<Ident>>,
@@ -272,6 +274,7 @@ impl<'a> Parser<'a> {
             stmt_ctx: false,
             cfg_select_rest: Default::default(),
             macro_scope_miss: std::cell::Cell::new(u32::MAX),
+            cfg_select_ends: Default::default(),
             include_as_expr: false,
             foreign_abi: None,
             cfg_out: 0,
@@ -1598,15 +1601,56 @@ impl<'a> Parser<'a> {
             && !self.name_imported(&name, self.pos)
     }
 
+    /// Where each unbraced arm (`pred => expr,`) of the `cfg_select!` in tokens `[lo, hi)` ends. rustc
+    /// parses the arm as an expression (cfg_select.rs `parse_token_tree`), so a comma inside it (generic
+    /// arguments, closure parameters) does not end the arm. An arm that does not parse is left out: the
+    /// expansion then reads it up to its first comma and the parse of that reports the error.
+    fn cfg_select_arm_ends(&mut self, lo: usize, hi: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut i = lo;
+        while i < hi {
+            while i < hi && self.toks.at(i).kind != T::FatArrow { i += 1; }
+            i += 1;
+            if i >= hi { break; }
+            if self.toks.at(i).kind == T::OpenBrace {
+                match self.tok_close_of(i, hi) {
+                    Some(c) => i = c + 1,
+                    None => break,
+                }
+            } else {
+                let save = self.pos;
+                let undo = self.tok_undo.len();
+                self.pos = i;
+                let ok = self.parse_stripped(|p| p.expr().map(|_| ())).is_ok();
+                let end = self.pos;
+                self.pos = save;
+                // a `>>` / `>=` the parse split is whole again for the expansion
+                while self.tok_undo.len() > undo {
+                    let (k, t) = self.tok_undo.pop().unwrap();
+                    self.toks.edit(k as usize, |x| *x = t);
+                }
+                if !ok || end <= i || end > hi { break; }
+                out.push((i, end));
+                i = end;
+            }
+            if i < hi && self.toks.at(i).kind == T::Comma { i += 1; }
+        }
+        out
+    }
+
     /// The arms of a `cfg_select!` that were not chosen are parsed as the chosen one is (rustc cfg_select.rs):
-    /// their syntax errors are reported. `how`: 0 an expression, 1 statements, 2 items.
+    /// their syntax errors are reported. `how`: 0 an expression, 1 statements, 2 items. An arm
+    /// written without braces (`pred => expr,`) is one expression ending at its comma wherever the
+    /// call stands (rustc parses it with `parse_expr` before it knows the position).
     fn parse_cfg_select_rest(&mut self, rest: Vec<(usize, usize)>, how: u8) -> PResult<()> {
         if rest.is_empty() || self.cfg_out > 0 { return Ok(()); }
         for (lo, hi) in rest {
             let save = self.pos;
+            let unbraced = lo > 0 && self.toks.at(lo - 1).kind == T::FatArrow;
             self.pos = lo;
             let r = self.parse_stripped(|p| {
                 match how {
+                    _ if unbraced => { if lo < hi { p.expr()?; } }
                     0 => { p.expr()?; }
                     1 => { let mut v = Vec::new(); while p.pos < hi { p.block_stmts_step(&mut v)?; } }
                     _ => { p.items_until(T::CloseBrace)?; }
@@ -2044,6 +2088,10 @@ impl<'a> Parser<'a> {
         if def.builtin != 0 {
             // built-in / hosted proc macro: tokens (its output is not re-lexed)
             let b = def.builtin;
+            if b < crate::builtins::HOSTED && crate::builtins::from_id(b) == B::CfgSelect {
+                let ends = self.cfg_select_arm_ends(toks.lo as usize, toks.hi as usize);
+                *self.cfg_select_ends.borrow_mut() = ends;
+            }
             let x = match crate::preload::timed_named(4, &def.name, || crate::builtins::expand(self, b, toks.lo as usize, toks.hi as usize, call_lo, call_hi)) {
                 Ok(x) => x,
                 // the error stays at the call (`compile_error!`): an expression's with the fn
@@ -2271,7 +2319,7 @@ impl<'a> Parser<'a> {
         let (pos, undo, mark) = (self.pos, self.tok_undo.len(), self.ast.mark());
         let lens = (self.item_start.len(), self.lazy_mods.len(), self.mod_stack.len(), self.scope_stack.len(), self.rule_scopes.len(), self.extra_items.len(), self.extra_assoc_items.len(), self.pending_shape.len());
         let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated);
-        let (pending_inner, cfg_select_rest) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone());
+        let (pending_inner, cfg_select_rest, cfg_select_ends) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone(), self.cfg_select_ends.borrow().clone());
         let macro_scope_miss = self.macro_scope_miss.get();
         let r = f(self);
         self.pos = pos;
@@ -2292,6 +2340,7 @@ impl<'a> Parser<'a> {
         (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated) = flags;
         self.pending_inner = pending_inner;
         *self.cfg_select_rest.borrow_mut() = cfg_select_rest;
+        *self.cfg_select_ends.borrow_mut() = cfg_select_ends;
         self.macro_scope_miss.set(macro_scope_miss);
         #[cfg(test)]
         assert_eq!(before, self.trace(), "Parser::look_ahead left a trace");
@@ -2314,7 +2363,7 @@ impl<'a> Parser<'a> {
             pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, foreign_rules, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
-            include_as_expr, foreign_abi, cfg_out, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss,
+            include_as_expr, foreign_abi, cfg_out, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss, cfg_select_ends,
         } = self;
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
@@ -2327,8 +2376,8 @@ impl<'a> Parser<'a> {
             tables {tables:?} token_input {token_input} exp_depth {exp_depth} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
             mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
             items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
-            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
-            macros.is_some(), cfg_select_rest.borrow(), macro_scope_miss.get())
+            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} {:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
+            macros.is_some(), cfg_select_rest.borrow(), cfg_select_ends.borrow(), macro_scope_miss.get())
     }
 
     /// After the one expression of an `include!` in expression position: tokens left are the
