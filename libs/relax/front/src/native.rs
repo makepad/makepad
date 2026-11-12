@@ -19,6 +19,11 @@
 //! cargo flags, the resolved packages (versions, features, sources), the C compiler and
 //! the target. A run with an unchanged key starts no cargo.
 //!
+//! A check without the flag starts no cargo either, but it reads a receipt the flag left behind:
+//! the same key, so the cfgs, rustc-env and OUT_DIR of that build are what its compile uses
+//! (`cached_scripts`). A tree whose C was built once type-checks whole from then on; only an
+//! absent receipt (or one that does not cover every native package) leaves a check without them.
+//!
 //! Cargo brings the lock up to date as `cargo run` does, and fetches only what is missing (the
 //! run's --offline / --frozen and cargo's offline settings still hold). Cargo.lock is not
 //! tracked, so each tree keeps its own, and with `--locked` every native build failed on a tree
@@ -46,6 +51,31 @@ pub struct Request<'a> {
     pub relax_dir: &'a str,
     pub triple: &'a str,
     pub resolvable: Resolvable,
+}
+
+/// What a caller allows the native path to do (`unitgraph::run_build_scripts`).
+#[derive(Clone, Copy)]
+pub enum Mode<'a> {
+    /// `--allow-c`: cargo builds the native packages (or reuses the cached build), and their
+    /// library is linked into the run.
+    Build(&'a Request<'a>),
+    /// A check without `--allow-c`: read the cfgs, env and OUT_DIR of a native build already in
+    /// the cache. Nothing is built and no native code is linked, so a tree whose C was built once
+    /// (with the flag) type-checks whole from then on.
+    Cached(&'a Request<'a>),
+}
+
+impl<'a> Mode<'a> {
+    pub fn request(&self) -> &'a Request<'a> {
+        match self {
+            Mode::Build(req) | Mode::Cached(req) => req,
+        }
+    }
+
+    /// Whether cargo may run and the native library be linked.
+    pub fn builds(&self) -> bool {
+        matches!(self, Mode::Build(_))
+    }
 }
 
 /// Which of the C symbols `names` the loader process binds once the libraries `dylibs` and the
@@ -166,10 +196,24 @@ fn id_name_version(id: &str) -> (String, String) {
     (it.next().unwrap_or("").to_string(), it.next().unwrap_or("").to_string())
 }
 
-/// Builds the native packages `seeds` (indices into `g.build_scripts`) with cargo, or finds the
-/// cached build, and links them. The error names what failed.
-pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("this executable: {e}"))?;
+/// Where the native build of `seeds` under `req` lives, and the cargo selection it is keyed on.
+struct Plan {
+    script_pkgs: Vec<String>,
+    lib_pkgs: Vec<String>,
+    /// cargo flags without `--release` (cargo check runs the release profile)
+    flags: Vec<String>,
+    /// "name version" of each native package
+    names: Vec<String>,
+    dir: String,
+    messages_path: String,
+    lib_path: String,
+    fast_mark: String,
+}
+
+/// The key a native build is stored under (module doc: the cargo flags, the resolved packages,
+/// the C compiler and the target). `build` writes under it and `cached_scripts` reads it, so a
+/// check reads exactly what a `--allow-c` run of the same inputs wrote.
+fn plan(g: &Graph, seeds: &[usize], req: &Request) -> Plan {
     let pk = |bs: &BuildScript| g.pkg[bs.krate].clone();
     // packages whose script runs for real: the native ones and the build-dependency closure of
     // those; packages whose lib compiles for real: that closure
@@ -193,7 +237,7 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     script_pkgs.sort();
     lib_pkgs.sort();
     // cargo flags without `--release` (cargo check runs the release profile below)
-    let flags: Vec<&String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").collect();
+    let flags: Vec<String> = req.cargo_flags.iter().filter(|f| f.as_str() != "--release").cloned().collect();
 
     // ---- the key
     let mut h = fnv(b"native-link-v12", 0xcbf29ce484222325);
@@ -239,30 +283,56 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
     let messages_path = format!("{}/messages.jsonl", dir);
     let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
     let lib_path = format!("{}/libnative.{}", dir, ext);
-
     let fast_mark = format!("{}/fast", dir);
-    let out = match std::fs::read_to_string(&messages_path).ok().and_then(|m| cached(&g.pkg, &script_table(g), seeds, &m, &lib_path)) {
+    Plan { script_pkgs, lib_pkgs, flags, names, dir, messages_path, lib_path, fast_mark }
+}
+
+/// Builds the native packages `seeds` (indices into `g.build_scripts`) with cargo, or finds the
+/// cached build, and links them. The error names what failed.
+pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("this executable: {e}"))?;
+    let plan = plan(g, seeds, req);
+    let flags: Vec<&String> = plan.flags.iter().collect();
+    let out = match std::fs::read_to_string(&plan.messages_path).ok().and_then(|m| cached(&g.pkg, &script_table(g), seeds, &m, &plan.lib_path)) {
         Some(out) => out,
         None => {
-            let m = run_cargo(g, req, &exe, &flags, &script_pkgs, &lib_pkgs, seeds, Tier::Fast)?;
-            std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir, e))?;
-            std::fs::write(&fast_mark, b"").map_err(|e| format!("{}: {}", fast_mark, e))?;
-            std::fs::write(&messages_path, &m).map_err(|e| format!("{}: {}", messages_path, e))?;
+            let m = run_cargo(g, req, &exe, &flags, &plan.script_pkgs, &plan.lib_pkgs, seeds, Tier::Fast)?;
+            std::fs::create_dir_all(&plan.dir).map_err(|e| format!("{}: {}", plan.dir, e))?;
+            std::fs::write(&plan.fast_mark, b"").map_err(|e| format!("{}: {}", plan.fast_mark, e))?;
+            std::fs::write(&plan.messages_path, &m).map_err(|e| format!("{}: {}", plan.messages_path, e))?;
             // a stale library of an earlier link under this key is not trusted
-            let _ = std::fs::remove_file(&lib_path);
+            let _ = std::fs::remove_file(&plan.lib_path);
             outputs(g, seeds, &m)?
         }
     };
     if out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty() {
         return Ok(Built { scripts: out.scripts, lib: None });
     }
-    if !std::path::Path::new(&lib_path).is_file() {
-        link(&lib_path, &out.archives, &out.search, &out.fw_search, &out.dylibs, &out.frameworks, req.triple, req.resolvable)?;
+    if !std::path::Path::new(&plan.lib_path).is_file() {
+        link(&plan.lib_path, &out.archives, &out.search, &out.fw_search, &out.dylibs, &out.frameworks, req.triple, req.resolvable)?;
     }
-    if std::path::Path::new(&fast_mark).is_file() {
-        optimize_later(g, req, exe, &flags, script_pkgs, lib_pkgs, seeds, &out, lib_path.clone(), fast_mark);
+    if std::path::Path::new(&plan.fast_mark).is_file() {
+        optimize_later(g, req, exe, &flags, plan.script_pkgs, plan.lib_pkgs, seeds, &out, plan.lib_path.clone(), plan.fast_mark);
     }
-    Ok(Built { scripts: out.scripts, lib: Some(NativeLib { path: lib_path, statics: out.statics, crates: names }) })
+    Ok(Built { scripts: out.scripts, lib: Some(NativeLib { path: plan.lib_path, statics: out.statics, crates: plan.names }) })
+}
+
+/// The script outputs of the native build already cached under `req`'s key (no cargo, no link):
+/// the cfgs, env and OUT_DIR a check compiles the native packages with. `None` when nothing is
+/// cached, when the receipt does not cover every seed (a partial build is not a build), or when
+/// the directories it names are gone. `cached` rejects the receipt of a build that did not link
+/// or whose library the target no longer holds, so only a whole build is read back as one.
+pub fn cached_scripts(g: &Graph, seeds: &[usize], req: &Request) -> Option<Vec<ScriptOut>> {
+    let plan = plan(g, seeds, req);
+    let messages = std::fs::read_to_string(&plan.messages_path).ok()?;
+    let out = cached(&g.pkg, &script_table(g), seeds, &messages, &plan.lib_path)?;
+    for &s in seeds {
+        let (_, n, v) = &g.pkg[g.build_scripts[s].krate];
+        if !out.scripts.iter().any(|o| g.pkg[o.krate].1 == *n && g.pkg[o.krate].2 == *v) {
+            return None;
+        }
+    }
+    Some(out.scripts)
 }
 
 /// The wrapper selects real builds by package name. Selecting one unit therefore

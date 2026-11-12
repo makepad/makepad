@@ -459,39 +459,52 @@ pub type ScriptsDone<'a> = dyn Fn(&Graph, &[usize], &[Vec<String>], &[Vec<(Strin
 /// the native packages (a cold `--allow-c` start: the C compile takes tens of seconds), with the
 /// crates' cfgs and env so far (the native packages' outputs missing). The boot starts the
 /// proc-macro world from it, beside the C compile. What it returns is kept until cargo is done.
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<&crate::native::Request>, check_only: bool,
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<crate::native::Mode<'_>>, check_only: bool,
     scripts_done: Option<&ScriptsDone<'_>>) -> Result<(), String> {
     // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
-    // an error naming the flag without it; Relax runs the other scripts
-    let mut native_seeds: Vec<usize> = Vec::new();
-    let mut check_skipped: Vec<usize> = Vec::new();
-    for (i, bs) in g.build_scripts.iter().enumerate() {
+    // an error naming the flag without it; Relax runs the other scripts. A check without the flag
+    // reads the cfgs, env and OUT_DIR a native build already in the cache produced, so it needs
+    // no cargo and no link of its own.
+    let builds = native.is_some_and(|m| m.builds());
+    let native_scripts: Vec<(usize, String)> = g.build_scripts.iter().enumerate().filter_map(|(i, bs)| {
         let (_, pname, _) = &g.pkg[bs.krate];
         // A kept GPU-kernel script (`Artefact`) that links native code (makepad-ai-cuda's nvcc
         // archives, `links =`) is cargo's too with `--allow-c`: its archives join the run's
         // native library. Without the flag it runs under Relax as before.
-        let kept_native = native.is_some() && matches!(script_role(pname, &bs.features), ScriptRole::Artefact);
+        let kept_native = builds && matches!(script_role(pname, &bs.features), ScriptRole::Artefact);
         if noop::script(bs, &g.raw) || !(kept_native || matches!(script_role(pname, &bs.features), ScriptRole::ToRemove)) {
-            continue;
+            return None;
         }
-        if let Some(why) = crate::native::native_reason(g, bs) {
-            if native.is_none() {
-                // a script that runs a C compiler cannot work without one; `links =` / DEP_
-                // metadata alone run under Relax as before
-                if why.contains("build-dependency") && check_only {
-                    eprintln!("makepad check: `{}`'s build script compiles C ({}): not run without `--allow-c` (its cfgs are left out)", pname, why);
-                    check_skipped.push(bs.krate);
-                    continue;
-                }
-                if why.contains("build-dependency") {
-                    return Err(format!("`{}` compiles C ({}): it {}", pname, why, relax_session::options::C_GATE));
-                }
-                continue;
-            }
-            if sess.runtime.profile {
+        crate::native::native_reason(g, bs).map(|why| (i, why))
+    }).collect();
+    let cached = match native {
+        Some(m) if !m.builds() && !native_scripts.is_empty() => {
+            let seeds: Vec<usize> = native_scripts.iter().map(|(i, _)| *i).collect();
+            crate::native::cached_scripts(g, &seeds, m.request())
+        }
+        _ => None,
+    };
+    let mut native_seeds: Vec<usize> = Vec::new();
+    let mut check_skipped: Vec<usize> = Vec::new();
+    for (i, why) in native_scripts {
+        let bs = &g.build_scripts[i];
+        let (_, pname, _) = &g.pkg[bs.krate];
+        if builds || cached.is_some() {
+            if builds && sess.runtime.profile {
                 eprintln!("makepad-run build-script: {} is native ({})", pname, why);
             }
             native_seeds.push(i);
+            continue;
+        }
+        // a script that runs a C compiler cannot work without one; `links =` / DEP_ metadata
+        // alone run under Relax as before
+        if why.contains("build-dependency") && check_only {
+            eprintln!("makepad check: `{}`'s build script compiles C ({}): not run without `--allow-c` (its cfgs and OUT_DIR are missing; a `--allow-c` run fills the cache this check reads)", pname, why);
+            check_skipped.push(bs.krate);
+            continue;
+        }
+        if why.contains("build-dependency") {
+            return Err(format!("`{}` compiles C ({}): it {}", pname, why, relax_session::options::C_GATE));
         }
     }
     let native_krates: Vec<usize> = native_seeds.iter().map(|&i| g.build_scripts[i].krate).collect();
@@ -511,7 +524,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     let gr: &Graph = g;
     let (native_built, results) = std::thread::scope(|scope| {
         let native_job = match (native, native_seeds.is_empty()) {
-            (Some(req), false) => Some(scope.spawn(|| {
+            (Some(crate::native::Mode::Build(req)), false) => Some(scope.spawn(|| {
                 let _z = crate::zone_alloc::compiler_thread();
                 crate::native::build(gr, &native_seeds, req)
             })),
@@ -557,33 +570,42 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             }
         }
         g.native = built.lib;
-        for n in built.scripts {
-            let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
-            for &k in std::iter::once(&n.krate).chain(&also) {
-                if n.host {
-                    if g.crates[k].host.is_some() {
-                        let (dir, name, ver) = &g.pkg[k];
-                        let mut env = pkg_env(dir, name, ver);
-                        env.push(("CARGO_CRATE_NAME".into(), g.crates[k].name.clone()));
-                        env.extend(n.env.iter().cloned());
-                        env.push(("OUT_DIR".into(), n.out_dir.clone()));
-                        // Keep host-feature cfgs out of the application crate.
-                        g.crates[k].host.as_mut().unwrap().build_outputs = Some((n.cfgs.clone(), env));
-                    }
-                    continue;
+        apply_native_scripts(g, built.scripts);
+    } else if let Some(scripts) = cached {
+        // a check's cached build: the same outputs cargo would have produced, no cargo and no lib
+        apply_native_scripts(g, scripts);
+    }
+    apply_script_results(g, results, check_only)
+}
+
+/// A native build's script outputs into the graph (cfgs, link libraries, env, OUT_DIR): what
+/// cargo wrote for `--allow-c`, or what `cached_scripts` read back from its receipt.
+fn apply_native_scripts(g: &mut Graph, scripts: Vec<crate::native::ScriptOut>) {
+    for n in scripts {
+        let also = g.build_scripts.iter().find(|b| b.krate == n.krate).map(|b| b.also.clone()).unwrap_or_default();
+        for &k in std::iter::once(&n.krate).chain(&also) {
+            if n.host {
+                if g.crates[k].host.is_some() {
+                    let (dir, name, ver) = &g.pkg[k];
+                    let mut env = pkg_env(dir, name, ver);
+                    env.push(("CARGO_CRATE_NAME".into(), g.crates[k].name.clone()));
+                    env.extend(n.env.iter().cloned());
+                    env.push(("OUT_DIR".into(), n.out_dir.clone()));
+                    // Keep host-feature cfgs out of the application crate.
+                    g.crates[k].host.as_mut().unwrap().build_outputs = Some((n.cfgs.clone(), env));
                 }
-                g.cfgs[k].extend(n.cfgs.iter().cloned());
-                g.env[k].extend(n.env.iter().cloned());
-                g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
+                continue;
             }
-            for l in n.system {
-                if !g.link_libs.contains(&l) {
-                    g.link_libs.push(l);
-                }
+            g.cfgs[k].extend(n.cfgs.iter().cloned());
+            g.env[k].extend(n.env.iter().cloned());
+            g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
+        }
+        for l in n.system {
+            if !g.link_libs.contains(&l) {
+                g.link_libs.push(l);
             }
         }
     }
-    apply_script_results(g, results, check_only)
 }
 
 /// The scripts Relax runs itself (every one but the native packages' and a check's skipped

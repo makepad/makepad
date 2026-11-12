@@ -1,0 +1,6 @@
+[package]
+name = "relax-fixture-cc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The one call of the cc crate's API that cnative's build script makes, with the system C compiler and ar: the fixture needs no registry, and its script still has the `cc` build-dependency a C build script has"

@@ -238,6 +238,18 @@ pub fn vaddw_u8(a: uint16x8_t, b: uint8x8_t) -> uint16x8_t {
     uint16x8_t(r)
 }
 
+/// vaddw_high: the upper half of `b` widened and added
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vaddw_high_u8(a: uint16x8_t, b: uint8x16_t) -> uint16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = a.0[i].wrapping_add(b.0[i + 8] as u16);
+        i += 1;
+    }
+    uint16x8_t(r)
+}
+
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vceq_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
     let mut r = [0; 8];
@@ -3127,6 +3139,21 @@ pub fn vpaddq_s32(a: int32x4_t, b: int32x4_t) -> int32x4_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vpaddq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if i < 8 {
+            a.0[i * 2].wrapping_add(a.0[i * 2 + 1])
+        } else {
+            b.0[(i - 8) * 2].wrapping_add(b.0[(i - 8) * 2 + 1])
+        };
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vpmaxq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
     let mut r = [0; 16];
     let mut i = 0;
@@ -4334,6 +4361,22 @@ pub fn vshrq_n_u8<const N: i32>(a: uint8x16_t) -> uint8x16_t {
     unsafe {
         vx::vx_unary(a, 2, 8, N)
     }
+}
+
+/// vsri: shift right and insert. Each lane of `b` shifted right by N (1..=8) replaces all but the
+/// top N bits of `a`'s lane; N = 8 keeps `a` whole.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+pub fn vsriq_n_u8<const N: i32>(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+    let n = N as u32;
+    let low = if n >= 8 { 0 } else { 0xffu8 >> n };
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = (a.0[i] & !low) | (b.0[i].checked_shr(n).unwrap_or(0) & low);
+        i += 1;
+    }
+    uint8x16_t(r)
 }
 
 #[inline]

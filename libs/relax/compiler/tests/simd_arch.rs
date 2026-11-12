@@ -222,6 +222,11 @@ fn arch() {
     u!(vaddvq_u32, uint32x4_t);
     u!(vmaxvq_u32, uint32x4_t);
     b!(vaddw_u8, uint16x8_t, uint8x8_t);
+    b!(vaddw_high_u8, uint16x8_t, uint8x16_t);
+    b!(vpaddq_u8, uint8x16_t, uint8x16_t);
+    b!(vsriq_n_u8::<1>, uint8x16_t, uint8x16_t);
+    b!(vsriq_n_u8::<5>, uint8x16_t, uint8x16_t);
+    b!(vsriq_n_u8::<8>, uint8x16_t, uint8x16_t);
     t!(vmlal_u16, uint32x4_t, uint16x4_t, uint16x4_t);
     t!(vmlal_high_u16, uint32x4_t, uint16x8_t, uint16x8_t);
     b!(vpadalq_u8, uint16x8_t, uint8x16_t);

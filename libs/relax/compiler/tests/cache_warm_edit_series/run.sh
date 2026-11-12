@@ -13,7 +13,7 @@
 # with "slot N of the startup image has no identity": the HAL's cached `lock` code, taken again
 # after the HAL edit, named a closure of the HAL's old lib.rs, and the image's slot for that key
 # was handed out undecoded.
-# Needs a display for the hidden window (165: WAYLAND_DISPLAY of a headless compositor).
+# Needs a display for the hidden window (WAYLAND_DISPLAY of a headless compositor on a Linux node).
 # Prints "cache_warm_edit_series: ok" or "cache_warm_edit_series: FAILED ...".
 H=$(cd "$(dirname "$0")" && pwd)
 W=$(cd "$H/../../../../.." && pwd)

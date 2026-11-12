@@ -22,6 +22,13 @@ fn neon_shift_and_ext_immediates_are_arguments() {
         assert_eq!(b8(transmute(vshrq_n_u8(u8s, 3))), b8(transmute(vshrq_n_u8::<3>(u8s))));
         assert_eq!(b8(transmute(vshrq_n_u8(u8s, 3))), bytes.map(|x| x >> 3));
         assert_eq!(b8(transmute(vshlq_n_u8(u8s, 2))), bytes.map(|x| x << 2));
+        // relax issue 42: shift right and insert keeps the top N bits of the first operand
+        let b: uint8x16_t = transmute(other);
+        let sri = |n: u32| -> [u8; 16] { core::array::from_fn(|i| if n == 8 { bytes[i] } else { (bytes[i] & !(0xff >> n)) | (other[i] >> n) }) };
+        assert_eq!(b8(transmute(vsriq_n_u8(u8s, b, 3))), sri(3));
+        assert_eq!(b8(transmute(vsriq_n_u8(u8s, b, 3))), b8(transmute(vsriq_n_u8::<3>(u8s, b))));
+        assert_eq!(b8(transmute(vsriq_n_u8(u8s, b, 1))), sri(1));
+        assert_eq!(b8(transmute(vsriq_n_u8(u8s, b, 8))), sri(8));
         assert_eq!(b8(transmute(vshrq_n_s8(s8s, 2))), bytes.map(|x| ((x as i8) >> 2) as u8));
         assert_eq!(b8(transmute(vshlq_n_s8(s8s, 1))), bytes.map(|x| ((x as i8) << 1) as u8));
         let w16: [u16; 8] = transmute(bytes);
@@ -35,7 +42,6 @@ fn neon_shift_and_ext_immediates_are_arguments() {
         assert_eq!(transmute::<_, [u64; 2]>(vshlq_n_u64(u64s, 7)), w64.map(|x| x << 7));
         assert_eq!(transmute::<_, [i64; 2]>(vshrq_n_s64(s64s, 63)), i64s.map(|x| x >> 63));
         assert_eq!(transmute::<_, [i64; 2]>(vshlq_n_s64(s64s, 1)), i64s.map(|x| x << 1));
-        let b: uint8x16_t = transmute(other);
         let ext = |n: usize| -> [u8; 16] { core::array::from_fn(|i| if i + n < 16 { bytes[i + n] } else { other[i + n - 16] }) };
         assert_eq!(b8(transmute(vextq_u8(u8s, b, 0))), ext(0));
         assert_eq!(b8(transmute(vextq_u8(u8s, b, 1))), ext(1));

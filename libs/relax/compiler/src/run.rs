@@ -780,9 +780,19 @@ pub(crate) fn resolve_package(
                 (crate::provided::check_sources(&pkgs, only), t.elapsed())
             }));
             // `--allow-c`: cargo builds the native dependencies (front native.rs); a build
-            // script's own child run never builds them again
+            // script's own child run never builds them again. A check without the flag reads the
+            // script outputs of a native build already in the cache: same key, same cfgs/env/OUT_DIR.
             let triple = crate::cfg::CfgSet::host(sess, &[]).triple();
-            let native_request = (options.allow_c && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()).then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple, resolvable: native_resolvable });
+            let native_request = std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none().then(|| crate::native::Request { workspace, package, cargo_flags, relax_dir: target_dir, triple, resolvable: native_resolvable });
+            let native_mode = native_request.as_ref().and_then(|req| {
+                if options.allow_c {
+                    Some(crate::native::Mode::Build(req))
+                } else if check_only {
+                    Some(crate::native::Mode::Cached(req))
+                } else {
+                    None
+                }
+            });
             // a cold `--allow-c` boot: while cargo still compiles the C code, the proc-macro world
             // (built from the other crates' outputs) starts beside it, unless a macro crate needs
             // a native package's output
@@ -798,7 +808,7 @@ pub(crate) fn resolve_package(
                 Some(Box::new(alone))
             };
             let hook: Option<&unitgraph::ScriptsDone<'_>> = (boot && !check_only).then_some(&early_world);
-            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_request.as_ref(), check_only, hook);
+            let scripts = unitgraph::run_build_scripts(sess, &mut g, target_dir, native_mode, check_only, hook);
             let scripts_ms = t_scripts.elapsed().as_secs_f64() * 1e3;
             let t_wait = Instant::now();
             (sources.map(|h| h.join().expect("provided source check")), scripts, scripts_ms, t_wait.elapsed().as_secs_f64() * 1e3)

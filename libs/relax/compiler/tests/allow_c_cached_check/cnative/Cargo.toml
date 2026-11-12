@@ -1,0 +1,9 @@
+[package]
+name = "cnative"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# a C build script's build-dependency, as a -sys crate has: the fixture's own (cc/), no registry
+[build-dependencies]
+cc = { path = "../cc", package = "relax-fixture-cc" }

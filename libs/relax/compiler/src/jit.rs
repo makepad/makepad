@@ -20791,7 +20791,7 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // program thread has a lazy compile in flight (or had one in the last TIER1_POLL): the UI
     // goes first. Speculative and other background compiles do not hold it back: they refreshed
     // an all-compiler quiet window for seconds after Stage's present, every O3 worker slept here
-    // with ~1.5k hot builds queued (lane SETTLE trace, 165), hot code waiting behind guesses.
+    // with ~1.5k hot builds queued (lane SETTLE trace), hot code waiting behind guesses.
     let needs_rir = |up: *mut Unit| {
         let f = &(&*up).fns[id as usize];
         f.compiled && f.rir.is_none() && f.build_err.is_none() && !f.building
@@ -22311,7 +22311,7 @@ pub fn bump_patch_epoch() {
 //   previous run's fns compiled on a worker (run.rs start_ahead);
 // - the O3 queue: an entry queued long ago for code that has gone cold is counted again
 //   (the common queue), so a backlog of once-busy startup code never builds unless it runs hot again.
-// Cold Stage on the old default (aot without these bounds, 165): 27k teardown builds (85% never
+// Cold Stage on the old default (aot without these bounds): 27k teardown builds (85% never
 // called, 4.6 s), Gandalf 4.4k app bodies (8.4 s; 13.8 s warm, 5.3k bodies), a 2k-entry O3 backlog
 // at the first present, 1.8k O3 builds dropped behind their own O2 build: 2-4 cores busy for 25 s+.
 

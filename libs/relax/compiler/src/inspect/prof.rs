@@ -152,7 +152,7 @@ mod imp {
 
     /// Why a ring did not open: the perf_event_open errno, or the mmap's (the locked-memory
     /// budget: RLIMIT_MEMLOCK plus the user's perf_event_mlock_kb x CPUs, shared with every perf
-    /// user of this uid -- 165 ran out at ~8-24 rings of 1 MB with ~100 program threads, and the
+    /// user of this uid -- a Linux node ran out at ~8-24 rings of 1 MB with ~100 program threads, and the
     /// busy UI thread got none: no JIT samples).
     enum OpenErr {
         Event(i64),

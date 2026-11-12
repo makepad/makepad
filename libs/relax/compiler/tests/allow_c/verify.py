@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-"""Run on a build node: verify.py <makepad binary> <scratch directory>.
+"""verify.py [<makepad binary> <scratch directory>]: without them (CI, from the workspace root) it
+builds this tree's makepad and works in a scratch dir under its target folder.
 
 Uses the existing offline C fixture, cargo and the system C toolchain. Keeps
 outputs in scratch for inspection; no fixture source or workspace is rewritten.
 """
+import atexit
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
-binary = str(Path(sys.argv[1]).resolve())
-scratch = Path(sys.argv[2]).resolve()
-scratch.mkdir(parents=True, exist_ok=True)
+if len(sys.argv) > 2:
+    binary = str(Path(sys.argv[1]).resolve())
+    scratch = Path(sys.argv[2]).resolve()
+    scratch.mkdir(parents=True, exist_ok=True)
+else:
+    # CI, from the workspace root: this tree's makepad, and a scratch dir under its target folder
+    # that goes with the run
+    subprocess.run(["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad"], check=True)
+    target = Path(os.environ.get("CARGO_TARGET_DIR", "target")).resolve()
+    binary = str(target / "host" / "makepad")
+    scratch = Path(tempfile.mkdtemp(prefix=Path(__file__).parent.name + "-", dir=target))
+    atexit.register(shutil.rmtree, scratch, True)
 fixture = scratch / "fixture"
 shutil.copytree(Path(__file__).parent, fixture,
                 ignore=shutil.ignore_patterns("target", "Cargo.lock", "__pycache__"))
