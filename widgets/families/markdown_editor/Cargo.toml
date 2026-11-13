@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad widgets: a Markdown document shown as its final text, over the code editor's document"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

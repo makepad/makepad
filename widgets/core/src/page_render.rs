@@ -5,13 +5,14 @@
 //! A page renders in horizontal bands sized so a band's readback stays within
 //! half of the context's readback budget and at most 4 MB (A4 at 300 dpi: nine
 //! bands), one band per frame, so the UI thread never waits on the GPU. A
-//! refused readback is asked for again on a later frame, never dropped. The
+//! band's readback that waits for room holds its ticket; one refused at the
+//! context's request limit is asked for again on a later frame, never dropped. The
 //! host widget calls [`PageRender::begin_page`] in its draw (drawing the page
 //! between it and [`PageRender::end_page`] when it answers a page) and
 //! [`PageRender::handle_event`] with its events.
 
 use crate::makepad_draw::*;
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 /// A page's paper, margins and resolution.
 #[derive(Clone, Copy, Debug)]
@@ -166,7 +167,7 @@ pub struct RenderedPage {
     pub height: usize,
     /// RGBA bands top to bottom: (pixels, width, rows); the last can hold
     /// rows past the page's height.
-    bands: Vec<(Arc<[u8]>, usize, usize)>,
+    bands: Vec<(HostBuf, usize, usize)>,
 }
 
 impl RenderedPage {
@@ -223,7 +224,7 @@ struct PageJob {
     index: usize,
     band: usize,
     state: Band,
-    bands: Vec<(Arc<[u8]>, usize, usize)>,
+    bands: Vec<(HostBuf, usize, usize)>,
     refused: usize,
 }
 
@@ -247,8 +248,9 @@ impl PageRender {
     pub fn new(cx: &mut Cx, format: PageFormat) -> Self {
         let (width, height) = format.pixels();
         // A readback reserves its rows padded to 4 KiB; a band takes at most
-        // half the context's budget, so it is never refused for good, and at
-        // most BAND_BYTES: its pixels are copied on the UI thread as they
+        // half the context's budget, so it is admitted beside other readbacks
+        // rather than waiting for all of them to be taken, and at most
+        // BAND_BYTES: its pixels are copied on the UI thread as they
         // come back, so a smaller band keeps each frame's share small.
         let padded_row = (width * 4 + 4095) & !4095;
         let budget_rows = (TEXTURE_READBACK_MAX_BYTES / 2 / padded_row).min(BAND_BYTES / (width * 4).max(1)).max(1);
@@ -384,9 +386,10 @@ impl PageRender {
                 job.refused = 0;
             }
             Err(ReadbackError::Backpressure) => {
-                // Other readbacks hold the budget until they are taken.
+                // The per-context limit of outstanding readback tickets is reached:
+                // ask again each frame until results are taken.
                 if job.refused == 0 {
-                    log!("page render: readback budget in use; asking again each frame");
+                    log!("page render: per-context readback request limit reached; band waits, asking again each frame");
                 }
                 job.refused += 1;
                 self.retry = cx.new_next_frame();

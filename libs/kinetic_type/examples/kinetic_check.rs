@@ -142,6 +142,8 @@ pub struct KineticHost {
     #[rust]
     next_frame: NextFrame,
     #[rust]
+    readback_wait_logged: bool,
+    #[rust]
     pass: Option<(DrawPass, DrawList2d, Texture)>,
     #[rust]
     sheet: Vec<u8>,
@@ -297,8 +299,17 @@ impl KineticHost {
                 }
                 let tex = self.pass.as_ref().unwrap().2.clone();
                 match tex.read_back(cx, ReadbackRequest::default()) {
-                    Ok(t) => self.state = Some(State::Read(t)),
-                    Err(ReadbackError::Backpressure) => self.state = Some(State::Wait(serial, since)),
+                    Ok(t) => {
+                        self.readback_wait_logged = false;
+                        self.state = Some(State::Read(t));
+                    }
+                    Err(ReadbackError::Backpressure) => {
+                        if !self.readback_wait_logged {
+                            log!("kinetic_check: context readback request limit reached; frame waits");
+                            self.readback_wait_logged = true;
+                        }
+                        self.state = Some(State::Wait(serial, since));
+                    }
                     Err(e) => finish(Err(format!("readback: {e}"))),
                 }
             }

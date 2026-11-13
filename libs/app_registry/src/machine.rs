@@ -6,7 +6,7 @@
 //!   (`#` comments): `lan = on|off` (the app's local-network switch, `MAKEPAD_LAN`), and
 //!   `env NAME=value` for a setting the app reads from its environment (a printer conf name).
 //! - `<makepad home>/wm/jit.env`: `NAME=value` lines every JIT run on this machine gets (how a
-//!   node debugs its JIT apps: `MAKEPAD_RUN_VERBOSE=1`, an on-disk `TMPDIR`).
+//!   node debugs its JIT apps: `RELAX_VERBOSE=1`, an on-disk `TMPDIR`).
 //! - `<makepad home>/apps/local.json`: this machine's own apps, rows of the shared table's shape
 //!   (`apps.json`) for checkouts of other repositories it runs (table.rs). The WM's dock and
 //!   menus list them; `<makepad home>/wm/apps.splash` picks how each runs, as for any app.
@@ -61,7 +61,7 @@ pub fn settable(name: &str) -> bool {
         && !test_hook(name)
 }
 
-/// A test's switch (`MAKEPAD_RUN_TEST_COMPILE_PANIC`, `MAKEPAD_TRAY_SELFTEST`, ...): a name with a
+/// A test's switch (`RELAX_TEST_COMPILE_PANIC`, `MAKEPAD_TRAY_SELFTEST`, ...): a name with a
 /// `TEST` word. A test sets it on the one process it runs; a machine file never does, or every
 /// later launch on the machine runs the test (a forced compile panic in the dock's app).
 pub fn test_hook(name: &str) -> bool {
@@ -152,7 +152,7 @@ pub fn request_launch(path: &std::path::Path, id: &str, native: bool) -> Result<
         // the id is checked above: only a WM from before `native` reads the two words as a bad id
         "makepad-wm refused not an app id" if native => {
             let package = crate::find(id).map_or(id, |a| a.package);
-            Err(format!("this WM is older than native launches: it takes them after its next restart. Until then, a screen lease that takes the test environment off: `devhub run <lane> screen --node <node> --native <why> -- env -u MAKEPAD_HIDE_WINDOWS -u MAKEPAD_TEST_LANE -u SANDBOX_MUTE -u MAKEPAD_LAN cargo run --release -p {package}`, which queues while the person is at the box (`devhub node <node> back` lets it through)"))
+            Err(format!("this WM is older than native launches: it takes them after its next restart. Until then, a screen lease that takes the test environment off: `devhub run <lane> screen --node <node> --native <why> -- env -u MAKEPAD_HIDE_WINDOWS -u MAKEPAD_TEST_LANE -u MAKEPAD_MUTE -u MAKEPAD_LAN cargo run --release -p {package}`, which queues while the person is at the box (`devhub node <node> back` lets it through)"))
         }
         other => Err(other.strip_prefix("makepad-wm refused ").map_or_else(|| format!("unexpected answer {other:?}"), str::to_string)),
     }
@@ -241,6 +241,24 @@ fn unsaved_in(dir: &std::path::Path) -> Vec<(u32, String, String)> {
     out
 }
 
+/// Where the apps of this machine say a person uses them (`makepad_platform::restart::set_in_use`):
+/// `$XDG_RUNTIME_DIR/makepad-in-use`, else `$HOME/.makepad/in-use` (a Mac has no runtime dir). One
+/// file per process, named by its pid, one line per use ("an XR headset (Quest 3)"); a file whose
+/// process is gone is a dead app's.
+pub fn in_use_dir() -> Option<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(|d| PathBuf::from(d).join("makepad-in-use"));
+    runtime.or_else(|| std::env::var_os("HOME").filter(|d| !d.is_empty()).map(|h| PathBuf::from(h).join(".makepad").join("in-use")))
+}
+
+/// The app a command line's words run, as the registry names it: a word that is its package or
+/// binary (a path's file name: `makepad run makepad-app-fab`, `.../release/makepad-fab`).
+pub fn app_in_command<'a>(words: impl IntoIterator<Item = &'a str>) -> Option<&'static crate::AppEntry> {
+    words.into_iter().find_map(|word| {
+        let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+        crate::apps().iter().find(|a| a.package == name || a.bin == name)
+    })
+}
+
 /// When process `pid` started: the boot time (`btime` of /proc/stat, whole seconds, so at most
 /// a second early) plus its start in clock ticks after boot (field 22 of /proc/<pid>/stat). None:
 /// no such process, or no /proc (macOS).
@@ -257,6 +275,78 @@ fn started(pid: u32) -> Option<std::time::SystemTime> {
     Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(boot) + std::time::Duration::from_millis(ticks * 1000 / TICKS_PER_S))
 }
 
+/// Who opened an app the WM hosts. The WM writes it as a line of the app's client log
+/// (`wm-client-<id>.log`, [`Launcher::line`]; a warm instance opened later gets a later line), and
+/// an agent's launch also carries it in the app's environment ([`LAUNCHED_BY_ENV`]), as a lease's
+/// run carries its lease's mark. A WM restart waits for a person's app, never an agent's: a
+/// terminal nobody had opened held a node's WM on its old binary for days (11-13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Launcher {
+    /// a person at the WM (its dock, launcher, keys, AI pane): what they opened
+    Person(String),
+    /// an agent: input injected over remote (who sent it), devhub's `show` through the WM socket
+    Agent(String),
+    /// the WM's warm pool: a standby no one has opened yet
+    Pool,
+}
+
+/// The environment variable an agent's launch carries: `agent: <who>` ([`Launcher::env_value`]).
+pub const LAUNCHED_BY_ENV: &str = "MAKEPAD_LAUNCHED_BY";
+
+const LAUNCHED_BY_LINE: &str = "wm: launched by ";
+
+impl Launcher {
+    /// "person: at the WM", "agent: devhub show", "pool": the value after the line's prefix.
+    pub fn env_value(&self) -> String {
+        match self {
+            Launcher::Person(how) => format!("person: {how}"),
+            Launcher::Agent(who) => format!("agent: {who}"),
+            Launcher::Pool => "pool".to_string(),
+        }
+    }
+
+    /// Its client-log line.
+    pub fn line(&self) -> String {
+        format!("{LAUNCHED_BY_LINE}{}", self.env_value())
+    }
+
+    /// The launcher an [`Self::env_value`] names.
+    pub fn parse(value: &str) -> Option<Launcher> {
+        let value = value.trim();
+        if value == "pool" {
+            return Some(Launcher::Pool);
+        }
+        let (kind, rest) = value.split_once(": ")?;
+        match kind {
+            "person" => Some(Launcher::Person(rest.to_string())),
+            "agent" => Some(Launcher::Agent(rest.to_string())),
+            _ => None,
+        }
+    }
+
+    /// The latest launcher a client log names (a warm instance's opening comes after its start).
+    pub fn last_in(log: &str) -> Option<Launcher> {
+        log.lines().rev().find_map(|l| l.strip_prefix(LAUNCHED_BY_LINE)).and_then(Launcher::parse)
+    }
+
+    /// For a line about the app: "a person (at the WM)", "an agent (devhub show)", "the WM's warm pool".
+    pub fn said(&self) -> String {
+        match self {
+            Launcher::Person(how) => format!("a person ({how})"),
+            Launcher::Agent(who) => format!("an agent ({who})"),
+            Launcher::Pool => "the WM's warm pool".to_string(),
+        }
+    }
+}
+
+/// The agent's mark in process `pid`'s environment ([`LAUNCHED_BY_ENV`]), if it carries one.
+#[cfg(target_os = "linux")]
+pub fn launched_by_env(pid: u32) -> Option<Launcher> {
+    let env = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let mark = format!("{LAUNCHED_BY_ENV}=");
+    env.split(|b| *b == 0).find_map(|v| v.strip_prefix(mark.as_bytes())).and_then(|v| Launcher::parse(&String::from_utf8_lossy(v)))
+}
+
 /// The registry label of a package or binary named by a command-line word (a path's file name).
 #[cfg(unix)]
 fn find_app_name(word: &str) -> Option<String> {
@@ -267,6 +357,20 @@ fn find_app_name(word: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launcher reads back from its client-log line and its environment value, the latest line
+    /// counting (a warm instance opened after its start).
+    #[test]
+    fn a_launcher_reads_back_from_its_line_and_the_latest_line_counts() {
+        for l in [Launcher::Person("at the WM".into()), Launcher::Agent("agent LANE7, pid 812 makepad".into()), Launcher::Pool] {
+            assert_eq!(Launcher::parse(&l.env_value()), Some(l.clone()));
+            assert_eq!(Launcher::last_in(&format!("booting\n{}\nmakepad-remote: pid 1 app x socket /s\n", l.line())), Some(l));
+        }
+        let log = format!("{}\nhello\n{}\n", Launcher::Pool.line(), Launcher::Agent("devhub show".into()).line());
+        assert_eq!(Launcher::last_in(&log), Some(Launcher::Agent("devhub show".into())));
+        assert_eq!(Launcher::last_in("no launch line\n"), None);
+        assert_eq!(Launcher::parse("robot: x"), None);
+    }
 
     #[cfg(unix)]
     #[test]
@@ -325,7 +429,7 @@ mod tests {
 
     #[test]
     fn jit_env_lines_skip_comments_and_build_inputs() {
-        let env = parse_env_lines("# debug\nMAKEPAD_RUN_VERBOSE=1\nTMPDIR = /data/tmp\nRUSTFLAGS=-Cx\nlower=1\n");
-        assert_eq!(env, vec![("MAKEPAD_RUN_VERBOSE".to_string(), "1".to_string()), ("TMPDIR".to_string(), "/data/tmp".to_string())]);
+        let env = parse_env_lines("# debug\nRELAX_VERBOSE=1\nTMPDIR = /data/tmp\nRUSTFLAGS=-Cx\nlower=1\n");
+        assert_eq!(env, vec![("RELAX_VERBOSE".to_string(), "1".to_string()), ("TMPDIR".to_string(), "/data/tmp".to_string())]);
     }
 }

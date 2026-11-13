@@ -388,7 +388,7 @@ fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bo
     cx.handle_actions();
     assert!(cx.has_key_focus(editor.scroll_bars.area()));
     session.set_selection(pos(0, 0), Affinity::After, SelectionMode::All, NewGroup::No);
-    let copy = TextClipboardEvent { response: Default::default() };
+    let copy = TextClipboardEvent::default();
     editor.handle_event(&mut cx, &Event::TextCopy(copy.clone()), &mut Scope::empty(), &mut session);
     assert_eq!(copy.response.borrow().as_deref(), Some("unchanged"));
     editor.blink_timer = cx.start_timeout(0.5);
@@ -429,9 +429,7 @@ fn assert_mutation_events_refused(document: CodeDocument, explicit_read_only: bo
         replaced_text: None,
         fallback_to_insert: true,
     }));
-    events.push(Event::TextCut(TextClipboardEvent {
-        response: Default::default(),
-    }));
+    events.push(Event::TextCut(TextClipboardEvent::default()));
     events.push(Event::Drop(DropEvent {
         modifiers: KeyModifiers::default(),
         handled: Arc::new(Mutex::new(false)),

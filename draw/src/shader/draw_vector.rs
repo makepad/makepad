@@ -315,6 +315,24 @@ script_mod! {
     }
 }
 
+/// Records that indices from `first` on pick as `id` (see `CxGeometry::pick_ranges`). Before
+/// the first run the id is 0, the draw call's own.
+pub fn push_pick_run(ranges: &mut Vec<[u32; 2]>, first: u32, id: u32) {
+    if ranges.last().map_or(0, |run| run[1]) == id {
+        return;
+    }
+    if ranges.last().is_some_and(|run| run[0] == first) {
+        let last = ranges.len() - 1;
+        ranges[last][1] = id;
+        let before = if last == 0 { 0 } else { ranges[last - 1][1] };
+        if before == id {
+            ranges.pop();
+        }
+    } else {
+        ranges.push([first, id]);
+    }
+}
+
 /// The curve/band pair belongs to a mesh, since its vertices carry header
 /// offsets into these textures. Cached meshes retain their own pair.
 #[derive(Clone, Debug, Default)]
@@ -365,6 +383,8 @@ pub struct DrawVector {
     pub acc_verts: Vec<f32>,
     #[rust]
     pub acc_indices: Vec<u32>,
+    #[rust]
+    pick_ranges: Vec<[u32; 2]>,
     /// The session asked for more mesh than memory gave or one GPU buffer
     /// holds: what it asked for in all. The shapes past that point were not
     /// added (the mesh is what fit); see [`Self::geometry_full`].
@@ -487,6 +507,12 @@ impl DrawVector {
         self.cur_shape_id = id;
     }
 
+    /// Indices added from now on pick as `id` in a pick repaint (0: as the draw call). The session
+    /// stays one draw call; the runs ride the mesh (`Geometry::set_pick_ranges`).
+    pub fn set_pick_id(&mut self, id: u32) {
+        push_pick_run(&mut self.pick_ranges, self.acc_indices.len() as u32, id);
+    }
+
     /// Feather subsequent fills/strokes using Gaussian sigma in path units.
     /// These equal device pixels in the usual unscaled DrawVector path; like
     /// the AA fringe, sigma follows the path through GPU transforms. Strokes
@@ -503,6 +529,7 @@ impl DrawVector {
     pub fn begin(&mut self) {
         self.acc_verts.clear();
         self.acc_indices.clear();
+        self.pick_ranges.clear();
         self.full = None;
         self.gradient_texture_data.clear();
         self.gradient_row_count = 0;
@@ -837,6 +864,7 @@ impl DrawVector {
         self.feather_texture_pool[slot] = self.feather_textures.clone();
         let geometry_id = self.geometry_pool[slot].geometry_id();
         self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
+        self.geometry_pool[slot].set_pick_ranges(cx.cx.cx, &mut self.pick_ranges);
         self.geometry = Some(geometry_id);
         self.geometry_slot = Some(slot);
         self.submit_geometry(cx, geometry_id);
@@ -862,6 +890,7 @@ impl DrawVector {
         self.feather_textures = FeatherTextures::default();
         self.finish_feather_textures(cx);
         geometry.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
+        geometry.set_pick_ranges(cx.cx.cx, &mut self.pick_ranges);
         self.submit_geometry(cx, geometry.geometry_id());
     }
 
@@ -1091,4 +1120,36 @@ fn sample_gradient_stops(stops: &[GradientStop], t: f32) -> (f32, f32, f32, f32)
     }
     let c = &stops[last].color;
     (c[0], c[1], c[2], c[3])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::push_pick_run;
+
+    #[test]
+    fn pick_ids_record_only_changes() {
+        let mut ranges = Vec::new();
+        push_pick_run(&mut ranges, 0, 0);
+        assert!(ranges.is_empty(), "a leading id 0 adds nothing");
+        push_pick_run(&mut ranges, 0, 5);
+        assert_eq!(ranges, vec![[0, 5]], "a first nonzero id starts a run");
+        push_pick_run(&mut ranges, 4, 5);
+        assert_eq!(ranges, vec![[0, 5]], "the same id adds nothing");
+        push_pick_run(&mut ranges, 6, 7);
+        assert_eq!(ranges, vec![[0, 5], [6, 7]], "a new id after indices starts another run");
+        push_pick_run(&mut ranges, 6, 8);
+        assert_eq!(ranges, vec![[0, 5], [6, 8]], "a change with no indices since overwrites");
+        push_pick_run(&mut ranges, 6, 5);
+        assert_eq!(ranges, vec![[0, 5]], "an overwrite equal to the run before merges");
+        push_pick_run(&mut ranges, 10, 0);
+        assert_eq!(ranges, vec![[0, 5], [10, 0]], "id 0 restores the draw call id after a labelled run");
+        push_pick_run(&mut ranges, 10, 3);
+        assert_eq!(ranges, vec![[0, 5], [10, 3]], "a change with no indices overwrites the call id run");
+
+        let mut ranges = Vec::new();
+        push_pick_run(&mut ranges, 0, 4);
+        assert_eq!(ranges, vec![[0, 4]], "a fresh table records its first nonzero id");
+        push_pick_run(&mut ranges, 0, 0);
+        assert!(ranges.is_empty(), "overwriting back to the call id leaves no table");
+    }
 }

@@ -277,19 +277,29 @@ pub fn built_binary(app: &AppTarget, root: Option<&Path>) -> Option<PathBuf> {
     Some(checkout_binary(app, root, target_dir.as_deref())).filter(|path| path.is_file())
 }
 
-/// The cargo to launch with: the one running us, else the rustup default
-/// (a Dock/GUI-launched process has no `~/.cargo/bin` on PATH), else PATH's.
+/// The cargo to launch with: the one the environment names. The one running us (`CARGO`),
+/// else the first on PATH (a terminal's, or the toolchain a devhub run puts there: rustup's
+/// proxy refuses on a box with no default toolchain), else rustup's in `~/.cargo/bin` (only
+/// where PATH has none: a Dock/GUI-launched process), else a bare `cargo`.
 pub fn cargo_bin() -> PathBuf {
-    if let Ok(cargo) = std::env::var("CARGO") {
+    cargo_in(std::env::var_os("CARGO"), std::env::var_os("PATH"), std::env::var_os("HOME"))
+}
+
+/// [`cargo_bin`] of the given `CARGO`, `PATH` and `HOME`.
+fn cargo_in(cargo: Option<std::ffi::OsString>, path: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    if let Some(cargo) = cargo.filter(|c| !c.is_empty()) {
         return PathBuf::from(cargo);
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let rustup = PathBuf::from(home).join(".cargo/bin/cargo");
-        if rustup.exists() {
-            return rustup;
-        }
-    }
-    PathBuf::from("cargo")
+    let exe = format!("cargo{}", std::env::consts::EXE_SUFFIX);
+    let rustup = home.filter(|h| !h.is_empty()).map(|h| PathBuf::from(h).join(".cargo").join("bin"));
+    let path = path.unwrap_or_default();
+    // (an empty PATH entry is the cwd: never a launcher's cargo)
+    std::env::split_paths(&path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .chain(rustup)
+        .map(|dir| dir.join(&exe))
+        .find(|cargo| cargo.is_file())
+        .unwrap_or_else(|| PathBuf::from("cargo"))
 }
 
 /// The build of `app` in the checkout at `root`: `cargo build --release`
@@ -436,13 +446,13 @@ pub fn build_command(entry: &AppEntry) -> Result<Command, String> {
     Ok(cargo_command(&program, &args, &root))
 }
 
-/// Err when `root` lies in the JIT's virtual source tree (its mount table, MAKEPAD_RUN_VFS: a
+/// Err when `root` lies in the JIT's virtual source tree (its mount table, RELAX_VFS: a
 /// devhub overlay run, or a run of a git repository). The JIT process reads its files, but cargo
 /// runs as a process of its own and finds only the disk, where that tree is not: under an overlay
 /// an app run's build failed with "manifest path `<work>/dev/src/Cargo.toml` does not exist"
 /// (11-08).
 pub fn on_disk(root: &Path) -> Result<(), String> {
-    match virtual_mount(root, &std::env::var("MAKEPAD_RUN_VFS").unwrap_or_default()) {
+    match virtual_mount(root, &std::env::var("RELAX_VFS").unwrap_or_default()) {
         Some(at) => Err(format!(
             "{} is in the JIT's virtual source tree (mounted at {at}): only the JIT process reads it, so cargo finds no checkout there. \
              Build from a checkout on disk: in devhub, the lane's tree (`devhub test <lane> <package> --tree`, \
@@ -607,6 +617,28 @@ mod tests {
         let root = std::env::temp_dir().join(format!("app-registry-absent-{}", std::process::id()));
         assert!(!has_sources(&find("stage").unwrap().target(), &root));
         assert!(!has_sources(&find("scope").unwrap().target(), &root));
+    }
+
+    /// A launcher builds with the cargo its environment names: a devhub run's toolchain on
+    /// PATH, not rustup's proxy in `~/.cargo/bin`, which refuses on a box with no default
+    /// toolchain (11-13: no hosted app of a WM started on a node ever built).
+    #[test]
+    fn the_cargo_is_cargo_then_path_then_rustups() {
+        let dir = std::env::temp_dir().join(format!("app-registry-cargo-{}", std::process::id()));
+        let exe = format!("cargo{}", std::env::consts::EXE_SUFFIX);
+        let (toolchain, home) = (dir.join("toolchain"), dir.join("home"));
+        let rustup = home.join(".cargo").join("bin");
+        for bin in [&toolchain, &rustup] {
+            std::fs::create_dir_all(bin).unwrap();
+            std::fs::write(bin.join(&exe), b"").unwrap();
+        }
+        let os = |p: &Path| Some(p.as_os_str().to_os_string());
+        let path = std::env::join_paths([dir.join("empty"), toolchain.clone()]).unwrap();
+        assert_eq!(cargo_in(None, Some(path.clone()), os(&home)), toolchain.join(&exe), "PATH's cargo goes ahead of ~/.cargo/bin");
+        assert_eq!(cargo_in(os(Path::new("/given/cargo")), Some(path), os(&home)), PathBuf::from("/given/cargo"), "CARGO goes first");
+        assert_eq!(cargo_in(None, os(&dir.join("empty")), os(&home)), rustup.join(&exe), "~/.cargo/bin only where PATH has no cargo");
+        assert_eq!(cargo_in(Some("".into()), None, None), PathBuf::from("cargo"), "nothing named: a bare cargo");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

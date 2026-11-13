@@ -229,10 +229,10 @@ impl AppLaunch {
 
     fn command(&self) -> Result<Command, String> {
         let target = Self::target_of(self.app, self.runner);
-        // a host that runs under the JIT loader starts JIT apps with that loader (`$MAKEPAD_RUN_LOADER
+        // a host that runs under the JIT loader starts JIT apps with that loader (`$RELAX_LOADER
         // run ...`, the runner's convention), never a cargo build of another one: a CI tree's cargo
         // (no CARGO_TARGET_DIR once scrubbed) built a whole host makepad on every launch
-        let loader = (self.run && self.runner == Runner::Jit).then(|| std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from)).flatten().filter(|l| l.is_file());
+        let loader = (self.run && self.runner == Runner::Jit).then(|| std::env::var_os("RELAX_LOADER").map(PathBuf::from)).flatten().filter(|l| l.is_file());
         let (program, args) = if let Some(loader) = &loader {
             self.root.as_deref().ok_or("no checkout to run from")?;
             (loader.clone(), self.process_args())
@@ -269,7 +269,7 @@ impl AppLaunch {
             // only after a sync of landed work, never what a lane or an edit writes there
             // (relax's `DockGate`).
             if let (Runner::Jit, Some(revision)) = (self.runner, self.root.as_ref().map(|r| r.join(crate::machine::FLEET_REVISION)).filter(|r| r.is_file())) {
-                command.env("MAKEPAD_RUN_DOCK_REVISION", revision);
+                command.env("RELAX_DOCK_REVISION", revision);
             }
         }
         if let Some(root) = &self.root {
@@ -445,7 +445,7 @@ mod tests {
 
     /// Under the JIT a checkout launch is `run <package> --bin <bin>` with the app's arguments after `--` (on
     /// Linux no `--stdin-loop`: the HAL finds the WM by its socket), given to the loader this host
-    /// runs under (`MAKEPAD_RUN_LOADER`), else to `cargo run` of the makepad tool.
+    /// runs under (`RELAX_LOADER`), else to `cargo run` of the makepad tool.
     #[test]
     fn a_jit_launch_runs_the_package_under_the_makepad_tool() {
         let root = crate::checkout_at_or_above(Path::new(env!("CARGO_MANIFEST_DIR"))).expect("tests run in a checkout");
@@ -453,7 +453,7 @@ mod tests {
         assert_eq!(kind, LaunchKind::Run);
         let hosted: &[&str] = if cfg!(target_os = "linux") { &[] } else { &["--stdin-loop"] };
         let run = [&["run", "makepad-app-terminal", "--bin", "makepad-app-terminal", "--"], hosted, &["--x"]].concat();
-        if std::env::var_os("MAKEPAD_RUN_LOADER").is_some_and(|l| Path::new(&l).is_file()) {
+        if std::env::var_os("RELAX_LOADER").is_some_and(|l| Path::new(&l).is_file()) {
             assert_eq!(args, run);
         } else {
             let tail: Vec<&str> = args.iter().map(String::as_str).skip_while(|a| *a != "-p").collect();
@@ -465,7 +465,7 @@ mod tests {
     }
 
     /// A JIT launch from a checkout devhub syncs (it holds `FLEET-REVISION.txt`) carries the dock
-    /// gate (`MAKEPAD_RUN_DOCK_REVISION`: only a sync of landed work changes that app's code); a
+    /// gate (`RELAX_DOCK_REVISION`: only a sync of landed work changes that app's code); a
     /// launch from any other tree (a lane's) does not.
     #[test]
     fn a_launch_from_the_synced_checkout_is_gated_on_its_revision() {
@@ -477,7 +477,7 @@ mod tests {
             let mut env = None;
             let entry = crate::find("calculator").unwrap();
             let _ = AppLaunch::start::<()>(entry, Runner::Jit, Some(root.to_path_buf()), Vec::new(), BuildPolicy::IfMissing, false, |cmd, _| {
-                env = cmd.get_envs().find(|(k, _)| *k == "MAKEPAD_RUN_DOCK_REVISION").and_then(|(_, v)| v.map(|v| v.to_os_string()));
+                env = cmd.get_envs().find(|(k, _)| *k == "RELAX_DOCK_REVISION").and_then(|(_, v)| v.map(|v| v.to_os_string()));
                 Err("captured".into())
             });
             env
@@ -508,14 +508,14 @@ mod tests {
             // what this machine sets for the app at run time is not a build input, nor is the
             // dock gate a JIT launch from a devhub-synced checkout carries (read by the running JIT)
             let mut machine: Vec<String> = crate::machine::launch_env(id, runner == Runner::Jit).into_iter().map(|(k, _)| k).collect();
-            machine.push("MAKEPAD_RUN_DOCK_REVISION".to_string());
+            machine.push("RELAX_DOCK_REVISION".to_string());
             let envs = |c: &Command| {
                 let mut v: Vec<_> = c.get_envs().filter(|(k, _)| !machine.iter().any(|m| k.to_str() == Some(m.as_str()))).map(|(k, v)| (k.to_os_string(), v.map(|v| v.to_os_string()))).collect();
                 v.sort();
                 v
             };
             let (run_args, build_args) = (args(&run), args(&build));
-            let loader = std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).filter(|p| p.is_file());
+            let loader = std::env::var_os("RELAX_LOADER").map(PathBuf::from).filter(|p| p.is_file());
             if let Some(loader) = loader.filter(|_| runner == Runner::Jit) {
                 assert_eq!(run.get_program(), loader.as_os_str());
                 let mut expected_args = vec!["run".to_string(), entry.package.to_string(), "--bin".to_string(), entry.bin.to_string()];

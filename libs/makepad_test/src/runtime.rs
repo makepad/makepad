@@ -1378,6 +1378,8 @@ struct Budget {
     /// the last; and how long the starves before it lasted, whose jobs got their permits.
     starved: (Duration, [u64; 3]),
     granted: Duration,
+    /// Who held the CPU budget's slots at the last look that found the pool starved.
+    slots: Vec<crate::remote::BudgetSlot>,
     /// What the test process had run beside its driving thread at the last look ([`beside_cpu`]),
     /// and how long, over the whole wait, that alone kept the app from counting as idle.
     beside: (Duration, Duration),
@@ -1393,7 +1395,7 @@ impl Budget {
 
     /// A wait's budget from the app's CPU `cpu` and the test process's `beside` it at `now`.
     fn at(limit: Duration, idle_limit: Duration, cpu: crate::remote::AppCpu, now: Instant, beside: Duration) -> Budget {
-        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO) }
+        Budget { limit, idle_limit, main: cpu.main, last: (now, cpu.own, cpu.main, cpu.waited), idle: Duration::ZERO, ticked: (Duration::ZERO, Duration::ZERO), faults: cpu.faults, memory: (Duration::ZERO, 0), paged: (Duration::ZERO, 0), taken: 0, queued: false, starved: (Duration::ZERO, [0; 3]), granted: Duration::ZERO, slots: Vec::new(), beside: (beside, Duration::ZERO), asked: (Duration::ZERO, Duration::ZERO, Duration::ZERO) }
     }
 
     /// The wait asked the app from `since` (its closure ran): its CPU before and after.
@@ -1437,7 +1439,8 @@ impl Budget {
         if (quiet || ticking) && busy_beside {
             self.beside.1 += over;
         }
-        let settled = if (quiet || ticking) && !busy_beside { Some(settled()?) } else { None };
+        let mut settled = if (quiet || ticking) && !busy_beside { Some(settled()?) } else { None };
+        let slots = settled.as_mut().map(|s| std::mem::take(&mut s.slots)).unwrap_or_default();
         let (queued, running, taken) = settled.as_ref().and_then(|s| s.pool).unwrap_or(([0; 3], 0, self.taken));
         // the app ran nothing (or only ticked), with nothing pending (or only pool jobs, none taken
         // since the last look), and nothing ran beside the test in its own process
@@ -1460,6 +1463,7 @@ impl Budget {
                 // the jobs the last look found queued are there still, none taken: they waited the
                 // whole look for a permit (a job queued since has waited for nothing yet)
                 self.starved = (self.starved.0 + over, queued);
+                self.slots = slots;
             } else if !queue {
                 // its queue emptied: the starve ended, and what stalls the app now is not it
                 self.granted += std::mem::take(&mut self.starved).0;
@@ -1488,8 +1492,12 @@ impl Budget {
             ),
             (_, (starved, queued)) if starved > Duration::ZERO => {
                 let classes: Vec<String> = ["Interactive", "Visible", "Background"].iter().zip(queued).filter(|(_, n)| *n > 0).map(|(class, n)| format!("{n} jobs queued at {class}")).collect();
+                let slots = match self.slots.is_empty() {
+                    true => "; no slot of the process's CPU budget was held at the last look".to_string(),
+                    false => format!("; the process's CPU budget slots at the last look: {}", self.slots.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")),
+                };
                 format!(
-                    "its pool was starved: {}, none granted for {:.1} s of the {idle:.1} s it ran nothing (budget {budget:.0} s; its main thread ran {main:.1} s of CPU){beside}",
+                    "its pool was starved: {}, none granted for {:.1} s of the {idle:.1} s it ran nothing (budget {budget:.0} s; its main thread ran {main:.1} s of CPU){slots}{beside}",
                     classes.join(", "),
                     starved.as_secs_f64()
                 )
@@ -1707,7 +1715,7 @@ mod tests {
         button_index, env_duration_ms, sanitize_path_component,
         snapshot_is_visible, visible_mode_enabled, Budget, NodeMatch,
     };
-    use crate::remote::{AppCpu, AppSettled};
+    use crate::remote::{AppCpu, AppSettled, BudgetSlot};
     use std::time::Instant;
 
     /// A wait for what never comes fails on the idle rule while the app's other thread ticks a
@@ -1726,7 +1734,7 @@ mod tests {
             (1..=60u64).find_map(|look| {
                 let n = look as f64;
                 let now = t0 + Duration::from_secs(look);
-                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None }) };
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: true, only_pool: false, pool: None, slots: Vec::new() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
                 budget.judge(cpu(main * n, (main + other) * n, waited * n), now, Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (look, why))
             })
@@ -1747,7 +1755,9 @@ mod tests {
     /// look finds the jobs the look before found queued, none taken: a job just queued has waited
     /// for nothing yet. (A counter's wait on a loaded box read as a starved pool for one look's
     /// queued font scan, and as "waiting on memory (swapping)" for one look's 89 page faults with
-    /// no memory pressure on the box, of 11 s it sat idle, 11-12.)
+    /// no memory pressure on the box, of 11 s it sat idle, 11-12.) A starve names who held the CPU
+    /// budget's slots at its last look, a JIT build among them (strength_here's 19 Background jobs
+    /// none granted for 10.1 s told no more, 11-13).
     #[test]
     fn a_stall_is_the_verdict_only_while_it_lasts() {
         // the app runs nothing; `look(n)` is its Background jobs queued then, taken so far, and its
@@ -1757,7 +1767,12 @@ mod tests {
             let mut budget = Budget::at(Duration::from_secs(300), Duration::from_secs(10), cpu(0), t0, Duration::ZERO);
             (1..=60u64).find_map(|n| {
                 let (queued, taken, faults) = look(n);
-                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)) }) };
+                // while jobs wait, a JIT build has held its slot since the wait began
+                let slots = || match queued {
+                    0 => Vec::new(),
+                    _ => vec![BudgetSlot { class: "background".into(), client: "jit".into(), label: "another compile job".into(), lent: false, n: 1, held: Duration::from_secs(n) }],
+                };
+                let mut settled = || -> crate::TestResult<AppSettled> { Ok(AppSettled { settled: queued == 0, only_pool: queued > 0, pool: Some(([0, 0, queued], 0, taken)), slots: slots() }) };
                 let mut on_jit = || -> crate::TestResult<bool> { Ok(false) };
                 budget.judge(cpu(faults), t0 + Duration::from_secs(n), Duration::ZERO, &mut settled, &mut on_jit).unwrap().map(|why| (n, why))
             }).expect("the wait ends")
@@ -1768,6 +1783,7 @@ mod tests {
         assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("for 2.0 s of it its pool's jobs waited for a CPU permit, granted since"), "a starve that ended is not the verdict: {n}: {why}");
         let (n, why) = wait(&|_| (1, 0, 0));
         assert!(n == 10 && why.starts_with("its pool was starved: 1 jobs queued at Background, none granted for 9.0 s of the 10.0 s"), "a starve to the end is: {n}: {why}");
+        assert!(why.contains("; the process's CPU budget slots at the last look: 1x background jit \"another compile job\" held 10.0 s"), "a starve names who held the slots: {why}");
         let (n, why) = wait(&|n| (0, 0, if n >= 2 { 89 } else { 0 }));
         assert!(n == 10 && why.starts_with("it sat idle for 10.0 s") && why.contains("for 1.0 s of it it waited on memory (89 major page faults), none since"), "a burst of page faults that stopped is not the verdict: {n}: {why}");
         let (n, why) = wait(&|n| (0, 0, 100 * n));

@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Kinetic type as engine primitives: glyph shapes and per-glyph records from a text, a Splash animator kernel per glyph writing the draw record in place, and an instanced glyph draw whose look is Splash"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

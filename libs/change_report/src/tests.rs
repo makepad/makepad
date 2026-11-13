@@ -249,6 +249,7 @@ fn endpoint_and_answer() {
     assert!(answer(404, b"<html>Not found</html>").unwrap_err().contains("404"));
     assert!(answer(429, b"").unwrap_err().contains("try again in an hour"));
     assert!(answer(502, b"Bad gateway").unwrap_err().contains("502"));
+    assert!(plain_address("name@example.org") && !plain_address("Name <name@example.org>") && !plain_address("name@example.org\r\nX-Other: 1") && !plain_address("a@example.org, c@example.net"));
     assert_eq!(response_id(b"{\"error\":\"Too much feedback\"}"), Err("Too much feedback".into()));
     assert!(response_id(b"<html>").is_err());
 }

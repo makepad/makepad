@@ -3186,7 +3186,7 @@ mod lazy_isolate_type_tests {
     use super::*;
 
     /// A second isolate's widget library is lazy; host Rust code that turns one of its types
-    /// into a script value before any script touched `mod` (a second sandbox game, a split
+    /// into a script value before any script touched `mod` (a second game's world, a split
     /// screen's second world) finds the type registered: the registry miss expands the library.
     #[test]
     fn a_second_isolate_converts_a_library_enum_before_any_script_ran() {
@@ -3208,8 +3208,8 @@ mod lazy_isolate_type_tests {
 #[cfg(test)]
 mod isolate_ui_step_tests {
     //! A host that registers an isolate's UI a unit at a time (`step_isolate_ui`) ends with the UI
-    //! a whole registration makes, however the steps are interrupted. Base is the game host's set;
-    //! Library is what Splash mini-apps and Stage slides allocate.
+    //! a whole registration makes, however the steps are interrupted. Base is the small set a host
+    //! builds on; Library is the default set, the one an embedded Splash widget's isolate allocates.
 
     use super::*;
     use crate::makepad_script::makepad_error_log::{set_log_tap, LogLevel};
@@ -3358,7 +3358,8 @@ mod isolate_ui_step_tests {
         names
     }
 
-    /// The game host's set. Its unit list is a unit per base theme and per base widget module.
+    /// The small set a host builds on. Its unit list is a unit per base theme and per base widget
+    /// module.
     #[test]
     fn a_stepped_base_isolate_ui_registers_as_whole_however_interrupted() {
         let names = stepping_registers_the_whole_ui(IsolateWidgets::Base);
@@ -3373,7 +3374,7 @@ mod isolate_ui_step_tests {
         assert_eq!(once.len(), names.iter().filter(|name| **name != "ui: host mod").count(), "no unit runs twice: {names:?}");
     }
 
-    /// What Splash mini-apps and Stage slides allocate.
+    /// The default set, the one an embedded Splash widget's isolate allocates.
     #[test]
     fn a_stepped_library_isolate_ui_registers_as_whole_however_interrupted() {
         stepping_registers_the_whole_ui(IsolateWidgets::Library);

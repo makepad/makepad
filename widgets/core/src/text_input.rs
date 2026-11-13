@@ -71,6 +71,10 @@ script_mod! {
                     color = self.color_note
                     dotted = 1.0
                 }
+                // Washed by the widget's match layer, never drawn here.
+                TextMarkKind.Match => {
+                    color = self.color_note
+                }
             }
             let p = self.pos * self.rect_size
             // The quad hangs from the baseline, so the centre line sits a gap
@@ -93,6 +97,21 @@ script_mod! {
                 }
             }
             return stroked
+        }
+    }
+
+    /** Found text (a Match mark): the theme's search-hit colour washed over
+     * the rows the mark covers, full height. Its draw calls form their own
+     * layer, which the widget opens where the wash belongs. */
+    mod.widgets.DrawTextMatch = set_type_default() do #(DrawTextMatch::script_shader(vm)) {
+        ..mod.draw.DrawQuad
+        draw_call_group: @found
+        color: theme.color_search_hit
+        /** how strongly found text is washed 0..1 step 0.01 */
+        wash: 0.32
+        pixel: fn() {
+            let a = self.color.a * self.wash
+            return vec4(self.color.rgb * a, a)
         }
     }
 
@@ -619,6 +638,9 @@ pub enum TextMarkKind {
     Warning = 2,
     /// Noteworthy: a defined term, a tracked change, a hint.
     Note = 3,
+    /// Found: a find's match. Washed, the row's full height, where the
+    /// other kinds draw a line under the words.
+    Match = 4,
 }
 
 /// A stretch of text marked as wrong, doubtful or noteworthy.
@@ -663,6 +685,11 @@ impl TextMark {
     /// A mark saying this text is worth noticing.
     pub fn note(start: usize, end: usize) -> Self {
         Self::new(start, end, TextMarkKind::Note)
+    }
+
+    /// A mark saying a find found this text.
+    pub fn found(start: usize, end: usize) -> Self {
+        Self::new(start, end, TextMarkKind::Match)
     }
 
     /// Whether the mark covers no text at all. An empty mark draws nothing.
@@ -832,6 +859,25 @@ impl DrawTextMark {
     }
 }
 
+/// The wash over found text: a [`TextMarkKind::Match`] mark is a find's
+/// hit, not a judgement on the words, so it washes them instead of drawing a
+/// line under them. A widget opens its layer (`new_draw_call`) where the wash
+/// belongs when it has a match to draw: a text field before its glyphs, so
+/// the wash stays behind them; a text flow after its blocks, whose own
+/// backgrounds would cover it.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawTextMatch {
+    #[deref]
+    draw_super: DrawQuad,
+    /// The colour of found text.
+    #[live]
+    pub color: Vec4f,
+    /// How strongly found text is washed, 0..1.
+    #[live]
+    pub wash: f32,
+}
+
 /// Caret phases (half a blink each) a focused field shows after its last input.
 const CARET_BLINKS: u32 = 20;
 
@@ -860,6 +906,9 @@ pub struct TextInput {
     draw_composition_underline: DrawQuad,
     #[live]
     draw_mark: DrawTextMark,
+    /// The wash under found text (a [`TextMarkKind::Match`] mark).
+    #[live]
+    draw_match: DrawTextMatch,
 
     /// The marked spans this field is showing. Dropped on every edit; the host
     /// re-validates and marks again.
@@ -2472,6 +2521,39 @@ impl TextInput {
         self.draw_composition_underline.end_many_instances(cx);
     }
 
+    /// Wash the text of every Match mark: the rows it covers, full height,
+    /// as the selection is drawn.
+    fn draw_found(&mut self, cx: &mut Cx2d, text_rect: Rect) {
+        let Some(laidout_text) = self.laidout_text.clone() else {
+            return;
+        };
+        let font_scale = self.draw_text.font_scale;
+        let text_len = self.text.len();
+        for mark in self.marks.as_slice() {
+            if mark.kind != TextMarkKind::Match {
+                continue;
+            }
+            let Some(range) = mark.clip_to(0, text_len) else {
+                continue;
+            };
+            let selection = Selection {
+                anchor: Cursor { index: floor_grapheme_boundary(&self.text, range.start), prefer_next_row: false },
+                cursor: Cursor { index: floor_grapheme_boundary(&self.text, range.end), prefer_next_row: false },
+            };
+            for SelectionRect { rect_in_lpxs, .. } in laidout_text.selection_rects(selection) {
+                self.draw_match.draw_abs(
+                    cx,
+                    rect(
+                        text_rect.pos.x + (rect_in_lpxs.origin.x * font_scale) as f64,
+                        text_rect.pos.y + (rect_in_lpxs.origin.y * font_scale) as f64,
+                        (rect_in_lpxs.size.width * font_scale) as f64,
+                        (rect_in_lpxs.size.height * font_scale) as f64,
+                    ),
+                );
+            }
+        }
+    }
+
     /// Draw a mark under the words of every marked range.
     ///
     /// One quad per row a mark touches. The layout's `selection_rects` has
@@ -2494,6 +2576,9 @@ impl TextInput {
 
         self.draw_mark.begin_many_instances(cx);
         for mark in self.marks.as_slice() {
+            if mark.kind == TextMarkKind::Match {
+                continue;
+            }
             let Some(range) = mark.clip_to(0, text_len) else {
                 continue;
             };
@@ -3064,6 +3149,12 @@ impl Widget for TextInput {
         // drawn after the text and caret (it needs their layout) and lands here
         // through its own draw_call_group, so it stays behind the glyphs.
         self.draw_selection.new_draw_call(cx);
+        // Found text washes the same way, behind the glyphs; a field with no
+        // match opens no call for it.
+        let found = !self.is_password && self.marks.as_slice().iter().any(|mark| mark.kind == TextMarkKind::Match);
+        if found {
+            self.draw_match.new_draw_call(cx);
+        }
         // Push an inner clip rect to prevent scrolled text from bleeding into
         // the padding area. For multiline, this clips vertically-scrolled content.
         // For single-line, this clips horizontally-scrolled content that overflows.
@@ -3077,6 +3168,9 @@ impl Widget for TextInput {
         let text_rect = self.draw_text(cx);
         let cursor_rect = self.draw_cursor(cx, text_rect);
         self.draw_selection(cx, text_rect);
+        if found {
+            self.draw_found(cx, text_rect);
+        }
         self.draw_composition_underline(cx, text_rect);
         self.draw_marks(cx, text_rect);
         self.scroll_to_cursor(cx, content_clip_index, text_rect.size.y);

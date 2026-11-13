@@ -154,6 +154,29 @@ pub(crate) struct AppSettled {
     /// The app pool's jobs queued per class (interactive, visible, background), on its workers,
     /// and taken by its workers so far; None before the pool started.
     pub(crate) pool: Option<([u64; 3], u64, u64)>,
+    /// While pool jobs wait: who holds the process's CPU budget slots (`slots`), the longest first.
+    pub(crate) slots: Vec<BudgetSlot>,
+}
+
+/// Holders of the CPU budget's slots alike in class, client (app, jit, hal), label and lent (its
+/// thread sleeps, its token back in the budget): how many, and the longest any has held its slot.
+pub(crate) struct BudgetSlot {
+    pub(crate) class: String,
+    pub(crate) client: String,
+    pub(crate) label: String,
+    pub(crate) lent: bool,
+    pub(crate) n: u64,
+    pub(crate) held: Duration,
+}
+
+impl std::fmt::Display for BudgetSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}x {} {} \"{}\" held {:.1} s", self.n, self.class, self.client, self.label, self.held.as_secs_f64())?;
+        if self.lent {
+            write!(f, " (lent: its thread sleeps)")?;
+        }
+        Ok(())
+    }
 }
 
 impl RemoteClient {
@@ -238,7 +261,20 @@ impl RemoteClient {
                 Some(([n(queued.first())?, n(queued.get(1))?, n(queued.get(2))?], n(pool.key("running"))?, n(pool.key("taken"))?))
             }
         };
-        Ok(AppSettled { settled, only_pool, pool })
+        let slots = json_array(json.key("slots")).map_or_else(Vec::new, |slots| {
+            slots
+                .iter()
+                .map(|slot| BudgetSlot {
+                    class: json_str(slot.key("class")).unwrap_or_default(),
+                    client: json_str(slot.key("client")).unwrap_or_default(),
+                    label: json_str(slot.key("label")).unwrap_or_default(),
+                    lent: matches!(slot.key("lent"), Some(JsonValue::Bool(true))),
+                    n: json_f64(slot.key("n")).unwrap_or(0.0) as u64,
+                    held: Duration::from_millis(json_f64(slot.key("held_ms")).unwrap_or(0.0) as u64),
+                })
+                .collect()
+        });
+        Ok(AppSettled { settled, only_pool, pool, slots })
     }
 
     /// The socket path this client dials, for diagnostics.

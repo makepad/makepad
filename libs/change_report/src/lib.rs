@@ -57,6 +57,18 @@ pub const DEFAULT_ENDPOINT: &str = "https://makepad.nl/api/feedback/changes";
 pub const FEEDBACK_HEADER: &str = "X-Makepad-Feedback";
 /// The sender's address, only when they chose to include it.
 pub const REPLY_TO_HEADER: &str = "X-Makepad-Reply-To";
+
+/// Whether `address` is one plain email address (`name@example.org`), as `--reply-to` takes it:
+/// no display name, no list, no spaces or control characters (it travels in a request header).
+pub fn plain_address(address: &str) -> bool {
+    let Some((local, domain)) = address.split_once('@') else { return false };
+    let local_ok = !local.is_empty() && local.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+/=?^_`{|}~.-".contains(&b));
+    let domain_ok = domain.contains('.')
+        && !domain.starts_with(['.', '-'])
+        && !domain.ends_with(['.', '-'])
+        && domain.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    local_ok && domain_ok
+}
 /// Set (to 1) in the Makepad Runner's coding agent tabs: there the Runner shows a report to the
 /// person, who sends it from the app's panel, so `makepad change-report send` refuses to.
 pub const RUNNER_AGENT_TAB: &str = "MAKEPAD_RUNNER_AGENT_TAB";

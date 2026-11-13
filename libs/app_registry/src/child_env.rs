@@ -29,16 +29,16 @@ pub const DIRECT_SHELL_ENV: &[&str] = &[
 pub const HOSTED_IDENTITY_ENV: &[&str] = &["STUDIO", "STUDIO_HOST", "STUDIO_BUILD", "STUDIO_CRATE", "MAKEPAD_STDIN_LOOP", "MAKEPAD_HIDE_WINDOWS"];
 
 /// A test instance's marks: a lane's run is badged and kept off the local network
-/// (`MAKEPAD_TEST_LANE`, `MAKEPAD_LAN`), a hidden one muted (`SANDBOX_MUTE`), and its builds and
+/// (`MAKEPAD_TEST_LANE`, `MAKEPAD_LAN`), a hidden one muted (`MAKEPAD_MUTE`), and its builds and
 /// JIT state go to the lane's own dirs. A registry launch (the dock's app) never inherits them.
-pub const LANE_ENV: &[&str] = &["MAKEPAD_TEST_LANE", "MAKEPAD_LAN", "SANDBOX_MUTE", "CARGO_TARGET_DIR"];
+pub const LANE_ENV: &[&str] = &["MAKEPAD_TEST_LANE", "MAKEPAD_LAN", "MAKEPAD_MUTE", "CARGO_TARGET_DIR"];
 
-/// The `makepad run` settings a launcher may carry (`MAKEPAD_RUN_HOME`, `_TARGET_DIR`, `_STD`,
+/// The `makepad run` settings a launcher may carry (`RELAX_HOME`, `_TARGET_DIR`, `_STD`,
 /// `_REPORT_TO`, ...): a registry launch starts with none of them; a machine sets its own in
 /// jit.env ([`crate::machine`]).
-pub const LANE_ENV_PREFIX: &str = "MAKEPAD_RUN_";
+pub const LANE_ENV_PREFIX: &str = "RELAX_";
 
-/// Clears [`LANE_ENV`] and every `MAKEPAD_RUN_*` of this process from `command`: what a registry
+/// Clears [`LANE_ENV`] and every `RELAX_*` of this process from `command`: what a registry
 /// launch starts is the same app with the same settings however its launcher was started.
 pub fn scrub_lane(command: &mut Command) {
     for key in LANE_ENV {

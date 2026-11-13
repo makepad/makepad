@@ -290,6 +290,10 @@ pub struct Markdown {
     /// dropped at the end of the draw.
     #[rust]
     images_drawn: Vec<WidgetUid>,
+    /// The folder a relative image source is read from (a document's own
+    /// folder); `None` reads it from the working directory.
+    #[rust]
+    base_dir: Option<PathBuf>,
 }
 
 impl Widget for Markdown {
@@ -393,6 +397,10 @@ pub struct MarkdownHost<'a> {
     /// The events continue a document drawn above them (the next part of
     /// it): their first block keeps the spacing above it.
     pub follows_block: bool,
+    /// Pictures the host already has, by their source as the view reads it
+    /// (see [`resolve_source`]): drawn as given, or (`None`: it did not
+    /// load) as their alt text. A source not here loads as usual.
+    pub pictures: Option<&'a HashMap<String, Option<Texture>>>,
 }
 
 impl MarkdownHost<'_> {
@@ -438,6 +446,15 @@ fn muted(color: Vec4f) -> Vec4f {
 }
 
 impl Markdown {
+    /// The folder relative image sources are read from: a document's own
+    /// folder. A new folder loads the images again from there.
+    pub fn set_base_dir(&mut self, cx: &mut Cx, base_dir: Option<&Path>) {
+        if self.base_dir.as_deref() != base_dir {
+            self.base_dir = base_dir.map(Path::to_path_buf);
+            self.redraw(cx);
+        }
+    }
+
     fn process_markdown_doc(&mut self, cx: &mut Cx2d) {
         let body = std::mem::take(&mut self.body);
         let parser = Parser::new_ext(
@@ -677,6 +694,8 @@ impl Markdown {
                     image_depth += 1;
                     if image_depth == 1 {
                         image_flat_start = tf.text_len();
+                        let src = resolve_source(&dest_url, self.base_dir.as_deref());
+                        let supplied = host.as_deref().and_then(|host| host.pictures).and_then(|pictures| pictures.get(src.as_ref()));
                         // A restricted Splash reads no files and makes no
                         // requests on the host's behalf.
                         image_drawn = load_images
@@ -686,7 +705,8 @@ impl Markdown {
                                 &mut self.image_requests,
                                 &mut self.images_drawn,
                                 self.load_http_images,
-                                &dest_url,
+                                &src,
+                                supplied.map(Option::as_ref),
                             );
                     }
                 }
@@ -1132,8 +1152,9 @@ fn draw_highlighted_code(
 }
 
 /// Draws the inline image for `src`, requesting its load the first time its
-/// widget sees that source. True when the picture was drawn; false while it
-/// loads, or when it cannot load, and the caller draws the alt text instead.
+/// widget sees that source, or as `supplied` by the host (`Some(None)`: it
+/// did not load). True when the picture was drawn; false while it loads, or
+/// when it cannot load, and the caller draws the alt text instead.
 fn draw_inline_image(
     cx: &mut Cx2d,
     tf: &mut TextFlow,
@@ -1141,15 +1162,25 @@ fn draw_inline_image(
     drawn: &mut Vec<WidgetUid>,
     load_http: bool,
     src: &str,
+    supplied: Option<Option<&Texture>>,
 ) -> bool {
     let entry_id = tf.new_counted_id();
     let item = tf.item(cx, entry_id, live_id!(inline_image));
     let uid = item.widget_uid();
     drawn.push(uid);
     let image = item.as_image();
-    if requests.get(&uid).map(|(requested, _)| requested.as_str()) != Some(src) {
-        let key = request_inline_image(cx, &image, src, load_http);
-        requests.insert(uid, (src.to_string(), key));
+    match supplied {
+        Some(None) => return false,
+        Some(Some(texture)) => {
+            requests.remove(&uid);
+            image.set_texture(cx, Some(texture.clone()));
+        }
+        None => {
+            if requests.get(&uid).map(|(requested, _)| requested.as_str()) != Some(src) {
+                let key = request_inline_image(cx, &image, src, load_http);
+                requests.insert(uid, (src.to_string(), key));
+            }
+        }
     }
     let Some((width, height)) = image.size_in_pixels(cx) else {
         return false;
@@ -1171,13 +1202,30 @@ fn draw_inline_image(
         &mut Scope::empty(),
         Walk::fixed(width * scale, height * scale),
     );
+    // The picture is one object in the flow's text: a caret stands before
+    // and after it, and a selection over it covers it.
+    tf.track_object(cx, item.area().rect(cx));
     true
+}
+
+/// `src` as the image loader takes it: a relative file path is read from
+/// `base_dir` when there is one; URLs, `data:` and absolute paths are kept.
+pub fn resolve_source<'a>(src: &'a str, base_dir: Option<&Path>) -> std::borrow::Cow<'a, str> {
+    let Some(base_dir) = base_dir else { return src.into() };
+    if src.starts_with("data:") || (src.contains("://") && !src.starts_with("file://")) {
+        return src.into();
+    }
+    let path = Path::new(src.strip_prefix("file://").unwrap_or(src));
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        return src.into();
+    }
+    base_dir.join(path).to_string_lossy().into_owned().into()
 }
 
 /// Starts loading `src` into `image` through the shared image cache: an
 /// `http(s)` URL (when allowed) with the platform's HTTP stack, a `data:`
 /// URL from its bytes, anything else as a file path (`file://` or plain,
-/// relative to the working directory), all decoded off the UI thread. An
+/// already resolved by [`resolve_source`]), all decoded off the UI thread. An
 /// SVG, from a `data:` URL or a `.svg` file, is parsed in place. Returns the
 /// cache key an asynchronous load completes under.
 fn request_inline_image(cx: &mut Cx, image: &ImageRef, src: &str, load_http: bool) -> Option<PathBuf> {
@@ -1215,6 +1263,21 @@ fn request_inline_image(cx: &mut Cx, image: &ImageRef, src: &str, load_http: boo
     }
     image.load_image_file_by_path_async(cx, path).ok()?;
     Some(path.to_path_buf())
+}
+
+/// The bytes of a picture's source as the view reads it (see
+/// [`resolve_source`]): a file, or a `data:` URL. None for a URL with another
+/// scheme, or a file that cannot be read. It reads files: call it off the UI
+/// thread.
+pub fn picture_bytes(src: &str) -> Option<Vec<u8>> {
+    if let Some(data_url) = src.strip_prefix("data:") {
+        return decode_data_url(data_url);
+    }
+    let path = src.strip_prefix("file://").unwrap_or(src);
+    if path.is_empty() || path.contains("://") {
+        return None;
+    }
+    std::fs::read(path).ok()
 }
 
 /// The bytes of a `data:` URL, given what follows `data:`: base64 when the
@@ -1414,5 +1477,20 @@ mod tests {
         assert_eq!(navigations(&mut cx), 1);
         cx.script_data.std.restrict_to_host_io();
         assert_eq!(navigations(&mut cx), 0);
+    }
+
+    #[test]
+    fn relative_images_read_from_the_base_folder() {
+        let base = Path::new("/docs/notes");
+        let joined = |src: &str| resolve_source(src, Some(base)).into_owned();
+        assert_eq!(joined("pics/a.png"), base.join("pics/a.png").to_string_lossy(), "a relative path joins the base");
+        assert_eq!(joined("file://pics/a.png"), base.join("pics/a.png").to_string_lossy(), "file:// keeps the relative rule");
+        assert_eq!(joined("../a.png"), base.join("../a.png").to_string_lossy(), "a path above the base still joins it");
+        let abs = std::env::temp_dir().join("a.png").to_string_lossy().into_owned();
+        let file_abs = format!("file://{abs}");
+        for kept in [abs.as_str(), file_abs.as_str(), "https://example.invalid/a.png", "data:image/png;base64,AAAA", ""] {
+            assert_eq!(joined(kept), kept, "{kept:?} is not relative and stays as written");
+        }
+        assert_eq!(resolve_source("pics/a.png", None), "pics/a.png", "with no base the working directory reads it");
     }
 }

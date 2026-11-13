@@ -287,7 +287,7 @@ pub fn launch_package(
     package_name: &str,
     bin_name: Option<&str>,
 ) -> TestResult<OwnedApp> {
-    if let Some(loader) = std::env::var_os("MAKEPAD_RUN_LOADER") {
+    if let Some(loader) = std::env::var_os("RELAX_LOADER") {
         let loader = PathBuf::from(loader);
         let mut command = Command::new(&loader);
         // no one attends a test's app: nothing parks there (a compile error or a panic ends it,
@@ -850,7 +850,7 @@ mod tests {
 
     #[test]
     fn a_stale_jit_at_startup_is_named_as_one() {
-        let tail = "stderr tail:\nmakepad live: The JIT itself changed (makepad_hal) -- Restart to update: a restart applies it\n";
+        let tail = "stderr tail:\nrelax live: The JIT itself changed (makepad_hal) -- Restart to update: a restart applies it\n";
         let stale = startup_exit(Path::new("app"), &"exit status: 0", "during startup", tail.into());
         assert!(stale.message().contains("stopped during startup: a stale JIT, not a test failure"), "{}", stale.message());
         assert!(stale.message().contains("tree in makepad_hal, a crate linked into the JIT"), "{}", stale.message());

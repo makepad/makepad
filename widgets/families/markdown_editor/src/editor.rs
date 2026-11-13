@@ -16,6 +16,7 @@ use crate::highlight::{Highlights, RowBlocks, RowHighlight, WholeBlock};
 use crate::print::{PrintJob, PrintUpdate};
 use crate::rowmap::{caret_src, flat_of, line_around, next_char, next_word, prev_char, prev_word, word_around};
 use makepad_code_editor::{
+    code_view::find_matches,
     history::EditKind,
     selection::{Cursor, Selection, SelectionSet},
     session::SessionId,
@@ -27,16 +28,25 @@ use makepad_markdown_edit::{
     pulldown_cmark::{CodeBlockKind, CowStr, Event as MdEvent, Tag, TagEnd},
     BlockKind, Index, LineEdit, Row, RowPart, Slice,
 };
+use makepad_widgets_core::makepad_platform::{
+    clipboard_read::{ClipboardContent, ClipboardImage, ClipboardWrite},
+    thread::{Class, SignalToUI, TaskHandle},
+};
+use makepad_widgets_core::text_input::TextMark;
 use makepad_widgets_core::*;
 use makepad_widgets_rich_text::{
-    markdown::{Markdown, MarkdownHost, MarkdownPiece, MarkdownWidgetRefExt},
-    text_flow::TextFlow,
+    markdown::{resolve_source, Markdown, MarkdownHost, MarkdownPiece, MarkdownWidgetRefExt},
+    text_flow::{CellSelection, TextFlow},
 };
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     ops::Range,
-    sync::mpsc::{channel, Receiver},
+    path::{Path, PathBuf},
+    sync::{
+        mpsc::{channel, Receiver},
+        Arc,
+    },
 };
 
 script_mod! {
@@ -69,6 +79,14 @@ script_mod! {
                 inline_links: true
                 body: ""
             }
+        }
+        // The picture a move drags, riding the pointer: drawn by the view
+        // in an overlay, never here.
+        chip_box := View{
+            visible: false
+            width: 0
+            height: 0
+            chip := Image{width: 96 height: 96}
         }
         // The rows as they print: drawn off screen by a print job, never here.
         print_page := View{
@@ -113,6 +131,15 @@ pub enum MarkdownEditorAction {
     EditLink(Option<String>),
     /// Cmd/Ctrl+click on a link: the host follows its destination.
     OpenLink(String),
+    /// Something the person must know about: a pasted picture that could
+    /// not be saved, and why.
+    Problem(String),
+    /// The view wrote a file beside the document (a pasted picture, or a
+    /// dropped one copied in): a list of the folder's files shows it now.
+    WroteFile(PathBuf),
+    /// A double-click on a picture (or Cmd/Ctrl+K with one selected): the
+    /// host edits its alt text and source, then calls `set_picture`.
+    EditPicture { alt: String, src: String },
     #[default]
     None,
 }
@@ -174,6 +201,100 @@ impl Drop for Attached {
     }
 }
 
+/// A picture dragged over the view: where it would go and its file.
+#[derive(Clone, Debug, PartialEq)]
+struct DropTarget {
+    at: Position,
+    /// The markdown the ghost shows.
+    source: String,
+}
+
+/// A picture in the document: its source span and where it reads from.
+struct Picture {
+    start: Position,
+    end: Position,
+    alt: String,
+    dest: String,
+}
+
+/// A picture being dragged to another place in the document.
+struct Moving {
+    start: Position,
+    end: Position,
+    /// Its markdown, as it goes in at the drop.
+    source: String,
+    /// Its file, for the chip on the pointer.
+    path: String,
+}
+
+/// The `internal_id` of a picture moved within the document.
+const PICTURE_MOVE: LiveId = live_id!(markdown_picture_move);
+
+/// How far the pointer moves from a press on a picture before it drags it.
+const DRAG_START: f64 = 6.0;
+
+/// The longest side of the chip a moved picture shows on the pointer.
+const CHIP: f64 = 96.0;
+
+/// The row a drop would go in, drawn as if the picture were there (its
+/// ghost): the copy's parse, and where the picture's source sits in it.
+struct GhostRow {
+    target: DropTarget,
+    row: usize,
+    cache: RowCache,
+    /// The ghost's source range in the copy's slice.
+    ghost: Range<usize>,
+}
+
+impl GhostRow {
+    fn new(index: &Index, lines: &[String], target: DropTarget) -> Option<Self> {
+        let row_id = index.row_at_line(target.at.line_index);
+        let row = index.row(row_id);
+        if matches!(row.part, RowPart::Code { .. }) || !row.lines.contains(&target.at.line_index) {
+            return None;
+        }
+        let mut copy = lines[row.lines.clone()].to_vec();
+        let line = &mut copy[target.at.line_index - row.lines.start];
+        let byte = target.at.byte_index.min(line.len());
+        if !line.is_char_boundary(byte) {
+            return None;
+        }
+        let source = target.source.clone();
+        line.insert_str(byte, &source);
+        let mut slice = Slice::new(&copy, 0..copy.len());
+        slice.first_line = row.lines.start;
+        let start = slice.offset(target.at.line_index, byte);
+        let cache = RowCache::of_slice(index, &row, slice);
+        Some(Self { target, row: row_id, cache, ghost: start..start + source.len() })
+    }
+
+    /// The document position of `flat` in the ghost row's flow: the drop
+    /// place itself anywhere on the ghost.
+    fn position_at(&self, flat: usize) -> Position {
+        let offset = caret_src(&self.cache.pieces, flat, &self.cache.links);
+        if offset <= self.ghost.start {
+            self.cache.position_of(offset)
+        } else if offset < self.ghost.end {
+            self.target.at
+        } else {
+            let mut position = self.cache.position_of(offset);
+            if position.line_index == self.target.at.line_index {
+                position.byte_index -= self.ghost.len();
+            }
+            position
+        }
+    }
+}
+
+/// A picture on its way into the document (pasted, or dropped from outside
+/// its folder), being written beside the document on a worker.
+struct Saving {
+    task: TaskHandle<Result<String, String>>,
+    /// Where it goes: a drop's place, or (a paste) the caret when it is saved.
+    at: Option<Position>,
+    alt: String,
+}
+
 /// A row's parse, kept while the row is drawn: its block's generation and
 /// part name it, so an edit elsewhere keeps it.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -225,6 +346,18 @@ impl RowCache {
                 .map(|(event, range)| (event.into_static(), range))
                 .collect(),
         };
+        Self::of_events(index, row, slice, events)
+    }
+
+    /// Row `row` drawn from `slice`, a copy of its lines with something put
+    /// in (a drop's ghost); not for a code chunk.
+    fn of_slice(index: &Index, row: &Row, slice: Slice) -> Self {
+        let events = index.parse_slice(&slice).into_iter().map(|(event, range)| (event.into_static(), range)).collect();
+        Self::of_events(index, row, slice, events)
+    }
+
+    fn of_events(index: &Index, row: &Row, slice: Slice, events: Vec<(MdEvent<'static>, Range<usize>)>) -> Self {
+        let block = &index.blocks()[row.block];
         let list_start = match (row.part, &block.kind) {
             (RowPart::Item { index, .. }, BlockKind::List { ordered: true, start, .. }) => Some(start + index as u64),
             _ => None,
@@ -412,9 +545,15 @@ fn map_offset(plan: &Plan, offset: usize, before: bool) -> usize {
     mapped.max(0) as usize
 }
 
+/// The anchor of the heading whose first line is `line` (`# Title #` or a
+/// setext title).
+pub(crate) fn heading_anchor(line: &str) -> String {
+    slug(line.trim_start().trim_start_matches('#').trim_end().trim_end_matches('#'))
+}
+
 /// A heading's anchor: its text in lower case, letters, digits, `-` and
 /// `_` kept, spaces as `-`, inline markers and other punctuation dropped.
-fn slug(text: &str) -> String {
+pub(crate) fn slug(text: &str) -> String {
     text.trim()
         .chars()
         .filter_map(|c| match c {
@@ -447,6 +586,32 @@ struct DrawnRow {
 struct Place {
     line: usize,
     y: f64,
+}
+
+/// Find in the final view: the query's matches in the document's source
+/// (the search the source view runs), washed where the view shows them.
+#[derive(Default)]
+struct Finding {
+    query: String,
+    /// Typing searches from here: where the selection started when find
+    /// opened.
+    from: Position,
+    matches: Vec<(Position, Position)>,
+    current: Option<usize>,
+}
+
+impl Finding {
+    /// Counts the matches in `lines`, keeping the current one where it was
+    /// (or the next after it), else the first after `from`.
+    fn count(&mut self, lines: &[String]) {
+        let from = self.current.and_then(|current| self.matches.get(current)).map_or(self.from, |m| m.0);
+        self.matches = find_matches(lines, &self.query);
+        self.current = if self.matches.is_empty() {
+            None
+        } else {
+            Some(self.matches.iter().position(|m| m.0 >= from).unwrap_or(0))
+        };
+    }
 }
 
 #[derive(Script, ScriptHook, Widget)]
@@ -520,6 +685,51 @@ pub struct MarkdownEditor {
     /// The pages being made for print or export.
     #[rust]
     print: Option<PrintJob>,
+    /// The document's file: its folder holds the document's relative images.
+    #[rust]
+    file: Option<PathBuf>,
+    /// The clipboard reads pastes asked for, in order, each with the text
+    /// its paste came with: a read's Markdown flavour pastes in its place,
+    /// and a picture alone on the clipboard is saved beside the document.
+    #[rust]
+    paste_reads: Vec<(u64, Option<String>)>,
+    /// A paste's text came as input and its read is on the way: the
+    /// Cmd/Ctrl+V key behind it asks for no second one.
+    #[rust]
+    paste_by_text: bool,
+    /// Pictures being written beside the document, then linked.
+    #[rust]
+    saving: Vec<Saving>,
+    /// A picture dragged over the view, and the row drawn with its ghost.
+    #[rust]
+    drop_target: Option<DropTarget>,
+    #[rust]
+    ghost_row: Option<GhostRow>,
+    /// A press on a picture, and where: a move starts once the pointer has
+    /// gone `DRAG_START` from there.
+    #[rust]
+    press_picture: Option<(Picture, DVec2)>,
+    #[rust]
+    moving: Option<Moving>,
+    /// Where the pointer is while a picture moves: the chip rides it.
+    #[rust]
+    chip_at: Option<DVec2>,
+    #[live]
+    chip_list: DrawList2d,
+    /// A wash (the ghost, found text) was due in a row drawn before its
+    /// pieces were known: one more draw washes it.
+    #[rust]
+    rewash: bool,
+    /// Find, while it is open.
+    #[rust]
+    find: Option<Finding>,
+    /// The caret a find moved scrolls in to the view's upper middle, not
+    /// to the edge it left by.
+    #[rust]
+    reveal_middle: bool,
+    /// The start of the picture whose alt text and source the host edits.
+    #[rust]
+    editing_picture: Option<Position>,
 }
 
 impl MarkdownEditor {
@@ -560,8 +770,18 @@ impl MarkdownEditor {
         }
         let Some(doc) = self.doc.as_ref() else { return false };
         let lines = doc.document.as_text().as_lines().to_vec();
-        self.print = Some(PrintJob::new(cx, title, doc.index.clone(), lines));
+        let base_dir = self.file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+        self.print = Some(PrintJob::new(cx, title, doc.index.clone(), lines, base_dir));
         true
+    }
+
+    /// The document's file: relative image sources are read from its
+    /// folder (`None`: from the working directory).
+    pub fn set_file(&mut self, cx: &mut Cx, file: Option<&Path>) {
+        if self.file.as_deref() != file {
+            self.file = file.map(Path::to_path_buf);
+            self.view.redraw(cx);
+        }
     }
 
     /// The title of the job running, if one is.
@@ -578,6 +798,7 @@ impl MarkdownEditor {
         let Some(job) = self.print.as_mut() else { return };
         let row = self.view.widget(cx, ids!(print_page.row));
         let Some(mut md) = row.borrow_mut::<Markdown>() else { return };
+        md.set_base_dir(cx, self.file.as_deref().and_then(Path::parent));
         job.draw(cx, &mut md, &mut self.draw_page_number);
     }
 
@@ -726,6 +947,9 @@ impl MarkdownEditor {
         }
         self.caret = self.clamp(self.caret);
         self.anchor = self.clamp(self.anchor);
+        if let (Some(find), Some(doc)) = (self.find.as_mut(), self.doc.as_ref()) {
+            find.count(doc.document.as_text().as_lines());
+        }
         self.view.redraw(cx);
     }
 
@@ -751,32 +975,74 @@ impl MarkdownEditor {
         }
         let (sel_start, sel_end) = self.ordered_selection();
         let footnote = |label: &str| index.footnote_number(label);
+        // A picture dragged over the view: its row draws from a copy with
+        // the picture in it.
+        match &self.drop_target {
+            Some(target) if self.ghost_row.as_ref().map_or(true, |ghost| ghost.target != *target) => {
+                self.ghost_row = GhostRow::new(index, lines, target.clone());
+            }
+            Some(_) => {}
+            None => self.ghost_row = None,
+        }
         while let Some(row_id) = list.next_visible_item(cx) {
             if row_id >= row_count {
                 continue;
             }
             let row = index.row(row_id);
             let key = RowKey::of(index, &row);
-            let cache = self.rows.entry(key).or_insert_with(|| RowCache::build(index, lines, &row));
+            let ghost = self.ghost_row.as_mut().filter(|ghost| ghost.row == row_id);
+            let ghost_range = ghost.as_ref().map(|ghost| ghost.ghost.clone());
+            let cache = match ghost {
+                Some(ghost) => &mut ghost.cache,
+                None => self.rows.entry(key).or_insert_with(|| RowCache::build(index, lines, &row)),
+            };
             cache.drawn_in = self.draws;
             let item = list.item(cx, row_id, id!(Row));
             let walk = item.walk(cx);
             let Some(mut md) = item.borrow_mut::<Markdown>() else { continue };
+            md.set_base_dir(cx, self.file.as_deref().and_then(Path::parent));
             // The selection in the flow's text, from what this row drew last
             // time (a row drawn for the first time shows it from the next draw).
             let (start, end) = cache.span();
-            let (a, b) = if sel_start < sel_end && sel_start <= end && sel_end >= start && !cache.pieces.is_empty() {
+            let (a, b) = if let Some(ghost) = &ghost_range {
+                // The ghost shows washed, as a selected picture does.
+                if cache.pieces.is_empty() {
+                    // its pieces come with this draw: wash it in the next
+                    self.rewash = true;
+                    (0, 0)
+                } else {
+                    (flat_of(&cache.pieces, ghost.start), flat_of(&cache.pieces, ghost.end))
+                }
+            } else if sel_start < sel_end && sel_start <= end && sel_end >= start && !cache.pieces.is_empty() {
                 let a = if sel_start <= start { 0 } else { flat_of(&cache.pieces, cache.offset_of(sel_start)) };
                 let b = if sel_end >= end { usize::MAX } else { flat_of(&cache.pieces, cache.offset_of(sel_end)) };
                 (a, b)
             } else {
                 (0, 0)
             };
+            // A selection from one cell of a table to another shows whole
+            // cells, not the text between.
+            let within = ghost_range.is_none() && sel_start < sel_end && sel_start >= start && sel_end <= end;
+            let cells = if within { cell_selection(cache, self.anchor, self.caret) } else { None };
+            let (a, b) = if cells.is_some() { (0, 0) } else { (a, b) };
             md.text_flow.set_selection(a, b);
+            md.text_flow.set_cell_selection(cells);
+            let found = match &self.find {
+                Some(find) => found_in_row(&find.matches, cache, start, end).unwrap_or_else(|| {
+                    // its pieces come with this draw: wash them in the next
+                    self.rewash = true;
+                    Vec::new()
+                }),
+                None => Vec::new(),
+            };
+            // Marks redraw the flow when set: set only when they change.
+            if md.text_flow.marks() != found.as_slice() {
+                md.text_flow.set_marks(cx, found);
+            }
             let follows_block = follows_block(row_id, &row);
             // A caret on a line that draws no text gets a place made for it.
             let caret_line = self.caret.line_index;
-            let anchors = if caret_line >= start.line_index && caret_line <= end.line_index && cache.line_is_blank(caret_line) {
+            let anchors = if ghost_range.is_none() && caret_line >= start.line_index && caret_line <= end.line_index && cache.line_is_blank(caret_line) {
                 vec![(cache.offset_of(self.caret), None)]
             } else {
                 Vec::new()
@@ -891,8 +1157,10 @@ impl MarkdownEditor {
         }
         let view = self.view.area().rect(cx);
         let height = self.caret_rect.map_or(16.0, |rect| rect.size.y);
+        let middle = std::mem::take(&mut self.reveal_middle).then(|| ((view.size.y - height) * 0.4).max(0.0));
         let target = match self.caret_y {
             Some(y) if y >= 0.0 && y + height <= view.size.y => None,
+            _ if middle.is_some() => middle,
             Some(y) if y < 0.0 => Some(0.0),
             Some(_) => Some((view.size.y - height).max(0.0)),
             None => {
@@ -913,6 +1181,15 @@ impl MarkdownEditor {
     /// The source position under `abs`: the drawn row nearest to it, and the
     /// character of its flow there.
     fn position_at(&self, cx: &Cx, abs: DVec2) -> Option<Position> {
+        let drawn = self.nearest_row(cx, abs)?;
+        let cache = self.rows.get(&drawn.key)?;
+        let md = drawn.item.borrow::<Markdown>()?;
+        let flat = md.text_flow.selection_point_to_char_index(cx, abs).unwrap_or(0);
+        Some(cache.caret_at(flat))
+    }
+
+    /// The drawn row nearest `abs` up or down.
+    fn nearest_row(&self, cx: &Cx, abs: DVec2) -> Option<&DrawnRow> {
         let mut best: Option<(&DrawnRow, f64)> = None;
         for drawn in &self.drawn {
             let rect = drawn.item.area().rect(cx);
@@ -927,11 +1204,7 @@ impl MarkdownEditor {
                 best = Some((drawn, dist));
             }
         }
-        let (drawn, _) = best?;
-        let cache = self.rows.get(&drawn.key)?;
-        let md = drawn.item.borrow::<Markdown>()?;
-        let flat = md.text_flow.selection_point_to_char_index(cx, abs).unwrap_or(0);
-        Some(cache.caret_at(flat))
+        best.map(|(drawn, _)| drawn)
     }
 
     /// The drawn row under `abs`.
@@ -979,6 +1252,20 @@ impl MarkdownEditor {
         true
     }
 
+    /// The picture drawn under `abs`, if a press there lands on one: its
+    /// whole `![alt](src)` and its destination.
+    fn object_at(&self, cx: &Cx, abs: DVec2) -> Option<Picture> {
+        let at = self.row_at(cx, abs)?;
+        let drawn = &self.drawn[at];
+        let cache = self.rows.get(&drawn.key)?;
+        let md = drawn.item.borrow::<Markdown>()?;
+        let flat = md.text_flow.object_at(cx, abs)?;
+        let end = flat + '\u{FFFC}'.len_utf8();
+        let piece = cache.pieces.iter().find(|piece| !piece.identity && piece.flat == (flat..end))?;
+        let (alt, dest) = plan::picture_at(&cache.events, piece.src.start)?;
+        Some(Picture { start: cache.position_of(piece.src.start), end: cache.position_of(piece.src.end), alt, dest })
+    }
+
     /// What a press at `abs` would hit besides text: a task box (the
     /// position of its `[`) or a link (its destination).
     fn target_at(&self, cx: &Cx, abs: DVec2) -> Option<Target> {
@@ -1012,6 +1299,100 @@ impl MarkdownEditor {
 
     /// The selection as markdown, repaired at its ends (markers open at the
     /// start and still open at the end closed), as the cut rules take it.
+    /// The selected source when it lies on one line: what a find opened
+    /// now looks for.
+    pub fn find_seed(&self) -> Option<String> {
+        let (start, end) = self.ordered_selection();
+        if start.line_index != end.line_index || start == end {
+            return None;
+        }
+        let doc = self.doc.as_ref()?;
+        let text = doc.document.as_text();
+        text.as_lines().get(start.line_index)?.get(start.byte_index..end.byte_index).map(str::to_string)
+    }
+
+    /// Finds `query` in the document: every match washed, the first at or
+    /// after where the selection started when find opened selected and
+    /// scrolled to. Typing on keeps searching from there.
+    pub fn set_find(&mut self, cx: &mut Cx, query: &str) {
+        let Some(doc) = &self.doc else { return };
+        let from = self.ordered_selection().0;
+        let find = self.find.get_or_insert_with(|| Finding { from, ..Default::default() });
+        find.query = query.to_string();
+        find.current = None;
+        find.count(doc.document.as_text().as_lines());
+        self.select_found(cx);
+    }
+
+    /// Steps to the next (+1) or previous (-1) match, wrapping.
+    pub fn find_step(&mut self, cx: &mut Cx, step: isize) {
+        let Some(find) = self.find.as_mut() else { return };
+        let count = find.matches.len();
+        if count == 0 {
+            return;
+        }
+        find.current = Some(match find.current {
+            Some(current) => (current as isize + step).rem_euclid(count as isize) as usize,
+            None => 0,
+        });
+        self.select_found(cx);
+    }
+
+    /// Ends find: the washes go, the last match stays selected.
+    pub fn close_find(&mut self, cx: &mut Cx) {
+        if self.find.take().is_some() {
+            self.view.redraw(cx);
+        }
+    }
+
+    /// While find is open: the current match (from 0) and how many there are.
+    pub fn find_count(&self) -> Option<(Option<usize>, usize)> {
+        self.find.as_ref().filter(|find| !find.query.is_empty()).map(|find| (find.current, find.matches.len()))
+    }
+
+    /// Selects the current match and scrolls it in when it is out of view.
+    fn select_found(&mut self, cx: &mut Cx) {
+        let Some((start, end)) = self.find.as_ref().and_then(|find| find.matches.get(find.current?)).copied() else {
+            self.view.redraw(cx);
+            return;
+        };
+        self.anchor = start;
+        self.caret = end;
+        self.prefer_next_row = false;
+        self.preferred_x = None;
+        self.reveal = true;
+        self.reveal_middle = true;
+        self.view.redraw(cx);
+        cx.widget_action(self.widget_uid(), MarkdownEditorAction::Caret);
+    }
+
+    /// What a copy of `markdown` (the selection's source) puts on the
+    /// clipboard: the text as it reads (no markers), the Markdown as its
+    /// Markdown flavour, which a paste back here takes, and its HTML. A
+    /// selection that reads as nothing (a picture without a description)
+    /// copies its Markdown as the text.
+    fn copied(&self, markdown: String) -> Option<ClipboardWrite> {
+        if markdown.is_empty() {
+            return None;
+        }
+        let doc = self.doc.as_ref()?;
+        let flavours = doc.index.flavours(markdown);
+        let text = if flavours.text.is_empty() { flavours.markdown.clone() } else { flavours.text };
+        Some(ClipboardWrite { text, html: Some(flavours.html), markdown: Some(flavours.markdown) })
+    }
+
+    /// Pastes what a read found: the Markdown flavour as it is, else the
+    /// text the paste came with (or the read's), else a picture.
+    fn paste(&mut self, cx: &mut Cx, content: &ClipboardContent, text: Option<String>) {
+        let markdown = content.markdown.as_deref().map(typed_text).filter(|m| !m.is_empty());
+        let text = text.or_else(|| content.text.as_deref().map(typed_text)).filter(|t| !t.is_empty());
+        if let Some(typed) = markdown.or(text) {
+            self.type_text(cx, &typed, true);
+        } else if let Some(image) = &content.image {
+            self.save_picture(cx, image.clone());
+        }
+    }
+
     fn selected_text(&self) -> String {
         let (start, end) = self.ordered_selection();
         if start == end {
@@ -1020,6 +1401,10 @@ impl MarkdownEditor {
         let Some((slice, events)) = self.blocks_around(start.line_index, end.line_index, 0, 0).and_then(|lines| self.parse(lines)) else {
             return String::new();
         };
+        let (anchor, caret) = (Self::slice_offset(&slice, self.anchor), Self::slice_offset(&slice, self.caret));
+        if let Some(block) = plan::cell_block(&slice.text, &events, anchor, caret) {
+            return plan::block_text(&slice.text, &events, &block).unwrap_or_default();
+        }
         let range = Self::slice_offset(&slice, start)..Self::slice_offset(&slice, end);
         plan::cut(&slice.text, &events, range).1
     }
@@ -1144,14 +1529,24 @@ impl MarkdownEditor {
 
     /// Removes the selection by the cut rules (markers kept balanced, tables
     /// and code kept whole): the markdown it removed and the history group
-    /// it started. None without a selection.
-    fn delete_selection(&mut self, cx: &mut Cx) -> Option<(EditKind, String)> {
+    /// it started. None without a selection. Whole cells of a table are
+    /// emptied, or with `cells_go` removed where they are whole rows or
+    /// columns (a Delete, a cut), and the caret goes to the first.
+    fn delete_selection(&mut self, cx: &mut Cx, cells_go: bool) -> Option<(EditKind, String)> {
         let (start, end) = self.ordered_selection();
         if start == end {
             return None;
         }
         let lines = self.blocks_around(start.line_index, end.line_index, 0, 0)?;
         let (slice, events) = self.parse(lines)?;
+        let (anchor, caret) = (Self::slice_offset(&slice, self.anchor), Self::slice_offset(&slice, self.caret));
+        if let Some(block) = plan::cell_block(&slice.text, &events, anchor, caret) {
+            let fragment = plan::block_text(&slice.text, &events, &block).unwrap_or_default();
+            let step = if cells_go { plan::delete_block(&slice.text, &events, &block) } else { plan::clear_block(&slice.text, &events, &block) }?;
+            let kind = self.new_group();
+            self.apply_step(cx, &slice, step, kind);
+            return Some((kind, fragment));
+        }
         let range = Self::slice_offset(&slice, start)..Self::slice_offset(&slice, end);
         let (plan, fragment) = plan::cut(&slice.text, &events, range);
         let kind = self.new_group();
@@ -1169,19 +1564,25 @@ impl MarkdownEditor {
         if !wrap {
             self.pending = pending.clone();
         }
-        let kind = match self.delete_selection(cx) {
+        let kind = match self.delete_selection(cx, false) {
             Some((group, _)) => group,
             None if wrap => self.new_group(),
             None if was_paste => EditKind::Other,
             None if typed == " " => EditKind::InsertSpace,
             None => EditKind::Insert,
         };
-        let Some(lines) = self.blocks_around(self.caret.line_index, self.caret.line_index, 0, 0) else { return };
         let start = self.caret;
+        // A blank line takes the blocks on both sides along: text typed
+        // there must not continue either one.
+        let blank_line = self.doc.as_ref().is_some_and(|doc| {
+            doc.document.as_text().as_lines().get(start.line_index).map_or(true, |line| line.trim().is_empty())
+        });
+        let around = usize::from(blank_line);
+        let Some(lines) = self.blocks_around(start.line_index, start.line_index, around, around) else { return };
         // Only a table cell (`|`), a fence (backticks, tildes), spaces at a
-        // line's start and a paste into a container type differently: other
-        // text needs no parse.
-        let (slice, planned) = if typed.contains(['|', '`', '~', '\n']) || typed.trim().is_empty() {
+        // line's start, a paste into a container and text on a blank line
+        // type differently: other text needs no parse.
+        let (slice, planned) = if typed.contains(['|', '`', '~', '\n']) || typed.trim().is_empty() || blank_line {
             let Some((slice, events)) = self.parse(lines) else { return };
             let at = Self::slice_offset(&slice, start);
             let typed = if typed.contains('\n') {
@@ -1212,10 +1613,267 @@ impl MarkdownEditor {
         }
     }
 
+    /// Writes a pasted picture beside the document on a worker, as
+    /// `<document>-image-N.png` (the first free N); `insert_saved` links it.
+    fn save_picture(&mut self, cx: &mut Cx, image: ClipboardImage) {
+        let Some(file) = self.file.clone() else {
+            cx.widget_action(self.widget_uid(), MarkdownEditorAction::Problem("save the document first: a pasted picture is saved beside it".into()));
+            return;
+        };
+        let job = move || {
+            let result = write_picture(&file, image);
+            SignalToUI::set_ui_signal();
+            result
+        };
+        match cx.task_pool().submit(Class::Visible, job) {
+            Ok(task) => self.saving.push(Saving { task, at: None, alt: String::new() }),
+            Err(error) => cx.widget_action(self.widget_uid(), MarkdownEditorAction::Problem(format!("the pasted picture was not saved: {error}"))),
+        }
+    }
+
+    /// A picture dropped at `at`: one under the document's folder is linked
+    /// where it is; any other is copied beside the document first, on a
+    /// worker, under its own name (or the first free `name-N`).
+    fn drop_picture(&mut self, cx: &mut Cx, at: Position, path: &str) {
+        let Some(folder) = self.file.as_deref().and_then(Path::parent).map(Path::to_path_buf) else {
+            cx.widget_action(self.widget_uid(), MarkdownEditorAction::Problem("save the document first: a dropped picture is linked from its folder".into()));
+            return;
+        };
+        let source = PathBuf::from(path);
+        let alt = picture_alt(&source);
+        if let Ok(relative) = source.strip_prefix(&folder) {
+            let relative: Vec<String> = relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+            self.anchor = self.clamp(at);
+            self.caret = self.anchor;
+            self.insert_source(cx, &plan::picture(&alt, &relative.join("/")));
+            return;
+        }
+        let job = move || {
+            let result = copy_picture(&folder, &source);
+            SignalToUI::set_ui_signal();
+            result
+        };
+        match cx.task_pool().submit(Class::Visible, job) {
+            Ok(task) => self.saving.push(Saving { task, at: Some(at), alt }),
+            Err(error) => cx.widget_action(self.widget_uid(), MarkdownEditorAction::Problem(format!("the dropped picture was not copied: {error}"))),
+        }
+    }
+
+    /// Links each picture saved since the last call, as one undo step: a
+    /// dropped one at its drop place, a pasted one at the caret, over the
+    /// selection.
+    fn insert_saved(&mut self, cx: &mut Cx) {
+        let mut i = 0;
+        while i < self.saving.len() {
+            let Some(result) = self.saving[i].task.try_take() else {
+                i += 1;
+                continue;
+            };
+            // finished and taken: nothing is left to detach
+            let Saving { task, at, alt } = self.saving.remove(i);
+            drop(task);
+            let error = match result {
+                Ok(Ok(name)) => {
+                    if let Some(folder) = self.file.as_deref().and_then(Path::parent) {
+                        cx.widget_action(self.widget_uid(), MarkdownEditorAction::WroteFile(folder.join(&name)));
+                    }
+                    if let Some(at) = at {
+                        self.anchor = self.clamp(at);
+                        self.caret = self.anchor;
+                    }
+                    self.insert_source(cx, &plan::picture(&alt, &name));
+                    continue;
+                }
+                Ok(Err(error)) => error,
+                Err(error) => format!("{error:?}"),
+            };
+            let what = if at.is_some() { "dropped picture was not copied" } else { "pasted picture was not saved" };
+            cx.widget_action(self.widget_uid(), MarkdownEditorAction::Problem(format!("the {what}: {error}")));
+        }
+    }
+
+    /// Pictures dragged over the view: a ghost where the drop would go, the
+    /// text reflowing around it; the drop links the picture there.
+    fn handle_drag(&mut self, cx: &mut Cx, event: &Event) {
+        let moving = self.moving.as_ref().map(|moving| moving.source.clone());
+        // What a drag carries for the view: a picture file, or the picture
+        // this view is moving (its markdown as it is).
+        let picture = |items: &[DragItem]| {
+            items.iter().find_map(|item| match item {
+                DragItem::FilePath { internal_id: Some(id), .. } if *id == PICTURE_MOVE => moving.clone().map(|source| (source, None)),
+                DragItem::FilePath { path, internal_id: None } if is_picture(path) => {
+                    Some((plan::picture(&picture_alt(Path::new(path)), path), Some(path.clone())))
+                }
+                _ => None,
+            })
+        };
+        // The chip rides the pointer wherever it goes.
+        if self.moving.is_some() {
+            match event {
+                Event::Drag(e) => {
+                    self.chip_at = Some(e.abs);
+                    self.view.redraw(cx);
+                }
+                Event::DragEnd => {
+                    self.moving = None;
+                    self.chip_at = None;
+                    self.view.redraw(cx);
+                }
+                _ => {}
+            }
+        }
+        let ours = match event {
+            Event::Drag(e) => picture(&e.items).is_some(),
+            Event::Drop(e) => picture(&e.items).is_some(),
+            Event::DragEnd => self.drop_target.is_some(),
+            _ => false,
+        };
+        if !ours || self.doc.is_none() {
+            return;
+        }
+        match event.drag_hits(cx, self.view.area()) {
+            DragHit::Drag(d) => {
+                let target = match (&d.state, picture(&d.items)) {
+                    (DragState::Out, _) | (_, None) => None,
+                    (_, Some((source, _))) => self.drop_position_at(cx, d.abs).map(|at| DropTarget { at, source }),
+                };
+                // A moved picture dropped on its own place stays.
+                let target = target.filter(|target| !self.moving.as_ref().is_some_and(|m| m.start <= target.at && target.at <= m.end));
+                if target.is_some() {
+                    *d.response.lock().unwrap_or_else(|e| e.into_inner()) = DragResponse::Copy;
+                }
+                if target != self.drop_target {
+                    self.drop_target = target;
+                    self.view.redraw(cx);
+                }
+            }
+            DragHit::Drop(d) => {
+                let target = self.drop_target.take();
+                self.ghost_row = None;
+                let moving = self.moving.take();
+                self.chip_at = None;
+                if let Some((_, path)) = picture(&d.items) {
+                    let at = match &moving {
+                        Some(_) => target.map(|target| target.at),
+                        None => target.map(|target| target.at).or_else(|| self.drop_position_at(cx, d.abs)),
+                    };
+                    if let Some(at) = at {
+                        cx.set_key_focus(self.view.area());
+                        match (moving, path) {
+                            (Some(moving), _) => self.move_picture(cx, moving, at),
+                            (None, Some(path)) => self.drop_picture(cx, at, &path),
+                            (None, None) => {}
+                        }
+                    }
+                }
+                self.view.redraw(cx);
+            }
+            DragHit::DragEnd | DragHit::NoHit => {
+                if self.drop_target.take().is_some() {
+                    self.ghost_row = None;
+                    self.view.redraw(cx);
+                }
+            }
+        }
+    }
+
+    /// Starts dragging `picture` to another place: the view's own drag, its
+    /// chip on the pointer.
+    fn start_move(&mut self, cx: &mut Cx, picture: Picture, abs: DVec2) {
+        let Some(lines) = self.blocks_around(picture.start.line_index, picture.end.line_index, 0, 0) else { return };
+        let Some(doc) = &self.doc else { return };
+        let slice = Slice::new(doc.document.as_text().as_lines(), lines);
+        let source = slice.text[Self::slice_offset(&slice, picture.start)..Self::slice_offset(&slice, picture.end)].to_string();
+        let path = resolve_source(&picture.dest, self.file.as_deref().and_then(Path::parent));
+        let path = path.strip_prefix("file://").unwrap_or(&path).to_string();
+        self.selecting = false;
+        self.chip_at = Some(abs);
+        self.moving = Some(Moving { start: picture.start, end: picture.end, source, path: path.clone() });
+        cx.start_dragging(vec![DragItem::FilePath { path, internal_id: Some(PICTURE_MOVE) }]);
+        self.view.redraw(cx);
+    }
+
+    /// Moves a picture to `at`: its removal and its insertion are one undo
+    /// step, and it stays selected.
+    fn move_picture(&mut self, cx: &mut Cx, moving: Moving, at: Position) {
+        if moving.start <= at && at <= moving.end {
+            return;
+        }
+        let first = moving.start.line_index.min(at.line_index);
+        let last = moving.end.line_index.max(at.line_index);
+        let Some(lines) = self.blocks_around(first, last, 0, 0) else { return };
+        let Some(doc) = &self.doc else { return };
+        let slice = Slice::new(doc.document.as_text().as_lines(), lines);
+        let (start, end, to) = (Self::slice_offset(&slice, moving.start), Self::slice_offset(&slice, moving.end), Self::slice_offset(&slice, at));
+        let source = slice.text[start..end].to_string();
+        let len = source.len();
+        let (edits, placed) = if to < start {
+            (vec![(to..to, source), (start..end, String::new())], to)
+        } else {
+            (vec![(start..end, String::new()), (to..to, source)], to - (end - start))
+        };
+        let plan = Plan { edits, caret: placed + len };
+        let kind = self.new_group();
+        self.apply_plan(cx, &slice, &plan, kind, After::Select { anchor: placed, caret: placed + len });
+    }
+
+    /// The chip of a moved picture, on the pointer, over everything.
+    fn draw_chip(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
+        let (Some(at), Some(moving)) = (self.chip_at, self.moving.as_ref()) else {
+            self.chip_list.begin_always(cx);
+            self.chip_list.end(cx);
+            return;
+        };
+        let chip = self.view.widget(cx, ids!(chip_box.chip));
+        let image = chip.as_image();
+        let _ = image.load_image_file_by_path_async(cx, Path::new(&moving.path));
+        self.chip_list.begin_overlay_last(cx);
+        let size = cx.current_pass_size();
+        cx.begin_root_turtle(size, Layout::default());
+        if let Some((width, height)) = image.size_in_pixels(cx).filter(|(width, height)| *width > 0 && *height > 0) {
+            let scale = (CHIP / width.max(height) as f64).min(1.0);
+            let walk = Walk {
+                abs_pos: Some(at + dvec2(14.0, 14.0)),
+                width: Size::Fixed(width as f64 * scale),
+                height: Size::Fixed(height as f64 * scale),
+                ..Walk::default()
+            };
+            chip.draw_walk_all(cx, scope, walk);
+        }
+        cx.end_pass_sized_turtle();
+        self.chip_list.end(cx);
+    }
+
+    /// Where a drop at `abs` would go: the caret place there, with the
+    /// ghost's row read as if the ghost were not in it.
+    fn drop_position_at(&self, cx: &Cx, abs: DVec2) -> Option<Position> {
+        let drawn = self.nearest_row(cx, abs)?;
+        let md = drawn.item.borrow::<Markdown>()?;
+        let flat = md.text_flow.selection_point_to_char_index(cx, abs).unwrap_or(0);
+        match self.ghost_row.as_ref().filter(|ghost| ghost.row == drawn.row) {
+            Some(ghost) => Some(ghost.position_at(flat)),
+            None => Some(self.rows.get(&drawn.key)?.caret_at(flat)),
+        }
+    }
+
+    /// Puts `source` in at the caret as it is (no escaping), over the
+    /// selection: one undo step.
+    fn insert_source(&mut self, cx: &mut Cx, source: &str) {
+        let kind = match self.delete_selection(cx, false) {
+            Some((group, _)) => group,
+            None => self.new_group(),
+        };
+        let Some(lines) = self.blocks_around(self.caret.line_index, self.caret.line_index, 0, 0) else { return };
+        let Some(doc) = &self.doc else { return };
+        let slice = Slice::new(doc.document.as_text().as_lines(), lines);
+        let at = Self::slice_offset(&slice, self.caret);
+        self.apply_plan(cx, &slice, &Plan::insert(at, source), kind, After::Caret);
+    }
+
     /// Enter (a new block, or one container level out), or with `hard` a
     /// line break inside the block.
     fn enter(&mut self, cx: &mut Cx, hard: bool) {
-        let kind = self.delete_selection(cx).map_or(EditKind::Other, |(group, _)| group);
+        let kind = self.delete_selection(cx, false).map_or(EditKind::Other, |(group, _)| group);
         let Some(lines) = self.blocks_around(self.caret.line_index, self.caret.line_index, 0, 0) else { return };
         let Some((slice, events)) = self.parse(lines) else { return };
         let at = Self::slice_offset(&slice, self.caret);
@@ -1241,13 +1899,13 @@ impl MarkdownEditor {
     /// Backspace or forward Delete; `to` names how far: a character (None),
     /// or the caret's word or line edge (a position the keys found).
     fn delete(&mut self, cx: &mut Cx, forward: bool, to: Option<Position>) {
-        if self.delete_selection(cx).is_some() {
+        if self.delete_selection(cx, true).is_some() {
             return;
         }
         if let Some(to) = to {
             if to != self.caret {
                 self.anchor = to;
-                self.delete_selection(cx);
+                self.delete_selection(cx, true);
             }
             return;
         }
@@ -1352,6 +2010,42 @@ impl MarkdownEditor {
         let line = position.line_index;
         let (slice, events) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines))?;
         plan::link_at(&slice.text, &events, Self::slice_offset(&slice, position))
+    }
+
+    /// Asks the host to edit `picture`'s alt text and source.
+    fn edit_picture(&mut self, cx: &mut Cx, picture: &Picture) {
+        self.editing_picture = Some(picture.start);
+        let action = MarkdownEditorAction::EditPicture { alt: picture.alt.clone(), src: picture.dest.clone() };
+        cx.widget_action(self.widget_uid(), action);
+    }
+
+    /// The picture the selection is, whole.
+    fn selected_picture(&self) -> Option<Picture> {
+        let (start, end) = self.ordered_selection();
+        let (slice, events) = self.blocks_around(start.line_index, end.line_index, 0, 0).and_then(|lines| self.parse(lines))?;
+        let (from, to) = (Self::slice_offset(&slice, start), Self::slice_offset(&slice, end));
+        let image = events.iter().any(|(event, range)| matches!(event, MdEvent::Start(Tag::Image { .. })) && *range == (from..to));
+        let (alt, dest) = plan::picture_at(&events, from).filter(|_| image)?;
+        Some(Picture { start, end, alt, dest })
+    }
+
+    /// Gives the picture `EditPicture` named the alt text `alt` and the
+    /// source `src` (an empty source keeps it as it is): one undo step, the
+    /// picture selected after it.
+    pub fn set_picture(&mut self, cx: &mut Cx, alt: &str, src: &str) {
+        let Some(start) = self.editing_picture.take() else { return };
+        let src = src.trim();
+        let src = src.strip_prefix('<').and_then(|src| src.strip_suffix('>')).unwrap_or(src);
+        if src.is_empty() {
+            return;
+        }
+        let line = start.line_index;
+        let Some((slice, events)) = self.blocks_around(line, line, 0, 0).and_then(|lines| self.parse(lines)) else { return };
+        let at = Self::slice_offset(&slice, start);
+        let Some(planned) = plan::set_picture(&slice.text, &events, at..at, alt.trim(), src) else { return };
+        let end = planned.caret;
+        let kind = self.new_group();
+        self.apply_plan(cx, &slice, &planned, kind, After::Select { anchor: at, caret: end });
     }
 
     /// Flips the task box of the item at `position`; the selection stays.
@@ -1505,9 +2199,7 @@ impl MarkdownEditor {
             doc.index.blocks().iter().enumerate().find_map(|(at, block)| {
                 let BlockKind::Heading(_) = block.kind else { return None };
                 let first = doc.index.block_lines(at).start;
-                let line = lines.get(first)?;
-                let title = line.trim_start().trim_start_matches('#').trim_end().trim_end_matches('#');
-                (slug(title) == want).then_some(first)
+                (heading_anchor(lines.get(first)?) == want).then_some(first)
             })
         };
         let Some(line) = found else { return false };
@@ -1687,10 +2379,13 @@ impl MarkdownEditor {
             KeyCode::KeyI if primary && !shift && !alt => self.toggle_mark(cx, Mark::Emphasis),
             KeyCode::KeyX if primary && shift && !alt => self.toggle_mark(cx, Mark::Strikethrough),
             KeyCode::KeyE if primary && !shift && !alt => self.toggle_mark(cx, Mark::Code),
-            KeyCode::KeyK if primary && !shift && !alt => {
-                let url = self.link_at_caret();
-                cx.widget_action(self.widget_uid(), MarkdownEditorAction::EditLink(url));
-            }
+            KeyCode::KeyK if primary && !shift && !alt => match self.selected_picture() {
+                Some(picture) => self.edit_picture(cx, &picture),
+                None => {
+                    let url = self.link_at_caret();
+                    cx.widget_action(self.widget_uid(), MarkdownEditorAction::EditLink(url));
+                }
+            },
             // Block styles: Cmd+Alt+0 to 6 a paragraph or a heading level;
             // Cmd+Shift+7, 8, 9 numbered, bullet and task lists; Cmd+Shift+.
             // a quote; Cmd+Shift+C a code block.
@@ -1722,14 +2417,50 @@ impl MarkdownEditor {
             KeyCode::KeyZ if primary => self.undo(cx, shift),
             KeyCode::KeyY if ke.modifiers.control && !ke.modifiers.logo => self.undo(cx, true),
             KeyCode::KeyA if primary && !shift => self.select_all(cx),
+            // A paste's text comes as input ahead of its key, and asked for
+            // the read; a key alone (a picture on the clipboard, no text)
+            // asks for it here.
+            KeyCode::KeyV if primary && !alt => {
+                if !std::mem::take(&mut self.paste_by_text) {
+                    self.paste_reads.push((cx.read_clipboard(), None));
+                }
+            }
             _ => cx.widget_action(self.widget_uid(), MarkdownEditorAction::UnhandledKey(ke.clone())),
         }
     }
 }
 
+/// Text as the editor types it: `\r\n` as `\n`, no control characters
+/// but new lines and tabs.
+fn typed_text(input: &str) -> String {
+    input.replace("\r\n", "\n").chars().filter(|c| *c == '\n' || *c == '\t' || !c.is_control()).collect()
+}
+
 impl Widget for MarkdownEditor {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.sync(cx);
+        // A press something drawn over the view took before it (a bar of
+        // the host's) is that widget's, not the view's.
+        let pressed_over = match event {
+            Event::MouseDown(e) => !e.handled.get().is_empty(),
+            Event::TouchUpdate(e) => e.touches.iter().any(|t| t.state == event::TouchState::Start && !t.handled.get().is_empty()),
+            _ => false,
+        };
+        if let Event::Clipboard(reply) = event {
+            if let Some(at) = self.paste_reads.iter().position(|(request, _)| *request == reply.request) {
+                let (_, text) = self.paste_reads.remove(at);
+                self.paste_by_text = false;
+                self.paste(cx, &reply.content, text);
+            }
+        }
+        if !self.saving.is_empty() {
+            self.insert_saved(cx);
+        }
+        self.handle_drag(cx, event);
+        if self.moving.is_some() {
+            // The chip's picture loads like any image: it takes its decode.
+            self.view.widget(cx, ids!(chip_box.chip)).handle_event(cx, event, scope);
+        }
         self.view.handle_event(cx, event, scope);
         let area = self.view.area();
         // The rows take the pointer's hover, so the view reads the moves
@@ -1742,7 +2473,8 @@ impl Widget for MarkdownEditor {
                     Some(Target::Link(url)) if me.modifiers.is_primary() => Some(url.clone()),
                     _ => None,
                 };
-                let hand = link.is_some() || matches!(target, Some(Target::Task(_)));
+                // A picture can be dragged to another place.
+                let hand = link.is_some() || matches!(target, Some(Target::Task(_))) || self.object_at(cx, me.abs).is_some();
                 cx.set_cursor(if hand { MouseCursor::Hand } else { MouseCursor::Text });
                 self.hover_link(cx, link);
             } else {
@@ -1751,7 +2483,8 @@ impl Widget for MarkdownEditor {
         }
         // The list under the rows takes the press first (for its scroll bar
         // and wheel); the view shares it.
-        match event.hits_with_capture_overload(cx, area, true) {
+        let hit = if pressed_over { Hit::Nothing } else { event.hits_with_capture_overload(cx, area, true) };
+        match hit {
             Hit::FingerHoverOut(_) => self.hover_link(cx, None),
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.set_key_focus(area);
@@ -1767,8 +2500,29 @@ impl Widget for MarkdownEditor {
                     }
                     _ => {}
                 }
-                if fe.tap_count >= 2 && !fe.modifiers.shift && self.select_around(cx, fe.abs, fe.tap_count >= 3) {
+                // A press on a picture selects it whole; a double-click
+                // edits its alt text and source.
+                let picture = if fe.modifiers.shift { None } else { self.object_at(cx, fe.abs) };
+                if picture.is_none() && fe.tap_count >= 2 && !fe.modifiers.shift && self.select_around(cx, fe.abs, fe.tap_count >= 3) {
                     self.selecting = false;
+                    return;
+                }
+                if let Some(picture) = picture {
+                    self.anchor = picture.start;
+                    self.caret = picture.end;
+                    if fe.tap_count >= 2 {
+                        self.edit_picture(cx, &picture);
+                    } else {
+                        self.press_picture = Some((picture, fe.abs));
+                    }
+                    self.prefer_next_row = false;
+                    self.preferred_x = None;
+                    self.last_input = None;
+                    self.selecting = false;
+                    if let Some(doc) = &self.doc {
+                        doc.document.force_new_group();
+                    }
+                    self.moved(cx);
                     return;
                 }
                 if let Some(position) = self.position_at(cx, fe.abs) {
@@ -1786,6 +2540,13 @@ impl Widget for MarkdownEditor {
                     self.moved(cx);
                 }
             }
+            Hit::FingerMove(fe) if self.press_picture.is_some() => {
+                if self.press_picture.as_ref().is_some_and(|(_, at)| (fe.abs - *at).length() >= DRAG_START) {
+                    if let Some((picture, _)) = self.press_picture.take() {
+                        self.start_move(cx, picture, fe.abs);
+                    }
+                }
+            }
             Hit::FingerMove(fe) if self.selecting => {
                 if let Some(position) = self.position_at(cx, fe.abs) {
                     if position != self.caret {
@@ -1794,13 +2555,18 @@ impl Widget for MarkdownEditor {
                     }
                 }
             }
-            Hit::FingerUp(_) => self.selecting = false,
+            Hit::FingerUp(_) => {
+                self.selecting = false;
+                self.press_picture = None;
+            }
             Hit::TextCopy(ce) => {
-                *ce.response.borrow_mut() = Some(self.selected_text());
+                if let Some(write) = self.copied(self.selected_text()) {
+                    ce.answer(write);
+                }
             }
             Hit::TextCut(ce) => {
-                if let Some((_, fragment)) = self.delete_selection(cx) {
-                    *ce.response.borrow_mut() = Some(fragment);
+                if let Some(write) = self.delete_selection(cx, true).and_then(|(_, fragment)| self.copied(fragment)) {
+                    ce.answer(write);
                 }
             }
             Hit::TextInput(te) => {
@@ -1810,13 +2576,18 @@ impl Widget for MarkdownEditor {
                 if te.composition.is_some() || te.full_state_sync.is_some() || te.replace_range.is_some() {
                     return;
                 }
-                let input: String = te
-                    .input
-                    .replace("\r\n", "\n")
-                    .chars()
-                    .filter(|c| *c == '\n' || *c == '\t' || !c.is_control())
-                    .collect();
+                let input = typed_text(&te.input);
                 if input.is_empty() {
+                    return;
+                }
+                // A paste waits for its read: the clipboard's Markdown
+                // flavour, when it has one, pastes instead of this text.
+                // Where its key came first (the web), the key's own read
+                // is this paste's too: only this one pastes.
+                if te.was_paste {
+                    self.paste_by_text = true;
+                    self.paste_reads.retain(|(_, text)| text.is_some());
+                    self.paste_reads.push((cx.read_clipboard(), Some(input)));
                     return;
                 }
                 // A dead key's accent, replaced by the accented letter.
@@ -1847,6 +2618,9 @@ impl Widget for MarkdownEditor {
                 self.draw_rows(cx, &mut list);
             }
         }
+        if std::mem::take(&mut self.rewash) {
+            self.view.redraw(cx);
+        }
         // A placement holds for the one draw that applied it.
         if let Some(place) = self.place.take() {
             self.place_caret_y = Some(place.y);
@@ -1858,6 +2632,7 @@ impl Widget for MarkdownEditor {
         }
         self.snap_caret();
         self.draw_caret(cx);
+        self.draw_chip(cx, scope);
         self.reveal_caret(cx);
         if let (Some(target), Some(at)) = (self.place_caret_y.take(), self.caret_y) {
             let delta = at - target;
@@ -1871,5 +2646,126 @@ impl Widget for MarkdownEditor {
             }
         }
         DrawStep::done()
+    }
+}
+
+/// Writes `image` beside `file` as `<stem>-image-N.png`, the first N no
+/// file has (a file another writer takes first is skipped): its name.
+fn write_picture(file: &Path, image: ClipboardImage) -> Result<String, String> {
+    use std::io::Write;
+    let png = match image {
+        ClipboardImage::Png(png) => png,
+        ClipboardImage::Rgba { width, height, rgba } => Arc::new(Cx::encode_rgba_as_png(width, height, &rgba)?),
+    };
+    let folder = file.parent().ok_or("the document has no folder")?;
+    let stem = file.file_stem().map_or("image".into(), |stem| stem.to_string_lossy());
+    let mut n = 1u64;
+    loop {
+        let name = format!("{stem}-image-{n}.png");
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(&name)) {
+            Ok(mut out) => {
+                out.write_all(&png).map_err(|error| format!("{name}: {error}"))?;
+                return Ok(name);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(error) => return Err(format!("{name}: {error}")),
+        }
+    }
+}
+
+/// The matches in a row's source `start..=end` as marks on its flow, from
+/// what the row drew last; None when it has matches but has not drawn yet.
+/// A match in markup the view hides shows nothing.
+fn found_in_row(matches: &[(Position, Position)], cache: &RowCache, start: Position, end: Position) -> Option<Vec<TextMark>> {
+    let first = matches.partition_point(|m| m.0 < start);
+    let within = matches[first..].iter().take_while(|m| m.1 <= end);
+    if cache.pieces.is_empty() {
+        return if within.clone().next().is_some() { None } else { Some(Vec::new()) };
+    }
+    Some(
+        within
+            .filter_map(|&(a, b)| {
+                let a = flat_of(&cache.pieces, cache.offset_of(a));
+                let b = flat_of(&cache.pieces, cache.offset_of(b));
+                (a < b).then(|| TextMark::found(a, b))
+            })
+            .collect(),
+    )
+}
+
+/// Copies `source` into `folder` under its own name, or the first free
+/// `name-N.ext` (a file in the way is never overwritten): the new name.
+/// The whole cells a selection inside `cache`'s row covers, its table
+/// counted as the row's flow counts them: None unless the selection runs
+/// from one cell of a table to another.
+fn cell_selection(cache: &RowCache, anchor: Position, caret: Position) -> Option<CellSelection> {
+    let block = plan::cell_block(&cache.slice.text, &cache.events, cache.offset_of(anchor), cache.offset_of(caret))?;
+    let table = cache
+        .events
+        .iter()
+        .filter(|(event, range)| matches!(event, MdEvent::Start(Tag::Table(_))) && range.end <= block.table)
+        .count();
+    Some(CellSelection { table, rows: block.rows, columns: block.columns })
+}
+
+fn copy_picture(folder: &Path, source: &Path) -> Result<String, String> {
+    let name = source.file_name().ok_or("the picture has no file name")?.to_string_lossy().into_owned();
+    let stem = source.file_stem().map_or_else(|| name.clone(), |stem| stem.to_string_lossy().into_owned());
+    let ext = source.extension().map(|ext| format!(".{}", ext.to_string_lossy())).unwrap_or_default();
+    let mut input = std::fs::File::open(source).map_err(|error| format!("{name}: {error}"))?;
+    let mut n = 1u64;
+    loop {
+        let candidate = if n == 1 { name.clone() } else { format!("{stem}-{n}{ext}") };
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(folder.join(&candidate)) {
+            Ok(mut out) => {
+                std::io::copy(&mut input, &mut out).map_err(|error| format!("{candidate}: {error}"))?;
+                return Ok(candidate);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+            Err(error) => return Err(format!("{candidate}: {error}")),
+        }
+    }
+}
+
+/// A file the final view draws as a picture, by its extension.
+fn is_picture(path: &str) -> bool {
+    Path::new(path).extension().and_then(|ext| ext.to_str()).is_some_and(|ext| {
+        ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"].iter().any(|known| ext.eq_ignore_ascii_case(known))
+    })
+}
+
+/// A picture's alt text: its file's name without the extension.
+fn picture_alt(path: &Path) -> String {
+    path.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pictures_brought_in_take_a_free_name_beside_the_document() {
+        let dir = std::env::temp_dir().join(format!("markdown-editor-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("my notes.md");
+        let png = Arc::new(vec![0x89, b'P', b'N', b'G', 1, 2, 3]);
+        let first = write_picture(&file, ClipboardImage::Png(png.clone())).unwrap();
+        assert_eq!(first, "my notes-image-1.png", "named after the document");
+        assert_eq!(std::fs::read(dir.join(&first)).unwrap(), *png, "a PNG is saved as it came");
+        std::fs::write(dir.join("my notes-image-2.png"), b"taken").unwrap();
+        let rgba = ClipboardImage::Rgba { width: 1, height: 1, rgba: Arc::new(vec![255, 0, 0, 255]) };
+        let third = write_picture(&file, rgba).unwrap();
+        assert_eq!(third, "my notes-image-3.png", "a name in use is skipped, never overwritten");
+        assert_eq!(std::fs::read(dir.join("my notes-image-2.png")).unwrap(), b"taken", "the file in the way is kept");
+        assert!(std::fs::read(dir.join(&third)).unwrap().starts_with(&[0x89, b'P', b'N', b'G']), "RGBA is encoded as PNG");
+        // A picture dropped from another folder is copied in under its own
+        // name, and beside a file of that name under the next free one.
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("shot.png"), b"shot").unwrap();
+        assert_eq!(copy_picture(&dir, &outside.join("shot.png")).unwrap(), "shot.png", "a dropped picture keeps its name");
+        assert_eq!(copy_picture(&dir, &outside.join("shot.png")).unwrap(), "shot-2.png", "a name in use is not overwritten");
+        assert_eq!(std::fs::read(dir.join("shot-2.png")).unwrap(), b"shot", "the copy holds the picture");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
