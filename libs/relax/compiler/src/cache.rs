@@ -1489,10 +1489,12 @@ impl Cache {
     /// A decoded key or entry says expression `expr` of `file` is the closure with identity
     /// `fp`: true when this program agrees (or has not parsed it yet and no other key said
     /// otherwise; the build checks it then). False rejects the entry: it was made from another
-    /// numbering of the file, and linking it would run or call the wrong code.
-    fn closure_fp_agrees(&mut self, u: &Unit, file: u32, expr: u32, fp: u64) -> bool {
+    /// numbering of the file, and linking it would run or call the wrong code. When decoding
+    /// coroutine metadata, require parsed text: a deferred check cannot undo shared TcX state.
+    fn closure_fp_agrees(&mut self, u: &Unit, file: u32, expr: u32, fp: u64, allow_unparsed: bool) -> bool {
         let ok = match closure_text_fp(u, file, expr) {
             Some(have) => have == fp,
+            None if !allow_unparsed => return false,
             None => *self.closure_fps.entry((file, expr)).or_insert(fp) == fp,
         };
         if !ok {
@@ -1667,7 +1669,10 @@ impl Cache {
                 return self.enc_tys(u, u.tcx.tys.list(args), e, crates, depth);
             }
             TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state }) => {
+                // A warm parent may never run typeck. Future::Output normalization still
+                // needs to know whether this closure is a coroutine after restoring it.
                 e.u8(17);
+                e.u8(u.tcx.coroutines.contains(&(file, expr)) as u8);
                 crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                 self.enc_file(u, file, e)?;
                 e.u32(expr);
@@ -1886,13 +1891,15 @@ impl Cache {
                 TyKind::FnDef(def, u.tcx.tys.mk_list(&self.dec_tys(u, d, depth)?), regions)
             }
             17 => {
+                let coroutine = match d.u8()? { 0 => false, 1 => true, _ => return None };
                 let file = self.dec_file(u, d)?;
                 let expr = d.u32()?;
-                if !self.closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
+                if !self.closure_fp_agrees(u, file, expr, d.u64()?, !coroutine) { return None; }
                 let kind = self.dec_ty(u, d, depth + 1)?;
                 let sig = self.dec_ty(u, d, depth + 1)?;
                 let state = self.dec_ty(u, d, depth + 1)?;
                 let owner = self.dec_ty(u, d, depth + 1)?;
+                if coroutine { u.tcx.coroutines.insert_first((file, expr), ()); }
                 TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
             }
             18 => {
@@ -4236,6 +4243,9 @@ fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident
     // not def.sub: module / impl indices are global to the program (they differ per app).
     // Impls (derived ones share their type's item) by what they implement for what.
     if def.kind == DefKind::Impl {
+        // Unresolved const arguments can share a structural type hash. Include the
+        // impl header so its anonymous constants cannot share a cached value.
+        crate::stable::def_ident(prog, d, &mut h);
         if let Some(t) = tcx.impl_self.get(&d) {
             h.u128(crate::stable::type_hash(&prog, &tcx, *t));
         }
@@ -6952,6 +6962,100 @@ mod data_tests {
         drop(cache); std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn cached_closure_types_restore_coroutine_classification() {
+        isolated_test!(cached_closure_types_restore_coroutine_classification);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-coroutine-type-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "#![no_std] fn owner() { let _ = || 1; let _ = async { 2 }; }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("coroutine_keys", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        let owner = DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "owner").unwrap() as u32);
+        let file = prog.def(owner).file;
+        let closures = crate::program::closure_exprs(&prog, owner);
+        assert_eq!(closures.len(), 2);
+        let mut u = Unit::new(prog, tcx, 0);
+        let mut cache = open_test_cache(&u, &root.join("cache"));
+        for expr in closures {
+            let coroutine = matches!(u.prog.files[file as usize].ast.expr(crate::ast::ExprId(expr)).kind, crate::ast::ExprKind::Async(..));
+            if coroutine { u.tcx.coroutines.insert_first((file, expr), ()); }
+            let tys = &u.tcx.tys;
+            let parent = tys.intern(TyKind::FnDef(owner, tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY));
+            let sig = tys.intern(TyKind::FnPtr(tys.mk_list(&[]), tys.u32_, crate::types::FnHeader::RUST, 0));
+            let ty = tys.intern(TyKind::Closure(file, expr, crate::types::ClosureArgs {
+                parent_args: parent, closure_kind_ty: tys.u8_, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tys.unit,
+            }));
+            let mut bytes = E::default();
+            assert!(cache.enc_ty(&u, ty, &mut bytes, &mut Vec::new(), 0).is_some());
+            let mut key = E::default();
+            let mut crates = Vec::new();
+            cache.enc_fnkey(&u, &FnKey::Inst(owner, vec![ty]), &mut key, &mut crates, 0).unwrap();
+            crates.sort_unstable();
+            crates.dedup();
+            assert_eq!(cache.key_crates(&u, &key.0), Some(crates));
+            let mut skipped = D { b: &key.0, p: 0 };
+            image::skip_fnkey(&mut skipped, 0, &mut image::no_atoms).unwrap();
+            assert_eq!(skipped.p, key.0.len(), "image reader must consume the entire closure key");
+            u.tcx.coroutines = Default::default();
+            assert!(!u.tcx.is_coroutine(ty));
+            for _ in 0..3 {
+                let mut reader = D { b: &bytes.0, p: 0 };
+                let restored = cache.dec_ty(&u, &mut reader, 0).unwrap();
+                assert_eq!(reader.p, bytes.0.len());
+                assert_eq!(restored, ty);
+                assert_eq!(u.tcx.is_coroutine(restored), coroutine);
+                assert_eq!(u.tcx.coroutines.mem_stats(|_, _| 0).0, usize::from(coroutine), "repeated decoding must not allocate duplicate coroutine entries");
+            }
+        }
+        // An unparsed id from another parse must miss without classifying that id.
+        let missing = 0x3fff_ffff;
+        assert!(closure_text_fp(&u, file, missing).is_none());
+        cache.closure_fps.insert((file, missing), 123);
+        u.tcx.coroutines.insert_first((file, missing), ());
+        let tys = &u.tcx.tys;
+        let uncertain = tys.intern(TyKind::Closure(file, missing, crate::types::ClosureArgs {
+            parent_args: tys.unit, closure_kind_ty: tys.u8_, closure_sig_as_fn_ptr_ty: tys.unit, tupled_upvars_ty: tys.unit,
+        }));
+        let mut bytes = E::default();
+        cache.enc_ty(&u, uncertain, &mut bytes, &mut Vec::new(), 0).unwrap();
+        u.tcx.coroutines = Default::default();
+        cache.closure_fps.clear();
+        assert!(cache.dec_ty(&u, &mut D { b: &bytes.0, p: 0 }, 0).is_none());
+        assert!(!u.tcx.is_coroutine(uncertain));
+        drop(cache); std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cached_impl_constants_have_distinct_serialized_identities() {
+        isolated_test!(cached_impl_constants_have_distinct_serialized_identities);
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let session = std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-impl-constant-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "#![no_std] struct Raw<const N: usize>; macro_rules! width { ($n:expr) => { impl Raw<{$n}> {} }; } width!(1 + 1); width!(2 + 2);").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("impl_constants", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        let constants: Vec<_> = prog.defs.iter().enumerate()
+            .filter(|(_, d)| d.kind == DefKind::AnonConst && prog.def(d.parent).kind == DefKind::Impl)
+            .map(|(i, _)| DefId(i as u32)).collect();
+        assert_eq!(constants.len(), 2);
+        let u = Unit::new(prog, tcx, 0);
+        let mut cache = open_test_cache(&u, &root.join("cache"));
+        let identities: Vec<_> = constants.into_iter().map(|d| {
+            let mut encoded = E::default();
+            cache.enc_fnkey(&u, &FnKey::Inst(d, vec![]), &mut encoded, &mut Vec::new(), 0).unwrap();
+            encoded.0
+        }).collect();
+        assert_ne!(identities[0], identities[1], "different impl initializers must never share a cached value");
+        drop(cache); std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn open_test_cache(u: &Unit, root: &std::path::Path) -> Cache {
         // ReadOnly avoids a pruning thread; tests explicitly enable in-memory recording.
         let mut c = Cache::open_in(u, Mode::ReadOnly, root.to_path_buf()).unwrap();
@@ -7712,7 +7816,7 @@ impl Linker {
             1 => {
                 let file = self.cache().dec_file(u, d)?;
                 let expr = d.u32()?;
-                if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
+                if !self.cache().closure_fp_agrees(u, file, expr, d.u64()?, true) { return None; }
                 // a parent the startup image names: its slot, decoded or not
                 let parent = match self.image_slot_at(u, d) {
                     Some(p) => p,
