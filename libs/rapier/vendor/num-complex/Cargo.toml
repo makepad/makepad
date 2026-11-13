@@ -9,7 +9,6 @@ exclude = [
     "/.github/*",
 ]
 description = "Complex numbers implementation for Rust"
-homepage = "https://github.com/rust-num/num-complex"
 documentation = "https://docs.rs/num-complex"
 readme = "README.md"
 keywords = [

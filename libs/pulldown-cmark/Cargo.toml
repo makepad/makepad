@@ -53,7 +53,7 @@ path = "../unicase"
 
 [features]
 default = []
-# html removed - kept as empty feature to silence cfg warnings
+# the HTML renderer (`html::push_html`), with its escape helpers in-crate
 html = []
 simd = []
 

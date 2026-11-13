@@ -258,6 +258,14 @@ extern "C" {
     pub fn MTLCreateSystemDefaultDevice() -> ObjcId;
     #[cfg(target_os = "macos")]
     pub fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
+    /// The devices (+1) and, through `observer` (+0), the token `MTLRemoveDeviceObserver` takes;
+    /// `handler` is a block `(device, notification name)` the system copies.
+    #[cfg(target_os = "macos")]
+    pub fn MTLCopyAllDevicesWithObserver(observer: *mut ObjcId, handler: *const c_void) -> ObjcId;
+    #[cfg(target_os = "macos")]
+    pub fn MTLRemoveDeviceObserver(observer: ObjcId);
+    #[cfg(target_os = "macos")]
+    pub static MTLDeviceWasRemovedNotification: ObjcId;
 }
 
 #[link(name = "AVFoundation", kind = "framework")]

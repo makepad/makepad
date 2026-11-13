@@ -29,7 +29,6 @@ autobenches = false
 description = """
 This crate exposes the Unicode `Script` and `Script_Extension` properties from [UAX #24](http://www.unicode.org/reports/tr24/)
 """
-homepage = "https://github.com/unicode-rs/unicode-script"
 documentation = "https://docs.rs/unicode-script"
 readme = "README.md"
 keywords = [

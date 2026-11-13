@@ -5,7 +5,6 @@ version = "1.1.0"
 authors = ["Nikolai Vazquez"]
 include = ["Cargo.toml", "src/**/*.rs", "README.md", "CHANGELOG.md", "LICENSE*"]
 description = "Compile-time assertions to ensure that invariants are met."
-homepage = "https://github.com/nvzqz/static-assertions-rs"
 documentation = "https://docs.rs/static_assertions/"
 readme = "README.md"
 keywords = ["assert", "static", "testing"]

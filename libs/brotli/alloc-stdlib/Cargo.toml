@@ -16,7 +16,6 @@ version = "0.2.4"
 authors = ["Daniel Reiter Horn <danielrh@dropbox.com>"]
 autobins = false
 description = "A dynamic allocator example that may be used with the stdlib"
-homepage = "https://github.com/dropbox/rust-alloc-no-stdlib"
 documentation = "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/master/alloc-stdlib/tests/lib.rs"
 readme = "README.md"
 keywords = [

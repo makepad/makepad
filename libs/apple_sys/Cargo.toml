@@ -5,5 +5,6 @@ edition = "2021"
 description = "Shared Apple ObjC/sys bindings for Makepad crates"
 license = "MIT OR Apache-2.0"
 
-[dependencies]
+# the crate is empty off Apple's platforms (lib.rs's #![cfg])
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
 makepad-objc-sys = { path = "../objc-sys", version = "1.0.0" }

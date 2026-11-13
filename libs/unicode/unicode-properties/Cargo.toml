@@ -31,7 +31,6 @@ description = """
 Query character Unicode properties according to
 UAX #44 and UTR #51.
 """
-homepage = "https://github.com/unicode-rs/unicode-properties"
 documentation = "https://docs.rs/unicode-properties"
 readme = "README.md"
 keywords = [

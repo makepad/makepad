@@ -82,6 +82,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod utils;
 
+#[cfg(feature = "html")]
+mod escape;
+#[cfg(feature = "html")]
+pub mod html;
+
 mod entities;
 mod firstpass;
 mod linklabel;

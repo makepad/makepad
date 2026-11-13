@@ -7322,6 +7322,7 @@ impl ImageUsageFlags {
     pub const STORAGE: Self = Self(8 as u32);
     pub const TRANSFER_DST: Self = Self(2 as u32);
     pub const TRANSFER_SRC: Self = Self(1 as u32);
+    pub const TRANSIENT_ATTACHMENT: Self = Self(64 as u32);
     pub const VIDEO_ENCODE_DPB_KHR: Self = Self(32768 as u32);
     pub const VIDEO_ENCODE_QUANTIZATION_DELTA_MAP_KHR: Self = Self(33554432 as u32);
     pub const VIDEO_ENCODE_SRC_KHR: Self = Self(16384 as u32);
@@ -8011,6 +8012,7 @@ impl MemoryPropertyFlags {
     pub const HOST_CACHED: Self = Self(8 as u32);
     pub const HOST_COHERENT: Self = Self(4 as u32);
     pub const HOST_VISIBLE: Self = Self(2 as u32);
+    pub const LAZILY_ALLOCATED: Self = Self(16 as u32);
     pub const PROTECTED: Self = Self(32 as u32);
     #[inline]
     pub const fn from_bits_retain(value: u32) -> Self { Self(value) }

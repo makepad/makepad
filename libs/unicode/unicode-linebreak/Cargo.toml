@@ -20,7 +20,6 @@ include = [
     "LICENSE",
 ]
 description = "Implementation of the Unicode Line Breaking Algorithm"
-homepage = "https://github.com/axelf4/unicode-linebreak"
 readme = "README.md"
 keywords = [
     "unicode",

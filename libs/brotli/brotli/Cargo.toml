@@ -33,7 +33,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "A brotli compressor and decompressor that with an interface avoiding the rust stdlib. This makes it suitable for embedded devices and kernels. It is designed with a pluggable allocator so that the standard lib's allocator may be employed. The default build also includes a stdlib allocator and stream interface. Disable this with --features=no-stdlib. All included code is safe."
-homepage = "https://github.com/dropbox/rust-brotli"
 documentation = "https://docs.rs/brotli/"
 readme = "README.md"
 keywords = [

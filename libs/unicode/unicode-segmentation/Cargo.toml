@@ -32,7 +32,6 @@ description = """
 This crate provides Grapheme Cluster, Word and Sentence boundaries
 according to Unicode Standard Annex #29 rules.
 """
-homepage = "https://github.com/unicode-rs/unicode-segmentation"
 readme = "README.md"
 keywords = [
     "text",

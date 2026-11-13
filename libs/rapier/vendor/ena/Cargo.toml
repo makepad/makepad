@@ -10,7 +10,6 @@ autoexamples = false
 autotests = false
 autobenches = false
 description = "Union-find, congruence closure, and other unification code. Based on code from rustc."
-homepage = "https://github.com/rust-lang/ena"
 readme = "README.md"
 keywords = [
     "unification",

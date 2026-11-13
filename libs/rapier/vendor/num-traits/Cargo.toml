@@ -20,7 +20,6 @@ exclude = [
     "/.github/*",
 ]
 description = "Numeric traits for generic mathematics"
-homepage = "https://github.com/rust-num/num-traits"
 documentation = "https://docs.rs/num-traits"
 readme = "README.md"
 keywords = [

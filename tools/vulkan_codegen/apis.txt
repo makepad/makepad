@@ -409,6 +409,7 @@ value VkImageUsageFlags DEPTH_STENCIL_ATTACHMENT
 value VkImageUsageFlags SAMPLED
 value VkImageUsageFlags TRANSFER_DST
 value VkImageUsageFlags TRANSFER_SRC
+value VkImageUsageFlags TRANSIENT_ATTACHMENT
 value VkImageViewType CUBE
 value VkImageViewType TYPE_2D
 value VkImageViewType TYPE_2D_ARRAY
@@ -417,6 +418,7 @@ value VkIndexType UINT32
 value VkMemoryPropertyFlags DEVICE_LOCAL
 value VkMemoryPropertyFlags HOST_COHERENT
 value VkMemoryPropertyFlags HOST_VISIBLE
+value VkMemoryPropertyFlags LAZILY_ALLOCATED
 value VkMemoryPropertyFlags PROTECTED
 value VkPhysicalDeviceType CPU
 value VkPhysicalDeviceType DISCRETE_GPU
