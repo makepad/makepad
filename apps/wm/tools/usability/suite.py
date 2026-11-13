@@ -737,17 +737,31 @@ def run_session(root, out, tasks, autohide, only, rows, screens, desk, shots_ses
     tag = "usability-autohide" if autohide else "usability-shots" if shots_session else "usability"
     apps = "notes,code" if shots_session else "notes,clock"
     if shots_session:
-        # A home of its own: ~/Screenshots is the session's.
+        # A home of its own: ~/Screenshots is the session's. The toolchain's homes stay where
+        # they are: rustup and cargo find theirs from HOME, and the WM's hosted apps build with
+        # them (with an empty ~/.rustup rustup has no default and every hosted build fails).
+        real = os.path.expanduser("~")
+        env["RUSTUP_HOME"] = os.environ.get("RUSTUP_HOME") or os.path.join(real, ".rustup")
+        env["CARGO_HOME"] = os.environ.get("CARGO_HOME") or os.path.join(real, ".cargo")
         env["HOME"] = os.path.join(out, tag, "home")
         os.makedirs(env["HOME"], exist_ok=True)
     rig = Rig(root, tag, apps=apps, files=files, env=env, size=desk, virtual=False, out=os.path.join(out, tag)).up()
     t = T(rig, out)
     try:
-        deadline = time.time() + 120
-        while time.time() < deadline:
+        # The hosted apps build before they show (a cold build takes minutes): the wait ends when
+        # both windows have frames, when the WM says a launch failed, or when the WM exits, never
+        # on a count of seconds.
+        first, second = apps.split(",")
+        while True:
             fr = t.last() if os.path.exists(rig.trace) else None
-            first, second = apps.split(",")
             if fr and t.win(first, fr) and t.win(second, fr) and all(w["host"] and w["host"]["has"] for w in fr["w"] if w["cap"] is None and w.get("host")):
+                break
+            failed = [l.strip() for l in open(rig.log, errors="replace") if "wm: launching" in l and "failed" in l]
+            if failed:
+                print(f"session: a hosted app did not start: {failed[0]}", flush=True)
+                break
+            if rig.ap.poll() is not None:
+                print(f"session: the WM exited while its apps started; see {rig.log}", flush=True)
                 break
             time.sleep(1)
         t.still()

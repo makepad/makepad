@@ -2186,12 +2186,17 @@ impl WmDesk {
         let pose = self.warp.pose_for(client, self.anims.get(&client)?.cur);
         Some(Self::lrect_to_rect(pose.shown))
     }
-    /// The window under `p`, with its app's own image: the texture of the
-    /// frame it last presented and that frame's size in pixels.
-    pub fn window_image_at(&self, p: Vec2d) -> Option<(Texture, [u32; 2])> {
+    /// The window under `p`: its client and, once its app has presented, the
+    /// app's own image (the texture of the frame it last presented and that
+    /// frame's size in pixels).
+    pub fn window_image_at(&self, p: Vec2d) -> Option<(ClientId, Option<(Texture, [u32; 2])>)> {
         let client = self.window_at(p)?;
         let item = self.items.get(&client)?;
-        with_tile_host(item, |tile| tile.presented_image()).flatten()
+        Some((client, with_tile_host(item, |tile| tile.presented_image()).flatten()))
+    }
+    /// Whether `client` still has a window on the desk.
+    pub fn has_window(&self, client: ClientId) -> bool {
+        self.items.contains_key(&client)
     }
     /// Files dropped at `p`: the window under it gets them as a drop at that
     /// point; its client, when it took them.

@@ -1,4 +1,4 @@
-# Desk Link protocol, version 8
+# Desk Link protocol, version 9
 
 Desk Link is how a viewer (this app) sees and drives a desktop (the window manager's
 `desk_link` server, `apps/wm/src/desk_link/`; the macOS / Windows Desk Host; a JIT host serving
@@ -282,11 +282,14 @@ takes the `Window` of the viewer that connected last (not view-only, its window 
 earlier ones see that size scaled. When it leaves, the one that connected before it decides
 again (`server::size_owner`).
 
-## Semantic inspection (version 8)
+## Semantic inspection (versions 8 and 9)
 
 Version 8 adds viewer message **25**, `A11yQuery { req u64, line str }`, and desktop
 message **109**, `A11yReply { req u64, text str }`. The text is the ordinary `ui`
 interpreter reply (including JSON when requested); request IDs correlate concurrent callers.
+Version 9 adds desktop message **110**, `A11yReplyPart { req u64, text str }`: a reply is
+never cut. One longer than 1 MiB goes first as `A11yReplyPart`s of at most 1 MiB each, cut on
+character boundaries; the `A11yReply` carries the rest, and the viewer joins them in order.
 Only `ui` commands are accepted. The desktop runs them on reusable session workers so a wait
 cannot hold up pings, video, input, or the semantic action that satisfies it. Workers
 grow to the session's observed query concurrency and stop when it disconnects. The same TLS fleet proof and `Need::Admin` check
@@ -303,5 +306,5 @@ then selects a window within it. `if_user_seq` is checked on the selected deskto
 not against the viewer's activity counter.
 
 A disconnected or timed-out query reports an error; actions are never replayed on reconnect.
-Version 7 peers are refused during Hello. Live tree embedding in the viewer's own OS
+A peer of another version is refused during Hello; the desktop's `Refused` names both versions. Live tree embedding in the viewer's own OS
 accessibility tree is not part of the query/reply transport.

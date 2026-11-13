@@ -1,5 +1,5 @@
 # Real-WM domain gate (native GPU; headless is only a logic check).
-# MUSIC_MUTE=1 MUSIC_SPOTIFY_CLI=/nonexistent (Amp stays silent and off any Spotify install)
+# MAKEPAD_MUTE=1 MUSIC_SPOTIFY_CLI=/nonexistent (Amp stays silent and off any Spotify install)
 # MAKEPAD_HOME=<fresh dir: saved calculator/WM state otherwise leaks in> \
 # MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HAL_STEP_TIMEOUT_MS=120000 \
 # MAKEPAD_HAL_SCRIPT=apps/wm/scripts/domains.hal MAKEPAD_HAL_SNAPSHOTS=<dir> \

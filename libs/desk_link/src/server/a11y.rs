@@ -66,12 +66,9 @@ impl Session {
                 makepad_remote::cmd::answer_to_cancellable(dispatch, &line, &mut bytes,
                     Some(Arc::new(move || !cancelled.load(Ordering::Acquire))));
                 if !alive.load(Ordering::Acquire) { break; }
-                let text = if bytes.len() + 12 <= proto::MAX_MESSAGE {
-                    String::from_utf8_lossy(&bytes).into_owned()
-                } else {
-                    "{\"err\":\"semantic reply exceeds Desk Link framing; narrow q= or depth=\"}\n".into()
-                };
-                if out.send(Out::Msg(ServerMsg::A11yReply { req, text }.encode())).is_err() { break; }
+                // a reply of any size: the parts of one too long for a message go first
+                let text = String::from_utf8_lossy(&bytes);
+                if proto::a11y_reply(req, &text).into_iter().any(|m| out.send(Out::Msg(m.encode())).is_err()) { break; }
                 count.fetch_sub(1, Ordering::AcqRel);
             }
         })?;

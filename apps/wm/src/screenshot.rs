@@ -79,9 +79,11 @@ pub enum Phase {
     /// A frame has been asked for: the next one presented is taken.
     Grabbing { kind: Kind, sink: u64, slot: Arc<Mutex<Option<Frame>>>, tries: u32, screen: Rect },
     Selecting(Select),
-    /// A picked window's own texture is being read back (`Cx::request_render_texture_capture`):
-    /// `px` is the size of the frame inside it.
-    Capturing { texture: Texture, px: (u32, u32), tries: u32 },
+    /// A picked window's own texture is being read back (`Texture::read_back`): the wait
+    /// ends when its ticket answers (pixels or why not) or the window closes, never on a
+    /// count. `texture` keeps the picture alive while it is read; `px` is the size of the
+    /// frame inside it.
+    Capturing { texture: Texture, ticket: Option<ReadbackTicket>, wait_logged: bool, client: makepad_app_host::ClientId, px: (u32, u32) },
 }
 
 pub struct ThumbDrag {
@@ -156,9 +158,9 @@ pub fn pixel_rect(r: Rect, scale: f64, width: u32, height: u32) -> Option<(u32, 
     (x1 > x0 && y1 > y0).then(|| (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32))
 }
 
-/// A readback's BGRA rows (`width` x `height`, tightly packed) as the top-left
-/// `px` of it, RGBA. None when `px` does not fit.
-pub fn bgra_to_frame(bytes: &[u8], width: usize, height: usize, px: (u32, u32)) -> Option<Frame> {
+/// A texture readback's RGBA rows (`width` x `height`, tightly packed) as the
+/// top-left `px` of it, opaque. None when `px` does not fit.
+pub fn window_frame(bytes: &[u8], width: usize, height: usize, px: (u32, u32)) -> Option<Frame> {
     let (w, h) = (px.0 as usize, px.1 as usize);
     if w == 0 || h == 0 || w > width || h > height || bytes.len() < width * height * 4 {
         return None;
@@ -166,7 +168,7 @@ pub fn bgra_to_frame(bytes: &[u8], width: usize, height: usize, px: (u32, u32)) 
     let mut rgba = Vec::with_capacity(w * h * 4);
     for y in 0..h {
         for p in bytes[y * width * 4..(y * width + w) * 4].chunks_exact(4) {
-            rgba.extend_from_slice(&[p[2], p[1], p[0], 255]);
+            rgba.extend_from_slice(&[p[0], p[1], p[2], 255]);
         }
     }
     Some(Frame { width: px.0, height: px.1, rgba })
@@ -489,17 +491,17 @@ mod tests {
 
     #[test]
     fn a_window_texture_readback_becomes_the_frame_inside_it() {
-        // 4x3 texture of BGRA pixels; the frame is its top-left 3x2.
+        // 4x3 texture of RGBA pixels; the frame is its top-left 3x2, made opaque.
         let mut bytes = Vec::new();
         for i in 0..12u8 {
             bytes.extend_from_slice(&[i, 100 + i, 200, 0]);
         }
-        let f = bgra_to_frame(&bytes, 4, 3, (3, 2)).unwrap();
+        let f = window_frame(&bytes, 4, 3, (3, 2)).unwrap();
         assert_eq!((f.width, f.height), (3, 2));
-        assert_eq!(&f.rgba[0..4], &[200, 100, 0, 255]);
-        assert_eq!(&f.rgba[12..16], &[200, 104, 4, 255], "the second row starts at texel 4");
-        assert!(bgra_to_frame(&bytes, 4, 3, (5, 2)).is_none());
-        assert!(bgra_to_frame(&bytes[..8], 4, 3, (3, 2)).is_none());
+        assert_eq!(&f.rgba[0..4], &[0, 100, 200, 255]);
+        assert_eq!(&f.rgba[12..16], &[4, 104, 200, 255], "the second row starts at texel 4");
+        assert!(window_frame(&bytes, 4, 3, (5, 2)).is_none());
+        assert!(window_frame(&bytes[..8], 4, 3, (3, 2)).is_none());
     }
 
     #[test]

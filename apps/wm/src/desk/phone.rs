@@ -195,6 +195,8 @@ struct Bands {
     sampled: u64,
     /// The sample in flight: its ticket, and the key and revision it is for.
     pending: Option<(ReadbackTicket, BandKey, u64)>,
+    asking: Option<(BandKey, u64)>,
+    readback_wait_logged: bool,
     asked_at: Option<f64>,
     retry: Timer,
     /// When `retry` is due: a timer whose event went elsewhere (the desk
@@ -569,6 +571,11 @@ impl WmDesk {
         // A retry whose timer event never came here (the desk left the
         // phone skin meanwhile) is forgotten.
         if !bands.retry.is_empty() && now>bands.retry_due+1.0 {bands.retry=Timer::empty();}
+        if bands.asking.is_some() {
+            if let Some(strip)=bands.strip.as_mut() {strip.freeze(cx);}
+            self.ask_band_readback(cx,bands,std::time::Instant::now());
+            return;
+        }
         let quiet=!std::mem::take(&mut bands.changed_now);
         if self.phone_ui.band_sampling_off || !bands.dirty() || bands.pending.is_some() || !quiet {
             if let Some(strip)=bands.strip.as_mut() {strip.freeze(cx);}
@@ -597,26 +604,43 @@ impl WmDesk {
         self.draw_band_rows(cx,capture,full,Rect{pos:r.pos+dvec2(0.0,half),size:dvec2(r.size.x,half)},true,1.0);
         strip.end(cx);
         let bands=&mut frame.bands;
-        bands.asked_at=Some(now);
-        match strip.texture().read_back(cx,ReadbackRequest::default()) {
+        bands.strip=Some(strip);
+        bands.asking=Some((key,bands.revision));
+        self.ask_band_readback(cx,bands,started);
+    }
+    fn ask_band_readback(&mut self,cx:&mut Cx,bands:&mut Bands,started:std::time::Instant) {
+        let Some((key,revision))=bands.asking else {return};
+        let texture=bands.strip.as_ref().unwrap().texture();
+        match texture.read_back(cx,ReadbackRequest::default()) {
             Ok(ticket)=>{
-                bands.pending=Some((ticket,key,bands.revision));
+                bands.readback_wait_logged=false;
+                bands.asking=None;
+                bands.asked_at=Some(cx.seconds_since_app_start());
+                bands.pending=Some((ticket,key,revision));
                 self.phone_ui.band_samples+=1;
                 if std::env::var_os("MAKEPAD_WM_TRACE_BANDS").is_some() {
-                    log!("wm: band sample {} asked (rev {}) in {:.3} ms",self.phone_ui.band_samples,bands.revision,started.elapsed().as_secs_f64()*1000.0);
+                    log!("wm: band sample {} asked (rev {}) in {:.3} ms",self.phone_ui.band_samples,revision,started.elapsed().as_secs_f64()*1000.0);
                 }
             }
-            // Refused: this revision counts as sampled, nothing retries.
-            // A backend that cannot read back at all is not asked again.
+            Err(ReadbackError::Backpressure)=>{
+                if !bands.readback_wait_logged {
+                    log!("wm: context readback request limit reached; phone band sample waits");
+                    bands.readback_wait_logged=true;
+                }
+                arm_band_retry(cx,bands,BAND_SETTLE);
+            }
+            // Other refusals still count as sampled.
             Err(error)=>{
-                bands.sampled=bands.revision;
+                bands.readback_wait_logged=false;
+                bands.asking=None;
+                bands.asked_at=Some(cx.seconds_since_app_start());
+                bands.sampled=revision;
                 if error==ReadbackError::UnsupportedBackend {
                     self.phone_ui.band_sampling_off=true;
                     log!("wm: band colours need texture readback, which this backend lacks; the bars keep the app's theme colours");
                 }
             }
         }
-        frame.bands.strip=Some(strip);
     }
     /// Band samples that came back: each client's band rows, and a redraw
     /// when the bars should change. Only drained while a sample of the
@@ -649,7 +673,7 @@ impl WmDesk {
         for frame in self.phone_frames.values_mut() {
             if frame.bands.retry.is_event(event).is_some() {
                 frame.bands.retry=Timer::empty();
-                due|=frame.bands.dirty();
+                due|=frame.bands.asking.is_some() || frame.bands.dirty();
             }
         }
         if due {
@@ -1149,7 +1173,6 @@ pub(super) struct PhoneFinger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
 
     /// A readback `width` wide whose rows are `row(y)`: RGBA bytes, top first.
     fn readback(width: usize, height: usize, row: impl Fn(usize, usize) -> [u8; 3]) -> TextureReadback {
@@ -1163,7 +1186,7 @@ mod tests {
         TextureReadback {
             ticket: ReadbackTicket(1), allocation_generation: 0, producer_serial: 0,
             width, height,
-            data: Ok::<Arc<[u8]>, ReadbackError>(data.into()),
+            data: Ok(data.into()),
         }
     }
 

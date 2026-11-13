@@ -12,7 +12,7 @@ class Rig:
         self.wp=sp.Popen(["nice","weston","--backend=headless","--renderer=gl",f"--socket={self.sock}","--width=1480","--height=1000","--idle-time=0"],stdout=open(f"/tmp/rig-{self.tag}-weston.log","w"),stderr=sp.STDOUT,env=e)
         time.sleep(4)
         import tempfile; self.state=tempfile.mkdtemp(prefix=f"rig-{tag_safe(self.tag)}-")
-        e.update(WAYLAND_DISPLAY=self.sock,SANDBOX_MUTE="1",MAKEPAD_HIDE_WINDOWS="1",MAKEPAD_WM_BACKDROP="warp-grid",MAKEPAD_WM_NO_WARM="1",
+        e.update(WAYLAND_DISPLAY=self.sock,MAKEPAD_MUTE="1",MAKEPAD_HIDE_WINDOWS="1",MAKEPAD_WM_BACKDROP="warp-grid",MAKEPAD_WM_NO_WARM="1",
                  MAKEPAD_WM_ROOT=self.root,MAKEPAD_HOME=self.state,XDG_CONFIG_HOME=self.state+"/c",XDG_DATA_HOME=self.state+"/d",XDG_CACHE_HOME=self.state+"/k")
         if self.trace: e["MAKEPAD_TRACE"]=self.trace
         e.update(self.env)

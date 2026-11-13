@@ -5,7 +5,7 @@ use makepad_remote::{json_str, Out, Req};
 use std::{collections::HashMap, sync::{Arc, Condvar, Mutex, OnceLock, Weak, mpsc::Sender, atomic::{AtomicU64, Ordering}}, time::{Duration, Instant}};
 
 #[derive(Default)]
-struct State { connected: bool, pending: HashMap<u64, Option<Result<String, String>>> }
+struct State { connected: bool, pending: HashMap<u64, Option<Result<String, String>>>, parts: makepad_desk_link::A11yParts }
 pub struct Endpoint { tx: Sender<ClientMsg>, state: Mutex<State>, changed: Condvar }
 fn tabs() -> &'static Mutex<Vec<(String, Weak<Endpoint>)>> {
     static TABS: OnceLock<Mutex<Vec<(String, Weak<Endpoint>)>>> = OnceLock::new();
@@ -34,8 +34,16 @@ impl Endpoint {
         self.changed.notify_all();
     }
     pub fn pending(&self, req: u64) -> bool { self.state.lock().unwrap().pending.get(&req).is_some_and(Option::is_none) }
+    /// A leading part of a reply too long for one message.
+    pub fn reply_part(&self, req: u64, text: &str) {
+        let mut state = self.state.lock().unwrap();
+        if state.pending.contains_key(&req) { state.parts.part(req, text); }
+    }
     pub fn reply(&self, req: u64, text: String) {
-        if let Some(result) = self.state.lock().unwrap().pending.get_mut(&req) { *result = Some(Ok(text)); }
+        let mut state = self.state.lock().unwrap();
+        let text = state.parts.end(req, text);
+        if let Some(result) = state.pending.get_mut(&req) { *result = Some(Ok(text)); }
+        drop(state);
         self.changed.notify_all();
     }
     fn query(&self, line: String, timeout: Duration, out: &Out) -> Result<String, String> {
@@ -57,17 +65,17 @@ impl Endpoint {
             state = self.changed.wait_timeout(state, left.min(Duration::from_millis(100))).unwrap().0;
         };
         state.pending.remove(&req);
+        state.parts.forget(req);
         result
     }
 }
 /// Desk Link's host route as the HAL calls it (a C entry: the HAL's code is rustc's under `makepad run`).
-extern "C" fn ui_router(req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: makepad_widgets::makepad_platform::makepad_hal::a11y::UiWrite) -> u32 {
-    unsafe { makepad_widgets::makepad_platform::makepad_hal::a11y::serve_ui_route(dispatch, req, len, limit, ctx, write) }
+extern "C" fn ui_router(req: *const u8, len: usize, ctx: *mut u8, write: makepad_widgets::makepad_platform::makepad_hal::a11y::UiWrite) -> bool {
+    unsafe { makepad_widgets::makepad_platform::makepad_hal::a11y::serve_ui_route(dispatch, req, len, ctx, write) }
 }
 fn dispatch(req: &Req, out: &mut Out) -> bool {
     let Some(machine) = req.get("machine") else { return false; };
     let tabs: Vec<_> = tabs().lock().unwrap().iter().filter_map(|(name,weak)| weak.upgrade().map(|e| (name.clone(), e))).collect();
-    out.limit = usize::MAX;
     if machine == "list" {
         for (index, (name, _)) in tabs.iter().enumerate() {
             out.line(&format!("{{\"machine\":{index},\"name\":{}}}", json_str(name)));

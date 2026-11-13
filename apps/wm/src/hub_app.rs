@@ -551,6 +551,8 @@ pub struct Supervised<C: ServiceConf> {
     first_start: bool,
     /// An adopted app being replaced gets SIGKILL at this time if it is still there.
     kill_at: Option<f64>,
+    /// Its SIGKILL waits for a lease start in flight ([`starting_leases`]), said once.
+    kill_waits: bool,
     started_at: f64,
     /// When the first start began waiting for the WM's socket.
     socket_wait: Option<f64>,
@@ -591,6 +593,7 @@ impl<C: ServiceConf> Supervised<C> {
             restart_pending: false,
             first_start: true,
             kill_at: None,
+            kill_waits: false,
             started_at: 0.0,
             socket_wait: None,
             adopt_by: None,
@@ -954,7 +957,13 @@ impl<C: ServiceConf> Supervised<C> {
             }
         }
         if let (Some(Running::Adopted(pid)), Some(at)) = (&self.running, self.kill_at) {
-            if now >= at && app_alive(self.kind, *pid) {
+            let starting = if std::ptr::eq(self.kind, &DEVHUB) { starting_leases() } else { Vec::new() };
+            if now >= at && !starting.is_empty() && app_alive(self.kind, *pid) {
+                if !self.kill_waits {
+                    makepad_widgets::log!("wm: {label}: pid {pid} finishes the lease start in flight ({}) before it exits; no SIGKILL until it is done", starting.join(", "));
+                    self.kill_waits = true;
+                }
+            } else if now >= at && app_alive(self.kind, *pid) {
                 makepad_widgets::log!("wm: {label}: pid {pid} outlived its stop; SIGKILL");
                 #[cfg(unix)]
                 makepad_app_host::launch::signal_group(*pid, true);
@@ -992,6 +1001,7 @@ impl<C: ServiceConf> Supervised<C> {
             let adopted = matches!(self.running, Some(Running::Adopted(_)));
             self.running = None;
             self.kill_at = None;
+            self.kill_waits = false;
             if self.restart_pending {
                 makepad_widgets::log!("wm: {label} stopped ({status}) for a restart");
                 self.crashes = 0;
@@ -1068,14 +1078,24 @@ impl<C: ServiceConf> Supervised<C> {
 }
 
 /// The leases the node's devhub runs now (`~/.makepad/devhub/leases/<id>.json`, one per live
-/// lease, removed at its end).
+/// lease, removed at its end) and the one it starts (`<id>.starting`, while its start runs): a
+/// WM restart replaced a hub in the middle of a start, whose ledger it had not written yet, and
+/// the start's git worktree lock stayed behind (11-13).
 fn live_leases() -> Vec<String> {
     let dir = crate::theme::makepad_home().join("devhub").join("leases");
     let mut ids: Vec<String> = std::fs::read_dir(dir)
-        .map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".json").map(str::to_string)).collect())
+        .map(|d| d.flatten().filter_map(|e| { let name = e.file_name(); let name = name.to_str()?; name.strip_suffix(".json").or_else(|| name.strip_suffix(".starting")).map(str::to_string) }).collect())
         .unwrap_or_default();
     ids.sort();
+    ids.dedup();
     ids
+}
+
+/// The lease starts the node's devhub has in flight (`<id>.starting`): a hub asked to stop
+/// finishes them before it exits, and its SIGKILL waits for them.
+fn starting_leases() -> Vec<String> {
+    let dir = crate::theme::makepad_home().join("devhub").join("leases");
+    std::fs::read_dir(dir).map(|d| d.flatten().filter_map(|e| e.file_name().to_str()?.strip_suffix(".starting").map(str::to_string)).collect()).unwrap_or_default()
 }
 
 /// How long a kept app has to come to the new WM's socket.

@@ -150,7 +150,7 @@ impl App {
         }
         for (app, native) in launches {
             log!("wm: socket asks for the dock's {app}{}", if native { ", compiled" } else { "" });
-            self.open_app(cx, &app, native);
+            self.open_app(cx, &app, native, Some(makepad_app_registry::machine::Launcher::Agent("devhub show, through the WM socket".to_string())));
         }
         for Adopted { client, pid, crate_name, launched, test_lane } in adopted {
             if launched {

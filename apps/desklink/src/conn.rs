@@ -590,6 +590,7 @@ impl Net {
                         drop(s);
                         self.signal.set();
                     }
+                    ServerMsg::A11yReplyPart { req, text } => self.semantic.reply_part(req, &text),
                     ServerMsg::A11yReply { req, text } => self.semantic.reply(req, text),
                     ServerMsg::Clipboard { .. } => {}
                 }

@@ -32,8 +32,8 @@ pub fn flush() {
 /// The WM's host route as the HAL calls it (a C entry: under `makepad run` this code is JIT-compiled
 /// and the HAL's is rustc's).
 #[cfg(not(target_arch = "wasm32"))]
-pub extern "C" fn ui_router(req: *const u8, len: usize, limit: usize, ctx: *mut u8, write: makepad_hal::a11y::UiWrite) -> u32 {
-    unsafe { makepad_hal::a11y::serve_ui_route(dispatch, req, len, limit, ctx, write) }
+pub extern "C" fn ui_router(req: *const u8, len: usize, ctx: *mut u8, write: makepad_hal::a11y::UiWrite) -> bool {
+    unsafe { makepad_hal::a11y::serve_ui_route(dispatch, req, len, ctx, write) }
 }
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     if req.get("machine").is_some() { return false; }

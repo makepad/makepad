@@ -79,7 +79,7 @@ registry_pid="$(bus_pid org.a11y.atspi.Registry)"
 [[ "$registry_pid" =~ ^[0-9]+$ ]]
 echo "Private accessibility bus PID $a11y_pid, registry PID $registry_pid, launcher PID $launcher_pid"
 if [[ "${1:-}" != --protocol-only ]]; then
-MAKEPAD_HAL_BACKEND=headless MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 target/release/makepad-example-counter --remote >target/atspi-rig/app.log 2>&1 &
+MAKEPAD_HAL_BACKEND=headless MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 target/release/makepad-example-counter --remote >target/atspi-rig/app.log 2>&1 &
 app_pid=$!
 for ((attempt=0; attempt<100; attempt++)); do
     if target/release/makepad-remote app "$app_pid" activity >target/atspi-rig/activity.log 2>&1; then break; fi
@@ -118,7 +118,7 @@ DBUS_WIRE_LIVE=1 cargo test --release --offline -j8 -p makepad-hal --test linux_
 
 if [[ "${1:-}" != --protocol-only ]]; then
 # Missing desktop daemons are an idle condition, and retries log only once.
-DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent MAKEPAD_HAL_BACKEND=headless MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 target/release/makepad-example-counter --remote >target/atspi-rig/no-bus.log 2>&1 &
+DBUS_SESSION_BUS_ADDRESS=unix:path=/nonexistent MAKEPAD_HAL_BACKEND=headless MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 target/release/makepad-example-counter --remote >target/atspi-rig/no-bus.log 2>&1 &
 app_pid=$!
 sleep 6
 [[ "$(grep -c '\[atspi\] idle:' target/atspi-rig/no-bus.log)" == 1 ]]

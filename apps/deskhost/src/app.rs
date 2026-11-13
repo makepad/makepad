@@ -109,6 +109,11 @@ impl App {
         let report = self.report();
         let enabled = Settings::load().enabled;
         let (glyph, status) = glyph_and_status(&report);
+        // a viewer watching this machine is a person using it: a node's devhub keeps other work
+        // off it while an app of ours runs there (said only when it changes)
+        let watching: Vec<&str> = report.viewers.iter().filter(|v| !v.paused).map(|v| v.name.as_str()).collect();
+        let how = (!watching.is_empty()).then(|| format!("a Desk Link viewer ({})", watching.join(", ")));
+        makepad_widgets::makepad_platform::restart::set_in_use("desk link", how.as_deref());
         let key = format!("{glyph:?}|{status}|{enabled}");
         if key != self.tray_key {
             self.tray_key = key;

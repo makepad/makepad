@@ -3,8 +3,8 @@
 //! the window it is dropped on. The state and the overlay are `screenshot.rs`.
 
 use crate::screenshot::{
-    bgra_to_frame, crop, pixel_rect, save_async, selection_rect, thumb_rect, Frame, Kind, Phase, Saved, Select, Thumb, ThumbDrag,
-    DRAG_SLOP, SWIPE_EDGE, THUMB_EASE, THUMB_LIFE,
+    crop, pixel_rect, save_async, selection_rect, thumb_rect, Frame, Kind, Phase, Saved, Select, Thumb, ThumbDrag,
+    window_frame, DRAG_SLOP, SWIPE_EDGE, THUMB_EASE, THUMB_LIFE,
 };
 use crate::*;
 use makepad_widgets::makepad_platform::screen_capture::{add_screen_capture, remove_screen_capture, ScreenCaptureOptions};
@@ -128,25 +128,32 @@ impl App {
             // The readback rides on a presented frame: ask for one.
             self.redraw_all(cx);
         }
-        // 1b. A picked window's own texture, read back once a frame has gone by.
-        let mut captured = None;
-        let mut capture_failed = false;
-        if let Phase::Capturing { texture, px, tries } = &mut self.state_mut().shot.phase {
-            *tries += 1;
-            captured = Some((texture.texture_id(), *px));
-            capture_failed = *tries > GRAB_TRIES;
-        }
-        if let Some((id, px)) = captured {
-            let got = cx.take_render_texture_captures().into_iter().find(|(t, ..)| *t == id);
-            if let Some((_, w, h, bytes)) = got {
+        // 1b. A picked window's own texture: its readback's answer, or the window gone.
+        self.shot_ask_capture(cx);
+        let capturing = match &self.state_mut().shot.phase {
+            Phase::Capturing { ticket: Some(ticket), client, px, .. } => Some((*ticket, *client, *px)),
+            _ => None,
+        };
+        if let Some((ticket, client, px)) = capturing {
+            if let Some(read) = cx.try_take_texture_readbacks_for(&[ticket]).into_iter().next() {
                 self.state_mut().shot.phase = Phase::Idle;
-                match bgra_to_frame(&bytes, w, h, px) {
-                    Some(frame) => self.shot_save(frame),
-                    None => self.show_osd(cx, shell::osd::OsdShow::message("Screenshot failed: odd window size")),
+                match read.data {
+                    Ok(rgba) => match window_frame(&rgba, read.width, read.height, px) {
+                        Some(frame) => self.shot_save(frame),
+                        None => {
+                            log!("wm: screenshot of a window: its {}x{} frame is not inside the {}x{} readback", px.0, px.1, read.width, read.height);
+                            self.show_osd(cx, shell::osd::OsdShow::message("Screenshot failed: odd window size"));
+                        }
+                    },
+                    Err(error) => {
+                        log!("wm: screenshot of a window: {error}");
+                        self.show_osd(cx, shell::osd::OsdShow::message(&format!("Screenshot failed: {error:?}")));
+                    }
                 }
-            } else if capture_failed {
+            } else if !self.desk(cx).borrow::<WmDesk>().is_some_and(|d| d.has_window(client)) {
+                cx.cancel_texture_readback(ticket);
                 self.state_mut().shot.phase = Phase::Idle;
-                self.show_osd(cx, shell::osd::OsdShow::message("Screenshot failed: no window image"));
+                self.show_osd(cx, shell::osd::OsdShow::message("Screenshot failed: the window closed"));
             }
         }
         // 2. The writer's answer.
@@ -305,12 +312,14 @@ impl App {
         let Phase::Selecting(s) = std::mem::replace(&mut self.state_mut().shot.phase, Phase::Idle) else { return };
         if s.pick_window {
             // The window's own image: the texture its app presented.
-            let image = self.desk(cx).borrow::<WmDesk>().and_then(|d| d.window_image_at(p));
-            match image {
-                Some((texture, px)) if cx.request_render_texture_capture(&texture) => {
-                    self.state_mut().shot.phase = Phase::Capturing { texture, px: (px[0], px[1]), tries: 0 };
+            let picked = self.desk(cx).borrow::<WmDesk>().and_then(|d| d.window_image_at(p));
+            match picked {
+                Some((client, Some((texture, px)))) => {
+                    self.state_mut().shot.phase = Phase::Capturing { texture, ticket: None, wait_logged: false, client, px: (px[0], px[1]) };
+                    self.shot_ask_capture(cx);
                 }
-                _ => self.show_osd(cx, shell::osd::OsdShow::message("That window cannot be captured")),
+                Some((_, None)) => self.show_osd(cx, shell::osd::OsdShow::message("That window cannot be captured: its app has shown no frame yet")),
+                None => self.show_osd(cx, shell::osd::OsdShow::message("No window there to capture")),
             }
         } else {
             let chosen = s
@@ -325,6 +334,29 @@ impl App {
         }
         self.shot_next = cx.new_next_frame();
         self.redraw_all(cx);
+    }
+
+    fn shot_ask_capture(&mut self, cx: &mut Cx) {
+        let Phase::Capturing { texture, ticket, wait_logged, .. } = &mut self.state_mut().shot.phase else { return };
+        if ticket.is_some() { return; }
+        match texture.read_back(cx, ReadbackRequest::default()) {
+            Ok(requested) => {
+                *wait_logged = false;
+                *ticket = Some(requested);
+            }
+            Err(ReadbackError::Backpressure) => {
+                if !*wait_logged {
+                    log!("wm: context readback request limit reached; window screenshot waits");
+                    *wait_logged = true;
+                }
+                // Capturing keeps shot_tick's NextFrame loop running.
+            }
+            Err(error) => {
+                self.state_mut().shot.phase = Phase::Idle;
+                log!("wm: screenshot of a window: {error}");
+                self.show_osd(cx, shell::osd::OsdShow::message(&format!("That window cannot be captured: {error:?}")));
+            }
+        }
     }
 
     fn shot_thumb_pointer(&mut self, cx: &mut Cx, event: &Event, p: Vec2d) -> bool {

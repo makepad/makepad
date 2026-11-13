@@ -24,10 +24,13 @@ pub mod xr_audio;
 #[cfg(feature = "server")]
 pub mod xr_pair;
 
-pub const VERSION: u16 = 8;
+pub const VERSION: u16 = 9;
 pub const DEFAULT_PORT: u16 = 8790;
 /// The largest message either side accepts (a key frame of a big desktop fits many times over).
 pub const MAX_MESSAGE: usize = 16 << 20;
+/// The text of one `ui` reply message at most: a longer reply crosses in parts
+/// ([`a11y_reply`]), so a reply of any size arrives whole.
+pub const A11Y_PART: usize = 1 << 20;
 
 /// The cursor shapes, by index on the wire (`Cursor::shape`). Names are the makepad
 /// `MouseCursor` variants; an index past the table is the default arrow.
@@ -205,7 +208,10 @@ pub enum ClientMsg {
 /// Server -> viewer.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerMsg {
+    /// The `ui` reply to `req` (its last part, when [`ServerMsg::A11yReplyPart`]s came first).
     A11yReply { req: u64, text: String },
+    /// A leading part of a `ui` reply too long for one message; the `A11yReply` ends it.
+    A11yReplyPart { req: u64, text: String },
     /// The session is open. `stream` is the picture size of `screen` (its output size); `input`
     /// says whether input is injected, `input_note` why not.
     Welcome { version: u16, session: u32, screens: Vec<ScreenInfo>, screen: u32, stream: [u32; 2], input: bool, input_note: String, server: String },
@@ -371,6 +377,7 @@ mod tag {
     pub const RATE: u8 = 108;
     pub const A11Y_QUERY: u8 = 25;
     pub const A11Y_REPLY: u8 = 109;
+    pub const A11Y_REPLY_PART: u8 = 110;
 }
 
 impl ClientMsg {
@@ -493,6 +500,9 @@ impl ServerMsg {
             ServerMsg::A11yReply { req, text } => {
                 let mut w = Out::new(A11Y_REPLY); w.u64(*req); w.str(text); w.done()
             }
+            ServerMsg::A11yReplyPart { req, text } => {
+                let mut w = Out::new(A11Y_REPLY_PART); w.u64(*req); w.str(text); w.done()
+            }
             ServerMsg::Welcome { version, session, screens, screen, stream, input, input_note, server } => {
                 let mut o = Out::new(WELCOME);
                 o.u16(*version).u32(*session).u32(screens.len() as u32);
@@ -546,6 +556,7 @@ impl ServerMsg {
         let mut r = In { b: payload };
         Ok(match ty {
             A11Y_REPLY => ServerMsg::A11yReply { req: r.u64()?, text: r.str()? },
+            A11Y_REPLY_PART => ServerMsg::A11yReplyPart { req: r.u64()?, text: r.str()? },
             WELCOME => {
                 let version = r.u16()?;
                 let session = r.u32()?;
@@ -681,6 +692,48 @@ pub fn write_all(w: &mut dyn Write, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+/// The messages of the `ui` reply `text` to `req`: parts of at most [`A11Y_PART`] bytes, each cut on
+/// a character boundary, the last an `A11yReply`.
+pub fn a11y_reply(req: u64, text: &str) -> Vec<ServerMsg> {
+    let mut msgs = Vec::new();
+    let mut rest = text;
+    while rest.len() > A11Y_PART {
+        let mut cut = A11Y_PART;
+        while !rest.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let (part, tail) = rest.split_at(cut);
+        msgs.push(ServerMsg::A11yReplyPart { req, text: part.to_string() });
+        rest = tail;
+    }
+    msgs.push(ServerMsg::A11yReply { req, text: rest.to_string() });
+    msgs
+}
+
+/// The viewer's side of [`a11y_reply`]: joins each request's parts.
+#[derive(Default)]
+pub struct A11yParts(std::collections::HashMap<u64, String>);
+
+impl A11yParts {
+    pub fn part(&mut self, req: u64, text: &str) {
+        self.0.entry(req).or_default().push_str(text);
+    }
+    /// The whole reply, given its last message's text.
+    pub fn end(&mut self, req: u64, text: String) -> String {
+        match self.0.remove(&req) {
+            Some(mut head) => {
+                head.push_str(&text);
+                head
+            }
+            None => text,
+        }
+    }
+    /// Drops what came of a reply nobody waits for any more.
+    pub fn forget(&mut self, req: u64) {
+        self.0.remove(&req);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,6 +821,31 @@ mod tests {
         round_server(ServerMsg::Clipboard { text: String::new() });
         round_server(ServerMsg::Bye { reason: "the WM quits".into() });
         round_server(ServerMsg::Rate { fps: 120, kbps: 250_000, limit: limit::LINK, full_chroma: true, codec: pref::HEVC, preset: pref::SHARP, streams: 2, why: "fast: the encoder is behind".into() });
+    }
+
+    /// A reply past a message's size arrives whole: parts cut inside no character, joined in order.
+    #[test]
+    fn a11y_reply_of_any_size_crosses_in_parts() {
+        let text: String = (0..2).map(|i| format!("{{\"row\":{i},\"name\":\"{}\"}}\n", "é→x".repeat(300_000))).collect();
+        let mut inbox = Inbox::default();
+        for m in a11y_reply(9, &text) {
+            inbox.feed(&m.encode());
+        }
+        let mut parts = A11yParts::default();
+        let mut whole = None;
+        let mut n = 0;
+        while let Some((ty, payload)) = inbox.next().unwrap() {
+            assert!(payload.len() <= A11Y_PART + 12, "a part is one message");
+            n += 1;
+            match ServerMsg::decode(ty, &payload).unwrap() {
+                ServerMsg::A11yReplyPart { req: 9, text } => parts.part(9, &text),
+                ServerMsg::A11yReply { req: 9, text } => whole = Some(parts.end(9, text)),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(n == 4 && whole.as_deref() == Some(text.as_str()), "{n} messages");
+        round_server(ServerMsg::A11yReply { req: 1, text: "{\"ok\":1}\n".into() });
+        assert_eq!(a11y_reply(1, "").len(), 1);
     }
 
     #[test]

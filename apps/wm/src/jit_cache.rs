@@ -1,7 +1,7 @@
 //! The JIT compile cache of `makepad run` as the phone's settings see it: its size, a request to
 //! clear it (honoured by the host at the next process start: nothing is deleted under the
 //! running compiler) and a restart into a new process. Only where the WM runs under
-//! `makepad run` (MAKEPAD_RUN_HOME is set by the host); elsewhere there is no cache to show.
+//! `makepad run` (RELAX_HOME is set by the host); elsewhere there is no cache to show.
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -10,7 +10,7 @@ static SIZE: AtomicU64 = AtomicU64::new(UNKNOWN);
 static MEASURING: AtomicBool = AtomicBool::new(false);
 
 fn home() -> Option<PathBuf> {
-    std::env::var_os("MAKEPAD_RUN_HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
+    std::env::var_os("RELAX_HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
 }
 
 /// Whether there is a JIT cache here at all.

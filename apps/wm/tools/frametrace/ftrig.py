@@ -9,13 +9,41 @@
     rig.down()                     # quits, reaps only the processes it started
     # rig.trace is the JSONL path; analyze.py reads it
 
-Hidden only (MAKEPAD_HIDE_WINDOWS=1, SANDBOX_MUTE=1, a private Weston
+Hidden only (MAKEPAD_HIDE_WINDOWS=1, MAKEPAD_MUTE=1, a private Weston
 socket). Kills only the PIDs it recorded (Weston, the WM, the WM's
 children by pid + start time). Needs a release build with frametrace.
 """
-import json, os, signal, subprocess as sp, tempfile, time
+import json, os, shutil, signal, subprocess as sp, tempfile, time
 
 HOME = os.path.expanduser("~")
+
+
+def jit_loader(root, log):
+    """The JIT (`makepad`, the host profile) the WM starts its hosted apps with (RELAX_LOADER).
+    Without one each hosted app runs `cargo run` of the JIT, and a registry launch drops
+    CARGO_TARGET_DIR, so in a devhub lane's tree it built the JIT again, cold, into the tree's
+    own target/ (10 minutes on a Linux node, every session: that target is not kept).
+    A devhub run's `makepad` is the JIT devhub found for this tree's sources (a content-keyed
+    `makepad.jit-<key>`), so nothing is built. Otherwise cargo builds this tree's JIT where its
+    launcher builds: CARGO_TARGET_DIR when set (a lane's warm target), else the checkout's
+    target/, where the registry would have built it."""
+    t0 = time.time()
+    found = shutil.which("makepad")
+    keyed = os.path.realpath(found) if found else ""
+    if os.path.basename(keyed).startswith("makepad.jit-"):
+        print(f"rig: the hosted apps run on this run's JIT {keyed}", flush=True)
+        return keyed
+    with open(log, "w") as err:
+        p = sp.run(["cargo", "build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad",
+                    "--message-format=json-render-diagnostics"], cwd=root, stdout=sp.PIPE, stderr=err, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"this tree's JIT did not build; see {log}")
+    for line in p.stdout.splitlines():
+        msg = json.loads(line) if line.startswith("{") else {}
+        if msg.get("reason") == "compiler-artifact" and msg.get("target", {}).get("name") == "makepad" and msg.get("executable"):
+            print(f"rig: the hosted apps run on this tree's JIT {msg['executable']}, built in {time.time() - t0:.1f} s", flush=True)
+            return msg["executable"]
+    raise RuntimeError(f"cargo named no `makepad` executable; see {log}")
 
 
 def _birth(pid):
@@ -67,12 +95,13 @@ class Rig:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, "w") as f:
                 f.write(text)
-        e.update(WAYLAND_DISPLAY=self.sock, SANDBOX_MUTE="1", MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_WM_BACKDROP="warp-grid",
+        e.update(WAYLAND_DISPLAY=self.sock, MAKEPAD_MUTE="1", MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_WM_BACKDROP="warp-grid",
                  MAKEPAD_WM_NO_WARM="1", MAKEPAD_WM_ROOT=self.root, MAKEPAD_HOME=self.state,
                  XDG_CONFIG_HOME=self.state + "/c", XDG_DATA_HOME=self.state + "/d", XDG_CACHE_HOME=self.state + "/k",
                  MAKEPAD_WM_FRAMETRACE=self.trace, CARGO_NET_OFFLINE="true", MAKEPAD_CEF_OFFLINE="1")
         if self.apps:
             e["MAKEPAD_WM_TEST_APP"] = self.apps
+            e["RELAX_LOADER"] = jit_loader(self.root, os.path.join(self.out, "jit-build.log"))
         e.update(self.env)
         args = [os.path.join(self.root, "target/release/makepad-app-wm"), "--remote", f"--window={self.size}@{self.dpi}",
                 f"-scale={self.scale}"] + (["--virtual-clock"] if self.virtual else [])

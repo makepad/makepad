@@ -16,6 +16,7 @@
 pub use makepad_widgets;
 use makepad_widgets::makepad_platform::thread::{Class, SignalToUI, TaskHandle};
 use makepad_widgets::makepad_platform::hosted_relay::HostRelayServer;
+use makepad_widgets::makepad_platform::clipboard_read::ClipboardWrite;
 use makepad_widgets::tween::{ClockPolicy, LagSmoothing, TweenClock};
 use makepad_widgets::*;
 
@@ -124,6 +125,7 @@ use binds::{match_bind_armed, WmAction};
 use desk::{WmDesk, WmDeskAction, WmState};
 use clients::{spawn_client, ClientLine, LaunchPolicy, WarmPool, WarmStatus};
 use makepad_app_registry::{BuildPolicy, LaunchEvent};
+use makepad_app_registry::machine::Launcher;
 use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
 #[cfg(not(target_os = "linux"))]
 use makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_from_host_swapchain;
@@ -650,6 +652,9 @@ pub struct App {
     /// prompts, file pickers): platform hosted_relay.rs.
     #[rust]
     relay: HostRelayServer,
+    /// The richer flavours a client sent ahead of its next copy's text (`SetClipboard`).
+    #[rust]
+    clip_flavours: Option<(ClientId, makepad_hal::window_controls::HostedClipboard)>,
     /// What the shell bar's status modules show, sampled on the tick.
     #[rust]
     bar_sample: BarData,
@@ -1102,12 +1107,19 @@ impl App {
     }
 
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
-        self.open_app(cx, app_id, false);
+        self.open_app(cx, app_id, false, None);
     }
 
     /// `native`: the app's compiled build, whatever runs it otherwise (`devhub show --native`): as
     /// a process of its own, past any domain, module or warm instance of its usual runner.
-    fn open_app(&mut self, cx: &mut Cx, app_id: &str, native: bool) {
+    /// `by`: who asks (the WM socket's devhub `show`); else an agent when the input being handled
+    /// was injected over remote, else the person at the WM. Its process's log and, an agent's,
+    /// its environment say so (`clients::note_launcher`).
+    fn open_app(&mut self, cx: &mut Cx, app_id: &str, native: bool, by: Option<Launcher>) {
+        let by = by.unwrap_or_else(|| match cx.injected_by() {
+            Some(who) => Launcher::Agent(who),
+            None => Launcher::Person("at the WM".to_string()),
+        });
         if (app_id == clients::HUB_SERVICE_APP || app_id == clients::DEVHUB_SERVICE_APP) && self.show_running_service(cx, app_id) {
             return;
         }
@@ -1175,7 +1187,7 @@ impl App {
 
         // THE POOL: a standby instance of this app becomes the window now,
         // already drawn, and the pool tops itself back up behind it.
-        if !native && self.adopt_warm(cx, app_id) {
+        if !native && self.adopt_warm(cx, app_id, &by) {
             return;
         }
 
@@ -1191,6 +1203,7 @@ impl App {
         // Opening an app builds it when it is missing or out of date: its
         // tile shows the build, then the app.
         let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
+        clients::note_launcher(id, by.clone());
         let spawned = spawn_client(
             &pool, &cx.thread_spawner(), app, id, hub_port, cwd.as_ref(),
             (app.id == "terminal").then_some(term_env.as_str()), &[], false, policy, runner, lines,
@@ -1198,7 +1211,7 @@ impl App {
         match spawned {
             Ok(slot) => {
                 let verb = if slot.is_building() { "building" } else { "launched" };
-                log!("wm: {} {} as client {}", verb, app.id, id);
+                log!("wm: {} {} as client {}, opened by {}", verb, app.id, id, by.said());
                 state.clients.insert(id, slot);
                 let area = self.desk_area(cx);
                 let state = self.state_mut();
@@ -1266,7 +1279,7 @@ impl App {
     /// The pool's half of a launch. True when a standby instance became
     /// the window (the caller is done); false to launch cold exactly as
     /// before — the pool is an optimization and never the only path.
-    fn adopt_warm(&mut self, cx: &mut Cx, app_id: &str) -> bool {
+    fn adopt_warm(&mut self, cx: &mut Cx, app_id: &str, by: &Launcher) -> bool {
         if !WarmPool::is_warm_app(app_id) {
             return false;
         }
@@ -1313,6 +1326,8 @@ impl App {
             let gap = state.gap;
             state.layout_mut().insert(client, area, gap);
         }
+        log!("wm: warm {} opened as client {} by {}", app_id, client, by.said());
+        clients::note_opened(client, by.clone());
         let hub_port = self.state_mut().hub_port;
         // The tile configures the child to its REAL rect on its next tick
         // (one WindowGeomChange plus the tile's own swapchain) — the same
@@ -1379,6 +1394,7 @@ impl App {
         let term_env = self.state_mut().term_env.clone();
         let lines = self.line_sender();
         let pool = cx.task_pool();
+        clients::note_launcher(id, Launcher::Pool);
         match spawn_client(
             &pool,
             &cx.thread_spawner(),
@@ -2327,6 +2343,7 @@ impl App {
     }
 
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
+        clients::forget_launcher(client);
         self.native_app_owner_gone(client);
         #[cfg(not(target_arch = "wasm32"))]
         a11y::disconnected(client);
@@ -3838,7 +3855,9 @@ impl App {
                 }
             }
             AppToStudio::SetClipboard(text) => {
-                cx.copy_to_clipboard(&text);
+                // the flavours the client sent just ahead of its text
+                let flavours = self.clip_flavours.take().filter(|(from, _)| *from == client).map(|(_, f)| f);
+                cx.copy_to_clipboard_flavours(ClipboardWrite::with_hosted(text.clone(), flavours));
                 // the Wayland clients (a browser) paste it too
                 wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text });
             }
@@ -3904,6 +3923,10 @@ impl App {
                 self.send_relays(answers);
             }
             AppToStudio::Custom(json) => {
+                if let Some(flavours) = makepad_hal::window_controls::HostedClipboard::parse(&json) {
+                    self.clip_flavours = Some((client, flavours));
+                    return;
+                }
                 if makepad_hal::window_controls::HostedAppFrame::parse(&json).is_some() {
                     self.note_app_frame(cx, client);
                     return;
@@ -7143,6 +7166,14 @@ impl AppMain for App {
         self.shelf_autohide_event(cx, event);
         if matches!(event, Event::NetworkResponses(_) | Event::PermissionResult(_) | Event::Clipboard(_)) {
             let answers = self.relay.on_event(event);
+            // a clipboard answer's flavours go just ahead of it
+            if let Some(state) = self.state.as_ref() {
+                for (client, flavours) in self.relay.take_clipboard_flavours() {
+                    if let Some(sender) = state.clients.get(&client).and_then(|slot| slot.sender.as_ref()) {
+                        send_to_app(sender, vec![StudioToApp::Custom(flavours.to_json())]);
+                    }
+                }
+            }
             self.send_relays(answers);
         }
         if matches!(cx.os_type(), OsType::LinuxDirect) && matches!(event, Event::MouseMove(_)) {

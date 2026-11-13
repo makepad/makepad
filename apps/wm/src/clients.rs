@@ -32,6 +32,7 @@ use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskPool, ThreadSpaw
 
 use makepad_app_host::ClientId;
 use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput, Runner};
+use makepad_app_registry::machine::{Launcher, LAUNCHED_BY_ENV};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPolicy {
@@ -832,6 +833,36 @@ pub fn client_log(id: ClientId, build: bool) -> PathBuf {
     host::homeless_root().join(format!("wm-client-{}{}.log", id, if build { "-build" } else { "" }))
 }
 
+/// Who opened each client the WM starts a process for ([`note_launcher`]): its process's log
+/// starts with that line, and an agent's launch carries its mark in the process's environment
+/// (`makepad_app_registry::machine::Launcher`), for devhub to tell a person's app from an agent's.
+static LAUNCHERS: std::sync::Mutex<Vec<(ClientId, Launcher)>> = std::sync::Mutex::new(Vec::new());
+
+/// Client `id`'s process is opened by `by`: its log says so, and an agent's carries the mark.
+pub fn note_launcher(id: ClientId, by: Launcher) {
+    let mut list = LAUNCHERS.lock().unwrap_or_else(|e| e.into_inner());
+    list.retain(|(c, _)| *c != id);
+    list.push((id, by));
+}
+
+/// A warm instance (`client`) opened by `by`: a later line of its log names who opened it.
+pub fn note_opened(client: ClientId, by: Launcher) {
+    use std::io::Write;
+    note_launcher(client, by.clone());
+    if let Ok(mut log) = std::fs::OpenOptions::new().append(true).open(client_log(client, false)) {
+        let _ = writeln!(log, "{}", by.line());
+    }
+}
+
+/// Client `id` is gone: its launcher with it.
+pub fn forget_launcher(id: ClientId) {
+    LAUNCHERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(c, _)| *c != id);
+}
+
+fn launcher_of(id: ClientId) -> Option<Launcher> {
+    LAUNCHERS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(c, _)| *c == id).map(|(_, by)| by.clone())
+}
+
 /// The nice level of every client process and build the WM starts.
 #[cfg(unix)]
 const CHILD_NICE: i32 = 10;
@@ -864,12 +895,20 @@ fn spawn_process(
     // spawning it, goes (quit, crash or kill), as app_host's hosted children do.
     #[cfg(target_os = "linux")]
     makepad_app_host::launch::exit_with_parent(&mut cmd);
+    let by = launcher_of(id);
+    if let Some(agent @ Launcher::Agent(_)) = &by {
+        cmd.env(LAUNCHED_BY_ENV, agent.env_value());
+    }
     let mut child = cmd.spawn().map_err(|e| format!("spawn {what}: {e}"))?;
     #[cfg(windows)]
     makepad_app_host::launch::exit_with_parent(&child);
     // Child output goes to a per-client log — silent children are
     // undebuggable — and every line also reaches the UI.
     let log = std::fs::File::create(&log_path).ok();
+    if let (Some(mut file), Some(by)) = (log.as_ref(), &by) {
+        use std::io::Write;
+        let _ = writeln!(file, "{}", by.line());
+    }
     let result = (|| {
         if let Some(out) = child.stdout.take() {
             pump(spawner, id, out, log.as_ref().and_then(|file| file.try_clone().ok()), lines.clone())?;
