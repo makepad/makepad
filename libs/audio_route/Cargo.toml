@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Route one application's audio through a caller-supplied mixer. macOS first; the same API is the multiplatform front."
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

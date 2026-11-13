@@ -21,7 +21,7 @@
 //! [`Mp3Decoder::set_gapless`] turns it off for a caller that wants the raw
 //! filterbank output, and [`Mp3Decoder::gapless`] reports the tag's values.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 
 mod bits;
 mod header;

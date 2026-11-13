@@ -8,7 +8,7 @@
 //! attacker-controlled input and a granule that claims 1000 scalefactor bands
 //! must produce an error, not an index panic.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 use super::bits::BitReader;
 use super::header::FrameHeader;
 use super::synth::Synthesis;

@@ -6,7 +6,7 @@
 //! overlapping reconstruction rather than a per-slot transform. Everything is
 //! preallocated: the per-frame loop touches no allocator.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 use super::tables::synth_window;
 
 /// Matrixing coefficients `N[i][k] = cos((16 + i)(2k + 1) pi / 64)`.

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Shared realtime synthesis: band-limited oscillators, filters, reverb, spatializer, dynamics, a data-driven sfx recipe format, physically-inspired vehicle engines and tyres, the Ironfish synth, and one Instrument trait over Makepad's piano, drum kits and SoundFont player"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [features]
