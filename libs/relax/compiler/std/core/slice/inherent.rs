@@ -234,9 +234,22 @@ impl<T> [T] {
         }
         (&self[..mid], &self[mid..])
     }
+    /// # Safety
+    /// `mid` must not exceed the slice length.
+    pub const unsafe fn split_at_unchecked(&self, mid: usize) -> (&[T], &[T]) {
+        let ptr = self.as_ptr();
+        (super::from_raw_parts(ptr, mid), super::from_raw_parts(ptr.add(mid), self.len() - mid))
+    }
     #[track_caller]
     pub const fn split_at_mut(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
         super::split_at_mut(self, mid)
+    }
+    /// # Safety
+    /// `mid` must not exceed the slice length; the returned slices are disjoint.
+    pub const unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [T], &mut [T]) {
+        let len = self.len();
+        let ptr = self.as_mut_ptr();
+        (super::from_raw_parts_mut(ptr, mid), super::from_raw_parts_mut(ptr.add(mid), len - mid))
     }
     pub const fn split_at_checked(&self, mid: usize) -> Option<(&[T], &[T])> {
         if mid > self.len() {
