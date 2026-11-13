@@ -4297,7 +4297,8 @@ impl<'a> Lcx<'a> {
     }
 
     /// `&` operands in extending position of a `let` initializer (rustc's temporary lifetime
-    /// extension): `&e`, and through tuples, arrays, struct literals, casts, parens, block tails.
+    /// extension): `&e`, and through tuples, arrays, struct literals, casts, parens,
+    /// tuple/variant constructors and block tails.
     fn collect_extending(&self, e: ExprId, out: &mut Vec<u32>) {
         let ast = self.ast();
         match &ast.expr(e).kind {
@@ -4317,6 +4318,12 @@ impl<'a> Lcx<'a> {
                 for f in ast.list(ast.row(*row).fields) {
                     self.collect_extending(f.expr, out);
                 }
+            }
+            ExprKind::Call(f, args)
+                if matches!(self.b.res.get(&strip_paren(ast, *f).0), Some(Res::Def(d))
+                    if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct)) =>
+            {
+                for x in ast.list(*args) { self.collect_extending(*x, out); }
             }
             ExprKind::Block(b, _) | ExprKind::Unsafe(b) => {
                 if let Some(Stmt::Expr(x, false)) = ast.stmts(*b).last() {
@@ -5731,19 +5738,14 @@ impl<'a> Lcx<'a> {
                 let b = self.to_leaves(b, t);
                 self.bytes_eq(a[0], a[1], b[0], b[1])
             }
-            _ => {
+            TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Ptr(..) | TyKind::FnPtr(..) => {
                 let a = self.to_leaves(a, t);
                 let b = self.to_leaves(b, t);
                 // all leaves equal
                 let mut acc: Option<VReg> = None;
                 for i in 0..a.len().min(b.len()) {
                     let c = self.f.vreg(Cls::I);
-                    if self.f.vregs[a[i].0 as usize] == Cls::I {
-                        self.emit(Inst::ICmp(Cond::Eq, false, c, a[i], b[i]));
-                    } else {
-                        let f64_ = self.f.vregs[a[i].0 as usize] == Cls::F64;
-                        self.emit(Inst::FCmp(Cond::Eq, f64_, c, a[i], b[i]));
-                    }
+                    self.emit(Inst::ICmp(Cond::Eq, false, c, a[i], b[i]));
                     acc = Some(match acc {
                         None => c,
                         Some(p) => {
@@ -5757,6 +5759,28 @@ impl<'a> Lcx<'a> {
                     Some(c) => c,
                     None => self.iconst(1),
                 }
+            }
+            _ => {
+                // Aggregate equality is PartialEq, including inactive enum payloads,
+                // references by value and custom impls. Indirect layouts have no scalar
+                // leaves; treating that as an empty comparison made every pair equal.
+                let method = self.u.tcx.lang_items.get(LangItem::PartialEq).and_then(|td| {
+                    self.u.prog.traits[self.u.prog.def(td).sub as usize].iter().copied()
+                        .find(|it| self.u.prog.name(*it) == "eq")
+                });
+                let Some(method) = method else {
+                    self.err(self.pos, "missing PartialEq::eq".to_string());
+                    return self.iconst(0);
+                };
+                let pa = self.val_to_place(a);
+                let pb = self.val_to_place(b);
+                let ra = self.ref_to_place(&pa, t);
+                let rb = self.ref_to_place(&pb, t);
+                let reference = self.u.tcx.tys.intern(TyKind::Ref(false, t, crate::types::RegionId::ERASED));
+                let instance = self.resolve_instance(method, &[t, t]);
+                let boolean = self.u.tcx.tys.bool_;
+                let result = self.emit_instance(instance, vec![(Val::L(ra), reference), (Val::L(rb), reference)], boolean);
+                self.to_leaves(result, boolean)[0]
             }
         }
     }
@@ -8139,17 +8163,13 @@ impl<'a> Lcx<'a> {
                 let av = self.lower_expr(a);
                 // (`fn_ptr == fn_item`: the rhs reified to the lhs pointer type)
                 let bv = self.lower_expr_coerced(b, at);
-                // `&a < &b` on primitives compares the values
+                // Reference equality compares values. Both operands are now `at`;
+                // keep the dereferenced type with their dereferenced values.
                 let (av, bv, at) = match self.kind(at) {
                     TyKind::Ref(_, inner, _) if matches!(self.kind_ref(inner), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Ref(..) | TyKind::FnPtr(..)) => {
-                        let bt = self.body_ty(b);
                         let (x, xt) = self.prim_leaves(av, at);
-                        let (y, _) = self.prim_leaves(bv, bt);
-                        if matches!(self.kind_ref(xt), TyKind::Ref(..)) {
-                            (Val::L(x), Val::L(y), at)
-                        } else {
-                            (Val::L(x), Val::L(y), xt)
-                        }
+                        let (y, _) = self.prim_leaves(bv, at);
+                        (Val::L(x), Val::L(y), xt)
                     }
                     _ => (av, bv, at),
                 };
