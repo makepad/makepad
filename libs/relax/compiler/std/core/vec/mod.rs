@@ -1055,6 +1055,13 @@ impl<'a, T: Clone> From<&'a Vec<T>> for Cow<'a, [T]> {
     }
 }
 #[cfg(not(relax_check))]
+// library/alloc/src/vec/cow.rs
+impl<'a, T: Clone> FromIterator<T> for Cow<'a, [T]> {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Cow<'a, [T]> {
+        Cow::Owned(FromIterator::from_iter(it))
+    }
+}
+
 impl<'a, T: Clone> From<Vec<T>> for Cow<'a, [T]> {
     fn from(v: Vec<T>) -> Cow<'a, [T]> {
         Cow::Owned(v)

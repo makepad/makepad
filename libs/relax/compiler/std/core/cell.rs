@@ -662,3 +662,27 @@ impl<T, F: FnOnce() -> T> Deref for LazyCell<T, F> {
         LazyCell::force(self)
     }
 }
+
+// core/src/cell/lazy.rs: `DerefMut for LazyCell` (stable 1.89) over `force_mut`. krilla pushes
+// into a lazily started PDF attribute list through it, from a closure that captures the cell.
+impl<T, F: FnOnce() -> T> LazyCell<T, F> {
+    pub fn force_mut(this: &mut LazyCell<T, F>) -> &mut T {
+        if this.cell.get().is_none() {
+            let value = match this.init.take() {
+                Some(f) => f(),
+                None => crate::panicking::panic_str("LazyCell instance has previously been poisoned"),
+            };
+            let _ = this.cell.set(value);
+        }
+        match this.cell.get_mut() {
+            Some(value) => value,
+            None => crate::panicking::panic_str("LazyCell instance has previously been poisoned"),
+        }
+    }
+}
+
+impl<T, F: FnOnce() -> T> DerefMut for LazyCell<T, F> {
+    fn deref_mut(&mut self) -> &mut T {
+        LazyCell::force_mut(self)
+    }
+}

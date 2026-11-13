@@ -1,6 +1,6 @@
 // std items the app sweep found missing: Default for Arc<[T]> / Rc<[T]> / Arc<str> / Rc<str>,
 // PathBuf: From<&T: AsRef<OsStr>> (so `(&path_buf).into()`), Cow<Path> conversions, and BTreeMap
-// lookups through Borrow<[T]> (Vec<String> keys looked up by &[String]).
+// lookups through Borrow<[T]> (Vec<String> keys looked up by &[String]), std::collections::Bound.
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,22 @@ struct Mesh {
     idx: Arc<[u32]>,
     name: Rc<str>,
     data: Rc<[u8]>,
+}
+
+/// redb's spelling (tree_store/btree_iters.rs): std::collections::Bound, std's deprecated
+/// re-export of std::ops::Bound, with the variants imported through that name
+mod bound_through_collections {
+    use Bound::{Excluded, Included, Unbounded};
+
+    use std::collections::Bound;
+
+    pub fn first(b: Bound<&u32>) -> Option<u32> {
+        match b {
+            Included(x) => Some(*x),
+            Excluded(x) => Some(*x + 1),
+            Unbounded => None,
+        }
+    }
 }
 
 #[test]
@@ -81,4 +97,42 @@ fn a05_slice_keys_hash_and_set() {
     s.insert(b"b".to_vec());
     let r: Vec<&Vec<u8>> = s.range::<[u8], _>((std::ops::Bound::Included(&b"a"[..]), std::ops::Bound::Unbounded)).collect();
     println!("| set range {:?} contains {}", r, s.contains(&b"b"[..]));
+}
+
+#[test]
+fn a06_collections_bound() {
+    use bound_through_collections::first;
+    use std::ops::RangeBounds;
+    // the same type as std::ops::Bound
+    let b: std::ops::Bound<&u32> = std::collections::Bound::Excluded(&4);
+    println!("| bound {:?} {:?} {:?}", first(b), first((7..9).start_bound()), first((..9).start_bound()));
+    let m: BTreeMap<u32, u32> = (0..10).map(|i| (i, i * i)).collect();
+    let r: Vec<u32> = m.range((std::collections::Bound::Excluded(2), std::collections::Bound::Included(5))).map(|(_, v)| *v).collect();
+    println!("| range {:?}", r);
+}
+
+// litemap's `#[derive(.., PartialOrd, Ord)] struct LiteMap<K: ?Sized, V: ?Sized, S>` (icu_locale_core's
+// extension maps): the derive compares the PhantomData fields too. "the trait bound
+// `PhantomData<T0>: PartialOrd<PhantomData<T0>>` is not satisfied".
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct Tagged<K: ?Sized, V: ?Sized, S> {
+    key: std::marker::PhantomData<K>,
+    values: S,
+    value: std::marker::PhantomData<V>,
+}
+
+#[test]
+fn a07_phantom_data_ord() {
+    use std::cmp::Ordering;
+    use std::marker::PhantomData;
+    let t = |v: Vec<u8>| Tagged::<str, [u16], Vec<u8>> { key: PhantomData, values: v, value: PhantomData };
+    let (a, b) = (t(vec![1, 2]), t(vec![1, 3]));
+    println!("| derived {:?} {:?} {:?} {}", a.cmp(&b), b.partial_cmp(&a), a.cmp(&a), a < b);
+    let p: PhantomData<dyn Fn(&str) -> u8> = PhantomData;
+    println!("| phantom {:?} {:?} {} {} {}", p.cmp(&p), p.partial_cmp(&p), p <= p, p < p, p.max(p) == p);
+    let mut v = vec![(PhantomData::<String>, 3u8), (PhantomData, 1), (PhantomData, 2)];
+    v.sort();
+    println!("| sorted {:?} {:?}", v.iter().map(|x| x.1).collect::<Vec<_>>(), v.iter().max() == Some(&(PhantomData, 3)));
+    let set: std::collections::BTreeSet<PhantomData<u8>> = [PhantomData, PhantomData].into_iter().collect();
+    println!("| set {} {:?}", set.len(), PhantomData::<u8>.cmp(&PhantomData) == Ordering::Equal);
 }

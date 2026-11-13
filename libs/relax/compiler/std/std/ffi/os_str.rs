@@ -188,6 +188,73 @@ impl<'a> From<Cow<'a, OsStr>> for OsString {
     }
 }
 
+// library/std/src/ffi/os_str.rs: Extend and FromIterator of OsString, &OsStr and Cow<OsStr>.
+impl Extend<OsString> for OsString {
+    fn extend<T: IntoIterator<Item = OsString>>(&mut self, iter: T) {
+        for s in iter {
+            self.push(&s);
+        }
+    }
+}
+
+impl<'a> Extend<&'a OsStr> for OsString {
+    fn extend<T: IntoIterator<Item = &'a OsStr>>(&mut self, iter: T) {
+        for s in iter {
+            self.push(s);
+        }
+    }
+}
+
+impl<'a> Extend<Cow<'a, OsStr>> for OsString {
+    fn extend<T: IntoIterator<Item = Cow<'a, OsStr>>>(&mut self, iter: T) {
+        for s in iter {
+            self.push(&s);
+        }
+    }
+}
+
+impl FromIterator<OsString> for OsString {
+    fn from_iter<I: IntoIterator<Item = OsString>>(iter: I) -> OsString {
+        let mut iterator = iter.into_iter();
+        // the first string's buffer is the one extended, as in std
+        match iterator.next() {
+            None => OsString::new(),
+            Some(mut buf) => {
+                buf.extend(iterator);
+                buf
+            }
+        }
+    }
+}
+
+impl<'a> FromIterator<&'a OsStr> for OsString {
+    fn from_iter<I: IntoIterator<Item = &'a OsStr>>(iter: I) -> OsString {
+        let mut buf = OsString::new();
+        for s in iter {
+            buf.push(s);
+        }
+        buf
+    }
+}
+
+impl<'a> FromIterator<Cow<'a, OsStr>> for OsString {
+    fn from_iter<I: IntoIterator<Item = Cow<'a, OsStr>>>(iter: I) -> OsString {
+        let mut iterator = iter.into_iter();
+        match iterator.next() {
+            None => OsString::new(),
+            Some(Cow::Owned(mut buf)) => {
+                buf.extend(iterator);
+                buf
+            }
+            Some(Cow::Borrowed(first)) => {
+                let mut buf = OsString::from(first);
+                buf.extend(iterator);
+                buf
+            }
+        }
+    }
+}
+
 impl From<OsString> for Box<OsStr> {
     fn from(s: OsString) -> Box<OsStr> {
         s.into_boxed_os_str()
