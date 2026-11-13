@@ -5,12 +5,15 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad HAL: the command/event interface below Cx (windows, GPU resources, input, timers), its session tables, GPU ledger and a headless backend"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
+
+[package.metadata.relax]
+# it hosts a program's windows: an app's start opens its window early, the main thread serves it
+window-host = true
 
 [dependencies]
 makepad-a11y = { path = "../../libs/a11y", version = "0.1.0" }
-makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
+relax-api = { path = "../../libs/relax_api", version = "1.0.0" }
 makepad-key-code = { path = "../key_code", version = "0.1.0" }
 # The font service rasterises glyphs with the same tables and outlines the text layout shapes.
 makepad-font-core = { path = "../../libs/font_core", version = "1.0.0" }
@@ -49,7 +52,7 @@ host-shims = []
 
 [dev-dependencies]
 # tests/entries.rs reads the generated #[relax_api] table
-makepad-relax-api = { path = "../../libs/relax_api", version = "1.0.0", features = ["host-shims"] }
+relax-api = { path = "../../libs/relax_api", version = "1.0.0", features = ["host-shims"] }
 
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dev-dependencies]
 makepad-shader = { path = "../shader", version = "1.0.0" }
@@ -57,6 +60,7 @@ makepad-shader = { path = "../shader", version = "1.0.0" }
 # Native inspection reads the HAL ledger directly, including when Cx runs under Relax.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 makepad-remote = { path = "../../libs/remote", version = "0.1.0" }
+makepad-core-util = { path = "../../libs/core_util", version = "0.1.0" }
 makepad-gpu-trace = { path = "../../libs/gpu_trace", version = "1.0.0" }
 
 [target.'cfg(target_os = "android")'.dependencies]

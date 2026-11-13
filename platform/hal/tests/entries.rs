@@ -1,7 +1,7 @@
 //! The `#[relax_api]` table this crate lays down under `host-shims` (what the `makepad` loader reads).
 #![cfg(feature = "host-shims")]
 
-use makepad_relax_api::{entries, HANDLE, OP, PLAIN};
+use relax_api::{entries, HANDLE, OP, PLAIN};
 
 #[test]
 fn the_four_ops_and_the_plain_types_are_marked() {

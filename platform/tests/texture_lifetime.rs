@@ -111,36 +111,45 @@ fn readback_round_trip_512_and_fifty_bounded_tickets() {
 
     let serial = cx.frame_submission_serial();
     let mut tickets = std::collections::HashSet::new();
-    let mut rejected = 0;
     for _ in 0..50 {
-        match texture.read_back(&mut cx, ReadbackRequest::default()) {
-            Ok(ticket) => { assert!(tickets.insert(ticket)); }
-            Err(ReadbackError::Backpressure) => rejected += 1,
-            other => panic!("unexpected admission: {other:?}"),
+        let ticket = texture.read_back(&mut cx, ReadbackRequest::default()).expect("requests below the ticket limit are accepted");
+        assert!(tickets.insert(ticket));
+        let usage = cx.texture_readback_usage();
+        assert!(usage.reserved_bytes <= TEXTURE_READBACK_MAX_BYTES);
+        if tickets.len() > TEXTURE_READBACK_MAX_BYTES / (4096 * 512) {
+            assert!(usage.waiting > 0, "requests beyond the admitted room wait with tickets");
         }
-        assert!(cx.texture_readback_usage().reserved_bytes <= TEXTURE_READBACK_MAX_BYTES);
     }
-    assert!(rejected > 0, "undrained results must exert backpressure");
-    assert_eq!(tickets.len() + rejected, 50);
+    assert_eq!(tickets.len(), 50);
+    // Keep the source allocation until every waiting copy has been admitted.
+    // Taking completed batches frees room for the next tickets in order.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut results = Vec::new();
+    while cx.texture_readback_usage().waiting != 0 {
+        results.extend(cx.try_take_texture_readbacks());
+        assert!(cx.texture_readback_usage().reserved_bytes <= TEXTURE_READBACK_MAX_BYTES);
+        if cx.texture_readback_usage().waiting == 0 { break; }
+        assert!(std::time::Instant::now() < deadline, "waiting readback admission timed out");
+        render(&mut cx);
+    }
     // Releasing through another handle cannot invalidate completed/in-flight
     // bytes, and current-content copies do not render or advance the serial.
     texture.clone().release(&mut cx);
-    let results = take_completed(&mut cx);
+    results.extend(take_completed(&mut cx));
     assert_eq!(results.len(), tickets.len());
     for result in results {
         assert!(tickets.remove(&result.ticket));
         assert_eq!(result.allocation_generation, generation);
         assert_eq!(result.producer_serial, serial);
-        assert_eq!(result.data, data);
+        assert_eq!(result.data.as_deref(), data.as_deref());
     }
     assert!(tickets.is_empty());
     assert_eq!(cx.frame_submission_serial(), serial);
     assert_eq!(cx.texture_readback_usage().reserved_bytes, 0);
     assert!(cx.try_take_texture_readbacks().is_empty());
 
-    // Retain rejected work and retry it after draining. Render a distinct
-    // byte pattern for each producer, then overwrite/release the target before
-    // taking results: each ticket must still identify its own submitted image.
+    // Render a distinct byte pattern for each producer, then overwrite/release
+    // the target before taking results: each ticket identifies its submitted image.
     let mut expected = std::collections::HashMap::new();
     let mut completed = 0;
     for iteration in 0..50u8 {
@@ -149,24 +158,19 @@ fn readback_round_trip_512_and_fifty_bounded_tickets() {
             pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0, 1.0,
         ));
         cx.passes[pass.draw_pass_id()].paint_dirty = true;
-        let ticket = loop {
-            match texture.read_back(&mut cx, ReadbackRequest::default()) {
-                Ok(ticket) => break ticket,
-                Err(ReadbackError::Backpressure) => {
-                    let ready = take_completed(&mut cx);
-                    assert!(!ready.is_empty());
-                    for result in ready {
-                        let pixel = expected.remove(&result.ticket).unwrap();
-                        assert_pixels(&result, session.headless, pixel);
-                        completed += 1;
-                    }
-                }
-                other => panic!("unexpected retry result: {other:?}"),
-            }
-        };
+        let ticket = texture.read_back(&mut cx, ReadbackRequest::default()).expect("each submitted image receives a ticket");
         assert!(expected.insert(ticket, pixel).is_none());
         render(&mut cx);
         assert!(cx.texture_readback_usage().reserved_bytes <= TEXTURE_READBACK_MAX_BYTES);
+        // Drain the admitted batch before another image would wait for room.
+        // Earlier tickets must retain their pixels across the later renders.
+        if cx.texture_readback_usage().reserved_bytes == TEXTURE_READBACK_MAX_BYTES {
+            for result in take_completed(&mut cx) {
+                let pixel = expected.remove(&result.ticket).unwrap();
+                assert_pixels(&result, session.headless, pixel);
+                completed += 1;
+            }
+        }
     }
     texture.release(&mut cx);
     for result in take_completed(&mut cx) {
@@ -199,8 +203,8 @@ fn readback_cancellation_and_reallocation_are_terminal() {
     render(&mut cx);
     let results = take_completed(&mut cx);
     assert_eq!(results.len(), 2);
-    assert_eq!(results.iter().find(|r| r.ticket == cancelled).unwrap().data, Err(ReadbackError::Cancelled));
-    assert_eq!(results.iter().find(|r| r.ticket == invalidated).unwrap().data, Err(ReadbackError::AllocationChanged));
+    assert_eq!(results.iter().find(|r| r.ticket == cancelled).unwrap().data.as_deref(), Err(&ReadbackError::Cancelled));
+    assert_eq!(results.iter().find(|r| r.ticket == invalidated).unwrap().data.as_deref(), Err(&ReadbackError::AllocationChanged));
     assert!(!cx.cancel_texture_readback(cancelled));
     let fresh = texture.read_back(&mut cx, ReadbackRequest::default()).unwrap();
     let result = take_completed(&mut cx).pop().unwrap();
@@ -211,7 +215,7 @@ fn readback_cancellation_and_reallocation_are_terminal() {
     drop(pass);
     let result = take_completed(&mut cx).pop().unwrap();
     assert_eq!(result.ticket, orphan);
-    assert_eq!(result.data, Err(ReadbackError::Cancelled));
+    assert_eq!(result.data.as_deref(), Err(&ReadbackError::Cancelled));
 }
 
 // The existing renderer tests drive the public native session interface.
@@ -260,7 +264,7 @@ fn take_completed(cx: &mut Cx) -> Vec<TextureReadback> {
 }
 fn assert_pixels(result: &TextureReadback, headless: bool, pixel: [u8; 4]) {
     if headless {
-        assert_eq!(result.data, Err(ReadbackError::UnsupportedBackend));
+        assert_eq!(result.data.as_deref(), Err(&ReadbackError::UnsupportedBackend));
     } else {
         let data = result.data.as_ref().unwrap();
         assert_eq!(data.len(), result.width * result.height * 4);

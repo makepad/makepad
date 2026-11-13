@@ -595,6 +595,15 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
 
+/// What a paste event's clipboard holds (empty: a flavour it lacks), sent ahead
+/// of the paste's text: the page reads the clipboard only there.
+#[derive(ToWasm)]
+pub struct ToWasmPasteFlavours {
+    pub text: String,
+    pub html: String,
+    pub markdown: String,
+}
+
 /// Finished frames' GPU times (timer queries, read a few frames late):
 /// the frame's start (ms, the page clock) and its GPU time (ms).
 #[derive(ToWasm)]

@@ -120,7 +120,7 @@ fn thread_pools_fold_into_one_row() {
     l.push_str("{\"id\":\"T9\",\"name\":\"run-owner\",\"role\":\"owner\",\"state\":\"waiting\",\"cpu_ms\":5}\n");
     let r = render("threads", &lines(&l));
     assert!(r.contains("| T2..T5 | makepad-pool* (4 threads) | program | 0 running | 0.04 |"), "{}", r);
-    assert!(r.starts_with("6 threads: 5 of the program, 1 of makepad run."), "{}", r);
+    assert!(r.starts_with("6 threads: 5 of the program, 1 of Relax."), "{}", r);
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn why_slow_says_the_ui_wakes_apart_from_its_frames() {
 #[test]
 fn a_hosted_apps_heap_is_its_domain_arena_by_resident_pages() {
     // a hosted app: the domain arena's committed bytes (whole chunks made writable) are 4x its
-    // resident pages; malloc holds makepad run's own blocks
+    // resident pages; malloc holds Relax's own blocks
     let r = render(
         "memory",
         &lines(r#"{"freed_by_domain_teardown_bytes":0}
@@ -182,12 +182,15 @@ fn a_hosted_apps_heap_is_its_domain_arena_by_resident_pages() {
 {"measured":"memory now","at_ms":1,"source":"x","partial":[]}
 {"rss_mb":2271.8,"peak_rss_mb":5398.2,"footprint_mb":1690.2,"peak_footprint_mb":4218.0,"compressed_mb":0.0,"malloc_in_use_mb":372.3,"malloc_held_free_mb":103.6}
 {"trims":57,"last_trim_ms":221295}
-{"split":{"routing":"compiler arena","program_heap":"domain 1 arena","program_heap_in_use_mb":291.4,"program_heap_held_free_mb":0.0,"program_heap_resident_mb":288.9,"compiler_arena_committed_mb":1929.8,"compiler_arena_touched_mb":927.6,"compiler_arena_large_mb":191.8,"slots_arena_committed_mb":271.7,"slots_arena_touched_mb":98.1,"slots_arena_large_mb":61.7,"jit_code_mb":47.4,"jit_ro_data_mb":4.5,"burst_arena_committed_mb":24.0}}
+{"split":{"routing":"compiler arena","program_heap":"domain 1 arena","program_heap_in_use_mb":291.4,"program_heap_held_free_mb":0.0,"program_heap_resident_mb":288.9,"compiler_arena_committed_mb":1929.8,"compiler_arena_touched_mb":927.6,"compiler_arena_large_mb":191.8,"slots_arena_committed_mb":271.7,"slots_arena_touched_mb":98.1,"slots_arena_large_mb":61.7,"jit_code_mb":47.4,"jit_ro_data_mb":4.5,"burst_arena_committed_mb":24.0,"compiler_arena_resident_mb":350.0,"slots_arena_resident_mb":120.0}}
 {"findings":[],"more":[]}"#),
     );
     assert!(r.contains("Program heap (domain 1 arena) 289 MB resident, 291 MB in use"), "{}", r);
     assert!(r.contains("| app domain 1 arena (makepad-calc) | 289 |"), "{}", r);
     assert!(r.contains("resident; 291 MB in use, 1.16 GB committed address space, 19 threads"), "{}", r);
-    assert!(r.contains("| malloc (makepad run, provided crates), in use | 372 |"), "{}", r);
+    assert!(r.contains("| malloc (Relax, provided crates), in use | 372 |"), "{}", r);
     assert!(!r.contains("program heap (malloc"), "{}", r);
+    // a Relax arena by its resident pages too: its touched pages include the ones it handed back
+    assert!(r.contains("| relax: compiler arena | 350 |"), "{}", r);
+    assert!(r.contains("| resident; 1.09 GB touched, 1.88 GB reserved |"), "{}", r);
 }

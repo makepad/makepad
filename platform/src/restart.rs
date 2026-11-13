@@ -387,6 +387,47 @@ pub fn unsaved() -> Option<String> {
     (!unsaved.is_empty()).then(|| format!("unsaved: {}", unsaved.iter().map(|(_, w)| w.as_str()).collect::<Vec<_>>().join(", ")))
 }
 
+/// How a person uses this process now, by a key of the process's own (`set_in_use`).
+static IN_USE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Registers (`Some(how)`: "an XR headset (Quest 3)") or clears (`None`) a person's use of this
+/// process under `key`: a part of an app that a person uses from elsewhere (a headset streaming
+/// its XR view, a Desk Link viewer watching the machine) says so while that use lasts. A node's
+/// devhub hub reads it and puts no other work on the machine meanwhile, as when a person sits at
+/// it: their frames would share its CPU and GPU (`makepad_devhub`'s `lease::hand`).
+pub fn set_in_use(key: &str, how: Option<&str>) {
+    let mut in_use = IN_USE.lock().unwrap();
+    let before = in_use.clone();
+    in_use.retain(|(k, _)| k != key);
+    if let Some(how) = how {
+        in_use.push((key.to_string(), how.to_string()));
+    }
+    if *in_use != before {
+        publish_in_use(&in_use);
+    }
+}
+
+/// The process's uses (Unix): `<dir>/<pid>`, one line per use, gone when none lasts. `<dir>` is
+/// `$XDG_RUNTIME_DIR/makepad-in-use`, else `$HOME/.makepad/in-use` (a Mac has no runtime dir);
+/// `makepad_app_registry::machine::in_use_dir` names the same one for its readers.
+fn publish_in_use(in_use: &[(String, String)]) {
+    #[cfg(unix)]
+    {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(|d| std::path::PathBuf::from(d).join("makepad-in-use"));
+        let Some(dir) = runtime.or_else(|| std::env::var_os("HOME").filter(|d| !d.is_empty()).map(|h| std::path::PathBuf::from(h).join(".makepad").join("in-use"))) else { return };
+        let file = dir.join(std::process::id().to_string());
+        if in_use.is_empty() {
+            let _ = std::fs::remove_file(&file);
+            return;
+        }
+        let text: String = in_use.iter().map(|(_, how)| format!("{}\n", how.replace('\n', " "))).collect();
+        let tmp = dir.join(format!("{}.new", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&tmp, text)).and_then(|_| std::fs::rename(&tmp, &file));
+    }
+    #[cfg(not(unix))]
+    let _ = in_use;
+}
+
 /// The person answered "restart" to the new version: the waiting restart happens at the next
 /// event without asking the app again (its state is still carried over).
 pub fn restart_anyway() {

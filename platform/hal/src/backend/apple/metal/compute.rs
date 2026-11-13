@@ -255,9 +255,13 @@ impl Metal {
             let incarnation = s.font_frames.clone();
             unsafe { let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 if let Some(reads) = resources.lock().unwrap_or_else(|e| e.into_inner()).take() {
-                    let status: u64 = unsafe { msg_send![cb, status] };
-                    let leases = if status == 4 { reads.into_iter().map(|(_, _, _, _, _, lease)| lease).collect() } else { Vec::new() };
-                    mailbox.push(Done::BufferLeases { sid, incarnation: incarnation.clone(), req, status: if status == 4 { readback::OK } else { readback::DEVICE_LOST }, leases });
+                    let status = match super::timing::command_buffer_failure(cb) {
+                        None => readback::OK,
+                        Some(super::timing::Failure::Work) => readback::FAILED,
+                        Some(super::timing::Failure::Device) => readback::DEVICE_LOST,
+                    };
+                    let leases = if status == readback::OK { reads.into_iter().map(|(_, _, _, _, _, lease)| lease).collect() } else { Vec::new() };
+                    mailbox.push(Done::BufferLeases { sid, incarnation: incarnation.clone(), req, status, leases });
                 }
             })]; }
             Ok::<_, String>(())

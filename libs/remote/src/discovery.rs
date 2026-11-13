@@ -400,26 +400,26 @@ mod caller_tests {
     /// An agent's mistyped command on a machine where someone works: it must not reach their app.
     #[test]
     fn a_bare_name_refuses_an_app_the_caller_did_not_start_and_says_which() {
-        let list = [app(7, "fab", None), app(9, "fab", Some("L1"))];
+        let list = [app(7, "tool-a", None), app(9, "tool-a", Some("L1"))];
         for who in [caller(false, None), caller(false, Some("L2"))] {
-            let why = named(&list, "fab", &who).unwrap_err();
+            let why = named(&list, "tool-a", &who).unwrap_err();
             assert!(why.contains("pid 9") && why.contains("newest of 2") && why.contains("the pid in place of the name"), "{why}");
         }
-        assert!(named(&[app(7, "fab", None)], "fab", &caller(false, None)).unwrap_err().contains("would reach pid 7"));
-        assert!(named(&[], "fab", &caller(false, None)).unwrap_err().contains("no running"));
+        assert!(named(&[app(7, "tool-a", None)], "tool-a", &caller(false, None)).unwrap_err().contains("would reach pid 7"));
+        assert!(named(&[], "tool-a", &caller(false, None)).unwrap_err().contains("no running"));
     }
 
     #[test]
     fn a_lease_reaches_its_own_by_name_and_a_person_the_newest() {
-        let list = [app(7, "fab", Some("L1")), app(9, "fab", Some("L2")), app(11, "fab", None)];
-        assert_eq!(named(&list, "fab", &caller(false, Some("L1"))).unwrap().pid, 7);
-        assert_eq!(named(&list, "fab", &caller(true, None)).unwrap().pid, 11);
+        let list = [app(7, "tool-a", Some("L1")), app(9, "tool-a", Some("L2")), app(11, "tool-a", None)];
+        assert_eq!(named(&list, "tool-a", &caller(false, Some("L1"))).unwrap().pid, 7);
+        assert_eq!(named(&list, "tool-a", &caller(true, None)).unwrap().pid, 11);
     }
 
     #[test]
     fn all_needs_a_terminal_or_a_lease_of_its_own() {
-        let list = [app(7, "fab", None)];
-        assert!(caller(false, None).all_refused(&list).unwrap().contains("7 fab"));
+        let list = [app(7, "tool-a", None)];
+        assert!(caller(false, None).all_refused(&list).unwrap().contains("7 tool-a"));
         assert!(caller(false, Some("L1")).all_refused(&list).is_none() && !caller(false, Some("L1")).reaches(&list[0]));
         assert!(caller(true, None).all_refused(&list).is_none() && caller(true, None).reaches(&list[0]));
     }

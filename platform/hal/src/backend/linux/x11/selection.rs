@@ -140,7 +140,7 @@ pub(super) struct Selections {
     root: x::Window,
     owner: x::Window,
     atoms: HashMap<String, x::Atom>,
-    clipboard: Arc<Vec<u8>>,
+    clipboard: ClipboardData,
     primary: Arc<Vec<u8>>,
     reads: HashMap<x::Window, Read>,
     writes: HashMap<(x::Window, x::Atom), Write>,
@@ -156,7 +156,7 @@ impl Selections {
             root,
             owner,
             atoms: HashMap::new(),
-            clipboard: Arc::new(Vec::new()),
+            clipboard: ClipboardData::default(),
             primary: Arc::new(Vec::new()),
             reads: HashMap::new(),
             writes: HashMap::new(),
@@ -173,12 +173,12 @@ impl Selections {
                 x::XInternAtom(self.display, input::cstring(name).as_ptr(), 0)
             })
     }
-    pub fn set(&mut self, text: String, primary: bool) {
+    pub fn set(&mut self, data: ClipboardData, primary: bool) {
         let atom = self.atom(if primary { "PRIMARY" } else { "CLIPBOARD" });
         if primary {
-            self.primary = Arc::new(text.into_bytes());
+            self.primary = Arc::new(data.text.into_bytes());
         } else {
-            self.clipboard = Arc::new(text.into_bytes());
+            self.clipboard = data;
         }
         unsafe {
             x::XSetSelectionOwner(self.display, atom, self.owner, 0);
@@ -238,6 +238,14 @@ impl Selections {
         let uri = self.atom(input::URI_MIME);
         if offered.contains(&uri) {
             formats.push_back((uri, input::URI_MIME.into()));
+        }
+        if clipboard {
+            for mime in [input::HTML_MIME, input::MARKDOWN_MIME] {
+                let atom = self.atom(mime);
+                if offered.contains(&atom) {
+                    formats.push_back((atom, mime.into()));
+                }
+            }
         }
         formats
     }
@@ -404,6 +412,9 @@ impl Selections {
         let utf8 = self.atom("UTF8_STRING");
         let uri = self.atom(input::URI_MIME);
         let primary = self.atom("PRIMARY");
+        let clipboard = self.atom("CLIPBOARD");
+        let html = self.atom(input::HTML_MIME);
+        let markdown = self.atom(input::MARKDOWN_MIME);
         let xdnd = self.atom("XdndSelection");
         let prop = if e.property == 0 {
             e.target
@@ -414,6 +425,14 @@ impl Selections {
         if e.target == targets {
             let mut offered: Vec<_> = input::TEXT_MIMES.iter().map(|m| self.atom(m)).collect();
             offered.push(targets);
+            if e.selection == clipboard {
+                if !self.clipboard.html.is_empty() {
+                    offered.push(html);
+                }
+                if !self.clipboard.markdown.is_empty() {
+                    offered.push(markdown);
+                }
+            }
             if e.selection == xdnd
                 && self
                     .outgoing
@@ -460,8 +479,16 @@ impl Selections {
                 Some(if e.selection == primary {
                     self.primary.clone()
                 } else {
-                    self.clipboard.clone()
+                    Arc::new(self.clipboard.text.as_bytes().to_vec())
                 })
+            } else if e.selection == clipboard && e.target == html && !self.clipboard.html.is_empty()
+            {
+                Some(Arc::new(self.clipboard.html.as_bytes().to_vec()))
+            } else if e.selection == clipboard
+                && e.target == markdown
+                && !self.clipboard.markdown.is_empty()
+            {
+                Some(Arc::new(self.clipboard.markdown.as_bytes().to_vec()))
             } else {
                 None
             };
@@ -486,7 +513,7 @@ impl Selections {
                     self.writes.insert(
                         (e.requestor, prop),
                         Write {
-                            target: if text { utf8 } else { uri },
+                            target: if text { utf8 } else { e.target },
                             data: bytes,
                             offset: 0,
                         },

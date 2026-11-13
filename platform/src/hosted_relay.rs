@@ -280,9 +280,17 @@ pub struct HostRelayServer {
     folder_dialogs: Vec<PendingDialog>,
     /// Host clipboard read id -> (client, the child's id).
     clipboard_reads: HashMap<u64, (u64, u64)>,
+    /// The richer flavours of the clipboard answers `on_event` made, for `take_clipboard_flavours`.
+    clipboard_flavours: Vec<(u64, crate::window_controls::HostedClipboard)>,
 }
 
 impl HostRelayServer {
+    /// The flavours of the clipboard answers the last `on_event` made, per client: each goes to
+    /// its child as a `Custom` message (`HostedClipboard::to_json`) just ahead of the answer.
+    pub fn take_clipboard_flavours(&mut self) -> Vec<(u64, crate::window_controls::HostedClipboard)> {
+        std::mem::take(&mut self.clipboard_flavours)
+    }
+
     /// A relay from `client`, whose window's top-left sits at `origin` in
     /// the host's coordinates (the clipboard menu is placed over the
     /// child's rect). Returns answers to send right away (none yet: every
@@ -404,7 +412,17 @@ impl HostRelayServer {
                         Some(crate::clipboard_read::ClipboardImage::Png(png)) => png.to_vec(),
                         _ => Vec::new(),
                     };
-                    out.push((client, HostRelay::Clipboard { request_id, text: e.content.text.clone().unwrap_or_default(), png }));
+                    let text = e.content.text.clone().unwrap_or_default();
+                    let flavours = crate::window_controls::HostedClipboard {
+                        request: request_id,
+                        text: text.clone(),
+                        html: e.content.html.clone().unwrap_or_default(),
+                        markdown: e.content.markdown.clone().unwrap_or_default(),
+                    };
+                    if flavours.any() {
+                        self.clipboard_flavours.push((client, flavours));
+                    }
+                    out.push((client, HostRelay::Clipboard { request_id, text, png }));
                 }
             }
             Event::PermissionResult(PermissionResult { permission, request_id, status }) => {
@@ -516,10 +534,14 @@ impl Cx {
                 Cx::post_action(file_dialog_action_from_relay(&result));
             }
             HostRelay::Clipboard { request_id, text, png } => {
-                use crate::clipboard_read::{ClipboardContent, ClipboardEvent, ClipboardImage};
+                use crate::clipboard_read::{ClipboardContent, ClipboardEvent, ClipboardImage, ClipboardWrite};
+                let flavours = self.clipboard.hosted_flavours.take().filter(|f| f.request == request_id);
+                let write = ClipboardWrite::with_hosted(text, flavours);
                 let content = ClipboardContent {
                     supported: true,
-                    text: (!text.is_empty()).then_some(text),
+                    text: (!write.text.is_empty()).then_some(write.text),
+                    html: write.html,
+                    markdown: write.markdown,
                     image: (!png.is_empty()).then(|| ClipboardImage::Png(std::sync::Arc::new(png))),
                     files: Vec::new(),
                 };

@@ -307,7 +307,7 @@ impl Player {
             .is_some_and(|s| s.ends_with(".m3u8") || s.ends_with(".mpd"));
         let profile = if !audio_only
             && !adaptive
-            && std::env::var_os("MAKEPAD_GST_NO_DMABUF").is_none()
+            && relax_api::env::var_os("MAKEPAD_GST_NO_DMABUF").is_none()
             && library.has_dmabuf_support()
         {
             VideoCapsProfile::DmaBuf

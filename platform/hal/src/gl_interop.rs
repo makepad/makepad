@@ -4,7 +4,7 @@
 //! cross by name (`TextureAdoptGl`), and a fence (`GlFence`) after the app's writes makes the
 //! HAL's frames wait for them on the GPU.
 use crate::backend::gl::egl::{Egl, Handle};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::ffi::{c_void, CString};
 
 /// A handle to JIT-compiled code (makepad run): the libEGL it uses is this crate's one load.

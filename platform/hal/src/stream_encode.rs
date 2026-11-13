@@ -52,7 +52,7 @@ pub const REFINE: u32 = 2;
 
 /// The text of this thread's last failed stream-encoder op (its first `out.len()` bytes); its
 /// length is returned.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_error(out: &mut [u8]) -> u64 {
     LAST_ERROR.with(|e| {
         let e = e.borrow();
@@ -65,7 +65,7 @@ pub fn hal_stream_encoder_error(out: &mut [u8]) -> u64 {
 /// A tool without a window (the encoder bench): makes the process's Vulkan device offscreen
 /// when nothing made one yet. Never call it before a windowed backend starts (its device would
 /// lack the window system's extensions). False when no device could be made.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_offscreen_device() -> bool {
     #[cfg(target_os = "linux")]
     return StreamEncoder::offscreen_device();
@@ -76,7 +76,7 @@ pub fn hal_stream_encoder_offscreen_device() -> bool {
 
 /// How many hardware encode engines the GPU has (its encode queues): the tiles a picture is
 /// best split into. 0 when this machine has no hardware encoder.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_engines() -> u32 {
     #[cfg(target_os = "linux")]
     return StreamEncoder::engines();
@@ -88,7 +88,7 @@ pub fn hal_stream_encoder_engines() -> u32 {
 /// The largest picture one stream encodes (`flags`: `FULL_CHROMA`, `HEVC`), width in the high 32
 /// bits, height in the low; 0 when this machine has no hardware encoder (for that codec). A
 /// larger picture is split into tiles (columns and bands) of at most this size.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_max_size(flags: u32) -> u64 {
     #[cfg(target_os = "linux")]
     return StreamEncoder::max_size(codec_of(flags), flags & FULL_CHROMA != 0).map_or(0, |[w, h]| (w as u64) << 32 | h as u64);
@@ -121,7 +121,7 @@ fn codec_of(flags: u32) -> Codec {
 /// `engine`, `flags` (`FULL_CHROMA`, `HEVC`, `CBR`, `SHARP`), at the encoder's quality level `quality`
 /// (0 its fastest; more than it has: its best) with a rate control buffer of `buffer_pictures`
 /// pictures. Its number, 0 when this machine cannot (the error says why).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, engine: u32, flags: u32, quality: u32, buffer_pictures: u32) -> u64 {
     let tuning = Tuning { quality, constant: flags & CBR != 0, buffer_pictures: buffer_pictures.max(1), sharp: flags & SHARP != 0 };
     #[cfg(target_os = "linux")]
@@ -146,7 +146,7 @@ pub fn hal_stream_encoder_open(width: u32, height: u32, fps: u32, kbps: u32, eng
 }
 
 /// What the encoder is (codec, sizes, rate, GPU): the first `out.len()` bytes; its length.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_info(encoder: u64, out: &mut [u8]) -> u64 {
     let Some(open) = get(encoder) else { return 0 };
     let open = crate::lock(&open);
@@ -185,7 +185,7 @@ fn encode(encoder: u64, f: impl FnOnce(&mut StreamEncoder) -> Result<Vec<u8>, St
 /// once the sync_file `sync_fd` has signalled (taken over; -1 when the picture's GPU work is
 /// complete). The bitstream's length, -1 when it failed.
 #[cfg(target_os = "linux")]
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32, x0: u32, y0: u32, sync_fd: i32, flags: u32) -> i64 {
     let sync = (sync_fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(sync_fd) });
     let (image, size) = match copy::registered_image(handle) {
@@ -207,13 +207,13 @@ pub fn hal_stream_encoder_texture(encoder: u64, handle: u64, source_height: u32,
 
 /// Encodes tightly packed NV12 bytes (NV24 for a 4:4:4 stream). The bitstream's length, -1 when
 /// it failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_nv12(encoder: u64, nv12: &[u8], flags: u32) -> i64 {
     encode(encoder, |e| e.encode_nv12(nv12, flags & KEY != 0))
 }
 
 /// Takes the last picture's bitstream into `out` (its length, -1 when `out` is short).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_read(encoder: u64, out: &mut [u8]) -> i64 {
     let Some(open) = get(encoder) else { return -1 };
     let mut open = crate::lock(&open);
@@ -227,13 +227,13 @@ pub fn hal_stream_encoder_read(encoder: u64, out: &mut [u8]) -> i64 {
 }
 
 /// The last picture's encode on the video queue, from GPU timestamps (ns; 0 when not measured).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_last_gpu_ns(encoder: u64) -> u64 {
     get(encoder).map_or(0, |open| crate::lock(&open).encoder.last_gpu_ns())
 }
 
 /// The rate for the pictures from the next one on (kbit/s).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_bitrate(encoder: u64, kbps: u32) {
     if let Some(open) = get(encoder) {
         crate::lock(&open).encoder.set_kbps(kbps);
@@ -243,7 +243,7 @@ pub fn hal_stream_encoder_bitrate(encoder: u64, kbps: u32) {
 /// The highest QP the encoder may use from its next picture on (0: its own range): a quality
 /// floor under constant rate (a plain picture then takes more of the rate instead of
 /// undershooting it). Vulkan Video only.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_max_qp(encoder: u64, qp: u32) {
     #[cfg(target_os = "linux")]
     if let Some(open) = get(encoder) {
@@ -253,7 +253,7 @@ pub fn hal_stream_encoder_max_qp(encoder: u64, qp: u32) {
     let _ = (encoder, qp);
 }
 
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_close(encoder: u64) {
     let open = crate::lock(&ENCODERS).as_mut().and_then(|e| e.remove(&encoder));
     drop(open);
@@ -261,7 +261,7 @@ pub fn hal_stream_encoder_close(encoder: u64) {
 
 /// The encoder's QP delta map grid into `out` (columns, rows, texel width, texel height (px),
 /// least and greatest delta): true when it takes one (Linux, VK_KHR_video_encode_quantization_map).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_qp_grid(encoder: u64, out: &mut [i32]) -> bool {
     #[cfg(target_os = "linux")]
     {
@@ -283,7 +283,7 @@ pub fn hal_stream_encoder_qp_grid(encoder: u64, out: &mut [i32]) -> bool {
 
 /// QP deltas (signed bytes, one per texel of `hal_stream_encoder_qp_grid`, row by row) for the
 /// pictures from the next one on: negative spends more bits there, positive fewer.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_encoder_qp_map(encoder: u64, deltas: &[u8]) -> bool {
     #[cfg(target_os = "linux")]
     {

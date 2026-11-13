@@ -83,8 +83,7 @@ pub(super) enum Event {
     /// `gpu_ns`: 0 when the GPU time isn't known. `ran`: the GPU did the frame's work.
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, ran: bool },
     BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
-    Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
-    Pick { req: u32, ids: Vec<u32> },
+    Readback { req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
 }
 
 pub(super) struct Done {
@@ -186,7 +185,7 @@ fn half(b: &[u8]) -> [u8; 2] {
 
 pub(super) enum Then {
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timing: Option<(GLuint, u64)> },
-    Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, pick: Option<[f32; 2]>, _charge: Charge },
+    Read { token: Token, req: u32, rect: [u32; 4], read: ReadFormat, pbo: GLuint, _charge: Charge },
     Copy { token: Token, req: u32, rect: [u32; 4] },
 }
 
@@ -442,9 +441,9 @@ impl Renderer {
                 self.mailbox.push(token, Event::Frame { target, kind, frame, window, gpu_ns, ran: !failed });
             }
             Then::Copy { token, req, rect } => {
-                self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new() });
+                self.mailbox.push(token, Event::Readback { req, rect, status: if failed { readback::FAILED } else { readback::OK }, lease: None });
             }
-            Then::Read { token, req, rect, read, pbo, pick, .. } => {
+            Then::Read { token, req, rect, read, pbo, .. } => {
                 let len = rect[2] as usize * rect[3] as usize * read.texel;
                 let mut bytes = Vec::new();
                 unsafe {
@@ -459,13 +458,10 @@ impl Renderer {
                 }
                 let event = if bytes.len() != len {
                     eprintln!("[hal-gl] readback: the pixels could not be mapped");
-                    if pick.is_some() { Event::Pick { req, ids: Vec::new() } } else { Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() } }
+                    Event::Readback { req, rect, status: readback::FAILED, lease: None }
                 } else {
                     let (status, pixels) = read.convert(&bytes);
-                    match pick {
-                        Some(pos) => Event::Pick { req, ids: pick_ids(&pixels, rect, pos) },
-                        None => Event::Readback { req, rect, status, pixels },
-                    }
+                    Event::Readback { req, rect, status, lease: Some(crate::lease::Lease::from_vec(pixels, 0)) }
                 };
                 self.mailbox.push(token, event);
             }
@@ -701,9 +697,9 @@ impl Renderer {
     }
 
     /// Reads `rect` of level 0 into a pixel buffer; completes after the GPU did.
-    pub fn read(&mut self, token: Token, key: u64, read: ReadFormat, req: u32, rect: [u32; 4], pick: Option<[f32; 2]>) {
+    pub fn read(&mut self, token: Token, key: u64, read: ReadFormat, req: u32, rect: [u32; 4]) {
         let Some(t) = self.textures.get(&key) else {
-            self.mailbox.push(token, if pick.is_some() { Event::Pick { req, ids: Vec::new() } } else { Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() } });
+            self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None });
             return;
         };
         self.bind_read(t);
@@ -718,7 +714,7 @@ impl Renderer {
             (gl.glBindFramebuffer)(sys::READ_FRAMEBUFFER, 0);
         }
         let charge = self.pools.charge(Pool::Staging, rect[2] as u64 * rect[3] as u64 * read.texel as u64);
-        self.after_gpu(Then::Read { token, req, rect, read, pbo, pick, _charge: charge });
+        self.after_gpu(Then::Read { token, req, rect, read, pbo, _charge: charge });
     }
 
     /// The host's synchronous read of a whole RGBA8/BGRA8 image as RGBA rows, top first.
@@ -739,7 +735,7 @@ impl Renderer {
     /// Copies a whole image into another of its size and format.
     pub fn copy(&mut self, token: Token, from: u64, to: u64, req: u32, rect: [u32; 4]) {
         if !self.blit(from, to, [rect[2], rect[3]]) {
-            self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() });
+            self.mailbox.push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None });
             return;
         }
         self.after_gpu(Then::Copy { token, req, rect });
@@ -780,21 +776,6 @@ impl Renderer {
         }
         self.ctx.present(window, self.read_fbo, size, damage)
     }
-}
-
-/// The ids a pick readback found, nearest to `pos` first (as Metal, Vulkan and D3D11 order them).
-fn pick_ids(rgba: &[u8], rect: [u32; 4], pos: [f32; 2]) -> Vec<u32> {
-    let mut ordered: Vec<_> = rgba.chunks_exact(4).enumerate().map(|(i, px)| {
-        let x = rect[0] as f32 + (i as u32 % rect[2]) as f32;
-        let y = rect[1] as f32 + (i as u32 / rect[2]) as f32;
-        ((x - pos[0]).powi(2) + (y - pos[1]).powi(2), u32::from_le_bytes(px.try_into().unwrap()) & 0x00ff_ffff)
-    }).collect();
-    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-    let mut ids = Vec::new();
-    for (_, id) in ordered {
-        if id != 0 && !ids.contains(&id) { ids.push(id); }
-    }
-    ids
 }
 
 /// The 1x1 texture of a sampled shape: transparent black colour, depth at the far plane; and

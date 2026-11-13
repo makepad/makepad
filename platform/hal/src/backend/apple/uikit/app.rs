@@ -136,7 +136,7 @@ pub(super) fn wake_event_loop() {
     run_on_main(|| {
         if stopping() {
             drain_ops();
-            std::process::exit(0);
+            makepad_core_util::process_end::end(0);
         }
     });
 }
@@ -444,7 +444,7 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
             }
         }
         #[cfg(target_os = "ios")]
-        OsCmd::ClipSet { text } => super::text::clipboard_set(&text),
+        OsCmd::ClipSet { data } => super::text::clipboard_set(&data),
         #[cfg(target_os = "ios")]
         OsCmd::ClipRead { req, .. } => {
             let content = super::text::clipboard_read();

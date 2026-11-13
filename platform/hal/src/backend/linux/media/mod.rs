@@ -709,7 +709,7 @@ impl Engine {
                     let mut audio = alsa_audio::AlsaAudioAccess::new(self.audio_change.clone());
                     self.audio_descs = audio.get_updated_descs();
                     self.audio = Some(audio);
-                    if std::env::var_os("MAKEPAD_DISABLE_PULSE_AUDIO").is_none() {
+                    if relax_api::env::var_os("MAKEPAD_DISABLE_PULSE_AUDIO").is_none() {
                         self.pulse = pulse_audio::PulseAudioAccess::new(
                             self.audio_change.clone(),
                             &self.entries,

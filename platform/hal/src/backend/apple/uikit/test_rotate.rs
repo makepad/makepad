@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_TEST_ROTATE").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| relax_api::env::var("MAKEPAD_TEST_ROTATE").is_ok_and(|v| v == "1"))
 }
 
 static STARTED: AtomicBool = AtomicBool::new(false);

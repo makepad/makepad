@@ -361,7 +361,7 @@ mod parameter_tests {
 
     fn run(line: &str) -> String {
         let mut bytes = Vec::new();
-        assert!(dispatch(&Req::parse(line), &mut Out::new(&mut bytes, usize::MAX)));
+        assert!(dispatch(&Req::parse(line), &mut Out::new(&mut bytes)));
         String::from_utf8(bytes).unwrap()
     }
 
@@ -377,7 +377,7 @@ mod parameter_tests {
     #[test]
     fn hal_rejects_unknown_parameters() {
         assert!(run("hal pace timeout=1").contains("unknown parameter"));
-        let ok = run("hal pace full=1");
+        let ok = run("hal pace");
         assert!(!ok.contains("\"err\""), "{ok}");
     }
 
@@ -385,7 +385,7 @@ mod parameter_tests {
     fn cap_rejects_unknown_parameters() {
         let error = run("cap grab timeout_ms=1");
         assert!(error.contains("unknown parameter") && error.contains("timeout,"), "{error}");
-        let ok = run("cap list full=1");
+        let ok = run("cap list");
         assert!(!ok.contains("\"err\""), "{ok}");
         assert!(run("cap tex X0 mip=1").contains("unknown parameter"));
     }

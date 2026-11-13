@@ -111,8 +111,9 @@ pub struct Vulkan {
     /// when `sweep` runs next (HAL clock ns)
     sweep_at: u64,
     /// The multisampled images of MSAA passes, by the attachment they resolve into (its raw
-    /// image) and sample count; dropped with that attachment (`frame::msaa_image`).
-    msaa: FastMap<(u64, u8), (std::sync::Weak<resources::Image>, Arc<resources::Image>)>,
+    /// image), sample count and whether they are transient; dropped with that attachment
+    /// (`frame::msaa_image`).
+    msaa: FastMap<(u64, u8, bool), (std::sync::Weak<resources::Image>, Arc<resources::Image>)>,
     win: FastMap<(u32, u32), Texture>,
     /// The session and frame a window's kept image holds all of, so that session's next pass can repaint just what changed since.
     damage_base: FastMap<(u32, u32), (u32, Weak<Image>, u64)>,
@@ -140,7 +141,6 @@ pub struct Vulkan {
     /// the composed image the badge frame being encoded draws into
     compose: Option<Arc<Image>>,
     aliases: FastMap<(u32, Id), Id>,
-    pick_ids: FastMap<(u32, Id), Id>,
     pick_pending: HashSet<(u32, Id)>,
     fallback: FastMap<u32, Arc<Image>>,
     windows: surface::Windows,
@@ -262,7 +262,7 @@ impl Vulkan {
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(target_os = "linux")] native_apps: Default::default(), #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: FastMap::default(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, leases: Default::default(), dev, info, tex: FastMap::default(), buf: FastMap::default(), zero_owed: Vec::new(), pipe: FastMap::default(), compute: FastMap::default(), programs: FastMap::default(), draw_bins: Vec::new(), draw_images: Vec::new(), draw_memo: Default::default(), kept: Default::default(),
             #[cfg(target_os = "android")] native_layers: Default::default(),
-            passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), damage_checks: Vec::new(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_ids: FastMap::default(), pick_pending: HashSet::new(),
+            passes: FastMap::default(), fbs: FastMap::default(), dead_fbs: Vec::new(), sweep_at: 0, msaa: FastMap::default(), win: FastMap::default(), damage_base: FastMap::default(), damage_checks: Vec::new(), hosted_sizes: FastMap::default(), scanout_images: FastMap::default(), #[cfg(target_os = "linux")] stamp: None, #[cfg(target_os = "linux")] window_px: [0, 0], badged: FastMap::default(), retained_stale: Default::default(), direct_frame: FastMap::default(), compose: None, aliases: FastMap::default(), pick_pending: HashSet::new(),
             fallback: FastMap::default(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
             batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
@@ -367,8 +367,7 @@ impl Vulkan {
                     world.frame_done(sid, target, kind, frame, gpu_ns, done.time, gpu_span);
                 }
                 Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
-                Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
-                Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),
+                Event::Readback { req, status, rect, lease } => world.to_session(sid, |q| q.readback(req, status, rect, lease)),
                 Event::Shared { id, handle } => world.to_session(sid, |q| q.texture_shared(id, handle)),
             }
         }
@@ -569,8 +568,9 @@ impl Backend for Vulkan {
             let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
             let is_window = kind & !target::FLAGS == target::WINDOW;
             'pass: for pass in &view.passes[passes] {
+                let samples = frame::pass_samples(pass, self.dev.msaa);
                 let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load, views: frame::pass_views(pass), fdm: false,
-                    samples: frame::pass_samples(pass, self.dev.msaa), depth_kept: true };
+                    samples, depth_kept: true, ms_kept: samples > 1 && exec::twins_kept(pass, view) };
                 for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
                     let Some(format) = format_of(*id) else { continue 'pass };
                     key.colors[i] = format;
@@ -707,7 +707,7 @@ impl Backend for Vulkan {
         if sid == HOST { self.badged.clear(); self.retained_stale.clear(); self.direct_frame.clear(); }
         self.win.retain(|k, _| k.0 != sid); self.damage_base.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
-        self.pick_ids.retain(|k, _| k.0 != sid); self.pick_pending.retain(|k| k.0 != sid);
+        self.pick_pending.retain(|k| k.0 != sid);
         self.sweep(crate::clock_ns());
         self.sharing.session_closed(sid);
         self.pressure.forget_session(sid);
@@ -852,7 +852,6 @@ impl exec::DeviceReset for Vulkan {
         for (_, f) in self.fbs.drain() { unsafe { self.dev.raw.destroy_framebuffer(f.raw, None) }; }
         for fb in self.dead_fbs.drain(..) { unsafe { self.dev.raw.destroy_framebuffer(fb, None) }; }
         self.passes.clear();
-        self.pick_ids.clear();
         self.pick_pending.clear();
         self.spares = Default::default();
         self.kept = Default::default();
@@ -1017,8 +1016,8 @@ impl Gpu for Vulkan {
         r.buffer.read(r.buffer.size as usize).ok()
     }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
-        if self.pick_pending.contains(&(s.id, id)) { s.events.readback(req, crate::types::readback::INCOMPLETE, rect, &[]); return; }
-        let image = self.resolve(s, id); self.read(s, image, req, rect, None);
+        if self.pick_pending.contains(&(s.id, id)) { s.events.readback(req, crate::types::readback::INCOMPLETE, rect, None); return; }
+        let image = self.resolve(s, id); self.read(s, image, req, rect);
     }
     fn texture_share(&mut self, s: &mut Session, id: Id) {
         let result = (|| {
@@ -1175,9 +1174,8 @@ impl Gpu for Vulkan {
         }
         result
     }
-    fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) { self.read_pick(s, window, req, pos); }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
-        let image = self.window_image(s, window); let rect = self.window_rect(s.id, window, image.as_deref()); self.read(s, image, req, rect, None);
+        let image = self.window_image(s, window); let rect = self.window_rect(s.id, window, image.as_deref()); self.read(s, image, req, rect);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) { self.copy_window(s, window, texture, req); }
     fn window_closed(&mut self, sid: u32, id: Id) {
@@ -1185,7 +1183,7 @@ impl Gpu for Vulkan {
         self.native_layers.close_window(sid, id);
         #[cfg(target_os = "linux")]
         self.capture_pool.remove(&(sid, id));
-        self.win.remove(&(sid, id.index)); self.damage_base.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));
+        self.win.remove(&(sid, id.index)); self.damage_base.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index));
         self.scanout_images.remove(&(sid, id));
         if sid == HOST { self.badged.remove(&id.index); self.retained_stale.remove(&id.index); self.direct_frame.remove(&id.index); }
         self.windows.remove((sid, id), self.queue.as_ref().unwrap());
@@ -1195,7 +1193,7 @@ impl Gpu for Vulkan {
         if let Some(shell) = self.shell { shell.lend(host, if attach { sid } else { HOST }, if attach { id } else { host }); }
         #[cfg(target_os = "android")]
         if let Some(shell) = &mut self.shell { shell.lent(sid, id, host, attach); }
-        if attach { self.aliases.insert((sid, id), host); } else { self.aliases.remove(&(sid, id)); self.pick_ids.remove(&(sid, id)); }
+        if attach { self.aliases.insert((sid, id), host); } else { self.aliases.remove(&(sid, id)); }
     }
 }
 

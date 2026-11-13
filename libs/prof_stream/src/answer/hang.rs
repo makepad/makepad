@@ -89,7 +89,7 @@ fn fold_others(list: &[&str]) -> String {
 }
 
 fn is_runtime_role(r: &str) -> bool {
-    matches!(r, "makepad run" | "compiler" | "inspect" | "owner")
+    matches!(r, "Relax" | "compiler" | "inspect" | "owner")
 }
 
 pub fn threads(a: &mut Answer) {
@@ -104,7 +104,7 @@ pub fn threads(a: &mut Answer) {
     let waiting: Vec<&&Value> = prog.iter().filter(|r| !s(r, "waits").is_empty()).collect();
     let unnamed = prog.iter().filter(|r| s(r, "role") == "unnamed").count();
     let mut head = format!(
-        "{} threads: {} of the program, {} of makepad run{}.",
+        "{} threads: {} of the program, {} of Relax{}.",
         rows.len(),
         prog.len() - unnamed,
         rt.len(),
@@ -149,7 +149,7 @@ pub fn threads(a: &mut Answer) {
         let name = if n.is_empty() { "(unnamed)" } else { n };
         t.row(vec![s(r, "id").into(), name.into(), s(r, "role").into(), s(r, "state").into(), sig(f(r, "cpu_ms") / 1000.0), a.names.text(s(r, "waits"))]);
     }
-    // makepad run's threads: one row per role, a busy one (5% or more of the CPU) on its own
+    // Relax's threads: one row per role, a busy one (5% or more of the CPU) on its own
     let mut roles: Vec<(String, usize, f64, Vec<String>)> = Vec::new();
     for r in &rt {
         let c = f(r, "cpu_ms");
@@ -289,10 +289,10 @@ pub fn stacks(a: &mut Answer) {
     a.head = if picked {
         format!("Stack{} of {}:", if n_threads == 1 { "" } else { "s" }, groups.iter().flat_map(|g| arr(g, "threads").iter().filter_map(Value::as_str)).collect::<Vec<_>>().join(", "))
     } else {
-        format!("{} threads: {} stack{} with program code below; {} makepad run threads folded.", n_threads, shown, if shown == 1 { "" } else { "s" }, idle.iter().map(|x| x.1.len()).sum::<usize>())
+        format!("{} threads: {} stack{} with program code below; {} Relax threads folded.", n_threads, shown, if shown == 1 { "" } else { "s" }, idle.iter().map(|x| x.1.len()).sum::<usize>())
     };
     if !idle.is_empty() {
-        a.line("\nmakepad run threads (no program code):");
+        a.line("\nRelax threads (no program code):");
         for (what, names) in &idle {
             let list = if names.len() > 4 { format!("{}, +{} more", names[..3].join(", "), names.len() - 3) } else { names.join(", ") };
             a.line(&format!("- {}: {}", what, list));

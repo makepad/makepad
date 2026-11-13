@@ -85,7 +85,7 @@ fn draw_pipeline(vm: &mut ScriptVm, dialect: u32) -> (Vec<u8>, Vec<Id>, Vec<Id>)
         spirv::SpirvPipeline { vertex: stage.vertex.to_vec(), fragment: stage.fragment.to_vec(), xr_vertex: vec![], xr_fragment: vec![],
             texture_base: stage.info.texture_binding_base(), sampler_base: stage.info.sampler_binding_base(), depth_binding: stage.info.xr_depth_binding(),
             instance_binding: stage.info.instance_binding().unwrap_or(u32::MAX), pick_binding: u32::MAX, pick_texture_base: u32::MAX,
-            textures: vec![0, 0], samplers: vec![sampler] }.encode()
+            textures: vec![0, 0], samplers: vec![sampler], sampler_textures: stage.info.sampler_textures().to_vec() }.encode()
     } else if dialect == dialect::HLSL { hlsl::HlslPipeline { source: view.combined.into(), textures: vec![0, 0], samplers: vec![sampler] }.encode() }
     else { view.combined.as_bytes().to_vec() };
     let storage: Vec<_> = view.storage_buffers.iter().map(|b| StorageBinding { index: b.index, offset: b.offset, writable: 0 }).collect();
@@ -156,7 +156,12 @@ pub fn run() {
                 read.insert(req, unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec());
                 hal_lease_release(record.token);
             }
-            HalEvent::Readback { req, status, pixels, .. } => { assert_eq!(status, readback::OK); read.insert(req, pixels.to_vec()); }
+            HalEvent::Readback { req, status, lease, .. } => {
+                // SAFETY: this process pumped the event and takes its lease once.
+                let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
+                assert_eq!(status, readback::OK);
+                read.insert(req, pixels.to_vec());
+            }
             HalEvent::FrameDone { frame, gpu_ns, .. } => { times.insert(frame, gpu_ns); }
             _ => {}
         }

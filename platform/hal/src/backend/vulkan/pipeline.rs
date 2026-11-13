@@ -17,7 +17,8 @@ pub(super) const VIDEO_SHAPE: u32 = 6;
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub(super) struct PassKey { pub colors: [u32; 4], pub depth: u32, pub load: [u8; 5], /** 1, or 2: a multiview pass */ pub views: u8, /** a fragment density map attachment after the others */ pub fdm: bool,
     /** samples per pixel: 1, or an MSAA pass (`Pass::samples`) rendering into multisampled attachments resolved into the pass's own at its end */ pub samples: u8,
-    /** the depth is stored at the pass's end (`exec::depth_kept`), else nothing reads it and it stays in tile memory */ pub depth_kept: bool }
+    /** the depth is stored at the pass's end (`exec::depth_kept`), else nothing reads it and it stays in tile memory */ pub depth_kept: bool,
+    /** an MSAA pass's multisampled images are stored at its end (`exec::twins_kept`), else they live for the pass alone (transient: resolved, never stored) */ pub ms_kept: bool }
 
 pub(super) struct RenderPass { pub dev: Arc<Device>, pub raw: vk::RenderPass, pub key: PassKey }
 
@@ -96,9 +97,11 @@ impl RenderPass {
         let used: Vec<usize> = (0..count).filter(|i| key.colors[*i] != ABSENT).collect();
         let mut attachments = Vec::new();
         let colour = vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL;
+        // the multisampled images: stored for a pass that continues them, else resolved alone
+        let ms_store = if key.ms_kept { vk::AttachmentStoreOp::STORE } else { vk::AttachmentStoreOp::DONT_CARE };
         for i in &used {
             let fmt = vk_format(key.colors[*i]).ok_or("unknown color format")?;
-            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(*i)).store_op(vk::AttachmentStoreOp::STORE)
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(*i)).store_op(ms_store)
                 .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::DONT_CARE).initial_layout(colour).final_layout(colour));
         }
         for i in &used {
@@ -125,8 +128,8 @@ impl RenderPass {
         let depth_aspect = if key.depth == crate::types::format::DEPTH24_STENCIL8 { vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL } else { vk::ImageAspectFlags::DEPTH };
         if key.depth != ABSENT {
             let fmt = vk_format(key.depth).ok_or("unknown depth format")?;
-            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(4)).store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(load(4)).stencil_store_op(vk::AttachmentStoreOp::STORE).initial_layout(depth_layout).final_layout(depth_layout));
+            attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(samples).load_op(load(4)).store_op(ms_store)
+                .stencil_load_op(load(4)).stencil_store_op(ms_store).initial_layout(depth_layout).final_layout(depth_layout));
             attachments.push(vk::AttachmentDescription2::default().format(fmt).samples(vk::SampleCountFlags::TYPE_1).load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .store_op(vk::AttachmentStoreOp::STORE).stencil_load_op(vk::AttachmentLoadOp::DONT_CARE).stencil_store_op(vk::AttachmentStoreOp::STORE)
                 .initial_layout(depth_layout).final_layout(depth_layout));
@@ -264,26 +267,32 @@ impl Program {
                 out.xr_fragment = out.dev.raw.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&out.code.xr_fragment), None).map_err(error)?;
             }
             for s in &out.code.samplers {
-                out.samplers.push(sampler(&out.dev, s)?);
+                out.samplers.push(sampler(&out.dev, s, false)?);
             }
         }
         Ok(Arc::new(out))
     }
 }
 
-/// The sampler a draw's or a kernel's sampler `s` describes.
-pub(super) fn sampler(dev: &Device, s: &crate::spirv::SpirvSampler) -> Result<vk::Sampler, String> {
-    let filter = if s.filter == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
+/// Whether sampler `s` blends texels (a linear filter, or a linear blend between mip levels),
+/// which Vulkan allows only on a format with `SAMPLED_IMAGE_FILTER_LINEAR` (a depth compare is
+/// exempt).
+pub(super) fn blends(s: &crate::spirv::SpirvSampler) -> bool { !s.compare && (s.filter != 0 || !s.pixel) }
+
+/// The sampler a draw's or a kernel's sampler `s` describes; `unfiltered`: its twin that blends
+/// nothing (nearest within and between mip levels, no anisotropy).
+pub(super) fn sampler(dev: &Device, s: &crate::spirv::SpirvSampler, unfiltered: bool) -> Result<vk::Sampler, String> {
+    let filter = if s.filter == 0 || unfiltered { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
     let address = match s.address { 0 => vk::SamplerAddressMode::REPEAT, 1 => vk::SamplerAddressMode::CLAMP_TO_EDGE,
         2 => vk::SamplerAddressMode::CLAMP_TO_BORDER, _ => vk::SamplerAddressMode::MIRRORED_REPEAT };
     if s.pixel && (s.compare || !matches!(s.address, 1 | 2)) { return Err("invalid unnormalized sampler".into()); }
     let mut info = vk::SamplerCreateInfo::default().mag_filter(filter).min_filter(filter)
-        .mipmap_mode(if s.pixel { vk::SamplerMipmapMode::NEAREST } else { vk::SamplerMipmapMode::LINEAR })
+        .mipmap_mode(if s.pixel || unfiltered { vk::SamplerMipmapMode::NEAREST } else { vk::SamplerMipmapMode::LINEAR })
         .address_mode_u(address).address_mode_v(address).address_mode_w(address)
         .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK).unnormalized_coordinates(s.pixel)
         .compare_enable(s.compare).compare_op(vk::CompareOp::LESS_OR_EQUAL).min_lod(0.0)
         .max_lod(if s.pixel { 0.0 } else { vk::LOD_CLAMP_NONE });
-    if s.anisotropy > 1 && dev.features.sampler_anisotropy == vk::TRUE {
+    if s.anisotropy > 1 && !unfiltered && dev.features.sampler_anisotropy == vk::TRUE {
         info = info.anisotropy_enable(true).max_anisotropy((s.anisotropy as f32).min(dev.properties.limits.max_sampler_anisotropy));
     }
     unsafe { dev.raw.create_sampler(&info, None) }.map_err(error)
@@ -394,7 +403,7 @@ impl State {
         if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
-        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1, depth_kept: true };
+        let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1, depth_kept: true, ms_kept: false };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
         let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };

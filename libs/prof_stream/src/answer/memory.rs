@@ -19,21 +19,22 @@ pub fn memory(a: &mut Answer) {
     let in_use = f(&t, "malloc_in_use_mb");
     let held = f(&t, "malloc_held_free_mb");
     let tracked = node("malloc/in use/program (tracked stacks, est.)");
-    // who owns the memory: the program's malloc heap, makepad run's arenas and JIT code, the app
-    // domains' arenas; resident estimates (an arena's touched pages, not what it reserved)
-    let arena_res = sp("compiler_arena_touched_mb") + sp("compiler_arena_large_mb");
-    let slots_res = sp("slots_arena_touched_mb") + sp("slots_arena_large_mb");
-    // a hosted app's heap is its domain's arena: malloc then holds makepad run's own blocks and its
+    // who owns the memory: the program's malloc heap, Relax's arenas and JIT code, the app
+    // domains' arenas; each arena by its resident pages (its touched pages also count the ones it
+    // handed back to the system, its reservation is address space)
+    let arena_res = sp("compiler_arena_resident_mb");
+    let slots_res = sp("slots_arena_resident_mb");
+    // a hosted app's heap is its domain's arena: malloc then holds Relax's own blocks and its
     // provided crates'
     let hosted = split.as_ref().is_some_and(|x| s(x, "program_heap").starts_with("domain"));
-    let (heap_name, held_note) = if hosted { ("malloc (makepad run, provided crates), in use", "freed, kept by malloc") } else { ("program heap (malloc, in use)", "freed by the program, kept by malloc") };
+    let (heap_name, held_note) = if hosted { ("malloc (Relax, provided crates), in use", "freed, kept by malloc") } else { ("program heap (malloc, in use)", "freed by the program, kept by malloc") };
     let mut parts: Vec<(String, f64, String)> = vec![
         (heap_name.into(), in_use, if tracked > 0.0 { format!("{} tracked by `heap start`", mb(tracked)) } else if hosted { "the program allocates in its domain's arena".into() } else { "the program's live allocations (`heap start` splits them by stack)".into() }),
         ("malloc: freed, held".into(), held, held_note.into()),
-        ("makepad run: compiler arena".into(), arena_res, format!("touched pages; {} reserved", mb(sp("compiler_arena_committed_mb")))),
-        ("makepad run: slot arena".into(), slots_res, format!("touched pages; {} reserved", mb(sp("slots_arena_committed_mb")))),
-        ("makepad run: burst arena".into(), sp("burst_arena_committed_mb"), "committed".into()),
-        ("makepad run: JIT code + data".into(), sp("jit_code_mb") + sp("jit_ro_data_mb"), String::new()),
+        ("relax: compiler arena".into(), arena_res, format!("resident; {} touched, {} reserved", mb(sp("compiler_arena_touched_mb") + sp("compiler_arena_large_mb")), mb(sp("compiler_arena_committed_mb")))),
+        ("relax: slot arena".into(), slots_res, format!("resident; {} touched, {} reserved", mb(sp("slots_arena_touched_mb") + sp("slots_arena_large_mb")), mb(sp("slots_arena_committed_mb")))),
+        ("relax: burst arena".into(), sp("burst_arena_committed_mb"), "committed".into()),
+        ("relax: JIT code + data".into(), sp("jit_code_mb") + sp("jit_ro_data_mb"), String::new()),
     ];
     // a domain arena by its resident pages (what the footprint counts): its committed bytes are address
     // space made writable a chunk at a time
@@ -60,9 +61,9 @@ pub fn memory(a: &mut Answer) {
         head.push_str(&format!(". Largest part: {} {}.", p.0, mb(p.1)));
     }
     if hosted {
-        head.push_str(&format!(" Program heap ({}) {} resident, {} in use; malloc {} (in use + held free) and makepad run's arenas + JIT code {} are the host's.", s(split.as_ref().unwrap(), "program_heap"), mb(sp("program_heap_resident_mb")), mb(sp("program_heap_in_use_mb")), mb(prog), mb(runtime)));
+        head.push_str(&format!(" Program heap ({}) {} resident, {} in use; malloc {} (in use + held free) and Relax's arenas + JIT code {} are the host's.", s(split.as_ref().unwrap(), "program_heap"), mb(sp("program_heap_resident_mb")), mb(sp("program_heap_in_use_mb")), mb(prog), mb(runtime)));
     } else {
-        head.push_str(&format!(" Program malloc heap {} (in use + held free) vs makepad run's own {} (arenas + JIT code).", mb(prog), mb(runtime)));
+        head.push_str(&format!(" Program malloc heap {} (in use + held free) vs Relax's own {} (arenas + JIT code).", mb(prog), mb(runtime)));
     }
     if let Some(t) = &trims {
         head.push_str(&format!(" Allocator trims: {} (last at {}).", f(t, "trims"), super::ms(f(t, "last_trim_ms"))));
@@ -83,10 +84,10 @@ pub fn memory(a: &mut Answer) {
             s(x, "arena"), f(x, "small_chunks"), mb(sm), mb(f(x, "small_live_slots_mb")), f(x, "small_live_blocks"), mb(f(x, "pinned_by_le4_blocks_mb")),
             f(x, "large_runs"), mb(lg), if top.is_empty() { String::new() } else { format!(" (largest {})", top.join(", ")) }));
     }
-    // the compiler heap by category (MAKEPAD_RUN_MEM_REPORT=1)
+    // the compiler heap by category (RELAX_MEM_REPORT=1)
     let mut tags: Vec<(String, f64)> = nodes.iter().filter_map(|n| {
         let k = s(n, "node");
-        k.strip_prefix("makepad-run/compiler heap (MAKEPAD_RUN_MEM_REPORT)/").map(|r| (r.to_string(), f(n, "mb")))
+        k.strip_prefix("relax/compiler heap (RELAX_MEM_REPORT)/").map(|r| (r.to_string(), f(n, "mb")))
     }).collect();
     if !tags.is_empty() {
         tags.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -96,7 +97,7 @@ pub fn memory(a: &mut Answer) {
     // compiler structures (memory compiler=1): the largest, by name
     let mut st: Vec<(String, f64)> = nodes.iter().filter_map(|n| {
         let k = s(n, "node");
-        k.strip_prefix("makepad-run/compiler structures/").map(|r| (r.to_string(), f(n, "mb")))
+        k.strip_prefix("relax/compiler structures/").map(|r| (r.to_string(), f(n, "mb")))
     }).collect();
     if !st.is_empty() {
         st.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -114,7 +115,7 @@ pub fn memory(a: &mut Answer) {
         .filter_map(|n| {
             let k = s(n, "node");
             let rest = k.strip_prefix("regions/")?;
-            Some((rest.replace("private/", "").replace(" (makepad run JIT code/data, burst arena, mapped files)", " (JIT, arenas, files)"), f(n, "mb")))
+            Some((rest.replace("private/", "").replace(" (Relax JIT code/data, burst arena, mapped files)", " (JIT, arenas, files)"), f(n, "mb")))
         })
         .collect();
     os.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -128,14 +129,14 @@ pub fn memory(a: &mut Answer) {
     }
     if let Some(fd) = findings {
         for x in arr(&fd, "findings").iter().filter_map(Value::as_str) {
-            if x.starts_with("makepad run's own reservations") || x.contains("/DefaultMallocZone") || x.starts_with("regions") {
+            if x.starts_with("Relax's own reservations") || x.contains("/DefaultMallocZone") || x.starts_with("regions") {
                 continue;
             }
             a.line(&format!("- {}", x));
         }
     }
     a.more("heap top (program heap by stack)");
-    a.more("heap start host=1 (makepad run's own heap)");
+    a.more("heap start host=1 (Relax's own heap)");
     a.more("mem timeline");
     a.more("memory compiler=1");
 }

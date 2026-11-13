@@ -26,6 +26,71 @@ const FRAMES_IN_FLIGHT: usize = 2;
 /// Backstop for an in-flight frame whose `FrameDone` has not arrived after this long: the
 /// stalled serial is logged and retired so the event loop never freezes permanently.
 const FRAME_STALL: std::time::Duration = std::time::Duration::from_secs(2);
+/// The event store's payload room when nothing larger is asked for.
+const EVENT_ARENA_BASE: usize = 1 << 20;
+/// Room above the base that no pump used for this long is given back (the lease pool's
+/// `BLOCK_IDLE_NS`).
+const EVENT_ARENA_IDLE_NS: u64 = 5_000_000_000;
+
+/// Payload room of the event store: the base, the camera's while a slot reads frames, and what
+/// an announced payload needs. It grows at once; room above the base goes back once no pump
+/// used it for `EVENT_ARENA_IDLE_NS`, so a large paste or an ended camera session does not
+/// hold megabytes for the life of the process. Per pump: two compares, and a clock read only
+/// while the room is above the base.
+#[derive(Default)]
+pub(crate) struct EventArena {
+    /// the room asked for: an announced payload (`PayloadSize`), a batch of read records
+    min: usize,
+    /// the room held while a slot reads camera frames
+    pub(super) standing: usize,
+    /// when a pump last used room above the base (HAL clock ns)
+    used_ns: u64,
+}
+
+impl EventArena {
+    pub(crate) fn ask(&mut self, bytes: usize) {
+        self.min = self.min.max(bytes);
+    }
+
+    fn base(&self) -> usize {
+        EVENT_ARENA_BASE.max(self.standing)
+    }
+
+    /// The room a new store starts with.
+    fn room(&self) -> usize {
+        self.min.max(self.base())
+    }
+
+    /// The room the next pump needs when it is not `cap`. `now` (HAL clock ns) is read only
+    /// while the room is above the base.
+    fn resize(&mut self, cap: usize, now: impl Fn() -> u64) -> Option<ArenaResize> {
+        let room = self.room();
+        if room > cap {
+            self.used_ns = now();
+            return Some(ArenaResize::Grow(room));
+        }
+        let base = self.base();
+        if cap > base && now().saturating_sub(self.used_ns) >= EVENT_ARENA_IDLE_NS {
+            self.min = 0;
+            return Some(ArenaResize::GiveBack { room: base, freed: cap - base });
+        }
+        None
+    }
+
+    /// A pump delivered `used` payload bytes.
+    fn used(&mut self, used: usize, now: impl Fn() -> u64) {
+        if used > self.base() {
+            self.used_ns = now();
+        }
+    }
+}
+
+/// A new room for the event store: more at once, or the base again (the pump logs that).
+#[derive(Debug, PartialEq)]
+enum ArenaResize {
+    Grow(usize),
+    GiveBack { room: usize, freed: usize },
+}
 
 /// `MAKEPAD_PAINT_INTERVAL` (seconds): a process whose windows are hidden
 /// (`MAKEPAD_HIDE_WINDOWS`) and draw offscreen work only (a batch renderer:
@@ -95,7 +160,7 @@ impl Cx {
             self.enable_pick_variants();
         }
         self.hal.frames.open(info.session, info);
-        self.hal.events = Some(EventStore::new(info.session, 512, 1 << 20));
+        self.hal.events = Some(EventStore::new(info.session, 512, self.hal.event_arena.room()));
         super::register_wake_session(info.session);
     }
 
@@ -206,7 +271,7 @@ impl Cx {
                 // an intake that unwound took the event store with it
                 if self.hal.events.is_none() {
                     if let Some(info) = self.hal.info {
-                        self.hal.events = Some(EventStore::new(info.session, 512, self.hal.event_arena_min.max(1 << 20)));
+                        self.hal.events = Some(EventStore::new(info.session, 512, self.hal.event_arena.room()));
                     }
                 }
                 self.recover_after_caught_panic();
@@ -651,8 +716,15 @@ impl Cx {
     fn hal_pump_events(&mut self, timeout_ns: u64, wait: PumpWait) -> bool {
         let mut store = self.hal.events.take().expect("event store");
         let mut buf = store.buf();
-        if self.hal.event_arena_min > buf.arena_cap as usize {
-            store = EventStore::new(buf.session, buf.cap as usize, self.hal.event_arena_min);
+        if let Some(resize) = self.hal.event_arena.resize(buf.arena_cap as usize, makepad_hal::clock_ns) {
+            let room = match resize {
+                ArenaResize::Grow(room) => room,
+                ArenaResize::GiveBack { room, freed } => {
+                    crate::log!("hal: the event arena gives back {} MB unused for {} s", freed >> 20, EVENT_ARENA_IDLE_NS / 1_000_000_000);
+                    room
+                }
+            };
+            store = EventStore::new(buf.session, buf.cap as usize, room);
             buf = store.buf();
         }
         let n = match wait {
@@ -672,6 +744,7 @@ impl Cx {
             }
             PumpWait::Nested => hal_pump(timeout_ns, &mut buf),
         };
+        self.hal.event_arena.used(buf.arena_len as usize, makepad_hal::clock_ns);
         let intake_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
         let mut alive = true;
         // Pointer moves are coalesced per batch: a move directly followed by another move of
@@ -726,6 +799,10 @@ impl Cx {
             }
         }
         self.hal.events = Some(store);
+        // a pipeline was made or failed while an app waited on `draw_shader_ready`: it asks again
+        if alive && self.hal.frames.take_answer() {
+            self.call_event_handler(&Event::DrawShadersReady);
+        }
         if let Some(start) = intake_start { self.hal.profile_input_ns += makepad_hal::clock_ns() - start; }
         alive
     }
@@ -1226,7 +1303,7 @@ fn dev_launch_begin() -> Option<std::path::PathBuf> {
         // process it cannot see
         eprintln!("makepad: could not complete the development launch: {error}");
         let _ = std::fs::write(dir.join("status"), "1\n");
-        std::process::exit(1);
+        makepad_core_util::process_end::end(1);
     }
     Some(dir)
 }
@@ -1247,5 +1324,59 @@ mod frame_log {
             if gap > Duration::from_millis(24) { eprintln!("[frames] beat gap {:.1} ms", gap.as_secs_f64() * 1e3); }
         }
         *last = Some(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ArenaResize, EventArena, EVENT_ARENA_BASE, EVENT_ARENA_IDLE_NS};
+    use makepad_hal::{input, EventQueue, EventStore, HalEvent, Id};
+
+    /// A paste over the base room: announced (`PayloadSize`), the store grows at once and the
+    /// paste arrives whole; the room above the base goes back once, after `EVENT_ARENA_IDLE_NS`
+    /// with no pump using it, on an injected clock.
+    #[test]
+    fn an_oversized_paste_grows_the_event_arena_and_its_room_goes_back_once() {
+        let paste = vec![7u8; 3 << 20];
+        let mut q = EventQueue::new();
+        q.text(Id::new(1, 1), input::text::PASTE, &paste);
+        let mut arena = EventArena::default();
+        let mut store = EventStore::new(1, 8, arena.room());
+        let mut gave_back = Vec::new();
+        // one pump at `t` s: resize as the event loop does, drain, hand the payloads to the arena
+        let mut pump = |t: u64, q: &mut EventQueue, store: &mut EventStore| -> (usize, Vec<String>) {
+            let now = || t * 1_000_000_000;
+            let mut buf = store.buf();
+            if let Some(resize) = arena.resize(buf.arena_cap as usize, now) {
+                let room = match resize {
+                    ArenaResize::Grow(room) => room,
+                    ArenaResize::GiveBack { room, freed } => {
+                        gave_back.push((t, freed));
+                        room
+                    }
+                };
+                *store = EventStore::new(buf.session, buf.cap as usize, room);
+                buf = store.buf();
+            }
+            let n = q.drain_into(&mut buf);
+            let seen = store.reader(n, buf.arena_len).map(|(_, e)| match e {
+                HalEvent::PayloadSize { bytes } => {
+                    arena.ask(bytes as usize);
+                    format!("size {bytes}")
+                }
+                HalEvent::Text { text, .. } => format!("text {} bytes{}", text.len(), if text.iter().all(|&b| b == 7) { "" } else { " WRONG" }),
+                e => format!("{e:?}"),
+            }).collect();
+            arena.used(buf.arena_len as usize, now);
+            (buf.arena_cap as usize, seen)
+        };
+        assert_eq!(pump(1, &mut q, &mut store), (EVENT_ARENA_BASE, vec![format!("size {}", 3 << 20)]), "announced at the base room");
+        assert_eq!(pump(1, &mut q, &mut store), (3 << 20, vec![format!("text {} bytes", 3 << 20)]), "grown at once: the paste whole");
+        let idle_s = EVENT_ARENA_IDLE_NS / 1_000_000_000;
+        assert_eq!(pump(1 + idle_s - 1, &mut q, &mut store), (3 << 20, vec![]), "kept while it was used less than the idle time ago");
+        assert_eq!(pump(1 + idle_s, &mut q, &mut store), (EVENT_ARENA_BASE, vec![]), "given back after the idle time");
+        assert_eq!(pump(1 + 10 * idle_s, &mut q, &mut store), (EVENT_ARENA_BASE, vec![]), "stays at the base");
+        drop(pump);
+        assert_eq!(gave_back, [(1 + idle_s, (3 << 20) - EVENT_ARENA_BASE)], "the room above the base goes back (and is logged) once");
     }
 }

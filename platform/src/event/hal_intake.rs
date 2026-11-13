@@ -20,7 +20,7 @@ use crate::{
     window::{CxWindowPool, WindowId},
 };
 use makepad_hal::{buffers::{read_domains, read_drag_items, read_items, read_strs}, domain_state, input, window_state, HalEvent, Id};
-use std::{cell::Cell, cell::RefCell, rc::Rc, sync::{Arc, Mutex}};
+use std::{cell::Cell, rc::Rc, sync::{Arc, Mutex}};
 
 pub(crate) fn window_id(id: Id) -> WindowId {
     WindowId(id.index as usize, id.gen as u64)
@@ -392,7 +392,7 @@ impl Cx {
                 self.call_event_handler(&Event::TextInput(TextInputEvent { input, replace_last: false, was_paste, ..Default::default() }));
             }
             HalEvent::PayloadSize { bytes } => {
-                self.hal.event_arena_min = self.hal.event_arena_min.max(bytes as usize);
+                self.hal.event_arena.ask(bytes as usize);
             }
             #[cfg(target_os = "linux")]
             HalEvent::DirectDisplays { window, generation, inventory } => self.hal_display_inventory(window, generation, inventory),
@@ -417,6 +417,8 @@ impl Cx {
                     Some(data) if supported => ClipboardContent {
                         supported: true,
                         text: (!data.text.is_empty()).then_some(data.text),
+                        html: (!data.html.is_empty()).then_some(data.html),
+                        markdown: (!data.markdown.is_empty()).then_some(data.markdown),
                         image: (!data.png.is_empty()).then_some(ClipboardImage::Png(Arc::new(data.png))),
                         files: data.files.into_iter().map(|(url, path)| ClipboardFile { url, path }).collect(),
                     },
@@ -1054,7 +1056,8 @@ impl Cx {
                 // Nothing is drawn until DeviceReset: the event loop waits on the HAL's events
                 // (no frames are built or asked of a host meanwhile), so this is said once.
                 if !std::mem::replace(&mut self.hal.device_lost, true) {
-                    crate::error!("hal: GPU device {generation} was lost; pending compute=[{}]; waiting for the HAL to replace it", String::from_utf8_lossy(dispatches));
+                    let next = if self.gpu_device_recovers() { "waiting for the HAL to replace it" } else { "this backend cannot replace a device: it is gone for this session" };
+                    crate::error!("hal: GPU device {generation} was lost; pending compute=[{}]; {next}", String::from_utf8_lossy(dispatches));
                     self.hal_fail_device_readbacks();
                     self.call_event_handler(&Event::GpuLost);
                 }
@@ -1085,12 +1088,16 @@ impl Cx {
                     Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
                 }
             }
-            HalEvent::Readback { req, status, rect, pixels } => {
+            HalEvent::Readback { req, status, rect, lease } => {
+                use makepad_hal::buffers::Wire;
+                let pixels = (lease.len() == makepad_hal::lease::Record::SIZE).then(|| {
+                    let record = makepad_hal::lease::Record::read(lease);
+                    // SAFETY: this event transfers one lease from the HAL in this process.
+                    unsafe { texture_readback_pixels(record) }
+                });
                 self.hal_readback(req, status, rect, pixels);
             }
             HalEvent::BufferLeases { req, status, records } => self.hal_buffer_leases(req, status, records),
-            // Cx asks for full pick images through TextureReadback; point picks belong to the host.
-            HalEvent::PickResult { .. } => {},
 
             // ---- results
             HalEvent::PrintResult { req, status, message } => {
@@ -1258,12 +1265,26 @@ impl Cx {
     /// Copy or cut: asks the focused widget for its text and puts the answer on the clipboard.
     /// A copy or cut of nothing (no selection) leaves the clipboard as it is.
     pub(crate) fn hal_clipboard_chord(&mut self, copy: bool) {
-        let response = Rc::new(RefCell::new(None));
-        let e = TextClipboardEvent { response: response.clone() };
-        self.call_event_handler(&if copy { Event::TextCopy(e) } else { Event::TextCut(e) });
-        let text = response.borrow().clone();
-        if let Some(text) = text.filter(|t| !t.is_empty()) {
-            self.hal.frames.w.clip_set(text.as_bytes());
+        let e = TextClipboardEvent::default();
+        let event = if copy { Event::TextCopy(e.clone()) } else { Event::TextCut(e.clone()) };
+        self.call_event_handler(&event);
+        if let Some(write) = e.written() {
+            self.hal_clipboard_write(write);
+        }
+    }
+
+    /// Puts a copy on the clipboard: a hosted child's goes to its host's.
+    pub(crate) fn hal_clipboard_write(&mut self, write: ClipboardWrite) {
+        if self.hal.hosted.is_some() {
+            Self::send_hosted_clipboard(write);
+        } else {
+            let data = makepad_hal::clipboard::ClipboardData {
+                text: write.text,
+                html: write.html.unwrap_or_default(),
+                markdown: write.markdown.unwrap_or_default(),
+                ..Default::default()
+            };
+            self.hal.frames.w.clip_set(&data.pack());
         }
     }
 
@@ -1362,6 +1383,15 @@ impl Cx {
             self.hal.frame_trace.present(present_ns as f64 * 1e-9);
         }
     }
+}
+
+fn release_texture_lease(token: u64) { makepad_hal::hal_lease_release(token); }
+
+/// # Safety
+/// The HAL delivered this record in this process; its one release obligation moves here.
+pub(crate) unsafe fn texture_readback_pixels(record: makepad_hal::lease::Record) -> crate::HostBuf {
+    // SAFETY: the caller transfers immutable storage and its release obligation.
+    unsafe { crate::HostBuf::from_lease(record.ptr as *const u8, record.len as usize, record.token, release_texture_lease) }
 }
 
 #[cfg(test)]

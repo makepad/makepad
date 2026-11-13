@@ -117,7 +117,7 @@ impl DrawVars {
                     texture_base: stage.info.texture_binding_base(), sampler_base: stage.info.sampler_binding_base(),
                     depth_binding: stage.info.xr_depth_binding(), instance_binding: stage.info.instance_binding().unwrap_or(u32::MAX),
                     pick_binding: stage.info.pick_binding().unwrap_or(u32::MAX), pick_texture_base: stage.info.pick_texture_base().unwrap_or(u32::MAX),
-                    textures, samplers }.encode())
+                    sampler_textures: stage.info.sampler_textures().to_vec(), textures, samplers }.encode())
             };
             // the multiview stages only where XR passes render multiview: a headset of the HAL's own
             // (a remote one renders its eyes side by side)

@@ -26,7 +26,7 @@ use crate::types::{Draw as CmdDraw, Id, PipelineDesc, StrId};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 static REC: AtomicBool = AtomicBool::new(false);
 
@@ -651,7 +651,7 @@ pub fn record_pass(key: FrameKey, s: &Session, sid: u32, name: StrId, pick: bool
 /// launch: the sources of pipelines made before a later `gpu prof start` are gone otherwise).
 pub fn keep_sources() -> bool {
     static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *KEEP.get_or_init(|| std::env::var("MAKEPAD_GPU_PROF").is_ok_and(|v| v == "1"))
+    *KEEP.get_or_init(|| relax_api::env::var("MAKEPAD_GPU_PROF").is_ok_and(|v| v == "1"))
 }
 
 /// Cost hints of a generated shader source (MSL / GLSL / HLSL text as the shader compiler emitted
@@ -972,10 +972,10 @@ pub fn recording_of(sid: Option<u32>) -> Option<Recording> {
 
 /// `MAKEPAD_GPU_PROF=1` records from launch (`MAKEPAD_GPU_PROF_SPLIT`, `_S`, `_HZ`).
 pub fn start_from_env() {
-    if std::env::var("MAKEPAD_GPU_PROF").map_or(true, |v| v != "1") || recording() {
+    if relax_api::env::var("MAKEPAD_GPU_PROF").map_or(true, |v| v != "1") || recording() {
         return;
     }
-    let get = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+    let get = |k: &str, d: u64| relax_api::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     start(StartOptions {
         keep_s: get("MAKEPAD_GPU_PROF_S", 60),
         split_every: get("MAKEPAD_GPU_PROF_SPLIT", 16) as u32,

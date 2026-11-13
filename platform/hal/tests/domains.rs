@@ -378,7 +378,7 @@ fn a_wm_runs_two_child_domains() {
         let mut cw = CmdWriter::new(d);
         cw.ime_show(WIN, [0.0; 4], 0);
         cw.cursor(WIN, 1);
-        cw.clip_set(b"x");
+        cw.clip_set(&makepad_hal::clipboard::ClipboardData { text: "x".into(), ..Default::default() }.pack());
         hal.submit(&cw.buf());
     };
     ask(&hal, a);

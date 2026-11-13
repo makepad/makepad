@@ -380,6 +380,7 @@ impl Geometry {
         let cxgeom = &mut cx.geometries[geometry.geometry_id()];
         cxgeom.origin = crate::gpu_ledger::GpuOrigin::here();
         cxgeom.indices.clear();
+        cxgeom.pick_ranges.clear();
         cxgeom.vertices.clear();
         cxgeom.index_count = 0;
         cxgeom.vertex_count = 0;
@@ -396,6 +397,7 @@ impl Geometry {
     pub fn update(&self, cx: &mut Cx, indices: Vec<u32>, vertices: Vec<f32>) {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = IndexData::U32(indices);
+        cxgeom.pick_ranges.clear();
         cxgeom.vertices = VertexData::F32(vertices);
         cxgeom.index_count = cxgeom.indices.len();
         cxgeom.vertex_count = cxgeom.vertices.as_f32().map(|v| v.len()).unwrap_or(0);
@@ -422,6 +424,7 @@ impl Geometry {
         let mut idx = IndexData::U32(std::mem::take(indices));
         let mut vtx = VertexData::F32(std::mem::take(vertices));
         std::mem::swap(&mut cxgeom.indices, &mut idx);
+        cxgeom.pick_ranges.clear();
         std::mem::swap(&mut cxgeom.vertices, &mut vtx);
         if let IndexData::U32(prev) = idx {
             *indices = prev;
@@ -442,6 +445,15 @@ impl Geometry {
         cxgeom.dirty_indices = true;
     }
 
+    /// Gives the mesh pick ids per index run (see [`CxGeometry::pick_ranges`]). Call it after the
+    /// update that set the indices: every update clears the runs. Swaps the table in and hands the
+    /// previous allocation back cleared, like [`Self::update_with_recycled_buffers`].
+    pub fn set_pick_ranges(&self, cx: &mut Cx, ranges: &mut Vec<[u32; 2]>) {
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        std::mem::swap(&mut cxgeom.pick_ranges, ranges);
+        ranges.clear();
+    }
+
     pub fn update_typed(
         &self,
         cx: &mut Cx,
@@ -455,6 +467,7 @@ impl Geometry {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.index_width = indices.index_width();
         cxgeom.indices = indices;
+        cxgeom.pick_ranges.clear();
         cxgeom.vertices = VertexData::Bytes(vertices);
         cxgeom.vertex_stride = layout.stride_bytes;
         cxgeom.vertex_layout_signature = Some(layout.layout_signature());
@@ -480,6 +493,7 @@ impl Geometry {
         let index_width = indices.index_width();
         let mut vtx = VertexData::Bytes(std::mem::take(vertices));
         std::mem::swap(&mut cxgeom.indices, indices);
+        cxgeom.pick_ranges.clear();
         std::mem::swap(&mut cxgeom.vertices, &mut vtx);
         if let VertexData::Bytes(prev) = vtx {
             *vertices = prev;
@@ -502,6 +516,7 @@ impl Geometry {
     pub fn update_indices(&self, cx: &mut Cx, indices: Vec<u32>) {
         let cxgeom = &mut cx.geometries[self.geometry_id()];
         cxgeom.indices = IndexData::U32(indices);
+        cxgeom.pick_ranges.clear();
         cxgeom.index_count = cxgeom.indices.len();
         cxgeom.index_width = 4;
         cxgeom.dirty = true;
@@ -708,6 +723,11 @@ pub struct CxGeometry {
     pub dirty_indices: bool,
     /// Goes up whenever the vertex or index data changes.
     pub data_generation: u64,
+    /// Pick ids of index runs, `[first_index, id]`, ascending by first index: a run ends where
+    /// the next starts, the last at `index_count`. Id 0, and indices before the first run, pick as
+    /// the draw call's id; empty (the usual case) means the whole mesh picks as its call. Read only
+    /// by the pick repaint ([`crate::pick::pick_runs`]); never uploaded.
+    pub pick_ranges: Vec<[u32; 2]>,
     pub logged_stride_mismatch: bool,
     pub logged_unsupported_typed: bool,
     /// Who made it (`Geometry::new`'s caller and the open `gpu_owner` scopes): the ledger and
@@ -732,6 +752,7 @@ impl Default for CxGeometry {
             dirty_vertices: false,
             dirty_indices: false,
             data_generation: 0,
+            pick_ranges: Vec::new(),
             logged_stride_mismatch: false,
             logged_unsupported_typed: false,
             origin: Default::default(),

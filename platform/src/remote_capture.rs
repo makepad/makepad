@@ -11,7 +11,7 @@
 //! presented frame and places it by wall time.
 //!
 //! Threads: the UI only arms requests and counts; the GPU completion thread
-//! hands the pixels (`Arc`, no copy) to the encoder worker through a
+//! hands the pixels (`HostBuf`, no copy) to the encoder worker through a
 //! channel; the worker converts, hashes and encodes. The worker never runs
 //! ahead of what the UI armed, and the UI stops arming new step frames while
 //! the worker is `MAX_FRAMES_AHEAD` behind, so a slow encoder slows `/step`
@@ -63,7 +63,7 @@ const FALLBACK_AUDIO_RATE: u32 = 48_000;
 pub(super) enum Pixels {
     /// A backend readback: `stride` bytes per row, in `order` (Metal).
     Raw {
-        data: Arc<[u8]>,
+        data: crate::HostBuf,
         stride: usize,
         order: ReadbackChannelOrder,
         origin: ReadbackOrigin,

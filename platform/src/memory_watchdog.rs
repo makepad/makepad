@@ -168,7 +168,7 @@ pub fn start_stdin_orphan_watchdog() {
                     "stdin-loop host is gone (reparented to init) — exiting orphaned app instance"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(100));
-                std::process::exit(0);
+                makepad_core_util::process_end::end(0);
             }
         })
         .ok();
@@ -190,7 +190,7 @@ fn watchdog_main(limits: MemoryLimits) {
                 "memory watchdog: stdin-loop host is gone (orphaned) — exiting to avoid a zombie app instance"
             );
             std::thread::sleep(std::time::Duration::from_millis(200));
-            std::process::exit(0);
+            makepad_core_util::process_end::end(0);
         }
         // Host-silence guard: parent may outlive us (studio spawns apps
         // directly), so also exit when the studio websocket goes quiet.
@@ -201,7 +201,7 @@ fn watchdog_main(limits: MemoryLimits) {
                 STDIN_HOST_SILENCE_LIMIT_S
             );
             std::thread::sleep(std::time::Duration::from_millis(200));
-            std::process::exit(0);
+            makepad_core_util::process_end::end(0);
         }
         let Some(footprint) = process_footprint_bytes() else {
             return;

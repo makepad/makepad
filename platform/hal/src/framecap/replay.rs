@@ -268,6 +268,8 @@ impl Replayer {
                     owner: 0,
                     damage: Range::default(),
                     damage_since: 0,
+                    // the views side by side, as captured
+                    view_rects: w.put_rects(&p.view_rects),
                 };
                 w.pass(pass);
                 let n = if pi == cut.pass { cut.draws.min(p.draws.len as usize) } else { p.draws.len as usize };
@@ -371,11 +373,13 @@ impl Replayer {
         self.hal.submit(&w2.buf());
         let mut out = Err("no answer".to_string());
         self.until(Duration::from_secs(30), |e| match e {
-            HalEvent::Readback { req: got, status, rect: r, pixels } if got == req => {
-                out = match status {
-                    readback::OK => Ok(Image { w: r[2], h: r[3], rgba: pixels.to_vec(), format: fmt }),
-                    readback::NATIVE => Ok(Image { w: r[2], h: r[3], rgba: to_rgba8(fmt, pixels), format: fmt }),
-                    s => Err(format!("readback status {s}")),
+            HalEvent::Readback { req: got, status, rect: r, lease } if got == req => {
+                // SAFETY: this process pumped the event and takes its lease once.
+                let pixels = unsafe { crate::lease::Held::from_payload(lease) };
+                out = match (status, pixels.as_deref()) {
+                    (readback::OK, Some(pixels)) => Ok(Image { w: r[2], h: r[3], rgba: pixels.to_vec(), format: fmt }),
+                    (readback::NATIVE, Some(pixels)) => Ok(Image { w: r[2], h: r[3], rgba: to_rgba8(fmt, pixels), format: fmt }),
+                    (s, _) => Err(format!("readback status {s}")),
                 };
                 true
             }

@@ -3,7 +3,7 @@
 //! first window opens where the old one was (its frame: the run host's remembered geometry) and,
 //! with this, at the same place in the window stacking: just below the window that was just above
 //! the old one, and without taking the focus the old one did not have. The new image learns that
-//! from `MAKEPAD_RUN_RESTART_STACK` (`<pid> <focused 0|1> <window above>`): the pid stays across
+//! from `RELAX_RESTART_STACK` (`<pid> <focused 0|1> <window above>`): the pid stays across
 //! an exec, so a process the restarted app starts never takes it for its own.
 //!
 //! A Space cannot be chosen through public API: the window opens on the active Space, which is
@@ -49,7 +49,7 @@ pub fn handover() -> Vec<(String, String)> {
     }
     let above = window_above(number as u32);
     let focused = KEY.load(Ordering::Acquire);
-    vec![("MAKEPAD_RUN_RESTART_STACK".into(), format!("{} {} {}", std::process::id(), u8::from(focused), above))]
+    vec![("RELAX_RESTART_STACK".into(), format!("{} {} {}", std::process::id(), u8::from(focused), above))]
 }
 
 /// The normal-level window just above `number` on screen (0: none, it is frontmost). CoreGraphics
@@ -85,7 +85,7 @@ pub(super) fn take_restart() -> Option<(bool, isize)> {
     if TAKEN.swap(true, Ordering::AcqRel) {
         return None;
     }
-    let v = std::env::var("MAKEPAD_RUN_RESTART_STACK").ok()?;
+    let v = std::env::var("RELAX_RESTART_STACK").ok()?;
     let w: Vec<&str> = v.split_whitespace().collect();
     match w.as_slice() {
         [pid, focused, above] if pid.parse() == Ok(std::process::id()) => Some((*focused == "1", above.parse().ok()?)),

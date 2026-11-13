@@ -4,6 +4,7 @@ use {
     std::rc::Rc,
 };
 
+pub use crate::clipboard_read::ClipboardWrite;
 pub use makepad_studio_protocol::{
     CharOffset, FullTextState, ImeAction, ImeActionEvent, KeyCode, KeyEvent, TextInputEvent,
 };
@@ -198,9 +199,31 @@ pub struct KeyFocusEvent {
     pub focus: Area,
 }
 
-#[derive(Clone, Debug)]
+/// A copy or cut asks the focused widget for its selection: the widget answers in `response`
+/// with plain text, or with `answer` for its richer flavours too.
+#[derive(Clone, Debug, Default)]
 pub struct TextClipboardEvent {
     pub response: Rc<RefCell<Option<String>>>,
+    /// The answer's richer flavours (HTML, Markdown) beside `response`'s text, set by `answer`.
+    pub rich: Rc<RefCell<Option<ClipboardWrite>>>,
+}
+
+impl TextClipboardEvent {
+    /// Answers with the selection's text and its richer flavours.
+    pub fn answer(&self, write: ClipboardWrite) {
+        *self.response.borrow_mut() = Some(write.text.clone());
+        *self.rich.borrow_mut() = Some(write);
+    }
+
+    /// What the copy puts on the clipboard; `None` (nothing selected) leaves the clipboard as it
+    /// is. The richer flavours go along only with the text they were answered with.
+    pub fn written(&self) -> Option<ClipboardWrite> {
+        let text = self.response.borrow().clone().filter(|t| !t.is_empty())?;
+        match self.rich.borrow().clone() {
+            Some(write) if write.text == text => Some(write),
+            _ => Some(ClipboardWrite::text(text)),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

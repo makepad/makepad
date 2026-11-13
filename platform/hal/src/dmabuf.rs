@@ -62,7 +62,7 @@ pub use share::copy;
 /// Exports `session`'s shared texture by its `TextureShared` ticket: returns a new descriptor
 /// the caller owns and writes its layout (`copy::Layout::to_words`, 6 words) to `layout`; -1 when
 /// the ticket is unknown or `layout` is short.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_export(session: u32, ticket: u64, layout: &mut [u64]) -> i32 {
     use std::os::fd::IntoRawFd;
     if layout.len() < 6 {
@@ -78,7 +78,7 @@ pub fn hal_dmabuf_export(session: u32, ticket: u64, layout: &mut [u64]) -> i32 {
 
 /// Names the image of descriptor `fd` (taken over, closed on failure) laid out as `layout`
 /// (6 words) for [`hal_dmabuf_read`]; 0 when refused.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_register(fd: i32, layout: &[u64]) -> u64 {
     use std::os::fd::FromRawFd;
     if fd < 0 {
@@ -91,14 +91,14 @@ pub fn hal_dmabuf_register(fd: i32, layout: &[u64]) -> u64 {
     }
 }
 
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_release(handle: u64) {
     copy::release(handle)
 }
 
 /// Reads `region` (x, y, width, height) of a registered image into `out` as BGRA: the bytes
 /// written, or -1 (an unknown handle, a region outside it, `out` too short, a GPU error).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_read(handle: u64, region: &[u32], out: &mut [u8]) -> i64 {
     let Ok(region) = <[u32; 4]>::try_from(region) else { return -1 };
     match copy::read(handle, region) {
@@ -128,7 +128,7 @@ fn failed(error: String) {
 
 /// The text of this thread's last failed DMA-BUF op: its first `out.len()` bytes are written,
 /// its length is returned.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_error(out: &mut [u8]) -> u64 {
     LAST_ERROR.with(|e| {
         let e = e.borrow();
@@ -139,7 +139,7 @@ pub fn hal_dmabuf_error(out: &mut [u8]) -> u64 {
 }
 
 /// A DMA-BUF descriptor without its FDs (`DmaBuf::into_parts` / `from_parts`).
-#[makepad_relax_api::relax_api(plain)]
+#[relax_api::relax_api(plain)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DmabufDesc {
@@ -184,7 +184,7 @@ fn owned(fd: i32) -> Option<OwnedFd> {
 /// Registers the image of descriptor `fd` (and timeline `timeline_fd`, -1 for none; both taken
 /// over) with `session` (`Hal::dmabuf_register`): its ticket, 0 when refused. The producer must
 /// have released the allocation to external ownership.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_import(session: u32, fd: i32, timeline_fd: i32, desc: &DmabufDesc) -> u64 {
     let (Some(fd), timeline) = (owned(fd), owned(timeline_fd)) else {
         failed("no DMA-BUF descriptor".into());
@@ -197,14 +197,14 @@ pub fn hal_dmabuf_import(session: u32, fd: i32, timeline_fd: i32, desc: &DmabufD
 }
 
 /// `Hal::dmabuf_release`: lets go of `session`'s registration `ticket`.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_unregister(session: u32, ticket: u64) {
     Hal::global().dmabuf_release(session, ticket)
 }
 
 /// New copies of the descriptor and timeline FDs of `session`'s shared image `ticket` (the caller
 /// owns them; `fds[1]` -1 when it has no timeline) and its layout; false when unknown.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_presentable(session: u32, ticket: u64, desc: &mut DmabufDesc, fds: &mut [i32]) -> bool {
     use std::os::fd::IntoRawFd;
     let Some(native) = Hal::global().dmabuf_handle(session, ticket) else { failed("shared image ticket expired".into()); return false };
@@ -224,13 +224,13 @@ pub fn hal_dmabuf_presentable(session: u32, ticket: u64, desc: &mut DmabufDesc, 
 }
 
 /// `Hal::dmabuf_acquire`; false: failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_acquire(session: u32, texture: Id) -> bool {
     Hal::global().dmabuf_acquire(session, texture).map_err(failed).is_ok()
 }
 
 /// `Hal::dmabuf_write_available`: 1 the writer may write, 0 not yet, -1 failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_write_available(session: u32, texture: Id) -> i32 {
     match Hal::global().dmabuf_write_available(session, texture) {
         Ok(available) => available as i32,
@@ -239,7 +239,7 @@ pub fn hal_dmabuf_write_available(session: u32, texture: Id) -> i32 {
 }
 
 /// `Hal::dmabuf_sequence` into `sequence`; false: failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_sequence(session: u32, texture: Id, sequence: &mut u64) -> bool {
     match Hal::global().dmabuf_sequence(session, texture) {
         Ok(value) => { *sequence = value; true }
@@ -248,13 +248,13 @@ pub fn hal_dmabuf_sequence(session: u32, texture: Id, sequence: &mut u64) -> boo
 }
 
 /// `Hal::dmabuf_copy_frame`; false: failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_copy_frame(session: u32, source: Id, destination: Id, sequence: u64) -> bool {
     Hal::global().dmabuf_copy_frame(session, source, destination, sequence).map_err(failed).is_ok()
 }
 
 /// What `hal_dmabuf_support` found besides the lists.
-#[makepad_relax_api::relax_api(plain)]
+#[relax_api::relax_api(plain)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DmabufSupportInfo {
@@ -270,7 +270,7 @@ pub struct DmabufSupportInfo {
 
 /// `Hal::dmabuf_support`: the render node's path into `node`, the importable formats into
 /// `formats` as (fourcc, modifier) word pairs.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_dmabuf_support(session: u32, formats: &mut [u64], node: &mut [u8]) -> DmabufSupportInfo {
     use std::os::unix::ffi::OsStrExt;
     let Some(support) = Hal::global().dmabuf_support(session) else { return DmabufSupportInfo::default() };

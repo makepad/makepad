@@ -214,7 +214,7 @@ pub struct EncodeJob {
     pub sink: GrabSink,
     pub width: u32,
     pub height: u32,
-    pub pixels: Arc<[u8]>,
+    pub pixels: crate::HostBuf,
     pub stride: usize,
     pub order: GrabOrder,
     pub origin: GrabOrigin,
@@ -301,7 +301,7 @@ pub fn halve_grab(job: &mut EncodeJob) -> bool {
             }
         }
     }
-    job.pixels = Arc::from(out.into_boxed_slice());
+    job.pixels = crate::HostBuf::from_vec(out);
     job.width = w2 as u32;
     job.height = h2 as u32;
     job.stride = w2 * 4;
@@ -2196,7 +2196,7 @@ mod tests {
                 cancelled: Arc::new(AtomicBool::new(false)),
                 tx,
             };
-            let pixels: Arc<[u8]> = Arc::from(vec![128u8; 64 * 32 * 4].into_boxed_slice());
+            let pixels = crate::HostBuf::from_vec(vec![128u8; 64 * 32 * 4]);
             submit_encode(
                 EncodeJob {
                     sink,

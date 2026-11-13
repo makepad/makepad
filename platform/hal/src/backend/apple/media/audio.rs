@@ -924,7 +924,7 @@ impl AudioUnitAccess {
                                 // MAKEPAD_VPIO_DUCKING=min|mid|max|default
                                 // and MAKEPAD_VPIO_ADVANCED=1 override for
                                 // experimentation.
-                                let level = match std::env::var("MAKEPAD_VPIO_DUCKING")
+                                let level = match relax_api::env::var("MAKEPAD_VPIO_DUCKING")
                                     .unwrap_or_default()
                                     .as_str()
                                 {
@@ -934,7 +934,7 @@ impl AudioUnitAccess {
                                     _ => DUCKING_LEVEL_MIN,
                                 };
                                 let advanced =
-                                    std::env::var("MAKEPAD_VPIO_ADVANCED").is_ok_and(|v| v == "1");
+                                    relax_api::env::var("MAKEPAD_VPIO_ADVANCED").is_ok_and(|v| v == "1");
                                 let config = DuckingConfig {
                                     enable_advanced_ducking: advanced as u8,
                                     _pad: [0; 3],

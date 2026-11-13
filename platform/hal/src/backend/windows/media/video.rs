@@ -528,7 +528,7 @@ impl Worker {
     /// The source reader for progressive files, the engine for the rest (or when forced with
     /// `MAKEPAD_MF_ENGINE`).
     fn open(&mut self) {
-        let force_engine = std::env::var_os("MAKEPAD_MF_ENGINE").is_some();
+        let force_engine = relax_api::env::var_os("MAKEPAD_MF_ENGINE").is_some();
         if !self.network && !self.audio_only && !force_engine && !prefers_engine(&self.url) {
             match ReaderSession::open(&self.device, &self.url) {
                 Ok(r) => {
@@ -544,7 +544,7 @@ impl Worker {
     }
 
     fn open_engine(&mut self) {
-        let bgra = std::env::var_os("MAKEPAD_MF_BGRA").is_some();
+        let bgra = relax_api::env::var_os("MAKEPAD_MF_BGRA").is_some();
         match EngineSession::open(&self.device, &self.url, self.looping, !bgra, self.tx.clone()) {
             Ok(e) => self.engine = Engine::Media(Box::new(e)),
             Err(e) => {

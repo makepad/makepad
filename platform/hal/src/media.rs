@@ -494,7 +494,7 @@ pub fn read_camera_frame(b: &[u8]) -> Option<CameraFrameData<'_>> {
 }
 
 /// What VideoToolbox can do with H.264 on this machine (`video_h264_probe`).
-#[makepad_relax_api::relax_api(plain)]
+#[relax_api::relax_api(plain)]
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct H264Probe {

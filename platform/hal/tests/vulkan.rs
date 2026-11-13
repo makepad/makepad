@@ -94,7 +94,7 @@ fn shader() -> Vec<u8> {
     ir.functions.extend([vertex, fragment]);
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
         texture_base: 0, sampler_base: 0, depth_binding: u32::MAX, instance_binding: u32::MAX,
-        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
+        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), sampler_textures: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
 fn resources(hal: &Hal, sid: u32) {
@@ -158,7 +158,9 @@ fn rendered(hal: &Hal, sid: u32, target: Id, kind: u32, size: [u32; 2], first: u
 fn pixels(hal: &Hal, sid: u32, req: u32) -> Vec<u8> {
     let mut pixels = Vec::new();
     until(hal, sid, |e| match e {
-        HalEvent::Readback { req: got, status, pixels: p, .. } if got == req => {
+        HalEvent::Readback { req: got, status, lease, .. } if got == req => {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let p = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK); pixels = p.to_vec(); true
         }
         _ => false,
@@ -207,7 +209,7 @@ fn sampled_shader() -> Vec<u8> {
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
         texture_base: 0, sampler_base: 1, depth_binding: u32::MAX, instance_binding: u32::MAX,
         pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: vec![0],
-        samplers: vec![makepad_hal::spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 }], xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
+        samplers: vec![makepad_hal::spirv::SpirvSampler { filter: 0, address: 1, compare: false, pixel: false, anisotropy: 1 }], sampler_textures: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
 #[cfg(target_os = "linux")]
@@ -361,6 +363,149 @@ fn offscreen_two_passes_three_draws_and_timestamp() {
     for x in [5, 16, 26] { assert_eq!(&image[(27 * 32 + x) * 4..][..4], &[255; 4]); }
     for x in [5, 26] { assert_eq!(&image[(2 * 32 + x) * 4..][..4], &[0, 0, 0, 255]); }
     assert!(hal.close(info.session));
+}
+
+/// The vertex position as given, the colour the first vec4 of the pass's uniform block (binding
+/// 0, `pipeline_binding::PASS`): a view of the pass shows its own block.
+fn pass_color_shader() -> Vec<u8> {
+    let mut ir = IrModule::new();
+    let vec4 = ir.vec_ty(4, IrScalar::F32);
+    let block_type = ir.synthetic_struct("PassColor", vec![IrField { name: Default::default(), ty: vec4 }]);
+    let block = ir.global(IrGlobalKind::Io(IrIo::UniformBuffer), Default::default(), block_type);
+    ir.globals[block as usize].binding = Some(0);
+    let mut vertex = IrFunction::new("vertex_main".into(), TY_VOID);
+    vertex.entry = Some(IrEntry { stage: IrStage::Vertex,
+        inputs: vec![IrEntryIo { name: "geometry".into(), ty: vec4, binding: IrIoBinding::Location(0) }],
+        outputs: vec![IrEntryIo { name: "position".into(), ty: vec4, binding: IrIoBinding::Builtin(IrBuiltinIo::Position) }] });
+    let input = vertex.expr(ExprKind::EntryIn(0), vec4);
+    let output = vertex.expr(ExprKind::EntryOut(0), vec4);
+    vertex.body.extend([Stmt::Assign(output, input), Stmt::Return(NO_EXPR)]);
+    let mut fragment = IrFunction::new("fragment_main".into(), TY_VOID);
+    fragment.entry = Some(IrEntry { stage: IrStage::Fragment, inputs: Vec::new(),
+        outputs: vec![IrEntryIo { name: "color".into(), ty: vec4, binding: IrIoBinding::Location(0) }] });
+    let global = fragment.expr(ExprKind::Global(block), block_type);
+    let color = fragment.expr(ExprKind::Field(global, 0), vec4);
+    let output = fragment.expr(ExprKind::EntryOut(0), vec4);
+    fragment.body.extend([Stmt::Assign(output, color), Stmt::Return(NO_EXPR)]);
+    ir.functions.extend([vertex, fragment]);
+    SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
+        texture_base: 1, sampler_base: 1, depth_binding: u32::MAX, instance_binding: u32::MAX,
+        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), sampler_textures: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
+}
+
+/// An MSAA pass (`Pass::samples`: 4) draws four samples a pixel and resolves them into its
+/// attachments: a slanted edge leaves pixels a quarter, a half and three quarters covered, and no
+/// other shade. Two passes side by side, as the eyes of an XR frame, both with depth, the second
+/// loading what the first left (their multisampled images are kept, `exec::twins_kept`): the
+/// first's half keeps its picture through the second's resolve. Then the same target as one pass
+/// with two views (`Pass::view_rects`), its multisampled images transient (resolved, never
+/// stored): each half shows its own view's block of the pass uniforms, resolved from four
+/// samples; the triangle reaches half a view past its view's left edge and nothing of a view
+/// lands in the other half; a frame drawn again reads the same (nothing rests on samples stored
+/// before). No draw is left out.
+#[test]
+fn an_msaa_pass_resolves_four_samples_and_a_loading_pass_or_a_second_view_continues_it() {
+    const TARGET: Id = Id::new(5, 1);
+    const DEPTH: Id = Id::new(6, 1);
+    const TRI: Id = Id::new(5, 1);
+    const TRI_INDEX: Id = Id::new(6, 1);
+    const VIEW_PIPE: Id = Id::new(5, 1);
+    let (hal, info) = open();
+    assert!(info.msaa & 4 != 0, "the GPU has 4 samples a pixel, and the HAL says so (msaa {:#b})", info.msaa);
+    let sid = info.session;
+    resources(&hal, sid);
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(TARGET, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 8, [1, 1], Attr::default());
+    w.texture_create(DEPTH, usage::RENDER_TARGET, format::DEPTH32F, 16, 8, [1, 1], Attr::default());
+    // a triangle at each view's top left whose long edge is not at 45 degrees, from half a view
+    // left of the view (clip x -2)
+    let tri: Vec<u8> = [-2.0f32, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, -2.0, -0.4, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+    w.buffer_create(TRI, buffer_kind::VERTEX, tri.len() as u64, Attr::default());
+    w.buffer_update(TRI, 0, &tri);
+    w.buffer_create(TRI_INDEX, buffer_kind::INDEX, 6, Attr::default());
+    w.buffer_update(TRI_INDEX, 0, &[0, 0, 1, 0, 2, 0]);
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &pass_color_shader(),
+        &[u32::MAX, 0, u32::MAX, u32::MAX, u32::MAX, 0], &[16]);
+    w.pipeline_create(VIEW_PIPE, dialect::SPIRV, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    until(&hal, sid, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == VIEW_PIPE));
+    let tri_draw = |pipeline: Id| Draw { pipeline, vb: TRI, ib: TRI_INDEX, index: [0, 3], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], ..Default::default() };
+    let eye_pass = |eye: usize| {
+        let load = if eye == 0 { pass_load::CLEAR } else { pass_load::LOAD };
+        Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], depth: DEPTH, load: [load; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], clear_depth: 1.0,
+            viewport: [8.0 * eye as f32, 0.0, 8.0, 8.0], dpi: 1.0, samples: 4, ..Default::default() }
+    };
+    let read = |w: &mut CmdWriter, n: u64, req: u32| -> Vec<[u8; 4]> {
+        hal.submit(&w.buf());
+        frame_done(&hal, sid, n);
+        w.clear();
+        w.texture_readback(TARGET, req, [0, 0, 16, 8]);
+        hal.submit(&w.buf());
+        pixels(&hal, sid, req).chunks(4).map(|p| [p[0], p[1], p[2], p[3]]).collect()
+    };
+    let quarters = |px: &[[u8; 4]], channel: usize, what: &str| {
+        for (k, p) in px.iter().enumerate() {
+            let q = p[channel] as f32 * 4.0 / 255.0;
+            assert!((q - q.round()).abs() * 255.0 / 4.0 <= 1.5, "{what}: pixel ({}, {}) {p:?}: not a quarter's step of coverage, so not 4 samples a pixel", k % 16, k / 16);
+        }
+    };
+    let half_holds = |px: &[[u8; 4]], half: usize, channel: usize, what: &str| {
+        let at = |x: usize, y: usize| px[y * 16 + half * 8 + x][channel];
+        let edge = (0..8).flat_map(|y| (0..8).map(move |x| (x, y))).filter(|&(x, y)| at(x, y) != 0 && at(x, y) != 255).count();
+        assert!(at(0, 0) == 255 && at(7, 7) == 0, "{what}: half {half} holds its triangle (corner {} and {}): {px:?}", at(0, 0), at(7, 7));
+        assert!(edge >= 4, "{what}: half {half}'s edge is resolved from its samples: {edge} pixels part covered, {px:?}");
+    };
+    // the two passes: the first frames ask for the four-sample states (drawn single sampled meanwhile)
+    let mut warm = 0;
+    let two_passes = loop {
+        warm += 1;
+        w.clear();
+        w.frame_begin(warm, FrameMeta::default());
+        for eye in 0..2 {
+            w.pass(eye_pass(eye));
+            w.draw(tri_draw(PIPE));
+        }
+        w.frame_end(TARGET, target::TEXTURE);
+        let px = read(&mut w, warm, warm as u32);
+        let stats = hal.with_world(|wd| wd.session(sid).unwrap().stats);
+        if px.iter().any(|p| p[0] != 0 && p[0] != 255) || warm == 20 {
+            assert_eq!(stats.skipped_draws, 0, "no draw was left out while the four-sample state compiled");
+            break px;
+        }
+    };
+    quarters(&two_passes, 0, "two passes");
+    for half in 0..2 { half_holds(&two_passes, half, 0, "two passes"); }
+    // one pass, two views: the left view's block red, the right's green; drawn until its
+    // pipeline's four-sample state is in, then once more
+    let mut views: Vec<Vec<[u8; 4]>> = Vec::new();
+    for n in warm + 1.. {
+        let resolved = views.last().is_some_and(|px| px.iter().any(|p| p[0] != 0 && p[0] != 255));
+        if (resolved && views.len() >= 2 && views[views.len() - 2].iter().any(|p| p[0] != 0 && p[0] != 255)) || n == warm + 20 {
+            break;
+        }
+        w.clear();
+        w.frame_begin(n, FrameMeta::default());
+        let uniforms = w.keep(&[1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0][..]);
+        let view_rects = w.put_rects(&[[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]]);
+        w.pass(Pass { color: [TARGET, Id::NONE, Id::NONE, Id::NONE], depth: DEPTH, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4], clear_depth: 1.0,
+            viewport: [0.0, 0.0, 16.0, 8.0], dpi: 1.0, samples: 4, uniforms, view_rects, ..Default::default() });
+        w.draw(tri_draw(VIEW_PIPE));
+        w.frame_end(TARGET, target::TEXTURE);
+        views.push(read(&mut w, n, n as u32));
+    }
+    let px = &views[views.len() - 1];
+    for (k, p) in px.iter().enumerate() {
+        let other = if k % 16 < 8 { p[1] } else { p[0] };
+        assert_eq!(other, 0, "views: pixel ({}, {}) {p:?}: the other view's colour landed in this half", k % 16, k / 16);
+    }
+    quarters(px, 0, "views, red");
+    quarters(px, 1, "views, green");
+    half_holds(px, 0, 0, "views");
+    half_holds(px, 1, 1, "views");
+    assert!(views.len() >= 2 && views[views.len() - 2] == views[views.len() - 1], "the frame drawn again reads the same: nothing rests on samples stored before");
+    let stats = hal.with_world(|wd| wd.session(sid).unwrap().stats);
+    assert_eq!((stats.skipped_draws, stats.bad_args), (0, 0), "every draw was drawn and the views were taken");
+    assert!(hal.close(sid));
 }
 
 #[test]
@@ -929,7 +1074,9 @@ fn uploads_from_freed_temporaries_land_the_bytes_of_the_call() {
                 got[0] = unsafe { std::slice::from_raw_parts(record.ptr as *const u8, record.len as usize) }.to_vec();
                 hal_lease_release(record.token);
             }
-            if let HalEvent::Readback { req: req @ 1..=2, status, pixels, .. } = e {
+        if let HalEvent::Readback { req: req @ 1..=2, status, lease, .. } = e {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK);
             got[req as usize - 1] = pixels.to_vec();
         }

@@ -1,7 +1,7 @@
 //! Host-native entry points. The host calls register_natives from its JNI_OnLoad; no JNI
 //! symbol is exported here, so app-side services can register their remaining methods.
 use super::{shell::{lock, AndroidParams, Shared}, state::{self, Pointer}, surface::Window};
-use crate::{backend::exec::OsCmd, buffers::Wire, clock_ns, input, lifecycle};
+use crate::{backend::exec::OsCmd, buffers::Wire, clipboard::ClipboardData, clock_ns, input, lifecycle};
 use makepad_jni_sys::{registration as reg, *};
 use std::{ffi::{c_long, c_void, CStr}, sync::{atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}, Mutex, OnceLock}, time::Duration};
 
@@ -24,10 +24,6 @@ extern "C" {
     fn AChoreographer_getInstance() -> *mut c_void;
     fn AChoreographer_postFrameCallback(choreographer: *mut c_void, callback: unsafe extern "C" fn(c_long, *mut c_void), data: *mut c_void);
 }
-extern "C" {
-    fn _exit(status: std::ffi::c_int) -> !;
-}
-
 /// The Choreographer calls newer than the app's minimum API level, looked up when it's set up.
 struct ChoreographerCalls {
     /// `AChoreographer_postVsyncCallback` and the frame data its callback reads (API 33)
@@ -536,7 +532,7 @@ pub(super) fn with_activity<R>(f: impl FnOnce(*mut JNIEnv, jobject) -> R) -> Opt
 /// Ends the process once the app returned. If an Activity was destroyed since the app started (`destroyed`
 /// is the count then) and the one here now never drew, it came as the app closed, so it starts again.
 pub(super) fn end_process(destroyed: usize) -> ! {
-    // Held through `_exit`, so an Activity created from here on waits in `create` and dies before
+    // Held through the end, so an Activity created from here on waits in `create` and dies before
     // it resumes, and the system starts it again in a new process.
     let current = lock(&ACTIVITY);
     if *current != 0 && ACTIVITIES_DESTROYED.load(Ordering::Acquire) != destroyed && SURFACE_COVERED.load(Ordering::Acquire) {
@@ -546,7 +542,8 @@ pub(super) fn end_process(destroyed: usize) -> ! {
             if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
         });
     }
-    unsafe { _exit(0) }
+    // the process's exit work (its endpoint's files), the flushes, then `_exit`, as every process ends
+    makepad_core_util::process_end::end(0)
 }
 
 pub(super) fn ime_command(cmd: OsCmd) -> bool {
@@ -603,15 +600,126 @@ pub(super) fn ime_command(cmd: OsCmd) -> bool {
     }).unwrap_or(false)
 }
 
-pub(super) fn copy_to_clipboard(text: &str) -> bool {
+unsafe fn clipboard_manager(env: *mut JNIEnv, activity: jobject) -> jobject {
+    let service = ((**env).NewStringUTF.unwrap())(env, c"clipboard".as_ptr());
+    if service.is_null() { return std::ptr::null_mut(); }
+    let manager = reg::object(env, activity, c"getSystemService", c"(Ljava/lang/String;)Ljava/lang/Object;", &[jvalue { l: service }]);
+    ((**env).DeleteLocalRef.unwrap())(env, service);
+    manager
+}
+
+/// A Java string of `text` (null when the VM is out of memory).
+unsafe fn java_string(env: *mut JNIEnv, text: &str) -> jstring {
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    ((**env).NewString.unwrap())(env, utf16.as_ptr(), utf16.len() as i32)
+}
+
+/// A new `class` made by its constructor `sig` (null on any failure, with its exception pending).
+unsafe fn new_object(env: *mut JNIEnv, class: &CStr, sig: &CStr, args: &[jvalue]) -> jobject {
+    let class = ((**env).FindClass.unwrap())(env, class.as_ptr());
+    if class.is_null() { return std::ptr::null_mut(); }
+    let init = ((**env).GetMethodID.unwrap())(env, class, c"<init>".as_ptr(), sig.as_ptr());
+    if init.is_null() { return std::ptr::null_mut(); }
+    ((**env).NewObjectA.unwrap())(env, class, init, args.as_ptr())
+}
+
+/// The extra of a clip item's intent that holds the copy's Markdown: Android has no Markdown type, and
+/// a second item would be pasted as more text by a text field elsewhere, which ignores the intent.
+const MARKDOWN_EXTRA: &CStr = c"text/markdown";
+
+pub(super) fn copy_to_clipboard(data: &ClipboardData) -> bool {
     with_activity(|env, activity| unsafe {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        let s = ((**env).NewString.unwrap())(env, utf16.as_ptr(), utf16.len() as i32);
-        let ok = !s.is_null() && void(env, activity, c"copyToClipboard", c"(Ljava/lang/String;)V", &[jvalue { l: s }]);
+        if activity.is_null() { return false; }
+        if ((**env).PushLocalFrame.unwrap())(env, 32) != 0 {
+            ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env);
+            return false;
+        }
+        let ok = (|| {
+            let s = java_string(env, &data.text);
+            if s.is_null() { return false; }
+            if data.html.is_empty() && data.markdown.is_empty() {
+                return void(env, activity, c"copyToClipboard", c"(Ljava/lang/String;)V", &[jvalue { l: s }]);
+            }
+            // one item: the text, its HTML and an intent holding its Markdown
+            let null = std::ptr::null_mut();
+            let html = if data.html.is_empty() { null } else { java_string(env, &data.html) };
+            let intent = if data.markdown.is_empty() {
+                null
+            } else {
+                let intent = new_object(env, c"android/content/Intent", c"()V", &[]);
+                let key = ((**env).NewStringUTF.unwrap())(env, MARKDOWN_EXTRA.as_ptr());
+                let markdown = java_string(env, &data.markdown);
+                if intent.is_null() || key.is_null() || markdown.is_null() { return false; }
+                reg::object(env, intent, c"putExtra", c"(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;", &[jvalue { l: key }, jvalue { l: markdown }]);
+                intent
+            };
+            let item = new_object(env, c"android/content/ClipData$Item", c"(Ljava/lang/CharSequence;Ljava/lang/String;Landroid/content/Intent;Landroid/net/Uri;)V", &[jvalue { l: s }, jvalue { l: html }, jvalue { l: intent }, jvalue { l: null }]);
+            let string = ((**env).FindClass.unwrap())(env, c"java/lang/String".as_ptr());
+            if item.is_null() || string.is_null() { return false; }
+            let types: &[&CStr] = if html.is_null() { &[c"text/plain"] } else { &[c"text/plain", c"text/html"] };
+            let mimes = ((**env).NewObjectArray.unwrap())(env, types.len() as i32, string, null);
+            if mimes.is_null() { return false; }
+            for (at, mime) in types.iter().enumerate() {
+                let mime = ((**env).NewStringUTF.unwrap())(env, mime.as_ptr());
+                if mime.is_null() { return false; }
+                ((**env).SetObjectArrayElement.unwrap())(env, mimes, at as i32, mime);
+            }
+            let label = ((**env).NewStringUTF.unwrap())(env, c"text".as_ptr());
+            if label.is_null() { return false; }
+            let description = new_object(env, c"android/content/ClipDescription", c"(Ljava/lang/CharSequence;[Ljava/lang/String;)V", &[jvalue { l: label }, jvalue { l: mimes }]);
+            if description.is_null() { return false; }
+            let clip = new_object(env, c"android/content/ClipData", c"(Landroid/content/ClipDescription;Landroid/content/ClipData$Item;)V", &[jvalue { l: description }, jvalue { l: item }]);
+            let manager = clipboard_manager(env, activity);
+            !clip.is_null() && !manager.is_null() && void(env, manager, c"setPrimaryClip", c"(Landroid/content/ClipData;)V", &[jvalue { l: clip }])
+        })();
         if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
-        if !s.is_null() { ((**env).DeleteLocalRef.unwrap())(env, s); }
+        ((**env).PopLocalFrame.unwrap())(env, std::ptr::null_mut());
         ok
     }).unwrap_or(false)
+}
+
+pub(super) fn read_clipboard() -> Option<ClipboardData> {
+    with_activity(|env, activity| unsafe {
+        if activity.is_null() { return None; }
+        if ((**env).PushLocalFrame.unwrap())(env, 16) != 0 {
+            ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env);
+            return None;
+        }
+        let mut content = (|| {
+            let mut content = ClipboardData::default();
+            let manager = clipboard_manager(env, activity);
+            if manager.is_null() { return None; }
+            let clip = reg::object(env, manager, c"getPrimaryClip", c"()Landroid/content/ClipData;", &[]);
+            if clip.is_null() { return Some(content); }
+            if int(env, clip, c"getItemCount", c"()I", &[]) == 0 { return Some(content); }
+            let item = reg::object(env, clip, c"getItemAt", c"(I)Landroid/content/ClipData$Item;", &[jvalue { i: 0 }]);
+            if item.is_null() { return None; }
+            let text = reg::object(env, item, c"getText", c"()Ljava/lang/CharSequence;", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { return None; }
+            if !text.is_null() {
+                let string = reg::object(env, text, c"toString", c"()Ljava/lang/String;", &[]);
+                if string.is_null() { return None; }
+                content.text = reg::string(env, string);
+                if ((**env).ExceptionCheck.unwrap())(env) != 0 { return None; }
+            }
+            let html = reg::object(env, item, c"getHtmlText", c"()Ljava/lang/String;", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { return None; }
+            content.html = reg::string(env, html);
+            let intent = reg::object(env, item, c"getIntent", c"()Landroid/content/Intent;", &[]);
+            if ((**env).ExceptionCheck.unwrap())(env) != 0 { return None; }
+            if !intent.is_null() {
+                let key = ((**env).NewStringUTF.unwrap())(env, MARKDOWN_EXTRA.as_ptr());
+                if key.is_null() { return None; }
+                let markdown = reg::object(env, intent, c"getStringExtra", c"(Ljava/lang/String;)Ljava/lang/String;", &[jvalue { l: key }]);
+                if ((**env).ExceptionCheck.unwrap())(env) != 0 { return None; }
+                content.markdown = reg::string(env, markdown);
+            }
+            Some(content)
+        })();
+        if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); content = None; }
+        ((**env).PopLocalFrame.unwrap())(env, std::ptr::null_mut());
+        content
+    }).flatten()
 }
 
 /// The selection's drag handles at `start` / `end`, in window points (the Activity takes pixels).

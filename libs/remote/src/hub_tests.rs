@@ -37,7 +37,7 @@ fn ledger_dir(test: &str) -> std::path::PathBuf {
 fn relay_endpoint() -> Endpoint {
     static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    relay::endpoint(relay::Config { name: "d".into(), launch: vec!["sleep".into()], env: vec![("SANDBOX_MUTE".into(), "1".into())], ledger: ledger_dir(&format!("shared{n}")) })
+    relay::endpoint(relay::Config { name: "d".into(), launch: vec!["sleep".into()], env: vec![("MAKEPAD_MUTE".into(), "1".into())], ledger: ledger_dir(&format!("shared{n}")) })
 }
 
 /// A relay on an existing ledger (what a restarted relay does).
@@ -129,6 +129,11 @@ fn requests_in_a_row_on_one_channel_take_one_route() {
         assert!(reply.len() == 1 && reply[0].starts_with("{\"pong\":1"), "{reply:?}");
         assert_eq!(hub.routes(), 1);
     }
+    // a reply far past the 16 KiB it was once cut at comes through the hub whole, the line a
+    // message boundary cut inside a character joined again
+    let mut big = Vec::new();
+    assert_eq!(asking.ask("big", &mut |l| big.push(l.to_string())), Ok(false));
+    assert!(big == crate::tests::big_lines(), "the big reply arrives whole through the hub");
     drop(asking);
     let t = std::time::Instant::now();
     while hub.routes() > 0 {
@@ -188,7 +193,10 @@ fn requests_to_an_unreachable_fleet_host_leave_no_route_threads() {
     // the request line arrives while the dial is still failing: the route ends without an
     // upstream, and its client -> upstream thread must end with it
     let hub = Hub::new(&Hosts::default());
-    hub.set_fleet(std::sync::Arc::new(|_addr: &str| {
+    let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = dials.clone();
+    hub.set_fleet(std::sync::Arc::new(move |_addr: &str| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(50));
         Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "down"))
     }));
@@ -207,6 +215,9 @@ fn requests_to_an_unreachable_fleet_host_leave_no_route_threads() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(hub.routes(), 0, "route threads left behind");
+    // a down host is dialled again only after a pause: ten requests in a row are not ten dials
+    let n = dials.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(n < 5, "{n} dials for 10 requests to a down host");
 }
 
 #[test]
@@ -488,4 +499,22 @@ fn closed_clients_are_let_go() {
     }
     let (_live, _served) = pair_served(&ep);
     assert_eq!(hub.kept_clients(), (1, 1));
+}
+
+/// The hub's socket, pid file and log are in this user's own socket dir, never at fixed names in
+/// the shared temp dir; and a client refuses a socket another user's process serves (checked
+/// where the system serves one anyone may connect to: macOS's mDNSResponder, Linux's D-Bus).
+#[test]
+fn the_hubs_files_are_this_users_and_a_client_refuses_another_users_socket() {
+    let own = crate::carrier::unix::socket_dir();
+    for p in [crate::hub::socket_path(), crate::hub::pid_path(), crate::hub::log_path()] {
+        assert_eq!(p.parent(), Some(own.as_path()), "{} is not in this user's own socket dir", p.display());
+    }
+    for sys in ["/var/run/mDNSResponder", "/run/dbus/system_bus_socket"] {
+        let path = std::path::Path::new(sys);
+        if UnixStream::connect(path).is_ok() {
+            let e = crate::carrier::unix::dial(path).err().expect("a client dialled another user's socket");
+            assert!(e.to_string().contains("another user"), "{sys}: {e}");
+        }
+    }
 }

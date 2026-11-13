@@ -7,16 +7,16 @@
 //! the link drops the hub reconnects and reopens the feed `from=<last seq>`, and the client sees a
 //! gap marker where the link was down, nothing else.
 //!
-//! The hub is started on demand by the CLI ([`connect`]), listens on `$TMPDIR/makepad-remote-hub.sock`
-//! (0600, same user), keeps a pid file and exits 60 s after its last client. With a TCP listener
-//! (`serve(.., Some(addr))`, only on request) it stays until killed.
+//! The hub is started on demand by the CLI ([`connect`]), listens on `makepad-remote-hub.sock` in this
+//! user's own socket dir (0600, same user; [`hub_dir`]), keeps a pid file and exits 60 s after its
+//! last client. With a TCP listener (`serve(.., Some(addr))`, only on request) it stays until killed.
 
 use crate::cmd::json_str;
 use crate::conn::{Channel, ChannelTx, Conn, Event, CLOSE_LINK_LOST, CLOSE_NORMAL, CLOSE_REFUSED};
 use crate::endpoint::{Endpoint, Factory};
 use crate::hosts::{Host, Hosts, Via};
 use crate::lines;
-use crate::link::{Client, Error, Target};
+use crate::link::{Client, Error, LineJoin, Target};
 use crate::stream::{write_varint, TAG_DROP};
 use std::io;
 use std::path::PathBuf;
@@ -31,16 +31,25 @@ const DIAL_WAIT: Duration = Duration::from_secs(5);
 /// A feed that lost its link tries this many times (backoff up to 2.5 s) before giving up.
 const FEED_RETRIES: u32 = 30;
 
+/// Where the hub's socket, pid file and log are: this user's own socket dir
+/// (`carrier::unix::socket_dir`: `/tmp/makepad-<uid>`, made 0700 and refused when it is not this
+/// user's own; on Windows the user's temp dir). At fixed names in the shared temp dir another
+/// user could bind the socket first and answer this user's requests, write a pid that kept this
+/// user's hub from starting, or own the log.
+pub fn hub_dir() -> PathBuf {
+    crate::carrier::unix::socket_dir()
+}
+
 pub fn socket_path() -> PathBuf {
-    std::env::temp_dir().join("makepad-remote-hub.sock")
+    hub_dir().join("makepad-remote-hub.sock")
 }
 
 pub fn pid_path() -> PathBuf {
-    std::env::temp_dir().join("makepad-remote-hub.pid")
+    hub_dir().join("makepad-remote-hub.pid")
 }
 
 pub fn log_path() -> PathBuf {
-    std::env::temp_dir().join("makepad-remote-hub.log")
+    hub_dir().join("makepad-remote-hub.log")
 }
 
 /// One host's link.
@@ -231,7 +240,7 @@ impl Hub {
 
     /// The endpoint local clients talk to: `route` and `hosts`.
     pub fn client_endpoint(&self) -> Endpoint {
-        let ep = Endpoint::new("makepad-run-hub");
+        let ep = Endpoint::new("relax-hub");
         ep.register("route", 1, route_factory(self.clone()));
         let hub = self.clone();
         ep.register("hosts", 1, lines::service("hosts", Arc::new(move |_, out| hub.hosts_report(out))));
@@ -253,7 +262,7 @@ impl Hub {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn listen_dial(&self, bind: &str, identity: makepad_network::tls::TlsIdentity, source: Source) -> io::Result<std::net::SocketAddr> {
         self.set_source(source.clone());
-        let ep = Endpoint::new("makepad-run-hub");
+        let ep = Endpoint::new("relax-hub");
         let s2 = source.clone();
         let keys: crate::carrier::tcp::KeySource = Arc::new(move || s2().dial_keys());
         let hub = self.clone();
@@ -291,7 +300,7 @@ impl Hub {
     #[cfg(test)]
     #[cfg_attr(not(unix), allow(dead_code))]
     pub(crate) fn accept_dialed(&self, car: crate::carrier::Carrier) -> Result<Conn, crate::hello::HandshakeError> {
-        let conn = Endpoint::new("makepad-run-hub").serve(car.reader, car.writer, car.shutdown)?;
+        let conn = Endpoint::new("relax-hub").serve(car.reader, car.writer, car.shutdown)?;
         self.bind_link(&conn.peer().name.clone(), &conn);
         Ok(conn)
     }
@@ -565,6 +574,8 @@ fn lock_pid() -> io::Result<bool> {
 /// listener). Returns `Ok(false)` at once when another hub already runs. `listen`: `host:port`
 /// for paired devices to dial; the hub's TLS identity is created on first use.
 pub fn serve(hosts: Hosts, listen: Option<&str>) -> io::Result<bool> {
+    #[cfg(unix)]
+    crate::carrier::unix::own_socket_dir()?;
     if !lock_pid()? {
         return Ok(false);
     }
@@ -613,6 +624,8 @@ pub fn connect(start: Option<&std::path::Path>) -> Result<Client, String> {
         return Ok(client);
     }
     let exe = start.ok_or_else(|| "no makepad hub is running".to_string())?;
+    #[cfg(unix)]
+    crate::carrier::unix::own_socket_dir().map_err(|e| e.to_string())?;
     let log = std::fs::File::create(log_path()).map_err(|e| format!("cannot write {}: {e}", log_path().display()))?;
     let log2 = log.try_clone().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
@@ -636,9 +649,10 @@ pub fn ask(client: &Client, target: &str, service: &str, args: &str, line: &str,
     let ch = client.open("route", &format!("{target} {service} {args}")).map_err(|e| e.to_string())?;
     ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let mut had_err = false;
+    let mut join = LineJoin::default();
     loop {
         let Some(event) = ch.recv() else { return Err("the hub connection ended".into()) };
-        if let Some(done) = answer_event(event, &mut had_err, each) {
+        if let Some(done) = answer_event(event, &mut join, &mut had_err, each) {
             return done;
         }
     }
@@ -664,9 +678,10 @@ impl Asking {
     pub fn ask(&self, line: &str, each: &mut dyn FnMut(&str)) -> Result<bool, String> {
         self.0.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
         let mut had_err = false;
+        let mut join = LineJoin::default();
         loop {
             let Some(event) = self.0.recv() else { return Err("the hub connection ended".into()) };
-            if let Some(done) = answer_event(event, &mut had_err, &mut |l| {
+            if let Some(done) = answer_event(event, &mut join, &mut had_err, &mut |l| {
                 each(l);
                 true
             }) {
@@ -712,6 +727,7 @@ pub fn ask_while(client: &Client, target: &str, service: &str, args: &str, line:
     let ch = client.open("route", &format!("{target} {service} {args}")).map_err(|e| e.to_string())?;
     ch.send(line.as_bytes().to_vec()).map_err(|e| e.to_string())?;
     let mut had_err = false;
+    let mut join = LineJoin::default();
     loop {
         let event = match ch.recv_timeout(Duration::from_millis(20)) {
             Ok(event) => event,
@@ -719,26 +735,28 @@ pub fn ask_while(client: &Client, target: &str, service: &str, args: &str, line:
             Err(true) => return Ok(None),
             Err(false) => return Err("the hub connection ended".into()),
         };
-        if let Some(done) = answer_event(event, &mut had_err, each) {
+        if let Some(done) = answer_event(event, &mut join, &mut had_err, each) {
             return done.map(Some);
         }
     }
 }
 
 /// One event of an answer to [`ask`]: Some once it ends the answer.
-fn answer_event(event: Event, had_err: &mut bool, each: &mut dyn FnMut(&str) -> bool) -> Option<Result<bool, String>> {
+fn answer_event(event: Event, join: &mut LineJoin, had_err: &mut bool, each: &mut dyn FnMut(&str) -> bool) -> Option<Result<bool, String>> {
     match event {
         Event::Data(d) => {
-            for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                if l.starts_with("{\"end\":") {
-                    return Some(Ok(*had_err));
+            let mut done = None;
+            join.feed(&d, &mut |l| {
+                if !l.starts_with("{\"end\":") {
+                    *had_err |= l.starts_with("{\"err\":");
+                    if each(l) {
+                        return true;
+                    }
                 }
-                *had_err |= l.starts_with("{\"err\":");
-                if !each(l) {
-                    return Some(Ok(*had_err));
-                }
-            }
-            None
+                done = Some(Ok(*had_err));
+                false
+            });
+            done
         }
         Event::Opened(_) => None,
         Event::Closed(CLOSE_NORMAL, _) => Some(Err("the answer ended without an end line".into())),

@@ -50,7 +50,7 @@ fn run_app(spec: &str, argv: &[String]) -> ExitCode {
     // `<host>:<app|pid>` goes through the hub to an app on another machine (a phone that dials in)
     #[cfg(unix)]
     let routed = (spec.contains(':') && !spec.contains('/')).then(|| {
-        let bin = std::env::var_os("MAKEPAD_RUN_BIN").map(PathBuf::from);
+        let bin = std::env::var_os("RELAX_BIN").map(PathBuf::from);
         makepad_remote::hub::connect(bin.as_deref()).map(|hub| makepad_remote::Client::routed(&hub, spec))
     });
     #[cfg(not(unix))]

@@ -28,6 +28,38 @@ use crate::{draw_list::DrawListId, draw_pass::DrawPassId};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
+/// The draws of a mesh's pick repaint: `(first_index, count, id)` covering `0..index_count` in
+/// order. Indices before the first run, and runs with id 0, take `call_id`. Starts are clamped
+/// to `index_count` and to the previous start, so a bad table never draws out of range; empty
+/// runs are skipped and neighbours with the same resolved id merge, so the counts sum to
+/// `index_count`.
+pub fn pick_runs(ranges: &[[u32; 2]], index_count: u32, call_id: u32) -> impl Iterator<Item = (u32, u32, u32)> + '_ {
+    let mut ranges = ranges.iter();
+    let mut first = 0;
+    let mut id = call_id;
+    let mut pending: Option<(u32, u32, u32)> = None;
+    std::iter::from_fn(move || loop {
+        if first == index_count {
+            return pending.take();
+        }
+        let (end, next_id) = match ranges.next() {
+            Some(&[start, id]) => (start.min(index_count).max(first), if id == 0 { call_id } else { id }),
+            None => (index_count, call_id),
+        };
+        let run = (first, end - first, id);
+        first = end;
+        id = next_id;
+        if run.1 == 0 {
+            continue;
+        }
+        match pending.as_mut() {
+            Some(prev) if prev.2 == run.2 => prev.1 += run.1,
+            Some(_) => return pending.replace(run),
+            None => pending = Some(run),
+        }
+    })
+}
+
 /// A pick asked for ([`Cx::request_pick`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PickTicket(pub u64);
@@ -50,8 +82,8 @@ pub enum PickError {
 pub struct PickImage {
     pub width: usize,
     pub height: usize,
-    /// BGRA8, the id in blue (high), green and red (low) bytes.
-    pub bytes: Vec<u8>,
+    /// RGBA8, the id in red (low), green and blue (high) bytes.
+    pub bytes: crate::HostBuf,
 }
 
 impl PickImage {
@@ -64,7 +96,7 @@ impl PickImage {
         let Some(p) = self.bytes.get(at..at + 4) else {
             return 0;
         };
-        p[2] as u32 | (p[1] as u32) << 8 | (p[0] as u32) << 16
+        p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16
     }
 
     /// The ids within `r` pixels of `x`, `y`, nearest first, each once.
@@ -324,5 +356,23 @@ impl Cx {
         if !self.passes[pass].color_textures.is_empty() {
             out.push(pass);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_runs;
+
+    #[test]
+    fn pick_runs_cover_the_mesh_once() {
+        let runs: Vec<_> = pick_runs(&[[3, 5], [6, 0], [9, 9], [12, 7], [12, 4], [25, 4], [40, 2]], 30, 9).collect();
+        assert_eq!(runs, vec![(0, 3, 9), (3, 3, 5), (6, 6, 9), (12, 18, 4)],
+            "leading gaps and id 0 take the call id, equal neighbours merge, empty runs vanish, and starts past the end clamp away");
+        assert_eq!(runs.iter().map(|run| run.1).sum::<u32>(), 30, "run counts cover the mesh exactly once");
+        assert_eq!(pick_runs(&[[10, 1], [4, 2]], 20, 3).collect::<Vec<_>>(), vec![(0, 10, 3), (10, 10, 2)],
+            "descending starts clamp to the previous start");
+        assert_eq!(pick_runs(&[], 12, 3).collect::<Vec<_>>(), vec![(0, 12, 3)],
+            "an empty table picks the whole mesh as the call id");
+        assert!(pick_runs(&[], 0, 3).collect::<Vec<_>>().is_empty(), "an empty mesh emits no runs");
     }
 }

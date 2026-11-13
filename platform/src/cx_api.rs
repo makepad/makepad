@@ -10,7 +10,7 @@ use {
         draw_list::DrawListId,
         draw_pass::{CxDrawPassParent, CxDrawPassRect, DrawPassId},
         dvec2,
-        event::keyboard::CharOffset,
+        event::keyboard::{CharOffset, ClipboardWrite},
         event::xr::XrAnchor,
         event::{
             video_playback::CameraPreviewMode, DigitId, DragItem, Event, NextFrame, QuitReason,
@@ -373,7 +373,7 @@ pub enum CxOsOp {
         keyboard_shift: f64,
     },
     HideClipboardActions,
-    CopyToClipboard(String),
+    CopyToClipboard(ClipboardWrite),
     ShareText(String),
     SetPrimarySelection(String),
     ShowSelectionHandles {
@@ -1926,9 +1926,14 @@ impl Cx {
     }
 
     pub fn copy_to_clipboard(&mut self, content: &str) {
+        self.copy_to_clipboard_flavours(ClipboardWrite::text(content));
+    }
+
+    /// Copies text with its richer flavours (HTML, Markdown) beside it: a paste target takes the
+    /// richest it understands. A platform without a flavour's clipboard type offers the rest.
+    pub fn copy_to_clipboard_flavours(&mut self, write: ClipboardWrite) {
         if self.script_data.std.host_io_only() { return; }
-        self.platform_ops
-            .push_back(CxOsOp::CopyToClipboard(content.to_owned()));
+        self.platform_ops.push_back(CxOsOp::CopyToClipboard(write));
     }
 
     /// Open the OS share sheet (Android `ACTION_SEND` chooser) with `content`.
@@ -3505,7 +3510,7 @@ impl Cx {
 
 impl Cx {
     /// Drain completed tickets without waiting. Call on Event::Signal, also
-    /// when no pass needs repainting. Returned Arc payloads belong to the
+    /// when no pass needs repainting. Returned HostBuf payloads belong to the
     /// caller and are no longer charged to the platform's result budget.
     pub fn try_take_texture_readbacks(&mut self) -> Vec<crate::texture::TextureReadback> {
         self.take_texture_readback_results(false)
@@ -3576,7 +3581,7 @@ impl Cx {
             }
             if !slot.pending && slot.receive.is_none() {
                 let mut slot = state.slots.remove(index);
-                state.reserved_bytes -= slot.reserved_bytes;
+                if slot.admitted { state.reserved_bytes -= slot.reserved_bytes; }
                 if slot.cancelled {
                     slot.result.data = Err(ReadbackError::Cancelled);
                 }
@@ -3585,6 +3590,7 @@ impl Cx {
                 index += 1;
             }
         }
+        if self.admit_waiting_readbacks() { self.poll_texture_readbacks(); }
         results
     }
 
@@ -3605,6 +3611,7 @@ impl Cx {
         if slot.pending {
             slot.pending = false;
         }
+        if !slot.admitted { self.poll_texture_readbacks(); }
         crate::thread::SignalToUI::set_ui_signal();
         true
     }
@@ -3612,6 +3619,7 @@ impl Cx {
     pub fn texture_readback_usage(&self) -> crate::texture::TextureReadbackUsage {
         crate::texture::TextureReadbackUsage {
             requests: self.textures.1.readbacks.slots.len(),
+            waiting: self.textures.1.readbacks.slots.iter().filter(|slot| slot.pending && !slot.admitted).count(),
             reserved_bytes: self.textures.1.readbacks.reserved_bytes,
         }
     }
@@ -3750,21 +3758,21 @@ mod host_io_tests {
 mod readback_routing_tests {
     use super::*;
     use crate::draw_pass::{DrawPass, DrawPassClearColor};
-    use crate::texture::{ReadbackError, ReadbackRequest, TextureFormat, TextureSize};
+    use crate::texture::{ReadbackError, ReadbackRequest, TextureFormat, TextureSize, TEXTURE_READBACK_MAX_BYTES, TEXTURE_READBACK_MAX_REQUESTS};
 
     /// A render target with a pass that has yet to paint it, so a
-    /// readback is admitted and stays pending until the pass renders.
-    fn pending_target(cx: &mut Cx) -> (Texture, DrawPass) {
+    /// readback stays pending without submitting a GPU copy.
+    fn pending_target(cx: &mut Cx, (width, height): (usize, usize)) -> (Texture, DrawPass) {
         let texture = Texture::new_with_format(
             cx,
             TextureFormat::RenderBGRAu8 {
-                size: TextureSize::Fixed { width: 8, height: 8 },
+                size: TextureSize::Fixed { width, height },
                 initial: true,
             },
         );
         let pass = DrawPass::new(cx);
         pass.add_color_texture(cx, &texture, DrawPassClearColor::ClearWith(crate::makepad_math::vec4(0.0, 0.0, 0.0, 1.0)));
-        pass.set_size(cx, dvec2(8.0, 8.0));
+        pass.set_size(cx, dvec2(width as f64, height as f64));
         cx.passes[pass.draw_pass_id()].dpi_factor = Some(1.0);
         cx.passes[pass.draw_pass_id()].paint_dirty = true;
         (texture, pass)
@@ -3775,7 +3783,7 @@ mod readback_routing_tests {
         // Two consumers in one process: each takes only its own tickets,
         // once; the take-all API still drains whatever is left.
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let targets: Vec<_> = (0..3).map(|_| pending_target(&mut cx)).collect();
+        let targets: Vec<_> = (0..3).map(|_| pending_target(&mut cx, (8, 8))).collect();
         let tickets: Vec<_> = targets
             .iter()
             .map(|(texture, _)| texture.read_back(&mut cx, ReadbackRequest::default()).unwrap())
@@ -3796,6 +3804,110 @@ mod readback_routing_tests {
         let rest = cx.try_take_texture_readbacks();
         assert_eq!(rest.iter().map(|r| r.ticket).collect::<Vec<_>>(), vec![tickets[2]]);
         assert_eq!(cx.texture_readback_usage().reserved_bytes, 0);
+
+        let small_targets: Vec<_> = (0..3).map(|_| pending_target(&mut cx, (8, 8))).collect();
+        let small_tickets: Vec<_> = small_targets
+            .iter()
+            .map(|(texture, _)| texture.read_back(&mut cx, ReadbackRequest::default()).expect("small requests receive tickets"))
+            .collect();
+        let small_usage = cx.texture_readback_usage();
+        assert!(small_usage.reserved_bytes > 0, "the three small requests reserve bytes immediately");
+        assert_eq!(small_usage.waiting, 0, "small requests that fit do not wait for room");
+
+        let (big_target, _big_pass) = pending_target(&mut cx, (4096, 2100));
+        let big_reservation = 4096 * 2100 * 4;
+        assert!(big_reservation > TEXTURE_READBACK_MAX_BYTES, "the big request exceeds the byte bound");
+        let big_ticket = big_target.read_back(&mut cx, ReadbackRequest::default()).expect("an oversized request receives a waiting ticket");
+        assert_eq!(cx.texture_readback_usage().waiting, 1, "the oversized request waits for existing reservations");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, small_usage.reserved_bytes, "the waiting oversized request is uncharged");
+
+        let (later_target, _later_pass) = pending_target(&mut cx, (8, 8));
+        let later_ticket = later_target.read_back(&mut cx, ReadbackRequest::default()).expect("a later small request receives a waiting ticket");
+        assert_eq!(cx.texture_readback_usage().waiting, 2, "the later small request waits behind the oversized request");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, small_usage.reserved_bytes, "the later small request cannot overtake the oversized request");
+
+        for ticket in &small_tickets {
+            assert!(cx.cancel_texture_readback(*ticket), "each admitted small request can be cancelled");
+        }
+        let small_results = cx.try_take_texture_readbacks_for(&small_tickets);
+        assert_eq!(small_results.len(), 3, "taking the three small requests returns all their charges");
+        assert!(small_results.iter().all(|result| matches!(result.data, Err(ReadbackError::Cancelled))), "cancelled small requests finish with Cancelled");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, big_reservation, "the oversized head is admitted alone when the small charges return");
+        assert_eq!(cx.texture_readback_usage().waiting, 1, "the later small request still waits while the oversized request holds its charge");
+
+        assert!(cx.cancel_texture_readback(big_ticket), "the admitted oversized request can be cancelled");
+        let big_results = cx.try_take_texture_readbacks_for(&[big_ticket]);
+        assert_eq!(big_results.len(), 1, "taking the oversized request returns its charge");
+        assert!(matches!(big_results[0].data, Err(ReadbackError::Cancelled)), "the cancelled oversized request finishes with Cancelled");
+        assert_eq!(cx.texture_readback_usage().waiting, 0, "the later small request is admitted after the oversized charge returns");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, small_usage.reserved_bytes / 3, "only the later small request holds a reservation");
+
+        assert!(cx.cancel_texture_readback(later_ticket), "the later admitted small request can be cancelled");
+        let later_results = cx.try_take_texture_readbacks_for(&[later_ticket]);
+        assert_eq!(later_results.len(), 1, "taking the later small request returns its charge");
+        assert!(matches!(later_results[0].data, Err(ReadbackError::Cancelled)), "the cancelled later request finishes with Cancelled");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, 0, "taking all results returns every admitted reservation");
+
+        let (first_target, _first_pass) = pending_target(&mut cx, (2048, 2048));
+        let (second_target, _second_pass) = pending_target(&mut cx, (2048, 1536));
+        let first_ticket = first_target.read_back(&mut cx, ReadbackRequest::default()).expect("the 16 MiB request receives a ticket");
+        let second_ticket = second_target.read_back(&mut cx, ReadbackRequest::default()).expect("the 12 MiB request receives a ticket");
+        let near_full = cx.texture_readback_usage();
+        assert_eq!(near_full.reserved_bytes, 28 * 1024 * 1024, "the first two requests reserve 28 MiB");
+        assert_eq!(near_full.waiting, 0, "both requests fit and are admitted immediately");
+
+        let (medium_target, _medium_pass) = pending_target(&mut cx, (2048, 1024));
+        let medium_ticket = medium_target.read_back(&mut cx, ReadbackRequest::default()).expect("a within-bound request that cannot fit receives a ticket");
+        assert_eq!(cx.texture_readback_usage().waiting, 1, "the 8 MiB request waits for room");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, near_full.reserved_bytes, "the waiting within-bound request is uncharged");
+
+        let (small_target, _small_pass) = pending_target(&mut cx, (8, 8));
+        let small_reservation = 4096 * 8;
+        assert!(small_reservation <= TEXTURE_READBACK_MAX_BYTES - near_full.reserved_bytes, "the later small request would fit the remaining room");
+        let small_ticket = small_target.read_back(&mut cx, ReadbackRequest::default()).expect("the later small request receives a waiting ticket");
+        assert_eq!(cx.texture_readback_usage().waiting, 2, "the small request waits behind the within-bound head");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, near_full.reserved_bytes, "the small request cannot overtake the within-bound head");
+
+        assert!(cx.cancel_texture_readback(first_ticket), "the 16 MiB request can be cancelled");
+        let first_results = cx.try_take_texture_readbacks_for(&[first_ticket]);
+        assert_eq!(first_results.len(), 1, "taking the 16 MiB request returns its reservation");
+        assert!(matches!(first_results[0].data, Err(ReadbackError::Cancelled)), "the cancelled 16 MiB request finishes with Cancelled");
+        assert_eq!(cx.texture_readback_usage().waiting, 0, "the medium head and then the small request are admitted when room frees");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, 20 * 1024 * 1024 + small_reservation, "the 12 MiB, 8 MiB and small requests hold the remaining reservations");
+
+        let remaining = [second_ticket, medium_ticket, small_ticket];
+        for ticket in remaining {
+            assert!(cx.cancel_texture_readback(ticket), "each remaining admitted request can be cancelled");
+        }
+        let remaining_results = cx.try_take_texture_readbacks_for(&remaining);
+        assert_eq!(remaining_results.len(), remaining.len(), "all remaining admitted requests return their results");
+        assert!(remaining_results.iter().all(|result| matches!(result.data, Err(ReadbackError::Cancelled))), "all remaining cancelled requests finish with Cancelled");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, 0, "taking the remaining results returns every reservation");
+
+        let limit_targets: Vec<_> = (0..TEXTURE_READBACK_MAX_REQUESTS).map(|_| pending_target(&mut cx, (8, 8))).collect();
+        let mut limit_tickets: Vec<_> = limit_targets.iter()
+            .map(|(texture, _)| texture.read_back(&mut cx, ReadbackRequest::default()).expect("every request below the ticket limit receives a ticket"))
+            .collect();
+        assert_eq!(cx.texture_readback_usage().requests, TEXTURE_READBACK_MAX_REQUESTS, "all outstanding tickets count toward the request limit");
+        let (extra_target, _extra_pass) = pending_target(&mut cx, (8, 8));
+        assert_eq!(extra_target.read_back(&mut cx, ReadbackRequest::default()), Err(ReadbackError::Backpressure), "the request limit returns Backpressure without a ticket");
+        assert_eq!(cx.texture_readback_usage().requests, TEXTURE_READBACK_MAX_REQUESTS, "a rejected request adds no outstanding ticket");
+        let taken_ticket = limit_tickets.remove(0);
+        assert!(cx.cancel_texture_readback(taken_ticket), "an outstanding ticket at the limit can be cancelled");
+        let taken_results = cx.try_take_texture_readbacks_for(&[taken_ticket]);
+        assert_eq!(taken_results.len(), 1, "taking a cancelled ticket frees a request slot");
+        assert!(matches!(taken_results[0].data, Err(ReadbackError::Cancelled)), "the ticket taken to free a slot finishes with Cancelled");
+        let retry_ticket = extra_target.read_back(&mut cx, ReadbackRequest::default()).expect("a request receives a ticket after an outstanding result is taken");
+        limit_tickets.push(retry_ticket);
+        for ticket in &limit_tickets {
+            assert!(cx.cancel_texture_readback(*ticket), "each ticket remaining after the retry can be cancelled");
+        }
+        let limit_results = cx.try_take_texture_readbacks_for(&limit_tickets);
+        assert_eq!(limit_results.len(), limit_tickets.len(), "every ticket remaining after the retry returns a result");
+        assert!(limit_results.iter().all(|result| matches!(result.data, Err(ReadbackError::Cancelled))), "all tickets remaining after the retry finish with Cancelled");
+        assert_eq!(cx.texture_readback_usage().requests, 0, "taking all request-limit results leaves no outstanding tickets");
+        assert_eq!(cx.texture_readback_usage().reserved_bytes, 0, "taking all request-limit results returns every reservation");
+        assert_eq!(cx.texture_readback_usage().waiting, 0, "taking all request-limit results leaves no waiting tickets");
     }
 }
 

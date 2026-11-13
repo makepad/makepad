@@ -3,7 +3,7 @@
 //!
 //! `MAKEPAD_RUN=collect-web MAKEPAD_COLLECT=<dir> <native app binary>`
 //! runs the app on its normal desktop backend (hidden with
-//! `MAKEPAD_HIDE_WINDOWS=1`, muted with `SANDBOX_MUTE=1`), with what the
+//! `MAKEPAD_HIDE_WINDOWS=1`, muted with `MAKEPAD_MUTE=1`), with what the
 //! web build would have:
 //!
 //! - the web font set (`app_main!`'s wasm choice), so the faces laid out

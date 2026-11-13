@@ -20,7 +20,7 @@ unsafe extern "C" {}
 /// Read once; all geometry queries and formatting stay behind this branch.
 pub fn trace_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("MAKEPAD_NATIVE_LAYER_TRACE").is_ok_and(|v| v == "1"))
+    *ENABLED.get_or_init(|| relax_api::env::var("MAKEPAD_NATIVE_LAYER_TRACE").is_ok_and(|v| v == "1"))
 }
 static UNPRESENTED: AtomicU64 = AtomicU64::new(0);
 static COMMITS: AtomicU64 = AtomicU64::new(0);

@@ -28,7 +28,7 @@
 //! something a realtime thread may do -- so it holds what it holds until
 //! the process ends.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 use crate::audio::{AudioBuffer, AudioInfo, AudioOutputFn, MAX_AUDIO_DEVICE_INDEX};
 use std::any::Any;
 use std::panic::{catch_unwind, AssertUnwindSafe};

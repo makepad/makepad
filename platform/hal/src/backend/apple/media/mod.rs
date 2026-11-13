@@ -209,6 +209,15 @@ impl Media {
         Media::default()
     }
 
+    /// The backend draws with another device: every player makes its texture cache on it.
+    pub fn device_replaced(&mut self, device: ObjcId) {
+        for sm in self.sessions.values_mut() {
+            for player in sm.players.values_mut() {
+                player.device_replaced(device);
+            }
+        }
+    }
+
     /// Executes a media command. False when the command is not one of this module's.
     pub fn command(&mut self, sink: &mut dyn Sink, s: &mut Session, c: &HalCmd) -> bool {
         match *c {

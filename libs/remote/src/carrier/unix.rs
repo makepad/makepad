@@ -201,10 +201,15 @@ mod imp {
         })
     }
 
-    /// Connects to the endpoint socket at `path`. The read timeout is for the handshake: call
+    /// Connects to the endpoint socket at `path` when a process of this user's serves it: one
+    /// another user bound (where both may write) is refused, never asked, or its answers would
+    /// be taken as the app's or the hub's. The read timeout is for the handshake: call
     /// [`settle`] on the returned stream handle afterwards.
     pub fn dial(path: &Path) -> io::Result<(Carrier, UnixStream)> {
         let s = UnixStream::connect(path)?;
+        if own_user_peer(&s).is_none() {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("the socket {} is served by another user's process", path.display())));
+        }
         s.set_read_timeout(Some(std::time::Duration::from_secs(1)))?;
         let keep = s.try_clone()?;
         Ok((carrier(s)?, keep))
@@ -249,10 +254,7 @@ mod imp {
                 let _ = C_PATHS.set((s, d));
             }
         }
-        extern "C" {
-            fn atexit(f: extern "C" fn()) -> i32;
-        }
-        unsafe { atexit(cleanup) };
+        makepad_core_util::process_end::at_exit(cleanup);
         served.map(|()| sock)
     }
 
@@ -381,10 +383,7 @@ mod imp {
         );
         std::fs::write(paths(pid).1, info)?;
         ep.set_discovery(paths(pid).1);
-        extern "C" {
-            fn atexit(f: extern "C" fn()) -> i32;
-        }
-        unsafe { atexit(cleanup) };
+        makepad_core_util::process_end::at_exit(cleanup);
         Ok(PathBuf::from(socket))
     }
     /// Serves `ep` at a fixed address such as the hub's: loopback TCP behind a fresh token, both

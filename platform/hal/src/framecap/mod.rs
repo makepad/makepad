@@ -19,7 +19,7 @@ pub mod file;
 pub mod replay;
 
 use crate::backend::exec::Gpu;
-use crate::buffers::{read_ids, read_pairs, CmdView};
+use crate::buffers::{read_ids, read_pairs, read_rects, CmdView};
 use crate::ledger::Kind;
 use crate::session::Session;
 use crate::types::*;
@@ -84,6 +84,8 @@ pub struct CapPass {
     pub viewport: [f32; 4],
     pub dpi: f32,
     pub uniforms: Vec<u8>,
+    /// `Pass::view_rects`: the views side by side (empty: one view)
+    pub view_rects: Vec<[f32; 4]>,
     pub draws: Range,
     pub name: StrId,
     pub owner: StrId,
@@ -465,6 +467,7 @@ fn record_packet(gpu: &mut dyn Gpu, s: &mut Session, sid: u32, p: &FramePacket, 
             viewport: pass.viewport,
             dpi: pass.dpi,
             uniforms,
+            view_rects: read_rects(view.arena, pass.view_rects).collect(),
             draws: Range { off: first, len: n },
             name: pass.name,
             owner: pass.owner,

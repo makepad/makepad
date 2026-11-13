@@ -266,6 +266,26 @@ impl HostedWindow {
     }
 }
 
+/// A clipboard's richer flavours (HTML, Markdown) across the hosted boundary, beside the text the
+/// studio protocol carries: up with a copy, just ahead of its `SetClipboard` (`request` 0), and
+/// down with a read's answer, just ahead of its `HostRelay::Clipboard` (`request` its id). `text`
+/// is the text they go with: a receiver takes them only with that same text. A `Custom` message,
+/// so it is no part of the hosted wire's fingerprint: a host or child that does not know it keeps
+/// the text alone.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedClipboard { pub request: u64, pub text: String, pub html: String, pub markdown: String }
+#[derive(SerJson, DeJson)]
+struct HostedClipboardEnvelope { makepad_clipboard: HostedClipboard }
+impl HostedClipboard {
+    pub fn to_json(&self) -> String { HostedClipboardEnvelope { makepad_clipboard: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_clipboard\"") { return None; }
+        HostedClipboardEnvelope::deserialize_json(json).ok().map(|e| e.makepad_clipboard)
+    }
+    /// Whether there is a flavour to send at all.
+    pub fn any(&self) -> bool { !self.html.is_empty() || !self.markdown.is_empty() }
+}
+
 #[cfg(test)]
 mod hosted_window_tests {
     use super::*;
@@ -278,5 +298,9 @@ mod hosted_window_tests {
         let mv = HostedWindow { x: 1610.5, y: -2.0, ..HostedWindow::new(3, hosted_window_op::MOVE) };
         assert_eq!(HostedWindow::parse(&mv.to_json()), Some(mv));
         assert_eq!(HostedWindow::parse(&HostedResize { w: 1.0, h: 2.0 }.to_json()), None);
+        // a clipboard's flavours, quotes, new lines and non-ASCII text included
+        let clip = HostedClipboard { request: 7, text: "a\tb \"c\"\n—".into(), html: "<p class=\"x\">a</p>\n".into(), markdown: "**a** `b`\n".into() };
+        assert_eq!(HostedClipboard::parse(&clip.to_json()), Some(clip));
+        assert_eq!(HostedClipboard::parse(&HostedWindow::new(1, 0).to_json()), None);
     }
 }

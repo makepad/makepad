@@ -1,6 +1,6 @@
 //! Ownership of readback memory, from GPU completion until the last application view drops.
 use std::{collections::HashMap, sync::{Mutex, OnceLock, atomic::{AtomicU64, Ordering}}};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 #[cfg(any(target_vendor = "apple", target_os = "linux", target_os = "android"))]
 use std::sync::Arc;
@@ -17,6 +17,28 @@ pub struct Record {
     pub token: u64,
     pub order: u32,
     pub reserved: u32,
+}
+
+/// A delivered lease read in this process: its bytes, released on drop.
+pub struct Held { record: Record }
+impl Held {
+    /// # Safety
+    /// `payload` is the lease range of an event this process pumped from the HAL,
+    /// taken once (its release obligation moves here).
+    pub unsafe fn from_payload(payload: &[u8]) -> Option<Held> {
+        use crate::buffers::Wire;
+        (payload.len() == Record::SIZE).then(|| Held { record: Record::read(payload) })
+    }
+}
+impl std::ops::Deref for Held {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        // SAFETY: the delivered lease keeps its immutable range alive until this guard drops.
+        unsafe { std::slice::from_raw_parts(self.record.ptr as *const u8, self.record.len as usize) }
+    }
+}
+impl Drop for Held {
+    fn drop(&mut self) { hal_lease_release(self.record.token); }
 }
 
 /// An undelivered lease. Discarding a completion releases its storage automatically.

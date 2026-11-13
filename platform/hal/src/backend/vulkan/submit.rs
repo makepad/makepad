@@ -23,8 +23,7 @@ pub(super) enum Event {
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2], ran: bool },
     DispatchTime { name: String, gpu_ns: u64 },
     BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
-    Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
-    Pick { req: u32, ids: Vec<u32> },
+    Readback { req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
     Shared { id: Id, handle: u64 },
 }
 pub(super) struct Done { pub token: Token, pub time: u64, pub event: Event }
@@ -47,7 +46,7 @@ pub(super) enum Ticket {
     #[cfg(target_os = "linux")]
     Capture { token: Token, window: Id, size: [u32;2], format: u32, buffer: Arc<Buffer> },
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool },
-    Read { token: Token, req: u32, rect: [u32; 4], format: u32, staging: Arc<Buffer>, stencil: Option<Arc<Buffer>>, pick: Option<[f32; 2]> },
+    Read { token: Token, req: u32, rect: [u32; 4], format: u32, staging: Arc<Buffer>, stencil: Option<Arc<Buffer>> },
     Shared { token: Token, id: Id, handle: u64 },
     Copy { token: Token, req: u32, rect: [u32; 4] },
     Host { reply: std::sync::mpsc::SyncSender<Option<crate::backend::Pixels>>, image: Arc<Image>, staging: Arc<Buffer> },
@@ -927,7 +926,7 @@ impl Batch {
                     push(token, Event::Frame { target, kind, frame, window: window && !failed, gpu_ns, gpu_span, ran: !failed });
                 }
                 Ticket::Copy { token, req, rect } => push(token, Event::Readback {
-                    req, rect, status: if failed { readback::FAILED } else { readback::OK }, pixels: Vec::new(),
+                    req, rect, status: if failed { readback::FAILED } else { readback::OK }, lease: None,
                 }),
                 Ticket::Shared { token, id, handle } => push(token, Event::Shared { id, handle: if failed { 0 } else { handle } }),
                 Ticket::FrameCap { staging, len, done } => done(if failed { None } else { staging.read(len).ok() }),
@@ -938,7 +937,7 @@ impl Batch {
                     }) };
                     let _ = reply.try_send(pixels);
                 }
-                Ticket::Read { token, req, rect, format: fmt, staging, stencil, pick } => {
+                Ticket::Read { token, req, rect, format: fmt, staging, stencil } => {
                     let pixels = if failed { Err("GPU submission failed".into()) } else {
                         staging.read(format::level_bytes(fmt, rect[2], rect[3]) as usize)
                     };
@@ -948,31 +947,16 @@ impl Batch {
                             if let Some(stencil) = stencil {
                                 match stencil.read(rect[2] as usize * rect[3] as usize) {
                                     Ok(values) => { for (p, s) in pixels.chunks_exact_mut(4).zip(values) { p[3] = s; } }
-                                    Err(_) => { push(token, Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() }); continue; }
+                                    Err(_) => { push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None }); continue; }
                                 }
                             }
                             if fmt == format::BGRA8 { for pixel in pixels.chunks_exact_mut(4) { pixel.swap(0, 2); } }
-                            if let Some(pos) = pick {
-                                let mut ids = Vec::new();
-                                let mut ordered: Vec<_> = pixels.chunks_exact(4).enumerate().map(|(i, px)| {
-                                    let x = rect[0] as f32 + (i as u32 % rect[2]) as f32;
-                                    let y = rect[1] as f32 + (i as u32 / rect[2]) as f32;
-                                    ((x - pos[0]).powi(2) + (y - pos[1]).powi(2), u32::from_le_bytes(px.try_into().unwrap()) & 0x00ff_ffff)
-                                }).collect();
-                                ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-                                for (_, id) in ordered {
-                                    if id != 0 && !ids.contains(&id) { ids.push(id); }
-                                }
-                                push(token, Event::Pick { req, ids });
-                            } else {
-                                let status = if matches!(fmt, format::RGBA8 | format::BGRA8) { readback::OK } else { readback::NATIVE };
-                                push(token, Event::Readback { req, rect, status, pixels });
-                            }
+                            let status = if matches!(fmt, format::RGBA8 | format::BGRA8) { readback::OK } else { readback::NATIVE };
+                            push(token, Event::Readback { req, rect, status, lease: Some(crate::lease::Lease::from_vec(pixels, 0)) });
                         }
                         Err(e) => {
                             eprintln!("[hal-vulkan] readback: {e}");
-                            push(token, if pick.is_some() { Event::Pick { req, ids: Vec::new() } }
-                                else { Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() } });
+                            push(token, Event::Readback { req, rect, status: readback::FAILED, lease: None });
                         }
                     }
                 }

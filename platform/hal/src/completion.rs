@@ -89,7 +89,7 @@ static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1)
 
 /// [`Hal::frame_completion`]: `notify` is called (any thread) once it answers. Its number for
 /// `hal_frame_completion_poll`, 0 when failed (`hal_frame_completion_error`).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_frame_completion(session: u32, notify: extern "C" fn()) -> u64 {
     // `notify` runs in the code that asked (`call_scope`), on whatever thread answers
     let scope = crate::call_scope::Scope::here();
@@ -109,7 +109,7 @@ pub fn hal_frame_completion(session: u32, notify: extern "C" fn()) -> u64 {
 /// Polls completion `id`: 0 pending; 1 complete, `fd` a sync_file the caller owns that the
 /// reader's GPU waits on (-1: none, the work is complete); -1 failed (or unknown). A completion
 /// that answered is gone.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_frame_completion_poll(id: u64, fd: &mut i32) -> i32 {
     let mut pending = crate::lock(&PENDING);
     let Some(completion) = pending.get_or_insert_with(Default::default).get_mut(&id) else {
@@ -144,14 +144,14 @@ fn raw_fd(_sync: SyncFile) -> i32 {
 }
 
 /// Forgets completion `id` unanswered.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_frame_completion_drop(id: u64) {
     crate::lock(&PENDING).as_mut().map(|p| p.remove(&id));
 }
 
 /// The text of this thread's last failed completion op: its first `out.len()` bytes are
 /// written, its length is returned.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_frame_completion_error(out: &mut [u8]) -> u64 {
     LAST_ERROR.with(|e| {
         let e = e.borrow();

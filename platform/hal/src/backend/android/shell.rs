@@ -177,7 +177,16 @@ impl Shell for AndroidShell {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
                 jni::ime_command(cmd)
             },
-            OsCmd::ClipSet { text } => jni::copy_to_clipboard(&text),
+            OsCmd::ClipSet { data } => jni::copy_to_clipboard(&data),
+            OsCmd::ClipRead { req, .. } => {
+                let Some(content) = jni::read_clipboard() else { return false; };
+                let content = content.pack();
+                Shared::global().emit_to(sid, Id::NONE, clock_ns(), |q, _| {
+                    q.payload_size(content.len() as u32);
+                    q.clipboard(req, true, &content);
+                });
+                true
+            }
             // they sit at the asking window's points, so only the Activity's own window places them (a hide always goes)
             OsCmd::SelectionHandles { id, op: action, start, end } if action == selection_handles::HIDE || lock(&Shared::global().state).recipient == Some((sid, id)) => jni::selection_handles(action, start, end),
             OsCmd::ClipboardActions { id, show, area, selection } if !show || lock(&Shared::global().state).recipient == Some((sid, id)) => jni::clipboard_actions(show, area, selection),

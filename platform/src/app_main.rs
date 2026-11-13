@@ -115,17 +115,15 @@ pub fn run_app(app: fn()) {
             eprintln!("[hal-linux] main loop returned; joining app thread");
         }
         let panicked = thread.join().is_err();
-        // the process exits next (main returns): the HAL's driver threads stop and are joined
-        // before exit() runs the driver's exit handlers, which fault a thread still inside it
-        makepad_hal::Hal::global().before_exit();
-        if panicked {
-            std::process::exit(101);
-        }
         #[cfg(target_os = "linux")]
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
-            eprintln!("[hal-linux] app thread joined, HAL stopped; run_app returning");
+            eprintln!("[hal-linux] app thread joined; the process ends");
         }
-        return;
+        // the HAL's driver threads stop and are joined, then the process ends the one way every
+        // Makepad process does, natively and under the JIT alike: its exit work, the flushes, and
+        // no C library exit handlers (a GPU driver's teardown in those can wait for good)
+        makepad_hal::Hal::global().before_exit();
+        makepad_core_util::process_end::end(if panicked { 101 } else { 0 });
     }
     let _ = hosted;
     app();

@@ -106,6 +106,9 @@ pub struct Device {
     /// The samplers of video textures (`Device::video_sampler`), by external format (0: an
     /// ordinary image's), destroyed with the device.
     video_samplers: Mutex<std::collections::HashMap<u64, VideoSampler>>,
+    /// The blend-free twins of draw samplers (`Device::unfiltered_sampler`), by the sampler
+    /// they stand in for, made when a draw first needs one and destroyed with the device.
+    unfiltered_samplers: Mutex<std::collections::HashMap<crate::spirv::SpirvSampler, vk::Sampler>>,
 }
 
 /// The immutable sampler of a video texture slot: a linear clamp-to-edge one for an ordinary
@@ -501,7 +504,7 @@ impl Device {
             timestamp_bits: queue.timestamp_valid_bits, calibrated, extensions, present_wait: pacing, multiview: has_multiview, compute, fdm: has_fdm, msaa, life: life.clone(),
             video_encode,
             pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
-            ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()),
+            ycbcr: has_ycbcr, video_samplers: Mutex::new(Default::default()), unfiltered_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0),
         })))
     }
@@ -548,6 +551,19 @@ impl Device {
         };
         let v = VideoSampler { conversion, sampler };
         samplers.insert(external_format, v);
+        Ok(v)
+    }
+
+    /// The twin of draw sampler `s` that blends nothing (nearest within and between mip
+    /// levels): what a texture whose format lacks `SAMPLED_IMAGE_FILTER_LINEAR` is read through
+    /// instead of a sampler that blends (Vulkan allows no linear filter or mip blend on it).
+    /// Made once per sampler and logged then.
+    pub fn unfiltered_sampler(&self, s: &crate::spirv::SpirvSampler) -> Result<vk::Sampler, String> {
+        let mut samplers = lock(&self.unfiltered_samplers);
+        if let Some(v) = samplers.get(s) { return Ok(*v); }
+        let v = super::pipeline::sampler(self, s, true)?;
+        eprintln!("[hal-vulkan] a texture whose format the device cannot filter is read through a blending sampler ({s:?}); it reads through a nearest twin");
+        samplers.insert(*s, v);
         Ok(v)
     }
 
@@ -659,7 +675,7 @@ impl Device {
             // a display peer only scans out: the GPU profiler times the rendering device
             timestamp_bits: queue.timestamp_valid_bits, calibrated: false, extensions, present_wait: pacing, multiview: false, compute: false, fdm: false, msaa: 1, life: owner.life.clone(), video_encode: None,
             pools: Default::default(), blocks: Default::default(), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), rebar_fallback_logged: AtomicBool::new(false), budget: Mutex::new(None),
-            ycbcr: false, video_samplers: Mutex::new(Default::default()),
+            ycbcr: false, video_samplers: Mutex::new(Default::default()), unfiltered_samplers: Mutex::new(Default::default()),
             pipeline_cache, pipeline_cache_file, pipeline_cache_cold, pipelines_made: AtomicU32::new(0), pipeline_made_ns: AtomicU64::new(0) }))
     }
 }
@@ -673,6 +689,7 @@ impl Drop for Device {
                 self.raw.destroy_sampler(v.sampler, None);
                 if v.conversion != vk::SamplerYcbcrConversion::null() { self.raw.destroy_sampler_ycbcr_conversion(v.conversion, None); }
             }
+            for (_, s) in lock(&self.unfiltered_samplers).drain() { self.raw.destroy_sampler(s, None); }
             if self.pipeline_cache != vk::PipelineCache::null() { self.raw.destroy_pipeline_cache(self.pipeline_cache, None); }
             lock(&self.blocks).release(self);
             self.raw.destroy_device(None);

@@ -1036,6 +1036,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.timers = [];
         // @section clipboard
         this.text_copy_response = "";
+        this.text_copy_html = "";
+        this.text_copy_markdown = "";
         // @end clipboard
         // @section websocket
         this.web_sockets = [];
@@ -1852,6 +1854,46 @@ export class WasmWebBrowser extends WasmBridge {
     // @section clipboard
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
+        this.text_copy_html = args.html
+        this.text_copy_markdown = args.markdown
+    }
+
+    // A copy or cut with richer flavours writes them all into the event's clipboard
+    // (text/markdown stays on this browser's clipboard for a paste into a page);
+    // a plain copy leaves the textarea's selected text to the browser.
+    write_copy_flavours(e) {
+        if (!this.text_copy_html && !this.text_copy_markdown) {
+            return;
+        }
+        e.clipboardData.setData('text/plain', this.text_copy_response);
+        if (this.text_copy_html) {
+            e.clipboardData.setData('text/html', this.text_copy_html);
+        }
+        if (this.text_copy_markdown) {
+            e.clipboardData.setData('text/markdown', this.text_copy_markdown);
+        }
+        e.preventDefault();
+    }
+
+    clear_copy_flavours() {
+        this.text_copy_response = "";
+        this.text_copy_html = "";
+        this.text_copy_markdown = "";
+    }
+
+    async FromWasmCopyToClipboard(args) {
+        try {
+            if (args.html) {
+                await navigator.clipboard.write([new ClipboardItem({
+                    'text/plain': new Blob([args.text], {type: 'text/plain'}),
+                    'text/html': new Blob([args.html], {type: 'text/html'})
+                })]);
+            } else {
+                await navigator.clipboard.writeText(args.text);
+            }
+        } catch (error) {
+            console.warn('Clipboard write failed', error);
+        }
     }
     // @end clipboard
 
@@ -4310,8 +4352,10 @@ export class WasmWebBrowser extends WasmBridge {
 
         // @section clipboard
         this.handlers.on_cut = e => {
+            this.write_copy_flavours(e);
             setTimeout(_ => {
                 ta.value = "";
+                this.clear_copy_flavours();
                 last_len = 0;
             }, 0)
         }
@@ -4319,8 +4363,10 @@ export class WasmWebBrowser extends WasmBridge {
         ta.addEventListener('cut', e => this.handlers.on_cut(e));
 
         this.handlers.on_copy = e => {
+            this.write_copy_flavours(e);
             setTimeout(_ => {
                 ta.value = "";
+                this.clear_copy_flavours();
                 last_len = 0;
             }, 0)
         }
@@ -4329,6 +4375,15 @@ export class WasmWebBrowser extends WasmBridge {
 
         this.handlers.on_paste = e => {
             was_paste = true;
+            // the reads this paste asks for get what its clipboard holds
+            const data = e.clipboardData;
+            if (data) {
+                this.to_wasm.ToWasmPasteFlavours({
+                    text: data.getData('text/plain'),
+                    html: data.getData('text/html'),
+                    markdown: data.getData('text/markdown'),
+                });
+            }
         }
 
         ta.addEventListener('paste', e => this.handlers.on_paste(e));
@@ -4439,6 +4494,7 @@ export class WasmWebBrowser extends WasmBridge {
             // @section clipboard
             if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
                 // we need to request the clipboard
+                this.clear_copy_flavours();
                 this.to_wasm.ToWasmTextCopy();
                 this.do_wasm_pump();
                 ta.value = this.text_copy_response;

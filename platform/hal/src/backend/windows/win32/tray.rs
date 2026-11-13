@@ -194,7 +194,7 @@ pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, alpha: Vec<u8>, tooltip: St
             }
             let count = t.items.len();
             TRAYS.with_borrow_mut(|trays| trays.push(t));
-            if std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
+            if relax_api::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
                 // the shell's own click on the new icon, through the icon's callback message
                 eprintln!("tray selftest: notify icon added={added}, {count} menu items; clicking it");
                 unsafe {
@@ -350,7 +350,7 @@ pub(super) fn window_at(sid: u32, hwnd: HWND, tray: u64, w: f32, h: f32) {
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, width, height, SWP_SHOWWINDOW);
         let _ = SetForegroundWindow(hwnd);
     }
-    if std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
+    if relax_api::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some() {
         eprintln!(
             "tray selftest: dropdown {width}x{height} px at ({x}, {y}), icon {}x{} px at ({}, {}), work area ({}, {})-({}, {}), scale {}",
             icon.right - icon.left, icon.bottom - icon.top, icon.left, icon.top, work.left, work.top, work.right, work.bottom, p.scale

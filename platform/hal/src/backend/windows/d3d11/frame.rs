@@ -111,6 +111,10 @@ struct Prepared {
     depth_state: usize,
     cull: usize,
     scissor: RECT,
+    /// the draw's own scissor (x, y, w, h), None: none. A pass's views clip it to each view.
+    draw_scissor: Option<[f32; 4]>,
+    /// the slot the program reads the pass block at (each view binds its own there)
+    pass_slot: Option<u32>,
     storage: Vec<(u32, Option<ID3D11ShaderResourceView>)>,
     index_first: u32,
     index_count: u32,
@@ -588,9 +592,6 @@ impl D3d11 {
                         self.pick_pending.remove(&(sid, id));
                     }
                 }
-                if !pass.color[0].is_none() {
-                    self.pick_ids.insert((sid, target), pass.color[0]);
-                }
             }
         }
         let mut presented = false;
@@ -657,9 +658,18 @@ impl D3d11 {
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 {
             return Err("invalid pass viewport".into());
         }
+        // the views side by side (`Pass::view_rects`): each draw runs once per view in this pass
+        let mut pviews = exec::pass_views(pass, view.arena).map_err(|e| format!("pass not drawn: {e}"))?;
+        let viewed = pass.view_rects.len != 0;
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         // an upper segment renders the window's draws into its own image at its rect
         let segment = self.segment.clone().filter(|_| is_window && !pick);
+        if let Some(seg) = &segment {
+            for pv in &mut pviews {
+                pv.rect[0] -= seg.origin[0];
+                pv.rect[1] -= seg.origin[1];
+            }
+        }
         let v = match &segment {
             Some(seg) => {
                 size = [seg.tex.desc.w, seg.tex.desc.h];
@@ -751,6 +761,14 @@ impl D3d11 {
         // ---- lay out the draws' transient bytes
         let mut sc = std::mem::take(&mut self.scratch);
         sc.clear();
+        // each view's block of the pass uniforms, laid out once for the pass
+        // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+        let pass_bytes = unsafe { pass.uniforms.as_bytes() };
+        if pviews[0].block.len() > 4096 * 16 {
+            self.scratch = sc;
+            return Err(format!("a {}-byte uniform block exceeds D3D11's 64 KiB constant buffer", pviews[0].block.len()));
+        }
+        let pass_cbs: Vec<Option<(u32, u32)>> = pviews.iter().map(|pv| (!pv.block.is_empty()).then(|| sc.bytes.put_cb(&pass_bytes[pv.block.clone()]))).collect();
         for d in draws {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 {
@@ -824,7 +842,9 @@ impl D3d11 {
                 ctx.OMSetBlendState(p.blend.as_ref(), Some(&[0.0; 4]), 0xffff_ffff);
                 ctx.OMSetDepthStencilState(Some(&self.dev.states.depth[p.depth_state]), 0);
                 ctx.RSSetState(Some(&self.dev.states.raster[p.cull]));
-                ctx.RSSetScissorRects(Some(&[p.scissor]));
+                if !viewed {
+                    ctx.RSSetScissorRects(Some(&[p.scissor]));
+                }
                 let stride = p.program.stride;
                 let offset = 0u32;
                 ctx.IASetVertexBuffers(0, 1, Some(&p.vb as *const _), Some(&stride), Some(&offset));
@@ -854,11 +874,32 @@ impl D3d11 {
                     ctx.VSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
                     ctx.PSSetShaderResources(*slot, Some(std::slice::from_ref(srv)));
                 }
-                for (_, count, base_cb) in &sc.ranges[p.ranges.clone()] {
-                    if p.program.instance_slot().is_some() {
-                        ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&arena as *const _), Some(base_cb as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
+                for (pv, block) in pviews.iter().zip(&pass_cbs) {
+                    if viewed {
+                        // the view's rect is its viewport and bounds its scissor; the draw's
+                        // scissor is relative to the rect
+                        let r = pv.rect;
+                        let (x, y, w, h) = match p.draw_scissor { Some([x, y, w, h]) => (r[0] + x, r[1] + y, w, h), None => (r[0], r[1], r[2], r[3]) };
+                        let x0 = x.max(r[0]).max(0.0).min(target_size[0] as f32) as i32;
+                        let y0 = y.max(r[1]).max(0.0).min(target_size[1] as f32) as i32;
+                        let x1 = (x + w).min(r[0] + r[2]).max(x0 as f32).min(target_size[0] as f32) as i32;
+                        let y1 = (y + h).min(r[1] + r[3]).max(y0 as f32).min(target_size[1] as f32) as i32;
+                        if x1 <= x0 || y1 <= y0 {
+                            continue;
+                        }
+                        ctx.RSSetViewports(Some(&[D3D11_VIEWPORT { TopLeftX: r[0], TopLeftY: r[1], Width: r[2], Height: r[3], MinDepth: 0.0, MaxDepth: 1.0 }]));
+                        ctx.RSSetScissorRects(Some(&[RECT { left: x0, top: y0, right: x1, bottom: y1 }]));
                     }
-                    ctx.DrawIndexedInstanced(p.index_count, *count, p.index_first, 0, 0);
+                    if let (Some(slot), Some((first, count))) = (p.pass_slot, block) {
+                        ctx1.VSSetConstantBuffers1(slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
+                        ctx1.PSSetConstantBuffers1(slot, 1, Some(&arena as *const _), Some(first as *const u32), Some(count as *const u32));
+                    }
+                    for (_, count, base_cb) in &sc.ranges[p.ranges.clone()] {
+                        if p.program.instance_slot().is_some() {
+                            ctx1.VSSetConstantBuffers1(INST_BASE_SLOT, 1, Some(&arena as *const _), Some(base_cb as *const u32), Some(&WINDOW_CONSTANTS as *const u32));
+                        }
+                        ctx.DrawIndexedInstanced(p.index_count, *count, p.index_first, 0, 0);
+                    }
                 }
             }
         }
@@ -940,7 +981,9 @@ impl D3d11 {
 
         // uniform blocks into the frame constant buffer
         let cbs_at = sc.cbs.len();
-        for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]), (pipeline_binding::PASS, pass.uniforms),
+        // (the pass's block is laid out once for the pass, a block per view: bound at draw time)
+        let pass_slot = program.slot(pipeline_binding::PASS);
+        for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]),
             (pipeline_binding::DRAW_LIST, d.uniforms[1]), (pipeline_binding::DYN, d.uniforms[2]), (pipeline_binding::SCOPE, d.uniforms[3])] {
             let Some(slot) = program.slot(which) else { continue };
             // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
@@ -1050,7 +1093,9 @@ impl D3d11 {
         let blend = self.dev.blend_state(modes, program.desc.blend & pipeline_blend::MAX != 0);
         let depth_state = if depth.is_none() { 0 } else { (if d.flags & Draw::DEPTH_WRITE != 0 { 1 } else { 2 }) + if d.flags & Draw::DEPTH_GREATER != 0 { 2 } else { 0 } };
         let cull = if d.flags & Draw::CULL != 0 { 1 } else { 0 };
-        let scissor = if d.scissor.iter().any(|n| n.is_nan()) {
+        let draw_scissor = (!d.scissor.iter().any(|n| n.is_nan())).then_some(d.scissor);
+        let scissor = if d.scissor.iter().any(|n| n.is_nan()) || pass.view_rects.len != 0 {
+            // (a pass's views clip the draw's scissor to each view at draw time)
             RECT { left: 0, top: 0, right: target_size[0] as i32, bottom: target_size[1] as i32 }
         } else {
             let [mut x, mut y, w, h] = d.scissor;
@@ -1096,6 +1141,8 @@ impl D3d11 {
             depth_state,
             cull,
             scissor,
+            draw_scissor,
+            pass_slot,
             index_first: d.index[0],
             index_count: d.index[1],
         }))

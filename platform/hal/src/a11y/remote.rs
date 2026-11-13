@@ -203,7 +203,6 @@ pub fn dispatch(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Sna
     };
     if let Err(e) = req.validate_params(params) { return out.err(&e); }
     backend.activate();
-    out.limit = usize::MAX;
     if let Err(e) = run(req, out, backend, snapshots) { out.err(&e); }
 }
 fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -> Result<(), String> {
@@ -416,7 +415,7 @@ mod tests {
         let snapshots = Snapshots::default();
         let run = |line: &str| {
             let mut bytes = Vec::new();
-            dispatch(&Req::parse(line), &mut Out::new(&mut bytes, usize::MAX), &super::super::Native, &snapshots);
+            dispatch(&Req::parse(line), &mut Out::new(&mut bytes), &super::super::Native, &snapshots);
             String::from_utf8(bytes).unwrap()
         };
         let error = run("ui wait timeout=1");
@@ -434,8 +433,8 @@ mod tests {
         assert!(gone.contains("\"gone\":true") && !gone.contains("\"err\""), "{gone}");
         let error = run("ui present json=1");
         assert!(error.contains("needs node=ID, q=QUERY or w=WINDOW"), "{error}");
-        // A key valid for one verb must not leak into the others, even with full output.
-        for line in ["ui find depth=1", "ui snap q=button", "ui lint node=1", "ui wait wait=1 full=1"] {
+        // A key valid for one verb must not leak into the others.
+        for line in ["ui find depth=1", "ui snap q=button", "ui lint node=1", "ui wait wait=1"] {
             let error = run(line);
             assert!(error.contains("unknown parameter"), "{line}: {error}");
         }

@@ -43,6 +43,8 @@ pub(super) struct PassJob {
     pub clear: [[f32; 4]; 4],
     pub clear_depth: f32,
     pub viewport: [i32; 4],
+    /// the views side by side (`Pass::view_rects`), each the viewport of its draws; empty: one view
+    pub views: Vec<[i32; 4]>,
     pub mips: Vec<Arc<TexObj>>,
     pub draws: Vec<DrawJob>,
     /// a partial repaint: only these rects are cleared, and the draws are cut to them
@@ -75,8 +77,11 @@ pub(super) struct DrawJob {
     pub depth_write: bool,
     pub depth_greater: bool,
     pub cull: bool,
-    /// the draw's scissor, or in a partial repaint that cut to each damaged rect it touches
-    pub scissors: Vec<[i32; 4]>,
+    /// (view, scissor) per draw call: the draw's scissor, in a partial repaint cut to each damaged
+    /// rect it touches, or once per view of the pass clipped to that view's rect
+    pub scissors: Vec<(usize, [i32; 4])>,
+    /// the pass block's binding and, per view, its (offset, length) in the frame's uniform bytes
+    pub pass_block: Option<(u32, Vec<(u32, u32)>)>,
     pub draw_buffers: u32,
 }
 
@@ -100,6 +105,16 @@ impl FrameBytes {
         let len = bytes.len().max(size as usize).max(16);
         self.uniforms.resize(at + len, 0);
         (at as u32, len as u32)
+    }
+    /// Each view's block of the pass uniforms at the size a program declares (`sizes` holds the
+    /// sizes the pass laid out already): a program declaring that size shares them.
+    fn put_pass_blocks(&mut self, sizes: &mut Vec<(u32, Vec<(u32, u32)>)>, pass: &[u8], views: &[exec::PassView], size: u32) -> Vec<(u32, u32)> {
+        if let Some((_, blocks)) = sizes.iter().find(|(s, _)| *s == size) {
+            return blocks.clone();
+        }
+        let blocks: Vec<(u32, u32)> = views.iter().map(|v| self.put_block(&pass[v.block.clone()], size)).collect();
+        sizes.push((size, blocks.clone()));
+        blocks
     }
     fn put_instances(&mut self, bytes: &[u8], stride: usize) -> u32 {
         let stride = stride.max(4);
@@ -267,7 +282,6 @@ impl GlBackend {
                 for id in pass.color.into_iter().filter(|t| !t.is_none()) {
                     if incomplete { self.pick_pending.insert((sid, id)); } else { self.pick_pending.remove(&(sid, id)); }
                 }
-                if !pass.color[0].is_none() { self.pick_ids.insert((sid, target), pass.color[0]); }
             }
         }
         let mut present = None;
@@ -297,6 +311,9 @@ impl GlBackend {
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 {
             return Err("invalid pass viewport".into());
         }
+        // the views side by side (`Pass::view_rects`): each draw runs once per view in this pass
+        let pviews = exec::pass_views(pass, view.arena).map_err(|e| format!("pass not drawn: {e}"))?;
+        let viewed = pass.view_rects.len != 0;
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         let mut colors: Vec<(usize, Arc<TexObj>)> = Vec::new();
         let mut window = None;
@@ -349,7 +366,7 @@ impl GlBackend {
         }
         let base = { let (sid, id) = self.window_key(s.id, target); (sid, id.index) };
         // The kept image still holds the frame the pass's damage is measured from, so we only repaint the damage.
-        let partial = retained && colors.len() == 1 && pass.load[0] == pass_load::CLEAR && (depth.is_none() || pass.load[4] != pass_load::LOAD)
+        let partial = retained && !viewed && colors.len() == 1 && pass.load[0] == pass_load::CLEAR && (depth.is_none() || pass.load[4] != pass_load::LOAD)
             && pass.damage_since != 0 && pass.damage.len <= 32
             && self.damage_base.get(&base).is_some_and(|(image, frame)| *frame == pass.damage_since && *image == colors[0].1.key);
         // the damaged rects inside the target, an empty one kept in its place since the draws' masks count them
@@ -363,6 +380,8 @@ impl GlBackend {
         let mask = damage.as_ref().map(|rects| rects.iter().enumerate().filter(|(_, r)| r[2] > 0 && r[3] > 0).fold(0u32, |m, (i, _)| m | 1 << i));
         let skipped_before = s.stats.skipped_draws;
         let mut prepared = Vec::new();
+        // the pass block per view, laid out once per declared size
+        let mut pass_sizes: Vec<(u32, Vec<(u32, u32)>)> = Vec::new();
         for d in draws {
             if d.storage_buffers.len != 0 { crate::compute::unsupported(); continue; }
             s.stats.draws += 1;
@@ -374,7 +393,7 @@ impl GlBackend {
                 for id in read_ids(view.arena, d.tex).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
                 continue;
             }
-            match self.prepare(s, pass, d, view.arena, pick, &colors, &depth, target_size, damage.as_deref().zip(mask), bytes, instance_words, now, deps) {
+            match self.prepare(s, pass, &pviews, &mut pass_sizes, d, view.arena, pick, &colors, &depth, target_size, damage.as_deref().zip(mask), bytes, instance_words, now, deps) {
                 Ok(Some(p)) => if !p.scissors.is_empty() { prepared.push(p) },
                 Ok(None) => s.stats.skipped_draws += 1,
                 Err(e) => {
@@ -401,11 +420,13 @@ impl GlBackend {
         }
         Ok((PassJob { attachments, uint_colors, depth_stencil: depth.as_ref().is_some_and(|d| d.desc.format == format::DEPTH24_STENCIL8),
             load: pass.load, clear: pass.clear, clear_depth: pass.clear_depth,
-            viewport: [v[0] as i32, v[1] as i32, v[2].round() as i32, v[3].round() as i32], mips, draws: prepared, damage }, window))
+            viewport: [v[0] as i32, v[1] as i32, v[2].round() as i32, v[3].round() as i32],
+            views: if viewed { pviews.iter().map(|pv| { let r = pv.rect; [r[0] as i32, r[1] as i32, r[2].round() as i32, r[3].round() as i32] }).collect() } else { Vec::new() },
+            mips, draws: prepared, damage }, window))
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, colors: &[(usize, Arc<TexObj>)], depth: &Option<Arc<TexObj>>,
+    fn prepare(&mut self, s: &mut Session, pass: &Pass, pviews: &[exec::PassView], pass_sizes: &mut Vec<(u32, Vec<(u32, u32)>)>, d: &Draw, arena: &[u8], pick: bool, colors: &[(usize, Arc<TexObj>)], depth: &Option<Arc<TexObj>>,
         target_size: [u32; 2], damage: Option<(&[[i32; 4]], u32)>, bytes: &mut FrameBytes, instance_words: &mut bool, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<DrawJob>, String> {
         for id in read_ids(arena, d.tex).chain(read_ids(arena, d.pick_tex)) {
             match exec::lent_state(s, s.id, id) {
@@ -449,7 +470,17 @@ impl GlBackend {
 
         // uniform blocks into the frame's uniform bytes, padded to the size the program declares
         let mut blocks = Vec::new();
-        for (binding, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]), (pipeline_binding::PASS, pass.uniforms),
+        // the pass's: a block per view, laid out once for the pass at the size the program declares
+        let mut pass_block = None;
+        if let Some(Some(size)) = linked.block_sizes.get(pipeline_binding::PASS) {
+            // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+            let data = unsafe { pass.uniforms.as_bytes() };
+            if pviews[0].block.len().max(*size as usize) > self.caps.max_ubo {
+                return Err(format!("a {}-byte uniform block exceeds the context's {} bytes", pviews[0].block.len(), self.caps.max_ubo));
+            }
+            pass_block = Some((pipeline_binding::PASS as u32, bytes.put_pass_blocks(pass_sizes, data, pviews, *size)));
+        }
+        for (binding, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]),
             (pipeline_binding::DRAW_LIST, d.uniforms[1]), (pipeline_binding::DYN, d.uniforms[2]), (pipeline_binding::SCOPE, d.uniforms[3])] {
             let Some(Some(size)) = linked.block_sizes.get(binding) else { continue };
             // SAFETY: as above
@@ -534,14 +565,27 @@ impl GlBackend {
             [x0, y0, x1 - x0, y1 - y0]
         };
         // a partial repaint draws once into each damaged rect the draw touches; an empty scissor
-        // draws nothing, which leaves the picture whole
-        let scissors: Vec<[i32; 4]> = match damage {
+        // draws nothing, which leaves the picture whole. A pass's views draw once per view, the
+        // draw's scissor relative to the view's rect and clipped to it.
+        let scissors: Vec<(usize, [i32; 4])> = match damage {
+            _ if pass.view_rects.len != 0 => pviews.iter().enumerate().filter_map(|(vi, pv)| {
+                let r = pv.rect;
+                let (x, y, w, h) = if d.scissor.iter().any(|n| n.is_nan()) { (r[0], r[1], r[2], r[3]) } else {
+                    let [x, y, w, h] = d.scissor;
+                    (r[0] + x, r[1] + y, w, h)
+                };
+                let x0 = x.max(r[0]).max(0.0).min(target_size[0] as f32) as i32;
+                let y0 = y.max(r[1]).max(0.0).min(target_size[1] as f32) as i32;
+                let x1 = (x + w).min(r[0] + r[2]).max(x0 as f32).min(target_size[0] as f32) as i32;
+                let y1 = (y + h).min(r[1] + r[3]).max(y0 as f32).min(target_size[1] as f32) as i32;
+                (x1 > x0 && y1 > y0).then_some((vi, [x0, y0, x1 - x0, y1 - y0]))
+            }).collect(),
             Some((rects, mask)) => rects.iter().enumerate().filter(|(i, _)| d.damage & mask & 1 << i != 0).filter_map(|(_, r)| {
                 let (x0, y0) = (scissor[0].max(r[0]), scissor[1].max(r[1]));
                 let (x1, y1) = ((scissor[0] + scissor[2]).min(r[0] + r[2]), (scissor[1] + scissor[3]).min(r[1] + r[3]));
-                (x1 > x0 && y1 > y0).then_some([x0, y0, x1 - x0, y1 - y0])
+                (x1 > x0 && y1 > y0).then_some((0, [x0, y0, x1 - x0, y1 - y0]))
             }).collect(),
-            None if scissor[2] > 0 && scissor[3] > 0 => vec![scissor],
+            None if scissor[2] > 0 && scissor[3] > 0 => vec![(0, scissor)],
             None => Vec::new(),
         };
 
@@ -550,7 +594,7 @@ impl GlBackend {
             s.ledger.touch(Kind::Buffer, id.index, id.gen, s.frame, now);
         }
         Ok(Some(DrawJob { program, vb, ib, index_u32, index: d.index, blocks, buffers, textures, twins, pick: pick_words, instances, stride,
-            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, depth_greater: d.flags & Draw::DEPTH_GREATER != 0, cull: d.flags & Draw::CULL != 0, scissors, draw_buffers }))
+            ranges, blend, depth_write: depth.is_some() && d.flags & Draw::DEPTH_WRITE != 0, depth_greater: d.flags & Draw::DEPTH_GREATER != 0, cull: d.flags & Draw::CULL != 0, scissors, pass_block, draw_buffers }))
     }
 }
 
@@ -563,6 +607,8 @@ struct Bound {
     depth_write: Option<bool>,
     depth_greater: Option<bool>,
     cull: Option<bool>,
+    /// the view whose rect the viewport is (`PassJob::views`), None: the pass's viewport
+    view: Option<usize>,
 }
 
 unsafe fn pointer(gl: &sys::Gl, a: &Attr, stride: i32, offset: usize) {
@@ -667,7 +713,7 @@ impl Renderer {
             if depth { (gl.glEnable)(sys::DEPTH_TEST) } else { (gl.glDisable)(sys::DEPTH_TEST) }
         }
         let mut bound = Bound { draw_buffers: Some(attached), ..Default::default() };
-        for d in &p.draws { self.run_draw(d, &mut bound); }
+        for d in &p.draws { self.run_draw(d, &p.views, &mut bound); }
         let gl = &self.ctx.gl;
         unsafe {
             (gl.glBindVertexArray)(0);
@@ -684,7 +730,7 @@ impl Renderer {
         Ok(())
     }
 
-    fn run_draw(&mut self, d: &DrawJob, bound: &mut Bound) {
+    fn run_draw(&mut self, d: &DrawJob, views: &[[i32; 4]], bound: &mut Bound) {
         let key = d.program.key;
         let Some(words_unit) = self.programs.get(&key).map(|p| p.words_unit) else { return };
         // instance words of a retained buffer, for a program that fetches instances by id
@@ -791,7 +837,18 @@ impl Renderer {
             };
             (gl.glBindBuffer)(sys::ARRAY_BUFFER, inst_buffer);
             let (index_type, width) = if d.index_u32 { (sys::UNSIGNED_INT, 4) } else { (sys::UNSIGNED_SHORT, 2) };
-            for [x, y, w, h] in &d.scissors {
+            let mut block_view = None;
+            for (vi, [x, y, w, h]) in &d.scissors {
+                if let Some([vx, vy, vw, vh]) = views.get(*vi).filter(|_| bound.view != Some(*vi)) {
+                    (gl.glViewport)(*vx, *vy, *vw, *vh);
+                    bound.view = Some(*vi);
+                }
+                if let Some((binding, blocks)) = d.pass_block.as_ref().filter(|_| block_view != Some(*vi)) {
+                    if let Some((at, len)) = blocks.get(*vi) {
+                        (gl.glBindBufferRange)(sys::UNIFORM_BUFFER, *binding, self.uniform_arena, *at as isize, *len as isize);
+                    }
+                    block_view = Some(*vi);
+                }
                 (gl.glScissor)(*x, *y, *w, *h);
                 for [start, count] in &d.ranges {
                     if *count == 0 { continue; }

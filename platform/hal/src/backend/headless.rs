@@ -76,7 +76,7 @@ impl Gpu for Headless {
     fn texture_update(&mut self, _s: &mut Session, _id: Id, _t: &TextureObj, _mip: u16, _rect: [u32; 4], _layer: u32, _data: &[u8]) {}
     fn texture_destroy(&mut self, _sid: u32, _id: Id) {}
     fn texture_readback(&mut self, s: &mut Session, _id: Id, req: u32, rect: [u32; 4]) {
-        s.events.readback(req, readback::NO_RASTER, rect, &[]);
+        s.events.readback(req, readback::NO_RASTER, rect, None);
     }
     fn texture_share(&mut self, s: &mut Session, id: Id) {
         // no shareable surface: handle 0
@@ -128,12 +128,9 @@ impl Gpu for Headless {
         })
     }
     fn badges(&self) -> bool { true }
-    fn pick(&mut self, s: &mut Session, _window: Id, req: u32, _pos: [f32; 2]) {
-        s.events.pick_result(req, &[]);
-    }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
         let g = s.windows.get(s.id, window).map_or([0.0; 4], |e| e.val.geom);
-        s.events.readback(req, readback::NO_RASTER, [0, 0, g[2] as u32, g[3] as u32], &[]);
+        s.events.readback(req, readback::NO_RASTER, [0, 0, g[2] as u32, g[3] as u32], None);
     }
     fn window_closed(&mut self, _sid: u32, _id: Id) {}
     fn completes_inline(&self) -> bool {

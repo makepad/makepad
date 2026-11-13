@@ -5,7 +5,7 @@
 use super::*;
 
 const MAGIC: &[u8; 4] = b"MKFC";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 struct W(Vec<u8>);
 
@@ -217,6 +217,8 @@ pub fn encode(c: &Capture) -> Vec<u8> {
         w.f4(p.viewport);
         w.f32(p.dpi);
         w.bytes(&p.uniforms);
+        w.u64(p.view_rects.len() as u64);
+        p.view_rects.iter().for_each(|r| w.f4(*r));
         w.range(p.draws);
         w.u32(p.name);
         w.u32(p.owner);
@@ -320,9 +322,10 @@ pub fn decode(b: &[u8]) -> Result<Capture, String> {
         let viewport = r.f4()?;
         let dpi = r.f32()?;
         let uniforms = r.bytes()?;
+        let view_rects = (0..r.count()?).map(|_| r.f4()).collect::<Res<Vec<_>>>()?;
         let draws = r.range()?;
         let (name, owner) = (r.u32()?, r.u32()?);
-        c.passes.push(CapPass { color, depth, load, clear, clear_depth, layer, viewport, dpi, uniforms, draws, name, owner });
+        c.passes.push(CapPass { color, depth, load, clear, clear_depth, layer, viewport, dpi, uniforms, view_rects, draws, name, owner });
     }
     for _ in 0..r.count()? {
         let pass = r.u32()?;

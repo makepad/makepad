@@ -7,17 +7,22 @@ use makepad_strict_json::Value;
 /// Which question goes to which command (the start of `help`).
 const START: &str = "\
 Ask by question (ids printed in answers are accepted by later commands: T<n> thread, S<n> fn slot,
-H<n> heap site, P<n> panic, K<n> breakpoint, G<n> probe group, F<n> frame, V<n> Splash VM):
+H<n> heap site, P<n> panic, K<n> breakpoint, G<n> probe group, F<n> frame):
 - slow / CPU: `why-slow`, then `prof [threads=T1] [s=5]`
 - stuck / hang / deadlock: `why-hung`, `waits`, `stacks thread=T3`
 - crash: `panics`, `locals panic=P1`, `resume P1 panic|retry|restart`
 - memory: `memory`, then `heap top [by=live|alloc]` (after `heap start`), `heap path H7`, `mem timeline`
 - JIT code: `versions <fn|S<n>>`, `tier <fn> o1|o3|auto`, `count <fn>`
 - frames / hitches: `timeline start`, `timeline frames`, `frame F12`, `events on=hitch`
-- threads: `threads`, `stacks`; Splash VMs: `vms`; GPU memory: `gpu top`
-Every command: `as=json` gives the JSON lines (for programs).";
+- threads: `threads`, `stacks`";
 
 pub fn help(a: &mut Answer) {
+    if a.req.pos.first().map(String::as_str) == Some("schema") {
+        if let Some(def) = a.take1("input_schema") {
+            a.line(&def.to_json());
+        }
+        return;
+    }
     let rows = a.take("cmd");
     let one = a.req.pos.first().is_some();
     if one {
@@ -26,9 +31,15 @@ pub fn help(a: &mut Answer) {
         }
         return;
     }
-    a.head = format!("makepad inspect: {} commands; `help <cmd>` gives one's arguments and answer.", rows.len());
+    a.head = format!("relax inspect: {} commands; `help <cmd>` gives one's arguments and answer.", rows.len());
     a.line(START);
     let names: Vec<&str> = rows.iter().map(|r| s(r, "cmd")).collect();
+    // what the host adds (a Makepad app's Splash VMs and GPU ledger), when it serves them
+    let host: Vec<&str> = [("vms", "Splash VMs (V<n>): `vms`"), ("gpu top", "GPU memory: `gpu top`")].iter().filter(|(c, _)| names.contains(c)).map(|(_, l)| *l).collect();
+    if !host.is_empty() {
+        a.line(&format!("- {}", host.join("; ")));
+    }
+    a.line("Every command: `as=json` gives the JSON lines (for programs).");
     a.line(&format!("all commands: {}", names.join(", ")));
 }
 

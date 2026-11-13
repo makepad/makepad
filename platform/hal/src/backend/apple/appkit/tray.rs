@@ -380,7 +380,7 @@ unsafe fn pointer_over(button: ObjcId) -> bool {
 }
 
 fn selftest_on() -> bool {
-    std::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some()
+    relax_api::env::var_os("MAKEPAD_TRAY_SELFTEST").is_some()
 }
 
 fn destroy(tray: Tray) {
@@ -493,7 +493,7 @@ unsafe fn selftest_click(sid: u32, tray: u64, item: ObjcId) {
 /// action (`trayClick:`, what a real click runs) fires that many seconds after the tray was made,
 /// once per entry, so a click arrives long after startup like a user's. False when not set.
 unsafe fn selftest_clicks(target: ObjcId, button: ObjcId) -> bool {
-    let Ok(list) = std::env::var("MAKEPAD_TRAY_SELFTEST_CLICKS") else { return false };
+    let Ok(list) = relax_api::env::var("MAKEPAD_TRAY_SELFTEST_CLICKS") else { return false };
     if target == nil || button == nil {
         return false;
     }
@@ -506,8 +506,8 @@ unsafe fn selftest_clicks(target: ObjcId, button: ObjcId) -> bool {
 
 /// `MAKEPAD_TRAY_SELFTEST_ITEM`: the item with that label is chosen after the delay.
 unsafe fn selftest_later(menu: ObjcId) {
-    let Ok(label) = std::env::var("MAKEPAD_TRAY_SELFTEST_ITEM") else { return };
-    let delay: f64 = std::env::var("MAKEPAD_TRAY_SELFTEST_DELAY").ok().and_then(|d| d.trim().parse().ok()).unwrap_or(20.0);
+    let Ok(label) = relax_api::env::var("MAKEPAD_TRAY_SELFTEST_ITEM") else { return };
+    let delay: f64 = relax_api::env::var("MAKEPAD_TRAY_SELFTEST_DELAY").ok().and_then(|d| d.trim().parse().ok()).unwrap_or(20.0);
     let count: i64 = msg_send![menu, numberOfItems];
     for index in 0..count {
         let entry: ObjcId = msg_send![menu, itemAtIndex: index];

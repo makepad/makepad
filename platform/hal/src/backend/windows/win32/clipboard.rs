@@ -1,5 +1,5 @@
-//! The clipboard: Unicode text writes (`ClipSet`) and reads of every representation at once
-//! (`ClipRead` -> `Clipboard`): text, an image (the registered "PNG" format as it is, else a
+//! The clipboard: text and rich-flavour writes (`ClipSet`) and reads of every representation at once
+//! (`ClipRead` -> `Clipboard`): text, HTML, Markdown, an image (the registered "PNG" format as it is, else a
 //! CF_DIBV5 / CF_DIB bitmap converted to PNG on the clipboard worker, never in the WndProc) and
 //! CF_HDROP file lists (file URL + native path). All representations are copied out under one
 //! open of the clipboard. A clipboard another process holds open is tried again on a later timer
@@ -48,26 +48,100 @@ fn utf16_text(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units)
 }
 
-pub(super) fn set_text(text: &str) {
-    let utf16 = wide(text);
+fn html_format() -> u32 {
+    static FORMAT: OnceLock<u32> = OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(PCWSTR(wide("HTML Format").as_ptr())) })
+}
+
+fn markdown_format() -> u32 {
+    static FORMAT: OnceLock<u32> = OnceLock::new();
+    *FORMAT.get_or_init(|| unsafe { RegisterClipboardFormatW(PCWSTR(wide("text/markdown").as_ptr())) })
+}
+
+fn build_cf_html(fragment: &str) -> Vec<u8> {
+    let header = |start_html, end_html, start_fragment, end_fragment| {
+        format!("Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n")
+    };
+    let prefix = "<html><body>\r\n<!--StartFragment-->";
+    let suffix = "<!--EndFragment-->\r\n</body></html>";
+    let start_html = header(0usize, 0usize, 0usize, 0usize).len();
+    let start_fragment = start_html + prefix.len();
+    let end_fragment = start_fragment + fragment.len();
+    let end_html = end_fragment + suffix.len();
+    let header = header(start_html, end_html, start_fragment, end_fragment);
+    format!("{header}{prefix}{fragment}{suffix}\0").into_bytes()
+}
+
+fn parse_cf_html(bytes: &[u8]) -> Option<String> {
+    let len = bytes.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+    let bytes = &bytes[..len];
+    let header_end = bytes.iter().position(|b| *b == b'<').unwrap_or(bytes.len());
+    let header = std::str::from_utf8(&bytes[..header_end]).ok()?;
+    let offset = |name: &str| {
+        header.lines().find_map(|line| line.strip_prefix(name)).and_then(|value| value.trim().parse::<usize>().ok())
+    };
+    if let (Some(start), Some(end)) = (offset("StartFragment:"), offset("EndFragment:")) {
+        if start >= header_end {
+            if let Some(fragment) = bytes.get(start..end).and_then(|b| std::str::from_utf8(b).ok()) {
+                return Some(fragment.to_string());
+            }
+        }
+    }
+    let start_marker = b"<!--StartFragment-->";
+    let end_marker = b"<!--EndFragment-->";
+    let start = bytes.windows(start_marker.len()).position(|b| b == start_marker)? + start_marker.len();
+    let end = bytes[start..].windows(end_marker.len()).position(|b| b == end_marker)? + start;
+    std::str::from_utf8(&bytes[start..end]).ok().map(str::to_string)
+}
+
+#[cfg(test)]
+#[test]
+fn cf_html_round_trip() {
+    let fragment = "<p>Héllo 世界 🦀</p>";
+    let bytes = build_cf_html(fragment);
+    assert_eq!(parse_cf_html(&bytes).as_deref(), Some(fragment), "UTF-8 byte offsets");
+    let html = String::from_utf8(bytes).unwrap();
+    let offsets_only = html.replace("<!--StartFragment-->", "<!--StartContents-->");
+    assert_eq!(parse_cf_html(offsets_only.as_bytes()).as_deref(), Some(fragment), "offsets without a fallback marker");
+    let fallback = html.replace("StartFragment:", "MissingOffset:");
+    assert_eq!(parse_cf_html(fallback.as_bytes()).as_deref(), Some(fragment), "comment marker fallback");
+    assert_eq!(parse_cf_html(b"StartFragment:999\r\nEndFragment:1000\r\n<html></html>"), None, "out-of-range offsets");
+}
+
+unsafe fn set_bytes(format: u32, bytes: &[u8]) {
+    if format == 0 {
+        return;
+    }
+    // GMEM_MOVEABLE: ownership passes to the clipboard on success
+    if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes.len()) {
+        let p = GlobalLock(mem) as *mut u8;
+        if p.is_null() {
+            let _ = GlobalFree(Some(mem));
+        } else {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
+            let _ = GlobalUnlock(mem);
+            if SetClipboardData(format, Some(HANDLE(mem.0))).is_err() {
+                let _ = GlobalFree(Some(mem));
+            }
+        }
+    }
+}
+
+pub(super) fn set(data: &ClipboardData) {
+    let utf16 = wide(&data.text);
+    let html = (!data.html.is_empty()).then(|| build_cf_html(&data.html));
     unsafe {
         if OpenClipboard(None).is_err() {
-            eprintln!("[hal-win32] clipboard busy: text not copied");
+            eprintln!("[hal-win32] clipboard busy: data not copied");
             return;
         }
         let _ = EmptyClipboard();
-        // GMEM_MOVEABLE: ownership passes to the clipboard on success
-        if let Ok(mem) = GlobalAlloc(GMEM_MOVEABLE, utf16.len() * 2) {
-            let p = GlobalLock(mem) as *mut u16;
-            if p.is_null() {
-                let _ = GlobalFree(Some(mem));
-            } else {
-                std::ptr::copy_nonoverlapping(utf16.as_ptr(), p, utf16.len());
-                let _ = GlobalUnlock(mem);
-                if SetClipboardData(CF_UNICODETEXT.0 as u32, Some(HANDLE(mem.0))).is_err() {
-                    let _ = GlobalFree(Some(mem));
-                }
-            }
+        set_bytes(CF_UNICODETEXT.0 as u32, std::slice::from_raw_parts(utf16.as_ptr().cast(), utf16.len() * 2));
+        if let Some(html) = html {
+            set_bytes(html_format(), &html);
+        }
+        if !data.markdown.is_empty() {
+            set_bytes(markdown_format(), data.markdown.as_bytes());
         }
         let _ = CloseClipboard();
     }
@@ -125,6 +199,18 @@ fn snapshot() -> Option<Snapshot> {
         let mut s = Snapshot { data: ClipboardData::default(), dib: None };
         if let Some(b) = GetClipboardData(CF_UNICODETEXT.0 as u32).ok().and_then(|h| global_bytes(h)) {
             s.data.text = utf16_text(&b);
+        }
+        let html = html_format();
+        if html != 0 {
+            if let Some(b) = GetClipboardData(html).ok().and_then(|h| global_bytes(h)) {
+                s.data.html = parse_cf_html(&b).unwrap_or_default();
+            }
+        }
+        let markdown = markdown_format();
+        if markdown != 0 {
+            if let Some(b) = GetClipboardData(markdown).ok().and_then(|h| global_bytes(h)) {
+                s.data.markdown = String::from_utf8_lossy(&b).trim_end_matches('\0').to_string();
+            }
         }
         if png_format != 0 && IsClipboardFormatAvailable(png_format).is_ok() {
             if let Some(b) = GetClipboardData(png_format).ok().and_then(|h| global_bytes(h)) {

@@ -27,7 +27,7 @@ pub fn gpu_working_set_bytes() -> u64 {
 /// `MAKEPAD_GPU_WORKING_SET=<bytes>` runs as on a device with no more
 /// memory than that (a smaller device's limits, tried on this one).
 pub fn set_gpu_working_set_bytes(bytes: u64) {
-    let emulated = std::env::var("MAKEPAD_GPU_WORKING_SET")
+    let emulated = relax_api::env::var("MAKEPAD_GPU_WORKING_SET")
         .ok()
         .and_then(|v| v.parse::<u64>().ok());
     let bytes = match emulated {

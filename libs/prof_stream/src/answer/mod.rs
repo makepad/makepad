@@ -1,9 +1,9 @@
 //! The text answers of `makepad inspect`: what an agent (or a person) reads by default; `as=json`
-//! prints the protocol's JSON lines instead (programs; Scope reads the binary `prof` stream).
+//! prints the protocol's JSON lines instead (programs; an app reads the binary `prof` stream).
 //!
 //! Rendered on the client from the answer's JSON lines, so every transport (local socket, hub,
 //! native apps' endpoints) answers in the same words. The one renderer: the inspect client
-//! (relax-compiler) and Scope's Live console both call [`render`]. The rules (profproto.md §5),
+//! (relax-compiler) and an app's Live console both call [`render`]. The rules (profproto.md §5),
 //! for LLM readers first, cheap in tokens and hard to misread:
 //! - answer first: line 1 is the finding with its key number; evidence follows;
 //! - the smallest useful answer; `more:` at the end names the drill-down commands with the ids

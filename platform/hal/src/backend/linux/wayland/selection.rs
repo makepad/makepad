@@ -37,6 +37,7 @@ struct Incoming {
 #[derive(Clone)]
 pub(super) struct Source {
     items: Arc<Vec<(u32, String)>>,
+    clipboard: Option<Arc<ClipboardData>>,
     drag: Option<Key>,
 }
 
@@ -53,7 +54,7 @@ pub(super) struct Selection {
     primary: Option<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1>,
     source: Option<wl_data_source::WlDataSource>,
     primary_source: Option<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1>,
-    pending_text: Option<String>,
+    pending_data: Option<ClipboardData>,
     pending_primary: Option<String>,
     reads: Vec<io::ReadPipe<(u64, String)>>,
     writes: Vec<io::WritePipe>,
@@ -102,11 +103,11 @@ impl Selection {
     }
 }
 impl State {
-    pub(super) fn set_clipboard(&mut self, text: String, primary: bool) {
+    pub(super) fn set_clipboard(&mut self, data: ClipboardData, primary: bool) {
         if primary {
-            self.selection.pending_primary = Some(text);
+            self.selection.pending_primary = Some(data.text);
         } else {
-            self.selection.pending_text = Some(text);
+            self.selection.pending_data = Some(data);
         }
         self.apply_selection();
     }
@@ -118,16 +119,25 @@ impl State {
             self.selection.manager.as_ref(),
             self.selection.device.as_ref(),
         ) {
-            if let Some(text) = self.selection.pending_text.take() {
+            if let Some(data) = self.selection.pending_data.take() {
+                let html = !data.html.is_empty();
+                let markdown = !data.markdown.is_empty();
                 let source = manager.create_data_source(
                     &self.qh,
                     Source {
-                        items: Arc::new(vec![(raw::drag_item::STRING, text)]),
+                        items: Arc::new(Vec::new()),
+                        clipboard: Some(Arc::new(data)),
                         drag: None,
                     },
                 );
                 for mime in common::TEXT_MIMES {
                     source.offer(mime.into());
+                }
+                if html {
+                    source.offer(common::HTML_MIME.into());
+                }
+                if markdown {
+                    source.offer(common::MARKDOWN_MIME.into());
                 }
                 device.set_selection(Some(&source), self.input.serial);
                 if let Some(old) = self.selection.source.replace(source) {
@@ -144,6 +154,7 @@ impl State {
                     &self.qh,
                     Source {
                         items: Arc::new(vec![(raw::drag_item::STRING, text)]),
+                        clipboard: None,
                         drag: None,
                     },
                 );
@@ -202,6 +213,13 @@ impl State {
         }
         if mimes.iter().any(|m| m == common::URI_MIME) {
             wanted.push(common::URI_MIME.to_string());
+        }
+        if matches!(purpose, Purpose::Reply(..)) {
+            for mime in [common::HTML_MIME, common::MARKDOWN_MIME] {
+                if mimes.iter().any(|m| m == mime) {
+                    wanted.push(mime.to_string());
+                }
+            }
         }
         if wanted.is_empty() {
             self.empty_read(purpose);
@@ -321,7 +339,15 @@ impl State {
             eprintln!("[hal-wayland] nonblocking selection: {e}");
             return;
         }
-        let bytes = if mime == common::URI_MIME {
+        let bytes = if let Some(data) = &source.clipboard {
+            let text = match mime {
+                common::HTML_MIME => &data.html,
+                common::MARKDOWN_MIME => &data.markdown,
+                mime if common::TEXT_MIMES.contains(&mime) => &data.text,
+                _ => return,
+            };
+            text.as_bytes().to_vec()
+        } else if mime == common::URI_MIME {
             common::encode_uris(&source.items)
         } else {
             source
@@ -353,6 +379,7 @@ impl State {
                     &self.qh,
                     Source {
                         items: Arc::new(items),
+                        clipboard: None,
                         drag: Some(recipient),
                     },
                 );

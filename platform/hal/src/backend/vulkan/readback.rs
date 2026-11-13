@@ -92,7 +92,7 @@ impl Vulkan {
         Ok((staging, stencil))
     }
 
-    pub(super) fn read(&mut self, s: &mut Session, image: Option<Arc<Image>>, req: u32, rect: [u32; 4], pick: Option<[f32; 2]>) {
+    pub(super) fn read(&mut self, s: &mut Session, image: Option<Arc<Image>>, req: u32, rect: [u32; 4]) {
         let result = (|| {
             let image = image.ok_or("readback image has no storage")?;
             if rect[0] >= image.desc.w || rect[1] >= image.desc.h { return Err("readback origin exceeds image".into()); }
@@ -100,11 +100,11 @@ impl Vulkan {
             let fmt = image.desc.format;
             let batch = self.ensure_batch()?;
             let (staging, stencil) = Self::record_read(batch, image, rect)?;
-            batch.tickets.push(Ticket::Read { token: Self::token(s), req, rect, format: fmt, staging, stencil, pick }); Ok::<_, String>(())
+            batch.tickets.push(Ticket::Read { token: Self::token(s), req, rect, format: fmt, staging, stencil }); Ok::<_, String>(())
         })();
         if let Err(e) = result {
             eprintln!("[hal-vulkan] readback: {e}");
-            if pick.is_some() { s.events.pick_result(req, &[]); } else { s.events.readback(req, readback::FAILED, rect, &[]); }
+            s.events.readback(req, readback::FAILED, rect, None);
         }
     }
 
@@ -143,22 +143,6 @@ impl Vulkan {
         batch.tickets.push(Ticket::FrameCap { staging, len: len as usize, done });
     }
 
-    pub(super) fn read_pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        let Some(id) = self.pick_ids.get(&(s.id, window)).copied() else { s.events.pick_result(req, &[]); return };
-        if self.pick_pending.contains(&(s.id, id)) { s.events.pick_result(req, &[]); return; }
-        let image = self.resolve(s, id);
-        let Some(t) = &image else { s.events.pick_result(req, &[]); return };
-        if pos.iter().any(|p| !p.is_finite()) { s.bad(); return; }
-        // Match Metal's 8-texel picking neighbourhood, clamped at every edge.
-        let pos = pos.map(f32::floor);
-        let x = (pos[0] as i64).saturating_sub(8).clamp(0, t.desc.w as i64) as u32;
-        let y = (pos[1] as i64).saturating_sub(8).clamp(0, t.desc.h as i64) as u32;
-        let x1 = (pos[0] as i64).saturating_add(9).clamp(x as i64, t.desc.w as i64) as u32;
-        let y1 = (pos[1] as i64).saturating_add(9).clamp(y as i64, t.desc.h as i64) as u32;
-        if x1 == x || y1 == y { s.events.pick_result(req, &[]); return; }
-        self.read(s, image, req, [x, y, x1 - x, y1 - y], Some(pos));
-    }
-
     pub(super) fn copy_window(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) {
         let result = (|| {
             let source = self.window_image(s, window).ok_or("window has no retained frame")?;
@@ -176,7 +160,7 @@ impl Vulkan {
             source.transition(batch.cb, source.sampled_layout()); destination.transition(batch.cb, destination.sampled_layout());
             batch.images.extend([source, destination]); batch.tickets.push(Ticket::Copy { token: Self::token(s), req, rect }); Ok::<_, String>(())
         })();
-        if let Err(e) = result { eprintln!("[hal-vulkan] window copy: {e}"); s.events.readback(req, readback::FAILED, [0; 4], &[]); }
+        if let Err(e) = result { eprintln!("[hal-vulkan] window copy: {e}"); s.events.readback(req, readback::FAILED, [0; 4], None); }
     }
 
     /// The Backend contract permits this synchronous host-only read. Gpu hooks always use

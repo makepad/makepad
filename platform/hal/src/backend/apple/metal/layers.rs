@@ -47,6 +47,21 @@ pub(super) struct Prepared {
 }
 
 impl Windows {
+    /// The backend draws with another device: every segment layer draws with it and makes its
+    /// depth again on the next frame.
+    pub fn device_replaced(&mut self, device: ObjcId) {
+        unsafe {
+            let () = msg_send![class!(CATransaction), begin];
+            let () = msg_send![class!(CATransaction), setDisableActions: YES];
+            for surface in self.windows.values_mut().flat_map(|w| w.surfaces.values_mut()) {
+                let () = msg_send![surface.layer.as_id(), setDevice: device];
+                surface.depth = None;
+                surface.depth_size = [0; 2];
+            }
+            let () = msg_send![class!(CATransaction), commit];
+        }
+    }
+
     pub fn contains(&self, sid: u32, window: Id) -> bool { self.windows.get(&(sid, window)).is_some_and(|w| w.active.load(std::sync::atomic::Ordering::Acquire)) }
 
     /// A badge/composition frame belongs to the physical host, while its native views

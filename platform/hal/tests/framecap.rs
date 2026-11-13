@@ -145,7 +145,9 @@ fn a_captured_frame_replays_to_the_same_pixels() {
     hal.submit(&w.buf());
     let mut live = Vec::new();
     until(&hal, sid, &mut store, |e| match e {
-        HalEvent::Readback { req: 99, status, pixels, .. } => {
+        HalEvent::Readback { req: 99, status, lease, .. } => {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK);
             live = pixels.to_vec();
             true
@@ -186,7 +188,7 @@ fn a_captured_frame_replays_to_the_same_pixels() {
         fn d(req: &makepad_remote::Req, out: &mut makepad_remote::Out) {
             framecap::dispatch(req, out);
         }
-        let (bytes, _) = makepad_remote::cmd::answer(d, &format!("{q} file={}", path.display()));
+        let bytes = makepad_remote::cmd::answer(d, &format!("{q} file={}", path.display()));
         String::from_utf8(bytes).unwrap()
     };
     let frame = ask("cap frame");
@@ -235,7 +237,9 @@ fn a_captured_frame_replays_to_the_same_pixels() {
     hal.submit(&w.buf());
     let mut live2 = Vec::new();
     until(&hal, sid, &mut store, |e| match e {
-        HalEvent::Readback { req: 98, pixels, .. } => {
+        HalEvent::Readback { req: 98, lease, .. } => {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             live2 = pixels.to_vec();
             true
         }

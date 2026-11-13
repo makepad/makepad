@@ -29,10 +29,10 @@ pub(crate) fn end_run() {
     ACTIVE.store(false, Ordering::Release);
 }
 
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn trace_enabled() -> bool {
     static TRACE: OnceLock<bool> = OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var("MAKEPAD_TRACE").is_ok_and(|s| s.split(',').any(|s| s == "native-app")))
+    *TRACE.get_or_init(|| relax_api::env::var("MAKEPAD_TRACE").is_ok_and(|s| s.split(',').any(|s| s == "native-app")))
 }
 
 pub(crate) fn enable_bridge(session: u32) { BRIDGE.store(session, Ordering::Release); }

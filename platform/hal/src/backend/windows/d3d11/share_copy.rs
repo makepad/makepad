@@ -447,7 +447,7 @@ fn read_impl(key: u64, region: [u32; 4]) -> Result<Vec<u8>, String> {
 /// Reads `region` (x, y, width, height) of the shared texture of wire key `key` into `out` as
 /// BGRA: the bytes written, or -1 (an unknown key, a region outside it, `out` too short, a GPU
 /// error).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_read(key: u64, region: &[u32], out: &mut [u8]) -> i64 {
     let Ok(region) = <[u32; 4]>::try_from(region) else { return -1 };
     match read_impl(key, region) {
@@ -487,7 +487,7 @@ fn last_error() -> String {
 
 /// The text of this thread's last failed shared-texture op: its first `out.len()` bytes are
 /// written, its length is returned.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_error(out: &mut [u8]) -> u64 {
     LAST_ERROR.with(|e| {
         let e = e.borrow();
@@ -498,19 +498,19 @@ pub fn hal_shared_error(out: &mut [u8]) -> u64 {
 }
 
 /// [`prepare`].
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_prepare() -> bool {
     process_device().is_ok()
 }
 
 /// [`release`].
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_release(key: u64) {
     lock(slots()).remove(&key);
 }
 
 /// [`device`]: the device as an `ID3D11Device*` with a reference for the caller.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_device() -> u64 {
     match device_impl() {
         Ok(d) => d.into_raw() as u64,
@@ -522,7 +522,7 @@ pub fn hal_shared_device() -> u64 {
 }
 
 /// [`picture`] of `region` (x, y, width, height): an `ID3D11Texture2D*` for the caller.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_picture(key: u64, region: &[u32]) -> u64 {
     let Ok(region) = <[u32; 4]>::try_from(region) else {
         failed("a region is four numbers".into());
@@ -538,7 +538,7 @@ pub fn hal_shared_picture(key: u64, region: &[u32]) -> u64 {
 }
 
 /// [`to_nv12`] of the texture `picture` (borrowed): an `ID3D11Texture2D*` for the caller.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_to_nv12(picture: u64, width: u32, height: u32) -> u64 {
     let Ok(source) = (unsafe { ID3D11Texture2D::from_raw(picture as *mut _) }) else {
         failed("no picture".into());
@@ -557,7 +557,7 @@ pub fn hal_shared_to_nv12(picture: u64, width: u32, height: u32) -> u64 {
 }
 
 /// [`copy`]: `probes` as x, y pairs, their BGRA texels into `out` (4 bytes each).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_copy(src: i64, key: u64, probes: &[u32], out: &mut [u8]) -> bool {
     let points: Vec<[u32; 2]> = probes.chunks_exact(2).map(|p| [p[0], p[1]]).collect();
     match copy_impl(src as isize, key, &points) {
@@ -579,7 +579,7 @@ pub fn hal_shared_copy(src: i64, key: u64, probes: &[u32], out: &mut [u8]) -> bo
 }
 
 /// [`upload`].
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_upload(key: u64, pixels: &[u8], width: u32, height: u32, stride: u64) -> bool {
     match upload_impl(key, pixels, width, height, stride as usize) {
         Ok(()) => true,
@@ -591,7 +591,7 @@ pub fn hal_shared_upload(key: u64, pixels: &[u8], width: u32, height: u32, strid
 }
 
 /// [`nv12_picture`]: an `ID3D11Texture2D*` for the caller.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_shared_nv12_picture(key: u64) -> u64 {
     match nv12_picture_impl(key) {
         Ok(t) => t.into_raw() as u64,

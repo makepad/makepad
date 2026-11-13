@@ -16,7 +16,7 @@ use {
         hub_protocol::FrameCodec, AppToStudio, EventSample, RunViewFrameData, RunViewFrameRequest,
         RunViewKeyFocusRect, ScreenshotResponse, StudioToApp,
     },
-    std::cell::{Cell, RefCell},
+    std::cell::Cell,
     std::collections::{HashMap, HashSet},
     std::rc::Rc,
 };
@@ -1052,6 +1052,16 @@ impl Cx {
         self.fingers.cycle_hover_area(live_id!(mouse).into());
     }
 
+    /// The copy or cut chord the host sends: the focused widget's answer goes to the host's
+    /// clipboard. A copy or cut of nothing leaves that clipboard as it is.
+    fn hosted_clipboard_chord(&mut self, copy: bool) {
+        let e = TextClipboardEvent::default();
+        self.call_event_handler(&if copy { Event::TextCopy(e.clone()) } else { Event::TextCut(e.clone()) });
+        if let Some(write) = e.written() {
+            Cx::send_hosted_clipboard(write);
+        }
+    }
+
     pub fn dispatch_studio_msg(
         &mut self,
         msg: StudioToApp,
@@ -1184,28 +1194,8 @@ impl Cx {
                 }));
                 self.call_event_handler(&Event::DragEnd);
             }
-            StudioToApp::TextCopy => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                // a copy or cut of nothing leaves the host's clipboard as it is
-                if let Some(text) = text.filter(|t| !t.is_empty()) {
-                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
-                }
-            }
-            StudioToApp::TextCut => {
-                let response = Rc::new(RefCell::new(None));
-                self.call_event_handler(&Event::TextCut(TextClipboardEvent {
-                    response: response.clone(),
-                }));
-                let text = response.borrow().clone();
-                // a copy or cut of nothing leaves the host's clipboard as it is
-                if let Some(text) = text.filter(|t| !t.is_empty()) {
-                    Cx::send_studio_message(AppToStudio::SetClipboard(text));
-                }
-            }
+            StudioToApp::TextCopy => self.hosted_clipboard_chord(true),
+            StudioToApp::TextCut => self.hosted_clipboard_chord(false),
             StudioToApp::Screenshot(request) => {
                 self.screenshot_requests.push(request);
                 self.redraw_all();
@@ -1251,7 +1241,10 @@ impl Cx {
                 return true;
             }
             StudioToApp::Custom(data) => {
-                if crate::ime::HostedBack::parse(&data).is_some_and(|back| back.handled.is_none()) {
+                // a read's flavours, ahead of its answer (handle_host_relay)
+                if let Some(flavours) = crate::window_controls::HostedClipboard::parse(&data) {
+                    self.clipboard.hosted_flavours = Some(flavours);
+                } else if crate::ime::HostedBack::parse(&data).is_some_and(|back| back.handled.is_none()) {
                     let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
                     self.call_event_handler(&event);
                     let Event::BackPressed { handled } = event else { unreachable!() };
@@ -2078,6 +2071,16 @@ impl Cx {
         std::mem::swap(&mut set, &mut self.new_next_frames);
 
         self.performance_stats.process_frame_data(time);
+
+        if set.contains(&self.textures.1.readbacks.legacy_retry) {
+            self.textures.1.readbacks.legacy_retry = Default::default();
+            let waiting = self.textures.1.readbacks.legacy_waiting.clone();
+            for texture in waiting {
+                self.request_render_texture_capture(&texture);
+                // The context is still full: later captures keep their place.
+                if self.textures.1.readbacks.legacy_waiting.contains(&texture) { break; }
+            }
+        }
 
         self.call_event_handler(&Event::NextFrame(NextFrameEvent {
             set,

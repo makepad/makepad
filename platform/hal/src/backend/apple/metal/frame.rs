@@ -135,6 +135,17 @@ pub(super) struct Overlay {
     copied: bool,
 }
 
+impl Overlay {
+    /// The backend draws with another device: the images were the old device's, the next
+    /// frames make them again.
+    pub(super) fn device_replaced(&mut self) {
+        self.base = None;
+        self.image = None;
+        self.ready = false;
+        self.copied = false;
+    }
+}
+
 /// The command buffer the batch's frames encode into.
 pub struct Batch {
     pub buffer: RcObjcId,
@@ -155,6 +166,8 @@ struct Encoder {
     /// MTLTriangleFillMode: 0 fill, 1 lines (`Draw::WIREFRAME`)
     fill: u64,
     scissor: Option<[u32; 4]>,
+    /// the viewport set (a pass's view rects set one per view)
+    viewport: [f32; 4],
     /// buffer and offset bound at each vertex / fragment buffer slot
     buffers: [(ObjcId, u64); 32],
     /// texture bound at each fragment/vertex texture slot (Metal's argument table: 31)
@@ -186,6 +199,17 @@ impl Encoder {
         unsafe {
             let _: () = msg_send![self.id, setVertexTexture: texture atIndex: index as u64];
             let _: () = msg_send![self.id, setFragmentTexture: texture atIndex: index as u64];
+        }
+    }
+
+    fn set_viewport(&mut self, v: [f32; 4]) {
+        if self.viewport == v {
+            return;
+        }
+        self.viewport = v;
+        let vp = MTLViewport { originX: v[0] as f64, originY: v[1] as f64, width: v[2].max(0.0) as f64, height: v[3].max(0.0) as f64, znear: 0.0, zfar: 1.0 };
+        unsafe {
+            let _: () = msg_send![self.id, setViewport: vp];
         }
     }
 
@@ -252,12 +276,18 @@ pub(super) fn texture_obj(tex: &mut FastMap<(u32, u32), Tex>, device: ObjcId, s:
 /// store actions (else every attachment is stored for the encoder after). `sample`: stage-boundary
 /// timestamps of this encoder, at (buffer, group start).
 /// `depth_kept`: the depth is stored at the end of the pass (else it is tile memory only).
-/// `twins`: an MSAA pass's multisampled images (one per colour, and the depth's) it draws in, kept
-/// and at its end resolved into the attachments.
+/// `twins`: an MSAA pass's multisampled images (one per colour, and the depth's) it draws in,
+/// resolved into the attachments at its end, and stored there unless they are transient.
 #[allow(clippy::too_many_arguments)]
 fn configure_pass(descriptor: ObjcId, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<ObjcId>, depth_kept: bool, first: bool, last: bool, sample: Option<(ObjcId, usize)>, twins: Option<&Twins>) {
-    // what an attachment keeps at the encoder's end: the pass's last also resolves a twin
-    let stored = if !last { MTLStoreAction::Store } else if twins.is_some() { MTLStoreAction::StoreAndMultisampleResolve } else { MTLStoreAction::Store };
+    // what an attachment keeps at the encoder's end: the pass's last also resolves a twin (a
+    // transient one is resolved alone: it is never stored)
+    let stored = match twins {
+        _ if !last => MTLStoreAction::Store,
+        Some(t) if t.transient => MTLStoreAction::MultisampleResolve,
+        Some(_) => MTLStoreAction::StoreAndMultisampleResolve,
+        None => MTLStoreAction::Store,
+    };
     unsafe {
         let attachments: ObjcId = msg_send![descriptor, colorAttachments];
         for i in 0..4u64 {
@@ -350,6 +380,8 @@ fn twin_slot<'a>(tex: &'a mut FastMap<(u32, u32), Tex>, win: &'a mut FastMap<(u3
 struct Twins {
     colors: Vec<ObjcId>,
     depth: Option<ObjcId>,
+    /// they live for the pass alone (`exec::twins_kept` false): resolved, never stored
+    transient: bool,
 }
 
 /// A render encoder with the pass's viewport and winding. `sample`: encoder timestamps (devices
@@ -687,7 +719,7 @@ impl Metal {
             let () = unsafe {
                 msg_send![batch.buffer.as_id(), addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                     let present_ns = crate::clock_ns();
-                    let status: u64 = unsafe { msg_send![cb, status] };
+                    let failure = command_buffer_failure(cb);
                     for t in &tickets {
                         for p in &t.prof {
                             if p.timed() {
@@ -698,7 +730,7 @@ impl Metal {
                         let (gpu_ns, gpu_span) = t.time.span(cb).map_or((0, [0.0; 2]), |(busy, start, end)| {
                             ((busy.max(0.0) * 1e9) as u64, [start, end])
                         });
-                        mailbox.push(Done::Frame { sid: t.sid, target: t.target, frame: t.frame, gpu_ns, present_ns, gpu_span, failed: status == 5, partial: t.partial, window: t.window, kind: t.kind, incarnation: t.font_frames.clone() });
+                        mailbox.push(Done::Frame { sid: t.sid, target: t.target, frame: t.frame, gpu_ns, present_ns, gpu_span, failure, partial: t.partial, window: t.window, kind: t.kind, incarnation: t.font_frames.clone() });
                     }
                 })]
             };
@@ -958,7 +990,7 @@ impl Metal {
         s.stats.max_frame_ns = s.stats.max_frame_ns.max(p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns));
         // research (ios-interp): MAKEPAD_HAL_FRAME_LOG=1 prints each frame's Cx build time
         static FRAME_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *FRAME_LOG.get_or_init(|| std::env::var_os("MAKEPAD_HAL_FRAME_LOG").is_some()) {
+        if *FRAME_LOG.get_or_init(|| relax_api::env::var_os("MAKEPAD_HAL_FRAME_LOG").is_some()) {
             eprintln!("hal-frame {} build_us {:.1}", frame, p.meta.build_end_ns.saturating_sub(p.meta.build_start_ns) as f64 / 1e3);
         }
 
@@ -1253,9 +1285,11 @@ impl Metal {
     /// storage to keep one with (a window layer's segment, whose drawable is the layer's: said
     /// once), or when the pass loads an attachment its twin does not hold the picture of (a pass
     /// drawn single sampled into it since, as the frame a pipeline's state for the samples became
-    /// ready between the eyes): it continues the attachment then.
+    /// ready between the eyes): it continues the attachment then. `keep`: the twins hold the
+    /// pass's samples past its end (`exec::twins_kept`, or a split frame); else they are
+    /// transient (resolved, never stored) and hold nothing after it.
     #[allow(clippy::too_many_arguments)]
-    fn twins(&mut self, s: &mut Session, sid: u32, target: Id, samples: u8, segment: bool, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<(Id, ObjcId)>, depth_kept: bool) -> Option<Twins> {
+    fn twins(&mut self, s: &mut Session, sid: u32, target: Id, samples: u8, segment: bool, pass: &Pass, colors: &[(usize, Id, ObjcId)], depth: Option<(Id, ObjcId)>, depth_kept: bool, keep: bool) -> Option<Twins> {
         let device = self.dev.device;
         let window = self.window_key(sid, target);
         // (attachment, its storage, whether the pass loads it, whether the pass keeps it)
@@ -1272,26 +1306,27 @@ impl Metal {
             };
             let (ms, bytes) = twin(device, obj, samples, slot)?;
             self.twinned = true;
-            if loads && !slot.as_ref().is_some_and(|t| t.kept) {
-                return None;
-            }
             if bytes > 0 && !id.is_none() {
-                // the twin's memory is its attachment's
+                // the twin's memory is its attachment's from when it is made, whether or not
+                // this pass draws in it
                 if let Some(l) = s.ledger.get_mut(Kind::Texture, id.index) {
                     l.bytes = allocated_size(obj) + bytes;
                 }
+            }
+            if loads && !slot.as_ref().is_some_and(|t| t.kept) {
+                return None;
             }
             made.push(ms);
         }
         // once the pass ends its twins hold its picture (a scratch colour and an unkept depth go)
         for (id, _, _, keeps) in attachments {
             if let Some(t) = twin_slot(&mut self.tex, &mut self.win, s, sid, window, id).and_then(|slot| slot.as_mut()) {
-                t.kept = keeps;
+                t.kept = keeps && keep;
             }
         }
         let depth = depth.map(|_| made[colors.len()]);
         made.truncate(colors.len());
-        Some(Twins { colors: made, depth })
+        Some(Twins { colors: made, depth, transient: !keep })
     }
 
     /// A pass drawn single sampled into attachments an MSAA pass has twins of: the twins no longer
@@ -1328,12 +1363,28 @@ impl Metal {
         prof_key: Option<FrameKey>,
         segment: Option<&super::layers::Segment>,
     ) -> Option<Vec<String>> {
+        // the views (`Pass::view_rects`): each draw runs once per view, in this one encoder
+        let mut views = match exec::pass_views(pass, view.arena) {
+            Ok(views) => views,
+            Err(e) => {
+                eprintln!("[metal] pass \"{}\" not drawn: {e}", s.string(pass.name).unwrap_or(""));
+                s.bad();
+                return None;
+            }
+        };
+        let viewed = pass.view_rects.len != 0;
         let mut viewport = pass.viewport;
         if let Some(segment) = segment {
             viewport[0] -= segment.rect[0];
             viewport[1] -= segment.rect[1];
+            for v in &mut views {
+                v.rect[0] -= segment.rect[0];
+                v.rect[1] -= segment.rect[1];
+            }
         }
         let (vw, vh) = segment.map_or((viewport[2].max(0.0), viewport[3].max(0.0)), |s| (s.rect[2], s.rect[3]));
+        // what scissors clamp to: the target (the views lie in the viewport)
+        let scissor_size = if viewed && segment.is_none() { [(viewport[0] + vw) as u64, (viewport[1] + vh) as u64] } else { [vw as u64, vh as u64] };
         // ---- attachments
         let depth_only = self.depth_only(sid, is_window, pick, pass, draws);
         let mut colors: Vec<(usize, Id, ObjcId)> = Vec::new();
@@ -1416,7 +1467,10 @@ impl Metal {
         let depth_kept = depth.as_ref().is_some_and(|(id, _)| exec::depth_kept(s, sid, pass, view, *id));
         // an MSAA pass draws in multisampled twins of its attachments, resolved into them at its end
         let mut msaa = self.pass_samples(sid, pick, pass, draws, &formats);
-        let twins = if msaa > 1 { self.twins(s, sid, target, msaa, segment.is_some(), pass, &colors, depth.as_ref().map(|(id, o)| (*id, *o)), depth_kept) } else { None };
+        // its twins hold its samples past its end when a pass continues them, or the profiler
+        // cuts it into encoders that do
+        let keep = !runs.is_empty() || exec::twins_kept(pass, view);
+        let twins = if msaa > 1 { self.twins(s, sid, target, msaa, segment.is_some(), pass, &colors, depth.as_ref().map(|(id, o)| (*id, *o)), depth_kept, keep) } else { None };
         if twins.is_none() {
             msaa = 1;
             if self.twinned {
@@ -1447,7 +1501,7 @@ impl Metal {
             return None;
         };
         let mut cur_sample = first_sample;
-        let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
+        let mut enc = Encoder { id: encoder_id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, viewport, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: scissor_size };
         // the GPU profiler's draw records
         let mut prof_draws: Vec<gpu_prof::DrawRecord> = Vec::new();
         // an ablation frame of the GPU profiler leaves out one shader's draws
@@ -1462,6 +1516,11 @@ impl Metal {
             s.ledger.touch(Kind::Texture, id.index, id.gen, frame, now);
         }
 
+        // each view's block of the pass uniforms, put once for the pass
+        // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+        let pass_bytes = unsafe { pass.uniforms.as_bytes() };
+        let pass_blocks: Vec<Option<Loc>> = views.iter().map(|v| self.dev.arena_put(&pass_bytes[v.block.clone()], seq)).collect();
+
         // ---- the draws
         for (di, d) in draws.iter().enumerate() {
             if let Some(g) = runs.iter().position(|r| *r == di).filter(|g| *g > 0) {
@@ -1475,7 +1534,7 @@ impl Metal {
                 }
                 configure_pass(descriptor, pass, &colors, depth_obj, depth_kept, false, g == runs.len() - 1, cur_sample.filter(|_| stage), twins.as_ref());
                 let Some(id) = open_encoder(cb, descriptor, viewport, cur_sample.filter(|_| !stage)) else { return None };
-                enc = Encoder { id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: [vw as u64, vh as u64] };
+                enc = Encoder { id, pso: nil, depth_state: nil, cull: 0, fill: 0, scissor: None, viewport, buffers: [(nil, u64::MAX); 32], textures: [nil; 31], size: scissor_size };
             }
             s.stats.draws += 1;
             // a surface lent by a session that is gone (or relaunched) is never sampled
@@ -1596,22 +1655,27 @@ impl Metal {
                 }
                 r.map(|v| v.max(0.0) as u32)
             });
-            enc.set_scissor(scissor);
+            if !viewed {
+                enc.set_scissor(scissor);
+            }
 
-            // buffers: the geometry, the instances, then the uniform blocks
+            // buffers: the geometry, the instances, then the uniform blocks (the pass's per view, below)
             enc.buffer(vb, 0, 0);
             enc.buffer(instances.buffer, instances.offset, 1);
             let b = &pipe.bindings;
             let slot = |i: usize| b.get(i).copied().filter(|v| *v != pipeline_binding::NONE);
-            let mut ok = true;
+            let pass_slot = slot(pipeline_binding::PASS);
+            let mut ok = pass_slot.is_none() || pass_blocks.iter().all(Option::is_some);
             let blocks = [
                 (pipeline_binding::DRAW_CALL, d.uniforms[0]),
-                (pipeline_binding::PASS, pass.uniforms),
                 (pipeline_binding::DRAW_LIST, d.uniforms[1]),
                 (pipeline_binding::DYN, d.uniforms[2]),
                 (pipeline_binding::SCOPE, d.uniforms[3]),
             ];
             for (which, uniforms) in blocks {
+                if !ok {
+                    break;
+                }
                 let Some(index) = slot(which) else { continue };
                 // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
                 let data = unsafe { uniforms.as_bytes() };
@@ -1707,24 +1771,46 @@ impl Metal {
                 let size = |id: Id| self.buf.get(&(sid, id.index)).filter(|b| b.gen == id.gen).map_or(0, |b| b.size);
                 prof_draws.push(gpu_prof::DrawRecord::new(s, d, view.arena, vw, vh, depth.is_some(), stride, size(d.vb) + size(d.ib), ntex));
             }
-            for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
-                let start = start.min(d.inst.count) as u64;
-                let count = (count as u64).min(d.inst.count as u64 - start);
-                if count == 0 {
-                    continue;
+            for (pv, block) in views.iter().zip(&pass_blocks) {
+                if viewed {
+                    // the view's rect is its viewport and bounds its scissor (a rasteriser need
+                    // not clip to the viewport); the draw's scissor is relative to the rect
+                    let r = pv.rect;
+                    let (x0, y0, x1, y1) = match scissor {
+                        None => (r[0], r[1], r[0] + r[2], r[1] + r[3]),
+                        Some(_) => {
+                            let [x, y, w, h] = d.scissor;
+                            ((r[0] + x).max(r[0]), (r[1] + y).max(r[1]), (r[0] + x + w).min(r[0] + r[2]), (r[1] + y + h).min(r[1] + r[3]))
+                        }
+                    };
+                    if x1 <= x0 || y1 <= y0 {
+                        continue;
+                    }
+                    enc.set_viewport(r);
+                    enc.set_scissor(Some([x0.max(0.0) as u32, y0.max(0.0) as u32, (x1 - x0) as u32, (y1 - y0) as u32]));
                 }
-                unsafe {
-                    let _: () = msg_send![
-                        enc.id,
-                        drawIndexedPrimitives: MTLPrimitiveType::Triangle
-                        indexCount: index_count
-                        indexType: index_type
-                        indexBuffer: ib
-                        indexBufferOffset: first
-                        instanceCount: count
-                        baseVertex: 0u64
-                        baseInstance: start
-                    ];
+                if let (Some(index), Some(loc)) = (pass_slot, block) {
+                    enc.buffer(loc.buffer, loc.offset, index as u64);
+                }
+                for [start, count] in whole.into_iter().chain(read_pairs(view.arena, d.inst_ranges)) {
+                    let start = start.min(d.inst.count) as u64;
+                    let count = (count as u64).min(d.inst.count as u64 - start);
+                    if count == 0 {
+                        continue;
+                    }
+                    unsafe {
+                        let _: () = msg_send![
+                            enc.id,
+                            drawIndexedPrimitives: MTLPrimitiveType::Triangle
+                            indexCount: index_count
+                            indexType: index_type
+                            indexBuffer: ib
+                            indexBufferOffset: first
+                            instanceCount: count
+                            baseVertex: 0u64
+                            baseInstance: start
+                        ];
+                    }
                 }
             }
         }
@@ -1733,7 +1819,12 @@ impl Metal {
         close_encoder(enc.id, cur_sample.filter(|_| !stage));
         split_runs.close(prof_draws.len() as u32);
         if let Some(key) = prof_key {
-            let (attach, bytes) = describe_attachments(s, sid, pass, &colors, &formats, depth.is_some().then_some(depth_kept), depth_only, vw as u64 * vh as u64);
+            let (mut attach, bytes) = describe_attachments(s, sid, pass, &colors, &formats, depth.is_some().then_some(depth_kept), depth_only, vw as u64 * vh as u64);
+            if let Some(t) = &twins {
+                // a split frame keeps its twins: its runs store and load their samples, which
+                // the pass's own frames do not
+                attach.push_str(&format!(", msaa {msaa} {}", if t.transient { "transient" } else { "kept" }));
+            }
             let timed = first_sample.is_some();
             let (pipes, session): (_, &Session) = (&self.pipe, s);
             let pi = gpu_prof::record_pass(key, session, sid, pass.name, pick, vw as u32, vh as u32, &attach, bytes, &prof_draws, timed, |pipeline| {
@@ -1766,11 +1857,6 @@ impl Metal {
                     let _: () = msg_send![blit, generateMipmapsForTexture: target];
                     let _: () = msg_send![blit, endEncoding];
                 }
-            }
-        }
-        if pick {
-            if let Some((_, id, _)) = colors.first() {
-                self.pick_ids.insert((sid, target.index), *id);
             }
         }
         Some(shaders)

@@ -98,7 +98,9 @@ impl Cx {
     /// this and keeps drawing the fallback until the new one is ready, so
     /// content never vanishes while a shader compiles. `float16` asks for
     /// the RGBA16Float (HDR target) pipeline too, and starts building it.
-    /// True where the backend compiles synchronously.
+    /// True where the backend compiles synchronously. After a `false`,
+    /// [`Event::DrawShadersReady`](crate::event::Event::DrawShadersReady) says
+    /// when to ask again: no need to ask every frame.
     pub fn draw_shader_ready(&self, shader: crate::draw_shader::DrawShaderId, float16: bool) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {

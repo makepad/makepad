@@ -15,11 +15,10 @@ use std::time::Instant;
 /// What a finished piece of GPU work tells the backend thread. Completion handlers run on
 /// Metal's threads: they push here and wake the pump; `Metal::step` turns them into events.
 pub(crate) enum Done {
-    Frame { sid: u32, target: crate::Id, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2], failed: bool, partial: bool, window: bool, kind: u32, incarnation: Arc<crate::font::FrameProgress> },
+    Frame { sid: u32, target: crate::Id, frame: u64, gpu_ns: u64, present_ns: u64, gpu_span: [f64; 2], failure: Option<Failure>, partial: bool, window: bool, kind: u32, incarnation: Arc<crate::font::FrameProgress> },
     DispatchTime { sid: u32, incarnation: Arc<crate::font::FrameProgress>, name: String, gpu_ns: u64 },
     BufferLeases { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, leases: Vec<crate::lease::Lease> },
-    Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
-    Pick { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, ids: Vec<u32> },
+    Readback { sid: u32, incarnation: Arc<crate::font::FrameProgress>, req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
     PipelineReady { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id },
     PipelineFailed { sid: u32, incarnation: Arc<crate::font::FrameProgress>, id: crate::Id, log: String },
     /// A recorded window frame is in its capture buffer (a retained `CVPixelBuffer`).
@@ -29,7 +28,7 @@ pub(crate) enum Done {
 impl Done {
     fn sid(&self) -> u32 {
         match self {
-            Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::BufferLeases { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
+            Done::Frame { sid, .. } | Done::DispatchTime { sid, .. } | Done::Readback { sid, .. } | Done::BufferLeases { sid, .. } | Done::PipelineReady { sid, .. }
             | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
         }
     }
@@ -54,8 +53,25 @@ impl Mailbox {
         (self.notify)(sid, window);
     }
 
+    /// Rouses the session's pump without a completion (a device the system removed).
+    #[cfg(target_os = "macos")]
+    pub fn wake(&self, sid: u32) {
+        (self.notify)(sid, false);
+    }
+
     pub(crate) fn take(&self) -> Vec<Done> {
         std::mem::take(&mut *self.queue.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// The same sessions' mailbox, empty: a replacement device's, so what the old device's
+    /// handlers still push stays apart from it (`Metal::retired`).
+    pub fn fresh(&self) -> Mailbox {
+        Mailbox::new(self.notify.clone())
+    }
+
+    /// Nothing can push here any more: no handler, compile or pipeline holds it.
+    pub fn alone(&self) -> bool {
+        Arc::strong_count(&self.queue) == 1
     }
 }
 
@@ -529,6 +545,19 @@ impl Device {
 }
 
 impl Device {
+    /// Waits up to `limit` for every command buffer made so far to complete (a replaced
+    /// device's, its workers stopped). False when some still run.
+    pub fn settle(&self, limit: std::time::Duration) -> bool {
+        let start = Instant::now();
+        while self.completed.load(Ordering::Acquire) < self.seq {
+            if start.elapsed() >= limit {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+
     /// Answers `reply` once every command buffer up to the newest one created has completed.
     pub fn when_completed(&self, reply: crate::completion::CompletionReply) {
         crate::lock(&self.waiters).push((self.seq, reply));

@@ -247,8 +247,8 @@ pub struct HalClient {
     /// videos the app's own decoder plays, and the ones the HAL's native player plays
     pub(crate) software_videos: HashMap<crate::makepad_live_id::LiveId, software_video::SoftwareVideo>,
     pub(crate) native_videos: HashMap<crate::makepad_live_id::LiveId, software_video::NativeVideo>,
-    /// the least event payload room the session needs (camera frames and readbacks are large)
-    pub(crate) event_arena_min: usize,
+    /// the event store's payload room: grows at once, gives back what went unused
+    pub(crate) event_arena: event_loop::EventArena,
     pub(crate) readbacks: readback::Readbacks,
     pub(crate) compute: crate::gpu_compute::ComputeState,
     /// font service answers the text stack has not taken yet
@@ -340,7 +340,7 @@ impl Default for HalClient {
             native_videos: HashMap::new(),
             readbacks: Default::default(),
             compute: Default::default(),
-            event_arena_min: 0,
+            event_arena: Default::default(),
             font_events: Vec::new(),
             in_background: false,
             glyph_wait: Default::default(),
@@ -634,11 +634,14 @@ impl Cx {
     /// Asking counts: a pipeline asked for while it compiles is one the frame would draw (a frame
     /// that waits waits for it, and it goes ahead in the HAL's compile queue).
     pub fn is_draw_shader_window_ready(&self, shader_id: crate::draw_shader::DrawShaderId) -> bool {
-        self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| {
+        let ready = self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| {
             let ready = self.hal.frames.pipeline_is_ready(pipe);
             if !ready { self.hal.frames.probed_unready(pipe); }
             ready
-        })
+        });
+        // the caller hears `Event::DrawShadersReady` once a pipeline answers
+        if !ready { self.hal.frames.asked_unready(); }
+        ready
     }
 
     pub(crate) fn poll_texture_lifetimes(&mut self) {

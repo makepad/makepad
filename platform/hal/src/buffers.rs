@@ -963,7 +963,7 @@ pub struct EventQueue {
     arena: Vec<u8>,
     now_ns: u64,
     /// events delivered without their whole payload because the caller's arena stayed too small
-    /// after `PayloadSize` (a readback failed, another event cut)
+    /// after `PayloadSize` (lease records must fit whole)
     pub truncated: u64,
     leases: std::collections::HashSet<u64>,
     /// the front event (tag, payload range) `drain_into` announced with `PayloadSize`
@@ -979,6 +979,22 @@ impl EventQueue {
             record.write(&mut records);
         }
         self.buffer_lease_records(req, status, &records);
+    }
+
+    pub fn readback(&mut self, req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease>) {
+        let mut records = Vec::new();
+        if let Some(lease) = lease {
+            let record = lease.into_record();
+            self.leases.insert(record.token);
+            record.write(&mut records);
+        }
+        self.readback_record(req, status, rect, &records);
+    }
+
+    fn delivered_leases(leases: &mut std::collections::HashSet<u64>, tag: u16, payload: &[u8]) {
+        if matches!(tag, crate::events::event_tag::BufferLeases | crate::events::event_tag::Readback) {
+            for record in payload.chunks_exact(crate::lease::Record::SIZE).map(crate::lease::Record::read) { leases.remove(&record.token); }
+        }
     }
 
     pub fn new() -> EventQueue {
@@ -1033,9 +1049,7 @@ impl EventQueue {
             let start = event.data.off as usize;
             let payload = start.checked_add(event.data.len as usize)
                 .and_then(|end| self.arena.get(start..end)).unwrap_or(&[]);
-            if event.tag == crate::events::event_tag::BufferLeases {
-                for record in payload.chunks_exact(crate::lease::Record::SIZE).map(crate::lease::Record::read) { self.leases.remove(&record.token); }
-            }
+            Self::delivered_leases(&mut self.leases, event.tag, payload);
             deliver(event, payload);
         }
         self.arena.clear();
@@ -1067,9 +1081,9 @@ impl EventQueue {
     /// how many were delivered. An event whose payload alone exceeds the caller's arena is
     /// announced first, alone in its pump (`PayloadSize`), and held for the next pump, which
     /// takes it whole from an arena the caller grew. A caller that pumps again with the same
-    /// arena gets it without its payload, loudly (logged with both sizes, counted in
-    /// `truncated`): a readback fails with `readback::TOO_LARGE`, any other event is cut. Never
-    /// stuck.
+    /// arena gets its payload cut, loudly (logged with both sizes, counted in
+    /// `truncated`). Buffer and texture lease records must fit whole and are never cut;
+    /// every other event advances even when its payload is cut.
     pub fn drain_into(&mut self, out: &mut EventBuf) -> u32 {
         let mut n = 0u32;
         let mut used = 0usize;
@@ -1093,23 +1107,14 @@ impl EventQueue {
                     out.arena_len = 0;
                     return 1;
                 }
-                assert_ne!(e.tag, crate::events::event_tag::BufferLeases, "buffer lease records must never be truncated");
+                assert!(!matches!(e.tag, crate::events::event_tag::BufferLeases | crate::events::event_tag::Readback), "lease records must never be truncated");
                 self.truncated += 1;
-                if let Some(HalEvent::Readback { req, rect, .. }) = e.decode(&[]) {
-                    eprintln!("[hal] readback {req}: {} bytes of pixels do not fit the caller's event arena of {} bytes, which did not grow after PayloadSize: it fails (readback::TOO_LARGE)", payload.len(), out.arena_cap);
-                    e = RawEvent::readback(req, readback::TOO_LARGE, rect, Range::default());
-                    (e.window, e.time_ns) = (front.window, front.time_ns);
-                    payload = &[];
-                } else {
-                    let name = crate::events::EVENT_TABLE.iter().find(|t| t.0 == e.tag).map_or("?", |t| t.1);
-                    eprintln!("[hal] event {name}: its {} byte payload does not fit the caller's event arena of {} bytes, which did not grow after PayloadSize: it is cut", payload.len(), out.arena_cap);
-                    payload = &payload[..out.arena_cap as usize];
-                }
+                let name = crate::events::EVENT_TABLE.iter().find(|t| t.0 == e.tag).map_or("?", |t| t.1);
+                eprintln!("[hal] event {name}: its {} byte payload does not fit the caller's event arena of {} bytes, which did not grow after PayloadSize: it is cut", payload.len(), out.arena_cap);
+                payload = &payload[..out.arena_cap as usize];
             }
             let len = payload.len();
-            if e.tag == crate::events::event_tag::BufferLeases {
-                for record in payload.chunks_exact(crate::lease::Record::SIZE).map(crate::lease::Record::read) { self.leases.remove(&record.token); }
-            }
+            Self::delivered_leases(&mut self.leases, e.tag, payload);
             // SAFETY: the caller's EventBuf names `cap` events and `arena_cap` bytes it owns
             // for this call (hal_pump contract); n < cap and used + len <= arena_cap
             unsafe {

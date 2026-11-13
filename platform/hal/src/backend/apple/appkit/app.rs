@@ -462,7 +462,7 @@ pub fn windows_gone_before_exit() {
             }
         }
         let () = msg_send![class!(CATransaction), flush];
-        if std::env::var_os("MAKEPAD_EXIT_TRACE").is_some() {
+        if relax_api::env::var_os("MAKEPAD_EXIT_TRACE").is_some() {
             let since = EXIT_REQUESTED.lock().ok().and_then(|t| *t).map(|t: std::time::Instant| t.elapsed().as_secs_f64() * 1e3);
             eprintln!("makepad-exit: windows gone ({} ordered out, {} already closed) {} ms after the close/quit request", ordered_out, count - ordered_out, since.map_or("?".to_string(), |ms| format!("{:.1}", ms)));
         }
@@ -1233,11 +1233,22 @@ fn command(sid: u32, cmd: OsCmd) {
                 q.clipboard(req, true, &content);
             });
         }
-        OsCmd::ClipSet { text } => unsafe {
+        OsCmd::ClipSet { data } => unsafe {
             let pasteboard = a.pasteboard.get();
-            let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
+            let mut types = vec![NSStringPboardType];
+            let html = str_to_nsstring("public.html");
+            let markdown = str_to_nsstring("net.daringfireball.markdown");
+            if !data.html.is_empty() { types.push(html); }
+            if !data.markdown.is_empty() { types.push(markdown); }
+            let array: ObjcId = msg_send![class!(NSArray), arrayWithObjects: types.as_ptr() count: types.len()];
             let () = msg_send![pasteboard, declareTypes: array owner: nil];
-            let () = msg_send![pasteboard, setString: str_to_nsstring(&text) forType: NSStringPboardType];
+            let () = msg_send![pasteboard, setString: str_to_nsstring(&data.text) forType: NSStringPboardType];
+            if !data.html.is_empty() {
+                let () = msg_send![pasteboard, setString: str_to_nsstring(&data.html) forType: html];
+            }
+            if !data.markdown.is_empty() {
+                let () = msg_send![pasteboard, setString: str_to_nsstring(&data.markdown) forType: markdown];
+            }
         },
         OsCmd::DragStart { id, items, image } => {
             if let Some(win) = window_of(id) {

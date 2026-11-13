@@ -3,7 +3,7 @@
 //! what needs a device to the backend's [`Gpu`] hooks. The headless backend implements the hooks
 //! without a device; the Metal backend implements them with one.
 
-use crate::buffers::{pack_domains, read_items, read_strs, CmdView, PipelineBlob};
+use crate::buffers::{pack_domains, read_items, read_rects, read_strs, CmdView, PipelineBlob};
 use crate::cmds::HalCmd;
 use crate::ledger::{Kind, LedgerEntry};
 use crate::session::*;
@@ -55,7 +55,8 @@ pub enum OsCmd {
     ImeShow { id: Id, area: [f32; 4], config: u32 },
     ImeHide { id: Id },
     ImeSync { id: Id, selection: [u32; 2], composition: [u32; 2], text: String },
-    ClipSet { text: String },
+    /// The flavours a copy writes (`clipboard::ClipboardData`: text, HTML, Markdown).
+    ClipSet { data: crate::clipboard::ClipboardData },
     ClipRead { req: u64, primary: bool },
     SelectionSet { text: String },
     /// `items`: (`input::drag_item` kind, string); `image`: an RGBA8 drag image.
@@ -172,7 +173,6 @@ pub trait Gpu {
     fn completes_inline(&self) -> bool {
         false
     }
-    fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]);
     /// Frame capture ([`crate::framecap`]): a copy of the texture's storage as everything submitted
     /// so far leaves it, before the frame that follows. Every mip level of every layer, tightly
     /// packed rows (whole 4x4 blocks for block formats), level-major then layer. `done` runs once
@@ -187,7 +187,7 @@ pub trait Gpu {
         None
     }
     fn window_copy(&mut self, s: &mut Session, _window: Id, _texture: Id, req: u32) {
-        s.events.readback(req, readback::NO_RASTER, [0; 4], &[]);
+        s.events.readback(req, readback::NO_RASTER, [0; 4], None);
     }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32);
     fn window_closed(&mut self, sid: u32, id: Id);
@@ -280,6 +280,73 @@ pub fn depth_kept(s: &Session, sid: u32, pass: &Pass, view: &CmdView, depth: Id)
     }
     let at = view.passes.iter().position(|p| std::ptr::eq(p, pass)).unwrap_or(0);
     view.passes[at + 1..].iter().any(|p| p.depth == depth && p.load[4] == pass_load::LOAD)
+}
+
+/// Whether an MSAA pass's multisampled images ([`Pass::samples`]) must hold its samples past its
+/// end: the pass loads an attachment (it continues what they hold), or a later MSAA pass of the
+/// submit loads one of its attachments (it continues them). Otherwise they live for the pass
+/// alone: transient, never stored (on a tile GPU they stay in tile memory unless the pass's
+/// geometry makes it spill them, so their storage is one a mid-pass flush can write), and
+/// its end resolves them. A backend that cuts the pass into several render passes (a split
+/// frame of the GPU profiler) keeps them too.
+pub fn twins_kept(pass: &Pass, view: &CmdView) -> bool {
+    /// A pass's colour attachments: its colour targets, or (none named) the window's own in slot 0.
+    fn colours(p: &Pass) -> impl Iterator<Item = usize> + '_ {
+        let window = p.color.iter().all(|c| c.is_none());
+        (0..4).filter(move |i| !p.color[*i].is_none() || (window && *i == 0))
+    }
+    let loads = |p: &Pass, of: &Pass| {
+        colours(p).any(|i| p.load[i] == pass_load::LOAD && colours(of).any(|k| of.color[k] == p.color[i]))
+            || (p.load[4] == pass_load::LOAD && !p.depth.is_none() && p.depth == of.depth)
+    };
+    if loads(pass, pass) {
+        return true;
+    }
+    let at = view.passes.iter().position(|p| std::ptr::eq(p, pass)).unwrap_or(0);
+    view.passes[at + 1..].iter().any(|p| p.samples > 1 && loads(p, pass))
+}
+
+/// One view of a pass ([`Pass::view_rects`]): where it draws (x, y, w, h in target pixels) and
+/// its block of the pass's uniforms (a byte range of [`Pass::uniforms`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PassView {
+    pub rect: [f32; 4],
+    pub block: std::ops::Range<usize>,
+}
+
+/// A pass's views: its `view_rects`, each with its block of the uniforms, or without rects the
+/// one view of its viewport with all of them. A pass whose rects break the rules of
+/// [`Pass::view_rects`] is refused, saying why: the backends draw nothing of it.
+pub fn pass_views(pass: &Pass, arena: &[u8]) -> Result<Vec<PassView>, &'static str> {
+    let n = pass.view_rects.len as usize;
+    let len = pass.uniforms.len();
+    if n == 0 {
+        return Ok(vec![PassView { rect: pass.viewport, block: 0..len }]);
+    }
+    if pass.views >= 2 {
+        return Err("view rects in a multiview pass");
+    }
+    if pass.damage.len != 0 {
+        return Err("view rects in a pass with damage");
+    }
+    if len % n != 0 {
+        return Err("the pass uniforms do not split into a block per view rect");
+    }
+    let v = pass.viewport;
+    let size = len / n;
+    let mut views = Vec::with_capacity(n);
+    for (i, r) in read_rects(arena, pass.view_rects).enumerate() {
+        let inside = r.iter().all(|x| x.is_finite()) && r[2] > 0.0 && r[3] > 0.0
+            && r[0] >= v[0] && r[1] >= v[1] && r[0] + r[2] <= v[0] + v[2] && r[1] + r[3] <= v[1] + v[3];
+        if !inside {
+            return Err("a view rect outside the pass viewport");
+        }
+        views.push(PassView { rect: r, block: i * size..(i + 1) * size });
+    }
+    if views.len() != n {
+        return Err("view rects past the end of the arena");
+    }
+    Ok(views)
 }
 
 /// Session 0's badge `id` moved to `geom` (`None`: it closes): where its window routes the
@@ -1496,9 +1563,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             let text = String::from_utf8_lossy(text).into_owned();
             os_cmd(gpu, sid, OsCmd::SelectionSet { text });
         }
-        HalCmd::ClipSet { text } => {
-            s.clipboard = String::from_utf8_lossy(text).into_owned();
-            os_cmd(gpu, sid, OsCmd::ClipSet { text: s.clipboard.clone() });
+        HalCmd::ClipSet { data } => {
+            let data = crate::clipboard::ClipboardData::read(data).unwrap_or_default();
+            s.clipboard = data.text.clone();
+            os_cmd(gpu, sid, OsCmd::ClipSet { data });
         }
         HalCmd::ClipRead { req, primary } => {
             if !os_cmd(gpu, sid, OsCmd::ClipRead { req, primary }) {
@@ -1650,7 +1718,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
                 gpu.texture_readback(s, id, req, rect);
             } else {
                 s.stale();
-                s.events.readback(req, readback::STALE, rect, &[]);
+                s.events.readback(req, readback::STALE, rect, None);
             }
         }
         HalCmd::TextureShare { id } => match s.textures.get(sid, id) {
@@ -1842,24 +1910,18 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             Err(_) => s.stale(),
         },
 
-        HalCmd::Pick { window, req, pos } => {
-            if s.windows.get(sid, window).is_err() {
-                s.stale();
-            }
-            gpu.pick(s, window, req, pos);
-        }
         HalCmd::Snapshot { window, req } => match s.windows.get(sid, window) {
             Ok(_) => gpu.snapshot(s, window, req),
             Err(_) => {
                 s.stale();
-                s.events.readback(req, readback::STALE, [0; 4], &[]);
+                s.events.readback(req, readback::STALE, [0; 4], None);
             }
         },
         HalCmd::WindowCopy { window, texture, req } => {
             if s.windows.get(sid, window).is_ok() && s.textures.get(sid, texture).is_ok() {
                 gpu.window_copy(s, window, texture, req);
             } else {
-                s.events.readback(req, readback::STALE, [0; 4], &[]);
+                s.events.readback(req, readback::STALE, [0; 4], None);
             }
         }
         HalCmd::A11yUpdate { id, bytes } => {

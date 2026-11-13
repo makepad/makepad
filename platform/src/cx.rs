@@ -1242,7 +1242,7 @@ pub fn startup_trace_enabled() -> bool {
 
 fn startup_t0() -> f64 {
     *STARTUP_T0.get_or_init(|| {
-        std::env::var("MAKEPAD_RUN_STARTUP_T0")
+        std::env::var("RELAX_STARTUP_T0")
             .or_else(|_| std::env::var("MAKEPAD_STARTUP_T0"))
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
@@ -1482,12 +1482,12 @@ pub fn first_present_seen() -> bool {
 pub fn launched_hidden_until_first_present() -> bool {
     static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *WANTED.get_or_init(|| {
-        std::env::var_os("MAKEPAD_RUN_REPORT_TO").is_some()
+        std::env::var_os("RELAX_REPORT_TO").is_some()
             && std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_none()
     })
 }
 
-/// Also tells a launcher (MAKEPAD_RUN_REPORT_TO, see `report_first_present`).
+/// Also tells a launcher (RELAX_REPORT_TO, see `report_first_present`).
 pub fn startup_trace_first_present() {
     static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
     if FIRST.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -1508,16 +1508,16 @@ pub fn startup_trace_first_present() {
 /// Relax runs the app in its own process and publishes this metadata before calling main.
 /// Cargo/rustc launches have no package marker and keep their existing stderr behavior.
 fn print_first_present(presented_at: f64) {
-    let Ok(package) = std::env::var("MAKEPAD_RUN_PACKAGE") else { return };
+    let Ok(package) = std::env::var("RELAX_PACKAGE") else { return };
     // Relax's boot progress line already printed its "ready" summary instead of this line
-    if std::env::var_os("MAKEPAD_RUN_PROGRESS").is_some() {
+    if std::env::var_os("RELAX_PROGRESS").is_some() {
         return;
     }
     // Capture the time in the hook, before report I/O or lazy compilation of the formatter.
     let present_ms = (presented_at - startup_t0()).max(0.0) * 1000.0;
-    let main_ms = std::env::var("MAKEPAD_RUN_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
-    let cache = std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
-    let ahead = std::env::var("MAKEPAD_RUN_AHEAD").unwrap_or_else(|_| "balanced".to_string());
+    let main_ms = std::env::var("RELAX_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let cache = std::env::var("RELAX_CACHE_STATE").unwrap_or_else(|_| "off".to_string());
+    let ahead = std::env::var("RELAX_AHEAD").unwrap_or_else(|_| "balanced".to_string());
     #[cfg(not(target_arch = "wasm32"))]
     let hold = first_frame_hold::summary();
     #[cfg(target_arch = "wasm32")]
@@ -1539,7 +1539,7 @@ fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str,
     line
 }
 
-/// A launcher that started this app with MAKEPAD_RUN_REPORT_TO=<path> (the runner app, through
+/// A launcher that started this app with RELAX_REPORT_TO=<path> (the runner app, through
 /// `makepad run --report-to`, or a native build it opened) learns that the first frame is on
 /// glass and which process to follow and stop: the lines `pid <pid> 0` and `present` appended to
 /// <path>, in the loader's progress format (the launcher times it on receipt). The launcher
@@ -1547,7 +1547,7 @@ fn first_present_line(package: &str, present_ms: f64, main_ms: f64, cache: &str,
 /// single O_APPEND write.
 fn report_first_present() {
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) = std::env::var_os("MAKEPAD_RUN_REPORT_TO") {
+    if let Some(path) = std::env::var_os("RELAX_REPORT_TO") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(path) {
             let _ = f.write_all(format!("pid\t{}\t0\npresent\n", std::process::id()).as_bytes());

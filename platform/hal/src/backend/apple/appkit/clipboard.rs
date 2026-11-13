@@ -45,6 +45,12 @@ pub(super) fn read() -> ClipboardData {
         if text != nil {
             content.text = nsstring_to_string(text);
         }
+        for (uti, value) in [("public.html", &mut content.html), ("net.daringfireball.markdown", &mut content.markdown)] {
+            let text: ObjcId = msg_send![pasteboard, stringForType: str_to_nsstring(uti)];
+            if text != nil {
+                *value = nsstring_to_string(text);
+            }
+        }
         let items: ObjcId = msg_send![pasteboard, pasteboardItems];
         if items != nil {
             let count: usize = msg_send![items, count];

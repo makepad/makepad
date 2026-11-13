@@ -519,14 +519,22 @@ pub(super) fn paste(win: &Win) {
     }
 }
 
-pub(super) fn clipboard_set(content: &str) {
+pub(super) fn clipboard_set(content: &ClipboardData) {
     unsafe {
         let pasteboard: ObjcId = msg_send![class!(UIPasteboard), generalPasteboard];
-        let () = msg_send![pasteboard, setString: str_to_nsstring(content)];
+        let item: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
+        let () = msg_send![item, setObject: str_to_nsstring(&content.text) forKey: str_to_nsstring("public.utf8-plain-text")];
+        for (uti, value) in [("public.html", &content.html), ("net.daringfireball.markdown", &content.markdown)] {
+            if !value.is_empty() {
+                let () = msg_send![item, setObject: str_to_nsstring(value) forKey: str_to_nsstring(uti)];
+            }
+        }
+        let items: ObjcId = msg_send![class!(NSArray), arrayWithObject: item];
+        let () = msg_send![pasteboard, setItems: items];
     }
 }
 
-/// The pasteboard's text and its image (PNG), for `ClipRead`.
+/// The pasteboard's text, rich flavours and image (PNG), for `ClipRead`.
 pub(super) fn clipboard_read() -> Vec<u8> {
     let mut content = ClipboardData::default();
     unsafe {
@@ -534,6 +542,22 @@ pub(super) fn clipboard_read() -> Vec<u8> {
         let string: ObjcId = msg_send![pasteboard, string];
         if string != nil {
             content.text = nsstring_to_string(string);
+        }
+        for (uti, value) in [("public.html", &mut content.html), ("net.daringfireball.markdown", &mut content.markdown)] {
+            let data: ObjcId = msg_send![pasteboard, valueForPasteboardType: str_to_nsstring(uti)];
+            if data == nil { continue; }
+            let is_string: BOOL = msg_send![data, isKindOfClass: class!(NSString)];
+            if is_string == YES {
+                *value = nsstring_to_string(data);
+            } else {
+                let is_data: BOOL = msg_send![data, isKindOfClass: class!(NSData)];
+                if is_data != YES { continue; }
+                let len: u64 = msg_send![data, length];
+                let bytes: *const u8 = msg_send![data, bytes];
+                if len > 0 && !bytes.is_null() {
+                    *value = String::from_utf8_lossy(std::slice::from_raw_parts(bytes, len as usize)).trim_end_matches('\0').to_string();
+                }
+            }
         }
         let data: ObjcId = msg_send![pasteboard, dataForPasteboardType: str_to_nsstring("public.png")];
         if data != nil {

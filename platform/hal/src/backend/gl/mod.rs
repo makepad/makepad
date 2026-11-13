@@ -140,8 +140,7 @@ pub struct GlBackend {
     /// pass can repaint just what changed since
     damage_base: HashMap<(u32, u32), (u64, u64)>,
     aliases: HashMap<(u32, Id), Id>,
-    /// the id target of each window's newest pick frame, and the targets missing a draw
-    pick_ids: HashMap<(u32, Id), Id>,
+    /// Pick targets whose latest replay skipped a draw.
     pick_pending: HashSet<(u32, Id)>,
     /// session 0's windows with a badge layer (by index), and the image each last presented: its
     /// retained image with the layer over it
@@ -193,7 +192,7 @@ impl GlBackend {
         if super::log_enabled() { eprintln!("[hal-gl] {} offscreen={} software={}", caps.renderer, shell.is_none(), caps.software); }
         Ok(Self { shell, info, caps, queue, thread: Some(thread), next_key: 1, pools,
             tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), win: HashMap::new(), damage_base: HashMap::new(),
-            aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(), badged: HashMap::new(), compose: None,
+            aliases: HashMap::new(), pick_pending: HashSet::new(), badged: HashMap::new(), compose: None,
             mailbox, media: Default::default() })
     }
 
@@ -285,8 +284,7 @@ impl GlBackend {
                     world.frame_done(sid, target, kind, frame, gpu_ns, done.time, [0.0; 2]);
                 }
                 Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
-                Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
-                Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),
+                Event::Readback { req, status, rect, lease } => world.to_session(sid, |q| q.readback(req, status, rect, lease)),
             }
         }
         for ((sid, index), pipe) in &mut self.pipe {
@@ -323,7 +321,7 @@ impl GlBackend {
     }
 
     /// Validates a readback of level 0 and queues it; answers the failure at once.
-    fn read(&mut self, s: &mut Session, tex: Option<Arc<TexObj>>, req: u32, rect: [u32; 4], pick: Option<[f32; 2]>) {
+    fn read(&mut self, s: &mut Session, tex: Option<Arc<TexObj>>, req: u32, rect: [u32; 4]) {
         let result = (|| {
             let t = tex.ok_or("readback texture has no storage")?;
             if rect[0] >= t.desc.w || rect[1] >= t.desc.h { return Err("readback origin exceeds texture".to_string()); }
@@ -331,31 +329,13 @@ impl GlBackend {
             if rect[2] == 0 || rect[3] == 0 { return Err("empty readback region".into()); }
             let read = ReadFormat::of(&t)?;
             let (token, key) = (Self::token(s), t.key);
-            self.queue.push(move |r| r.read(token, key, read, req, rect, pick));
+            self.queue.push(move |r| r.read(token, key, read, req, rect));
             Ok(())
         })();
         if let Err(e) = result {
             eprintln!("[hal-gl] readback: {e}");
-            if pick.is_some() { s.events.pick_result(req, &[]); } else { s.events.readback(req, readback::FAILED, rect, &[]); }
+            s.events.readback(req, readback::FAILED, rect, None);
         }
-    }
-
-    fn read_pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        let Some(id) = self.pick_ids.get(&(s.id, window)).copied() else { s.events.pick_result(req, &[]); return };
-        if self.pick_pending.contains(&(s.id, id)) || pos.iter().any(|p| !p.is_finite()) {
-            s.events.pick_result(req, &[]);
-            return;
-        }
-        let tex = self.resolve(s, id);
-        let Some(t) = &tex else { s.events.pick_result(req, &[]); return };
-        // the 8-texel neighbourhood, as Metal, Vulkan and D3D11 read it
-        let pos = pos.map(f32::floor);
-        let x = (pos[0] as i64).saturating_sub(8).clamp(0, t.desc.w as i64) as u32;
-        let y = (pos[1] as i64).saturating_sub(8).clamp(0, t.desc.h as i64) as u32;
-        let x1 = (pos[0] as i64).saturating_add(9).clamp(x as i64, t.desc.w as i64) as u32;
-        let y1 = (pos[1] as i64).saturating_add(9).clamp(y as i64, t.desc.h as i64) as u32;
-        if x1 == x || y1 == y { s.events.pick_result(req, &[]); return; }
-        self.read(s, tex, req, [x, y, x1 - x, y1 - y], Some(pos));
     }
 
     /// The host's synchronous read of a window's newest frame (automation); never on a shell thread.
@@ -428,7 +408,6 @@ impl Backend for GlBackend {
         self.win.retain(|k, _| k.0 != sid);
         self.damage_base.retain(|k, _| k.0 != sid);
         self.aliases.retain(|k, _| k.0 != sid);
-        self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
         if sid == HOST { self.badged.clear(); }
         self.programs.retain(|_, state| state.strong_count() > 0);
@@ -504,11 +483,11 @@ impl Gpu for GlBackend {
     }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
         if self.pick_pending.contains(&(s.id, id)) {
-            s.events.readback(req, readback::INCOMPLETE, rect, &[]);
+            s.events.readback(req, readback::INCOMPLETE, rect, None);
             return;
         }
         let t = self.resolve(s, id);
-        self.read(s, t, req, rect, None);
+        self.read(s, t, req, rect);
     }
     /// GLES textures have no cross-process handle here: handle 0, as headless answers.
     fn texture_share(&mut self, s: &mut Session, id: Id) {
@@ -599,13 +578,10 @@ impl Gpu for GlBackend {
         }
         self.encode_frame(s, sid, target, kind, packet, view, now)
     }
-    fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        self.read_pick(s, window, req, pos);
-    }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
         let t = self.window_image(s, window);
         let rect = t.as_ref().map_or([0; 4], |t| [0, 0, t.desc.w, t.desc.h]);
-        self.read(s, t, req, rect, None);
+        self.read(s, t, req, rect);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) {
         let result = (|| {
@@ -621,14 +597,13 @@ impl Gpu for GlBackend {
         })();
         if let Err(e) = result {
             eprintln!("[hal-gl] window copy: {e}");
-            s.events.readback(req, readback::FAILED, [0; 4], &[]);
+            s.events.readback(req, readback::FAILED, [0; 4], None);
         }
     }
     fn window_closed(&mut self, sid: u32, id: Id) {
         self.win.remove(&(sid, id.index));
         if sid == HOST { self.badged.remove(&id.index); }
         self.damage_base.remove(&(sid, id.index));
-        self.pick_ids.remove(&(sid, id));
         self.queue.push(move |r| r.ctx.close((sid, id)));
     }
     fn badges(&self) -> bool { true }
@@ -649,7 +624,6 @@ impl Gpu for GlBackend {
             self.aliases.insert((sid, id), host);
         } else {
             self.aliases.remove(&(sid, id));
-            self.pick_ids.remove(&(sid, id));
         }
     }
 }

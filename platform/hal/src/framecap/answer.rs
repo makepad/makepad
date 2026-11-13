@@ -20,7 +20,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("cap frame", "[file=<x.mkcap>]", "the captured frame: passes, draws by owner, shaders, resources, what was not captured"),
     ("cap draws", "[pass=P<k>] [owner=<text>] [sort=order|pixels] [n=40]", "the draw list with owners, shaders and pixels each draw changed"),
     ("cap draw", "D<k>", "one draw: owner, shader and its source, state, bound textures and buffers, instances, pixels changed"),
-    ("cap code", "D<k>|S<k> [full=1]", "a draw's pipeline: its shader's source location and the backend code it runs"),
+    ("cap code", "D<k>|S<k>", "a draw's pipeline: its shader's source location and the backend code it runs"),
     ("cap rt", "D<k> [png=<path>] [max=1000] [mark=0] [wire=1]", "the render target right after a draw, as a PNG for viewing (wire=1: the draw's triangle edges over it)"),
     ("cap pixel", "<x>,<y> [pass=P<k>]", "pixel history: the draws that changed a pixel, with the value before and after each"),
     ("cap overdraw", "[png=<path>] [max=1000]", "per-pixel count of draws that changed it, as a heatmap PNG and numbers"),
@@ -537,14 +537,8 @@ pub fn dispatch(req: &Req, out: &mut Out) -> bool {
     out.measured(&what, src, &[]);
     match r {
         Ok(text) => {
-            if req.get("full") == Some("1") {
-                out.limit = usize::MAX;
-            }
             for l in text.lines() {
                 out.line(l);
-            }
-            if out.truncated {
-                out.always("(cut at the size limit; ask with full=1)");
             }
         }
         Err(e) => out.err(&e),
@@ -756,17 +750,12 @@ fn code_text(c: &Arc<Capture>, req: &Req) -> Result<String, String> {
     );
     if p.dialect == dialect::MSL || p.dialect == dialect::GLSL || p.dialect == dialect::HLSL {
         let code = String::from_utf8_lossy(blob.code);
-        let lines: Vec<&str> = code.lines().collect();
-        let n = if req.get("full") == Some("1") { lines.len() } else { lines.len().min(80) };
         t.push_str("```\n");
-        for l in &lines[..n] {
+        for l in code.lines() {
             t.push_str(l);
             t.push('\n');
         }
         t.push_str("```\n");
-        if lines.len() > n {
-            t.push_str(&format!("+{} more lines (full=1)\n", lines.len() - n));
-        }
     } else {
         t.push_str("(binary code; the shader's source location above is where to read it)\n");
     }

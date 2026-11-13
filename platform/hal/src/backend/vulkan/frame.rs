@@ -6,7 +6,7 @@ use super::pipeline::{PassKey, Pipeline, RenderPass, ABSENT};
 use super::prof::{self, BatchProf, ProfPass};
 use super::resources::{Buffer, Image};
 use super::sets::{BufferBinding, ImageBinding};
-use super::submit::{Batch, Ticket};
+use super::submit::{Batch, Placed, Ticket};
 use super::{window_row, Texture, Vulkan};
 use crate::backend::exec::{self, LentState};
 use crate::backend::log_enabled;
@@ -87,6 +87,8 @@ struct Bound {
     vertex: vk::Buffer,
     index: (vk::Buffer, vk::IndexType),
     scissor: Option<(i32, i32, u32, u32)>,
+    /// the view (`Pass::view_rects`) whose rect the viewport is, None: the pass's viewport
+    view: Option<usize>,
 }
 
 struct Prepared {
@@ -96,6 +98,8 @@ struct Prepared {
     descriptors: vk::DescriptorSet,
     /// the dynamic offsets of the set's arena bindings, in binding order (`Program::dynamic`)
     offsets: [u32; MAX_DYNAMIC],
+    /// where among `offsets` the pass block's is (a view of the pass binds its own block there)
+    pass_offset: Option<usize>,
     first_instance: u32,
 }
 
@@ -550,7 +554,6 @@ impl Vulkan {
                 for id in pass.color.into_iter().filter(|t| !t.is_none()) {
                     if incomplete { self.pick_pending.insert((sid, id)); } else { self.pick_pending.remove(&(sid, id)); }
                 }
-                if !pass.color[0].is_none() { self.pick_ids.insert((sid, target), pass.color[0]); }
             }
         }
         let mut presented = false;
@@ -677,11 +680,15 @@ impl Vulkan {
 
     /// The multisampled image `samples` per pixel an MSAA pass renders into for `target` (made
     /// at its first pass, kept while `target` lives; a resized target is a new image).
-    fn msaa_image(&mut self, target: &Arc<Image>, samples: u8) -> Result<Arc<Image>, String> {
+    /// `transient`: it lives for the pass alone (`exec::twins_kept` false), lazily allocated
+    /// memory where the device offers it. The other class goes: a frame that keeps its images (a
+    /// profiled one) leaves no memory behind once the passes are transient again.
+    fn msaa_image(&mut self, target: &Arc<Image>, samples: u8, transient: bool) -> Result<Arc<Image>, String> {
         self.msaa.retain(|_, (t, _)| t.strong_count() > 0);
-        let key = (target.image.as_raw(), samples);
+        let key = (target.image.as_raw(), samples, transient);
         if let Some((_, ms)) = self.msaa.get(&key) { return Ok(ms.clone()); }
-        let ms = Image::multisampled(self.dev.clone(), &target.desc, samples as u32)?.in_pool(Pool::Multisample);
+        self.msaa.remove(&(key.0, samples, !transient));
+        let ms = Image::multisampled(self.dev.clone(), &target.desc, samples as u32, transient)?.in_pool(Pool::Multisample);
         self.msaa.insert(key, (Arc::downgrade(target), ms.clone()));
         Ok(ms)
     }
@@ -693,6 +700,9 @@ impl Vulkan {
         if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
         let views = pass_views(pass);
         if views > 1 && (!self.dev.multiview || pick) { return Err("a multiview pass on a device without multiview (or a pick pass)".into()); }
+        // the views side by side (`Pass::view_rects`): each draw runs once per view in this render pass
+        let pviews = exec::pass_views(pass, view.arena).map_err(|e| format!("pass not drawn: {e}"))?;
+        let viewed = pass.view_rects.len != 0;
         let mut size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         // A pass into the window image (no colour target of its own) is the frame's size: that image
         // holds every such pass of the frame. A pass into its own textures keeps its viewport's size
@@ -760,14 +770,17 @@ impl Vulkan {
         let samples = if pick || density.is_some() { 1 } else { pass_samples(pass, self.dev.msaa) };
         let base = { let (sid, id) = self.window_key(s.id, target); (sid, id.index) };
         // The kept image still holds the frame the pass's damage is measured from, so we only repaint the damage.
-        let partial = retained && views == 1 && samples == 1 && density.is_none() && colors.len() == 1
+        let partial = retained && views == 1 && !viewed && samples == 1 && density.is_none() && colors.len() == 1
             && pass.load[0] == pass_load::CLEAR && (depth.is_none() || pass.load[4] != pass_load::LOAD)
             && pass.damage_since != 0 && pass.damage.len <= 32
             && self.damage_base.get(&base).is_some_and(|(sid, image, frame)| *sid == s.id && *frame == pass.damage_since && image.as_ptr() == Arc::as_ptr(&colors[0].1));
         // a depth nothing reads later stays in tile memory, as on Metal; a profiled pass keeps it, since
         // each of its split runs loads what the one before stored
         let depth_kept = depth.is_some() && (batch.prof.is_some() || exec::depth_kept(s, s.id, pass, view, pass.depth));
-        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples, depth_kept };
+        // an MSAA pass's multisampled images outlive it when a pass continues them; a profiled
+        // pass keeps them too, since its split runs each load what the one before stored
+        let ms_kept = samples > 1 && (batch.prof.is_some() || exec::twins_kept(pass, view));
+        let mut key = PassKey { colors: [ABSENT; 4], depth: depth.as_ref().map_or(ABSENT, |d| d.desc.format), load: pass.load, views, fdm: density.is_some(), samples, depth_kept, ms_kept };
         for (i, c) in &colors { key.colors[*i] = c.desc.format; }
         if partial { key.load[0] = pass_load::LOAD; }
         let render_pass = if let Some(pass) = self.passes.get(&key) { pass.clone() } else {
@@ -785,6 +798,24 @@ impl Vulkan {
         let ablate = prof_key.filter(|k| k.ablate && !pick).and_then(|_| gpu_prof::ablate_target());
         batch.forget_blocks();
         self.draw_memo = DrawMemo::default();
+        // the pass uniforms, placed once for the pass: one block, or a block per view at an aligned
+        // stride in one upload (a view's draws bind the pass block at its dynamic offset)
+        // SAFETY: the Slice is the caller's memory, borrowed for this hal_submit call
+        let pass_bytes = unsafe { pass.uniforms.as_bytes() };
+        let block_len = pviews[0].block.len();
+        let (pass_block, pass_stride) = if viewed {
+            let align = (self.dev.properties.limits.min_uniform_buffer_offset_alignment as usize).max(16);
+            let stride = block_len.max(16).div_ceil(align) * align;
+            let mut packed = vec![0u8; stride * (pviews.len() - 1) + block_len];
+            for (i, v) in pviews.iter().enumerate() {
+                packed[i * stride..i * stride + block_len].copy_from_slice(&pass_bytes[v.block.clone()]);
+            }
+            (batch.put(&packed)?, stride as u64)
+        } else {
+            (batch.put_block(pipeline_binding::PASS, pass_bytes)?, 0)
+        };
+        let view_at = (0..pviews.len() as u64).map(|i| u32::try_from(pass_block.at + i * pass_stride)).collect::<Result<Vec<u32>, _>>()
+            .map_err(|_| "arena offset exceeds 32 bits")?;
         // the damaged rects inside the target, an empty one kept in its place since the draws' masks count them
         let damage: Option<Vec<vk::Rect2D>> = partial.then(|| read_rects(view.arena, pass.damage).map(|[x, y, w, h]| {
             let x0 = x.max(0.0).min(target_size[0] as f32) as u32;
@@ -808,7 +839,7 @@ impl Vulkan {
                 for id in read_ids(view.arena, d.tex).filter(|i| !i.is_none()) { s.ledger.touch(Kind::Texture, id.index, id.gen, s.frame, now); }
                 continue;
             }
-            match self.prepare(s, pass, d, view.arena, pick, &render_pass, &attachments, batch, now, deps) {
+            match self.prepare(s, pass, d, view.arena, pick, &render_pass, &attachments, (pass_block, block_len), batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),
                 Ok(None) => s.stats.skipped_draws += 1,
                 Err(e) => {
@@ -827,7 +858,7 @@ impl Vulkan {
         let mut msaa_depth = None;
         if samples > 1 {
             for (i, color) in &colors {
-                let ms = self.msaa_image(color, samples)?;
+                let ms = self.msaa_image(color, samples, !ms_kept)?;
                 ms.transition(batch.cb, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
                 attachment_views.push(view_of(&ms, pass.layer[*i]));
                 clear.push(vk::ClearValue { color: vk::ClearColorValue { float32: pass.clear[*i] } });
@@ -835,7 +866,7 @@ impl Vulkan {
                 batch.images.push(ms);
             }
             if let Some(depth) = &depth {
-                let ms = self.msaa_image(depth, samples)?;
+                let ms = self.msaa_image(depth, samples, !ms_kept)?;
                 ms.transition(batch.cb, vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
                 msaa_depth = Some(ms);
             }
@@ -961,7 +992,7 @@ impl Vulkan {
             // The state the last draw bound in this render pass: a draw binds only what changed
             // (a run of one model's copies or layers shares the pipeline and often the buffers).
             let mut bound = Bound::default();
-            let mut scissors = Vec::new();
+            let mut scissors: Vec<(usize, vk::Rect2D)> = Vec::new();
             for (di, (d, p)) in prepared.into_iter().enumerate() {
                 if let (Some(q), Some(lp), Some(g)) = (split_q, &load_pass, runs.iter().position(|r| *r == di).filter(|g| *g > 0)) {
                     // the next run of a split pass: a render pass of its own, continuing the attachments
@@ -976,24 +1007,44 @@ impl Vulkan {
                     // a new render pass starts with no state bound
                     bound = Bound::default();
                 }
-                let scissor = if d.scissor.iter().any(|n| n.is_nan()) { area } else {
-                    // relative to the viewport origin, inside the render area
-                    let [x, y, w, h] = d.scissor;
-                    let (x, y) = if segment.is_some() { (x + v[0] - offset[0] as f32, y + v[1] - offset[1] as f32) }
-                        else { (x + origin[0] as f32, y + origin[1] as f32) };
-                    let x0 = x.max(origin[0] as f32).min(target_size[0] as f32) as u32;
-                    let y0 = y.max(origin[1] as f32).min(target_size[1] as f32) as u32;
-                    let x1 = (x + w).max(x0 as f32).min(target_size[0] as f32) as u32;
-                    let y1 = (y + h).max(y0 as f32).min(target_size[1] as f32) as u32;
-                    vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }
-                };
-                if scissor.extent.width == 0 || scissor.extent.height == 0 { continue; }
-                // a partial repaint draws once into each damaged rect the draw touches
                 scissors.clear();
-                match (&damage, damage_mask) {
-                    (Some(rects), Some(mask)) => scissors.extend(rects.iter().enumerate()
-                        .filter(|(i, _)| d.damage & mask & 1 << i != 0).filter_map(|(_, rect)| intersect(&scissor, rect))),
-                    _ => scissors.push(scissor),
+                if viewed {
+                    // once per view: its rect bounds the scissor (a guard-band rasteriser does not
+                    // clip to the viewport), the draw's scissor is relative to the rect
+                    for (vi, pv) in pviews.iter().enumerate() {
+                        let r = pv.rect;
+                        let (rx, ry) = (r[0] - offset[0] as f32, r[1] - offset[1] as f32);
+                        let (x, y, w, h) = if d.scissor.iter().any(|n| n.is_nan()) { (rx, ry, r[2], r[3]) } else {
+                            let [x, y, w, h] = d.scissor;
+                            (rx + x, ry + y, w, h)
+                        };
+                        let x0 = x.max(rx).max(0.0).min(target_size[0] as f32) as u32;
+                        let y0 = y.max(ry).max(0.0).min(target_size[1] as f32) as u32;
+                        let x1 = (x + w).min(rx + r[2]).max(x0 as f32).min(target_size[0] as f32) as u32;
+                        let y1 = (y + h).min(ry + r[3]).max(y0 as f32).min(target_size[1] as f32) as u32;
+                        if x1 > x0 && y1 > y0 {
+                            scissors.push((vi, vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }));
+                        }
+                    }
+                } else {
+                    let scissor = if d.scissor.iter().any(|n| n.is_nan()) { area } else {
+                        // relative to the viewport origin, inside the render area
+                        let [x, y, w, h] = d.scissor;
+                        let (x, y) = if segment.is_some() { (x + v[0] - offset[0] as f32, y + v[1] - offset[1] as f32) }
+                            else { (x + origin[0] as f32, y + origin[1] as f32) };
+                        let x0 = x.max(origin[0] as f32).min(target_size[0] as f32) as u32;
+                        let y0 = y.max(origin[1] as f32).min(target_size[1] as f32) as u32;
+                        let x1 = (x + w).max(x0 as f32).min(target_size[0] as f32) as u32;
+                        let y1 = (y + h).max(y0 as f32).min(target_size[1] as f32) as u32;
+                        vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1 - x0, height: y1 - y0 } }
+                    };
+                    if scissor.extent.width == 0 || scissor.extent.height == 0 { continue; }
+                    // a partial repaint draws once into each damaged rect the draw touches
+                    match (&damage, damage_mask) {
+                        (Some(rects), Some(mask)) => scissors.extend(rects.iter().enumerate()
+                            .filter(|(i, _)| d.damage & mask & 1 << i != 0).filter_map(|(_, rect)| intersect(&scissor, rect).map(|r| (0, r)))),
+                        _ => scissors.push((0, scissor)),
+                    }
                 }
                 if scissors.is_empty() { continue; }
                 if prof_key.is_some() {
@@ -1018,7 +1069,10 @@ impl Vulkan {
                     batch.buffers.push(p.index.clone());
                 }
                 let dynamic = p.pipeline.program.dynamic.len();
-                self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
+                // (a view of the pass binds the set with its own pass block, below)
+                if !viewed || p.pass_offset.is_none() {
+                    self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &p.offsets[..dynamic]);
+                }
                 let storage = &p.pipeline.program.storage;
                 if d.storage_buffers.len as usize != storage.len() { s.bad(); continue; }
                 let mut push = vec![0u8; p.pipeline.program.desc.storage_push_size as usize];
@@ -1034,7 +1088,21 @@ impl Vulkan {
                 if !valid { s.bad(); continue; }
                 if !push.is_empty() { self.dev.raw.cmd_push_constants(batch.cb, p.pipeline.program.layout, vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, 0, &push); }
                 if d.inst_ranges.len != 0 && read_pairs(view.arena, d.inst_ranges).count() != d.inst_ranges.len as usize { s.bad(); continue; }
-                for scissor in &scissors {
+                for (vi, scissor) in &scissors {
+                    if viewed {
+                        // the view's rect is its viewport, its block of the pass uniforms is bound
+                        if bound.view != Some(*vi) {
+                            let r = pviews[*vi].rect;
+                            let viewport = vk::Viewport { x: r[0] - offset[0] as f32, y: r[1] + r[3] - offset[1] as f32, width: r[2], height: -r[3], min_depth: 0.0, max_depth: 1.0 };
+                            self.dev.raw.cmd_set_viewport(batch.cb, 0, &[viewport]);
+                            bound.view = Some(*vi);
+                        }
+                        if let Some(at) = p.pass_offset {
+                            let mut offsets = p.offsets;
+                            offsets[at] = view_at[*vi];
+                            self.dev.raw.cmd_bind_descriptor_sets(batch.cb, vk::PipelineBindPoint::GRAPHICS, p.pipeline.program.layout, 0, &[p.descriptors], &offsets[..dynamic]);
+                        }
+                    }
                     let rect = (scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height);
                     if bound.scissor != Some(rect) {
                         self.dev.raw.cmd_set_scissor(batch.cb, 0, std::slice::from_ref(scissor));
@@ -1176,18 +1244,19 @@ impl Vulkan {
         }) });
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: &RenderPass, attachments: &[Arc<Image>],
-        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Prepared>, String> {
+        pass_block: (Placed, usize), batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Prepared>, String> {
         let (mut bins, mut images) = (std::mem::take(&mut self.draw_bins), std::mem::take(&mut self.draw_images));
         bins.clear(); images.clear();
-        let prepared = self.prepare_with(s, pass, d, arena, pick, render_pass, attachments, batch, now, deps, &mut bins, &mut images);
+        let prepared = self.prepare_with(s, pass, d, arena, pick, render_pass, attachments, pass_block, batch, now, deps, &mut bins, &mut images);
         (self.draw_bins, self.draw_images) = (bins, images);
         prepared
     }
 
     #[allow(clippy::too_many_arguments)]
     fn prepare_with(&mut self, s: &mut Session, pass: &Pass, d: &Draw, arena: &[u8], pick: bool, render_pass: &RenderPass, attachments: &[Arc<Image>],
-        batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, bins: &mut Vec<BufferBinding>,
+        pass_block: (Placed, usize), batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>, bins: &mut Vec<BufferBinding>,
         images: &mut Vec<ImageBinding>) -> Result<Option<Prepared>, String> {
         let (tex_ids, pick_ids) = (id_bytes(arena, d.tex), id_bytes(arena, d.pick_tex));
         // an earlier draw of the pass named the same textures: their lent state is known and
@@ -1268,7 +1337,17 @@ impl Vulkan {
             dynamic_offset(p, &mut offsets, p.code.instance_binding, offset)?;
             bins.push((p.code.instance_binding, vk::DescriptorType::STORAGE_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(instance).range(range), serial));
         }
-        for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]), (pipeline_binding::PASS, pass.uniforms),
+        // the pass's block, placed once for the pass (view 0's: a view binds its own at draw time)
+        let mut pass_offset = None;
+        if p.bindings[pipeline_binding::PASS] != ABSENT {
+            let (placed, len) = pass_block;
+            let slot = p.bindings[pipeline_binding::PASS];
+            if len == 0 || len as u64 > self.dev.properties.limits.max_uniform_buffer_range as u64 { return Err("invalid uniform block size".into()); }
+            dynamic_offset(p, &mut offsets, slot, placed.at)?;
+            pass_offset = p.dynamic.iter().position(|b| *b == slot);
+            bins.push((slot, vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC, vk::DescriptorBufferInfo::default().buffer(placed.buffer).range(len as u64), placed.serial));
+        }
+        for (which, source) in [(pipeline_binding::DRAW_CALL, d.uniforms[0]),
             (pipeline_binding::DRAW_LIST, d.uniforms[1]), (pipeline_binding::DYN, d.uniforms[2]), (pipeline_binding::SCOPE, d.uniforms[3])] {
             let slot = p.bindings[which]; if slot == ABSENT { continue; }
             let bytes = unsafe { source.as_bytes() };
@@ -1298,6 +1377,9 @@ impl Vulkan {
         };
         if !same_images {
             let mut video_slot = 0usize;
+            // the bound textures whose format the device cannot filter (bit i: texture i; `high`:
+            // one past bit 31): the samplers that read them read through their blend-free twins
+            let (mut unfiltered, mut high) = (0u32, false);
             for (i, shape) in p.code.textures.iter().enumerate() {
                 let id = id_at(arena, d.tex, i);
                 // An imported texture without storage yet (a video/camera target before its first
@@ -1319,6 +1401,9 @@ impl Vulkan {
                     if image.video != *v && image.video.conversion != vk::SamplerYcbcrConversion::null() { return Err("a video picture bound with another conversion's program".into()); }
                     Some(v.sampler)
                 } else { None };
+                if sampler.is_none() && !self.dev.formats[image.desc.format as usize].optimal_tiling_features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR) {
+                    if i < 32 { unfiltered |= 1 << i } else { high = true }
+                }
                 self.bind_image(s, id, image, *shape, p.code.texture_base + i as u32, attachments, batch, now, images, sampler)?;
                 if pick && p.code.pick_texture_base != ABSENT {
                     let twin_id = id_at(arena, d.pick_tex, i);
@@ -1337,7 +1422,12 @@ impl Vulkan {
                 batch.images.push(image);
             }
             for (i, sampler) in p.samplers.iter().enumerate() {
-                images.push((p.code.sampler_base + i as u32, vk::DescriptorType::SAMPLER, vk::DescriptorImageInfo::default().sampler(*sampler), 0));
+                let reads = p.code.sampler_textures.get(i).copied().unwrap_or(u32::MAX);
+                let sampler = match &p.code.samplers[i] {
+                    desc if (reads & unfiltered != 0 || (high && reads == u32::MAX)) && super::pipeline::blends(desc) => self.dev.unfiltered_sampler(desc)?,
+                    _ => *sampler,
+                };
+                images.push((p.code.sampler_base + i as u32, vk::DescriptorType::SAMPLER, vk::DescriptorImageInfo::default().sampler(sampler), 0));
             }
         }
         if p.code.pick_binding != ABSENT {
@@ -1372,7 +1462,7 @@ impl Vulkan {
         }
         if !same_vertex { memo.vb = Some((d.vb, vertex.clone())); }
         if !same_index { memo.ib = Some((d.ib, index.clone())); }
-        Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, offsets, first_instance }))
+        Ok(Some(Prepared { pipeline, vertex, index, descriptors: set, offsets, pass_offset, first_instance }))
     }
 
     fn write_set(&self, set: vk::DescriptorSet, bins: &[BufferBinding], images: &[ImageBinding]) {
@@ -1442,7 +1532,7 @@ fn damage_check() -> bool {
         if let Some(value) = crate::backend::android::xr::system_property("debug.makepad.damage_check") {
             return value == "1";
         }
-        std::env::var_os("MAKEPAD_DAMAGE_CHECK").is_some_and(|v| v == "1")
+        relax_api::env::var_os("MAKEPAD_DAMAGE_CHECK").is_some_and(|v| v == "1")
     })
 }
 
@@ -1450,5 +1540,5 @@ fn damage_check() -> bool {
 #[cfg(target_os = "linux")]
 fn frame_stamp() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_FRAME_STAMP").is_some_and(|v| v == "1"))
+    *ON.get_or_init(|| relax_api::env::var_os("MAKEPAD_FRAME_STAMP").is_some_and(|v| v == "1"))
 }

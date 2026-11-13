@@ -1,6 +1,6 @@
 //! Completed Linux capture buffers. The HAL owns the mapped allocation until every recorder
 //! lease is released. Handles in ScreenSurface are session-scoped tickets, never raw pointers.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::{
     collections::HashMap,
     sync::{

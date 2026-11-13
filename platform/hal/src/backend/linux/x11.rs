@@ -1501,8 +1501,11 @@ impl Shell for App {
                         }
                     }
                 }
-                OsCmd::ClipSet { text } => self.selection.set(text, false),
-                OsCmd::SelectionSet { text } => self.selection.set(text, true),
+                OsCmd::ClipSet { data } => self.selection.set(data, false),
+                OsCmd::SelectionSet { text } => self.selection.set(
+                    crate::clipboard::ClipboardData { text, ..Default::default() },
+                    true,
+                ),
                 OsCmd::ClipRead { req, primary } => self
                     .selection
                     .read(selection::Purpose::Reply(sid, req), primary),

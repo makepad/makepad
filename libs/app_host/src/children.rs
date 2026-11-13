@@ -25,6 +25,7 @@ use makepad_app_registry::{AppEntry, AppLaunch, BuildPolicy, LaunchEvent, Launch
 use makepad_error_log::log;
 use makepad_platform::thread::{SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_platform::*;
+use makepad_platform::clipboard_read::ClipboardWrite;
 use makepad_studio_protocol::{AppToStudio, ChildRelay, HostRelay, StudioToApp};
 
 use crate::hub::{AppHub, ClientId, HubEvent};
@@ -70,7 +71,7 @@ pub struct ChildSpec {
     pub app: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
-    /// Audible; otherwise it runs with `SANDBOX_MUTE=1`.
+    /// Audible; otherwise it runs with `MAKEPAD_MUTE=1`.
     pub audio: bool,
     pub home: Home,
     pub policy: BuildPolicy,
@@ -152,6 +153,8 @@ pub struct Slot<K, X> {
     pub folder: PathBuf,
     /// What the owner keeps per slot.
     pub extra: X,
+    /// The richer flavours the child sent ahead of its next copy's text.
+    clip_flavours: Option<makepad_platform::window_controls::HostedClipboard>,
 }
 
 impl<K, X> Slot<K, X> {
@@ -328,6 +331,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             born: Cx::monotonic_now(),
             folder,
             extra,
+            clip_flavours: None,
         });
         self.slots.last_mut().unwrap()
     }
@@ -476,8 +480,16 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
                     _ => Vec::new(),
                 };
                 let text = e.content.text.clone().unwrap_or_default();
+                let write = ClipboardWrite { text: text.clone(), html: e.content.html.clone(), markdown: e.content.markdown.clone() };
+                let flavours = write.hosted(request_id);
                 if let Some(slot) = self.slots.iter_mut().find(|slot| slot.client == client) {
-                    slot.hosted.send(vec![StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png })]);
+                    // the flavours go just ahead of the answer
+                    let mut msgs = Vec::new();
+                    if flavours.any() {
+                        msgs.push(StudioToApp::Custom(flavours.to_json()));
+                    }
+                    msgs.push(StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png }));
+                    slot.hosted.send(msgs);
                 }
             }
         }
@@ -637,7 +649,10 @@ fn route<K: Clone, X>(cx: &mut Cx, slot: &mut Slot<K, X>, client: ClientId, msg:
     match msg {
         // The children share the host's clipboard: a child's copy is the host's (which, hosted
         // itself, hands it on to its own host), a child's read is answered from it.
-        AppToStudio::SetClipboard(text) => cx.copy_to_clipboard(&text),
+        AppToStudio::SetClipboard(text) => {
+            // the flavours the child sent just ahead of its text
+            cx.copy_to_clipboard_flavours(ClipboardWrite::with_hosted(text, slot.clip_flavours.take()));
+        }
         AppToStudio::Relay(ChildRelay::SetPrimarySelection { text }) => cx.set_primary_selection(&text),
         AppToStudio::Relay(ChildRelay::ReadClipboard { request_id }) => {
             clipboard_reads.insert(cx.read_clipboard(), (client, request_id));
@@ -667,6 +682,10 @@ fn route<K: Clone, X>(cx: &mut Cx, slot: &mut Slot<K, X>, client: ClientId, msg:
             }
         }
         AppToStudio::Custom(json) => {
+            if let Some(flavours) = makepad_platform::window_controls::HostedClipboard::parse(&json) {
+                slot.clip_flavours = Some(flavours);
+                return;
+            }
             if let Some(caps) = makepad_platform::ime::HostedPointerCaps::parse(&json) {
                 for hosted in slot.windows_mut() {
                     hosted.set_pointer_caps(caps.clone());
@@ -827,7 +846,7 @@ fn spawn_process(
             command.env("SANDBOX_HOME", &home).env("MAKEPAD_HOME", &home);
         }
         if !spec.audio {
-            command.env("SANDBOX_MUTE", "1");
+            command.env("MAKEPAD_MUTE", "1");
         }
         launch::configure(&mut command, port, client, bin);
         // A hosted child never outlives this host (quit, crash or kill).

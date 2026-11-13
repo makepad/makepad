@@ -1,4 +1,4 @@
-//! The query engine agents (and Scope's analysis panel, and other lanes' tools) ask a profile:
+//! The query engine agents (and an app's analysis panel, and other lanes' tools) ask a profile:
 //! compact text answers per profproto.md §5. Line 1 is the finding; evidence follows as tables
 //! with units in the header; ids (F812, T3) are accepted by later queries; every list says what
 //! it left out; the last line offers drill-downs (`more:`).
@@ -14,12 +14,12 @@ use crate::{jit, role};
 use std::collections::HashMap;
 
 /// An answer: the finding (line 1), then blocks of evidence, then drill-down queries. The text
-/// rendering ([`Ans::text`]) is what an agent reads; Scope draws the same blocks.
+/// rendering ([`Ans::text`]) is what an agent reads; an app draws the same blocks.
 #[derive(Clone, Debug, Default)]
 pub struct Ans {
     pub finding: String,
     pub blocks: Vec<Block>,
-    /// follow-up queries (`frame F812`, `top jit`): Scope shows them as buttons
+    /// follow-up queries (`frame F812`, `top jit`): an app shows them as buttons
     pub more: Vec<String>,
 }
 
@@ -170,7 +170,7 @@ pub fn ask(p: &Profile, query: &str, base: Option<&Profile>) -> Ans {
     let q = Q::parse(query);
     let cmd = q.pos.first().map(String::as_str).unwrap_or("summary");
     if p.lanes.is_empty() && p.gpu.frames.is_empty() && p.events.is_empty() && cmd != "help" {
-        return "empty profile: nothing was recorded (is the app drawing? under makepad run the main lane needs the platform's phase markers)\nmore: help".into();
+        return "empty profile: nothing was recorded (is the app drawing? under Relax the main lane needs the platform's phase markers)\nmore: help".into();
     }
     match cmd {
         "summary" => summary(p),
@@ -1621,7 +1621,7 @@ fn events(p: &Profile, q: &Q, cat_default: Option<&str>) -> Ans {
 /// `input [n=20]`: the recorded input (what a replay feeds back).
 fn input(p: &Profile, q: &Q) -> Ans {
     if p.inputs.is_empty() {
-        return "no input recorded (the program records its input under makepad run with the flight recorder on)\nmore: events".into();
+        return "no input recorded (the program records its input under Relax with the flight recorder on)\nmore: events".into();
     }
     let mut by: Vec<(String, usize)> = Vec::new();
     for i in &p.inputs {

@@ -19,7 +19,7 @@ use crate::backend::vulkan::{Device, Image};
 use crate::dmabuf::DmaBuf;
 use crate::hosted_ipc::{self, ClientEndpoint};
 use crate::types::*;
-use crate::window_controls::{hosted_window_op, HostedAppFrame, HostedResize, HostedWindow, WINDOW_OP_FULLSCREEN};
+use crate::window_controls::{hosted_window_op, HostedAppFrame, HostedClipboard, HostedResize, HostedWindow, WINDOW_OP_FULLSCREEN};
 use crate::{session, wm_socket, Id};
 use makepad_micro_serde::SerBin;
 use makepad_studio_protocol::{
@@ -547,6 +547,8 @@ pub(super) struct App {
     /// WM as relays; relay id -> (session, its request id).
     clip_reads: HashMap<u64, (u32, u64)>,
     next_clip_read: u64,
+    /// A read's richer flavours the WM sent just ahead of its answer (`HostedClipboard`).
+    clip_flavours: Option<HostedClipboard>,
     /// The last primary selection this process made (also sent to the WM).
     selection: crate::clipboard::ClipboardData,
     /// The WM's drag queries (`HostedDragQuery` ids) the app has not answered yet, oldest first:
@@ -609,7 +611,7 @@ impl App {
         lock(&PACE).started = true;
         Ok(Self { state, hub, aux_path: hosted_ipc::aux_path(port, &client.to_string()), aux: None,
             pending: Vec::new(), windows: HashMap::new(), early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false,
-            clip_reads: HashMap::new(), next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
+            clip_reads: HashMap::new(), next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(), trays: HashMap::new(),
             hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false })
     }
 
@@ -804,6 +806,11 @@ impl App {
                 }
             }
             StudioToApp::Custom(json) => {
+                // A clipboard read's flavours, just ahead of its answer.
+                if let Some(flavours) = HostedClipboard::parse(&json) {
+                    self.clip_flavours = Some(flavours);
+                    return;
+                }
                 // A press in the window: the app's drag query says whether it is its caption.
                 if let Some(query) = HostedDragQuery::parse(&json) {
                     if let Some((key, x, y)) = self.pointer_at(query.x, query.y) {
@@ -875,8 +882,11 @@ impl App {
                 }
             }
             StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png }) => {
+                // the flavours the host sent just ahead, when they go with this text
+                let flavours = self.clip_flavours.take().filter(|f| f.request == request_id && f.text == text).unwrap_or_default();
                 if let Some((sid, req)) = self.clip_reads.remove(&request_id) {
-                    let bytes = crate::clipboard::ClipboardData { text, png, files: Vec::new() }.pack();
+                    let (html, markdown) = (flavours.html, flavours.markdown);
+                    let bytes = crate::clipboard::ClipboardData { text, html, markdown, png, files: Vec::new() }.pack();
                     self.state.shared.push((sid, Id::NONE), |q, _| q.clipboard(req, true, &bytes));
                 }
             }
@@ -1293,7 +1303,16 @@ impl Shell for App {
                     }
                 }
                 OsCmd::Cursor { cursor, .. } => self.hub.send(vec![AppToStudio::SetCursor(mouse_cursor(cursor))]),
-                OsCmd::ClipSet { text } => self.hub.send(vec![AppToStudio::SetClipboard(text)]),
+                // the flavours go just ahead of the text the studio protocol carries
+                OsCmd::ClipSet { data } => {
+                    let flavours = HostedClipboard { request: 0, text: data.text.clone(), html: data.html, markdown: data.markdown };
+                    let mut msgs = Vec::new();
+                    if flavours.any() {
+                        msgs.push(AppToStudio::Custom(flavours.to_json()));
+                    }
+                    msgs.push(AppToStudio::SetClipboard(data.text));
+                    self.hub.send(msgs);
+                }
                 // A drag out of the window: the WM carries the files from here (`StartFileDrag`),
                 // so the app's own gesture ends now, as when a desktop drag session ends.
                 OsCmd::DragStart { id, items, .. } => {
@@ -1527,7 +1546,7 @@ mod tests {
         let hub = Hub::connect(port, 78, "makepad-app-hidden", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_001, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
@@ -1558,7 +1577,7 @@ mod tests {
         let hub = Hub::connect(port, 79, "makepad-app-resize", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let (tile, later) = ((9_002, Id::new(1, 1)), (9_002, Id::new(2, 1)));
         app.windows.insert(tile, Win { window_id: 0, recipient: tile, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
@@ -1595,7 +1614,7 @@ mod tests {
         let hub = Hub::connect(port, 79, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let item = |kind, cmd| MenuItem { parent: 0, kind, cmd, key: 0, str: Default::default() };
         let items = vec![
@@ -1649,7 +1668,7 @@ mod tests {
         let hub = Hub::connect(port, 81, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let id = Id::new(5, 1);
         app.command(Op::Cmd(6, OsCmd::WindowCreate { id, kind: window_kind::DROPDOWN, parent: Id::NONE, geom: [0.0; 4] }));
@@ -1692,7 +1711,7 @@ mod tests {
         let hub = Hub::connect(port, 80, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_003, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
@@ -1739,7 +1758,7 @@ mod tests {
         let hub = Hub::connect(port, 79, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let key = (9_002, Id::new(1, 1));
         app.windows.insert(key, Win { window_id: 0, recipient: key, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });
@@ -1786,7 +1805,7 @@ mod tests {
         let hub = Hub::connect(port, 79, "makepad-app-clock", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(1, 1));
         let lent = (9_002, Id::new(4, 1));
@@ -1878,7 +1897,7 @@ mod tests {
         server.join().unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
-            next_clip_read: 0, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
+            next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
             trays: HashMap::new(), hidden_windows: Default::default(), detached_at: None, reattach_error: None, quit_sent: false, stopping: false };
         let host = (session::HOST, Id::new(77, 1));
         app.windows.insert(host, Win { window_id: 0, recipient: host, requested: false, awaiting: false, ahead: 0, geom: None, dropdown: false });

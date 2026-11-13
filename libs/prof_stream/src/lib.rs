@@ -10,7 +10,7 @@
 //! - [`model::Profile`] is the profile built from the records (lanes, spans, waits, frames, JIT
 //!   events, GPU frames), live or loaded; [`ask`] answers queries on it as compact text, and
 //!   [`text`] renders the tables, timelines and sparklines those answers use.
-//! - [`answer`] renders `makepad inspect`'s JSON answers as text (the inspect client and Scope).
+//! - [`answer`] renders `makepad inspect`'s JSON answers as text (the inspect client and an app).
 
 pub mod answer;
 pub mod ask;
@@ -460,7 +460,7 @@ pub struct Hello {
     pub build: String,
     pub device: String,
     pub refresh_mhz: u64,
-    /// bit0: a JIT (makepad run) app; bit1: a native build
+    /// bit0: a JIT (Relax) app; bit1: a native build
     pub flags: u64,
     /// the process's start on the stream clock (0: unknown): answers say "at 896 s of the run"
     pub start_mono: u64,

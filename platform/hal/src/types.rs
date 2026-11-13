@@ -2,7 +2,7 @@
 //! `#[relax_api(plain)]`: Relax-compiled code reads, builds and drops them itself (Relax checks
 //! rustc's size, align and field offsets against its own).
 
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 /// A resource id chosen by Cx: its pool slot and the slot's generation. The id space is per kind
 /// (texture, buffer, pipeline, window).
@@ -1038,9 +1038,6 @@ pub mod readback {
     /// A pick replay skipped a pending pipeline or sampled an incomplete pick target. Retry it.
     pub const INCOMPLETE: u32 = 5;
     pub const DEVICE_LOST: u32 = 6;
-    /// The pixels were larger than the caller's event arena, and the caller pumped again without
-    /// growing it after the `PayloadSize` that announced them: `pixels` is empty.
-    pub const TOO_LARGE: u32 = 7;
 }
 
 /// One element of `DragStart` / `DragMove` item arrays.
@@ -1239,7 +1236,8 @@ pub struct Pass {
     /// per colour attachment: the cube face / array slice it renders into
     pub layer: [u32; 4],
     /// x, y, w, h in target pixels. Draw scissors are relative to its origin; with an origin
-    /// (an eye of a side-by-side stereo target) the pass clears and stores from the origin on.
+    /// the pass clears and stores from the origin on. With `view_rects`: the area every view
+    /// lies in, which the pass clears and stores.
     pub viewport: [f32; 4],
     pub dpi: f32,
     /// 0 or 1: one view. 2 (`info_flags::MULTIVIEW` only): multiview, both views in one pass --
@@ -1252,8 +1250,13 @@ pub struct Pass {
     /// of its attachments' formats and size the backend keeps per attachment, resolved into the
     /// attachments at its end (colour: the samples' average; depth: sample 0). A pass that loads
     /// continues the multisampled images (the second eye of a side-by-side target), not what
-    /// another pass wrote into the attachments.
+    /// another pass wrote into the attachments. The multisampled images last for the pass alone,
+    /// never stored (on a tile GPU they stay in tile memory unless the pass spills them), unless a
+    /// pass loads them: this one, or a later MSAA pass of the submit loading one of its
+    /// attachments (`exec::twins_kept`).
     pub samples: u32,
+    /// The pass's uniform block; with `view_rects` of n rects, n blocks of equal size, view
+    /// i's at `i * len / n`.
     pub uniforms: Slice,
     pub draws: Range,
     pub name: StrId,
@@ -1263,6 +1266,12 @@ pub struct Pass {
     pub damage: Range,
     /// The frame `damage` is measured from, or 0 when we don't know what changed.
     pub damage_since: u64,
+    /// Empty: one view, `viewport`. Else n rects (x, y, w, h in target pixels inside
+    /// `viewport`, `CmdWriter::put_rects`), the views side by side in one target (the eyes of a
+    /// side-by-side stereo target): each draw runs once per rect in the same pass, with that
+    /// rect as viewport and scissor bound and that view's block of `uniforms`. Draw scissors
+    /// are relative to each rect's origin. Not with `views` 2, nor with `damage`.
+    pub view_rects: Range,
 }
 
 unsafe impl Plain for Pass {}

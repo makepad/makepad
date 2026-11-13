@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 #[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

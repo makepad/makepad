@@ -156,6 +156,11 @@ pub(crate) struct FrameBuilder {
     pub(crate) w: CmdWriter,
     /// a pipeline was probed while it compiled since the last `want_probed`
     probes: std::cell::Cell<bool>,
+    /// an app was told a draw shader cannot draw yet (`Cx::draw_shader_ready`) since the last
+    /// `Event::DrawShadersReady`
+    asked: std::cell::Cell<bool>,
+    /// a pipeline was made or failed since then ([`FrameBuilder::take_answer`])
+    answered: bool,
     /// Window targets in the current batch, recorded during the existing pass walk.
     pub(crate) window_frames: Vec<Id>,
     window_submitted: HashMap<Id, u64>,
@@ -568,10 +573,23 @@ impl FrameBuilder {
                 // memory for it), and then its draws, left out so far, paint again.
                 let was_failed = std::mem::take(&mut p.failed);
                 let again = std::mem::replace(&mut p.ready, true);
+                self.answered = true;
                 std::mem::take(&mut p.drawn_unready) || again || was_failed
             }
             _ => false,
         }
+    }
+
+    /// An app asked whether a draw shader can draw, and it cannot yet: the next pipeline
+    /// answer tells it so ([`FrameBuilder::take_answer`]).
+    pub(crate) fn asked_unready(&self) {
+        self.asked.set(true);
+    }
+
+    /// Whether an app told "not yet" hears `Event::DrawShadersReady` now: a pipeline was made
+    /// or failed since. Clears both marks; the next "not yet" asks again.
+    pub(crate) fn take_answer(&mut self) -> bool {
+        std::mem::take(&mut self.answered) && self.asked.replace(false)
     }
 
     /// Whether a pass must wait for the pipeline: the HAL is still compiling it. The wait is
@@ -632,6 +650,7 @@ impl FrameBuilder {
     pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<(usize, bool)> {
         let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
         p.failed = true;
+        self.answered = true;
         Some((p.first_shader, std::mem::take(&mut p.drawn_unready)))
     }
 
@@ -1197,6 +1216,10 @@ impl Cx {
             };
             if let Some(pipe) = shared {
                 self.draw_shaders[index].pipeline_id = Some(pipe);
+                // an already answered pipeline answers this shader too: no PipelineReady comes
+                if fb.pipes[pipe].ready || fb.pipes[pipe].failed {
+                    fb.answered = true;
+                }
                 continue;
             }
             let debug_id = self.draw_shaders[index].debug_id;
@@ -1645,21 +1668,23 @@ impl Cx {
                 self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
             }
         } else if stereo {
-            // both eyes side by side: a pass per eye with that eye's camera. The left eye's pass
-            // clears (its colour as the pass says, its depth always) and the right eye's loads:
-            // a clear is the whole attachment's on Metal and D3D11 (the viewport does not bound
-            // it), so a right-eye clear wiped the left eye's picture and depth
+            // both eyes side by side in one pass (`Pass::view_rects`): the draws are built once
+            // and each runs once per eye, with that eye's half and camera; the pass clears once
+            // (its colour as the pass says, its depth always)
             let base = self.passes[pass_id].pass_uniforms;
             let half = (tw / 2) as f32;
-            for eye in 0..2 {
-                let Some(uniforms) = self.hal_xr_eye_uniforms(&base, eye) else { break };
+            let left = self.hal_xr_eye_uniforms(&base, 0).copied();
+            let right = self.hal_xr_eye_uniforms(&base, 1).copied();
+            if let (Some(left), Some(right)) = (left, right) {
                 let mut p = pass;
-                p.uniforms = fb.w.keep(uniforms.as_slice());
-                p.viewport = [half * eye as f32, 0.0, half, th as f32];
-                if eye > 0 {
-                    p.load[..4].fill(load::LOAD);
-                }
-                if !p.depth.is_none() { p.load[4] = if eye == 0 { load::CLEAR } else { load::LOAD }; }
+                // the eyes' blocks in one run: view i's at i * len / 2
+                p.uniforms = makepad_stack::with_frame(|f| {
+                    let (l, r) = (left.as_slice(), right.as_slice());
+                    let both = f.slice_from_fn(l.len() + r.len(), |i| if i < l.len() { l[i] } else { r[i - l.len()] });
+                    fb.w.keep(&both[..])
+                });
+                p.view_rects = fb.w.put_rects(&[[0.0, 0.0, half, th as f32], [half, 0.0, half, th as f32]]);
+                if !p.depth.is_none() { p.load[4] = load::CLEAR; }
                 fb.w.pass(p);
                 let mut zbias = 0.0f32;
                 self.fb_list(fb, pass_id, list_id, sploded, &mut zbias, step, serial);
@@ -2138,16 +2163,25 @@ impl Cx {
         if let Some(o) = self.draw_owners.as_mut() {
             o.draw(list_id.index(), item_id, slots, instances);
         }
-        if !list.input_transparent && fb.w.pass_has_native_layers() {
-            if let Some(rects) = instance_rects(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px) {
-                fb.w.draw_with_input_rects(draw, rects);
+        // The pick repaint draws each labelled index run of a mesh with its own id;
+        // the colour frame draws the mesh once.
+        if self.pick.paint.is_some() && !self.geometries[geometry_id].pick_ranges.is_empty() {
+            for (first, count, id) in crate::pick::pick_runs(&self.geometries[geometry_id].pick_ranges, index_count as u32, call.pick_id) {
+                fb.w.draw(Draw { index: [first, count], pick: id, ..draw });
+                fb.stats.draws += 1;
+            }
+        } else {
+            if !list.input_transparent && fb.w.pass_has_native_layers() {
+                if let Some(rects) = instance_rects(&sh.mapping, &list.draw_list_uniforms, item, slots, instances, fb.pass_px) {
+                    fb.w.draw_with_input_rects(draw, rects);
+                } else {
+                    fb.w.draw(draw);
+                }
             } else {
                 fb.w.draw(draw);
             }
-        } else {
-            fb.w.draw(draw);
+            fb.stats.draws += 1;
         }
-        fb.stats.draws += 1;
         // consumed: the encode that presents this content happened
         let call_gen = call.uniforms_gen;
         item.consumed_instance_id = item.retained_instance_id;
@@ -2403,11 +2437,19 @@ mod tests {
         assert_eq!(fb.pipelines_pending(), 2);
         // compiling: the pass waits for it (keeps its picture) and its answer repaints
         assert!(fb.pipeline_waited_for(0));
+        // an app asked about it and was told "not yet" (`Cx::draw_shader_ready`)
+        fb.asked_unready();
+        assert!(!fb.take_answer(), "no answer yet: no DrawShadersReady");
         assert!(fb.pipeline_ready(new_id), "PipelineReady repaints the held pass");
+        assert!(fb.take_answer(), "the app told not yet hears the answer");
+        assert!(!fb.take_answer(), "once");
         assert!(!fb.pipeline_waited_for(0), "ready: nothing to wait for");
         // a pipeline that fails: the pass that waited paints again, and nobody waits for it after
         assert!(fb.pipeline_waited_for(1));
         assert_eq!(fb.pipeline_failed(bad_id), Some((1, true)));
+        assert!(!fb.take_answer(), "an answer nobody waited for sends nothing");
+        fb.asked_unready();
+        assert!(!fb.take_answer(), "a later not-yet waits for the next answer");
         assert!(!fb.pipeline_waited_for(1), "a failed pipeline never holds a picture");
         assert_eq!(fb.pipelines_pending(), 0);
     }
@@ -2565,6 +2607,41 @@ mod tests {
         assert_eq!(cx.passes[id].painted_serial, 4, "the paint left a draw out");
         assert!(cx.passes[id].incomplete);
         assert!(cx.passes[id].paint_dirty, "and paints again");
+    }
+
+    /// An offscreen XR display's pass (both eyes side by side in one target) is one pass with two
+    /// views (`Pass::view_rects`): the whole target its viewport, each eye's half a rect, each
+    /// eye's pass uniforms a block, the depth cleared once; its draw list is walked once for both.
+    #[test]
+    fn an_offscreen_xr_pass_is_one_pass_with_a_view_per_eye() {
+        use crate::texture::{TextureFormat, TextureSize};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut fb = FrameBuilder::default();
+        cx.hal.info = Some(makepad_hal::HalInfo { flags: makepad_hal::info_flags::XR | makepad_hal::info_flags::XR_OFFSCREEN, ..Default::default() });
+        cx.hal_xr_start();
+        let window = cx.hal.xr.as_ref().expect("the XR window").window;
+        cx.windows[window].window_geom.inner_size = crate::makepad_math::dvec2(16.0, 8.0);
+        let hw = cx.hal.windows.get_mut(&window.0).expect("its HAL window");
+        (hw.confirmed, hw.credit) = (true, true);
+        let xr = cx.hal.xr.as_mut().unwrap();
+        (xr.frame, xr.msaa) = (Some(makepad_hal::XrFrame::default()), 4);
+        let (pass, _list, _target) = texture_pass(&mut cx);
+        let depth = Texture::new_with_format(&mut cx, TextureFormat::DepthD32 { size: TextureSize::Fixed { width: 16, height: 8 }, initial: true });
+        pass.set_depth_texture(&mut cx, &depth, DrawPassClearDepth::InitWith(1.0));
+        let id = pass.draw_pass_id();
+        cx.passes[id].parent = CxDrawPassParent::Xr;
+        cx.repaint_id = 3;
+        assert!(cx.fb_pass(&mut fb, id, 0).is_some(), "the XR pass was built");
+        let buf = fb.w.buf();
+        // SAFETY: the writer is not changed while the view is read
+        let view = unsafe { buf.view() }.expect("the built commands");
+        assert_eq!(view.passes.len(), 1, "both eyes in one pass");
+        let p = &view.passes[0];
+        assert_eq!(p.viewport, [0.0, 0.0, 16.0, 8.0], "the pass's viewport is the whole target");
+        let rects: Vec<[f32; 4]> = makepad_hal::buffers::read_rects(view.arena, p.view_rects).collect();
+        assert_eq!(rects, vec![[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]], "a view per eye, side by side");
+        assert_eq!(p.uniforms.len(), 2 * std::mem::size_of::<crate::draw_pass::DrawPassUniforms>(), "a block of pass uniforms per eye");
+        assert_eq!((p.views, p.samples, p.load[4]), (0, 4, load::CLEAR), "not multiview, the XR samples, depth cleared once");
     }
 
     #[test]

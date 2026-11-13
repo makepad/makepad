@@ -83,8 +83,7 @@ pub struct D3d11 {
     /// the composed image the badge frame being encoded draws into
     compose: Option<Arc<Texture>>,
     aliases: HashMap<(u32, Id), Id>,
-    /// the id target of each window's newest pick frame, and the targets missing a draw
-    pick_ids: HashMap<(u32, Id), Id>,
+    /// Pick targets whose latest replay skipped a draw.
     pick_pending: std::collections::HashSet<(u32, Id)>,
     /// window capture textures (recording), reused once no sink holds them
     captures: Vec<([u32; 2], makepad_windows_sys::Win32::Graphics::Direct3D11::ID3D11Texture2D, crate::ledger::Charge)>,
@@ -202,7 +201,6 @@ impl D3d11 {
             badged: HashMap::new(),
             compose: None,
             aliases: HashMap::new(),
-            pick_ids: HashMap::new(),
             pick_pending: Default::default(),
             acquired: Vec::new(),
             captures: Vec::new(),
@@ -330,8 +328,7 @@ impl D3d11 {
                     world.frame_done(sid, target, kind, frame, gpu_ns, done.time, gpu_span);
                 }
                 Event::BufferLeases { req, status, leases } => world.to_session(sid, |q| q.buffer_leases(req, status, leases)),
-                Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
-                Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),
+                Event::Readback { req, status, rect, lease } => world.to_session(sid, |q| q.readback(req, status, rect, lease)),
             }
         }
         for ((sid, index), pipe) in &mut self.pipe {
@@ -496,7 +493,6 @@ impl Backend for D3d11 {
         self.native_fallback.retain(|k| k.0 != sid);
         if sid == HOST { self.badged.clear(); }
         self.aliases.retain(|k, _| k.0 != sid);
-        self.pick_ids.retain(|k, _| k.0 != sid);
         self.pick_pending.retain(|k| k.0 != sid);
         self.programs.retain(|_, list| {
             list.retain(|w| w.strong_count() > 0);
@@ -542,7 +538,6 @@ impl exec::DeviceReset for D3d11 {
         self.segments.clear();
         self.segment_depths.clear();
         for composed in self.badged.values_mut() { *composed = None; }
-        self.pick_ids.clear();
         self.pick_pending.clear();
         self.captures.clear();
         self.acquired.clear();
@@ -686,11 +681,11 @@ impl Gpu for D3d11 {
     }
     fn texture_readback(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
         if self.pick_pending.contains(&(s.id, id)) {
-            s.events.readback(req, crate::types::readback::INCOMPLETE, rect, &[]);
+            s.events.readback(req, crate::types::readback::INCOMPLETE, rect, None);
             return;
         }
         let t = self.resolve(s, id);
-        self.read(s, t, req, rect, None);
+        self.read(s, t, req, rect);
     }
     fn texture_share(&mut self, s: &mut Session, id: Id) {
         let key = self.tex.get(&(s.id, id.index)).filter(|t| t.gen == id.gen).and_then(|t| t.tex.shared.as_ref()).map_or(0, |sh| sh.key);
@@ -786,13 +781,10 @@ impl Gpu for D3d11 {
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
         self.encode_frame(s, sid, target, kind, packet, view, now)
     }
-    fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        self.read_pick(s, window, req, pos);
-    }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
         let t = self.window_image(s, window);
         let rect = t.as_ref().map_or([0; 4], |t| [0, 0, t.desc.w, t.desc.h]);
-        self.read(s, t, req, rect, None);
+        self.read(s, t, req, rect);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) {
         self.copy_window(s, window, texture, req);
@@ -803,7 +795,6 @@ impl Gpu for D3d11 {
         self.segment_depths.retain(|k, _| (k.0, k.1) != (sid, id.index));
         self.native_fallback.remove(&(sid, id));
         if sid == HOST { self.badged.remove(&id.index); }
-        self.pick_ids.remove(&(sid, id));
         if let Some(shell) = self.shell {
             self.chains.remove(shell, (sid, id));
         }
@@ -816,7 +807,6 @@ impl Gpu for D3d11 {
             self.aliases.insert((sid, id), host);
         } else {
             self.aliases.remove(&(sid, id));
-            self.pick_ids.remove(&(sid, id));
         }
     }
 }

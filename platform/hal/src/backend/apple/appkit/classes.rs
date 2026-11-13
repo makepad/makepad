@@ -203,6 +203,9 @@ fn define_tray_target_class() -> *const Class {
             super::tray::click(sid as u32, tray as u64);
         }));
     }
+    // the pointer entered a tray's button: nothing to do, but the tracking area asks for
+    // entered and exited, and an owner without this selector aborts the app on hover
+    extern "C" fn tray_entered(_this: &Object, _sel: Sel, _event: ObjcId) {}
     // the pointer left a tray's button (its tracking area's owner)
     extern "C" fn tray_exited(this: &Object, _sel: Sel, _event: ObjcId) {
         shielded("tray exit", std::panic::AssertUnwindSafe(|| {
@@ -214,6 +217,7 @@ fn define_tray_target_class() -> *const Class {
     unsafe {
         decl.add_method(sel!(trayAction:), tray_action as extern "C" fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(trayClick:), tray_click as extern "C" fn(&Object, Sel, ObjcId));
+        decl.add_method(sel!(mouseEntered:), tray_entered as extern "C" fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(mouseExited:), tray_exited as extern "C" fn(&Object, Sel, ObjcId));
     }
     decl.add_ivar::<usize>("sid");

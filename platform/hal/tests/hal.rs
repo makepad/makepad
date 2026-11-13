@@ -23,7 +23,7 @@ fn every_event_round_trips() {
     q.set_time(77);
     let expected = sample_events(&mut q);
     assert_eq!(expected.len(), EVENT_TABLE.len());
-    assert_eq!(EVENT_TABLE.len(), 109, "58 core (incl. BufferLeases, Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, BackendChanged, GpuPressure, Redraw, DispatchTime), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 3 XR (XrFrame, XrDepth, XrSpace) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording) and 1 print result (PrintResult)");
+    assert_eq!(EVENT_TABLE.len(), 108, "57 core (incl. BufferLeases, Clipboard, GpuBudget, PayloadSize, MouseCancel, AppMessage, DeviceReset, BackendChanged, GpuPressure, Redraw, DispatchTime), 6 parent/child (85-90), 13 media, 4 font, 4 direct display/input 1 GL interop and 9 mobile (LongPress, ImeState, ImeAction, ImeResize, PhysicalKeyboard, SelectionHandle, TouchCancel, SafeArea, ImeAnimate) and 2 system back (BackGesture, BackPressed) and 2 tray (TrayMenu, TrayClick) and 3 XR (XrFrame, XrDepth, XrSpace) and 2 accessibility (A11yState, A11yAction) and 1 native layer events and 1 hosted native relay (HostedNativeOut) and 1 GPU profiler readout (GpuProfRecording) and 1 print result (PrintResult)");
     assert_eq!(EVENT_TABLE.iter().filter(|t| (120..133).contains(&t.0)).count(), 13);
     assert_eq!(EVENT_TABLE.iter().filter(|t| (100..104).contains(&t.0)).count(), 4);
     let tags: std::collections::HashSet<u16> = EVENT_TABLE.iter().map(|t| t.0).collect();
@@ -88,25 +88,34 @@ fn small_event_buffer_delivers_in_order_without_loss() {
 
 /// A payload larger than the caller's event arena is announced (`PayloadSize`) and held: a
 /// caller that grows gets it whole on the next pump; one that pumps again with the same arena
-/// gets a failed readback or a cut event, never a silent cut and never a stuck queue.
+/// gets a cut event, never a silent cut and never a stuck queue. Leased pixels fit a small arena.
 #[test]
 fn a_payload_larger_than_the_event_arena_is_announced_and_held() {
     let window = Id::new(1, 1);
     let mut q = EventQueue::new();
-    let pixels = vec![9u8; 64 * 64 * 4];
-    for req in [1, 2] {
-        q.readback(req, readback::OK, [0, 0, 64, 64], &pixels);
+    for _ in 0..2 {
+        q.text(window, input::text::TYPED, &[9u8; 16384]);
         q.text(window, input::text::TYPED, b"after");
     }
     q.text(window, input::text::TYPED, &[7u8; 8192]);
+    q.readback(1, readback::OK, [0, 0, 64, 64], Some(lease::Lease::from_vec(vec![9u8; 64 * 64 * 4], 0)));
     let pump = |q: &mut EventQueue, store: &mut EventStore| -> Vec<String> {
         let mut buf = store.buf();
         let n = q.drain_into(&mut buf);
         store.reader(n, buf.arena_len).map(|(_, e)| match e {
             HalEvent::PayloadSize { bytes } => format!("size {bytes}"),
-            HalEvent::Readback { req, status, rect, pixels: p } =>
-                format!("readback {req} status {status} {rect:?} {} bytes{}", p.len(), if p.iter().all(|&b| b == 9) { "" } else { " WRONG" }),
-            HalEvent::Text { text, .. } => format!("text {} bytes", text.len()),
+            HalEvent::Readback { req, status, rect, lease } => {
+                assert_eq!(lease.len(), 32, "only the lease record travels in the arena");
+                // SAFETY: this process pumped the event and takes its lease once.
+                let pixels = unsafe { lease::Held::from_payload(lease) }.unwrap();
+                format!("readback {req} status {status} {rect:?} {} bytes{}", pixels.len(), if pixels.iter().all(|&b| b == 9) { "" } else { " WRONG" })
+            }
+            HalEvent::Text { text, .. } => {
+                if text.len() == 16384 {
+                    assert!(text.iter().all(|&b| b == 9), "the grown arena retains the whole text");
+                }
+                format!("text {} bytes", text.len())
+            }
             e => format!("{e:?}"),
         }).collect()
     };
@@ -114,13 +123,15 @@ fn a_payload_larger_than_the_event_arena_is_announced_and_held() {
     let mut store = EventStore::new(1, 8, 4096);
     assert_eq!(pump(&mut q, &mut store), ["size 16384"], "announced alone, held");
     let mut grown = EventStore::new(1, 8, 16384);
-    assert_eq!(pump(&mut q, &mut grown), [format!("readback 1 status {} {rect:?} 16384 bytes", readback::OK)], "whole from the grown arena");
+    assert_eq!(pump(&mut q, &mut grown), ["text 16384 bytes"], "whole from the grown arena");
     assert_eq!(pump(&mut q, &mut grown), ["text 5 bytes"]);
     assert_eq!(pump(&mut q, &mut store), ["size 16384"], "the next one is announced too");
-    assert_eq!(pump(&mut q, &mut store), [format!("readback 2 status {} {rect:?} 0 bytes", readback::TOO_LARGE), "text 5 bytes".into()],
-        "an arena that did not grow: the readback fails, the queue goes on");
+    assert_eq!(pump(&mut q, &mut store), ["text 4096 bytes"], "an arena that did not grow cuts the text");
+    assert_eq!(pump(&mut q, &mut store), ["text 5 bytes"], "the queue goes on");
     assert_eq!(pump(&mut q, &mut store), ["size 8192"]);
     assert_eq!(pump(&mut q, &mut store), ["text 4096 bytes"], "another event is cut to the arena");
+    let mut small = EventStore::new(1, 8, 32);
+    assert_eq!(pump(&mut q, &mut small), [format!("readback 1 status {} {rect:?} 16384 bytes", readback::OK)], "leased pixels arrive through a 32-byte arena");
     assert!(q.is_empty());
     assert_eq!(q.truncated, 2);
 }

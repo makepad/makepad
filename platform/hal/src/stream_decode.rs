@@ -53,7 +53,7 @@ fn failed(error: String) {
 
 /// The text of this thread's last failed stream-decoder op (its first `out.len()` bytes); its
 /// length is returned.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_error(out: &mut [u8]) -> u64 {
     LAST_ERROR.with(|e| {
         let e = e.borrow();
@@ -65,7 +65,7 @@ pub fn hal_stream_decoder_error(out: &mut [u8]) -> u64 {
 
 /// Opens a decoder for a stream of about `width` x `height` pictures (`flags`: `HEVC`). Its
 /// number, 0 when this machine cannot (the error says why).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_open(width: u32, height: u32, flags: u32) -> u64 {
     #[cfg(target_os = "android")]
     let opened = StreamDecoder::open(width, height, flags & HEVC != 0, flags & GPU != 0).map(|decoder| Open { decoder, out: VecDeque::new() });
@@ -88,7 +88,7 @@ pub fn hal_stream_decoder_open(width: u32, height: u32, flags: u32) -> u64 {
 }
 
 /// The decoder's name (its first `out.len()` bytes); its length.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_name(decoder: u64, out: &mut [u8]) -> u64 {
     let Some(open) = get(decoder) else { return 0 };
     #[cfg(target_os = "android")]
@@ -103,7 +103,7 @@ pub fn hal_stream_decoder_name(decoder: u64, out: &mut [u8]) -> u64 {
 /// Queues one Annex-B access unit with presentation time `pts_us` and collects the pictures
 /// decoded, waiting up to `wait_us` for one. The number of pictures waiting to be read, -1 when
 /// it failed.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_push(decoder: u64, annex_b: &[u8], pts_us: i64, wait_us: u32) -> i64 {
     let Some(open) = get(decoder) else {
         failed("no such decoder".into());
@@ -135,7 +135,7 @@ pub fn hal_stream_decoder_push(decoder: u64, annex_b: &[u8], pts_us: i64, wait_u
 /// ticket names it to the texture import (`texture_handle::VIDEO`) until it is released
 /// (`hal_stream_decoder_release`). Its length; 0 when none waits, more than `out.len()` when
 /// `out` is short (the picture stays).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_read(decoder: u64, out: &mut [u8]) -> u64 {
     let Some(open) = get(decoder) else { return 0 };
     let mut open = crate::lock(&open);
@@ -176,7 +176,7 @@ pub fn hal_stream_decoder_read(decoder: u64, out: &mut [u8]) -> u64 {
 
 /// A GPU picture is done with (every frame that drew it finished): its image goes back to the
 /// decoder.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_release(ticket: u64) {
     #[cfg(target_os = "android")]
     {
@@ -188,7 +188,7 @@ pub fn hal_stream_decoder_release(ticket: u64) {
     let _ = ticket;
 }
 
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_stream_decoder_close(decoder: u64) {
     let open = crate::lock(&DECODERS).as_mut().and_then(|d| d.remove(&decoder));
     drop(open);

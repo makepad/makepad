@@ -409,7 +409,7 @@ impl Shell for App {
                     if self.owns_display(sid) { preferences::set_tap_to_click(on); self.publish_input(); }
                     else { eprintln!("[hal-direct] session={sid} cannot set tap to click: it does not own the desktop"); }
                 }
-                OsCmd::ClipSet { text } => self.clipboard.text = text,
+                OsCmd::ClipSet { data } => self.clipboard = data,
                 OsCmd::SelectionSet { text } => self.selection.text = text,
                 OsCmd::ClipRead { req, primary } => {
                     let bytes = if primary { &self.selection } else { &self.clipboard }.pack();

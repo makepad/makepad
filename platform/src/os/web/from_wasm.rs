@@ -100,6 +100,14 @@ impl FromWasmSetMouseCursor {
 #[derive(FromWasm)]
 pub struct FromWasmTextCopyResponse {
     pub response: String,
+    pub html: String,
+    pub markdown: String,
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmCopyToClipboard {
+    pub text: String,
+    pub html: String,
 }
 
 /// Measure each frame's GPU time where the browser offers a timer query

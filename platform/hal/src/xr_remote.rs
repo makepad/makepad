@@ -21,14 +21,14 @@
 
 /// This process offers a remote headset slot (its apps see `info_flags::XR`): since a headset
 /// linked to its XR server (`hal_xr_remote_enable`).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_enabled() -> bool {
     enabled()
 }
 
 /// A headset linked: the slot is offered from now on (the process's apps see `info_flags::XR`
 /// with `XR_OFFSCREEN` and may present XR on it); the HAL is woken so its apps learn it.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_enable() {
     if !ENABLED.swap(true, std::sync::atomic::Ordering::AcqRel) {
         if let Some(wake) = lock(&remote().state).wake.clone() {
@@ -38,14 +38,14 @@ pub fn hal_xr_remote_enable() {
 }
 
 /// The headset's eye size (pixels) and display refresh (mHz): the XR window takes them.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_attach(eye_w: u32, eye_h: u32, refresh_mhz: u32) {
     attach([eye_w, eye_h], refresh_mhz as f32 / 1000.0);
 }
 
 /// The pose of the headset's next frame: `frame` is one `XrFrame` (`buffers::Wire`), predicted
 /// for `display_ns` (the headset's clock: passed through). False while no app presents XR.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_pose(seq: u64, display_ns: u64, frame: &[u8]) -> bool {
     pose(seq, display_ns, frame)
 }
@@ -53,7 +53,7 @@ pub fn hal_xr_remote_pose(seq: u64, display_ns: u64, frame: &[u8]) -> bool {
 /// The app built the XR frame of the pose it was asked for and has room for the next one (a
 /// picture slot): the newest pose that came meanwhile is asked for now. Until then the slot asks
 /// for no frame (the frames in flight stay bounded by the app's slots).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_drawn() {
     drawn();
 }
@@ -62,7 +62,7 @@ pub fn hal_xr_remote_drawn() {
 /// need not be the last one's) or its wearer recentered. The XR window learns it (`XrSpace`, the
 /// generation counted up) ahead of the poses that follow; a pose still waiting from before goes
 /// (it is in the old space).
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn hal_xr_remote_space_reset() {
     space_reset();
 }

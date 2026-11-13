@@ -74,6 +74,8 @@ pub enum ReadbackError {
     UnsupportedFormat,
     InvalidSize,
     NotRendered,
+    /// The context has [`TEXTURE_READBACK_MAX_REQUESTS`] outstanding tickets.
+    /// No ticket is accepted; retain the request and retry after taking results.
     Backpressure,
     Cancelled,
     AllocationChanged,
@@ -116,19 +118,27 @@ pub struct TextureReadback {
     pub producer_serial: u64,
     pub width: usize,
     pub height: usize,
-    pub data: Result<Arc<[u8]>, ReadbackError>,
+    pub data: Result<crate::HostBuf, ReadbackError>,
 }
 
-/// Per-context limits. Admission reserves staging AND result capacity before
-/// returning a ticket. Keep/retry a rejected request after draining results.
+/// Per-context admitted staging/result byte bound. Requests that cannot fit
+/// wait with tickets in first-come, first-served order, uncharged until room
+/// frees. Later requests cannot overtake a waiter. An oversized request is
+/// admitted alone when no bytes are reserved.
 pub const TEXTURE_READBACK_MAX_BYTES: usize = 32 * 1024 * 1024;
 pub const TEXTURE_READBACK_MAX_REQUESTS: usize = 256;
 
+/// Per-context requests and admitted reservations. Requests of any size that
+/// cannot fit wait with tickets in first-come, first-served order; later
+/// requests queue behind them. Waiting tickets reserve no bytes until admitted.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TextureReadbackUsage {
     pub requests: usize,
-    /// Includes queued, in-flight and undelivered results. Each reservation
-    /// covers a staging allocation and, independently, its CPU result.
+    /// Uncharged tickets of any size waiting for room or behind an earlier
+    /// waiter, in first-come, first-served order.
+    pub waiting: usize,
+    /// Admitted staging/result capacity, including requests awaiting a producer,
+    /// in-flight copies and undelivered results.
     pub reserved_bytes: usize,
 }
 
@@ -144,9 +154,11 @@ pub(crate) struct ReadbackSlot {
     pub previous_serial: u64,
     pub pending: bool,
     pub cancelled: bool,
+    /// The reservation is charged until this slot's result is taken.
+    pub admitted: bool,
     pub reserved_bytes: usize,
     pub result: TextureReadback,
-    pub receive: Option<crate::makepad_network::mpsc::Receiver<Result<Arc<[u8]>, ReadbackError>>>,
+    pub receive: Option<crate::makepad_network::mpsc::Receiver<Result<crate::HostBuf, ReadbackError>>>,
 }
 
 #[derive(Default)]
@@ -154,17 +166,20 @@ pub(crate) struct TextureReadbacks {
     pub next_ticket: u64,
     pub slots: Vec<ReadbackSlot>,
     pub reserved_bytes: usize,
+    /// Legacy captures refused a ticket, retained until a later frame admits them.
+    pub legacy_waiting: Vec<Texture>,
+    pub legacy_retry: crate::event::NextFrame,
 }
 
 /// A one-shot completion sender. Capacity is reserved per ticket; unrelated
 /// completions can never fill it. A dropped sender becomes an explicit error
 /// when the owning renderer polls the receiver.
 pub(crate) struct ReadbackCompletion(
-    pub crate::makepad_network::mpsc::SyncSender<Result<Arc<[u8]>, ReadbackError>>,
+    pub crate::makepad_network::mpsc::SyncSender<Result<crate::HostBuf, ReadbackError>>,
 );
 
 impl ReadbackCompletion {
-    pub fn finish(self, result: Result<Arc<[u8]>, ReadbackError>) {
+    pub fn finish(self, result: Result<crate::HostBuf, ReadbackError>) {
         // There is exactly one producer and one message in this channel. The
         // only possible send failure is teardown of the owning Cx.
         let _ = self.0.try_send(result);
@@ -184,6 +199,38 @@ pub(crate) struct ReadbackWork {
 }
 
 impl Cx {
+    pub(crate) fn defer_render_texture_capture(&mut self, texture: &Texture) {
+        if !self.textures.1.readbacks.legacy_waiting.contains(texture) {
+            crate::log!("render texture capture: context readback request limit reached; texture {:?} waits", texture.texture_id());
+            self.textures.1.readbacks.legacy_waiting.push(texture.clone());
+        }
+        if self.textures.1.readbacks.legacy_retry == crate::event::NextFrame::default() {
+            self.textures.1.readbacks.legacy_retry = self.new_next_frame();
+        }
+    }
+
+    /// Admit waiting tickets in slot order. Returns whether a copy can issue
+    /// without a producer repaint, so callers outside the poll path can poll it.
+    pub(crate) fn admit_waiting_readbacks(&mut self) -> bool {
+        let mut copy_ready = false;
+        for index in 0..self.textures.1.readbacks.slots.len() {
+            let state = &self.textures.1.readbacks;
+            let slot = &state.slots[index];
+            if !slot.pending || slot.admitted { continue; }
+            let fits = if slot.reserved_bytes > TEXTURE_READBACK_MAX_BYTES { state.reserved_bytes == 0 }
+                else { slot.reserved_bytes <= TEXTURE_READBACK_MAX_BYTES.saturating_sub(state.reserved_bytes) };
+            if !fits { break; }
+            let painted = self.textures[slot.texture.texture_id()].producer_serial > slot.previous_serial;
+            let state = &mut self.textures.1.readbacks;
+            let slot = &mut state.slots[index];
+            slot.admitted = true;
+            if painted { slot.pass = None; }
+            state.reserved_bytes += slot.reserved_bytes;
+            copy_ready |= slot.pass.is_none();
+        }
+        copy_ready
+    }
+
     pub(crate) fn validate_pending_readbacks(&mut self) {
         let mut latest = None;
         for index in 0..self.textures.1.readbacks.slots.len() {
@@ -228,7 +275,7 @@ impl Cx {
         let mut work = Vec::new();
         for index in 0..self.textures.1.readbacks.slots.len() {
             let slot = &self.textures.1.readbacks.slots[index];
-            if !slot.pending || slot.pass != pass { continue; }
+            if !slot.pending || !slot.admitted || slot.pass != pass { continue; }
             let id = slot.texture.texture_id();
             let texture = &self.textures[id];
             let error = if texture.allocation_generation != slot.result.allocation_generation {
@@ -313,10 +360,15 @@ impl Texture {
     /// frame) is copied as it is now, whatever `next_render` says; its result
     /// carries `producer_serial` 0. Other formats return UnsupportedFormat.
     ///
-    /// Admission reserves bounded staging/result bytes and pins this handle.
-    /// Backpressure accepts no ticket: retain the request and retry after
-    /// draining results. Every accepted ticket yields exactly one result,
-    /// including cancellation, allocation changes and device errors. Poll
+    /// Tickets pin this handle. Requests of any size that cannot fit the room
+    /// under [`TEXTURE_READBACK_MAX_BYTES`] wait with tickets, uncharged, in
+    /// first-come, first-served order; later requests cannot overtake them.
+    /// Oversized requests are admitted alone when no bytes are reserved.
+    /// Backpressure means [`TEXTURE_READBACK_MAX_REQUESTS`] tickets are already
+    /// outstanding (or the ticket counter overflowed). It accepts no ticket:
+    /// retain the request and retry after taking results.
+    /// Every accepted ticket yields exactly one result, including cancellation,
+    /// allocation changes and device errors. Poll
     /// `Cx::try_take_texture_readbacks` on Event::Signal. No redraw is needed
     /// for a copy of an existing allocation.
     pub fn read_back(&self, cx: &mut Cx, request: ReadbackRequest) -> Result<ReadbackTicket, ReadbackError> {
@@ -366,17 +418,28 @@ impl Texture {
         let previous_serial = texture.producer_serial;
         let pass_generation = pending_pass.map(|pass| cx.passes.0.pool[pass.0].generation);
         let state = &mut cx.textures.1.readbacks;
-        if state.slots.len() >= TEXTURE_READBACK_MAX_REQUESTS || reserved_bytes > TEXTURE_READBACK_MAX_BYTES.saturating_sub(state.reserved_bytes) {
+        let oversized = reserved_bytes > TEXTURE_READBACK_MAX_BYTES;
+        let fits = if oversized { state.reserved_bytes == 0 }
+            else { reserved_bytes <= TEXTURE_READBACK_MAX_BYTES.saturating_sub(state.reserved_bytes) };
+        let waiting = state.slots.iter().any(|slot| slot.pending && !slot.admitted) || !fits;
+        if state.slots.len() >= TEXTURE_READBACK_MAX_REQUESTS {
             return Err(ReadbackError::Backpressure);
         }
         let ticket = ReadbackTicket(state.next_ticket.checked_add(1).ok_or(ReadbackError::Backpressure)?);
+        if oversized {
+            if waiting {
+                crate::log!("texture readback {width}x{height}: {} MiB is over the {} MiB per-context bound; waiting with {} MiB reserved by other readbacks; later requests queue behind it", reserved_bytes as f64 / (1024.0 * 1024.0), TEXTURE_READBACK_MAX_BYTES / (1024 * 1024), state.reserved_bytes as f64 / (1024.0 * 1024.0));
+            } else {
+                crate::log!("texture readback {width}x{height}: {} MiB is over the {} MiB per-context bound; admitted alone", reserved_bytes as f64 / (1024.0 * 1024.0), TEXTURE_READBACK_MAX_BYTES / (1024 * 1024));
+            }
+        }
         state.next_ticket = ticket.0;
-        state.reserved_bytes += reserved_bytes;
+        if !waiting { state.reserved_bytes += reserved_bytes; }
         state.slots.push(ReadbackSlot {
             legacy: false,
             texture: self.clone(), pass: pending_pass, pending: true, cancelled: false,
             pass_generation, next_render: request.next_render, external, previous_serial,
-            reserved_bytes, receive: None,
+            admitted: !waiting, reserved_bytes, receive: None,
             result: TextureReadback {
                 ticket, allocation_generation: generation, producer_serial, width, height,
                 data: Err(ReadbackError::NotRendered),

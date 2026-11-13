@@ -17,13 +17,31 @@ fn dispatch(req: &Req, out: &mut Out) {
     match req.cmd.as_str() {
         "ping" => out.line("{\"pong\":1}"),
         "big" => {
-            for i in 0..2000 {
-                out.line(&format!("{{\"row\":{i}}}"));
+            let lines = big_lines();
+            let (last, rows) = lines.split_last().unwrap();
+            for l in rows {
+                out.line(l);
             }
+            // the last line in two messages, cut inside a character (a relayed reply's chunks)
+            let cut = last.find('→').unwrap() + 1;
+            out.relay(&last.as_bytes()[..cut]);
+            assert!(out.flush());
+            out.relay(&last.as_bytes()[cut..]);
+            out.relay(b"\n");
         }
         "boom" => panic!("a bug in a command"),
         c => out.err(&format!("unknown command `{c}`")),
     }
+}
+
+/// What `big` answers, line by line: far past the 16 KiB a reply was once cut at. Short rows,
+/// lines longer than a channel write (64 KiB) and than a frame (1 MiB), multibyte text.
+pub(crate) fn big_lines() -> Vec<String> {
+    let mut l: Vec<String> = (0..3000).map(|i| format!("{{\"row\":{i}}}")).collect();
+    for n in [1, 1000, 12_000, 200_000] {
+        l.push(format!("{{\"text\":\"{}\"}}", "é→x".repeat(n)));
+    }
+    l
 }
 
 /// Echoes every message back on its channel.
@@ -223,26 +241,27 @@ fn unknown_service_is_refused() {
 }
 
 #[test]
-fn cmd_answers_end_and_truncation() {
+fn cmd_answers_whole_with_end() {
     let ep = Endpoint::new("t");
     ep.register_cmd(dispatch);
     let conn = pair(&ep);
+    // the answer's bytes as they arrive, until its end line
     let ask = |line: &str| -> Vec<String> {
         let ch = conn.open("cmd", "").unwrap();
         ch.send(line.as_bytes().to_vec()).unwrap();
-        let mut lines = Vec::new();
-        while !lines.last().is_some_and(|l: &String| l.starts_with("{\"end\":")) {
-            lines.extend(String::from_utf8(data(&ch)).unwrap().lines().map(str::to_string));
+        let mut bytes = Vec::new();
+        while !(bytes.ends_with(b"\n") && bytes[..bytes.len() - 1].rsplit(|b| *b == b'\n').next().unwrap().starts_with(b"{\"end\":")) {
+            bytes.extend(data(&ch));
         }
-        lines
+        String::from_utf8(bytes).unwrap().lines().map(str::to_string).collect()
     };
     let l = ask("ping");
     assert_eq!(l[0], "{\"pong\":1}");
-    assert!(l[1].starts_with("{\"end\":\"ping\"") && !l[1].contains("truncated"));
-    let l = ask("big");
-    assert!(l.last().unwrap().contains("\"truncated\":true") && l.len() < 2000);
-    let l = ask("big full=1");
-    assert_eq!(l.len(), 2001);
+    assert!(l[1].starts_with("{\"end\":\"ping\""));
+    // a reply of 1.4 MB arrives byte for byte, then its end line
+    let (l, want) = (ask("big"), big_lines());
+    assert!(l.len() == want.len() + 1 && l[..want.len()] == want[..], "the big reply arrives whole");
+    assert!(l[want.len()].starts_with("{\"end\":\"big\""));
     let l = ask("boom");
     assert!(l[0].starts_with("{\"err\":") && l.last().unwrap().starts_with("{\"end\":\"boom\""));
     // several cmd channels at once
@@ -470,8 +489,9 @@ fn tcp_loopback_with_tls_and_key_proof() {
     let client = Client::connect_tcp(&addr.to_string(), creds(&key)).unwrap();
     let mut lines = client.cmd("ping").unwrap();
     assert!(lines.next().unwrap().unwrap().starts_with("{\"pong\":1"));
-    let big = client.cmd("big full=1").unwrap().count();
-    assert_eq!(big, 2000);
+    // the client joins a line a message boundary cut (inside a character, too)
+    let big: Vec<String> = client.cmd("big").unwrap().map(Result::unwrap).collect();
+    assert!(big == big_lines(), "the big reply arrives whole over TLS");
     // a key the endpoint does not hold never gets a connection
     assert!(Client::connect_tcp(&addr.to_string(), creds(&Psk::generate().unwrap())).is_err());
     let _ = std::fs::remove_dir_all(&dir);

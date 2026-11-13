@@ -5,7 +5,7 @@
 //! meter prints its totals every 5 s (a diagnostic: printing is off the hot path otherwise).
 //! Times are seconds of [`crate::monotonic_seconds`]: the web has no `Instant`.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static OVERRUNS: AtomicU64 = AtomicU64::new(0);

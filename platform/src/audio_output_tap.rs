@@ -22,7 +22,7 @@
 //! by the next call into the registry after it. A tap that panics is dropped
 //! from its slot on the spot and leaked, never freed on the realtime thread.
 
-use makepad_relax::relax;
+use relax_attr::relax;
 use crate::audio::{AudioBuffer, AudioInfo};
 use std::cell::UnsafeCell;
 use std::panic::{catch_unwind, AssertUnwindSafe};

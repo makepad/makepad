@@ -37,7 +37,7 @@ pub struct Options {
     pub builtins: bool,
     pub launch: Vec<String>,
     /// A capability passed with every call (`caller=` of the `app` request): the app that
-    /// issued it (Scope, per agent lane) decides what the caller may do.
+    /// issued it (an app, per agent lane) decides what the caller may do.
     pub caller: Option<String>,
 }
 
@@ -233,7 +233,7 @@ fn connect(target: &str) -> Result<Client, String> {
     if target.contains(':') && !target.contains('/') {
         #[cfg(unix)]
         {
-            let relax = std::env::var_os("MAKEPAD_RUN_BIN").map(std::path::PathBuf::from);
+            let relax = std::env::var_os("RELAX_BIN").map(std::path::PathBuf::from);
             let hub = crate::hub::connect(relax.as_deref())?;
             return Ok(Client::routed(&hub, target));
         }

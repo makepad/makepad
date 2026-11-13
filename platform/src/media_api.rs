@@ -1,4 +1,4 @@
-use makepad_relax::relax;
+use relax_attr::relax;
 use crate::{
     audio::{AudioBuffer, AudioDeviceId, AudioInfo, AudioInputFn, AudioInputOptions, AudioOutputFn},
     midi::*,

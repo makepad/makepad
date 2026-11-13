@@ -469,7 +469,6 @@ pub fn cmd_prof(req: &Req, out: &mut Out) {
     if req.get("ev").is_some_and(|e| e != "cpu") {
         return out.err("a native app samples CPU time only (macOS gives no per-thread hardware sampling without root)");
     }
-    out.limit = usize::MAX;
     let gone = out.gone();
     let run = collect(secs, hz, req.get("threads").unwrap_or("all"), wall, &*gone);
     if gone() {
@@ -647,7 +646,6 @@ fn off_cpu_stacks(t: &Th) -> (Vec<(String, usize)>, usize) {
 pub fn cmd_why_slow(req: &Req, out: &mut Out) {
     if let Err(e) = req.validate_params(makepad_remote::params::inspect("why-slow").unwrap()) { return out.err(&e); }
     let secs = (req.num("s", 3) as f64).clamp(0.5, 30.0);
-    out.limit = usize::MAX;
     let gone = out.gone();
     let run = collect(secs, 250, "all", false, &*gone);
     if gone() {

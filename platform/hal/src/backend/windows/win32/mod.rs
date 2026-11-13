@@ -57,7 +57,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// `MAKEPAD_HAL_LOG=1`: the shell says what it does.
 pub(crate) fn log_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_HAL_LOG").is_some())
+    *ON.get_or_init(|| relax_api::env::var_os("MAKEPAD_HAL_LOG").is_some())
 }
 
 /// The dispatch window's message: ops are queued.
@@ -794,7 +794,7 @@ fn compositor_clock() -> Option<makepad_windows_sys::composition::Win32::Graphic
     static CLOCK: OnceLock<Option<DCompositionWaitForCompositorClock>> = OnceLock::new();
     *CLOCK.get_or_init(|| unsafe {
         // `MAKEPAD_WIN_COMPOSITOR_CLOCK=0` takes the path of systems without one
-        if std::env::var("MAKEPAD_WIN_COMPOSITOR_CLOCK").ok().as_deref() == Some("0") {
+        if relax_api::env::var("MAKEPAD_WIN_COMPOSITOR_CLOCK").ok().as_deref() == Some("0") {
             eprintln!("[hal-win32] compositor clock not used (MAKEPAD_WIN_COMPOSITOR_CLOCK=0)");
             return None;
         }

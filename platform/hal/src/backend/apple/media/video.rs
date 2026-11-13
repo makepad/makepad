@@ -654,6 +654,36 @@ impl Player {
         self.time_ranges(ranges)
     }
 
+    /// The backend draws with another device: the texture cache is made on it and the frame
+    /// shows again (the textures it was bound to were made again, empty). A paused player
+    /// seeks to where it stands, as a paused seek shows its frame; a playing one presents its
+    /// next frame anyway.
+    pub fn device_replaced(&mut self, device: ObjcId) {
+        if self.cleaned_up {
+            return;
+        }
+        unsafe {
+            if !self.texture_cache.is_null() {
+                CVMetalTextureCacheFlush(self.texture_cache, 0);
+                CFRelease(self.texture_cache as *const c_void);
+                self.texture_cache = std::ptr::null_mut();
+            }
+            let _: () = msg_send![device, retain];
+            let _: () = msg_send![self.device, release];
+            self.device = device;
+            let status = CVMetalTextureCacheCreate(std::ptr::null_mut(), std::ptr::null_mut(), device, std::ptr::null_mut(), &mut self.texture_cache);
+            if status != 0 {
+                eprintln!("[media] CVMetalTextureCacheCreate failed with status {status}");
+            }
+        }
+        self.cpu_texture = None;
+        if self.has_presented_frame && !self.should_play.load(Ordering::Acquire) {
+            self.seek_to(self.current_position_ms());
+        } else {
+            self.frame_pending = true;
+        }
+    }
+
     /// Polls for a new video frame. True if a new frame was bound to the textures.
     pub fn poll_frame(&mut self, s: &mut Session, sink: &mut dyn Sink) -> bool {
         if !self.is_prepared || !self.needs_poll() {

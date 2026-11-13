@@ -175,7 +175,8 @@ hal_commands! {
     ImeSync = 32, ime_sync { id: obj, sel_start: u32, sel_end: u32, comp_start: u32, comp_end: u32, text: rng };
 
     // ---- clipboard, drag, menu, dialogs
-    ClipSet = 40, clip_set { text: rng };
+    /// A copy: a packed `clipboard::ClipboardData` (the text and its richer flavours).
+    ClipSet = 40, clip_set { data: rng };
     /// The Linux primary selection.
     SelectionSet = 41, selection_set { text: rng };
     /// A drag out of the app from window `id`: `items` holds `count` flat `DragItem`s, then the
@@ -230,8 +231,6 @@ hal_commands! {
     // ---- frames
     /// Render `packet` (index into `CmdBuf::frames`) to `target`; `kind` is `target::*`.
     Frame = 70, frame { target: obj, kind: u32, packet: u32 };
-    /// A pick-mode frame request at `pos`; answered by `PickResult`.
-    Pick = 71, pick { window: obj, req: u32, pos: v2 };
     /// Answered by a `Readback` event with the same `req`.
     Snapshot = 72, snapshot { window: obj, req: u32 };
 

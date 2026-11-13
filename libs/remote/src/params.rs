@@ -35,13 +35,12 @@ fn field<'a>(s: &'a str, fields: &mut Vec<(&'a str, &'a str)>) {
     }
 }
 
-/// `full` belongs to the cmd envelope, which consumes it before any family dispatch.
+/// Every key of a request must be one of the schema's.
 pub fn validate<'a>(keys: impl IntoIterator<Item = &'a str>, params: &str) -> Result<(), String> {
     let properties = properties(params);
     for key in keys {
-        if key != "full" && !properties.iter().any(|(known, _)| *known == key) {
-            let mut known: Vec<_> = properties.iter().map(|(key, _)| *key).collect();
-            if !known.contains(&"full") { known.push("full"); }
+        if !properties.iter().any(|(known, _)| *known == key) {
+            let known: Vec<_> = properties.iter().map(|(key, _)| *key).collect();
             return Err(format!("unknown parameter {key:?}; known: {}", known.join(", ")));
         }
     }
@@ -143,8 +142,8 @@ mod tests {
     #[test]
     fn schemas_reject_unknown_parameters() {
         let nested = r#""value":{"anyOf":[{"type":"string"},{"type":"number"}],"description":"braces }, comma, and \"quote\""},"count":{"type":"integer"}"#;
-        assert!(validate(["value", "count", "full"], nested).is_ok());
-        assert!(validate(["type"], nested).unwrap_err().contains("known: value, count, full"));
+        assert!(validate(["value", "count"], nested).is_ok());
+        assert!(validate(["type"], nested).unwrap_err().ends_with("known: value, count"));
         for verb in ["", "find", "act", "type", "wait", "done", "present", "snap", "diff", "speak", "lint", "oscheck"] {
             let schema = ui(verb).unwrap();
             assert!(validate(["timeout_ms", "json", "w", "app", "machine"], schema).is_ok());
@@ -168,6 +167,7 @@ pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
     Some(match (cmd, sub) {
         ("session" | "pin" | "help" | "ping" | "threads" | "cpu" | "waits" | "vms" | "panics" | "pause" | "resume" | "rm" | "continue" | "versions" | "cache" | "frame", _) => "",
         ("inputs", _) => params!("match": "string", "of": "string"),
+        ("test-results", _) => params!("group": "integer"),
         ("hold", _) => params!("files": "string", "dir": "string"),
         ("why-hung" | "hang", _) => params!("probe_ms": "integer", "depth": "integer"),
         ("capture", _) => params!("why": "string"),
@@ -192,7 +192,7 @@ pub fn jit(cmd: &str, sub: &str) -> Option<&'static str> {
         ("mem", _) => "",
         ("diff", _) => params!("n": "integer"),
         ("heap", "start") => params!("host": "integer", "life": "integer", "rate": "integer", "ttl_s": "integer"),
-        ("heap", "top") => params!("host": "integer", "by": "string", "n": "integer", "depth": "integer", "zone": "string", "group": "string"),
+        ("heap", "top") => params!("host": "integer", "by": "string", "n": "integer", "depth": "integer", "zone": "string", "group": "string", "tag": "string"),
         ("heap", "frame" | "rate") => params!("host": "integer", "s": "number", "n": "integer"),
         ("heap", "life") => params!("host": "integer", "n": "integer", "ms": "integer", "file": "string"),
         ("heap", "diff") => params!("host": "integer", "n": "integer", "depth": "integer"),

@@ -38,6 +38,14 @@ layout(location = 0) out vec4 color;
 void main() { color = vec4(1.0); }
 ";
 
+/// The first vec4 of the pass's uniform block: a view of the pass shows its own block.
+const PASS_COLOR_GLSL: &str = "#version 300 es
+precision highp float;
+layout(std140) uniform passUniforms { vec4 pass_color; };
+layout(location = 0) out vec4 color;
+void main() { color = pass_color; }
+";
+
 const PICK_GLSL: &str = "#version 300 es
 precision highp float;
 uniform uvec2 mp_pick;
@@ -178,7 +186,9 @@ fn rendered(hal: &Hal, sid: u32, target: Id, kind: u32, size: [u32; 2], frame: u
 fn pixels(hal: &Hal, sid: u32, req: u32) -> Vec<u8> {
     let mut pixels = Vec::new();
     until(hal, sid, |e| match e {
-        HalEvent::Readback { req: got, status, pixels: p, .. } if got == req => {
+        HalEvent::Readback { req: got, status, lease, .. } if got == req => {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let p = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK);
             pixels = p.to_vec();
             true
@@ -341,19 +351,15 @@ fn pick_frame_answers_the_draw_id() {
     hal.submit(&w.buf());
     frame_done(&hal, sid, 1);
     w.clear();
-    // inside the triangle (its base is the bottom rows) and outside it (a top corner)
-    w.pick(WINDOW, 7, [16.0, 28.0]);
-    w.pick(WINDOW, 8, [1.0, 1.0]);
+    w.texture_readback(PICK_TEX, 7, [0, 0, 32, 32]);
     hal.submit(&w.buf());
-    let mut answers = std::collections::HashMap::new();
-    until(&hal, sid, |e| {
-        if let HalEvent::PickResult { req, ids } = e {
-            answers.insert(req, ids.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect::<Vec<_>>());
-        }
-        answers.len() == 2
-    });
-    assert_eq!(answers[&7].first(), Some(&0x12_3456));
-    assert!(answers[&8].is_empty(), "nothing drawn near the corner: {:?}", answers[&8]);
+    let pixels = pixels(&hal, sid, 7);
+    let id_at = |x: usize, y: usize| {
+        let p = &pixels[(y * 32 + x) * 4..];
+        p[0] as u32 | (p[1] as u32) << 8 | (p[2] as u32) << 16
+    };
+    assert_eq!(id_at(16, 28), 0x12_3456, "the triangle's draw id");
+    assert_eq!(id_at(1, 1), 0, "nothing drawn at the corner");
     assert!(hal.close(sid));
 }
 
@@ -542,5 +548,53 @@ fn a_window_layer_samples_the_apps_newest_frame_and_goes() {
         assert_eq!(w.session(HOST).unwrap().stats.bad_args, 0);
         assert_eq!(w.session(sid).unwrap().stats.bad_args, 0);
     });
+    assert!(hal.close(sid));
+}
+
+/// One pass with two views side by side (`Pass::view_rects`), as the eyes of an XR frame: each
+/// draw runs once per view with that view's rect and its block of the pass uniforms (the left
+/// view's red, the right's green). The quad reaches two views past its view's left edge: every
+/// pixel of each half is its own view's colour, none the other's.
+#[test]
+fn two_views_draw_side_by_side_in_one_pass() {
+    const VIEWS: Id = Id::new(5, 1);
+    const WIDE: Id = Id::new(5, 1);
+    const WIDE_INDEX: Id = Id::new(6, 1);
+    const VIEW_PIPE: Id = Id::new(5, 1);
+    let (hal, info) = open();
+    let sid = info.session;
+    let mut w = CmdWriter::new(sid);
+    w.texture_create(VIEWS, usage::RENDER_TARGET | usage::SAMPLED, format::RGBA8, 16, 8, [1, 1], Attr::default());
+    let quad: Vec<u8> = [-3.0f32, -1.0, 0.0, 1.0, 1.0, -1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, -3.0, 1.0, 0.0, 1.0].into_iter().flat_map(f32::to_le_bytes).collect();
+    w.buffer_create(WIDE, buffer_kind::VERTEX, quad.len() as u64, Attr::default());
+    w.buffer_update(WIDE, 0, &quad);
+    let index: Vec<u8> = [0u16, 1, 2, 0, 2, 3].into_iter().flat_map(u16::to_le_bytes).collect();
+    w.buffer_create(WIDE_INDEX, buffer_kind::INDEX, index.len() as u64, Attr::default());
+    w.buffer_update(WIDE_INDEX, 0, &index);
+    let none = u32::MAX;
+    let blob = CmdWriter::pipeline_blob(PipelineDesc { outputs: 1, ..Default::default() }, &payload(VERTEX_GLSL, PASS_COLOR_GLSL, Vec::new(), false), &[none, 1, none, none, none, 0], &LAYOUT);
+    w.pipeline_create(VIEW_PIPE, dialect::GLSL, Attr::default(), &blob);
+    hal.submit(&w.buf());
+    until(&hal, sid, |e| matches!(e, HalEvent::PipelineReady { pipeline } if pipeline == VIEW_PIPE));
+    w.clear();
+    w.frame_begin(1, FrameMeta::default());
+    let uniforms = w.keep(&[1.0f32, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0][..]);
+    let view_rects = w.put_rects(&[[0.0, 0.0, 8.0, 8.0], [8.0, 0.0, 8.0, 8.0]]);
+    w.pass(Pass { color: [VIEWS, Id::NONE, Id::NONE, Id::NONE], load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 1.0]; 4],
+        viewport: [0.0, 0.0, 16.0, 8.0], dpi: 1.0, uniforms, view_rects, ..Default::default() });
+    w.draw(Draw { pipeline: VIEW_PIPE, vb: WIDE, ib: WIDE_INDEX, index: [0, 6], inst: Inst::inline(Slice::EMPTY, 1), scissor: [f32::NAN; 4], ..Default::default() });
+    w.frame_end(VIEWS, target::TEXTURE);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, 1);
+    w.clear();
+    w.texture_readback(VIEWS, 1, [0, 0, 16, 8]);
+    hal.submit(&w.buf());
+    let image = pixels(&hal, sid, 1);
+    for (k, p) in image.chunks(4).enumerate() {
+        let want: &[u8] = if k % 16 < 8 { &[255, 0, 0, 255] } else { &[0, 255, 0, 255] };
+        assert_eq!(p, want, "pixel ({}, {}) is not its own view's colour", k % 16, k / 16);
+    }
+    let stats = hal.with_world(|wd| wd.session(sid).unwrap().stats);
+    assert_eq!((stats.skipped_draws, stats.bad_args, stats.draws), (0, 0, 1), "the draw was drawn, once, and the views were taken");
     assert!(hal.close(sid));
 }

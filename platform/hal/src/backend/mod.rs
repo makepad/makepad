@@ -60,17 +60,17 @@ use crate::types::{HalInfo, Id};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub(crate) fn log_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_HAL_LOG").is_some())
+    *ON.get_or_init(|| relax_api::env::var_os("MAKEPAD_HAL_LOG").is_some())
 }
 
 /// When a device loss is simulated (HAL clock ns): `MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_MS` after
 /// now (the backend is being made). With `MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_APP` only the
 /// process whose executable has that name simulates it: one hosted app under a host that
 /// passes its environment on (the host's own device stays).
-#[cfg(any(windows, target_os = "linux", target_os = "android"))]
+#[cfg(any(windows, target_os = "linux", target_os = "android", target_vendor = "apple"))]
 pub(crate) fn simulated_loss_at() -> Option<u64> {
-    let ms = std::env::var("MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_MS").ok()?.parse::<u64>().ok()?;
-    if let Ok(app) = std::env::var("MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_APP") {
+    let ms = relax_api::env::var("MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_MS").ok()?.parse::<u64>().ok()?;
+    if let Ok(app) = relax_api::env::var("MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_APP") {
         let exe = std::env::current_exe().ok()?;
         if exe.file_stem().is_none_or(|stem| stem != app.as_str()) { return None; }
     }

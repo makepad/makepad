@@ -36,7 +36,7 @@ pub const CHECK_NS: u64 = 250_000_000;
 /// the smaller of [`RESERVE_MAX`] and a [`RESERVE_SHARE`]th of the device.
 pub fn ui_reserve(size: u64) -> u64 {
     static ENV: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-    let env = *ENV.get_or_init(|| std::env::var("MAKEPAD_GPU_UI_RESERVE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()));
+    let env = *ENV.get_or_init(|| relax_api::env::var("MAKEPAD_GPU_UI_RESERVE_MB").ok().and_then(|v| v.trim().parse::<u64>().ok()));
     env.map_or_else(|| RESERVE_MAX.min(size / RESERVE_SHARE), |mb| mb * MB)
 }
 

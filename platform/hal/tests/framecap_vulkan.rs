@@ -40,7 +40,7 @@ fn shader() -> Vec<u8> {
     ir.functions.extend([vertex, fragment]);
     SpirvPipeline { vertex: ir_to_spirv(&ir, 0, false).unwrap(), fragment: ir_to_spirv(&ir, 1, false).unwrap(),
         texture_base: 0, sampler_base: 0, depth_binding: u32::MAX, instance_binding: u32::MAX,
-        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
+        pick_binding: u32::MAX, pick_texture_base: u32::MAX, textures: Vec::new(), samplers: Vec::new(), sampler_textures: Vec::new(), xr_vertex: Vec::new(), xr_fragment: Vec::new() }.encode()
 }
 
 fn until(hal: &Hal, store: &mut EventStore, mut accept: impl FnMut(HalEvent<'_>) -> bool) {
@@ -120,7 +120,9 @@ fn a_captured_vulkan_frame_replays_to_the_same_pixels() {
     hal.submit(&w.buf());
     let mut live = Vec::new();
     until(&hal, &mut store, |e| match e {
-        HalEvent::Readback { req: 99, status, pixels, .. } => {
+        HalEvent::Readback { req: 99, status, lease, .. } => {
+            // SAFETY: this process pumped the event and takes its lease once.
+            let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
             assert_eq!(status, readback::OK);
             live = pixels.to_vec();
             true

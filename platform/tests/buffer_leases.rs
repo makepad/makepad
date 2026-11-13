@@ -97,12 +97,7 @@ fn device_loss_answers_pending_reads_and_keeps_native_lease_readable() {
         if i < 2 { cx.read_to_pool(&ranges, Class::Interactive, move |r| { tx.send((i, r)).unwrap(); }).unwrap(); }
         else { cx.read(&ranges, move |_, r| { tx.send((i, r)).unwrap(); }).unwrap(); }
     }
-    if cfg!(target_vendor = "apple") {
-        // Metal has no simulated replacement hook; inject the same intake event.
-        hal::Hal::global().with_events(info.session, |q| q.device_lost(1, b"readback fixture"));
-    } else {
-        hal::Hal::global().simulate_device_loss();
-    }
+    hal::Hal::global().simulate_device_loss();
     let start = Instant::now();
     let mut answers = [0; 4];
     while answers.contains(&0) {

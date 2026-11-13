@@ -2,7 +2,7 @@
 //! `makepad app <id>`): the AppUserModelID `Makepad.<id>` -- the one the app's Start menu
 //! shortcut carries -- for the process, and per top-level window the relaunch properties the
 //! taskbar pins (command `"<makepad.exe>" app --home "<home>" <id>`: a pin sets no environment,
-//! so it names the loader's home, MAKEPAD_RUN_HOME; the app's title, the icon the runner made).
+//! so it names the loader's home, RELAX_HOME; the app's title, the icon the runner made).
 //! Without one, Windows groups the windows under the executable as before.
 
 use makepad_windows_sys::core::{GUID, PWSTR};
@@ -73,7 +73,7 @@ pub(super) fn window_created(hwnd: HWND) {
     let exe = std::env::current_exe().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
     let title = std::env::var("MAKEPAD_APP_TITLE").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| id.clone());
     set(&store, &PKEY_AppUserModel_ID, Some(&aumid(&id)));
-    let home = std::env::var("MAKEPAD_RUN_HOME").ok().filter(|h| !h.is_empty());
+    let home = std::env::var("RELAX_HOME").ok().filter(|h| !h.is_empty());
     set(&store, &PKEY_AppUserModel_RelaunchCommand, Some(&relaunch_command(&exe, home.as_deref(), &id)));
     set(&store, &PKEY_AppUserModel_RelaunchDisplayNameResource, Some(&title));
     if let Some(icon) = std::env::var("MAKEPAD_APP_ICON").ok().filter(|i| !i.is_empty()) {

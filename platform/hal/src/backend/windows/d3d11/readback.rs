@@ -68,7 +68,7 @@ impl D3d11 {
         Ok(Staged { tex: staging, format: t.desc.format, w: rect[2], h: rect[3], _charge: charge })
     }
 
-    pub(super) fn read(&mut self, s: &mut Session, tex: Option<Arc<Texture>>, req: u32, rect: [u32; 4], pick: Option<[f32; 2]>) {
+    pub(super) fn read(&mut self, s: &mut Session, tex: Option<Arc<Texture>>, req: u32, rect: [u32; 4]) {
         let result = (|| {
             let t = tex.ok_or("readback texture has no storage")?;
             if rect[0] >= t.desc.w || rect[1] >= t.desc.h {
@@ -80,40 +80,14 @@ impl D3d11 {
             }
             let staged = self.stage(&t, rect)?;
             let mut batch = Batch::default();
-            batch.tickets.push(Ticket::Read { token: Self::token(s), req, rect, staged, pick });
+            batch.tickets.push(Ticket::Read { token: Self::token(s), req, rect, staged });
             self.complete.submit(batch);
             Ok(())
         })();
         if let Err(e) = result {
             eprintln!("[hal-d3d11] readback: {e}");
-            if pick.is_some() {
-                s.events.pick_result(req, &[]);
-            } else {
-                s.events.readback(req, readback::FAILED, rect, &[]);
-            }
+            s.events.readback(req, readback::FAILED, rect, None);
         }
-    }
-
-    /// The ids drawn around `pos` in the window's newest pick frame: the 8-texel neighbourhood
-    /// (as Metal and Vulkan read it), nearest first.
-    pub(super) fn read_pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        let Some(id) = self.pick_ids.get(&(s.id, window)).copied() else { s.events.pick_result(req, &[]); return };
-        if self.pick_pending.contains(&(s.id, id)) || pos.iter().any(|p| !p.is_finite()) {
-            s.events.pick_result(req, &[]);
-            return;
-        }
-        let tex = self.resolve(s, id);
-        let Some(t) = &tex else { s.events.pick_result(req, &[]); return };
-        let pos = pos.map(f32::floor);
-        let x = (pos[0] as i64).saturating_sub(8).clamp(0, t.desc.w as i64) as u32;
-        let y = (pos[1] as i64).saturating_sub(8).clamp(0, t.desc.h as i64) as u32;
-        let x1 = (pos[0] as i64).saturating_add(9).clamp(x as i64, t.desc.w as i64) as u32;
-        let y1 = (pos[1] as i64).saturating_add(9).clamp(y as i64, t.desc.h as i64) as u32;
-        if x1 == x || y1 == y {
-            s.events.pick_result(req, &[]);
-            return;
-        }
-        self.read(s, tex, req, [x, y, x1 - x, y1 - y], Some(pos));
     }
 
     pub(super) fn copy_window(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) {
@@ -131,7 +105,7 @@ impl D3d11 {
         })();
         if let Err(e) = result {
             eprintln!("[hal-d3d11] window copy: {e}");
-            s.events.readback(req, readback::FAILED, [0; 4], &[]);
+            s.events.readback(req, readback::FAILED, [0; 4], None);
         }
     }
 

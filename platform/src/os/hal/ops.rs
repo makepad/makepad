@@ -653,13 +653,7 @@ impl Cx {
                     let w = self.hal_target_window();
                     self.hal.frames.w.clipboard_actions(w, false, [0.0; 4], false)
                 }
-                CxOsOp::CopyToClipboard(content) => {
-                    if self.hal.hosted.is_some() {
-                        Self::send_studio_message(crate::studio::AppToStudio::SetClipboard(content));
-                    } else {
-                        self.hal.frames.w.clip_set(content.as_bytes());
-                    }
-                }
+                CxOsOp::CopyToClipboard(write) => self.hal_clipboard_write(write),
                 CxOsOp::ShareText(text) => self.hal.frames.w.share_text(text.as_bytes()),
                 // a hosted child's selection is its host's primary selection
                 CxOsOp::SetPrimarySelection(text) => {

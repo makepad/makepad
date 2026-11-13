@@ -112,7 +112,7 @@ pub use session::World;
 pub use types::*;
 
 use backend::{headless::Headless, Backend};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
@@ -405,6 +405,10 @@ static GLOBAL: OnceLock<Arc<Hal>> = OnceLock::new();
 /// exit() then ran the driver's exit handlers under them (a SIGSEGV in a batch's completion).
 /// Registered once the backend, and with it the driver, is made: exit() runs the handlers
 /// last registered first, so this one runs before those the driver registered as it loaded.
+/// The C library's list only, not the process's exit work (`makepad_core_util::process_end`): a
+/// process that ends that way stopped the HAL already (a native app's `run_app`), or hosts it
+/// (the JIT, whose own exit work still draws and reads the run's window: stopped first, the runs
+/// of `makepad run` ended with 1).
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn before_exit_at_exit() {
     extern "C" { fn atexit(f: extern "C" fn()) -> i32; }
@@ -644,7 +648,7 @@ impl Hal {
         // Stopping or relaunching an app waits for its threads and frees its heap: never on the caller's
         // thread (a window manager's render thread would stall for the whole teardown). Starts already
         // run on the host's loader threads.
-        let off_thread = std::env::var_os("MAKEPAD_SYNC_STOP").is_none()
+        let off_thread = relax_api::env::var_os("MAKEPAD_SYNC_STOP").is_none()
             && calls.iter().any(|c| matches!(c, session::HostCall::Stop { .. } | session::HostCall::Relaunch(_)));
         // the thread runs them on this instance (not the process-wide one: a test's or a runner's
         // own Hal has its own domain host)
@@ -652,13 +656,13 @@ impl Hal {
             let _ = std::thread::Builder::new().name("hal-host-calls".into()).spawn(move || {
                 let t0 = std::time::Instant::now();
                 hal.run_host_calls(calls);
-                if std::env::var_os("MAKEPAD_FRAME_LOG").is_some() { eprintln!("[hal] domain stop/relaunch host calls took {:.0} ms (off the caller's thread)", t0.elapsed().as_secs_f64() * 1e3); }
+                if relax_api::env::var_os("MAKEPAD_FRAME_LOG").is_some() { eprintln!("[hal] domain stop/relaunch host calls took {:.0} ms (off the caller's thread)", t0.elapsed().as_secs_f64() * 1e3); }
             });
             return;
         }
         let t0 = std::time::Instant::now();
         self.run_host_calls(calls);
-        if std::env::var_os("MAKEPAD_FRAME_LOG").is_some() { eprintln!("[hal] host calls took {:.0} ms on the caller's thread", t0.elapsed().as_secs_f64() * 1e3); }
+        if relax_api::env::var_os("MAKEPAD_FRAME_LOG").is_some() { eprintln!("[hal] host calls took {:.0} ms on the caller's thread", t0.elapsed().as_secs_f64() * 1e3); }
     }
 
     fn run_host_calls(&self, calls: Vec<session::HostCall>) {
@@ -783,7 +787,7 @@ impl Hal {
         let run = lock(&self.runners).remove(&session);
         if let Some(run) = run {
             if !run.finish(self) {
-                std::process::exit(1);
+                makepad_core_util::process_end::end(1);
             }
         }
     }
@@ -914,7 +918,7 @@ impl Hal {
 
     /// Tests and automation: the backend handles its device as lost on its next step and replaces
     /// it (sessions hear `DeviceLost`, then `DeviceReset`). No effect on a backend without a
-    /// device reset (headless; Metal and Vulkan implement the two hooks after the HAL push).
+    /// device reset (`info_flags::DEVICE_RESET`: headless has none).
     pub fn simulate_device_loss(&self) {
         {
             let mut guard = lock(&self.state);
@@ -1358,7 +1362,7 @@ pub fn hal_open(req: &OpenReq) -> HalInfo {
         Ok(script) => script,
         Err(error) => {
             println!("{{\"summary\":true,\"ok\":false,\"error\":{}}}", automation::json(&error));
-            std::process::exit(2);
+            makepad_core_util::process_end::end(2);
         }
     });
     let info = hal.open_as(req, CAPS.with(|c| c.get()), false, false);

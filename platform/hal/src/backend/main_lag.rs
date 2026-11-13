@@ -27,7 +27,7 @@ thread_local! {
 }
 
 pub fn wanted() -> bool {
-    std::env::var_os("MAKEPAD_HAL_MAIN_LAG").is_some()
+    relax_api::env::var_os("MAKEPAD_HAL_MAIN_LAG").is_some()
 }
 
 /// Starts the meter on the calling (main) thread.

@@ -322,8 +322,8 @@ pub struct Config {
 impl Config {
     pub fn new(session: u32, dpi: f32) -> Config {
         // (a cold compile of the app takes longer than a step normally waits)
-        let ms = std::env::var("MAKEPAD_HAL_STEP_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).filter(|ms| *ms > 0).unwrap_or(10_000);
-        let first = std::env::var("MAKEPAD_HAL_FIRST_FRAME_S").ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(300);
+        let ms = relax_api::env::var("MAKEPAD_HAL_STEP_TIMEOUT_MS").ok().and_then(|v| v.parse().ok()).filter(|ms| *ms > 0).unwrap_or(10_000);
+        let first = relax_api::env::var("MAKEPAD_HAL_FIRST_FRAME_S").ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(300);
         Config { session, dpi, step_timeout: Duration::from_millis(ms), first_frame_timeout: Duration::from_secs(first), snapshot_dir: None }
     }
 }

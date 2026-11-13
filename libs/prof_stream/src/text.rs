@@ -1,6 +1,6 @@
 //! Text renderings for agents (profproto.md §5): numbers at 2-3 significant digits, markdown
 //! tables with units in the header, Unicode lane timelines with a legend, sparklines, and short
-//! names with a legend of their full paths. Scope's panels show the same things drawn.
+//! names with a legend of their full paths. An app's panels show the same things drawn.
 
 use crate::model::Profile;
 use crate::role;
@@ -63,7 +63,7 @@ pub fn pct(part: u64, whole: u64) -> String {
 pub struct Table {
     pub head: Vec<String>,
     pub rows: Vec<Vec<String>>,
-    /// per row, a query it leads to (Scope makes the row clickable); empty: none
+    /// per row, a query it leads to (an app makes the row clickable); empty: none
     pub links: Vec<Option<String>>,
 }
 

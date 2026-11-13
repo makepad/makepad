@@ -22,13 +22,13 @@ const SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "1" || v == "repeat"))
+    *ON.get_or_init(|| relax_api::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "1" || v == "repeat"))
 }
 
 /// `MAKEPAD_TEST_LIVE_RESIZE=repeat`: drag again every few seconds, growing and shrinking in turn
 /// (a run that changes the app in between sees the live resize before and after the change).
 fn repeat() -> bool {
-    std::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "repeat")
+    relax_api::env::var("MAKEPAD_TEST_LIVE_RESIZE").is_ok_and(|v| v == "repeat")
 }
 
 /// Drags made so far: an odd one shrinks the window back.

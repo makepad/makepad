@@ -31,8 +31,7 @@ pub enum Event {
     DispatchTime { name: String, gpu_ns: u64 },
     Frame { target: Id, kind: u32, frame: u64, window: bool, gpu_ns: u64, gpu_span: [f64; 2] },
     BufferLeases { req: u32, status: u32, leases: Vec<crate::lease::Lease> },
-    Readback { req: u32, status: u32, rect: [u32; 4], pixels: Vec<u8> },
-    Pick { req: u32, ids: Vec<u32> },
+    Readback { req: u32, status: u32, rect: [u32; 4], lease: Option<crate::lease::Lease> },
 }
 
 pub struct Done {
@@ -171,7 +170,7 @@ fn prof_passes(dev: &Device, t: &Timer, clock: Option<(u64, u64, u64)>, key: cra
 pub enum Ticket {
     BufferLeases { token: Token, req: u32, staging: super::leases::Staging, ranges: Vec<(u64, u64)> },
     Frame { token: Token, target: Id, kind: u32, frame: u64, window: bool, timer: Option<Timer> },
-    Read { token: Token, req: u32, rect: [u32; 4], staged: Staged, pick: Option<[f32; 2]> },
+    Read { token: Token, req: u32, rect: [u32; 4], staged: Staged },
     Copy { token: Token, req: u32, rect: [u32; 4] },
     Host { reply: std::sync::mpsc::SyncSender<Option<crate::backend::Pixels>>, staged: Staged },
 }
@@ -372,7 +371,7 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
                 out.push((token, Event::Frame { target, kind, frame, window: window && !lost, gpu_ns, gpu_span }));
             }
             Ticket::Copy { token, req, rect } => {
-                out.push((token, Event::Readback { req, rect, status: if lost { readback::FAILED } else { readback::OK }, pixels: Vec::new() }));
+                out.push((token, Event::Readback { req, rect, status: if lost { readback::FAILED } else { readback::OK }, lease: None }));
             }
             Ticket::Host { reply, staged } => {
                 let pixels = if lost { None } else {
@@ -383,37 +382,15 @@ fn complete(dev: &Device, mut batch: Batch, lost: bool, mailbox: &Mailbox, timer
                 };
                 let _ = reply.try_send(pixels);
             }
-            Ticket::Read { token, req, rect, staged, pick } => {
+            Ticket::Read { token, req, rect, staged } => {
                 let pixels = if lost { None } else { read_staged(dev, &staged) };
-                match (pixels, pick) {
-                    (Some(mut pixels), Some(pos)) => {
-                        to_rgba(staged.format, &mut pixels);
-                        // ids nearest the point first (the Metal/Vulkan pick neighbourhood order)
-                        let mut ordered: Vec<(f32, u32)> = pixels
-                            .chunks_exact(4)
-                            .enumerate()
-                            .map(|(i, px)| {
-                                let x = rect[0] as f32 + (i as u32 % rect[2]) as f32;
-                                let y = rect[1] as f32 + (i as u32 / rect[2]) as f32;
-                                ((x - pos[0]).powi(2) + (y - pos[1]).powi(2), u32::from_le_bytes(px.try_into().unwrap()) & 0x00ff_ffff)
-                            })
-                            .collect();
-                        ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-                        let mut ids = Vec::new();
-                        for (_, id) in ordered {
-                            if id != 0 && !ids.contains(&id) {
-                                ids.push(id);
-                            }
-                        }
-                        out.push((token, Event::Pick { req, ids }));
-                    }
-                    (Some(mut pixels), None) => {
+                match pixels {
+                    Some(mut pixels) => {
                         to_rgba(staged.format, &mut pixels);
                         let status = if matches!(staged.format, format::RGBA8 | format::BGRA8) { readback::OK } else { readback::NATIVE };
-                        out.push((token, Event::Readback { req, rect, status, pixels }));
+                        out.push((token, Event::Readback { req, rect, status, lease: Some(crate::lease::Lease::from_vec(pixels, 0)) }));
                     }
-                    (None, Some(_)) => out.push((token, Event::Pick { req, ids: Vec::new() })),
-                    (None, None) => out.push((token, Event::Readback { req, rect, status: readback::FAILED, pixels: Vec::new() })),
+                    None => out.push((token, Event::Readback { req, rect, status: readback::FAILED, lease: None })),
                 }
             }
         }

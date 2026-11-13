@@ -1,4 +1,4 @@
-//! Pixels back from the GPU: `TextureReadback`, `Snapshot`, `Pick` (events when the command
+//! Pixels back from the GPU: `TextureReadback`, `Snapshot` (events when the command
 //! buffer that holds the copy completes, ordered after the frames in the same batch), and the
 //! host's synchronous window read. Moved from os/apple/metal.rs (`encode_texture_readback`,
 //! `encode_render_texture_captures`, the pick readback in metal_pick.rs).
@@ -11,9 +11,6 @@ use crate::session::Session;
 use crate::types::*;
 use makepad_apple_sys::*;
 use std::sync::Mutex;
-
-/// How far (texels) around the pick position the ids are gathered.
-const PICK_RADIUS: i64 = 8;
 
 /// 8-bit colour comes back as RGBA8 rows; any other texel layout as it is.
 fn finish_rows(fmt: u32, bytes: &mut Vec<u8>) -> u32 {
@@ -51,13 +48,13 @@ impl Metal {
         let source = self.retained_window(owner, physical);
         let destination = self.tex.get(&(sid, texture.index)).filter(|t| t.gen == texture.gen);
         let Some((source, destination)) = source.zip(destination) else {
-            s.events.readback(req, readback::FAILED, [0; 4], &[]);
+            s.events.readback(req, readback::FAILED, [0; 4], None);
             return;
         };
         let (width, height) = (source.w, source.h);
         let valid = s.textures.get(sid, texture).is_ok_and(|t| t.val.w == width && t.val.h == height && t.val.format == format::BGRA8);
         if !valid {
-            s.events.readback(req, readback::FAILED, [0; 4], &[]);
+            s.events.readback(req, readback::FAILED, [0; 4], None);
             return;
         }
         let source = source.tex.obj.clone();
@@ -78,7 +75,7 @@ impl Metal {
             let _: () = msg_send![cb, addCompletedHandler: &objc_block!(move |cb: ObjcId| {
                 if resources.lock().unwrap_or_else(|e| e.into_inner()).take().is_some() {
                     let status: u64 = unsafe { msg_send![cb, status] };
-                    mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status: if status == 4 { readback::OK } else { readback::FAILED }, rect: [0, 0, width, height], pixels: Vec::new() });
+                    mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status: if status == 4 { readback::OK } else { readback::FAILED }, rect: [0, 0, width, height], lease: None });
                 }
             })];
         }
@@ -201,25 +198,25 @@ impl Metal {
     pub(super) fn readback_texture(&mut self, s: &mut Session, id: Id, req: u32, rect: [u32; 4]) {
         let sid = s.id;
         if self.pick_pending.contains(&(sid, id)) {
-            s.events.readback(req, readback::INCOMPLETE, rect, &[]);
+            s.events.readback(req, readback::INCOMPLETE, rect, None);
             return;
         }
         let (Some(tex), Ok(entry)) = (self.tex.get(&(sid, id.index)).filter(|t| t.gen == id.gen), s.textures.get(sid, id)) else {
             // the storage was given back, or it is an import without one
-            s.events.readback(req, readback::FAILED, rect, &[]);
+            s.events.readback(req, readback::FAILED, rect, None);
             return;
         };
         let t = entry.val.clone();
         let blocks = format::is_block(t.format) || format::is_depth(t.format);
         let Some(rect) = Self::clamp(rect, t.w, t.h).filter(|_| !blocks) else {
             s.bad();
-            s.events.readback(req, readback::FAILED, rect, &[]);
+            s.events.readback(req, readback::FAILED, rect, None);
             return;
         };
         let (obj, fmt) = (tex.obj.as_id(), t.format);
         let mailbox = self.dev.mailbox.clone();
         let incarnation = s.font_frames.clone();
-        self.queue_copy(obj, fmt, rect, move |status, pixels| mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status, rect, pixels }));
+        self.queue_copy(obj, fmt, rect, move |status, pixels| mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status, rect, lease: (!pixels.is_empty()).then(|| crate::lease::Lease::from_vec(pixels, 0)) }));
     }
 
     pub(super) fn readback_window(&mut self, s: &mut Session, window: Id, req: u32) {
@@ -229,59 +226,13 @@ impl Metal {
             // a real window that keeps no frames has nothing to read; otherwise no frame has been
             // drawn into the window yet
             let status = if self.shell.is_some() && !self.retain { readback::NO_RASTER } else { readback::FAILED };
-            s.events.readback(req, status, [0; 4], &[]);
+            s.events.readback(req, status, [0; 4], None);
             return;
         };
         let (obj, rect) = (win.tex.obj.as_id(), [0, 0, win.w, win.h]);
         let mailbox = self.dev.mailbox.clone();
         let incarnation = s.font_frames.clone();
-        self.queue_copy(obj, format::BGRA8, rect, move |status, pixels| mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status, rect, pixels }));
-    }
-
-    /// The ids around `pos` in the id texture of the window's newest pick frame, nearest first.
-    pub(super) fn read_pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) {
-        let sid = s.id;
-        let Some(id) = self.pick_ids.get(&(sid, window.index)).copied() else {
-            s.events.pick_result(req, &[]);
-            return;
-        };
-        let (Some(tex), Ok(entry)) = (self.tex.get(&(sid, id.index)).filter(|t| t.gen == id.gen), s.textures.get(sid, id)) else {
-            s.events.pick_result(req, &[]);
-            return;
-        };
-        let (w, h) = (entry.val.w as i64, entry.val.h as i64);
-        let (cx, cy) = (pos[0].floor() as i64, pos[1].floor() as i64);
-        let (x0, y0) = ((cx - PICK_RADIUS).max(0), (cy - PICK_RADIUS).max(0));
-        let (x1, y1) = ((cx + PICK_RADIUS + 1).min(w), (cy + PICK_RADIUS + 1).min(h));
-        if x1 <= x0 || y1 <= y0 {
-            s.events.pick_result(req, &[]);
-            return;
-        }
-        let rect = [x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32];
-        let obj = tex.obj.as_id();
-        let mailbox = self.dev.mailbox.clone();
-        let incarnation = s.font_frames.clone();
-        // the copy comes back as RGBA8 (the id texture is BGRA8): id = blue (high), green, red
-        self.queue_copy(obj, format::BGRA8, rect, move |status, bytes| {
-            let mut found: Vec<(i64, u32)> = Vec::new();
-            if status == readback::OK {
-                for (i, px) in bytes.chunks_exact(4).enumerate() {
-                    let id = px[0] as u32 | (px[1] as u32) << 8 | (px[2] as u32) << 16;
-                    if id != 0 {
-                        let (dx, dy) = (rect[0] as i64 + (i as i64 % rect[2] as i64) - cx, rect[1] as i64 + (i as i64 / rect[2] as i64) - cy);
-                        found.push((dx * dx + dy * dy, id));
-                    }
-                }
-            }
-            found.sort();
-            let mut ids: Vec<u32> = Vec::new();
-            for (_, id) in found {
-                if !ids.contains(&id) {
-                    ids.push(id);
-                }
-            }
-            mailbox.push(Done::Pick { sid, incarnation, req, ids });
-        });
+        self.queue_copy(obj, format::BGRA8, rect, move |status, pixels| mailbox.push(Done::Readback { sid, incarnation: incarnation.clone(), req, status, rect, lease: (!pixels.is_empty()).then(|| crate::lease::Lease::from_vec(pixels, 0)) }));
     }
 
     /// The window's pixels now, for the host: waits for the GPU. Only the host's thread calls it.

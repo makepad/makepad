@@ -96,7 +96,7 @@ mod imp {
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::{dvec2, Vec2d};
-    use crate::texture::{ReadbackRequest, ReadbackTicket, TextureReadback};
+    use crate::texture::{ReadbackError, ReadbackRequest, ReadbackTicket, TextureReadback};
     use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
     use crate::window::WindowId;
     use makepad_studio_protocol::{
@@ -393,6 +393,7 @@ mod imp {
         due: Instant,
         every: Duration,
         last_request: Option<u64>,
+        readback_wait_logged: bool,
         cancelled: Arc<AtomicBool>,
     }
 
@@ -545,7 +546,7 @@ mod imp {
             Request::Off => return,
             Request::Refused(why) => {
                 eprintln!("[makepad-remote] {why}");
-                std::process::exit(2);
+                makepad_core_util::process_end::end(2);
             }
             Request::Local => false,
             Request::On => true,
@@ -673,7 +674,7 @@ mod imp {
             Ok(l) => l,
             Err(why) => return Some(result_line(call_id, false, &why)),
         };
-        let (reply, _) = makepad_remote::cmd::answer(dispatch, &line);
+        let reply = makepad_remote::cmd::answer(dispatch, &line);
         let text = String::from_utf8_lossy(&reply).trim_end().to_string();
         let failed = text.lines().any(|l| l.starts_with("{\"err\":"));
         Some(result_line(call_id, !failed, &text))
@@ -833,7 +834,6 @@ mod imp {
                 words.extend(req.pos.iter().cloned());
                 if let Err(e) = req.validate_params(params(&words)) { return out.err(&e); }
                 let kv = req.kv.clone();
-                out.limit = usize::MAX;
                 match ask(move |tx| Cmd::Platform(Box::new(PlatformCmd::AppQuery { f, words, kv, tx })), 6) {
                     Reply::Text(t) => {
                         for l in t.lines() {
@@ -857,8 +857,6 @@ mod imp {
                     "why-slow" => return crate::prof_sampler::cmd_why_slow(req, out),
                     _ => {}
                 }
-                // A semantic tree or an app query may contain every visible item.
-                out.limit = usize::MAX;
                 let mut words = vec![req.cmd.clone()];
                 words.extend(req.pos.iter().cloned());
                 let resolved = match resolve(&words) {
@@ -880,9 +878,9 @@ mod imp {
     // ------------------------------------------------------------------
 
     /// A command for the Relax host: the request line in, the reply lines out through `sink`
-    /// as they are produced (chunks, not lines); true when the reply was cut at the size limit.
+    /// as they are produced (chunks, not lines).
     #[cfg(relax)]
-    pub(crate) extern "C" fn host_query(line: *const u8, len: usize, sink: extern "C" fn(*const u8, usize, *mut std::ffi::c_void), ctx: *mut std::ffi::c_void) -> bool {
+    pub(crate) extern "C" fn host_query(line: *const u8, len: usize, sink: extern "C" fn(*const u8, usize, *mut std::ffi::c_void), ctx: *mut std::ffi::c_void) {
         struct SinkWriter(extern "C" fn(*const u8, usize, *mut std::ffi::c_void), *mut std::ffi::c_void);
         impl Write for SinkWriter {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -895,9 +893,8 @@ mod imp {
         }
         let line = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(line, len)) };
         let mut w = std::io::BufWriter::with_capacity(64 << 10, SinkWriter(sink, ctx));
-        let truncated = makepad_remote::cmd::answer_to(dispatch, line, &mut w);
+        makepad_remote::cmd::answer_to(dispatch, line, &mut w);
         let _ = w.flush();
-        truncated
     }
 
     /// The host's sink of a service channel: `kind` 0 sends `ptr..len` as one message (false: the
@@ -1145,7 +1142,7 @@ mod imp {
                             sink,
                             width,
                             height,
-                            pixels: Arc::from(png),
+                            pixels: crate::HostBuf::from_vec(png.to_vec()),
                             stride: 0,
                             order: GrabOrder::Rgba,
                             origin: GrabOrigin::TopLeft,
@@ -1169,7 +1166,7 @@ mod imp {
         request_ids: Vec<u64>,
         width: u32,
         height: u32,
-        pixels: Arc<[u8]>,
+        pixels: crate::HostBuf,
         stride: usize,
         order: ReadbackChannelOrder,
         origin: ReadbackOrigin,
@@ -1322,11 +1319,25 @@ mod imp {
                     .and_then(|pass| cx.passes[pass].color_textures.first())
                     .map(|color| color.texture.clone());
                 let texture = if cx.in_makepad_studio { texture } else { None };
-                let ticket = texture.and_then(|texture| {
-                    texture
-                        .read_back(cx, ReadbackRequest { next_render: true })
-                        .ok()
-                });
+                let ticket = match texture {
+                    Some(texture) => match texture.read_back(cx, ReadbackRequest { next_render: true }) {
+                        Ok(ticket) => {
+                            batch.readback_wait_logged = false;
+                            Some(ticket)
+                        }
+                        Err(ReadbackError::Backpressure) => {
+                            if !batch.readback_wait_logged {
+                                crate::log!("remote grab: context readback request limit reached; grab {id} waits");
+                                batch.readback_wait_logged = true;
+                            }
+                            // The next presentation polls this same batch again.
+                            cx.request_remote_window_present(batch.window);
+                            return true;
+                        }
+                        Err(_) => None,
+                    },
+                    None => None,
+                };
                 if let Some(ticket) = ticket {
                     cx.textures
                         .1
@@ -1346,6 +1357,7 @@ mod imp {
                         kind_id: 0,
                     });
                 }
+                batch.readback_wait_logged = false;
                 batch.ids.pop_front();
                 batch.last_request = Some(id);
                 batch.due += batch.every;
@@ -1700,6 +1712,31 @@ mod imp {
         }
     }
 
+    /// Who holds the process's CPU budget slots now, for `/settled` while pool jobs wait (a starved
+    /// pool's verdict names them): one entry per class, client, label and lent, with how many hold
+    /// it and the longest any has held its slot. A lent slot's thread sleeps and its token is back.
+    fn budget_slots() -> Vec<String> {
+        let mut slots: Vec<(u8, u8, String, bool, usize, u64)> = Vec::new();
+        for h in makepad_cpu_budget::tokens().holders {
+            match slots.iter_mut().find(|s| s.0 == h.class && s.1 == h.client && s.2 == h.label && s.3 == h.lent) {
+                Some(s) => {
+                    s.4 += 1;
+                    s.5 = s.5.max(h.held_ns);
+                }
+                None => slots.push((h.class, h.client, h.label, h.lent, 1, h.held_ns)),
+            }
+        }
+        slots.sort_by(|a, b| b.5.cmp(&a.5));
+        let class = |c: u8| ["interactive", "visible", "background"].get(c as usize).copied().unwrap_or("?");
+        let client = |c: u8| ["app", "jit", "hal"].get(c as usize).copied().unwrap_or("?");
+        slots
+            .iter()
+            .map(|(c, k, label, lent, n, ns)| {
+                format!("{{\"class\":\"{}\",\"client\":\"{}\",\"label\":{},\"lent\":{lent},\"n\":{n},\"held_ms\":{}}}", class(*c), client(*k), json_str(label), ns / 1_000_000)
+            })
+            .collect()
+    }
+
     /// `/settled`: why the app would still change if time moved on.
     fn settled_json(cx: &Cx) -> String {
         let mut reasons = Vec::new();
@@ -1749,6 +1786,9 @@ mod imp {
         }
         if let Some(p) = &pool {
             out.push_str(&format!(",\"pool\":{{\"queued\":[{},{},{}],\"running\":{},\"taken\":{}}}", p.queued[0], p.queued[1], p.queued[2], p.running, p.taken));
+        }
+        if reasons.contains(&"pool") {
+            out.push_str(&format!(",\"slots\":[{}]", budget_slots().join(",")));
         }
         if let Some(now) = app_clock::now() {
             out.push_str(&format!(",\"frame\":{},\"time\":{}", app_clock::frame(), num(now)));
@@ -2225,14 +2265,22 @@ mod imp {
                             continue;
                         }
                     };
-                    // A HAL app's copy / cut chord, as a physical key press gives it (hal_intake):
-                    // the focused widget's text goes on the clipboard before the key itself.
+                    // A copy / cut chord, as a physical key press gives it, before the key itself:
+                    // a HAL app asks its focused widget and sets the clipboard (hal_intake); a
+                    // hosted app gets the TextCopy / TextCut its host sends for a physical chord,
+                    // and its answer goes to the host's clipboard.
                     if let StudioToApp::KeyDown(e) = &msg {
-                        if (e.modifiers.control || e.modifiers.logo) && cx.hal.hosted.is_none() {
-                            match e.key_code {
-                                crate::event::KeyCode::KeyC => cx.hal_clipboard_chord(true),
-                                crate::event::KeyCode::KeyX => cx.hal_clipboard_chord(false),
-                                _ => {}
+                        let copy = match e.key_code {
+                            crate::event::KeyCode::KeyC => Some(true),
+                            crate::event::KeyCode::KeyX => Some(false),
+                            _ => None,
+                        };
+                        if let Some(copy) = copy.filter(|_| e.modifiers.control || e.modifiers.logo) {
+                            if cx.hal.hosted.is_none() {
+                                cx.hal_clipboard_chord(copy);
+                            } else {
+                                let chord = if copy { StudioToApp::TextCopy } else { StudioToApp::TextCut };
+                                cx.dispatch_studio_msg(chord, window_id, dvec2(0.0, 0.0));
                             }
                         }
                     }
@@ -2273,6 +2321,7 @@ mod imp {
                         due: started,
                         every,
                         last_request: None,
+                        readback_wait_logged: false,
                         cancelled,
                     })
                 });
@@ -3097,7 +3146,7 @@ mod imp {
                 assert!(answer.contains("unknown parameter") && answer.contains("typo") && answer.contains("known:"), "{command}: {answer}");
             }
             for line in ["status typo=1", r#"{"cmd":"resize","typo":1}"#, "settled typo=1"] {
-                let (bytes, _) = makepad_remote::cmd::answer(dispatch, line);
+                let bytes = makepad_remote::cmd::answer(dispatch, line);
                 let answer = String::from_utf8(bytes).unwrap();
                 assert!(answer.contains("unknown parameter") && answer.contains("known:"), "{line}: {answer}");
             }
@@ -3107,10 +3156,10 @@ mod imp {
             let cross = answered("tweak op", &[("op", "state"), ("splash", "{}")]);
             assert!(cross.contains("unknown parameter"), "{cross}");
             register_app_query("parameter_test", "[limit=]", "parameter validation", |_| r#""limit":{"type":"integer"}"#, |_, _, _| panic!("invalid request reached the UI"));
-            let (bytes, _) = makepad_remote::cmd::answer(dispatch, "parameter_test typo=1");
+            let bytes = makepad_remote::cmd::answer(dispatch, "parameter_test typo=1");
             let answer = String::from_utf8(bytes).unwrap();
             APP_QUERIES.lock().unwrap().retain(|q| q.0 != "parameter_test");
-            assert!(answer.contains("unknown parameter") && answer.contains("known: limit, full"), "{answer}");
+            assert!(answer.contains("unknown parameter") && answer.contains("known: limit"), "{answer}");
         }
 
         #[test]
@@ -3167,7 +3216,7 @@ mod imp {
         #[test]
         fn dispatch_answers_help_and_refuses_unknown_commands() {
             let run = |line: &str| {
-                let (reply, _) = makepad_remote::cmd::answer(dispatch, line);
+                let reply = makepad_remote::cmd::answer(dispatch, line);
                 String::from_utf8(reply).unwrap()
             };
             let help = run("help");
@@ -3305,7 +3354,7 @@ pub(crate) mod host_registration {
             usize,
             extern "C" fn(*const u8, usize, *mut std::ffi::c_void),
             *mut std::ffi::c_void,
-        ) -> bool;
+        );
         let register = host_symbol(c"relax_register_inspect".as_ptr());
         if register.is_null() {
             return;

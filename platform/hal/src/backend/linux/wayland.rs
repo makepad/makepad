@@ -271,7 +271,7 @@ impl State {
             || std::env::args()
                 .find_map(|a| a.strip_prefix("--wayland-decoration=").and_then(preference))
                 .or_else(|| {
-                    std::env::var("MAKEPAD_WAYLAND_DECORATION")
+                    relax_api::env::var("MAKEPAD_WAYLAND_DECORATION")
                         .ok()
                         .and_then(|v| preference(&v))
                 })
@@ -822,8 +822,11 @@ impl State {
                     self.ime_sync(k, selection, text);
                 }
             }
-            OsCmd::ClipSet { text } => self.set_clipboard(text, false),
-            OsCmd::SelectionSet { text } => self.set_clipboard(text, true),
+            OsCmd::ClipSet { data } => self.set_clipboard(data, false),
+            OsCmd::SelectionSet { text } => self.set_clipboard(
+                crate::clipboard::ClipboardData { text, ..Default::default() },
+                true,
+            ),
             OsCmd::ClipRead { req, primary } => {
                 self.read_clipboard(selection::Purpose::Reply(sid, req), primary)
             }

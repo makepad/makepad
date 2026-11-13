@@ -430,6 +430,9 @@ pub struct Stats {
     /// (`exec::clamped_pass`; a pass is sized as its target, so any is a caller's bug)
     pub clamped_passes: u64,
     pub frames: u64,
+    /// frames whose GPU work failed on its own (the device stood): finished, never presented,
+    /// and drawn again on the next beat
+    pub failed_frames: u64,
     /// frames of this session that reached one of its windows, and the newest
     pub window_frames: u64,
     pub last_window_frame: u64,

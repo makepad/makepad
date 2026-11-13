@@ -11,7 +11,7 @@ pub enum Kind {
     Program,
     /// Relax's std / core (JIT)
     Std,
-    /// host code: makepad run, system libraries
+    /// host code: Relax, system libraries
     Runtime,
 }
 

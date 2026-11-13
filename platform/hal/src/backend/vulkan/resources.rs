@@ -121,19 +121,23 @@ impl Image {
     }
     pub fn new(dev: Arc<Device>, desc: TextureObj) -> Result<Arc<Self>, String> {
         let usage = image_usage(&desc);
-        Self::new_with(dev, desc, vk::SampleCountFlags::TYPE_1, usage)
+        Self::new_with(dev, desc, vk::SampleCountFlags::TYPE_1, usage, false)
     }
 
     /// A multisampled render target of `samples` per pixel shaped like `like` (format, size,
     /// layers): an MSAA pass renders into it and resolves into `like`'s image. Only an
     /// attachment, never sampled or copied.
-    pub fn multisampled(dev: Arc<Device>, like: &TextureObj, samples: u32) -> Result<Arc<Self>, String> {
+    /// `transient`: it lives for one render pass (never stored): a transient attachment, in
+    /// lazily allocated memory where the device offers it (tile GPUs; desktop GPUs do not).
+    pub fn multisampled(dev: Arc<Device>, like: &TextureObj, samples: u32, transient: bool) -> Result<Arc<Self>, String> {
         let desc = TextureObj { mips: 1, lent: None, imported: false, ..like.clone() };
         let usage = if format::is_depth(desc.format) { vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT } else { vk::ImageUsageFlags::COLOR_ATTACHMENT };
-        Self::new_with(dev, desc, vk::SampleCountFlags(samples), usage)
+        let usage = if transient { usage | vk::ImageUsageFlags::TRANSIENT_ATTACHMENT } else { usage };
+        Self::new_with(dev, desc, vk::SampleCountFlags(samples), usage, transient)
     }
 
-    fn new_with(dev: Arc<Device>, desc: TextureObj, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags) -> Result<Arc<Self>, String> {
+    /// `lazy`: in lazily allocated memory where the device has such a type.
+    fn new_with(dev: Arc<Device>, desc: TextureObj, samples: vk::SampleCountFlags, usage: vk::ImageUsageFlags, lazy: bool) -> Result<Arc<Self>, String> {
         let fmt = vk_format(desc.format).ok_or("unknown texture format")?;
         if desc.w == 0 || desc.h == 0 || desc.depth == 0 || desc.mips == 0
             || desc.mips > 32 - desc.w.max(desc.h).leading_zeros()
@@ -160,8 +164,12 @@ impl Image {
         let image = unsafe { dev.raw.create_image(&info, None) }.map_err(error)?;
         let req = unsafe { dev.raw.get_image_memory_requirements(image) };
         let memory = (|| {
-            let ty = dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
-                .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::empty()))?;
+            let lazily = vk::MemoryPropertyFlags::DEVICE_LOCAL | vk::MemoryPropertyFlags::LAZILY_ALLOCATED;
+            let ty = match dev.memory_type(req.memory_type_bits, lazily) {
+                Ok(ty) if lazy => Ok(ty),
+                _ => dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL),
+            }
+            .or_else(|_| dev.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::empty()))?;
             unsafe { dev.raw.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty), None) }.map_err(error)
         })();
         let memory = match memory {

@@ -86,7 +86,9 @@ impl Device {
                     }
                 }
                 HalEvent::AtlasEvicted { count, slots, .. } => self.seen.evicted.extend(wire::read_slots(slots, count).into_iter().map(|(s, _)| s)),
-                HalEvent::Readback { req: 7, status, pixels, .. } => {
+                HalEvent::Readback { req: 7, status, lease, .. } => {
+                    // SAFETY: this process pumped the event and takes its lease once.
+                    let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) }.unwrap();
                     assert_eq!(status, readback::OK);
                     self.seen.readback = Some(pixels.to_vec());
                 }
@@ -137,7 +139,8 @@ impl Device {
             self.w.frame_begin(n, FrameMeta::default());
             self.w.pass(Pass { color: [Id::NONE; 4], depth: Id::NONE, load: [pass_load::CLEAR; 5], clear: [[0.0, 0.0, 0.0, 0.0]; 4], viewport: [0.0, 0.0, W as f32, H as f32], dpi: 1.0, ..Default::default() });
             let tex = self.w.put_ids(&[alias]);
-            self.w.draw(Draw { pipeline: PIPE, vb: QUAD, ib: INDEX, index: [0, 6], inst: Inst::inline(Slice::of(&inst[..]), glyphs.len() as u32), tex, scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
+            // SAFETY: `inst` lives, unchanged, until `submit` below has returned
+            self.w.draw(Draw { pipeline: PIPE, vb: QUAD, ib: INDEX, index: [0, 6], inst: Inst::inline(unsafe { Slice::of(&inst[..]) }, glyphs.len() as u32), tex, scissor: [f32::NAN; 4], bounds: [f32::NAN; 4], ..Default::default() });
             self.w.frame_end(WIN, target::WINDOW);
             self.w.snapshot(WIN, 7);
             self.seen.readback = None;

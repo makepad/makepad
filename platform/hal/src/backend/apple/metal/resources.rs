@@ -47,7 +47,11 @@ pub struct Tex {
 
 /// The multisampled image of an attachment an MSAA pass (`Pass::samples`) draws in and resolves
 /// into the attachment at its end. A pass that loads continues it (the second eye of a
-/// side-by-side target), not what another pass wrote into the attachment.
+/// side-by-side target), not what another pass wrote into the attachment. A pass whose twins are
+/// transient (`exec::twins_kept` false) never stores them; their storage is private memory all
+/// the same, never memoryless: a pass with more geometry than the GPU bins at once spills its
+/// samples mid-pass, and Metal fails a command buffer whose memoryless attachments would have to
+/// take that.
 pub struct Twin {
     samples: u8,
     /// the attachment's width, height, pixel format and slices it was made for

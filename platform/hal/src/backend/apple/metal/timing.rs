@@ -358,6 +358,50 @@ pub fn spawn_hang_watchdog(in_flight: InFlightQueue, completed: Arc<AtomicU64>, 
 /// `MTLCommandBufferStatusError`: the buffer's GPU work did not run.
 const MTL_COMMAND_BUFFER_STATUS_ERROR: u64 = 5;
 
+/// What a command buffer that ended in error took with it. Decided here alone
+/// ([`command_buffer_failure`]), from its `MTLCommandBufferError` code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The buffer's own work: its frames are dropped (finished, never presented), its readbacks
+    /// fail. The device and everything on it stand; the next frame draws as usual.
+    Work,
+    /// The device: it was removed, or this process's access to it was revoked. Every session
+    /// hears `DeviceLost`.
+    Device,
+}
+
+/// The `MTLCommandBufferError` codes (`MTLCommandBuffer.h`) that take the device:
+/// `AccessRevoked` (4) and `DeviceRemoved` (11). Every other code fails the buffer's work alone:
+/// `Internal` (1), `Timeout` (2), `PageFault` (3), `NotPermitted` (7), `OutOfMemory` (8),
+/// `InvalidResource` (9), `Memoryless` (10: more geometry than memoryless attachments survive),
+/// `StackOverflow` (12), and a code this list does not know (its log line names it). A run of
+/// failures stays what each one is: no count turns into a lost device, and no failed buffer is
+/// sent again.
+fn failure_of(code: i64) -> Failure {
+    match code {
+        4 | 11 => Failure::Device,
+        _ => Failure::Work,
+    }
+}
+
+/// The buffer's error code and description; code 0 when it carries no `NSError`.
+fn command_buffer_error(cb: ObjcId) -> (i64, String) {
+    let error: ObjcId = unsafe { msg_send![cb, error] };
+    if error == nil {
+        return (0, "no NSError attached".to_string());
+    }
+    let code: i64 = unsafe { msg_send![error, code] };
+    let desc: ObjcId = unsafe { msg_send![error, localizedDescription] };
+    (code, nsstring_to_string(desc))
+}
+
+/// How a completed command buffer failed, `None` when it ran. Every completion handler that
+/// answers for a buffer's work asks this.
+pub fn command_buffer_failure(cb: ObjcId) -> Option<Failure> {
+    let status: u64 = unsafe { msg_send![cb, status] };
+    (status == MTL_COMMAND_BUFFER_STATUS_ERROR).then(|| failure_of(command_buffer_error(cb).0))
+}
+
 /// Command buffers that ended in error since launch. Bounds the log below.
 static CB_ERRORS: AtomicU64 = AtomicU64::new(0);
 
@@ -369,29 +413,25 @@ pub(crate) fn end_run() {
 /// A command buffer that ends in `MTLCommandBufferStatusError` produced no pixels: whatever it
 /// was going to draw is missing from the frame, and nothing else in the backend notices, because
 /// Metal runs the completion handler either way, so the completion frontier advances and the
-/// watchdog stays quiet over a stale or black window. Names the failure and the passes that were
-/// in the buffer. Returns whether the buffer failed.
-pub fn report_command_buffer_error(cb: ObjcId, seq: u64, entry: Option<&InFlightCb>) -> bool {
+/// watchdog stays quiet over a stale or black window. Names the failure, what it took (the
+/// frame alone, or the device: [`Failure`]) and the passes that were in the buffer.
+pub fn report_command_buffer_error(cb: ObjcId, seq: u64, entry: Option<&InFlightCb>) {
     let status: u64 = unsafe { msg_send![cb, status] };
     if status != MTL_COMMAND_BUFFER_STATUS_ERROR {
-        return false;
+        return;
     }
     let count = CB_ERRORS.fetch_add(1, Ordering::Relaxed);
     if count >= 32 {
-        return true;
+        return;
     }
-    let error: ObjcId = unsafe { msg_send![cb, error] };
-    let (code, description) = if error != nil {
-        let code: i64 = unsafe { msg_send![error, code] };
-        let desc: ObjcId = unsafe { msg_send![error, localizedDescription] };
-        (code, nsstring_to_string(desc))
-    } else {
-        (0, "no NSError attached".to_string())
+    let (code, description) = command_buffer_error(cb);
+    let took = match failure_of(code) {
+        Failure::Work => "Its frame did not render; the device stays",
+        Failure::Device => "The device is lost",
     };
     let passes = entry.map(|entry| describe_passes(&entry.passes)).unwrap_or_else(|| "(no in-flight entry)".to_string());
     eprintln!(
-        "[metal] command buffer #{seq} failed with MTLCommandBufferError {code}: {description}. Its frame did not render. Passes: {passes}{}",
+        "[metal] command buffer #{seq} failed with MTLCommandBufferError {code}: {description}. {took}. Passes: {passes}{}",
         if count == 31 { " (further command-buffer errors suppressed)" } else { "" },
     );
-    true
 }

@@ -180,6 +180,12 @@ pub enum Event {
     /// The GPU device was lost. Fail in-flight work now; replacement may not
     /// succeed immediately. GpuReset announces when new work can be submitted.
     GpuLost,
+    /// A draw shader that [`Cx::draw_shader_ready`](crate::cx::Cx::draw_shader_ready)
+    /// said cannot draw yet may have an answer now: a pipeline was made, or failed
+    /// for good, since. Ask again. Sent only after such a "not yet", at most once per
+    /// batch of the GPU's answers, so a caller that waits on a pipeline waits for this
+    /// event instead of asking every frame.
+    DrawShadersReady,
     /// Clear all hover/pressed visual state, e.g. after an overlay that
     /// swallowed the hover-outs (a context menu) has closed.
     ClearHover,
@@ -395,6 +401,7 @@ impl Event {
             19 => "ClearAtlasses",
             78 => "GpuReset",
             95 => "GpuLost",
+            97 => "DrawShadersReady",
             72 => "ClearHover",
 
             20 => "MouseDown",
@@ -508,6 +515,7 @@ impl Event {
             Self::ClearAtlasses => 19,
             Self::GpuReset => 78,
             Self::GpuLost => 95,
+            Self::DrawShadersReady => 97,
             Self::ClearHover => 72,
             Self::PopupDismissed(_) => 61,
 
