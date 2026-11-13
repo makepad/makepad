@@ -13,7 +13,7 @@
 //! stdarch comparison on nightly, or with `RUSTC_BOOTSTRAP=x86_64` for that test
 //! crate only. This opt-in changes tests, not the emulated core modules.
 
-pub use core::ptr;
+pub use core::{mem, ptr};
 // The source modules now call the compiler SIMD/runtime bridges. Expose those
 // when this harness is run by Relax; rustc cannot implement relax-intrinsic ABI.
 #[cfg(relax)]
