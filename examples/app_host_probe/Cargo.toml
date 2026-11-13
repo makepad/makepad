@@ -8,7 +8,7 @@ publish = false
 # Hosts makepad-example-counter with makepad-app-host's HostedApp: waits for a
 # presented frame, reads the semantic mirror, presses the button through its
 # action path and waits for the label to change. Run the release binary hidden:
-#   MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 target/release/makepad-example-app-host-probe --remote
+#   MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 target/release/makepad-example-app-host-probe --remote
 # (the counter binary must be built: cargo build --release -p makepad-example-counter).
 
 [dependencies]

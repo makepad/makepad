@@ -4,8 +4,9 @@
 //!
 //! Contract: `reveal(cx, rel)` opens the folders above a file, selects and
 //! scrolls to it; `focus_filter(cx)` puts the keyboard in the filter field.
-//! Rows emit `IdeAction::OpenFile`; a drag of a row starts
-//! `DragItem::FilePath` with the absolute path; create / rename / delete
+//! Rows emit `IdeAction::OpenFile`; a mouse drag of a row starts
+//! `DragItem::FilePath` with the absolute path, the file's name on a chip
+//! riding the pointer (a finger's drag scrolls); create / rename / delete
 //! emit `Created` / `Renamed` / `Deleted`; "Add to chat" emits
 //! `AddReference`.
 //!
@@ -317,6 +318,35 @@ script_mod! {
                 }
             }
         }
+
+        // The file a row's drag carries, riding the pointer: drawn by the
+        // panel in an overlay, never here.
+        chip_box := View{
+            visible: false
+            width: 0
+            height: 0
+            chip := View{
+                width: Fit
+                height: Fit
+                padding: Inset{left: 8 right: 8 top: 4 bottom: 4}
+                show_bg: true
+                draw_bg +: {
+                    color: mod.look.rail
+                    pixel: fn() {
+                        let p = self.pos * self.rect_size
+                        let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+                        let c0 = self.rect_size * 0.5
+                        let d = Finish.sd_chamfer(p, c0, c0 - vec2(0.5, 0.5), 4.0)
+                        let inside = Finish.cover(d, px)
+                        let edge = Finish.band(d, 0.0, px, px)
+                        var c = vec4(self.color.rgb, 1.0) * inside
+                        c = mix(c, vec4(mod.look.agent.rgb, 1.0), edge * 0.6)
+                        return vec4(c.rgb * c.a, c.a)
+                    }
+                }
+                chip_label := Mono{}
+            }
+        }
     }
 }
 
@@ -389,6 +419,12 @@ pub struct FilesPanel {
     edit: Edit,
     #[rust]
     press: Option<Press>,
+    /// The name of the file a row's drag carries and where the pointer is:
+    /// an in-window drag has no picture of its own, so the panel draws one.
+    #[rust]
+    drag_chip: Option<(String, Vec2d)>,
+    #[live]
+    chip_list: DrawList2d,
     #[rust]
     menu_target: Option<String>,
     #[rust]
@@ -858,6 +894,7 @@ impl FilesPanel {
                     continue;
                 }
                 if fd.device.is_primary_hit() {
+                    self.claim_drag(cx, &fd);
                     self.press = Some(Press { index, start: fd.abs, dragged: false });
                     self.sel = self.tree.as_ref().and_then(|t| t.nodes().get(index)).map(|n| n.path.clone());
                     self.focus_tree(cx);
@@ -868,9 +905,8 @@ impl FilesPanel {
                 if let Some(p) = self.press.as_mut().filter(|p| p.index == index && !p.dragged) {
                     if (fm.abs - p.start).length() > 4.0 {
                         p.dragged = true;
-                        if let Some(node) = self.tree.as_ref().and_then(|t| t.nodes().get(index)) {
-                            let abs = self.root.join(&node.path).to_string_lossy().to_string();
-                            cx.start_dragging(vec![DragItem::FilePath { path: abs, internal_id: None }]);
+                        if let Some(path) = self.tree.as_ref().and_then(|t| t.nodes().get(index)).map(|n| n.path.clone()) {
+                            self.start_drag(cx, &path, fm.abs);
                         }
                     }
                 }
@@ -887,6 +923,7 @@ impl FilesPanel {
             let head = item.view(cx, ids!(hit_head));
             if let Some(fd) = head.finger_down(actions) {
                 if fd.device.is_primary_hit() {
+                    self.claim_drag(cx, &fd);
                     self.msel = index;
                     self.press = Some(Press { index, start: fd.abs, dragged: false });
                     self.view.redraw(cx);
@@ -896,9 +933,8 @@ impl FilesPanel {
                 if let Some(p) = self.press.as_mut().filter(|p| p.index == index && !p.dragged) {
                     if (fm.abs - p.start).length() > 4.0 {
                         p.dragged = true;
-                        if let Some(m) = self.matches.get(index) {
-                            let abs = self.root.join(&m.path).to_string_lossy().to_string();
-                            cx.start_dragging(vec![DragItem::FilePath { path: abs, internal_id: None }]);
+                        if let Some(path) = self.matches.get(index).map(|m| m.path.clone()) {
+                            self.start_drag(cx, &path, fm.abs);
                         }
                     }
                 }
@@ -914,7 +950,42 @@ impl FilesPanel {
         }
     }
 
+    /// A mouse press on a row: its drag is the file's, so the list does not
+    /// scroll with it (a finger still scrolls the list).
+    fn claim_drag(&mut self, cx: &mut Cx, fd: &FingerDownEvent) {
+        if !fd.device.is_touch() {
+            cx.claim_finger_drag(fd.digit_id);
+        }
+    }
+
+    /// Drags the file at `rel`, its name on a chip riding the pointer.
+    fn start_drag(&mut self, cx: &mut Cx, rel: &str, at: Vec2d) {
+        let abs = self.root.join(rel).to_string_lossy().to_string();
+        let name = rel.rsplit('/').next().unwrap_or(rel).to_string();
+        self.drag_chip = Some((name, at));
+        cx.start_dragging(vec![DragItem::FilePath { path: abs, internal_id: None }]);
+        self.view.redraw(cx);
+    }
+
     // ---- drawing -----------------------------------------------------------
+
+    /// The chip of a dragged file, on the pointer, over everything.
+    fn draw_chip(&mut self, cx: &mut Cx2d, scope: &mut Scope) {
+        let Some((name, at)) = self.drag_chip.clone() else {
+            self.chip_list.begin_always(cx);
+            self.chip_list.end(cx);
+            return;
+        };
+        self.view.label(cx, ids!(chip_box.chip.chip_label)).set_text(cx, &name);
+        let chip = self.view.widget(cx, ids!(chip_box.chip));
+        self.chip_list.begin_overlay_last(cx);
+        let size = cx.current_pass_size();
+        cx.begin_root_turtle(size, Layout::default());
+        let walk = Walk { abs_pos: Some(at + dvec2(12.0, 10.0)), ..Walk::fit() };
+        chip.draw_walk_all(cx, scope, walk);
+        cx.end_pass_sized_turtle();
+        self.chip_list.end(cx);
+    }
 
     fn draw_tree(&mut self, cx: &mut Cx2d, list: &mut PortalList) {
         let Some(tree) = self.tree.as_ref() else {
@@ -942,7 +1013,16 @@ impl FilesPanel {
             row.label(cx, ids!(file_mark)).set_text(cx, mark);
             let mut name = row.label(cx, ids!(file_name));
             name.set_text(cx, &node.name);
-            let ink = if selected { vec(p.text_hi, 1.0) } else if node.dir { vec(p.text, 1.0) } else { vec(p.meta, 1.0) };
+            // What git ignores is listed dimmer (theme `disabled`, the look's `dim`).
+            let ink = if selected {
+                vec(p.text_hi, 1.0)
+            } else if node.ignored {
+                vec(p.disabled, 1.0)
+            } else if node.dir {
+                vec(p.text, 1.0)
+            } else {
+                vec(p.meta, 1.0)
+            };
             script_apply_eval!(cx, name, { draw_text +: { color: #(ink) } });
             row.draw_all(cx, &mut Scope::empty());
         }
@@ -1060,6 +1140,22 @@ impl Widget for FilesPanel {
                 self.view.redraw(cx);
             }
         }
+        // The chip rides the pointer until the drag ends, wherever it goes.
+        if self.drag_chip.is_some() {
+            match event {
+                Event::Drag(e) => {
+                    if let Some((_, at)) = self.drag_chip.as_mut() {
+                        *at = e.abs;
+                    }
+                    self.view.redraw(cx);
+                }
+                Event::DragEnd => {
+                    self.drag_chip = None;
+                    self.view.redraw(cx);
+                }
+                _ => {}
+            }
+        }
         if let Event::KeyDown(ke) = event {
             if self.tree_has_focus(cx) {
                 self.tree_key(cx, ke);
@@ -1105,6 +1201,7 @@ impl Widget for FilesPanel {
         if std::mem::take(&mut self.want_tree_focus) {
             cx.set_key_focus(self.view.area());
         }
+        self.draw_chip(cx, scope);
         DrawStep::done()
     }
 }

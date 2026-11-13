@@ -32,6 +32,6 @@ library is `local/amp/offline/` (`songdb.json`, `songs/`, `art/`): Amp shows
 and plays those songs without a Spotify connection, and copying the folder
 to another checkout carries the songs, metadata and artwork along.
 `AMP_DATA_DIR` overrides the data folder for an isolated run. Environment:
-`MUSIC_MUTE=1` processes the sound without playing it (test runs).
+`MAKEPAD_MUTE=1` processes the sound without playing it (test runs).
 
 Credits and third-party notes: [CREDITS.md](CREDITS.md).

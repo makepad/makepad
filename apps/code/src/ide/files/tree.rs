@@ -1,7 +1,9 @@
 //! The workspace file tree: directories are listed the first time they are
 //! opened, never ahead of time, so a big checkout costs nothing until the
 //! person (or the agent touching a file) goes there. What git ignores is
-//! not listed (the same rules as the file index), and `.git` never is.
+//! listed too, marked (the view draws it dimmer) and closed like every
+//! folder, so `target/` costs nothing until it is opened; `.git` never is.
+//! The file index (search, the filter, quick open) leaves ignored files out.
 
 use makepad_git::ignore::GitIgnore;
 use std::path::{Path, PathBuf};
@@ -14,6 +16,8 @@ pub struct Node {
     pub depth: usize,
     pub dir: bool,
     pub open: bool,
+    /// Git ignores it (the same rules as the file index), or a folder above it.
+    pub ignored: bool,
 }
 
 /// Never listed, ignored or not.
@@ -30,7 +34,7 @@ pub struct FileTree {
 impl FileTree {
     pub fn new(root: &Path) -> Self {
         let mut tree = FileTree { root: root.to_path_buf(), nodes: Vec::new(), ignore: GitIgnore::with_user_excludes(root).ok() };
-        tree.nodes = tree.list("", 0);
+        tree.nodes = tree.list("", 0, false);
         tree
     }
 
@@ -38,7 +42,9 @@ impl FileTree {
         &self.nodes
     }
 
-    fn list(&mut self, rel: &str, depth: usize) -> Vec<Node> {
+    /// The entries of the folder `rel`; `ignored`: git ignores that folder,
+    /// so everything in it is ignored too.
+    fn list(&mut self, rel: &str, depth: usize, ignored: bool) -> Vec<Node> {
         let dir = if rel.is_empty() { self.root.clone() } else { self.root.join(rel) };
         let Ok(read) = std::fs::read_dir(&dir) else { return Vec::new() };
         let mut out: Vec<Node> = Vec::new();
@@ -49,12 +55,8 @@ impl FileTree {
             }
             let dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
             let path = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
-            if let Some(ig) = self.ignore.as_mut() {
-                if ig.ignored(&path, dir).unwrap_or(false) {
-                    continue;
-                }
-            }
-            out.push(Node { path, name, depth, dir, open: false });
+            let ignored = ignored || self.ignore.as_mut().is_some_and(|ig| ig.ignored(&path, dir).unwrap_or(false));
+            out.push(Node { path, name, depth, dir, open: false, ignored });
         }
         out.sort_by(|a, b| b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
         out
@@ -71,8 +73,8 @@ impl FileTree {
             self.nodes.drain(index + 1..end);
             self.nodes[index].open = false;
         } else {
-            let (path, depth) = (node.path.clone(), node.depth);
-            let children = self.list(&path, depth + 1);
+            let (path, depth, ignored) = (node.path.clone(), node.depth, node.ignored);
+            let children = self.list(&path, depth + 1, ignored);
             self.nodes[index].open = true;
             self.nodes.splice(index + 1..index + 1, children);
         }
@@ -116,7 +118,7 @@ impl FileTree {
     pub fn refresh(&mut self) {
         let open: Vec<String> = self.nodes.iter().filter(|n| n.open).map(|n| n.path.clone()).collect();
         self.ignore = GitIgnore::with_user_excludes(&self.root).ok();
-        self.nodes = self.list("", 0);
+        self.nodes = self.list("", 0, false);
         // Parents come before children in `open`, so each reopens in place.
         for path in open {
             if let Some(i) = self.nodes.iter().position(|n| n.dir && n.path == path) {
@@ -152,18 +154,27 @@ mod tests {
     }
 
     #[test]
-    fn directories_list_lazily_dirs_first_and_skip_ignored() {
+    fn directories_list_lazily_dirs_first_and_mark_ignored() {
         let dir = scratch("lazy");
+        std::fs::write(dir.join("target/built"), "x").unwrap();
         let mut tree = FileTree::new(&dir);
-        let names: Vec<_> = tree.nodes().iter().map(|n| n.name.as_str()).collect();
-        assert_eq!(names, ["src", ".gitignore", "README.md"]);
-        tree.toggle(0);
+        let rows = |tree: &FileTree| tree.nodes().iter().map(|n| (n.path.clone(), n.ignored, n.open)).collect::<Vec<_>>();
+        let row = |path: &str, ignored: bool| (path.to_string(), ignored, false);
+        assert_eq!(
+            rows(&tree),
+            [row("out", true), row("src", false), row("target", true), row(".gitignore", false), row("README.md", false), row("scratch.tmp", true)],
+            "ignored entries are listed, marked and closed, folders first"
+        );
+        tree.toggle(1);
         let names: Vec<_> = tree.nodes().iter().map(|n| n.path.as_str()).collect();
-        assert_eq!(names, ["src", "src/deep", "src/main.rs", ".gitignore", "README.md"]);
-        assert_eq!(tree.parent(2), Some(0));
-        assert_eq!(tree.subtree_end(0), 3);
-        tree.toggle(0);
-        assert_eq!(tree.nodes().len(), 3);
+        assert_eq!(names, ["out", "src", "src/deep", "src/main.rs", "target", ".gitignore", "README.md", "scratch.tmp"], "a folder lists when opened");
+        assert_eq!(tree.parent(3), Some(1));
+        assert_eq!(tree.subtree_end(1), 4);
+        tree.toggle(1);
+        assert_eq!(tree.nodes().len(), 6, "a closed folder drops its rows");
+        tree.toggle(2);
+        assert_eq!(tree.nodes()[3].path, "target/built");
+        assert!(tree.nodes()[3].ignored, "what an ignored folder holds is ignored too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -171,11 +182,11 @@ mod tests {
     fn reveal_opens_the_ancestors_and_refresh_keeps_them_open() {
         let dir = scratch("reveal");
         let mut tree = FileTree::new(&dir);
-        assert_eq!(tree.reveal("src/deep/a.rs"), Some(2));
-        assert_eq!(tree.nodes()[2].depth, 2);
+        assert_eq!(tree.reveal("src/deep/a.rs"), Some(3));
+        assert_eq!(tree.nodes()[3].depth, 2);
         std::fs::write(dir.join("src/deep/b.rs"), "x").unwrap();
         tree.refresh();
-        assert_eq!(tree.position("src/deep/b.rs"), Some(3));
+        assert_eq!(tree.position("src/deep/b.rs"), Some(4));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

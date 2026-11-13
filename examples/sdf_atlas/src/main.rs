@@ -318,7 +318,7 @@ fn slot_rect(slot: usize, slots_x: usize) -> Rect {
     }
 }
 
-type Readbacks = Arc<Mutex<Vec<(&'static str, Result<(usize, usize, Arc<[u8]>), String>)>>>;
+type Readbacks = Arc<Mutex<Vec<(&'static str, Result<(usize, usize, HostBuf), String>)>>>;
 
 #[derive(Script, ScriptHook, Widget)]
 pub struct AtlasView {
@@ -831,7 +831,7 @@ fn f16s(b: &[u8]) -> Vec<f32> {
 }
 
 /// Compares every read-back target with its model; prints one line per target.
-fn check(got: &[(&'static str, Result<(usize, usize, Arc<[u8]>), String>)]) -> bool {
+fn check(got: &[(&'static str, Result<(usize, usize, HostBuf), String>)]) -> bool {
     let mut fails = Vec::new();
     for (name, res) in got {
         let (w, h, bytes) = match res {

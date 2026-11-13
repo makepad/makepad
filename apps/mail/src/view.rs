@@ -2082,7 +2082,7 @@ mod tests {
             }
             input.set_cursor(&mut cx, Cursor {index: 0, prefer_next_row: false}, false);
             input.set_cursor(&mut cx, Cursor {index: input.text().len(), prefer_next_row: false}, true);
-            dispatch(&mut view, &mut cx, Event::TextCut(TextClipboardEvent {response: Default::default()}));
+            dispatch(&mut view, &mut cx, Event::TextCut(TextClipboardEvent::default()));
             assert_eq!(view.composer_snapshot(&cx), submitted);
         }
         assert_eq!(view.doc, doc);

@@ -78,7 +78,7 @@ fn config_from_args() -> (AgentConfig, Vec<String>) {
         }
     }
     // run from git stores (makepad run), a relative folder is one of the virtual workspace
-    let root = match (root, std::env::var_os("MAKEPAD_RUN_WORKSPACE").filter(|w| !w.is_empty())) {
+    let root = match (root, std::env::var_os("RELAX_WORKSPACE").filter(|w| !w.is_empty())) {
         (Some(r), Some(ws)) if r.is_relative() => PathBuf::from(ws).join(r),
         (Some(root), _) => root,
         (None, _) => match files.first().and_then(|f| f.parent()) {

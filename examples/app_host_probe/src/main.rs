@@ -91,7 +91,7 @@ impl Probe {
         let mut cmd = Command::new(binary);
         cmd.arg("--stdin-loop").arg("--remote")
             .env("MAKEPAD_HIDE_WINDOWS", "1")
-            .env("SANDBOX_MUTE", "1")
+            .env("MAKEPAD_MUTE", "1")
             .stdin(Stdio::null());
         launch::configure(&mut cmd, hub.port, CLIENT, "makepad-example-counter");
         let child = cmd.spawn().expect("spawn the counter");
@@ -172,10 +172,10 @@ impl Probe {
                 // Exercise the hosted command interpreter and its action/presentation replies.
                 // The UI continues pumping the child while the pool task waits.
                 match cx.task_pool().submit(Class::Background, move || {
-                    let (bytes, truncated) = makepad_remote::cmd::answer(dispatch_hosted, &command);
+                    let bytes = makepad_remote::cmd::answer(dispatch_hosted, &command);
                     let reply = String::from_utf8_lossy(&bytes);
                     println!("hosted {command}: {reply}");
-                    if truncated || reply.contains("\"err\"") || !reply.starts_with("handled:") {
+                    if reply.contains("\"err\"") || !reply.starts_with("handled:") {
                         Err(reply.into_owned())
                     } else { Ok(()) }
                 }) {

@@ -33,8 +33,8 @@ script_mod! {
     mod.stories.TextFlowMarkedSpans = StoryPage{
         StoryNote{text: "A mark says which stretch of text is wrong, doubtful or worth noticing, and it draws under those words. A field that turns red says only that something in it is wrong; a mark says which word."}
 
-        StoryHeading{text: "Three flavours"}
-        StoryNote{text: "Error, warning and note. The colours are theme tokens, the wave is measured in pixels, and the last mark below runs past the end of a line: it comes back as one band per row, each hanging from that row's own baseline."}
+        StoryHeading{text: "Four flavours"}
+        StoryNote{text: "Error, warning and note, and a match: what a find found, washed under the words rather than underlined. The colours are theme tokens, the wave is measured in pixels, and the note below runs past the end of a line: it comes back as one band per row, each hanging from that row's own baseline."}
         StoryRow{
             View{
                 width: Fill height: Fit
@@ -46,7 +46,7 @@ script_mod! {
         }
 
         StoryHeading{text: "In a field"}
-        StoryNote{text: "The same call on a text field. Type in it and the mark goes: the library does no edit arithmetic, so a host re-validates and marks again rather than have the squiggle drift onto the wrong word."}
+        StoryNote{text: "The same call on a text field, with a misspelling and a match. Type in it and the marks go: the library does no edit arithmetic, so a host re-validates and marks again rather than have the squiggle drift onto the wrong word."}
         StoryRow{
             View{
                 width: Fill height: Fit
@@ -70,6 +70,7 @@ past the end of a line and carry its mark onto the next row with it.";
 const MISSPELT: &str = "mispelt";
 const DOUBTFUL: &str = "merely doubtful";
 const NOTEWORTHY: &str = "long enough to run past the end of a line";
+const FOUND: &str = "colours the whole field";
 
 fn paragraph_marks() -> Vec<TextMark> {
     let mut marks = Vec::new();
@@ -81,6 +82,9 @@ fn paragraph_marks() -> Vec<TextMark> {
     }
     if let Some(at) = PARAGRAPH.find(NOTEWORTHY) {
         marks.push(TextMark::note(at, at + NOTEWORTHY.len()));
+    }
+    if let Some(at) = PARAGRAPH.find(FOUND) {
+        marks.push(TextMark::found(at, at + FOUND.len()));
     }
     marks
 }
@@ -118,8 +122,9 @@ impl Widget for StoryMarkedSpans {
 /// found in it by search rather than written as a number.
 const FIELD_TEXT: &str = "sales@exampel.com";
 const FIELD_TYPO: &str = "exampel";
+const FIELD_FOUND: &str = "sales";
 
-/// A field with one word in it marked wrong.
+/// A field with one word in it marked wrong and one found.
 #[derive(Script, ScriptHook, Widget)]
 pub struct StoryMarkedField {
     #[deref]
@@ -138,9 +143,9 @@ impl Widget for StoryMarkedField {
             let field = self.view.text_input(cx.cx.cx, ids!(field));
             if field.borrow().is_some() {
                 self.marked = true;
-                if let Some(at) = FIELD_TEXT.find(FIELD_TYPO) {
-                    field.set_marks(cx.cx.cx, [TextMark::error(at, at + FIELD_TYPO.len())]);
-                }
+                let typo = FIELD_TEXT.find(FIELD_TYPO).map(|at| TextMark::error(at, at + FIELD_TYPO.len()));
+                let found = FIELD_TEXT.find(FIELD_FOUND).map(|at| TextMark::found(at, at + FIELD_FOUND.len()));
+                field.set_marks(cx.cx.cx, typo.into_iter().chain(found));
             }
         }
         step
@@ -177,7 +182,7 @@ flow.set_marks(cx, [
 ]);
 ```
 
-Three flavours: `error` for wrong, `warning` for doubtful, `note` for worth noticing. Error and warning draw a wave in `color_error` and `color_warning`; a note draws a dotted rule in `color_info`, so the three do not rely on colour alone to tell each other apart.
+Four flavours: `error` for wrong, `warning` for doubtful, `note` for worth noticing, `found` for what a find found. Error and warning draw a wave in `color_error` and `color_warning`; a note draws a dotted rule in `color_info`, so the three do not rely on colour alone to tell each other apart. A match is not a judgement on the words, so it does not underline them: `draw_match` washes the rows it covers, full height, in `color_search_hit`, light enough that the words read through it.
 
 ## What it reaches
 

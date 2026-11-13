@@ -142,6 +142,8 @@ pub struct App {
     #[rust]
     pending_capture: Option<u64>,
     #[rust]
+    capture_wait_logged: bool,
+    #[rust]
     capture_reads: Vec<(ReadbackTicket, u64, String)>,
     #[rust(false)]
     done: bool,
@@ -203,8 +205,21 @@ impl App {
         };
         let path = format!("{}/frame_{:04}.png", config.out_dir, frame);
         match texture.read_back(cx, ReadbackRequest::default()) {
-            Ok(ticket) => self.capture_reads.push((ticket, frame, path)),
-            Err(error) => log!("splat-bench: capture of frame {frame} failed: {error}"),
+            Ok(ticket) => {
+                self.capture_wait_logged = false;
+                self.capture_reads.push((ticket, frame, path));
+            }
+            Err(ReadbackError::Backpressure) => {
+                if !self.capture_wait_logged {
+                    log!("splat-bench: context readback request limit reached; capture of frame {frame} waits");
+                    self.capture_wait_logged = true;
+                }
+                self.pending_capture = Some(frame);
+            }
+            Err(error) => {
+                self.capture_wait_logged = false;
+                log!("splat-bench: capture of frame {frame} failed: {error}");
+            }
         }
     }
 
@@ -424,7 +439,7 @@ impl MatchEvent for App {
         if let Some(frame) = self.pending_capture.take() {
             self.capture(cx, frame);
             captured_now = true;
-            if !self.capture_reads.is_empty() { self.next_frame = cx.new_next_frame(); return; }
+            if self.pending_capture.is_some() || !self.capture_reads.is_empty() { self.next_frame = cx.new_next_frame(); return; }
         }
         let Some(config) = self.config.as_ref() else {
             return;

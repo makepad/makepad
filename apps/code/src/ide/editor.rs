@@ -37,7 +37,7 @@ use makepad_code_editor::{CodeDocument, CodeSession};
 use makepad_code_agent::runs::{Diagnostic, Level, RunManager};
 use makepad_markdown_editor::{BlockStyle, Mark, MarkdownEditor, MarkdownEditorAction, PrintUpdate, TableEdit};
 use makepad_widgets::makepad_platform::thread::{Class, SignalToUI, TaskHandle};
-use super::IdeAction;
+use super::{IdeAction, Workspace};
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -467,6 +467,7 @@ script_mod! {
                             link_color: mod.look.agent
                             draw_text +: { color: mod.look.text }
                             draw_selection +: { color: mod.look.agent_select }
+                            draw_match +: { color: mod.look.agent wash: 0.22 }
                             draw_block +: {
                                 line_color: mod.look.hair_hi
                                 sep_color: mod.look.hair
@@ -491,6 +492,33 @@ script_mod! {
                     }
                     link_url := BarField{ empty_text: "url (empty removes the link)" }
                     link_close := BarGlyph{ text: "×" }
+                }
+                // A double-click on a picture: its description and its file.
+                // Enter in either field applies both, Escape closes.
+                picture_bar := FloatBar{
+                    visible: false
+                    width: 480
+                    margin: Inset{top: 6 right: 18}
+                    BarText{
+                        text: "picture"
+                        draw_text +: { color: mod.look.meta text_style: mod.look.mono{font_size: 8.0} }
+                    }
+                    picture_alt := BarField{ empty_text: "description" }
+                    picture_src := BarField{ empty_text: "file or url" }
+                    picture_close := BarGlyph{ text: "×" }
+                }
+                // Cmd/Ctrl+F: the document's matches washed where the view
+                // shows them, the current one selected. Enter steps on
+                // (Shift+Enter back), Escape closes.
+                final_find := FloatBar{
+                    visible: false
+                    width: 340
+                    margin: Inset{top: 6 right: 18}
+                    find_query := BarField{ empty_text: "find" }
+                    find_count := Count{}
+                    find_prev := BarGlyph{ text: "↑" }
+                    find_next := BarGlyph{ text: "↓" }
+                    find_close := BarGlyph{ text: "×" }
                 }
             }
 
@@ -735,6 +763,12 @@ pub struct FileEditor {
     /// The link bar just opened: its field takes the keyboard once drawn.
     #[rust]
     link_focus_pending: bool,
+    /// The picture bar just opened: its description takes the keyboard.
+    #[rust]
+    picture_focus_pending: bool,
+    /// The final view's find bar just opened: its query takes the keyboard.
+    #[rust]
+    find_focus_pending: bool,
     /// Where the pages being made go.
     #[rust]
     print_to: Option<PrintTo>,
@@ -817,6 +851,7 @@ impl FileEditor {
     pub fn open(&mut self, cx: &mut Cx, root: &Path, rel: &str) {
         self.root = root.to_path_buf();
         self.path = Some(rel.to_string());
+        self.follow_folder(cx);
         self.ready = false;
         self.saved_digest = None;
         self.conflict = DiskConflict::None;
@@ -834,6 +869,7 @@ impl FileEditor {
         let old_ext = self.path.as_deref().and_then(extension).map(str::to_string);
         self.root = root.to_path_buf();
         self.path = Some(rel.to_string());
+        self.follow_folder(cx);
         if let Some(abs) = self.abs() {
             self.seen_stamp = std::fs::metadata(&abs).ok().map(|m| Stamp::of(&m));
         }
@@ -860,6 +896,15 @@ impl FileEditor {
 
     fn abs(&self) -> Option<PathBuf> {
         Some(self.root.join(self.path.as_ref()?))
+    }
+
+    /// The final view knows the document's file: it reads the document's
+    /// relative images from its folder.
+    fn follow_folder(&self, cx: &mut Cx) {
+        let abs = self.abs();
+        let md = self.md(cx);
+        let Some(mut md) = md.borrow_mut::<MarkdownEditor>() else { return };
+        md.set_file(cx, abs.as_deref());
     }
 
     fn code(&self, cx: &mut Cx) -> WidgetRef {
@@ -988,7 +1033,10 @@ impl FileEditor {
                     let name = self.pdf_write.take().map(|(_, name)| name).unwrap_or_default();
                     match result {
                         // Where it went, the one thing the person needs to know.
-                        Ok(Ok(())) => self.print_note(cx, &format!("PDF: {name}")),
+                        Ok(Ok(())) => {
+                            self.print_note(cx, &format!("PDF: {name}"));
+                            refresh_files(cx);
+                        }
                         Ok(Err(error)) => self.print_note(cx, &format!("PDF not written: {error}")),
                         Err(error) => self.print_note(cx, &format!("PDF not written: {error:?}")),
                     }
@@ -1084,6 +1132,11 @@ impl FileEditor {
         self.view.view(cx, ids!(format_bar)).set_visible(cx, markdown && self.final_view);
         if !self.final_view {
             self.view.view(cx, ids!(link_bar)).set_visible(cx, false);
+            self.view.view(cx, ids!(picture_bar)).set_visible(cx, false);
+            self.view.view(cx, ids!(final_find)).set_visible(cx, false);
+            if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+                md.close_find(cx);
+            }
         }
         for (path, lit) in [(ids!(source_mode), !self.final_view), (ids!(final_mode), self.final_view)] {
             let on = if lit { 1.0 } else { 0.0 };
@@ -1143,6 +1196,94 @@ impl FileEditor {
         } else if input.escaped(actions) || self.view.button(cx, ids!(link_close)).clicked(actions) {
             self.close_link_bar(cx);
         }
+        let alt = self.view.text_input(cx, ids!(picture_alt));
+        let src = self.view.text_input(cx, ids!(picture_src));
+        if alt.returned(actions).is_some() || src.returned(actions).is_some() {
+            let (alt, src) = (alt.text(), src.text());
+            if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+                md.set_picture(cx, &alt, &src);
+            }
+            self.close_picture_bar(cx);
+        } else if alt.escaped(actions) || src.escaped(actions) || self.view.button(cx, ids!(picture_close)).clicked(actions) {
+            self.close_picture_bar(cx);
+        }
+        let query = self.view.text_input(cx, ids!(find_query));
+        let mut step = 0;
+        if let Some(text) = query.changed(actions) {
+            if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+                md.set_find(cx, &text);
+            }
+            self.show_find_count(cx);
+        }
+        if let Some((_, modifiers)) = query.returned(actions) {
+            step = if modifiers.shift { -1 } else { 1 };
+            // A single-line field lets go of the keyboard on Enter; the
+            // next Enter steps again.
+            if let Some(mut input) = query.borrow_mut() {
+                input.take_key_focus(cx);
+            }
+        }
+        if self.view.button(cx, ids!(find_next)).clicked(actions) {
+            step = 1;
+        } else if self.view.button(cx, ids!(find_prev)).clicked(actions) {
+            step = -1;
+        }
+        if step != 0 {
+            if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+                md.find_step(cx, step);
+            }
+            self.show_find_count(cx);
+        }
+        if query.escaped(actions) || self.view.button(cx, ids!(find_close)).clicked(actions) {
+            self.close_final_find(cx);
+        }
+        if let Some(TextInputAction::KeyDownUnhandled(KeyEvent { key_code: KeyCode::KeyF, modifiers, .. })) =
+            actions.filter_widget_actions_cast::<TextInputAction>(query.widget_uid()).last()
+        {
+            if modifiers.is_primary() {
+                if let Some(mut input) = query.borrow_mut() {
+                    input.select_all(cx);
+                }
+            }
+        }
+    }
+
+    /// The final view's find bar: its query the selection (when on one
+    /// line) or the last one, searched at once.
+    fn open_final_find(&mut self, cx: &mut Cx) {
+        self.view.view(cx, ids!(link_bar)).set_visible(cx, false);
+        self.view.view(cx, ids!(picture_bar)).set_visible(cx, false);
+        self.view.view(cx, ids!(final_find)).set_visible(cx, true);
+        let input = self.view.text_input(cx, ids!(find_query));
+        if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+            let query = md.find_seed().unwrap_or_else(|| input.text());
+            input.set_text(cx, &query);
+            md.set_find(cx, &query);
+        }
+        self.show_find_count(cx);
+        self.emit_caret(cx);
+        self.find_focus_pending = true;
+        self.focus_pending = false;
+        self.view.redraw(cx);
+    }
+
+    fn close_final_find(&mut self, cx: &mut Cx) {
+        self.view.view(cx, ids!(final_find)).set_visible(cx, false);
+        if let Some(mut md) = self.md(cx).borrow_mut::<MarkdownEditor>() {
+            md.close_find(cx);
+        }
+        self.focus(cx);
+    }
+
+    /// "3 of 12" (or "No results") beside the query.
+    fn show_find_count(&mut self, cx: &mut Cx) {
+        let count = self.md(cx).borrow::<MarkdownEditor>().and_then(|md| md.find_count());
+        let text = match count {
+            Some((Some(current), total)) => format!("{} of {total}", current + 1),
+            Some((None, _)) => "No results".to_string(),
+            None => String::new(),
+        };
+        self.view.widget(cx, ids!(find_count)).set_text(cx, &text);
     }
 
     fn apply_format(&mut self, cx: &mut Cx, format: Format) {
@@ -1168,6 +1309,8 @@ impl FileEditor {
     /// The link bar, its field holding `url` (all of it selected once the
     /// bar is drawn and the field takes the keyboard).
     fn open_link_bar(&mut self, cx: &mut Cx, url: Option<String>) {
+        self.close_final_find(cx);
+        self.view.view(cx, ids!(picture_bar)).set_visible(cx, false);
         self.view.view(cx, ids!(link_bar)).set_visible(cx, true);
         self.view.text_input(cx, ids!(link_url)).set_text(cx, url.as_deref().unwrap_or(""));
         self.link_focus_pending = true;
@@ -1177,6 +1320,24 @@ impl FileEditor {
 
     fn close_link_bar(&mut self, cx: &mut Cx) {
         self.view.view(cx, ids!(link_bar)).set_visible(cx, false);
+        self.focus(cx);
+    }
+
+    /// The picture bar, holding the picture's description and file (the
+    /// description selected once the bar is drawn and takes the keyboard).
+    fn open_picture_bar(&mut self, cx: &mut Cx, alt: &str, src: &str) {
+        self.close_final_find(cx);
+        self.view.view(cx, ids!(link_bar)).set_visible(cx, false);
+        self.view.view(cx, ids!(picture_bar)).set_visible(cx, true);
+        self.view.text_input(cx, ids!(picture_alt)).set_text(cx, alt);
+        self.view.text_input(cx, ids!(picture_src)).set_text(cx, src);
+        self.picture_focus_pending = true;
+        self.focus_pending = false;
+        self.view.redraw(cx);
+    }
+
+    fn close_picture_bar(&mut self, cx: &mut Cx) {
+        self.view.view(cx, ids!(picture_bar)).set_visible(cx, false);
         self.focus(cx);
     }
 
@@ -1584,7 +1745,8 @@ impl FileEditor {
     /// Files dropped on the editor: their paths are typed at the caret (a
     /// path with spaces in double quotes), as the terminal does.
     fn drop_paths(&mut self, cx: &mut Cx, scope: &mut Scope, drop: &DropEvent) {
-        if !self.ready || *drop.handled.lock().unwrap_or_else(|e| e.into_inner()) {
+        // The final view takes its own drops (pictures, with a ghost).
+        if !self.ready || self.final_view || *drop.handled.lock().unwrap_or_else(|e| e.into_inner()) {
             return;
         }
         let code = self.code(cx);
@@ -1619,6 +1781,14 @@ fn drop_text(items: &[DragItem]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Code wrote a file (a picture brought into a document, an exported PDF):
+/// the file tree lists the folder again, as it watches nothing itself.
+fn refresh_files(cx: &mut Cx) {
+    if let Some(ws) = Workspace::of(cx) {
+        ws.index.refresh();
+    }
 }
 
 impl Widget for FileEditor {
@@ -1694,7 +1864,10 @@ impl Widget for FileEditor {
                     light = true;
                 }
                 MarkdownEditorAction::EditLink(url) => self.open_link_bar(cx, url),
+                MarkdownEditorAction::EditPicture { alt, src } => self.open_picture_bar(cx, &alt, &src),
                 MarkdownEditorAction::OpenLink(url) => self.follow_link(cx, &url),
+                MarkdownEditorAction::Problem(problem) => self.print_note(cx, &problem),
+                MarkdownEditorAction::WroteFile(_) => refresh_files(cx),
                 MarkdownEditorAction::UnhandledKey(KeyEvent { key_code: KeyCode::KeyS, modifiers, .. })
                     if modifiers.is_primary() && !modifiers.shift && !modifiers.alt =>
                 {
@@ -1710,8 +1883,16 @@ impl Widget for FileEditor {
                 {
                     print = Some(true);
                 }
+                MarkdownEditorAction::UnhandledKey(KeyEvent { key_code: KeyCode::KeyF, modifiers, .. })
+                    if modifiers.is_primary() && !modifiers.shift && !modifiers.alt =>
+                {
+                    self.open_final_find(cx);
+                }
                 _ => {}
             }
+        }
+        if md_changed && self.view.view(cx, ids!(final_find)).visible() {
+            self.show_find_count(cx);
         }
         if self.view.button(cx, ids!(print_key)).clicked(&actions) {
             print = Some(true);
@@ -1771,12 +1952,18 @@ impl Widget for FileEditor {
         // After an edit the caret's row parses again in the draw: the keys
         // follow it from there.
         self.light_format_keys(cx);
-        if std::mem::take(&mut self.link_focus_pending) {
-            let input = self.view.text_input(cx, ids!(link_url));
-            input.set_key_focus(cx);
-            if let Some(mut field) = input.borrow_mut() {
-                field.select_all(cx);
-            };
+        for (pending, field) in [
+            (std::mem::take(&mut self.link_focus_pending), ids!(link_url)),
+            (std::mem::take(&mut self.picture_focus_pending), ids!(picture_alt)),
+            (std::mem::take(&mut self.find_focus_pending), ids!(find_query)),
+        ] {
+            if pending {
+                let input = self.view.text_input(cx, field);
+                input.set_key_focus(cx);
+                if let Some(mut field) = input.borrow_mut() {
+                    field.select_all(cx);
+                };
+            }
         }
         if self.focus_pending && self.ready {
             self.focus_pending = false;

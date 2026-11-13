@@ -85,7 +85,7 @@ pub struct App {
 
 /// A hidden instance (tests, headless runs) makes no sound.
 fn muted() -> bool {
-    std::env::var_os("SANDBOX_MUTE").is_some_and(|v| v != "0")
+    std::env::var_os("MAKEPAD_MUTE").is_some_and(|v| v != "0")
 }
 
 impl MatchEvent for App {

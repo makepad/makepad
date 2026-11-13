@@ -158,14 +158,14 @@ fn reach() -> &'static Mutex<Reach> {
 }
 
 /// The hub of the remote registry: started from the `makepad` next to this program (or
-/// `MAKEPAD_RUN_BIN`) when none runs.
+/// `RELAX_BIN`) when none runs.
 fn hub() -> Result<Client, String> {
     if let Some(c) = reach().lock().unwrap().hub.clone() {
         return Ok(c);
     }
     #[cfg(unix)]
     {
-        let relax = std::env::var_os("MAKEPAD_RUN_BIN").map(std::path::PathBuf::from).or_else(|| {
+        let relax = std::env::var_os("RELAX_BIN").map(std::path::PathBuf::from).or_else(|| {
             let exe = std::env::current_exe().ok()?;
             let sibling = exe.parent()?.join("makepad");
             sibling.exists().then_some(sibling)

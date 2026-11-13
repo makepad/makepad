@@ -271,8 +271,8 @@ fn header(t: &str) -> Option<(Level, String)> {
 /// `src/main.rs:10:9` as (path, line, col); the path may hold colons.
 /// A `makepad run`'s output read line by line for the errors of its code:
 /// what the editor marks inline. Three shapes carry a place:
-/// - an edit refused with errors: `makepad live: <files>: NOT applied (errors
-///   below); ...` then `makepad live:   <path>:<line>:<col>: <message>` lines;
+/// - an edit refused with errors: `relax live: <files>: NOT applied (errors
+///   below); ...` then `relax live:   <path>:<line>:<col>: <message>` lines;
 /// - a compile error at start or after a relaunch: `... compile error in
 ///   <fn>: <path>:<line>:<col>: <code>: <message>`;
 /// - a refused live edit's borrow check: `borrow check failed: <fn> at
@@ -306,15 +306,15 @@ impl LiveParser {
                 None => false,
             };
         }
-        // the app domain failed to load (a relaunch): `makepad-run domain: <app>: <place>: <message>`
-        if let Some(rest) = t.strip_prefix("makepad-run domain: ") {
+        // the app domain failed to load (a relaunch): `relax domain: <app>: <place>: <message>`
+        if let Some(rest) = t.strip_prefix("relax domain: ") {
             let Some((_, place)) = rest.split_once(": ") else { return false };
             return match self.located(Level::Error, place, "") {
                 Some(d) => self.push(d),
                 None => false,
             };
         }
-        if let Some(rest) = t.strip_prefix("makepad live:") {
+        if let Some(rest) = t.strip_prefix("relax live:") {
             if let Some(item) = rest.strip_prefix("   ") {
                 if !self.errors_below {
                     return false;
@@ -2050,37 +2050,37 @@ warning: unused variable: `x`
         let mut p = LiveParser::new(Path::new("/ws"));
         let feed = |p: &mut LiveParser, lines: &[&str]| for l in lines { p.feed(l); };
         feed(&mut p, &[
-            "makepad live: main.rs: NOT applied (errors below); the app runs the previous code",
-            "makepad live:   /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types: expected `u32`, found `&str`",
+            "relax live: main.rs: NOT applied (errors below); the app runs the previous code",
+            "relax live:   /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types: expected `u32`, found `&str`",
         ]);
         assert_eq!(p.diags, [Diagnostic { level: Level::Error, message: "E0308: mismatched types: expected `u32`, found `&str`".into(), path: Some("examples/counter/src/main.rs".into()), line: 51, col: 24 }]);
         // fixed: the patch clears them
-        feed(&mut p, &["makepad live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
+        feed(&mut p, &["relax live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
         assert!(p.diags.is_empty());
         // a restart's reasons are not errors
         feed(&mut p, &[
-            "makepad live: main.rs: relaunching the app domain (window kept)",
-            "makepad live:   /ws/examples/counter/src/main.rs:1:1: impl `` removed -- removing this kind of item is not applied live yet: restart the app",
+            "relax live: main.rs: relaunching the app domain (window kept)",
+            "relax live:   /ws/examples/counter/src/main.rs:1:1: impl `` removed -- removing this kind of item is not applied live yet: restart the app",
         ]);
         assert!(p.diags.is_empty());
         // the borrow checker's refusal: compiler-style, the place on the `-->` line
         feed(&mut p, &[
             "borrow check failed: app::App::tick at /ws/examples/counter/src/main.rs:51:42: cannot borrow `v` as mutable (live edit refused)",
-            "makepad live: /ws/examples/counter/src/main.rs: NOT applied (errors below); the app runs the previous code",
-            "makepad live:   refused by the borrow checker (1 error(s))",
-            "makepad live:   error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable",
+            "relax live: /ws/examples/counter/src/main.rs: NOT applied (errors below); the app runs the previous code",
+            "relax live:   refused by the borrow checker (1 error(s))",
+            "relax live:   error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable",
             "  --> /ws/examples/counter/src/main.rs:51:42",
             "   |",
         ]);
         assert_eq!(p.diags.iter().map(|d| (d.line, d.col, d.message.as_str())).collect::<Vec<_>>(), [(51, 42, "cannot borrow `v` as mutable because it is also borrowed as immutable [E0502]")]);
         // a domain that failed to load
-        feed(&mut p, &["makepad live: main.rs: relaunching the app domain (window kept)"]);
-        feed(&mut p, &["makepad-run domain: makepad-example-counter: /ws/examples/counter/src/main.rs:51:5: expected item (found KwLet `let`)"]);
+        feed(&mut p, &["relax live: main.rs: relaunching the app domain (window kept)"]);
+        feed(&mut p, &["relax domain: makepad-example-counter: /ws/examples/counter/src/main.rs:51:5: expected item (found KwLet `let`)"]);
         assert_eq!(p.diags.iter().map(|d| (d.line, d.col, d.message.as_str())).collect::<Vec<_>>(), [(51, 5, "expected item (found KwLet `let`)")]);
-        feed(&mut p, &["makepad live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
+        feed(&mut p, &["relax live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
         // a compile error at start or after a relaunch, and a refused borrow check
         feed(&mut p, &[
-            "makepad-run: [t=170471 ms] compile error in makepad_example_counter::::handle_actions: /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types",
+            "relax: [t=170471 ms] compile error in makepad_example_counter::::handle_actions: /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types",
             "borrow check failed: app::App::tick at /ws/apps/x/src/app.rs:7:13: cannot borrow `v` as mutable more than once at a time (live edit refused)",
         ]);
         let places: Vec<_> = p.diags.iter().map(|d| (d.path.clone().unwrap(), d.line, d.col, d.message.clone())).collect();

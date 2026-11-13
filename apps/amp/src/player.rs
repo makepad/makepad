@@ -77,7 +77,7 @@ pub struct Shared {
     /// The `seq` of the play the base belongs to.
     base_seq: AtomicU64,
     /// Sound is processed (the visualizer sees it) but not played: test
-    /// runs set `MUSIC_MUTE` so they never sound on the machine's speakers.
+    /// runs set `MAKEPAD_MUTE` so they never sound on the machine's speakers.
     muted: bool,
 }
 
@@ -95,7 +95,7 @@ impl Shared {
             base_frame: AtomicU64::new(0),
             base_ms: AtomicU64::new(0),
             base_seq: AtomicU64::new(0),
-            muted: std::env::var_os("MUSIC_MUTE").is_some(),
+            muted: std::env::var_os("MAKEPAD_MUTE").is_some(),
         })
     }
 

@@ -10,7 +10,7 @@ ci.step("check other platforms", fn(){
     ci.check_targets({packages: ["makepad-app-amp"] targets: ci.host.targets})
 })
 
-let app = ci.launch({package: "makepad-app-amp" binary: "makepad-app-amp" cwd: "." app_env: {MUSIC_MUTE: "1"}})
+let app = ci.launch({package: "makepad-app-amp" binary: "makepad-app-amp" cwd: "." app_env: {MAKEPAD_MUTE: "1"}})
 
 ci.step("comes up", fn(){
     ci.sleep(3.0)
