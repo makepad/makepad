@@ -2270,6 +2270,137 @@ fn _mm_store_si128() {
     }
 }
 
+// Explicit-length string compares. Lengths cover negative, in-range and saturating values, and
+// odd cases draw both strings from four byte values (two of them negative as signed bytes), so
+// that elements do match and the signed and unsigned range orders differ.
+unsafe fn cmpestr_args(rng: &mut Rng, case: usize) -> (hr::__m128i, i32, hr::__m128i, i32) {
+    let mut a: [u8; 16] = sample(rng, case, 0);
+    let la: i32 = sample(rng, case, 1);
+    let mut b: [u8; 16] = sample(rng, case, 2);
+    let lb: i32 = sample(rng, case, 3);
+    if case % 2 == 1 {
+        for x in a.iter_mut().chain(b.iter_mut()) {
+            *x &= 0x81;
+        }
+    }
+    let (la, lb) = if case % 8 == 0 { (la, lb) } else { (la % 20, lb % 20) };
+    (cast(a), la, cast(b), lb)
+}
+
+const CMPESTR_LENGTHS: [(i32, i32); 8] = [
+    (0, 0),
+    (16, 16),
+    (8, 8),
+    (-16, 5),
+    (3, -9),
+    (17, -17),
+    (i32::MIN, i32::MAX),
+    (i32::MAX, i32::MIN),
+];
+
+#[test]
+fn _mm_cmpestri() {
+    unsafe fn compare<const N: i32>(
+        (a, la, b, lb, case): (hr::__m128i, i32, hr::__m128i, i32, usize),
+    ) {
+        let got = hr::_mm_cmpestri::<N>(a, la, b, lb);
+        let expected = real::_mm_cmpestri::<N>(cast(a), la, cast(b), lb);
+        assert_eq!(got, expected, "case {case}, lengths {la} {lb}, immediate {N}");
+    }
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        intel::_mm_cmpestri();
+        if !std::is_x86_feature_detected!("sse4.2") {
+            eprintln!("_mm_cmpestri: sse4.2 unavailable; 3 Intel fixtures passed");
+            return;
+        }
+        for case in 0..RANDOM_CASES + 17 {
+            let (a, la, b, lb) = cmpestr_args(&mut rng, case);
+            let lengths = if case < 64 { &CMPESTR_LENGTHS[..] } else { &[] };
+            for &(la, lb) in lengths.iter().chain(&[(la, lb)]) {
+                immediate_cases!(
+                    compare,
+                    (a, la, b, lb, case),
+                    [
+                    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+                    60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78,
+                    79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
+                    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
+                    114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 140,
+                    255
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn _mm_cmpestrm() {
+    unsafe fn compare<const N: i32>(
+        (a, la, b, lb, case): (hr::__m128i, i32, hr::__m128i, i32, usize),
+    ) {
+        let got = hr::_mm_cmpestrm::<N>(a, la, b, lb);
+        let expected = real::_mm_cmpestrm::<N>(cast(a), la, cast(b), lb);
+        assert_eq!(
+            bytes(&got),
+            bytes(&expected),
+            "case {case}, lengths {la} {lb}, immediate {N}"
+        );
+    }
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        intel::_mm_cmpestrm();
+        if !std::is_x86_feature_detected!("sse4.2") {
+            eprintln!("_mm_cmpestrm: sse4.2 unavailable; 3 Intel fixtures passed");
+            return;
+        }
+        for case in 0..RANDOM_CASES + 17 {
+            let (a, la, b, lb) = cmpestr_args(&mut rng, case);
+            let lengths = if case < 64 { &CMPESTR_LENGTHS[..] } else { &[] };
+            for &(la, lb) in lengths.iter().chain(&[(la, lb)]) {
+                immediate_cases!(
+                    compare,
+                    (a, la, b, lb, case),
+                    [
+                    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                    22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+                    41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+                    60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78,
+                    79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
+                    98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113,
+                    114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 140,
+                    255
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn _mm_extract_epi16() {
+    unsafe fn compare<const N: i32>((p0, case): (hr::__m128i, usize)) {
+        let got = hr::_mm_extract_epi16::<N>(p0);
+        let expected = real::_mm_extract_epi16::<N>(cast(p0));
+        assert_eq!(bytes(&got), bytes(&expected), "case {case}, immediate {N}");
+    }
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    unsafe {
+        intel::_mm_extract_epi16();
+        if !std::is_x86_feature_detected!("sse2") {
+            eprintln!("_mm_extract_epi16: sse2 unavailable; 3 Intel fixtures passed");
+            return;
+        }
+        for case in 0..RANDOM_CASES + 17 {
+            let p0: hr::__m128i = sample(&mut rng, case, 0);
+            immediate_cases!(compare, (p0, case), [0, 1, 2, 3, 4, 5, 6, 7]);
+        }
+    }
+}
+
 #[allow(dead_code)]
 mod sha256_oracle {
     include!("common/sha256_oracle.rs");

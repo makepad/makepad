@@ -4516,3 +4516,88 @@ pub fn _mm_store_si128() {
         }
     }
 }
+
+fn m128(b: &[u8; 16]) -> hr::__m128i {
+    unsafe { std::ptr::read_unaligned(b.as_ptr().cast()) }
+}
+
+pub fn _mm_cmpestri() {
+    unsafe {
+        {
+            // equal any: neither string has a valid element, so no bit is set
+            let z = m128(&[0; 16]);
+            let got = hr::_mm_cmpestri::<0>(z, 0, z, 0);
+            assert_eq!(got, 16, "Intel fixture 0");
+        }
+        {
+            // equal any: bytes 2 and 5 of "ab<cd&ef" are in the set "<&"
+            let set = m128(b"<&\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+            let hay = m128(b"ab<cd&ef\0\0\0\0\0\0\0\0");
+            let got = hr::_mm_cmpestri::<0>(set, 2, hay, 8);
+            assert_eq!(got, 2, "Intel fixture 1");
+            let got = hr::_mm_cmpestri::<0x40>(set, 2, hay, 8);
+            assert_eq!(got, 5, "Intel fixture 1, most significant");
+        }
+        {
+            // equal ordered: "cd" starts at 3 and 6, and its first byte ends the block at 15
+            let needle = m128(b"cd\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+            let hay = m128(b"abccdxcdxxxxxxxc");
+            let got = hr::_mm_cmpestri::<0x0c>(needle, 2, hay, 16);
+            assert_eq!(got, 3, "Intel fixture 2");
+            let got = hr::_mm_cmpestri::<0x4c>(needle, 2, hay, 16);
+            assert_eq!(got, 15, "Intel fixture 2, most significant");
+        }
+    }
+}
+
+pub fn _mm_cmpestrm() {
+    unsafe {
+        {
+            let z = m128(&[0; 16]);
+            let got = hr::_mm_cmpestrm::<0>(z, 0, z, 0);
+            assert_eq!(bytes(&got), &[0; 16], "Intel fixture 0");
+        }
+        {
+            // equal any, bit mask: bytes 2 and 5 of "ab<cd&ef" are in the set "<&"
+            let set = m128(b"<&\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+            let hay = m128(b"ab<cd&ef\0\0\0\0\0\0\0\0");
+            let got = hr::_mm_cmpestrm::<0>(set, 2, hay, 8);
+            assert_eq!(
+                bytes(&got),
+                &[0b10_0100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "Intel fixture 1"
+            );
+        }
+        {
+            // ranges, masked negative, unit mask: of the four valid bytes "aB3d", the two
+            // outside 'a'..='z' are set
+            let range = m128(b"az\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+            let hay = m128(b"aB3d\0\0\0\0\0\0\0\0\0\0\0\0");
+            let got = hr::_mm_cmpestrm::<0x74>(range, 2, hay, 4);
+            assert_eq!(
+                bytes(&got),
+                &[0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "Intel fixture 2"
+            );
+        }
+    }
+}
+
+pub fn _mm_extract_epi16() {
+    unsafe {
+        let v = m128(&[1, 0, 0, 128, 3, 0, 4, 0, 5, 0, 6, 0, 7, 0, 255, 255]);
+        {
+            let got = hr::_mm_extract_epi16::<0>(m128(&[0; 16]));
+            assert_eq!(got, 0, "Intel fixture 0");
+        }
+        {
+            // the word is zero-extended
+            let got = hr::_mm_extract_epi16::<1>(v);
+            assert_eq!(got, 0x8000, "Intel fixture 1");
+        }
+        {
+            let got = hr::_mm_extract_epi16::<7>(v);
+            assert_eq!(got, 0xffff, "Intel fixture 2");
+        }
+    }
+}
