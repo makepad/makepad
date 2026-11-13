@@ -8,7 +8,6 @@ categories = ["gui"]
 description = "Exposes access to Makepad's context states on Android"
 license = "MIT"
 readme = "README.md"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "Xn0xvOdZChZbltM8tMBk0zLdOBc="
 

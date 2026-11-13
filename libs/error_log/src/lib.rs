@@ -126,6 +126,22 @@ pub fn trace_topics() -> String {
         .clone()
 }
 
+/// Content keys already reported, for [`first_report`].
+static REPORTED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// True the first time `key` is reported in this process. A condition that
+/// repeated work meets again (the same input prepared on every install) logs
+/// once: the caller keys it by its input and logs only when this is true.
+pub fn first_report(key: u64) -> bool {
+    let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
+    if reported.contains(&key) {
+        false
+    } else {
+        reported.push(key);
+        true
+    }
+}
+
 /// An enabled trace span. Dropping it logs elapsed wall-clock time.
 pub struct TraceSpan {
     topic: String,

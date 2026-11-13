@@ -536,7 +536,14 @@ pub fn find_packs_in_objects_dir(objects_dir: &Path) -> Result<Vec<PackIndex>, G
         let entry = entry.map_err(|e| GitError::io_at("list pack directory", &pack_dir, e))?;
         let path = entry.path();
         if path.extension().map(|e| e == "idx").unwrap_or(false) {
-            packs.push(read_pack_index(&path)?);
+            // an index a repack removed after the listing: its objects are in the pack that
+            // replaced it, as git skips such a pack too. Its error failed every read of a
+            // repository listed while another process repacked it (11-13).
+            match read_pack_index(&path) {
+                Ok(pack) => packs.push(pack),
+                Err(GitError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -564,6 +571,13 @@ mod tests {
         let changed = read_pack_index(&path).unwrap();
         assert!(!std::sync::Arc::ptr_eq(&reopened.tables, &changed.tables), "changed size/mtime must invalidate parsed tables");
         assert_eq!(changed.tables.oids.len(), 2);
+        // an index a repack removed between the listing and its open (a dangling link stands in
+        // for it) is skipped, and the others still read
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.path().join("gone"), path.with_file_name("pack-gone.idx")).unwrap();
+            assert_eq!(find_packs(dir.path()).unwrap().len(), 1, "a vanished index is skipped");
+        }
     }
 
     #[test]

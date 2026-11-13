@@ -230,6 +230,92 @@ fn cjk_font_keeps_its_outlines_and_shaping() {
 }
 
 #[test]
+fn static_instances_draw_as_the_loader_does() {
+    let fonts = FONTS.iter().copied().chain([
+        "widgets/resources/IBMPlexSans-SemiBold.ttf",
+        "widgets/resources/IBMPlexSans-Italic.ttf",
+        "widgets/resources/IBMPlexSans-BoldItalic.ttf",
+        "widgets/resources/LiberationMono-Regular.ttf",
+        "widgets/resources/NotoSans-Regular.ttf",
+        CJK_FONT,
+        "widgets/resources/fa-solid-900.ttf",
+    ]);
+    for path in fonts {
+        let original = load(path);
+        let default = face_at(&original, &[]);
+        let mut glyphs: Vec<u16> = if path.ends_with("fa-solid-900.ttf") {
+            // Every other glyph with an outline: the ids between stay unlisted.
+            (0..default.number_of_glyphs()).filter(|&g| outline(&default, g).0.is_some()).step_by(2).take(20).collect()
+        } else {
+            let text = if path.contains("LXGWWenKai") { CJK_SAMPLE } else { SAMPLE };
+            text.chars().filter_map(|c| default.glyph_index(c).map(|g| g.0)).collect()
+        };
+        glyphs.sort_unstable();
+        glyphs.dedup();
+        let count = glyphs.last().copied().unwrap_or_else(|| panic!("{path} at default: no sample glyphs")) + 1;
+        let omitted = (0..count).find(|g| !glyphs.contains(g))
+            .unwrap_or_else(|| panic!("{path} at default: no unlisted glyph below {count}"));
+        let has_width = default.variation_axes().into_iter().any(|a| a.tag == Tag::from_bytes(b"wdth"));
+        let settings: Vec<_> = instances(&default).into_iter().filter(|instance| {
+            instance.is_empty() || if has_width {
+                instance.len() == 2
+            } else {
+                instance.len() == 1 && instance[0].0 == Tag::from_bytes(b"wght")
+            }
+        }).collect();
+        let mut default_outlines: Vec<Recorder> = Vec::new();
+        let mut varied = false;
+        // Exercise duplicate, unsorted input without outlining it twice.
+        let mut requested = glyphs.clone();
+        requested.reverse();
+        requested.push(glyphs[0]);
+        for instance in &settings {
+            let source = face_at(&original, instance);
+            let mut coords: Vec<_> = instance.iter().map(|&(tag, value)| (tag.0, value)).collect();
+            coords.push((u32::from_be_bytes(*b"NONE"), 42.0)); // An absent axis is ignored.
+            let font = static_instance(&original, 0, &coords, &requested)
+                .unwrap_or_else(|err| panic!("{path} at {instance:?}: {err}"));
+            let baked = ttf_parser::Face::parse(&font, 0)
+                .unwrap_or_else(|err| panic!("{path} at {instance:?}: static font parse: {err:?}"));
+            assert_eq!(baked.number_of_glyphs(), count, "{path} glyph {} at {instance:?}: glyph count", count - 1);
+            assert!(!baked.is_variable(), "{path} glyph {} at {instance:?}: static font", count - 1);
+            let mut baked_outlines = Vec::new();
+            for &glyph in &glyphs {
+                let (source_box, source_outline) = outline(&source, glyph);
+                let (baked_box, baked_outline) = outline(&baked, glyph);
+                assert_eq!(source_box.is_some(), baked_box.is_some(), "{path} glyph {glyph} at {instance:?}: outline presence");
+                assert_eq!(source_outline.0.len(), baked_outline.0.len(), "{path} glyph {glyph} at {instance:?}: command count");
+                for (command, ((a_kind, a), (b_kind, b))) in source_outline.0.iter().zip(&baked_outline.0).enumerate() {
+                    assert_eq!(a_kind, b_kind, "{path} glyph {glyph} at {instance:?}: command {command}");
+                    for (&a, &b) in a.iter().zip(b) {
+                        let (a, b) = (f32::from_bits(a), f32::from_bits(b));
+                        assert!((a - b).abs() <= 1.0, "{path} glyph {glyph} at {instance:?}: command {command}, {a} != {b}");
+                    }
+                }
+                assert_eq!(source.glyph_hor_advance(GlyphId(glyph)), baked.glyph_hor_advance(GlyphId(glyph)), "{path} glyph {glyph} at {instance:?}: advance");
+                assert_eq!(baked.glyph_hor_side_bearing(GlyphId(glyph)), Some(baked_box.map_or(0, |b| b.x_min)), "{path} glyph {glyph} at {instance:?}: left bearing");
+                baked_outlines.push(baked_outline);
+            }
+            if instance.is_empty() {
+                default_outlines = baked_outlines;
+            } else {
+                varied |= baked_outlines != default_outlines;
+            }
+            assert!(outline(&baked, omitted).0.is_none(), "{path} glyph {omitted} at {instance:?}: unlisted outline");
+            assert_eq!(baked.glyph_hor_advance(GlyphId(omitted)), Some(0), "{path} glyph {omitted} at {instance:?}: unlisted advance");
+            let tables = Tables::read(&font).unwrap();
+            assert_eq!(tables.tables.len(), 6, "{path} glyph {} at {instance:?}: PDF program tables", count - 1);
+            eprintln!("{path} at {instance:?}: static {} bytes, {} kept glyphs, {count} glyph ids", font.len(), glyphs.len());
+        }
+        assert_eq!(varied, default.is_variable(), "{path} glyphs {glyphs:?} at {settings:?}: non-default instances change an outline");
+        let past_end = default.number_of_glyphs();
+        assert!(matches!(static_instance(&original, 0, &[], &[past_end]), Err(SubsetError::Malformed(_))), "{path} glyph {past_end} at default: out of range");
+    }
+    let path = "widgets/resources/NewCMMath-Regular.otf";
+    assert!(matches!(static_instance(&load(path), 0, &[], &[0]), Err(SubsetError::Unsupported(message)) if message.contains("Type 3")), "{path} glyph 0 at default: CFF needs Type 3");
+}
+
+#[test]
 fn ligatures_and_features_reach_the_closure() {
     let original = load("widgets/resources/RobotoFlex.ttf");
     let tnum = u32::from_be_bytes(*b"tnum");

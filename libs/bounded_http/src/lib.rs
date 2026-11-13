@@ -7,7 +7,8 @@
 //!   no trailers, bounded hex size lines).
 //! - Budgets everywhere: head bytes, header line bytes, header count, target
 //!   length, query pair count, body bytes, chunk size digits.
-//! - No percent-decoding: a literal `%` in the target is refused, so routes
+//! - The target takes RFC 3986's characters (unreserved, sub-delims, `:`
+//!   `@` `/` `?`), but no percent-decoding: a literal `%` is refused, so routes
 //!   only ever see the byte-for-byte charset below and no decoded alias can
 //!   smuggle separators. Path segments `.` and `..` are refused outright.
 //! - Duplicate tracked headers and duplicate query keys are refused.
@@ -111,6 +112,9 @@ pub struct Head {
     pub origin: Option<String>,
     /// `Content-Type` as sent (bounded); routes decide what they accept.
     pub content_type: Option<String>,
+    /// `Content-Length` as declared, `Some(0)` included; `None` when the
+    /// request sent none (chunked or no body), so a route can require one.
+    pub content_length: Option<u64>,
     /// `Accept` as sent (bounded).
     pub accept: Option<String>,
     /// `MCP-Protocol-Version` as sent (bounded).
@@ -663,6 +667,7 @@ pub fn reason(status: u16) -> &'static str {
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Payload Too Large",
         414 => "URI Too Long",
         416 => "Range Not Satisfiable",
@@ -713,10 +718,15 @@ fn find_terminator(buf: &[u8]) -> Option<usize> {
     buf.windows(4).position(|w| w == b"\r\n\r\n")
 }
 
+/// RFC 3986 `pchar` and `query` characters except `%` (refused before this
+/// check, since targets are never percent-decoded): unreserved, sub-delims,
+/// `:` and `@`, plus `/` and `?`. A comma-separated list value is legal.
 fn target_byte_ok(b: u8) -> bool {
     matches!(b,
         b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
-        | b'-' | b'_' | b'.' | b'/' | b':' | b'?' | b'=' | b'&')
+        | b'-' | b'_' | b'.' | b'~'
+        | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'='
+        | b':' | b'@' | b'/' | b'?')
 }
 
 fn token_byte_ok(b: u8) -> bool {
@@ -909,6 +919,7 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
     };
 
     // ---- body framing ----
+    let mut declared_length = None;
     if content_length.is_some() && transfer_encoding.is_some() {
         return Err((400, "content-length with transfer-encoding"));
     }
@@ -928,6 +939,7 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
             return Err((400, "malformed content-length"));
         }
         let n: u64 = cl.parse().map_err(|_| (400, "malformed content-length"))?;
+        declared_length = Some(n);
         if n == 0 {
             BodyState::None
         } else {
@@ -952,6 +964,7 @@ pub fn parse_head(block: &[u8]) -> Result<Head, (u16, &'static str)> {
         authorization,
         origin,
         content_type,
+        content_length: declared_length,
         accept,
         mcp_protocol_version,
         mcp_session_id,
@@ -1114,6 +1127,13 @@ mod tests {
         assert_eq!(head_of(b"GET /a?x=1&x=2 HTTP/1.1\r\nHost: x\r\n\r\n").unwrap_err().0, 400);
         assert_eq!(head_of(b"GET http://h/a HTTP/1.1\r\nHost: x\r\n\r\n").unwrap_err().0, 400);
         assert_eq!(head_of(b"GET /a b HTTP/1.1\r\nHost: x\r\n\r\n").unwrap_err().0, 400);
+        assert_eq!(head_of(b"GET /a%2Cb HTTP/1.1\r\nHost: x\r\n\r\n").unwrap_err().0, 400, "no percent-decoding");
+        assert_eq!(head_of(b"GET /a\"b HTTP/1.1\r\nHost: x\r\n\r\n").unwrap_err().0, 400, "outside RFC 3986");
+        // RFC 3986 sub-delims and the rest of pchar are legal in path and query.
+        let head = head_of(b"GET /a,b;c@d~e!$'()*+ HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(head.segs, vec!["a,b;c@d~e!$'()*+".to_string()]);
+        let head = head_of(b"GET /a?list=x,y:z/w HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        assert_eq!(head.query_get("list"), Some("x,y:z/w"));
     }
 
     #[test]

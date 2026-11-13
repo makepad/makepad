@@ -1,7 +1,7 @@
 //! What makepad-platform's build script generates, in one place: `platform/build.rs` (cargo) includes
-//! this file with `#[path]`, and `makepad run` (libs/relax/front/src/unitgraph.rs) includes the same file
+//! this file with `#[path]`, and the makepad host (tools/run/src/script_answers.rs) includes the same file
 //! and answers the script natively, without booting a second Relax process for it. Plain std code, no
-//! cargo calls: the two callers cannot drift (a test in relax-front runs the real build.rs against it).
+//! cargo calls: the two callers cannot drift (a test in makepad-run runs the real build.rs against it).
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};

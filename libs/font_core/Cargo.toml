@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Font tables, glyph outlines and glyph rasterisation shared by the text layout (draw) and the HAL's font service"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 # files outside this crate its build reads (makepad-source-slice ships them in a slice or source archive)

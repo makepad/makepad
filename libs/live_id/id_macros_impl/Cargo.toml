@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Expansion logic of makepad-live-id-macros (id!, ids!, live_id!, derive(FromLiveId), ...), as a library"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

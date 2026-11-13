@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use std::{
     collections::HashMap,
@@ -8,7 +8,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     sync::Once,
 };
-use makepad_relax_api::sync::Mutex;
+use relax_api::sync::Mutex;
 
 impl LiveIdInterner {
     pub fn add(&mut self, val: &str) {
@@ -25,7 +25,7 @@ impl LiveIdInterner {
         F: FnOnce(&mut Self) -> R,
     {
         // (the process's table, whichever program's op interns a name)
-        makepad_relax_api::process_heap(|| Self::with_table(f))
+        relax_api::process_heap(|| Self::with_table(f))
     }
 
     fn with_table<F, R>(f: F) -> R
@@ -82,7 +82,7 @@ thread_local! {
 fn known_name<R>(id: LiveId, f: impl FnOnce(&str) -> R) -> Option<R> {
     // (the process's blocks, like the table's: a program's op can fill them on a thread that
     // outlives the program)
-    makepad_relax_api::process_heap(|| {
+    relax_api::process_heap(|| {
         KNOWN_NAMES
             .try_with(|known| {
                 let mut known = known.borrow_mut();
@@ -102,7 +102,7 @@ fn known_name<R>(id: LiveId, f: impl FnOnce(&str) -> R) -> Option<R> {
 /// Notes `name`, read from the table under its lock, as `id`'s for this thread; `replaced` is
 /// the [`NAMES_REPLACED`] count read before the table was: after a replace it is not noted.
 fn remember_name(id: LiveId, name: &str, replaced: u64) {
-    makepad_relax_api::process_heap(|| {
+    relax_api::process_heap(|| {
         let _ = KNOWN_NAMES.try_with(|known| {
             let mut known = known.borrow_mut();
             if known.0 == replaced {

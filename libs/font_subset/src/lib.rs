@@ -14,6 +14,8 @@
 //! when its licence reserves the name ([`reserved_font_names`]). [`stub`]
 //! writes a one-glyph font for a face nothing draws from, and [`verify`]
 //! checks a subset against the original for the text it was made for.
+//! [`static_instance()`] bakes selected outlines and advances at the requested
+//! variation coordinates into a minimal TrueType program for PDF text.
 
 mod closure;
 mod cmap;
@@ -24,12 +26,14 @@ mod layout;
 mod name;
 mod ot_layout;
 mod sfnt;
+mod static_instance;
 mod stub;
 mod var_store;
 
 pub use {
     closure::{closure, gsub_closure, unvaried_axes, verify, ClosureInputs, ShapeRun},
     name::reserved_font_names,
+    static_instance::static_instance,
     stub::stub,
 };
 

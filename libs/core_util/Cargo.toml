@@ -2,10 +2,14 @@
 name = "makepad-core-util"
 version = "0.1.0"
 edition = "2021"
-description = "Small std-only primitives shared across Makepad and the applications built on it: streaming SHA-256 and a reuse-address UDP bind"
+description = "Small std-only primitives shared across Makepad and the applications built on it: streaming SHA-256, a reuse-address UDP bind and how a process ends"
 license = "MIT OR Apache-2.0"
 
 # Zero dependencies, on purpose. The AI hub, the model document, the asset
 # contract and the flow engine all need these few primitives; none of them
 # should link another of them, or a transport crate, to reach one.
 [dependencies]
+
+[lints.rust]
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
