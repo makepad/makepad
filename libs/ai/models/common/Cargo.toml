@@ -18,3 +18,7 @@ makepad-ai-llm = { path = "../../llm" }
 # in build.rs) arrives exactly on the targets that have the dependency.
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 makepad-ai-cuda = { path = "../../cuda" }
+
+[package.metadata.relax]
+# reads the GPU kernel builds' outputs: stays with them
+build-script = "keep"

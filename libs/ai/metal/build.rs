@@ -100,7 +100,7 @@ fn build_metallib() {
         .unwrap_or(precompile_default)
         // Run by Relax (a dev run): no 8-14 s `xcrun metal -O3` per (re)run; the empty metallib
         // makes libs/ggml compile the shader source at first Metal use, as without the feature.
-        && env::var_os("MAKEPAD_RUN_BUILD_SCRIPT").is_none();
+        && env::var_os("RELAX_BUILD_SCRIPT").is_none();
 
     let out_dir = env::var("OUT_DIR").unwrap();
     let _ = fs::create_dir_all(&out_dir);

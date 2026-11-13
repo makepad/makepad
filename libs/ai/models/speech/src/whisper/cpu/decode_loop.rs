@@ -45,6 +45,31 @@ pub struct WhisperParams {
     pub max_tokens: usize,
     pub no_speech_thold: f32,
     pub suppress_blank: bool,
+    /// Asks a running transcription to stop (its job was cancelled, its service is stopping).
+    pub abort: Option<Abort>,
+}
+
+/// A stop a transcription notices promptly: it is asked before each 30 s window, between the
+/// encoder's layers and before each decoded token. A transcription that stops returns the
+/// segments of the windows it finished. On a CPU one window's encoder pass alone ran minutes
+/// (whisper-large-v3-turbo under the JIT), and a hub quitting waited for it.
+#[derive(Clone)]
+pub struct Abort(std::sync::Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl Abort {
+    pub fn new(stop: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Abort(std::sync::Arc::new(stop))
+    }
+
+    pub fn is_set(&self) -> bool {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for Abort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Abort")
+    }
 }
 
 impl Default for WhisperParams {
@@ -59,6 +84,7 @@ impl Default for WhisperParams {
             max_tokens: 0,
             no_speech_thold: 0.6,
             suppress_blank: true,
+            abort: None,
         }
     }
 }
@@ -163,8 +189,9 @@ impl WhisperState {
 
         // Use the original (non-30s-padded) mel length as the decode endpoint.
         let mel_end = n_mel_len_org.min(n_mel_len);
+        let aborted = || params.abort.as_ref().is_some_and(Abort::is_set);
 
-        while seek < mel_end {
+        while seek < mel_end && !aborted() {
             // 2. Extract mel chunk: [n_mels, 2*n_ctx] starting at seek
             let chunk_len = 2 * n_ctx;
             let is_final_chunk = seek + chunk_len >= mel_end;
@@ -181,7 +208,9 @@ impl WhisperState {
 
             // 3. Encode
             let _t = std::time::Instant::now();
-            let encoder_out = encoder::encode(model, &mel_chunk, n_ctx);
+            let Some(encoder_out) = encoder::encode(model, &mel_chunk, n_ctx, &aborted) else {
+                break;
+            };
             crate::whisper::PROF_ENCODER.fetch_add(
                 _t.elapsed().as_nanos() as u64,
                 std::sync::atomic::Ordering::Relaxed,
@@ -294,7 +323,7 @@ impl WhisperState {
             let mut seek_delta: usize = n_ctx * 2; // default: advance full chunk
 
             for _i in 0..max_tokens {
-                if self.kv_cache.n_past >= model.hparams.n_text_ctx as usize {
+                if self.kv_cache.n_past >= model.hparams.n_text_ctx as usize || aborted() {
                     break;
                 }
                 // Get logits for last token
@@ -358,6 +387,10 @@ impl WhisperState {
                 }
 
                 result_tokens.push(token);
+            }
+            // a window the stop cut short is not a segment
+            if aborted() {
+                break;
             }
 
             // Mirror whisper.cpp behavior: if decoding ends with a single trailing timestamp,
@@ -541,7 +574,7 @@ impl WhisperState {
                 mel_chunk[j * chunk_len + i] = mel_data[j * n_mel_len + i];
             }
         }
-        let encoder_out = encoder::encode(model, &mel_chunk, n_ctx);
+        let encoder_out = encoder::encode(model, &mel_chunk, n_ctx, &|| false)?;
         let cross_kv = encoder::compute_cross_kv(model, &encoder_out);
 
         let mut sequence: Vec<i32> = vec![vocab.token_sot];

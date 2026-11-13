@@ -135,7 +135,7 @@ impl ContentBackend for WhisperBackend {
         let segments = match &mut self.recognizer {
             Recognizer::Stub(recognize) => recognize(&job)?,
             #[cfg(feature = "stt")]
-            Recognizer::Whisper(engine) => engine.transcribe(&job)?,
+            Recognizer::Whisper(engine) => engine.transcribe(&job, cancel)?,
         };
         cancel.check()?;
         let text = segments
@@ -237,7 +237,7 @@ impl WhisperBackend {
                 SttMode::Words => {
                     progress("transcribe with word timing", 0.1);
                     let segments = engine
-                        .transcribe_aligned(samples, language)?
+                        .transcribe_aligned(samples, language, cancel)?
                         .into_iter()
                         .map(|segment| AlignedSegmentJson {
                             start_ms: segment.start_ms,
@@ -273,7 +273,7 @@ impl WhisperBackend {
 #[cfg(feature = "stt")]
 mod whisper_engine {
     use super::{TranscribeJob, TranscriptSegmentJson, WordTiming};
-    use crate::backend::BackendCtx;
+    use crate::backend::{BackendCtx, CancelToken};
     use crate::error::AssetAiError;
     use makepad_ai_speech::whisper::{WhisperModel, WhisperParams, WhisperState};
     use std::path::PathBuf;
@@ -285,6 +285,14 @@ mod whisper_engine {
         pub text: String,
         pub words: Vec<WordTiming>,
         pub tokens: Vec<i32>,
+    }
+
+    /// The job's cancel as the transcription's stop: a cancelled job, or a service that stops
+    /// (its jobs are cancelled), ends the transcription between encoder layers or tokens instead
+    /// of after the whole of it (the caller's `cancel.check()` then answers Cancelled).
+    fn abort(cancel: &CancelToken) -> makepad_ai_speech::whisper::Abort {
+        let cancel = cancel.clone();
+        makepad_ai_speech::whisper::Abort::new(move || cancel.is_cancelled())
     }
 
     fn timing(word: makepad_ai_speech::whisper::WordSpan) -> WordTiming {
@@ -350,7 +358,7 @@ mod whisper_engine {
         /// The bake's word-timed transcription: cross-attention DTW over
         /// the alignment heads, greedy, no prompt, the model's own token
         /// limit per window.
-        pub fn transcribe_aligned(&mut self, samples_16k: &[f32], language: &str) -> Result<Vec<AlignedSegment>, AssetAiError> {
+        pub fn transcribe_aligned(&mut self, samples_16k: &[f32], language: &str, cancel: &CancelToken) -> Result<Vec<AlignedSegment>, AssetAiError> {
             let (model, state) = self
                 .loaded
                 .as_mut()
@@ -362,6 +370,7 @@ mod whisper_engine {
             params.temperature = 0.0;
             params.suppress_blank = true;
             params.max_tokens = 0;
+            params.abort = Some(abort(cancel));
             Ok(state
                 .transcribe_aligned(model, samples_16k, &params)
                 .into_iter()
@@ -384,7 +393,7 @@ mod whisper_engine {
             Ok(state.force_align(model, samples_16k, tokens, language).map(|words| words.into_iter().map(timing).collect()))
         }
 
-        pub fn transcribe(&mut self, job: &TranscribeJob) -> Result<Vec<TranscriptSegmentJson>, AssetAiError> {
+        pub fn transcribe(&mut self, job: &TranscribeJob, cancel: &CancelToken) -> Result<Vec<TranscriptSegmentJson>, AssetAiError> {
             let (model, state) = self
                 .loaded
                 .as_mut()
@@ -396,6 +405,7 @@ mod whisper_engine {
             params.single_segment = false;
             params.temperature = 0.0;
             params.suppress_blank = true;
+            params.abort = Some(abort(cancel));
             Ok(state
                 .transcribe(model, job.samples_16k, &params)
                 .into_iter()

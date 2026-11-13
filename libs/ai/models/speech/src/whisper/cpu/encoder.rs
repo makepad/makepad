@@ -129,11 +129,12 @@ fn multi_head_attention(
 
 /// Run the whisper encoder on a mel spectrogram chunk.
 /// mel_data: slice of mel spectrogram for this chunk, shape [n_mels, 2*n_ctx]
-/// Returns encoder output: [n_ctx, n_state]
-pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
+/// Returns encoder output: [n_ctx, n_state]; None when `aborted` asked it to stop (it is asked
+/// between the CPU path's layers).
+pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize, aborted: &dyn Fn() -> bool) -> Option<Tensor> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     if let Some(data) = crate::whisper::accel::try_encode(model, mel_data, n_ctx) {
-        return Tensor { data, shape: vec![n_ctx, model.hparams.n_audio_state as usize] };
+        return Some(Tensor { data, shape: vec![n_ctx, model.hparams.n_audio_state as usize] });
     }
     let n_mels = model.hparams.n_mels as usize;
     let n_state = model.hparams.n_audio_state as usize;
@@ -197,15 +198,18 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
             let dt = t_stack.elapsed().as_nanos() as u64;
             crate::whisper::PROF_ENC_ATTN.fetch_add(dt / 2, std::sync::atomic::Ordering::Relaxed);
             crate::whisper::PROF_ENC_ELEM.fetch_add(dt - dt / 2, std::sync::atomic::Ordering::Relaxed);
-            return Tensor {
+            return Some(Tensor {
                 data: out,
                 shape: cur.shape.clone(),
-            };
+            });
         }
     }
 
-    // Transformer encoder blocks
+    // Transformer encoder blocks; a stop is asked between them (None: stopped)
     for layer in &model.encoder_layers {
+        if aborted() {
+            return None;
+        }
         if crate::whisper::accel::is_requested() {
             let t_layer = std::time::Instant::now();
             if let Some(out) = crate::whisper::accel::try_encoder_layer_f32(
@@ -360,7 +364,7 @@ pub fn encode(model: &WhisperModel, mel_data: &[f32], n_ctx: usize) -> Tensor {
     }
 
     // Final layer norm
-    Tensor::layer_norm_mul_add(&cur, &model.e_ln_w, &model.e_ln_b, EPS)
+    Some(Tensor::layer_norm_mul_add(&cur, &model.e_ln_w, &model.e_ln_b, EPS))
 }
 
 /// Pre-compute cross-attention K and V for all decoder layers.

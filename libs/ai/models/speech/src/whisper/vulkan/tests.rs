@@ -374,7 +374,7 @@ fn fused_encoder_decoder_and_cache_match_cpu() {
         (61, Some(GGML_TYPE_Q5_K)), (71, Some(GGML_TYPE_Q4_K))] {
         let model = model_with_quant(seed, ty);
         let mel = values(8 * 74, seed);
-        let want = cpu(|| encoder::encode(&model, &mel, 37));
+        let want = cpu(|| encoder::encode(&model, &mel, 37, &|| false).unwrap());
         let encoded = try_encode(&model, &mel, 37).unwrap();
         close_stack("complete encoder", &encoded, &want.data, ty.is_some());
         let input = Tensor { data: encoded, shape: vec![37, 128] };

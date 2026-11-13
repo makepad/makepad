@@ -1498,6 +1498,11 @@ mod imp {
 )))]
 #[allow(unused_variables)]
 mod imp {
+    // No bounce calls the CUDA crate here, but the dependency stays: its build script's links
+    // metadata (DEP_MAKEPAD_AI_CUDA_KERNELS) is what tells build.rs whether kernels exist.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    use makepad_ai_cuda as _;
+
     pub(super) fn device_memory() -> Result<(u64, u64), String> {
         Err("no Metal device".to_string())
     }

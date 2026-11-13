@@ -25,3 +25,7 @@ path = "src/bin/swap_bench.rs"
 
 [target.'cfg(windows)'.dependencies]
 makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}
+
+[package.metadata.relax]
+# the GPU kernel build stays until its replacement is decided
+build-script = "keep"

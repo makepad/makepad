@@ -25,3 +25,7 @@ smallvec = { path = "../../smallvec" }
 [[bin]]
 name = "metal-residency-bench"
 path = "src/bin/metal_residency_bench.rs"
+
+[package.metadata.relax]
+# the GPU kernel build stays until its replacement is decided
+build-script = "keep"
