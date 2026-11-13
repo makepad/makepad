@@ -1488,7 +1488,7 @@ impl Names {
     }
     /// `snapshot(ci)` of each of `cis` (crates whose names no other crate of the graph has),
     /// from one pass over each table: a snapshot per crate filtered every table, which made
-    /// the demand record of a 257-crate graph quadratic (Stage: 11.6 s). An entry belongs to
+    /// the demand record of a 257-crate graph quadratic (a large app: 11.6 s). An entry belongs to
     /// the crate its first path segment names (`within`; crate names have no `::`).
     pub fn snapshots(&self, cis: &[usize]) -> Vec<(Vec<u8>, u128)> {
         let slot: HashMap<&str, usize> = cis.iter().enumerate().map(|(k, &ci)| (self.crates[ci].name.as_str(), k)).collect();
@@ -1654,8 +1654,8 @@ impl NamespaceDelta {
 }
 /// A part's closure delta, always as the bytes it is stored as: the recorder encodes it once, a
 /// stored part reads those bytes without decoding them (a decoded delta is one owned spelling per
-/// name, 0.4 GB on a cold Stage), and only a load that applies the delta decodes it. The legacy
-/// size is MAKEPAD_RUN_PROFILE's report, taken from the delta at the record (0 unprofiled or read).
+/// name, 0.4 GB on a large app's cold start), and only a load that applies the delta decodes it. The legacy
+/// size is RELAX_PROFILE's report, taken from the delta at the record (0 unprofiled or read).
 pub(crate) struct ClosureDelta { image: Vec<u8>, legacy: usize }
 impl Codec for ClosureDelta {
     fn put(&self, w: &mut Vec<u8>) {

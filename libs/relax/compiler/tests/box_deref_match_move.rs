@@ -22,7 +22,7 @@ fn twice(q: Box<Box<E>>) -> u32 { match **q { E::A { x, .. } => x.0, E::B(_) => 
 #[test] fn take_unwrap() { reset(); assert_eq!(taken(Some(Box::new(E::A { x: D(1), y: D(2) }))), 3); assert_eq!(drops(), 2); }
 #[test] fn box_box() { reset(); assert_eq!(twice(Box::new(Box::new(E::A { x: D(1), y: D(2) }))), 1); assert_eq!(drops(), 2); }
 
-// the shape that crashed Scope's parser (code_graph TypeRef / Path / PathSegment): a qualified
+// the shape that crashed an app's parser (code_graph TypeRef / Path / PathSegment): a qualified
 // self `<T as Tr>::` taken out of a path and its boxed parts moved into a new value
 struct Segment { generics: Vec<Ty> }
 struct Path { segments: Vec<Segment>, qself: Option<Box<Ty>> }

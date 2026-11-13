@@ -1,6 +1,6 @@
 // Character properties, mappings, escapes, encodings, digits and parsing.
 // Differential file: `| ` lines equal under rustc --test and makepad test.
-// Replaces the former std/check text_char.rs; all scalar values share one exhaustive test.
+// All scalar values share one exhaustive test.
 
 struct D(u64, u32);
 impl D {

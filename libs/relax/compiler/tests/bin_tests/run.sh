@@ -8,16 +8,16 @@
 # `--features broken`: tests/broken.rs does not compile, its error names it, and every other
 # target still passes. Prints "bin_tests: ok" or "bin_tests: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" test bt-app 2>&1)
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" test bt-app 2>&1)
 rc=$?
 echo "$OUT"
 ok=$(echo "$OUT" | grep -c "^test result: ok")
 pass=$(echo "$OUT" | grep -cE "^test (tests::lib_add|tests::bin_greet|runs_the_bin|target_tmpdir|statics_and_environment_start_fresh) \.\.\. ok$")
 plain=$(echo "$OUT" | grep -cxE "nh main|plain main cfg-test")
-doc=$(echo "$OUT" | grep -c "^makepad test: 1 doc test not run")
+doc=$(echo "$OUT" | grep -c "^relax test: 1 doc test not run")
 if [ $rc = 0 ] && [ "$ok" = 5 ] && [ "$pass" = 6 ] && [ "$plain" = 2 ] && [ "$doc" = 1 ]; then echo "bin_tests: ok"; else echo "bin_tests: FAILED (rc $rc, results $ok, passes $pass, plain $plain, doc $doc)"; exit 1; fi
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" test bt-app --features broken 2>&1)
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" test bt-app --features broken 2>&1)
 rc=$?
 echo "$OUT"
 ok=$(echo "$OUT" | grep -c "^test result: ok")

@@ -1,4 +1,4 @@
-// std-os lane: std::sync (differential: os_diff.sh)
+// std-os lane: std::sync (differential: agree.sh)
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Condvar, LazyLock, Mutex, Once, OnceLock, RwLock, TryLockError};

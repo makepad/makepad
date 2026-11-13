@@ -1,4 +1,4 @@
-// std-os lane: core::ffi (CStr, c types) and alloc::ffi::CString (differential: os_diff.sh)
+// std-os lane: core::ffi (CStr, c types) and alloc::ffi::CString (differential: agree.sh)
 extern crate alloc;
 use alloc::ffi::CString;
 use core::ffi::{c_char, CStr};

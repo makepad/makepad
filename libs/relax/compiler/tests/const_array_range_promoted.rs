@@ -1,6 +1,6 @@
 // `CONST[..n]` of a const array borrows the promoted constant (rustc promote_consts: the index's
 // `&CONST` is a borrow of a constant), so the sub-slice is 'static and outlives the fn or closure
-// that took it. Fab's coral rows test (`GAPS[..1].iter()` returned from a flat_map closure) read
+// that took it. An app's coral rows test (`GAPS[..1].iter()` returned from a flat_map closure) read
 // a dead stack copy and faulted in `format!`.
 const PLATES: [(&str, &str); 3] = [("cube", "c-text"), ("bench", "b-text"), ("vase", "v-text")];
 const CUBE_TURNED: &str = "t-text";

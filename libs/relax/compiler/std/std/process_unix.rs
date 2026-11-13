@@ -32,6 +32,8 @@ enum StdioKind {
     Null,
     Piped,
     Fd(OwnedFd),
+    /// this process's own stdout or stderr (real std's StaticFd): the child's stream goes where it goes
+    Static(RawFd),
 }
 
 pub struct Stdio(StdioKind);
@@ -51,6 +53,17 @@ impl Stdio {
 impl From<File> for Stdio {
     fn from(f: File) -> Stdio {
         Stdio(StdioKind::Fd(OwnedFd::from(f)))
+    }
+}
+
+impl From<io::Stdout> for Stdio {
+    fn from(_: io::Stdout) -> Stdio {
+        Stdio(StdioKind::Static(1))
+    }
+}
+impl From<io::Stderr> for Stdio {
+    fn from(_: io::Stderr) -> Stdio {
+        Stdio(StdioKind::Static(2))
     }
 }
 
@@ -207,7 +220,7 @@ impl ExitCode {
 }
 
 /// rustc library/std/src/process.rs: what `fn main` may return.
-#[cfg_attr(not(relax_check), lang = "termination")]
+#[lang = "termination"]
 pub trait Termination {
     fn report(self) -> ExitCode;
 }
@@ -218,17 +231,9 @@ impl Termination for () {
     }
 }
 
-// `!` as a type is unstable under rustc; the shim (check_os) builds without this impl.
-#[cfg(not(relax_shim))]
 impl Termination for ! {
     fn report(self) -> ExitCode {
         self
-    }
-}
-
-impl Termination for core::convert::Infallible {
-    fn report(self) -> ExitCode {
-        match self {}
     }
 }
 
@@ -436,12 +441,18 @@ impl Command {
         if self_exec {
             flags |= 2;
         }
+        // a package binary this run prepared (a test's CARGO_BIN_EXE_<name>): its host builds as
+        // this run did (relax-base progenv.rs, relax issue 168)
+        let program = self.program.as_encoded_bytes();
+        if unsafe { __relax_prepared_bin(program.as_ptr(), program.len()) } != 0 {
+            flags |= 16;
+        }
         match dir {
             ChildDir::Same => {}
             ChildDir::Virtual(workspace, vfs) => {
                 flags |= 4;
-                wire_push(&mut plumbing, b"MAKEPAD_RUN_WORKSPACE", Some(workspace.as_encoded_bytes()));
-                wire_push(&mut plumbing, b"MAKEPAD_RUN_VFS", Some(vfs.as_encoded_bytes()));
+                wire_push(&mut plumbing, b"RELAX_WORKSPACE", Some(workspace.as_encoded_bytes()));
+                wire_push(&mut plumbing, b"RELAX_VFS", Some(vfs.as_encoded_bytes()));
             }
             ChildDir::Real => flags |= 8,
         }
@@ -461,26 +472,22 @@ impl Command {
         Ok(out)
     }
 
-    /// Under `makepad run` the program's executable is Relax itself: spawning it runs this
-    /// program again (Relax's command line up to `--`, then the new arguments). A spawn of the
-    /// loader whose first argument is `run` or `app` is a launcher starting another program
-    /// through it (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`, `... app <id>`: a launch
-    /// record), and one whose first argument is `export` asks the loader for a source tree (the
-    /// runner's Install natively): those run as written.
+    /// Under `makepad run` the program's executable is its own hard link of Relax (Relax
+    /// selfexe.rs, the first word of RELAX_SELF_EXEC): spawning it runs this program again
+    /// (Relax's command line up to `--`, then the new arguments), whatever they are. A spawn of
+    /// the loader by its own name (`$RELAX_LOADER run <package>`, `... test`) is not this path, and
+    /// runs as written.
     fn self_exec_args(&self) -> Option<Vec<OsString>> {
-        let pre = crate::env::host_var_os("MAKEPAD_RUN_SELF_EXEC")?.into_string().ok()?;
-        if self.args.get(1).is_some_and(|a| matches!(a.as_encoded_bytes(), b"run" | b"app" | b"export")) {
-            return None;
-        }
-        // inside a build script (MAKEPAD_RUN_AS_RUSTC): its spawns of this executable are RUSTC
+        let pre = crate::env::host_var_os("RELAX_SELF_EXEC")?.into_string().ok()?;
+        // inside a build script (RELAX_AS_RUSTC): its spawns of this executable are RUSTC
         // questions, answered as written (relax_as_rustc); re-running the script would recurse
-        if crate::env::host_var_os("MAKEPAD_RUN_AS_RUSTC").is_some() {
+        if crate::env::host_var_os("RELAX_AS_RUSTC").is_some() {
             return None;
         }
         let parts: Vec<&str> = pre.split('\u{1f}').collect();
         let exe = crate::path::Path::new(parts[0]);
         let p = crate::fs::canonicalize(crate::path::Path::new(&self.program)).ok()?;
-        // the Relax executable itself runs this program
+        // the program's own executable runs this program
         if p.as_path() != exe {
             return None;
         }
@@ -506,8 +513,8 @@ impl Command {
     }
 
     /// A current folder under Relax's VFS (a git repository run) is no folder the OS knows: the
-    /// child keeps this process's real folder and gets the virtual one as MAKEPAD_RUN_WORKSPACE plus the
-    /// mount table (MAKEPAD_RUN_VFS), which a Relax program's std and Relax itself serve paths from. A
+    /// child keeps this process's real folder and gets the virtual one as RELAX_WORKSPACE plus the
+    /// mount table (RELAX_VFS), which a Relax program's std and Relax itself serve paths from. A
     /// real current folder clears an inherited virtual one.
     fn spawn_with_mode(&mut self, default: Stdio, exec: bool) -> io::Result<Child> {
         // NDK r28 spawn.h: addchdir_np requires API 34; spawning itself requires API 28.
@@ -545,7 +552,7 @@ impl Command {
         }
         // replacing this process with the program again (an exec, not a spawn) continues the
         // live session: the `--silent` Relax added for re-runs (it ends live editing) goes
-        if let Some(v) = self_exec.as_mut().filter(|_| exec && crate::env::host_var_os("MAKEPAD_RUN_SELF_EXEC_SILENT_ADDED").is_some()) {
+        if let Some(v) = self_exec.as_mut().filter(|_| exec && crate::env::host_var_os("RELAX_SELF_EXEC_SILENT_ADDED").is_some()) {
             if v.get(2).is_some_and(|a| a.as_encoded_bytes() == b"--silent") {
                 v.remove(2);
             }
@@ -553,8 +560,8 @@ impl Command {
         // ... and its clocks go on from this process's start (relax base clock.rs EXEC_ORIGIN_ENV)
         let mut host: Vec<(OsString, OsString)> = Vec::new();
         if exec && self_exec.is_some() {
-            if let Some(t0) = crate::env::host_var_os("MAKEPAD_RUN_STARTUP_T0") {
-                host.push((OsString::from("MAKEPAD_RUN_EXEC_ORIGIN_EPOCH"), t0));
+            if let Some(t0) = crate::env::host_var_os("RELAX_STARTUP_T0") {
+                host.push((OsString::from("RELAX_EXEC_ORIGIN_EPOCH"), t0));
             }
         }
         let prog = match &self_exec {
@@ -730,14 +737,16 @@ impl Command {
         // (POSIX: only async-signal-safe work between fork and exec). The loader builds the
         // child's half and the closures, with what they call, now; its fork marks the child
         // (a stub reached there anyway ends it with the function's name, never a hang).
-        // Under rustc (std/check_os) there is no loader: plain fork.
         // A child that reached code built only now (a vtable's fn) ended before its exec, with
         // none of its effects left: the loader built that code, and the fork goes again.
         let loader = ForkLoader::get();
         if let Some(pre) = loader.precompile {
-            pre(Self::fork_child_half as usize);
+            // each root bounded on its own (the loader's FORK_PRECOMPILE_MAX)
+            let half = Self::fork_child_half as usize;
+            pre(&half, 1, false);
             for p in &self.closures {
-                pre(p.run as usize);
+                let run = p.run as usize;
+                pre(&run, 1, false);
             }
         }
         let mut again = 0;
@@ -856,11 +865,11 @@ pub(crate) unsafe fn run_pre_exec<F: FnMut() -> io::Result<()>>(f: *mut u8) -> i
     (*(f as *mut F))()
 }
 
-/// The loader's fork-for-exec entry points (jit.rs / forkexec.rs, found through dlsym: none
-/// when std runs without Relax, e.g. under rustc in std/check_os).
+/// The loader's fork-for-exec entry points (jit.rs / forkexec.rs), found through dlsym.
+/// When the symbols are unavailable, spawning uses plain fork.
 #[cfg(not(target_os = "android"))]
 struct ForkLoader {
-    precompile: Option<extern "C" fn(usize) -> u64>,
+    precompile: Option<unsafe extern "C" fn(*const usize, usize, bool) -> u64>,
     fork_exec: Option<extern "C" fn() -> sys::pid_t>,
     fork_exec_done: Option<extern "C" fn(sys::pid_t) -> u32>,
 }
@@ -884,7 +893,7 @@ impl ForkLoader {
         unsafe {
             let (p, f, d) = (sym(c"__relax_precompile"), sym(c"__relax_fork_exec"), sym(c"__relax_fork_exec_done"));
             ForkLoader {
-                precompile: (p != 0).then(|| core::mem::transmute::<usize, extern "C" fn(usize) -> u64>(p)),
+                precompile: (p != 0).then(|| core::mem::transmute::<usize, unsafe extern "C" fn(*const usize, usize, bool) -> u64>(p)),
                 fork_exec: (f != 0).then(|| core::mem::transmute::<usize, extern "C" fn() -> sys::pid_t>(f)),
                 fork_exec_done: (d != 0).then(|| core::mem::transmute::<usize, extern "C" fn(sys::pid_t) -> u32>(d)),
             }
@@ -949,6 +958,8 @@ fn wire_push(out: &mut Vec<u8>, k: &[u8], v: Option<&[u8]>) {
 
 extern "C" {
     fn __relax_spawn_env(edits: *const u8, edits_len: usize, host: *const u8, host_len: usize, flags: u32, out: *mut *const u8, out_len: *mut usize);
+    /// relax-base progenv.rs prepared_bin: 1 for a package binary this run prepared
+    fn __relax_prepared_bin(path: *const u8, len: usize) -> i32;
 }
 
 /// Iterator over a Command's arguments (Command::get_args).
@@ -1037,6 +1048,8 @@ fn setup_stdio(cfg: Option<Stdio>, default_piped: bool, readable_by_child: bool)
     match kind {
         StdioKind::Inherit => Ok((None, None)),
         StdioKind::Fd(fd) => Ok((Some(fd), None)),
+        // (a copy of the descriptor as it is at the spawn; the child's slot gets it)
+        StdioKind::Static(fd) => Ok((Some(unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?), None)),
         StdioKind::Null => {
             let mut opts = crate::fs::OpenOptions::new();
             opts.read(readable_by_child).write(!readable_by_child);

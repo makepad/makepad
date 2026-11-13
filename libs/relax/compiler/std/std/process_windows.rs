@@ -119,6 +119,8 @@ extern "C" {
     /// again.
     fn __relax_self_spawn();
     fn __relax_spawn_env(edits: *const u8, edits_len: usize, host: *const u8, host_len: usize, flags: u32, out: *mut *const u8, out_len: *mut usize);
+    /// relax-base progenv.rs prepared_bin: 1 for a package binary this run prepared
+    fn __relax_prepared_bin(path: *const u8, len: usize) -> i32;
 }
 
 pub fn exit(code: i32) -> ! {
@@ -140,6 +142,8 @@ enum StdioKind {
     Null,
     Piped,
     Handle(OwnedHandle),
+    /// this process's own stdout or stderr (real std's InheritSpecific): its STD_*_HANDLE id
+    InheritSpecific(u32),
 }
 
 pub struct Stdio(StdioKind);
@@ -159,6 +163,17 @@ impl Stdio {
 impl From<File> for Stdio {
     fn from(f: File) -> Stdio {
         Stdio(StdioKind::Handle(OwnedHandle::from(f)))
+    }
+}
+
+impl From<io::Stdout> for Stdio {
+    fn from(_: io::Stdout) -> Stdio {
+        Stdio(StdioKind::InheritSpecific(win::STD_OUTPUT_HANDLE))
+    }
+}
+impl From<io::Stderr> for Stdio {
+    fn from(_: io::Stderr) -> Stdio {
+        Stdio(StdioKind::InheritSpecific(win::STD_ERROR_HANDLE))
     }
 }
 
@@ -280,7 +295,7 @@ impl ExitCode {
 }
 
 /// rustc library/std/src/process.rs: what `fn main` may return.
-#[cfg_attr(not(relax_check), lang = "termination")]
+#[lang = "termination"]
 pub trait Termination {
     fn report(self) -> ExitCode;
 }
@@ -291,17 +306,9 @@ impl Termination for () {
     }
 }
 
-// `!` as a type is unstable under rustc; the shim (check_os) builds without this impl.
-#[cfg(not(relax_shim))]
 impl Termination for ! {
     fn report(self) -> ExitCode {
         self
-    }
-}
-
-impl Termination for core::convert::Infallible {
-    fn report(self) -> ExitCode {
-        match self {}
     }
 }
 
@@ -520,12 +527,18 @@ impl Command {
         if self_exec {
             flags |= 2;
         }
+        // a package binary this run prepared (a test's CARGO_BIN_EXE_<name>): its host builds as
+        // this run did (relax-base progenv.rs, relax issue 168)
+        let program = self.program.as_encoded_bytes();
+        if unsafe { __relax_prepared_bin(program.as_ptr(), program.len()) } != 0 {
+            flags |= 16;
+        }
         match dir {
             ChildDir::Same => {}
             ChildDir::Virtual(workspace, vfs) => {
                 flags |= 4;
-                wire_push(&mut plumbing, b"MAKEPAD_RUN_WORKSPACE", Some(workspace.as_encoded_bytes()));
-                wire_push(&mut plumbing, b"MAKEPAD_RUN_VFS", Some(vfs.as_encoded_bytes()));
+                wire_push(&mut plumbing, b"RELAX_WORKSPACE", Some(workspace.as_encoded_bytes()));
+                wire_push(&mut plumbing, b"RELAX_VFS", Some(vfs.as_encoded_bytes()));
             }
             ChildDir::Real => flags |= 8,
         }
@@ -554,30 +567,27 @@ impl Command {
         make_envp(map)
     }
 
-    /// Under `makepad run` the program's executable is Relax itself: spawning it runs this
-    /// program again (Relax's command line up to `--`, then the new arguments). A spawn of the
-    /// loader whose first argument is `run` or `app` is a launcher starting another program through
-    /// it (`$MAKEPAD_RUN_LOADER run [flags] <package> ...`, `... app <id>`), and one whose first argument is
-    /// `export` asks the loader for a source tree (the runner's Install natively): those run as written. `program` is the
-    /// resolved executable (NUL-terminated UTF-16, with its `.exe`); the result is the argument
-    /// list after argv[0] to run instead of this command's.
+    /// Under `makepad run` the program's executable is its own hard link of Relax (Relax
+    /// selfexe.rs, the first word of RELAX_SELF_EXEC): spawning it runs this program again
+    /// (Relax's command line up to `--`, then the new arguments), whatever they are. A spawn of
+    /// the loader by its own name (`$RELAX_LOADER run <package>`, `... test`) is not this path, and
+    /// runs as written. `program` is the resolved executable (NUL-terminated UTF-16, with its
+    /// `.exe`); the result is the argument list after argv[0] to run instead of this command's.
     fn self_exec_args(&self, program: &[u16]) -> Option<Vec<Arg>> {
-        let pre = crate::env::host_var_os("MAKEPAD_RUN_SELF_EXEC")?.into_string().ok()?;
-        if self.args.first().is_some_and(|a| matches!(a.as_os_str().as_encoded_bytes(), b"run" | b"app" | b"export")) {
-            return None;
-        }
-        // inside a build script (MAKEPAD_RUN_AS_RUSTC): its spawns of this executable are RUSTC
+        let pre = crate::env::host_var_os("RELAX_SELF_EXEC")?.into_string().ok()?;
+        // inside a build script (RELAX_AS_RUSTC): its spawns of this executable are RUSTC
         // questions, answered as written (relax_as_rustc); re-running the script would recurse
-        if crate::env::host_var_os("MAKEPAD_RUN_AS_RUSTC").is_some() {
+        if crate::env::host_var_os("RELAX_AS_RUSTC").is_some() {
             return None;
         }
         let parts: Vec<&str> = pre.split('\u{1f}').collect();
         let exe = Path::new(parts[0]);
         let resolved = OsString::from_wide(strip_nul(program));
         let p = crate::fs::canonicalize(Path::new(&resolved)).ok()?;
-        // the Relax executable itself, or a copy of it (makepad-cef re-execs the program from a
-        // copy of its executable inside a synthetic app bundle): the copy runs this program
-        if p.as_path() != exe && !same_file_contents(p.as_path(), exe) {
+        // the program's own executable, or a copy of it (makepad-cef re-execs the program from a
+        // copy of its executable inside a synthetic app bundle): the copy runs this program. The
+        // loader by another name has the same contents but is the same file as the link, not a copy.
+        if p.as_path() != exe && !(same_file_contents(p.as_path(), exe) && !same_file(p.as_path(), exe)) {
             return None;
         }
         let mut out: Vec<Arg> = Vec::new();
@@ -592,7 +602,7 @@ impl Command {
 
     /// A child started in a virtual folder of a git run (Relax's VFS) cannot get it as its
     /// working directory: it runs from the current one and finds its workspace through
-    /// MAKEPAD_RUN_WORKSPACE + the mount table (MAKEPAD_RUN_VFS), as on unix (process_unix.rs).
+    /// RELAX_WORKSPACE + the mount table (RELAX_VFS), as on unix (process_unix.rs).
     fn spawn_with(&mut self, default: StdioKind, needs_stdin: bool) -> io::Result<Child> {
         let Some(dir) = self.cwd.clone() else {
             // the child runs in the folder set_current_dir chose, if the program changed it
@@ -813,7 +823,8 @@ fn dup_inheritable(h: HANDLE) -> io::Result<OwnedHandle> {
 /// pipe).
 fn to_handle(kind: &StdioKind, stdio_id: u32) -> io::Result<(Option<OwnedHandle>, Option<OwnedHandle>)> {
     match kind {
-        StdioKind::Inherit => {
+        StdioKind::Inherit | StdioKind::InheritSpecific(_) => {
+            let stdio_id = if let StdioKind::InheritSpecific(from) = kind { *from } else { stdio_id };
             let h = unsafe { win::GetStdHandle(stdio_id) };
             if h.is_null() || h == win::INVALID_HANDLE_VALUE {
                 // no stdio handle: the child gets null too
@@ -1332,6 +1343,16 @@ fn env_map_set(map: &mut Vec<(OsString, OsString)>, k: OsString, v: Option<OsStr
 }
 
 /// Whether two files have the same bytes (a copy of an executable).
+/// Whether `a` and `b` name one file (one volume, one file index: two names of a hard link).
+fn same_file(a: &Path, b: &Path) -> bool {
+    use crate::os::windows::fs::MetadataExt;
+    let id = |p: &Path| {
+        let m = File::open(p).and_then(|f| f.metadata()).ok()?;
+        Some((m.volume_serial_number()?, m.file_index()?))
+    };
+    matches!((id(a), id(b)), (Some(x), Some(y)) if x == y)
+}
+
 fn same_file_contents(a: &Path, b: &Path) -> bool {
     match (crate::fs::metadata(a), crate::fs::metadata(b)) {
         (Ok(x), Ok(y)) if x.len() == y.len() => {}

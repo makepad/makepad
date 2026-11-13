@@ -19,12 +19,12 @@ pub use sources::{
 use crate::cmp::Ordering;
 use crate::ops::{Add, Mul};
 
-#[cfg_attr(not(relax_check), lang = "iterator")]
+#[lang = "iterator"]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub trait Iterator {
     type Item;
 
-    #[cfg_attr(not(relax_check), lang = "next")]
+    #[lang = "next"]
     fn next(&mut self) -> Option<Self::Item>;
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -770,7 +770,7 @@ pub trait ExactSizeIterator: Iterator {
     }
 }
 
-#[cfg_attr(not(relax_check), lang = "fused_iterator")]
+#[lang = "fused_iterator"]
 pub trait FusedIterator: Iterator {}
 
 pub unsafe trait TrustedLen: Iterator {}
@@ -799,7 +799,7 @@ pub unsafe trait TrustedRandomAccessNoCoerce: Sized {
 pub trait IntoIterator {
     type Item;
     type IntoIter: Iterator<Item = Self::Item>;
-    #[cfg_attr(not(relax_check), lang = "into_iter")]
+    #[lang = "into_iter"]
     fn into_iter(self) -> Self::IntoIter;
 }
 

@@ -1,4 +1,4 @@
-//! JITSAFE 19: with MAKEPAD_RUN_VERIFY_PASSES the backend verifies the RIR its internal rewrites
+//! JITSAFE 19: with RELAX_VERIFY_PASSES the backend verifies the RIR its internal rewrites
 //! hand to the register allocator, and a broken function is an error naming the pass -- never
 //! compiled.
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]

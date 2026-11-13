@@ -30,7 +30,7 @@ fn dispatch(req: &Req, out: &mut Out) {
 
 fn answer(command: &str) -> String {
     let _kept = crate::zone_alloc::kept();
-    let (bytes, _) = makepad_remote::cmd::answer(dispatch, &format!("{command} full=1"));
+    let bytes = makepad_remote::cmd::answer(dispatch, command);
     if bytes.is_empty() && command.starts_with("hal ") {
         return "(host provider did not answer)\n".into();
     }
@@ -66,7 +66,7 @@ fn finish((rx, at): (Receiver<String>, Instant)) -> String {
 }
 
 pub(crate) fn app() -> String {
-    std::env::var("MAKEPAD_RUN_PACKAGE").unwrap_or_else(|_| super::APP.lock().unwrap_or_else(|e| e.into_inner()).clone())
+    std::env::var("RELAX_PACKAGE").unwrap_or_else(|_| super::APP.lock().unwrap_or_else(|e| e.into_inner()).clone())
 }
 
 pub(crate) fn objects(text: &str) -> impl Iterator<Item = Value> + '_ {
@@ -190,7 +190,7 @@ pub fn capture(why: &str) -> Snapshot {
     let dir = makepad_remote::hot::home().join("captures");
     let path = dir.join(format!("{at}-{safe_app}-{}.txt", std::process::id()));
     let recording = path.with_extension("mkpf");
-    if let Err(e) = std::fs::create_dir_all(&dir) { eprintln!("makepad: cannot create {}: {e}", dir.display()); }
+    if let Err(e) = std::fs::create_dir_all(&dir) { eprintln!("relax: cannot create {}: {e}", dir.display()); }
     // Keep every bounded ring, including stall samples. Their naming has a 3 s owner queue
     // wait, so it starts beside the sections and gets a bounded remaining wait after them.
     let rec_path = recording.display().to_string();
@@ -202,16 +202,16 @@ pub fn capture(why: &str) -> Snapshot {
     let cause = cause(&sections);
     let present = first_present_ms().map_or_else(|| "none".into(), |ms| format!("{ms:.1} ms since process start"));
     let exe = std::env::current_exe().map_or_else(|e| format!("unavailable: {e}"), |p| p.display().to_string());
-    let mut report = format!("why: {why}\ncause: {cause}\napp: {app}\npid: {}\nnode: {}\nat: {at}\nuptime_ms: {:.1}\nfirst_present: {}; {present}\ncache: {}\nloader: {}; MAKEPAD_RUN_LOADER={}; provenance={}; codegen_id={:032x}\nflight recording: {}\n",
+    let mut report = format!("why: {why}\ncause: {cause}\napp: {app}\npid: {}\nnode: {}\nat: {at}\nuptime_ms: {:.1}\nfirst_present: {}; {present}\ncache: {}\nloader: {}; RELAX_LOADER={}; provenance={}; codegen_id={:032x}\nflight recording: {}\n",
         std::process::id(), hostname(), crate::clock::ms_since_process_start(), crate::jit::first_present_seen(),
-        std::env::var("MAKEPAD_RUN_CACHE_STATE").unwrap_or_default(), exe,
-        std::env::var("MAKEPAD_RUN_LOADER").unwrap_or_default(), crate::jit::PROVENANCE, crate::codegen_id::id(), recording.display());
+        std::env::var("RELAX_CACHE_STATE").unwrap_or_default(), exe,
+        std::env::var("RELAX_LOADER").unwrap_or_default(), crate::jit::PROVENANCE, crate::codegen_id::id(), recording.display());
     for (cmd, answer) in sections { report.push_str(&format!("\n== {cmd}\n{answer}")); }
-    if let Err(e) = std::fs::write(&path, &report) { eprintln!("makepad: cannot write capture {}: {e}", path.display()); }
+    if let Err(e) = std::fs::write(&path, &report) { eprintln!("relax: cannot write capture {}: {e}", path.display()); }
     let saved = finish((rec, Instant::now()));
     if !saved.is_empty() {
         use std::io::Write;
-        eprintln!("makepad: flight recording {}: {}", recording.display(), saved.trim());
+        eprintln!("relax: flight recording {}: {}", recording.display(), saved.trim());
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
             let _ = writeln!(f, "\n== flight recording\n{saved}");
         }

@@ -1,6 +1,7 @@
-// Stage search.rs:2822 (asset store build_candidate_sql): `flat_map(TermGroup::all).enumerate()` where `all` is a method
-// item returning `impl Iterator`. rustc accepts; the tip's old selector failed method dispatch (E0599 enumerate /
-// NoSolution panic in tcx/selection.rs). Same family as Score's filter_map/flat_map and the FlatMap/zip instances.
+// An app's search.rs:2822 (asset store build_candidate_sql): `flat_map(TermGroup::all).enumerate()` where
+// `all` is a method item returning `impl Iterator`. rustc accepts; the tip's old selector failed method
+// dispatch (E0599 enumerate / NoSolution panic in tcx/selection.rs). Same family as Score's
+// filter_map/flat_map and the FlatMap/zip instances.
 struct TermGroup { exact: Vec<String>, expansion: Vec<String> }
 impl TermGroup {
     fn all(&self) -> impl Iterator<Item = &String> { self.exact.iter().chain(self.expansion.iter()) }

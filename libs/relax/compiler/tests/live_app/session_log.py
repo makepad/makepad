@@ -33,14 +33,14 @@ fn main() {
         output = root / (mode + ".log")
         with output.open("w") as log:
             p = subprocess.Popen([binary, "run", "session-log", "--", mode], cwd=root,
-                                 env=dict(os.environ, MAKEPAD_RUN_CACHE="off"), stdout=log, stderr=subprocess.STDOUT)
+                                 env=dict(os.environ, RELAX_CACHE="off"), stdout=log, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 120
                 while "session-log fixture ready" not in output.read_text(errors="replace"):
                     assert p.poll() is None and time.monotonic() < deadline, output.read_text(errors="replace")
                     time.sleep(.05)
                 text = output.read_text(errors="replace")
-                match = re.search(r"makepad-run: session log (.+)", text)
+                match = re.search(r"relax: session log (.+)", text)
                 assert match, text
                 transcript = Path(match[1].strip())
                 assert "session-log fixture ready" in transcript.read_text(errors="replace")

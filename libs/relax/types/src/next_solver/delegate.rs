@@ -43,13 +43,13 @@ impl Tcx {
         fold::fold_predicate(&self.tys, p, &mut ArgFolder { indices: &self.generic_indices_of(prog, def), args })
     }
     pub(crate) fn identity_impl_trait_ref(&self, prog: &Program, imp: DefId) -> &TraitRef {
-        self.declaration_queries(prog, imp).impl_trait_ref.get_or_init(|| {
+        self.declaration_queries(prog, imp).impl_trait_ref.get_or_init(|| crate::body_facts::item_text(prog, imp, crate::body_facts::ItemCell::Declaration, || {
             let def_id = self.impl_trait[&imp];
             let mut compact = vec![self.impl_self[&imp]];
             compact.extend_from_slice(self.impl_trait_args.get(&imp).map_or(&[], |a| a.as_slice()));
             let regions = self.impl_trait_regions.get(&imp).copied().unwrap_or(RegionArgsId::EMPTY);
             TraitRef { def_id, args: self.complete_args(prog, def_id, &compact, regions) }
-        })
+        }))
     }
     pub fn impl_trait_ref(&self, prog: &Program, imp: DefId, args: &[GenericArg]) -> TraitRef {
         let identity = self.identity_impl_trait_ref(prog, imp);
@@ -61,12 +61,12 @@ impl Tcx {
     /// rustc_hir_analysis/src/collect/item_bounds.rs:526: elaborate in the impl's
     /// identity binder once, then instantiate for each candidate.
     pub fn impl_super_outlives(&self, prog: &Program, imp: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, imp).impl_super_outlives.get_or_init(|| {
+        self.declaration_queries(prog, imp).impl_super_outlives.get_or_init(|| crate::body_facts::item_text(prog, imp, crate::body_facts::ItemCell::Declaration, || {
             let identity = self.identity_impl_trait_ref(prog, imp);
             self.supertraits(prog, collect::trait_predicate(identity.def_id, identity.args.clone()))
                 .into_iter().filter(|p| matches!(p.kind,
                     PredicateKind::Clause(ClauseKind::RegionOutlives(..) | ClauseKind::TypeOutlives(..)))).collect()
-        })
+        }))
     }
 
 }

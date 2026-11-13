@@ -1,6 +1,6 @@
 //! Synthetic malloc-fragmentation probe (separate processes for ON/OFF):
 //! CARGO_INCREMENTAL=0 cargo run --release -p relax-base --example burst_probe
-//! MAKEPAD_RUN_BURST_ARENA=0 CARGO_INCREMENTAL=0 cargo run --release -p relax-base --example burst_probe
+//! RELAX_BURST_ARENA=0 CARGO_INCREMENTAL=0 cargo run --release -p relax-base --example burst_probe
 //! Allocates 240 MB of transient blocks interleaved with same-sized long-lived heap blocks.
 //! It intentionally leaves one arena block per class escaping until the last measurement.
 //! This measures allocator behavior, not Amp or compiler throughput.

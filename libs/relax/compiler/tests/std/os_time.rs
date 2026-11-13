@@ -1,4 +1,4 @@
-// std-os lane: std::time Instant / SystemTime (differential: os_diff.sh)
+// std-os lane: std::time Instant / SystemTime (differential: agree.sh)
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]

@@ -1239,3 +1239,12 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for Range<'_, K, V> {
         l.finish()
     }
 }
+
+// A range that yields `&mut V` prints the entries it has not yielded yet, read through a
+// borrowing range over the same span, as the other mutable and owning iterators here do.
+impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for RangeMut<'_, K, V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let range = Range { map: unsafe { &*self.map }, front: self.front, back: self.back, done: self.done };
+        fmt::Debug::fmt(&range, f)
+    }
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cold startup and SIGINT shutdown regression; run on the test node via x64run.
 
-Pass --makepad, --workspace, --out and the package to run. MAKEPAD_RUN_STD and the
+Pass --makepad, --workspace, --out and the package to run. RELAX_STD and the
 headless display environment come from the caller. Each launch gets a new cache.
 Optional --gdb captures only this harness's child, before forcibly stopping it.
 """
@@ -46,7 +46,7 @@ def main():
     results = []
     for cycle in range(1, args.runs + 1):
         log = out / f"{cycle}.log"
-        env = dict(os.environ, MAKEPAD_RUN_CACHE="on", MAKEPAD_RUN_CACHE_DIR=str(out / f"cache-{cycle}"))
+        env = dict(os.environ, RELAX_CACHE="on", RELAX_CACHE_DIR=str(out / f"cache-{cycle}"))
         with log.open("w") as stream:
             child = subprocess.Popen(
                 [str(args.makepad.resolve()), "run", "--verbose", args.package],

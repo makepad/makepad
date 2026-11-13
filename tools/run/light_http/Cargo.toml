@@ -6,7 +6,8 @@ license = "MIT OR Apache-2.0"
 description = "One blocking HTTPS request on the operating system's own TLS stack"
 publish = false
 
-[dependencies]
+# apple.rs's waits
+[target.'cfg(target_vendor = "apple")'.dependencies]
 relax-session = { workspace = true }
 
 # the process's one OpenSSL setup (makepad_network::tls::init_openssl)

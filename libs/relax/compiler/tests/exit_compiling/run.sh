@@ -38,7 +38,7 @@ fn main() {
 }""")
 open(sys.argv[1], "w").write("\n".join(out) + "\n")
 PY
-(cd "$C/p" && MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_CACHE_DIR="$C/target" MAKEPAD_RUN_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run --verbose relax-exit-compiling) > "$C/run.log" 2>&1
+(cd "$C/p" && RELAX_CACHE=off RELAX_CACHE_DIR="$C/target" RELAX_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run --verbose relax-exit-compiling) > "$C/run.log" 2>&1
 END=$(python3 -c 'import time;print(int(time.time()*1000))')
 python3 - "$C" "$END" <<'PY'
 import os, re, shutil, sys
@@ -53,7 +53,7 @@ else:
     dt = end - int(m.group(1))
     if dt > 500:
         bad.append(f"exit took {dt} ms")
-if "makepad-run: exit at" not in t and "makepad-run: main returned" not in t:
+if "relax: exit at" not in t and "relax: main returned" not in t:
     bad.append("no exit summary")
 if "no summary" in t:
     bad.append("summary skipped: " + re.search(r"no summary[^\n]*", t).group(0))

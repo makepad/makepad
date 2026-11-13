@@ -112,7 +112,7 @@ fn get_default_and_filtering_lending_iterator_use_final_polonius_verdict() {
     }
 }
 
-/// A program with one crate whose relaxed Rust features are `features` (MAKEPAD_RUN_RELAXED), and
+/// A program with one crate whose relaxed Rust features are `features` (RELAX_RELAXED), and
 /// a fn of it to own fixture MIR.
 fn relaxed_prog(features: &str) -> (crate::program::Program, crate::program::DefId) {
     let mut session = crate::Session::default();

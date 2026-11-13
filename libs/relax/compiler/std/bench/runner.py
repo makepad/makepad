@@ -20,10 +20,6 @@ if only:
 out_name = 'results-' + host + ('-only' if only else '') + '.md'
 results = {}
 failures = []
-fallbacks = {
-    'hashset_string': 'shim String lacks the host Hash implementation',
-    'rc_refcell_churn': 'optimized shim panics: RefCell already borrowed; its UnsafeCell is not the rustc interior-mutability lang item',
-}
 batches = dict(re.findall(r'"([a-z0-9_]+)" => (\d+)', (bench / 'src/benches.rs').read_text()))
 metadata = {
     'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -38,9 +34,7 @@ metadata = {
 (logs / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
 for name in names:
     results[name] = {}
-    for column, binary in [('A', str(Path(target) / 'std-bench-real')),
-                           ('B', str(Path(target) / 'release/std-bench-shim')),
-                           ('C', relax)]:
+    for column, binary in [('A', str(Path(target) / 'std-bench-real')), ('C', relax)]:
         if column == 'C':
             case = logs / name
             case.mkdir(exist_ok=True)
@@ -57,7 +51,7 @@ for name in names:
                 'target': {'kind': ['bin'], 'name': 'std_bench', 'src_path': str(source), 'edition': '2021'},
                 'mode': 'build', 'features': [], 'dependencies': []}]}))
             command = ['nice', '-n', '10', relax, 'run', '--quiet', '--units', str(units), 'std_bench']
-            env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=str(Path(target) / 'relax' / name))
+            env = dict(os.environ, RELAX_CACHE_DIR=str(Path(target) / 'relax' / name))
         else:
             command = ['nice', '-n', '10', binary, name]
             env = os.environ.copy()
@@ -72,18 +66,17 @@ for name in names:
         else:
             failures.append((name, column, completed.returncode, output))
     # Write incrementally so interrupted runs still retain completed evidence.
-    lines = ['| bench | A ms | B ms | C ms | B/A | C/B | checksums equal |',
-             '|---|---:|---:|---:|---:|---:|---|']
+    lines = ['| bench | A ms | C ms | C/A | checksums equal |',
+             '|---|---:|---:|---:|---|']
     for n, row in results.items():
         def ms(c):
             return f'{row[c][0]:.2f}' if c in row else 'ERROR'
         def ratio(c, d):
             return f'{row[c][0]/row[d][0]:.2f}' if c in row and d in row and row[d][0] else '—'
-        equal = ('yes' if len({v[1] for v in row.values()}) == 1 else '**MISMATCH**') if len(row) == 3 else ('A=B; C unavailable' if 'A' in row and 'B' in row and row['A'][1] == row['B'][1] else '**INCOMPLETE / MISMATCH**')
-        lines.append(f'| {n + (" (B=real)" if n in fallbacks else "")} | {ms("A")} | {ms("B")} | {ms("C")} | {ratio("B", "A")} | {ratio("C", "B")} | {equal} |')
-    lines += ['', 'Milliseconds per fixed batch: one warm-up batch, best of five batches. Includes input construction, allocation, checksumming and destruction. All columns use identical batch counts. B uses host iterator traits and thread spawning with Relax mpsc. Default hashers intentionally differ.',
+        equal = ('yes' if row['A'][1] == row['C'][1] else '**MISMATCH**') if len(row) == 2 else '**INCOMPLETE**'
+        lines.append(f'| {n} | {ms("A")} | {ms("C")} | {ratio("C", "A")} | {equal} |')
+    lines += ['', 'Milliseconds per fixed batch: one warm-up batch, best of five batches. Includes input construction, allocation, checksumming and destruction. Both columns use identical batch counts. Default hashers intentionally differ.',
               '', 'Batch counts: ' + ', '.join(n + '=' + str(metadata['batches'][n]) for n in names) + '.',
-              '', 'B=real fallbacks: ' + '; '.join(n + ': ' + reason for n, reason in fallbacks.items()) + '.',
               '', 'Environment: ' + metadata['platform'] + '; ' + metadata['rustc'] + '. Binary/source hashes and batch counts: logs-' + host + '/metadata.json.']
     if any('setpriority: Operation not permitted' in p.read_text() for p in logs.glob('*-A.log')):
         lines += ['', 'Sandbox limitation: nice -n 10 was invoked, but setpriority was denied; the measured processes ran at the inherited priority.']
@@ -93,5 +86,5 @@ for name in names:
     (bench / out_name).write_text('\n'.join(lines) + '\n')
 
 (logs / 'measurements.json').write_text(json.dumps(results, indent=2) + '\n')
-if failures or any(len(row) != 3 or len({v[1] for v in row.values()}) != 1 for row in results.values()):
+if failures or any(len(row) != 2 or row['A'][1] != row['C'][1] for row in results.values()):
     sys.exit(1)

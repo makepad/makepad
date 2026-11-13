@@ -6,7 +6,7 @@ for CONFIG in '1 1 1' '0 1 1' '0 0 1' '0 1 0' '0 0 0'; do
     read -r TRUSTED FUEL TIER <<< "$CONFIG"
     LOG=$(mktemp)
     TRACE=$(mktemp)
-    if MAKEPAD_RUN_WATCHDOG_MS=180000 MAKEPAD_RUN_MODULES_TRUSTED=$TRUSTED MAKEPAD_RUN_SANDBOX_FUEL=$FUEL MAKEPAD_RUN_O3=$TIER MAKEPAD_RUN_O3_CALLS=2000 MAKEPAD_RUN_O3_TRACE=1 "$1" test "$D/milk.rs" >"$LOG" 2>"$TRACE"; then
+    if RELAX_WATCHDOG_MS=180000 RELAX_MODULES_TRUSTED=$TRUSTED RELAX_SANDBOX_FUEL=$FUEL RELAX_O3=$TIER RELAX_O3_CALLS=2000 RELAX_O3_TRACE=1 "$1" test "$D/milk.rs" >"$LOG" 2>"$TRACE"; then
         echo "modules milk (trusted=$TRUSTED fuel=$FUEL tier1=$TIER):"
         grep '^milk\|^out milk' "$LOG"
         grep -q '^out milk: true$' "$LOG" || { cat "$LOG" "$TRACE"; rm "$LOG" "$TRACE"; exit 1; }

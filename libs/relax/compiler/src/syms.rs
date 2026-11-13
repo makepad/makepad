@@ -54,6 +54,17 @@ pub enum SymKind {
     /// a `#[thread_local]` static's offset (jit.rs Unit::thread_local_place): from the thread
     /// pointer, or in the thread-local block
     ThreadLocal(DefId),
+    /// sandboxed code (sandbox.rs): twin slot `.0`'s sandbox thunk, its value as a fn pointer
+    SbThunk(u32),
+    /// sandboxed code: the offset in the sandbox's data image of the data symbol `.0` names
+    SbPlace(u32),
+    /// sandboxed code: the offset in a segment's thread-locals of the thread-local symbol `.0`
+    SbTls(u32),
+    /// sandboxed code: the base of the sandbox thunk table (indirect calls are masked into it)
+    SbTable,
+    /// sandboxed code: the version of host entry `.0` (`c:<C name>`, `rt:<runtime entry>`) the
+    /// domain's policy gives its code
+    SbHost(String),
 }
 
 /// What the bytes of a data object hold.
@@ -963,13 +974,13 @@ fn has_enum(u: &Unit, t: TyId, depth: u32) -> bool {
     }
 }
 
-/// Every symbol and its kind (MAKEPAD_RUN_SYMS diagnostics).
+/// Every symbol and its kind (RELAX_SYMS diagnostics).
 pub fn dump(u: &Unit) -> Vec<(u32, SymKind, u64)> {
     u.syms.kinds.iter().enumerate().map(|(i, k)| (i as u32, k.clone(), unsafe { std::ptr::read((u.syms.vals as *const u64).add(i)) })).collect()
 }
 
 /// A stable description of a symbol (the same in every run of the same sources): what the
-/// MAKEPAD_RUN_RELOC_SIG / MAKEPAD_RUN_CODE_SIG dumps print instead of symbol ids, and what the disk cache
+/// RELAX_RELOC_SIG / RELAX_CODE_SIG dumps print instead of symbol ids, and what the disk cache
 /// will key relocations by.
 pub fn describe(u: &Unit, s: Sym) -> String {
     let base = match u.syms.kind(s.id) {
@@ -991,6 +1002,11 @@ pub fn describe(u: &Unit, s: Sym) -> String {
         Some(SymKind::TierRec(id)) if s.off == crate::jit::PATCH_FLAG_OFF => format!("patch-flag:{}", stable_fn_name(u, id)),
         Some(SymKind::TierRec(id)) => format!("loop-counter:{}", stable_fn_name(u, id)),
         Some(SymKind::Provided(n)) => format!("provided:{}", n),
+        Some(SymKind::SbThunk(id)) => format!("sandbox-thunk:{}", stable_fn_name(u, id)),
+        Some(SymKind::SbPlace(id)) => format!("sandbox-place:{}", describe(u, Sym::new(id))),
+        Some(SymKind::SbTls(id)) => format!("sandbox-tls:{}", describe(u, Sym::new(id))),
+        Some(SymKind::SbTable) => "sandbox-table".to_string(),
+        Some(SymKind::SbHost(n)) => format!("sandbox-host:{}", n),
         Some(SymKind::Rw(k)) => {
             let b = u.syms.rw_blocks.lock().unwrap_or_else(|e| e.into_inner());
             let (sz, al) = b.get(k as usize).copied().unwrap_or((0, 0));
@@ -1067,21 +1083,21 @@ pub fn canon_dump(u: &Unit, d: &str) -> String {
 
 fn reloc_sig_code() -> Option<&'static str> {
     static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    VALUE.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("MAKEPAD_RUN_RELOC_SIG_CODE").ok())).as_deref()
+    VALUE.get_or_init(|| crate::zone_alloc::kept_with(|| std::env::var("RELAX_RELOC_SIG_CODE").ok())).as_deref()
 }
 
 fn reloc_sig_verbose() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_RELOC_SIG_VERBOSE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_RELOC_SIG_VERBOSE").is_some())
 }
 
-/// MAKEPAD_RUN_RELOC_SIG=<file>: per compiled function, a hash of its machine code with the address
+/// RELAX_RELOC_SIG=<file>: per compiled function, a hash of its machine code with the address
 /// pool zeroed, its relocations by stable description and its pc map by file path. Two runs of
-/// the same program (one with MAKEPAD_RUN_PERTURB) must print the same lines: a difference is a
+/// the same program (one with RELAX_PERTURB) must print the same lines: a difference is a
 /// run-dependent value that reached code without a relocation.
 pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &[relax_backend::rir::RelocAt], pc_map: &[(u32, u64)]) {
     static F: std::sync::OnceLock<Option<Mutex<std::fs::File>>> = std::sync::OnceLock::new();
-    let m = match F.get_or_init(|| std::env::var("MAKEPAD_RUN_RELOC_SIG").ok().and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new)) {
+    let m = match F.get_or_init(|| std::env::var("RELAX_RELOC_SIG").ok().and_then(|p| std::fs::File::create(p).ok()).map(Mutex::new)) {
         Some(m) => m,
         None => return,
     };
@@ -1139,7 +1155,7 @@ pub fn reloc_sig(u: &Unit, name: impl FnOnce() -> String, code: &[u8], relocs: &
     let _ = m.lock().unwrap_or_else(|e| e.into_inner()).write_all(line.as_bytes());
 }
 
-/// MAKEPAD_RUN_PERTURB=<n>: shifts the per-run numbering compiled code must not depend on (dummy
+/// RELAX_PERTURB=<n>: shifts the per-run numbering compiled code must not depend on (dummy
 /// sites and symbols; the data / static areas start later). 0 when unset.
 pub fn perturb(options: &crate::options::Options) -> u64 {
     options.perturb
@@ -1268,6 +1284,8 @@ pub fn class_of(k: &SymKind) -> relax_backend::rir::SymClass {
         SymKind::Data(_) | SymKind::Thunk(_) | SymKind::Missing(_) => SymClass::Near,
         // (the tier records are a reservation of their own, outside the code area)
         SymKind::Foreign(_) | SymKind::Provided(_) | SymKind::StaticAddr(_) | SymKind::TierRec(_) => SymClass::Far,
+        // (an offset of the sandbox's own, or an address outside the unit's code area)
+        SymKind::SbThunk(_) | SymKind::SbPlace(_) | SymKind::SbTls(_) | SymKind::SbTable | SymKind::SbHost(_) => SymClass::Far,
         SymKind::Site(_) | SymKind::ThreadLocal(_) => SymClass::Imm,
     }
 }

@@ -23,7 +23,7 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/provided_script.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp" "$dir/reg"
 # not a live session, a registry of its own, no unwatched park: a refusal (the guard, a regression)
 # ends the run instead of parking it for a decision (a live run parks its panic for 600 s)
-jit() { TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_REMOTE_REGISTRY="$dir/reg" MAKEPAD_RUN_PANIC_PARK=0 MAKEPAD_RUN_CACHE=off perl -e 'alarm 600; exec @ARGV' "$T/makepad" run --quiet --no-live "$@" 2>&1; }
+jit() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_REMOTE_REGISTRY="$dir/reg" RELAX_PANIC_PARK=0 RELAX_CACHE=off perl -e 'alarm 600; exec @ARGV' "$T/makepad" run --quiet --no-live "$@" 2>&1; }
 fail=""
 for bin in $BINS; do
     native=$(cargo run --release -q -p relax-provided-script-ops --bin "$bin" 2>&1); native_rc=$?

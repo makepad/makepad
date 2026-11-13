@@ -178,13 +178,13 @@ impl Table {
     }
 }
 
-/// MAKEPAD_RUN_VARS_STATS: [bodies with a table, bodies compiled, table bytes, pc-map bytes of
+/// RELAX_VARS_STATS: [bodies with a table, bodies compiled, table bytes, pc-map bytes of
 /// the table's entries (varint form as PcMap stores it), pc-map bytes of the code's own entries].
 pub static STATS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
 pub fn stats_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VARS_STATS").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_VARS_STATS").is_some())
 }
 
 /// Bytes of `entries` in PcMap's varint delta form, continuing from entry `prev`.
@@ -204,7 +204,7 @@ pub fn varint_bytes(prev: (u32, u64), entries: &[(u32, u64)]) -> u64 {
     n
 }
 
-/// Counts a body's pc map (its code entries, then the table's) for MAKEPAD_RUN_VARS_STATS.
+/// Counts a body's pc map (its code entries, then the table's) for RELAX_VARS_STATS.
 pub fn note_stats(code: &[(u32, u64)], vars: &[(u32, u64)], table_bytes: usize) {
     use std::sync::atomic::Ordering::Relaxed;
     if !stats_on() {
@@ -214,7 +214,7 @@ pub fn note_stats(code: &[(u32, u64)], vars: &[(u32, u64)], table_bytes: usize) 
     STATS[4].fetch_add(varint_bytes((0, 0), code), Relaxed);
     if n % 2000 == 0 {
         let g = |k: usize| STATS[k].load(Relaxed);
-        eprintln!("makepad-run vars: {} of {} bodies with a table, table bytes {}, its pc-map bytes {}, code pc-map bytes {}", g(0), g(1), g(2), g(3), g(4));
+        eprintln!("relax vars: {} of {} bodies with a table, table bytes {}, its pc-map bytes {}, code pc-map bytes {}", g(0), g(1), g(2), g(3), g(4));
     }
     if !vars.is_empty() {
         STATS[0].fetch_add(1, Relaxed);
@@ -224,10 +224,10 @@ pub fn note_stats(code: &[(u32, u64)], vars: &[(u32, u64)], table_bytes: usize) 
     }
 }
 
-/// Whether the table is built (MAKEPAD_RUN_NO_VARS=1: not; the code is the same either way).
+/// Whether the table is built (RELAX_NO_VARS=1: not; the code is the same either way).
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_NO_VARS").is_none())
+    *ON.get_or_init(|| std::env::var_os("RELAX_NO_VARS").is_none())
 }
 
 /// The target's facts the table needs: its callee-saved registers, a spill-area offset as a
@@ -242,7 +242,7 @@ pub struct Frame<'a> {
     /// registers a call sequence may write besides its argument registers (scratch, target)
     pub call_writes: &'a [u8],
     pub spill_fp: &'a dyn Fn(i32) -> i32,
-    pub slot_fp: &'a dyn Fn(u32) -> i32,
+    pub slot_fp: &'a dyn Fn(u32) -> Option<i32>,
 }
 
 /// Builds the table of `f` (after allocation `al`) for the calls the emitter placed: `calls`
@@ -265,8 +265,8 @@ pub fn build(f: &Func, al: &Alloc, fr: &Frame, calls: &[(u32, u32)]) -> Vec<u8> 
         slots.resize(f.slots.len(), None);
         let mut ranges = Vec::new();
         for (s, used) in used_slots(f).into_iter().enumerate() {
-            if used {
-                let at = (fr.slot_fp)(s as u32);
+            // (a slot with no fixed home -- an over-aligned one, where its cell points -- holds none)
+            if let Some(at) = used.then(|| (fr.slot_fp)(s as u32)).flatten() {
                 slots[s] = Some((at, false));
                 ranges.push((at as i64, at as i64 + f.slots[s].size as i64, s));
             }
@@ -756,7 +756,7 @@ fn finish(f: &Func, al: &Alloc, mut table: Table) -> Vec<u8> {
         return Vec::new();
     }
     static TRACE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    if let Some(w) = TRACE.get_or_init(|| std::env::var("MAKEPAD_RUN_VARS_TRACE").ok()) {
+    if let Some(w) = TRACE.get_or_init(|| std::env::var("RELAX_VARS_TRACE").ok()) {
         if f.name.contains(w.as_str()) {
             eprintln!("=== vars {}\ndbg {:?}\nloc {:?}\ntable {:?}\n{}", f.name, f.dbg, f.dbg.iter().flat_map(|d| match &d.loc { DbgLoc::Regs(r) => r.clone(), _ => Vec::new() }).filter(|v| *v != DBG_NONE).map(|v| (v.0, al.loc[v.0 as usize], al.remat[v.0 as usize])).collect::<Vec<_>>(), table, f.dump());
         }

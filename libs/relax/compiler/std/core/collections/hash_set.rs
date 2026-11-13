@@ -318,6 +318,13 @@ impl<K> Iterator for IntoIter<K> {
 
 impl<K> ExactSizeIterator for IntoIter<K> {}
 
+// std collections/hash/set.rs: the remaining keys, as a list
+impl<K: fmt::Debug> fmt::Debug for IntoIter<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.inner, f)
+    }
+}
+
 pub struct Drain<'a, K: 'a> {
     inner: hash_map::Drain<'a, K, ()>,
 }
@@ -336,6 +343,12 @@ impl<'a, K> Iterator for Drain<'a, K> {
 }
 
 impl<'a, K> ExactSizeIterator for Drain<'a, K> {}
+
+impl<'a, K: fmt::Debug> fmt::Debug for Drain<'a, K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.inner.iter().map(|(k, _)| k)).finish()
+    }
+}
 
 pub struct Intersection<'a, T: 'a, S: 'a> {
     iter: Iter<'a, T>,
@@ -462,5 +475,27 @@ impl<T: Eq + Hash, const N: usize> From<[T; N]> for HashSet<T, RandomState> {
             set.insert(x);
         }
         set
+    }
+}
+
+// std collections/hash/set.rs: a set operation prints the items it yields, as a list
+impl<'a, T: fmt::Debug + Eq + Hash, S: BuildHasher> fmt::Debug for Intersection<'a, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+impl<'a, T: fmt::Debug + Eq + Hash, S: BuildHasher> fmt::Debug for Difference<'a, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+impl<'a, T: fmt::Debug + Eq + Hash, S: BuildHasher> fmt::Debug for SymmetricDifference<'a, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
+    }
+}
+impl<'a, T: fmt::Debug + Eq + Hash, S: BuildHasher> fmt::Debug for Union<'a, T, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.clone()).finish()
     }
 }

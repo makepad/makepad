@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """Interpreter vs JIT vs rustc on bench_rt kernels (ios-interp research prototype).
 Usage: cmp.py <makepad binary> <rustc bench binary> [kernel ...]; ROUNDS (default 3) interleaved rounds,
-best per mode. Modes: rustc; jit-o1 (MAKEPAD_RUN_O3=0 MAKEPAD_RUN_O1=0); jit-o3 (default tiers, BENCH_WARM_MS=2500);
-interp (MAKEPAD_RUN_INTERP=all, O3/O1 off). Prints a markdown table of best ms and ratios, checksums compared."""
+best per mode. Modes: rustc; jit-o1 (RELAX_O3=0 RELAX_O1=0); jit-o3 (default tiers, BENCH_WARM_MS=2500);
+interp (RELAX_INTERP=all, O3/O1 off). Prints a markdown table of best ms and ratios, checksums compared."""
 import os, re, subprocess, sys
 here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 mk, native = sys.argv[1], sys.argv[2]
 src = open(os.path.join(here, "src/main.rs")).read()
 names = sys.argv[3:] or re.findall(r'\("(\w+)", \w+\),', src)
 rounds = int(os.environ.get("ROUNDS", "3"))
-base = dict(os.environ, MAKEPAD_RUN_STD=os.path.join(here, "../std"), MAKEPAD_RUN_CACHE="off",
+base = dict(os.environ, RELAX_STD=os.path.join(here, "../std"), RELAX_CACHE="off",
             BENCH_FONT=os.path.normpath(os.path.join(here, "../../../../widgets/resources/IBMPlexSans-Text.ttf")))
 modes = {
     "rustc": None,
-    "jit-o1": dict(MAKEPAD_RUN_O3="0", MAKEPAD_RUN_O1="0"),
+    "jit-o1": dict(RELAX_O3="0", RELAX_O1="0"),
     "jit-o3": dict(BENCH_WARM_MS="2500"),
-    "interp": dict(MAKEPAD_RUN_INTERP="all", MAKEPAD_RUN_INTERP_STATS="1", MAKEPAD_RUN_O3="0", MAKEPAD_RUN_O1="0"),
+    "interp": dict(RELAX_INTERP="all", RELAX_INTERP_STATS="1", RELAX_O3="0", RELAX_O1="0"),
     # no machine code at all: precompiled glue, every function interpreted
     # (it tiers up as the JIT does: O3 builds as threaded code, so it warms up as jit-o3 does)
-    "nocodegen": dict(MAKEPAD_RUN_NO_CODEGEN="1", MAKEPAD_RUN_INTERP_STATS="1", BENCH_WARM_MS="2500"),
+    "nocodegen": dict(RELAX_NO_CODEGEN="1", RELAX_INTERP_STATS="1", BENCH_WARM_MS="2500"),
     # A/B of the lowering's own clean-ups: no constant-branch folding and no loop-constant preload
-    "interp-plain": dict(MAKEPAD_RUN_INTERP="all", MAKEPAD_RUN_INTERP_STATS="1", MAKEPAD_RUN_O3="0", MAKEPAD_RUN_O1="0", MAKEPAD_RUN_INTERP_NOFOLD="1"),
+    "interp-plain": dict(RELAX_INTERP="all", RELAX_INTERP_STATS="1", RELAX_O3="0", RELAX_O1="0", RELAX_INTERP_NOFOLD="1"),
 }
 want = os.environ.get("MODES")
 if want:
@@ -38,7 +38,7 @@ def one(mode, n):
     except subprocess.TimeoutExpired:
         return None, None, "timeout"
     m = re.search(r"^\| " + n + r" ([\d.]+) (\d+)$", out.stdout, re.M)
-    st = re.search(r"makepad-run interp: (\d+) fns interpreted .*?, (\d+) stayed native(.*)", out.stderr)
+    st = re.search(r"relax interp: (\d+) fns interpreted .*?, (\d+) stayed native(.*)", out.stderr)
     if not m:
         return None, None, (out.stdout + out.stderr)[-300:].replace("\n", " ")
     return float(m.group(1)), m.group(2), (st.group(0) if st else "")
@@ -68,7 +68,7 @@ for n in names:
         return "%.2f" % (t[a] / t[b]) if t.get(a) and t.get(b) else "-"
     sums = {r[1] for r in row if r[1]}
     cov = res.get((n, iv), (None, None, ""))[2]
-    cov = re.sub(r"makepad-run interp: ", "", cov or "")[:160]
+    cov = re.sub(r"relax interp: ", "", cov or "")[:160]
     print("| %s | %s | %s | %s | %s | %s | %s |" % (n, " | ".join("%.3f" % x[0] if x[0] else "FAIL" for x in row), ratio(iv, "jit-o1"), ratio(iv, "jit-o3"), ratio(iv, "rustc"), "ok" if len(sums) == 1 else "DIFF", cov))
 # geometric means of the interpreted column's ratios
 import math

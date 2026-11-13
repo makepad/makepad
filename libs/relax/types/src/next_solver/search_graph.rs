@@ -71,7 +71,7 @@ pub(super) struct ProofTreeCacheEntry {
     pub misses: std::sync::Arc<Vec<(u32, String)>>,
 }
 impl SolverCache {
-    /// memory report (MAKEPAD_RUN_MEM_REPORT): exact bytes per solver structure
+    /// memory report (RELAX_MEM_REPORT): exact bytes per solver structure
     pub(crate) fn mem_lines(&self) -> Vec<(String, u64)> {
         use std::mem::size_of;
         let mut out: Vec<(String, u64)> = Vec::new();
@@ -220,7 +220,7 @@ impl SolverDelegate<'_> {
 #[cfg(test)]
 pub(crate) use graph::CANDIDATE_PAIRS;
 
-/// MAKEPAD_RUN_SOLVER_WORK_TRACE histograms, printed at the first present (goal_hist_report):
+/// RELAX_SOLVER_WORK_TRACE histograms, printed at the first present (goal_hist_report):
 /// computed goals by kind+trait and by kind+trait+self type (which 0), root goals weighted by the
 /// goals their evaluation visited (1), the cycle heads of goals left out of the global cache (2),
 /// the head index of those (3).
@@ -258,8 +258,8 @@ pub fn goal_hist_report() {
     let Some(m) = g.as_ref() else { return };
     for (name, i, n) in [("computed-head", 0usize, 30usize), ("computed-full", 4, 30), ("root-weighted", 1, 30), ("cycle-head", 2, 30), ("cycle-head-index", 3, 12), ("rerun", 5, 40)] {
         let mut v: Vec<_> = m[i].iter().collect(); v.sort_by(|x, y| y.1.cmp(x.1));
-        eprintln!("makepad-run goal-hist {}: {} distinct, {} total", name, v.len(), v.iter().map(|x| *x.1).sum::<u64>());
-        for (k, c) in v.into_iter().take(n) { eprintln!("makepad-run goal-hist {} {:>9} {}", name, c, k); }
+        eprintln!("relax goal-hist {}: {} distinct, {} total", name, v.len(), v.iter().map(|x| *x.1).sum::<u64>());
+        for (k, c) in v.into_iter().take(n) { eprintln!("relax goal-hist {} {:>9} {}", name, c, k); }
     }
 }
 

@@ -314,7 +314,7 @@ fn matching_angle(s: &str, open: usize) -> Option<usize> {
 fn our_sides(q: &str, max: usize) -> Result<(Vec<(u32, Side)>, Vec<String>), String> {
     let up = crate::jit::current_unit();
     if up.is_null() {
-        return Err("no running unit (asm reads JIT code of a `makepad run` process)".into());
+        return Err(format!("no running unit (asm reads JIT code of a `{tool} run` process)", tool = crate::tool_name()));
     }
     let q = q.to_string();
     let r = crate::owner::call_within(crate::owner::Class::Job, 10_000, move || -> Result<(Vec<(u32, Side)>, Vec<String>), String> {
@@ -432,9 +432,9 @@ fn our_sides(q: &str, max: usize) -> Result<(Vec<(u32, Side)>, Vec<String>), Str
                     (rt.memset, "memset"),
                     (rt.str_eq, "str equality (runtime)"),
                     (rt.panicking, "std::thread::panicking"),
-                    (u.lazy_entry, "makepad run: lazy compile entry (first call of a slot)"),
-                    (u.hot_entry, "makepad run: tier-up counter entry"),
-                    (u.env.tls_slow, "makepad run: thread-local slow path"),
+                    (u.lazy_entry, "relax run: lazy compile entry (first call of a slot)"),
+                    (u.hot_entry, "relax run: tier-up counter entry"),
+                    (u.env.tls_slow, "relax run: thread-local slow path"),
                 ];
                 let (lo, hi) = (b.start, b.start + b.len as u64);
                 for k in 0..s.insns.len() {
@@ -556,10 +556,11 @@ fn auto_native(build: bool) -> Result<String, String> {
     // a git run's package is in its virtual tree: cargo cannot build what is not on disk, and a
     // log or target made there was a real folder at the virtual root, which refused every overlay
     // lease of its box after it (a Linux node, 11-06)
-    if crate::vfs::is_virtual(&dir) {
+    if crate::vfs::in_store(&dir) {
         return Err(format!("no native build of a package in a git run's virtual tree ({}): cargo builds only what is on disk; {}", dir, how));
     }
-    let mut ws = std::path::PathBuf::from(&dir);
+    // (a shared workspace's package is in its checkout on disk)
+    let mut ws = std::path::PathBuf::from(&*crate::vfs::on_disk(&dir));
     let mut cur = ws.clone();
     loop {
         if std::fs::read_to_string(cur.join("Cargo.toml")).map_or(false, |t| t.contains("[workspace]")) {
@@ -613,7 +614,7 @@ fn auto_native(build: bool) -> Result<String, String> {
         .stdout(f)
         .stderr(f2);
     for (k, _) in std::env::vars_os() {
-        if k.to_string_lossy().starts_with("MAKEPAD_RUN_") {
+        if k.to_string_lossy().starts_with("RELAX_") {
             cmd.env_remove(&k);
         }
     }
@@ -1232,7 +1233,7 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
         }
         None => format!("`{}`: {} instr ({}, {} B){}", short(&a.name, 100), a.insns.len(), a.label.trim_start_matches("ours "), bytes(a), if ts > 0 { format!("; {} {} in it ({:.1} s at {} Hz)", count_str(ts), ev_unit(ev), took, hz) } else { String::new() }),
     };
-    out.always(&head);
+    out.line(&head);
     let fnd = b.map(|b| findings(a, b, &j)).unwrap_or_default();
     if view == "summary" || view == "lines" {
         for (_, f) in fnd.iter().take(if view == "summary" { 6 } else { 3 }) {
@@ -1320,9 +1321,6 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
             out.line(&format!("{:5x} {}{}", a.insns[k].off, listing_row(a, k, true), if here { "   <== at" } else { "" }));
         }
         out.line("```");
-        if out.truncated {
-            out.always("(cut at the reply limit: full=1, or at=<offset> for a window)");
-        }
     }
     if view == "listing" || view == "ours" {
         // per line, in our code order: our instructions, then rustc's at that line
@@ -1352,9 +1350,6 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
             }
             out.line("```");
         }
-        if out.truncated {
-            out.always("(cut at the reply limit: add line=<n> or full=1)");
-        }
     }
     // what is not shown, how it was measured, drill-down
     let mut tail = Vec::new();
@@ -1375,10 +1370,10 @@ fn render(out: &mut Out, slot: u32, a: &Side, b: Option<&Side>, view: &str, line
     }
     tail.push(super::reliability::line(took > 0.0));
     for t in tail {
-        out.always(&format!("note: {}", t));
+        out.line(&format!("note: {}", t));
     }
     let lines_hint = j.keys.iter().zip(&j.samples).max_by_key(|x| x.1).map(|x| x.0.rsplit(':').next().unwrap_or("").to_string()).unwrap_or_default();
-    out.always(&format!("more: asm @{} view=listing line={}  asm @{} view=code  asm @{} view=lines  remarks @{}  versions @{}", slot, lines_hint, slot, slot, slot, slot));
+    out.line(&format!("more: asm @{} view=listing line={}  asm @{} view=code  asm @{} view=lines  remarks @{}  versions @{}", slot, lines_hint, slot, slot, slot, slot));
 }
 
 // ------------------------------------------------------------------ asm top
@@ -1540,9 +1535,9 @@ fn cmd_top(req: &Req, out: &mut Out) {
     let top = rows.first().map(|r| r.1.split('|').nth(2).unwrap_or("").trim().to_string()).unwrap_or_default();
     if vs {
         let est: f64 = rows.iter().map(|r| r.0).sum::<f64>() * 100.0 / jit_total.max(1) as f64;
-        out.always(&format!("excess JIT instructions cost an estimated {:.1}% of the JIT code's {} ({} of {} on all threads in {:.1} s); worst: {}", est, ev_unit(ev), count_str(jit_total), count_str(total), run.secs, if top.is_empty() { "-".into() } else { top }));
+        out.line(&format!("excess JIT instructions cost an estimated {:.1}% of the JIT code's {} ({} of {} on all threads in {:.1} s); worst: {}", est, ev_unit(ev), count_str(jit_total), count_str(total), run.secs, if top.is_empty() { "-".into() } else { top }));
     } else {
-        out.always(&format!("{} of {} {} ({}%) in JIT code in {:.1} s; hottest: {}", count_str(jit_total), count_str(total), ev_unit(ev), pct(jit_total, total), run.secs, if top.is_empty() { "-".into() } else { top }));
+        out.line(&format!("{} of {} {} ({}%) in JIT code in {:.1} s; hottest: {}", count_str(jit_total), count_str(total), ev_unit(ev), pct(jit_total, total), run.secs, if top.is_empty() { "-".into() } else { top }));
     }
     out.line("");
     out.line(&format!("| slot | fn (root) | JIT {} % | tier | ours instr | rustc instr | excess cost % |", ev_unit(ev)));
@@ -1554,22 +1549,22 @@ fn cmd_top(req: &Req, out: &mut Out) {
         out.line(&format!("+{} smaller", rows.len() - n));
     }
     if vs {
-        out.always("note: a root is the innermost fn on a sample's stack that rustc kept as a symbol; ours = its JIT body + the bodies of JIT callees under it that rustc inlined ((n fns)); excess cost % = samples % x (ours - rustc) / ours");
+        out.line("note: a root is the innermost fn on a sample's stack that rustc kept as a symbol; ours = its JIT body + the bodies of JIT callees under it that rustc inlined ((n fns)); excess cost % = samples % x (ours - rustc) / ours");
         if unrooted > 0 {
-            out.always(&format!("note: {}% of the JIT samples have no root (no JIT frame on their stack that rustc has a symbol of)", pct(unrooted, jit_total)));
+            out.line(&format!("note: {}% of the JIT samples have no root (no JIT frame on their stack that rustc has a symbol of)", pct(unrooted, jit_total)));
         }
         if unmatched > 0 {
-            out.always(&format!("note: {}% of the JIT samples count for their leaf alone: a JIT fn between it and the root is not in rustc's inline tree of the root (a name we do not match)", pct(unmatched, jit_total)));
+            out.line(&format!("note: {}% of the JIT samples count for their leaf alone: a JIT fn between it and the root is not in rustc's inline tree of the root (a name we do not match)", pct(unmatched, jit_total)));
         }
         if let Err(e) = &native {
-            out.always(&format!("note: {}", e));
+            out.line(&format!("note: {}", e));
         }
     }
     for s in &run.notes {
-        out.always(&format!("note: {}", s));
+        out.line(&format!("note: {}", s));
     }
-    out.always(&format!("note: {}", super::reliability::line(true)));
-    out.always("more: asm @<slot> vs=rustc  asm @<slot> view=code  remarks @<slot>  prof view=tree");
+    out.line(&format!("note: {}", super::reliability::line(true)));
+    out.line("more: asm @<slot> vs=rustc  asm @<slot> view=code  remarks @<slot>  prof view=tree");
 }
 
 #[cfg(test)]

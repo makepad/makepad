@@ -388,7 +388,7 @@ fn shift256(name: &str, b: &mut Bd, x: &[Val], c: &[i64]) -> Option<Val> {
     }
 }
 
-/// MAKEPAD_RUN_NO_SIMD=1: std's scalar intrinsics
+/// RELAX_NO_SIMD=1: std's scalar intrinsics
 fn off(options: &crate::options::Options) -> bool {
     options.no_simd
 }

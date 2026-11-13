@@ -46,7 +46,7 @@ wait_for() { # wait_for <log> <pid> <pattern>: until the log has it (0) or the r
 cp -R "$dir/fx" "$dir/fx-app"
 printf '\n#[allow(dead_code)]\nfn unused() -> u32 {\n    "app"\n}\n' >> "$dir/fx-app/app/src/main.rs"
 # shellcheck disable=SC2086
-out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-app" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx-app" $J run lazy-typeck-app 2>&1); rc=$?
+out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-app" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx-app" $J run lazy-typeck-app 2>&1); rc=$?
 echo "$out" > "$dir/app-error.log"
 { [ $rc != 0 ] && echo "$out" | grep -q E0308 && echo "$out" | grep -q "not started" && ! echo "$out" | grep -q "main runs"; } || { fail="$fail app-error:$rc"; echo "$out" | tail -8; }
 
@@ -54,7 +54,7 @@ echo "$out" > "$dir/app-error.log"
 # main does, so its report and main's first line come in either order (a loaded box once printed
 # the report first): both must show, and the run stays up
 # shellcheck disable=SC2086
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-bg" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app > "$dir/bg.log" 2>&1 &
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-bg" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app > "$dir/bg.log" 2>&1 &
 pid=$!
 if wait_for "$dir/bg.log" $pid "E0308"; then
   wait_for "$dir/bg.log" $pid "main runs" || fail="$fail background-main-never-ran"
@@ -67,21 +67,21 @@ kill $pid 2>/dev/null; wait $pid 2>/dev/null
 # unattended: the same call in a run no one attends (`--unattended`: an app a test starts) parks
 # nothing; the run ends at once, non-zero, with the error's text (before the park case fixes it)
 # shellcheck disable=SC2086
-out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-unattended" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run --unattended lazy-typeck-app -- call 2>&1); rc=$?
+out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-unattended" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run --unattended lazy-typeck-app -- call 2>&1); rc=$?
 { [ $rc != 0 ] && echo "$out" | grep -q "compile error in lazy_typeck_dep::broken" && ! echo "$out" | grep -q "parked"; } || { fail="$fail unattended-parked:$rc"; echo "$out" | tail -8; }
 
 # unwatched: no visible Run panel, devhub observer or terminal can decide this panic. It parks
 # briefly, says why even under --quiet, then unwinds and ends the run without an inspect client.
 started=$SECONDS
 # shellcheck disable=SC2086
-out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-unwatched" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_REMOTE_REGISTRY="$dir/reg-unwatched" perl -e "$IN" "$dir/fx" $J run --quiet lazy-typeck-app -- panic < /dev/null 2>&1); rc=$?
+out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-unwatched" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_REMOTE_REGISTRY="$dir/reg-unwatched" perl -e "$IN" "$dir/fx" $J run --quiet lazy-typeck-app -- panic < /dev/null 2>&1); rc=$?
 elapsed=$((SECONDS - started))
 echo "$out" > "$dir/unwatched.log"
 { [ "$elapsed" -lt 60 ] && [ $rc != 0 ] && echo "$out" | grep -q "panic parked" && echo "$out" | grep -q -- "--unattended"; } || { fail="$fail unwatched:$rc:${elapsed}s"; echo "$out" | tail -8; }
 
 # park: the call of `broken` parks and reports; fixing it resumes the call
 # shellcheck disable=SC2086
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-park" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app -- call > "$dir/park.log" 2>&1 &
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-park" MAKEPAD_HIDE_WINDOWS=1 perl -e "$IN" "$dir/fx" $J run lazy-typeck-app -- call > "$dir/park.log" 2>&1 &
 pid=$!
 if wait_for "$dir/park.log" $pid "compile error parked"; then
   # (the error's own line comes from the report path: not ordered with the parked line)
@@ -102,7 +102,7 @@ fi
 # check / test of the dependency (the fixed copy is the app-error one's: `broken` still fails there)
 for cmd in check test; do
   # shellcheck disable=SC2086
-  out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-$cmd" perl -e "$IN" "$dir/fx-app" $J $cmd lazy-typeck-dep 2>&1); rc=$?
+  out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-$cmd" perl -e "$IN" "$dir/fx-app" $J $cmd lazy-typeck-dep 2>&1); rc=$?
   echo "$out" > "$dir/$cmd.log"
   { [ $rc != 0 ] && echo "$out" | grep -q E0308; } || { fail="$fail $cmd:$rc"; echo "$out" | tail -8; }
 done
@@ -113,14 +113,14 @@ lib="$dir/fx/libs/dep/src/lib.rs"
 if grep -q '= 10;' "$lib"; then
   for i in 1 2; do
     # shellcheck disable=SC2086
-    out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-tv" MAKEPAD_RUN_VERBOSE=1 perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
+    out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-tv" RELAX_VERBOSE=1 perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
     echo "$out" > "$dir/test-verdict-$i.log"
     [ $rc = 0 ] || { fail="$fail test-verdict-run$i:$rc"; echo "$out" | tail -8; }
   done
   echo "$out" | grep -q "clean verdicts are stored" || { fail="$fail test-verdict-not-reused"; echo "$out" | grep -a "test check" | tail -3; }
   sed 's/= 10;/= "ten";/' "$lib" > "$lib.new" && mv "$lib.new" "$lib"
   # shellcheck disable=SC2086
-  out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/h-tv" perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
+  out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/h-tv" perl -e "$IN" "$dir/fx" $J test lazy-typeck-dep 2>&1); rc=$?
   echo "$out" > "$dir/test-verdict-edit.log"
   { [ $rc != 0 ] && echo "$out" | grep -q E0308; } || { fail="$fail test-verdict-stale:$rc"; echo "$out" | tail -8; }
 fi

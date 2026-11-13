@@ -14,12 +14,12 @@ fixture = Path(sys.argv[2])
 with tempfile.TemporaryDirectory(prefix="relax-ctfe-deferred-") as scratch:
     for mode in ("1", "0", "check"):
         state = Path(scratch) / mode
-        env = dict(os.environ, MAKEPAD_RUN_HOME=str(state),
-                   MAKEPAD_RUN_CACHE_DIR=str(state / "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=str(state / "target"),
-                   MAKEPAD_RUN_STD=str(fixture.parent.parent / "std"),
-                   MAKEPAD_RUN_OFFLINE="1", MAKEPAD_RUN_CTFE=mode,
-                   MAKEPAD_RUN_LAZY_DEFER="/payload.rs", MAKEPAD_RUN_DEFERRED_TRACE="1")
+        env = dict(os.environ, RELAX_HOME=str(state),
+                   RELAX_CACHE_DIR=str(state / "cache"),
+                   RELAX_TARGET_DIR=str(state / "target"),
+                   RELAX_STD=str(fixture.parent.parent / "std"),
+                   RELAX_OFFLINE="1", RELAX_CTFE=mode,
+                   RELAX_LAZY_DEFER="/payload.rs", RELAX_DEFERRED_TRACE="1")
         for launch in ("cold", "warm"):
             result = subprocess.run([relax, "run", "ctfe-deferred"],
                                     cwd=fixture, env=env, text=True,
@@ -29,6 +29,6 @@ with tempfile.TemporaryDirectory(prefix="relax-ctfe-deferred-") as scratch:
             assert "ctfe_deferred: complete catalogue" in output, output
             assert "CTFE MISMATCH" not in output, output
             if launch == "cold":
-                assert "makepad-run deferred: demand loaded 1 module(s)" in output, output
+                assert "relax deferred: demand loaded 1 module(s)" in output, output
             print(f"ctfe_deferred: CTFE={mode} {launch} passed", flush=True)
 PY

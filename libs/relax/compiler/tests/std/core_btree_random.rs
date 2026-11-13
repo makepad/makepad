@@ -1,6 +1,5 @@
 // BTreeMap and BTreeSet random operations, ranges, ownership and panic safety.
 // Differential file: `| ` lines equal under rustc --test and makepad test.
-// Replaces the former std/check btree.rs and coll_btree.rs.
 
 use std::cell::Cell;
 use std::collections::{btree_map::Entry, BTreeMap, BTreeSet};

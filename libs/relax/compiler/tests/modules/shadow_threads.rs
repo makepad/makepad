@@ -4,7 +4,7 @@
 //    outer A's live shadow frames (it used to restart at the top of A's shadow stack, over them).
 // 2. Two threads in one module at once: each keeps its own shadow frames and result slots.
 // 3. Fuel is per thread and per call: another thread entering the module does not refill it.
-// Run with MAKEPAD_RUN_MODULE_FUEL=2000000.
+// Run with RELAX_MODULE_FUEL=2000000.
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 

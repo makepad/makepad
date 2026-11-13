@@ -3,7 +3,7 @@
 //! linker defines for the section are that block's ends -- ELF's `__start_<name>` /
 //! `__stop_<name>` (for a name that is a C identifier), Mach-O's `section$start$<seg>$<sect>` /
 //! `section$end$<seg>$<sect>` (a `\x01` link name: the exact symbol). A table the linker collects
-//! (makepad_relax_api's `#[relax_api]` entries, `linkme`-style slices) reads the same entries as
+//! (relax_api's `#[relax_api]` entries, `linkme`-style slices) reads the same entries as
 //! under rustc. COFF defines no bounds: a section `name$part` joins `name`, its parts sorted by
 //! their names, so a table's `$a` and `$z` marker statics enclose its `$m` entries.
 //!
@@ -319,10 +319,10 @@ fn constructors(u: &mut Unit, root: u32) -> Result<Vec<(DefId, u64)>, String> {
         let d = DefId(i as u32);
         let at = u.pos_str(def.file, f.ast.item(def.item).lo);
         match how {
-            Startup::Refuse(why) => refused.push(format!("{}: static `{}` is in `{}`, {}: makepad run does not run it -- run the program natively (cargo)", at, u.prog.def_path(d), name, why)),
+            Startup::Refuse(why) => refused.push(format!("{}: static `{}` is in `{}`, {}: Relax does not run it -- run the program natively (cargo)", at, u.prog.def_path(d), name, why)),
             Startup::Run(rank, key) => match u.tcx.const_ty(&u.prog, d) {
                 Some(t) if plain_ctor(u, t) => found.push((rank, key, d)),
-                _ => refused.push(format!("{}: static `{}` is in `{}`, a constructor table, but is not a fn pointer taking nothing (or an array of them): makepad run calls only those -- run the program natively (cargo)", at, u.prog.def_path(d), name)),
+                _ => refused.push(format!("{}: static `{}` is in `{}`, a constructor table, but is not a fn pointer taking nothing (or an array of them): Relax calls only those -- run the program natively (cargo)", at, u.prog.def_path(d), name)),
             },
         }
     }

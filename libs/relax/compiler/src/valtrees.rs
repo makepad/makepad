@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     #[test]
     fn jit_query_preserves_aggregate_types_and_reports_panics() {
-        const CHILD: &str = "MAKEPAD_RUN_VALTREE_QUERY_CHILD";
+        const CHILD: &str = "RELAX_VALTREE_QUERY_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "valtrees::tests::jit_query_preserves_aggregate_types_and_reports_panics", "--test-threads=1"])
@@ -110,7 +110,7 @@ mod tests {
             assert!(status.success()); return;
         }
         crate::borrowck::lazy::disable_gandalf();
-        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
         let dir = std::env::temp_dir().join(format!("relax-valtree-query-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lib.rs");

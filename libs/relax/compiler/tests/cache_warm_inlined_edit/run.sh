@@ -89,8 +89,8 @@ k=0
 run() { # run <label> <expected line>
   k=$((k + 1))
   log=$C/run$k.log
-  (cd "$P" && env -u MAKEPAD_RUN_CACHE_TRACE -u MAKEPAD_RUN_PRELINK MAKEPAD_RUN_HOME="$C/home" MAKEPAD_RUN_TARGET_DIR="$C/home/target" MAKEPAD_RUN_CACHE_DIR="$C/home/cache" \
-    TMPDIR="$C/home/tmp" MAKEPAD_RUN_VERBOSE=1 MAKEPAD_RUN_STD="$S" "$R" run --verbose inlined_edit_app > "$log" 2>&1)
+  (cd "$P" && env -u RELAX_CACHE_TRACE -u RELAX_PRELINK RELAX_HOME="$C/home" RELAX_TARGET_DIR="$C/home/target" RELAX_CACHE_DIR="$C/home/cache" \
+    TMPDIR="$C/home/tmp" RELAX_VERBOSE=1 RELAX_STD="$S" "$R" run --verbose inlined_edit_app > "$log" 2>&1)
   rc=$?
   got=$(grep -a -m1 '^LINE ' "$log")
   printf 'step %-10s rc=%s %s | %s\n' "$1" "$rc" "$got" "$(grep -a -m1 -oE '[0-9]+ refused by their dependency certificate' "$log")"

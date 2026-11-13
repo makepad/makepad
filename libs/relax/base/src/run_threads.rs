@@ -260,7 +260,7 @@ pub fn reset_gate() -> std::sync::RwLockWriteGuard<'static, ()> {
         }
         if !said && start.elapsed() >= Duration::from_secs(5) {
             said = true;
-            eprintln!("makepad-run: a run's end waits for a request or a watcher that has not finished");
+            eprintln!("relax: a run's end waits for a request or a watcher that has not finished");
         }
         std::thread::sleep(Duration::from_millis(1));
     }

@@ -42,6 +42,13 @@ pub struct OnceState {
     set_state_to: Cell<State>,
 }
 
+// rustc 1.100.0 (once_default)
+impl Default for Once {
+    fn default() -> Once {
+        Once::new()
+    }
+}
+
 impl OnceState {
     pub fn is_poisoned(&self) -> bool {
         self.poisoned

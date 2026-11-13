@@ -76,7 +76,6 @@ impl fmt::Display for TryFromSliceError {
 
 impl crate::error::Error for TryFromSliceError {}
 
-#[cfg(not(relax_check))]
 impl<T, const N: usize> [T; N] {
     pub const fn map<U, F: FnMut(T) -> U>(self, f: F) -> [U; N] {
         let mut f = f;
@@ -145,6 +144,16 @@ impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<&'b [U]> for [T; N] {
 impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<[U; N]> for &'b [T] {
     fn eq(&self, other: &[U; N]) -> bool {
         crate::slice::slice_eq(*self, &other[..])
+    }
+}
+impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<&'b mut [U]> for [T; N] {
+    fn eq(&self, other: &&'b mut [U]) -> bool {
+        crate::slice::slice_eq(&self[..], &**other)
+    }
+}
+impl<'b, T: PartialEq<U>, U, const N: usize> PartialEq<[U; N]> for &'b mut [T] {
+    fn eq(&self, other: &[U; N]) -> bool {
+        crate::slice::slice_eq(&**self, &other[..])
     }
 }
 impl<T: Eq, const N: usize> Eq for [T; N] {}
@@ -265,6 +274,10 @@ impl<T, const N: usize> IntoIter<T, N> {
     fn base(&self) -> *const T {
         &*self.data as *const [T; N] as *const T
     }
+    /// the items' pointer for drops (from the unique borrow, as Drop's)
+    fn base_mut(&mut self) -> *mut T {
+        &mut *self.data as *mut [T; N] as *mut T
+    }
     pub fn as_slice(&self) -> &[T] {
         unsafe { im::slice_from_raw(im::ptr_add(self.base(), self.start), self.end - self.start) }
     }
@@ -284,6 +297,20 @@ impl<T, const N: usize> Iterator for IntoIter<T, N> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let n = self.end - self.start;
         (n, Some(n))
+    }
+    // core array iter.rs: the skipped items leave the live range first, then drop as one slice,
+    // so a panicking drop neither drops one twice (the iterator's Drop no longer has them) nor
+    // leaks the others (a slice's drop goes on past a panicking element)
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        let len = self.end - self.start;
+        let k = if n < len { n } else { len };
+        let from = self.start;
+        self.start += k;
+        if crate::mem::needs_drop::<T>() {
+            // SAFETY: from..from + k were alive and are out of the live range now: dropped once
+            unsafe { crate::ptr::drop_in_place(crate::ptr::slice_from_raw_parts_mut(im::ptr_add_mut(self.base_mut(), from), k)) };
+        }
+        if k < n { Err(n - k) } else { Ok(()) }
     }
 }
 
@@ -339,11 +366,12 @@ impl<T, const N: usize> Drop for IntoIter<T, N> {
         if !crate::mem::needs_drop::<T>() {
             return;
         }
-        let p = &mut *self.data as *mut [T; N] as *mut T;
-        while self.start < self.end {
-            unsafe { im::drop_in_place(im::ptr_add_mut(p, self.start)) };
-            self.start += 1;
-        }
+        // core: the alive items as one slice (a panicking drop leaves the others to the slice's
+        // drop, which goes on with them)
+        let (from, k) = (self.start, self.end - self.start);
+        self.start = self.end;
+        // SAFETY: from..from + k are the alive items, dropped here once
+        unsafe { crate::ptr::drop_in_place(crate::ptr::slice_from_raw_parts_mut(im::ptr_add_mut(self.base_mut(), from), k)) };
     }
 }
 

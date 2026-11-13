@@ -1,4 +1,4 @@
-//! Commercial-lane blockers, round 3 (Stage under `makepad run`); each = rustc --test.
+//! Commercial-lane blockers, round 3 (an app under `makepad run`); each = rustc --test.
 //! 1. SILENT (flow graph/mod.rs:2826): a closure that reads a shared reference only through
 //!    it (`node.id`) captures a copy of the reference (edition 2021 captures the place
 //!    `(*node).id`; rustc truncates it at the deref to a copy of `node`, upvar.rs
@@ -9,12 +9,12 @@
 //!    expected_inputs_for_expected_output, per input), so `&[]` is checked against `&[String]`
 //!    and unsizes from `&[String; 0]`.
 //! 3. widgets grid.rs:1343: `iter.map(fn_item).try_fold(0usize, usize::checked_add)`.
-//! 4. Stage (io_err): `File::open(p).map_err(io_err("open"))?` with
+//! 4. An app (io_err): `File::open(p).map_err(io_err("open"))?` with
 //!    `fn io_err(op) -> impl Fn(io::Error) -> ClientError`: map_err's F comes from the opaque's
 //!    Fn bound (ClientError) before `?` converts it into the fn's error type.
-//! 5. Stage TOOLS table: `concat!` with `macro_rules!` calls among its arguments (rustc expands
+//! 5. An app's TOOLS table: `concat!` with `macro_rules!` calls among its arguments (rustc expands
 //!    them first).
-//! 6. Stage studio_api_host: `spawner.spawn_worker(options, body)` with
+//! 6. An app's API host: `spawner.spawn_worker(options, body)` with
 //!    body: Box<dyn FnOnce() + Send> and `F: FnOnce() -> T`: T = () through the Box impl
 //!    (`<Box<F> as FnOnce<A>>::Output = <F as FnOnce<A>>::Output`), plus a generic constructor
 //!    whose J/D come only from the closure body's call.

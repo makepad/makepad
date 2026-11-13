@@ -15,8 +15,8 @@ ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_tiers.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"
-MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-    MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_RUN_PANIC_PARK=600 \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+    RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache" RELAX_PANIC_PARK=600 \
     PROBE_TRIGGER="$dir/trigger" PROBE_SECS=300 \
     $J run relax-provided-fixture --bin relax-inspect-tiers > "$dir/run.log" 2>&1 &
 pid=$!
@@ -64,13 +64,13 @@ ask resume P1 panic > /dev/null 2>&1
 kill $pid 2>/dev/null; wait $pid 2>/dev/null
 # warm: a short run that ends on its own writes its cache (outer's O3 code); the next run of the
 # same cache dir links that code, with its inline stack
-MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-    MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/wcache" PROBE_SECS=6 \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+    RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/wcache" PROBE_SECS=6 \
     $J run relax-provided-fixture --bin relax-inspect-tiers > "$dir/run1.log" 2>&1 &
 pid=$!
 wait $pid
-MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-    MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/wcache" MAKEPAD_RUN_PANIC_PARK=600 \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+    RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/wcache" RELAX_PANIC_PARK=600 \
     PROBE_TRIGGER="$dir/trigger" PROBE_SECS=300 \
     $J run relax-provided-fixture --bin relax-inspect-tiers > "$dir/run2.log" 2>&1 &
 pid=$!

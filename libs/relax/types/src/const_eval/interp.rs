@@ -25,7 +25,7 @@ pub enum Outcome {
     Ok,
     /// rustc's error for it: (span in the constant's own body or at the item, message with its code)
     Error(mir::Span, String),
-    /// an operation the interpreter does not have yet (`MAKEPAD_RUN_INTERP_TRACE=1` prints it)
+    /// an operation the interpreter does not have yet (`RELAX_INTERP_TRACE=1` prints it)
     Unsupported(String),
 }
 

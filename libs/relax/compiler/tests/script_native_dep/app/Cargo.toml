@@ -1,0 +1,11 @@
+[package]
+name = "snd-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+snd-callback = { path = "../callback" }
+
+[build-dependencies]
+snd-plain = { path = "../plain" }

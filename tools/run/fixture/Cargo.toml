@@ -12,10 +12,10 @@ default-run = "relax-provided-fixture"
 host-shims = []
 
 [dependencies]
-makepad-relax-api = { workspace = true }
+relax-api = { workspace = true }
 
 [dev-dependencies]
-makepad-relax-api = { workspace = true, features = ["host-shims"] }
+relax-api = { workspace = true, features = ["host-shims"] }
 
 [lib]
 path = "src/lib.rs"

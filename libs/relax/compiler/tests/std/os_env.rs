@@ -1,4 +1,4 @@
-// std-os lane: std::env and std::process (differential: os_diff.sh)
+// std-os lane: std::env and std::process (differential: agree.sh)
 use std::env;
 use std::io::Write;
 use std::process::{Command, Stdio};

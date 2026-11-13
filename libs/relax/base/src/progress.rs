@@ -22,6 +22,38 @@ pub fn set_report(f: fn(&str, &str)) {
     let _ = REPORT.set(f);
 }
 
+/// `--silent` (the run's command line): nothing of Relax's own on stderr but errors (a program
+/// re-running itself, a binary's wrapper script, whose stderr is the program's). The one switch
+/// every layer reads; the run sets it.
+static SILENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_silent() {
+    SILENT.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn silent() -> bool {
+    SILENT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The session log's writer for a line the terminal does not show (the run's `tui::log_only`),
+/// set by the run when it starts its session log.
+static LOG_ONLY: std::sync::OnceLock<fn(&str)> = std::sync::OnceLock::new();
+
+pub fn set_log_only(f: fn(&str)) {
+    let _ = LOG_ONLY.set(f);
+}
+
+/// A line of Relax's own about the run (what it waits on, what it was given): on stderr, which
+/// the session log takes in, unless the run is silent; then in the session log alone. Either way
+/// the log has it.
+pub fn say(line: &str) {
+    if !silent() {
+        eprintln!("{line}");
+    } else if let Some(log_only) = LOG_ONLY.get() {
+        log_only(line);
+    }
+}
+
 fn step_of(done: u64, total: Option<u64>) -> u64 {
     match total {
         Some(t) if t > 0 => done.min(t) * 100 / t,
@@ -69,8 +101,8 @@ pub fn progress(label: &str, done: u64, total: Option<u64>) {
         report("progress", &format!("{done} {} {label}", total_text(total)));
     } else {
         match total {
-            Some(t) if t > 0 => eprintln!("makepad: {label}: {} %", done.min(t) * 100 / t),
-            _ => eprintln!("makepad: {label}: {} MB", done >> 20),
+            Some(t) if t > 0 => eprintln!("relax: {label}: {} %", done.min(t) * 100 / t),
+            _ => eprintln!("relax: {label}: {} MB", done >> 20),
         }
     }
 }
@@ -79,7 +111,7 @@ pub fn progress(label: &str, done: u64, total: Option<u64>) {
 /// remote could not be reached): the launcher's report as `note`, and a stderr line.
 pub fn note(text: &str) {
     let text: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
-    eprintln!("makepad: {text}");
+    eprintln!("relax: {text}");
     if let Some(report) = REPORT.get().copied() {
         report("note", &text);
     }

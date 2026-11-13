@@ -6,7 +6,7 @@ T=${CARGO_TARGET_DIR:-$PWD/target}
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
 J="cargo run --profile host -q --manifest-path $PWD/Cargo.toml -p makepad-run --bin makepad --"
 B=$J
-export MAKEPAD_RUN_STD=$PWD/libs/relax/compiler/std
+export RELAX_STD=$PWD/libs/relax/compiler/std
 CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 > ${TMPDIR:-/tmp}/allapps-build.log 2>&1 || { tail -20 ${TMPDIR:-/tmp}/allapps-build.log; echo "BUILD FAILED"; exit 3; }
 for toml in apps/*/Cargo.toml apps/*/*/Cargo.toml examples/*/Cargo.toml wm/Cargo.toml wm/*/Cargo.toml; do
   [ -f "$toml" ] || continue

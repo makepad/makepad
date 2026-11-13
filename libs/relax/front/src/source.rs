@@ -297,7 +297,7 @@ impl SourceRegistry {
             }
             Some(SourceBytes::Shared(_)) => {
                 MAPPED_SOURCE_MISMATCH.fetch_add(1, Relaxed);
-                if std::env::var_os("MAKEPAD_RUN_LAZY_VERIFY").is_some() { panic!("mapped source differs from the registry's bytes: {path}"); }
+                if std::env::var_os("RELAX_LAZY_VERIFY").is_some() { panic!("mapped source differs from the registry's bytes: {path}"); }
                 false
             }
             Some(_) => true,

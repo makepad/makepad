@@ -1,16 +1,16 @@
-//! `makepad clean [-p <package>]`: removes the workspace's run dir, `<target>/makepad-run` (dirs.rs),
+//! `makepad clean [-p <package>]`: removes the workspace's run dir, `<target>/relax` (dirs.rs),
 //! and nothing else: never cargo's own build output next to it.
 //!
 //! The workspace is found as for the cache (cargo's rules, from the current folder). Refused:
-//! under MAKEPAD_RUN_CACHE_DIR (an override for tests and measurement; clean never deletes an arbitrary
-//! folder), and unless the resolved folder (symlinks resolved, the `makepad-run` folder itself not a
-//! link) is `<root>/target/makepad-run` where `<root>` holds a Cargo.toml that has `[workspace]` or is
+//! under RELAX_CACHE_DIR (an override for tests and measurement; clean never deletes an arbitrary
+//! folder), and unless the resolved folder (symlinks resolved, the `relax` folder itself not a
+//! link) is `<root>/target/relax` where `<root>` holds a Cargo.toml that has `[workspace]` or is
 //! the package root cargo resolves -- or, with a target dir set by CARGO_TARGET_DIR /
-//! CARGO_BUILD_TARGET_DIR / cargo config, exactly `<that target dir>/makepad-run`.
+//! CARGO_BUILD_TARGET_DIR / cargo config, exactly `<that target dir>/relax`.
 //!
 //! The tree is removed by walking it (no shell, no glob; links are removed, never followed).
 //! This includes every entry left by an older layout, not just the current store files:
-//! `startup/`, `serve/` and any other directory inside `<target>/makepad-run` all go.
+//! `startup/`, `serve/` and any other directory inside `<target>/relax` all go.
 //! A file that cannot be removed (on Windows: mapped or open by a running app or makepad run) is
 //! skipped and reported: the next start's prune removes stale store generations, and a later
 //! clean the rest. Exit 0 with a summary.
@@ -31,7 +31,7 @@ pub fn cmd_clean(args: &[String]) -> i32 {
                 i += 1;
             }
             _ => {
-                eprintln!("usage: makepad clean [-p <package>]");
+                eprintln!("usage: {tool} clean [-p <package>]", tool = crate::tool_name());
                 return 2;
             }
         }
@@ -41,7 +41,7 @@ pub fn cmd_clean(args: &[String]) -> i32 {
         Ok(Some(d)) => d,
         Ok(None) => return 0,
         Err(e) => {
-            eprintln!("makepad clean: {e}");
+            eprintln!("relax clean: {e}");
             return 1;
         }
     };
@@ -59,23 +59,23 @@ pub fn cmd_clean(args: &[String]) -> i32 {
     0
 }
 
-/// The relax dir to clean, checked (None: there is none, said so). `overridden`: MAKEPAD_RUN_CACHE_DIR
+/// The relax dir to clean, checked (None: there is none, said so). `overridden`: RELAX_CACHE_DIR
 /// is set.
 pub fn checked_dir(workspace: &str, overridden: bool) -> Result<Option<PathBuf>, String> {
     if overridden {
-        return Err("MAKEPAD_RUN_CACHE_DIR is set: that override is for tests and measurement only, and clean never deletes an arbitrary folder (unset it, or remove that folder yourself)".to_string());
+        return Err("RELAX_CACHE_DIR is set: that override is for tests and measurement only, and clean never deletes an arbitrary folder (unset it, or remove that folder yourself)".to_string());
     }
     if crate::vfs::is_virtual(workspace) {
-        return Err(format!("{workspace} is a git repository run's virtual workspace: no target folder to clean"));
+        return Err(format!("{workspace} is a virtual workspace (a git repository run's, or a shared one: RELAX_SHARE): no target folder to clean"));
     }
     let target = crate::resolve::target_dir(workspace)?;
     let default = format!("{}/target", crate::resolve::find_root(workspace)?);
     let custom = crate::vfs::normalize_path(&target) != crate::vfs::normalize_path(&default);
-    let dir = Path::new(&target).join("makepad-run");
+    let dir = Path::new(&target).join("relax");
     let meta = match std::fs::symlink_metadata(&dir) {
         Ok(m) => m,
         Err(_) => {
-            println!("makepad clean: {} does not exist: nothing to remove", dir.display());
+            println!("relax clean: {} does not exist: nothing to remove", dir.display());
             return Ok(None);
         }
     };
@@ -84,14 +84,14 @@ pub fn checked_dir(workspace: &str, overridden: bool) -> Result<Option<PathBuf>,
     }
     let real = std::fs::canonicalize(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let parent = std::fs::canonicalize(&target).map_err(|e| format!("{target}: {e}"))?;
-    if real != parent.join("makepad-run") {
+    if real != parent.join("relax") {
         return Err(format!("{} resolves to {}, outside {}: refused", dir.display(), real.display(), parent.display()));
     }
-    if !same_name(real.file_name(), "makepad-run") {
-        return Err(format!("{} is not named `makepad-run`: refused", real.display()));
+    if !same_name(real.file_name(), "relax") {
+        return Err(format!("{} is not named `relax`: refused", real.display()));
     }
     if custom {
-        println!("makepad clean: the target dir is set (CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR or cargo config build.target-dir): cleaning {}", real.display());
+        println!("relax clean: the target dir is set (CARGO_TARGET_DIR, CARGO_BUILD_TARGET_DIR or cargo config build.target-dir): cleaning {}", real.display());
         return Ok(Some(real));
     }
     if !same_name(parent.file_name(), "target") {
@@ -172,12 +172,12 @@ impl Removal {
                 for f in &self.removed {
                     println!("removed {}", f.display());
                 }
-                println!("makepad clean -p {p}: removed {} files, {} bytes ({})", self.files, self.bytes, human(self.bytes));
+                println!("{tool} clean -p {p}: removed {} files, {} bytes ({})", self.files, self.bytes, human(self.bytes), tool = crate::tool_name());
             }
-            None => println!("makepad clean: removed {} ({} files, {} bytes, {})", dir.display(), self.files, self.bytes, human(self.bytes)),
+            None => println!("relax clean: removed {} ({} files, {} bytes, {})", dir.display(), self.files, self.bytes, human(self.bytes)),
         }
         if !self.skipped.is_empty() {
-            println!("makepad clean: {} in use (open or mapped by a running app or makepad run), skipped; they go at the next start (stale store generations) or the next clean:", self.skipped.len());
+            println!("relax clean: {} in use (open or mapped by a running app or Relax), skipped; they go at the next start (stale store generations) or the next clean:", self.skipped.len());
             for (p, e) in &self.skipped {
                 println!("  {} ({e})", p.display());
             }
@@ -220,34 +220,34 @@ mod tests {
         w(&ws.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n");
         w(&ws.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\n");
         w(&ws.join("target/release/keep.rlib"), "cargo's");
-        w(&ws.join("target/makepad-run/cache/core-0123456789abcdef.rcs"), "0123456789");
-        w(&ws.join("target/makepad-run/startup/app.startup"), "abc");
+        w(&ws.join("target/relax/cache/core-0123456789abcdef.rcs"), "0123456789");
+        w(&ws.join("target/relax/startup/app.startup"), "abc");
 
-        // under MAKEPAD_RUN_CACHE_DIR: refused
-        assert!(checked_dir(&ws_s, true).unwrap_err().contains("MAKEPAD_RUN_CACHE_DIR"));
+        // under RELAX_CACHE_DIR: refused
+        assert!(checked_dir(&ws_s, true).unwrap_err().contains("RELAX_CACHE_DIR"));
 
         // no Cargo.toml at or above the folder: refused, nothing touched
         let bare = tmp("bare");
-        w(&bare.join("target/makepad-run/x"), "x");
+        w(&bare.join("target/relax/x"), "x");
         assert!(checked_dir(&bare.display().to_string(), false).is_err());
-        assert!(bare.join("target/makepad-run/x").exists());
+        assert!(bare.join("target/relax/x").exists());
 
         // a package below a workspace that does not list it is its own root (cargo's rule);
-        // a folder named target/makepad-run2 is never cleaned: only `makepad-run` is ever returned
+        // a folder named target/relax2 is never cleaned: only `relax` is ever returned
         let solo = tmp("solo");
         w(&solo.join("Cargo.toml"), "[package]\nname = \"solo\"\nversion = \"0.1.0\"\n");
-        w(&solo.join("target/makepad-run2/x"), "x");
+        w(&solo.join("target/relax2/x"), "x");
         assert_eq!(checked_dir(&solo.display().to_string(), false).unwrap(), None);
-        w(&solo.join("target/makepad-run/x"), "x");
-        assert_eq!(checked_dir(&solo.display().to_string(), false).unwrap(), Some(std::fs::canonicalize(solo.join("target/makepad-run")).unwrap()));
+        w(&solo.join("target/relax/x"), "x");
+        assert_eq!(checked_dir(&solo.display().to_string(), false).unwrap(), Some(std::fs::canonicalize(solo.join("target/relax")).unwrap()));
 
         // a target dir set by cargo config (as CARGO_TARGET_DIR would): exactly `<it>/relax`
         let custom = tmp("custom");
-        w(&custom.join("makepad-run/x"), "x");
+        w(&custom.join("relax/x"), "x");
         let cfg = tmp("cfg");
         w(&cfg.join("Cargo.toml"), "[workspace]\n");
         w(&cfg.join(".cargo/config.toml"), &format!("[build]\ntarget-dir = \"{}\"\n", custom.display()));
-        assert_eq!(checked_dir(&cfg.display().to_string(), false).unwrap(), Some(std::fs::canonicalize(custom.join("makepad-run")).unwrap()));
+        assert_eq!(checked_dir(&cfg.display().to_string(), false).unwrap(), Some(std::fs::canonicalize(custom.join("relax")).unwrap()));
 
         // a relax dir that is a link elsewhere: refused
         #[cfg(unix)]
@@ -256,22 +256,22 @@ mod tests {
             let linked = tmp("linked");
             w(&linked.join("Cargo.toml"), "[workspace]\n");
             std::fs::create_dir_all(linked.join("target")).unwrap();
-            std::os::unix::fs::symlink(&elsewhere, linked.join("target/makepad-run")).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, linked.join("target/relax")).unwrap();
             assert!(checked_dir(&linked.display().to_string(), false).is_err());
             assert!(elsewhere.exists());
-            std::fs::remove_file(linked.join("target/makepad-run")).unwrap();
+            std::fs::remove_file(linked.join("target/relax")).unwrap();
             std::fs::remove_dir_all(&linked).unwrap();
             std::fs::remove_dir(&elsewhere).unwrap();
         }
 
-        // the workspace's own, from a member folder: exactly target/makepad-run goes, bytes counted
+        // the workspace's own, from a member folder: exactly target/relax goes, bytes counted
         let dir = checked_dir(&ws.join("app").display().to_string(), false).unwrap().unwrap();
-        assert_eq!(dir, std::fs::canonicalize(ws.join("target/makepad-run")).unwrap());
+        assert_eq!(dir, std::fs::canonicalize(ws.join("target/relax")).unwrap());
         let mut r = Removal::default();
         r.tree(&dir);
         assert_eq!((r.files, r.bytes), (2, 13));
         assert!(r.skipped.is_empty());
-        assert!(!ws.join("target/makepad-run").exists());
+        assert!(!ws.join("target/relax").exists());
         assert!(ws.join("target/release/keep.rlib").is_file());
         assert_eq!(checked_dir(&ws_s, false).unwrap(), None);
 
@@ -280,11 +280,11 @@ mod tests {
         }
     }
 
-    /// A folder whose name is not `makepad-run` under `target` is never what checked_dir returns, and a
+    /// A folder whose name is not `relax` under `target` is never what checked_dir returns, and a
     /// file that cannot be removed is skipped and reported, the rest removed.
     #[test]
     fn skipped_files_are_reported() {
-        assert!(!same_name(Some(std::ffi::OsStr::new("makepad-run2")), "makepad-run"));
+        assert!(!same_name(Some(std::ffi::OsStr::new("relax2")), "relax"));
         assert!(!same_name(Some(std::ffi::OsStr::new("tmp")), "target"));
         let d = tmp("skip");
         w(&d.join("a/x"), "12345");

@@ -2,7 +2,7 @@
 // type (rustc op.rs check_overloaded_binop), so an instance does not make it the left type.
 // `x == &W(y.as_ref())` with x: &W<Name> compares W<Name> with W<&str> through
 // `impl<S1, S2> PartialEq<W<S2>> for W<S1>` (unicase's Unicode / Ascii comparison, reached by
-// Scope through pulldown-cmark's UniCase<CowStr>).
+// an app through pulldown-cmark's UniCase<CowStr>).
 struct W<S>(S);
 impl<S1: AsRef<str>, S2: AsRef<str>> PartialEq<W<S2>> for W<S1> {
     fn eq(&self, other: &W<S2>) -> bool { self.0.as_ref() == other.0.as_ref() }

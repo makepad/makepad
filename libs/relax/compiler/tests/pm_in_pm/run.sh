@@ -5,7 +5,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet pmpm-app 2>>"$ERR")
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet pmpm-app 2>>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "Helper Other App" ]; then echo "pm_in_pm: ok"; else tail -5 "$ERR"; echo "pm_in_pm: FAILED"; exit 1; fi

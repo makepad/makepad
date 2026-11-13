@@ -37,7 +37,7 @@ shutil.copytree(Path(__file__).parent, fixture,
                 ignore=shutil.ignore_patterns("target", "Cargo.lock", "__pycache__"))
 env = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true",
            CARGO_TARGET_DIR=str(scratch / "cargo"),
-           MAKEPAD_RUN_CACHE_DIR=str(scratch / "jit"))
+           RELAX_CACHE_DIR=str(scratch / "jit"))
 
 
 def run(label, args, success=True):

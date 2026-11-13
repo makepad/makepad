@@ -1,21 +1,40 @@
 #!/usr/bin/env python3
-"""Loopback protocol and CLI integration. Fixture copies and logs survive for inspection."""
+"""Loopback protocol and CLI integration. Fixture copies and logs survive for inspection.
+run.py [/path/to/relax] (the relax binary, or makepad's; without one, from a makepad checkout's
+workspace root: makepad's host build)."""
 import concurrent.futures, json, os, pathlib, shutil, signal, socket, subprocess, sys, tempfile, time
-relax = pathlib.Path(sys.argv[1]).resolve()
+if len(sys.argv) > 1:
+    relax = pathlib.Path(sys.argv[1]).resolve()
+else:
+    subprocess.run(['cargo', 'build', '--profile', 'host', '-q', '-p', 'makepad-run', '--bin', 'makepad'], check=True)
+    relax = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', 'target')).resolve() / 'host' / ('makepad.exe' if os.name == 'nt' else 'makepad')
 here = pathlib.Path(__file__).resolve().parent
 work = pathlib.Path(tempfile.mkdtemp(prefix='relax-serve-'))
 fixture = work / 'fixture'
 shutil.copytree(here / 'fixture', fixture)
 cache = work / 'cache'
-env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=str(cache), MAKEPAD_RUN_CACHE='off',
-           MAKEPAD_RUN_STD=str(here.parents[1] / 'std'),
-           CARGO_NET_OFFLINE='true', MAKEPAD_RUN_OFFLINE='1')
+env = dict(os.environ, RELAX_CACHE_DIR=str(cache), RELAX_CACHE='off',
+           RELAX_STD=str(here.parents[1] / 'std'),
+           CARGO_NET_OFFLINE='true', RELAX_OFFLINE='1')
 source = fixture / 'main.rs'
 original = source.read_text()
 fixed = original.replace('Missing', 'i32')
 log = open(work / 'serve.log', 'w')
 child = subprocess.Popen([str(relax), 'serve', '--workspace', str(fixture)], env=env, stdout=log, stderr=log)
 endpoint = None
+stale = None
+# A check server of another build (what an upgrade leaves running): every answer names its compiler
+# and carries a verdict this build would not give.
+STALE_SERVER = """
+import json, socket
+s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()
+print(s.getsockname()[1], flush=True)
+while True:
+    c, _ = s.accept(); f = c.makefile('rwb'); f.readline()
+    f.write(json.dumps(dict(id=1, result=dict(workspace='', compiler='stale build', packages=[], uptime_s=0,
+        diagnostics=[dict(code='E0373', message='a stale verdict')], summary=dict(errors=1)))).encode() + b'\\n')
+    f.flush(); c.close()
+"""
 
 def await_endpoint():
     deadline = time.monotonic() + 180
@@ -146,6 +165,16 @@ try:
     deadline = time.monotonic()+15
     while endpoint.exists() and time.monotonic()<deadline: time.sleep(.02)
     assert not endpoint.exists()
+    # A server of another compiler is stopped by the pid it recorded, and the check runs in-process.
+    stale = subprocess.Popen([sys.executable, '-c', STALE_SERVER], stdout=subprocess.PIPE, text=True)
+    port = stale.stdout.readline().strip()
+    fd = os.open(endpoint, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, f'{port} {"0"*64} {stale.pid}\n'.encode()); os.close(fd)
+    upgraded, upgraded_rows = cli('check', '--json', 'serve_fixture')
+    assert 'runs another compiler (stale build): stopped it; checking in-process' in upgraded.stderr, upgraded.stderr
+    assert upgraded.returncode == one.returncode and stable(upgraded_rows) == stable(rows), (upgraded, upgraded_rows)
+    assert stale.wait(timeout=15) == (-signal.SIGTERM if os.name != 'nt' else 1)
+    stale.stdout.close(); endpoint.unlink()
     # SIGTERM cleanup and idle cleanup exercise the exact same lease guard.
     for args, terminate in [([],True),(['--idle-min','0.002'],False)]:
         child = subprocess.Popen([str(relax),'serve','--workspace',str(fixture),*args],env=env,stdout=log,stderr=log)
@@ -159,6 +188,7 @@ finally:
         try:
             cleanup = Client(); cleanup.call('shutdown'); cleanup.close()
         except (OSError, ValueError, AssertionError): pass
+    if stale is not None and stale.poll() is None: stale.kill(); stale.wait()
     if child.poll() is None:
         child.terminate()
         try: child.wait(timeout=15)

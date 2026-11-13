@@ -4,7 +4,7 @@
 //! own in front of the loop). With indices of 64 bits the scaled difference can wrap to zero, a
 //! difference or a shift narrower than the pointers is zero for other indices too, and an index
 //! defined again after the subtraction is no longer the one subtracted: no fold. Results must agree
-//! with the RIR before the pass; MAKEPAD_RUN_OPT=-emptytest leaves it.
+//! with the RIR before the pass; RELAX_OPT=-emptytest leaves it.
 use relax_backend::rir::*;
 use relax_codegen::opt;
 

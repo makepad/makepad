@@ -32,7 +32,7 @@ impl Session {
     }
     pub fn finish(self) -> std::sync::Arc<Reuse> {
         let s = REUSE.with(|s| s.borrow_mut().take().unwrap());
-        if std::env::var_os("MAKEPAD_RUN_RELOAD_TRACE_DETAIL").is_some() {
+        if std::env::var_os("RELAX_RELOAD_TRACE_DETAIL").is_some() {
             eprintln!("reload-parse: expansion reuse {} hits, {} entries", s.hits, s.next.expansions.len() + s.next.rules.len());
         }
         std::sync::Arc::new(s.next)

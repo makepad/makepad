@@ -35,8 +35,9 @@ impl Cache {
         let pend: HashMap<u128, usize> = self.pending.iter().enumerate().filter(|(_, e)| e.1.kind == KIND_CODE).map(|(i, e)| (e.1.key, i)).collect();
         for (i, &id) in ids.iter().enumerate() {
             if i % 64 == 63 && stop() { return Err(()); }
-            // interpreted slots link one by one (their code is not machine code to place)
-            if relax_codegen::interp::is_entry(u.fns[id as usize].code) { continue; }
+            // interpreted slots link one by one (their code is not machine code to place); so do
+            // sandboxed twins (the image prelinks before any sandbox is set up: not_in_image)
+            if relax_codegen::interp::is_entry(u.fns[id as usize].code) || not_in_image(u, id) { continue; }
             let Some(key0) = self.slot_key(u, id) else { continue };
             let crates = self.slot_crates.get(&id).cloned().unwrap_or_default();
             if let Some(k) = self.image_entry(id, key0, &pend) {
@@ -47,14 +48,15 @@ impl Cache {
         // own code, or inlined into code -- with a code entry: the image places them too. Startup
         // code a later tier replaced (O2/O3 over the O1 code that inlined them) calls them as fns
         // of their own; without them in the image every such call was a lazy link on the thread
-        // that made it, the UI thread's first frames after the present (Sandbox: ~200 back to back
+        // that made it, the UI thread's first frames after the present (a large app: ~200 back to back
         // on the first warm start after a cold one, 50-90 ms: the JIT indicator).
         crate::run::yield_section("image add_called");
         self.add_called(u, &mut chosen, &pend, stop)?;
         // SPEC-V: the image sends a verified-clean caller's calls to a twin to the twin's base when the
         // base's code is in the image too (a twin's key is its base's key behind tag 4): the code is
         // the caller's earlier (unverified) lowering, sound to call verified code once the caller's
-        // own verdict is clean. Later warm launches then never run the cold launch's twins (the race's
+        // own verdict is clean and asks for no run-time disjoint-index checks, and never from a twin
+        // (Unit::unverified_code_calls_bases). Later warm launches then never run the cold launch's twins (the race's
         // draw path: draw_view .. set_uniform), at no link cost (twin_link_target for the lazy path).
         crate::run::yield_section("image twins");
         let twinlink = !relax_backend::stats::opt_off(&u.prog.session.options, "-twinlink");
@@ -91,8 +93,7 @@ impl Cache {
             let sum = if pend.contains_key(k) { crate::store::sum64(payload) } else { let Some(s) = self.entry_sum(*k) else { continue }; s };
             let Some(bytes) = self.slot_bytes_known(*id) else { continue };
             let mut cr: Vec<u32> = crates.clone();
-            let body = match u.fns[*id as usize].key { crate::jit::FnKey::Plain(b) => b, _ => *id };
-            let clean = twinlink && u.verdict_clean(body);
+            let clean = twinlink && u.unverified_code_calls_bases(*id);
             let retarget = |t: &[u8]| -> bool { clean && t.first().copied().and_then(KeyKind::of) == Some(KeyKind::Twin) && in_image.contains(&t[1..]) };
             if image_slot(&mut tab, &mut slots, &mut blob, *k, sum, bytes, payload, &mut cr, &self.crate_by_ident, &retarget).is_some() {
                 n += 1;
@@ -132,7 +133,7 @@ impl Cache {
         if stop() { return Err(()); }
         // the functions thunk symbols name (fn pointers in data: vtables, callbacks) are keys
         // too: the prelink makes their slots with the others, so linking a thunk is a lookup by
-        // bytes instead of a fn key decode per symbol (Stage: ~18k of 22k thunks)
+        // bytes instead of a fn key decode per symbol (a large app: ~18k of 22k thunks)
         crate::run::yield_section("image thunks");
         let mut thunk_keys = Vec::new();
         for i in 0..tab.syms.list.len() {
@@ -238,7 +239,7 @@ impl Cache {
             if stop() { return Err(()); }
         }
         if self.verbose {
-            eprintln!("makepad-run cache: startup image of {} slots ({} keys, {} symbols, {} crates, {} KB code); ms: slots to {:.1}, data to {:.1}, key crates to {:.1}, encoded {:.1}", n, tab.keys.list.len(), tab.syms.list.len(), tab.crates.len(), blob.len() / 1024, ph[0], ph[1], ph[2], ph[3]);
+            eprintln!("relax cache: startup image of {} slots ({} keys, {} symbols, {} crates, {} KB code); ms: slots to {:.1}, data to {:.1}, key crates to {:.1}, encoded {:.1}", n, tab.keys.list.len(), tab.syms.list.len(), tab.crates.len(), blob.len() / 1024, ph[0], ph[1], ph[2], ph[3]);
         }
         Ok(Some((e.0, n)))
     }
@@ -389,7 +390,7 @@ impl Cache {
                 None => continue,
             };
             for c in callees {
-                if (c as usize) >= u.fns.len() || have.contains(&c) || !ran(c) || relax_codegen::interp::is_entry(u.fns[c as usize].code) { continue; }
+                if (c as usize) >= u.fns.len() || have.contains(&c) || !ran(c) || relax_codegen::interp::is_entry(u.fns[c as usize].code) || not_in_image(u, c) { continue; }
                 have.insert(c);
                 let Some(key0) = self.slot_key(u, c) else { continue };
                 let crates = self.slot_crates.get(&c).cloned().unwrap_or_default();
@@ -400,7 +401,7 @@ impl Cache {
             }
         }
         if self.verbose && added > 0 {
-            eprintln!("makepad-run cache: startup image: {} slots its code calls added", added);
+            eprintln!("relax cache: startup image: {} slots its code calls added", added);
         }
         Ok(())
     }
@@ -924,7 +925,7 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
             d.u8()?;
             d.u32()?;
         }
-        17 => {
+        17 | 29 => {
             skip_file(d, v)?;
             d.u32()?;
             d.u64()?;
@@ -959,7 +960,7 @@ fn skip_ty(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Option<()> {
         }
         20 => skip_const(d, depth + 1, v)?,
         27 => skip_def(d, v)?,
-        28 => {
+        28 | 30 => {
             skip_ty(d, depth + 1, v)?;
             d.u32()?;
             d.u64()?;
@@ -994,7 +995,10 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
             skip_fnkey(d, depth + 1, v)
         }
         KeyKind::Glue => {
-            d.u8()?;
+            // a kind below 0xFF is one byte; 0xFF escapes to a u32 (cache.rs enc_fnkey)
+            if d.u8()? == 0xFF {
+                d.u32()?;
+            }
             skip_ty(d, 0, v)
         }
         KeyKind::Shim => {
@@ -1016,6 +1020,11 @@ pub(crate) fn skip_fnkey(d: &mut D, depth: u32, v: &mut dyn FnMut(Atom)) -> Opti
         }
         // an unverified-mode twin: its base's key
         KeyKind::Twin => skip_fnkey(d, depth + 1, v),
+        // a sandboxed twin: its domain's name and its base's key
+        KeyKind::Sandbox => {
+            d.str()?;
+            skip_fnkey(d, depth + 1, v)
+        }
     }
 }
 
@@ -1745,7 +1754,7 @@ impl Linker {
         }
         // the hot code together (GAPX6: x64 front-end stalls): the O3 slots first, in image order
         // (the order they first ran in), then the rest. The slots stay in image order in `out`
-        // (install order feeds the next manifest's start order). MAKEPAD_RUN_OPT=-hotimage: image order.
+        // (install order feeds the next manifest's start order). RELAX_OPT=-hotimage: image order.
         let hot_first = !relax_backend::stats::opt_env_off("-hotimage");
         for pass in [true, false] {
             for e in layout.iter_mut() {
@@ -1917,7 +1926,7 @@ impl Linker {
         if self.cache().verbose {
             let s = &self.cache().stats;
             let unchanged = (0..nk).filter(|&k| need[k] && im.slot[k] == NO_SLOT && im.key_ok[k]).count();
-            eprintln!("makepad-run cache: startup identities decoded: {} ({} duplicate, {} did not decode, {} of those naming only unchanged crates) in {:.1} ms",
+            eprintln!("relax cache: startup identities decoded: {} ({} duplicate, {} did not decode, {} of those naming only unchanged crates) in {:.1} ms",
                 s.ids_decoded, s.ids_dup, s.ids_failed, unchanged, s.ids_ns as f64 / 1e6);
         }
         let t_check = crate::jit::wall_ns();
@@ -1989,9 +1998,9 @@ impl Linker {
         super::warm_count::add(super::warm_count::IMG_FAILED, im.failed);
         super::warm_count::add(super::warm_count::IMG_HAD_CODE, im.had_code);
         c.stats.prelink_ns += crate::jit::wall_ns() - t0;
-        if im.timed && std::env::var_os("MAKEPAD_RUN_BOOT_TRACE").is_some() {
+        if im.timed && std::env::var_os("RELAX_BOOT_TRACE").is_some() {
             let tags: Vec<String> = im.t_tag.iter().enumerate().filter(|(_, e)| e.1 != 0).map(|(k, e)| format!("tag{}={}/{:.1}ms", k, e.1, e.0 as f64 / 1e6)).collect();
-            eprintln!("makepad-run cache: prelink symbols: place_data {:.1} ms (incl. its symbols), {} symbols in the image; resolved by tag: {}; thunks decoded (not image keys) {} in {:.1} ms",
+            eprintln!("relax cache: prelink symbols: place_data {:.1} ms (incl. its symbols), {} symbols in the image; resolved by tag: {}; thunks decoded (not image keys) {} in {:.1} ms",
                 im.t_place as f64 / 1e6, im.syms.len(), tags.join(" "), super::THUNK_DECODED.load(std::sync::atomic::Ordering::Relaxed), super::THUNK_DECODE_NS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e6);
         }
         // what decides whether the next manifest carries a fresh image (record_manifest)
@@ -2029,6 +2038,13 @@ impl Linker {
             self.name_unnamed(u, id);
         }
     }
+}
+
+/// Whether slot `id`'s code stays out of the startup image: a sandboxed twin's identity and
+/// symbols resolve only once its unit's sandbox is set up (a run-time module's load, a macro
+/// world's confinement), after the image's prelink; it links lazily from its entry.
+fn not_in_image(u: &Unit, id: u32) -> bool {
+    matches!(u.fns[id as usize].key, crate::jit::FnKey::Sandbox(_))
 }
 
 /// Whether slot `id` is a startup image slot whose identity is still encoded.

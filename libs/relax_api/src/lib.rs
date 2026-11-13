@@ -17,13 +17,16 @@
 //!   only that side's code makes and reads, laid out by that side's std). Without it, JIT code
 //!   that reaches a provided crate's static of a type not the same bytes on both sides is refused:
 //!   rustc's one copy cannot be read with Relax's layouts.
+//! - `run`, beside any of these: the ops allocate in the program's heap ([`run_op`]), so the
+//!   program's end takes what they made. A crate whose objects are the program's (a script VM)
+//!   says it on every attribute. Without it an op allocates in the host's heap ([`host_op`]).
 //!
 //! In a normal build the attribute leaves the item as it is. With the crate's `host-shims`
 //! feature (only the `makepad` loader build enables it) it also emits, next to the item, an extern "C"
 //! wrapper and one [`Entry`] in the `relax_api` link section; [`entries`] reads them all back.
 //! Nothing generated is checked in.
 
-pub use makepad_relax_api_macro::relax_api;
+pub use relax_api_macro::relax_api;
 
 static APP_CALL: std::sync::OnceLock<fn(unsafe extern "C" fn(*mut u8), *mut u8) -> bool> = std::sync::OnceLock::new();
 
@@ -72,6 +75,40 @@ pub fn host_op() -> impl Sized {
 #[cfg(not(feature = "host-shims"))]
 #[inline(always)]
 pub fn host_op() {}
+
+/// The program's environment, for a provided crate's code. Under the loader a provided crate's
+/// bound ops run rustc's code in the loader's process, where `std::env` is the host's environment;
+/// the program's own (a package's run-env, the program's writes) is the loader's to answer. Read a
+/// setting that only tunes or reports the program's own run (a log, a trace, a tuning knob) here;
+/// one that decides what the process loads, runs or opens, a choice of the person's invocation, or
+/// a variable a C library reads too stays a `std::env` read.
+pub mod env {
+    use std::ffi::{OsStr, OsString};
+
+    static PROGRAM_READ: std::sync::OnceLock<fn(&OsStr) -> Option<OsString>> = std::sync::OnceLock::new();
+
+    /// The loader's read of the program's environment (relax-base progenv `program_var_os`), once per
+    /// process. Without one, and in JIT-compiled code, the program's environment is `std::env`.
+    pub fn set_program_read(read: fn(&OsStr) -> Option<OsString>) {
+        let _ = PROGRAM_READ.set(read);
+    }
+
+    /// `std::env::var_os` of the program's environment.
+    pub fn var_os<K: AsRef<OsStr>>(key: K) -> Option<OsString> {
+        match PROGRAM_READ.get() {
+            Some(read) => read(key.as_ref()),
+            None => std::env::var_os(key),
+        }
+    }
+
+    /// `std::env::var` of the program's environment.
+    pub fn var<K: AsRef<OsStr>>(key: K) -> Result<String, std::env::VarError> {
+        match var_os(key) {
+            Some(v) => v.into_string().map_err(std::env::VarError::NotUnicode),
+            None => Err(std::env::VarError::NotPresent),
+        }
+    }
+}
 
 /// The locks a provided crate's process-lifetime data uses. On macOS std's lock allocates a block
 /// at its first use, on whatever thread and in whatever phase that is: in an op, that block would

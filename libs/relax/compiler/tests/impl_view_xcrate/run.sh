@@ -7,7 +7,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off CARGO_NET_OFFLINE=true
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet ivx-app 2>>"$ERR")
+export RELAX_CACHE=off CARGO_NET_OFFLINE=true
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet ivx-app 2>>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "impl_view_xcrate 120 7" ]; then echo "impl_view_xcrate: ok"; else tail -5 "$ERR"; echo "impl_view_xcrate: FAILED"; exit 1; fi

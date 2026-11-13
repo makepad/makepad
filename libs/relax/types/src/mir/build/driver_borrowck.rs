@@ -1,10 +1,10 @@
-//! `MAKEPAD_RUN_MIR_BORROWCK_ALL=1 makepad check <pkg>`: the whole MIR borrowck pipeline on every body root of the
+//! `RELAX_MIR_BORROWCK_ALL=1 makepad check <pkg>`: the whole MIR borrowck pipeline on every body root of the
 //! package's dependency graph, the way S11 will call it: build, `mir_promoted`, signature regions, `type_check_body`
 //! (renumber, MIR type check, liveness), `do_mir_borrowck` (nested bodies first, region inference, `mir_borrowck`).
 //! Prints the errors in `BORROWCK_ALL`'s format and an inventory (errors per code, MIR bugs, unchecked bodies by reason)
 //! so it can be diffed against the BIR checker's, app by app.
 //!
-//! `MAKEPAD_RUN_MIR_BUILD_ONLY=<substr>` restricts the owners (as for the build harness).
+//! `RELAX_MIR_BUILD_ONLY=<substr>` restricts the owners (as for the build harness).
 use super::driver::closure_children;
 use super::{build_mir, BuildCx, BuildRoot};
 use crate::ast::ExprKind;
@@ -36,7 +36,7 @@ impl Inventory {
         let mut rows: Vec<_> = self.rows.iter().collect();
         rows.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         for (key, (n, at)) in rows {
-            eprintln!("makepad-run mir-borrowck: {title} {n:>6}  {key}   e.g. {at}");
+            eprintln!("relax mir-borrowck: {title} {n:>6}  {key}   e.g. {at}");
         }
     }
 }
@@ -48,7 +48,7 @@ fn line_of(prog: &Program, file: u32, pos: u32) -> usize {
 
 /// Returns the number of borrowck errors reported (the gate).
 pub fn borrowck_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
-    let only = std::env::var("MAKEPAD_RUN_MIR_BUILD_ONLY").ok();
+    let only = std::env::var("RELAX_MIR_BUILD_ONLY").ok();
     let std_crates: Vec<u32> = ["core", "alloc", "std"].iter().filter_map(|n| prog.crates.iter().position(|c| prog.syms.str(c.name) == *n).map(|i| i as u32)).collect();
     let (mut roots, mut checked_bodies, mut errors_total, mut typeck_fail) = (0usize, 0usize, 0usize, 0usize);
     let (mut errors, mut region_errors, mut mir_bugs, mut unchecked, mut panics) =
@@ -103,7 +103,7 @@ pub fn borrowck_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
         }
     }
     eprintln!(
-        "makepad-run mir-borrowck: {roots} roots ({typeck_fail} failed typeck), {checked_bodies} bodies checked, {errors_total} errors, {} region errors, {} MIR bugs, {} unchecked, {} panicked; cpu {:.1} ms",
+        "relax mir-borrowck: {roots} roots ({typeck_fail} failed typeck), {checked_bodies} bodies checked, {errors_total} errors, {} region errors, {} MIR bugs, {} unchecked, {} panicked; cpu {:.1} ms",
         region_errors.total(), mir_bugs.total(), unchecked.total(), panics.total(), (relax_session::clock::cpu_ns() - t0) as f64 / 1e6
     );
     errors.print("ERROR");

@@ -3,13 +3,13 @@
 app's state kept, no leftover threads.
 
 usage: restart_in_place.py [--visible]   (run from the workspace root; the JIT runs through
-  `cargo run --profile host`; MAKEPAD_RUN_STD in the environment, default libs/relax/compiler/std)
+  `cargo run --profile host`; RELAX_STD in the environment, default libs/relax/compiler/std)
 
 Copies live_kinds/ to a temporary dir and runs it with its window (`--features window`: a HAL app,
 hidden and muted unless --visible). Once it ticks, a layout edit of the app struct is saved: a field
 added (its `#[rust(..)]` initial value code naming the derive's `vm`), which the app struct's value
 the running app holds cannot take: the Restart rung. It passes when:
-  - the run ends in this process ("makepad-run: run end:") and no window is made for the next one;
+  - the run ends in this process ("relax: run end:") and no window is made for the next one;
   - the process is the same pid afterwards and is the only one the run left;
   - the app's state came back ("out restored <tick>" at or past the tick before the edit, the
     platform's "restart (..): kept .. app state kept") and the new code runs (later=123);
@@ -28,7 +28,7 @@ same process and window, nothing left parked, both on the ledger.
 GPU work in flight at a run's end (a compute job of about a second) leaves the next run in the same
 process and window with a GPU that does its work right, and the ended run's read unanswered.
 Then ROUNDS more relaunches: what a run's end leaves in the process's statics
-(MAKEPAD_RUN_LEFTOVERS: a heap that went stays unmapped, so a word still pointing there is a fault
+(RELAX_LEFTOVERS: a heap that went stays unmapped, so a word still pointing there is a fault
 too) must be a row of process_statics.tsv, and threads and resident memory must not grow.
 A relaunch that lands after the next run's boot but before the app's first event is through (the
 app's start takes seconds on cue) brings the run after it up with the state that run was started
@@ -45,7 +45,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", os.path.abspath("Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
 BAD = ("panicked", "panic parked", "stale access parked", "internal compiler error", "FATAL", "Segmentation", "SIGSEGV", "SIGBUS",
        "retaining mapping", "fault outside JIT code", "fault in host code")
-os.environ.setdefault("MAKEPAD_RUN_STD", os.path.abspath("libs/relax/compiler/std"))
+os.environ.setdefault("RELAX_STD", os.path.abspath("libs/relax/compiler/std"))
 visible = "--visible" in sys.argv
 ROUNDS = 8
 # resident memory comes and goes by tens of MB with the driver's; a leak of a run's worth does not
@@ -75,9 +75,9 @@ open(manifest, "w").write(text + "\n[patch.crates-io]\n" + "\n".join(patch) + "\
 app_src = os.path.join(pkg, "src", "window.rs")
 ready = os.path.join(tmp, "ready")
 home = os.path.join(tmp, "home")
-env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-           MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1",
-           MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_RUN_LIVE_LOG=os.path.join(tmp, "live.jsonl"))
+env = dict(os.environ, RELAX_LIVE_READY=ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+           RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_MUTE="1",
+           RELAX_LIVE_TRACE="1", RELAX_LIVE_LOG=os.path.join(tmp, "live.jsonl"))
 if not visible:
     env["MAKEPAD_HIDE_WINDOWS"] = "1"
 panic_file = os.path.join(tmp, "panic-now")
@@ -92,13 +92,13 @@ env["RESTART_HOLD_FILE"] = hold_file
 slow_file = os.path.join(tmp, "slow-start")
 env["RESTART_SLOW_START_FILE"] = slow_file
 env["RESTART_GPU_FILE"] = gpu_file
-env["MAKEPAD_RUN_PANIC_PARK"] = "600"
-env["MAKEPAD_RUN_STALE_PARK"] = "1"
+env["RELAX_PANIC_PARK"] = "600"
+env["RELAX_STALE_PARK"] = "1"
 # where a quit that does not end stops (the term stage prints it)
-env["MAKEPAD_RUN_QUIT_TRACE"] = "1"
-env["MAKEPAD_RUN_MODULES_TRUSTED"] = "1"
-env["MAKEPAD_RUN_LEFTOVERS"] = leftovers_file
-env["MAKEPAD_RUN_TEST_HOT_BUILD_ERROR"] = "hot_fail_target"
+env["RELAX_QUIT_TRACE"] = "1"
+env["RELAX_MODULES_TRUSTED"] = "1"
+env["RELAX_LEFTOVERS"] = leftovers_file
+env["RELAX_TEST_HOT_BUILD_ERROR"] = "hot_fail_target"
 env["MAKEPAD_HOME"] = os.path.join(tmp, "makepad")
 def owned():
     """Linux: the run dies with this script (PR_SET_PDEATHSIG), so
@@ -306,7 +306,7 @@ if not fails:
             print("restart_in_place: session relaunch: " + (asked.stdout + asked.stderr).strip().replace("\n", " | ")[:300])
         except subprocess.TimeoutExpired:
             fails.append("relaunch-no-reply")
-    restarting = lambda: next((t for t, l in err[n_err:] if "makepad live: restarting (" in l), None)
+    restarting = lambda: next((t for t, l in err[n_err:] if "relax live: restarting (" in l), None)
     if t_ask and not wait(lambda: restarting() is not None, 120):
         fails.append("no-restart")
     t_end = restarting()
@@ -329,7 +329,7 @@ if not fails:
         fails.append("no-first-frame")
     time.sleep(2.0)
     try:
-        presents = [l for l in open(env["MAKEPAD_RUN_LIVE_LOG"]) if '"event":"restart_present"' in l]
+        presents = [l for l in open(env["RELAX_LIVE_LOG"]) if '"event":"restart_present"' in l]
     except OSError:
         presents = []
     if not presents:
@@ -343,7 +343,7 @@ if not fails:
         fails.append("processes(%d->%d)" % (procs0, procs1))
     if threads1 > threads0 + 2:
         fails.append("threads(%d->%d)" % (threads0, threads1))
-    if not any("makepad-run: run end:" in l for _, l in err[n_err:]):
+    if not any("relax: run end:" in l for _, l in err[n_err:]):
         fails.append("no-run-end")
     windows1 = windows(pid1) if pid1 else None
     if not windows0 or windows1 != windows0:
@@ -411,7 +411,7 @@ def park_and_restart(stage, trigger):
     if panic is None:
         fails.append(stage + "-not-parked")
         print("restart_in_place: %s: panics: %s" % (stage, ask(pid, ["panics"])[:600]))
-        print("\n".join(l[:300] for _, l in err[n_err:][-40:] if not l.startswith("makepad live: a change")))
+        print("\n".join(l[:300] for _, l in err[n_err:][-40:] if not l.startswith("relax live: a change")))
         print("\n".join(l[:160] for _, l in out[n_out:][-3:]))
         return
     reply = ask(pid, ["resume", panic, "restart"])
@@ -584,7 +584,7 @@ if not fails:
         fails.append("threads-grew")
     if len(rss) > 2 and min(rss[-3:]) > min(rss[:3]) + ROUND_GROWTH_KB * ROUNDS:
         fails.append("resident-grew")
-    # (MAKEPAD_RUN_LEFTOVERS is Linux's: run_end::leftovers)
+    # (RELAX_LEFTOVERS is Linux's: run_end::leftovers)
     left = leftovers(leftovers_file) if sys.platform.startswith("linux") else []
     if left:
         fails.append("leftovers")
@@ -652,8 +652,8 @@ if not fails:
         os.kill(pid, signal.SIGTERM)
         if not wait(lambda: p.poll() is not None or app_pid() is None, 60):
             fails.append("term-ignored")
-            # the quit's steps (MAKEPAD_RUN_QUIT_TRACE) and the rest of what it said
-            print("\n".join("restart_in_place: term: " + l[:300] for t, l in err[n_err:] if t >= t_term and not l.startswith("makepad live: ")))
+            # the quit's steps (RELAX_QUIT_TRACE) and the rest of what it said
+            print("\n".join("restart_in_place: term: " + l[:300] for t, l in err[n_err:] if t >= t_term and not l.startswith("relax live: ")))
             stuck(pid)
         else:
             print("restart_in_place: term: the paused app quit %.1f s after SIGTERM" % (time.time() - t_term))

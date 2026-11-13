@@ -81,6 +81,13 @@ pub fn id() -> u128 {
             h.str(name);
             h.u128(*stamp);
         }
+        // the native macro sets the host registered (relax_native_macros::register), by name: their
+        // crates are outside this closure (the base set's stamp is relax-native-macros' part above).
+        // Reading the sets here fixes them, so a set registered after this read is refused.
+        for set in relax_native_macros::sets().iter().filter(|s| !std::ptr::eq(**s, &relax_native_macros::BASE)) {
+            h.str(set.name);
+            h.u128(set.stamp);
+        }
         h.finish128()
     })
 }

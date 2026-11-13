@@ -5,8 +5,8 @@ use super::*;
 #[test]
 fn settle_rebuild_segregates_slot_lifetimes() {
     isolated_test!(settle_rebuild_segregates_slot_lifetimes);
-    std::env::set_var("MAKEPAD_RUN_COMPILER_ARENA", "1");
-    std::env::set_var("MAKEPAD_RUN_CACHE", "on");
+    std::env::set_var("RELAX_COMPILER_ARENA", "1");
+    std::env::set_var("RELAX_CACHE", "on");
     crate::borrowck::lazy::disable_gandalf();
     let dir = std::env::temp_dir().join(format!("relax-slot-lifetimes-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -182,7 +182,7 @@ fn settle_rebuild_segregates_slot_lifetimes() {
 #[test]
 fn settle_rebuild_covers_a_crate_added_at_run_time() {
     isolated_test!(settle_rebuild_covers_a_crate_added_at_run_time);
-    std::env::set_var("MAKEPAD_RUN_CACHE", "on");
+    std::env::set_var("RELAX_CACHE", "on");
     crate::borrowck::lazy::disable_gandalf();
     let dir = std::env::temp_dir().join(format!("relax-added-crate-{}", std::process::id()));
     let (host, added) = (dir.join("host"), dir.join("added"));
@@ -252,12 +252,113 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
         // the added crate's code compiles from the rebuilt program
         unsafe { compile_fn(up, slot) }.expect("the added crate's fn compiles after the rebuild");
     });
-    // the same program again: the store holds the image of it, added crate included
+    // the same program again: the store holds the image of it, added crate included. A proc-macro
+    // world is alive now (a run whose hosted macros ran after the load): the rebuild does not wait
+    // for it, which it did for the rest of such a run ("the proc-macro world is alive")
+    crate::pmhost::stand_in_world();
     match settle_rebuild::run(up, false) {
         settle_rebuild::Outcome::Done => {}
         settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the second settle rebuild did not replace: {why}"),
     }
     assert_eq!(settle_rebuild::encodes(), encodes + 1, "a rebuild of a program the store holds encodes nothing");
+    assert!(crate::pmhost::world_alive(), "the rebuild leaves the world alive");
+    // The isolated process owns the runtime globals; no workers survive the child.
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A coroutine is still one after a settle rebuild. The slots keep their keys across the replace
+/// (the new interner is topped up from the live one, so a key's types keep their ids), but which
+/// closure types are coroutines is not in the collected image: Tcx::coroutines is filled by the
+/// type check of the body that holds the async block and by a decoded cache key (dec_ty 28), and
+/// neither comes again for a slot that exists. The restored context had no marks, so every such
+/// type became a plain closure with no `Future` impl: an instance over it built after the
+/// rebuild (a first call, a tier-up, the poll function lowered again for a coroutine's layout)
+/// stopped with "failed to normalize body for codegen: NoSolution", and the slot's cache key
+/// changed (enc_ty wrote 17 for 28), so its stored code was not found either.
+#[test]
+fn settle_rebuild_keeps_coroutines() {
+    isolated_test!(settle_rebuild_keeps_coroutines);
+    use crate::types::{ClosureArgs, FnHeader, List, RegionArgsId};
+    std::env::set_var("RELAX_CACHE", "on");
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::env::temp_dir().join(format!("relax-settle-coroutines-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::dirs::set_relax_dir(dir.join("run"));
+    let path = dir.join("lib.rs");
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"settle_coroutines\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    std::fs::write(&path, "#![no_std]\nfn method<T>() {}\nfn owner() { let _ = || 1u32; let _ = async { 2u32 }; }\n").unwrap();
+    let mut session = crate::Session::default();
+    session.options.ctfe = crate::options::Ctfe::Off;
+    let session = std::sync::Arc::new(session);
+    let cfg = crate::cfg::CfgSet::host(&session, &[]);
+    let root = path.to_string_lossy().into_owned();
+    let pre = vec![crate::preload::PreCrate {
+        name: "settle_coroutines".into(), root: root.clone(), edition: 2021,
+        cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![],
+    }];
+    settle_rebuild::remember_boot(&pre);
+    let _compiler = crate::zone_alloc::compiler();
+    let mut prog = Program::new(&session);
+    prog.record_front = true;
+    prog.front_sink = Some(crate::cache::FrontSink::for_dir(&crate::dirs::cache_dir()));
+    prog.preload(pre.clone());
+    prog.load_crate("settle_coroutines", &root, 2021, cfg, vec![]).unwrap();
+    prog.resolve_imports();
+    assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+    crate::cache::ColdFront::default().finish_in(&mut prog, crate::dirs::cache_dir());
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let named = |u: &Unit, name: &str| (0..u.prog.defs.len()).map(|d| DefId(d as u32)).find(|&d| u.prog.name(d) == name).unwrap();
+    let (method, owner) = (named(&u, "method"), named(&u, "owner"));
+    let file = u.prog.def(owner).file;
+    // the two types as the type check of `owner` makes them
+    let closure_ty = |tcx: &Tcx, expr: u32| {
+        let tys = &tcx.tys;
+        let sig = tys.intern(TyKind::FnPtr(List::EMPTY, tys.u32_, FnHeader::RUST, 0));
+        let parent = tys.intern(TyKind::FnDef(owner, List::EMPTY, RegionArgsId::EMPTY));
+        tys.intern(TyKind::Closure(file, expr, ClosureArgs {
+            parent_args: parent, closure_kind_ty: tys.prim(crate::program::Prim::I8), closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tys.unit,
+        }))
+    };
+    let (exprs, types, slots) = crate::owner::call(crate::owner::Class::Program, || {
+        let cache = crate::cache::Cache::open(&u, crate::cache::Mode::On).unwrap();
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let exprs = crate::program::closure_exprs(&u.prog, owner);
+        assert_eq!(exprs.len(), 2, "the closure, then the async block");
+        // ... the async block's marked a coroutine, as that type check (typeck coroutine_type) and
+        // a decoded cache key (dec_ty 28) do
+        u.tcx.coroutines.insert((file, exprs[1]), ());
+        let types = [closure_ty(&u.tcx, exprs[0]), closure_ty(&u.tcx, exprs[1])];
+        // an instance over each, made before the rebuild and not built yet: its slot outlives the
+        // context that knew what its type argument is
+        let slots = types.map(|ty| u.fn_id(FnKey::Inst(method, vec![ty])));
+        assert!(!u.tcx.is_coroutine(types[0]) && u.tcx.is_coroutine(types[1]));
+        (exprs, types, slots)
+    });
+    FIRST_PRESENT.store(true, Ordering::Release);
+    // the first rebuild records the image and restores it; the second restores the stored one (a
+    // warm launch's rebuild): each replaces the type context
+    for round in ["first", "second"] {
+        match settle_rebuild::run(up, false) {
+            settle_rebuild::Outcome::Done => {}
+            settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the {round} settle rebuild did not replace: {why}"),
+        }
+        crate::owner::call(crate::owner::Class::Program, || {
+            let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+            for ((&ty, &slot), coroutine) in types.iter().zip(&slots).zip([false, true]) {
+                assert_eq!(u.fns[slot as usize].key, FnKey::Inst(method, vec![ty]), "the slot keeps its key");
+                assert_eq!(ty, closure_ty(&u.tcx, exprs[coroutine as usize]), "the key's type keeps its id in the new interner");
+                assert_eq!(u.tcx.is_coroutine(ty), coroutine, "after the {round} rebuild: the {} type of a slot made before it", if coroutine { "coroutine's" } else { "closure's" });
+                // a query that asks (Tcx::needs_drop: a coroutine always has its state to drop)
+                assert_eq!(u.tcx.needs_drop(&u.prog, env, ty), coroutine, "after the {round} rebuild");
+            }
+        });
+    }
+    assert_eq!(settle_rebuild::rebuilds(), 2);
     // The isolated process owns the runtime globals; no workers survive the child.
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
@@ -266,11 +367,11 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
 // Rounds 49-50: restarting leaves the running solver answers and native code intact.
 #[test]
 fn round47_const_fn_body_invalidates_solver_answer() {
-    const CHILD: &str = "MAKEPAD_RUN_R47_CONST_FN_CHILD";
+    const CHILD: &str = "RELAX_R47_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round47_const_fn_body_invalidates_solver_answer", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -316,15 +417,15 @@ fn round47_const_fn_body_invalidates_solver_answer() {
 // candidate is diagnosed separately by a cold check.
 #[test]
 fn round48_const_fn_tentative_check_uses_new_body() {
-    const CHILD: &str = "MAKEPAD_RUN_R48_CONST_FN_CHILD";
+    const CHILD: &str = "RELAX_R48_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round48_const_fn_tentative_check_uses_new_body", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         let cold = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round48_const_fn_tentative_check_uses_new_body", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "cold").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "cold").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(cold.status.success(), "{}\n{}", String::from_utf8_lossy(&cold.stdout), String::from_utf8_lossy(&cold.stderr));
         return;
     }
@@ -447,8 +548,8 @@ fn allocator_swap_serves_background_finish() {
 #[test]
 fn hot_o3_cache_roundtrip() {
     // Tiering is process-global: the second unit is a fresh launch, sharing only disk cache.
-    const CHILD: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST";
-    const DIR: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST_DIR";
+    const CHILD: &str = "RELAX_HOT_O3_CACHE_TEST";
+    const DIR: &str = "RELAX_HOT_O3_CACHE_TEST_DIR";
     let Ok(phase) = std::env::var(CHILD) else {
         let dir = std::env::temp_dir().join(format!("relax-hot-o3-cache-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -464,16 +565,16 @@ fn main() {}
         for phase in ["cold", "warm"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::hot_o3_cache_roundtrip", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0"));
+                .env(CHILD, phase).env(DIR, &dir).env("RELAX_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
         return;
     };
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let session = std::sync::Arc::new(crate::Session::default());
     let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "hot_o3_cache", false).unwrap();
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
@@ -556,15 +657,90 @@ fn main() {}
     std::mem::forget(u);
 }
 
+/// A quit write's pass stays valid on its own: the exit's write may be skipped (the owner thread
+/// held past its wait, a harness's kill after the quit), and the next launch links what the pass
+/// wrote rather than build it again.
+#[test]
+fn the_next_launch_links_what_a_quit_writes_pass_stored_without_the_exits_write() {
+    const CHILD: &str = "RELAX_QUIT_PASS_TEST";
+    const DIR: &str = "RELAX_QUIT_PASS_TEST_DIR";
+    let Ok(phase) = std::env::var(CHILD) else {
+        let dir = std::env::temp_dir().join(format!("relax-quit-pass-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("input.rs"), r#"
+pub fn hot(out: &mut u32) {
+    let mut i = 0u32;
+    let mut sum = 0u32;
+    while i < 200 { sum = sum.wrapping_add(i); i += 1; }
+    *out = sum;
+}
+fn main() {}
+"#).unwrap();
+        for phase in ["quit", "next"] {
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::settle_tests::the_next_launch_links_what_a_quit_writes_pass_stored_without_the_exits_write", "--nocapture", "--test-threads=1"])
+                .env(CHILD, phase).env(DIR, &dir).env("RELAX_SPEC", "0"));
+            assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    crate::borrowck::lazy::disable_gandalf();
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
+    let session = std::sync::Arc::new(crate::Session::default());
+    let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "quit_pass", false).unwrap();
+    let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && prog.name(id) == "hot").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    let (id, entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let id = u.fn_id(FnKey::Inst(def, Vec::new()));
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        if phase == "quit" {
+            let built = unsafe { compile_fn(up, id) }.unwrap();
+            let entry = u.install(id, &built.0, &built.2, built.1.clone(), 0).unwrap();
+            let mut cache = u.cache.take().unwrap();
+            cache.record_o2(&u, id, &built.0, &built.2, &built.1);
+            u.cache = Some(cache);
+            (id, entry)
+        } else {
+            let entry = unsafe { ready_code_locked(up, id) }.expect("the next launch links the quit write's code");
+            assert!(u.cache.as_ref().unwrap().stats.hits >= 1, "the code came from the quit write's store, not a build");
+            (id, entry)
+        }
+    });
+    if phase == "quit" {
+        // the quit write's pass, and no exit write after it (the process ends here)
+        let written = unsafe { crate::run::quit_write_pass(up) };
+        assert!(matches!(written, Some((n, _)) if n > 0), "the quit write's pass stored nothing: {written:?}");
+    }
+    let _ = id;
+    let mut result = 0u32;
+    unsafe { call_jit(up, entry, &mut result as *mut u32 as u64) }
+        .unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+    assert_eq!(result, 19900);
+    // As in the settling fixture, process exit owns the runtime's teardown.
+    std::mem::forget(u);
+}
+
 #[test]
 fn prebuild_link_needing_initializer_bails() {
-    // Rule I-PUB (remote-XR Sandbox on a node: "O3 build of slot N panicked: initializer inside a
+    // Rule I-PUB (a remote-XR app on a node: "O3 build of slot N panicked: initializer inside a
     // publish"): an O3 replacement's prebuild_callees linked a callee's stored entry inside a
     // publish; the entry names a static whose value the cache does not hold, so the link ran its
     // initializer there. The link is a take now: it bails, and the program's own link (or a
     // later build) runs the initializer. A link inside a publish panics on every call.
-    const CHILD: &str = "MAKEPAD_RUN_PREBUILD_INIT_TEST";
-    const DIR: &str = "MAKEPAD_RUN_PREBUILD_INIT_TEST_DIR";
+    const CHILD: &str = "RELAX_PREBUILD_INIT_TEST";
+    const DIR: &str = "RELAX_PREBUILD_INIT_TEST_DIR";
     let Ok(phase) = std::env::var(CHILD) else {
         let dir = std::env::temp_dir().join(format!("relax-prebuild-init-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -579,16 +755,16 @@ fn main() {}
         for phase in ["cold", "warm"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::prebuild_link_needing_initializer_bails", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_SPEC", "0"));
+                .env(CHILD, phase).env(DIR, &dir).env("RELAX_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
         return;
     };
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let session = std::sync::Arc::new(crate::Session::default());
     let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "prebuild_init", false).unwrap();
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
@@ -654,7 +830,7 @@ fn prebuild_builds_callees_that_ran_before() {
     // them. Those that ran in the image's session are built before the replacement's install, not
     // on the program's threads at its first call; a callee with no sign of having run stays lazy.
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-prebuild-ran-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("input.rs"), "pub fn ran(x: u32) -> u32 { x + 1 }\npub fn never(x: u32) -> u32 { x + 2 }\nfn main() {}\n").unwrap();
@@ -690,21 +866,21 @@ fn prebuild_builds_callees_that_ran_before() {
 fn settle_rebuild_pins_tier1_and_closure_history() {
     // Unit installs process-global runtime state. Cache fixtures in the same harness can
     // leave a reentrant unit lock behind; run this fixture in its own runtime process.
-    const CHILD: &str = "MAKEPAD_RUN_SETTLE_TEST_CHILD";
+    const CHILD: &str = "RELAX_SETTLE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::settle_rebuild_pins_tier1_and_closure_history", "--test-threads=1", "--nocapture"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_ICE_BT", "1"));
+            .env(CHILD, "1").env("RELAX_ICE_BT", "1"));
         assert!(status.success());
         return;
     }
     crate::borrowck::lazy::disable_gandalf();
-    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
-        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     }
     let dir = std::env::temp_dir().join(format!("relax-settle-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let path = dir.join("input.rs");
     let source = r#"
 const fn width() -> usize { 3 }
@@ -895,7 +1071,7 @@ fn round23_fnptr_keys_preserve_receiver_abi() {
 
 #[test]
 fn round42_const_and_build_cancellation_are_retryable() {
-    const CHILD: &str = "MAKEPAD_RUN_CONST_PREEMPT_CHILD";
+    const CHILD: &str = "RELAX_CONST_PREEMPT_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = crate::test_child::status(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round42_const_and_build_cancellation_are_retryable", "--test-threads=1"])
@@ -962,14 +1138,14 @@ fn round42_const_and_build_cancellation_are_retryable() {
 
 #[test]
 fn round50_initializer_reload_policy() {
-    const CHILD: &str = "MAKEPAD_RUN_R50_INITIALIZER_CHILD";
+    const CHILD: &str = "RELAX_R50_INITIALIZER_CHILD";
     let Ok(case) = std::env::var(CHILD) else {
         // (R2, lead decision 52: a foldable const read only by an ordinary fn, and a static,
         // stay on the per-file path)
         for case in ["body", "refuse", "literal", "static", "static_unused"] {
             let result = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
-                .env(CHILD, case).env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+                .env(CHILD, case).env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
             assert!(result.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
         }
         return;
@@ -1050,11 +1226,11 @@ fn round50_initializer_reload_policy() {
 /// pile up: a patch's working state goes when it is installed.
 #[test]
 fn edit_cost_does_not_grow_with_edits() {
-    const CHILD: &str = "MAKEPAD_RUN_EDIT_COST_CHILD";
+    const CHILD: &str = "RELAX_EDIT_COST_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::edit_cost_does_not_grow_with_edits", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1101,11 +1277,11 @@ fn edit_cost_does_not_grow_with_edits() {
 
 #[test]
 fn round50_opaque_body_invalidates_solver_answer() {
-    const CHILD: &str = "MAKEPAD_RUN_R50_OPAQUE_CHILD";
+    const CHILD: &str = "RELAX_R50_OPAQUE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round50_opaque_body_invalidates_solver_answer", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1147,11 +1323,11 @@ fn round50_opaque_body_invalidates_solver_answer() {
 // T11: reload evaluates candidates with running native code; owner: codegen2.
 #[test]
 fn round50_foldable_const_with_native_dependent() {
-    const CHILD: &str = "MAKEPAD_RUN_R50_FOLDED_DEPENDENT_CHILD";
+    const CHILD: &str = "RELAX_R50_FOLDED_DEPENDENT_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::round50_foldable_const_with_native_dependent", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1187,7 +1363,7 @@ fn round50_foldable_const_with_native_dependent() {
 fn round50_inline_const_reload() {
     let result = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
-        .env("MAKEPAD_RUN_R50_INITIALIZER_CHILD", "inline_literal").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+        .env("RELAX_R50_INITIALIZER_CHILD", "inline_literal").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
     assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
 }
 
@@ -1201,11 +1377,11 @@ fn copy_versions_move_with_the_flags_their_code_reads() {
     // version that moved: a later session's starts at 0 and would reach the value again while the
     // code's copies may be stale. Control: the same record naming a version at 0 is encoded.
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-copy-versions-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("input.rs"), "pub fn hot(out: &mut u32) { *out = 7; }\npub fn cool(out: &mut u32) { *out = 8; }\npub fn early() {}\npub fn late() {}\nfn main() {}\n").unwrap();
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let session = std::sync::Arc::new(crate::Session::default());
     let (prog, core, krate) = crate::load_with_std(&session, dir.join("input.rs").to_str().unwrap(), "copy_versions", false).unwrap();
     let def = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| (d.krate == krate && prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
@@ -1263,7 +1439,7 @@ fn a_copy_that_reads_no_flag_moves_its_hosts_version() {
     // patched before the install moves it at the install. Control: a host of a copy of a body
     // that is not patched keeps its version.
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-copy-hosts-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("input.rs"), "pub fn leaf() {}\npub fn early() {}\npub fn calm() {}\npub fn host() {}\npub fn late_host() {}\npub fn calm_host() {}\nfn main() {}\n").unwrap();
@@ -1301,8 +1477,8 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
     // A deferred record (Cache::defer_record) is encoded after the install; an edit, rollback or
     // reload in between (the patch epoch moves) must drop it, never key old code by new text.
     // Control: the same record with no change in between is encoded.
-    const CHILD: &str = "MAKEPAD_RUN_DEFERRED_RECORD_TEST";
-    const DIR: &str = "MAKEPAD_RUN_DEFERRED_RECORD_TEST_DIR";
+    const CHILD: &str = "RELAX_DEFERRED_RECORD_TEST";
+    const DIR: &str = "RELAX_DEFERRED_RECORD_TEST_DIR";
     let Ok(phase) = std::env::var(CHILD) else {
         let dir = std::env::temp_dir().join(format!("relax-deferred-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1310,18 +1486,18 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
         for phase in ["current", "stale"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "jit::settle_tests::deferred_cache_record_is_dropped_when_a_source_changed", "--nocapture", "--test-threads=1"])
-                .env(CHILD, phase).env(DIR, dir.join(phase)).env("MAKEPAD_RUN_SPEC", "0"));
+                .env(CHILD, phase).env(DIR, dir.join(phase)).env("RELAX_SPEC", "0"));
             assert!(output.status.success(), "{phase}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(dir).unwrap();
         return;
     };
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
     std::fs::create_dir_all(&dir).unwrap();
     let src = dir.parent().unwrap().join("input.rs");
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let session = std::sync::Arc::new(crate::Session::default());
     let (prog, core, krate) = crate::load_with_std(&session, src.to_str().unwrap(), "deferred_record", false).unwrap();
     let def = prog.defs.iter().enumerate().find_map(|(i, d)| {
@@ -1360,11 +1536,11 @@ fn deferred_cache_record_is_dropped_when_a_source_changed() {
 // the restored source.
 #[test]
 fn invalid_inliner_built_after_patch_is_in_its_group() {
-    const CHILD: &str = "MAKEPAD_RUN_INVALID_INLINER_CHILD";
+    const CHILD: &str = "RELAX_INVALID_INLINER_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::invalid_inliner_built_after_patch_is_in_its_group", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0"));
+            .env(CHILD, "1").env("RELAX_CACHE", "off").env("RELAX_GANDALF", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -1415,7 +1591,7 @@ fn preempted_check_under_a_front_read_gives_way() {
     // program's main thread queued behind it. Under a held read the preempted check gives its
     // work up instead.
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax_preempted_read_{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("input.rs");
@@ -1448,8 +1624,8 @@ fn preempted_check_under_a_front_read_gives_way() {
 }
 
 /// The run monitor's settle sweep runs in steps, one owner request each (JITOWNER: one request
-/// over every slot held the owner 10-50 ms while a cold Fab's UI dragged): a main-thread request
-/// that comes during a step is served when that step ends, while the sweep still has steps to go,
+/// over every slot held the owner 10-50 ms while a large app's UI dragged on a cold start): a main-thread
+/// request that comes during a step is served when that step ends, while the sweep still has steps to go,
 /// and the stepped sweep still ends with every eligible slot's RIR and body taken (freed by its
 /// requester, not on the owner).
 #[test]
@@ -1538,24 +1714,24 @@ fn a_settle_sweep_lets_main_through_between_steps() {
 /// SPEC-V: a twin that turns hot asks for its base's verdict then: the base's check is the next one
 /// the background checker runs (RANK_HOT, no check ahead of it), from the pool worker's pick after
 /// its inbox drain (prioritize_hot_verdicts). A twin has no owner of its own, so it asked for
-/// nothing, and an unverified slot asked only when its O3 build started: a cold Fab's hot UI fns
+/// nothing, and an unverified slot asked only when its O3 build started: a large app's hot UI fns (cold)
 /// ran twin code for the whole run, their bases' checks behind a 13.6k-job queue. The checker is
 /// held here (the startup phase: it runs live edits' checks only), so its queue reads as the hot
 /// push left it.
 #[test]
 fn hot_twin_asks_for_its_base_verdict() {
-    const CHILD: &str = "MAKEPAD_RUN_HOT_TWIN_VERDICT_TEST";
+    const CHILD: &str = "RELAX_HOT_TWIN_VERDICT_TEST";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "jit::settle_tests::hot_twin_asks_for_its_base_verdict", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0").env("MAKEPAD_RUN_SPEC", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0").env("RELAX_SPEC", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
     CHECK_FIRST.store(false, Ordering::Relaxed);
     SPECV_HOLD.store(1, Ordering::Relaxed);
     begin_startup_phase();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-hot-twin-verdict-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();

@@ -1,8 +1,8 @@
-//! Commercial-lane blockers, round 2 (Stage under `makepad run`); each = rustc.
+//! Commercial-lane blockers, round 2 (an app under `makepad run`); each = rustc.
 //! 1. libloading os/unix/mod.rs: `cfg_if!` in statement position. Its expansion is
 //!    `#[cfg(..)] $crate::cfg_if! { @__temp_group .. }` statements: a macro statement behind
 //!    attributes, cfg-stripped before it expands (rustc_expand config.rs).
-//! 2. stage faces.rs:412: `left_rank.cmp(right_rank)` with left_rank: &{integer} (match
+//! 2. An app's faces.rs:412: `left_rank.cmp(right_rank)` with left_rank: &{integer} (match
 //!    ergonomics on a closure's tuple pattern): rustc's by-value probe step on `&{integer}`
 //!    takes the integers' `Ord::cmp(&self)` with Self = {integer}, not `impl Ord for &A`.
 

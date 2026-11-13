@@ -1,7 +1,7 @@
-//! Trace-driven wasm export (`MAKEPAD_RUN_WASM_EXPORT=<file.wasm>`): every function the run
+//! Trace-driven wasm export (`RELAX_WASM_EXPORT=<file.wasm>`): every function the run
 //! compiles is captured as the RIR its code is made from; at the end of the run the captured
 //! set and its static call/data-pointer closure become one module (relax_backend::wasm).
-//! Every function ships whole; MAKEPAD_RUN_WASM_EXPORT_BLOCKS=1 opts into the smaller
+//! Every function ships whole; RELAX_WASM_EXPORT_BLOCKS=1 opts into the smaller
 //! trace-specific profile with untraced block/function stubs. The data the code names (literals, vtables, statics' initial
 //! images, writable blocks) is placed in linear memory with pointer words translated: data
 //! pointers to their wasm addresses, function pointers to table indices. Runtime entries become
@@ -10,8 +10,8 @@
 //! require module implementations and reject every import except `env.js_*`.
 //!
 //! First version for size work: run with a fresh cache (no code from disk) and
-//! `MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0` so every function passes the capture.
-//! MAKEPAD_RUN_WASM_EXPORT_STATS=1 prints the size breakdown.
+//! `RELAX_O1=always RELAX_O3=0` so every function passes the capture.
+//! RELAX_WASM_EXPORT_STATS=1 prints the size breakdown.
 
 use crate::jit::Unit;
 use crate::syms::SymKind;
@@ -21,7 +21,6 @@ use relax_session::sync::Mutex;
 use std::collections::{BTreeMap, HashMap};
 
 struct Captured {
-    entry: u32,
     funcs: BTreeMap<u32, Func>,
 }
 
@@ -32,8 +31,20 @@ pub fn new_unit() -> usize {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     if enabled() { NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) } else { 0 }
 }
-/// the first captured slot: the run's entry (the test fn, main)
+/// the run's entry: its unit's `main` (MAINS), when no test fn or export is a root
 static ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+/// each unit's `main` slot (`entry`)
+static MAINS: Mutex<BTreeMap<usize, u32>> = Mutex::new(BTreeMap::new());
+
+/// Slot `id` is unit `unit`'s `main`, the function its run enters: the export's `t0` when no test
+/// fn or `--exports` symbol is a root. (Not the unit's first captured slot: a static's initializer
+/// compiles before `main`, and the module ships no initializer.)
+pub fn entry(unit: usize, id: u32) {
+    if enabled() {
+        let mut m = MAINS.lock().unwrap_or_else(|e| e.into_inner());
+        crate::zone_alloc::kept_with(|| m.insert(unit, id));
+    }
+}
 static FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CLOSURE_ORIGINS: Mutex<BTreeMap<u32, &'static str>> = Mutex::new(BTreeMap::new());
 static CLOSURE_PARENTS: Mutex<BTreeMap<u32, u32>> = Mutex::new(BTreeMap::new());
@@ -57,7 +68,7 @@ pub(crate) fn note_samples(u: &Unit, it: impl Iterator<Item = (u32, u64)>) {
     }
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_HOT=<fraction> (default 0.99): an O3 candidate (o3_policy) ships an O3
+/// RELAX_WASM_EXPORT_HOT=<fraction> (default 0.99): an O3 candidate (o3_policy) ships an O3
 /// body only if it is among the slots that took this fraction of the run's CPU samples, hottest
 /// first (LLVM's profile summary: hot = the counts that make up 99% of the total). The rest of the
 /// shipping code is O1: it runs too rarely for O3's size to pay (`Imdct::new`, run once per
@@ -65,7 +76,7 @@ pub(crate) fn note_samples(u: &Unit, it: impl Iterator<Item = (u32, u64)>) {
 /// tier-up alone decides).
 fn hot_fraction() -> f64 {
     static F: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_HOT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.99))
+    *F.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_HOT").ok().and_then(|v| v.parse().ok()).unwrap_or(0.99))
 }
 
 static HOT: std::sync::OnceLock<Option<std::collections::HashSet<u32>>> = std::sync::OnceLock::new();
@@ -90,7 +101,7 @@ pub(crate) fn sampled_hot(id: u32) -> bool {
             acc += w;
             set.insert(id);
         }
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             eprintln!("wasm export: sampled hot set: {} slots take {:.1}% of {} CPU samples", set.len(), 100.0 * acc as f64 / total.max(1) as f64, total);
         }
         Some(set)
@@ -105,23 +116,23 @@ pub(crate) fn note_o3_body(id: u32) {
 }
 static POSTOPT_EFFECTS: [std::sync::atomic::AtomicUsize; 5] = [const { std::sync::atomic::AtomicUsize::new(0) }; 5];
 
-/// Process start (the loader's main): `MAKEPAD_RUN_WASM_EXPORT_BLOCKS=1` turns block coverage on
+/// Process start (the loader's main): `RELAX_WASM_EXPORT_BLOCKS=1` turns block coverage on
 /// before the program loads (code cache off), so the export drops the blocks the run never entered.
 pub fn startup() {
-    if enabled() && std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_BLOCKS").is_some_and(|v| v != "0") {
-        std::env::set_var("MAKEPAD_RUN_CACHE", "off");
+    if enabled() && std::env::var_os("RELAX_WASM_EXPORT_BLOCKS").is_some_and(|v| v != "0") {
+        std::env::set_var("RELAX_CACHE", "off");
         crate::coverage::enable();
     }
 }
 
 fn stats_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some())
 }
 
 fn untraced_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNTRACED").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_WASM_EXPORT_UNTRACED").is_some())
 }
 
 /// Block shaking: remove native coverage effects from the captured RIR and
@@ -291,7 +302,7 @@ fn splash_blank(path: &str, images: &mut [(u32, Vec<u8>)]) -> (usize, usize, usi
         }
     }
     unmatched.sort_by(|a, b| b.0.cmp(&a.0));
-    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: splash: {} .splash files in the crates; {} embedded ones no VM evaluated, blanked whole", splash_files.len(), whole);
         eprintln!("wasm export: splash: {} text objects >= 4 KB not in the record, {} bytes", unmatched.len(), unmatched.iter().map(|u| u.0).sum::<usize>());
         for (n, t) in unmatched.iter().take(20) {
@@ -348,7 +359,7 @@ fn succs(t: &relax_backend::rir::Term) -> Vec<u32> {
 
 pub fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_WASM_EXPORT").is_some())
 }
 
 /// (slot, export name: None = a test fn, exported as `t<k>` in registration order)
@@ -433,15 +444,12 @@ pub fn capture(unit: usize, id: u32, f: &Func) {
                 }
             }
         }
-        extern "C" {
-            fn atexit(f: extern "C" fn()) -> i32;
-        }
-        unsafe { atexit(at_exit) };
+        makepad_core_util::process_end::at_exit(at_exit);
     }
     // process state: on the kept heap
     crate::zone_alloc::kept_with(|| {
         g.get_or_insert_with(BTreeMap::new).entry(unit)
-            .or_insert_with(|| Captured { entry: id, funcs: BTreeMap::new() })
+            .or_insert_with(|| Captured { funcs: BTreeMap::new() })
             .funcs.insert(id, f.clone());
     });
 }
@@ -556,7 +564,7 @@ pub(crate) fn ro_read(ctx: usize, s: Sym, n: u32) -> relax_backend::passes::RoRe
 /// configuration. A malformed or incomplete union must not produce a module.
 fn read_union() -> Result<HashMap<String, std::collections::HashSet<(usize, usize)>>, String> {
     let mut hits: HashMap<String, std::collections::HashSet<(usize, usize)>> = HashMap::new();
-    let Ok(file) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_UNION") else { return Ok(hits) };
+    let Ok(file) = std::env::var("RELAX_WASM_EXPORT_UNION") else { return Ok(hits) };
     for path in file.split(',').filter(|p| !p.is_empty()) {
         let bytes = std::fs::read(path).map_err(|e| format!("union {path}: {e}"))?;
         let j = crate::json::parse(&bytes).map_err(|e| format!("union {path}: {e}"))?;
@@ -615,17 +623,17 @@ fn force_union(up: *mut Unit, hits: &HashMap<String, std::collections::HashSet<(
     let mut missing: Vec<&str> = hits.keys().filter(|k| !captured_keys.contains(*k)).map(String::as_str).collect();
     missing.sort_unstable();
     if !missing.is_empty() {
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             for key in &missing {
                 let slots: Vec<_> = (0..u.fns.len() as u32).filter(|id| crate::jit::slot_key(u, *id) == *key)
                     .map(|id| (id, u.fns[id as usize].compiled, tried.contains(&id))).collect();
                 eprintln!("wasm export: missing union key {key}: slots (id, compiled, tried) {slots:?}");
             }
         }
-        // MAKEPAD_RUN_WASM_EXPORT_UNION_LENIENT=1: a size A/B that replays an older export's training
+        // RELAX_WASM_EXPORT_UNION_LENIENT=1: a size A/B that replays an older export's training
         // union with a compiler whose std renamed some functions (local/wasmcg/recap.sh); never a
         // shipping export (the replay gate needs every trained function)
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNION_LENIENT").is_some_and(|v| v != "0") {
+        if std::env::var_os("RELAX_WASM_EXPORT_UNION_LENIENT").is_some_and(|v| v != "0") {
             eprintln!("wasm export: union: {} training keys absent in this build (lenient A/B replay)", missing.len());
         } else {
             return Err(format!("union: {} training functions were not captured:\n{}", missing.len(), missing.join("\n")));
@@ -637,7 +645,7 @@ fn force_union(up: *mut Unit, hits: &HashMap<String, std::collections::HashSet<(
             forced.insert(*id);
         }
     }
-    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: union: {} keys, {} training slots retained, {} functions compiled in ({} rounds, 0 failed)", hits.len(), forced.len(), tried.len(), rounds);
     }
     Ok(forced)
@@ -645,7 +653,7 @@ fn force_union(up: *mut Unit, hits: &HashMap<String, std::collections::HashSet<(
 
 /// Writes the module of the captured functions to the export path.
 pub fn finish(u: &Unit) {
-    let Some(path) = std::env::var("MAKEPAD_RUN_WASM_EXPORT").ok() else { return };
+    let Some(path) = std::env::var("RELAX_WASM_EXPORT").ok() else { return };
     if FORCING.swap(true, std::sync::atomic::Ordering::AcqRel) {
         return;
     }
@@ -664,7 +672,7 @@ pub fn finish(u: &Unit) {
     // `%p`: the process id (a run's child processes capture their own sets)
     let path = path.replace("%p", &std::process::id().to_string());
     let Some(captured) = CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|g| g.remove(&u.wasm_export_id)) else { return };
-    ENTRY.store(captured.entry, std::sync::atomic::Ordering::Relaxed);
+    ENTRY.store(MAINS.lock().unwrap_or_else(|e| e.into_inner()).get(&u.wasm_export_id).copied().unwrap_or(u32::MAX), std::sync::atomic::Ordering::Relaxed);
     let mut funcs = captured.funcs;
     // the trace: slots whose code was installed (called); a build made ahead of a call that
     // never came is not part of it
@@ -678,10 +686,10 @@ pub fn finish(u: &Unit) {
     // Use the coverage collector's same distinction, keeping every union root.
     funcs.retain(|id, _| (*id as usize) < u.fns.len() && (forced.contains(id)
         || u.fns[*id as usize].compiled && crate::coverage::runtime_function(u, *id)));
-    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: {} slots captured, {} installed runtime/union roots (of {} slots in the unit); {} compiler initializer roots excluded", n_cap, funcs.len(), u.fns.len(), n_initializers);
     }
-    if let Ok(pat) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_DUMP") {
+    if let Ok(pat) = std::env::var("RELAX_WASM_EXPORT_DUMP") {
         for (id, f) in &funcs {
             if f.name.contains(pat.as_str()) {
                 eprintln!("slot {}: {}", id, f.dump());
@@ -701,14 +709,14 @@ pub fn finish(u: &Unit) {
     };
     if !block_profile() && module_inline_on() {
         let (sites, bodies) = module_inline(u, &mut funcs, &kept);
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             eprintln!("wasm export: module inline: {sites} call sites inlined into {bodies} bodies");
         }
     }
     let hits = crate::coverage::export_hits(u, &union);
-    // MAKEPAD_RUN_WASM_EXPORT_VARIANTS="a=opts;b=opts": one module per variant from this capture
-    // (<path>.a.wasm, ...) for size work; else one module with MAKEPAD_RUN_WASM_OPT
-    match std::env::var("MAKEPAD_RUN_WASM_EXPORT_VARIANTS") {
+    // RELAX_WASM_EXPORT_VARIANTS="a=opts;b=opts": one module per variant from this capture
+    // (<path>.a.wasm, ...) for size work; else one module with RELAX_WASM_OPT
+    match std::env::var("RELAX_WASM_EXPORT_VARIANTS") {
         Ok(v) => {
             for var in v.split(';').filter(|v| !v.is_empty()) {
                 let (name, o) = var.split_once('=').unwrap_or((var, ""));
@@ -720,7 +728,7 @@ pub fn finish(u: &Unit) {
                 emit(u, &funcs, &kept, kept_failed, &hits, &forced, o, &p);
             }
         }
-        Err(_) => emit(u, &funcs, &kept, kept_failed, &hits, &forced, &std::env::var("MAKEPAD_RUN_WASM_OPT").unwrap_or_default(), &path),
+        Err(_) => emit(u, &funcs, &kept, kept_failed, &hits, &forced, &std::env::var("RELAX_WASM_OPT").unwrap_or_default(), &path),
     }
 }
 
@@ -739,7 +747,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         ..wasm::Options::default()
     };
     let mut single = true;
-    // off by default: under brotli the merged module is LARGER (P(DOOM), block-shaken: raw -360 KB,
+    // off by default: under brotli the merged module is LARGER (a game, block-shaken: raw -360 KB,
     // 23,345 -> 18,620 functions, br11 +5.0 KB): the compressor already shares near-identical
     // bodies, the callers' extra constants cost more. Kept as an option for raw size / compile time.
     let mut merge = false;
@@ -791,7 +799,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             nt += t;
             nr += r;
         }
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             eprintln!("wasm export: blocks: {} of {} blocks trapped (never entered), {} coverage stores removed", nt, nb, nr);
         }
         shaken_store = w;
@@ -842,7 +850,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         for id in &reached { carried.extend(funcs[id].inl_slots.iter().copied()); }
         let lost: Vec<u32> = forced.iter().copied().filter(|id| funcs.contains_key(id) && !carried.contains(id)).collect();
         if !lost.is_empty() {
-            if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+            if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
                 eprintln!("wasm export: {} trained functions neither called nor carried inline, shipped as roots", lost.len());
             }
             seeds.extend(lost);
@@ -851,7 +859,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             reached = reach(u, funcs, &seeds);
         }
     }
-    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: {} roots (entry + address-taken), {} of {} captured reached", seeds.len(), reached.len(), funcs.len());
         // the untraced callees (slot, name), for the stub ids `env.u(id)` reports
         let mut un: std::collections::BTreeSet<u32> = Default::default();
@@ -866,7 +874,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
                 }
             }
         }
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_UNTRACED").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_UNTRACED").is_some() {
             for t in &un {
                 let n = if (*t as usize) < u.fns.len() { u.fns[*t as usize].name.to_string() } else { String::new() };
                 eprintln!("  untraced slot {} {}", t, n);
@@ -880,7 +888,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         let keep: std::collections::HashSet<u32> = seeds.iter().copied().collect();
         let mut next = (u.fns.len() as u32).max(w.keys().next_back().map_or(0, |k| k + 1));
         let ms = relax_backend::merge::merge_similar(&mut w, &keep, &mut next, 16);
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             eprintln!("wasm export: merge: {} rounds, {} groups, {} functions merged ({} thunks), {} extra params; {} -> {} functions", ms.rounds, ms.groups, ms.merged, ms.thunks, ms.params, reached.len(), w.len());
         }
         merged_store = w;
@@ -1029,18 +1037,18 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         }
         images.push((id, bytes));
     }
-    // Splash shaking: `MAKEPAD_RUN_WASM_EXPORT_SPLASH=<splash use record>` (platform splash_trace.rs,
+    // Splash shaking: `RELAX_WASM_EXPORT_SPLASH=<splash use record>` (platform splash_trace.rs,
     // MAKEPAD_SPLASH_TRACE): in each embedded `script_mod!` text (found by its hash), the top-level
     // statements no run used are blanked to spaces (newlines kept): kept statements stay verbatim,
     // length and offsets unchanged, no code patched
-    if let (true, Ok(rec)) = (splash, std::env::var("MAKEPAD_RUN_WASM_EXPORT_SPLASH")) {
+    if let (true, Ok(rec)) = (splash, std::env::var("RELAX_WASM_EXPORT_SPLASH")) {
         let st = splash_blank(&rec, &mut images);
-        if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+        if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
             eprintln!("wasm export: splash: {} blocks in the record, {} found in the data; {} of {} bytes blanked ({} items dropped)", st.0, st.1, st.3, st.2, st.4);
         }
     }
     let n_data = images.len();
-    // MAKEPAD_RUN_WASM_EXPORT_STATS: the data by what it is (literals and vtables, statics, blocks)
+    // RELAX_WASM_EXPORT_STATS: the data by what it is (literals and vtables, statics, blocks)
     let mut data_kinds: HashMap<String, (usize, usize)> = HashMap::new();
     let mut data_top: Vec<(usize, String)> = Vec::new();
     for (id, bytes) in &images {
@@ -1100,7 +1108,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         eprintln!("wasm export: {}: {}", std::path::Path::new(&path).display(), e);
         return;
     }
-    if let Ok(manifest) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FUNCTIONS") {
+    if let Ok(manifest) = std::env::var("RELAX_WASM_EXPORT_FUNCTIONS") {
         // A shipping body includes its inline instances even when those instances
         // need no standalone wasm entry. Use provenance from these exact bodies,
         // not historical inline/dependency lists (which also include nounwind
@@ -1129,18 +1137,18 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             closure_rows.push_str(&format!("{edge}\t{generic}\t{id}\t{bytes}\t{}\n", crate::jit::slot_key(u, *id)));
         }
     }
-    if let Ok(path) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
+    if let Ok(path) = std::env::var("RELAX_WASM_EXPORT_FNLIST") {
         let _ = std::fs::write(format!("{}.closure", path.replace("%p", &std::process::id().to_string())), closure_rows);
     }
     for (edge, (count, bytes)) in growth {
         eprintln!("wasm export: closure growth {edge}: {count} functions, {bytes} code bytes");
     }
     drop(origins);
-    // MAKEPAD_RUN_WASM_EXPORT_FNLIST=<file>: one line per module function for size analysis:
+    // RELAX_WASM_EXPORT_FNLIST=<file>: one line per module function for size analysis:
     // slot, wasm bytes (0: folded into an identical one), RIR insts, blocks, direct call sites to
     // it in the module, address taken, kept (keep_reachable, not traced), name, tier (o3 / o1),
     // the trace's CPU samples, size-first build shipped (1)
-    if let Ok(fl) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
+    if let Ok(fl) = std::env::var("RELAX_WASM_EXPORT_FNLIST") {
         use relax_backend::rir::Callee;
         let mut calls_in: HashMap<u32, usize> = HashMap::new();
         for id in &reached {
@@ -1252,7 +1260,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
         }
         let _ = std::fs::write(format!("{}.data", fl), dt);
     }
-    if std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         let s = &out.stats;
         for (id, target) in &s.untraced_calls {
             eprintln!("wasm export: untraced call {} ({}) -> {} ({})", id, funcs[id].name, target, crate::syms::stable_fn_name(u, *target));
@@ -1261,7 +1269,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             "wasm export: {} bytes ({} functions captured, {} in module, {} types, {} imports): code {} data {} types {} imports {} funcs {} elems {} other {}; {} data objects, {} pointer words linked, {} symbols unlinked, {} untraced call sites, {} functions failed, {} folded into identical ones",
             s.total, nf, s.n_funcs, s.n_types, s.n_imports, s.code, s.data, s.types, s.imports, s.funcs, s.elems, s.other, n_data, n_ptrs, n_unlinked, s.untraced_sites, s.failed.len(), s.n_folded
         );
-        let top: usize = std::env::var("MAKEPAD_RUN_WASM_EXPORT_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let top: usize = std::env::var("RELAX_WASM_EXPORT_TOP").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         let mut sz = s.fn_sizes.clone();
         sz.sort_by(|a, b| b.2.cmp(&a.2));
         let kept_bytes: usize = s.fn_sizes.iter().filter(|x| kept.contains(&x.0)).map(|x| x.2).sum();
@@ -1428,10 +1436,10 @@ pub(crate) enum O3Policy {
     All,
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_FULL (default on): shipping bodies take O1's whole pipeline.
+/// RELAX_WASM_EXPORT_FULL (default on): shipping bodies take O1's whole pipeline.
 pub(crate) fn full_o1() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_FULL").map_or(true, |v| v != "0"))
 }
 
 /// A cold shipping O1 body's inline limits for `#[inline]` callees, small leaves and
@@ -1440,8 +1448,8 @@ pub(crate) fn full_o1() -> bool {
 /// call (8 instructions, 2 blocks), closure-chain adapters as the JIT.
 pub(crate) const EXPORT_O1_INLINE: [usize; 4] = [0, 8, 2, 120];
 
-/// `var`=hint,leaf,leaf_blocks,chain (A/B; MAKEPAD_RUN_WASM_EXPORT_O1_INLINE for cold shipping
-/// bodies, MAKEPAD_RUN_O1_INLINE for every O1 build) overrides `default` (None: the JIT's O1 limits)
+/// `var`=hint,leaf,leaf_blocks,chain (A/B; RELAX_WASM_EXPORT_O1_INLINE for cold shipping
+/// bodies, RELAX_O1_INLINE for every O1 build) overrides `default` (None: the JIT's O1 limits)
 pub(crate) fn o1_inline_limits(lim: relax_codegen::opt::InlineLimits, var: &'static str, default: Option<[usize; 4]>) -> relax_codegen::opt::InlineLimits {
     static L: std::sync::OnceLock<std::sync::Mutex<HashMap<&'static str, Option<[usize; 4]>>>> = std::sync::OnceLock::new();
     let l = (*L.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()).entry(var).or_insert_with(|| {
@@ -1455,14 +1463,14 @@ pub(crate) fn o1_inline_limits(lim: relax_codegen::opt::InlineLimits, var: &'sta
     }
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_SIZE_FIRST (default on; `0`: every shipping O1 body as the JIT's O1, A/B):
+/// RELAX_WASM_EXPORT_SIZE_FIRST (default on; `0`: every shipping O1 body as the JIT's O1, A/B):
 /// a shipping O1 body the trace never sampled ships its size-first build (EXPORT_O1_INLINE), every
 /// other body its JIT-limit build. Every export O1 build makes both (jit.rs build_rir_body): the
 /// JIT-limit one stays the slot's RIR, so O3 bodies, the inliners' inputs and the module's
 /// references are the same as without size first, and the hot path's code with them.
 pub(crate) fn size_first_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_SIZE_FIRST").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_SIZE_FIRST").map_or(true, |v| v != "0"))
 }
 
 /// The size-first builds of shipping O1 bodies (jit.rs build_rir_body), until export_rir takes them.
@@ -1491,35 +1499,35 @@ pub(crate) fn take_size_first(id: u32, o3: bool) -> Option<Func> {
     Some(f)
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O1_FOLDS (default on; `0` off): shipping O1 bodies also take the O3
+/// RELAX_WASM_EXPORT_O1_FOLDS (default on; `0` off): shipping O1 bodies also take the O3
 /// folds that only remove code (value-range compares, small-set compares)
 pub(crate) fn o1_folds() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O1_FOLDS").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_O1_FOLDS").map_or(true, |v| v != "0"))
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O3_LTO (default on; `0` off): shipping O3 bodies inline as a fat-LTO
+/// RELAX_WASM_EXPORT_O3_LTO (default on; `0` off): shipping O3 bodies inline as a fat-LTO
 /// build does (InlineLimits::lto: cross-crate callees as local ones, single callers take their
 /// callee's body: the Splash VM's opcode dispatch into run_core, as LLVM has it)
 pub(crate) fn o3_lto() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_LTO").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_O3_LTO").map_or(true, |v| v != "0"))
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O3_COLD (default `tiny`): a shipping O3 body's sites that are neither
+/// RELAX_WASM_EXPORT_O3_COLD (default `tiny`): a shipping O3 body's sites that are neither
 /// hot nor in a loop inline only callees that do not grow it (InlineLimits::cold_tiny); `0`: O3's
 /// own reach everywhere (A/B)
 pub(crate) fn o3_cold_tiny() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_COLD").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_O3_COLD").map_or(true, |v| v != "0"))
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_INLINE (default on; `0` off): the shipping module's own inlining
-/// (module_inline) and static reachability from the entry, exports and taken addresses. P(DOOM)
+/// RELAX_WASM_EXPORT_INLINE (default on; `0` off): the shipping module's own inlining
+/// (module_inline) and static reachability from the entry, exports and taken addresses. A game
 /// (WASMCG runs A/B, both gated): 10.29 MB br11 with it, 10.79 without, CPU equal.
 fn module_inline_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_INLINE").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_INLINE").map_or(true, |v| v != "0"))
 }
 
 /// The shipping module's inlining, as a size-first AOT compiler's: bottom-up over the direct-call
@@ -1624,30 +1632,37 @@ fn module_inline(u: &Unit, funcs: &mut BTreeMap<u32, Func>, kept: &std::collecti
 }
 
 /// The crate that defines slot `id` (a closure's or shim's owner's), "" for generated code.
-pub(crate) fn slot_crate(u: &Unit, id: u32) -> &str {
+fn slot_crate(u: &Unit, id: u32) -> Option<&crate::program::CrateInfo> {
     let mut owner = id;
     loop {
         match &u.fns[owner as usize].key {
-            crate::jit::FnKey::Inst(d, _) => return u.prog.syms.str(u.prog.crates[u.prog.def(*d).krate as usize].name),
+            crate::jit::FnKey::Inst(d, _) => return u.prog.crates.get(u.prog.def(*d).krate as usize),
             crate::jit::FnKey::Closure(_, _, p) | crate::jit::FnKey::Plain(p) | crate::jit::FnKey::Sandbox(p)
                 if *p != owner && (*p as usize) < u.fns.len() => owner = *p,
-            _ => return "",
+            _ => return None,
         }
     }
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O3_CRATES=a,b: crates whose functions all take the O3 pipeline, as the
-/// rustc web build compiles its hot crates at opt-level 3 (default: the Splash VM, makepad_script,
-/// the old film exporter's HOT_CRATES).
+/// The crates whose functions all take the O3 pipeline, as the rustc web build compiles its hot
+/// crates at opt-level 3: those whose manifest says `[package.metadata.relax] export-opt-level = 3`
+/// (the Splash VM's), or the list RELAX_WASM_EXPORT_O3_CRATES=a,b names instead.
 /// Only the crate's own code, as rustc compiles it: a generic instance (or a closure of one) is
 /// codegened in the crate that instantiates it, at that crate's opt-level (opt z for the derive
 /// helpers the widget crates instantiate: `script_derive_proto_field::<T>`, 316 instances at O3
 /// were 3.8 MB of code against rustc's 35 KB); trace-hot instances still take O3 (o3_policy).
 pub(crate) fn o3_crate(u: &Unit, id: u32) -> bool {
-    static C: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    let crates = C.get_or_init(|| std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3_CRATES").unwrap_or_else(|_| "makepad_script".to_string())
-        .split(',').filter(|c| !c.is_empty()).map(|c| c.replace('-', "_")).collect());
-    !crates.is_empty() && !generic_instance(u, id) && crates.iter().any(|c| c == slot_crate(u, id))
+    static C: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
+    let named = C.get_or_init(|| std::env::var("RELAX_WASM_EXPORT_O3_CRATES").ok()
+        .map(|v| v.split(',').filter(|c| !c.is_empty()).map(|c| c.replace('-', "_")).collect()));
+    if named.as_ref().is_some_and(|c| c.is_empty()) || generic_instance(u, id) {
+        return false;
+    }
+    let Some(k) = slot_crate(u, id) else { return false };
+    match named {
+        Some(c) => c.iter().any(|c| c == u.prog.syms.str(k.name)),
+        None => k.export_opt_level() == Some(3),
+    }
 }
 
 /// Slot `id` is an instance with generic arguments, or a closure / shim / twin of one.
@@ -1663,10 +1678,10 @@ fn generic_instance(u: &Unit, id: u32) -> bool {
     }
 }
 
-/// MAKEPAD_RUN_WASM_EXPORT_O3=hot|all|0: shipping bodies built by the JIT's O3 pipeline.
+/// RELAX_WASM_EXPORT_O3=hot|all|0: shipping bodies built by the JIT's O3 pipeline.
 pub(crate) fn o3_policy() -> O3Policy {
     static P: std::sync::OnceLock<O3Policy> = std::sync::OnceLock::new();
-    *P.get_or_init(|| match std::env::var("MAKEPAD_RUN_WASM_EXPORT_O3").as_deref() {
+    *P.get_or_init(|| match std::env::var("RELAX_WASM_EXPORT_O3").as_deref() {
         Ok("0") | Ok("off") => O3Policy::Off,
         Ok("all") => O3Policy::All,
         _ => O3Policy::Hot,
@@ -1676,7 +1691,7 @@ pub(crate) fn o3_policy() -> O3Policy {
 /// One profile switch for capture, closure, emission and gate semantics.
 fn block_profile() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_BLOCKS").is_some_and(|v| v != "0"))
+    *ON.get_or_init(|| std::env::var_os("RELAX_WASM_EXPORT_BLOCKS").is_some_and(|v| v != "0"))
 }
 
 /// Apply only semantics shared by every requested emission variant. These are
@@ -1686,10 +1701,10 @@ pub(crate) fn prepare_shipping(u: &Unit, f: &mut Func) {
     use relax_backend::rir::{Callee, Term};
     static PROFILE: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
     let &(abort, single) = PROFILE.get_or_init(|| {
-        let variants = std::env::var("MAKEPAD_RUN_WASM_EXPORT_VARIANTS").ok();
+        let variants = std::env::var("RELAX_WASM_EXPORT_VARIANTS").ok();
         let opts: Vec<String> = match variants {
             Some(v) => v.split(';').filter(|v| !v.is_empty()).map(|v| v.split_once('=').map_or("", |x| x.1).to_string()).collect(),
-            None => vec![std::env::var("MAKEPAD_RUN_WASM_OPT").unwrap_or_default()],
+            None => vec![std::env::var("RELAX_WASM_OPT").unwrap_or_default()],
         };
         opts.iter().map(|o| {
             let (mut abort, mut single) = (true, true);
@@ -1815,7 +1830,7 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
     // bodies and annotated keep_reachable closure instead of making every web
     // callback (and effectively the application) a whole-function root.
     let mut required = std::collections::BTreeSet::new();
-    if let Ok(names) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_ROOTS") {
+    if let Ok(names) = std::env::var("RELAX_WASM_EXPORT_ROOTS") {
         let roots = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
         for name in names.split(',').filter(|s| !s.is_empty()) {
             let id = roots.iter().find(|(_, n)| n.as_deref() == Some(name)).map(|(id, _)| *id)
@@ -1940,7 +1955,7 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
     }
     let mut vtables = CLOSURE_VTABLES.lock().unwrap_or_else(|e| e.into_inner());
     vtables.clear();
-    if let Ok(path) = std::env::var("MAKEPAD_RUN_WASM_EXPORT_FNLIST") {
+    if let Ok(path) = std::env::var("RELAX_WASM_EXPORT_FNLIST") {
         // Printed closure-type arguments can coincide across owner instances.
         // Join evidence to module ranges by slot, never by the display key.
         let mut inline_rows = String::from("emitted_slot\temitted\tcontext\tparent_context\tinlined_slot\tinlined\n");
@@ -1975,7 +1990,7 @@ fn keep_closure(funcs: &mut BTreeMap<u32, Func>, u: &Unit, whole: bool) -> Resul
         }
         let _ = std::fs::write(format!("{}.removed-edges", path.replace("%p", &std::process::id().to_string())), rows);
     }
-    if whole && std::env::var_os("MAKEPAD_RUN_WASM_EXPORT_STATS").is_some() {
+    if whole && std::env::var_os("RELAX_WASM_EXPORT_STATS").is_some() {
         eprintln!("wasm export: postopt: {} captured call/address edges eliminated before closure; {} optimized bodies", removed_edges.len(), kept.len());
         let n = POSTOPT_EFFECTS.each_ref().map(|x| x.load(std::sync::atomic::Ordering::Relaxed));
         eprintln!("wasm export: postopt semantics: {} abort unwind edges, {} constant host bindings, {} semantic trap tails, {} immutable static reads resolved", n[0], n[1], n[2], n[3]);
@@ -1992,6 +2007,7 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&CAPTURED, Mutex::new(None));
     reset(&ENTRY, std::sync::atomic::AtomicU32::new(u32::MAX));
+    reset(&MAINS, Mutex::new(BTreeMap::new()));
     reset(&FAILED, std::sync::atomic::AtomicBool::new(false));
     reset(&CLOSURE_ORIGINS, Mutex::new(BTreeMap::new()));
     reset(&CLOSURE_PARENTS, Mutex::new(BTreeMap::new()));

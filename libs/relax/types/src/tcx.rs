@@ -264,6 +264,9 @@ pub struct Tcx {
     /// async blocks / async fn bodies (file, expr; an async fn body is ASYNC_FN_BODY | block):
     /// closure types that are coroutines -- they implement Future<Output = sig's return>; their
     /// storage record holds the state word and is extended by saved locals (coro_frames).
+    /// Whoever makes such a type marks it here first: the type check of the body that holds the
+    /// block, and the code cache for a type it decodes (cache.rs dec_ty), whose body this run may
+    /// never check.
     pub coroutines: crate::conc::MemoMap<(u32, u32), ()>,
     /// `mir_coroutine_witnesses` reduced to what dropck asks (whether any local live across a suspension
     /// point needs drop), per coroutine (file, expr), set when borrowck has built the coroutine's MIR.
@@ -322,7 +325,7 @@ pub struct Tcx {
 
 
 
-/// `f` over `items` on the boot's worker count (MAKEPAD_RUN_JOBS), results in item order.
+/// `f` over `items` on the boot's worker count (RELAX_JOBS), results in item order.
 fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> where T: Copy {
     let jobs = crate::preload::jobs().min(items.len().max(1));
     if jobs < 2 {
@@ -694,7 +697,7 @@ impl Tcx {
             Some(Some(a)) => match Abi::from_name(&crate::lit::unescape_str(prog.files[file as usize].text(a))) {
                 Some(abi) => {
                     let target = &prog.session.options.target;
-                    let arch = if target.is_empty() { std::env::consts::ARCH } else { target.split('-').next().unwrap() };
+                    let arch = target.split('-').next().unwrap();
                     if !abi.is_supported_on_arch(arch) {
                         self.err(cx, prog, file, a.lo, format!("E0570: \"{}\" is not a supported ABI for the current target", abi.name()));
                     }
@@ -1638,7 +1641,7 @@ impl Tcx {
     fn init_signature<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<SigParts>>) -> &'a SigParts {
         // (computed outside the cell's Once: relax_base::query::init_once)
         let diagnostics = std::cell::Cell::new(None);
-        let value: &Box<_> = crate::query::init_once(cell, || {
+        let value: &Box<_> = crate::query::init_once(cell, || crate::body_facts::item_text(prog, d, crate::body_facts::ItemCell::Signature, || {
             if crate::why::enabled() && prog.files.get(prog.def(d).file as usize)
                 .and_then(|f| f.ast.items.get(prog.def(d).item.0 as usize)).is_some() {
                 let cause = prog.why_def(d, "signature-demand");
@@ -1654,7 +1657,7 @@ impl Tcx {
             if !parts.errors.is_empty() { cx.errors().note_reported_error(); }
             diagnostics.set(Some(cx.errors().take_since(checkpoint)));
             Box::new(parts)
-        }, |parts| {
+        }), |parts| {
             let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
@@ -1882,7 +1885,7 @@ impl Tcx {
 
     /// Signatures computed and resident: a mapped image's entries count once decoded (reading
     /// all of them here decoded the whole map into the heap: `memory compiler=1` grew the compiler
-    /// arena by 15 MB per call in a Sandbox race).
+    /// arena by 15 MB per call in a game).
     pub fn signature_count(&self) -> usize {
         self.sigs.decoded_values().filter(|cell| cell.get().is_some()).count()
     }
@@ -2356,7 +2359,7 @@ impl Tcx {
     fn init_const_decl<'a>(&'a self, prog: &Program, d: DefId, cell: &'a std::sync::OnceLock<Box<ConstDecl>>) -> &'a ConstDecl {
         // (computed outside the cell's Once: relax_base::query::init_once)
         let diagnostics = std::cell::Cell::new(None);
-        let value: &Box<_> = crate::query::init_once(cell, || {
+        let value: &Box<_> = crate::query::init_once(cell, || crate::body_facts::item_text(prog, d, crate::body_facts::ItemCell::ConstDecl, || {
             let _mem = crate::memstat::tag(crate::memstat::Tag::Sigs);
             let state = EvalState::new();
             let cx = EvalCx::new(prog, self, TypingEnv::fully_monomorphized(prog), &state);
@@ -2370,7 +2373,7 @@ impl Tcx {
             if !decl.errors.is_empty() { cx.errors().note_reported_error(); }
             diagnostics.set(Some(cx.errors().take_since(checkpoint)));
             Box::new(decl)
-        }, |decl| {
+        }), |decl| {
             let (errors, warnings) = diagnostics.take().unwrap_or_default();
             for error in errors {
                 let owner = if error.cause.body_id == NO_DEF { d } else { error.cause.body_id };
@@ -2673,6 +2676,20 @@ impl Tcx {
         matches!(self.tys.kind(t), TyKind::Closure(f, e, ..) if self.coroutines.contains(&(*f, *e)))
     }
 
+    /// Takes over which closure types are coroutines from `old`, the context this one replaces
+    /// for the same program (a settle rebuild: the same files, the same parses, type ids kept).
+    /// `coroutines` is no declaration state, so a context restored from the collected image has
+    /// none of it, and nothing fills it in again for a type that already exists: the body that
+    /// holds the block is not checked again while its code runs, and a cache key is decoded
+    /// once, when its slot is made. A type left unmarked is a plain closure to the solver, with
+    /// no `Future` impl.
+    pub fn inherit_coroutines(&self, old: &Tcx) {
+        for (coroutine, ()) in old.coroutines.snapshot() {
+            // (looked up first: an insert adds a node each time)
+            if !self.coroutines.contains(&coroutine) { self.coroutines.insert(coroutine, ()); }
+        }
+    }
+
     /// Does `t` mention a generic parameter?
     pub fn has_param(&self, t: TyId) -> bool {
         // rustc_type_ir/src/visit.rs: has_non_region_param includes rigid
@@ -2913,7 +2930,7 @@ impl Tcx {
                         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, p);
                         self.infer_elided_assoc_lifetimes(cx, prog, ad, &mut own_regions, source_ty.is_none());
                         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, p, Some(ad));
-                        self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
+                        self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions, cx.infcx.filter(|_| source_ty.is_none()));
                         args.extend(own_args);
                         let mut rs = self.tys.region_args(tr).to_vec();
                         rs.extend(own_regions);
@@ -3292,7 +3309,7 @@ impl Tcx {
         }
         cx.state.lowering.borrow_mut().push(key);
         let read0 = cx.state.impl_read.replace(false);
-        let t = self.lower_alias_rhs(cx, prog, d);
+        let t = crate::body_facts::item_text(prog, d, crate::body_facts::ItemCell::AliasTy, || self.lower_alias_rhs(cx, prog, d));
         cx.state.lowering.borrow_mut().pop();
         let read = cx.state.impl_read.get();
         cx.state.impl_read.set(read0 || read);
@@ -3374,21 +3391,29 @@ impl Tcx {
         for _ in 0..lifetimes { regions.push(infcx.next_region_var()); }
     }
 
-    pub(crate) fn fit_assoc_own_args(&self, prog: &Program, ad: DefId, args: &mut Vec<TyId>, regions: &mut Vec<RegionId>) {
+    /// The associated type's own arguments, one per parameter: missing ones are errors, or with
+    /// `infer` (an expression path's segment, rustc `seg.infer_args`) inference variables, so
+    /// `Self::RwLock::new(value)` for `type RwLock<T>` infers T like `RwLock::new(value)`.
+    pub(crate) fn fit_assoc_own_args(&self, prog: &Program, ad: DefId, args: &mut Vec<TyId>, regions: &mut Vec<RegionId>, infer: Option<&crate::infer::InferCtxt<'_>>) {
         let def = prog.def(ad);
         let ast = &prog.files[def.file as usize].ast;
         let Some(generics) = ast.kind_generics(&ast.item(def.item).kind) else { return; };
         let params = ast.list(generics.params);
         let lifetimes = params.iter().filter(|p| matches!(p.kind, GenericParamKind::Lifetime(_))).count();
-        regions.resize(lifetimes, self.tys.intern_region(RegionKind::ReError));
+        regions.truncate(lifetimes);
+        while regions.len() < lifetimes {
+            regions.push(infer.map_or_else(|| self.tys.intern_region(RegionKind::ReError), |infcx| infcx.next_region_var()));
+        }
         let mut own = params.iter().filter(|p| !matches!(p.kind, GenericParamKind::Lifetime(_)));
         let mut fitted = Vec::new();
         for _ in 0..params.len() - lifetimes {
             let param = own.next().unwrap();
-            fitted.push(match args.get(fitted.len()) {
-                Some(&t) => t,
-                None if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))),
-                None => self.tys.error,
+            fitted.push(match (args.get(fitted.len()), infer) {
+                (Some(&t), _) => t,
+                (None, Some(infcx)) if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(infcx.next_const_var())),
+                (None, Some(infcx)) => infcx.next_ty_var(),
+                (None, None) if matches!(param.kind, GenericParamKind::Const(..)) => self.tys.intern(TyKind::Const(self.tys.intern_const(crate::consts::ConstKind::Error))),
+                (None, None) => self.tys.error,
             });
         }
         *args = fitted;
@@ -3980,7 +4005,7 @@ impl Tcx {
         let mut own_regions = self.written_lifetimes(cx.infcx, prog, file, env, path);
         self.infer_elided_assoc_lifetimes(cx, prog, alias.kind.def_id(), &mut own_regions, source_ty.is_none());
         let mut own_args = self.lower_generic_args_of_item(cx, prog, file, module, env, path, Some(alias.kind.def_id()));
-        self.fit_assoc_own_args(prog, alias.kind.def_id(), &mut own_args, &mut own_regions);
+        self.fit_assoc_own_args(prog, alias.kind.def_id(), &mut own_args, &mut own_regions, cx.infcx.filter(|_| source_ty.is_none()));
         args.extend(own_args);
         let mut regions = self.tys.region_args(alias.regions).to_vec();
         regions.extend(own_regions);

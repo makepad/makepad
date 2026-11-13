@@ -3,10 +3,12 @@
 # (libs/devhub/src/lease/loaders.rs): the gate's, when this box has none for its tree's inputs.
 b=$(mktemp) || exit 2
 trap 'rm -f -- "$b"' EXIT
-CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 > "$b" 2>&1
+# short messages: each warning or error line names its file, which the bucket's blame matches against each landing's diff
+CARGO_INCREMENTAL=0 cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 --message-format short > "$b" 2>&1
 rc=$?
 if [ $rc -ne 0 ]; then tail -20 "$b"; echo "LOADER-FAIL build"; exit 1; fi
-if grep -E "^(warning|error)" "$b" | grep -qv sandbox; then grep -E "^(warning|error)" "$b" | grep -v sandbox | head -20; echo "LOADER-FAIL warnings"; exit 1; fi
+said='^([^ :]+:[0-9]+:[0-9]+: )?(warning|error)'
+if grep -E "$said" "$b" | grep -qv sandbox; then grep -E "$said" "$b" | grep -v sandbox | head -20; echo "LOADER-FAIL warnings"; exit 1; fi
 grep -E '^ +Compiling' "$b" | wc -l | sed 's/^ */jit: /; s/$/ crates rebuilt/'
 : > "${CARGO_TARGET_DIR:-$PWD/target}/host/makepad.publish"
 echo "LOADER-OK"

@@ -5,7 +5,7 @@
 // live edit of `next` reaches the running loop: its slow call's result is what the loop adds up.
 // The loop runs in bursts (`burst`, called again and again: each call enters its newest code, so it
 // reaches O3 while the spinner runs); the session settles before its second run
-// (MAKEPAD_RUN_LIVE_SETTLE) and the edit's report names `next`'s copies (expect.txt). Each run
+// (RELAX_LIVE_SETTLE) and the edit's report names `next`'s copies (expect.txt). Each run
 // stops the spinner the previous run started, prints what it computed after the run began, then
 // starts a new one.
 //   v0: next(i) = Some(i + 10) for i < N;  v1: Some(i + 20)

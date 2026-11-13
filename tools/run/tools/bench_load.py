@@ -18,25 +18,25 @@ def main():
     parser.add_argument("--std", type=Path, required=True)
     parser.add_argument("--target", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--jobs", type=int, nargs="+", default=[16], help="worker counts; 0 tests the default with MAKEPAD_RUN_JOBS unset")
+    parser.add_argument("--jobs", type=int, nargs="+", default=[16], help="worker counts; 0 tests the default with RELAX_JOBS unset")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--package", default="makepad-runner")
     parser.add_argument("--profile", action="store_true")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, MAKEPAD_RUN_CACHE="off", MAKEPAD_RUN_OFFLINE="1",
+    env = dict(os.environ, RELAX_CACHE="off", RELAX_OFFLINE="1",
                RUSTC_BOOTSTRAP="1",
-               MAKEPAD_RUN_CACHE_DIR=str(args.target.resolve()), MAKEPAD_RUN_STD=str(args.std.resolve()))
-    for key in ("MAKEPAD_RUN_PROFILE", "MAKEPAD_RUN_BOOT_TRACE"):
+               RELAX_CACHE_DIR=str(args.target.resolve()), RELAX_STD=str(args.std.resolve()))
+    for key in ("RELAX_PROFILE", "RELAX_BOOT_TRACE"):
         env.pop(key, None)
     if args.profile:
-        env["MAKEPAD_RUN_PROFILE"] = "1"
+        env["RELAX_PROFILE"] = "1"
     results = []
     for jobs in args.jobs:
         if jobs == 0:
-            env.pop("MAKEPAD_RUN_JOBS", None)
+            env.pop("RELAX_JOBS", None)
         else:
-            env["MAKEPAD_RUN_JOBS"] = str(jobs)
+            env["RELAX_JOBS"] = str(jobs)
         for run in range(1, args.runs + 1):
             log = args.output / f"{args.label}-{jobs}-{run}.log"
             start = time.monotonic()
@@ -45,7 +45,7 @@ def main():
                                         cwd=args.workspace, env=env, stdout=out, stderr=subprocess.STDOUT)
             data = log.read_text()
             load = re.search(r"load\+parse[^\n]*?\s([\d.]+) ms", data)
-            errors = re.search(r"makepad check: [^\n]* (\d+) errors", data)
+            errors = re.search(r"relax check: [^\n]* (\d+) errors", data)
             row = dict(run=run, jobs=jobs, load_ms=float(load[1]) if load else None,
                        errors=int(errors[1]) if errors else None, exit=result.returncode,
                        wall_s=round(time.monotonic() - start, 2), log=str(log))

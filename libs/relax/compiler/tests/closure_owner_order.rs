@@ -1,4 +1,4 @@
-//! Run with MAKEPAD_RUN_STD=$PWD/std MAKEPAD_RUN_CACHE=off cargo test --release --offline --test closure_owner_order.
+//! Run with RELAX_STD=$PWD/std RELAX_CACHE=off cargo test --release --offline --test closure_owner_order.
 //! The fixture also runs with `makepad test tests/closure_owner/main.rs`.
 use relax_compiler::{program::{DefId, Program}, tcx::{EvalCx, EvalState, Tcx, TypingEnv}, typeck, types::TyKind};
 

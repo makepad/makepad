@@ -6,7 +6,7 @@
 //! initialiser itself waits for queries other threads run, so a reader blocked in the `Once`
 //! while the initialising thread waits for a query that reader runs is a cycle nobody can break
 //! (the owner initialised a signature, pumped inside it, and a lowering-ahead helper slept in that
-//! signature's `Once`: Sandbox's race game, 2026-10-21). Here the value is computed with the `Once`
+//! signature's `Once`: a game, 2026-10-21). Here the value is computed with the `Once`
 //! free and published with `set` (the first value stands). A thread that meets a cell another
 //! thread is computing computes it too: every wait inside goes through the query engine (its
 //! latches, its cycle check, the owner's pump), so there is no wait the engine does not see. The
@@ -68,7 +68,7 @@ pub fn init_once<'a, T>(cell: &'a std::sync::OnceLock<T>, compute: impl FnOnce()
                     return v;
                 }
             }
-            panic!("makepad: a declaration asks for itself while this thread computes it (a cycle)");
+            panic!("relax: a declaration asks for itself while this thread computes it (a cycle)");
         }
     };
     let mut value = compute();
@@ -86,7 +86,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::OnceLock;
 
-    /// The shape of the Sandbox hang: the thread initialising a cell waits (inside its
+    /// The shape of a game hang: the thread initialising a cell waits (inside its
     /// initialiser) for work of a second thread, and that second thread needs the same cell. With
     /// `OnceLock::get_or_init` the second thread sleeps in the `Once` and the first never finishes;
     /// here the second computes the value itself and both go on. The value is stored once and its

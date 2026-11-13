@@ -2,6 +2,7 @@
 //! A linked worktree owns HEAD and index.lock; its refs live in commondir.
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[derive(Default)]
 pub(super) struct Repositories {
@@ -11,17 +12,23 @@ pub(super) struct Repositories {
     roots: HashMap<PathBuf, PathBuf>,
 }
 
-#[derive(PartialEq, Eq)]
+#[derive(PartialEq, Eq, Clone)]
 pub(super) struct Snapshot {
-    pub busy: bool,
-    identities: Vec<(PathBuf, super::inputs::Stamp, Option<String>)>,
+    /// (repository, file, its stamp, its text): what a git operation writes, per repository (its
+    /// git dir)
+    identities: Vec<(PathBuf, PathBuf, super::inputs::Stamp, Option<String>)>,
+    /// (repository, file, made): its locks (index.lock, HEAD.lock, a ref's), each with its change
+    /// time, and a HEAD that names nothing (unreadable, a ref cycle), with none
+    holds: Vec<(PathBuf, PathBuf, Option<SystemTime>)>,
 }
 
 impl Repositories {
     pub fn include<'a>(&mut self, paths: impl Iterator<Item = &'a str>) {
         for path in paths {
-            if crate::vfs::is_virtual(path) { continue; }
-            let mut at = Path::new(path).parent();
+            // (a store's file is in no repository on disk; a folder mount's is in its checkout's)
+            if crate::vfs::in_store(path) { continue; }
+            let disk = crate::vfs::on_disk(path);
+            let mut at = Path::new(&*disk).parent();
             let mut visited = Vec::new();
             let mut found = None;
             while let Some(dir) = at {
@@ -41,9 +48,14 @@ impl Repositories {
                 if let Ok(text) = std::fs::read_to_string(&dot) {
                     if let Some(gitdir) = text.trim().strip_prefix("gitdir:") {
                         let gitdir = dir.join(gitdir.trim());
-                        self.roots.insert(gitdir.clone(), dir.to_path_buf());
-                        found = Some(gitdir);
-                        break;
+                        // the same for a `gitdir:` that names no repository (a worktree or a
+                        // submodule checkout without its main repository): read, its HEAD never
+                        // resolved and every save waited for a quiet window that never came (relax#33)
+                        if gitdir.join("HEAD").is_file() {
+                            self.roots.insert(gitdir.clone(), dir.to_path_buf());
+                            found = Some(gitdir);
+                            break;
+                        }
                     }
                 }
                 at = dir.parent();
@@ -54,28 +66,32 @@ impl Repositories {
     }
 
     pub fn snapshot(&self) -> Snapshot {
-        let mut out = Snapshot { busy: false, identities: Vec::new() };
+        let mut out = Snapshot { identities: Vec::new(), holds: Vec::new() };
         for dir in &self.dirs {
-            let common = out.read(dir.join("commondir")).map(|p| dir.join(p.trim())).unwrap_or_else(|| dir.clone());
+            let common = out.read(dir, dir.join("commondir")).map(|p| dir.join(p.trim())).unwrap_or_else(|| dir.clone());
             // Sampling the index identity also notices an operation that began
             // and ended between polls without moving HEAD (checkout of paths).
             for base in [dir, &common] {
-                out.busy |= base.join("index.lock").exists();
-                out.note(base.join("index"));
+                out.lock(dir, base.join("index.lock"));
+                out.note(dir, base.join("index"));
             }
-            let mut value = out.read(dir.join("HEAD"));
-            out.busy |= value.is_none() || dir.join("HEAD.lock").exists();
+            let mut value = out.read(dir, dir.join("HEAD"));
+            if value.is_none() { out.holds.push((dir.clone(), dir.join("HEAD"), None)); }
+            out.lock(dir, dir.join("HEAD.lock"));
             let mut refs = BTreeSet::new();
             while let Some(name) = value.as_deref().and_then(|s| s.trim().strip_prefix("ref:")).map(str::trim) {
                 let name = name.to_string();
-                if !refs.insert(name.clone()) { out.busy = true; break; }
+                if !refs.insert(name.clone()) {
+                    out.holds.push((dir.clone(), common.join(&name), None));
+                    break;
+                }
                 let path = common.join(&name);
-                out.busy |= path.with_file_name(format!("{}.lock", path.file_name().unwrap_or_default().to_string_lossy())).exists();
-                value = out.read(path);
+                out.lock(dir, path.with_file_name(format!("{}.lock", path.file_name().unwrap_or_default().to_string_lossy())));
+                value = out.read(dir, path);
                 if value.is_none() {
                     // A ref can be packed; both its value and the packed file's
                     // identity participate in the quiet window.
-                    value = out.read(common.join("packed-refs")).and_then(|text| text.lines().find_map(|line| {
+                    value = out.read(dir, common.join("packed-refs")).and_then(|text| text.lines().find_map(|line| {
                         let (hash, reference) = line.split_once(' ')?;
                         (reference == name).then(|| hash.to_string())
                     }));
@@ -136,16 +152,51 @@ fn lexical(p: &Path) -> PathBuf {
 }
 
 impl Snapshot {
-    fn note(&mut self, path: PathBuf) {
+    fn note(&mut self, repo: &Path, path: PathBuf) {
         let stamp = super::stamp(&path.to_string_lossy());
-        self.identities.push((path, stamp, None));
+        self.identities.push((repo.to_path_buf(), path, stamp, None));
     }
 
-    fn read(&mut self, path: PathBuf) -> Option<String> {
+    fn read(&mut self, repo: &Path, path: PathBuf) -> Option<String> {
         let stamp = super::stamp(&path.to_string_lossy());
         let text = std::fs::read_to_string(&path).ok();
-        self.identities.push((path, stamp, text.clone()));
+        self.identities.push((repo.to_path_buf(), path, stamp, text.clone()));
         text
+    }
+
+    fn lock(&mut self, repo: &Path, path: PathBuf) {
+        if let Ok(m) = std::fs::metadata(&path) {
+            self.holds.push((repo.to_path_buf(), path, m.modified().ok()));
+        }
+    }
+
+    /// The lock that holds a save back (or the HEAD that names nothing): one a git operation can
+    /// be writing for it. A lock made at or after the save's first change (`save`) can be its
+    /// writer's; an older one holds only while its repository's HEAD, refs or index moved since
+    /// the last settled snapshot (`settled`: an operation under way). An older lock in a
+    /// repository that stands still is a crashed operation's (git starts none until it goes):
+    /// the save is the person's, and it applies. Read as busy, such a lock held every save back
+    /// for a quiet window that never came (relax#33).
+    pub fn holding(&self, save: SystemTime, settled: &Snapshot) -> Option<&Path> {
+        self.holds.iter()
+            .find(|(repo, _, made)| made.is_some_and(|t| t >= save) || self.moved_since(repo, settled))
+            .map(|(_, path, _)| path.as_path())
+    }
+
+    /// Whether `repo`'s identities differ from `settled`'s (a repository `settled` did not
+    /// sample has not moved: it was added to the watch since)
+    fn moved_since(&self, repo: &Path, settled: &Snapshot) -> bool {
+        settled.identities.iter().any(|i| i.0 == repo)
+            && self.identities.iter().filter(|i| i.0 == repo).ne(settled.identities.iter().filter(|i| i.0 == repo))
+    }
+
+    /// The first file whose identity or lock differs from `before`'s: what moved, for the line
+    /// of a long wait
+    pub fn moved_from<'a>(&'a self, before: &'a Snapshot) -> Option<&'a Path> {
+        fn first<'a, T: PartialEq>(a: &'a [T], b: &'a [T], path: impl Fn(&'a T) -> &'a Path) -> Option<&'a Path> {
+            (0..a.len().max(b.len())).find(|&k| a.get(k) != b.get(k)).and_then(|k| a.get(k).or(b.get(k))).map(path)
+        }
+        first(&self.identities, &before.identities, |i| i.1.as_path()).or_else(|| first(&self.holds, &before.holds, |h| h.1.as_path()))
     }
 }
 
@@ -173,7 +224,8 @@ mod tests {
         let mut repos = Repositories::default();
         repos.include(std::iter::once(file.to_str().unwrap()));
         assert_eq!(repos.dirs.iter().cloned().collect::<Vec<_>>(), vec![outer.join(".git")], "the repository above the empty .git folder");
-        assert!(!repos.snapshot().busy, "a repository with HEAD and its ref is not busy");
+        let now = repos.snapshot();
+        assert!(now.holding(std::time::UNIX_EPOCH, &now).is_none(), "a repository with HEAD and its ref holds nothing");
 
         // without the outer repository the search goes on up as it does from the scratch folder
         // (a repository above it, if the temp folder sits in one; none, and so not busy, elsewhere)
@@ -184,7 +236,8 @@ mod tests {
         repos.include(std::iter::once(file.to_str().unwrap()));
         assert_eq!(repos.dirs, above.dirs, "the repositories above the scratch folder, never the empty .git");
         if above.dirs.is_empty() {
-            assert!(!repos.snapshot().busy, "no repository is not busy");
+            let now = repos.snapshot();
+            assert!(now.holding(std::time::UNIX_EPOCH, &now).is_none(), "no repository holds nothing");
         }
         let _ = std::fs::remove_dir_all(&root);
     }

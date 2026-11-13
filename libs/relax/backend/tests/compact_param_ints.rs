@@ -1,6 +1,6 @@
 //! `passes::compact_vregs` renames the declared parameter types (`Func::param_ints`) with their
 //! vregs: a stale number names another parameter, and the wasm backend narrows a declared
-//! <= 32-bit parameter to i32 (P(DOOM)'s size-first export: a closure's u64 LiveId parameter
+//! <= 32-bit parameter to i32 (a game's size-first export: a closure's u64 LiveId parameter
 //! took the declared u32 of the pointer before it and lost its high half).
 use relax_backend::passes;
 use relax_backend::rir::*;

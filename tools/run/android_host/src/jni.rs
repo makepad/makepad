@@ -27,15 +27,15 @@ const RTLD_NOLOAD: c_int = 4;
 const ASSET_MODE_UNKNOWN: c_int = 0;
 
 /// The packed source archive's name in the APK's assets.
-const ARCHIVE_ASSET: &str = "makepad-run-src.pack";
+const ARCHIVE_ASSET: &str = "relax-src.pack";
 /// The package the APK runs and the compile's flags (cargo_makepad `android run-host` writes them
-/// into assets/makepad-run-host.conf: one `key=value` per line).
-const CONF_ASSET: &str = "makepad-run-host.conf";
+/// into assets/relax-host.conf: one `key=value` per line).
+const CONF_ASSET: &str = "relax-host.conf";
 /// A compile cache recorded on a device of this build, shipped in the APK (cargo_makepad `build-host
 /// --cache-seed=<dir>`): the index lists one path per line relative to the relax home
-/// (`target/<run dir>/cache/<store>`), each stored as the asset `makepad-run-seed/<path>`.
-const SEED_INDEX_ASSET: &str = "makepad-run-seed/index.txt";
-const SEED_ASSET_DIR: &str = "makepad-run-seed";
+/// (`target/<run dir>/cache/<store>`), each stored as the asset `relax-seed/<path>`.
+const SEED_INDEX_ASSET: &str = "relax-seed/index.txt";
+const SEED_ASSET_DIR: &str = "relax-seed";
 
 #[no_mangle]
 pub unsafe extern "system" fn JNI_OnLoad(vm: *mut sys::JavaVM, _: *mut c_void) -> sys::jint {
@@ -161,7 +161,7 @@ unsafe fn asset_copy(manager: *mut c_void, name: &str, dst: &std::path::Path) ->
 unsafe fn seed_cache(manager: *mut c_void, home: &std::path::Path) {
     // a seed put on disk (an installer's or the app's own download) comes first
     if let Some(files) = home.parent() {
-        if seed_from_dir(&files.join("makepad-run-seed"), home) { return; }
+        if seed_from_dir(&files.join("relax-seed"), home) { return; }
     }
     let Ok(index) = asset_text(manager, SEED_INDEX_ASSET) else { return };
     if has_stores(home) {
@@ -194,7 +194,7 @@ fn has_stores(home: &std::path::Path) -> bool {
         .any(|d| std::fs::read_dir(d.path().join("cache")).into_iter().flatten().flatten().any(|f| f.file_name().to_string_lossy().contains(".rcs")))
 }
 
-/// A seed an installer or the app's own download put on disk (`<files>/makepad-run-seed/`: an
+/// A seed an installer or the app's own download put on disk (`<files>/relax-seed/`: an
 /// `index.txt` and the stores it lists, the APK seed's layout), so a phone gets its warm first
 /// launch from a download sized to it instead of from the APK. The files are moved into the relax
 /// home (a rename: the same filesystem) and the folder is removed; the same first-launch rule as
@@ -232,7 +232,7 @@ struct App {
 struct Conf {
     /// the apps the APK carries (`app=<package>`, then its `flag=` lines); the first is the default
     apps: Vec<App>,
-    /// environment of the process (`env=KEY=VALUE`: MAKEPAD_TRACE, SANDBOX_MUTE, ...)
+    /// environment of the process (`env=KEY=VALUE`: MAKEPAD_TRACE, MAKEPAD_MUTE, ...)
     env: Vec<(String, String)>,
     /// `privileged=1`: the app that boots is the window manager (domain control)
     privileged: bool,
@@ -391,14 +391,14 @@ fn boot_thread(
     remote: &str,
 ) -> Result<(), String> {
     name_host_library();
-    let relax_home = files.join("makepad-run");
+    let relax_home = files.join("relax");
     std::fs::create_dir_all(&relax_home).map_err(|e| format!("{}: {e}", relax_home.display()))?;
     // an Android app has no HOME and /tmp is not its own
     std::env::set_var("HOME", files);
     std::env::set_var("TMPDIR", cache);
-    std::env::set_var("MAKEPAD_RUN_HOME", &relax_home);
+    std::env::set_var("RELAX_HOME", &relax_home);
     if let Some(mb) = boot::memory_budget_mb() {
-        std::env::set_var("MAKEPAD_RUN_MEM_BUDGET_MB", mb.to_string());
+        std::env::set_var("RELAX_MEM_BUDGET_MB", mb.to_string());
     }
     crate::socket::register();
     // makepad-remote: dial the dev machine's hub so the phone is reachable like a desktop (no run-as, no shell)
@@ -421,8 +421,8 @@ fn boot_thread(
     }
     let edits = crate::devhub::edits_dir(files);
     std::fs::create_dir_all(&edits).map_err(|e| format!("{}: {e}", edits.display()))?;
-    std::env::set_var("MAKEPAD_RUN_EDITS", &edits);
-    std::env::set_var("MAKEPAD_RUN_STORE_LIVE", "1");
+    std::env::set_var("RELAX_EDITS", &edits);
+    std::env::set_var("RELAX_STORE_LIVE", "1");
     relax_compiler::vfs::set_edits(Some(edits));
     for (k, v) in &conf.env {
         std::env::set_var(k, v);
@@ -434,8 +434,8 @@ fn boot_thread(
     // with aot-max 3-6 s once the cache has seen a few runs, the cold first frame 56 s instead of
     // 100 s. The pass costs memory (1.5 GB resident during a cold run, +0.2 GB warm), so a phone
     // under 6 GB keeps the default level.
-    if std::env::var_os("MAKEPAD_RUN_AHEAD").is_none() && boot::total_memory_mb().is_some_and(|mb| mb >= 6 * 1024) {
-        std::env::set_var("MAKEPAD_RUN_AHEAD", "aot-max");
+    if std::env::var_os("RELAX_AHEAD").is_none() && boot::total_memory_mb().is_some_and(|mb| mb >= 6 * 1024) {
+        std::env::set_var("RELAX_AHEAD", "aot-max");
     }
     let chosen = if app.is_empty() {
         conf.apps.first().map(|a| App { package: a.package.clone(), cargo_flags: a.cargo_flags.clone() })

@@ -1,5 +1,5 @@
 // Vec::dedup / dedup_by / dedup_by_key: results and drop counts. (Panic safety -- same_bucket panicking
-// part-way -- is checked in std/check/tests/vec_dedup.rs: Relax panics do not unwind, R11.)
+// part-way -- is core_vec_dedup.rs's.)
 use std::cell::Cell;
 
 thread_local! {

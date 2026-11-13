@@ -52,8 +52,8 @@ fn main() {
     let pkg = std::env::args().last().unwrap_or_default();
     let src = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
     match jit_break_resolve::refuses(&src) {
-        Some(why) => println!("src/lib.rs:2:1: error: {why}\nmakepad check: {pkg}: 1 crate, all, 1 errors"),
-        None => println!("makepad check: {pkg}: 1 crate, all, 0 errors"),
+        Some(why) => println!("src/lib.rs:2:1: error: {why}\nrelax check: {pkg}: 1 crate, all, 1 errors"),
+        None => println!("relax check: {pkg}: 1 crate, all, 0 errors"),
     }
 }'
 g init -q -b base && g add -A && g commit -q -m base

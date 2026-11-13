@@ -315,9 +315,39 @@ impl Program {
     /// E0364 / E0365 (rustc_resolve imports.rs finalize_import): a `pub use` whose every
     /// resolved binding is less visible than the import itself.
     fn cannot_reexport(&self, im: &Import, segs: &[(SegKind, Sym)], edition: u16) -> Option<String> {
-        let (_, name) = *segs.last()?;
-        if segs.is_empty() || im.segs.last().map_or(false, |s| s.0 != SegKind::Ident) {
-            return None;
+        let (kind, name) = *segs.last()?;
+        // the import's nominal visibility: the `use` item's
+        let f = self.files.get(im.file as usize)?;
+        let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use(_)))?;
+        let import_vis = self.vis_module(im.file, im.module, &item.vis);
+        let krate_root = self.crates[self.mods[im.module as usize].krate as usize].root_mod;
+        let message = |code: &str, n: &str, bv: BindVis| {
+            if bv == Some(self.mods[krate_root as usize].normal) {
+                format!("{code}: `{n}` is only public within the crate, and cannot be re-exported outside")
+            } else {
+                format!("{code}: `{n}` is private, and cannot be re-exported")
+            }
+        };
+        if kind != SegKind::Ident {
+            // `pub use super as p;` / `pub use super::super as a;` / `pub use super::{self as p};`:
+            // the binding is the module's own, as visible as the module (a crate root: public);
+            // rustc names the keyword the import ends in
+            let m = self.resolve_mod_path(im.module, im.global, segs, edition < 2018, true)?;
+            let d = self.def(m);
+            if d.kind != DefKind::Mod || self.mods[d.sub as usize].parent_mod.is_none() {
+                return None;
+            }
+            let v = self.def_item_vis(m);
+            if !self.vis_wider(import_vis, v) {
+                return None;
+            }
+            let n = match kind {
+                _ if im.bound & BOUND_SELF_ONLY != 0 => "self",
+                SegKind::Super => "super",
+                SegKind::Crate => "crate",
+                _ => "self",
+            };
+            return Some(message("E0365", n, v));
         }
         let parent = if segs.len() == 1 {
             // `pub use foo as bar;`: an item of this module (of the crate root before 2018)
@@ -326,10 +356,6 @@ impl Program {
         } else {
             self.resolve_mod_path(im.module, im.global, &segs[..segs.len() - 1], edition < 2018, true)?
         };
-        // the import's nominal visibility: the `use` item's
-        let f = self.files.get(im.file as usize)?;
-        let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use(_)))?;
-        let import_vis = self.vis_module(im.file, im.module, &item.vis);
         let pd = self.def(parent);
         let mut any_ok = self.lookup_macro_in_container(parent, name);
         let mut failed: Option<(bool, BindVis)> = None;
@@ -354,14 +380,6 @@ impl Program {
             return None;
         }
         let (ns_type, bv) = failed?;
-        let n = self.syms.str(name);
-        let krate_root = self.crates[self.mods[im.module as usize].krate as usize].root_mod;
-        let crate_private = bv == Some(self.mods[krate_root as usize].normal);
-        let code = if ns_type { "E0365" } else { "E0364" };
-        Some(if crate_private {
-            format!("{code}: `{n}` is only public within the crate, and cannot be re-exported outside")
-        } else {
-            format!("{code}: `{n}` is private, and cannot be re-exported")
-        })
+        Some(message(if ns_type { "E0365" } else { "E0364" }, self.syms.str(name), bv))
     }
 }

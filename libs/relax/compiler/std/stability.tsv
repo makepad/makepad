@@ -1,5 +1,5 @@
 alloc::__export	liballoc_internals	implementation detail
-alloc::alloc::Global	allocator_api	
+alloc::alloc::Global		
 alloc::alloc::__alloc_error_handler	alloc_internals	
 alloc::alloc::alloc		
 alloc::alloc::alloc_zeroed		
@@ -16,52 +16,52 @@ alloc::borrow::ToOwned::Owned
 alloc::borrow::ToOwned::clone_into		
 alloc::borrow::ToOwned::to_owned		
 alloc::boxed::Box		
-alloc::boxed::Box::allocator	allocator_api	
-alloc::boxed::Box::as_mut_ptr	box_as_ptr	
-alloc::boxed::Box::as_ptr	box_as_ptr	
+alloc::boxed::Box::allocator		
+alloc::boxed::Box::as_mut_ptr		
+alloc::boxed::Box::as_ptr		
 alloc::boxed::Box::assume_init		
 alloc::boxed::Box::clone_from_ref	clone_from_ref	
 alloc::boxed::Box::clone_from_ref_in	clone_from_ref	
-alloc::boxed::Box::from_non_null	box_vec_non_null	
-alloc::boxed::Box::from_non_null_in	allocator_api	
+alloc::boxed::Box::from_non_null		
+alloc::boxed::Box::from_non_null_in		
 alloc::boxed::Box::from_raw		
-alloc::boxed::Box::from_raw_in	allocator_api	
+alloc::boxed::Box::from_raw_in		
 alloc::boxed::Box::into_array	alloc_slice_into_array	
 alloc::boxed::Box::into_boxed_slice	box_into_boxed_slice	
 alloc::boxed::Box::into_inner	box_into_inner	
-alloc::boxed::Box::into_non_null	box_vec_non_null	
-alloc::boxed::Box::into_non_null_with_allocator	allocator_api	
+alloc::boxed::Box::into_non_null		
+alloc::boxed::Box::into_non_null_with_allocator		
 alloc::boxed::Box::into_pin		
 alloc::boxed::Box::into_raw		
-alloc::boxed::Box::into_raw_with_allocator	allocator_api	
+alloc::boxed::Box::into_raw_with_allocator		
 alloc::boxed::Box::leak		
 alloc::boxed::Box::map	smart_pointer_try_map	
 alloc::boxed::Box::new		
-alloc::boxed::Box::new_in	allocator_api	
+alloc::boxed::Box::new_in		
 alloc::boxed::Box::new_uninit		
-alloc::boxed::Box::new_uninit_in	allocator_api	
+alloc::boxed::Box::new_uninit_in	allocator_ext	
 alloc::boxed::Box::new_uninit_slice		
-alloc::boxed::Box::new_uninit_slice_in	allocator_api	
+alloc::boxed::Box::new_uninit_slice_in	allocator_ext	
 alloc::boxed::Box::new_zeroed		
-alloc::boxed::Box::new_zeroed_in	allocator_api	
+alloc::boxed::Box::new_zeroed_in	allocator_ext	
 alloc::boxed::Box::new_zeroed_slice		
-alloc::boxed::Box::new_zeroed_slice_in	allocator_api	
+alloc::boxed::Box::new_zeroed_slice_in	allocator_ext	
 alloc::boxed::Box::pin		
-alloc::boxed::Box::pin_in	allocator_api	
-alloc::boxed::Box::take	box_take	
+alloc::boxed::Box::pin_in	allocator_ext	
+alloc::boxed::Box::take		
 alloc::boxed::Box::try_clone_from_ref	clone_from_ref	
 alloc::boxed::Box::try_clone_from_ref_in	clone_from_ref	
 alloc::boxed::Box::try_map	smart_pointer_try_map	
-alloc::boxed::Box::try_new	allocator_api	
-alloc::boxed::Box::try_new_in	allocator_api	
-alloc::boxed::Box::try_new_uninit	allocator_api	
-alloc::boxed::Box::try_new_uninit_in	allocator_api	
-alloc::boxed::Box::try_new_uninit_slice	allocator_api	
-alloc::boxed::Box::try_new_uninit_slice_in	allocator_api	
-alloc::boxed::Box::try_new_zeroed	allocator_api	
-alloc::boxed::Box::try_new_zeroed_in	allocator_api	
-alloc::boxed::Box::try_new_zeroed_slice	allocator_api	
-alloc::boxed::Box::try_new_zeroed_slice_in	allocator_api	
+alloc::boxed::Box::try_new	allocator_ext	
+alloc::boxed::Box::try_new_in	allocator_ext	
+alloc::boxed::Box::try_new_uninit	allocator_ext	
+alloc::boxed::Box::try_new_uninit_in	allocator_ext	
+alloc::boxed::Box::try_new_uninit_slice	allocator_ext	
+alloc::boxed::Box::try_new_uninit_slice_in	allocator_ext	
+alloc::boxed::Box::try_new_zeroed	allocator_ext	
+alloc::boxed::Box::try_new_zeroed_in	allocator_ext	
+alloc::boxed::Box::try_new_zeroed_slice	allocator_ext	
+alloc::boxed::Box::try_new_zeroed_slice_in	allocator_ext	
 alloc::boxed::Box::write		
 alloc::boxed::ThinBox	thin_box	
 alloc::boxed::box_assume_init_into_vec_unsafe	liballoc_internals	
@@ -74,7 +74,7 @@ alloc::bstr::ByteStr	bstr
 alloc::bstr::ByteString	bstr	
 alloc::collections::TryReserveError		
 alloc::collections::binary_heap::BinaryHeap		
-alloc::collections::binary_heap::BinaryHeap::allocator	allocator_api	
+alloc::collections::binary_heap::BinaryHeap::allocator	allocator_ext	
 alloc::collections::binary_heap::BinaryHeap::append		
 alloc::collections::binary_heap::BinaryHeap::as_mut_slice	binary_heap_as_mut_slice	
 alloc::collections::binary_heap::BinaryHeap::as_slice		
@@ -90,7 +90,7 @@ alloc::collections::binary_heap::BinaryHeap::is_empty
 alloc::collections::binary_heap::BinaryHeap::iter		
 alloc::collections::binary_heap::BinaryHeap::len		
 alloc::collections::binary_heap::BinaryHeap::new		
-alloc::collections::binary_heap::BinaryHeap::new_in	allocator_api	
+alloc::collections::binary_heap::BinaryHeap::new_in	allocator_ext	
 alloc::collections::binary_heap::BinaryHeap::peek		
 alloc::collections::binary_heap::BinaryHeap::peek_mut		
 alloc::collections::binary_heap::BinaryHeap::pop		
@@ -104,15 +104,15 @@ alloc::collections::binary_heap::BinaryHeap::shrink_to_fit
 alloc::collections::binary_heap::BinaryHeap::try_reserve		
 alloc::collections::binary_heap::BinaryHeap::try_reserve_exact		
 alloc::collections::binary_heap::BinaryHeap::with_capacity		
-alloc::collections::binary_heap::BinaryHeap::with_capacity_in	allocator_api	
+alloc::collections::binary_heap::BinaryHeap::with_capacity_in	allocator_ext	
 alloc::collections::binary_heap::Drain		
-alloc::collections::binary_heap::Drain::allocator	allocator_api	
+alloc::collections::binary_heap::Drain::allocator	allocator_ext	
 alloc::collections::binary_heap::DrainSorted	binary_heap_drain_sorted	
-alloc::collections::binary_heap::DrainSorted::allocator	allocator_api	
+alloc::collections::binary_heap::DrainSorted::allocator	allocator_ext	
 alloc::collections::binary_heap::IntoIter		
-alloc::collections::binary_heap::IntoIter::allocator	allocator_api	
+alloc::collections::binary_heap::IntoIter::allocator	allocator_ext	
 alloc::collections::binary_heap::IntoIterSorted	binary_heap_into_iter_sorted	
-alloc::collections::binary_heap::IntoIterSorted::allocator	allocator_api	
+alloc::collections::binary_heap::IntoIterSorted::allocator	allocator_ext	
 alloc::collections::binary_heap::Iter		
 alloc::collections::binary_heap::PeekMut		
 alloc::collections::binary_heap::PeekMut::pop		
@@ -358,7 +358,7 @@ alloc::collections::linked_list::LinkedList::iter
 alloc::collections::linked_list::LinkedList::iter_mut		
 alloc::collections::linked_list::LinkedList::len		
 alloc::collections::linked_list::LinkedList::new		
-alloc::collections::linked_list::LinkedList::new_in	allocator_api	
+alloc::collections::linked_list::LinkedList::new_in	allocator_ext	
 alloc::collections::linked_list::LinkedList::pop_back		
 alloc::collections::linked_list::LinkedList::pop_front		
 alloc::collections::linked_list::LinkedList::push_back		
@@ -371,7 +371,7 @@ alloc::collections::linked_list::LinkedList::split_off
 alloc::collections::vec_deque::ExtractIf	vec_deque_extract_if	
 alloc::collections::vec_deque::Splice	deque_extend_front	
 alloc::collections::vec_deque::VecDeque		
-alloc::collections::vec_deque::VecDeque::allocator	allocator_api	
+alloc::collections::vec_deque::VecDeque::allocator	allocator_ext	
 alloc::collections::vec_deque::VecDeque::append		
 alloc::collections::vec_deque::VecDeque::as_mut_slices		
 alloc::collections::vec_deque::VecDeque::as_slices		
@@ -399,7 +399,7 @@ alloc::collections::vec_deque::VecDeque::iter_mut
 alloc::collections::vec_deque::VecDeque::len		
 alloc::collections::vec_deque::VecDeque::make_contiguous		
 alloc::collections::vec_deque::VecDeque::new		
-alloc::collections::vec_deque::VecDeque::new_in	allocator_api	
+alloc::collections::vec_deque::VecDeque::new_in	allocator_ext	
 alloc::collections::vec_deque::VecDeque::partition_point		
 alloc::collections::vec_deque::VecDeque::pop_back		
 alloc::collections::vec_deque::VecDeque::pop_back_if		
@@ -430,14 +430,14 @@ alloc::collections::vec_deque::VecDeque::swap
 alloc::collections::vec_deque::VecDeque::swap_remove_back		
 alloc::collections::vec_deque::VecDeque::swap_remove_front		
 alloc::collections::vec_deque::VecDeque::truncate		
-alloc::collections::vec_deque::VecDeque::truncate_front	vec_deque_truncate_front	
+alloc::collections::vec_deque::VecDeque::truncate_front		
 alloc::collections::vec_deque::VecDeque::try_reserve		
 alloc::collections::vec_deque::VecDeque::try_reserve_exact		
 alloc::collections::vec_deque::VecDeque::try_with_capacity	try_with_capacity	
 alloc::collections::vec_deque::VecDeque::with_capacity		
-alloc::collections::vec_deque::VecDeque::with_capacity_in	allocator_api	
+alloc::collections::vec_deque::VecDeque::with_capacity_in	allocator_ext	
 alloc::collections::vec_deque::drain::Drain		
-alloc::collections::vec_deque::extract_if::ExtractIf::allocator	allocator_api	
+alloc::collections::vec_deque::extract_if::ExtractIf::allocator	allocator_ext	
 alloc::collections::vec_deque::into_iter::IntoIter		
 alloc::collections::vec_deque::iter::Iter		
 alloc::collections::vec_deque::iter::Iter::as_slices	vec_deque_iter_as_slices	
@@ -477,53 +477,53 @@ alloc::fmt::Error		reexport core::fmt::Error
 alloc::fmt::format		
 alloc::intrinsics	liballoc_internals	
 alloc::raw_vec	raw_vec_internals	unstable const warnings
-alloc::rc::Rc::allocator	allocator_api	
+alloc::rc::Rc::allocator	allocator_ext	
 alloc::rc::Rc::as_ptr		
 alloc::rc::Rc::assume_init		
 alloc::rc::Rc::clone_from_ref	clone_from_ref	
 alloc::rc::Rc::clone_from_ref_in	clone_from_ref	
 alloc::rc::Rc::decrement_strong_count		
-alloc::rc::Rc::decrement_strong_count_in	allocator_api	
+alloc::rc::Rc::decrement_strong_count_in	allocator_ext	
 alloc::rc::Rc::downcast		
 alloc::rc::Rc::downcast_unchecked	downcast_unchecked	
 alloc::rc::Rc::downgrade		
 alloc::rc::Rc::from_raw		
-alloc::rc::Rc::from_raw_in	allocator_api	
+alloc::rc::Rc::from_raw_in	allocator_ext	
 alloc::rc::Rc::get_mut		
 alloc::rc::Rc::get_mut_unchecked	get_mut_unchecked	
 alloc::rc::Rc::increment_strong_count		
-alloc::rc::Rc::increment_strong_count_in	allocator_api	
+alloc::rc::Rc::increment_strong_count_in	allocator_ext	
 alloc::rc::Rc::into_array	alloc_slice_into_array	
 alloc::rc::Rc::into_inner		
 alloc::rc::Rc::into_raw		
-alloc::rc::Rc::into_raw_with_allocator	allocator_api	
+alloc::rc::Rc::into_raw_with_allocator	allocator_ext	
 alloc::rc::Rc::make_mut		
 alloc::rc::Rc::map	smart_pointer_try_map	
 alloc::rc::Rc::new		
 alloc::rc::Rc::new_cyclic		
-alloc::rc::Rc::new_cyclic_in	allocator_api	
-alloc::rc::Rc::new_in	allocator_api	
+alloc::rc::Rc::new_cyclic_in	allocator_ext	
+alloc::rc::Rc::new_in	allocator_ext	
 alloc::rc::Rc::new_uninit		
-alloc::rc::Rc::new_uninit_in	allocator_api	
+alloc::rc::Rc::new_uninit_in	allocator_ext	
 alloc::rc::Rc::new_uninit_slice		
-alloc::rc::Rc::new_uninit_slice_in	allocator_api	
+alloc::rc::Rc::new_uninit_slice_in	allocator_ext	
 alloc::rc::Rc::new_zeroed		
-alloc::rc::Rc::new_zeroed_in	allocator_api	
+alloc::rc::Rc::new_zeroed_in	allocator_ext	
 alloc::rc::Rc::new_zeroed_slice		
-alloc::rc::Rc::new_zeroed_slice_in	allocator_api	
+alloc::rc::Rc::new_zeroed_slice_in	allocator_ext	
 alloc::rc::Rc::pin		
-alloc::rc::Rc::pin_in	allocator_api	
+alloc::rc::Rc::pin_in	allocator_ext	
 alloc::rc::Rc::ptr_eq		
 alloc::rc::Rc::strong_count		
 alloc::rc::Rc::try_clone_from_ref	clone_from_ref	
 alloc::rc::Rc::try_clone_from_ref_in	clone_from_ref	
 alloc::rc::Rc::try_map	smart_pointer_try_map	
-alloc::rc::Rc::try_new	allocator_api	
-alloc::rc::Rc::try_new_in	allocator_api	
-alloc::rc::Rc::try_new_uninit	allocator_api	
-alloc::rc::Rc::try_new_uninit_in	allocator_api	
-alloc::rc::Rc::try_new_zeroed	allocator_api	
-alloc::rc::Rc::try_new_zeroed_in	allocator_api	
+alloc::rc::Rc::try_new	allocator_ext	
+alloc::rc::Rc::try_new_in	allocator_ext	
+alloc::rc::Rc::try_new_uninit	allocator_ext	
+alloc::rc::Rc::try_new_uninit_in	allocator_ext	
+alloc::rc::Rc::try_new_zeroed	allocator_ext	
+alloc::rc::Rc::try_new_zeroed_in	allocator_ext	
 alloc::rc::Rc::try_unwrap		
 alloc::rc::Rc::unwrap_or_clone		
 alloc::rc::Rc::weak_count		
@@ -536,14 +536,14 @@ alloc::rc::UniqueRc::new	unique_rc_arc
 alloc::rc::UniqueRc::new_in	unique_rc_arc	
 alloc::rc::UniqueRc::try_map	smart_pointer_try_map	
 alloc::rc::Weak		
-alloc::rc::Weak::allocator	allocator_api	
+alloc::rc::Weak::allocator	allocator_ext	
 alloc::rc::Weak::as_ptr		
 alloc::rc::Weak::from_raw		
-alloc::rc::Weak::from_raw_in	allocator_api	
+alloc::rc::Weak::from_raw_in	allocator_ext	
 alloc::rc::Weak::into_raw		
-alloc::rc::Weak::into_raw_with_allocator	allocator_api	
+alloc::rc::Weak::into_raw_with_allocator	allocator_ext	
 alloc::rc::Weak::new		
-alloc::rc::Weak::new_in	allocator_api	
+alloc::rc::Weak::new_in	allocator_ext	
 alloc::rc::Weak::ptr_eq		
 alloc::rc::Weak::strong_count		
 alloc::rc::Weak::upgrade		
@@ -560,7 +560,7 @@ alloc::slice::::sort_by_key
 alloc::slice::::to_ascii_lowercase		
 alloc::slice::::to_ascii_uppercase		
 alloc::slice::::to_vec		
-alloc::slice::::to_vec_in	allocator_api	
+alloc::slice::::to_vec_in	allocator_ext	
 alloc::slice::ArrayWindows		reexport core::slice::ArrayWindows
 alloc::slice::Concat	slice_concat_trait	
 alloc::slice::Concat::Output	slice_concat_trait	
@@ -594,7 +594,7 @@ alloc::string::FromUtf16Error
 alloc::string::FromUtf8Error		
 alloc::string::FromUtf8Error::as_bytes		
 alloc::string::FromUtf8Error::into_bytes		
-alloc::string::FromUtf8Error::into_utf8_lossy	string_from_utf8_lossy_owned	
+alloc::string::FromUtf8Error::into_utf8_lossy		
 alloc::string::FromUtf8Error::utf8_error		
 alloc::string::IntoChars	string_into_chars	
 alloc::string::IntoChars::as_str	string_into_chars	
@@ -612,13 +612,13 @@ alloc::string::String::extend_from_within
 alloc::string::String::from_raw_parts		
 alloc::string::String::from_utf16		
 alloc::string::String::from_utf16_lossy		
-alloc::string::String::from_utf16be	str_from_utf16_endian	
-alloc::string::String::from_utf16be_lossy	str_from_utf16_endian	
-alloc::string::String::from_utf16le	str_from_utf16_endian	
-alloc::string::String::from_utf16le_lossy	str_from_utf16_endian	
+alloc::string::String::from_utf16be		
+alloc::string::String::from_utf16be_lossy		
+alloc::string::String::from_utf16le		
+alloc::string::String::from_utf16le_lossy		
 alloc::string::String::from_utf8		
 alloc::string::String::from_utf8_lossy		
-alloc::string::String::from_utf8_lossy_owned	string_from_utf8_lossy_owned	
+alloc::string::String::from_utf8_lossy_owned		
 alloc::string::String::from_utf8_unchecked		
 alloc::string::String::insert		
 alloc::string::String::insert_str		
@@ -651,56 +651,56 @@ alloc::string::String::try_with_capacity	try_with_capacity
 alloc::string::String::with_capacity		
 alloc::string::ToString		
 alloc::string::ToString::to_string		
-alloc::sync::Arc::allocator	allocator_api	
+alloc::sync::Arc::allocator	allocator_ext	
 alloc::sync::Arc::as_ptr		
 alloc::sync::Arc::assume_init		
 alloc::sync::Arc::clone_from_ref	clone_from_ref	
 alloc::sync::Arc::clone_from_ref_in	clone_from_ref	
 alloc::sync::Arc::decrement_strong_count		
-alloc::sync::Arc::decrement_strong_count_in	allocator_api	
+alloc::sync::Arc::decrement_strong_count_in	allocator_ext	
 alloc::sync::Arc::downcast		
 alloc::sync::Arc::downcast_unchecked	downcast_unchecked	
 alloc::sync::Arc::downgrade		
 alloc::sync::Arc::from_raw		
-alloc::sync::Arc::from_raw_in	allocator_api	
+alloc::sync::Arc::from_raw_in	allocator_ext	
 alloc::sync::Arc::get_mut		
 alloc::sync::Arc::get_mut_unchecked	get_mut_unchecked	
 alloc::sync::Arc::increment_strong_count		
-alloc::sync::Arc::increment_strong_count_in	allocator_api	
+alloc::sync::Arc::increment_strong_count_in	allocator_ext	
 alloc::sync::Arc::into_array	alloc_slice_into_array	
 alloc::sync::Arc::into_inner		
 alloc::sync::Arc::into_raw		
-alloc::sync::Arc::into_raw_with_allocator	allocator_api	
+alloc::sync::Arc::into_raw_with_allocator	allocator_ext	
 alloc::sync::Arc::is_unique	arc_is_unique	
 alloc::sync::Arc::make_mut		
 alloc::sync::Arc::map	smart_pointer_try_map	
 alloc::sync::Arc::new		
 alloc::sync::Arc::new_cyclic		
-alloc::sync::Arc::new_cyclic_in	allocator_api	
-alloc::sync::Arc::new_in	allocator_api	
+alloc::sync::Arc::new_cyclic_in	allocator_ext	
+alloc::sync::Arc::new_in	allocator_ext	
 alloc::sync::Arc::new_uninit		
-alloc::sync::Arc::new_uninit_in	allocator_api	
+alloc::sync::Arc::new_uninit_in	allocator_ext	
 alloc::sync::Arc::new_uninit_slice		
-alloc::sync::Arc::new_uninit_slice_in	allocator_api	
+alloc::sync::Arc::new_uninit_slice_in	allocator_ext	
 alloc::sync::Arc::new_zeroed		
-alloc::sync::Arc::new_zeroed_in	allocator_api	
+alloc::sync::Arc::new_zeroed_in	allocator_ext	
 alloc::sync::Arc::new_zeroed_slice		
-alloc::sync::Arc::new_zeroed_slice_in	allocator_api	
+alloc::sync::Arc::new_zeroed_slice_in	allocator_ext	
 alloc::sync::Arc::pin		
-alloc::sync::Arc::pin_in	allocator_api	
+alloc::sync::Arc::pin_in	allocator_ext	
 alloc::sync::Arc::ptr_eq		
 alloc::sync::Arc::strong_count		
 alloc::sync::Arc::try_clone_from_ref	clone_from_ref	
 alloc::sync::Arc::try_clone_from_ref_in	clone_from_ref	
 alloc::sync::Arc::try_map	smart_pointer_try_map	
-alloc::sync::Arc::try_new	allocator_api	
-alloc::sync::Arc::try_new_in	allocator_api	
-alloc::sync::Arc::try_new_uninit	allocator_api	
-alloc::sync::Arc::try_new_uninit_in	allocator_api	
-alloc::sync::Arc::try_new_zeroed	allocator_api	
-alloc::sync::Arc::try_new_zeroed_in	allocator_api	
-alloc::sync::Arc::try_pin	allocator_api	
-alloc::sync::Arc::try_pin_in	allocator_api	
+alloc::sync::Arc::try_new	allocator_ext	
+alloc::sync::Arc::try_new_in	allocator_ext	
+alloc::sync::Arc::try_new_uninit	allocator_ext	
+alloc::sync::Arc::try_new_uninit_in	allocator_ext	
+alloc::sync::Arc::try_new_zeroed	allocator_ext	
+alloc::sync::Arc::try_new_zeroed_in	allocator_ext	
+alloc::sync::Arc::try_pin	allocator_ext	
+alloc::sync::Arc::try_pin_in	allocator_ext	
 alloc::sync::Arc::try_unwrap		
 alloc::sync::Arc::unwrap_or_clone		
 alloc::sync::Arc::weak_count		
@@ -713,14 +713,14 @@ alloc::sync::UniqueArc::new	unique_rc_arc
 alloc::sync::UniqueArc::new_in	unique_rc_arc	
 alloc::sync::UniqueArc::try_map	smart_pointer_try_map	
 alloc::sync::Weak		
-alloc::sync::Weak::allocator	allocator_api	
+alloc::sync::Weak::allocator	allocator_ext	
 alloc::sync::Weak::as_ptr		
 alloc::sync::Weak::from_raw		
-alloc::sync::Weak::from_raw_in	allocator_api	
+alloc::sync::Weak::from_raw_in	allocator_ext	
 alloc::sync::Weak::into_raw		
-alloc::sync::Weak::into_raw_with_allocator	allocator_api	
+alloc::sync::Weak::into_raw_with_allocator	allocator_ext	
 alloc::sync::Weak::new		
-alloc::sync::Weak::new_in	allocator_api	
+alloc::sync::Weak::new_in	allocator_ext	
 alloc::sync::Weak::ptr_eq		
 alloc::sync::Weak::strong_count		
 alloc::sync::Weak::upgrade		
@@ -735,11 +735,11 @@ alloc::task::local_waker_fn	waker_fn
 alloc::task::waker_fn	waker_fn	
 alloc::vec::PeekMut	vec_peek_mut	
 alloc::vec::Vec		
-alloc::vec::Vec::allocator	allocator_api	
+alloc::vec::Vec::allocator		
 alloc::vec::Vec::append		
 alloc::vec::Vec::as_mut_ptr		
 alloc::vec::Vec::as_mut_slice		
-alloc::vec::Vec::as_non_null	box_vec_non_null	
+alloc::vec::Vec::as_non_null	vec_as_non_null	
 alloc::vec::Vec::as_ptr		
 alloc::vec::Vec::as_slice		
 alloc::vec::Vec::capacity		
@@ -752,26 +752,26 @@ alloc::vec::Vec::drain
 alloc::vec::Vec::extend_from_slice		
 alloc::vec::Vec::extend_from_within		
 alloc::vec::Vec::extract_if		
-alloc::vec::Vec::from_fn	vec_from_fn	
-alloc::vec::Vec::from_parts	box_vec_non_null	
-alloc::vec::Vec::from_parts_in	allocator_api	
+alloc::vec::Vec::from_fn		
+alloc::vec::Vec::from_parts		
+alloc::vec::Vec::from_parts_in		
 alloc::vec::Vec::from_raw_parts		
-alloc::vec::Vec::from_raw_parts_in	allocator_api	
+alloc::vec::Vec::from_raw_parts_in		
 alloc::vec::Vec::insert		
 alloc::vec::Vec::insert_mut		
 alloc::vec::Vec::into_array	alloc_slice_into_array	
 alloc::vec::Vec::into_boxed_slice		
 alloc::vec::Vec::into_chunks	vec_into_chunks	
 alloc::vec::Vec::into_flattened		
-alloc::vec::Vec::into_parts	box_vec_non_null	
-alloc::vec::Vec::into_parts_with_alloc	allocator_api	
+alloc::vec::Vec::into_parts		
+alloc::vec::Vec::into_parts_with_alloc		
 alloc::vec::Vec::into_raw_parts		
-alloc::vec::Vec::into_raw_parts_with_alloc	allocator_api	
+alloc::vec::Vec::into_raw_parts_with_alloc		
 alloc::vec::Vec::is_empty		
 alloc::vec::Vec::leak		
 alloc::vec::Vec::len		
 alloc::vec::Vec::new		
-alloc::vec::Vec::new_in	allocator_api	
+alloc::vec::Vec::new_in		
 alloc::vec::Vec::peek_mut	vec_peek_mut	
 alloc::vec::Vec::pop		
 alloc::vec::Vec::pop_if		
@@ -799,17 +799,17 @@ alloc::vec::Vec::try_reserve_exact
 alloc::vec::Vec::try_shrink_to	vec_fallible_shrink	
 alloc::vec::Vec::try_shrink_to_fit	vec_fallible_shrink	
 alloc::vec::Vec::try_with_capacity	try_with_capacity	
-alloc::vec::Vec::try_with_capacity_in	allocator_api	
+alloc::vec::Vec::try_with_capacity_in	allocator_ext	
 alloc::vec::Vec::with_capacity		
 alloc::vec::drain::Drain		
-alloc::vec::drain::Drain::allocator	allocator_api	
+alloc::vec::drain::Drain::allocator	allocator_ext	
 alloc::vec::drain::Drain::as_slice		
 alloc::vec::drain::Drain::keep_rest	drain_keep_rest	
-alloc::vec::extract_if::ExtractIf::allocator	allocator_api	
+alloc::vec::extract_if::ExtractIf::allocator	allocator_ext	
 alloc::vec::from_elem		
-alloc::vec::from_elem_in	allocator_api	
+alloc::vec::from_elem_in	allocator_ext	
 alloc::vec::into_iter::IntoIter		
-alloc::vec::into_iter::IntoIter::allocator	allocator_api	
+alloc::vec::into_iter::IntoIter::allocator	allocator_ext	
 alloc::vec::into_iter::IntoIter::as_mut_slice		
 alloc::vec::into_iter::IntoIter::as_slice		
 alloc::vec::into_iter::NonDrop	std_internals	
@@ -818,10 +818,10 @@ alloc::vec::peek_mut::PeekMut::pop	vec_peek_mut
 alloc::vec::push		
 alloc::vec::push_mut		
 alloc::vec::splice::Splice		
-alloc::vec::with_capacity_in	allocator_api	
+alloc::vec::with_capacity_in		
 alloc::wtf8	wtf8_internals	this is internal code for representing OsStr on some platforms and not a public API
-core::alloc::AllocError	allocator_api	
-core::alloc::Allocator	allocator_api	
+core::alloc::AllocError		
+core::alloc::Allocator		
 core::alloc::global::GlobalAlloc		
 core::alloc::global::GlobalAlloc::alloc		
 core::alloc::global::GlobalAlloc::alloc_zeroed		
@@ -836,7 +836,7 @@ core::alloc::layout::Layout::dangling_ptr
 core::alloc::layout::Layout::extend		
 core::alloc::layout::Layout::extend_packed		
 core::alloc::layout::Layout::for_value		
-core::alloc::layout::Layout::for_value_raw	layout_for_ptr	
+core::alloc::layout::Layout::for_value_raw		
 core::alloc::layout::Layout::from_size_align		
 core::alloc::layout::Layout::from_size_align_unchecked		
 core::alloc::layout::Layout::from_size_alignment	ptr_alignment_type	
@@ -935,8 +935,8 @@ core::async_iter::async_iter::Poll::async_gen_ready	async_gen_internals
 core::async_iter::from_iter::FromIter	async_iter_from_iter	
 core::async_iter::from_iter::from_iter	async_iter_from_iter	
 core::autodiff	autodiff	
-core::bool::bool::ok_or	bool_to_result	
-core::bool::bool::ok_or_else	bool_to_result	
+core::bool::bool::ok_or		
+core::bool::bool::ok_or_else		
 core::bool::bool::then		
 core::bool::bool::then_some		
 core::borrow::Borrow		
@@ -1002,15 +1002,15 @@ core::cell::RefMut::map_split
 core::cell::RefMut::try_map	refcell_try_map	
 core::cell::SyncUnsafeCell	sync_unsafe_cell	
 core::cell::UnsafeCell		
-core::cell::UnsafeCell::as_mut_unchecked	unsafe_cell_access	
-core::cell::UnsafeCell::as_ref_unchecked	unsafe_cell_access	
+core::cell::UnsafeCell::as_mut_unchecked		
+core::cell::UnsafeCell::as_ref_unchecked		
 core::cell::UnsafeCell::from_mut		
 core::cell::UnsafeCell::get		
 core::cell::UnsafeCell::get_mut		
 core::cell::UnsafeCell::into_inner		
 core::cell::UnsafeCell::new		
 core::cell::UnsafeCell::raw_get		
-core::cell::UnsafeCell::replace	unsafe_cell_access	
+core::cell::UnsafeCell::replace		
 core::cell::lazy::LazyCell		
 core::cell::lazy::LazyCell::get		
 core::cell::lazy::LazyCell::get_mut		
@@ -1210,7 +1210,7 @@ core::ffi::c_void
 core::ffi::primitives::c_ptrdiff_t	c_size_t	
 core::ffi::primitives::c_size_t	c_size_t	
 core::ffi::primitives::c_ssize_t	c_size_t	
-core::ffi::va_list	c_variadic	the `c_variadic` feature has not been properly tested on all supported platforms
+core::ffi::va_list		
 core::field	field_projections	
 core::field::Field	field_projections	
 core::field::FieldRepresentingType	field_representing_type_raw	
@@ -1329,13 +1329,13 @@ core::fmt::builders::DebugTuple::finish_non_exhaustive
 core::fmt::builders::FromFn		
 core::fmt::builders::finish		
 core::fmt::builders::from_fn		
-core::fmt::num::::format_into	int_format_into	
-core::fmt::num::i128::format_into	int_format_into	
-core::fmt::num::u128::format_into	int_format_into	
-core::fmt::num_buffer::NumBuffer	int_format_into	
-core::fmt::num_buffer::NumBuffer::capacity	int_format_into	
-core::fmt::num_buffer::NumBuffer::new	int_format_into	
-core::fmt::num_buffer::NumBufferTrait	int_format_into	
+core::fmt::num::::format_into		
+core::fmt::num::i128::format_into		
+core::fmt::num::u128::format_into		
+core::fmt::num_buffer::NumBuffer		
+core::fmt::num_buffer::NumBuffer::capacity		
+core::fmt::num_buffer::NumBuffer::new		
+core::fmt::num_buffer::NumBufferTrait	fmt_internals	
 core::fmt::rt	fmt_internals	internal to format_args!
 core::fmt::write		
 core::from	derive_from	
@@ -1694,7 +1694,7 @@ core::marker::_	adt_const_params
 core::marker::variance	phantom_variance_markers	
 core::mem::Alignment	ptr_alignment_type	
 core::mem::Discriminant		
-core::mem::DropGuard	drop_guard	
+core::mem::DropGuard		
 core::mem::MaybeDangling	maybe_dangling	
 core::mem::SizedTypeProperties	sized_type_properties	
 core::mem::SizedTypeProperties::ALIGN	sized_type_properties	
@@ -1705,7 +1705,7 @@ core::mem::SizedTypeProperties::MAX_SLICE_LEN	sized_type_properties
 core::mem::SizedTypeProperties::SIZE	sized_type_properties	
 core::mem::align_of		
 core::mem::align_of_val		
-core::mem::align_of_val_raw	layout_for_ptr	
+core::mem::align_of_val_raw		
 core::mem::alignment::Alignment	ptr_alignment_type	
 core::mem::alignment::Alignment::MIN	ptr_alignment_type	
 core::mem::alignment::Alignment::as_nonzero_usize	ptr_alignment_type	
@@ -1717,13 +1717,13 @@ core::mem::alignment::Alignment::new_unchecked	ptr_alignment_type
 core::mem::alignment::Alignment::of	ptr_alignment_type	
 core::mem::alignment::Alignment::of_val	ptr_alignment_type	
 core::mem::alignment::Alignment::of_val_raw	ptr_alignment_type	
-core::mem::conjure_zst	mem_conjure_zst	
+core::mem::conjure_zst		
 core::mem::copy	mem_copy_fn	
 core::mem::discriminant		
 core::mem::drop		
-core::mem::drop_guard::DropGuard	drop_guard	
-core::mem::drop_guard::dismiss	drop_guard	
-core::mem::drop_guard::new	drop_guard	
+core::mem::drop_guard::DropGuard		
+core::mem::drop_guard::dismiss		
+core::mem::drop_guard::new		
 core::mem::forget		
 core::mem::forget_unsized	forget_unsized	
 core::mem::manually_drop::ManuallyDrop		
@@ -1765,7 +1765,7 @@ core::mem::needs_drop
 core::mem::replace		
 core::mem::size_of		
 core::mem::size_of_val		
-core::mem::size_of_val_raw	layout_for_ptr	
+core::mem::size_of_val_raw		
 core::mem::swap		
 core::mem::take		
 core::mem::transmutability::Assume	transmutability	
@@ -1960,11 +1960,11 @@ core::num::f128::f128::NEG_INFINITY	f128
 core::num::f128::f128::RADIX	f128	
 core::num::f128::f128::SIGN_MASK	float_masks	
 core::num::f128::f128::abs	f128	
-core::num::f128::f128::algebraic_add	float_algebraic	
-core::num::f128::f128::algebraic_div	float_algebraic	
-core::num::f128::f128::algebraic_mul	float_algebraic	
-core::num::f128::f128::algebraic_rem	float_algebraic	
-core::num::f128::f128::algebraic_sub	float_algebraic	
+core::num::f128::f128::algebraic_add	f128	
+core::num::f128::f128::algebraic_div	f128	
+core::num::f128::f128::algebraic_mul	f128	
+core::num::f128::f128::algebraic_rem	f128	
+core::num::f128::f128::algebraic_sub	f128	
 core::num::f128::f128::ceil	f128	
 core::num::f128::f128::clamp	f128	
 core::num::f128::f128::clamp_magnitude	clamp_magnitude	
@@ -2057,11 +2057,11 @@ core::num::f16::f16::NEG_INFINITY	f16
 core::num::f16::f16::RADIX	f16	
 core::num::f16::f16::SIGN_MASK	float_masks	
 core::num::f16::f16::abs	f16	
-core::num::f16::f16::algebraic_add	float_algebraic	
-core::num::f16::f16::algebraic_div	float_algebraic	
-core::num::f16::f16::algebraic_mul	float_algebraic	
-core::num::f16::f16::algebraic_rem	float_algebraic	
-core::num::f16::f16::algebraic_sub	float_algebraic	
+core::num::f16::f16::algebraic_add	f16	
+core::num::f16::f16::algebraic_div	f16	
+core::num::f16::f16::algebraic_mul	f16	
+core::num::f16::f16::algebraic_rem	f16	
+core::num::f16::f16::algebraic_sub	f16	
 core::num::f16::f16::cbrt	f16	
 core::num::f16::f16::ceil	f16	
 core::num::f16::f16::clamp	f16	
@@ -2167,11 +2167,11 @@ core::num::f32::f32::NEG_INFINITY
 core::num::f32::f32::RADIX		
 core::num::f32::f32::SIGN_MASK	float_masks	
 core::num::f32::f32::abs		
-core::num::f32::f32::algebraic_add	float_algebraic	
-core::num::f32::f32::algebraic_div	float_algebraic	
-core::num::f32::f32::algebraic_mul	float_algebraic	
-core::num::f32::f32::algebraic_rem	float_algebraic	
-core::num::f32::f32::algebraic_sub	float_algebraic	
+core::num::f32::f32::algebraic_add		
+core::num::f32::f32::algebraic_div		
+core::num::f32::f32::algebraic_mul		
+core::num::f32::f32::algebraic_rem		
+core::num::f32::f32::algebraic_sub		
 core::num::f32::f32::clamp		
 core::num::f32::f32::clamp_magnitude	clamp_magnitude	
 core::num::f32::f32::classify		
@@ -2278,11 +2278,11 @@ core::num::f64::f64::NEG_INFINITY
 core::num::f64::f64::RADIX		
 core::num::f64::f64::SIGN_MASK	float_masks	
 core::num::f64::f64::abs		
-core::num::f64::f64::algebraic_add	float_algebraic	
-core::num::f64::f64::algebraic_div	float_algebraic	
-core::num::f64::f64::algebraic_mul	float_algebraic	
-core::num::f64::f64::algebraic_rem	float_algebraic	
-core::num::f64::f64::algebraic_sub	float_algebraic	
+core::num::f64::f64::algebraic_add		
+core::num::f64::f64::algebraic_div		
+core::num::f64::f64::algebraic_mul		
+core::num::f64::f64::algebraic_rem		
+core::num::f64::f64::algebraic_sub		
 core::num::f64::f64::clamp		
 core::num::f64::f64::clamp_magnitude	clamp_magnitude	
 core::num::f64::f64::classify		
@@ -2360,7 +2360,7 @@ core::num::nonzero::NonZero::from_ascii	int_from_ascii
 core::num::nonzero::NonZero::from_ascii_radix	int_from_ascii	
 core::num::nonzero::NonZero::from_be	nonzero_bitwise	
 core::num::nonzero::NonZero::from_le	nonzero_bitwise	
-core::num::nonzero::NonZero::from_str_radix	nonzero_from_str_radix	
+core::num::nonzero::NonZero::from_str_radix		
 core::num::nonzero::checked_neg		
 core::num::nonzero::from_mut	nonzero_from_mut	
 core::num::nonzero::from_mut_unchecked	nonzero_from_mut	
@@ -2622,7 +2622,7 @@ core::option::Option::iter
 core::option::Option::iter_mut		
 core::option::Option::map		
 core::option::Option::map_or		
-core::option::Option::map_or_default	result_option_map_or_default	
+core::option::Option::map_or_default		
 core::option::Option::map_or_else		
 core::option::Option::ok_or		
 core::option::Option::ok_or_else		
@@ -2941,7 +2941,7 @@ core::range::iter::RangeInclusiveIter
 core::range::iter::RangeInclusiveIter::remainder	new_range_remainder	
 core::range::iter::RangeIter		
 core::range::iter::RangeIter::remainder	new_range_remainder	
-core::range::legacy	new_range_api_legacy	
+core::range::legacy		
 core::result::IntoIter		
 core::result::Iter		
 core::result::IterMut		
@@ -2971,7 +2971,7 @@ core::result::Result::iter_mut
 core::result::Result::map		
 core::result::Result::map_err		
 core::result::Result::map_or		
-core::result::Result::map_or_default	result_option_map_or_default	
+core::result::Result::map_or_default		
 core::result::Result::map_or_else		
 core::result::Result::ok		
 core::result::Result::or		
@@ -3102,15 +3102,15 @@ core::slice::::split_once	slice_split_once
 core::slice::::splitn		
 core::slice::::splitn_mut		
 core::slice::::starts_with		
-core::slice::::strip_circumfix	strip_circumfix	
+core::slice::::strip_circumfix		
 core::slice::::strip_prefix		
 core::slice::::strip_suffix		
-core::slice::::subslice_range	substr_range	
+core::slice::::subslice_range		
 core::slice::::swap		
 core::slice::::swap_unchecked	slice_swap_unchecked	
 core::slice::::swap_with_slice		
-core::slice::::trim_prefix	trim_prefix_suffix	
-core::slice::::trim_suffix	trim_prefix_suffix	
+core::slice::::trim_prefix		
+core::slice::::trim_suffix		
 core::slice::::windows		
 core::slice::GetDisjointMutError		
 core::slice::GetDisjointMutIndex	get_disjoint_mut_helpers	
@@ -3283,10 +3283,10 @@ core::str::str::split_terminator
 core::str::str::split_whitespace		
 core::str::str::splitn		
 core::str::str::starts_with		
-core::str::str::strip_circumfix	strip_circumfix	
+core::str::str::strip_circumfix		
 core::str::str::strip_prefix		
 core::str::str::strip_suffix		
-core::str::str::substr_range	substr_range	
+core::str::str::substr_range		
 core::str::str::trim		
 core::str::str::trim_ascii		
 core::str::str::trim_ascii_end		
@@ -3295,11 +3295,11 @@ core::str::str::trim_end
 core::str::str::trim_end_matches		
 core::str::str::trim_left		
 core::str::str::trim_matches		
-core::str::str::trim_prefix	trim_prefix_suffix	
+core::str::str::trim_prefix		
 core::str::str::trim_right		
 core::str::str::trim_start		
 core::str::str::trim_start_matches		
-core::str::str::trim_suffix	trim_prefix_suffix	
+core::str::str::trim_suffix		
 core::str::traits::FromStr		
 core::str::traits::FromStr::Err		
 core::str::traits::FromStr::from_str		
@@ -3309,10 +3309,10 @@ core::sync::SyncView	exclusive_wrapper
 core::sync::atomic::::as_ptr		
 core::sync::atomic::::fetch_max		
 core::sync::atomic::::fetch_min		
-core::sync::atomic::::from_mut	atomic_from_mut	
-core::sync::atomic::::from_mut_slice	atomic_from_mut	
+core::sync::atomic::::from_mut		
+core::sync::atomic::::from_mut_slice		
 core::sync::atomic::::from_ptr		
-core::sync::atomic::::get_mut_slice	atomic_from_mut	
+core::sync::atomic::::get_mut_slice		
 core::sync::atomic::::try_update		
 core::sync::atomic::::update		
 core::sync::atomic::Atomic	generic_atomic	
@@ -3325,11 +3325,11 @@ core::sync::atomic::AtomicBool::fetch_nand
 core::sync::atomic::AtomicBool::fetch_not		
 core::sync::atomic::AtomicBool::fetch_or		
 core::sync::atomic::AtomicBool::fetch_xor		
-core::sync::atomic::AtomicBool::from_mut	atomic_from_mut	
-core::sync::atomic::AtomicBool::from_mut_slice	atomic_from_mut	
+core::sync::atomic::AtomicBool::from_mut		
+core::sync::atomic::AtomicBool::from_mut_slice		
 core::sync::atomic::AtomicBool::from_ptr		
 core::sync::atomic::AtomicBool::get_mut		
-core::sync::atomic::AtomicBool::get_mut_slice	atomic_from_mut	
+core::sync::atomic::AtomicBool::get_mut_slice		
 core::sync::atomic::AtomicBool::into_inner		
 core::sync::atomic::AtomicBool::load		
 core::sync::atomic::AtomicBool::new		
@@ -3348,11 +3348,11 @@ core::sync::atomic::AtomicPtr::fetch_or
 core::sync::atomic::AtomicPtr::fetch_ptr_add		
 core::sync::atomic::AtomicPtr::fetch_ptr_sub		
 core::sync::atomic::AtomicPtr::fetch_xor		
-core::sync::atomic::AtomicPtr::from_mut	atomic_from_mut	
-core::sync::atomic::AtomicPtr::from_mut_slice	atomic_from_mut	
+core::sync::atomic::AtomicPtr::from_mut		
+core::sync::atomic::AtomicPtr::from_mut_slice		
 core::sync::atomic::AtomicPtr::from_ptr		
 core::sync::atomic::AtomicPtr::get_mut		
-core::sync::atomic::AtomicPtr::get_mut_slice	atomic_from_mut	
+core::sync::atomic::AtomicPtr::get_mut_slice		
 core::sync::atomic::AtomicPtr::into_inner		
 core::sync::atomic::AtomicPtr::load		
 core::sync::atomic::AtomicPtr::new		
@@ -3520,16 +3520,16 @@ std::collections::hash::map::HashMap::iter_mut
 std::collections::hash::map::HashMap::keys		
 std::collections::hash::map::HashMap::len		
 std::collections::hash::map::HashMap::new		
-std::collections::hash::map::HashMap::new_in	allocator_api	
+std::collections::hash::map::HashMap::new_in	allocator_ext	
 std::collections::hash::map::HashMap::retain		
 std::collections::hash::map::HashMap::values		
 std::collections::hash::map::HashMap::values_mut		
 std::collections::hash::map::HashMap::with_capacity		
 std::collections::hash::map::HashMap::with_capacity_and_hasher		
-std::collections::hash::map::HashMap::with_capacity_and_hasher_in	allocator_api	
-std::collections::hash::map::HashMap::with_capacity_in	allocator_api	
+std::collections::hash::map::HashMap::with_capacity_and_hasher_in	allocator_ext	
+std::collections::hash::map::HashMap::with_capacity_in	allocator_ext	
 std::collections::hash::map::HashMap::with_hasher		
-std::collections::hash::map::HashMap::with_hasher_in	allocator_api	
+std::collections::hash::map::HashMap::with_hasher_in	allocator_ext	
 std::collections::hash::map::IntoIter		
 std::collections::hash::map::IntoKeys		
 std::collections::hash::map::IntoValues		
@@ -3583,14 +3583,14 @@ std::collections::hash::set::HashSet::is_empty
 std::collections::hash::set::HashSet::iter		
 std::collections::hash::set::HashSet::len		
 std::collections::hash::set::HashSet::new		
-std::collections::hash::set::HashSet::new_in	allocator_api	
+std::collections::hash::set::HashSet::new_in	allocator_ext	
 std::collections::hash::set::HashSet::retain		
 std::collections::hash::set::HashSet::with_capacity		
 std::collections::hash::set::HashSet::with_capacity_and_hasher		
-std::collections::hash::set::HashSet::with_capacity_and_hasher_in	allocator_api	
-std::collections::hash::set::HashSet::with_capacity_in	allocator_api	
+std::collections::hash::set::HashSet::with_capacity_and_hasher_in	allocator_ext	
+std::collections::hash::set::HashSet::with_capacity_in	allocator_ext	
 std::collections::hash::set::HashSet::with_hasher		
-std::collections::hash::set::HashSet::with_hasher_in	allocator_api	
+std::collections::hash::set::HashSet::with_hasher_in	allocator_ext	
 std::collections::hash::set::Intersection		
 std::collections::hash::set::IntoIter		
 std::collections::hash::set::Iter		
@@ -3795,8 +3795,8 @@ std::fs::remove_file
 std::fs::rename		
 std::fs::set_permissions		
 std::fs::set_permissions_nofollow	set_permissions_nofollow	
-std::fs::set_times	fs_set_times	
-std::fs::set_times_nofollow	fs_set_times	
+std::fs::set_times		
+std::fs::set_times_nofollow		
 std::fs::symlink_metadata		
 std::fs::write		
 std::future		reexport core::future
@@ -5164,15 +5164,15 @@ std::os::windows::net::addr	windows_unix_domain_sockets
 std::os::windows::net::listener	windows_unix_domain_sockets	
 std::os::windows::net::stream	windows_unix_domain_sockets	
 std::os::windows::prelude		
-std::os::windows::process::ChildExt	windows_process_extensions_main_thread_handle	
-std::os::windows::process::ChildExt::main_thread_handle	windows_process_extensions_main_thread_handle	
+std::os::windows::process::ChildExt		
+std::os::windows::process::ChildExt::main_thread_handle		
 std::os::windows::process::CommandExt		
 std::os::windows::process::CommandExt::async_pipes	windows_process_extensions_async_pipes	
 std::os::windows::process::CommandExt::creation_flags		
 std::os::windows::process::CommandExt::force_quotes	windows_process_extensions_force_quotes	
 std::os::windows::process::CommandExt::inherit_handles	windows_process_extensions_inherit_handles	
 std::os::windows::process::CommandExt::raw_arg		
-std::os::windows::process::CommandExt::show_window	windows_process_extensions_show_window	
+std::os::windows::process::CommandExt::show_window		
 std::os::windows::process::CommandExt::spawn_with_attributes	windows_process_extensions_raw_attribute	
 std::os::windows::process::CommandExt::startupinfo_force_feedback	windows_process_extensions_startupinfo	
 std::os::windows::process::CommandExt::startupinfo_fullscreen	windows_process_extensions_startupinfo	
@@ -5259,7 +5259,7 @@ std::path::Path::has_trailing_sep	path_trailing_sep
 std::path::Path::into_path_buf		
 std::path::Path::is_absolute		
 std::path::Path::is_dir		
-std::path::Path::is_empty	path_is_empty	
+std::path::Path::is_empty		
 std::path::Path::is_file		
 std::path::Path::is_relative		
 std::path::Path::is_symlink		
@@ -5275,7 +5275,7 @@ std::path::Path::starts_with
 std::path::Path::strip_prefix		
 std::path::Path::symlink_metadata		
 std::path::Path::to_path_buf		
-std::path::Path::trim_prefix	trim_prefix_suffix	
+std::path::Path::trim_prefix		
 std::path::Path::trim_trailing_sep	path_trailing_sep	
 std::path::Path::try_exists		
 std::path::Path::with_added_extension		
@@ -5290,7 +5290,7 @@ std::path::PathBuf::capacity
 std::path::PathBuf::clear		
 std::path::PathBuf::into_boxed_path		
 std::path::PathBuf::into_os_string		
-std::path::PathBuf::into_string	pathbuf_into_string	
+std::path::PathBuf::into_string		
 std::path::PathBuf::leak		
 std::path::PathBuf::new		
 std::path::PathBuf::pop		
@@ -5708,7 +5708,7 @@ std::thread::local::LocalKey::replace
 std::thread::local::LocalKey::set		
 std::thread::local::LocalKey::take		
 std::thread::local::LocalKey::try_with		
-std::thread::local::LocalKey::update	local_key_cell_update	
+std::thread::local::LocalKey::update		
 std::thread::local::LocalKey::with		
 std::thread::local::LocalKey::with_borrow		
 std::thread::local::LocalKey::with_borrow_mut		

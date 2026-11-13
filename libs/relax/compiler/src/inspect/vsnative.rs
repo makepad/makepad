@@ -170,10 +170,11 @@ mod imp {
             Err(e) => return out.err(&e),
         };
         // the program's own arguments (after `--` on makepad run's command line), unless args= says
-        let args: Vec<String> = match req.get("args") {
-            Some(a) => a.split(',').map(|s| s.to_string()).filter(|s| !s.is_empty()).collect(),
+        // (as the OS gave them: they need not be Unicode)
+        let args: Vec<std::ffi::OsString> = match req.get("args") {
+            Some(a) => a.split(',').filter(|s| !s.is_empty()).map(std::ffi::OsString::from).collect(),
             None => {
-                let all: Vec<String> = std::env::args().collect();
+                let all: Vec<std::ffi::OsString> = std::env::args_os().collect();
                 all.iter().position(|a| a == "--").map(|k| all[k + 1..].to_vec()).unwrap_or_default()
             }
         };
@@ -308,7 +309,7 @@ mod imp {
             crate::inspect::prof::Ev::Cpu => "CPU samples",
             e => e.name(),
         };
-        out.always(&format!(
+        out.line(&format!(
             "JIT {} {}/s vs native {}/s over {:.1} s ({:.2}x); biggest difference: {}",
             unit,
             g(per_s(jit_total, tj)),
@@ -326,13 +327,13 @@ mod imp {
         if rows.len() > n {
             out.line(&format!("+{} fns with smaller differences", rows.len() - n));
         }
-        out.always(&format!("note: native = {} {} (pid {}, warmed {} ms, log {}); {} of its samples outside its own code (libc, vdso: not named)", native, args.join(" "), pid, warm, log.display(), pct(unnamed, nat_total)));
-        out.always("note: both at once on this machine, same event and rate; per second of wall fits fixed-pace work -- flat-out loops: compare the % columns (shares)");
+        out.line(&format!("note: native = {} {} (pid {}, warmed {} ms, log {}); {} of its samples outside its own code (libc, vdso: not named)", native, args.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "), pid, warm, log.display(), pct(unnamed, nat_total)));
+        out.line("note: both at once on this machine, same event and rate; per second of wall fits fixed-pace work -- flat-out loops: compare the % columns (shares)");
         for p in partial.iter().chain(run.notes.iter()) {
-            out.always(&format!("note: {}", p));
+            out.line(&format!("note: {}", p));
         }
-        out.always(&format!("note: {}", crate::inspect::reliability::line(true)));
-        out.always("more: asm <fn> vs=rustc  asm top vs=rustc  counters");
+        out.line(&format!("note: {}", crate::inspect::reliability::line(true)));
+        out.line("more: asm <fn> vs=rustc  asm top vs=rustc  counters");
     }
 
     pub(super) fn g(x: f64) -> String {
@@ -472,7 +473,7 @@ mod stacks {
         let mut srows: Vec<(f64, String)> = js.keys().chain(ns.keys()).map(|k| (js.get(k).copied().unwrap_or(0.0) / tj - ns.get(k).copied().unwrap_or(0.0) / tn, k.clone())).collect();
         srows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal).then(a.1.cmp(&b.1)));
         srows.dedup_by(|a, b| a.1 == b.1);
-        out.always(&format!(
+        out.line(&format!(
             "JIT {:.1} {} vs native {:.1} {} under {} ({:.2}x, gap {:+.1} {}); biggest self-time gap: {}",
             jr, unit, nr, unit, if roots.is_empty() { "all stacks".to_string() } else { req.get("roots").unwrap_or("").to_string() }, jr / nr.max(1e-9), gap, unit,
             srows.first().map_or("-".to_string(), |r| format!("{} {:+.2}", r.1, r.0))
@@ -547,7 +548,7 @@ mod stacks {
                 let path = std::env::temp_dir().join(format!("makepad-vsnative-{}-{}-{}.folded", std::process::id(), side, crate::inspect::now_ms()));
                 let text: String = folded.iter().map(|(k, w)| format!("{} {:.0}\n", k, w)).collect();
                 if std::fs::write(&path, text).is_ok() {
-                    out.always(&format!("saved {} stacks ({} ms of CPU over {:.1} s): {}", side, v.iter().map(|x| x.1).sum::<f64>() as u64, t, path.display()));
+                    out.line(&format!("saved {} stacks ({} ms of CPU over {:.1} s): {}", side, v.iter().map(|x| x.1).sum::<f64>() as u64, t, path.display()));
                 }
             }
         }
@@ -558,8 +559,8 @@ mod stacks {
     /// [n=30] [tree=0] [save=1]`: the native build's stacks recorded by its own sampler (`prof raw=<file>`
     /// of a rustc-built app: macOS has no cross-process sampling without privileges), named here by its
     /// DWARF inline tree (`native=`, else the file's executable; macOS: its dSYM), against this
-    /// process's samples taken now for the same length. For deterministic work (Sandbox's SANDBOX_DET
-    /// frames) the two windows need not be simultaneous.
+    /// process's samples taken now for the same length. For deterministic work (an app's
+    /// deterministic frames) the two windows need not be simultaneous.
     pub fn run_file(req: &Req, out: &mut Out, path: &str) {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -633,12 +634,12 @@ mod stacks {
             return out.err(&e);
         }
         let (unit, nall, ntot, jall, jtot, tj) = compare(req, out, &run, &ours, &theirs, fsecs);
-        out.always(&format!("note: native = {} (samples {}: {} over {:.1} s at {} Hz), {:.1} {} of its sampled CPU, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots (sampled now, {:.1} s)", native, path, raw.len(), fsecs, fhz, nall / fsecs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9), tj));
-        out.always("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2 / a dSYM); the two windows are not simultaneous: compare deterministic work only");
+        out.line(&format!("note: native = {} (samples {}: {} over {:.1} s at {} Hz), {:.1} {} of its sampled CPU, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots (sampled now, {:.1} s)", native, path, raw.len(), fsecs, fhz, nall / fsecs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9), tj));
+        out.line("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2 / a dSYM); the two windows are not simultaneous: compare deterministic work only");
         for p in partial.iter().chain(run.notes.iter()) {
-            out.always(&format!("note: {}", p));
+            out.line(&format!("note: {}", p));
         }
-        out.always(&format!("note: {}", crate::inspect::reliability::line(true)));
+        out.line(&format!("note: {}", crate::inspect::reliability::line(true)));
     }
 
     /// (user ms, system ms, voluntary switches, involuntary switches) of thread `tid` of `pid` so far.
@@ -777,16 +778,16 @@ mod stacks {
             out.line(&r);
         }
         let tn_names: Vec<String> = tids.iter().map(|t| format!("{} (T{})", t.1, t.0)).collect();
-        out.always(&format!("note: native = {} pid {} threads {}; {:.1} {} of its CPU in the window, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots", exe, pid, tn_names.join(", "), nall / secs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9)));
-        out.always("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2); a fn rustc inlined and we did not shows as self time of its caller natively");
+        out.line(&format!("note: native = {} pid {} threads {}; {:.1} {} of its CPU in the window, {:.0}% under the roots; JIT {:.1} {} on threads={}, {:.0}% under the roots", exe, pid, tn_names.join(", "), nall / secs, unit, ntot * 100.0 / nall.max(1e-9), jall / tj, unit, req.get("threads").unwrap_or("main"), jtot * 100.0 / jall.max(1e-9)));
+        out.line("note: keys are `Type::fn` without generics on both sides (JIT: inline levels expanded; native: the DWARF inline tree, needs debuginfo=2); a fn rustc inlined and we did not shows as self time of its caller natively");
         if lost > 0 {
             notes.push(format!("{} native sample batches lost (ring overflow)", lost));
         }
         for p in partial.iter().chain(run.notes.iter()).chain(notes.iter()) {
-            out.always(&format!("note: {}", p));
+            out.line(&format!("note: {}", p));
         }
-        out.always(&format!("note: {}", crate::inspect::reliability::line(true)));
-        out.always("more: asm <fn> vs=rustc  asm top vs=rustc  prof view=tree");
+        out.line(&format!("note: {}", crate::inspect::reliability::line(true)));
+        out.line("more: asm <fn> vs=rustc  asm top vs=rustc  prof view=tree");
     }
 }
 

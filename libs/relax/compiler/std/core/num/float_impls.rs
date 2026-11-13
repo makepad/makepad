@@ -7,7 +7,6 @@ use crate::libm;
 use crate::num::FpCategory;
 use crate::cmp::Ordering;
 
-#[cfg(not(relax_check))]
 impl f64 {
     pub const RADIX: u32 = 2;
     pub const MANTISSA_DIGITS: u32 = 53;
@@ -96,7 +95,6 @@ impl f64 {
     pub unsafe fn to_int_unchecked<Int>(self) -> Int where Self: crate::convert::FloatToInt<Int> { unsafe { crate::convert::FloatToInt::<Int>::to_int_unchecked(self) } }
 }
 
-#[cfg(not(relax_check))]
 impl f32 {
     pub const RADIX: u32 = 2;
     pub const MANTISSA_DIGITS: u32 = 24;

@@ -221,7 +221,7 @@ impl Tcx {
         image.add_bytes(0, w);
         if stop() { return None; }
         let mut id = 2;
-        let tr = std::env::var_os("MAKEPAD_RUN_COLLECTED_TRACE").is_some();
+        let tr = std::env::var_os("RELAX_COLLECTED_TRACE").is_some();
         let mut t = std::time::Instant::now();
         let mut lap = |what: &str| if tr { eprintln!("tcx-writer: {what} {:.1} ms", t.elapsed().as_secs_f64() * 1e3); t = std::time::Instant::now(); };
         macro_rules! table { ($($f:ident),+) => { $(self.$f.write_image_with(&mut image, &mut id, stop)?; lap(stringify!($f));)+ }; }

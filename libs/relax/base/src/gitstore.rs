@@ -547,7 +547,7 @@ pub fn append(path: &Path, add: Append, keep: &dyn Fn(&[Ref]) -> Vec<Ref>) -> Re
         file.seek(SeekFrom::Start(0)).map_err(err)?;
         file.read_exact(&mut head).map_err(err)?;
         if &head[..8] != MAGIC {
-            return Err(format!("{}: not a makepad run git store", path.display()));
+            return Err(format!("{}: not a Relax git store", path.display()));
         }
         match Store::last_trailer(&file, 0, len, &|_| true).map_err(err)? {
             Some((e, i, _)) => (e, i),
@@ -688,15 +688,14 @@ pub fn compact(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
-/// The store file of a repository URL in `cache`: `git-<name>-<hash8>.store`.
-/// makepad run's own folder: $MAKEPAD_RUN_HOME, else ~/.makepad-run (%USERPROFILE%\.makepad-run);
+/// makepad run's own folder: $RELAX_HOME, else ~/.relax (%USERPROFILE%\.relax);
 /// its stores are in `cache/` there.
 pub fn relax_home() -> PathBuf {
-    if let Some(h) = std::env::var_os("MAKEPAD_RUN_HOME").filter(|h| !h.is_empty()) {
+    if let Some(h) = std::env::var_os("RELAX_HOME").filter(|h| !h.is_empty()) {
         return PathBuf::from(h);
     }
     let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_else(|| ".".into());
-    home.join(".makepad-run")
+    home.join(".relax")
 }
 
 /// One file of `url`'s repository at `commit`, from its store (None: no store, the commit is
@@ -708,11 +707,14 @@ pub fn store_file(url: &str, commit: &Oid, path: &str) -> Option<Vec<u8>> {
     s.object(&e.oid).ok()?.map(|(_, d)| d)
 }
 
+/// The store file of a repository URL in `cache`: `git-<name>-<sha1 of the URL>.store`. The
+/// whole hash: with part of it a URL made to share another's name (2^32 tries for 8 hex digits)
+/// shared its store, and its fetches answered for the other URL.
 pub fn store_path(cache: &Path, url: &str) -> PathBuf {
     let last = url.trim_end_matches('/').rsplit('/').next().unwrap_or("repo");
     let name: String = last.trim_end_matches(".git").chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect();
     let h = sha1(url.trim_end_matches('/').as_bytes());
-    cache.join(format!("git-{}-{}.store", if name.is_empty() { "repo" } else { &name }, &hex(&h)[..8]))
+    cache.join(format!("git-{}-{}.store", if name.is_empty() { "repo" } else { &name }, hex(&h)))
 }
 
 /// BTreeMap of a path table's folders (for read_dir/is_dir): each folder -> its direct children.

@@ -17,7 +17,7 @@ for mode in plain live; do
   flags=(--quiet --units "$T/u/units.json")
   [ "$mode" = plain ] && flags+=(--no-live)
   t0=$SECONDS
-  MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt-$mode "$1" run "${flags[@]}" layout_diff > "$T/$mode.out" 2>"$T/$mode.err"
+  RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt-$mode "$1" run "${flags[@]}" layout_diff > "$T/$mode.out" 2>"$T/$mode.err"
   if diff "$T/real.out" "$T/$mode.out" > "$T/$mode.diff"; then
     echo "layout_diff ($mode run): $(wc -l < "$T/real.out" | tr -d ' ') lines equal ($((SECONDS - t0)) s)"
   else

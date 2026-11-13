@@ -64,8 +64,8 @@ run() { # run <label> <expected line>
   k=$((k + 1))
   log=$C/run$k.log
   s=$EPOCHREALTIME
-  (cd "$P" && env -u MAKEPAD_RUN_CACHE_TRACE MAKEPAD_RUN_HOME="$C/home" MAKEPAD_RUN_TARGET_DIR="$C/home/target" MAKEPAD_RUN_CACHE_DIR="$C/home/cache" \
-    TMPDIR="$C/home/tmp" MAKEPAD_RUN_VERBOSE=1 LATE_PROBE_V="$V" ${O:+LATE_PROBE_O="$O"} "$R" run --verbose late_app > "$log" 2>&1)
+  (cd "$P" && env -u RELAX_CACHE_TRACE RELAX_HOME="$C/home" RELAX_TARGET_DIR="$C/home/target" RELAX_CACHE_DIR="$C/home/cache" \
+    TMPDIR="$C/home/tmp" RELAX_VERBOSE=1 LATE_PROBE_V="$V" ${O:+LATE_PROBE_O="$O"} "$R" run --verbose late_app > "$log" 2>&1)
   rc=$?
   e=$EPOCHREALTIME
   got=$(grep -a -m1 '^LINE ' "$log")

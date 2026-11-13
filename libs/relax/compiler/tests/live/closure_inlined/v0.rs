@@ -1,4 +1,4 @@
-// M46: closure_on_stack with A built at O3 (MAKEPAD_RUN_O3_CALLS=1 makes it hot at once; each run
+// M46: closure_on_stack with A built at O3 (RELAX_O3_CALLS=1 makes it hot at once; each run
 // sleeps so its O3 code installs before the thread parks in it): A's code inlined the closure, so
 // the parked frame's next call of it is the old copy inside old A.
 //   A = keep(0) + keep(1);  v0: keep(i) = i + base;  v1: keep(i) = i + base * 2  (base = 10)

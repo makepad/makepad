@@ -196,18 +196,18 @@ pub fn run(name: &str, policy: OnPanic, mut body: impl FnMut()) {
         match policy {
             OnPanic::Fatal => {
                 set_state(i, DEAD);
-                eprintln!("makepad-run: FATAL: JIT thread `{}` panicked: {} -- it cannot be restarted, the process ends", name, line);
+                eprintln!("relax: FATAL: JIT thread `{}` panicked: {} -- it cannot be restarted, the process ends", name, line);
                 crate::inspect::flightrec::fault_dump(&format!("thread {} panicked: {}", name, line));
                 std::process::abort();
             }
             OnPanic::Restart if restarts > MAX_RESTARTS => {
                 set_state(i, DEAD);
-                eprintln!("makepad-run: JIT thread `{}` panicked {} times, last: {} -- given up (dead: `makepad inspect threads`)", name, restarts, line);
+                eprintln!("relax: JIT thread `{}` panicked {} times, last: {} -- given up (dead: `{tool} inspect threads`)", name, restarts, line, tool = crate::tool_name());
                 return;
             }
             OnPanic::Restart => {
                 set_state(i, RESTARTING);
-                eprintln!("makepad-run: JIT thread `{}` panicked: {} -- restarted ({} of {})", name, line, restarts, MAX_RESTARTS);
+                eprintln!("relax: JIT thread `{}` panicked: {} -- restarted ({} of {})", name, line, restarts, MAX_RESTARTS);
                 std::thread::sleep(std::time::Duration::from_millis(if cfg!(test) { 1 } else { 10u64 << restarts.min(6) }));
                 set_state(i, ALIVE);
             }
@@ -226,7 +226,7 @@ pub fn spawn(name: String, policy: OnPanic, stack: Option<usize>, body: impl FnM
     match started {
         Ok(_) => true,
         Err(e) => {
-            eprintln!("makepad-run: cannot start JIT thread `{}`: {}", name, e);
+            eprintln!("relax: cannot start JIT thread `{}`: {}", name, e);
             crate::inspect::flightrec::event("thread.spawn_failed", &name, 0, 0);
             false
         }

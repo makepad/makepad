@@ -1,5 +1,5 @@
 //! The token model Relax's built-in macros and derive inputs use (pm_tokens.rs). Plus the byte
-//! encoding the sandboxed JIT proc-macro host (pmhost.rs) uses.
+//! encoding the JIT proc-macro host (pmhost.rs) uses.
 
 pub use crate::pm_tokens::*;
 

@@ -7,7 +7,7 @@
 //!   shared file pages are counted whole, so they do not add up to the kernel's resident size.
 //! - `malloc/...`: the allocator's own view: in use, held free (the retention a trim returns).
 //! - `relax/...`: what Relax holds for the app: JIT code / data / statics, the burst arena, the
-//!   compiler's heap by subsystem when MAKEPAD_RUN_MEM_REPORT counts it, structure sizes on request.
+//!   compiler's heap by subsystem when RELAX_MEM_REPORT counts it, structure sizes on request.
 //!
 //! No owner needed (structure sizes excepted, asked with a timeout); nothing kept running but a
 //! resident-size ring the detector fills four times a second, with phase markers.
@@ -93,7 +93,7 @@ pub fn take(compiler: bool, partial: &mut Vec<String>) -> Snap {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn os_regions(s: &mut Snap) {
     let text = std::fs::read_to_string("/proc/self/smaps").unwrap_or_default();
-    let home = std::env::var("MAKEPAD_RUN_HOME").unwrap_or_default();
+    let home = std::env::var("RELAX_HOME").unwrap_or_default();
     let mut cat = String::new();
     let (mut rss, mut anon) = (0u64, 0u64);
     let flush = |s: &mut Snap, cat: &str, rss: u64, anon: u64| {
@@ -142,14 +142,14 @@ fn classify_path(path: &str, home: &str) -> String {
         "[heap]" => "malloc main heap".into(),
         "[stack]" => "main stack".into(),
         "[vdso]" | "[vvar]" | "[vsyscall]" | "[vvar_vclock]" => "kernel".into(),
-        p if p.starts_with("[anon:makepad-run-jit-code") => "makepad run JIT code".into(),
-        p if p.starts_with("[anon:makepad-run-jit-data") => "makepad run JIT data".into(),
-        p if p.starts_with("[anon:makepad-run-burst") => "makepad run burst arena".into(),
-        p if p.starts_with("[anon:makepad-run-stack") => "makepad run compile stacks".into(),
+        p if p.starts_with("[anon:relax-jit-code") => "Relax JIT code".into(),
+        p if p.starts_with("[anon:relax-jit-data") => "Relax JIT data".into(),
+        p if p.starts_with("[anon:relax-burst") => "Relax burst arena".into(),
+        p if p.starts_with("[anon:relax-stack") => "Relax compile stacks".into(),
         p if p.starts_with("[anon:") => format!("named {}", p.trim_start_matches("[anon:").trim_end_matches(']')),
         p if p.starts_with("/dev/dri") || p.starts_with("/dev/nvidia") || p.contains("/drm") => "GPU driver mappings".into(),
         p if p.starts_with("/memfd:") => format!("memfd {}", p.trim_start_matches("/memfd:").split(' ').next().unwrap_or("")),
-        p if p.contains("/.makepad-run/") || p.contains("/makepad-run/") || (!home.is_empty() && p.starts_with(home)) => "makepad run cache files".into(),
+        p if p.contains("/.relax/") || p.contains("/relax/") || (!home.is_empty() && p.starts_with(home)) => "Relax cache files".into(),
         p if p.contains(".so") => "shared libraries".into(),
         p if p.ends_with("/makepad") || p.contains("target/release/makepad") => "makepad binary".into(),
         p if p.ends_with(".ttf") || p.ends_with(".otf") || p.ends_with(".ttc") => "fonts".into(),
@@ -185,8 +185,8 @@ fn os_regions(s: &mut Snap) {
     }
     let page = unsafe { vm_page_size } as u64;
     let (mut addr, mut depth) = (0u64, 0u32);
-    // MAKEPAD_RUN_MEM_REGIONS=1: the largest resident regions (address, size, resident, dirtied, tag, share mode, protection)
-    let list = std::env::var_os("MAKEPAD_RUN_MEM_REGIONS").is_some();
+    // RELAX_MEM_REGIONS=1: the largest resident regions (address, size, resident, dirtied, tag, share mode, protection)
+    let list = std::env::var_os("RELAX_MEM_REGIONS").is_some();
     let mut big: Vec<(u64, u64, u64, u64, u32, u32, u32)> = Vec::new();
     // a VM object mapped more than once (Relax's JIT code has a writable and an executable view;
     // shared libraries' pages) counts once
@@ -242,7 +242,7 @@ fn os_regions(s: &mut Snap) {
                         res += v[c0..c1].iter().filter(|b| **b & 1 != 0).count();
                     }
                 }
-                eprintln!("makepad-run mem unit {}: {:#x}..{:#x} ({:.0} MB) resident {:.1} MB", names[k], lo, hi, (hi - lo) as f64 / 1048576.0, res as f64 * page as f64 / 1048576.0);
+                eprintln!("relax mem unit {}: {:#x}..{:#x} ({:.0} MB) resident {:.1} MB", names[k], lo, hi, (hi - lo) as f64 / 1048576.0, res as f64 * page as f64 / 1048576.0);
             }
         }
         big.sort_unstable_by(|a, b| b.0.cmp(&a.0));
@@ -254,7 +254,7 @@ fn os_regions(s: &mut Snap) {
             let mut buf = [0u8; 1024];
             let n = unsafe { proc_regionfilename(getpid(), a, buf.as_mut_ptr(), buf.len() as u32) };
             let file = if n > 0 { String::from_utf8_lossy(&buf[..n as usize]).into_owned() } else { String::new() };
-            eprintln!("makepad-run mem region: {:#x} size {:.1} MB resident {:.1} MB dirtied {:.1} MB tag {} share {} prot {} file {}", a, size as f64 / 1048576.0, res as f64 / 1048576.0, dirty as f64 / 1048576.0, tag, share, prot, file);
+            eprintln!("relax mem region: {:#x} size {:.1} MB resident {:.1} MB dirtied {:.1} MB tag {} share {} prot {} file {}", a, size as f64 / 1048576.0, res as f64 / 1048576.0, dirty as f64 / 1048576.0, tag, share, prot, file);
         }
     }
 }
@@ -265,7 +265,7 @@ fn os_regions(s: &mut Snap) {
 /// IOACCELERATOR 100 and IOSURFACE 88.
 #[cfg(any(target_vendor = "apple", test))]
 const VM_TAGS: &[(u32, &str)] = &[
-    (0, "untagged (makepad run JIT code/data, burst arena, mapped files)"),
+    (0, "untagged (Relax JIT code/data, burst arena, mapped files)"),
     (1, "malloc"),
     (2, "malloc small"),
     (3, "malloc large"),
@@ -478,16 +478,16 @@ fn relax_parts(s: &mut Snap, compiler: bool, partial: &mut Vec<String>) {
     let up = crate::jit::current_unit();
     if !up.is_null() {
         let (code, data, rw) = unsafe { &*up }.reserved_use();
-        s.add("makepad-run/JIT code (incl. thunks, stubs)", code);
-        s.add("makepad-run/JIT read-only data", data);
-        s.add("makepad-run/program statics", rw);
+        s.add("relax/JIT code (incl. thunks, stubs)", code);
+        s.add("relax/JIT read-only data", data);
+        s.add("relax/program statics", rw);
     }
     let (program, host) = super::heap::live_totals();
     if let Some(live) = program {
         s.add("malloc/in use/program (tracked stacks, est.)", live.max(0) as u64);
     }
     if let Some(live) = host {
-        s.add("malloc/in use/makepad run + compiled-in crates (tracked stacks, est.)", live.max(0) as u64);
+        s.add("malloc/in use/Relax + compiled-in crates (tracked stacks, est.)", live.max(0) as u64);
     }
     // Splash VMs (their registry's estimates, as of their last evaluation / collection)
     for v in super::vm_summaries() {
@@ -501,36 +501,36 @@ fn relax_parts(s: &mut Snap, compiler: bool, partial: &mut Vec<String>) {
         }
     }
     let (committed, live, _) = crate::zone_alloc::burst_stats();
-    s.add("makepad-run/burst arena committed", committed as u64);
-    s.add("makepad-run/burst arena live", live as u64);
+    s.add("relax/burst arena committed", committed as u64);
+    s.add("relax/burst arena live", live as u64);
     let (jobs, survivor_jobs, survivor_bytes) = crate::zone_alloc::job_stats();
-    s.add("makepad-run/job arena/jobs ended", jobs as u64);
-    s.add("makepad-run/job arena/jobs that left survivors", survivor_jobs as u64);
-    s.add("makepad-run/job arena/survivor bytes (not copied out)", survivor_bytes as u64);
-    s.add("makepad-run/settle rebuilds", crate::jit::settle_rebuild::rebuilds() as u64);
+    s.add("relax/job arena/jobs ended", jobs as u64);
+    s.add("relax/job arena/jobs that left survivors", survivor_jobs as u64);
+    s.add("relax/job arena/survivor bytes (not copied out)", survivor_bytes as u64);
+    s.add("relax/settle rebuilds", crate::jit::settle_rebuild::rebuilds() as u64);
     let (ccommitted, clive, cchunks) = crate::zone_alloc::compiler_stats();
-    s.add("makepad-run/compiler arena committed", ccommitted as u64);
-    s.add("makepad-run/compiler arena live", clive as u64);
-    s.add("makepad-run/compiler arena/chunks (2 MB)", cchunks as u64);
+    s.add("relax/compiler arena committed", ccommitted as u64);
+    s.add("relax/compiler arena live", clive as u64);
+    s.add("relax/compiler arena/chunks (2 MB)", cchunks as u64);
     let (touched, slots, large, listed) = crate::zone_alloc::compiler_detail();
-    s.add("makepad-run/compiler arena/small chunks touched", touched as u64);
-    s.add("makepad-run/compiler arena/small live slots", slots as u64);
-    s.add("makepad-run/compiler arena/large blocks", large as u64);
-    s.add("makepad-run/compiler arena/chunks listed for reuse", listed as u64);
+    s.add("relax/compiler arena/small chunks touched", touched as u64);
+    s.add("relax/compiler arena/small live slots", slots as u64);
+    s.add("relax/compiler arena/large blocks", large as u64);
+    s.add("relax/compiler arena/chunks listed for reuse", listed as u64);
     let (committed, live, chunks) = crate::zone_alloc::slots_stats();
-    s.add("makepad-run/slot arena committed", committed as u64);
-    s.add("makepad-run/slot arena live", live as u64);
-    s.add("makepad-run/slot arena/chunks (2 MB)", chunks as u64);
+    s.add("relax/slot arena committed", committed as u64);
+    s.add("relax/slot arena live", live as u64);
+    s.add("relax/slot arena/chunks (2 MB)", chunks as u64);
     let (touched, slots, large, listed) = crate::zone_alloc::slots_detail();
-    s.add("makepad-run/slot arena/small chunks touched", touched as u64);
-    s.add("makepad-run/slot arena/small live slots", slots as u64);
-    s.add("makepad-run/slot arena/large blocks", large as u64);
-    s.add("makepad-run/slot arena/chunks listed for reuse", listed as u64);
+    s.add("relax/slot arena/small chunks touched", touched as u64);
+    s.add("relax/slot arena/small live slots", slots as u64);
+    s.add("relax/slot arena/large blocks", large as u64);
+    s.add("relax/slot arena/chunks listed for reuse", listed as u64);
     if crate::memstat::enabled() {
         for (i, name) in crate::memstat::TAG_NAMES.iter().enumerate() {
             let v = crate::memstat::live_of_index(i);
             if v > 0 {
-                s.add(&format!("makepad-run/compiler heap (MAKEPAD_RUN_MEM_REPORT)/{}", name), v as u64);
+                s.add(&format!("relax/compiler heap (RELAX_MEM_REPORT)/{}", name), v as u64);
             }
         }
     }
@@ -540,7 +540,7 @@ fn relax_parts(s: &mut Snap, compiler: bool, partial: &mut Vec<String>) {
             Some(rows) => {
                 for (k, v) in rows {
                     if v > 0 && !k.starts_with(' ') {
-                        s.add(&format!("makepad-run/compiler structures/{}", k), v);
+                        s.add(&format!("relax/compiler structures/{}", k), v);
                     }
                 }
             }
@@ -599,13 +599,18 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     let (cs, bs) = crate::zone_alloc::arena_states();
     out.line(&format!("{{\"arena_states\":\"compiler\",{}}}", st(&cs)));
     out.line(&format!("{{\"arena_states\":\"burst\",{}}}", st(&bs)));
-    out.line(&format!("{{\"arena_states\":\"slots\",{}}}", st(&crate::zone_alloc::slots_states())));
+    let ss = crate::zone_alloc::slots_states();
+    out.line(&format!("{{\"arena_states\":\"slots\",{}}}", st(&ss)));
+    // the Relax arenas' resident pages, as the domain arenas': touched pages include the ones a
+    // chunk handed back to the system after the compile that used them (a cold start's compiler arena:
+    // 944 MB touched, 340 MB resident)
+    let (c_resident, s_resident) = (arena_resident(&cs), arena_resident(&ss));
     let compiler = req.get("compiler") == Some("1");
     let n = req.num("n", 24) as usize;
     let mut partial = Vec::new();
     let snap = take(compiler, &mut partial);
     let prev = SNAPS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == "last").map(|x| x.1.nodes.clone());
-    out.measured("memory now: OS mappings, allocator, makepad run's own parts", "os + malloc + makepad run counters (no owner unless compiler=1)", &partial);
+    out.measured("memory now: OS mappings, allocator, Relax's own parts", "os + malloc + Relax counters (no owner unless compiler=1)", &partial);
     let rss = snap.get("rss");
     let mut total = format!("{{\"rss_mb\":{},\"peak_rss_mb\":{}", mb(rss), mb(snap.get("peak_rss")));
     if snap.get("footprint") > 0 {
@@ -631,26 +636,28 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     // The program's malloc, the compiler's arenas and the JIT's mappings are accounted apart.
     out.line(&format!("{{\"trims\":{},\"last_trim_ms\":{}}}", crate::memstat::TRIMS.load(std::sync::atomic::Ordering::Relaxed), crate::memstat::LAST_TRIM_MS.load(std::sync::atomic::Ordering::Relaxed)));
     out.line(&format!(
-        "{{\"split\":{{\"routing\":{},\"program_heap\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"program_heap_resident_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"slots_arena_committed_mb\":{},\"slots_arena_live_mb\":{},\"slots_arena_touched_mb\":{},\"slots_arena_large_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{}}},\"job_arena\":{{\"jobs\":{},\"survivor_jobs\":{},\"survivor_bytes\":{}}}}}}}",
-        json_str(if crate::zone_alloc::compiler_arena_enabled() { "compiler arena" } else { "off (MAKEPAD_RUN_COMPILER_ARENA=0)" }),
+        "{{\"split\":{{\"routing\":{},\"program_heap\":{},\"program_heap_in_use_mb\":{},\"program_heap_held_free_mb\":{},\"program_heap_resident_mb\":{},\"compiler_arena_committed_mb\":{},\"compiler_arena_live_mb\":{},\"slots_arena_committed_mb\":{},\"slots_arena_live_mb\":{},\"slots_arena_touched_mb\":{},\"slots_arena_large_mb\":{},\"jit_code_mb\":{},\"jit_ro_data_mb\":{},\"program_statics_mb\":{},\"burst_arena_committed_mb\":{},\"compiler_arena_touched_mb\":{},\"compiler_arena_live_slots_mb\":{},\"compiler_arena_large_mb\":{},\"compiler_arena_chunks_listed\":{},\"compiler_arena_resident_mb\":{},\"slots_arena_resident_mb\":{},\"compiler_arena_events\":{{\"contended_chunk\":{},\"contended_pool\":{},\"contended_warm\":{},\"contended_partial\":{},\"yields\":{},\"commits\":{},\"decommits\":{},\"pushes\":{},\"pops\":{}}},\"job_arena\":{{\"jobs\":{},\"survivor_jobs\":{},\"survivor_bytes\":{}}}}}}}",
+        json_str(if crate::zone_alloc::compiler_arena_enabled() { "compiler arena" } else { "off (RELAX_COMPILER_ARENA=0)" }),
         json_str(&program),
         mb(p_inuse),
         mb(p_held),
         mb(p_resident),
-        mb(snap.get("makepad-run/compiler arena committed")),
-        mb(snap.get("makepad-run/compiler arena live")),
-        mb(snap.get("makepad-run/slot arena committed")),
-        mb(snap.get("makepad-run/slot arena live")),
-        mb(snap.get("makepad-run/slot arena/small chunks touched")),
-        mb(snap.get("makepad-run/slot arena/large blocks")),
-        mb(snap.get("makepad-run/JIT code (incl. thunks, stubs)")),
-        mb(snap.get("makepad-run/JIT read-only data")),
-        mb(snap.get("makepad-run/program statics")),
-        mb(snap.get("makepad-run/burst arena committed")),
-        mb(snap.get("makepad-run/compiler arena/small chunks touched")),
-        mb(snap.get("makepad-run/compiler arena/small live slots")),
-        mb(snap.get("makepad-run/compiler arena/large blocks")),
-        snap.get("makepad-run/compiler arena/chunks listed for reuse"),
+        mb(snap.get("relax/compiler arena committed")),
+        mb(snap.get("relax/compiler arena live")),
+        mb(snap.get("relax/slot arena committed")),
+        mb(snap.get("relax/slot arena live")),
+        mb(snap.get("relax/slot arena/small chunks touched")),
+        mb(snap.get("relax/slot arena/large blocks")),
+        mb(snap.get("relax/JIT code (incl. thunks, stubs)")),
+        mb(snap.get("relax/JIT read-only data")),
+        mb(snap.get("relax/program statics")),
+        mb(snap.get("relax/burst arena committed")),
+        mb(snap.get("relax/compiler arena/small chunks touched")),
+        mb(snap.get("relax/compiler arena/small live slots")),
+        mb(snap.get("relax/compiler arena/large blocks")),
+        snap.get("relax/compiler arena/chunks listed for reuse"),
+        mb(c_resident as u64),
+        mb(s_resident as u64),
         ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8],
         jobs.0, jobs.1, jobs.2,
     ));
@@ -675,9 +682,9 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     if free > 64 << 20 {
         f.push((free, format!("malloc holds {} MB freed but not returned (retention; {:.0}% of its in-use bytes): a trim returns it", mb(free), free as f64 * 100.0 / inuse.max(1) as f64)));
     }
-    let relax: u64 = snap.nodes.iter().filter(|x| x.0.starts_with("makepad-run/") && !x.0["makepad-run/".len()..].contains('/') && !x.0.ends_with(" live")).map(|x| x.1).sum();
+    let relax: u64 = snap.nodes.iter().filter(|x| x.0.starts_with("relax/") && !x.0["relax/".len()..].contains('/') && !x.0.ends_with(" live")).map(|x| x.1).sum();
     if relax > 0 {
-        f.push((relax, format!("makepad run's own reservations in use: {} MB (JIT code + data + statics + burst, compiler and slot arenas)", mb(relax))));
+        f.push((relax, format!("Relax's own reservations in use: {} MB (JIT code + data + statics + burst, compiler and slot arenas)", mb(relax))));
     }
     if let Some(p) = &prev {
         let mut growth: Vec<(i64, &String)> = snap.nodes.iter().map(|(k, v)| (*v as i64 - p.iter().find(|x| &x.0 == k).map_or(0, |x| x.1 as i64), k)).filter(|x| x.0 >= 16 << 20 && x.1.contains('/')).collect();
@@ -690,7 +697,7 @@ pub fn cmd_memory(req: &Req, out: &mut Out) {
     if tracked > 0 {
         f.push((tracked, format!("program heap (tracked since `heap start`): {} MB live: `heap top` for the stacks", mb(tracked))));
     } else if !crate::memstat::enabled() {
-        f.push((0, "program heap vs makepad run's heap is not split yet: `heap start` tracks the program's allocations by stack, `heap start host=1` makepad run's own (compiler + compiled-in crates, by stack and category)".into()));
+        f.push((0, "program heap vs Relax's heap is not split yet: `heap start` tracks the program's allocations by stack, `heap start host=1` Relax's own (compiler + compiled-in crates, by stack and category)".into()));
     }
     f.sort_by(|a, b| b.0.cmp(&a.0));
     let lines: Vec<String> = f.iter().map(|x| json_str(&x.1)).collect();
@@ -717,7 +724,7 @@ pub fn cmd_mem(req: &Req, out: &mut Out) {
             let name = req.pos.get(1).cloned().unwrap_or_else(|| format!("s{}", now_ms()));
             let mut partial = Vec::new();
             let s = take(req.get("compiler") == Some("1"), &mut partial);
-            out.measured(&format!("snapshot `{}`", name), "os + malloc + makepad run counters", &partial);
+            out.measured(&format!("snapshot `{}`", name), "os + malloc + Relax counters", &partial);
             out.line(&format!("{{\"snap\":{},\"rss_mb\":{},\"nodes\":{}}}", json_str(&name), mb(s.get("rss")), s.nodes.len()));
             mark(&format!("snap {}", name));
             keep(&name, s);

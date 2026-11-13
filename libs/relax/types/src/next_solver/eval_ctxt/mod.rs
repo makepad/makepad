@@ -64,8 +64,23 @@ impl InferCtxt<'_> {
             if let Some(result) = fast_path::compute_goal_fast_path(self, prog, &goal) { return Ok(result); }
         }
         let evaluate = |ecx: &mut EvalCtxt<'_, '_>| ecx.evaluate_goal_raw(GoalSource::Misc, goal.clone()).map(|(nested, result)| { assert!(nested.is_empty()); result });
-        let result = self.enter_root(prog, evaluate);
+        let result = self.enter_root(prog, &evaluate);
+        let result = self.rerun_at_twice_the_limit_on_overflow(prog, result, |r| matches!(r, Ok(e) if e.certainty.is_overflow()), |depth| self.enter_root_with_depth(prog, depth, &evaluate));
         result.map_err(NoSolutionOrRerunNonErased::assert_no_rerun)
+    }
+    /// rustc_next_trait_solver eval_ctxt (maybe_evaluate_root_goal_with_higher_recursion_limit and
+    /// its proof-tree twin): the old solver checks no depth when it reads its cache, the next
+    /// solver does, so an evaluation that overflows is made once more at twice the limit (which
+    /// saturates), and that answer stands unless it overflows too. rustc then lints
+    /// `recursion_depth_exceeding_limit`, which only `-Znext-solver` fires: stable rustc type
+    /// checks with the old solver and is silent.
+    fn rerun_at_twice_the_limit_on_overflow<T>(&self, prog: &crate::program::Program, first: T, overflows: impl Fn(&T) -> bool, run: impl FnOnce(usize) -> T) -> T {
+        if !self.rerun_overflow_at_twice_the_limit || !overflows(&first) { return first; }
+        let depth = self.recursion_limit(prog).saturating_mul(2);
+        self.commit_if_ok(|_| {
+            let rerun = run(depth);
+            if overflows(&rerun) { Err(()) } else { Ok(rerun) }
+        }).unwrap_or(first)
     }
     /// rustc_next_trait_solver/src/solve/eval_ctxt/mod.rs:283-300.
     pub fn root_goal_may_hold_opaque_types_jank(&self, prog: &crate::program::Program, goal: Goal) -> bool {
@@ -311,13 +326,18 @@ impl EvalCtxt<'_, '_> {
 }
 impl InferCtxt<'_> {
     pub fn evaluate_root_goal_for_proof_tree(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
-        let depth = self.recursion_limit(prog);
-        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth, true)
+        self.evaluate_root_goal_for_proof_tree_rerun(prog, goal, true)
     }
     /// rustc_trait_selection/src/solve/inspect/analyse.rs: diagnostics inspect failed candidates too.
     /// Keep their nested goals for this report only; the selection cache prunes them.
     pub(crate) fn evaluate_root_goal_for_diagnostics(&self, prog: &crate::program::Program, goal: Goal) -> super::inspect::GoalEvaluation {
-        self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, self.recursion_limit(prog), false)
+        self.evaluate_root_goal_for_proof_tree_rerun(prog, goal, false)
+    }
+    /// A proof tree is the evaluation `evaluate_root_goal` made: an overflowing one is built again
+    /// at twice the limit, and that tree stands unless it overflows too.
+    fn evaluate_root_goal_for_proof_tree_rerun(&self, prog: &crate::program::Program, goal: Goal, cached: bool) -> super::inspect::GoalEvaluation {
+        let tree = self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal.clone(), self.recursion_limit(prog), cached);
+        self.rerun_at_twice_the_limit_on_overflow(prog, tree, |tree| matches!(&tree.result, Ok(r) if r.value.certainty.is_overflow()), |depth| self.evaluate_root_goal_for_proof_tree_with_depth(prog, goal, depth, cached))
     }
     fn evaluate_root_goal_for_proof_tree_with_depth(&self, prog: &crate::program::Program, goal: Goal, root_depth: usize, cached: bool) -> super::inspect::GoalEvaluation {
         assert!(!self.typing_mode.get().is_erased_not_coherence());

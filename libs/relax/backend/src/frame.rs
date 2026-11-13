@@ -179,9 +179,9 @@ pub fn slot_colors_used(f: &Func, min: u32, addressed: &[bool]) -> Option<Vec<u3
     } else {
         slot_live_intervals(f, &cand, &der, &acc, &ent, &ext)
     };
-    // MAKEPAD_RUN_COLOR_TRACE=<name substring>: each slot of the matching fns, escaping or not
+    // RELAX_COLOR_TRACE=<name substring>: each slot of the matching fns, escaping or not
     static TRACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    if let Some(w) = relax_session::phase::env_once(&TRACE, "MAKEPAD_RUN_COLOR_TRACE") {
+    if let Some(w) = relax_session::phase::env_once(&TRACE, "RELAX_COLOR_TRACE") {
         if f.name.contains(w) {
             for s in 0..ns {
                 if f.slots[s].size >= min && addressed[s] {
@@ -455,7 +455,7 @@ pub fn slot_addr_positions(f: &Func, at: &[i64]) -> Vec<i64> {
 /// `Copy(dst, src, n)` with both addresses at known frame positions (`slot_addr_positions`) whose
 /// byte ranges overlap but are not the same bytes: `dst - src` in bytes, else 0. Copy is memcpy
 /// (no pass may make such a copy: rir `overlapping_copy`), but the frame layout shares storage
-/// too, so the backends check the final layout: under MAKEPAD_RUN_VERIFY_PASSES such a copy fails
+/// too, so the backends check the final layout: under RELAX_VERIFY_PASSES such a copy fails
 /// the build, elsewhere it is emitted in memmove order -- a correct copy, never a wrong one.
 pub fn copy_overlap(pos: &[i64], dst: VReg, src: VReg, n: u32) -> i64 {
     let (Some(&pd), Some(&ps)) = (pos.get(dst.0 as usize), pos.get(src.0 as usize)) else { return 0 };
@@ -707,22 +707,39 @@ pub fn born_liveness(f: &Func, cand: &[usize], der: &[Vec<u32>], live: &mut [Vec
     }
 }
 
+/// The alignment of the base a frame's slots are laid out below (x64's rbp, arm64's fp, wasm's
+/// frame pointer): a slot aligned beyond it is not aligned by its offset alone.
+pub const FRAME_BASE_ALIGN: u32 = 16;
+
 /// The frame offsets of a function's stack slots: `off` is where the slot area starts (bytes
 /// below the frame's base); each slot something addresses gets the end of its storage
 /// (offset of its lowest byte below the base, its alignment respected), slots sharing storage
-/// (`slot_colors`) the same; unaddressed slots take no space. Returns the offsets and the new
-/// end of the area. `share` false (MAKEPAD_RUN_OPT=-slotcolor): every slot keeps its own storage.
-pub fn slot_layout(f: &Func, off: i64, share: bool) -> (Vec<i64>, i64) {
-    slot_layout_aligned(f, off, share, |_| 1)
+/// (`slot_colors`) the same; unaddressed slots take no space. Returns the offsets, the new end
+/// of the area, and per slot its storage's alignment when that is above FRAME_BASE_ALIGN (else
+/// 0). `share` false (RELAX_OPT=-slotcolor): every slot keeps its own storage. `pad_over`: such
+/// a storage gets room to be aligned at run time (its offset 16-aligned, align - 16 bytes more:
+/// the native backends keep its aligned address in a frame cell); without it its offset is
+/// aligned, and the frame's base must be (wasm aligns its frame pointer).
+pub fn slot_layout(f: &Func, off: i64, share: bool, pad_over: bool) -> (Vec<i64>, i64, Vec<u32>) {
+    slot_layout_aligned(f, off, share, |_| 1, pad_over)
+}
+
+/// One storage of `size` bytes aligned to `al` below `off` (slot_layout): its offset, and its
+/// alignment when that is above the base's
+fn place_storage(off: &mut i64, size: u32, al: u32, pad_over: bool) -> (i64, u32) {
+    let (al, base) = (al.max(1) as i64, FRAME_BASE_ALIGN as i64);
+    let (need, to) = if al <= base { (size as i64, al) } else if pad_over { (size as i64 + al - base, base) } else { (size as i64, al) };
+    *off = (*off + need + to - 1) / to * to;
+    (*off, if al > base { al as u32 } else { 0 })
 }
 
 /// `slot_layout` with each storage aligned to at least `min_align(size)` (arm64: 8-byte and
 /// 16-byte aggregates on 8 / 16, so their 8-byte fields and q pairs take scaled immediate
 /// offsets instead of an offset register)
-pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u32) -> u32) -> (Vec<i64>, i64) {
+pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u32) -> u32, pad_over: bool) -> (Vec<i64>, i64, Vec<u32>) {
     let ns = f.slots.len();
     if ns == 0 {
-        return (Vec::new(), off);
+        return (Vec::new(), off, Vec::new());
     }
     let used = crate::rir::used_slots(f);
     // Small baseline frames do not repay the address/lifetime analysis. Keep
@@ -730,16 +747,14 @@ pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u3
     let share = share && (!f.baseline || ns >= 8 && f.slots.iter().map(|s| s.size as u64).sum::<u64>() >= SLOT_SHARE_MIN_BYTES);
     let to = if share { slot_colors_used(f, SLOT_SHARE_MIN, &used) } else { None };
     let mut at = vec![off; ns];
+    let mut over = vec![0u32; ns];
     let Some(to) = to else {
         for (s, slot) in f.slots.iter().enumerate() {
             if used[s] {
-                let al = slot.align.max(min_align(slot.size)).max(1) as i64;
-                off += slot.size as i64;
-                off = (off + al - 1) / al * al;
-                at[s] = off;
+                (at[s], over[s]) = place_storage(&mut off, slot.size, slot.align.max(min_align(slot.size)), pad_over);
             }
         }
-        return (at, off);
+        return (at, off, over);
     };
     // a shared storage's size and alignment: its members' largest
     let mut size: Vec<u32> = f.slots.iter().map(|s| s.size).collect();
@@ -755,17 +770,15 @@ pub fn slot_layout_aligned(f: &Func, mut off: i64, share: bool, min_align: fn(u3
         if !used[s] || to[s] as usize != s {
             continue;
         }
-        let al = align[s].max(min_align(size[s])) as i64;
-        off += size[s] as i64;
-        off = (off + al - 1) / al * al;
-        at[s] = off;
+        (at[s], over[s]) = place_storage(&mut off, size[s], align[s].max(min_align(size[s])), pad_over);
     }
     for s in 0..ns {
         if to[s] as usize != s {
             at[s] = at[to[s] as usize];
+            over[s] = over[to[s] as usize];
         }
     }
-    (at, off)
+    (at, off, over)
 }
 
 /// slots from this size up share storage when their lifetimes cannot overlap (slot_layout)

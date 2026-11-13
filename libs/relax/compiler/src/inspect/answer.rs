@@ -1,5 +1,5 @@
 //! The inspect client's text answers: inspect's own commands go through the one renderer
-//! ([`makepad_prof_stream::answer`], which Scope's Live console calls too); the app's
+//! ([`makepad_prof_stream::answer`], which an app's Live console calls too); the app's
 //! remote-control commands (`ui`, `ui find`, `ui act`, ..) keep their own output.
 
 use makepad_prof_stream::answer::{self, Request};
@@ -9,7 +9,7 @@ fn renders(line: &str) -> bool {
     let req = makepad_remote::Req::parse(line);
     let c = req.cmd.as_str();
     // (`src`, `vm`, `verbs`, `script`: the Splash VM's host commands, makepad_script::inspect_query;
-    // `game`: the Sandbox's app query)
+    // `game`: an app's query)
     matches!(c, "frames" | "frame" | "top" | "path" | "hang" | "panics" | "resume" | "rm" | "continue" | "pause" | "src" | "vm" | "verbs" | "script" | "game")
         || super::COMMANDS.iter().chain(makepad_gpu_trace::query::COMMANDS).any(|x| x.0 == c)
 }

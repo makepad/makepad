@@ -1,6 +1,6 @@
 //! Native built-in macros (builtins lane).
 //!
-//! - proc macros (derives and function-like) go through the sandboxed JIT host (pmhost.rs);
+//! - proc macros (derives and function-like) go through the JIT proc-macro host (pmhost.rs);
 //! - derive input preparation (cfg_eval, derive attrs removed);
 //! - the std built-ins those expansions use: file!, line!, column!, module_path!, env!,
 //!   option_env!, stringify!, concat!, include_str!, include_bytes!.
@@ -375,7 +375,7 @@ pub fn lookup(name: &str) -> Builtin {
 }
 
 /// A `macro_rules!` definition Relax replaces with a native expansion: the bitflags crate's
-/// 2.x `bitflags!` (MAKEPAD_RUN_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
+/// 2.x `bitflags!` (RELAX_NATIVE_BITFLAGS=0 keeps the crate's macro_rules, for A/B measurement).
 pub fn override_rules(options: &crate::options::Options, d: crate::macros::MacroRef) -> crate::macros::MacroRef {
     // Match the implementation the native expander replaces. Version 1 declares a named
     // `bits` field and supplies implicit derives; substituting the 2.x tuple breaks its API.
@@ -673,6 +673,17 @@ fn stringify_o(buf: Buf, toks: &(impl TokSeq + ?Sized), lo: usize, hi: usize, or
                 space = false;
             }
             if t.kind == T::Pound && n.kind == T::OpenBracket {
+                space = false;
+            }
+            // IDENT|`fn`|`Self`|`pub` + `(`: `f(3)`, `fn(x: u8)`, `Self()`, `pub(crate)`; another
+            // reserved word keeps a space it had (`let (a, b)`). The keyword kinds follow the
+            // edition, as rustc's `is_reserved` does; the unused reserved words lex as idents.
+            let glues_paren = match t.kind {
+                T::RawIdent | T::KwFn | T::KwSelfType | T::KwPub => true,
+                T::Ident => !matches!(text, "_" | "abstract" | "become" | "do" | "final" | "macro" | "override" | "priv" | "typeof" | "unsized" | "virtual"),
+                _ => false,
+            };
+            if glues_paren && n.kind == T::OpenParen {
                 space = false;
             }
             // paths print without spaces around `::` (a `$p:path` / `$t:ty` fragment is
@@ -1010,7 +1021,7 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
                     Some(s) => Ok(one_str(&s)),
                     None => Err(match args.get(1) {
                         Some(m) => m.clone(),
-                        None => format!("environment variable `{}` not defined at compile time -- set it before running makepad run", name),
+                        None => format!("environment variable `{}` not defined at compile time -- set it before running {tool} run", name, tool = crate::tool_name()),
                     }),
                 }
             };
@@ -1073,15 +1084,22 @@ fn expand_buf(p: &crate::parser::Parser, id: u16, lo: usize, hi: usize, call_lo:
                     i += 1;
                 } else {
                     body_lo = i;
-                    let mut depth = 0;
-                    while i < hi {
-                        match kind(i) {
-                            T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
-                            T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
-                            T::Comma if depth == 0 => break,
-                            _ => {}
+                    // the parser measured the expression (parser.rs cfg_select_arm_ends): a comma
+                    // inside it is not the arm's end. Not measured: up to the first comma.
+                    let measured = p.cfg_select_ends.borrow().iter().find(|e| e.0 == body_lo).map(|e| e.1);
+                    if let Some(end) = measured {
+                        i = end;
+                    } else {
+                        let mut depth = 0;
+                        while i < hi {
+                            match kind(i) {
+                                T::OpenParen | T::OpenBracket | T::OpenBrace => depth += 1,
+                                T::CloseParen | T::CloseBracket | T::CloseBrace => depth -= 1,
+                                T::Comma if depth == 0 => break,
+                                _ => {}
+                            }
+                            i += 1;
                         }
-                        i += 1;
                     }
                     body_hi = i;
                 }
@@ -1298,8 +1316,8 @@ fn expand_pm_ts(p: &crate::parser::Parser, span_needed: bool, lo: usize, hi: usi
     let call = span_of(call_lo, call_hi);
     drop(stream_timer);
     drop(input_timer);
-    let verify = std::env::var("MAKEPAD_RUN_PARSE_VERIFY").as_deref() == Ok("1");
-    let profile = std::env::var("MAKEPAD_RUN_PARSE_INPUT_PROFILE").as_deref() == Ok("1");
+    let verify = std::env::var("RELAX_PARSE_VERIFY").as_deref() == Ok("1");
+    let profile = std::env::var("RELAX_PARSE_INPUT_PROFILE").as_deref() == Ok("1");
     if verify || profile {
         let (expected, expected_call) = legacy_pm_input(p, span_needed, lo, hi, call_lo, call_hi, profile);
         verify_pm_spans(&input, &expected);
@@ -1572,9 +1590,34 @@ fn item_tokens(p: &crate::parser::Parser, buf: &Buf, lo: usize, hi: usize, item_
     v
 }
 
+/// The outer doc comments of `gap`, the source between an item's previous token and its first
+/// (at `gap_lo`), as `#[doc = ".."]` trees, and where the first begins (`gap_lo + gap.len()`
+/// when none): rustc hands a derive the item with all its outer attributes, the doc comments
+/// before its first `#[..]` included (relax #106). The lexer drops comments, and a token stream
+/// reads docs only from the gaps between its own tokens.
+fn leading_docs(gap: &[u8], gap_lo: u32, span_of: &dyn Fn(u32, u32) -> Span) -> (u32, Vec<TokenTree>) {
+    let mut first = gap_lo + gap.len() as u32;
+    let mut docs = Vec::new();
+    if !gap.windows(2).any(|w| w == b"//" || w == b"/*") {
+        return (first, docs);
+    }
+    crate::pm_tokens::for_each_gap_doc(gap, |d| {
+        if d.inner {
+            return;
+        }
+        first = first.min(gap_lo + d.lo as u32);
+        let t = Tok { kind: T::DocComment, lo: d.lo as u32, hi: d.hi as u32 };
+        if let Ok(ts) = crate::pm_tokens::from_toks(gap, &[t], &|a, z| span_of(gap_lo + a, gap_lo + z)) {
+            docs.extend(ts.trees);
+        }
+    });
+    (first, docs)
+}
+
 /// Derives of one item, from its source bytes (`item_lo`: its position, for diagnostics).
 /// Linked derives run natively, the rest through the JIT host (pmhost.rs; any thread).
-fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>, resolve: Option<&dyn Fn(&str) -> Option<crate::macro_reg::Entry>>) -> Result<ItemOut, (u32, String)> {
+/// `docs`: the item's doc comments before its first token (leading_docs), as `#[doc]` trees.
+fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, item: &[u8], fresh: Vec<Tok>, docs: Vec<TokenTree>, item_lo: u32, location: (usize, usize), cfg: Option<&CfgSet>, edition: u16, authored: Option<&dyn Fn(u32, u32) -> Option<Span>>, resolve: Option<&dyn Fn(&str) -> Option<crate::macro_reg::Entry>>) -> Result<ItemOut, (u32, String)> {
     let span_of = |a: u32, z: u32| authored.and_then(|f| f(item_lo + a, item_lo + z)).unwrap_or(Span { file: 0, lo: item_lo + a, hi: item_lo + z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
     // the item's own tokens (parsing rewrites tokens in place, `>>` closing two generic lists
     // becomes `>`: callers hand over the tokens as the source spelled them)
@@ -1584,10 +1627,11 @@ fn expand_item(sess: &std::sync::Arc<crate::Session>, krate: &str, path: &str, i
             crate::tokbuf::verify_fail(&format!("derive input tokens differ from the lexed item text at {item_lo}: lexed {:?} given {:?} in `{}`", lexed.iter().map(|t| (t.kind, t.lo, t.hi)).collect::<Vec<_>>(), fresh.iter().map(|t| (t.kind, t.lo, t.hi)).collect::<Vec<_>>(), String::from_utf8_lossy(item)));
         }
     }
-    let input = match to_stream_buf(Buf::plain(item), &fresh, 0, fresh.len(), &span_of) {
+    let mut input = match to_stream_buf(Buf::plain(item), &fresh, 0, fresh.len(), &span_of) {
         Some(s) => s,
         None => return Err((item_lo, "unbalanced delimiters in derive input".to_string())),
     };
+    input.trees.splice(0..0, docs);
     let (mut names, item_ts) = prepare_derive_input(input, cfg);
     // A spelling absent from the registry may be an imported alias. The
     // parallel prescan has no lexical scope, so leave that item to the parser.
@@ -1857,7 +1901,7 @@ pub fn derive_items(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo: u
 
 fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo: usize, hi: usize) -> Result<Option<Expansion>, (u32, String)> {
     let sess = p.session;
-    // MAKEPAD_RUN_DERIVES=0: derives are not expanded at all (baseline for measurements only)
+    // RELAX_DERIVES=0: derives are not expanded at all (baseline for measurements only)
     if crate::preload::derives_off(&p.session.options) {
         return Ok(None);
     }
@@ -1898,10 +1942,19 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         return Ok(None);
     }
     let _profile = crate::load_profile::span(p.session.runtime.profile, "derive", p.bctx.as_ref().map_or("", |c| c.path.as_str()));
-    let key = if reusable && !crate::macro_reg::declaring() { crate::parse_work::key_tokens(p, "hosted-derive", item_lo, item_hi, lo..hi, item_location(p, item_lo)) } else { None };
+    // the doc comments before the item's first token (an authored item's: expansion text has
+    // its docs as `#[doc]` tokens), which the reuse key covers with the item
+    let (docs_lo, docs) = if item_lo < p.src.len() as u32 {
+        let gap_lo = if lo == 0 { 0 } else { toks.at(lo - 1).hi.min(item_lo) };
+        let span_of = |a: u32, z: u32| p.input_span(a, z).unwrap_or(Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
+        leading_docs(&p.src[gap_lo as usize..item_lo as usize], gap_lo, &span_of)
+    } else {
+        (item_lo, Vec::new())
+    };
+    let key = if reusable && !crate::macro_reg::declaring() { crate::parse_work::key_tokens(p, "hosted-derive", docs_lo, item_hi, lo..hi, item_location(p, item_lo)) } else { None };
     let reused = crate::parse_work::get(&key);
-    // MAKEPAD_RUN_REUSE_VERIFY=1: every reused derive expansion is recomputed and must be identical.
-    if reused.is_some() && std::env::var_os("MAKEPAD_RUN_REUSE_VERIFY").is_none() { return Ok(reused); }
+    // RELAX_REUSE_VERIFY=1: every reused derive expansion is recomputed and must be identical.
+    if reused.is_some() && std::env::var_os("RELAX_REUSE_VERIFY").is_none() { return Ok(reused); }
     crate::macro_reg::add_pre(false);
     // an item of expansion text has its tokens (as the source spelled them); an authored item's
     // tokens are the source's own (the parser's are the configured view: `#[cfg_attr]` expanded,
@@ -1916,12 +1969,12 @@ fn derive_items_inner(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], lo:
         v
     };
     let cfg = p.bctx.as_ref().map(|c| &c.cfg);
-    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)), Some(&|name| derive_entry(p, lo, name)));
+    let r = expand_item(sess, &p.krate, p.bctx.as_ref().map_or("", |c| c.path.as_str()), buf.get(item_lo, item_hi), fresh, docs, item_lo, item_location(p,item_lo), cfg, p.edition, Some(&|lo, hi| p.input_span(lo, hi)), Some(&|name| derive_entry(p, lo, name)));
     match r? {
         ItemOut::Done(x) => {
             if let Some(reused) = reused {
                 assert!(reused.text == x.text && format!("{:?}{:?}", reused.toks, reused.origins) == format!("{:?}{:?}", x.toks, x.origins),
-                    "MAKEPAD_RUN_REUSE_VERIFY: reused derive expansion differs at {item_lo}");
+                    "RELAX_REUSE_VERIFY: reused derive expansion differs at {item_lo}");
                 return Ok(Some(reused));
             }
             if !x.text.contains("compile_error") { crate::parse_work::put(key, &x); }
@@ -1973,7 +2026,7 @@ pub fn attr_macro_at(p: &crate::parser::Parser, attrs: &[crate::ast::Attr]) -> O
             }
             i += 1;
         }
-        // `#[relax(O2)]` / `#[relax(O3)]` / `#[relax(O3, always)]` (makepad-relax): read by Relax
+        // `#[relax(O2)]` / `#[relax(O3)]` / `#[relax(O3, always)]` (relax-attr): read by Relax
         // itself from the item's attributes (relax_level), never expanded; other arguments run
         // the macro, whose compile_error! reports them
         if last == "relax" && (relax_level_toks(&text, toks, i, hi).is_some() || relax_keep_toks(&text, toks, i, hi)) {
@@ -2136,8 +2189,8 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
         crate::parse_work::key_tokens(p, &format!("hosted-attr-{}-{}", entry.unit, entry.fname), item_lo, item_hi, lo..hi, item_location(p, item_lo))
     } else { None };
     let reused = crate::parse_work::get(&key);
-    // MAKEPAD_RUN_REUSE_VERIFY=1: every reused expansion is recomputed and must be identical.
-    if reused.is_some() && std::env::var_os("MAKEPAD_RUN_REUSE_VERIFY").is_none() { return Ok(reused.unwrap()); }
+    // RELAX_REUSE_VERIFY=1: every reused expansion is recomputed and must be identical.
+    if reused.is_some() && std::env::var_os("RELAX_REUSE_VERIFY").is_none() { return Ok(reused.unwrap()); }
     let span_of = |a: u32, z: u32| p.input_span(a, z).unwrap_or(Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } });
     let stream = |text: &[u8], offset: u32| -> Result<TokenStream, (u32, String)> {
         let mut t = Vec::new();
@@ -2209,7 +2262,7 @@ pub fn expand_attr_macro(p: &crate::parser::Parser, attrs: &[crate::ast::Attr], 
             out.text.push('\n');
             if let Some(reused) = reused {
                 assert!(reused.text == out.text && format!("{:?}{:?}", reused.toks, reused.origins) == format!("{:?}{:?}", out.toks, out.origins),
-                    "MAKEPAD_RUN_REUSE_VERIFY: reused #[{}] expansion differs at {item_lo}", name);
+                    "RELAX_REUSE_VERIFY: reused #[{}] expansion differs at {item_lo}", name);
             }
             crate::parse_work::put(key, &out);
             return Ok(out);
@@ -2263,7 +2316,11 @@ pub fn pre_expand_derives(krate: &str, files: &[(&str, &[u8], &[Tok])], cfg: &Cf
                     }
                     let (fi, lo, hi) = sites[k];
                     let src = files[fi].1;
-                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
+                    let before = files[fi].2.partition_point(|t| t.lo < lo);
+                    let gap_lo = if before == 0 { 0 } else { files[fi].2[before - 1].hi.min(lo) };
+                    let span_of = |a: u32, z: u32| Span { file: 0, lo: a, hi: z, start: LineColumn { line: 1, column: 1 }, end: LineColumn { line: 1, column: 1 } };
+                    let (_, docs) = leading_docs(&src[gap_lo as usize..lo as usize], gap_lo, &span_of);
+                    out.push((k, expand_item(sess, krate, files[fi].0, &src[lo as usize..hi as usize], site_tokens(files[fi].2, lo, hi), docs, lo, crate::lexer::line_col_at(&lines[fi], src.len(), lo), Some(cfg), edition, None, None)));
                 }
                 out
             }));

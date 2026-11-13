@@ -21,10 +21,10 @@ for name in ('warm', 'reference'):
         source += '\n[workspace]\n'
     manifest.write_text(source)
 base = (tmp / 'warm' / relative).read_text()
-env = dict(os.environ, MAKEPAD_RUN_STD=str(pathlib.Path(__file__).resolve().parents[2] / 'std'),
-           MAKEPAD_RUN_CACHE_DIR=str(tmp / 'target'), MAKEPAD_RUN_CACHE='off', CARGO_NET_OFFLINE='true')
+env = dict(os.environ, RELAX_STD=str(pathlib.Path(__file__).resolve().parents[2] / 'std'),
+           RELAX_CACHE_DIR=str(tmp / 'target'), RELAX_CACHE='off', CARGO_NET_OFFLINE='true')
 # The unit-graph resolver must not fetch missing registry packages in this gate.
-env['MAKEPAD_RUN_OFFLINE'] = '1'
+env['RELAX_OFFLINE'] = '1'
 err = open(tmp / 'watch.stderr', 'w')
 child = subprocess.Popen([str(relax), 'check', '--watch', '--json', pkg], cwd=tmp / 'warm', env=env,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err, text=True, bufsize=1)

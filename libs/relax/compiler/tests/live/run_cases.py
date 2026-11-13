@@ -20,7 +20,7 @@ A case is a directory under tests/live/ (the files directly in tests/live/ are t
                               note=<text>: the edit's output must contain <text> (rest of the line)
   expect-v0.out (optional)   what the v0 second run prints, if not what a fresh run of v0 prints
   env (optional)             KEY=VALUE lines for both the live session and the oracle runs
-                              MAKEPAD_RUN_LIVE_STREAM=1 feeds single-file edits through apply_stream, 17 ms apart.
+                              RELAX_LIVE_STREAM=1 feeds single-file edits through apply_stream, 17 ms apart.
   xfail (optional)           the case is expected to FAIL today; its first line names the gap (G1..G10)
   timed (optional)           the case has a wall-time bound: it runs only when --only names it, on a quiet box
   forbid (optional)          substrings (one per line) that must not appear in the live session's output from the
@@ -97,7 +97,7 @@ def versions(d):
 
 def read_env(d):
     env = dict(os.environ)
-    env.setdefault("MAKEPAD_RUN_CACHE", "0")
+    env.setdefault("RELAX_CACHE", "0")
     p = os.path.join(d, "env")
     if os.path.exists(p):
         for line in open(p):

@@ -20,7 +20,7 @@ unsafe impl<P: PinSafePointer> PinSafePointer for Pin<P> {}
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 #[fundamental]
-#[cfg_attr(not(relax_check), lang = "pin")]
+#[lang = "pin"]
 pub struct Pin<P> {
     pointer: P,
 }
@@ -42,7 +42,7 @@ impl<P: Deref> Pin<P> {
     {
         Pin { pointer }
     }
-    #[cfg_attr(not(relax_check), lang = "new_unchecked")]
+    #[lang = "new_unchecked"]
     pub const unsafe fn new_unchecked(pointer: P) -> Pin<P> {
         Pin { pointer }
     }

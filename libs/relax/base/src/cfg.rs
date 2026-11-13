@@ -13,11 +13,11 @@ pub struct CfgSet {
 
 impl CfgSet {
     /// The target the program is read for: the machine Relax runs on (JIT target), or
-    /// MAKEPAD_RUN_CHECK_TARGET's.
+    /// RELAX_CHECK_TARGET's.
     pub fn host(sess: &std::sync::Arc<crate::Session>, features: &[String]) -> CfgSet {
-        // MAKEPAD_RUN_CHECK_TARGET=x86_64-pc-windows-gnu: type-check (`makepad check` / `makepad run
+        // RELAX_CHECK_TARGET=x86_64-pc-windows-gnu: type-check (`makepad check` / `makepad run
         // --check`, with cargo's `--target` of the same triple) another platform's code from here
-        // and MAKEPAD_RUN_CHECK_TARGET=aarch64-apple-darwin / x86_64-unknown-linux-gnu (`makepad host-gen`
+        // and RELAX_CHECK_TARGET=aarch64-apple-darwin / x86_64-unknown-linux-gnu (`makepad host-gen`
         // reads the provided crates as each target sees them)
         let mut cs = match sess.options.check_target {
             crate::options::CheckTarget::WindowsX64 => CfgSet::windows_x64(sess, features),
@@ -35,7 +35,7 @@ impl CfgSet {
         cs
     }
 
-    /// The machine Relax runs on, whatever MAKEPAD_RUN_CHECK_TARGET checks: code Relax itself runs
+    /// The machine Relax runs on, whatever RELAX_CHECK_TARGET checks: code Relax itself runs
     /// at compile time (the proc-macro world, pmhost.rs) is built for here. A world read as
     /// another target called that target's OS (Windows' FlsAlloc on Linux): every JIT derive
     /// failed, and `makepad host-gen` wrote a short Windows table.

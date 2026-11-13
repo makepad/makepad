@@ -1,4 +1,4 @@
-// alloc/src/boxed/convert.rs: Box<str> / Box<[T]> from a Cow (Scope's code_graph:
+// alloc/src/boxed/convert.rs: Box<str> / Box<[T]> from a Cow (an app's code_graph:
 // `written: String::from_utf8_lossy(..).into()` into a Box<str> field)
 use std::borrow::Cow;
 #[test]

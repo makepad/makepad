@@ -3,11 +3,11 @@
 test of its package, which records the lints' uses as it loads.
 
 usage: shared_std.py   (run from the workspace root; the JIT runs through `cargo run --profile host`;
-                        MAKEPAD_RUN_STD defaults to libs/relax/compiler/std)
+                        RELAX_STD defaults to libs/relax/compiler/std)
 
 The package's build script and its test call the same code, which goes through io::Error's
 bitpacked representation (std/io/error/repr_bitpacked.rs: `decode_repr` and the closures its
-callers pass it). Each process writes its cache trace (MAKEPAD_RUN_CACHE_TRACE):
+callers pass it). Each process writes its cache trace (RELAX_CACHE_TRACE):
   1. `makepad test`, cold: the build script runs first (a run's load: it keeps no front images and
      parses std itself) and records its code; then the test's load parses std again, recording lint
      uses as it goes;
@@ -35,7 +35,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent.parent
 JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", str(ROOT / "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
-os.environ.setdefault("MAKEPAD_RUN_STD", str(ROOT / "libs/relax/compiler/std"))
+os.environ.setdefault("RELAX_STD", str(ROOT / "libs/relax/compiler/std"))
 STD = {"std", "core", "alloc"}
 BROKE = ("internal compiler error", "outside the parsed tree", "side table: no entry")
 PROBE = '''pub fn probe() -> u32 {
@@ -65,8 +65,8 @@ def main():
     (pkg / "build.rs").write_text('include!("src/probe.rs");\nfn main() {\n    println!("cargo:rustc-env=PROBE_N={}", probe());\n}\n')
     (pkg / "src" / "lib.rs").write_text('include!("probe.rs");\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn same_as_the_build_script() {\n'
                                         '        assert_eq!(super::probe(), env!("PROBE_N").parse::<u32>().unwrap());\n    }\n}\n')
-    env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=str(tmp / "cache"), MAKEPAD_RUN_HOME=str(tmp / "home"), TMPDIR=str(tmp),
-               SANDBOX_MUTE="1", MAKEPAD_MUTE="1", MUSIC_MUTE="1")
+    env = dict(os.environ, RELAX_CACHE_DIR=str(tmp / "cache"), RELAX_HOME=str(tmp / "home"), TMPDIR=str(tmp),
+               MAKEPAD_MUTE="1")
     procs = []
     for step in ["cold", "after a build.rs edit"]:
         if step != "cold":
@@ -74,7 +74,7 @@ def main():
             b.write_text(b.read_text() + "// edited: the build script runs again\n")
         d = tmp / ("traces-%d" % len(procs))
         d.mkdir()
-        p = subprocess.run(JIT + ["test", "shared-std-probe"], cwd=pkg, env=dict(env, MAKEPAD_RUN_CACHE_TRACE=str(d / "{pid}.tsv")),
+        p = subprocess.run(JIT + ["test", "shared-std-probe"], cwd=pkg, env=dict(env, RELAX_CACHE_TRACE=str(d / "{pid}.tsv")),
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         if p.returncode != 0 or "test result: ok. 1 passed" not in p.stdout:
             fails.append("%s: the test did not pass (exit %d)" % (step, p.returncode))

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure compose_partial on 3,000 lines using the release makepad binary argument.
 
-Run from libs/relax/compiler with MAKEPAD_RUN_STD=$PWD/std MAKEPAD_RUN_CACHE=0. No build or download.
+Run from libs/relax/compiler with RELAX_STD=$PWD/std RELAX_CACHE=0. No build or download.
 """
 import os
 import pathlib
@@ -27,11 +27,11 @@ def main():
             # The first item changes; the final item has only its header so far.
             path.write_text(source.replace("    0\n", f"    {i}\n", 1).split("#[test]")[0] + "#[test]\nfn ru")
             versions.append(str(path))
-        env = dict(os.environ, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STREAM_TIMING="1")
+        env = dict(os.environ, RELAX_CACHE="0", RELAX_STREAM_TIMING="1")
         run = subprocess.run([sys.argv[1], "live", str(initial), *versions],
                              env=env, text=True, stdout=subprocess.PIPE,
                              stderr=subprocess.STDOUT, timeout=180)
-        costs = [float(x) for x in re.findall(r"makepad-run stream: compose_partial \d+ bytes ([\d.]+) ms", run.stdout)]
+        costs = [float(x) for x in re.findall(r"relax stream: compose_partial \d+ bytes ([\d.]+) ms", run.stdout)]
         if run.returncode or len(costs) != len(versions) or "rung=refuse" in run.stdout or "rung=restart" in run.stdout:
             sys.exit(run.stdout)
         ordered = sorted(costs)

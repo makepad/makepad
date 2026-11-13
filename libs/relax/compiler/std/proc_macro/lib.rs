@@ -302,37 +302,63 @@ fn push_i128(s: &mut String, n: i128) {
     }
 }
 
-/// `{:?}` of a char inside a string literal (rustc's Literal::string escaping): `\0 \t \r \n
-/// \\ \"`, other control chars as `\u{..}`.
-fn push_escaped(s: &mut String, c: char, quote: char) {
-    match c {
-        '\0' => s.push_str("\\0"),
-        '\t' => s.push_str("\\t"),
-        '\r' => s.push_str("\\r"),
-        '\n' => s.push_str("\\n"),
-        '\\' => s.push_str("\\\\"),
-        _ if c == quote => {
-            s.push('\\');
-            s.push(c);
+/// How Literal's constructors spell a literal's text: rustc's library/proc_macro/src/escape.rs.
+#[derive(Copy, Clone)]
+struct EscapeOptions {
+    /// Produce \'.
+    escape_single_quote: bool,
+    /// Produce \".
+    escape_double_quote: bool,
+    /// Produce \x escapes for non-ASCII, and use \x rather than \u for ASCII control characters.
+    escape_nonascii: bool,
+}
+
+fn escape_bytes(bytes: &[u8], opt: EscapeOptions) -> String {
+    let mut repr = String::new();
+    if opt.escape_nonascii {
+        for &byte in bytes {
+            escape_single_byte(byte, opt, &mut repr);
         }
-        _ if (c as u32) < 0x20 || c as u32 == 0x7f => {
-            s.push_str("\\u{");
-            let v = c as u32;
-            let hex = b"0123456789abcdef";
-            let mut started = false;
-            let mut sh = 28i32;
-            while sh >= 0 {
-                let d = (v >> sh as u32) & 15;
-                if d != 0 || started || sh == 0 {
-                    s.push(hex[d as usize] as char);
-                    started = true;
-                }
-                sh -= 4;
+    } else {
+        for chunk in bytes.utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                escape_single_char(ch, opt, &mut repr);
             }
-            s.push('}');
+            for &byte in chunk.invalid() {
+                escape_single_byte(byte, opt, &mut repr);
+            }
         }
-        _ => s.push(c),
     }
+    repr
+}
+
+fn escape_single_byte(byte: u8, opt: EscapeOptions, repr: &mut String) {
+    if byte == b'\0' {
+        repr.push_str("\\0");
+    } else if (byte == b'\'' && !opt.escape_single_quote) || (byte == b'"' && !opt.escape_double_quote) {
+        repr.push(byte as char);
+    } else {
+        // \t, \r, \n, \\, \', \", and \x## for non-ASCII and ASCII control characters
+        repr.extend(byte.escape_ascii().map(char::from));
+    }
+}
+
+fn escape_single_char(ch: char, opt: EscapeOptions, repr: &mut String) {
+    if (ch == '\'' && !opt.escape_single_quote) || (ch == '"' && !opt.escape_double_quote) {
+        repr.push(ch);
+    } else {
+        // \0, \t, \r, \n, \\, \', \", and \u{...} for non-printable and Grapheme_Extend characters
+        repr.extend(ch.escape_debug());
+    }
+}
+
+/// `open` `repr` `close`: a literal's text around its escaped contents (rustc's Literal::new and
+/// the bridge's Display of a LitKind).
+fn delimited(open: &str, repr: String, close: char) -> Literal {
+    let mut s = String::from(open);
+    s.push_str(&repr);
+    s.push(close);
+    Literal::from_text(s)
 }
 
 macro_rules! int_lits {
@@ -400,58 +426,25 @@ impl Literal {
         Literal::from_text(s)
     }
     pub fn string(string: &str) -> Literal {
-        let mut s = String::from("\"");
-        for c in string.chars() {
-            push_escaped(&mut s, c, '"');
-        }
-        s.push('"');
-        Literal::from_text(s)
+        let escape = EscapeOptions { escape_single_quote: false, escape_double_quote: true, escape_nonascii: false };
+        delimited("\"", escape_bytes(string.as_bytes(), escape), '"')
     }
     pub fn character(ch: char) -> Literal {
-        let mut s = String::from("'");
-        push_escaped(&mut s, ch, '\'');
-        s.push('\'');
-        Literal::from_text(s)
+        let escape = EscapeOptions { escape_single_quote: true, escape_double_quote: false, escape_nonascii: false };
+        delimited("'", escape_bytes(ch.encode_utf8(&mut [0u8; 4]).as_bytes(), escape), '\'')
     }
     pub fn byte_character(byte: u8) -> Literal {
-        let hex = b"0123456789abcdef";
-        let mut s = String::from("b'");
-        match byte {
-            b'\t' => s.push_str("\\t"),
-            b'\r' => s.push_str("\\r"),
-            b'\n' => s.push_str("\\n"),
-            b'\\' => s.push_str("\\\\"),
-            b'\'' => s.push_str("\\'"),
-            0x20..=0x7e => s.push(byte as char),
-            _ => {
-                s.push_str("\\x");
-                s.push(hex[(byte >> 4) as usize] as char);
-                s.push(hex[(byte & 15) as usize] as char);
-            }
-        }
-        s.push('\'');
-        Literal::from_text(s)
+        let escape = EscapeOptions { escape_single_quote: true, escape_double_quote: false, escape_nonascii: true };
+        delimited("b'", escape_bytes(&[byte], escape), '\'')
     }
     pub fn byte_string(bytes: &[u8]) -> Literal {
-        let hex = b"0123456789abcdef";
-        let mut s = String::from("b\"");
-        for &b in bytes {
-            match b {
-                b'\t' => s.push_str("\\t"),
-                b'\r' => s.push_str("\\r"),
-                b'\n' => s.push_str("\\n"),
-                b'\\' => s.push_str("\\\\"),
-                b'"' => s.push_str("\\\""),
-                0x20..=0x7e => s.push(b as char),
-                _ => {
-                    s.push_str("\\x");
-                    s.push(hex[(b >> 4) as usize] as char);
-                    s.push(hex[(b & 15) as usize] as char);
-                }
-            }
-        }
-        s.push('"');
-        Literal::from_text(s)
+        let escape = EscapeOptions { escape_single_quote: false, escape_double_quote: true, escape_nonascii: true };
+        delimited("b\"", escape_bytes(bytes, escape), '"')
+    }
+    /// C string literal (stable since 1.79).
+    pub fn c_string(string: &std::ffi::CStr) -> Literal {
+        let escape = EscapeOptions { escape_single_quote: false, escape_double_quote: true, escape_nonascii: false };
+        delimited("c\"", escape_bytes(string.to_bytes(), escape), '"')
     }
     pub fn span(&self) -> Span {
         self.span

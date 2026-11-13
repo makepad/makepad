@@ -949,7 +949,7 @@ pub fn foreign_blocks(prog: &Program, own: &[bool]) -> Vec<String> {
                                 }
                                 if t == b"kind" && crate::cfg::tok_str(sp, i + 2) == b"\"framework\"" {
                                     let target = &prog.session.options.target;
-                                    let apple = if target.is_empty() { cfg!(target_vendor = "apple") } else { target.contains("apple") };
+                                    let apple = target.contains("apple");
                                     if !apple {
                                         errors.push(prog.record_error(file, sp.tok(lo).lo, "typeck", "E0455: link kind `framework` is only supported on Apple targets".to_string()));
                                     }
@@ -1181,10 +1181,9 @@ pub fn attribute_safety(prog: &Program, d: DefId) -> Vec<String> {
         // check_attr.rs check_instruction_set: `arm::*` instruction sets are for the arm targets
         if from_source && name == b"instruction_set" && hi > first + 2 && crate::cfg::tok_str(p, first + 1) == b"(" && crate::cfg::tok_str(p, first + 2) == b"arm" {
             let target = &prog.session.options.target;
-            let arch = if target.is_empty() { std::env::consts::ARCH } else { target.split('-').next().unwrap_or("") };
+            let arch = target.split('-').next().unwrap_or("");
             if !arch.starts_with("arm") && arch != "thumbv7em" {
-                let triple = if target.is_empty() { format!("{}-unknown-{}-gnu", arch, std::env::consts::OS) } else { target.clone() };
-                errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("target `{}` does not support `#[instruction_set(arm::*)]`", triple)));
+                errors.push(prog.record_uncoded_error(def.file, pos, "typeck", format!("target `{}` does not support `#[instruction_set(arm::*)]`", target)));
             }
         }
         if from_source && name == b"export_name" && hi > first + 2 && crate::cfg::tok_str(p, first + 1) == b"=" {

@@ -4,7 +4,7 @@
 // held at the fork and never reached exec (makepad-app-aihub: GpuCache -> nvidia-smi with a
 // PR_SET_PDEATHSIG pre_exec, 2026-10-24). Every pre_exec closure here is a fresh instantiation
 // (not compiled before its fork) so that the child is where its code is first reached.
-// Lines starting with "| " must equal real std's (os_diff.sh / core_diff.sh). The file is kept
+// Lines starting with "| " must equal real std's (agree.sh). The file is kept
 // twice, byte-identical: here, for the std diff runners, and as tools/run/fixture/src/os_fork_busy.rs,
 // the `makepad run relax-fork-busy` program (fork_busy.rs, fork_busy.sh), so the fixture crate holds
 // no file from outside itself (tests copy it alone). fork_busy.sh fails when the two differ.
@@ -194,7 +194,8 @@ pub fn concurrent_spawns_while_tiers_build() {
 /// Between `pipe` and `fcntl(FD_CLOEXEC)` another thread's fork left this spawn's error pipe open in
 /// its child, and the spawn read that pipe until that child ended (a devhub test's hub held its
 /// lease table through it, and its tools waited for the run that never started, 2026-11-04). Real
-/// std's `pipe2` has no such moment on Linux; macOS has no pipe2, in real std either.
+/// std's `pipe2` has no such moment on Linux; macOS has no pipe2, in real std either, so there the count
+/// is a race in both std's and goes to stderr, not into the compared lines.
 #[test]
 fn a04_spawns_never_wait_for_each_others_children() {
     spawns_never_wait_for_each_others_children();
@@ -226,7 +227,12 @@ pub fn spawns_never_wait_for_each_others_children() {
             });
         }
     });
-    println!("| spawns that waited for another spawn's child: {}", waited.load(Ordering::Relaxed));
+    let waited = waited.load(Ordering::Relaxed);
+    if cfg!(target_vendor = "apple") {
+        eprintln!("os_fork_busy: spawns that waited for another spawn's child: {waited}");
+    } else {
+        println!("| spawns that waited for another spawn's child: {waited}");
+    }
 }
 
 trait Probe: Sync {
@@ -247,7 +253,7 @@ impl Probe for ParentCheck {
 /// code names): under the JIT the child ends before exec at the unbuilt fn, the spawn builds it
 /// and forks again -- the spawn succeeds as with real std, and never hangs.
 #[test]
-fn a02_pre_exec_through_a_vtable() {
+fn a05_pre_exec_through_a_vtable() {
     let o: &'static dyn Probe = Box::leak(Box::new(ParentCheck(std::env::args().count() as i32)));
     for round in 0..2 {
         let st = unsafe {

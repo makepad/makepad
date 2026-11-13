@@ -1,4 +1,4 @@
-//! MAKEPAD_RUN_PROFILE compilation census. No code/selection/publication decisions use it.
+//! RELAX_PROFILE compilation census. No code/selection/publication decisions use it.
 //! CPU is exclusive between nested records and phases, and includes only intervals
 //! completed before the present boundary. An open interval is not extrapolated.
 use std::cell::RefCell;
@@ -10,7 +10,7 @@ use relax_session::sync::Mutex;
 
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_PROFILE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_PROFILE").is_some())
 }
 /// Unit addresses may be recycled by proc-macro/CTFE hosts in the same process.
 pub fn new_unit() -> usize {

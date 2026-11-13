@@ -31,7 +31,7 @@ static ANY_MODULE_CRATE: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 
 fn module_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_MODULE_TRACE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_MODULE_TRACE").is_some())
 }
 
 fn note_module_crate(krate: u32) {
@@ -322,7 +322,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
     }
     marks.push(("collect", std::time::Instant::now()));
     if tr {
-        let mut line = format!("makepad-run module: {} crate(s) front:", new.len());
+        let mut line = format!("relax module: {} crate(s) front:", new.len());
         for w in marks.windows(2) {
             line.push_str(&format!(" {} {:.2}", w[1].0, (w[1].1 - w[0].1).as_secs_f64() * 1e3));
         }
@@ -376,7 +376,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
                         }
                         bodies.push(b);
                     }
-                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- makepad run bug, report it", u.prog.def_path(d))),
+                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- Relax bug, report it", u.prog.def_path(d))),
                 }
             }
         }
@@ -387,7 +387,7 @@ unsafe fn front(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox:
     }
     marks.push(("check", std::time::Instant::now()));
     if tr {
-        let mut line = format!("makepad-run module: {} front:", name);
+        let mut line = format!("relax module: {} front:", name);
         for w in marks.windows(2) {
             line.push_str(&format!(" {} {:.2}", w[1].0, (w[1].1 - w[0].1).as_secs_f64() * 1e3));
         }
@@ -439,7 +439,7 @@ fn root_fns(u: &Unit, defs: &[DefId]) -> Vec<DefId> {
     defs.iter().copied().filter(|d| matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) && u.tcx.fn_sig(&u.prog, *d).map_or(false, |s| s.n_generics == 0)).collect()
 }
 
-/// Loads a trusted module (MAKEPAD_RUN_MODULES_TRUSTED=1; on the owner thread): it runs as host code.
+/// Loads a trusted module (RELAX_MODULES_TRUSTED=1; on the owner thread): it runs as host code.
 unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: bool) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
     let (krate, root_file, defs) = front(up, name, path, deps, sandbox)?;
     note_module_crate(krate);
@@ -558,7 +558,7 @@ pub(crate) unsafe fn load_in_module(up: *mut Unit, parent: u32, name: &str, v: c
                             }
                         }
                     }
-                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- makepad run bug, report it", u.prog.def_path(d))),
+                    Err(_) => errs.push(format!("internal compiler error type-checking {} -- Relax bug, report it", u.prog.def_path(d))),
                 }
             }
         }
@@ -688,7 +688,7 @@ pub(crate) fn plain_result(u: &Unit, t: crate::types::TyId) -> bool {
         if depth > 16 { return false; }
         match u.tcx.tys.kind(t).clone() {
             TyKind::Adt(d, args, _) => {
-                !crate::sandbox::is_sandboxed_crate_key(&u.prog, &FnKey::Inst(d, Vec::new()))
+                !crate::sandbox::is_sandboxed_crate_key(&u.sandbox, &u.prog, &FnKey::Inst(d, Vec::new()))
                     && u.tcx.tys.list(args).iter().all(|a| host_types(u, *a, depth + 1))
                     && u.tcx.adts.get(&d).map_or(false, |a| a.variants.iter().enumerate().all(|(vi, v)| (0..v.fields.len()).all(|fi| host_types(u, u.tcx.field_ty(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), d, vi as u32, fi as u32, u.tcx.tys.list(args)), depth + 1))))
             }
@@ -853,7 +853,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let sess = &session;
     let runtime = &sess.runtime;
     let options = &sess.options;
-    // MAKEPAD_RUN_SANDBOX_NOCHECK=1 (tests of the memory confinement alone): no compile-time refusal
+    // RELAX_SANDBOX_NOCHECK=1 (tests of the memory confinement alone): no compile-time refusal
     let check = !options.sandbox_nocheck;
     let t0 = std::time::Instant::now();
     let (krate, root_file, mut defs) = front(up, name, path, deps, check)?;
@@ -868,7 +868,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     }
     let mem: u64 = runtime.module_mem_mb << 20;
     let fuel: i64 = runtime.module_fuel;
-    let arena = match crate::sandbox::new_arena(idx, name, mem, fuel) {
+    let arena = match crate::sandbox::new_arena(up, idx, name, mem, fuel) {
         Ok(a) => a,
         Err(e) => return Err(fail(up, &defs, vec![e])),
     };
@@ -877,7 +877,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let _ = std::fs::create_dir_all(&dir);
     let wpath = dir.join(format!("__sbw_{}_{}.rs", name, idx));
     if let Err(e) = std::fs::write(&wpath, &src) {
-        crate::sandbox::free_arena(&arena);
+        crate::sandbox::free_arena(&*up, &arena);
         return Err(fail(up, &defs, vec![format!("cannot write the module wrapper: {}", e)]));
     }
     let wname = format!("__sbw_{}_{}", name, idx);
@@ -887,13 +887,13 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let (wk, _, wdefs) = match front(up, &wname, &wpath.to_string_lossy(), &wdeps, false) {
         Ok(x) => x,
         Err(e) => {
-            crate::sandbox::free_arena(&arena);
+            crate::sandbox::free_arena(&*up, &arena);
             let mut e = e;
-            e.insert(0, format!("{}: the generated wrapper did not compile (makepad run bug, report it):", path));
+            e.insert(0, format!("{}: the generated wrapper did not compile (Relax bug, report it):", path));
             return Err(fail(up, &defs, e));
         }
     };
-    crate::sandbox::add_wrapper_crate(wk);
+    crate::sandbox::add_wrapper_crate(&*up, wk);
     let t_wrap = t1.elapsed();
     let t2 = std::time::Instant::now();
     let u = &mut *up;
@@ -901,13 +901,13 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let fns0 = u.fns.len();
     if let Err(e) = compile_all(up, roots, &|_, _| true, &|u, id| crate::reload::module_own(u, id)) {
         drop_defs(up, &wdefs);
-        crate::sandbox::free_arena(&arena);
+        crate::sandbox::free_arena(&*up, &arena);
         return Err(fail(up, &defs, e));
     }
-    // MAKEPAD_RUN_MODULE_TRACE=1: where a load's time goes
+    // RELAX_MODULE_TRACE=1: where a load's time goes
     if module_trace() {
         eprintln!(
-            "makepad-run module: {} loaded in {:.2} ms: front {:.2} (parse, resolve, typeck, check), wrapper {:.2}, compile {:.2} ({} slots)",
+            "relax module: {} loaded in {:.2} ms: front {:.2} (parse, resolve, typeck, check), wrapper {:.2}, compile {:.2} ({} slots)",
             name,
             t0.elapsed().as_secs_f64() * 1e3,
             t_front.as_secs_f64() * 1e3,
@@ -963,7 +963,7 @@ unsafe fn ensure_export(up: *mut Unit, idx: usize, m: &mut Module, name: &str) -
     let mut deps = vec![m.name.clone()];
     deps.extend(u.prog.crates[m.krate as usize].deps.iter().map(|(n, _)| u.prog.syms.str(*n).to_string()));
     let (wk, _, defs) = front(up, &wname, &path.to_string_lossy(), &deps, false).map_err(|e| e.join("\n"))?;
-    crate::sandbox::add_wrapper_crate(wk);
+    crate::sandbox::add_wrapper_crate(&*up, wk);
     let u = &mut *up;
     let roots = root_fns(u, &defs).into_iter().map(|d| u.fn_id(FnKey::Inst(d, Vec::new()))).collect();
     if let Err(e) = compile_all(up, roots, &|_, _| true, &|u, id| crate::reload::module_own(u, id)) {
@@ -1033,7 +1033,7 @@ pub extern "C" fn __relax_module_load_src(name: *const u8, nlen: usize, path: *c
         Ok(h) => h,
         Err(p) => {
             let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "panic".to_string());
-            set_error(format!("internal compiler error loading a module: {}{} -- makepad run bug, report it", msg, jit::take_ice_location()));
+            set_error(format!("internal compiler error loading a module: {}{} -- Relax bug, report it", msg, jit::take_ice_location()));
             0
         }
     }
@@ -1071,7 +1071,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
     }
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
-    // MAKEPAD_RUN_MODULES_TRUSTED=1: a trusted module (host code, no sandbox; diagnosis only)
+    // RELAX_MODULES_TRUSTED=1: a trusted module (host code, no sandbox; diagnosis only)
     let trusted = options.modules_trusted;
     let fix = |t: String| -> String {
         match &temp {
@@ -1187,7 +1187,7 @@ pub extern "C" fn __relax_module_unload(h: u64) {
                 m.alive = false;
                 m.gen += 1;
                 if let Some(a) = m.arena.take() {
-                    crate::sandbox::free_arena(&a);
+                    crate::sandbox::free_arena(unsafe { &*jit::current_unit() }, &a);
                 }
                 std::mem::take(&mut m.defs)
             }
@@ -1234,13 +1234,14 @@ pub extern "C" fn __relax_module_error(buf: *mut u8, cap: usize) -> usize {
     })
 }
 
-/// A wrapper enters module `idx`'s arena: 0, or 1 (the module was unloaded), or 2 (every
-/// per-thread segment of the module is in use).
+/// A wrapper enters module `idx`'s arena: 0, or 1 (the module was unloaded), or 2 (this thread
+/// cannot have a segment: it is past its thread-local destructors, or the segment cannot be
+/// mapped). A thread that finds every segment in use waits for one.
 pub extern "C" fn __relax_sb_enter(idx: u32) -> u32 {
     match crate::sandbox::enter_module(idx) {
         Ok(()) => 0,
         Err(crate::sandbox::EnterError::Unloaded) => 1,
-        Err(crate::sandbox::EnterError::Busy) => 2,
+        Err(crate::sandbox::EnterError::NoSegment) => 2,
     }
 }
 
@@ -1370,7 +1371,8 @@ pub fn guard_reset(m: GuardMark) {
 /// every version stays), image ro bytes, image rw bytes, arenas live, unloaded modules' windows
 /// (reserved, inaccessible, never reused)].
 pub extern "C" fn __relax_sb_stats(out: *mut [u64; 5]) {
-    let (ro, rw, n) = crate::sandbox::stats();
+    let up = jit::current_unit();
+    let (ro, rw, n) = if up.is_null() { (0, 0, 0) } else { crate::sandbox::stats(unsafe { &*up }) };
     unsafe { *out = [crate::sandbox::twin_code_bytes(), ro as u64, rw as u64, n as u64, crate::sandbox::dead_arenas() as u64] };
 }
 

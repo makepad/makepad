@@ -458,7 +458,7 @@ impl SearchGraph {
         lower_available_depth: LowerAvailableDepth,
         inspect: &mut crate::next_solver::inspect::ProofTreeBuilder,
     ) -> u32 {
-        // MAKEPAD_RUN_SOLVER_WORK_TRACE: each root goal with the goals its evaluation visited
+        // RELAX_SOLVER_WORK_TRACE: each root goal with the goals its evaluation visited
         if self.stack.is_empty() && crate::solver_work::enabled() {
             crate::solver_work::count(crate::solver_work::ROOT_GOALS);
             let g0 = crate::solver_work::get(crate::solver_work::SEARCH_GOALS);

@@ -608,7 +608,7 @@ fn a_tag_that_reaches_the_payload_keeps_the_option_and_its_copy_apart() {
     }
 }
 
-/// DFREE (Sandbox: glibc "double free or corruption (out)"): HashMap::entry inlined. The key K (40
+/// DFREE (an app: glibc "double free or corruption (out)"): HashMap::entry inlined. The key K (40
 /// bytes: String, bool, live-edit ext word) moves into the Entry result R (64 bytes) at offset 0 on
 /// the Vacant path and at offset 8 on the Occupied path (behind the -1 niche word). Joining K into R
 /// along the Vacant copy made the Occupied move a copy of one slot onto itself shifted by a word,

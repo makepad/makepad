@@ -14,7 +14,10 @@
 //! while it loads (a C constructor) runs before them. Until then each slot holds its stub's
 //! unbound trap: it writes the loader's error for that symbol to stderr as one line and ends
 //! the process with exit status 1 (`write`, then `exit`, whose handlers carry the line through
-//! the run's stderr tee), where a zero slot would jump to address 0.
+//! the run's stderr tee), where a zero slot would jump to address 0. A slot stays unbound in a
+//! program that links only some of the library's packages (a build script's run of its parent's
+//! library) when its symbol is no fn of that program: the C that calls it is a package's the
+//! program does not link, which a linker would have left out (relax issue 174).
 
 /// The table of slots, one pointer per stub.
 pub const SLOTS: &str = "__relax_native_callbacks";
@@ -60,7 +63,7 @@ pub fn object(triple: &str, names: &[String]) -> Result<Vec<u8>, String> {
 
 /// What a slot's trap writes when C code calls it before the loader bound it.
 fn unbound_message(name: &str) -> String {
-    format!("makepad-run: cannot load the --allow-c native library: its C code calls `{name}` while the library loads (a C constructor), before the program's fns are bound to it\n")
+    format!("relax: the --allow-c native library's C code calls `{name}`, which no fn of the program is bound to: a C constructor calls it while the library loads, or C of a package the program does not link runs\n")
 }
 
 /// The object's code: the stubs, one unbound trap per stub, and the traps' shared exit.

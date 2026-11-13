@@ -64,7 +64,7 @@ pub fn relayout_order(f: &mut Func) -> Vec<u32> {
     }
     // loop blocks: an equality of two values decides a search there (`find`, `position`, a key
     // compare per element): the hit is the rare way out of the scan
-    // (MAKEPAD_RUN_OPT=-searchlayout: off, A/B)
+    // (RELAX_OPT=-searchlayout: off, A/B)
     let eq_test = |b: usize| match f.blocks[b].term {
         Term::Branch(c, ..) => f.blocks[b].insts.iter().rev().find(|i| {
             let mut d = false;

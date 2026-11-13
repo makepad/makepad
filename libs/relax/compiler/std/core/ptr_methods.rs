@@ -6,7 +6,6 @@
 use crate::cmp::Ordering;
 use crate::intrinsics_mem as im;
 
-#[cfg(not(relax_check))]
 impl<T: crate::marker::PointeeSized> *const T {
     #[rustc_diagnostic_item = "ptr_const_is_null"]
     pub const fn is_null(self) -> bool {
@@ -52,6 +51,14 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn byte_offset(self, count: isize) -> *const T {
         self.wrapping_byte_add(count as usize)
     }
+    /// Distance in bytes to `origin`, which may point to another type; both into the same
+    /// allocation (core const_ptr.rs: the `u8` casts' offset_from).
+    pub const unsafe fn byte_offset_from<U: crate::marker::PointeeSized>(self, origin: *const U) -> isize {
+        unsafe { self.cast::<u8>().offset_from(origin.cast::<u8>()) }
+    }
+    pub const unsafe fn byte_offset_from_unsigned<U: crate::marker::PointeeSized>(self, origin: *const U) -> usize {
+        unsafe { self.cast::<u8>().offset_from_unsigned(origin.cast::<u8>()) }
+    }
     // (core: `self.cast::<u8>().wrapping_add(count).with_metadata_of(self)`: the address word moves
     // with its provenance, the metadata stays)
     pub const fn wrapping_byte_add(self, count: usize) -> *const T {
@@ -68,7 +75,6 @@ impl<T: crate::marker::PointeeSized> *const T {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T> *const T {
     pub const unsafe fn add(self, count: usize) -> *const T {
         im::ptr_add(self, count)
@@ -140,7 +146,6 @@ impl<T> *const T {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T> *const [T] {
     pub const fn len(self) -> usize {
         unsafe { im::slice_len(&*self) }
@@ -151,9 +156,17 @@ impl<T> *const [T] {
     pub const fn as_ptr(self) -> *const T {
         self as *const T
     }
+    /// A raw pointer to the underlying array, `None` when the length is not exactly `N` (stable
+    /// since 1.93).
+    pub const fn as_array<const N: usize>(self) -> Option<*const [T; N]> {
+        if self.len() == N {
+            Some(self.as_ptr() as *const [T; N])
+        } else {
+            None
+        }
+    }
 }
 
-#[cfg(not(relax_check))]
 impl<T: crate::marker::PointeeSized> *mut T {
     #[rustc_diagnostic_item = "ptr_is_null"]
     pub const fn is_null(self) -> bool {
@@ -212,6 +225,13 @@ impl<T: crate::marker::PointeeSized> *mut T {
     pub const fn byte_offset(self, count: isize) -> *mut T {
         self.wrapping_byte_add(count as usize)
     }
+    // (core mut_ptr.rs: the unsigned form takes a `*mut U`, the signed one a `*const U`)
+    pub const unsafe fn byte_offset_from<U: crate::marker::PointeeSized>(self, origin: *const U) -> isize {
+        unsafe { (self as *const T).byte_offset_from(origin) }
+    }
+    pub const unsafe fn byte_offset_from_unsigned<U: crate::marker::PointeeSized>(self, origin: *mut U) -> usize {
+        unsafe { (self as *const T).byte_offset_from_unsigned(origin as *const U) }
+    }
     // (core: `self.cast::<u8>().wrapping_add(count).with_metadata_of(self)`: the address word moves
     // with its provenance, the metadata stays)
     pub const fn wrapping_byte_add(self, count: usize) -> *mut T {
@@ -231,7 +251,6 @@ impl<T: crate::marker::PointeeSized> *mut T {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T> *mut T {
     pub const unsafe fn add(self, count: usize) -> *mut T {
         im::ptr_add_mut(self, count)
@@ -304,7 +323,6 @@ impl<T> *mut T {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T> *mut [T] {
     pub const fn len(self) -> usize {
         unsafe { im::slice_len(&*self) }
@@ -314,6 +332,15 @@ impl<T> *mut [T] {
     }
     pub const fn as_mut_ptr(self) -> *mut T {
         self as *mut T
+    }
+    /// A raw, mutable pointer to the underlying array, `None` when the length is not exactly `N`
+    /// (stable since 1.93).
+    pub const fn as_mut_array<const N: usize>(self) -> Option<*mut [T; N]> {
+        if self.len() == N {
+            Some(self.as_mut_ptr() as *mut [T; N])
+        } else {
+            None
+        }
     }
 }
 

@@ -20,8 +20,8 @@ use crate::slice::SliceIndex;
 /// RawVec's stored capacity: the high bit stays unused, including for ZSTs.
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-#[cfg_attr(all(not(relax_check), target_pointer_width = "64"), rustc_layout_scalar_valid_range_end(0x7fff_ffff_ffff_ffff))]
-#[cfg_attr(all(not(relax_check), target_pointer_width = "32"), rustc_layout_scalar_valid_range_end(0x7fff_ffff))]
+#[cfg_attr(target_pointer_width = "64", rustc_layout_scalar_valid_range_end(0x7fff_ffff_ffff_ffff))]
+#[cfg_attr(target_pointer_width = "32", rustc_layout_scalar_valid_range_end(0x7fff_ffff))]
 pub(crate) struct Cap(usize);
 
 impl Cap {
@@ -73,7 +73,7 @@ const fn capacity_overflow() -> ! {
 // Real alloc's RawVecInner: the element-independent half of a Vec's buffer (its growth, the
 // layout arithmetic and the allocator calls) is one body for every element type, the element's
 // layout passed as a value, so the `Vec<T>` instances keep only a capacity compare and a call
-// (P(DOOM)'s wasm had 694 `try_grow_to`, 88 `try_reserve`, 875 `do_reserve_and_handle` copies).
+// (a game's wasm had 694 `try_grow_to`, 88 `try_reserve`, 875 `do_reserve_and_handle` copies).
 
 /// `n` elements of `elem` (Layout::array).
 fn raw_array(elem: Layout, n: usize) -> Result<Layout, crate::collections::TryReserveError> {
@@ -143,6 +143,14 @@ impl<T> Vec<T> {
             v.grow_to(capacity);
         }
         v
+    }
+
+    /// rustc 1.100.0 (vec_from_fn): `[f(0), f(1), .., f(length - 1)]`
+    pub fn from_fn<F>(length: usize, f: F) -> Self
+    where
+        F: FnMut(usize) -> T,
+    {
+        (0..length).map(f).collect()
     }
 
     /// # Safety: `ptr` must be non-null and aligned, with `length` initialized elements.
@@ -907,7 +915,6 @@ where
     }
 }
 
-#[cfg(not(relax_check))]
 impl<'a, T: Clone, U> PartialEq<Vec<U>> for Cow<'a, [T]>
 where
     T: PartialEq<U>,
@@ -918,7 +925,6 @@ where
 }
 
 // alloc vec/partial_eq.rs: a borrowed or owned slice compares with slice references too
-#[cfg(not(relax_check))]
 impl<'a, 'b, T: Clone, U> PartialEq<&'b [U]> for Cow<'a, [T]>
 where
     T: PartialEq<U>,
@@ -928,12 +934,40 @@ where
     }
 }
 
-#[cfg(not(relax_check))]
 impl<'a, 'b, T: Clone, U> PartialEq<&'b mut [U]> for Cow<'a, [T]>
 where
     T: PartialEq<U>,
 {
     fn eq(&self, other: &&'b mut [U]) -> bool {
+        crate::slice::slice_eq(&**self, &**other)
+    }
+}
+
+// rustc 1.100.0 (partialeq_cow_for_vec_and_slice): a vector or slice reference compares with a borrowed or
+// owned slice
+impl<'a, T, U: Clone> PartialEq<Cow<'a, [U]>> for Vec<T>
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Cow<'a, [U]>) -> bool {
+        crate::slice::slice_eq(self.as_slice(), &**other)
+    }
+}
+
+impl<'a, 'b, T, U: Clone> PartialEq<Cow<'a, [U]>> for &'b [T]
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Cow<'a, [U]>) -> bool {
+        crate::slice::slice_eq(*self, &**other)
+    }
+}
+
+impl<'a, 'b, T, U: Clone> PartialEq<Cow<'a, [U]>> for &'b mut [T]
+where
+    T: PartialEq<U>,
+{
+    fn eq(&self, other: &Cow<'a, [U]>) -> bool {
         crate::slice::slice_eq(&**self, &**other)
     }
 }
@@ -983,7 +1017,6 @@ impl<T> BorrowMut<[T]> for Vec<T> {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T: Clone> ToOwned for [T] {
     type Owned = Vec<T>;
     fn to_owned(&self) -> Vec<T> {
@@ -1025,19 +1058,16 @@ impl<'a, T: Clone, const N: usize> From<&'a mut [T; N]> for Vec<T> {
         v
     }
 }
-#[cfg(not(relax_check))]
 impl<'a, T: Clone> From<Cow<'a, [T]>> for Vec<T> {
     fn from(s: Cow<'a, [T]>) -> Vec<T> {
         s.into_owned()
     }
 }
-#[cfg(not(relax_check))]
 impl<T> From<crate::boxed::Box<[T]>> for Vec<T> {
     fn from(s: crate::boxed::Box<[T]>) -> Vec<T> {
         s.into_vec()
     }
 }
-#[cfg(not(relax_check))]
 impl<T> From<Vec<T>> for crate::boxed::Box<[T]> {
     fn from(v: Vec<T>) -> crate::boxed::Box<[T]> {
         v.into_boxed_slice()
@@ -1048,26 +1078,29 @@ impl<'a> From<&'a str> for Vec<u8> {
         From::from(s.as_bytes())
     }
 }
-#[cfg(not(relax_check))]
 impl<'a, T: Clone> From<&'a Vec<T>> for Cow<'a, [T]> {
     fn from(v: &'a Vec<T>) -> Cow<'a, [T]> {
         Cow::Borrowed(v.as_slice())
     }
 }
-#[cfg(not(relax_check))]
+// library/alloc/src/vec/cow.rs
+impl<'a, T: Clone> FromIterator<T> for Cow<'a, [T]> {
+    fn from_iter<I: IntoIterator<Item = T>>(it: I) -> Cow<'a, [T]> {
+        Cow::Owned(FromIterator::from_iter(it))
+    }
+}
+
 impl<'a, T: Clone> From<Vec<T>> for Cow<'a, [T]> {
     fn from(v: Vec<T>) -> Cow<'a, [T]> {
         Cow::Owned(v)
     }
 }
-#[cfg(not(relax_check))]
 impl<'a, T: Clone> From<&'a [T]> for Cow<'a, [T]> {
     fn from(s: &'a [T]) -> Cow<'a, [T]> {
         Cow::Borrowed(s)
     }
 }
 /// library/alloc/src/vec/cow.rs (stable 1.77, cow_from_array_ref): `(&[]).into()` (Robrix)
-#[cfg(not(relax_check))]
 impl<'a, T: Clone, const N: usize> From<&'a [T; N]> for Cow<'a, [T]> {
     fn from(s: &'a [T; N]) -> Cow<'a, [T]> {
         Cow::Borrowed(s as &[_])
@@ -1103,16 +1136,10 @@ impl<T> Vec<T> {
 }
 
 /// Whether `I` is `slice::Iter<'_, T>` (real alloc reaches extend_from_slice for it through
-/// specialization; here by type identity, lifetimes erased). The rustc shim has no lifetime-free
-/// type id and always says no (the generic path is checked there).
+/// specialization; here by type identity, lifetimes erased).
 fn is_slice_iter<I, T>() -> bool {
-    #[cfg(not(relax_check))]
     {
         unsafe { im::type_id::<I>() == im::type_id::<crate::slice::Iter<'static, T>>() }
-    }
-    #[cfg(relax_check)]
-    {
-        false
     }
 }
 
@@ -1140,11 +1167,9 @@ impl<T> Extend<T> for Vec<T> {
             self.len += 1;
         }
     }
-    #[cfg(not(relax_check))]
     fn extend_one(&mut self, item: T) {
         self.push(item);
     }
-    #[cfg(not(relax_check))]
     fn extend_reserve(&mut self, additional: usize) {
         self.reserve(additional);
     }
@@ -1176,7 +1201,6 @@ impl<'a, T: Copy + 'a> Extend<&'a T> for Vec<T> {
             self.push(*x);
         }
     }
-    #[cfg(not(relax_check))]
     fn extend_one(&mut self, item: &'a T) {
         self.push(*item);
     }

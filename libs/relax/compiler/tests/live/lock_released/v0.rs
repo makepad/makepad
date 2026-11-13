@@ -2,7 +2,7 @@
 // A program thread keeps calling functions it never called before (each first call is a lazy
 // compile, which needs the unit lock) while an edit makes `heavy` reachable (~250 ms to build
 // on a pool node): no first call may wait more than 100 ms. (Before: the patch held the lock for its
-// whole build.) The f_i are big enough not to be inlined into `call`. Speculative compiles are off (MAKEPAD_RUN_SPEC=0) so each first call really compiles.
+// whole build.) The f_i are big enough not to be inlined into `call`. Speculative compiles are off (RELAX_SPEC=0) so each first call really compiles.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 

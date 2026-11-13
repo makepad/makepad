@@ -3,8 +3,8 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet bare-test-app 2>>"$ERR")
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet bare-test-app 2>>"$ERR")
 echo "$OUT"
 EXPECTED='macro: picked
 macro: by_path

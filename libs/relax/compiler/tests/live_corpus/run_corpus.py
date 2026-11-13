@@ -3,7 +3,7 @@
 
 usage: run_corpus.py --app <counter|todo|...> --tree <makepad tree> --makepad <loader> [--only A..B] [--out JSON]
 
-The app runs under the loader (a working tree: live) with a fresh session log (MAKEPAD_RUN_LIVE_LOG); each edit
+The app runs under the loader (a working tree: live) with a fresh session log (RELAX_LIVE_LOG); each edit
 is one full-file write, then the driver waits for its log record (an edit; after a restart also
 the restarted run's first present). At the end: % applied in place (patch + unchanged) per category
 and overall, p50/p95 save->applied of in-place edits, p50/p95 save->present of restarts, the
@@ -63,8 +63,8 @@ def main():
     orig = open(path).read()
     log = "/tmp/live-corpus-%s-%d.jsonl" % (a.app, os.getpid())
     out_txt = "/tmp/live-corpus-%s-%d.out" % (a.app, os.getpid())
-    env = dict(os.environ, MAKEPAD_RUN_LIVE_LOG=log, MAKEPAD_TRACE="startup", MAKEPAD_RUN_TRACE="startup", SANDBOX_MUTE="1")
-    env.setdefault("MAKEPAD_RUN_STD", os.path.join(a.tree, "libs/relax/compiler/std"))
+    env = dict(os.environ, RELAX_LIVE_LOG=log, MAKEPAD_TRACE="startup", RELAX_TRACE="startup", MAKEPAD_MUTE="1")
+    env.setdefault("RELAX_STD", os.path.join(a.tree, "libs/relax/compiler/std"))
     cmd = [a.makepad, "run", c.PKG] + list(getattr(c, "ARGS", []))
     outf = open(out_txt, "w")
     proc = subprocess.Popen(cmd, cwd=a.tree, env=env, stdout=outf, stderr=subprocess.STDOUT, start_new_session=True)

@@ -13,8 +13,8 @@ ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 dir=$(mktemp -d "${TMPDIR:-/tmp}/inspect_probe.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"
-MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-    MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_RUN_PANIC_PARK=600 \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+    RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache" RELAX_PANIC_PARK=600 \
     PROBE_TRIGGER="$dir/trigger" PROBE_SECS=300 \
     $J run relax-provided-fixture --bin relax-inspect-probe > "$dir/run.log" 2>&1 &
 pid=$!

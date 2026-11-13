@@ -8,7 +8,7 @@ use relax_session::sync::Mutex;
 
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_WARM_STRICT").as_deref() == Ok("1"))
+    *ON.get_or_init(|| std::env::var("RELAX_WARM_STRICT").as_deref() == Ok("1"))
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -187,7 +187,7 @@ impl Drop for Scope {
         }
         if s.presented && s.valid == Some(true) {
             let (_, name, reason) = describe(&s, &event);
-            eprintln!("makepad: warm miss: {} ({}; {})", name, reason, event.phase);
+            eprintln!("relax: warm miss: {} ({}; {})", name, reason, event.phase);
         } else if let Some(pending) = s.events.get_mut(index) {
             pending.cpu = event.cpu;
         }
@@ -251,7 +251,7 @@ fn report(present: bool) {
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     for (name, reason, phases, _) in &rows {
         eprintln!(
-            "makepad: warm miss: {} ({}; {})",
+            "relax: warm miss: {} ({}; {})",
             name,
             reason,
             phases.iter().copied().collect::<Vec<_>>().join(", ")
@@ -259,7 +259,7 @@ fn report(present: bool) {
     }
     if present {
         eprintln!(
-            "makepad: warm misses {}, CPU {:.3} ms",
+            "relax: warm misses {}, CPU {:.3} ms",
             rows.len(),
             rows.iter().map(|r| r.3).sum::<u64>() as f64 / 1e6
         );

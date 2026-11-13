@@ -28,7 +28,7 @@ in-repo inputs; no UI, GPU or window. The micro-kernels live in `../bench_rt`.
 
 With the commercial checkout at `apps/commercial`, `run.py` also runs the workloads of `apps/commercial/relax_tests/src/bench.rs`
 (package `relax-commercial-tests`, binary `relax-rwbench-commercial`, this crate's `src/harness.rs` included by path), after the
-OSS ones and in the same rounds and tables: `sandbox_sim` (Sandbox's game sim over box3d f64: a crate stack and a capsule-mover
+OSS ones and in the same rounds and tables: `sandbox_sim` (a game sim over box3d f64: a crate stack and a capsule-mover
 scene, 300 ticks each, plus a vehicle lap), `level_walk` (nav grid build and seeded walker tours), `model_build` (a props program
 and a character preset built to GLB through the model-script registry and libs/model). `RW_COMMERCIAL=0` leaves them out;
 `NATIVE_COMMERCIAL` names a prebuilt rustc binary of it. The same package's default binary is diff_fast's commercial package program set.
@@ -58,7 +58,7 @@ builds on the same makepad revision and fixed input tree.
 Process failures or checksum mismatches make the runner exit nonzero.
 
 Each name's table ends with the stuck count: the runs that ended with hot fns below O3 and nothing pending
-(the JIT's `makepad-run: O3 stuck:` line, `inspect why-tier stuck`). It should be 0.
+(the JIT's `relax: O3 stuck:` line, `inspect why-tier stuck`). It should be 0.
 
 ## Output
 
@@ -81,7 +81,7 @@ the binaries in alternating order (base, new / new, base / ...). Per name it pri
 of the steady ms with the [min..max] spread, the Relax/rustc ratio (median of the per-round ratios, so drift hits both
 sides) with its spread, time-to-steady, O3 coverage and whether all checksums agree. With several names a final A/B
 table gives new/base per workload (median of per-round ratios, spread) and the geomean. The first name is the base; the
-same binary under two names measures the noise floor. `RW_MS` (4000) is the per-process iteration budget, `MAKEPAD_RUN_STD`
+same binary under two names measures the noise floor. `RW_MS` (4000) is the per-process iteration budget, `RELAX_STD`
 defaults to `../std`, `RUN_PREFIX` defaults to `nice -n 10` (`none` on Windows). Timing belongs on the quiet machines
 through the bench queue:
 

@@ -6,8 +6,8 @@ H=$(cd "$(dirname "$0")" && pwd)
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 cp -R "$H/." "$W/"
-unset MAKEPAD_RUN_STD MAKEPAD_RUN_CACHE MAKEPAD_RUN_CACHE_DIR
-export MAKEPAD_RUN_VERBOSE=1
+unset RELAX_STD RELAX_CACHE RELAX_CACHE_DIR
+export RELAX_VERBOSE=1
 # "<selected> <stored clean>" of one run
 counts() {
   local out

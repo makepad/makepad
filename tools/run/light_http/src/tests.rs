@@ -28,7 +28,7 @@ fn content_length_body() {
     assert_eq!((r.status, body.as_slice(), r.header("etag")), (200, &b"hello"[..], Some("x")));
     let sent = String::from_utf8(t.join().unwrap()).unwrap();
     assert!(sent.starts_with("GET /a?b=c HTTP/1.1\r\n") && sent.contains(&format!("Host: 127.0.0.1:{port}\r\n")), "{sent}");
-    assert!(sent.contains("Git-Protocol: version=2\r\n") && sent.contains("User-Agent: makepad-run/0.1\r\n"));
+    assert!(sent.contains("Git-Protocol: version=2\r\n") && sent.contains("User-Agent: relax/0.1\r\n"));
 }
 
 #[test]
@@ -56,4 +56,5 @@ fn close_delimited_body_redirect_and_cap() {
 fn refuses_plain_http_off_loopback() {
     assert!(fetch(&Request::get("http://example.com/")).is_err());
     assert!(fetch(&Request::get("https://user@example.com/")).is_err());
+    assert!(fetch(&Request { headers: &[("X-Note", "a\x0bb")], ..Request::get("http://127.0.0.1:1/") }).is_err_and(|e| e.starts_with("invalid header")));
 }

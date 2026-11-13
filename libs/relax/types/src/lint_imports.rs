@@ -326,8 +326,54 @@ fn macro_closure(prog: &Program, names: &mut HashSet<String>) {
 ///
 /// Only when the program recorded its import uses (`import_uses_recorded`): a check whose load
 /// did not (a test's run of its own binary, a run) has no unused import to tell.
-pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach: &crate::lint_dead::Reach, traits: &HashSet<DefId>) {
-    if !lint::enabled() || !prog.import_uses_recorded() { return; }
+/// How `check` makes a crate's reports. A report the recorded import uses decide (an import or an
+/// `extern crate` judged unused) is a candidate when it says something: a warning, an error, a met
+/// expectation. Those uses are the ones the check recorded, plus the stored verdicts' of the
+/// bodies it replayed (compiler/src/check_bodies.rs); a stored verdict that lacks a use would
+/// make a false report, so a crate with replayed bodies reports none on their word alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Judge {
+    /// Every body of the crate was checked here: its reports.
+    Report,
+    /// Bodies of the crate were replayed: with a candidate, nothing is reported (the replayed
+    /// bodies are checked, then `Recheck`); without one, its reports.
+    Defer,
+    /// The replayed bodies checked after all: its reports.
+    Recheck,
+}
+
+/// A crate's reports, made once its imports are judged.
+struct Reports<'p> {
+    prog: &'p Program,
+    judge: Judge,
+    pending: Vec<(DefId, Vec<Attr>, &'static Lint, u32, u32, String)>,
+    /// "path:line:col: message" of each candidate (`Judge`), when judged
+    candidates: Vec<String>,
+}
+
+impl Reports<'_> {
+    /// A report; `by_uses`: the recorded import uses decided it.
+    fn emit(&mut self, def: DefId, attrs: Vec<Attr>, lint: &'static Lint, file: u32, pos: u32, msg: String, by_uses: bool) {
+        if by_uses && self.judge != Judge::Report {
+            let spec = lint::level_at(self.prog, def, &attrs, lint, file, pos);
+            if spec.level != lint::Level::Allow || spec.expect.is_some() {
+                let (l, c) = self.prog.files[file as usize].line_col(pos);
+                self.candidates.push(format!("{}:{}:{}: {}", self.prog.file_paths[file as usize], l, c, msg));
+            }
+        }
+        self.pending.push((def, attrs, lint, file, pos, msg));
+    }
+}
+
+/// The crate's import lints, made as `judge` says; the candidates judged (none with
+/// `Judge::Report`). `Judge::Defer` with candidates reports nothing.
+pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach: &crate::lint_dead::Reach, traits: &HashSet<DefId>, judge: Judge) -> Vec<String> {
+    if !lint::enabled() || !prog.import_uses_recorded() { return Vec::new(); }
+    // the lint's own lookups (a trait's methods, a redundant import's other binding) are no uses
+    // of what they find (rustc's check_unused records none): recorded, a crate judged again
+    // (`Judge::Recheck`) would find the imports this judgement looked at used
+    let _quiet = crate::program::QuietLookups::begin();
+    let mut out = Reports { prog, judge, pending: Vec::new(), candidates: Vec::new() };
     let mut scopes: Vec<Scope> = Vec::new();
     for &m in &c.mods {
         let md = &prog.mods[m as usize];
@@ -393,7 +439,7 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
         if let Some(r) = reached.get(&sc.module) { written[si].extend(r.iter().cloned()); }
     }
     for sc in &scopes {
-        unused_extern_crates(prog, sc);
+        unused_extern_crates(prog, sc, &mut out);
     }
     // the macro names written anywhere in each crate
     let mut crate_written: HashMap<u32, HashSet<String>> = HashMap::new();
@@ -402,7 +448,7 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
         crate_written.entry(prog.mods[sc.module as usize].krate).or_default().extend(written[si].iter().cloned());
     }
     for sc in &scopes {
-        unused_macro_use(prog, sc, &crate_written);
+        unused_macro_use(prog, sc, &crate_written, &mut out);
     }
     for (si, sc) in scopes.iter().enumerate() {
         let names = &written[si];
@@ -418,6 +464,7 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
             leaves(prog, sc.file, sc.ast, &u.tree, start, item.hi, &mut Vec::new(), &mut ls);
             let ctx = Ctx { prog, sc, names, traits };
             let mut unused: Vec<(u32, u32)> = Vec::new();
+            let mut by_uses = false;
             // `pub use` that leaves the crate cannot be judged (a glob of nothing exports nothing)
             let exported = matches!(item.vis, Vis::Pub) && reach.defs.contains(&sc.def);
             // a glob imported again in the scope (a `pub` one overwrites a private one) is not judged
@@ -449,6 +496,7 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
                 }
                 if !ctx.leaf_used(l) {
                     unused.push(l.span);
+                    by_uses = true;
                 }
             }
             let _ = tcx;
@@ -459,7 +507,7 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
                         let attrs = sc.ast.list(item.attrs).to_vec();
                         let name = l.name.as_deref().unwrap_or("");
                         let _ = pf;
-                        lint::emit_in(prog, sc.def, &attrs, &REDUNDANT_IMPORTS, sc.file, l.span.0, &format!("the item `{}` is imported redundantly", name));
+                        out.emit(sc.def, attrs, &REDUNDANT_IMPORTS, sc.file, l.span.0, format!("the item `{}` is imported redundantly", name), false);
                     }
                 }
             }
@@ -474,15 +522,20 @@ pub fn check(prog: &Program, tcx: &Tcx, c: &crate::lint_dead::CrateItems, reach:
             };
             let msg = format!("unused import{}: {}", if snippets.len() == 1 { "" } else { "s" }, list);
             let attrs = sc.ast.list(item.attrs).to_vec();
-            lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, unused[0].0, &msg);
+            out.emit(sc.def, attrs, &UNUSED_IMPORTS, sc.file, unused[0].0, msg, by_uses);
         }
     }
+    if judge == Judge::Defer && !out.candidates.is_empty() { return out.candidates; }
+    for (def, attrs, lint, file, pos, msg) in out.pending {
+        lint::emit_in(prog, def, &attrs, lint, file, pos, &msg);
+    }
+    out.candidates
 }
 
 /// `unused_extern_crates` (check_unused.rs report_unused_extern_crate_items, the fully unused
 /// case): an `extern crate` item nothing resolved through, neither its module binding nor (a
 /// renamed one at the crate root) its extern prelude entry.
-fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
+fn unused_extern_crates(prog: &Program, sc: &Scope<'_>, out: &mut Reports<'_>) {
     if sc.block || sc.module == u32::MAX { return; }
     let krate = prog.mods[sc.module as usize].krate;
     let ast = sc.ast;
@@ -502,7 +555,7 @@ fn unused_extern_crates(prog: &Program, sc: &Scope<'_>) {
         let used = prog.import_binding_used(sc.module, bind) || (rename.is_some() && root && prog.extern_prelude_used(krate, bind));
         if used { continue; }
         let attrs = ast.list(item.attrs).to_vec();
-        lint::emit_in(prog, sc.def, &attrs, &UNUSED_EXTERN_CRATES, sc.file, item.lo, "unused extern crate");
+        out.emit(sc.def, attrs, &UNUSED_EXTERN_CRATES, sc.file, item.lo, "unused extern crate".to_string(), true);
     }
 }
 
@@ -580,7 +633,7 @@ pub const UNUSED_MACRO_USE_MSG: &str = "unused `#[macro_use]` import";
 /// `#[macro_use] extern crate dep;` (also `#[macro_use(a, b)]`): unused when none of the macros it
 /// brings into the macro_use prelude is invoked by name in the crate (an approximation of
 /// rustc's per-resolution record: a macro reached only by path counts as a use here too).
-fn unused_macro_use(prog: &Program, sc: &Scope<'_>, written: &HashMap<u32, HashSet<String>>) {
+fn unused_macro_use(prog: &Program, sc: &Scope<'_>, written: &HashMap<u32, HashSet<String>>, out: &mut Reports<'_>) {
     if sc.block || sc.module == u32::MAX { return; }
     let krate = prog.mods[sc.module as usize].krate;
     let Some(used) = written.get(&krate) else { return };
@@ -609,11 +662,11 @@ fn unused_macro_use(prog: &Program, sc: &Scope<'_>, written: &HashMap<u32, HashS
                 let mut all: Vec<String> = prog.macros.defs.iter().filter(|(_, v)| v.iter().any(|d| d.exported && d.krate == target)).map(|(k, _)| k.clone()).collect();
                 if matches!(target.as_str(), "core" | "std" | "alloc") { all.extend(crate::program::BUILTIN_MACROS.iter().map(|s| s.to_string())); }
                 if !all.iter().any(|n| used.contains(n)) {
-                    lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, p.tok(lo).lo, UNUSED_MACRO_USE_MSG);
+                    out.emit(sc.def, attrs.clone(), &UNUSED_IMPORTS, sc.file, p.tok(lo).lo, UNUSED_MACRO_USE_MSG.to_string(), false);
                 }
             } else {
                 for (n, pos) in names {
-                    if !used.contains(&n) { lint::emit_in(prog, sc.def, &attrs, &UNUSED_IMPORTS, sc.file, pos, UNUSED_MACRO_USE_MSG); }
+                    if !used.contains(&n) { out.emit(sc.def, attrs.clone(), &UNUSED_IMPORTS, sc.file, pos, UNUSED_MACRO_USE_MSG.to_string(), false); }
                 }
             }
         }

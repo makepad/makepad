@@ -1,4 +1,4 @@
-//! File demand census under MAKEPAD_RUN_PROFILE. This measures compilation for a call,
+//! File demand census under RELAX_PROFILE. This measures compilation for a call,
 //! not instruction coverage: inlining and calls to already-installed ahead code
 //! do not enter the lazy stub. Body queries keep those files out of the strict
 //! declaration-only bucket. All state is diagnostic; no load decisions use it.

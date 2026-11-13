@@ -1,6 +1,6 @@
 // An async fn moves one field out of a by-value parameter (`req.layers.into_iter()`) after an
 // await that sits on a path not taken; at the return only the fields still in place drop
-// (rustc's drop elaboration of a coroutine's saved locals). fab-slice live_trace's CPU trace
+// (rustc's drop elaboration of a coroutine's saved locals). A slicer's live CPU trace
 // double-freed `request.layers` this way.
 use std::cell::RefCell;
 use std::future::Future;

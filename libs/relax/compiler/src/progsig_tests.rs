@@ -11,7 +11,7 @@ use std::os::unix::process::ExitStatusExt;
 use crate::jit::{FnKey, Unit};
 use crate::owner::{self, Class};
 
-const CHILD: &str = "MAKEPAD_RUN_PROGSIG_CHILD";
+const CHILD: &str = "RELAX_PROGSIG_CHILD";
 #[cfg(target_os = "linux")]
 const SIGUSR2: i32 = 12;
 #[cfg(target_vendor = "apple")]
@@ -226,14 +226,14 @@ fn child(test: &str, hook: &str) -> std::process::Output {
     std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("progsig_tests::{test}"), "--nocapture", "--test-threads=1"])
         .env(CHILD, test)
-        .env("MAKEPAD_RUN_TEST_SIGNAL_IN_COMPILE", hook)
+        .env("RELAX_TEST_SIGNAL_IN_COMPILE", hook)
         .output()
         .expect("the signal test child must run")
 }
 
 fn setup() -> (Box<Unit>, u32) {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-progsig-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("lib.rs");

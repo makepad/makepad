@@ -2,7 +2,7 @@
 //! `a` at its uses, so `a` must hold its value there too -- not only `w`. The loop split parks `a`
 //! (live through the loop, never read in it: only the chain reads it) in a copy around a loop that
 //! needs the registers while `w` stays live past it; `v` is read inside the loop: the load must not
-//! use `a`'s register, which the loop's values take while `a` is parked. (Sandbox race x64 segfault
+//! use `a`'s register, which the loop's values take while `a` is parked. (a game x64 segfault
 //! at 0x2948 in Renderer::draw_scene_inner: `self` parked around a set_uniform loop, the loop counter
 //! in its register.)
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]

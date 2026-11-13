@@ -393,7 +393,7 @@ fn in_window(t: u64) -> bool {
     fp != 0 && t >= fp && t < fp + WINDOW_NS
 }
 
-/// The lines are `--verbose` (MAKEPAD_RUN_VERBOSE=1) diagnostics; the counters always run.
+/// The lines are `--verbose` (RELAX_VERBOSE=1) diagnostics; the counters always run.
 fn verbose() -> bool {
     crate::run::VERBOSE.load(Relaxed)
 }
@@ -402,23 +402,23 @@ fn may_log() -> bool {
     verbose() && LOGGED.fetch_add(1, Relaxed) < if owner_long_all() { 20 * LOG_MAX } else { LOG_MAX }
 }
 
-/// MAKEPAD_RUN_OWNER_LONG=1: every long owner request of the run is logged, not only the first
+/// RELAX_OWNER_LONG=1: every long owner request of the run is logged, not only the first
 /// windows' (diagnostics of what the UI's requests queued behind)
 fn owner_long_all() -> bool {
     static ALL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ALL.get_or_init(|| std::env::var_os("MAKEPAD_RUN_OWNER_LONG").is_some())
+    *ALL.get_or_init(|| std::env::var_os("RELAX_OWNER_LONG").is_some())
 }
 
 fn ms(ns: u64) -> f64 {
     ns as f64 / 1e6
 }
 
-/// MAKEPAD_RUN_POSTFRAME_LOG=<path>: every main-thread lazy compile after the first present, one
+/// RELAX_POSTFRAME_LOG=<path>: every main-thread lazy compile after the first present, one
 /// line each as it ends (appended): ms after the present, wall ms, how, typeck ahead, owner queue,
 /// front, back, finish, in-flight wait (ms), the slot's key (its instance; the fn name when no
 /// front ran). A diagnostic: the key is made on the owner thread in the front's request.
 pub(crate) fn log_on() -> bool {
-    LOG.get_or_init(|| std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").and_then(|p| crate::zone_alloc::kept_with(|| std::fs::OpenOptions::new().create(true).append(true).open(p).ok().map(std::sync::Mutex::new)))).is_some()
+    LOG.get_or_init(|| std::env::var_os("RELAX_POSTFRAME_LOG").and_then(|p| crate::zone_alloc::kept_with(|| std::fs::OpenOptions::new().create(true).append(true).open(p).ok().map(std::sync::Mutex::new)))).is_some()
 }
 static LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
 /// the key of the main thread's compile the owner ran a front for (log_on only)
@@ -475,7 +475,7 @@ pub(crate) fn main_compile(name: &str, r: &MainCompile) {
             c => format!("{} for `{}` from {}", crate::owner::CLASS_NAMES[(c - 1) as usize], crate::os::thread::name(r.behind_from), r.behind_site.map_or("?".to_string(), |l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line()))),
         };
         eprintln!(
-            "makepad-run main stall: `{}` {:.1} ms at +{:.2} s after the first present (owner queue {:.1} ms, longest behind {} {:.1} ms; typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; at its start {} compile jobs ran, queued: speculative {}, O2 {}, O3 {})",
+            "relax main stall: `{}` {:.1} ms at +{:.2} s after the first present (owner queue {:.1} ms, longest behind {} {:.1} ms; typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; at its start {} compile jobs ran, queued: speculative {}, O2 {}, O3 {})",
             name,
             ms(dt),
             (r.start - fp) as f64 / 1e9,
@@ -505,7 +505,7 @@ pub(crate) fn before_present_line(main_ns: u64) -> String {
     let how: Vec<String> = crate::jit::MAIN_HOW_NAMES.iter().enumerate().filter(|(i, _)| BEFORE_HOW[*i].load(Relaxed) > 0).map(|(i, n)| format!("{} {}", n, BEFORE_HOW[i].load(Relaxed))).collect();
     let busy = |i: usize| crate::owner::BUSY_NS[i].load(Relaxed) as f64 / 1e6;
     format!(
-        "makepad-run before the first present: main {:.0} ms after its start, {} main-thread compiles ({}) {:.0} ms wall: typeck ahead {:.0}, owner queue {:.0}, front {:.0}, back {:.0}, finish {:.0}, in-flight {:.0} ms; cpu front {:.0}, opt {:.0}, codegen {:.0} ms; main's owner requests {} waited {:.0} ms (queue {:.0}, wake {:.0}); owner busy: job {:.0}, publish {:.0}, program {:.0} ms",
+        "relax before the first present: main {:.0} ms after its start, {} main-thread compiles ({}) {:.0} ms wall: typeck ahead {:.0}, owner queue {:.0}, front {:.0}, back {:.0}, finish {:.0}, in-flight {:.0} ms; cpu front {:.0}, opt {:.0}, codegen {:.0} ms; main's owner requests {} waited {:.0} ms (queue {:.0}, wake {:.0}); owner busy: job {:.0}, publish {:.0}, program {:.0} ms",
         main_ns as f64 / 1e6, BEFORE[0].load(Relaxed), how.join(", "), b(1), b(2), b(3), b(4), b(5), b(6), b(7), b(8), b(9), b(10),
         m(0), m(1) as f64 / 1e6, m(2) as f64 / 1e6, m(3) as f64 / 1e6, busy(0), busy(1), busy(2)
     ) + &{
@@ -544,11 +544,11 @@ pub(crate) fn owner_served(class: usize, site: &std::panic::Location<'_>, from: 
             SERVED_BLOCKING[class].fetch_add(dt, Relaxed);
         }
     }
-    // MAKEPAD_RUN_OWNER_LONG=1: every long request of the run, not only the first windows'
+    // RELAX_OWNER_LONG=1: every long request of the run, not only the first windows'
     let all = owner_long_all();
     if dt >= STALL_LOG_NS && (all || t0 < fp + 3 * WINDOW_NS) && may_log() {
         eprintln!(
-            "makepad-run owner long: {} request of `{}` from {}:{} served {:.1} ms at +{:.2} s ({} program-thread requests queued at its end)",
+            "relax owner long: {} request of `{}` from {}:{} served {:.1} ms at +{:.2} s ({} program-thread requests queued at its end)",
             crate::owner::CLASS_NAMES[class],
             crate::os::thread::name(from),
             site.file().rsplit('/').next().unwrap_or(""),
@@ -586,7 +586,7 @@ pub fn in_first_frames() -> bool {
 /// The startup image's window: until the first present, and then until the frame after it is
 /// presented (at most IMAGE_WINDOW_NS). The slots installed in it are the next start's image
 /// (jit.rs ORDER_PRESENT_LEN): the first frames after the present call hundreds of fns no earlier
-/// frame did (Sandbox: ~270 back to back right at the present, 50-90 ms of cached links on the
+/// frame did (a large app: ~270 back to back right at the present, 50-90 ms of cached links on the
 /// UI thread, enough for the JIT indicator), and those are prelinked at the next start instead.
 pub fn image_window_open() -> bool {
     let fp = present_ns();
@@ -620,7 +620,7 @@ pub(crate) extern "C" fn relax_frame_done() {
     }
     let last = LAST_FRAME.swap(now, Relaxed);
     if fp != 0 && last >= fp && FRAMES_AFTER_PRESENT.fetch_add(1, Relaxed) == 0 && crate::run::VERBOSE.load(Relaxed) {
-        eprintln!("makepad-run startup image window closed at +{:.0} ms after the first present ({} startup slots)", ms(now - fp), crate::jit::ORDER_PRESENT_LEN.load(Relaxed));
+        eprintln!("relax startup image window closed at +{:.0} ms after the first present ({} startup slots)", ms(now - fp), crate::jit::ORDER_PRESENT_LEN.load(Relaxed));
     }
     episode_end();
     let compiled = MAIN_COMPILE_NS.load(Relaxed);
@@ -639,7 +639,7 @@ pub(crate) extern "C" fn relax_frame_done() {
     }
     if gap >= FRAME_GAP_NS && now < fp + 3 * WINDOW_NS && may_log() {
         eprintln!(
-            "makepad-run frame gap: {:.0} ms ending at +{:.2} s after the first present ({:.0} ms of it main-thread lazy compiles)",
+            "relax frame gap: {:.0} ms ending at +{:.2} s after the first present ({:.0} ms of it main-thread lazy compiles)",
             ms(gap),
             (now - fp) as f64 / 1e9,
             ms(compiled.saturating_sub(compiled_before))
@@ -680,7 +680,7 @@ pub(crate) fn ahead_over() {
 
 fn ahead_line() -> String {
     let ah = |i: usize| crate::jit::AHEAD_STATS[i].load(Relaxed).saturating_sub(crate::jit::AHEAD_AT_PRESENT[i].load(Relaxed));
-    format!("makepad-run post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends, {} late: their build had begun), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms; {}",
+    format!("relax post-present ahead since the present: {} bodies checked ({} taken by builds, {} dropped untaken at burst ends, {} late: their build had begun), cpu off the UI thread {:.0} ms, on it {:.0} ms; {} lowered ({} taken), cpu {:.0} ms; {}",
         ah(0), ah(1), crate::jit::AHEAD_DROPPED.load(Relaxed), crate::jit::AHEAD_LATE.load(Relaxed), ms(ah(4)), ms(ah(3)), ah(5), ah(6), ms(ah(7)), crate::jit::bmemo::line())
 }
 
@@ -689,7 +689,7 @@ pub fn summary() -> String {
     let c = |i: usize| COMPILES[i].load(Relaxed);
     let g = |i: usize| GAPS[i].load(Relaxed);
     format!(
-        "{}\nmakepad-run post-present {:.0} s: main thread stalled {:.1} ms in {} lazy compiles ({} of {:.0} ms or more; owner queue {:.1}, typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; by how: {}), {} owner requests waited {:.1} ms in all; real-time threads stalled {:.1} ms in {} lazy compiles; {} frames, {} gaps of {:.0} ms or more ({:.0} ms, longest {:.0} ms); owner served ms {} (with program-thread requests queued at the end: {})",
+        "{}\nrelax post-present {:.0} s: main thread stalled {:.1} ms in {} lazy compiles ({} of {:.0} ms or more; owner queue {:.1}, typeck ahead {:.1}, front {:.1}, back {:.1}, finish {:.1}, in-flight wait {:.1} ms; by how: {}), {} owner requests waited {:.1} ms in all; real-time threads stalled {:.1} ms in {} lazy compiles; {} frames, {} gaps of {:.0} ms or more ({:.0} ms, longest {:.0} ms); owner served ms {} (with program-thread requests queued at the end: {})",
         ahead_line(),
         WINDOW_NS as f64 / 1e9,
         ms(c(1)),

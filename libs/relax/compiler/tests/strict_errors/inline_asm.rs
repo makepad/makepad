@@ -1,4 +1,4 @@
-//~ msg: inline assembly (asm!, global_asm!, naked_asm!) in crate `inline_asm` is blocked by `--no-asm` (MAKEPAD_RUN_NO_ASM=1)
+//~ msg: inline assembly (asm!, global_asm!, naked_asm!) in crate `inline_asm` is blocked by `--no-asm` (RELAX_NO_ASM=1)
 //~ flags: --no-asm
 fn read() -> u64 {
     let v: u64;

@@ -118,8 +118,10 @@ impl Niche {
         }
     }
 
+    /// A niche with invalid values left; a 16-byte one (u128 / i128 scalars and tags) too: its
+    /// tag is read and written as its two words (lower.rs emit_load_disc / emit_store_disc).
     fn some(self) -> Option<Niche> {
-        if self.available() > 0 && self.bytes <= 8 {
+        if self.available() > 0 && self.bytes <= 16 {
             Some(self)
         } else {
             None
@@ -176,7 +178,7 @@ impl LTable {
         use std::sync::atomic::{AtomicU32, Ordering};
         let i = t.0 as usize;
         let ci = i >> LCHUNK_BITS;
-        assert!(ci < LMAX_CHUNKS, "makepad: layout table full");
+        assert!(ci < LMAX_CHUNKS, "relax: layout table full");
         let mut c = self.chunks[ci].load(Ordering::Acquire);
         if c.is_null() {
             let fresh: Box<[AtomicU32]> = (0..LCHUNK).map(|_| AtomicU32::new(0)).collect();
@@ -476,7 +478,7 @@ impl Layouts {
         self.struct_layout(lcx, tcx, &storage.fields, Repr { pack: 0, align: 0, reorder: true }, kind)
     }
 
-    /// Memory report (MAKEPAD_RUN_MEM_REPORT): exact bytes of the slot tables (live and retired) and of
+    /// Memory report (RELAX_MEM_REPORT): exact bytes of the slot tables (live and retired) and of
     /// the shared layout entries with their vectors.
     pub fn mem_lines(&self) -> Vec<(String, u64)> {
         use std::sync::atomic::Ordering;
@@ -528,7 +530,7 @@ impl Layouts {
             at = Some(pool.next[i as usize]).filter(|n| *n != u32::MAX);
         }
         let i = self.ents.push(e) as u32;
-        assert!(i < SLOT_IDX, "makepad: layout entries full");
+        assert!(i < SLOT_IDX, "relax: layout entries full");
         let first = pool.head.insert(h, i);
         pool.next.push(first.unwrap_or(u32::MAX));
         i + 1
@@ -648,6 +650,7 @@ impl Layouts {
                     tcx.dcx.report(crate::next_solver::fulfill::ObligationCause { body_id: *d, span: lcx.prog.files[def.file as usize].ast.item(def.item).lo },
                         format!("E0391: cycle detected when computing layout of `{}`", lcx.prog.def_path(*d)));
                 }
+                crate::cycle::note_stand_in();
                 return Box::leak(Box::new(plain(0, 1, None)));
             }
         };
@@ -927,7 +930,7 @@ impl Layouts {
                     // its sized instances may be reordered differently, so say so loudly
                     if kind == Kind::AlwaysSized && repr.reorder && fts.len() > 1 && self.is_unsized(lcx, tcx, fts[fts.len() - 1]) {
                         let name = lcx.prog.def_path(d);
-                        eprintln!("makepad: layout of `{}` with an unsized last field, but its definition requires that field sized (rustc: E0277); declare the parameter `?Sized`", name);
+                        eprintln!("relax: layout of `{}` with an unsized last field, but its definition requires that field sized (rustc: E0277); declare the parameter `?Sized`", name);
                     }
                     let mut l = self.struct_layout(lcx, tcx, &fts, repr, kind);
                     if adt.is_simd() {
@@ -944,7 +947,11 @@ impl Layouts {
                         // `rustc_layout_scalar_valid_range_*`: the range of the struct's scalar
                         if let Some(first) = l.leaves.as_ref().and_then(|v| v.first().copied()) {
                             if first.off == 0 && matches!(first.mem, Mem::Int(..)) {
+                                // a 128-bit integer is two word leaves but one 16-byte scalar, which
+                                // rustc's niche covers whole (Option<NonZero<u128>>: None is 0 in both words)
+                                let wide = matches!(fts.as_slice(), [f] if matches!(tcx.tys.kind(*f), TyKind::Int(p) if tcx.tys.int_info(*p).0 == 16));
                                 let bytes = match first.mem {
+                                    _ if wide => 16,
                                     Mem::Int(b, _) => b as u32,
                                     _ => 8,
                                 };
@@ -1384,6 +1391,7 @@ impl Layouts {
                     tcx.dcx.report(crate::next_solver::fulfill::ObligationCause { body_id: *d, span: lcx.prog.files[def.file as usize].ast.item(def.item).lo },
                         format!("E0391: cycle detected when computing layout of `{}`", lcx.prog.def_path(*d)));
                 }
+                crate::cycle::note_stand_in();
                 return false;
             }
         };

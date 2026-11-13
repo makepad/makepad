@@ -7,12 +7,12 @@ pub fn wall_ns() -> u64 {
     T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
 }
 
-// Why this thread is working (type-checking bodies, parsing lazily): MAKEPAD_RUN_TYCK_STATS /
-// MAKEPAD_RUN_LAZY_STATS attribute their numbers by it.
+// Why this thread is working (type-checking bodies, parsing lazily): RELAX_TYCK_STATS /
+// RELAX_LAZY_STATS attribute their numbers by it.
 thread_local! { pub static TYS_ORIGIN: std::cell::Cell<&'static str> = const { std::cell::Cell::new("?") }; }
 
 /// Names why this thread type-checks bodies until the guard drops (the previous name is
-/// restored): MAKEPAD_RUN_TYCK_STATS / MAKEPAD_RUN_LAZY_STATS attribute checks and lazy parses by it.
+/// restored): RELAX_TYCK_STATS / RELAX_LAZY_STATS attribute checks and lazy parses by it.
 pub fn origin(o: &'static str) -> OriginGuard {
     OriginGuard(TYS_ORIGIN.with(|c| c.replace(o)))
 }
@@ -50,7 +50,7 @@ static PROCESS_START: std::sync::OnceLock<(std::time::SystemTime, std::time::Ins
 /// Relax's std sets this on that exec) -- the same session going on, so every clock
 /// counts from the first process's start (epoch seconds), and first-frame / main times include
 /// both boots. Taken once at entry and removed, so no child launch inherits it.
-pub const EXEC_ORIGIN_ENV: &str = "MAKEPAD_RUN_EXEC_ORIGIN_EPOCH";
+pub const EXEC_ORIGIN_ENV: &str = "RELAX_EXEC_ORIGIN_EPOCH";
 
 pub fn mark_process_start() {
     PROCESS_START.get_or_init(|| {

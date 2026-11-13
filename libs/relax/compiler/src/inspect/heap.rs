@@ -271,7 +271,13 @@ mod imp {
 // ------------------------------------------------------------------ tracking state
 
 pub(crate) const DEPTH: usize = 24;
-const MAX_STACKS: usize = 1 << 16;
+/// Stack ids: the live table's record keeps one in its bits above 40 (24 bits).
+const MAX_STACKS: usize = 1 << 24;
+/// Stacks are allocated in chunks of this many as ids are handed out: a cold compile of a large
+/// app makes 100 k+ distinct stacks (a fixed 64 k table dropped 340 k samples of one run).
+const STACK_CHUNK: usize = 1 << 12;
+/// Lifetime mode keeps its per-stack classes for the first ids only (2.4 KB each).
+const LIFE_SITES: usize = 1 << 16;
 /// A sample's weight bits in the live table's record (the stack id is above bit 40).
 const WEIGHT: u64 = (1 << 39) - 1;
 const AFTER_MARK: u64 = 1 << 39;
@@ -294,8 +300,72 @@ struct Stack {
     peak_bytes: AtomicI64,
 }
 
+/// The stacks by id, in chunks allocated as ids are handed out (`intern`, under the index lock):
+/// a chunk is published before any id in it, so a reader holding an id below `used` finds it.
+struct Stacks {
+    chunks: Box<[std::sync::atomic::AtomicPtr<Stack>]>,
+}
+
+impl Stacks {
+    fn new() -> Stacks {
+        Stacks { chunks: (0..MAX_STACKS / STACK_CHUNK).map(|_| std::sync::atomic::AtomicPtr::new(std::ptr::null_mut())).collect() }
+    }
+    fn get(&self, id: usize) -> Option<&Stack> {
+        let c = self.chunks.get(id / STACK_CHUNK)?.load(Acquire);
+        (!c.is_null()).then(|| unsafe { &*c.add(id % STACK_CHUNK) })
+    }
+    /// Makes room for `id` (the index lock held): false when the id space is full.
+    fn reserve(&self, id: usize) -> bool {
+        let Some(slot) = self.chunks.get(id / STACK_CHUNK) else { return false };
+        if slot.load(Relaxed).is_null() {
+            // the tracker's own chunk is not a sample, and it outlives the compiler arena
+            let was = IN_HOST_SAMPLE.with(|b| b.replace(true));
+            let chunk: Box<[Stack]> = crate::zone_alloc::kept_with(|| (0..STACK_CHUNK).map(|_| mk_stack()).collect());
+            IN_HOST_SAMPLE.with(|b| b.set(was));
+            slot.store(Box::into_raw(chunk).cast::<Stack>(), Release);
+        }
+        true
+    }
+    /// The stacks with ids below `n` (all handed out).
+    fn upto(&self, n: usize) -> impl Iterator<Item = &Stack> {
+        (0..n).filter_map(move |i| self.get(i))
+    }
+}
+
+impl std::ops::Index<usize> for Stacks {
+    type Output = Stack;
+    fn index(&self, id: usize) -> &Stack {
+        self.get(id).expect("a stack id below `used` has its chunk")
+    }
+}
+
+impl Drop for Stacks {
+    fn drop(&mut self) {
+        for c in self.chunks.iter_mut() {
+            let p = *c.get_mut();
+            if !p.is_null() {
+                drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(p, STACK_CHUNK)) });
+            }
+        }
+    }
+}
+
+fn mk_stack() -> Stack {
+    Stack {
+        frames: [const { AtomicU64::new(0) }; DEPTH],
+        n: AtomicU8::new(0),
+        tag: AtomicU8::new(0),
+        live_bytes: AtomicI64::new(0),
+        live_blocks: AtomicI64::new(0),
+        alloc_bytes: AtomicI64::new(0),
+        alloc_blocks: AtomicI64::new(0),
+        freed_bytes: AtomicI64::new(0),
+        peak_bytes: AtomicI64::new(0),
+    }
+}
+
 struct Tables {
-    stacks: Box<[Stack]>,
+    stacks: Stacks,
     used: AtomicUsize,
     /// stack hash -> id (taken only when a sample is recorded)
     index: Mutex<std::collections::HashMap<u64, u32>>,
@@ -442,7 +512,7 @@ fn life_bucket(size: u64) -> usize {
 /// Lifetime mode: classifies a tracked block's free (`fp`/`ra`: the freeing JIT frame) against
 /// the activations that allocated it, and counts it on its stack.
 fn life_free(t: &Tables, id: usize, rec: (&[u64; LIFE_FRAMES], u64, u64), fp: u64, ra: u64) {
-    let (Some(sites), Some(st)) = (t.sites.as_ref(), t.stacks.get(id)) else { return };
+    let (Some(sl), Some(st)) = (t.sites.as_ref().and_then(|s| s.get(id)), t.stacks.get(id)) else { return };
     let (fps, size, frame) = rec;
     let n = (st.n.load(Relaxed) as usize).saturating_sub(1).min(LIFE_FRAMES);
     // the freeing thread's JIT activations (frame record, return address into the caller)
@@ -480,7 +550,6 @@ fn life_free(t: &Tables, id: usize, rec: (&[u64; LIFE_FRAMES], u64, u64), fp: u6
     if class == usize::MAX {
         class = if same_ui_frame { LIFE_FRAMES } else { LIFE_FRAMES + 1 };
     }
-    let sl = &sites[id];
     sl.class[class].fetch_add(1, Relaxed);
     if same_body {
         sl.same_body.fetch_add(1, Relaxed);
@@ -570,7 +639,7 @@ fn intern(tr: &Tracker, t: &Tables, frames: &[u64; DEPTH], n: u8, tag: u8) -> Op
         return Some(id);
     }
     let id = t.used.load(Relaxed);
-    if id >= MAX_STACKS {
+    if !t.stacks.reserve(id) {
         tr.dropped.fetch_add(1, Relaxed);
         return None;
     }
@@ -850,7 +919,7 @@ fn host_alloc(p: *mut u8, size: usize) {
     IN_HOST_SAMPLE.with(|b| b.set(true));
     let mut frames = [0u64; DEPTH];
     let n = capture_host(&mut frames);
-    // frames kept per host stack (MAKEPAD_RUN_HEAP_DEPTH): a whole cold start at the full depth
+    // frames kept per host stack (RELAX_HEAP_DEPTH): a whole cold start at the full depth
     // fills the stack table before its end, and later samples go uncounted
     let k = host_depth();
     let n = if (n as usize) > k {
@@ -865,7 +934,7 @@ fn host_alloc(p: *mut u8, size: usize) {
 
 fn host_depth() -> usize {
     static D: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *D.get_or_init(|| std::env::var("MAKEPAD_RUN_HEAP_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEPTH).clamp(1, DEPTH))
+    *D.get_or_init(|| std::env::var("RELAX_HEAP_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(DEPTH).clamp(1, DEPTH))
 }
 
 /// Leaves this thread's allocations out of the host heap's samples (inspect's own threads).
@@ -892,19 +961,8 @@ fn new_tables_life(rate: u64, life: Option<u64>) -> *mut Tables {
 }
 
 fn new_tables_inner(rate: u64, life: Option<u64>) -> *mut Tables {
-    let mk_stack = || Stack {
-        frames: [const { AtomicU64::new(0) }; DEPTH],
-        n: AtomicU8::new(0),
-        tag: AtomicU8::new(0),
-        live_bytes: AtomicI64::new(0),
-        live_blocks: AtomicI64::new(0),
-        alloc_bytes: AtomicI64::new(0),
-        alloc_blocks: AtomicI64::new(0),
-        freed_bytes: AtomicI64::new(0),
-        peak_bytes: AtomicI64::new(0),
-    };
     Box::into_raw(Box::new(Tables {
-        stacks: (0..MAX_STACKS).map(|_| mk_stack()).collect(),
+        stacks: Stacks::new(),
         used: AtomicUsize::new(0),
         index: Mutex::new(std::collections::HashMap::new()),
         keys: (0..LIVE_SLOTS).map(|_| AtomicU64::new(0)).collect(),
@@ -914,7 +972,7 @@ fn new_tables_inner(rate: u64, life: Option<u64>) -> *mut Tables {
         started_ms: now_ms(),
         life: life.map(|_| (0..LIVE_SLOTS).map(|_| LifeRec { fps: [const { AtomicU64::new(0) }; LIFE_FRAMES], size: AtomicU64::new(0), frame: AtomicU64::new(0) }).collect()),
         sites: life.map(|_| {
-            (0..MAX_STACKS)
+            (0..LIFE_SITES)
                 .map(|_| SiteLife {
                     class: [const { AtomicU64::new(0) }; LIFE_CLASSES],
                     hist: [const { [const { AtomicU32::new(0) }; LIFE_BUCKETS] }; LIFE_CLASSES],
@@ -961,7 +1019,7 @@ fn start_life(host: bool, rate: u64, life: Option<u64>) -> Result<(), &'static s
     #[cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_vendor = "apple", target_arch = "aarch64")))]
     {
         if REAL[0].load(Relaxed) == 0 {
-            return Err("the program has not called the allocator through makepad run yet: ask again in a second (it hooks the allocator on its first call)");
+            return Err("the program has not called the allocator through Relax yet: ask again in a second (it hooks the allocator on its first call)");
         }
         PROGRAM.on.store(false, Release);
         PROGRAM.tables.store(new_tables_life(rate, life), Release);
@@ -1010,7 +1068,7 @@ pub fn expire() {
 
 /// Live bytes over all tracked stacks (estimated): (program, host), for `memory`.
 pub fn live_totals() -> (Option<i64>, Option<i64>) {
-    let sum = |tr: &Tracker| tr.tables().map(|t| t.stacks[..t.used.load(Acquire)].iter().map(|s| s.live_bytes.load(Relaxed)).sum());
+    let sum = |tr: &Tracker| tr.tables().map(|t| t.stacks.upto(t.used.load(Acquire)).map(|s| s.live_bytes.load(Relaxed)).sum());
     (sum(&PROGRAM), sum(&HOST))
 }
 
@@ -1132,7 +1190,7 @@ fn tag_name(t: &Tables, id: usize) -> &'static str {
 pub fn cmd_heap(req: &Req, out: &mut Out) {
     let host = req.get("host") == Some("1");
     let tr = if host { &HOST } else { &PROGRAM };
-    let what = if host { "makepad run's own heap (compiler + compiled-in crates)" } else { "program heap" };
+    let what = if host { "Relax's own heap (compiler + compiled-in crates)" } else { "program heap" };
     let pre = if host { "R" } else { "H" };
     match req.pos.first().map(String::as_str).unwrap_or("status") {
         "start" => {
@@ -1155,7 +1213,7 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
         }
         "status" => {
             for (name, t) in [("program", &PROGRAM), ("host", &HOST)] {
-                let live: i64 = t.tables().map_or(0, |x| x.stacks[..x.used.load(Acquire)].iter().map(|s| s.live_bytes.load(Relaxed)).sum());
+                let live: i64 = t.tables().map_or(0, |x| x.stacks.upto(x.used.load(Acquire)).map(|s| s.live_bytes.load(Relaxed)).sum());
                 out.line(&format!(
                     "{{\"heap\":\"{}\",\"tracking\":{},\"rate_bytes\":{},\"since_ms\":{},\"stacks\":{},\"live_mb_est\":{},\"dropped_samples\":{}}}",
                     name,
@@ -1176,10 +1234,14 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             let by = req.get("by").unwrap_or("live");
             let n = req.num("n", 15) as usize;
             let depth = req.num("depth", 5) as usize;
-            let all = match req.get("zone") {
+            let mut all = match req.get("zone") {
                 Some(z) => zone_rows(t, z),
                 None => rows(t),
             };
+            // `tag=<category>`: the stacks of one compiler category (what `group=tag` sums)
+            if let Some(tn) = req.get("tag") {
+                all.retain(|x| tag_name(t, x.0) == tn);
+            }
             let key = |x: &Row| match by {
                 "alloc" => x.3,
                 "freed" | "churn" => x.5,
@@ -1274,7 +1336,7 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             d.sort_by(|x, y| y.2.cmp(&x.2).then(x.0.cmp(&y.0)));
             let (tb, tn): (i64, i64) = d.iter().fold((0, 0), |s, x| (s.0 + x.1, s.1 + x.2));
             let per = |v: i64| if frames > 0 { format!("{:.1}", v as f64 / frames as f64) } else { "-".into() };
-            out.always(&format!(
+            out.line(&format!(
                 "{} allocations ({:.1} KB) in {:.1} s, {} frames: {} allocs/frame, {:.0} allocs/s (estimates from 1-in-{}-bytes sampling)",
                 tn, tb as f64 / 1024.0, took, frames, per(tn), tn as f64 / took.max(0.01), t.rate
             ));
@@ -1302,12 +1364,12 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
                 out.line(&format!("+{} more sites", d.len() - n));
             }
             if frames == 0 {
-                out.always("note: no UI frames in the window (not a makepad UI app, or nothing redrew): per-second rates only");
+                out.line("note: no UI frames in the window (not a makepad UI app, or nothing redrew): per-second rates only");
             }
             for p in partial {
-                out.always(&format!("note: {}", p));
+                out.line(&format!("note: {}", p));
             }
-            out.always("more: path H<n>  heap snap a; heap diff a now (leak candidates)  memory (fragmentation: malloc in use vs held free)");
+            out.line("more: path H<n>  heap snap a; heap diff a now (leak candidates)  memory (fragmentation: malloc in use vs held free)");
         }
         "life" => {
             // lifetime mode's answer (STACKALLOC.MEASURE): per allocating stack, how its blocks died
@@ -1318,7 +1380,8 @@ pub fn cmd_heap(req: &Req, out: &mut Out) {
             let sites = t.sites.as_ref().unwrap();
             let used = t.used.load(Acquire);
             let frames = super::timeline::FRAMES.load(Relaxed).wrapping_sub(t.start_frame).min(t.frame_limit).max(1);
-            let mut ids: Vec<usize> = (0..used).filter(|&i| t.stacks[i].alloc_blocks.load(Relaxed) > 0).collect();
+            // (the stacks past the first LIFE_SITES ids have no lifetime classes)
+            let mut ids: Vec<usize> = (0..used.min(sites.len())).filter(|&i| t.stacks[i].alloc_blocks.load(Relaxed) > 0).collect();
             ids.sort_by_key(|&i| (std::cmp::Reverse(t.stacks[i].alloc_blocks.load(Relaxed)), i));
             let n = (req.num("n", 400) as usize).min(ids.len());
             let mut partial = Vec::new();

@@ -1,9 +1,9 @@
-//! The MIR-building harness behind `MAKEPAD_RUN_MIR_BUILD_ALL=1 makepad check <pkg>`: build the MIR of every body
+//! The MIR-building harness behind `RELAX_MIR_BUILD_ALL=1 makepad check <pkg>`: build the MIR of every body
 //! owner (fns, consts, statics, anonymous consts, closures and async blocks), run `mir::validate` on each result
 //! and print a per-reason histogram of the bodies that could not be built or do not validate.
 //!
-//! `MAKEPAD_RUN_MIR_BUILD_ALL=std` includes the standard library crates, `MAKEPAD_RUN_MIR_BUILD_ONLY=<substr>`
-//! restricts the owners to those whose path contains the substring, and `MAKEPAD_RUN_MIR_BUILD_DUMP=<substr>`
+//! `RELAX_MIR_BUILD_ALL=std` includes the standard library crates, `RELAX_MIR_BUILD_ONLY=<substr>`
+//! restricts the owners to those whose path contains the substring, and `RELAX_MIR_BUILD_DUMP=<substr>`
 //! prints the pretty MIR (`mir::pretty`) of each built body whose path contains the substring.
 use super::{build_mir, BuildCx, BuildRoot, UnsupportedReason};
 use crate::ast::{ExprId, ExprKind, ItemKind as ExprKindItem};
@@ -119,8 +119,8 @@ fn reason_key(reason: &UnsupportedReason) -> String {
 /// Build and validate every body. Returns the number of bodies that panicked or did not validate (the gate);
 /// unbuilt bodies are counted per reason and are not failures.
 pub fn build_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
-    let only = std::env::var("MAKEPAD_RUN_MIR_BUILD_ONLY").ok();
-    let dump: Vec<String> = std::env::var("MAKEPAD_RUN_MIR_BUILD_DUMP").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
+    let only = std::env::var("RELAX_MIR_BUILD_ONLY").ok();
+    let dump: Vec<String> = std::env::var("RELAX_MIR_BUILD_DUMP").map(|s| s.split(',').map(str::to_string).collect()).unwrap_or_default();
     let std_crates: Vec<u32> = ["core", "alloc", "std"].iter().filter_map(|n| prog.crates.iter().position(|c| prog.syms.str(c.name) == *n).map(|i| i as u32)).collect();
     let (mut owners, mut typeck_fail, mut built, mut validate_fail, mut panics) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut unbuilt = Histogram::default();
@@ -130,7 +130,7 @@ pub fn build_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
     let mut const_errors = Histogram::default();
     let (mut promoted_ok, mut promoted_invalid, mut n_promoted) = (0usize, 0usize, 0usize);
     let provider = BuildProvider { prog, tcx, memo: Default::default() };
-    let passes = std::env::var_os("MAKEPAD_RUN_MIR_BUILD_NO_PASSES").is_none();
+    let passes = std::env::var_os("RELAX_MIR_BUILD_NO_PASSES").is_none();
     let mut by_kind: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let t0 = relax_session::clock::cpu_ns();
     for owner in body::owners(prog) {
@@ -239,21 +239,21 @@ pub fn build_all(prog: &Program, tcx: &Tcx, with_std: bool) -> usize {
         }
     }
     eprintln!(
-        "makepad-run mir-build: {owners} owners ({typeck_fail} failed typeck), {built} bodies built, {validate_fail} failed validation, {panics} panicked, {} not built; cpu {:.1} ms",
+        "relax mir-build: {owners} owners ({typeck_fail} failed typeck), {built} bodies built, {validate_fail} failed validation, {panics} panicked, {} not built; cpu {:.1} ms",
         unbuilt.counts.values().sum::<usize>(),
         (relax_session::clock::cpu_ns() - t0) as f64 / 1e6
     );
     if passes {
-        eprintln!("makepad-run mir-build: mir_promoted: {promoted_ok} bodies ok ({promoted_invalid} invalid afterwards), {n_promoted} promoted bodies, {} blocked, {} const-check errors", blocked.counts.values().sum::<usize>(), const_errors.counts.values().sum::<usize>());
+        eprintln!("relax mir-build: mir_promoted: {promoted_ok} bodies ok ({promoted_invalid} invalid afterwards), {n_promoted} promoted bodies, {} blocked, {} const-check errors", blocked.counts.values().sum::<usize>(), const_errors.counts.values().sum::<usize>());
     }
     for (kind, (all, ok)) in &by_kind {
-        eprintln!("makepad-run mir-build: {kind:>12}: {ok}/{all} built");
+        eprintln!("relax mir-build: {kind:>12}: {ok}/{all} built");
     }
     for (title, h) in [("not built", &unbuilt), ("INVALID", &invalid), ("PANIC", &panicked), ("BLOCKED", &blocked), ("CONST ERROR", &const_errors)] {
         let mut rows: Vec<_> = h.counts.iter().collect();
         rows.sort_by(|a, b| b.1.cmp(a.1));
         for (reason, n) in rows {
-            eprintln!("makepad-run mir-build: {title} {n:>6}  {reason}   e.g. {}", h.example.get(reason).map_or("", |s| s.as_str()));
+            eprintln!("relax mir-build: {title} {n:>6}  {reason}   e.g. {}", h.example.get(reason).map_or("", |s| s.as_str()));
         }
     }
     validate_fail + panics

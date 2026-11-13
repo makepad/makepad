@@ -573,7 +573,7 @@ pub(crate) fn frame_fields(u: &Unit, c: &PcCode) -> (String, String, String, Str
         code.push_str(&format!(",\"build\":{}", json_str(crate::jit::PROVENANCE)));
     }
     if super::patches::active(c.slot) {
-        code.push_str(",\"inspect\":\"instrumented or pinned by makepad inspect (probes)\"");
+        code.push_str(&format!(",\"inspect\":\"instrumented or pinned by {tool} inspect (probes)\"", tool = crate::tool_name()));
     }
     // code made inaccessible for good (invalid.rs): a frame in it parks at its next instruction
     if let Some(r) = crate::stale::lookup(c.start) {
@@ -1041,7 +1041,7 @@ pub fn cmd_tier(req: &Req, out: &mut Out) {
                     let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { crate::jit::compile_tier1(up, id) })).unwrap_or(false);
                     let row = crate::owner::call(crate::owner::Class::Program, || {
                         let u = unsafe { &*up };
-                        let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: MAKEPAD_RUN_TIER1_TRACE=1 says why)".into()) };
+                        let r: Result<bool, String> = if ok { Ok(true) } else { Err("the O3 build was dropped (not verified, instrumented by a probe, outdated, or failed: RELAX_TIER1_TRACE=1 says why)".into()) };
                         let mut s = format!("{{\"o3\":{},\"slot\":{},\"installed\":{},{}", json_str(&short(&super::display_name(u, id, 0), 160)), id, ok, patched_row(u, id, &before, &r));
                         if !ok {
                             s.push_str(&format!(",\"why\":{}", json_str(r.as_ref().err().unwrap())));
@@ -1158,7 +1158,7 @@ pub fn cmd_cache(_req: &Req, out: &mut Out) {
             for l in rows {
                 out.line(&l);
             }
-            out.always("more: pf jit  versions <fn>  why-tier <fn>");
+            out.line("more: pf jit  versions <fn>  why-tier <fn>");
         }
         None => out.err(&format!("the owner did not answer in 10 s ({})", crate::owner::serving_note())),
     }

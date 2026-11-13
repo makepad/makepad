@@ -30,11 +30,11 @@ shutil.copytree(Path(__file__).parent, fixture,
                 ignore=shutil.ignore_patterns("target", "Cargo.lock", "__pycache__"))
 env = dict(os.environ, CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true",
            CARGO_TARGET_DIR=str(scratch / "cargo"),
-           MAKEPAD_RUN_CACHE_DIR=str(scratch / "jit"))
+           RELAX_CACHE_DIR=str(scratch / "jit"))
 
 
-def run(label, args, success=True):
-    result = subprocess.run(args, cwd=fixture, env=env, capture_output=True, text=True)
+def run(label, args, success=True, extra=None):
+    result = subprocess.run(args, cwd=fixture, env=dict(env, **(extra or {})), capture_output=True, text=True)
     (scratch / (label + ".stdout")).write_text(result.stdout)
     (scratch / (label + ".stderr")).write_text(result.stderr)
     assert (result.returncode == 0) == success, (
@@ -80,6 +80,18 @@ assert keys == sorted(p.name for p in native.iterdir() if (p / "messages.jsonl")
 assert receipts == {key: (native / key / "messages.jsonl").stat().st_mtime_ns for key in keys}, "warm launch rewrote native build receipt"
 print("PASS cache: reordered unused patches keep one key; second launch reuses native build")
 
+# A variable a build script declares (`rerun-if-env-changed`, as a -sys crate's OPENSSL_DIR) is an
+# input of the native build: another value builds again, as cargo runs the script again, and the
+# value it had before builds again too (relax review B-M5: the build under the key was reused, and
+# the library built with the old value stayed linked)
+assert "offset 7\n" in baseline.stdout, f"cargo's baseline: {baseline.stdout}"
+changed = run("env-changed", command, extra={"CNATIVE_OFFSET": "9"})
+assert "offset 9\n" in changed.stdout, f"a changed declared variable reused the native build: {changed.stdout}"
+assert "building native dependencies with cargo" in changed.stderr, "a changed declared variable was not built again"
+back = run("env-back", command)
+assert back.stdout == baseline.stdout, f"the variable unset again: {back.stdout}"
+print("PASS env: a variable a build script declares builds the native library again when it changes")
+
 # `makepad selftest --allow-c` builds every fn against the libraries the run links: `add` reads the
 # C static cn_offset, which a selftest that linked nothing reported as "foreign static not found"
 selftest = run("selftest", [binary, "selftest", "--allow-c", "allow-c-fixture"])
@@ -90,6 +102,14 @@ print("PASS selftest: every fn builds against the native library, its C static i
 manifest = fixture / "Cargo.toml"
 manifest.write_text(manifest.read_text().split("[patch.crates-io]")[0])
 run("lock-without-patches", ["cargo", "generate-lockfile", "--offline"])
+
+# An integration test that starts the package's binary (CARGO_BIN_EXE_<bin>) gets it as cargo builds it:
+# its argv[0] names the binary, and nothing of Relax's is on its stderr (relax issue 119: argv[0] was
+# the Relax binary's, and the child's native build printed its status line on the child's stderr)
+run("cargo-bin-exe", ["cargo", "test", "--release", "--locked", "--quiet", "--test", "bin_exe"])
+bin_exe = run("bin-exe", [binary, "test", "--allow-c", "allow-c-fixture", "--test", "bin_exe"])
+assert "test result: ok. 1 passed" in bin_exe.stdout, f"bin exe: {bin_exe.stdout}\n{bin_exe.stderr}"
+print("PASS bin exe: the integration test's CARGO_BIN_EXE child names itself, its stderr empty")
 
 # An unused function still carries an unresolved import. Neither a library nor
 # the program defines it: the native bundle is rejected before even the

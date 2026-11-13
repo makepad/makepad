@@ -110,6 +110,7 @@ impl crate::tcx::Tcx {
         let local_crate=prog.def(imp).krate;
         let mut infcx=crate::infer::InferCtxt::for_item(self, prog, crate::tcx::TypingMode::Coherence, imp);
         infcx.coherence_crate=Some(local_crate);
+        infcx.rerun_overflow_at_twice_the_limit=false;
         let args=infcx.fresh_args_for_item(prog,imp);
         let tr=self.impl_trait_ref(prog,imp,&args);
         if prog.def(tr.def_id).krate==local_crate { return Ok(()); }

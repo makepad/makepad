@@ -219,10 +219,10 @@ pub(crate) fn report(run: &super::prof::Run, req: &Req, out: &mut Out) {
             parts.extend(st.iter().map(|f| format!("{} [{}]", f.name.replace(';', ":"), f.tier)));
             *folded.entry(parts.join(";")).or_default() += w;
         }
-        let path = std::env::temp_dir().join(format!("makepad-run-inspect-{}-prof-{}.folded", std::process::id(), now_ms()));
+        let path = std::env::temp_dir().join(format!("relax-inspect-{}-prof-{}.folded", std::process::id(), now_ms()));
         let text: String = folded.iter().map(|(k, v)| format!("{} {}\n", k, v)).collect();
         match std::fs::write(&path, text) {
-            Ok(()) => out.always(&format!("folded stacks (inline levels expanded, [tier] per frame): {} ({} distinct stacks)", path.display(), folded.len())),
+            Ok(()) => out.line(&format!("folded stacks (inline levels expanded, [tier] per frame): {} ({} distinct stacks)", path.display(), folded.len())),
             Err(e) => out.err(&format!("cannot write {}: {}", path.display(), e)),
         }
         if view == "flame" {
@@ -234,7 +234,7 @@ pub(crate) fn report(run: &super::prof::Run, req: &Req, out: &mut Out) {
         return out.err(&format!("no samples{}; try: prof view=tree s=5 threads=all", req.get("focus").or(req.get("fn")).map_or(String::new(), |q| format!(" with `{}` on the stack", q))));
     }
     let (hp, hw) = tree.hot_path();
-    out.always(&format!(
+    out.line(&format!(
         "{} {} samples over {:.1} s{}; hottest path ({}%): {}",
         count(root_total),
         unit,
@@ -289,12 +289,12 @@ pub(crate) fn report(run: &super::prof::Run, req: &Req, out: &mut Out) {
     for l in legend.iter().take(12) {
         out.line(l);
     }
-    out.always("tiers: O3/O2/O1/baseline = JIT code of that tier, inl = a level the JIT inlined (its own frame here), native = compiled-in code (makepad run, provided crates, system)");
+    out.line("tiers: O3/O2/O1/baseline = JIT code of that tier, inl = a level the JIT inlined (its own frame here), native = compiled-in code (Relax, provided crates, system)");
     for p in &partial {
-        out.always(&format!("note: {}", p));
+        out.line(&format!("note: {}", p));
     }
-    out.always(&format!("note: {}", super::reliability::line(true)));
-    out.always("more: prof view=tree focus=<fn>  prof view=callers fn=<fn>  prof view=flame  asm <fn> vs=rustc");
+    out.line(&format!("note: {}", super::reliability::line(true)));
+    out.line("more: prof view=tree focus=<fn>  prof view=callers fn=<fn>  prof view=flame  asm <fn> vs=rustc");
     let _ = json_str;
 }
 

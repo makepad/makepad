@@ -766,7 +766,7 @@ unsafe fn resend_process(sig: i32, info: *const u8) -> bool {
 /// and said, never retried.
 fn lost(sig: i32) {
     COUNTS[sig as usize][LOST].fetch_add(1, Relaxed);
-    let mut line = *b"makepad-run: signal 00 for the program was lost: the queue of pending signals is full\n";
+    let mut line = *b"relax: signal 00 for the program was lost: the queue of pending signals is full\n";
     line[20] = b'0' + (sig / 10) as u8;
     line[21] = b'0' + (sig % 10) as u8;
     crate::os::fault::raw_stderr(&line);
@@ -839,7 +839,7 @@ pub(crate) fn applied_mask(want: impl Fn(u64) -> bool) -> u64 {
 
 // ------------------------------------------------------------ the compile hook of the tests
 
-/// MAKEPAD_RUN_TEST_SIGNAL_IN_COMPILE's send, from inside the compile of `name` on a program
+/// RELAX_TEST_SIGNAL_IN_COMPILE's send, from inside the compile of `name` on a program
 /// thread (jit.rs `test_signal_in_compile`): signal `sig` `to` this thread (`self`), the process
 /// (`process`), this thread with the program's handler put straight into the kernel (`raw-self`,
 /// what the trampoline never allows: the re-entry check's case), or three times queued with the
@@ -874,9 +874,9 @@ pub(crate) unsafe fn test_send(sig: i32, to: &str, block: bool, name: &str) {
                 sys::syscall(SYS_RT_TGSIGQUEUEINFO, sys::getpid() as i64, tid, sig as i64, p);
             }
         }
-        _ => panic!("MAKEPAD_RUN_TEST_SIGNAL_IN_COMPILE: unknown target `{to}`"),
+        _ => panic!("RELAX_TEST_SIGNAL_IN_COMPILE: unknown target `{to}`"),
     }
-    eprintln!("makepad-run test: sent signal {sig} ({to}) in the compile of `{name}`; its handler ran {} times so far", counts(sig)[RAN]);
+    eprintln!("relax test: sent signal {sig} ({to}) in the compile of `{name}`; its handler ran {} times so far", counts(sig)[RAN]);
     if block {
         let mut fds = [0i32; 2];
         sys::pipe(fds.as_mut_ptr());

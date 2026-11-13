@@ -77,7 +77,7 @@ pub fn live_main(app: &super::client::App, words: &[String]) -> i32 {
     let client = match makepad_remote::Client::connect(&app.socket) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("makepad inspect: {} (pid {}): {:?}", app.app, app.pid, e);
+            eprintln!("relax inspect: {} (pid {}): {:?}", app.app, app.pid, e);
             return 2;
         }
     };
@@ -112,7 +112,7 @@ pub fn live_main(app: &super::client::App, words: &[String]) -> i32 {
                 p.feed(&d);
             }
             Ok(makepad_remote::Event::Closed(_, why)) => {
-                eprintln!("makepad inspect: the stream closed: {why}");
+                eprintln!("relax inspect: the stream closed: {why}");
                 break;
             }
             Ok(_) => {}

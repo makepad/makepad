@@ -26,9 +26,9 @@ k=0
 session() { # session <dir> <run home> <label> <args...>: one launch to idle and quit; prints its `jit` session line
     d=$1; rh=$d/$2; label=$3; shift 3
     rm -f "$d/report.$label"
-    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$d/t" \
-        MAKEPAD_HOME="$d/home" MAKEPAD_RUN_HOME="$rh" MAKEPAD_RUN_CACHE_DIR="$rh/cache" MAKEPAD_RUN_TARGET_DIR="$rh/target" \
-        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$d/report.$label" "$@" > "$d/log.$label" 2>&1 &
+    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$d/t" \
+        MAKEPAD_HOME="$d/home" RELAX_HOME="$rh" RELAX_CACHE_DIR="$rh/cache" RELAX_TARGET_DIR="$rh/target" \
+        RELAX_VERBOSE=1 $B run --report-to "$d/report.$label" "$@" > "$d/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$d/report.$label" 2>/dev/null; do

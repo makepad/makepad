@@ -34,10 +34,10 @@ class Run:
         home = os.path.join(work, "runhome")
         for d in ("home", "t"):
             os.makedirs(os.path.join(work, d), exist_ok=True)
-        env = dict(os.environ, MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MAKEPAD_HOME=os.path.join(work, "home"),
-                   TMPDIR=os.path.join(work, "t"), MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"))
-        env.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+        env = dict(os.environ, MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", MAKEPAD_HOME=os.path.join(work, "home"),
+                   TMPDIR=os.path.join(work, "t"), RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+                   RELAX_TARGET_DIR=os.path.join(home, "target"))
+        env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
         self.env = env
         self.p = subprocess.Popen(jit + ["run", "--report-to", self.report, "makepad-app-wm", "--", "--remote"], cwd=ROOT, env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)

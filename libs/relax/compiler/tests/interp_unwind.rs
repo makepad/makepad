@@ -1,9 +1,9 @@
 // Panics unwinding through a mix of interpreted, JIT-compiled and native frames run every
 // frame's drops in rustc's order. Functions named `xi_*` are the interpreted ones when the run sets
-// MAKEPAD_RUN_INTERP=::xi_ (the threaded interpreter, codegen/src/interp.rs); `xj_*` stay JIT
+// RELAX_INTERP=::xi_ (the threaded interpreter, codegen/src/interp.rs); `xj_*` stay JIT
 // code; libc's qsort is a native frame between them. Each test prints its drop log as "| " lines,
 // which must be identical under rustc (`rustc --test`), the JIT and every interpreter mix:
-//   MAKEPAD_RUN_INTERP=all, =::xi_, =::xj_ (the opposite split), unset.
+//   RELAX_INTERP=all, =::xi_, =::xj_ (the opposite split), unset.
 // interp/unwind_cmp.py runs the comparison.
 use std::cell::RefCell;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};

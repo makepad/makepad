@@ -385,8 +385,8 @@ fn pace(w: &Want) -> f32 {
 pub fn summary(want: Option<Want>, alert: Option<Alert>) -> String {
     if let Some(alert) = alert {
         return match alert {
-            Alert::Stale => format!("paused on invalidated code · makepad inspect {} panics", std::process::id()),
-            Alert::Panic => format!("paused on a panic · makepad inspect {} panics", std::process::id()),
+            Alert::Stale => format!("paused on invalidated code · {tool} inspect {} panics", std::process::id(), tool = relax_base::tool_name()),
+            Alert::Panic => format!("paused on a panic · {tool} inspect {} panics", std::process::id(), tool = relax_base::tool_name()),
             Alert::RebuildFailed => "building the new JIT failed · the app runs the previous code (see the terminal)".into(),
             Alert::PatchFailed => "Live patch not applied · previous code is running · retrying when sources settle or change".into(),
             Alert::UpdateReady => "Update ready · click to restart".into(),

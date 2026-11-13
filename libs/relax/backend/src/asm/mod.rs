@@ -352,7 +352,10 @@ impl Lexer<'_> {
                     i += 2;
                     continue;
                 }
-                if text[i..].starts_with(comment) || text[i..].starts_with(b"//") {
+                // LLVM AsmLexer::LexToken: on every target a `#` that starts a statement starts a line
+                // comment (or a `# 1 "file"` line marker, which emits nothing either); zeroize's
+                // `asm!("# {}", in(reg) ptr)` is written that way for aarch64 too
+                if text[i..].starts_with(comment) || text[i..].starts_with(b"//") || (c == b'#' && cur.is_empty()) {
                     in_line_comment = true;
                     continue;
                 }

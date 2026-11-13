@@ -1,0 +1,5 @@
+# proc_macro's Literal constructors, `Literal::c_string` among them (tools/run/fixture/modules_harness.rs).
+# `cargo run -p plc-app` prints the texts and values the harness test expects.
+[workspace]
+members = ["mac", "app"]
+resolver = "2"

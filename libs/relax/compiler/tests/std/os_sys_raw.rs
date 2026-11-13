@@ -1,6 +1,6 @@
 // std-os lane: the raw libSystem/glibc calls std's sys layer makes, self-contained (no std
 // types beyond println), so Relax's C ABI for exactly these shapes is checked before the
-// std modules themselves compile under Relax. Differential: os_diff.sh --makepad.
+// std modules themselves compile under Relax. Differential: agree.sh.
 // macOS arm64 only for now (Linux constants/layouts differ; see std/std/sys/linux.rs).
 
 #[repr(C)]
@@ -108,7 +108,7 @@ fn work(n: u64) -> u64 {
 /// Worker: blocks on the futex until the main thread opens GATE, then computes.
 extern "C" fn worker(p: *mut u8) -> *mut u8 {
     unsafe {
-        let gate = &mut GATE as *mut u32 as *mut u8;
+        let gate = core::ptr::addr_of_mut!(GATE) as *mut u8;
         while GATE == 0 {
             os_sync_wait_on_address(gate, 0, 4, 0);
         }
@@ -213,7 +213,7 @@ fn a03_dirs() {
 #[test]
 fn a04_futex_tls_env() {
     unsafe {
-        let addr = &mut FUTEX as *mut u32 as *mut u8;
+        let addr = core::ptr::addr_of_mut!(FUTEX) as *mut u8;
         // value differs: returns at once
         let r1 = os_sync_wait_on_address_with_timeout(addr, 8, 4, 0, 32, 1_000_000);
         // value matches: times out after 2 ms
@@ -233,7 +233,8 @@ fn a04_futex_tls_env() {
         let v = getenv(b"HR_SYS_RAW\0" as *const [u8; 11] as *const _);
         println!("| env {}", c_text(v.cast()));
         println!("| cpus {} pid {}", sysconf(58) >= 1, getpid() > 0);
-        println!("| dtor runs so far {}", DTOR_RUNS);
+        let dtor_runs = DTOR_RUNS;
+        println!("| dtor runs so far {}", dtor_runs);
     }
 }
 
@@ -250,7 +251,7 @@ fn a05_threads_futex() {
         let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000 };
         nanosleep(&req as *const Timespec, 0 as *mut Timespec);
         GATE = 1;
-        os_sync_wake_by_address_all(&mut GATE as *mut u32 as *mut u8, 4, 0);
+        os_sync_wake_by_address_all(core::ptr::addr_of_mut!(GATE) as *mut u8, 4, 0);
         i = 0;
         while i < 4 {
             pthread_join(ts[i], 0 as *mut *mut u8);
@@ -268,12 +269,12 @@ fn a06_futex_backends() {
         let k = dlsym(-2isize as *mut u8, b"os_sync_wake_by_address_any\0" as *const [u8; 28] as *const u8) as usize;
         let missing = dlsym(-2isize as *mut u8, b"os_sync_no_such_symbol\0" as *const [u8; 23] as *const u8) as usize;
         println!("| dlsym {} {} {}", w != 0, k != 0, missing == 0);
-        let addr = &mut FUTEX2 as *mut u32 as *mut u8;
+        let addr = core::ptr::addr_of_mut!(FUTEX2) as *mut u8;
         let wait: WaitTimeoutFn = core::mem::transmute(w);
         let wake: WakeFn = core::mem::transmute(k);
         let r = wait(addr, 3, 4, 0, 32, 1_000_000);
         println!("| os_sync via ptr {} {} {}", r, errno(), wake(addr, 4, 0));
-        // the __ulock fallback (MAKEPAD_RUN_FORCE_ULOCK=1 path)
+        // the __ulock fallback (RELAX_FORCE_ULOCK=1 path)
         let r1 = __ulock_wait(1, addr, 4, 1000);
         let r2 = __ulock_wait(1, addr, 3, 2000);
         let e2 = errno();

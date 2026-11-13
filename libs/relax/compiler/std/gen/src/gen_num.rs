@@ -92,7 +92,6 @@ pub fn run(core: &str) {
     }
     gen_u8_ascii(&mut a);
     std::fs::write(format!("{}/num/int_impls.rs", core), &a).expect("write int_impls.rs");
-    std::fs::write(format!("{}/../check/src/num_int_check.rs", core), check_copy(&a)).expect("write num_int_check.rs");
 
     let mut f = String::new();
     header(&mut f, "Inherent methods and constants of f32/f64 (Relax only).");
@@ -123,8 +122,8 @@ pub fn run(core: &str) {
     std::fs::write(format!("{}/num/prim_traits.rs", core), p).expect("write prim_traits.rs");
 
     let mut z = String::new();
-    header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
+    header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr, Neg), as real core's nonzero.rs macros generate it.");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
     }
@@ -172,26 +171,27 @@ fn gen_nonzero(o: &mut String, t: &Int) {
     let _ = writeln!(o, "    pub const fn checked_pow(self, other: u32) -> Option<NonZero<{n}>> {{ match self.get().checked_pow(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
     let _ = writeln!(o, "    pub const fn saturating_pow(self, other: u32) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_pow(other)) }} }}");
     if !t.signed {
-        let _ = writeln!(o, "    pub fn checked_add(self, other: {n}) -> Option<NonZero<{n}>> {{ match self.get().checked_add(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
-        let _ = writeln!(o, "    pub fn saturating_add(self, other: {n}) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_add(other)) }} }}");
-        let _ = writeln!(o, "    pub fn checked_next_power_of_two(self) -> Option<NonZero<{n}>> {{ match self.get().checked_next_power_of_two() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+        let _ = writeln!(o, "    pub const fn checked_add(self, other: {n}) -> Option<NonZero<{n}>> {{ match self.get().checked_add(other) {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+        let _ = writeln!(o, "    pub const fn saturating_add(self, other: {n}) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_add(other)) }} }}");
+        let _ = writeln!(o, "    pub const fn checked_next_power_of_two(self) -> Option<NonZero<{n}>> {{ match self.get().checked_next_power_of_two() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
         let _ = writeln!(o, "    pub const fn ilog2(self) -> u32 {{ {n}::BITS - 1 - self.get().leading_zeros() }}");
-        let _ = writeln!(o, "    pub fn ilog10(self) -> u32 {{ self.get().ilog10() }}");
+        let _ = writeln!(o, "    pub const fn ilog10(self) -> u32 {{ self.get().ilog10() }}");
         let _ = writeln!(o, "    pub const fn is_power_of_two(self) -> bool {{ self.get().is_power_of_two() }}");
-        let _ = writeln!(o, "    pub fn isqrt(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().isqrt()) }} }}");
+        let _ = writeln!(o, "    pub const fn midpoint(self, rhs: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().midpoint(rhs.get())) }} }}");
+        let _ = writeln!(o, "    pub const fn isqrt(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().isqrt()) }} }}");
     } else {
-        let _ = writeln!(o, "    pub fn abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().abs()) }} }}");
-        let _ = writeln!(o, "    pub fn checked_abs(self) -> Option<NonZero<{n}>> {{ match self.get().checked_abs() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
-        let _ = writeln!(o, "    pub fn overflowing_abs(self) -> (NonZero<{n}>, bool) {{ let (v, f) = self.get().overflowing_abs(); (unsafe {{ NonZero::new_unchecked(v) }}, f) }}");
-        let _ = writeln!(o, "    pub fn saturating_abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_abs()) }} }}");
-        let _ = writeln!(o, "    pub fn wrapping_abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().wrapping_abs()) }} }}");
-        let _ = writeln!(o, "    pub fn unsigned_abs(self) -> NonZero<{u}> {{ unsafe {{ NonZero::new_unchecked(self.get().unsigned_abs()) }} }}");
+        let _ = writeln!(o, "    pub const fn abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().abs()) }} }}");
+        let _ = writeln!(o, "    pub const fn checked_abs(self) -> Option<NonZero<{n}>> {{ match self.get().checked_abs() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+        let _ = writeln!(o, "    pub const fn overflowing_abs(self) -> (NonZero<{n}>, bool) {{ let (v, f) = self.get().overflowing_abs(); (unsafe {{ NonZero::new_unchecked(v) }}, f) }}");
+        let _ = writeln!(o, "    pub const fn saturating_abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_abs()) }} }}");
+        let _ = writeln!(o, "    pub const fn wrapping_abs(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().wrapping_abs()) }} }}");
+        let _ = writeln!(o, "    pub const fn unsigned_abs(self) -> NonZero<{u}> {{ unsafe {{ NonZero::new_unchecked(self.get().unsigned_abs()) }} }}");
         let _ = writeln!(o, "    pub const fn is_positive(self) -> bool {{ self.get() > 0 }}");
         let _ = writeln!(o, "    pub const fn is_negative(self) -> bool {{ self.get() < 0 }}");
-        let _ = writeln!(o, "    pub fn checked_neg(self) -> Option<NonZero<{n}>> {{ match self.get().checked_neg() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
-        let _ = writeln!(o, "    pub fn overflowing_neg(self) -> (NonZero<{n}>, bool) {{ let (v, f) = self.get().overflowing_neg(); (unsafe {{ NonZero::new_unchecked(v) }}, f) }}");
-        let _ = writeln!(o, "    pub fn wrapping_neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().wrapping_neg()) }} }}");
-        let _ = writeln!(o, "    pub fn saturating_neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_neg()) }} }}");
+        let _ = writeln!(o, "    pub const fn checked_neg(self) -> Option<NonZero<{n}>> {{ match self.get().checked_neg() {{ Some(v) => Some(unsafe {{ NonZero::new_unchecked(v) }}), None => None }} }}");
+        let _ = writeln!(o, "    pub const fn overflowing_neg(self) -> (NonZero<{n}>, bool) {{ let (v, f) = self.get().overflowing_neg(); (unsafe {{ NonZero::new_unchecked(v) }}, f) }}");
+        let _ = writeln!(o, "    pub const fn wrapping_neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().wrapping_neg()) }} }}");
+        let _ = writeln!(o, "    pub const fn saturating_neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self.get().saturating_neg()) }} }}");
     }
     let _ = writeln!(o, "}}");
     let _ = writeln!(o, "impl From<NonZero<{n}>> for {n} {{ fn from(n: NonZero<{n}>) -> {n} {{ n.get() }} }}");
@@ -200,6 +200,11 @@ fn gen_nonzero(o: &mut String, t: &Int) {
     let _ = writeln!(o, "impl BitOr<NonZero<{n}>> for {n} {{ type Output = NonZero<{n}>; fn bitor(self, rhs: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self | rhs.get()) }} }} }}");
     let _ = writeln!(o, "impl BitOrAssign for NonZero<{n}> {{ fn bitor_assign(&mut self, rhs: NonZero<{n}>) {{ *self = *self | rhs; }} }}");
     let _ = writeln!(o, "impl BitOrAssign<{n}> for NonZero<{n}> {{ fn bitor_assign(&mut self, rhs: {n}) {{ *self = *self | rhs; }} }}");
+    if t.signed {
+        // negating a nonzero value never gives zero (MIN overflows as the primitive's `-` does)
+        let _ = writeln!(o, "impl Neg for NonZero<{n}> {{ type Output = NonZero<{n}>; fn neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(-self.get()) }} }} }}");
+        let _ = writeln!(o, "impl<'a> Neg for &'a NonZero<{n}> {{ type Output = NonZero<{n}>; fn neg(self) -> NonZero<{n}> {{ -*self }} }}");
+    }
     o.push('\n');
 }
 
@@ -209,8 +214,8 @@ fn gen_int(o: &mut String, t: &Int) {
     let b = t.bits;
     let bytes = b / 8;
     match pw_cfg(t) {
-        Some(c) => { let _ = writeln!(o, "#[cfg(all(not(relax_check), {c}))]\nimpl {} {{", n); }
-        None => { let _ = writeln!(o, "#[cfg(not(relax_check))]\nimpl {} {{", n); }
+        Some(c) => { let _ = writeln!(o, "#[cfg({c})]\nimpl {} {{", n); }
+        None => { let _ = writeln!(o, "impl {} {{", n); }
     }
     let _ = writeln!(o, "    pub const MIN: {n} = {};", lit_min(t));
     let _ = writeln!(o, "    pub const MAX: {n} = {};", max_of(t));
@@ -510,8 +515,7 @@ fn signed_of(u: &str) -> &'static str {
 
 fn gen_u8_ascii(o: &mut String) {
     o.push_str(
-        r#"#[cfg(not(relax_check))]
-impl u8 {
+        r#"impl u8 {
     pub const fn is_ascii(&self) -> bool { *self < 128 }
     pub const fn is_ascii_alphabetic(&self) -> bool { matches!(*self, b'A'..=b'Z' | b'a'..=b'z') }
     pub const fn is_ascii_uppercase(&self) -> bool { matches!(*self, b'A'..=b'Z') }
@@ -541,7 +545,7 @@ fn gen_float(o: &mut String, f: &str) {
     let is64 = f == "f64";
     let bits_t = if is64 { "u64" } else { "u32" };
     let sfx = if is64 { "" } else { "f" };
-    let _ = writeln!(o, "#[cfg(not(relax_check))]\nimpl {f} {{");
+    let _ = writeln!(o, "impl {f} {{");
     if is64 {
         o.push_str(
             "    pub const RADIX: u32 = 2;
@@ -687,7 +691,12 @@ fn op_impls(o: &mut String, n: &str, ops: &[(&str, &str, &str)]) {
 fn shift_impls(o: &mut String, n: &str, r: &str) {
     for (tr, m, sym) in [("Shl", "shl", "<<"), ("Shr", "shr", ">>")] {
         let _ = writeln!(o, "impl {tr}<{r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ self {sym} rhs }} }}");
+        // core's forward_ref_binop! / forward_ref_op_assign!: either side by reference
+        let _ = writeln!(o, "impl<'a> {tr}<&'a {r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<{r}> for &'a {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ *self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {r}> for &'b {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ *self {sym} *rhs }} }}");
         let _ = writeln!(o, "impl {tr}Assign<{r}> for {n} {{ fn {m}_assign(&mut self, rhs: {r}) {{ *self = *self {sym} rhs; }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {r}> for {n} {{ fn {m}_assign(&mut self, rhs: &'a {r}) {{ *self = *self {sym} *rhs; }} }}");
     }
 }
 
@@ -785,6 +794,12 @@ impl Eq for bool {}
 impl PartialOrd for bool { fn partial_cmp(&self, other: &bool) -> Option<Ordering> { Some(self.cmp(other)) } }
 impl Ord for bool { fn cmp(&self, other: &bool) -> Ordering { (*self as u8).cmp(&(*other as u8)) } }
 impl Not for bool { type Output = bool; fn not(self) -> bool { !self } }
+// `!` (rustc 1.100.0: never_type stable; Not since 1.60)
+impl PartialEq for ! { fn eq(&self, _: &!) -> bool { *self } }
+impl Eq for ! {}
+impl PartialOrd for ! { fn partial_cmp(&self, _: &!) -> Option<Ordering> { *self } }
+impl Ord for ! { fn cmp(&self, _: &!) -> Ordering { *self } }
+impl Not for ! { type Output = !; fn not(self) -> ! { match self {} } }
 impl<'a> Not for &'a bool { type Output = bool; fn not(self) -> bool { !*self } }
 impl BitAnd for bool { type Output = bool; fn bitand(self, rhs: bool) -> bool { self & rhs } }
 impl BitOr for bool { type Output = bool; fn bitor(self, rhs: bool) -> bool { self | rhs } }
@@ -804,10 +819,11 @@ impl Ord for char { fn cmp(&self, other: &char) -> Ordering { (*self as u32).cmp
 
 // ---- ()
 
-#[cfg(not(relax_check))]
 impl bool {
     pub const fn then_some<T>(self, t: T) -> Option<T> { if self { Some(t) } else { None } }
     pub const fn then<T, F: FnOnce() -> T>(self, f: F) -> Option<T> { if self { Some(f()) } else { None } }
+    /// rustc 1.100.0 (bool_toggle)
+    pub const fn toggle(&mut self) { *self = !*self; }
 }
 
 ",
@@ -879,96 +895,3 @@ fn has_from(from: &Int, to: &Int) -> bool {
     lossless(from, to)
 }
 
-fn is_ident(c: u8) -> bool {
-    c == b'_' || c.is_ascii_alphanumeric()
-}
-
-/// Replaces the token `self` with `self.0`.
-fn replace_self(line: &str) -> String {
-    let b = line.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if line[i..].starts_with("self") && (i == 0 || !is_ident(b[i - 1])) && (i + 4 >= b.len() || !is_ident(b[i + 4])) {
-            out.push_str("self.0");
-            i += 4;
-        } else {
-            out.push(b[i] as char);
-            i += 1;
-        }
-    }
-    out
-}
-
-/// The rustc-checkable copy of int_impls.rs: each `impl T` becomes `impl H_T` on a newtype,
-/// with `self` in bodies as `self.0`, so every generated method body runs under rustc with
-/// the real methods it calls and is compared against the real method of the same name
-/// (check/tests/core_num.rs).
-fn check_copy(src: &str) -> String {
-    let mut out = String::new();
-    out.push_str("// GENERATED by gen/src/gen_num.rs from core/num/int_impls.rs (rustc-checkable copy).\n");
-    out.push_str("#![allow(non_camel_case_types, unused_parens, clippy::all)]\n");
-    out.push_str("use crate::intrinsics_int as ii;\nuse crate::num::parse;\nuse crate::num::ParseIntError;\n\n");
-    let mut cur = String::new();
-    let mut skip = false;
-    let mut seen_u8 = false;
-    let mut skip_next = false;
-    let mut skip_blank = false;
-    for line in src.lines() {
-        if line.starts_with("#[cfg(") && line.contains("target_pointer_width = \"32\"") {
-            skip_next = true;
-            continue;
-        }
-        if line.starts_with("use ") || line.starts_with("//") || line.starts_with("#[cfg(") {
-            continue;
-        }
-        if skip_next && line.starts_with("impl ") {
-            skip_next = false;
-            skip = true;
-            skip_blank = true;
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("impl ") {
-            let name = rest.trim_end_matches(" {").to_string();
-            if name == "u8" && seen_u8 {
-                skip = true;
-                continue;
-            }
-            if name == "u8" {
-                seen_u8 = true;
-            }
-            cur = name.clone();
-            out.push_str(&format!("#[derive(Clone, Copy)]\npub struct H_{0}(pub {0});\nimpl H_{0} {{\n", name));
-            continue;
-        }
-        if skip {
-            if line == "}" {
-                skip = false;
-            }
-            continue;
-        }
-        // Omit the separator after a skipped 32-bit pointer impl as well.
-        if skip_blank {
-            skip_blank = false;
-            if line.is_empty() { continue; }
-        }
-        let l = line.replace("pub const fn ", "pub fn ").replace("    const fn ", "    fn ");
-        let t = l.trim_start();
-        let mut r = if t.starts_with("pub const ") {
-            l.clone()
-        } else {
-            replace_self(&l)
-        };
-        if t.starts_with("pub fn ") || t.starts_with("fn ") {
-            if let Some(p) = r.find('(') {
-                let close = r[p..].find(')').map(|x| x + p).unwrap_or(r.len());
-                let sig = r[p..close].replace("self.0", "self");
-                r = format!("{}{}{}", &r[..p], sig, &r[close..]);
-            }
-        }
-        r = r.replace("self.0.one_less_than_next_power_of_two()", &format!("H_{}(self.0).one_less_than_next_power_of_two()", cur));
-        out.push_str(&r);
-        out.push('\n');
-    }
-    out
-}

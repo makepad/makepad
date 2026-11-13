@@ -42,13 +42,13 @@ for pkg in $pkgs; do
     codesign --force --timestamp=none --sign - "$app" > /dev/null 2>&1 || { fail="$fail sign:$pkg"; continue; }
     xcrun simctl install "$udid" "$app" || { fail="$fail install:$pkg"; continue; }
     t0=$(date +%s)
-    SIMCTL_CHILD_MAKEPAD_HAL_SCRIPT="$work/quit.hal" SIMCTL_CHILD_MAKEPAD_MUTE=1 SIMCTL_CHILD_MAKEPAD_RUN_INTERP_STATS=1 \
-        perl -e 'alarm 1200; exec @ARGV' xcrun simctl launch --console-pty --terminate-running-process "$udid" "$id" 2>&1 | tee "$work/$pkg.out" | grep -a --line-buffered -E 'makepad-run: |interp|panic|error|frame'
+    SIMCTL_CHILD_MAKEPAD_HAL_SCRIPT="$work/quit.hal" SIMCTL_CHILD_MAKEPAD_MUTE=1 SIMCTL_CHILD_RELAX_INTERP_STATS=1 \
+        perl -e 'alarm 1200; exec @ARGV' xcrun simctl launch --console-pty --terminate-running-process "$udid" "$id" 2>&1 | tee "$work/$pkg.out" | grep -a --line-buffered -E 'relax: |interp|panic|error|frame'
     rc=${PIPESTATUS[0]}
     # (a launch cut short by the alarm leaves the app running)
     xcrun simctl terminate "$udid" "$id" > /dev/null 2>&1
     echo "run $pkg: rc $rc in $(( $(date +%s) - t0 ))s"
-    grep -a -E 'makepad-run interp:|first frame|boot-trace: first|panicked|error' "$work/$pkg.out" | tail -8 | cut -c1-240
+    grep -a -E 'relax interp:|first frame|boot-trace: first|panicked|error' "$work/$pkg.out" | tail -8 | cut -c1-240
     if [ "$rc" != 0 ]; then
         grep -a -v '^\s*$' "$work/$pkg.out" | tail -20 | cut -c1-240
         fail="$fail run:$pkg"

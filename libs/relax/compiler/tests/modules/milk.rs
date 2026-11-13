@@ -76,7 +76,7 @@ fn milk() {
     let _ = measure("host", |i, o, mode| (milk_kernel::batch(&mut state, i, o, mode), 0));
     let path = std::path::Path::new(file!()).parent().unwrap().join("milk_kernel.rs");
     let mut src = std::fs::read_to_string(&path).unwrap();
-    let trusted = std::env::var("MAKEPAD_RUN_MODULES_TRUSTED").unwrap_or_default() == "1";
+    let trusted = std::env::var("RELAX_MODULES_TRUSTED").unwrap_or_default() == "1";
     if trusted {
         src.push_str("\npub fn make_handle() -> usize { Box::into_raw(new_state()) as usize }\npub fn call_handle(s: usize, i: &[f64], o: &mut [f64], mode: u32) -> u64 { batch(unsafe { &mut *(s as *mut MilkState) }, i, o, mode) }\npub fn drop_handle(s: usize) { unsafe { drop(Box::from_raw(s as *mut MilkState)); } }\n");
     }

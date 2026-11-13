@@ -1,4 +1,5 @@
-// std-os lane: std::fs (differential: os_diff.sh). Works in a fresh dir under $TMPDIR.
+// std-os lane: std::fs (differential: agree.sh). Works in a fresh dir under $TMPDIR. a03:
+// fs::hard_link links a symlink itself, dangling or not (relax #107).
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -89,4 +90,25 @@ fn a02_dirs() {
     println!("| {:?}", fs::symlink_metadata(d.join("x/link")).unwrap().file_type().is_symlink());
     fs::remove_dir_all(&d).unwrap();
     println!("| {:?}", fs::metadata(&d).map(|_| ()).map_err(|e| e.kind() == ErrorKind::NotFound));
+}
+
+#[test]
+fn a03_hard_link() {
+    let d = scratch("hard-link");
+    let kind = |p: &str| {
+        let m = fs::symlink_metadata(d.join(p)).unwrap();
+        (m.file_type().is_symlink(), m.is_file(), m.nlink())
+    };
+    std::os::unix::fs::symlink(d.join("missing"), d.join("dangling")).unwrap();
+    println!("| {:?}", fs::hard_link(d.join("dangling"), d.join("second")));
+    println!("| {:?} {:?} {}", kind("second"), kind("dangling"), fs::read_link(d.join("second")).unwrap() == d.join("missing"));
+    fs::write(d.join("file"), "data").unwrap();
+    std::os::unix::fs::symlink("file", d.join("to-file")).unwrap();
+    println!("| {:?}", fs::hard_link(d.join("to-file"), d.join("third")));
+    println!("| {:?} {:?} {:?}", kind("third"), kind("file"), fs::read_to_string(d.join("third")));
+    println!("| {:?}", fs::hard_link(d.join("file"), d.join("fourth")));
+    println!("| {:?} {:?}", kind("fourth"), kind("file"));
+    println!("| {:?}", fs::hard_link(d.join("file"), d.join("fourth")).map_err(|e| e.kind()));
+    println!("| {:?}", fs::hard_link(d.join("nope"), d.join("fifth")).map_err(|e| e.kind()));
+    fs::remove_dir_all(&d).unwrap();
 }

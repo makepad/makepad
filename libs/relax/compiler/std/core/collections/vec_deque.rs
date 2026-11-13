@@ -857,7 +857,16 @@ impl<'a, T> Iterator for Iter<'a, T> {
         let n = self.a.len() + self.b.len();
         (n, Some(n))
     }
-    #[cfg(not(relax_check))]
+    // core vec_deque iter.rs: the front half, then the rest of `n` in the back one, each in O(1)
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        match self.a.advance_by(n) {
+            Ok(()) => Ok(()),
+            Err(k) => {
+                crate::mem::swap(&mut self.a, &mut self.b);
+                self.a.advance_by(k)
+            }
+        }
+    }
     #[doc(hidden)]
     #[inline]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a T {
@@ -884,13 +893,21 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
             }
         }
     }
+    // core vec_deque iter.rs: the back half from its end, then the rest of `n` in the front one
+    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+        match self.b.advance_back_by(n) {
+            Ok(()) => Ok(()),
+            Err(k) => {
+                crate::mem::swap(&mut self.a, &mut self.b);
+                self.b.advance_back_by(k)
+            }
+        }
+    }
 }
 
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 impl<'a, T> FusedIterator for Iter<'a, T> {}
-#[cfg(not(relax_check))]
 unsafe impl<'a, T> crate::iter::TrustedRandomAccess for Iter<'a, T> {}
-#[cfg(not(relax_check))]
 unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for Iter<'a, T> {
     const MAY_HAVE_SIDE_EFFECT: bool = false;
 }
@@ -921,7 +938,16 @@ impl<'a, T> Iterator for IterMut<'a, T> {
         let n = self.a.len() + self.b.len();
         (n, Some(n))
     }
-    #[cfg(not(relax_check))]
+    // core vec_deque iter.rs: the front half, then the rest of `n` in the back one, each in O(1)
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        match self.a.advance_by(n) {
+            Ok(()) => Ok(()),
+            Err(k) => {
+                crate::mem::swap(&mut self.a, &mut self.b);
+                self.a.advance_by(k)
+            }
+        }
+    }
     #[doc(hidden)]
     #[inline]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> &'a mut T {
@@ -948,13 +974,21 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
             }
         }
     }
+    // core vec_deque iter.rs: the back half from its end, then the rest of `n` in the front one
+    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+        match self.b.advance_back_by(n) {
+            Ok(()) => Ok(()),
+            Err(k) => {
+                crate::mem::swap(&mut self.a, &mut self.b);
+                self.b.advance_back_by(k)
+            }
+        }
+    }
 }
 
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
 impl<'a, T> FusedIterator for IterMut<'a, T> {}
-#[cfg(not(relax_check))]
 unsafe impl<'a, T> crate::iter::TrustedRandomAccess for IterMut<'a, T> {}
-#[cfg(not(relax_check))]
 unsafe impl<'a, T> crate::iter::TrustedRandomAccessNoCoerce for IterMut<'a, T> {
     const MAY_HAVE_SIDE_EFFECT: bool = false;
 }

@@ -1537,7 +1537,7 @@ pub fn split_patched_path(f: &mut Func, get: &dyn Fn(u32) -> Option<(*const Func
     f.patched_path = true;
     if relax_backend::rir::verify_passes_on() {
         if let Err(e) = verify_patched_path(f) {
-            panic!("makepad: patched path broken in {}: {}\n{}", f.name, e, f.dump());
+            panic!("relax: patched path broken in {}: {}\n{}", f.name, e, f.dump());
         }
     }
     Some(st)

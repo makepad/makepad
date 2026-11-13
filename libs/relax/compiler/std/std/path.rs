@@ -779,6 +779,10 @@ impl Path {
             None => Err(StripPrefixError(())),
         }
     }
+    /// rustc 1.100.0 (trim_prefix_suffix): `self` without the leading `base` components, else `self`
+    pub fn trim_prefix<P: AsRef<Path>>(&self, base: P) -> &Path {
+        self.strip_prefix(base).unwrap_or(self)
+    }
     pub fn starts_with<P: AsRef<Path>>(&self, base: P) -> bool {
         iter_after(self.components(), base.as_ref().components()).is_some()
     }
@@ -1429,7 +1433,6 @@ extern "system" {
 }
 
 /// Byte copy of the whole value (real std's CloneToUninit for Path), for Rc/Arc::make_mut.
-#[cfg(not(relax_shim))]
 unsafe impl core::clone::CloneToUninit for Path {
     unsafe fn clone_to_uninit(&self, dest: *mut u8) {
         let n = core::mem::size_of_val(self);

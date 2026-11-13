@@ -151,7 +151,7 @@ up)
     [ "${4:-}" = server-only ] && exit 0
     cp "$here/makepad.sh" "$base/home/makepad.sh"
     env MAKEPAD_LOADER_SERVICE="$api" MAKEPAD_LOADER_ROOT="$base/install" MAKEPAD_RUNNER_APPS_DIR="$base/apps" \
-        MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
+        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
         nohup sh "$base/home/makepad.sh" > "$base/logs/entry.log" 2>&1 < /dev/null &
     echo $! > "$base/state/entry.pid"
     echo "entry script pid $(cat "$base/state/entry.pid")" ;;
@@ -159,8 +159,8 @@ runner)
     # start the installed loader directly (what the entry script ends with): the runner checks the
     # service for a newer JIT at its start
     root=$base/install
-    env MAKEPAD_RUN_HOME="$root" MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$api" MAKEPAD_RUNNER_APPS_DIR="$base/apps" \
-        MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
+    env RELAX_HOME="$root" MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$api" MAKEPAD_RUNNER_APPS_DIR="$base/apps" \
+        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_LOADER_EMAIL=fixture@example.org \
         PATH="$root/rust/bin:$PATH" CARGO_HOME="$root/cache/cargo-home" RUSTC="$root/rust/bin/rustc" CARGO_INCREMENTAL=0 \
         nohup "$root/cache/loader/$(cat "$root/cache/loader/current" 2>/dev/null || echo src)/target/host/makepad" >> "$base/install/cache/logs/makepad.log" 2>&1 < /dev/null &
     echo $! > "$base/state/runner.pid"

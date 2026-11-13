@@ -101,7 +101,7 @@ mod os {
         if p as isize == -1 || p.is_null() {
             return None;
         }
-        crate::memstat::name_mapping(p as usize, len, c"makepad-run-secondary-stack");
+        crate::memstat::name_mapping(p as usize, len, c"relax-secondary-stack");
         Some(p as usize)
     }
     pub fn commit(_from: usize, to: usize) -> Option<usize> {

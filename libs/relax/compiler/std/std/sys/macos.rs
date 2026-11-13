@@ -19,6 +19,8 @@ pub const O_NONBLOCK: c_int = 0x4;
 pub const O_APPEND: c_int = 0x8;
 pub const O_NOFOLLOW: c_int = 0x100;
 pub const O_CREAT: c_int = 0x200;
+/// sys/fcntl.h: the current directory, for the *at calls.
+pub const AT_FDCWD: c_int = -2;
 pub const O_TRUNC: c_int = 0x400;
 pub const O_EXCL: c_int = 0x800;
 pub const O_DIRECTORY: c_int = 0x100000;
@@ -225,7 +227,7 @@ pub fn fill_random(buf: &mut [u8]) {
 // <os/os_sync_wait_on_address.h> (macOS 14.4+) is used when the running macOS has it; it is
 // looked up with dlsym (no link-time dependency, so the binary still loads on older macOS).
 // Otherwise __ulock_wait/__ulock_wake. The choice is made once and cached;
-// MAKEPAD_RUN_FORCE_ULOCK=1 forces the fallback (testing only).
+// RELAX_FORCE_ULOCK=1 forces the fallback (testing only).
 
 type OsSyncWait = unsafe extern "C" fn(*mut c_void, u64, usize, u32) -> c_int;
 type OsSyncWaitTimeout = unsafe extern "C" fn(*mut c_void, u64, usize, u32, u32, u64) -> c_int;
@@ -251,7 +253,7 @@ fn lookup(name: &[u8]) -> usize {
 
 fn force_ulock() -> bool {
     unsafe {
-        let v = super::getenv(b"MAKEPAD_RUN_FORCE_ULOCK\0".as_ptr() as *const c_char);
+        let v = super::getenv(b"RELAX_FORCE_ULOCK\0".as_ptr() as *const c_char);
         !v.is_null() && *v == b'1' as c_char && *v.add(1) == 0
     }
 }

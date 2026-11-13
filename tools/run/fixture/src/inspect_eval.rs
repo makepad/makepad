@@ -6,7 +6,7 @@
 //! - threads `ledger` and `audit` take the locks `STOCK` and `ORDERS` in opposite order: they
 //!   deadlock after ~2 s.
 //! - thread `importer` panics in `parse_record` (index 6 of a 4-field record) once EVAL_SECS/60
-//!   seconds (at least 5) have passed (parks under MAKEPAD_RUN_PANIC_PARK).
+//!   seconds (at least 5) have passed (parks under RELAX_PANIC_PARK).
 //! - thread `uploader` waits on a channel whose sender (main) never sends: blocked, not deadlocked.
 
 use std::sync::Mutex;

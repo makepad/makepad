@@ -1,0 +1,9 @@
+[package]
+name = "cache-warm-dep-macro-impls"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+codec = { path = "codec" }
+
+[workspace]

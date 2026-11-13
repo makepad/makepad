@@ -11,9 +11,9 @@ A/B table gives new/base per workload (median of per-round ratios, spread) and t
 The commercial set (apps/commercial/relax_tests/src/bench.rs) joins when present; RW_COMMERCIAL=0 skips it,
 NATIVE_COMMERCIAL names its prebuilt rustc binary.
 Env: WARM=1 (O3/code disk cache on, one dir per name, one untimed fill run per workload and name before the timed rounds; the O3 column then shows hot / installed / from the disk cache), ROUNDS (default 4), RW_MS (per-process iteration budget ms, default 4000), WORKLOADS ("a b": only those),
-MAKEPAD_RUN_STD_<NAME> (that name's own std tree, e.g. its compiler tree's std; a Relax change that touches std must be measured with its own std), NATIVE (prebuilt rustc binary; else built here with cargo --release into <target dir>/rustc), MAKEPAD_RUN_STD
+RELAX_STD_<NAME> (that name's own std tree, e.g. its compiler tree's std; a Relax change that touches std must be measured with its own std), NATIVE (prebuilt rustc binary; else built here with cargo --release into <target dir>/rustc), RELAX_STD
 (default ../std), RUN_PREFIX (default "nice -n 10", "none" on Windows), RW_ROOT (the tree holding the inputs).
-MAKEPAD_RUN_ENV_<NAME> supplies shell-quoted KEY=value overrides for that name.
+RELAX_ENV_<NAME> supplies shell-quoted KEY=value overrides for that name.
 Timing belongs on a quiet machine; the spreads show how quiet it was."""
 import os, re, subprocess, sys, shlex, time, statistics
 from pathlib import Path
@@ -59,7 +59,7 @@ if cnames and not cnative:
     cnative = os.path.join(target, "rustc/release/" + CBIN + exe)
 def native_cmd(w): return [cnative if w in cnames else native, w]
 def relax_cmd(p, w): return [p, "run", "--quiet", "--verbose"] + ([CPKG, "--bin", CBIN] if w in cnames else ["relax-rwbench"]) + ["--", w]
-std = os.environ.get("MAKEPAD_RUN_STD", os.path.join(here, "../std"))
+std = os.environ.get("RELAX_STD", os.path.join(here, "../std"))
 base = dict(os.environ, RW_MS=os.environ.get("RW_MS", "8000"))
 LINE = r"^\| (\w+) steady_ms=([\d.]+) tts_main_ms=([\d.]+) tts_proc_ms=([\d.]+) iters=(\d+) first_ms=([\d.]+) o3_ms=(-?\d+) (\d+)$"
 
@@ -72,8 +72,8 @@ def one(cmd, e):
     m = re.search(LINE, out.stdout, re.M)
     if out.returncode != 0 or not m:
         return None, ("exit %d: " % out.returncode) + (out.stdout + out.stderr)[-300:].replace("\n", " ").replace("|", "/")
-    t1 = re.search(r"makepad-run: O3: (\d+) hot, (\d+) installed(?:.*?(\d+) from the disk cache)?", out.stderr, re.M)
-    stuck = re.search(r"^makepad-run: O3 stuck: (\d+) hot fns[^\n]*", out.stderr, re.M)
+    t1 = re.search(r"relax: O3: (\d+) hot, (\d+) installed(?:.*?(\d+) from the disk cache)?", out.stderr, re.M)
+    stuck = re.search(r"^relax: O3 stuck: (\d+) hot fns[^\n]*", out.stderr, re.M)
     return dict(stuck=int(stuck.group(1)) if stuck else None, stuck_line=stuck.group(0) if stuck else "", steady=float(m.group(2)), tts=float(m.group(4)), sum=m.group(8), o3=int(m.group(7)), tier1="%s hot / %s inst / %s cache" % (t1.group(1), t1.group(2), t1.group(3) or "0") if t1 else "-"), None
 
 # runs[workload]["rustc" | name] = [result per round or None]
@@ -83,23 +83,23 @@ assert len({n for n, _ in bins}) == len(bins), "Relax names must be unique"
 
 def relax_env(n, w=""):
     suffix = n.upper().replace("-", "_")
-    nstd = os.environ.get("MAKEPAD_RUN_STD_" + suffix, std)
+    nstd = os.environ.get("RELAX_STD_" + suffix, std)
     # rwbench links the platform (the layout workload), so `makepad run` hosts it through the HAL: with no
     # display (a bench box, a pool node) it needs the HAL's headless backend; no window opens on the mini either
-    e = dict(base, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STD=nstd, MAKEPAD_RUN_CACHE_DIR=os.path.join(target, "relax-" + n))
+    e = dict(base, RELAX_CACHE="0", RELAX_STD=nstd, RELAX_CACHE_DIR=os.path.join(target, "relax-" + n))
     e.setdefault("MAKEPAD_HAL_BACKEND", "headless")
     # the timed window starts when the JIT reports its optimised code settled (main.rs RW_O3_PROGRESS)
     prog = os.path.join(target, "o3-progress-%s-%s" % (n, w))
-    e["MAKEPAD_RUN_O3_PROGRESS"] = prog
+    e["RELAX_O3_PROGRESS"] = prog
     e["RW_O3_PROGRESS"] = prog
     try: os.unlink(prog)
     except OSError: pass
     if warm:
-        e.update(MAKEPAD_RUN_CACHE="on")
-    for item in shlex.split(os.environ.get("MAKEPAD_RUN_ENV_" + suffix, "")):
+        e.update(RELAX_CACHE="on")
+    for item in shlex.split(os.environ.get("RELAX_ENV_" + suffix, "")):
         key, sep, value = item.partition("=")
         if not sep or not key:
-            raise ValueError("MAKEPAD_RUN_ENV_" + suffix + " requires KEY=value entries")
+            raise ValueError("RELAX_ENV_" + suffix + " requires KEY=value entries")
         e[key] = value
     return e
 def prepare(n, p, w):

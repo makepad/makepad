@@ -1,5 +1,5 @@
-//! relax-compiler's build: MAKEPAD_RUN_PROVENANCE (build_stamp.rs: content hashes of the packages
-//! this crate compiles and of the std it ships with, never git state) and MAKEPAD_RUN_STD_DIGEST.
+//! relax-compiler's build: RELAX_PROVENANCE (build_stamp.rs: content hashes of the packages
+//! this crate compiles and of the std it ships with, never git state) and RELAX_STD_DIGEST.
 use std::path::Path;
 
 #[path = "../base/src/json.rs"]
@@ -51,9 +51,9 @@ fn main() {
     println!("cargo:rerun-if-changed=../build_stamp.rs");
     let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let std = std_digest(&dir);
-    println!("cargo:rustc-env=MAKEPAD_RUN_STD_DIGEST={}", std);
+    println!("cargo:rustc-env=RELAX_STD_DIGEST={}", std);
     let g = build_stamp::graph(&dir);
-    println!("cargo:rustc-env=MAKEPAD_RUN_PROVENANCE={}", g.provenance(&[dir.parent().unwrap(), &dir.join("../../../tools/run")], &format!("std {}", std)));
+    println!("cargo:rustc-env=RELAX_PROVENANCE={}", g.provenance(&[dir.parent().unwrap(), &dir.join("../../../tools/run")], &format!("std {}", std)));
     println!("cargo:rerun-if-changed=../self_stamp.rs");
     self_stamp::write(&[("std".to_string(), std.as_bytes().to_vec())]);
     codegen_parts(&g, &dir);

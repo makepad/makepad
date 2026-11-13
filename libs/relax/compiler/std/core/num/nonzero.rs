@@ -105,16 +105,24 @@ impl<T: ZeroablePrimitive> Hash for NonZero<T> {
         self.0.hash(state)
     }
 }
-impl<T: ZeroablePrimitive> fmt::Debug for NonZero<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
+/// Real core's `impl_nonzero_fmt!`: every formatting trait the integer has. The call names the
+/// trait because this ZeroablePrimitive also has Debug and Display as supertraits, which would make
+/// real core's `self.get().fmt(f)` ambiguous here.
+macro_rules! impl_nonzero_fmt {
+    ($($Trait:ident)*) => {
+        $(
+            impl<T> fmt::$Trait for NonZero<T>
+            where
+                T: ZeroablePrimitive + fmt::$Trait,
+            {
+                fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    fmt::$Trait::fmt(&self.0, f)
+                }
+            }
+        )*
+    };
 }
-impl<T: ZeroablePrimitive> fmt::Display for NonZero<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
+impl_nonzero_fmt! { Debug Display Binary Octal LowerHex UpperHex LowerExp UpperExp }
 impl<T: ZeroablePrimitive> FromStr for NonZero<T> {
     type Err = ParseIntError;
     fn from_str(src: &str) -> Result<NonZero<T>, ParseIntError> {

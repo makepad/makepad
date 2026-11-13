@@ -1,0 +1,10 @@
+[package]
+name = "pc-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "pc_native"
+build = "build.rs"
+
+[build-dependencies]
+cc = { path = "../cc", package = "pc-cc" }

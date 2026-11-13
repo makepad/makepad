@@ -326,6 +326,7 @@ impl Pipeline {
                 instance_binding: info.instance_binding().unwrap_or(u32::MAX),
                 pick_binding: info.pick_binding().unwrap_or(u32::MAX),
                 pick_texture_base: info.pick_texture_base().unwrap_or(u32::MAX),
+                sampler_textures: info.sampler_textures().to_vec(),
                 // the boot screen never draws into a multiview pass
                 xr_vertex: Vec::new(),
                 xr_fragment: Vec::new(),

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """JITPATCH: a live patch of main.rs while handlers of the replaced version are kept in a registry
-(as Fab's script_mod! design keeps its closures). The handlers run only after the patch: they are
+(as an app's script_mod! design keeps its closures). The handlers run only after the patch: they are
 the old version's closures and build closures of OTHER old-version fns (`adder`, `scaled`) whose
-bodies were never lowered in this process (warm: their code came from the disk cache). Fab's
+bodies were never lowered in this process (warm: their code came from the disk cache). An app's
 `makepad run` panicked there: "the environment of a closure of a replaced version of main.rs
 (expression N) is unknown: no body of that version was lowered in this process".
 
-usage: run.py --makepad <makepad binary> [--warm]   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary> [--warm]   (RELAX_STD in the environment)
 
   1. main.rs: a fn added above `adder` (ids shift), `main` prints with it -> "patched"
   2. the file `go`: the stored v0 handlers run -> "out val <n> <v>" with v0's values, no ICE
@@ -31,9 +31,9 @@ def expect(n):
     b = ((n % 3) * 10 + 7) * 2
     return "out val %d %d" % (n, a + b)
 
-base_env = dict(os.environ, MAKEPAD_RUN_AHEAD="minimal")
+base_env = dict(os.environ, RELAX_AHEAD="minimal")
 if warm:
-    env = dict(base_env, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(tmp, "target"))
+    env = dict(base_env, RELAX_CACHE_DIR=os.path.join(tmp, "cache"), RELAX_TARGET_DIR=os.path.join(tmp, "target"))
     open(os.path.join(pkg, "go"), "w").close()
     open(os.path.join(pkg, "stop"), "w").close()
     fill = subprocess.run([relax, "run", "--quiet", "relax-live-closure-owner-app"], cwd=pkg, env=env, capture_output=True, text=True, timeout=600)
@@ -42,7 +42,7 @@ if warm:
     if fill.returncode != 0:
         print(fill.stderr[-3000:]); sys.exit(1)
 else:
-    env = dict(base_env, MAKEPAD_RUN_CACHE="0")
+    env = dict(base_env, RELAX_CACHE="0")
 p = subprocess.Popen([relax, "run", "--verbose", "relax-live-closure-owner-app"], cwd=pkg, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 out, err = [], []
 def pump(f, acc):

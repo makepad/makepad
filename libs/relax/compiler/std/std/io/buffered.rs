@@ -171,6 +171,33 @@ impl<W> From<IntoInnerError<W>> for Error {
     }
 }
 
+/// The buffer `BufWriter::into_parts` returns when the inner writer panicked: the bytes still
+/// buffered, of which an unknown part may have been written (rustc alloc/io/buffered/bufwriter.rs).
+pub struct WriterPanicked {
+    buf: Vec<u8>,
+}
+
+impl WriterPanicked {
+    #[must_use = "`self` will be dropped if the result is not used"]
+    pub fn into_inner(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl core::error::Error for WriterPanicked {}
+
+impl fmt::Display for WriterPanicked {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("BufWriter inner writer panicked, what data remains unwritten is not known")
+    }
+}
+
+impl fmt::Debug for WriterPanicked {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("WriterPanicked").field("buffer", &format_args!("{}/{}", self.buf.len(), self.buf.capacity())).finish()
+    }
+}
+
 impl<W: Write> BufWriter<W> {
     pub fn new(inner: W) -> BufWriter<W> {
         BufWriter::with_capacity(DEFAULT_BUF_SIZE, inner)
@@ -231,6 +258,13 @@ impl<W: Write> BufWriter<W> {
             Err(e) => Err(IntoInnerError(self, e)),
             Ok(()) => Ok(self.inner.take().unwrap()),
         }
+    }
+    /// The writer and the buffer, unflushed; the buffer is `WriterPanicked` when the inner writer
+    /// panicked (rustc's into_parts). Taking `inner` leaves Drop nothing to flush.
+    pub fn into_parts(mut self) -> (W, core::result::Result<Vec<u8>, WriterPanicked>) {
+        let buf = core::mem::take(&mut self.buf);
+        let buf = if !self.panicked { Ok(buf) } else { Err(WriterPanicked { buf }) };
+        (self.inner.take().unwrap(), buf)
     }
 }
 

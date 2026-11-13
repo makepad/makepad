@@ -4,7 +4,7 @@
 
 use crate::option::Option::{self, None, Some};
 
-#[cfg_attr(not(relax_check), lang = "eq")]
+#[lang = "eq"]
 pub trait PartialEq<Rhs: crate::marker::PointeeSized = Self>: crate::marker::PointeeSized {
     #[must_use]
     #[rustc_diagnostic_item = "cmp_partialeq_eq"]
@@ -29,7 +29,7 @@ pub struct AssertParamIsEq<T: Eq + crate::marker::PointeeSized> { _field: crate:
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(i8)]
-#[cfg_attr(not(relax_check), lang = "Ordering")]
+#[lang = "Ordering"]
 pub enum Ordering {
     Less = -1,
     Equal = 0,
@@ -90,7 +90,7 @@ impl Ord for Ordering {
     }
 }
 
-#[cfg_attr(not(relax_check), lang = "partial_ord")]
+#[lang = "partial_ord"]
 pub trait PartialOrd<Rhs: crate::marker::PointeeSized = Self>: PartialEq<Rhs> + crate::marker::PointeeSized {
     #[rustc_diagnostic_item = "cmp_partialord_cmp"]
     fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;

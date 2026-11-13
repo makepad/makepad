@@ -6,8 +6,8 @@
 # variables in the process environment. Prints "cargo_config_env: ok" or "cargo_config_env: FAILED"
 # (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off
-run() { (cd "$H" && env "$@" MAKEPAD_RUN_STD=$H/../../std "$MAKEPAD" run --quiet cce-app 2>>"$ERR"); }
+export RELAX_CACHE=off
+run() { (cd "$H" && env "$@" RELAX_STD=$H/../../std "$MAKEPAD" run --quiet cce-app 2>>"$ERR"); }
 MAKEPAD=$1
 ERR=$(mktemp)
 A=$(run -u CCE_FORCED -u CCE_PLAIN)

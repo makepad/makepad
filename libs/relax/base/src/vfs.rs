@@ -5,7 +5,7 @@
 //! served from the mount (the longest mount root wins: a repository mounted inside another);
 //! every other path is the disk. Paths stay plain strings everywhere else.
 //!
-//! EDITS (MAKEPAD_RUN_EDITS=<folder>): the files a program writes into its own virtual folders (Stage's
+//! EDITS (RELAX_EDITS=<folder>): the files a program writes into its own virtual folders (an app's
 //! EDIT mode changing an app's sources) live in that disk folder, at the same path relative to
 //! the outermost mount, on top of the store: a file there is read instead of the store's. Only
 //! edited files exist there. `.makepad-run-edits` in it records, per edited file, the store blob it
@@ -17,14 +17,30 @@
 //! At a run's start (`reconcile_edits`) edits whose store file is unchanged carry over to the
 //! release being run; when the release changed the file too, the edit moves to
 //! `.makepad-run-conflicts/<commit>/<path>` (beside it `<path>.base`) and the run reports it -- an edit
-//! is never dropped silently. Without MAKEPAD_RUN_EDITS virtual files stay read-only.
+//! is never dropped silently. Without RELAX_EDITS virtual files stay read-only.
 //!
-//! SEED (MAKEPAD_RUN_EDITS_SEED=<folder>[,<folder>...], relative to the outermost mount): at a run's
+//! SEED (RELAX_EDITS_SEED=<folder>[,<folder>...], relative to the outermost mount): at a run's
 //! start the store's files under those folders are written into the edits folder where it has none
 //! (`seed_edits`), so a tool outside the run (a coding agent) finds an app's whole source on disk and
 //! edits it in place. `.makepad-run-seeded` records each written file's blob: a seeded file whose
 //! bytes still are that blob is not an edit; `reconcile_edits` brings it to the release being run.
 //! One whose bytes changed becomes an edit (recorded in `.makepad-run-edits` from that blob).
+//!
+//! FOLDER MOUNTS (`mount_folder`): a virtual folder served from a disk folder, the plain map
+//! `<root>/<rel>` -> `<folder>/<rel>`: no store, ledger, whiteouts, base copies or seeding; reads,
+//! probes and writes go to the mapped disk path. The edits folder serves store mounts only.
+//! `in_store` tells a store mount's path (immutable, edited through the ledger) from a folder
+//! mount's; `is_virtual` keeps meaning "not where another program finds it" for both, and
+//! `on_disk` / `virtual_of` map between a folder mount's two spellings.
+//!
+//! SHARE (RELAX_SHARE=<name>, `share_from_env`): the workspace of the current folder (cargo's root
+//! for it) is folder-mounted at `<relax home>/vfs/share/<name>` and the run's workspace is its place
+//! there. Every path a cache key or a stored record holds is then the virtual one and the run dir is
+//! the relax home's (dirs.rs): checkouts of one repository at different places (git worktrees,
+//! clones) that give the same name share their stores, and a crate compiles again only where its text
+//! differs. What the run prints names the checkout's files (`shown`, the crates' print macros); the
+//! JIT-run program's own output (panic locations, `file!()`) names the virtual paths, which keep its
+//! code stores shared. A current folder in no cargo workspace has none to share and mounts nothing.
 use crate::gitstore::{self as store, Entry, Oid, Store};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -44,25 +60,25 @@ struct Mount {
 
 static ANY: AtomicBool = AtomicBool::new(false);
 
-// ---- the read log (MAKEPAD_RUN_READ_LOG=<file>): what `pack-src` records. Every process of a run (the
+// ---- the read log (RELAX_READ_LOG=<file>): what `pack-src` records. Every process of a run (the
 // build-script children inherit the variable) appends `<kind>\t<path>` once per path and kind:
 // `f` a file whose bytes were read, `p` a path a probe (metadata, exists, is_file, is_dir) found,
 // `d` a folder that was listed. One relaxed load when off.
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static RECORDED: relax_session::sync::Mutex<Option<(std::collections::HashSet<(u8, String)>, std::fs::File)>> = relax_session::sync::Mutex::new(None);
 
-/// Starts the read log from MAKEPAD_RUN_READ_LOG (the loader calls this at start, next to MAKEPAD_RUN_VFS).
+/// Starts the read log from RELAX_READ_LOG (the loader calls this at start, next to RELAX_VFS).
 pub fn record_from_env() -> Result<(), String> {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
-    let Some(p) = std::env::var_os("MAKEPAD_RUN_READ_LOG").filter(|p| !p.is_empty()) else { return Ok(()) };
-    let f = std::fs::OpenOptions::new().create(true).append(true).open(&p).map_err(|e| format!("MAKEPAD_RUN_READ_LOG {}: {e}", p.to_string_lossy()))?;
+    let Some(p) = std::env::var_os("RELAX_READ_LOG").filter(|p| !p.is_empty()) else { return Ok(()) };
+    let f = std::fs::OpenOptions::new().create(true).append(true).open(&p).map_err(|e| format!("RELAX_READ_LOG {}: {e}", p.to_string_lossy()))?;
     *RECORDED.lock().unwrap() = Some((Default::default(), f));
     RECORDING.store(true, Ordering::Release);
     Ok(())
 }
 
-/// Whether this process records its reads (MAKEPAD_RUN_READ_LOG): reads made only for the log
+/// Whether this process records its reads (RELAX_READ_LOG): reads made only for the log
 /// (provided::read_identity_files) are skipped when it does not.
 pub fn recording() -> bool {
     RECORDING.load(Ordering::Acquire)
@@ -84,7 +100,10 @@ fn note(kind: u8, path: &std::path::Path) {
     }
 }
 static MOUNTS: RwLock<Vec<Arc<Mount>>> = RwLock::new(Vec::new());
-/// MAKEPAD_RUN_EDITS: the disk folder holding the edited files (None: virtual files are read-only)
+/// Folder mounts (`mount_folder`): (root, disk folder), longest root first.
+static FOLDER_MOUNTS: RwLock<Vec<(String, std::path::PathBuf)>> = RwLock::new(Vec::new());
+static ANY_FOLDER: AtomicBool = AtomicBool::new(false);
+/// RELAX_EDITS: the disk folder holding the edited files (None: virtual files are read-only)
 static EDITS: RwLock<Option<std::path::PathBuf>> = RwLock::new(None);
 // A verified binary std always reads the store bytes that were compared, even with app edits.
 static FROZEN: RwLock<Vec<String>> = RwLock::new(Vec::new());
@@ -94,7 +113,7 @@ static FROZEN: RwLock<Vec<String>> = RwLock::new(Vec::new());
 pub fn verify_std(path: &str, expected: &str) -> Result<(), String> {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
-    let (m, rel) = find(path).ok_or("no makepad run std mount")?;
+    let (m, rel) = find(path).ok_or("no Relax std mount")?;
     let prefix = if rel.is_empty() { String::new() } else { format!("{rel}/") };
     let mut files = Vec::new();
     for e in m.files.iter().filter(|e| e.path.starts_with(&prefix)) {
@@ -105,7 +124,7 @@ pub fn verify_std(path: &str, expected: &str) -> Result<(), String> {
         files.push((e.path[prefix.len()..].to_string(), bytes));
     }
     if files.is_empty() {
-        return Err("mounted commit has no makepad run std".into());
+        return Err("mounted commit has no Relax std".into());
     }
     let actual = crate::std_digest::digest(files);
     if actual != expected {
@@ -138,9 +157,158 @@ pub fn mount(root: &str, store: Arc<Store>, commit: &Oid) -> Result<(), String> 
     Ok(())
 }
 
-/// Whether `path` lies under a git mount (callers that hand paths to other programs check this).
+/// Serves `root` (a folder that does not exist on disk) from the disk folder `folder`: `<root>/<rel>`
+/// is `<folder>/<rel>`.
+pub fn mount_folder(root: &str, folder: &std::path::Path) {
+    // process state: built in the kept heap
+    let _k = crate::zone_alloc::kept();
+    let root = normalize_path(root);
+    let mut m = FOLDER_MOUNTS.write().unwrap();
+    m.retain(|x| x.0 != root);
+    m.push((root, folder.to_path_buf()));
+    m.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    ANY_FOLDER.store(true, Ordering::Release);
+    ANY.store(true, Ordering::Release);
+}
+
+/// The folder mount whose root is the innermost mount containing `p` (normalized): (root, disk
+/// folder, `p` relative to the root). A store mount inside it wins for its own folder.
+fn folder_mount(p: &str) -> Option<(String, std::path::PathBuf, String)> {
+    if !ANY_FOLDER.load(Ordering::Acquire) {
+        return None;
+    }
+    let folders = FOLDER_MOUNTS.read().unwrap();
+    let (root, dir, rel) = folders.iter().find_map(|(r, d)| relative(p, r).map(|rel| (r, d, rel)))?;
+    if MOUNTS.read().unwrap().iter().any(|m| m.root.len() > root.len() && relative(p, &m.root).is_some()) {
+        return None;
+    }
+    Some((root.clone(), dir.clone(), rel.to_string()))
+}
+
+/// The disk path of `path` when it lies under a folder mount.
+fn folder_path(path: &str) -> Option<std::path::PathBuf> {
+    let (_, dir, rel) = folder_mount(&normalize_path(path))?;
+    Some(if rel.is_empty() { dir } else { dir.join(rel) })
+}
+
+/// Whether `path` lies under a mount, of a store or a folder: it is on no disk under this name
+/// (callers that hand paths to other programs check this, and map a folder mount's with `on_disk`).
 pub fn is_virtual(path: &str) -> bool {
+    ANY.load(Ordering::Acquire) && (find(path).is_some() || folder_path(path).is_some())
+}
+
+/// Whether `path` lies under a folder mount (a shared workspace's checkout, SHARE).
+pub fn in_folder(path: &str) -> bool {
+    folder_path(path).is_some()
+}
+
+/// Whether `path` lies under a store mount: immutable, changed only by an edit through the edits
+/// ledger (a folder mount's path is a disk file under another name).
+pub fn in_store(path: &str) -> bool {
     ANY.load(Ordering::Acquire) && find(path).is_some()
+}
+
+/// `path` as another program finds it: a folder mount's file or folder is the disk one; any other
+/// path is itself (a store mount's is on no disk).
+pub fn on_disk(path: &str) -> std::borrow::Cow<'_, str> {
+    match folder_path(path) {
+        Some(p) => std::borrow::Cow::Owned(normalize_path(&p.to_string_lossy())),
+        None => std::borrow::Cow::Borrowed(path),
+    }
+}
+
+/// The inverse of [`on_disk`]: a disk path inside a folder mount's folder as the mount's virtual
+/// path (a build script's declared input, given under its current folder on disk); any other path
+/// is itself.
+pub fn virtual_of(path: &str) -> std::borrow::Cow<'_, str> {
+    if !ANY_FOLDER.load(Ordering::Acquire) {
+        return std::borrow::Cow::Borrowed(path);
+    }
+    let p = normalize_path(path);
+    for (root, dir) in FOLDER_MOUNTS.read().unwrap().iter() {
+        if let Some(rel) = relative(&p, &normalize_path(&dir.to_string_lossy())) {
+            return std::borrow::Cow::Owned(if rel.is_empty() { root.clone() } else { format!("{root}/{rel}") });
+        }
+    }
+    std::borrow::Cow::Borrowed(path)
+}
+
+/// Whether a folder mount is in place (a shared workspace's run, SHARE).
+pub fn folder_mounted() -> bool {
+    ANY_FOLDER.load(Ordering::Acquire)
+}
+
+/// The disk folders of the folder mounts (a shared workspace's checkout, SHARE), sorted.
+pub fn folder_disks() -> Vec<String> {
+    if !ANY_FOLDER.load(Ordering::Acquire) {
+        return Vec::new();
+    }
+    let mut disks: Vec<String> = FOLDER_MOUNTS.read().unwrap().iter().map(|(_, d)| normalize_path(&d.to_string_lossy())).collect();
+    disks.sort();
+    disks
+}
+
+/// `text` with each folder mount's virtual paths as the disk's (`roots`: (root, disk folder)
+/// pairs): a root matches only at a path boundary, followed by `/` or by a byte that cannot continue
+/// a name (`<root>2` is another folder).
+pub fn shown_with<'a>(roots: &[(String, String)], text: &'a str) -> std::borrow::Cow<'a, str> {
+    let mut out: Option<String> = None;
+    for (root, disk) in roots {
+        let cur = out.as_deref().unwrap_or(text);
+        if !cur.contains(root.as_str()) {
+            continue;
+        }
+        let mut s = String::with_capacity(cur.len());
+        let mut rest = cur;
+        while let Some(at) = rest.find(root.as_str()) {
+            let after = &rest[at + root.len()..];
+            let boundary = after.bytes().next().is_none_or(|b| !(b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.') || b >= 0x80));
+            s.push_str(&rest[..at]);
+            s.push_str(if boundary { disk.as_str() } else { root.as_str() });
+            rest = after;
+        }
+        s.push_str(rest);
+        out = Some(s);
+    }
+    match out {
+        Some(s) => std::borrow::Cow::Owned(s),
+        None => std::borrow::Cow::Borrowed(text),
+    }
+}
+
+/// `text` as a shared workspace's user reads it ([`shown_with`] over this process's folder
+/// mounts): the paths a run holds, its keys and stores, are the mount's; what it prints (a
+/// diagnostic's location, a trace) names the files where an editor and a coding agent find them.
+pub fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    if !ANY_FOLDER.load(Ordering::Acquire) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let roots: Vec<(String, String)> = FOLDER_MOUNTS.read().unwrap().iter().map(|(r, d)| (r.clone(), normalize_path(&d.to_string_lossy()))).collect();
+    match shown_with(&roots, text) {
+        std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s),
+        std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Borrowed(text),
+    }
+}
+
+/// The crates' print macros (base, front, types and compiler lib.rs): a write whose error is
+/// dropped; with a folder mount in place its paths are [`shown`].
+pub fn write_err(text: std::fmt::Arguments<'_>) {
+    use io::Write as _;
+    if !ANY_FOLDER.load(Ordering::Relaxed) {
+        let _ = io::stderr().write_fmt(text);
+        return;
+    }
+    let _ = io::stderr().write_all(shown(&std::fmt::format(text)).as_bytes());
+}
+
+/// [`write_err`] for stdout.
+pub fn write_out(text: std::fmt::Arguments<'_>) {
+    use io::Write as _;
+    if !ANY_FOLDER.load(Ordering::Relaxed) {
+        let _ = io::stdout().write_fmt(text);
+        return;
+    }
+    let _ = io::stdout().write_all(shown(&std::fmt::format(text)).as_bytes());
 }
 
 /// One lexical spelling for VFS paths on every host OS. For host-independent lookups,
@@ -217,11 +385,15 @@ fn relative<'a>(path: &'a str, root: &str) -> Option<&'a str> {
 }
 
 /// The mount `path` is under and the path inside it ("" for the mount's root).
+/// A path whose innermost mount is a folder mount has none ([`folder_path`]).
 fn find(path: &str) -> Option<(Arc<Mount>, String)> {
     let p = normalize_path(path);
     let m = MOUNTS.read().unwrap();
     for mount in m.iter() {
         if let Some(rest) = relative(&p, &mount.root) {
+            if ANY_FOLDER.load(Ordering::Acquire) && FOLDER_MOUNTS.read().unwrap().iter().any(|(r, _)| r.len() > mount.root.len() && relative(&p, r).is_some()) {
+                return None;
+            }
             return Some((mount.clone(), rest.to_string()));
         }
     }
@@ -243,17 +415,25 @@ fn outer_rel(p: &str) -> Option<String> {
     relative(p, root).map(str::to_string)
 }
 
-/// The outermost mount root containing `path` (a git run's virtual workspace root), normalized.
+/// The outermost mount root containing `path` (a git run's virtual workspace root, a shared
+/// workspace's mount), normalized.
 pub fn outer_root(path: &str) -> Option<String> {
     let p = normalize_path(path);
     let m = MOUNTS.read().unwrap();
-    m.iter().filter(|mount| relative(&p, &mount.root).is_some()).map(|mount| mount.root.clone()).min_by_key(|r| r.len())
+    let stores = m.iter().filter(|mount| relative(&p, &mount.root).is_some()).map(|mount| mount.root.clone());
+    let folders = FOLDER_MOUNTS.read().unwrap();
+    let folders = folders.iter().filter(|(r, _)| relative(&p, r).is_some()).map(|(r, _)| r.clone());
+    stores.chain(folders).min_by_key(|r| r.len())
 }
 
 /// Where `path` (virtual) lives in the edits folder, whether or not it exists there.
+/// A folder mount's path has none: the edits folder serves store mounts only.
 fn edit_path(path: &str) -> Option<(std::path::PathBuf, String)> {
     let dir = EDITS.read().unwrap().clone()?;
     let path = normalize_path(path);
+    if folder_mount(&path).is_some() {
+        return None;
+    }
     if FROZEN.read().unwrap().iter().any(|p| relative(&path, p).is_some()) {
         return None;
     }
@@ -340,7 +520,7 @@ pub fn edits_enabled() -> bool {
     EDITS.read().unwrap().is_some()
 }
 
-/// The edits folder from MAKEPAD_RUN_EDITS (the runner sets it per licensed app).
+/// The edits folder from RELAX_EDITS (the runner sets it per licensed app).
 pub fn set_edits(dir: Option<std::path::PathBuf>) {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
@@ -476,9 +656,9 @@ impl ReadSnapshot {
         drop(paths);
         for (path, (c, o)) in &totals {
             calls += c; opens += o; max = max.max(*o); repeated += usize::from(*o > 1);
-            eprintln!("makepad-run source-read: calls={c} opens={o} path={path:?}");
+            eprintln!("relax source-read: calls={c} opens={o} path={path:?}");
         }
-        eprintln!("makepad-run source-reads: calls={calls} paths={} opens={opens} repeated_paths={repeated} max_opens_per_path={max}", totals.len());
+        eprintln!("relax source-reads: calls={calls} paths={} opens={opens} repeated_paths={repeated} max_opens_per_path={max}", totals.len());
     }
 }
 /// The innermost snapshot bound on this thread.
@@ -534,6 +714,7 @@ fn read_uncached_inner(path: &std::path::Path, entry: Option<&ReadEntry>) -> io:
         return read_disk(path, entry);
     }
     let s = path.to_string_lossy();
+    if let Some(p) = folder_path(&s) { return read_disk(&p, entry); }
     if whiteout(&s) { return Err(not_found(&s)); }
     match find(&s) {
         None => read_disk(path, entry),
@@ -587,6 +768,7 @@ pub fn metadata(path: impl AsRef<std::path::Path>) -> io::Result<Metadata> {
 
 fn metadata_inner(path: &std::path::Path) -> io::Result<Metadata> {
     let s = path.to_string_lossy();
+    if let Some(p) = folder_path(&s) { return disk_metadata(&p); }
     if whiteout(&s) { return Err(not_found(&s)); }
     if let Some((mount, rel)) = ANY.load(Ordering::Acquire).then(|| find(&s)).flatten() {
         if let Some(edited) = edited_file(&s) { return metadata(edited); }
@@ -600,6 +782,10 @@ fn metadata_inner(path: &std::path::Path) -> io::Result<Metadata> {
             is_symlink: entry.is_some_and(|e| e.mode == 0o120000),
         });
     }
+    disk_metadata(path)
+}
+
+fn disk_metadata(path: &std::path::Path) -> io::Result<Metadata> {
     let link = std::fs::symlink_metadata(path)?;
     let meta = std::fs::metadata(path)?;
     Ok(Metadata { len: meta.len(), modified: meta.modified()?, is_dir: meta.is_dir(),
@@ -613,7 +799,8 @@ pub fn canonicalize(path: impl AsRef<std::path::Path>) -> io::Result<std::path::
     if ANY.load(Ordering::Acquire) {
         let raw = normalize_components(&path.to_string_lossy(), false);
         let mounts = MOUNTS.read().unwrap();
-        if let Some(rel) = mounts.iter().find_map(|m| relative(&raw, &m.root)) {
+        let folders = FOLDER_MOUNTS.read().unwrap();
+        if let Some(rel) = mounts.iter().map(|m| m.root.as_str()).chain(folders.iter().map(|f| f.0.as_str())).find_map(|root| relative(&raw, root)) {
             let mut depth = 0usize;
             for part in rel.split('/') {
                 match part {
@@ -625,12 +812,14 @@ pub fn canonicalize(path: impl AsRef<std::path::Path>) -> io::Result<std::path::
             }
             let normalized = normalize_path(&raw);
             drop(mounts);
+            drop(folders);
             if !exists(&normalized) { return Err(not_found(&normalized)); }
             return Ok(normalized.into());
         }
         drop(mounts);
+        drop(folders);
         let normalized = normalize_path(&raw);
-        if find(&normalized).is_some() {
+        if is_virtual(&normalized) {
             if !exists(&normalized) { return Err(not_found(&normalized)); }
             return Ok(normalized.into());
         }
@@ -655,10 +844,11 @@ pub fn exists(path: impl AsRef<std::path::Path>) -> bool {
 
 fn exists_inner(path: &std::path::Path) -> bool {
     if let Some(held) = landing_read(path) { return held.is_some(); }
-    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.exists();
     }
+    if let Some(p) = folder_path(&path.to_string_lossy()) { return p.exists(); }
+    if whiteout(&path.to_string_lossy()) { return false; }
     let s = path.to_string_lossy();
     match find(&s) {
         None => path.exists(),
@@ -676,10 +866,11 @@ pub fn is_file(path: impl AsRef<std::path::Path>) -> bool {
 
 fn is_file_inner(path: &std::path::Path) -> bool {
     if let Some(held) = landing_read(path) { return held.is_some(); }
-    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.is_file();
     }
+    if let Some(p) = folder_path(&path.to_string_lossy()) { return p.is_file(); }
+    if whiteout(&path.to_string_lossy()) { return false; }
     let s = path.to_string_lossy();
     match find(&s) {
         None => path.is_file(),
@@ -696,10 +887,11 @@ pub fn is_dir(path: impl AsRef<std::path::Path>) -> bool {
 }
 
 fn is_dir_inner(path: &std::path::Path) -> bool {
-    if whiteout(&path.to_string_lossy()) { return false; }
     if !ANY.load(Ordering::Acquire) {
         return path.is_dir();
     }
+    if let Some(p) = folder_path(&path.to_string_lossy()) { return p.is_dir(); }
+    if whiteout(&path.to_string_lossy()) { return false; }
     let s = path.to_string_lossy();
     match find(&s) {
         None => path.is_dir(),
@@ -717,7 +909,9 @@ pub fn read_dir(path: impl AsRef<std::path::Path>) -> io::Result<Vec<(String, bo
 }
 
 fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
-    if whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
+    let folder = folder_path(&path.to_string_lossy());
+    let path = folder.as_deref().unwrap_or(path);
+    if folder.is_none() && whiteout(&path.to_string_lossy()) { return Err(not_found(&path.to_string_lossy())); }
     let disk = || -> io::Result<Vec<(String, bool)>> {
         let mut v: Vec<(String, bool)> = std::fs::read_dir(path)?
             .flatten()
@@ -726,7 +920,7 @@ fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
         v.sort();
         Ok(v)
     };
-    if !ANY.load(Ordering::Acquire) {
+    if !ANY.load(Ordering::Acquire) || folder.is_some() {
         return disk();
     }
     match find(&path.to_string_lossy()) {
@@ -751,10 +945,11 @@ fn read_dir_inner(path: &std::path::Path) -> io::Result<Vec<(String, bool)>> {
                     v.push(e);
                 }
             }
-            // repositories mounted directly inside this folder are folders of it too
+            // repositories and folders mounted directly inside this folder are folders of it too
             let here = normalize_path(&path.to_string_lossy());
-            for x in MOUNTS.read().unwrap().iter() {
-                if let Some(name) = relative(&x.root, &here) {
+            let folders: Vec<String> = FOLDER_MOUNTS.read().unwrap().iter().map(|f| f.0.clone()).collect();
+            for root in MOUNTS.read().unwrap().iter().map(|x| x.root.clone()).chain(folders) {
+                if let Some(name) = relative(&root, &here) {
                     if !name.is_empty() && !name.contains('/') && !v.iter().any(|e| e.0 == name) {
                         v.push((name.to_string(), true));
                     }
@@ -794,6 +989,7 @@ pub fn read_dir_entries(path: impl AsRef<std::path::Path>) -> io::Result<Vec<Dir
         Ok(entries)
     };
     let name = path.to_string_lossy();
+    if let Some(p) = folder_path(&name) { return disk(&p); }
     let Some((mount, rel)) = ANY.load(Ordering::Acquire).then(|| find(&name)).flatten() else { return disk(path) };
     let edited = edit_path(&name).and_then(|(path, _)| disk(&path).ok()).unwrap_or_default();
     // Preserve read_dir's mount/overlay precedence and nested mount listing.
@@ -810,6 +1006,7 @@ pub fn read_dir_entries(path: impl AsRef<std::path::Path>) -> io::Result<Vec<Dir
 pub fn read_link(path: impl AsRef<std::path::Path>) -> io::Result<std::path::PathBuf> {
     let path = path.as_ref();
     let name = path.to_string_lossy();
+    if let Some(p) = folder_path(&name) { return std::fs::read_link(p); }
     if ANY.load(Ordering::Acquire) && find(&name).is_some() {
         if let Some(edited) = edited_file(&name) { return std::fs::read_link(edited); }
         return read_to_string(path).map(std::path::PathBuf::from);
@@ -830,9 +1027,10 @@ pub struct FileStat {
 }
 pub const STAT_RACY_NS: u64 = 2_000_000_000;
 
-/// The stat of an on-disk path (None: virtual (a mounted store or an edits overlay), missing).
+/// The stat of an on-disk path (None: virtual (a mounted store or an edits overlay, a folder
+/// mount: its content names it), missing).
 pub fn file_stat(path: &str) -> Option<FileStat> {
-    if ANY.load(Ordering::Acquire) && find(path).is_some() {
+    if is_virtual(path) {
         return None;
     }
     disk_stat(path)
@@ -876,6 +1074,9 @@ fn disk_stat(path: &str) -> Option<FileStat> {
 /// When the file last changed (a git file: never, None; the caller treats it as unchanged).
 pub fn modified(path: impl AsRef<std::path::Path>) -> Option<std::time::SystemTime> {
     let path = path.as_ref();
+    if let Some(p) = folder_path(&path.to_string_lossy()) {
+        return std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    }
     if ANY.load(Ordering::Acquire) && find(&path.to_string_lossy()).is_some() {
         // an edited file changes on disk; the store's never does
         return edited_file(&path.to_string_lossy()).and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
@@ -883,8 +1084,9 @@ pub fn modified(path: impl AsRef<std::path::Path>) -> Option<std::time::SystemTi
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// What a virtual path's content is fixed by: its mount's store and commit (None on disk). Caches
-/// that would compare file times compare this instead.
+/// What a virtual path's content is fixed by: its mount's store and commit (None on disk, and under
+/// a folder mount: its content names it). Caches that would compare file times compare this
+/// instead.
 pub fn identity(path: &str) -> Option<String> {
     if !ANY.load(Ordering::Acquire) {
         return None;
@@ -901,8 +1103,9 @@ pub fn identity(path: &str) -> Option<String> {
 
 // ---- the mount table as text (a child process started in a virtual folder mounts the same)
 
-/// `root\tstore path\tcommit hex[\toffset+len]` per mount, newline-separated (the range of a store
-/// that sits inside a bigger file, gitstore.rs `open_range`).
+/// `root\tstore path\tcommit hex[\toffset+len]` per store mount, newline-separated (the range of a
+/// store that sits inside a bigger file, gitstore.rs `open_range`), and `root\tfolder\tdir` per
+/// folder mount.
 pub fn mounts_text() -> String {
     let m = MOUNTS.read().unwrap();
     let mut out = String::new();
@@ -913,21 +1116,46 @@ pub fn mounts_text() -> String {
         }
         out.push('\n');
     }
+    for (root, dir) in FOLDER_MOUNTS.read().unwrap().iter() {
+        out.push_str(&format!("{root}\t{}\tdir\n", dir.display()));
+    }
     out
 }
 
-/// Mounts what `mounts_text` wrote (MAKEPAD_RUN_VFS).
+/// The mount table as a key holds it: what the files are, not where a folder mount reads them
+/// (`root\tstore@commit[@range]` per store mount, `root\tdir` per folder mount). Two checkouts of
+/// one shared workspace give the same.
+pub fn mounts_key_text() -> String {
+    let mut out = String::new();
+    for x in MOUNTS.read().unwrap().iter() {
+        out.push_str(&format!("{}\t{}@{}", x.root, x.store.path.display(), store::hex(&x.commit)));
+        if let Some((offset, len)) = x.store.range {
+            out.push_str(&format!("@{offset}+{len}"));
+        }
+        out.push('\n');
+    }
+    for (root, _) in FOLDER_MOUNTS.read().unwrap().iter() {
+        out.push_str(&format!("{root}\tdir\n"));
+    }
+    out
+}
+
+/// Mounts what `mounts_text` wrote (RELAX_VFS).
 pub fn mount_text(text: &str) -> Result<(), String> {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     for line in text.lines().filter(|l| !l.is_empty()) {
         let mut it = line.split('\t');
-        let (Some(root), Some(path), Some(commit)) = (it.next(), it.next(), it.next()) else { return Err(format!("MAKEPAD_RUN_VFS: bad line {line}")) };
-        let commit = store::from_hex(commit).ok_or_else(|| format!("MAKEPAD_RUN_VFS: bad commit in {line}"))?;
+        let (Some(root), Some(path), Some(commit)) = (it.next(), it.next(), it.next()) else { return Err(format!("RELAX_VFS: bad line {line}")) };
+        if commit == "dir" {
+            mount_folder(root, std::path::Path::new(path));
+            continue;
+        }
+        let commit = store::from_hex(commit).ok_or_else(|| format!("RELAX_VFS: bad commit in {line}"))?;
         let s = match it.next() {
             None => Store::open(std::path::Path::new(path)).map_err(|e| format!("{path}: {e}"))?,
             Some(range) => {
-                let (offset, len) = parse_range(range).ok_or_else(|| format!("MAKEPAD_RUN_VFS: bad range in {line}"))?;
+                let (offset, len) = parse_range(range).ok_or_else(|| format!("RELAX_VFS: bad range in {line}"))?;
                 Store::open_range(std::path::Path::new(path), offset, len).map_err(|e| format!("{path}: {e}"))?
             }
         };
@@ -942,18 +1170,49 @@ pub fn parse_range(s: &str) -> Option<(u64, u64)> {
     Some((o.parse().ok()?, l.parse().ok()?))
 }
 
-/// MAKEPAD_RUN_VFS from the environment, mounted once (the loader calls this at start).
+/// RELAX_VFS from the environment, mounted once (the loader calls this at start); without one,
+/// a shared workspace's mount (RELAX_SHARE, `share_from_env`).
 pub fn mount_from_env() -> Result<(), String> {
     // process state: built in the kept heap
     let _k = crate::zone_alloc::kept();
     record_from_env()?;
-    if let Some(d) = std::env::var_os("MAKEPAD_RUN_EDITS").filter(|d| !d.is_empty()) {
+    if let Some(d) = std::env::var_os("RELAX_EDITS").filter(|d| !d.is_empty()) {
         set_edits(Some(d.into()));
     }
-    match std::env::var("MAKEPAD_RUN_VFS") {
+    match std::env::var("RELAX_VFS") {
         Ok(t) if !t.is_empty() => mount_text(&t),
-        _ => Ok(()),
+        _ => share_from_env(),
     }
+}
+
+/// Where a shared workspace named `name` is mounted: `<relax home>/vfs/share/<name>` (beside
+/// the git runs' labels and `vfs/git`, never among them).
+pub fn share_root(name: &str) -> String {
+    normalize_path(&store::relax_home().join("vfs").join("share").join(name).to_string_lossy())
+}
+
+/// RELAX_SHARE=<name>: the workspace of the current folder (cargo's root for it) is folder-mounted
+/// at [`share_root`] and the run's workspace is the current folder's place there, said in
+/// RELAX_VFS and RELAX_WORKSPACE as run facts (progenv.rs; the name is one too): this run again (a
+/// self-exec child) and a build script of the mount (unitgraph.rs) are handed them; no other child
+/// inherits them. A run handed a mount (RELAX_VFS) mounts that and never reaches here. A current
+/// folder in no cargo workspace (or one whose manifest does not read) mounts nothing: the loader
+/// mounts before it knows the command, `--version` and `inspect` need no workspace, and a command
+/// that needs one reports the manifest as it does without RELAX_SHARE.
+fn share_from_env() -> Result<(), String> {
+    let Some(name) = std::env::var("RELAX_SHARE").ok().filter(|n| !n.is_empty()) else { return Ok(()) };
+    if name.starts_with('.') || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')) {
+        return Err(format!("RELAX_SHARE: `{name}` is not a name (letters, digits, `-`, `_`, `.`)"));
+    }
+    let root = share_root(&name);
+    let Ok(cwd) = std::env::current_dir() else { return Ok(()) };
+    let cwd = cwd.to_string_lossy().into_owned();
+    let Ok(disk) = crate::resolve::find_root(&cwd) else { return Ok(()) };
+    let rel = relative_path(&cwd, &disk).unwrap_or_default();
+    mount_folder(&root, std::path::Path::new(&disk));
+    crate::progenv::set_run_fact("RELAX_VFS", mounts_text());
+    crate::progenv::set_run_fact("RELAX_WORKSPACE", if rel.is_empty() { root } else { format!("{root}/{rel}") });
+    Ok(())
 }
 
 // ---- what a program running on Relax's std calls (std/fs.rs, std/process.rs; C ABI, found by
@@ -987,10 +1246,23 @@ pub extern "C" fn relax_vfs_stat(p: *const u8, n: usize, size: *mut u64, mtime_n
         return 0;
     }
     let path = unsafe { path_arg(p, n) };
+    let since = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+    if let Some(disk) = folder_path(path) {
+        return match std::fs::metadata(disk) {
+            Ok(meta) if meta.is_dir() => 2,
+            Ok(meta) => {
+                unsafe {
+                    *size = meta.len();
+                    *mtime_ns = meta.modified().map_or(0, since);
+                }
+                1
+            }
+            Err(_) => -1,
+        };
+    }
     let Some((m, rel)) = find(path) else { return 0 };
     if let Some(f) = edited_file(path) {
         let meta = std::fs::metadata(f).ok();
-        let since = |t: std::time::SystemTime| t.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         unsafe {
             *size = meta.as_ref().map_or(0, |m| m.len());
             *mtime_ns = meta.and_then(|m| m.modified().ok()).map_or(0, since);
@@ -1050,7 +1322,7 @@ pub extern "C" fn relax_vfs_release(id: u64) {
 }
 
 
-// ---- edits (MAKEPAD_RUN_EDITS): writes into virtual folders
+// ---- edits (RELAX_EDITS): writes into virtual folders
 
 /// The edits folder's records: edited path -> the store blob it was edited from (None: a file
 /// the store did not have).
@@ -1153,9 +1425,16 @@ pub fn seed_edits(folders: &[String]) -> io::Result<usize> {
 /// What a write into a virtual path needs: the disk path to write (in the edits folder), its
 /// folder made, and on the first edit of a store file its record and base copy. `keep`: the
 /// write keeps the content (append, read-write): the store's bytes are copied first. Err when
-/// the path is not virtual or there is no edits folder (the file stays read-only).
+/// the path is not virtual or there is no edits folder (the file stays read-only). A folder
+/// mount's path is written where it maps, as it is (no ledger).
 pub fn prepare_edit(path: &str, keep: bool) -> io::Result<std::path::PathBuf> {
-    let (disk, rel) = edit_path(path).ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "read-only (no MAKEPAD_RUN_EDITS)"))?;
+    if let Some(disk) = folder_path(path) {
+        if let Some(parent) = disk.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        return Ok(disk);
+    }
+    let (disk, rel) = edit_path(path).ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "read-only (no RELAX_EDITS)"))?;
     if rel.is_empty() || rel.starts_with(".makepad-run-") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not an editable path"));
     }
@@ -1208,12 +1487,15 @@ pub fn edits_ledger_stamp() -> Option<(std::time::SystemTime, u64)> {
 /// The disk path of `path` in the edits folder when it is an edited file or folder there
 /// (removing or renaming an edited file).
 pub fn edited_disk_path(path: &str) -> Option<std::path::PathBuf> {
+    if let Some(disk) = folder_path(path) {
+        return disk.exists().then_some(disk);
+    }
     let (p, rel) = edit_path(path)?;
     (!rel.starts_with(".makepad-run-") && p.exists()).then_some(p)
 }
 
 /// The edits folder as one look found it: each file and folder in it (the run's own
-/// `.makepad-run-*` files left out) with its (modified time, length). A watcher's round that
+/// `.relax-*` files left out) with its (modified time, length). A watcher's round that
 /// looks at every virtual file takes their stamps from it: one walk of the edits instead of a
 /// failing stat per unedited file (5,500 of them on a big app's every edit).
 pub struct EditsLook(BTreeMap<String, (std::time::SystemTime, u64)>);
@@ -1270,9 +1552,12 @@ pub fn edits_record() -> Option<std::path::PathBuf> {
     EDITS.read().unwrap().as_ref().map(|d| d.join(".makepad-run-edits"))
 }
 
-/// A folder made in a virtual folder: made in the edits folder.
+/// A folder made in a virtual folder: made in the edits folder (a folder mount's: where it maps).
 pub fn prepare_edit_dir(path: &str) -> io::Result<std::path::PathBuf> {
-    let (disk, rel) = edit_path(path).ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "read-only (no MAKEPAD_RUN_EDITS)"))?;
+    if let Some(disk) = folder_path(path) {
+        return Ok(disk);
+    }
+    let (disk, rel) = edit_path(path).ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "read-only (no RELAX_EDITS)"))?;
     if rel.starts_with(".makepad-run-") {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "not an editable path"));
     }
@@ -1568,7 +1853,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&edits);
     }
 
-    /// Sandbox game_store (asset client cache.rs open: create_dir_all(tmp), then read_dir(tmp)): a
+    /// A game's store (asset client cache.rs open: create_dir_all(tmp), then read_dir(tmp)): a
     /// folder the run made in a virtual folder lists, empty, as the disk's new folder does; it
     /// was NotFound while it had no entries.
     #[test]
@@ -1633,6 +1918,92 @@ mod tests {
         }
         assert_eq!(canonical(graph), "c:/Users/u/devhub/native/lane/libs/git/tests/worktree_conformance.rs");
         MOUNTS.write().unwrap().retain(|m| m.root != normalize_path(root));
+    }
+
+    /// A shared workspace's text as its user reads it (`shown_with`, pure over the mount table): a
+    /// root names the disk folder only at a path boundary, so share `ws` leaves share `ws2` alone.
+    #[test]
+    fn shown_paths_match_a_root_only_at_a_path_boundary() {
+        let roots = [("/h/vfs/share/ws".to_string(), "/src/a".to_string()), ("/h/vfs/share/ws2".to_string(), "/src/b".to_string())];
+        assert_eq!(shown_with(&roots, "/h/vfs/share/ws/src/x.rs:3:1"), "/src/a/src/x.rs:3:1");
+        assert_eq!(shown_with(&roots, "in /h/vfs/share/ws2/y.rs and /h/vfs/share/ws"), "in /src/b/y.rs and /src/a", "each root, its own folder");
+        assert_eq!(shown_with(&roots, "/h/vfs/share/ws-old/z /h/vfs/share/ws_1 /h/vfs/share/ws.x"), "/h/vfs/share/ws-old/z /h/vfs/share/ws_1 /h/vfs/share/ws.x", "a longer name is another folder");
+        assert_eq!(shown_with(&roots, "'/h/vfs/share/ws': nothing"), "'/src/a': nothing", "a quote ends a name");
+        assert!(matches!(shown_with(&roots, "no path here"), std::borrow::Cow::Borrowed(_)), "text without a root is not copied");
+    }
+
+    /// A folder mount (a shared workspace, SHARE) is its disk folder under another name: every read
+    /// and probe answers the disk's, edits write the disk file itself, `on_disk` and `virtual_of`
+    /// map both ways, keys name the mount without the folder, and a store mount beside it or inside
+    /// it serves its own files (the edits folder of the port's first shape served a git
+    /// dependency's `src/lib.rs` from the checkout's).
+    #[test]
+    fn a_folder_mount_is_its_folder_under_another_name() {
+        let _one = EDITS_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!("relax-vfs-folder-{}", std::process::id()));
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(checkout.join("src")).unwrap();
+        std::fs::create_dir_all(checkout.join("empty")).unwrap();
+        std::fs::write(checkout.join("src/lib.rs"), "checkout").unwrap();
+        std::fs::write(checkout.join("Cargo.toml"), "[package]").unwrap();
+        let disk = normalize_path(&checkout.to_string_lossy());
+        let root = normalize_path(&base.join("vfs/share/ws").to_string_lossy());
+        let dep_root = normalize_path(&base.join("vfs/git/dep/abc").to_string_lossy());
+        let inner_root = format!("{root}/vendor/dep");
+        mount_folder(&root, &checkout);
+        let dep = test_store::Fixture::new(&[("src/lib.rs", b"dep"), ("Cargo.toml", b"[dep]")]);
+        mount(&dep_root, dep.store.clone(), &dep.commit).unwrap();
+        mount(&inner_root, dep.store.clone(), &dep.commit).unwrap();
+        let lib = format!("{root}/src/lib.rs");
+
+        assert_eq!(read_to_string(&lib).unwrap(), "checkout");
+        assert!(exists(&lib) && is_file(&lib) && !is_dir(&lib) && is_dir(format!("{root}/src")) && is_dir(&root));
+        assert!(!exists(format!("{root}/none.rs")) && read(format!("{root}/none.rs")).is_err());
+        assert_eq!(metadata(&lib).unwrap().len, 8);
+        let mut names: Vec<String> = read_dir(&root).unwrap().into_iter().map(|(n, _)| n).collect();
+        names.sort();
+        assert_eq!(names, ["Cargo.toml", "empty", "src"], "the folder's own entries");
+        assert!(read_dir(format!("{root}/empty")).unwrap().is_empty());
+        assert_eq!(canonicalize(format!("{root}/src/../src/lib.rs")).unwrap(), std::path::PathBuf::from(&lib), "the virtual spelling, never the disk's");
+        assert!(is_virtual(&lib) && in_folder(&lib) && !in_store(&lib));
+        assert!(identity(&lib).is_none() && file_stat(&lib).is_none(), "its content names it");
+
+        assert_eq!(on_disk(&lib), format!("{disk}/src/lib.rs"));
+        assert_eq!(on_disk(&root), disk);
+        assert_eq!(virtual_of(&format!("{disk}/src/lib.rs")), lib, "a path a script gave under its folder on disk");
+        assert_eq!(virtual_of(&disk), root);
+        assert_eq!(virtual_of(&format!("{disk}2/x")), format!("{disk}2/x"), "a longer folder name is not the checkout");
+        assert_eq!(on_disk("/elsewhere/x"), "/elsewhere/x");
+        assert_eq!(shown(&format!("{lib}:1:2")), format!("{disk}/src/lib.rs:1:2"));
+
+        std::fs::write(prepare_edit(&format!("{root}/src/new/m.rs"), false).unwrap(), "new").unwrap();
+        assert_eq!(std::fs::read_to_string(checkout.join("src/new/m.rs")).unwrap(), "new", "an edit writes the checkout");
+        assert_eq!(edited_disk_path(&lib), Some(checkout.join("src/lib.rs")));
+        std::fs::write(checkout.join("src/lib.rs"), "changed").unwrap();
+        assert_eq!(read_to_string(&lib).unwrap(), "changed", "no copy: the disk as it is now");
+
+        for r in [&dep_root, &inner_root] {
+            assert_eq!(read_to_string(format!("{r}/src/lib.rs")).unwrap(), "dep", "{r}: the store's own text");
+            assert!(in_store(&format!("{r}/src/lib.rs")) && !in_folder(&format!("{r}/src/lib.rs")));
+        }
+        assert_eq!(on_disk(&format!("{inner_root}/src/lib.rs")), format!("{inner_root}/src/lib.rs"), "a store file is on no disk");
+
+        let text = mounts_text();
+        assert!(text.contains(&format!("{root}\t{}\tdir\n", checkout.display())), "{text}");
+        let key = mounts_key_text();
+        assert!(key.contains(&format!("{root}\tdir\n")) && !key.contains(&disk), "a key names no checkout: {key}");
+        let other = normalize_path(&base.join("vfs/share/other").to_string_lossy());
+        mount_text(&format!("{other}\t{}\tdir\n", checkout.display())).unwrap();
+        assert_eq!(read_to_string(format!("{other}/Cargo.toml")).unwrap(), "[package]", "the table's text mounts it again");
+
+        MOUNTS.write().unwrap().retain(|m| m.root != dep_root && m.root != inner_root);
+        let mut folders = FOLDER_MOUNTS.write().unwrap();
+        folders.retain(|(r, _)| *r != root && *r != other);
+        if folders.is_empty() {
+            ANY_FOLDER.store(false, Ordering::Release);
+        }
+        drop(folders);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]

@@ -21,7 +21,7 @@ BIN=$1
 T=$(mktemp -d "${TMPDIR:-/tmp}/stale_jit_boot.XXXXXX") || exit 1
 : "${T:?}"
 trap 'rm -rf "$T"' EXIT
-unset MAKEPAD_RUN_STD MAKEPAD_RUN_LOADER
+unset RELAX_STD RELAX_LOADER
 mkdir -p "$T/ws/fixture" "$T/home" "$T/tmp"
 cp -R "$R/tools/run/fixture/Cargo.toml" "$R/tools/run/fixture/src" "$R/tools/run/fixture/tests" "$T/ws/fixture/"
 cat > "$T/ws/Cargo.toml" <<EOF
@@ -30,7 +30,7 @@ members = ["fixture"]
 resolver = "2"
 
 [workspace.dependencies]
-makepad-relax-api = { path = "$R/libs/relax_api" }
+relax-api = { path = "$R/libs/relax_api" }
 EOF
 printf '\npub fn stale_jit_boot_marker() {}\n' >> "$T/ws/fixture/src/lib.rs"
 fails=""
@@ -39,7 +39,7 @@ fails=""
 check() {
     local case=$1 phrase=$2 exe=$3
     shift 3
-    out=$(cd "$T/ws" && MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_HOME="$T/home" TMPDIR="$T/tmp" perl -e 'alarm 300; exec @ARGV' "$exe" "$@" 2>&1)
+    out=$(cd "$T/ws" && RELAX_CACHE=off RELAX_HOME="$T/home" TMPDIR="$T/tmp" perl -e 'alarm 300; exec @ARGV' "$exe" "$@" 2>&1)
     rc=$?
     if [ $rc = 0 ] || [ $rc = 142 ] || ! echo "$out" | grep -qE "The JIT itself changed \(relax_provided_fixture: [^,)]*/ws/fixture/src/lib\.rs\)" || ! echo "$out" | grep -q "$phrase"; then
         fails="$fails $case:rc=$rc"

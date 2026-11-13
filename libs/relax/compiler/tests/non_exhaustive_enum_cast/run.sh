@@ -6,8 +6,8 @@
 set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
 RELAX=$(realpath "$1")
-export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$H/../../std}
-export MAKEPAD_RUN_CACHE=off
+export RELAX_STD=${RELAX_STD:-$H/../../std}
+export RELAX_CACHE=off
 cd "$H"
 "$RELAX" check enum-cast-app
 test "$("$RELAX" run --quiet enum-cast-app)" = "non-exhaustive enum casts: ok"

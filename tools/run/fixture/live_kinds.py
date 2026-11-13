@@ -2,11 +2,11 @@
 """Live patches always land: one edit per edit kind against a running program, visible effect asserted.
 
 usage: live_kinds.py [--only k1,k2] [--jobs N] [--warm]
-  (the JIT runs through `cargo run --profile host`; MAKEPAD_RUN_STD in the environment, default
+  (the JIT runs through `cargo run --profile host`; RELAX_STD in the environment, default
    libs/relax/compiler/std; run from the workspace root)
 
 For each kind: copy live_kinds/ to a worker dir, `makepad run --ahead=minimal relax-live-kinds` (a working
-tree: live, hidden, muted, own MAKEPAD_RUN_HOME), wait for the live watcher (MAKEPAD_RUN_LIVE_READY) and
+tree: live, hidden, muted, own RELAX_HOME), wait for the live watcher (RELAX_LIVE_READY) and
 the first tick, save the kind's edit and wait for the probe's printed value to become the expected one.
 The outcome is how the edit landed: patched (installed live), restarted (the program printed
 "out restored": a state-preserving restart in place), refused, or pending (a restart nobody made).
@@ -42,7 +42,7 @@ def wrong(lines):
 only = [k for k in opt("--only", "").split(",") if k]
 jobs = int(opt("--jobs", "3"))
 warm_start = "--warm" in args
-os.environ.setdefault("MAKEPAD_RUN_STD", os.path.abspath("libs/relax/compiler/std"))
+os.environ.setdefault("RELAX_STD", os.path.abspath("libs/relax/compiler/std"))
 WAIT = float(os.environ.get("LIVE_KINDS_WAIT", "60"))
 
 K = "src/kinds.rs"
@@ -248,9 +248,9 @@ def run_ui_locked(slot, kind):
     os.makedirs(tmp, exist_ok=True)
     home = os.path.join(work, "uihome")
     originals = {rel: open(os.path.abspath(rel)).read() for rel, _, _ in edits}
-    env = dict(os.environ, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"),
-               MAKEPAD_HIDE_WINDOWS="1", SANDBOX_MUTE="1", MAKEPAD_MUTE="1", MAKEPAD_REMOTE="1", MAKEPAD_HOME=os.path.join(work, "mphome"), TMPDIR=tmp,
-               MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_WINDOW="640x400@1")
+    env = dict(os.environ, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"), RELAX_TARGET_DIR=os.path.join(home, "target"),
+               MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", MAKEPAD_REMOTE="1", MAKEPAD_HOME=os.path.join(work, "mphome"), TMPDIR=tmp,
+               RELAX_LIVE_TRACE="1", MAKEPAD_WINDOW="640x400@1")
     logpath = os.path.join(work, "ui-%s.log" % name)
     log = open(logpath, "w")
     p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "makepad-example-counter"], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
@@ -352,9 +352,9 @@ def run_kind(slot, kind):
     if os.path.exists(ready):
         os.remove(ready)
     home = os.path.join(work, "home")
-    env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-               MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", SANDBOX_MUTE="1", MAKEPAD_MUTE="1",
-               LIVE_KINDS_SECS=str(int(WAIT) * 3 + 120), MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_REMOTE="1")
+    env = dict(os.environ, RELAX_LIVE_READY=ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+               RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1",
+               LIVE_KINDS_SECS=str(int(WAIT) * 3 + 120), RELAX_LIVE_TRACE="1", MAKEPAD_REMOTE="1")
     window = name == "partial_landing" or key == "pixel"
     features = ["--features", "window"] if window else []
     if warm_start and slot not in filled:
@@ -382,7 +382,7 @@ def run_kind(slot, kind):
         return False
     ticks = lambda: [l for _, l in out if l.startswith("out ") and not l.startswith("out restored")]
     res = {"kind": name, "outcome": "-", "effect": "no", "ms": "-", "value": None, "note": ""}
-    # the watcher applies saves once its startup gate opens (MAKEPAD_RUN_LIVE_TRACE says when)
+    # the watcher applies saves once its startup gate opens (RELAX_LIVE_TRACE says when)
     started = wait(lambda: os.path.exists(ready) and len(ticks()) >= 3 and any("watcher gate open" in l for _, l in err), 300)
     if started and window:
         started = wait(lambda: "Live patch probe" in inspect(p.pid, os.environ.get("TMPDIR", "/tmp"), "ui"), WAIT)
@@ -518,7 +518,7 @@ def run_kind(slot, kind):
             res["outcome"] = "pending"
         else:
             res["outcome"] = "silent"
-        why = [l.replace("makepad live:", "").strip() for l in e if l.startswith("makepad live:   ") or "note:" in l or "kept:" in l]
+        why = [l.replace("relax live:", "").strip() for l in e if l.startswith("relax live:   ") or "note:" in l or "kept:" in l]
         res["note"] = "; ".join(why)[:220]
         if os.environ.get("LIVE_KINDS_VERBOSE"):
             sys.stderr.write("---- %s stderr\n%s\n" % (name, "\n".join(l for _, l in err[0 if os.environ["LIVE_KINDS_VERBOSE"] == "2" else n_err:] if "watch round" not in l)[-6000:]))

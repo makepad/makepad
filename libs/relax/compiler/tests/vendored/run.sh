@@ -7,13 +7,13 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
+export RELAX_CACHE=off
 # an empty CARGO_HOME (no registry cache, no config) under the ignored target/
 E=$H/target/empty-cargo-home
 mkdir -p "$E"
-OUT=$(cd "$H/app" && CARGO_HOME=$E MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet vendored-app 2>>"$ERR")
-MISS=$(cd "$H/missing" && CARGO_HOME=$E MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet vendored-missing 2>&1)
-WITHC=$(cd "$H/withc" && CARGO_HOME=$E MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet vendored-withc 2>&1)
+OUT=$(cd "$H/app" && CARGO_HOME=$E RELAX_STD=$H/../../std "$1" run --quiet vendored-app 2>>"$ERR")
+MISS=$(cd "$H/missing" && CARGO_HOME=$E RELAX_STD=$H/../../std "$1" run --quiet vendored-missing 2>&1)
+WITHC=$(cd "$H/withc" && CARGO_HOME=$E RELAX_STD=$H/../../std "$1" run --quiet vendored-withc 2>&1)
 echo "$OUT"
 echo "$MISS" | grep -m1 'not vendored'
 echo "$WITHC" | grep -m1 'compiles C'

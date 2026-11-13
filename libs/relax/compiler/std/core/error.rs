@@ -57,6 +57,8 @@ impl dyn Error + Send + Sync {
     }
 }
 
+impl Error for ! {}
+
 impl<'a, E: Error + ?Sized> Error for &'a E {
     fn provide<'b>(&'b self, request: &mut Request<'b>) {
         Error::provide(&**self, request);

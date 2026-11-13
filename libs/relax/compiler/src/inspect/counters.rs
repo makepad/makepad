@@ -13,8 +13,8 @@ pub fn cmd_counters(req: &Req, out: &mut Out) {
     let secs = req.get("s").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0).clamp(0.1, 30.0);
     let n = req.num("n", 12) as usize;
     imp::run(secs, n, out);
-    out.always(&format!("note: {}", super::reliability::line(true)));
-    out.always("more: asm top vs=rustc ev=cycles  asm <fn> ev=instructions  prof threads=main");
+    out.line(&format!("note: {}", super::reliability::line(true)));
+    out.line("more: asm top vs=rustc ev=cycles  asm <fn> ev=instructions  prof threads=main");
 }
 
 #[cfg(any(target_os = "linux", target_vendor = "apple"))]
@@ -78,7 +78,7 @@ mod imp {
         threads.retain(|t| !crate::inspect::is_inspect_thread(t, &skip));
         let fds: Vec<(usize, Vec<Option<i32>>)> = threads.iter().enumerate().map(|(k, t)| (k, EVENTS.iter().map(|e| open(t.os_id, e.0)).collect())).collect();
         if fds.iter().all(|(_, v)| v.iter().all(|x| x.is_none())) {
-            out.always("no hardware counters for this process (perf_event_paranoid > 2, or no PMU in this VM); CPU time only: prof, why-slow");
+            out.line("no hardware counters for this process (perf_event_paranoid > 2, or no PMU in this VM); CPU time only: prof, why-slow");
             return;
         }
         crate::run_threads::sleep(std::time::Duration::from_secs_f64(secs));
@@ -113,7 +113,7 @@ mod imp {
             ));
         }
         rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        out.always(&format!(
+        out.line(&format!(
             "{:.1} s: {} cycles, {} instructions (IPC {:.2}) in user space over {} threads; busiest: {}",
             secs,
             g(tot[0]),
@@ -132,7 +132,7 @@ mod imp {
             let rest: f64 = rows[n..].iter().map(|r| r.0).sum();
             out.line(&format!("+{} threads, {} cycles", rows.len() - n, g(rest)));
         }
-        out.always("note: perf_event counting, user space only, per thread; scaled where the kernel multiplexed counters");
+        out.line("note: perf_event counting, user space only, per thread; scaled where the kernel multiplexed counters");
     }
 }
 
@@ -156,22 +156,22 @@ mod imp {
 
     pub fn run(secs: f64, _n: usize, out: &mut Out) {
         let Some(a) = sample() else {
-            out.always("no counters: proc_pid_rusage failed");
+            out.line("no counters: proc_pid_rusage failed");
             return;
         };
         crate::run_threads::sleep(std::time::Duration::from_secs_f64(secs));
         let Some(b) = sample() else {
-            out.always("no counters: proc_pid_rusage failed");
+            out.line("no counters: proc_pid_rusage failed");
             return;
         };
         let ins = b.0.saturating_sub(a.0) as f64;
         let cyc = b.1.saturating_sub(a.1) as f64;
         if cyc == 0.0 {
-            out.always(&format!("{:.1} s: this macOS reports no instruction/cycle counts for the process (rusage v4 counters are 0)", secs));
+            out.line(&format!("{:.1} s: this macOS reports no instruction/cycle counts for the process (rusage v4 counters are 0)", secs));
             return;
         }
-        out.always(&format!("{:.1} s: {} cycles, {} instructions (IPC {:.2}) for the whole process (all threads)", secs, g(cyc), g(ins), ins / cyc));
-        out.always("note: macOS gives an unprivileged process only its whole-process instructions and cycles (proc_pid_rusage); per-thread counters, branch and cache misses need root: not shown. Per-fn costs: asm <fn> (CPU-time samples)");
+        out.line(&format!("{:.1} s: {} cycles, {} instructions (IPC {:.2}) for the whole process (all threads)", secs, g(cyc), g(ins), ins / cyc));
+        out.line("note: macOS gives an unprivileged process only its whole-process instructions and cycles (proc_pid_rusage); per-thread counters, branch and cache misses need root: not shown. Per-fn costs: asm <fn> (CPU-time samples)");
     }
 }
 
@@ -179,6 +179,6 @@ mod imp {
 mod imp {
     use super::Out;
     pub fn run(_secs: f64, _n: usize, out: &mut Out) {
-        out.always("no hardware counters on this target");
+        out.line("no hardware counters on this target");
     }
 }

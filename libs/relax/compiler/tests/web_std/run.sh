@@ -2,7 +2,7 @@
 # run.sh <relax binary> <w32|w64> [workdir]: web_std.rs under Relax's web std against rustc's.
 # Reference: web_std.rs built by rustc as a wasm32-unknown-unknown cdylib and run in node (host.js; both
 # widths compare to it: the program prints nothing that depends on the pointer width). Relax: `run`
-# under MAKEPAD_RUN_CHECK_TARGET=wasm{32,64}-unknown-unknown (w64 executes natively; w32 needs the
+# under RELAX_CHECK_TARGET=wasm{32,64}-unknown-unknown (w64 executes natively; w32 needs the
 # 32-bit execution mode); js_console_log writes to stderr. The lines the panicking calls print
 # (RELAX-ONLY, rustc aborts there) are compared with relax_only.expected.
 # REF=<file>: a reference output made elsewhere. Prints "web_std <w>: N lines equal" or the diff.
@@ -23,11 +23,11 @@ mkdir -p "$T/u"
 cat > "$T/u/units.json" <<J
 {"version":1,"roots":[0],"units":[{"pkg_id":"path+file://$T#web_std@0.0.0","target":{"kind":["bin"],"name":"web_std","src_path":"$H/web_std.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]}]}
 J
-MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt "$B" run --quiet --units "$T/u/units.json" web_std --release > "$T/relax.stdout" 2>"$T/relax.err"
+RELAX_CHECK_TARGET=$TRIPLE RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt "$B" run --quiet --units "$T/u/units.json" web_std --release > "$T/relax.stdout" 2>"$T/relax.err"
 rc=$?
 sed -n '/^web_std start/,/^web_std end/p' "$T/relax.err" > "$T/relax.all"
 # (the runner's panic-park notices are on the same stream)
-grep -v '^RELAX-ONLY\|^makepad:\|^  report:' "$T/relax.all" > "$T/relax.out"
+grep -v '^RELAX-ONLY\|^relax:\|^  report:' "$T/relax.all" > "$T/relax.out"
 grep '^RELAX-ONLY' "$T/relax.all" > "$T/relax.only"
 n=$(grep -c . "$T/ref.out")
 fail=0
@@ -43,7 +43,7 @@ else
   exit 1
 fi
 
-MAKEPAD_RUN_WASM_EXPORT=$T/relax.wasm MAKEPAD_RUN_SPEC=0 MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0 MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt-export "$B" run --quiet --no-live --units "$T/u/units.json" web_std --release > /dev/null 2> "$T/export.err" || { tail -40 "$T/export.err"; exit 1; }
+RELAX_WASM_EXPORT=$T/relax.wasm RELAX_SPEC=0 RELAX_O1=always RELAX_O3=0 RELAX_CHECK_TARGET=$TRIPLE RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt-export "$B" run --quiet --no-live --units "$T/u/units.json" web_std --release > /dev/null 2> "$T/export.err" || { tail -40 "$T/export.err"; exit 1; }
 node "$H/host.js" "$T/relax.wasm" > "$T/export.out" || exit 1
 diff "$T/ref.out" "$T/export.out" || exit 1
 node "$H/host.js" "$T/relax.wasm" probes > "$T/export.only" || exit 1

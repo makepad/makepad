@@ -189,7 +189,7 @@ def common_env(home):
     env = dict(os.environ)
     for d in ('t', 'userhome', 'root/local'):
         os.makedirs(os.path.join(home, d), exist_ok=True)
-    env.update({'SANDBOX_MUTE': '1', 'MUSIC_MUTE': '1', 'MAKEPAD_GGML_NO_CUDA': '1', 'MAKEPAD_SEED': '1',
+    env.update({'MAKEPAD_MUTE': '1', 'MAKEPAD_GGML_NO_CUDA': '1', 'MAKEPAD_SEED': '1',
                 'TMPDIR': os.path.join(home, 't'), 'HOME': os.path.join(home, 'userhome'),
                 'MAKEPAD_ROOT': os.path.join(home, 'root'), 'RUST_MIN_STACK': '16777216'})
     # Linux: hidden windows on the bench box's private headless weston. macOS (the mini, a bench box with no user):
@@ -201,9 +201,9 @@ def common_env(home):
 
 def jit_env(env, home, src):
     rh = os.path.join(home, 'run')
-    env.update({'MAKEPAD_RUN_HOME': rh, 'MAKEPAD_RUN_TARGET_DIR': rh + '/target', 'MAKEPAD_RUN_CACHE_DIR': rh + '/cache',
-                'MAKEPAD_RUN_STD': os.path.join(src, 'libs/relax/compiler/std'),
-                'MAKEPAD_RUN_O3_PROGRESS': os.path.join(home, 'o3-progress')})
+    env.update({'RELAX_HOME': rh, 'RELAX_TARGET_DIR': rh + '/target', 'RELAX_CACHE_DIR': rh + '/cache',
+                'RELAX_STD': os.path.join(src, 'libs/relax/compiler/std'),
+                'RELAX_O3_PROGRESS': os.path.join(home, 'o3-progress')})
     return rh
 
 
@@ -229,7 +229,7 @@ class Ctx:
 
     def idle_start(self):
         """live: when the JIT went (and stayed) idle, s since launch; None while it compiles. Native: 0.
-        Linux: the 10-s mean CPU of the compile threads (run-*) < 0.02 cores. macOS: MAKEPAD_RUN_O3_PROGRESS
+        Linux: the 10-s mean CPU of the compile threads (run-*) < 0.02 cores. macOS: RELAX_O3_PROGRESS
         reads 0 pending with an unchanged install count for 10 s."""
         if self.kind != 'jit':
             return 0.0
@@ -246,7 +246,7 @@ class Ctx:
                     start = None
             return start
         try:
-            f = open(self.env['MAKEPAD_RUN_O3_PROGRESS']).read().split()
+            f = open(self.env['RELAX_O3_PROGRESS']).read().split()
             cur = (int(f[0]), int(f[1]))
         except (OSError, ValueError, IndexError, KeyError):
             return None
@@ -320,7 +320,7 @@ def rw_prepare(c, name):
     cwd = os.path.join(c.src, 'libs/relax/compiler/rwbench')
     if c.kind == 'jit':
         jit_env(c.env, c.home, c.src)
-        c.env.update({'MAKEPAD_RUN_CACHE': 'on', 'MAKEPAD_HAL_BACKEND': 'headless', 'RW_O3_PROGRESS': c.env['MAKEPAD_RUN_O3_PROGRESS']})
+        c.env.update({'RELAX_CACHE': 'on', 'MAKEPAD_HAL_BACKEND': 'headless', 'RW_O3_PROGRESS': c.env['RELAX_O3_PROGRESS']})
         pkg = ['relax-commercial-tests', '--bin', 'relax-rwbench-commercial'] if commercial else ['relax-rwbench']
         return [c.bin, 'run', '--quiet', '--verbose'] + pkg + ['--', name], cwd
     return [c.bin, name], cwd

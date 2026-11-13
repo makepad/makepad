@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live edits wait for present even across a compile-quiet startup interval.
 
-Run with an absolute release Relax binary; MAKEPAD_RUN_STD names this checkout's std.
+Run with an absolute release Relax binary; RELAX_STD names this checkout's std.
 The fixture uses the platform crate name to exercise the GUI admission policy,
 without creating a window or requiring a GPU.
 """
@@ -40,7 +40,7 @@ fn main() {
     log_path = root / "run.log"
     with log_path.open("w") as log:
         p = subprocess.Popen([binary, "run", "makepad-platform"], cwd=root,
-                             env=dict(os.environ, MAKEPAD_RUN_LIVE_READY=str(root / "live-ready"), MAKEPAD_RUN_CACHE="off", MAKEPAD_RUN_STARTUP_PHASE="0"),
+                             env=dict(os.environ, RELAX_LIVE_READY=str(root / "live-ready"), RELAX_CACHE="off", RELAX_STARTUP_PHASE="0"),
                              stdout=log, stderr=subprocess.STDOUT)
         def text():
             return log_path.read_text(errors="replace")

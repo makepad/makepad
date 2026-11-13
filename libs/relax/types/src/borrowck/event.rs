@@ -139,9 +139,9 @@ pub fn app_crate(prog: &Program, krate: u32) -> bool {
     APP_SCOPE.lock().unwrap_or_else(|e| e.into_inner()).contains(&root)
 }
 
-/// The one all-crates switch: the compiled APP_CRATES_ONLY, with MAKEPAD_RUN_GANDALF_ALL=1 on top.
+/// The one all-crates switch: the compiled APP_CRATES_ONLY, with RELAX_GANDALF_ALL=1 on top.
 pub fn all_crates() -> bool {
-    !APP_CRATES_ONLY || std::env::var("MAKEPAD_RUN_GANDALF_ALL").as_deref() == Ok("1")
+    !APP_CRATES_ONLY || std::env::var("RELAX_GANDALF_ALL").as_deref() == Ok("1")
 }
 
 /// Whether a crate's borrow errors are reported (and refuse live edits).

@@ -4,8 +4,8 @@
 //! Why: a program that loads CEF installs Chromium's malloc shim as the default zone (it tells
 //! Relax first: jit.rs `allocator_swap`). After that every compile on every thread allocated
 //! through the shim, and with speculative workers running, the main thread's back end took ~3x
-//! the CPU for the same functions (Stage cold: codegen 3.9 us per RIR instruction with one
-//! worker vs 1.2 us compiling alone, 0.76 us without CEF): speculation made Stage's first frame
+//! the CPU for the same functions (a large app's cold start: codegen 3.9 us per RIR instruction with one
+//! worker vs 1.2 us compiling alone, 0.76 us without CEF): speculation made a large app's first frame
 //! several times slower than compiling on the caller. A zone of our own is untouched by the
 //! swap. Before the swap the default zone stays in use (its small-allocation path is faster
 //! than a created zone's: Amp/counter/runner +5% first present when everything used the zone).
@@ -43,7 +43,7 @@
 //! Safety rule (MEMSAFE.DESIGN.md M1): a block is released only by its owner's Drop. No arena
 //! frees, decommits or protects live blocks in bulk; which arena a block lives in is a matter of
 //! memory footprint, never of lifetime.
-//! `MAKEPAD_RUN_COMPILER_ARENA=0` turns compiler routing off (read once, without allocating).
+//! `RELAX_COMPILER_ARENA=0` turns compiler routing off (read once, without allocating).
 //!
 //! The JIT allocator ABI selects a domain heap through thread-local ownership (domain.rs), and so
 //! does an op of a crate whose objects are the program's (the run phase, `relax_session::phase::run`).
@@ -54,7 +54,7 @@
 #[allow(dead_code)]
 mod burst {
     pub const COMPILER: bool = false;
-    pub const LABEL: &std::ffi::CStr = c"makepad-run-burst";
+    pub const LABEL: &std::ffi::CStr = c"relax-burst";
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
     #[cfg(test)]
@@ -64,7 +64,7 @@ mod burst {
 #[allow(dead_code)]
 mod compiler {
     pub const COMPILER: bool = true;
-    pub const LABEL: &std::ffi::CStr = c"makepad-run-compiler";
+    pub const LABEL: &std::ffi::CStr = c"relax-compiler";
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
 }
@@ -72,7 +72,7 @@ mod compiler {
 #[allow(dead_code)]
 mod slots {
     pub const COMPILER: bool = true;
-    pub const LABEL: &std::ffi::CStr = c"makepad-run-slots";
+    pub const LABEL: &std::ffi::CStr = c"relax-slots";
     const WEB_AT: usize = 0;
     include!("zone_alloc/arena.rs");
 }
@@ -221,18 +221,18 @@ fn flag(cell: &std::sync::atomic::AtomicU8, name: &std::ffi::CStr, default: bool
 static JOB_CHECK: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static ZAP: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
-/// MAKEPAD_RUN_ZAP=1: a block freed in the compiler or job arena is filled with 0xcd first, so a
+/// RELAX_ZAP=1: a block freed in the compiler or job arena is filled with 0xcd first, so a
 /// read of freed memory (unsafe code, a raw pointer kept past its owner) sees poison at once.
 #[inline(always)]
 fn zap(p: *mut u8, l: Layout) {
-    if flag(&ZAP, c"MAKEPAD_RUN_ZAP", false) {
+    if flag(&ZAP, c"RELAX_ZAP", false) {
         unsafe { std::ptr::write_bytes(p, 0xcd, l.size()) };
     }
 }
 
-/// MAKEPAD_RUN_JOB_CHECK=1: every job that ends with survivors in its job arena is reported.
+/// RELAX_JOB_CHECK=1: every job that ends with survivors in its job arena is reported.
 pub fn job_check_on() -> bool {
-    flag(&JOB_CHECK, c"MAKEPAD_RUN_JOB_CHECK", false)
+    flag(&JOB_CHECK, c"RELAX_JOB_CHECK", false)
 }
 
 /// A compile job's arena scope: the optimiser and back end of one function build (O1 codegen,
@@ -240,8 +240,8 @@ pub fn job_check_on() -> bool {
 /// relocations, pc map, optimised RIR) is copied out (`copy_out`) where it is handed on. Front
 /// ends, type checks and lowering run in the compiler arena: their results are memoized by queries
 /// and interners, which a per-job arena would only pin. Nested scopes add nothing.
-/// `enabled` = RuntimeOptions::burst_arena (MAKEPAD_RUN_BURST_ARENA=0 turns it off; with
-/// MAKEPAD_RUN_COMPILER_ARENA=0 too every block is in the system heap, for ASan/valgrind runs).
+/// `enabled` = RuntimeOptions::burst_arena (RELAX_BURST_ARENA=0 turns it off; with
+/// RELAX_COMPILER_ARENA=0 too every block is in the system heap, for ASan/valgrind runs).
 pub struct JobScope {
     open: Option<(ScratchGuard, isize, &'static str)>,
 }
@@ -271,7 +271,7 @@ impl Drop for JobScope {
             if job_check_on() {
                 let _k = kept();
                 let t = std::thread::current();
-                eprintln!("makepad-run job: {label} on {} left {left} bytes in its job arena (not copied out)", t.name().unwrap_or("?"));
+                eprintln!("relax job: {label} on {} left {left} bytes in its job arena (not copied out)", t.name().unwrap_or("?"));
             }
         }
     }
@@ -394,7 +394,7 @@ pub fn slots_trim() {
     slots::trim();
 }
 
-/// Whether compiler-phase routing is on in this process (`MAKEPAD_RUN_COMPILER_ARENA=0` turns it off).
+/// Whether compiler-phase routing is on in this process (`RELAX_COMPILER_ARENA=0` turns it off).
 pub fn compiler_arena_enabled() -> bool {
     enabled()
 }
@@ -407,7 +407,7 @@ fn decide() -> bool {
             fn getenv(name: *const core::ffi::c_char) -> *mut core::ffi::c_char;
         }
         // std::env would allocate, and this runs inside the allocator's first routed call
-        let p = getenv(c"MAKEPAD_RUN_COMPILER_ARENA".as_ptr()).cast::<u8>();
+        let p = getenv(c"RELAX_COMPILER_ARENA".as_ptr()).cast::<u8>();
         !p.is_null() && *p == b'0' && *p.add(1) == 0
     };
     #[cfg(not(unix))]
@@ -641,7 +641,7 @@ mod zone {
             return z;
         }
         let z = unsafe { malloc_create_zone(0, 0) };
-        unsafe { malloc_set_zone_name(z, b"makepad-run\0".as_ptr()) };
+        unsafe { malloc_set_zone_name(z, b"relax\0".as_ptr()) };
         match ZONE.compare_exchange(std::ptr::null_mut(), z, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => z,
             Err(w) => w,

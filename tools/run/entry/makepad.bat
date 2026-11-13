@@ -149,7 +149,7 @@ if !CURL_AGE! lss 7068 (
 )
 where tar.exe >nul 2>nul || (set "T=Makepad needs tar.exe: Windows 10 version 1803 or later." & goto :fail)
 for %%D in ("%DOWNLOADS%" "%LOGS%" "%CACHE%\loader" "%CACHE%\runner" "%ROOT%\apps") do if not exist "%%~D" mkdir "%%~D" || (set "T=Cannot create the folder %%~D." & goto :fail)
-set "MAKEPAD_RUN_HOME=%ROOT%"
+set "RELAX_HOME=%ROOT%"
 
 rem Restore an unconfirmed switch before choosing the source folder or checking its build stamp.
 set "LOADER=!CACHE!\loader"

@@ -90,6 +90,28 @@ impl<T> Arc<T> {
         }
     }
 
+    /// rustc 1.100.0 (smart_pointer_map): `f` of the value, in the same allocation when this is the only
+    /// reference and `U` fits it exactly
+    pub fn map<U>(this: Self, f: impl FnOnce(&T) -> U) -> Arc<U> {
+        if crate::mem::size_of::<T>() == crate::mem::size_of::<U>()
+            && crate::mem::align_of::<T>() == crate::mem::align_of::<U>()
+            && Arc::is_unique(&this)
+        {
+            unsafe {
+                let ptr = Arc::into_raw(this);
+                let value = ptr::read(ptr);
+                let mut allocation = Arc::from_raw(ptr as *const crate::mem::MaybeUninit<U>);
+                Arc::get_mut_unchecked(&mut allocation).write(f(&value));
+                allocation.assume_init()
+            }
+        } else {
+            let output = f(&*this);
+            let ptr = Arc::into_raw(this);
+            unsafe { Arc::decrement_strong_count(ptr) }
+            Arc::new(output)
+        }
+    }
+
     pub fn into_inner(this: Arc<T>) -> Option<T> {
         let this = crate::mem::ManuallyDrop::new(this);
         let old = unsafe { ia::atomic_fetch_sub(strong_ptr(header_of(this.ptr.as_ptr())), 1usize, RELEASE) };
@@ -194,6 +216,14 @@ impl<T: ?Sized> Arc<T> {
 
     pub fn strong_count(this: &Arc<T>) -> usize {
         unsafe { ia::atomic_load(strong_ptr(header_of(this.ptr.as_ptr())) as *const usize, ACQUIRE) }
+    }
+
+    /// The only Arc, and no Weak exists (alloc's private `is_unique`).
+    fn is_unique(this: &Arc<T>) -> bool {
+        unsafe {
+            ia::atomic_load(weak_ptr(header_of(this.ptr.as_ptr())) as *const usize, ACQUIRE) == 1
+                && ia::atomic_load(strong_ptr(header_of(this.ptr.as_ptr())) as *const usize, ACQUIRE) == 1
+        }
     }
 
     /// Mutable access when this is the only Arc and no Weak exists.

@@ -7,7 +7,7 @@
 #   in relax's linked copy; relax-native-macros' build now refuses such cfgs, native_cfg.rs.)
 # Prints "derive_parity: ok" or "derive_parity: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_STD=$H/../../std
+export RELAX_CACHE=off RELAX_STD=$H/../../std
 ok=1
 R=$(cd "$H" && "$1" check dp-reject 2>&1); rc=$?
 E=$(echo "$R" | grep -E '^/.*:[0-9]+:[0-9]+: (E[0-9]{4}|error|internal)' | sed "s|^$H/||")

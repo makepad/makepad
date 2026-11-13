@@ -120,7 +120,7 @@ impl RegionArgsId {
 /// are read without a lock, found through the types' open-addressing index (slot: the hash's
 /// high half over the id), which lookups read without a lock either. Interning a new entry
 /// takes its index's lock, so ids stay dense. A single Mutex over all of it was the top contended
-/// lock of a parallel `makepad check` (20% of Scope's cycles spinning on it), and sharded
+/// lock of a parallel `makepad check` (20% of an app's cycles spinning on it), and sharded
 /// RwLocks after it still bounced their reader counts between the check's cores.
 pub(crate) struct Regions {
     pub(crate) kinds: crate::conc::AppendVec<RegionKind>,
@@ -713,7 +713,7 @@ impl Types {
         }
         let i = self.len.load(Relaxed) as usize;
         let ci = i >> CHUNK_BITS;
-        assert!(i + 1 < 1 << ID_BITS, "makepad: type interner full");
+        assert!(i + 1 < 1 << ID_BITS, "relax: type interner full");
         let mut c = self.chunks[ci].load(Relaxed);
         if c.is_null() {
             let layout = std::alloc::Layout::array::<Entry>(CHUNK).unwrap();

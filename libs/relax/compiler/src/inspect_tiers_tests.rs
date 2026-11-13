@@ -64,8 +64,8 @@ fn holds_leaf(u: &Unit, id: u32, leaf: u32) -> bool {
 fn inlined_fn_versions_probes_and_pins() {
     isolated_test!(inlined_fn_versions_probes_and_pins);
     crate::borrowck::lazy::disable_gandalf();
-    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
-        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     }
     let dir = std::env::temp_dir().join(format!("relax-inspect-tiers-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -289,8 +289,8 @@ fn a_frame_in_a_patched_path_is_named() {
     // moves caller's copy version, and the loop then leaves for its patched path and computes the
     // same.
     crate::borrowck::lazy::disable_gandalf();
-    if std::env::var_os("MAKEPAD_RUN_STD").is_none() {
-        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     }
     let dir = std::env::temp_dir().join(format!("relax-patched-path-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

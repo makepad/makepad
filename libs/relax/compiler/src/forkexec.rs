@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// This process is a forked child on its way to exec (set in the child only).
 static EXEC_CHILD: AtomicBool = AtomicBool::new(false);
-/// MAKEPAD_RUN_VERBOSE: a child that reached unbuilt code says which on its stderr
+/// RELAX_VERBOSE: a child that reached unbuilt code says which on its stderr
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 pub fn exec_child() -> bool {
@@ -39,6 +39,21 @@ const CLAIMED: u64 = u64::MAX;
 pub const STATE_FORKING: u64 = 1;
 pub const STATE_CHILD: u64 = 2;
 pub const STATE_UNBUILT: u64 = 3;
+/// STATE_UNBUILT in no-codegen mode: the slot is the precompiled pools' global one, which only the
+/// parent maps to its unit's (jit.rs nc_unit_slot takes a lock)
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+const STATE_UNBUILT_GLOBAL: u64 = 4;
+
+/// The unit's slot a child that reached unbuilt code names (its entry's state word), in the parent.
+fn unbuilt_slot(st: u64) -> Option<u32> {
+    let slot = (st >> 32) as u32;
+    match st & 0xffff_ffff {
+        STATE_UNBUILT => Some(slot),
+        #[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+        STATE_UNBUILT_GLOBAL => crate::jit::nc_unit_slot(slot),
+        _ => None,
+    }
+}
 
 /// One fork for an exec: [pid (0 free), forking thread's OS id, wall ns at the fork, state].
 type Entry = [AtomicU64; 4];
@@ -69,7 +84,7 @@ thread_local! {
 /// or code memory is touched: the module's header), and the child is marked and recorded.
 pub(crate) extern "C" fn relax_fork_exec() -> i32 {
     static ENV: std::sync::Once = std::sync::Once::new();
-    ENV.call_once(|| VERBOSE.store(std::env::var_os("MAKEPAD_RUN_VERBOSE").is_some_and(|v| v != "0"), Ordering::Relaxed));
+    ENV.call_once(|| VERBOSE.store(std::env::var_os("RELAX_VERBOSE").is_some_and(|v| v != "0"), Ordering::Relaxed));
     let t = table();
     let k = t.and_then(|t| t.iter().position(|e| e[0].compare_exchange(0, CLAIMED, Ordering::SeqCst, Ordering::SeqCst).is_ok()));
     if let (Some(t), Some(k)) = (t, k) {
@@ -108,16 +123,15 @@ pub(crate) extern "C" fn relax_fork_exec_done(pid: i32) -> u32 {
     let Some(t) = table() else { return 0 };
     let mut unbuilt = None;
     for e in t.iter().filter(|e| pid > 0 && e[0].load(Ordering::Acquire) == pid as u64) {
-        let st = e[3].load(Ordering::Acquire);
-        if st & 0xffff_ffff == STATE_UNBUILT {
-            unbuilt = Some((st >> 32) as u32);
+        if let Some(slot) = unbuilt_slot(e[3].load(Ordering::Acquire)) {
+            unbuilt = Some(slot);
         }
         e[0].store(0, Ordering::Release);
     }
     match unbuilt {
         Some(slot) => {
-            crate::jit::with_slot_name(slot, &mut |n| eprintln!("makepad run: a forked child ended at `{}`, not built before its fork: built now, forking again", String::from_utf8_lossy(n)));
-            crate::jit::precompile_from(slot);
+            crate::jit::with_slot_name(slot, &mut |n| eprintln!("relax run: a forked child ended at `{}`, not built before its fork: built now, forking again", String::from_utf8_lossy(n)));
+            crate::jit::precompile_from(&[slot], false);
             1
         }
         None => 0,
@@ -128,11 +142,23 @@ pub(crate) extern "C" fn relax_fork_exec_done(pid: i32) -> u32 {
 /// built before the fork. Compiling here could wait for good on a lock another thread held at
 /// the fork, so the child ends at once (exit 127), with the function's name in its entry: the
 /// parent builds it and std forks again (`relax_fork_exec_done`). Async-signal-safe: atomics,
-/// _exit; the name goes to stderr only with MAKEPAD_RUN_VERBOSE (read before the fork).
+/// _exit; the name goes to stderr only with RELAX_VERBOSE (read before the fork).
 pub(crate) fn child_reached_unbuilt(slot: u32) -> ! {
+    reached_unbuilt(STATE_UNBUILT, slot)
+}
+
+/// child_reached_unbuilt for no-codegen mode's lazy entry (jit.rs rt_compile_global), with the
+/// precompiled pools' global slot `g`: the interpreted child waited for good on the owner thread
+/// it does not have (the two std os_* fork files under RELAX_NO_CODEGEN=1).
+#[cfg(all(target_arch = "aarch64", target_vendor = "apple"))]
+pub(crate) fn child_reached_unbuilt_global(g: u32) -> ! {
+    reached_unbuilt(STATE_UNBUILT_GLOBAL, g)
+}
+
+fn reached_unbuilt(state: u64, slot: u32) -> ! {
     let k = ENTRY.try_with(|e| e.get()).unwrap_or(usize::MAX);
     if let Some(t) = table().filter(|_| k < ENTRIES) {
-        t[k][3].store(STATE_UNBUILT | (slot as u64) << 32, Ordering::Release);
+        t[k][3].store(state | (slot as u64) << 32, Ordering::Release);
     }
     extern "C" {
         fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
@@ -143,8 +169,12 @@ pub(crate) fn child_reached_unbuilt(slot: u32) -> ! {
     if !VERBOSE.load(Ordering::Relaxed) {
         crate::os::thread::exit_now(127)
     }
-    put(b"makepad run: a forked child reached `");
-    crate::jit::with_slot_name(slot, &mut |n| put(&n[..n.len().min(300)]));
+    put(b"relax run: a forked child reached `");
+    if state == STATE_UNBUILT {
+        crate::jit::with_slot_name(slot, &mut |n| put(&n[..n.len().min(300)]));
+    } else {
+        put(b"(a function of the precompiled pools)");
+    }
     put(b"` before its exec, and it was not built before the fork: the child of a spawn never compiles (it has only the forking thread; locks other threads held stay held) -- it ends (exit 127), and the spawn builds it and forks again\n");
     crate::os::thread::exit_now(127)
 }
@@ -167,7 +197,11 @@ pub fn in_flight() -> Vec<InFlight> {
             let pid = e[0].load(Ordering::Acquire);
             (pid != 0).then(|| {
                 let st = e[3].load(Ordering::Acquire);
-                InFlight { pid: if pid == CLAIMED { 0 } else { pid }, thread: e[1].load(Ordering::Relaxed), age_ns: now.saturating_sub(e[2].load(Ordering::Relaxed)), state: st & 0xffff_ffff, slot: (st >> 32) as u32 }
+                let (state, slot) = match unbuilt_slot(st) {
+                    Some(slot) => (STATE_UNBUILT, slot),
+                    None => (st & 0xffff_ffff, (st >> 32) as u32),
+                };
+                InFlight { pid: if pid == CLAIMED { 0 } else { pid }, thread: e[1].load(Ordering::Relaxed), age_ns: now.saturating_sub(e[2].load(Ordering::Relaxed)), state, slot }
             })
         })
         .collect()

@@ -52,7 +52,7 @@ impl Bytes {
 
 /// `len` bytes of `file` at `off` (a multiple of `view_align`), mapped read-only until `unmap_view`.
 /// Shared, not private: a private file mapping costs ~1.9 ms to set up on macOS (an M4, while the
-/// file is being appended to), and a cold Stage maps ~3.5k images on the load thread (6.5 s);
+/// file is being appended to), and a large app's cold start maps ~3.5k images on the load thread (6.5 s);
 /// read-only, both read the page cache's bytes, and an appended payload never changes.
 #[cfg(unix)]
 fn map_view(file: &std::fs::File, off: u64, len: usize) -> Option<*const u8> {
@@ -289,8 +289,44 @@ pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     crate::os::proc::ensure_private_dir(dir)
 }
 
+/// A run's run dir made private before the run writes into it: created owner-only when missing
+/// (with the mode at its mkdir; on Windows with the owner-only DACL at its creation), checked when
+/// present. Err for one that belongs to another user, which a run never uses: its `exe/`,
+/// `native/` and `build/` hold what that user could swap (the run's own executable, a library it
+/// loads, a build script's output). A dir of this user's that others can write only turns the
+/// cache off (cache.rs says so).
+pub fn own_run_dir(dir: &Path) -> Result<(), String> {
+    match ensure_private_dir(dir) {
+        Err(e) if e.ends_with(crate::os::proc::OTHER_USERS) => Err(format!("{e}: a run never uses another user's run dir (set CARGO_TARGET_DIR to a folder of your own)")),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A run dir is created owner-only at its mkdir, with the folders above it it creates (one
+    /// that create_dir_all made group-writable, under umask 002, turned the cache off for good),
+    /// and is the run's; another user's (`/` is root's) is refused, naming why.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_dir_is_made_owner_only_and_another_users_is_refused() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("relax-run-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("target").join("relax");
+        super::own_run_dir(&dir).unwrap();
+        for d in [&dir, &base.join("target")] {
+            let mode = std::fs::metadata(d).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{} was made {mode:o}, not owner-only", d.display());
+        }
+        super::own_run_dir(&dir).unwrap();
+        let ours = std::fs::metadata(&dir).unwrap().uid();
+        let _ = std::fs::remove_dir_all(&base);
+        if std::fs::metadata("/").unwrap().uid() != ours {
+            let e = super::own_run_dir(std::path::Path::new("/")).unwrap_err();
+            assert!(e.contains("belongs to another user") && e.contains("never uses"), "another user's run dir was taken: {e}");
+        }
+    }
     /// The settle's release of the cache mappings' resident pages: the process's resident size
     /// falls by about the mapped size and the same bytes are read again from the file.
     #[test]

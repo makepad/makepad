@@ -1,7 +1,7 @@
 //! The iOS app's entry (`makepad` built for aarch64-apple-ios / -sim, the executable of the
 //! bundle `cargo makepad apple ios run-host` makes): the app's source is the packed store in the
-//! bundle (`makepad-run-src.pack`, `makepad pack-src --target aarch64-apple-ios`), what to run is
-//! `makepad-run-host.conf` beside it (the Android host's format: `app=`, `flag=`, `env=K=V`,
+//! bundle (`relax-src.pack`, `makepad pack-src --target aarch64-apple-ios`), what to run is
+//! `relax-host.conf` beside it (the Android host's format: `app=`, `flag=`, `env=K=V`,
 //! `privileged=1`), and the run is `makepad run --src <pack> <package> [flags]` with the HAL's
 //! UIKit shell on the main thread. iOS maps no executable memory for a signed app, so the run is
 //! in no-codegen mode (relax_session::options::no_codegen_env): every function of the app, its
@@ -9,9 +9,9 @@
 //! signed with the bundle.
 
 /// The packed source store in the bundle.
-const PACK: &str = "makepad-run-src.pack";
+const PACK: &str = "relax-src.pack";
 /// What the bundle runs (cargo_makepad apple `run-host` writes it).
-const CONF: &str = "makepad-run-host.conf";
+const CONF: &str = "relax-host.conf";
 
 struct Conf {
     package: String,
@@ -37,8 +37,8 @@ fn parse_conf(text: &str) -> Result<Conf, String> {
             _ => return Err(format!("{CONF}: unknown key {k:?}")),
         }
     }
-    // the first app is the one the bundle boots (MAKEPAD_RUN_APP picks another it carries)
-    let want = std::env::var("MAKEPAD_RUN_APP").ok().filter(|s| !s.is_empty());
+    // the first app is the one the bundle boots (RELAX_APP picks another it carries)
+    let want = std::env::var("RELAX_APP").ok().filter(|s| !s.is_empty());
     let (package, flags) = match &want {
         Some(w) => apps.into_iter().find(|a| &a.0 == w).ok_or_else(|| format!("{CONF}: the bundle does not carry {w}"))?,
         None => apps.into_iter().next().ok_or_else(|| format!("{CONF}: no app"))?,
@@ -66,10 +66,10 @@ fn boot() -> Result<i32, String> {
     // the app's container: HOME is it; only Library/ and tmp/ are the app's to write
     let home = std::path::PathBuf::from(std::env::var_os("HOME").ok_or("no HOME")?);
     let caches = home.join("Library/Caches");
-    let relax_home = caches.join("makepad-run");
+    let relax_home = caches.join("relax");
     std::fs::create_dir_all(&relax_home).map_err(|e| format!("{}: {e}", relax_home.display()))?;
-    if std::env::var_os("MAKEPAD_RUN_HOME").is_none() {
-        std::env::set_var("MAKEPAD_RUN_HOME", &relax_home);
+    if std::env::var_os("RELAX_HOME").is_none() {
+        std::env::set_var("RELAX_HOME", &relax_home);
     }
     if std::env::var_os("MAKEPAD_HOME").is_none() {
         std::env::set_var("MAKEPAD_HOME", home.join("Library/Application Support/makepad"));

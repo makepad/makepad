@@ -3,7 +3,7 @@
 
 use crate::result::Result::{self, Ok};
 
-#[cfg_attr(not(relax_check), lang = "From")]
+#[lang = "From"]
 pub trait From<T>: Sized {
     fn from(value: T) -> Self;
 }
@@ -107,17 +107,21 @@ impl AsRef<[u8]> for str {
     }
 }
 
-/// The error type for errors that can never happen.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub enum Infallible {}
+/// The error type for errors that can never happen: an alias of `!` since rustc 1.100.0 (its
+/// impls are `!`'s).
+pub type Infallible = !;
 
-impl crate::fmt::Display for Infallible {
-    fn fmt(&self, _f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
-        match *self {}
+impl<T: ?Sized> AsRef<T> for ! {
+    fn as_ref(&self) -> &T {
+        *self
     }
 }
 
-impl crate::error::Error for Infallible {}
+impl<T: ?Sized> AsMut<T> for ! {
+    fn as_mut(&mut self) -> &mut T {
+        *self
+    }
+}
 
 pub const fn identity<T>(x: T) -> T {
     x

@@ -63,6 +63,11 @@ pub struct InferCtxt<'a> {
     /// dependency graph are not candidates. None = every crate (codegen of concrete types).
     pub impl_view: Option<u32>,
     pub inner: RefCell<InferCtxtInner>,
+    /// The next solver's forward-compatibility rerun: a root goal that overflows is evaluated once
+    /// more at twice the recursion limit (rustc 1.99.1 with -Znext-solver proves a 60-deep `Send`
+    /// goal under `recursion_limit = "32"`). Off where stable rustc already solved with the next
+    /// solver before: coherence (orphan and overlap checks) and impossible clauses.
+    pub rerun_overflow_at_twice_the_limit: bool,
     universe: Cell<UniverseIndex>,
     pub(crate) lexical_region_resolutions: RefCell<Option<lexical_region_resolve::LexicalRegionResolutions>>,
     pub(crate) canonicalizer_state: RefCell<crate::next_solver::canonical::CanonicalizerState>,
@@ -96,7 +101,7 @@ impl<'a> InferCtxt<'a> {
         std::mem::take(&mut inner.hir_typeck_potentially_region_dependent_goals)
     }
     pub fn new(tcx: &'a Tcx, typing_mode: TypingMode, recursion_limit: crate::tcx::RecursionLimit) -> Self {
-        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, recursion_read: Cell::new(crate::program::NO_DEF), skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, impl_view: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
+        Self { tcx, typing_mode: Cell::new(typing_mode), recursion_limit, recursion_read: Cell::new(crate::program::NO_DEF), skip_leak_check: false, cause: Default::default(), in_hir_typeck: false, origin_span: Cell::new(0), errors: tcx.dcx.into_taintable(), diagnostic_checkpoint: tcx.dcx.checkpoint(), tainted: Cell::new(false), coherence_crate: None, impl_view: None, inner: RefCell::new(InferCtxtInner { region_constraint_storage: Some(Default::default()), ..Default::default() }), rerun_overflow_at_twice_the_limit: true, lexical_region_resolutions: RefCell::new(None), universe: Cell::new(UniverseIndex::ROOT), canonicalizer_state: RefCell::new(Default::default()) }
     }
     pub fn for_item(tcx: &'a Tcx, prog: &crate::program::Program, typing_mode: TypingMode, def: crate::program::DefId) -> Self {
         let mut infcx = Self::new(tcx, typing_mode, crate::tcx::RecursionLimit::for_item(prog, def));

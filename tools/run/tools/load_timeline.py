@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert MAKEPAD_RUN_PROFILE stderr to a Chrome/Perfetto trace and phase summaries.
+"""Convert RELAX_PROFILE stderr to a Chrome/Perfetto trace and phase summaries.
 
 Durations are inclusive elapsed time, not CPU time. Nested phases must not be
 added together. The trace preserves worker ids, start times, waits and paths.

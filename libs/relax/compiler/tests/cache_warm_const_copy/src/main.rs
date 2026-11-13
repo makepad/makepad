@@ -2,7 +2,7 @@
 // (domain.rs rehome_const); one whose integers only look like addresses is not. A warm run
 // links the code reading them from the disk cache and must print the cold run's line: the
 // cache once named the per-domain copy as a fresh, zeroed block, so a warm run read a null
-// pointer and a length of 0 (the warm Stage hang: unicode-segmentation's word_cat_table).
+// pointer and a length of 0 (an app's warm-run hang: unicode-segmentation's word_cat_table).
 static S: u64 = 7;
 static WORDS: [u64; 3] = [3, 5, 8];
 

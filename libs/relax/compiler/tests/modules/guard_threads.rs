@@ -1,4 +1,4 @@
-// Run with MAKEPAD_RUN_SANDBOX_FUEL=0: these must be watchdog errors, not fuel exhaustion.
+// Run with RELAX_SANDBOX_FUEL=0: these must be watchdog errors, not fuel exhaustion.
 use std::relax::{guard, Module};
 use std::sync::{Arc, Barrier};
 use std::sync::atomic::{AtomicBool, Ordering};

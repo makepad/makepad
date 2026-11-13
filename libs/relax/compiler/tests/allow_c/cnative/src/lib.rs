@@ -11,6 +11,8 @@ pub fn add(a: i32, b: i32) -> i32 { unsafe { cn_add(a, b) - cn_offset } }
 pub fn hash(b: &[u8]) -> u64 { unsafe { cn_hash(b.as_ptr(), b.len()) } }
 pub fn apply(f: extern "C" fn(i32) -> i32, x: i32) -> i32 { unsafe { cn_apply(f, x) } }
 pub fn built() -> bool { cfg!(cnative_built) }
+/// The offset the build script compiled in (CNATIVE_OFFSET).
+pub fn offset() -> i32 { unsafe { cn_offset } }
 /// Calls the C code, which calls back into Rust by symbol name.
 pub fn square_plus(x: i32) -> i32 { unsafe { cn_square_plus(x) } }
 /// Only C calls it.

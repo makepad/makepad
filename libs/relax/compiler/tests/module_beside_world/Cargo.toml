@@ -1,0 +1,5 @@
+# A run-time module loaded while the proc-macro world lives (tools/run/fixture/modules_harness.rs).
+# Runs only under the runner (std::relax::Module).
+[workspace]
+members = ["l1", "l2", "l3", "l4", "mac", "app"]
+resolver = "2"

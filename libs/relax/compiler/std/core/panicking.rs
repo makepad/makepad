@@ -151,7 +151,7 @@ impl fmt::Write for StackBuf {
 #[inline(never)]
 #[cold]
 #[track_caller]
-#[cfg_attr(not(relax_check), lang = "panic_fmt")]
+#[lang = "panic_fmt"]
 #[rustc_do_not_const_check] // hooked by const-eval
 pub const fn panic_fmt(args: fmt::Arguments<'_>) -> ! {
     panic_at(args, Location::caller())
@@ -209,7 +209,7 @@ pub const fn panic_str(msg: &'static str) -> ! {
 }
 
 #[track_caller]
-#[cfg_attr(not(relax_check), lang = "panic_display")]
+#[lang = "panic_display"]
 #[rustc_do_not_const_check] // hooked by const-eval
 pub const fn panic_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("{}", x))

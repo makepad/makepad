@@ -1,4 +1,4 @@
-// std-os lane: std::io (differential: os_diff.sh)
+// std-os lane: std::io (differential: agree.sh)
 use std::io::{self, BufRead, BufReader, BufWriter, Cursor, ErrorKind, LineWriter, Read, Seek, SeekFrom, Write};
 
 #[test]

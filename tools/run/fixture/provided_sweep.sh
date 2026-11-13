@@ -8,7 +8,7 @@
 T=${CARGO_TARGET_DIR:-$PWD/target}
 APPS=${APPS:-"makepad-fab makepad-stage makepad-scope makepad-sandbox makepad-app-synth makepad-app-calculator makepad-app-wm"}
 SECS=${SECS:-20}
-export MAKEPAD_RUN_STD=$PWD/libs/relax/compiler/std
+export RELAX_STD=$PWD/libs/relax/compiler/std
 nice cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher -j8 > "${TMPDIR:-/tmp}/sweep-build.log" 2>&1 || { tail -20 "${TMPDIR:-/tmp}/sweep-build.log"; echo "BUILD FAILED"; exit 3; }
 M="$T/host/makepad"
 # the logs stay in the target (`devhub get <lane> target/provided_sweep.out <dir>`); each app's files are rewritten
@@ -30,7 +30,7 @@ for app in $APPS; do
     fi
     if [ "${RUNS:-1}" != 0 ]; then
         mkdir -p "$out/$app.home" "$out/$app.tmp"
-        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$out/$app.home" TMPDIR="$out/$app.tmp" \
+        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$out/$app.home" TMPDIR="$out/$app.tmp" \
             nice "$M" run "$app" > "$out/$app.run" 2>&1 &
         pid=$!
         for _ in $(seq 1 "$SECS"); do kill -0 $pid 2>/dev/null || break; sleep 1; done

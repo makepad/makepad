@@ -1,7 +1,11 @@
 # Crates Relax provides itself instead of compiling their source (coord.md SV1).
 # <crate name> <semver major (or 0.minor) it stands in for> <crate root relative to this dir>
-# The loader uses the root below whenever the crate graph lists that crate at a matching version;
-# the crate keeps its name, deps are [core, alloc, std], features are ignored. The rustc build
-# keeps the real crates (libs/smallvec, libs/vulkan/arrayvec).
-smallvec 1 smallvec/lib.rs
-arrayvec 0.7 arrayvec/lib.rs
+#   <the crate's features the root implements, comma-separated>
+# The loader uses the root below whenever the crate graph lists that crate at a matching version
+# and enables none of its features but those (as cargo resolved them for the graph); the crate
+# keeps its name and those features, deps are [core, alloc, std]. A unit at another version, or
+# one with another feature enabled (`serde`: an impl for a crate the root does not depend on),
+# compiles its own source. The rustc build keeps the real crates (libs/smallvec,
+# libs/vulkan/arrayvec).
+smallvec 1 smallvec/lib.rs const_generics,const_new,union,write
+arrayvec 0.7 arrayvec/lib.rs default,std

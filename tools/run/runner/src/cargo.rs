@@ -2,9 +2,9 @@
 //! its role; later calls are rustc's option-led probes or cargo's subcommands, never loader runs.
 
 pub fn dispatch(raw_args: &[Vec<u8>]) -> bool {
-    match std::env::var("MAKEPAD_RUN_AS_RUSTC").as_deref() {
+    match std::env::var("RELAX_AS_RUSTC").as_deref() {
         Ok("build-script") => {
-            std::env::set_var("MAKEPAD_RUN_AS_RUSTC", "rustc,cargo");
+            std::env::set_var("RELAX_AS_RUSTC", "rustc,cargo");
             return false;
         }
         Ok("rustc,cargo") => {}
@@ -20,7 +20,7 @@ pub fn dispatch(raw_args: &[Vec<u8>]) -> bool {
         }
         // The native loader has no virtual cwd until the inherited mounts are installed.
         relax_compiler::vfs::mount_from_env()?;
-        let dir = match std::env::var("MAKEPAD_RUN_WORKSPACE").ok().filter(|d| !d.is_empty()) {
+        let dir = match std::env::var("RELAX_WORKSPACE").ok().filter(|d| !d.is_empty()) {
             Some(d) => d,
             None => std::env::current_dir().map_err(|e| e.to_string())?.display().to_string(),
         };
@@ -29,7 +29,7 @@ pub fn dispatch(raw_args: &[Vec<u8>]) -> bool {
     match result {
         Ok(json) => println!("{json}"),
         Err(e) => {
-            eprintln!("makepad: cargo: {}", e.lines().collect::<Vec<_>>().join(" "));
+            eprintln!("relax: cargo: {}", e.lines().collect::<Vec<_>>().join(" "));
             std::process::exit(1);
         }
     }

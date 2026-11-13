@@ -1,8 +1,8 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: an unused path dependency body still fails the run.
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off
-unset MAKEPAD_RUN_STD
+export RELAX_CACHE=off
+unset RELAX_STD
 OUT=$(cd "$H" && "$1" test test-dep-borrowck 2>&1)
 rc=$?
 echo "$OUT"

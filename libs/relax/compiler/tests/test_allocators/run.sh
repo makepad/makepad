@@ -8,7 +8,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 C=$(mktemp -d) || exit 1
 for pass in cold warm; do
-    OUT=$(cd "$H" && MAKEPAD_RUN_CACHE_DIR=$C MAKEPAD_RUN_STD=$H/../../std "$1" test ta-app 2>&1)
+    OUT=$(cd "$H" && RELAX_CACHE_DIR=$C RELAX_STD=$H/../../std "$1" test ta-app 2>&1)
     rc=$?
     echo "$OUT"
     ok=$(echo "$OUT" | grep -c "^test result: ok. 1 passed")

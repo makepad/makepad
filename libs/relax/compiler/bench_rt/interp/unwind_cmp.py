@@ -18,11 +18,11 @@ mk = os.path.abspath(sys.argv[1])
 files = sys.argv[2:] or ["tests/interp_unwind.rs", "tests/interp_unwind_abort_cleanup.rs", "tests/interp_unwind_abort_ffi.rs", "tests/unwind_drops.rs", "tests/drop_order_scopes.rs", "tests/let_chain_drops.rs", "tests/jump_temp_drops.rs", "tests/drop_elab_flags.rs", "tests/thread_panic.rs", "tests/unwind_nested_catch_restore.rs"]
 MODES = [
     ("jit", {}),
-    ("interp-all", {"MAKEPAD_RUN_INTERP": "all"}),
-    ("interp-xi", {"MAKEPAD_RUN_INTERP": "::xi_"}),
-    ("interp-xj", {"MAKEPAD_RUN_INTERP": "::xj_,{closure"}),
-    ("interp-std", {"MAKEPAD_RUN_INTERP": "std::,core::,alloc::"}),
-    ("nocodegen", {"MAKEPAD_RUN_NO_CODEGEN": "1"}),
+    ("interp-all", {"RELAX_INTERP": "all"}),
+    ("interp-xi", {"RELAX_INTERP": "::xi_"}),
+    ("interp-xj", {"RELAX_INTERP": "::xj_,{closure"}),
+    ("interp-std", {"RELAX_INTERP": "std::,core::,alloc::"}),
+    ("nocodegen", {"RELAX_NO_CODEGEN": "1"}),
 ]
 if os.environ.get("MODES"):
     MODES = [m for m in MODES if m[0] in os.environ["MODES"].split(",")]
@@ -55,7 +55,7 @@ for f in files:
         print("%-42s rustc did not abort (rc %d)" % (f, rr.returncode))
         bad += 1
     for name, env in MODES:
-        e = dict(os.environ, MAKEPAD_RUN_CACHE="off", **env)
+        e = dict(os.environ, RELAX_CACHE="off", **env)
         p = subprocess.run(["nice", "-n", "5", mk, "test", path], cwd=comp, env=e, capture_output=True, text=True, timeout=900)
         got = lines(p.stdout + p.stderr)
         ok = got == ref and (p.returncode in (-6, 134) if aborts else p.returncode == 0)

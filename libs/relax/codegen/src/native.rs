@@ -1,6 +1,6 @@
 //! Relax's entry into the machine-code back end (relax-backend): installs Relax's compile
 //! profilers as the back end's probe, and on AArch64 sends the functions selected for the
-//! threaded interpreter (MAKEPAD_RUN_INTERP / MAKEPAD_RUN_NO_CODEGEN) there instead.
+//! threaded interpreter (RELAX_INTERP / RELAX_NO_CODEGEN) there instead.
 
 use relax_backend::rir::Func;
 #[cfg(target_arch = "aarch64")]
@@ -82,10 +82,10 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &target::En
 
 fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     install_probe();
-    // Keep the actual backend input alongside MAKEPAD_RUN_DUMP's source RIR,
+    // Keep the actual backend input alongside RELAX_DUMP's source RIR,
     // including baseline/O1 bodies transformed for W32 execution.
     static DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *DUMP.get_or_init(|| std::env::var_os("MAKEPAD_RUN_DUMP").is_some()) {
+    if *DUMP.get_or_init(|| std::env::var_os("RELAX_DUMP").is_some()) {
         target::set_rir_map(true);
     }
     // the wasm32 web target's program (web32.rs): pointers are offsets into its window
@@ -101,16 +101,16 @@ fn compile_freq_inner(options: &relax_session::Options, f: &Func, env: &target::
 fn compile_native(options: &relax_session::Options, f: &Func, env: &target::Env, freq: Option<&[f32]>) -> Result<target::Compiled, String> {
     #[cfg(target_arch = "aarch64")]
     {
-        // the function runs in the threaded interpreter (interp.rs, MAKEPAD_RUN_INTERP /
-        // MAKEPAD_RUN_NO_CODEGEN): its "code" is the interpreter's relocatable form (interp/blob.rs)
+        // the function runs in the threaded interpreter (interp.rs, RELAX_INTERP /
+        // RELAX_NO_CODEGEN): its "code" is the interpreter's relocatable form (interp/blob.rs)
         if let Some((code, relocs)) = crate::interp::maybe_compile(options, f, env.slots, env.syms, env.sym_class, env.tls_slow, env.resume) {
             let n = code.len() as u32;
             return Ok(target::Compiled { code, pc_map: Vec::new(), frame_size: 0, text_len: n, alloc_sig: 0, relocs, rir_map: Vec::new(), rir_emitted: String::new() });
         }
-        // research (ios-interp): MAKEPAD_RUN_INTERP_STATS=1 also sums the machine-code backend's
+        // research (ios-interp): RELAX_INTERP_STATS=1 also sums the machine-code backend's
         // time and output for functions compiled natively, to compare with the interpreter's lowering
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP_STATS").is_some()) {
+        if *ON.get_or_init(|| std::env::var_os("RELAX_INTERP_STATS").is_some()) {
             let t = std::time::Instant::now();
             let r = target::compile_freq(options, f, env, freq);
             if let Ok(c) = &r {

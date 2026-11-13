@@ -113,7 +113,7 @@ pub(crate) fn run(u: &mut Unit, up: *mut Unit, groups: &[(String, u32)]) -> i32 
         let c = match run_crate(u, up, *krate) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("makepad test: {e}");
+                eprintln!("relax test: {e}");
                 101
             }
         };
@@ -188,7 +188,7 @@ fn prepare(u: &mut Unit, krate: u32) -> Result<(Vec<Found>, Vec<Test>, u64), Str
         })
         .collect();
     if u.session.options.verbose {
-        eprintln!("makepad test timing: prepare_ms={:.3} tests={} reused=false", started.elapsed().as_secs_f64() * 1000.0, table.len());
+        eprintln!("relax test timing: prepare_ms={:.3} tests={} reused=false", started.elapsed().as_secs_f64() * 1000.0, table.len());
     }
     Ok((found, table, main_entry))
 }
@@ -228,8 +228,15 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
             run.why = Some(format!("unknown reach: {n} tests"));
             run.initial = false;
         }
-        let mut v = live::Verdict { ran: 0, passed: 0, ignored: 0, failures: Vec::new(), stale: Vec::new(), why: run.why.clone(), skipped: 0 };
+        let mut v = live::Verdict { ran: 0, passed: 0, ignored: 0, failures: Vec::new(), stale: Vec::new(), why: run.why.clone(), skipped: 0, tests: Vec::with_capacity(run.table.len()) };
         for (test, found) in run.table.iter().zip(&run.found) {
+            let status = match test.result {
+                1 => live::TestStatus::Passed,
+                2 => live::TestStatus::Failed,
+                3 => live::TestStatus::Ignored,
+                _ => live::TestStatus::Filtered,
+            };
+            v.tests.push(live::TestResult { name: found.name.clone(), status, ran: test.selected != 0 && matches!(test.result, 1 | 2) });
             if test.result != 0 && test.selected == 0 { v.skipped += 1; }
             if matches!(test.result, 1 | 2) && test.selected != 0 { v.ran += 1; }
             match test.result {
@@ -276,7 +283,7 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
                         t.len = run.table.len();
                         t.revision += 1;
                     }
-                    Err(e) => { eprintln!("makepad test: {e}"); t.code = 101; return 0; }
+                    Err(e) => { eprintln!("relax test: {e}"); t.code = 101; return 0; }
                 }
             }
             for (i, test) in run.table.iter().enumerate() {
@@ -285,7 +292,7 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
             run.overhead_ms = started.elapsed().as_secs_f64() * 1000.0;
             if t.verbose != 0 {
                 let changed: Vec<_> = edit.changed.iter().flatten().map(|d| u.prog.def_path(*d)).collect();
-                eprintln!("makepad test selection: changed={changed:?} select_ms={:.3} why={:?}", run.overhead_ms, run.why);
+                eprintln!("relax test selection: changed={changed:?} select_ms={:.3} why={:?}", run.overhead_ms, run.why);
             }
             1
         })
@@ -296,4 +303,102 @@ extern "C" fn next_run(t: *mut Tests, ms: f64) -> u32 {
 pub(crate) unsafe fn reset_statics() {
     live::reset_statics();
     reach::reset_statics();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The first test asks the loader to build the second test and its return value's adapter
+    // (their addresses come in as argv[0]): with `--precompile` the harness built them, with all
+    // they call, before the first test started, so nothing is left to build.
+    const SOURCE: &str = r#"
+use std::sync::atomic::{AtomicU32, Ordering};
+static RAN: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
+extern "C" {
+    fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64;
+}
+#[test]
+fn chosen_first() {
+    let roots: Vec<usize> = std::env::args().next().unwrap().split(',').map(|s| s.parse().unwrap()).collect();
+    let built = unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true) };
+    assert_eq!(built, 0, "a selected test still had code to build when the first test started");
+    RAN[0].fetch_add(1, Ordering::SeqCst);
+}
+#[test]
+fn chosen_second() -> Result<(), String> {
+    RAN[1].fetch_add(1, Ordering::SeqCst);
+    Ok(())
+}
+#[test]
+#[ignore]
+fn chosen_ignored() {
+    panic!("an ignored test ran");
+}
+#[test]
+fn other() {
+    panic!("a filtered-out test ran");
+}
+pub fn ran(out: *mut [u32; 2]) {
+    unsafe { *out = [RAN[0].load(Ordering::SeqCst), RAN[1].load(Ordering::SeqCst)] };
+}
+"#;
+
+    /// `-- --precompile` with a filter and one thread: the selected tests (one returning a value)
+    /// are built before the first starts, the ignored and the filtered-out ones are not built, and
+    /// each selected test runs once (none as a warm-up).
+    #[test]
+    fn precompile_builds_the_selected_tests_before_the_first_starts() {
+        isolated_test!(precompile_builds_the_selected_tests_before_the_first_starts);
+        if std::env::var_os("RELAX_STD").is_none() {
+            std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        }
+        let dir = std::env::temp_dir().join(format!("relax-harness-precompile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lib.rs");
+        std::fs::write(&path, SOURCE).unwrap();
+        let mut session = crate::Session::default();
+        session.options.tier1 = false;
+        session.options.tyck_ahead = false;
+        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "harness_fixture", true).unwrap();
+        crate::layout::set_root_crate(krate);
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        let mut u = Unit::new(prog, tcx, core);
+        let up = &mut *u as *mut Unit;
+        unsafe { jit::UNIT = up };
+        let slot = |u: &mut Unit, path: &str| {
+            let d = find_fn(u, path).unwrap_or_else(|| panic!("no {path}"));
+            u.fn_id(FnKey::Inst(d, Vec::new()))
+        };
+        let roots = crate::owner::call(crate::owner::Class::Program, || {
+            let second = find_fn(&u, "harness_fixture::chosen_second").unwrap();
+            let ret = u.tcx.fn_sig(&u.prog, second).unwrap().ret;
+            let start = find_fn(&u, "std::relax::test::__relax_test_start").unwrap();
+            let adapter = u.fn_id(FnKey::Inst(start, vec![ret]));
+            let second = slot(&mut u, "harness_fixture::chosen_second");
+            format!("{},{}", u.entry(second), u.entry(adapter))
+        });
+        jit::set_program_args(vec![roots.into_bytes(), b"chosen".to_vec(), b"--precompile".to_vec(), b"--test-threads=1".to_vec()]);
+        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0, "the selected tests pass");
+        let (unbuilt, ran) = crate::owner::call(crate::owner::Class::Program, || {
+            let unbuilt: Vec<bool> = ["harness_fixture::chosen_ignored", "harness_fixture::other"]
+                .iter()
+                .map(|p| {
+                    let id = slot(&mut u, p);
+                    !u.fns[id as usize].compiled
+                })
+                .collect();
+            let ran = slot(&mut u, "harness_fixture::ran");
+            (unbuilt, u.entry(ran))
+        });
+        assert_eq!(unbuilt, [true, true], "the ignored and the filtered-out test stay unbuilt");
+        let mut counts = [0u32; 2];
+        unsafe { jit::call_jit(up, ran, &mut counts as *mut [u32; 2] as u64) }.unwrap_or_else(|p| panic!("{}", p.message));
+        assert_eq!(counts, [1, 1], "each selected test ran once");
+        // the harness's threads may still be retiring: the unit outlives them, as the CLI's does
+        Box::leak(u);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

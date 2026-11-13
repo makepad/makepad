@@ -1,26 +1,26 @@
 // ported from library/core/src/marker.rs @8d1a764
 //! Marker traits and PhantomData. Copy/Send/Sync/Sized/Unpin are known to the compiler.
 
-#[cfg_attr(not(relax_check), lang = "sized")]
+#[lang = "sized"]
 #[fundamental]
 pub trait Sized: MetaSized {}
-#[cfg_attr(not(relax_check), lang = "meta_sized")]
+#[lang = "meta_sized"]
 #[fundamental]
 pub trait MetaSized: PointeeSized {}
-#[cfg_attr(not(relax_check), lang = "pointee_sized")]
+#[lang = "pointee_sized"]
 #[fundamental]
 pub trait PointeeSized {}
-#[cfg_attr(not(relax_check), lang = "unsize")]
+#[lang = "unsize"]
 #[rustc_deny_explicit_impl]
 pub trait Unsize<T: PointeeSized>: PointeeSized {}
-#[cfg_attr(not(relax_check), lang = "copy")]
+#[lang = "copy"]
 pub trait Copy: crate::clone::Clone {}
 // library/core/src/marker.rs:484: the never type is trivially Copy.
 impl Copy for ! {}
 // library/core/src/marker.rs:488: copying a shared reference does not copy its pointee.
 impl<T: PointeeSized> Copy for &T {}
 pub unsafe auto trait Send {}
-#[cfg_attr(not(relax_check), lang = "sync")]
+#[lang = "sync"]
 pub unsafe auto trait Sync {}
 // library/core/src/marker.rs:105,537-538: a shared borrow transfers only
 // thread-safe access; a mutable borrow transfers exclusive access.
@@ -31,11 +31,11 @@ impl<T: PointeeSized> !Send for *const T {}
 impl<T: PointeeSized> !Send for *mut T {}
 impl<T: PointeeSized> !Sync for *const T {}
 impl<T: PointeeSized> !Sync for *mut T {}
-#[cfg_attr(not(relax_check), lang = "unpin")]
+#[lang = "unpin"]
 pub auto trait Unpin {}
 /// Zero-sized marker owning a `T` for variance/drop-check purposes.
 #[rustc_diagnostic_item = "PhantomData"]
-#[cfg_attr(not(relax_check), lang = "phantom_data")]
+#[lang = "phantom_data"]
 pub struct PhantomData<T: PointeeSized>;
 
 impl<T: PointeeSized> crate::clone::Clone for PhantomData<T> {
@@ -109,7 +109,7 @@ impl crate::hash::Hash for PhantomPinned {
     fn hash<H: crate::hash::Hasher>(&self, _state: &mut H) {}
 }
 
-#[cfg_attr(not(relax_check), lang = "tuple_trait")]
+#[lang = "tuple_trait"]
 pub trait Tuple {}
 
 // library/core/src/marker.rs:1039-1051: a pointer moves independently of its pointee.
@@ -120,7 +120,7 @@ impl<T: PointeeSized> Unpin for *mut T {}
 impl !Unpin for PhantomPinned {}
 
 // :257: implemented by the PartialEq derive with its exact generic bounds.
-#[cfg_attr(not(relax_check), lang = "structural_peq")]
+#[lang = "structural_peq"]
 pub trait StructuralPartialEq {}
 impl StructuralPartialEq for usize {}
 impl StructuralPartialEq for u8 {}
@@ -144,14 +144,14 @@ impl<T: PointeeSized> StructuralPartialEq for &T {}
 impl<T: PointeeSized> StructuralPartialEq for PhantomData<T> {}
 
 // library/core/src/marker.rs:880-887,904-906,1059-1063.
-#[cfg_attr(not(relax_check), lang = "discriminant_kind")]
+#[lang = "discriminant_kind"]
 pub trait DiscriminantKind {
-    #[cfg_attr(not(relax_check), lang = "discriminant_type")]
+    #[lang = "discriminant_type"]
     type Discriminant: crate::clone::Clone + Copy + crate::fmt::Debug + crate::cmp::Eq + crate::cmp::PartialEq + crate::hash::Hash + Send + Sync + Unpin;
 }
-#[cfg_attr(not(relax_check), lang = "destruct")]
+#[lang = "destruct"]
 pub trait Destruct: PointeeSized {}
-#[cfg_attr(not(relax_check), lang = "freeze")]
+#[lang = "freeze"]
 pub unsafe auto trait Freeze {}
 impl<T: PointeeSized> !Freeze for crate::cell::UnsafeCell<T> {}
 

@@ -17,10 +17,10 @@ R=$1
 C=$(mktemp -d)
 chmod 700 "$C"
 bad=""
-run() { (cd "$H" && env "$@" MAKEPAD_RUN_CACHE_DIR="$C/cache" MAKEPAD_RUN_TARGET_DIR="$C/target" MAKEPAD_RUN_STD="$H/../../std" "$R" run --verbose cache-warm-twin-tier); }
-run PRELINK_ONCE=1 MAKEPAD_RUN_O3_TRACE=1 > "$C/fill.log" 2>&1 || bad="$bad fill exit $?;"
+run() { (cd "$H" && env "$@" RELAX_CACHE_DIR="$C/cache" RELAX_TARGET_DIR="$C/target" RELAX_STD="$H/../../std" "$R" run --verbose cache-warm-twin-tier); }
+run PRELINK_ONCE=1 RELAX_O3_TRACE=1 > "$C/fill.log" 2>&1 || bad="$bad fill exit $?;"
 grep -E "^O3b .*::step.* installed" "$C/fill.log" > /dev/null && bad="$bad the fill built step's O3 (the warm run would have nothing to tier up);"
-run MAKEPAD_RUN_O3_TRACE=1 > "$C/warm.log" 2>&1 || bad="$bad warm exit $?;"
+run RELAX_O3_TRACE=1 > "$C/warm.log" 2>&1 || bad="$bad warm exit $?;"
 grep -q "prelinked" "$C/warm.log" || bad="$bad warm run not prelinked;"
 grep -q "^cache_warm_twin_tier ticks 1 sum" "$C/warm.log" || bad="$bad no result line;"
 grep -E "^O3b .*::step.* installed" "$C/warm.log" > /dev/null || bad="$bad step never reached O3 in the warm run ($(grep -c '^O3b' "$C/warm.log") O3 installs);"

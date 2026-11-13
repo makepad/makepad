@@ -196,11 +196,11 @@ fn guard_filters_non_app() {
     assert!(!app_crate(&prog, 0));
     // The one all-crates switch applies on top of the compiled default.
     assert!(!admit(&prog, 0));
-    std::env::set_var("MAKEPAD_RUN_GANDALF_ALL", "1");
+    std::env::set_var("RELAX_GANDALF_ALL", "1");
     assert!(admit(&prog, 0));
-    std::env::set_var("MAKEPAD_RUN_GANDALF_ALL", "0");
+    std::env::set_var("RELAX_GANDALF_ALL", "0");
     assert!(!admit(&prog, 0));
-    std::env::remove_var("MAKEPAD_RUN_GANDALF_ALL");
+    std::env::remove_var("RELAX_GANDALF_ALL");
     unsubscribe(id);
 }
 

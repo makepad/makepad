@@ -10,7 +10,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet anc-app 2>>"$ERR")
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet anc-app 2>>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "ancestry ok 0 1 2 2 1 7 3" ]; then echo "shader_ancestry: ok"; else tail -5 "$ERR"; echo "shader_ancestry: FAILED"; exit 1; fi

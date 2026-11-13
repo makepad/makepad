@@ -1,8 +1,6 @@
 pub mod s {
-    // The shim UnsafeCell is not rustc's lang item; see README and probe log.
     pub use std::{cell::RefCell, rc::Rc};
     pub type RcVec<T> = std::vec::Vec<T>;
-    // Entire hashset_string row uses real std in B: shim String lacks Hash.
     pub use std::collections::HashSet;
     pub type SetVec<T> = std::vec::Vec<T>;
     pub fn set_key(i: u64) -> std::string::String {

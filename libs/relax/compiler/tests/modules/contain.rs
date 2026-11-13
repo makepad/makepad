@@ -1,7 +1,7 @@
-// The sandbox's memory confinement alone (MAKEPAD_RUN_SANDBOX_NOCHECK=1: the compile-time refusal
+// The sandbox's memory confinement alone (RELAX_SANDBOX_NOCHECK=1: the compile-time refusal
 // is off, so modules may use unsafe): whatever address a module writes or reads, the host's
 // memory is untouched and a bad access ends the call with an error.
-// Run: MAKEPAD_RUN_SANDBOX_NOCHECK=1 makepad test tests/modules/contain.rs
+// Run: RELAX_SANDBOX_NOCHECK=1 makepad test tests/modules/contain.rs
 static mut SECRET: u64 = 0x1234_5678;
 
 fn addr() -> u64 {

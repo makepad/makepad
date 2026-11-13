@@ -71,7 +71,7 @@ pub unsafe fn copy<T>(src: *const T, dst: *mut T, count: usize) {
 pub const unsafe fn copy_nonoverlapping<T>(src: *const T, dst: *mut T, count: usize) {
     im::copy_nonoverlapping(src, dst, count)
 }
-#[cfg_attr(not(relax_check), lang = "drop_glue")]
+#[lang = "drop_glue"]
 pub const unsafe fn drop_in_place<T: crate::marker::PointeeSized>(to_drop: *mut T) {
     im::drop_in_place(to_drop)
 }
@@ -135,7 +135,7 @@ pub const fn from_mut<T: crate::marker::PointeeSized>(r: &mut T) -> *mut T {
 #[rustc_layout_scalar_valid_range_start(1)]
 #[rustc_nonnull_optimization_guaranteed]
 #[rustc_diagnostic_item = "NonNull"]
-#[cfg_attr(not(relax_check), lang = "non_null")]
+#[lang = "non_null"]
 pub struct NonNull<T: crate::marker::PointeeSized> {
     pointer: *const T,
 }
@@ -326,12 +326,12 @@ impl<T: crate::marker::PointeeSized> !Send for NonNull<T> {}
 impl<T: crate::marker::PointeeSized> !Sync for NonNull<T> {}
 
 // ported from library/core/src/ptr/metadata.rs:56-68,158-169 @8d1a764
-#[cfg_attr(not(relax_check), lang = "pointee_trait")]
+#[lang = "pointee_trait"]
 pub trait Pointee: crate::marker::PointeeSized {
-    #[cfg_attr(not(relax_check), lang = "metadata_type")]
+    #[lang = "metadata_type"]
     type Metadata: crate::fmt::Debug + crate::marker::Copy + crate::marker::Send + crate::marker::Sync + crate::cmp::Ord + crate::hash::Hash + crate::marker::Unpin + crate::marker::Freeze;
 }
-#[cfg_attr(not(relax_check), lang = "dyn_metadata")]
+#[lang = "dyn_metadata"]
 pub struct DynMetadata<Dyn: crate::marker::PointeeSized> {
     _vtable_ptr: NonNull<VTable>,
     _phantom: crate::marker::PhantomData<Dyn>,

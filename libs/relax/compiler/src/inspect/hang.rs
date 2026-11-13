@@ -325,7 +325,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
                         };
                         let mut why = format!("{why} -- see `loop`");
                         if kind == "frame owed" {
-                            let (bytes, _) = makepad_remote::cmd::answer(wm_pace, "hal pace");
+                            let bytes = makepad_remote::cmd::answer(wm_pace, "hal pace");
                             let pace = String::from_utf8_lossy(&bytes);
                             if let Some(first) = pace.lines().next() {
                                 let detail = if string_field(first, "verdict").as_deref() == Some("OWED") {

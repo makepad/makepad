@@ -753,7 +753,7 @@ pub fn cmd(req: &Req, out: &mut Out) {
     };
     if splash {
         if !super::host_query("sprobe", req, out) {
-            out.err("Splash line probes need a host with Splash VMs (makepad run of a makepad app)");
+            out.err(&format!("Splash line probes need a host with Splash VMs ({tool} run of a makepad app)", tool = crate::tool_name()));
         }
         return;
     }

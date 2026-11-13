@@ -16,9 +16,23 @@
 #   box's JIT store) is never a hang, and nor is a unit at work, however long it takes: a bound from its warm
 #   measure (twice it, then the quiet) failed a cold JIT's `makepad-fab --bin` HUNG at 672 s against a warm 66 s,
 #   its first frame at 471 s and a test thread at a core in JIT code (11-09), and would fail every landing that
-#   changes the JIT. So a unit that spins busy runs on here: a driver thread at 96% of a core, its main waiting
-#   in the driver, held a unit 732 min (11-08); six threads in `while !go` and a test thread spinning in a
-#   budget callback would have held one for ever (11-09).
+#   changes the JIT.
+# - or, past twice its measure (MEASURE_S: its last run's seconds, 0: none yet), its tests run and make no progress,
+#   by the same look, for its measure (at least two looks, at most HUNG_QUIET): the user's rule for a CI leg past
+#   twice its measured time (11-02) is its JIT's capture and a failure with the cause, and a unit is held to its
+#   own measure as a whole lease is to its class's (sched.rs say_stalled). Held to the 9 min alone, `test
+#   relax-runner` (measured 27 s) sat 9 min, its harness parked reading a child that waited on nothing, and its
+#   shard and box with it (L939783, 11-13). A build and a unit at work are still never stopped.
+# - or its CPU is no work of its own: no new test result, no I/O and no process gone for HUNG_QUIET s while its
+#   tests run, and every process of it busy over a second answers the JIT's why-hung with main idle (or waiting
+#   on the GPU) and every busy thread of it in a shared library alone, no frame in the JIT's image or the
+#   program's (driver_spin): a thread spinning in a GPU driver's fence wait. Counted as work, such a thread held
+#   a unit 732 min (11-08), and a full run's `test makepad-ai-vulkan` (measured 37 s) 35 min, its main idle and
+#   one thread at 94% in libnvidia-eglcore, until it was cancelled by hand (11-12). Asked once a minute past the
+#   quiet; a process the JIT does not answer for, main at work, or a busy thread with a frame of its own code is
+#   work.
+# A unit that spins in its own code runs on here: by its stacks a spin there is no different from work (six
+# threads in `while !go` and a test thread spinning in a budget callback would have held one for ever, 11-09).
 # Such a unit is said, never stopped: once its tests run BUSY_S s with no new test result (its busy measure,
 # land_gate.sh's: far past its last one; 0: never), the watch keeps one sample of its state in <out>.busy (as
 # <out>.hung's, with its side files under <out>.busy.*), into the lease's keep dir ($DEVHUB_KEEP/<out's dir's
@@ -38,12 +52,22 @@
 # The most it held at once, in MB in <out>.peak (the tests run's GATEPEAK), and its five largest processes then in
 # <out>.peak.by (peak_look).
 # B: the JIT command for the captures (`makepad`); HUNG_QUIET, HUNG_LOOK (s between looks), IDLE_PCT; BUSY_S,
-# BUSY_UNIT (its GATEBUSY name). What sources this gives it its clock and /proc: `now`, `proc`, `nap`, wait_s <s>,
-# read_gpu <file> and wall (the epoch s).
+# BUSY_UNIT (its GATEBUSY name); MEASURE_S. What sources this gives it its clock and /proc: `now`, `proc`, `nap`,
+# wait_s <s>, read_gpu <file> and wall (the epoch s).
 set -u
 session=$1 out=$2
 HUNG_QUIET=${HUNG_QUIET:-540} HUNG_LOOK=${HUNG_LOOK:-10} IDLE_PCT=${IDLE_PCT:-5} B=${B:-makepad}
-BUSY_S=${BUSY_S:-0} BUSY_UNIT=${BUSY_UNIT:-}
+BUSY_S=${BUSY_S:-0} BUSY_UNIT=${BUSY_UNIT:-} MEASURE_S=${MEASURE_S:-0}
+# quiet_now: the quiet that fails it now, into quiet, and what it says of it into past: HUNG_QUIET, or past twice its
+# measure, that measure (at least two looks, at most HUNG_QUIET)
+quiet_now() {
+  quiet=$HUNG_QUIET past=""
+  [ "$MEASURE_S" -gt 0 ] && [ "$now" -ge $((2 * MEASURE_S)) ] || return 0
+  local q=$MEASURE_S
+  [ "$q" -ge $((2 * HUNG_LOOK)) ] || q=$((2 * HUNG_LOOK))
+  [ "$q" -lt "$HUNG_QUIET" ] || return 0
+  quiet=$q past=", past twice its measured $MEASURE_S s"
+}
 # unit_activity: the session's processes' CPU in µs (/proc stat utime, stime, cutime, cstime at 100 Hz), storage
 # I/O bytes (io read_bytes + write_bytes) and resident memory in KB: their RSS now, summed (status VmRSS), and the
 # largest one's own peak (VmHWM: between looks too; its pid in ua_hwm_pid) into ua_cpu, ua_io, ua_rss and ua_hwm,
@@ -100,16 +124,16 @@ peak_look() {
   printf '%s\n' "$by" > "$out.peak.by"
 }
 # parked_line: the first park of the unit that waits past a look, from <out> and its processes' session logs
-# (tui.rs: $TMPDIR/makepad-run-session-<pid>-<ns>.log), with the compile error it parked at; none: empty
+# (tui.rs: $TMPDIR/relax-session-<pid>-<ns>.log), with the compile error it parked at; none: empty
 parked_line() {
   local f files=("$out") line s p
   for p in "${ua_pids[@]}"; do
-    for f in "${TMPDIR:-/tmp}/makepad-run-session-$p-"*.log; do [ -e "$f" ] && files+=("$f"); done
+    for f in "${TMPDIR:-/tmp}/relax-session-$p-"*.log; do [ -e "$f" ] && files+=("$f"); done
   done
   for f in "${files[@]}"; do
     while IFS= read -r line; do
       case $line in
-        "makepad: panic parked on thread "*" s -- attach: "*)
+        "relax: panic parked on thread "*" s -- attach: "*)
           s=${line% s -- attach: *}; s=${s##* for }
           [[ $s =~ ^[0-9]+$ ]] && [ "$s" -le "$HUNG_LOOK" ] && continue ;;
         *"compile error parked"*)
@@ -117,7 +141,7 @@ parked_line() {
           [ -z "$p" ] || line="$p; $line" ;;
       esac
       echo "${line:0:600}"; return
-    done < <(grep -E '^makepad: (panic parked on thread |compile error parked on thread |stale access parked as P[0-9]|.* -- parked as P[0-9]+ \(the app holds still)' "$f" 2>/dev/null)
+    done < <(grep -E '^relax: (panic parked on thread |compile error parked on thread |stale access parked as P[0-9]|.* -- parked as P[0-9]+ \(the app holds still)' "$f" 2>/dev/null)
   done
 }
 # out_state: from the unit's output, the test results it reported (out_results) and whether a target's tests run
@@ -182,6 +206,45 @@ keep_state() {
     else echo "  (nvidia-smi has not answered by the end of the capture: the driver may be stuck)"; cat "$gpu"; fi
     printf '%s' "$caps"; } > "$file" 2>&1
 }
+# driver_spin: the unit's threads busy over a second (threads), when each of their processes answers the JIT's
+# why-hung with main idle or waiting on the GPU and each thread of it busy in that probe (its own line's cpu_pct,
+# or other_threads' `<name> T<n> <state> <pct>%: <top>`) runs in shared libraries alone: what spins, as `pid 7:
+# main idle, T28 94% in libnvidia-eglcore.so.610.57.04`; else empty (none busy, no answer, main at work, or a
+# frame of its own)
+driver_spin() {
+  local th p a d said="" pids=()
+  th=$(threads "${ua_pids[@]}")
+  while read -r p; do pids+=("$p"); done < <(awk -v min="$IDLE_PCT" '{ for (i = 2; i < NF; i++) if ($i ~ /^[0-9]+%$/ && $(i + 1) == "wchan" && $i + 0 >= min) { split($1, t, "/"); print t[1]; break } }' <<< "$th" | sort -u)
+  [ "${#pids[@]}" -gt 0 ] || return 0
+  for p in "${pids[@]}"; do
+    a=$($B inspect "$p" why-hung as=json 2>/dev/null | head -c 200000)
+    d=$(awk -v min="$IDLE_PCT" '
+      function lib(m) { return m ~ /\.(so|dylib|dll)(\.[0-9]+)*$/ }
+      /^\{"verdict":/ { match($0, /"verdict":"[^"]*"/); v = substr($0, RSTART + 11, RLENGTH - 12) }
+      /^\{"thread":/ {
+        c = 0; if (match($0, /"cpu_pct":[0-9.]+/)) c = substr($0, RSTART + 10, RLENGTH - 10) + 0
+        if (c < min) next
+        id = "?"; if (match($0, /"id":"[^"]*"/)) id = substr($0, RSTART + 6, RLENGTH - 7)
+        r = $0; n = 0; in1 = ""
+        while (match(r, /"in":"[^"]*"/)) { m = substr(r, RSTART + 6, RLENGTH - 7); r = substr(r, RSTART + RLENGTH); n++; if (!lib(m)) own = 1; else if (in1 == "") in1 = m }
+        if (!n) own = 1; else spin = spin (spin == "" ? "" : ", ") id " " c "% in " in1
+      }
+      /^\{"other_threads":/ {
+        r = $0
+        while (match(r, / T[0-9]+ [a-z ]+ [0-9]+%: [^"]*/)) {
+          e = substr(r, RSTART, RLENGTH); r = substr(r, RSTART + RLENGTH)
+          split(e, h, "%: "); c = h[1]; sub(/.* /, "", c)
+          if (c + 0 < min) continue
+          m = h[2]; sub(/\+0x[0-9a-f]+$/, "", m)
+          if (!lib(m)) own = 1; else { split(e, w, " "); spin = spin (spin == "" ? "" : ", ") w[1] " " c "% in " m }
+        }
+      }
+      END { if (!own && spin != "" && (v == "idle" || v == "gpu wait")) print "main " v ", " spin }' <<< "$a")
+    [ -n "$d" ] || return 0
+    said+="${said:+; }pid $p: $d"
+  done
+  echo "$said"
+}
 # say <line>: live, on fd 4 (land_gate.sh's at_once: the shard's log); none there, nowhere
 say() { { printf '%s\n' "$1" >&4; } 2> /dev/null || :; }
 # busy_said: its stall was said (GATEBUSY); moved: when its tests last moved (a build, a new result); r1: its results then
@@ -189,7 +252,7 @@ busy_said="" moved=0 r1=0
 stop() { echo $((peak / 1024)) > "$out.peak"; }
 peak=0
 trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; stop; exit 0' TERM
-since=$now
+since=$now rsince=$now spin_at=0
 unit_activity; c0=$ua_cpu; i0=$ua_io; peak_look
 out_state; r0=$out_results
 why=""
@@ -212,12 +275,21 @@ while :; do
     say "GATEBUSY $BUSY_UNIT :: $(( $(wall) - (now - moved) )) $kept ${s:0:300}"
     busy_said=1
   fi
-  # progress: a build (no target's tests run), a new test result, a process gone with what it had done, its CPU
-  # past IDLE_PCT of a core or storage I/O
-  if [ "$out_in" != 1 ] || [ "$out_results" -gt "$r0" ] || [ "$ua_cpu" -lt "$c0" ] || [ "$ua_io" -lt "$i0" ] || [ $((ua_cpu - c0)) -gt $(( over * IDLE_PCT / 100 > 200000 ? over * IDLE_PCT / 100 : 200000 )) ] || [ $((ua_io - i0)) -gt 1048576 ]; then
-    since=$now; c0=$ua_cpu; i0=$ua_io; r0=$out_results; continue
+  # progress: a build (no target's tests run), a new test result, a process gone with what it had done or storage
+  # I/O; its CPU past IDLE_PCT of a core too, unless that CPU spins outside its code past the quiet (driver_spin)
+  if [ "$out_in" != 1 ] || [ "$out_results" -gt "$r0" ] || [ "$ua_cpu" -lt "$c0" ] || [ "$ua_io" -lt "$i0" ] || [ $((ua_io - i0)) -gt 1048576 ]; then
+    since=$now rsince=$now; c0=$ua_cpu; i0=$ua_io; r0=$out_results; continue
   fi
-  if [ $((now - since)) -ge "$HUNG_QUIET" ]; then why="its processes did nothing (no test result, under $IDLE_PCT% of a core, no I/O) for $((now - since)) s while its tests ran, $now s into the unit"; break; fi
+  quiet_now
+  if [ $((ua_cpu - c0)) -gt $(( over * IDLE_PCT / 100 > 200000 ? over * IDLE_PCT / 100 : 200000 )) ]; then
+    since=$now; c0=$ua_cpu; i0=$ua_io
+    if [ $((now - rsince)) -ge "$quiet" ] && [ "$now" -ge "$spin_at" ]; then
+      spin_at=$((now + 60)); spin=$(driver_spin)
+      if [ -n "$spin" ]; then why="its processes did no work of their own (no test result, no I/O; their CPU a spin outside their code: $spin) for $((now - rsince)) s while its tests ran, $now s into the unit$past"; break; fi
+    fi
+    continue
+  fi
+  if [ $((now - since)) -ge "$quiet" ]; then why="its processes did nothing (no test result, under $IDLE_PCT% of a core, no I/O) for $((now - since)) s while its tests ran, $now s into the unit$past"; break; fi
 done
 stop
 keep_state "$out.hung" "$why" "$out"

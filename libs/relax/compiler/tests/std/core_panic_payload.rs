@@ -17,7 +17,6 @@ fn describe(p: &Box<dyn Any + Send>) -> String {
     }
 }
 
-#[derive(Debug)]
 struct Custom(u8);
 
 #[test]
@@ -32,7 +31,7 @@ fn a01_catch_unwind_payloads() {
     println!("| panic_any u32: {}", describe(&r.unwrap_err()));
     let r = panic::catch_unwind(|| panic::panic_any(Custom(3)));
     let p = r.unwrap_err();
-    println!("| panic_any custom: {} {:?}", describe(&p), p.downcast_ref::<Custom>());
+    println!("| panic_any custom: {} {:?}", describe(&p), p.downcast_ref::<Custom>().map(|c| c.0));
     let r = panic::catch_unwind(|| panic::resume_unwind(Box::new(String::from("resumed"))));
     println!("| resume_unwind: {}", describe(&r.unwrap_err()));
     let r = panic::catch_unwind(|| {

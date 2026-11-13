@@ -1,0 +1,9 @@
+# A dependency's impls whose array lengths are a type-level number's associated constant, from a
+# module the file selection defers (`libs/nums/src/sizes.rs`, RELAX_LAZY_DEFER): the
+# background coherence check evaluates them while the program runs (relax issue 33: the owner,
+# serving that evaluation, waited for the check's front read to load the module, and the check
+# waited for the owner; every later lazy compile waited with them). The crates under libs/ are no
+# app crates. `cargo run -p cdl-app` prints `steps 8 state 7`.
+[workspace]
+members = ["app"]
+resolver = "2"

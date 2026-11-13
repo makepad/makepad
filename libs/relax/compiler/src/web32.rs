@@ -1,4 +1,4 @@
-//! The wasm32 web target run on this machine (`MAKEPAD_RUN_CHECK_TARGET=wasm32-unknown-unknown`,
+//! The wasm32 web target run on this machine (`RELAX_CHECK_TARGET=wasm32-unknown-unknown`,
 //! local/agent_state/wasm/web32.DESIGN.md): the runtime half. The program's pointers are 32-bit
 //! offsets into the linear memory's 4 GB window at `BASE` (zone_alloc/web.rs), so everything it
 //! can address is placed in the window (offsets):
@@ -73,24 +73,24 @@ pub fn offset(a: u64) -> u64 {
 /// region). Panics when the window is taken (one wasm32 program per process).
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn reserve_unit(_code: usize, _rest: usize) -> u64 {
-    panic!("makepad run: the wasm32 web target runs on macOS and Linux only")
+    panic!("relax run: the wasm32 web target runs on macOS and Linux only")
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn reserve_unit(code: usize, rest: usize) -> u64 {
     if !crate::zone_alloc::web::active() {
         if let Err(e) = crate::web::activate() {
-            panic!("makepad run: {}", e);
+            panic!("relax run: {}", e);
         }
     }
     let at = crate::os::mem::reserve_at(BASE + UNIT_AT, code, rest);
     if at == 0 {
-        panic!("makepad run: the wasm32 window's unit range {:#x}+{:#x} is taken (one wasm32 program per process)", BASE + UNIT_AT, code + rest);
+        panic!("relax run: the wasm32 window's unit range {:#x}+{:#x} is taken (one wasm32 program per process)", BASE + UNIT_AT, code + rest);
     }
     assert!(UNIT_AT + (code + rest) as u64 <= SLOTS_AT, "web32: unit reservation overlaps the slots");
     let misc = map_rw(BASE + MISC_AT, (MISC_END - MISC_AT) as usize);
     if misc == 0 {
-        panic!("makepad run: the wasm32 window's misc range {:#x} is taken", BASE + MISC_AT);
+        panic!("relax run: the wasm32 window's misc range {:#x} is taken", BASE + MISC_AT);
     }
     MISC_NEXT.store(BASE + MISC_AT, Ordering::Release);
     ON.store(true, Ordering::Release);
@@ -104,11 +104,11 @@ pub fn reserve_slots(code: usize, rest: usize) -> u64 {
     let len = ((code + rest) as u64 + 0xffff) & !0xffff;
     let at = SLOTS_NEXT.fetch_add(len, Ordering::AcqRel);
     if at + len > SLOTS_END {
-        panic!("makepad run: the wasm32 window's function slots are full");
+        panic!("relax run: the wasm32 window's function slots are full");
     }
     let r = crate::os::mem::reserve_at(BASE + at, code, rest);
     if r == 0 {
-        panic!("makepad run: the wasm32 window's slot range {:#x} is taken", BASE + at);
+        panic!("relax run: the wasm32 window's slot range {:#x} is taken", BASE + at);
     }
     r
 }
@@ -139,7 +139,7 @@ fn map_rw(at: u64, len: usize) -> u64 {
             return 0;
         }
     }
-    crate::memstat::name_mapping(at as usize, len, c"makepad-run-web32-misc");
+    crate::memstat::name_mapping(at as usize, len, c"relax-web32-misc");
     at
 }
 
@@ -162,7 +162,7 @@ pub fn alloc(size: usize) -> u64 {
     let a = MISC_NEXT.fetch_add(len, Ordering::AcqRel);
     if a + len > BASE + MISC_END {
         // called from runtime entries (no unwinding): fatal, said plainly
-        eprintln!("makepad run: the wasm32 window's misc region is full ({} bytes asked)", size);
+        eprintln!("relax run: the wasm32 window's misc region is full ({} bytes asked)", size);
         std::process::abort();
     }
     a
@@ -226,7 +226,7 @@ pub fn rt_w32_stack(frame: u64) -> u64 {
         let (sp, lim) = (*w, *w.add(1));
         if sp < lim + frame {
             // as a native stack overflow: fatal
-            eprintln!("makepad run: wasm32 shadow stack overflow (recursion too deep)");
+            eprintln!("relax run: wasm32 shadow stack overflow (recursion too deep)");
             std::process::abort();
         }
         sp - frame

@@ -8,8 +8,8 @@ cargo build --profile host -p makepad-run --bin makepad --bin makepad-launcher |
 T=${CARGO_TARGET_DIR:-target}/host
 dir=$(mktemp -d "${TMPDIR:-/tmp}/wm_ui_route.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/t"
-MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-    MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_RUN_TARGET_DIR="$dir/target" \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+    RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache" RELAX_TARGET_DIR="$dir/target" \
     "$T/makepad" run --report-to "$dir/report" makepad-app-wm -- --remote > "$dir/run.log" 2>&1 &
 pid=$!
 for i in $(seq 1 480); do

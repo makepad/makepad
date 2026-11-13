@@ -242,9 +242,9 @@ pub struct Boot {
     /// the last turn drew the window's frame
     turn_drew: bool,
     dump: Option<dump::Dump>,
-    /// the app has the window: the field is drawn offscreen (a dump with `MAKEPAD_RUN_BOOT_HOLD`)
+    /// the app has the window: the field is drawn offscreen (a dump with `RELAX_BOOT_HOLD`)
     offscreen: bool,
-    /// `MAKEPAD_RUN_BOOT_STATS=1`: the HAL's GPU time of the boot session's frames, printed as it goes
+    /// `RELAX_BOOT_STATS=1`: the HAL's GPU time of the boot session's frames, printed as it goes
     gpu: bool,
     /// the backend composes a window layer over a lent window (`info_flags::WINDOW_LAYERS`)
     layers: bool,
@@ -321,7 +321,7 @@ impl Boot {
             turn_drew: false,
             dump: dump::Dump::from_env(),
             offscreen: false,
-            gpu: std::env::var_os("MAKEPAD_RUN_BOOT_STATS").is_some(),
+            gpu: std::env::var_os("RELAX_BOOT_STATS").is_some(),
             layers: info.flags & info_flags::WINDOW_LAYERS != 0,
             badges: info.flags & info_flags::WINDOW_BADGES != 0,
             display_clock: info.flags & info_flags::DISPLAY_CLOCK != 0,
@@ -835,7 +835,7 @@ impl Boot {
             true
         });
         if !live {
-            eprintln!("makepad-run: the boot window ends: its HAL session is gone");
+            eprintln!("relax: the boot window ends: its HAL session is gone");
             return false;
         }
         let mut alive = true;
@@ -858,8 +858,8 @@ impl Boot {
                 match renderer.text.event(&event) {
                     Ok(changed) => renderer.redraw |= changed,
                     Err(error) => {
-                        eprintln!("makepad-run: {error}");
-                        eprintln!("makepad-run: the boot window ends: its text renderer failed");
+                        eprintln!("relax: {error}");
+                        eprintln!("relax: the boot window ends: its text renderer failed");
                         alive = false;
                     }
                 }
@@ -893,7 +893,7 @@ impl Boot {
                         let shown = self.ring.dot_age().unwrap_or_default();
                         self.events.push(Event::RingPressed { injected: mods & input::MOD_INJECTED != 0, shown })
                     } else {
-                        eprintln!("makepad-run: a press beside the ring's dot, not on it: nothing happens");
+                        eprintln!("relax: a press beside the ring's dot, not on it: nothing happens");
                     }
                 }
                 HalEvent::MouseMove { window, .. } | HalEvent::MouseLeave { window, .. }
@@ -942,7 +942,7 @@ impl Boot {
                     let fixed = self.dump.as_ref().is_some_and(|d| d.chrome.is_some());
                     if self.chrome.native != native && !fixed {
                         if self.dump.is_some() {
-                            eprintln!("makepad-run: boot window chrome: native window buttons at {native:?}");
+                            eprintln!("relax: boot window chrome: native window buttons at {native:?}");
                         }
                         self.chrome.native = native;
                         if let Some(renderer) = &mut self.renderer {
@@ -991,7 +991,7 @@ impl Boot {
                         )]));
                         if renderer.active.is_none() {
                             if renderer.bundled {
-                                eprintln!("makepad-run: the boot window ends: its own document's pipeline failed ({})", String::from_utf8_lossy(log));
+                                eprintln!("relax: the boot window ends: its own document's pipeline failed ({})", String::from_utf8_lossy(log));
                                 alive = false;
                             } else {
                                 self.replace_document(Document::bundled(), false);
@@ -999,9 +999,11 @@ impl Boot {
                         }
                     }
                 }
-                HalEvent::Readback { req, rect, pixels, .. } => {
+                HalEvent::Readback { req, rect, lease, .. } => {
+                    // SAFETY: this process pumped the event and takes its lease once.
+                    let pixels = unsafe { makepad_hal::lease::Held::from_payload(lease) };
                     if let Some(dump) = &mut self.dump {
-                        dump.ready(req, rect, pixels);
+                        dump.ready(req, rect, pixels.as_deref().unwrap_or(&[]));
                     }
                 }
                 HalEvent::FrameReady { window, .. } if Some(window) == self.window => {
@@ -1014,21 +1016,21 @@ impl Boot {
                     }
                 }
                 HalEvent::CloseRequested { window } if Some(window) == self.window => {
-                    eprintln!("makepad-run: the boot window ends: the window was asked to close");
+                    eprintln!("relax: the boot window ends: the window was asked to close");
                     alive = false
                 }
                 HalEvent::Closed { window } if Some(window) == self.window => {
-                    eprintln!("makepad-run: the boot window ends: the window was closed");
+                    eprintln!("relax: the boot window ends: the window was closed");
                     alive = false
                 }
                 HalEvent::Lifecycle {
                     kind: lifecycle::QUIT_REQUESTED,
                 } => {
-                    eprintln!("makepad-run: the boot window ends: the system asked the app to quit");
+                    eprintln!("relax: the boot window ends: the system asked the app to quit");
                     alive = false
                 }
                 HalEvent::DeviceLost { .. } => {
-                    eprintln!("makepad-run: the boot window ends: the graphics device was lost");
+                    eprintln!("relax: the boot window ends: the graphics device was lost");
                     alive = false
                 }
                 _ => {}
@@ -1548,7 +1550,7 @@ impl Boot {
         Hal::global().submit(&writer.buf());
     }
 
-    /// Whether frames are dumped (`MAKEPAD_RUN_BOOT_DUMP`): the run looks in at the dump's pace.
+    /// Whether frames are dumped (`RELAX_BOOT_DUMP`): the run looks in at the dump's pace.
     pub fn dumping(&self) -> bool {
         self.dump.is_some()
     }
@@ -2244,7 +2246,7 @@ impl Boot {
             });
             if let Some((frames, total, max)) = stats.filter(|s| s.0 > 0) {
                 eprintln!(
-                    "makepad-run: boot window gpu: {} frames, mean {:.0} us, max {:.0} us",
+                    "relax: boot window gpu: {} frames, mean {:.0} us, max {:.0} us",
                     frames,
                     total as f64 / frames as f64 / 1e3,
                     max as f64 / 1e3

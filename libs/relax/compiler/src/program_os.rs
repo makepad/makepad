@@ -8,7 +8,7 @@
 //! the TEB's bounds, which GetCurrentThreadStackLimits reads). Another thread, or a thread that is
 //! not on a program stack, gets the OS answer.
 //!
-//! Thread names (pthread_setname_np, Linux): a thread that names itself as MAKEPAD_RUN_RT_THREADS
+//! Thread names (pthread_setname_np, Linux): a thread that names itself as RELAX_RT_THREADS
 //! lists is a live real-time thread for the JIT's queue (jit::realtime_live).
 //!
 //! Heap (glibc mallinfo2): a program thread that runs in a domain allocates in that domain's heap
@@ -29,7 +29,7 @@ extern "C" {
     fn libc_pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32;
 }
 
-/// pthread_setname_np: a thread that takes a name MAKEPAD_RUN_RT_THREADS lists is a live real-time
+/// pthread_setname_np: a thread that takes a name RELAX_RT_THREADS lists is a live real-time
 /// thread (jit::realtime_live: the tier-up builds go below it from now on).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub extern "C" fn pthread_setname_np(t: usize, name: *const std::ffi::c_char) -> i32 {

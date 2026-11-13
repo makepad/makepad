@@ -397,7 +397,7 @@ fn coroutine_closure_view(
 }
 
 pub(crate) fn dump_captures(prog: &Program, body: &Body) {
-    if std::env::var_os("MAKEPAD_RUN_DUMP_CAPTURES").is_some() {
+    if std::env::var_os("RELAX_DUMP_CAPTURES").is_some() {
         dump(prog, body);
     }
 }
@@ -416,7 +416,7 @@ fn dump(prog: &Program, b: &Body) {
         let Some(c) = b.min_captures.get(ce) else {
             continue;
         };
-        eprintln!("MAKEPAD_RUN_CAPTURES {} file={} closure={} kind={:?} origin={:?} captures={:?} errors={:?} root_slots={:?} keys={:?} coroutine={:?}", prog.def_path(b.def), b.file, ce, c.kind, c.kind_origin, c.captures, c.errors, b.closure_locals.get(ce), capture_keys(c), c.coroutine);
+        eprintln!("RELAX_CAPTURES {} file={} closure={} kind={:?} origin={:?} captures={:?} errors={:?} root_slots={:?} keys={:?} coroutine={:?}", prog.def_path(b.def), b.file, ce, c.kind, c.kind_origin, c.captures, c.errors, b.closure_locals.get(ce), capture_keys(c), c.coroutine);
     }
 }
 

@@ -37,9 +37,9 @@ restore() {
 trap 'restore; exit 1' INT TERM
 session() { # session <label>: one launch to idle and quit; prints its first-frame line and its `jit` session line
     label=$1
-    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
-        MAKEPAD_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" MAKEPAD_RUN_TARGET_DIR="$dir/run/target" \
-        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
+    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
+        MAKEPAD_HOME="$dir/home" RELAX_HOME="$dir/run" RELAX_CACHE_DIR="$dir/run/cache" RELAX_TARGET_DIR="$dir/run/target" \
+        RELAX_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do

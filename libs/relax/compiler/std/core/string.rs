@@ -10,7 +10,7 @@ use crate::result::Result::{self, Err, Ok};
 use crate::str::pattern::{Pattern, StrSearcher};
 use crate::str::{Chars, StrIndex, Utf8Error};
 
-#[cfg_attr(not(relax_check), lang = "String")]
+#[lang = "String"]
 pub struct String {
     vec: Vec<u8>,
 }
@@ -56,9 +56,7 @@ impl fmt::Display for FromUtf16Error {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for FromUtf8Error {}
-#[cfg(not(relax_check))]
 impl crate::error::Error for FromUtf16Error {}
 
 /// `bytes` with each invalid sequence replaced by U+FFFD (String::from_utf8_lossy's text).
@@ -401,7 +399,6 @@ impl String {
 }
 
 /// `String::from_utf8_lossy` (borrows when the bytes are valid).
-#[cfg(not(relax_check))]
 impl String {
     pub fn from_utf8_lossy(v: &[u8]) -> crate::borrow::Cow<'_, str> {
         let mut iter = crate::str::utf8_chunks(v);
@@ -905,7 +902,6 @@ pub trait ToString {
 }
 
 /// Every Display type gets `to_string` (one of the blanket impls core may write).
-#[cfg(not(relax_check))]
 impl<T: fmt::Display + ?Sized> ToString for T {
     fn to_string(&self) -> String {
         if let Some(s) = exact_to_string(self) {
@@ -923,7 +919,6 @@ impl<T: fmt::Display + ?Sized> ToString for T {
 /// real alloc's SpecToString classes, selected by type identity with lifetimes erased.
 /// A non-generic classifier keeps the comparisons out of each ToString instance; the inliner
 /// folds it for the constant type id of an instance.
-#[cfg(not(relax_check))]
 fn spec_class(id: u64) -> u8 {
     macro_rules! classes {
         ($($t:ty => $class:expr,)*) => {
@@ -970,7 +965,6 @@ fn spec_class(id: u64) -> u8 {
 }
 
 /// real alloc's SpecToString: preserve each specialized type's allocation capacity.
-#[cfg(not(relax_check))]
 fn exact_to_string<T: ?Sized>(v: &T) -> Option<String> {
     macro_rules! integer {
         (unsigned $t:ty) => {{
@@ -1043,7 +1037,6 @@ fn exact_to_string<T: ?Sized>(v: &T) -> Option<String> {
     }
 }
 
-#[cfg(not(relax_check))]
 mod borrow_impls {
     use super::String;
     use crate::borrow::{Borrow, BorrowMut, Cow, ToOwned};
@@ -1187,36 +1180,6 @@ mod borrow_impls {
     impl crate::hash::Hash for String {
         fn hash<H: crate::hash::Hasher>(&self, hasher: &mut H) {
             crate::hash::Hash::hash(self.as_str(), hasher)
-        }
-    }
-}
-
-/// rustc shim only: lets tests compare/print this String with real std's.
-#[cfg(relax_check)]
-mod check_bridge {
-    use super::String;
-
-    impl std::fmt::Debug for String {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            std::fmt::Debug::fmt(self.as_str(), f)
-        }
-    }
-
-    impl std::fmt::Display for String {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            std::fmt::Display::fmt(self.as_str(), f)
-        }
-    }
-
-    impl PartialEq<std::string::String> for String {
-        fn eq(&self, other: &std::string::String) -> bool {
-            self.as_str() == other.as_str()
-        }
-    }
-
-    impl PartialEq<String> for std::string::String {
-        fn eq(&self, other: &String) -> bool {
-            self.as_str() == other.as_str()
         }
     }
 }

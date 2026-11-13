@@ -1,13 +1,13 @@
 //! Select the binary's std from a git mount only when every path and byte matches the build.
 
-pub const DIGEST: &str = env!("MAKEPAD_RUN_STD_DIGEST");
+pub const DIGEST: &str = env!("RELAX_STD_DIGEST");
 static SELECTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// Automatic choices are marked so a runner's child can select against its own repositories.
-/// An explicit MAKEPAD_RUN_STD (including an empty one) always wins.
+/// An explicit RELAX_STD (including an empty one) always wins.
 pub fn select(workspace: &str, fallback: &std::path::Path) {
-    let current = std::env::var_os("MAKEPAD_RUN_STD");
-    if current.is_some() && current != std::env::var_os("MAKEPAD_RUN_STD_AUTO") {
+    let current = std::env::var_os("RELAX_STD");
+    if current.is_some() && current != std::env::var_os("RELAX_STD_AUTO") {
         return;
     }
     // Recheck an inherited automatic choice in a child (also installs the immutable std
@@ -20,7 +20,7 @@ pub fn select(workspace: &str, fallback: &std::path::Path) {
     let candidate = format!("{}/libs/relax/compiler/std", root.trim_end_matches(['/', '\\']));
     let chosen = if crate::vfs::is_virtual(workspace) {
         // Diagnostic hook only forces rejection; it can never approve an incompatible std.
-        let expected = if std::env::var_os("MAKEPAD_RUN_TEST_STD_MISMATCH").is_some() {
+        let expected = if std::env::var_os("RELAX_TEST_STD_MISMATCH").is_some() {
             "test-mismatch"
         } else {
             DIGEST
@@ -31,7 +31,7 @@ pub fn select(workspace: &str, fallback: &std::path::Path) {
             Err(reason) => {
                 // (a silent run's stderr is the program's: its parent run said it already)
                 if !crate::run::silent() {
-                    eprintln!("makepad-run: using disk std {}: {reason}", fallback.display());
+                    eprintln!("relax: using disk std {}: {reason}", fallback.display());
                 }
                 fallback.to_path_buf()
             }
@@ -39,6 +39,6 @@ pub fn select(workspace: &str, fallback: &std::path::Path) {
     } else {
         fallback.to_path_buf()
     };
-    std::env::set_var("MAKEPAD_RUN_STD", &chosen);
-    std::env::set_var("MAKEPAD_RUN_STD_AUTO", &chosen);
+    std::env::set_var("RELAX_STD", &chosen);
+    std::env::set_var("RELAX_STD_AUTO", &chosen);
 }

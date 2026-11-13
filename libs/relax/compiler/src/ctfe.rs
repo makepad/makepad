@@ -36,7 +36,7 @@ struct Ctx<'a> {
 
 pub(crate) fn trace_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CTFE_TRACE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_CTFE_TRACE").is_some())
 }
 
 /// Evaluates const/static `d` (instance `args`) into `buf` (its layout's size). Returns false
@@ -127,7 +127,7 @@ fn check_quiet(u: &mut Unit, d: crate::program::DefId, args: &[TyId]) -> Option<
     Some(b)
 }
 
-/// MAKEPAD_RUN_CTFE=check: evaluate here AND compile and run the initializer, compare the two values
+/// RELAX_CTFE=check: evaluate here AND compile and run the initializer, compare the two values
 /// by type (pointers by what they point to, padding ignored); a difference is reported.
 pub fn check_mode(options: &crate::options::Options) -> bool {
     options.ctfe == crate::options::Ctfe::Check
@@ -364,7 +364,7 @@ pub fn zero_undefined(u: &mut Unit, t: TyId, a: u64) {
     }
 }
 
-/// MAKEPAD_RUN_CTFE=0: every initializer is compiled and run (the reference behaviour).
+/// RELAX_CTFE=0: every initializer is compiled and run (the reference behaviour).
 /// (The evaluator models 8-byte pointer and usize words: a wasm32 program's initializers run as
 /// code, web32.rs, whatever the option says.)
 fn off(options: &crate::options::Options) -> bool {
@@ -564,6 +564,9 @@ impl<'a> Ctx<'a> {
                 Some(Vec::new())
             }
             ExprKind::Cast(x, _) => {
+                if let Some(v) = self.variant_cast(b, x, t) {
+                    return v;
+                }
                 let v = self.eval(b, env, x)?;
                 self.cast(&v, b.ty(x), t)
             }
@@ -1265,6 +1268,32 @@ impl<'a> Ctx<'a> {
             return None;
         }
         Some(store_int(r, n))
+    }
+
+    /// A fieldless variant's path cast to an integer: its discriminant (lower::variant_cast_discr),
+    /// the explicit discriminant constant read as any constant is, plus the variant's offset. No
+    /// enum value is built, so no layout is asked for. None: not such a cast.
+    fn variant_cast(&mut self, b: &Body, x: ExprId, t: TyId) -> Option<Option<Vec<u8>>> {
+        if !matches!(self.kind(t), TyKind::Int(_)) {
+            return None;
+        }
+        let ast = &self.u.prog.files[b.file as usize].ast;
+        let x = crate::lit::strip_paren(ast, x);
+        if !matches!(ast.expr(x).kind, ExprKind::Path(_)) {
+            return None;
+        }
+        let Some(&Res::Def(d)) = b.res.get(&x.0) else { return None };
+        let (explicit, offset, rt) = crate::lower::variant_cast_discr(self.u, d, b.ty(x))?;
+        let (n, signed) = self.int_of(rt)?;
+        let base = match explicit {
+            Some(c) => match self.const_data(c, Vec::new()) {
+                Some(a) => load_int(unsafe { std::slice::from_raw_parts(a as *const u8, n) }, n, signed),
+                None => return Some(None),
+            },
+            None => 0,
+        };
+        let repr = store_int(base.wrapping_add(offset as i128), n);
+        Some(self.cast(&repr, rt, t))
     }
 
     fn cast(&mut self, v: &[u8], from: TyId, to: TyId) -> Option<Vec<u8>> {

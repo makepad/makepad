@@ -21,7 +21,7 @@ fn warnings_in_child_with(name: &str, env: &[(&str, &str)]) -> Option<Vec<String
     let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture", "--test-threads=1", "--format=terse"])
         .env(CHILD, "1")
-        .env_remove("MAKEPAD_RUN_LINT_FLAGS")
+        .env_remove("RELAX_LINT_FLAGS")
         .envs(env.iter().copied()));
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
@@ -68,10 +68,10 @@ fn check_code_uses(lib: &str, bins: &[&str], harness: bool, uses: Uses) -> i32 {
     check_code_as(lib, bins, harness, uses, false)
 }
 
-/// `check_code_uses`; `post_mono`: the check of a build (Options::post_mono, MAKEPAD_RUN_CHECK_BUILD).
+/// `check_code_uses`; `post_mono`: the check of a build (Options::post_mono, RELAX_CHECK_BUILD).
 fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono: bool) -> i32 {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     // `makepad check`'s session (run.rs): constants go through the check-mode interpreter first
     let mut sess = crate::Session::default();
     sess.options.const_fuel = true;
@@ -127,7 +127,7 @@ fn check_code_as(lib: &str, bins: &[&str], harness: bool, uses: Uses, post_mono:
 
 /// A check whose load did not record its import uses reports no import unused: it cannot tell
 /// one (`Program::import_uses_recorded`). A test's run of its own binary, the variable
-/// `MAKEPAD_RUN_LINT_FLAGS=-D warnings` set by the test, had checked its crate again with no
+/// `RELAX_LINT_FLAGS=-D warnings` set by the test, had checked its crate again with no
 /// uses recorded: every import of relax-compiler read unused, each an error. The used and the
 /// unused import alike are left out here; the other lints stay.
 #[test]
@@ -345,7 +345,7 @@ fn a_const_reads_cfg_as_the_crate_sets_it() {
 
 /// `makepad check` is cargo check: a constant that fails only for the type arguments an instance
 /// gives it is a post-monomorphization error, reported when the program is built (rustc's
-/// collector), not by the check. The check of a build (MAKEPAD_RUN_CHECK_BUILD=1, the UI suite's
+/// collector), not by the check. The check of a build (RELAX_CHECK_BUILD=1, the UI suite's
 /// build-fail cases) reports it: E0080.
 #[test]
 fn a_post_monomorphization_error_is_the_builds_not_the_checks() {
@@ -366,7 +366,7 @@ fn a_post_monomorphization_error_is_the_builds_not_the_checks() {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", NAME, "--nocapture", "--test-threads=1", "--format=terse"])
             .env(CHILD, "1")
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS")
+            .env_remove("RELAX_LINT_FLAGS")
             .envs(env.iter().copied()));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned());
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
@@ -529,15 +529,23 @@ fn an_allow_in_a_macros_expansion_covers_the_tokens_passed_in() {
     assert_eq!(warnings, ["unnecessary `unsafe` block -- because it's nested under this `unsafe` block [unused_unsafe]"]);
 }
 
-/// WARNZERO class 1 (fab slice live_trace.rs:253 and :277, hal vulkan/device.rs:165): a tuple
+/// WARNZERO class 1 (an app's slice live_trace.rs:253 and :277, hal vulkan/device.rs:165): a tuple
 /// field read through an overloaded deref (`self: Pin<&mut Self>`, `self: Arc<Self>`, `&Arc<S>`)
 /// is a read of that struct's field; a tuple field nothing reads still is dead.
+///
+/// The same check proves the body-fact store codec (check_bodies.rs): every storable body's facts
+/// -- local refs and field reads, a std trait's method (`exercise`), imports, a glob, a fn nested
+/// in a body -- survive the table into a fresh resolver, and the one body whose facts carry a
+/// position (`warned`: a lint) is refused for storage, so it is checked again.
 #[test]
 fn a_tuple_field_read_through_pin_or_arc_is_read() {
     let Some(warnings) = warnings_in_child("check_lint_tests::a_tuple_field_read_through_pin_or_arc_is_read") else {
-        return check_package(r#"
+        crate::check_bodies::FACT_CODEC_CHECK.with(|f| f.set(true));
+        check_package(r#"
             use std::pin::Pin;
             use std::sync::Arc;
+            use std::fmt::Write;
+            use std::collections::*;
             struct Yield(bool);
             impl Yield { fn poll(mut self: Pin<&mut Self>) -> bool { if self.0 { return true } self.0 = true; false } }
             struct Wake(u32);
@@ -551,9 +559,22 @@ fn a_tuple_field_read_through_pin_or_arc_is_read() {
                 let _ = Unread(3);
                 Arc::new(Wake(1)).wake() + life(&Arc::new(Life(1, None))) as u32
             }
+            pub fn exercise() -> usize {
+                fn nested(n: usize) -> usize { n + 1 }
+                let mut s = String::new();
+                s.write_str("x").unwrap();
+                nested(HashMap::<u8, u8>::new().len() + s.len())
+            }
+            pub fn warned() -> usize {
+                let unused = 1;
+                2
+            }
         "#, &[]);
+        crate::check_bodies::FACT_CODEC_CHECK.with(|f| f.set(false));
+        let refused = crate::check_bodies::FACT_CODEC_REFUSED.with(|r| std::mem::take(&mut *r.borrow_mut()));
+        return assert!(refused.len() == 1 && refused[0].ends_with("warned"), "only the body whose facts carry a position is refused for storage: {refused:?}");
     };
-    assert_eq!(warnings, ["field `0` is never read [dead_code]"]);
+    assert_eq!(warnings, ["field `0` is never read [dead_code]", "unused variable: `unused` [unused_variables]"]);
 }
 
 /// WARNZERO class 8 (hal linux_ipc.rs:69 and :74): `IoSlice` and `IoSliceMut` are FFI-safe, as
@@ -581,7 +602,7 @@ fn io_slices_are_ffi_safe() {
 }
 
 /// WARNZERO class 2: an import of a macro is used by a module that glob-imports its module
-/// (sandbox blocks' `live_id` through `use super::*`), by a macro call by path
+/// (an app's blocks' `live_id` through `use super::*`), by a macro call by path
 /// (`crate::kit::global_instance!()`), and by a `use` that goes through it (asset data's
 /// `use crate::codec::{canon_enum, ..}` of `pub(crate) use canon_enum;`); one nothing reaches is
 /// still unused.

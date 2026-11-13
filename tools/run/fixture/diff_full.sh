@@ -42,9 +42,9 @@ if [ "$1" = "--corpus-job" ]; then
     # harness's overflow handler (overflow.rs: 30+ min on a node)
     ( cd "$(dirname "$src")" && $TO "$bin" --nocapture --test-threads=1 2>/dev/null | sed -E "$norm" | sort > "$work/$n.native" )
     for k in base o3; do
-        if [ $k = base ]; then tier="MAKEPAD_RUN_O3=0"; else tier="MAKEPAD_RUN_O3=1"; fi
-        ( cd "$(dirname "$src")" && env $tier MAKEPAD_RUN_O3_CALLS=1 MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
-            MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_RUN_STD="$root/libs/relax/compiler/std" \
+        if [ $k = base ]; then tier="RELAX_O3=0"; else tier="RELAX_O3=1"; fi
+        ( cd "$(dirname "$src")" && env $tier RELAX_O3_CALLS=1 MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
+            RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" RELAX_STD="$root/libs/relax/compiler/std" \
             nice -n 10 $TO $M test "$src" 2>/dev/null | sed -E "$norm" | sort > "$work/$n.$k" )
     done
     rm -r "$d"
@@ -78,8 +78,8 @@ if [ $what = all ] || [ $what = replay ]; then
     for side in native jit; do
         d=$out/$side; mkdir -p "$d/home" "$d/tmp"
         if [ $side = native ]; then cmd="$nat"; set -- $nat; else set -- $M run makepad-app-calculator; fi
-        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
-            MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 MAKEPAD_RUN_O3=1 MAKEPAD_RUN_O3_CALLS=1 \
+        MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
+            RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 RELAX_O3=1 RELAX_O3_CALLS=1 \
             nice -n 10 "$@" > "$d/log" 2>&1 &
         pid=$!
         n=0

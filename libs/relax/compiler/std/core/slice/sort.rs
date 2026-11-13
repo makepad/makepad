@@ -9,18 +9,8 @@ use crate::mem::{self, MaybeUninit};
 /// `T: Freeze` for this instance (no UnsafeCell outside indirection).
 #[inline(always)]
 pub(crate) fn is_freeze<T>() -> bool {
-    #[cfg(relax_check)]
-    if FORCE_FREEZE.load(core::sync::atomic::Ordering::Relaxed) {
-        return true;
-    }
     unsafe { crate::intrinsics_mem::is_freeze::<T>() }
 }
-
-/// Shim-only override. Tests must serialize access and avoid comparing mutable
-/// interior state when forcing Freeze for a type that is not actually Freeze.
-#[cfg(relax_check)]
-pub static FORCE_FREEZE: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
 
 pub fn insertion_sort<T, F: FnMut(&T, &T) -> bool>(v: &mut [T], is_less: &mut F) {
     if v.len() >= 2 && mem::size_of::<T>() != 0 {

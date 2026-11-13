@@ -78,9 +78,6 @@ mod group {
 
 #[cfg(target_arch = "x86_64")]
 mod group {
-    #[cfg(relax_check)]
-    use core::arch::x86_64::*;
-    #[cfg(not(relax_check))]
     use crate::arch::x86_64::*;
     pub(super) struct BitMask(u16);
     impl BitMask {
@@ -134,9 +131,6 @@ mod group {
 
 #[cfg(target_arch = "aarch64")]
 mod group {
-    #[cfg(relax_check)]
-    use core::arch::aarch64::*;
-    #[cfg(not(relax_check))]
     use crate::arch::aarch64::*;
     pub(super) struct BitMask(u64);
     impl BitMask {
@@ -300,7 +294,7 @@ pub(crate) fn next_full(ctrl: &[u8], from: usize) -> usize {
 
 // hashbrown's RawTableInner: the element-independent table. Growth and rehashing are one body
 // for every element type, the bucket's size and alignment passed as values and the hasher as a
-// `&dyn Fn` of (table, bucket) -- P(DOOM)'s wasm had 355 copies each of reserve, resize_to and
+// `&dyn Fn` of (table, bucket) -- a game's wasm had 355 copies each of reserve, resize_to and
 // rehash_in_place (0.47 MB). `RawTable<T>` keeps the typed accessors and the fast paths.
 struct RawInner {
     ctrl: *mut u8,

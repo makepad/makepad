@@ -101,6 +101,10 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
         frame += s.size as u64;
     }
     let frame = (frame + 15) & !15;
+    // a slot aligned above the stack pointer's 16: the frame's base is aligned down to the
+    // largest such alignment, and the room that takes is reserved with it
+    let realign = f.slots.iter().map(|s| s.align as u64).max().filter(|&a| a > 16);
+    let room = frame + realign.map_or(0, |a| a - 16);
     let has_frame = !f.slots.is_empty();
     let base = f.vreg(Cls::I);
     let t_ss = f.vreg(Cls::I);
@@ -125,21 +129,28 @@ pub fn transform(f: &mut Func, c: &Cfg, sym_class: u64) -> Result<(), String> {
         push0(&mut b0, Inst::TlsAddr(t_ss, c.ss));
         push0(&mut b0, Inst::Load(Mem::Int(8, false), ssp0, t_ss, 0));
         push0(&mut b0, Inst::Load(Mem::Int(8, false), lim, t_ss, 8));
-        push0(&mut b0, Inst::IBinI(IOp::Add, U64, need, lim, frame as i64));
+        push0(&mut b0, Inst::IBinI(IOp::Add, U64, need, lim, room as i64));
         // no room (or no stack yet: both words 0): the runtime's slow path
         push0(&mut b0, Inst::ICmp(Cond::Lt, false, short, ssp0, need));
-        push0(&mut b0, Inst::IBinI(IOp::Sub, U64, nsp, ssp0, frame as i64));
+        if let Some(a) = realign {
+            let below = f.vreg(Cls::I);
+            push0(&mut b0, Inst::IBinI(IOp::Sub, U64, below, ssp0, frame as i64));
+            push0(&mut b0, Inst::IBinI(IOp::And, U64, nsp, below, -(a as i64)));
+        } else {
+            push0(&mut b0, Inst::IBinI(IOp::Sub, U64, nsp, ssp0, frame as i64));
+        }
         let slow = n + 1;
         let cont = n + 2;
         b0.term = Term::Branch(short, slow, cont);
         let got = f.vreg(Cls::I);
-        extra.push(Block {
-            insts: vec![Inst::Iconst(fr, frame as i64), Inst::Call(Callee::Host(c.grow), vec![fr], vec![got]), Inst::Mov(nsp, got)],
-            pos: vec![pos0, pos0, pos0],
-            term: Term::Jump(cont),
-            term_pos: pos0,
-            count: -1.0,
-        });
+        let mut insts = vec![Inst::Iconst(fr, room as i64), Inst::Call(Callee::Host(c.grow), vec![fr], vec![got])];
+        if let Some(a) = realign {
+            let up = f.vreg(Cls::I);
+            insts.extend([Inst::IBinI(IOp::Add, U64, up, got, a as i64 - 1), Inst::IBinI(IOp::And, U64, nsp, up, -(a as i64))]);
+        } else {
+            insts.push(Inst::Mov(nsp, got));
+        }
+        extra.push(Block { pos: vec![pos0; insts.len()], insts, term: Term::Jump(cont), term_pos: pos0, count: -1.0 });
         extra.push(Block { insts: vec![Inst::Store(Mem::Int(8, false), t_ss, 0, nsp)], pos: vec![pos0], term: Term::Jump(1), term_pos: pos0, count: -1.0 });
     }
     // These copies deliberately use full native addresses and are not passed

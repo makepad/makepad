@@ -34,7 +34,7 @@ pub fn activate() -> bool {
         unsafe { munmap(p, len); }
         return false;
     }
-    crate::memstat::name_mapping(at, len, c"makepad-run-web-memory");
+    crate::memstat::name_mapping(at, len, c"relax-web-memory");
     *end = Some(ARENA_OFFSET);
     true
 }

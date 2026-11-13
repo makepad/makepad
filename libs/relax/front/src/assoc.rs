@@ -20,7 +20,7 @@ pub fn collect(prog: &mut Program) {
 /// that crate's dependencies, none of which changed, so its synthesized RPITIT items and
 /// trait-item links are exactly what a full pass recomputes; they are kept.
 pub fn collect_in(prog: &mut Program, visible: Option<&[bool]>) {
-    if std::env::var_os("MAKEPAD_RUN_INVALIDATION_TRACE").is_some() { eprintln!("invalidation-trace: assoc whole={} scoped={}", usize::from(visible.is_none()), usize::from(visible.is_some())); }
+    if std::env::var_os("RELAX_INVALIDATION_TRACE").is_some() { eprintln!("invalidation-trace: assoc whole={} scoped={}", usize::from(visible.is_none()), usize::from(visible.is_some())); }
     let sees = |prog: &Program, d: DefId| visible.map_or(true, |v| v.get(prog.def(d).krate as usize).copied().unwrap_or(true));
     let previous = match visible {
         None => {
@@ -71,7 +71,7 @@ pub fn collect_loaded(prog: &mut Program, first_def: usize, visible: &[bool]) {
 /// prefix whose synthesized items were dropped with the definitions after the suffix start
 /// (Program::retain_collected_prefix). They come first, as the whole pass links them in order.
 pub fn collect_loaded_with(prog: &mut Program, first_def: usize, visible: &[bool], extra_traits: &[usize], extra_impls: &[usize]) {
-    if std::env::var_os("MAKEPAD_RUN_INVALIDATION_TRACE").is_some() { eprintln!("invalidation-trace: assoc added=1"); }
+    if std::env::var_os("RELAX_INVALIDATION_TRACE").is_some() { eprintln!("invalidation-trace: assoc added=1"); }
     let mut traits: Vec<usize> = extra_traits.to_vec();
     let mut impls: Vec<usize> = extra_impls.to_vec();
     for di in first_def..prog.defs.len() {
@@ -328,7 +328,7 @@ mod tests {
         collect(&mut prog);
         assert_eq!(prog.defs.len(), count);
         for d in trait_assocs { assert!(prog.impl_trait_in_trait_data.contains_key(&d)); }
-        let files = prog.current_source_files(|_| true).into_iter().collect();
+        let files = prog.current_source_module_files(|_| true).into_iter().collect();
         prog.recollect_check_crate(0, files).unwrap();
         assert_eq!(prog.impl_trait_in_trait_data.len(), 6);
         for (&d, _) in &prog.impl_trait_in_trait_data { assert!(d.0 as usize >= count); }

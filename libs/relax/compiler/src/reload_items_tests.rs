@@ -291,3 +291,21 @@ fn removed_inner_items_are_not_checked_against_the_next_edit() {
         });
     });
 }
+
+/// One file declared as two modules (`#[path]` on both) is two versions, each parsed as its
+/// module: a live edit of the file reaches both (relax issue 135's shape; the edit's fan-out took
+/// one version per crate, and the other module ran its old code). `module_path!()` tells the
+/// versions apart: each is its own module's after the edit too.
+#[test]
+fn a_live_edit_of_a_file_declared_as_two_modules_reaches_both() {
+    in_child("reload_items_tests::a_live_edit_of_a_file_declared_as_two_modules_reaches_both", &["only"], |_| {
+        let lib = "#[path = \"shared.rs\"]\nmod first;\n#[path = \"shared.rs\"]\nmod second;\n\npub fn first_value(out: &mut u64) {\n    *out = first::value();\n}\n\npub fn second_value(out: &mut u64) {\n    *out = second::value();\n}\n";
+        let shared = "pub fn value() -> u64 {\n    module_path!().len() as u64 * 10 + 1\n}\n";
+        live_app("two-module-file", &[("lib.rs", lib), ("shared.rs", shared)], &["first_value", "second_value"], |call, edit| {
+            assert_eq!((call("first_value"), call("second_value")), (151, 161), "live_app::first, live_app::second");
+            let applied = edit("shared.rs", &[("* 10 + 1", "* 10 + 2")]);
+            assert_eq!(applied.rung, Rung::Patch, "{:?}", applied.lines);
+            assert_eq!((call("first_value"), call("second_value")), (152, 162), "each module runs the edit, as its own module");
+        });
+    });
+}

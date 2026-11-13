@@ -1,11 +1,5 @@
-//! Relax runtime hooks used by std (declared in core::intrinsics_rt). The rustc shim
-//! (check_os, built with --cfg relax_shim) uses check_os/src/rt_shim.rs instead.
+//! Relax runtime hooks used by std (declared in core::intrinsics_rt).
 
-#[cfg(relax_shim)]
-#[path = "../../check_os/src/rt_shim.rs"]
-mod imp;
-
-#[cfg(not(relax_shim))]
 mod imp {
 use core::ffi::c_char;
 

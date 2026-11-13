@@ -21,18 +21,18 @@ pub fn hub(args: &[String]) -> i32 {
         let hosts = match registry() {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("makepad hub: {e}");
+                eprintln!("relax hub: {e}");
                 return 1;
             }
         };
         match makepad_remote::hub::serve(hosts, flag(args, "--listen")) {
             Ok(true) => 0,
             Ok(false) => {
-                eprintln!("makepad hub: one is already running");
+                eprintln!("relax hub: one is already running");
                 0
             }
             Err(e) => {
-                eprintln!("makepad hub: {e}");
+                eprintln!("relax hub: {e}");
                 1
             }
         }
@@ -40,7 +40,7 @@ pub fn hub(args: &[String]) -> i32 {
     #[cfg(not(unix))]
     {
         let _ = args;
-        eprintln!("makepad hub: not available on Windows yet");
+        eprintln!("relax hub: not available on Windows yet");
         2
     }
 }
@@ -81,11 +81,11 @@ pub fn relay(args: &[String]) -> i32 {
     {
         use makepad_remote::relay;
         let Ok(exe) = std::env::current_exe() else {
-            eprintln!("remote-relay: cannot find the makepad executable");
+            eprintln!("remote-relay: cannot find the {tool} executable", tool = relax_compiler::tool_name());
             return 1;
         };
         let name = flag(args, "--name").unwrap_or("relay").to_string();
-        let mut env: Vec<(String, String)> = vec![("MAKEPAD_HIDE_WINDOWS".into(), "1".into()), ("SANDBOX_MUTE".into(), "1".into())];
+        let mut env: Vec<(String, String)> = vec![("MAKEPAD_HIDE_WINDOWS".into(), "1".into()), ("MAKEPAD_MUTE".into(), "1".into())];
         for (i, a) in args.iter().enumerate() {
             if a != "--env" {
                 continue;
@@ -130,9 +130,9 @@ pub fn relay(args: &[String]) -> i32 {
 }
 
 fn remote_usage() -> i32 {
-    eprintln!("usage: makepad remote add <name> --ssh <user@host> [--makepad <path on that host>] [--env NAME=value ...]");
-    eprintln!("       makepad remote pair <name> [--hub <host:port>] [--print | --adb | --ssh <user@host>]");
-    eprintln!("       makepad remote list");
+    eprintln!("usage: {tool} remote add <name> --ssh <user@host> [--makepad <path on that host>] [--env NAME=value ...]", tool = relax_compiler::tool_name());
+    eprintln!("       {tool} remote pair <name> [--hub <host:port>] [--print | --adb | --ssh <user@host>]", tool = relax_compiler::tool_name());
+    eprintln!("       {tool} remote list", tool = relax_compiler::tool_name());
     2
 }
 
@@ -169,11 +169,11 @@ pub fn remote(args: &[String]) -> i32 {
                 };
                 let hub = flag(args, "--hub").unwrap_or(if matches!(delivery, Delivery::Adb) { "127.0.0.1:7907" } else { "" });
                 if hub.is_empty() {
-                    return Err("pair: --hub <host:port> (the address the device dials; the hub runs `makepad hub --listen` on it)".into());
+                    return Err(format!("pair: --hub <host:port> (the address the device dials; the hub runs `{tool} hub --listen` on it)", tool = relax_compiler::tool_name()));
                 }
                 let cmd = pair(name, hub, delivery).map_err(|e| e.to_string())?;
                 println!("{cmd}");
-                eprintln!("paired `{name}`; (re)start `makepad hub --listen {hub}` to accept it");
+                eprintln!("paired `{name}`; (re)start `{tool} hub --listen {hub}` to accept it", tool = relax_compiler::tool_name());
                 Ok(())
             }
             Some("list") => {
@@ -193,7 +193,7 @@ pub fn remote(args: &[String]) -> i32 {
         Ok(()) => 0,
         Err(e) if e.is_empty() => remote_usage(),
         Err(e) => {
-            eprintln!("makepad remote: {e}");
+            eprintln!("relax remote: {e}");
             1
         }
     }

@@ -301,6 +301,14 @@ impl<T: Ord> Extend<T> for BinaryHeap<T> {
     }
 }
 
+impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for BinaryHeap<T> {
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        for x in iter {
+            self.push(*x);
+        }
+    }
+}
+
 // alloc/src/collections/binary_heap/mod.rs
 #[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct Iter<'a, T: 'a> {

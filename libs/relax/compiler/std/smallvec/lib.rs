@@ -958,6 +958,27 @@ where
     }
 }
 
+// smallvec 1.15.1 src/lib.rs, feature `write`: written bytes are appended.
+#[cfg(feature = "write")]
+impl<A: Array<Item = u8>> std::io::Write for SmallVec<A> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.extend_from_slice(buf);
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 // ---------------------------------------------------------------- IntoIter
 
 /// An iterator that consumes a `SmallVec` and yields its items by value.

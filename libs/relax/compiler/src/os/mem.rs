@@ -13,7 +13,7 @@
 include!("../rt_abi.rs");
 pub use imp::*;
 
-/// no-codegen mode (MAKEPAD_RUN_NO_CODEGEN): reservations get no executable view, and any code
+/// no-codegen mode (RELAX_NO_CODEGEN): reservations get no executable view, and any code
 /// write is an error naming its caller -- the process must run without machine code of its own.
 static NO_CODEGEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -78,7 +78,7 @@ pub fn anonymous_exec_regions() -> Vec<(u64, u64, i32)> {
 #[cold]
 #[cfg_attr(not(target_vendor = "apple"), allow(dead_code))]
 fn refuse_code(what: &str, addr: u64, len: usize) -> ! {
-    panic!("makepad run: no-codegen mode: {} of {} bytes at {:#x} (machine code is not allowed in this mode)", what, len, addr)
+    panic!("relax run: no-codegen mode: {} of {} bytes at {:#x} (machine code is not allowed in this mode)", what, len, addr)
 }
 
 /// Replaces the 8 code bytes at `addr` (8-aligned) with one atomic store: a thread executing
@@ -100,7 +100,7 @@ pub unsafe fn patch_code_u32(addr: u64, w: u32) {
 /// The code [addr, addr + len) of a run that ended: nothing can execute it any more, while whatever
 /// still reads it (a thunk's word, a disassembly) can, and a compile still in flight can finish
 /// writing (through the RW alias, which stays). The whole range goes at once, also what no code was
-/// placed in yet. Where code has one read-write-execute view (MAKEPAD_RUN_WX=0, the perf map) it
+/// placed in yet. Where code has one read-write-execute view (RELAX_WX=0, the perf map) it
 /// turns read-write. A failure is fatal: the old run would go on.
 pub fn end_code(addr: u64, len: usize) {
     if no_codegen() {
@@ -114,9 +114,36 @@ pub fn end_code(addr: u64, len: usize) {
     #[cfg(windows)]
     let ok = end_code_committed(addr, len);
     if !ok {
-        eprintln!("makepad run: the code of an ended run at {:#x} ({} bytes) could not be made non-executable", addr, len);
+        eprintln!("relax run: the code of an ended run at {:#x} ({} bytes) could not be made non-executable", addr, len);
         std::process::abort();
     }
+}
+
+/// Code memory [addr, addr + len) (whole pages) held back -- inaccessible, a fetch there faults --
+/// or given back as its reservation made it (executable; read-write too where code has one
+/// view). A table that grows into its reservation keeps the part it has not written held
+/// (sandbox.rs: zero bytes are no trap on x86). False: the protection did not change.
+#[cfg(unix)]
+pub fn code_held(addr: u64, len: usize, held: bool) -> bool {
+    const PROT_RX: i32 = 5;
+    const PROT_RWX: i32 = 7;
+    let prot = if held { 0 } else if single_code_view(addr) { PROT_RWX } else { PROT_RX };
+    unsafe { unix::mprotect(addr as *mut u8, len, prot) == 0 }
+}
+
+/// Writes held code (`code_held`) and only then lets it run: [addr, addr + len) is readable (and
+/// writable where code has one view) while `fill` writes it and the instruction cache is told,
+/// then executable. No thread can run the range before it holds what `fill` wrote.
+#[cfg(unix)]
+pub unsafe fn code_unhold_filled(addr: u64, len: usize, fill: impl FnOnce(&mut [u8])) -> bool {
+    const PROT_R: i32 = 1;
+    const PROT_RW: i32 = 3;
+    let prot = if single_code_view(addr) { PROT_RW } else { PROT_R };
+    if unix::mprotect(addr as *mut u8, len, prot) != 0 {
+        return false;
+    }
+    fill_code(addr, len, fill);
+    code_held(addr, len, false)
 }
 
 /// The OS page size (mprotect's granularity): 4 KB on x86-64, 16 KB on Apple arm64.
@@ -161,7 +188,7 @@ pub fn invalidate_code(addr: u64, len: usize) {
         unsafe { crate::os::win32::VirtualProtect(addr as *mut u8, len, crate::os::win32::PAGE_NOACCESS, &mut old) != 0 }
     };
     if !ok {
-        eprintln!("makepad run: invalidated code at {:#x} ({} bytes) could not be made inaccessible", addr, len);
+        eprintln!("relax run: invalidated code at {:#x} ({} bytes) could not be made inaccessible", addr, len);
         std::process::abort();
     }
 }
@@ -213,7 +240,7 @@ mod unix {
             if mprotect(addr as *mut u8, len, 0) != 0 {
                 // (a failed MAP_FIXED may already have removed the old mapping: the range could be
                 // handed out again while stale return addresses name it. Never contained: abort)
-                eprintln!("makepad run: retired code memory at {:#x} ({} bytes) could not be made unreachable", addr, len);
+                eprintln!("relax run: retired code memory at {:#x} ({} bytes) could not be made unreachable", addr, len);
                 std::process::abort();
             }
         }
@@ -275,7 +302,7 @@ mod imp {
     // code addresses (what everyone calls and patches by address) and a read-write alias that
     // only `write_code` / `fill_code` write through. No page of the process is writable and
     // executable at once, so a stray write in the program or the JIT cannot become code.
-    // MAKEPAD_RUN_WX=0 (and the perf map, whose JIT symbols perf applies only to anonymous
+    // RELAX_WX=0 (and the perf map, whose JIT symbols perf applies only to anonymous
     // memory) keeps the single read-write-execute view. A program's fork gives the child copies
     // (fork_prepare / fork_child).
 
@@ -311,7 +338,7 @@ mod imp {
     /// W^X is on (decided once: before the first reservation).
     fn wx() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| !std::env::var_os("MAKEPAD_RUN_WX").is_some_and(|v| v == "0") && !crate::jit::perf_map_on())
+        *ON.get_or_init(|| !std::env::var_os("RELAX_WX").is_some_and(|v| v == "0") && !crate::jit::perf_map_on())
     }
     static WX_FAILED: AtomicBool = AtomicBool::new(false);
 
@@ -323,7 +350,7 @@ mod imp {
     /// rest stays a hole (zero pages). -1: no memfd.
     unsafe fn copy_region(r: &[AtomicU64; 3], old: i32) -> i32 {
         let (size, rw) = (r[1].load(Ordering::Relaxed), r[2].load(Ordering::Relaxed));
-        let fd = syscall(SYS_MEMFD_CREATE, c"makepad-run-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
+        let fd = syscall(SYS_MEMFD_CREATE, c"relax-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
         let mut ok = fd >= 0 && ftruncate(fd, size as i64) == 0;
         let mut at = 0i64;
         while ok && (at as u64) < size {
@@ -388,7 +415,7 @@ mod imp {
                     && mmap(rx as *mut u8, size as usize, PROT_RX, MAP_SHARED | MAP_FIXED, fd, 0) as u64 == rx
                     && mmap(rw as *mut u8, size as usize, PROT_RW, MAP_SHARED | MAP_FIXED, fd, 0) as u64 == rw;
                 if !ok {
-                    let msg = b"makepad run: the forked child has no copy of its code memory, exiting\n";
+                    let msg = b"relax run: the forked child has no copy of its code memory, exiting\n";
                     write(2, msg.as_ptr().cast(), msg.len());
                     _exit(134);
                 }
@@ -409,7 +436,7 @@ mod imp {
             panic!("code memory: more than {} code reservations in this process", REGIONS_CAP);
         }
         unsafe {
-            let fd = syscall(SYS_MEMFD_CREATE, c"makepad-run-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
+            let fd = syscall(SYS_MEMFD_CREATE, c"relax-jit-code".as_ptr(), MFD_CLOEXEC) as i32;
             if fd < 0 {
                 return false;
             }
@@ -478,7 +505,7 @@ mod imp {
                 return;
             }
             WX_FAILED.store(true, Ordering::Relaxed);
-            eprintln!("makepad run: no memfd for W^X code memory here: code pages are read-write-execute");
+            eprintln!("relax run: no memfd for W^X code memory here: code pages are read-write-execute");
         }
         if unsafe { mprotect(base as *mut u8, code, PROT_RWX) } != 0 {
             panic!("reservation: mprotect RWX failed");
@@ -487,14 +514,14 @@ mod imp {
 
     pub fn reserve(code: usize, rest: usize) -> u64 {
         let base = alloc_rw(code + rest);
-        crate::memstat::name_mapping(base as usize + code, rest, c"makepad-run-jit-data");
+        crate::memstat::name_mapping(base as usize + code, rest, c"relax-jit-data");
         make_code(base, code);
         // perf names samples in anonymous memory from /tmp/perf-<pid>.map, but only for mappings
-        // it sees as anonymous ("//anon"): a prctl-named mapping ("[anon:makepad-run-jit-code]") is a
+        // it sees as anonymous ("//anon"): a prctl-named mapping ("[anon:relax-jit-code]") is a
         // DSO to it, and the JIT's names would never appear. With the perf map on, the code
         // stays unnamed (and W^X is off: a memfd view is a file to perf too).
         if !crate::jit::perf_map_on() && code_rw_of(base).is_none() {
-            crate::memstat::name_mapping(base as usize, code, c"makepad-run-jit-code");
+            crate::memstat::name_mapping(base as usize, code, c"relax-jit-code");
         }
         huge_code_pages(base, code);
         base
@@ -523,10 +550,10 @@ mod imp {
         if p as isize == -1 || p as u64 != at {
             return 0;
         }
-        crate::memstat::name_mapping(at as usize + code, rest, c"makepad-run-jit-data");
+        crate::memstat::name_mapping(at as usize + code, rest, c"relax-jit-data");
         make_code(at, code);
         if code_rw_of(at).is_none() {
-            crate::memstat::name_mapping(at as usize, code, c"makepad-run-jit-code");
+            crate::memstat::name_mapping(at as usize, code, c"relax-jit-code");
         }
         at
     }
@@ -690,7 +717,7 @@ mod imp {
                 let mut at = context;
                 let (mut cur, mut max) = (0i32, 0i32);
                 if mach_vm_remap(task, &mut at, size, 0, VM_FLAGS_FIXED, task, rw, 0, &mut cur, &mut max, VM_INHERIT_NONE) != 0 || at != context || mprotect(context as *mut u8, size as usize, 5) != 0 {
-                    let msg = b"makepad: forked child cannot map its code memory, exiting\n";
+                    let msg = b"relax: forked child cannot map its code memory, exiting\n";
                     write(2, msg.as_ptr().cast(), msg.len());
                     _exit(134);
                 }
@@ -879,11 +906,11 @@ mod imp {
     // and a read-write alias elsewhere that only write_code / fill_code / the unwind entry write
     // through. The views replace a placeholder (VirtualAlloc2 / MapViewOfFile3), so the code
     // stays right below the reservation's data. No page is writable and executable at once.
-    // MAKEPAD_RUN_WX=0, or a system without placeholders / sections, keeps one
+    // RELAX_WX=0, or a system without placeholders / sections, keeps one
     // PAGE_EXECUTE_READWRITE view.
     fn wx() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *ON.get_or_init(|| !std::env::var_os("MAKEPAD_RUN_WX").is_some_and(|v| v == "0"))
+        *ON.get_or_init(|| !std::env::var_os("RELAX_WX").is_some_and(|v| v == "0"))
     }
     static WX_FAILED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -1010,7 +1037,7 @@ mod imp {
             views = unsafe { reserve_views(code, rest) };
             if views.is_none() {
                 WX_FAILED.store(true, Ordering::Relaxed);
-                eprintln!("makepad run: no placeholder views for W^X code memory here: code pages are read-write-execute");
+                eprintln!("relax run: no placeholder views for W^X code memory here: code pages are read-write-execute");
             }
         }
         let (base, rw, sec) = match views {

@@ -41,7 +41,7 @@ sdk = scratch / "sdk" / "lib"
 loader_path = "DYLD_LIBRARY_PATH" if sys.platform == "darwin" else "LD_LIBRARY_PATH"
 base = {k: v for k, v in os.environ.items() if k not in ("RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", loader_path)}
 base.update(CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true", DEMO_SDK_DIR=str(sdk),
-            CARGO_TARGET_DIR=str(scratch / "cargo"), MAKEPAD_RUN_CACHE_DIR=str(scratch / "jit"))
+            CARGO_TARGET_DIR=str(scratch / "cargo"), RELAX_CACHE_DIR=str(scratch / "jit"))
 rpath = {"RUSTFLAGS": f"-C link-arg=-Wl,-rpath,{sdk}"}
 library = "libdemo.dylib" if sys.platform == "darwin" else "libdemo.so"
 

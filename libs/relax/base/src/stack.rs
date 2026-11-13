@@ -52,14 +52,14 @@ pub fn program_stack_bounds() -> Option<(usize, usize)> {
 pub const PROGRAM_STACK_GUARD: usize = imp::PROGRAM_GUARD;
 
 /// Size of a program thread's stack reservation: a quarter of physical memory, 1..64 GiB
-/// (MAKEPAD_RUN_STACK_GB overrides). Pages are committed as the stack grows into them, so the size
+/// (RELAX_STACK_GB overrides). Pages are committed as the stack grows into them, so the size
 /// costs address space only; the bound keeps a runaway recursion from paging the machine to death
 /// before it reaches the guard.
 pub fn program_stack_size() -> usize {
     static SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *SIZE.get_or_init(|| {
         const GB: usize = 1 << 30;
-        if let Some(g) = std::env::var("MAKEPAD_RUN_STACK_GB").ok().and_then(|v| v.parse::<usize>().ok()) {
+        if let Some(g) = std::env::var("RELAX_STACK_GB").ok().and_then(|v| v.parse::<usize>().ok()) {
             return g.clamp(1, 1024) * GB;
         }
         if cfg!(not(target_pointer_width = "64")) {
@@ -325,7 +325,7 @@ mod imp {
         }
         // a guard page at the low end: an overflow faults instead of writing below the segment
         unsafe { mprotect(seg, GUARD, 0) };
-        crate::memstat::name_mapping(seg as usize, len, c"makepad-run-stack");
+        crate::memstat::name_mapping(seg as usize, len, c"relax-stack");
         Some(Segment { base: seg as usize, len, lo: seg as usize + GUARD, floor: seg as usize + GUARD, top: (seg as usize + len) & !15 })
     }
 
@@ -367,7 +367,7 @@ mod imp {
             unsafe { munmap(seg, len) };
             return None;
         }
-        crate::memstat::name_mapping(seg as usize, len, c"makepad-run-program-stack");
+        crate::memstat::name_mapping(seg as usize, len, c"relax-program-stack");
         let lo = seg as usize + PROGRAM_GUARD;
         Some(Segment { base: seg as usize, len, lo, floor: lo, top: (seg as usize + len) & !15 })
     }

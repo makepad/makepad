@@ -178,6 +178,15 @@ impl<I: Iterator> Iterator for Enumerate<I> {
         self.count = i + 1;
         Some((i, a))
     }
+    // core enumerate.rs: the count goes on by the items the inner iterator advanced
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        let remaining = self.iter.advance_by(n);
+        self.count += match remaining {
+            Ok(()) => n,
+            Err(rem) => n - rem,
+        };
+        remaining
+    }
     #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> (usize, I::Item) {
         // SAFETY: the caller keeps Iterator::__iterator_get_unchecked's contract
@@ -518,6 +527,9 @@ impl<I: DoubleEndedIterator> Iterator for Rev<I> {
     fn nth(&mut self, n: usize) -> Option<I::Item> {
         self.iter.nth_back(n)
     }
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        self.iter.advance_back_by(n)
+    }
 }
 
 impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
@@ -526,6 +538,9 @@ impl<I: DoubleEndedIterator> DoubleEndedIterator for Rev<I> {
     }
     fn nth_back(&mut self, n: usize) -> Option<I::Item> {
         self.iter.nth(n)
+    }
+    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+        self.iter.advance_by(n)
     }
 }
 
@@ -581,6 +596,17 @@ impl<I: Iterator> Iterator for Take<I> {
             None
         }
     }
+    // core take.rs: at most the items left to take, in one advance_by of the inner iterator
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        let min = if self.n < n { self.n } else { n };
+        let rem = match self.iter.advance_by(min) {
+            Ok(()) => 0,
+            Err(rem) => rem,
+        };
+        let advanced = min - rem;
+        self.n -= advanced;
+        if advanced < n { Err(n - advanced) } else { Ok(()) }
+    }
 }
 
 impl<I: DoubleEndedIterator + ExactSizeIterator> DoubleEndedIterator for Take<I> {
@@ -621,6 +647,41 @@ impl<I: Iterator> Iterator for Skip<I> {
         } else {
             self.iter.next()
         }
+    }
+    // core skip.rs: the skip and `n` go to the inner iterator as one nth (O(1) on a slice); the
+    // default took `n` steps, so a `step_by` over a `skip` of a slice was quadratic
+    fn nth(&mut self, n: usize) -> Option<I::Item> {
+        let skip = crate::mem::take(&mut self.n);
+        let n = match skip.checked_add(n) {
+            Some(nth) => nth,
+            None => {
+                // more than usize::MAX items: the skip first, as an nth of its own (skip > 0 here)
+                self.iter.nth(skip - 1)?;
+                n
+            }
+        };
+        self.iter.nth(n)
+    }
+    // core skip.rs: the skip and `n` in one advance_by of the inner iterator (their sum saturates:
+    // the rest of `n` then goes in a second); a skip the inner iterator did not reach stays
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        let mut n = n;
+        let skip_inner = self.n;
+        let skip_and_advance = skip_inner.saturating_add(n);
+        let remainder = match self.iter.advance_by(skip_and_advance) {
+            Ok(()) => 0,
+            Err(r) => r,
+        };
+        let advanced_inner = skip_and_advance - remainder;
+        n -= advanced_inner.saturating_sub(skip_inner);
+        self.n = self.n.saturating_sub(advanced_inner);
+        if remainder == 0 && n > 0 {
+            n = match self.iter.advance_by(n) {
+                Ok(()) => 0,
+                Err(r) => r,
+            };
+        }
+        if n == 0 { Ok(()) } else { Err(n) }
     }
     fn size_hint(&self) -> (usize, Option<usize>) {
         let (lower, upper) = self.iter.size_hint();
@@ -700,6 +761,42 @@ impl<I: Iterator> Iterator for StepBy<I> {
             (f(lower), upper.map(f))
         }
     }
+    // core step_by.rs spec_nth: the `n` steps go to the inner iterator as one nth (O(1) on a
+    // slice), in several when `n` times the step overflows
+    fn nth(&mut self, mut n: usize) -> Option<I::Item> {
+        if self.first_take {
+            self.first_take = false;
+            let first = self.iter.next();
+            if n == 0 {
+                return first;
+            }
+            n -= 1;
+        }
+        // n and the step are counts from here: one more than the indices nth takes
+        let mut step = self.step_minus_one + 1;
+        if n == usize::MAX {
+            self.iter.nth(step - 1);
+        } else {
+            n += 1;
+        }
+        loop {
+            if let Some(m) = n.checked_mul(step) {
+                return self.iter.nth(m - 1);
+            }
+            let div_n = usize::MAX / n;
+            let div_step = usize::MAX / step;
+            let nth_n = div_n * n;
+            let nth_step = div_step * step;
+            let nth = if nth_n > nth_step {
+                step -= div_n;
+                nth_n
+            } else {
+                n -= div_step;
+                nth_step
+            };
+            self.iter.nth(nth - 1);
+        }
+    }
 }
 
 impl<I: ExactSizeIterator> ExactSizeIterator for StepBy<I> {}
@@ -773,6 +870,37 @@ impl<A: Iterator, B: Iterator<Item = A::Item>> Iterator for Chain<A, B> {
         };
         (lower, upper)
     }
+    // core chain.rs: `a` advances as far as it goes, the rest goes to `b` (which is not fused)
+    fn advance_by(&mut self, mut n: usize) -> Result<(), usize> {
+        if let Some(a) = &mut self.a {
+            n = match a.advance_by(n) {
+                Ok(()) => return Ok(()),
+                Err(k) => k,
+            };
+            self.a = None;
+        }
+        match &mut self.b {
+            Some(b) => b.advance_by(n),
+            None => if n == 0 { Ok(()) } else { Err(n) },
+        }
+    }
+    // core chain.rs: `a` advances by `n` in one advance_by (O(1) on a slice), the rest is `b`'s nth
+    fn nth(&mut self, mut n: usize) -> Option<A::Item> {
+        if let Some(a) = &mut self.a {
+            n = match a.advance_by(n) {
+                Ok(()) => match a.next() {
+                    None => 0,
+                    x => return x,
+                },
+                Err(k) => k,
+            };
+            self.a = None;
+        }
+        match &mut self.b {
+            Some(b) => b.nth(n),
+            None => None,
+        }
+    }
 }
 
 impl<A: DoubleEndedIterator, B: DoubleEndedIterator<Item = A::Item>> DoubleEndedIterator for Chain<A, B> {
@@ -785,6 +913,36 @@ impl<A: DoubleEndedIterator, B: DoubleEndedIterator<Item = A::Item>> DoubleEnded
         }
         match &mut self.a {
             Some(a) => a.next_back(),
+            None => None,
+        }
+    }
+    // core chain.rs: advance_by and nth mirrored, `b` first
+    fn advance_back_by(&mut self, mut n: usize) -> Result<(), usize> {
+        if let Some(b) = &mut self.b {
+            n = match b.advance_back_by(n) {
+                Ok(()) => return Ok(()),
+                Err(k) => k,
+            };
+            self.b = None;
+        }
+        match &mut self.a {
+            Some(a) => a.advance_back_by(n),
+            None => if n == 0 { Ok(()) } else { Err(n) },
+        }
+    }
+    fn nth_back(&mut self, mut n: usize) -> Option<A::Item> {
+        if let Some(b) = &mut self.b {
+            n = match b.advance_back_by(n) {
+                Ok(()) => match b.next_back() {
+                    None => 0,
+                    x => return x,
+                },
+                Err(k) => k,
+            };
+            self.b = None;
+        }
+        match &mut self.a {
+            Some(a) => a.nth_back(n),
             None => None,
         }
     }
@@ -856,6 +1014,9 @@ impl<'a, T: 'a + Copy, I: Iterator<Item = &'a T>> Iterator for Copied<I> {
     fn nth(&mut self, n: usize) -> Option<T> {
         self.it.nth(n).copied()
     }
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        self.it.advance_by(n)
+    }
     #[doc(hidden)]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> T {
         // SAFETY: the caller keeps Iterator::__iterator_get_unchecked's contract
@@ -866,6 +1027,9 @@ impl<'a, T: 'a + Copy, I: Iterator<Item = &'a T>> Iterator for Copied<I> {
 impl<'a, T: 'a + Copy, I: DoubleEndedIterator<Item = &'a T>> DoubleEndedIterator for Copied<I> {
     fn next_back(&mut self) -> Option<T> {
         self.it.next_back().copied()
+    }
+    fn advance_back_by(&mut self, n: usize) -> Result<(), usize> {
+        self.it.advance_back_by(n)
     }
 }
 
@@ -962,6 +1126,15 @@ impl<I: Iterator> Iterator for Peekable<I> {
             Some(None) => 0,
             Some(Some(_)) => 1 + self.iter.count(),
             None => self.iter.count(),
+        }
+    }
+    // core peekable.rs: the peeked item is the first, the rest one nth of the inner iterator
+    fn nth(&mut self, n: usize) -> Option<I::Item> {
+        match self.peeked.take() {
+            Some(None) => None,
+            Some(v @ Some(_)) if n == 0 => v,
+            Some(Some(_)) => self.iter.nth(n - 1),
+            None => self.iter.nth(n),
         }
     }
     fn last(self) -> Option<I::Item> {
@@ -1356,6 +1529,33 @@ impl<I: Iterator> Iterator for Fuse<I> {
         match &self.iter {
             Some(it) => it.size_hint(),
             None => (0, Some(0)),
+        }
+    }
+    // core fuse.rs: one nth of the inner iterator (O(1) on a slice), not `n` nexts; a None fuses
+    fn nth(&mut self, n: usize) -> Option<I::Item> {
+        match &mut self.iter {
+            Some(it) => match it.nth(n) {
+                None => {
+                    self.iter = None;
+                    None
+                }
+                item => item,
+            },
+            None => None,
+        }
+    }
+    // one advance_by of the inner iterator; one that ran out (it returned None) fuses, as core's
+    // default advance_by through `next` does
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
+        match &mut self.iter {
+            Some(it) => match it.advance_by(n) {
+                Ok(()) => Ok(()),
+                Err(k) => {
+                    self.iter = None;
+                    Err(k)
+                }
+            },
+            None => if n == 0 { Ok(()) } else { Err(n) },
         }
     }
     #[doc(hidden)]

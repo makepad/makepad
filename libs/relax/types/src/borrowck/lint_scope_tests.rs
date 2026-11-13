@@ -7,7 +7,7 @@
 fn run_alone(name: &str, child: &str, flags: &str) {
     let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture", "--test-threads=1", "--format=terse"])
-        .env(child, "1").env("MAKEPAD_RUN_LINT_FLAGS", flags));
+        .env(child, "1").env("RELAX_LINT_FLAGS", flags));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
 }

@@ -27,7 +27,7 @@ function Publish($text, $broken) {
         'fx1/launcher.rs' = "fn main() {}`n"
         # makepad.bat compiles the assembler rust-mingw's dlltool needs from the loader's source
         'fx1/tools/run/entry/assemble.rs' = [IO.File]::ReadAllText("$here\assemble.rs")
-        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"MAKEPAD_RUN_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {}`", dep_a::text(), record.is_file());`n}`n" })
+        'fx1/main.rs' = $(if ($broken) { "fn main() { this is not rust }`n" } else { "fn main() {`n    let home = std::env::var(`"RELAX_HOME`").unwrap_or_default();`n    let record = std::path::Path::new(&home).join(`"apps/runner.launch`");`n    println!(`"fixture loader: {} launch record present: {}`", dep_a::text(), record.is_file());`n}`n" })
     }
     foreach ($k in $files.Keys) { [IO.File]::WriteAllText("$zipdir\$($k.Replace('/', '\'))", $files[$k], $utf8) }
     $zip = "$Base\www\public\app\runner\fx1\loader.zip"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: four modules, each a call nested 2000 deep (cargo run takes it), parse on
-# the load's parse workers (MAKEPAD_RUN_JOBS=2) and compile on the JIT's pool workers as on the owner thread:
+# the load's parse workers (RELAX_JOBS=2) and compile on the JIT's pool workers as on the owner thread:
 # every compiler thread has the same stack (COMPILER_STACK), so the nesting fits whichever thread takes a
 # module. Runs the program twice; prints "compiler_thread_stack: ok" or "compiler_thread_stack: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
@@ -15,7 +15,7 @@ done
 WANT="deep $N $((N + 1)) $((N + 2)) $((N + 3))"
 ok=1
 for r in 1 2; do
-  OUT=$(cd "$T/x" && MAKEPAD_RUN_JOBS=2 MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_STD=$H/../../std MAKEPAD_HOME=$T/home MAKEPAD_RUN_HOME=$T MAKEPAD_RUN_TARGET_DIR=$T/target "$1" run --quiet cts-app 2>>"$T/err")
+  OUT=$(cd "$T/x" && RELAX_JOBS=2 RELAX_CACHE=off RELAX_STD=$H/../../std MAKEPAD_HOME=$T/home RELAX_HOME=$T RELAX_TARGET_DIR=$T/target "$1" run --quiet cts-app 2>>"$T/err")
   echo "run $r: $OUT"
   [ "$OUT" = "$WANT" ] || ok=0
 done

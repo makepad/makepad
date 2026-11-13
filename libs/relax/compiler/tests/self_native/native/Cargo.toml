@@ -1,0 +1,7 @@
+[package]
+name = "sn-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "sn_native"
+build = "build.rs"

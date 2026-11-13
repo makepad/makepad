@@ -48,7 +48,7 @@ def edits():
 
 class App:
     def __init__(self, package):
-        env = dict(os.environ, MAKEPAD_REMOTE="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1", MAKEPAD_HOME=os.path.join(WORK, "home"))
+        env = dict(os.environ, MAKEPAD_REMOTE="1", MAKEPAD_MUTE="1", MAKEPAD_HOME=os.path.join(WORK, "home"))
         env.pop("MAKEPAD_HIDE_WINDOWS", None)
         if "--live-resize" in sys.argv:
             env["MAKEPAD_TEST_LIVE_RESIZE"] = "repeat"
@@ -205,7 +205,7 @@ def main():
         h = 0xcbf29ce484222325
         for b in package.encode():
             h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff
-        d = os.path.join(target, "makepad-run", "windows")
+        d = os.path.join(target, "relax", "windows")
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "%016x.geom" % h), "w") as f:
             f.write(geom + "\n")

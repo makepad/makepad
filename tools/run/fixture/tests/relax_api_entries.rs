@@ -4,8 +4,8 @@
 #[test]
 fn entries_are_linked() {
     let _ = relax_provided_fixture::bound();
-    let e = makepad_relax_api::entries();
-    let size = std::mem::size_of::<makepad_relax_api::Entry>();
+    let e = relax_api::entries();
+    let size = std::mem::size_of::<relax_api::Entry>();
     println!("COUNTS entries().len() {} span bytes {} entry size {} divisible {}", e.len(), e.len() * size, size, (e.len() * size) % size == 0);
     let mut counts = std::collections::BTreeMap::<(String, u32), usize>::new();
     for x in e {

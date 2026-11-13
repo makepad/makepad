@@ -1,10 +1,7 @@
 //! char: conversions, UTF-8/16 coding, properties, case mapping and escapes.
-//! The `impl char` methods (char/inherent.rs, Relax only) forward to the free fns here;
-//! the rustc shim tests these fns against real std.
+//! The `impl char` methods (char/inherent.rs) forward to the free fns here.
 
-#[cfg(not(relax_check))]
 mod inherent;
-#[cfg(not(relax_check))]
 mod convert_impls;
 
 use crate::fmt;
@@ -755,11 +752,7 @@ pub fn try_from_u32(i: u32) -> Result<char, CharTryFromError> {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for CharTryFromError {}
-#[cfg(not(relax_check))]
 impl crate::error::Error for TryFromCharError {}
-#[cfg(not(relax_check))]
 impl crate::error::Error for ParseCharError {}
-#[cfg(not(relax_check))]
 impl crate::error::Error for DecodeUtf16Error {}

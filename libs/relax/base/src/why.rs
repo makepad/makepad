@@ -1,4 +1,4 @@
-//! Opt-in, first-observation provenance. MAKEPAD_RUN_WHY=/path/events writes
+//! Opt-in, first-observation provenance. RELAX_WHY=/path/events writes
 //! /path/events.<pid>.jsonl (separate files across child processes and forks) and records
 //! reads separately from collection, lowering, body checking and code generation.
 //! A cause is a compiler request, not evidence that an application called a function.
@@ -27,7 +27,7 @@ struct Trace {
 }
 static TRACE: OnceLock<Option<Mutex<Trace>>> = OnceLock::new();
 fn trace() -> Option<&'static Mutex<Trace>> {
-    TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_WHY").map(|path| {
+    TRACE.get_or_init(|| std::env::var_os("RELAX_WHY").map(|path| {
         let pid = std::process::id();
         let file = open(&path, pid);
         Mutex::new(Trace { file, path, pid, seq: 0, first: BTreeMap::new(), edges: BTreeMap::new() })
@@ -35,7 +35,7 @@ fn trace() -> Option<&'static Mutex<Trace>> {
 }
 fn open(path: &std::ffi::OsStr, pid: u32) -> File {
     let mut name = path.to_os_string(); name.push(format!(".{pid}.jsonl"));
-    File::create(&name).unwrap_or_else(|e| panic!("MAKEPAD_RUN_WHY {:?}: {e}", name))
+    File::create(&name).unwrap_or_else(|e| panic!("RELAX_WHY {:?}: {e}", name))
 }
 impl Trace {
     fn process(&mut self) {
@@ -74,8 +74,8 @@ fn write_event(t: &mut Trace, phase: &str, target: &str, line: usize, symbol: &s
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let line = format!("{{\"seq\":{},\"pid\":{},\"at_ns\":{},\"phase\":{},\"target\":{},\"line\":{},\"symbol\":{},\"from\":{},\"from_line\":{},\"kind\":{},\"caller\":{}}}",
         t.seq, t.pid, at, quoted(phase), quoted(target), line, quoted(symbol), quoted(&cause.file), cause.line, quoted(&cause.kind), quoted(&cause.symbol));
-    t.file.write_all(line.as_bytes()).expect("write MAKEPAD_RUN_WHY");
-    t.file.write_all(b"\n").expect("write MAKEPAD_RUN_WHY newline");
+    t.file.write_all(line.as_bytes()).expect("write RELAX_WHY");
+    t.file.write_all(b"\n").expect("write RELAX_WHY newline");
 }
 /// Remember the first scheduling edge before a worker reads the file.
 pub fn edge(target: &str, cause: Cause) {

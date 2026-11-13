@@ -37,7 +37,6 @@ impl fmt::Display for Utf8Error {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for Utf8Error {}
 
 /// Width of a UTF-8 sequence from its first byte (0 = not a valid first byte).

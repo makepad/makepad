@@ -319,7 +319,18 @@ pub fn set_current_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     Ok(())
 }
 
+/// Under `makepad run`, the program's own executable: Relax's hard link for this run (Relax
+/// selfexe.rs), the first word of RELAX_SELF_EXEC. The process itself runs the loader's file.
+fn run_exe() -> Option<PathBuf> {
+    let pre = host_var_os("RELAX_SELF_EXEC")?;
+    let first = pre.as_encoded_bytes().split(|&b| b == 0x1f).next()?;
+    (!first.is_empty()).then(|| PathBuf::from(unsafe { OsString::from_encoded_bytes_unchecked(first.to_vec()) }))
+}
+
 pub fn current_exe() -> io::Result<PathBuf> {
+    if let Some(p) = run_exe() {
+        return Ok(p);
+    }
     let w = fill_utf16_buf(|buf, n| unsafe { GetModuleFileNameW(core::ptr::null_mut(), buf, n) })?;
     Ok(os2path(&w))
 }

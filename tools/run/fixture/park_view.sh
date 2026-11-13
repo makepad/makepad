@@ -11,16 +11,16 @@
 #            app goes on
 # Hidden and muted, fresh homes. Run from the workspace root after
 # `cargo build --release -p makepad-run`. TARGET (default target/release). PARK_VIEW_DUMP=<dir>
-# keeps the window's frames as PNG files (MAKEPAD_RUN_BOOT_DUMP) to look at.
+# keeps the window's frames as PNG files (RELAX_BOOT_DUMP) to look at.
 T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
-export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$PWD/libs/relax/compiler/std}
+export RELAX_STD=${RELAX_STD:-$PWD/libs/relax/compiler/std}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/park_view.XXXXXX") || exit 1
 fail=""
 run_case() { # run_case <main|thread>
     local case=$1 log="$dir/$1.log" pid ask view
     mkdir -p "$dir/$case-home" "$dir/$case-t"
-    env PARK_VIEW=$case MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/$case-home" TMPDIR="$dir/$case-t" \
-        MAKEPAD_RUN_HOME="$dir/$case-runhome" ${PARK_VIEW_DUMP:+MAKEPAD_RUN_BOOT_DUMP=$PARK_VIEW_DUMP/$case@400} \
+    env PARK_VIEW=$case MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/$case-home" TMPDIR="$dir/$case-t" \
+        RELAX_HOME="$dir/$case-runhome" ${PARK_VIEW_DUMP:+RELAX_BOOT_DUMP=$PARK_VIEW_DUMP/$case@400} \
         "$T/makepad" run relax-park-view > "$log" 2>&1 &
     pid=$!
     for i in $(seq 1 1200); do

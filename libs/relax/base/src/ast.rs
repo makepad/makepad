@@ -2017,7 +2017,7 @@ impl Ast {
     fn part_or_panic(&self, what: &str, id: u32) -> &Ast {
         match self.part.get() {
             Some(p) => p,
-            None => panic!("makepad: {} {} is outside the parsed tree (its lazily parsed body part is missing)", what, id),
+            None => panic!("relax: {} {} is outside the parsed tree (its lazily parsed body part is missing)", what, id),
         }
     }
     /// Drops the arrays' growth slack (a parsed tree is not appended to again).

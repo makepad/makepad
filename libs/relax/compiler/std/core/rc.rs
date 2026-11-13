@@ -139,6 +139,28 @@ impl<T> Rc<T> {
         }
     }
 
+    /// rustc 1.100.0 (smart_pointer_map): `f` of the value, in the same allocation when this is the only
+    /// reference and `U` fits it exactly
+    pub fn map<U>(this: Self, f: impl FnOnce(&T) -> U) -> Rc<U> {
+        if crate::mem::size_of::<T>() == crate::mem::size_of::<U>()
+            && crate::mem::align_of::<T>() == crate::mem::align_of::<U>()
+            && Rc::is_unique(&this)
+        {
+            unsafe {
+                let ptr = Rc::into_raw(this);
+                let value = ptr::read(ptr);
+                let mut allocation = Rc::from_raw(ptr as *const crate::mem::MaybeUninit<U>);
+                Rc::get_mut_unchecked(&mut allocation).write(f(&value));
+                allocation.assume_init()
+            }
+        } else {
+            let output = f(&*this);
+            let ptr = Rc::into_raw(this);
+            unsafe { Rc::decrement_strong_count(ptr) }
+            Rc::new(output)
+        }
+    }
+
     pub fn into_inner(this: Rc<T>) -> Option<T> {
         match Rc::try_unwrap(this) {
             Ok(v) => Some(v),
@@ -236,6 +258,11 @@ impl<T: ?Sized> Rc<T> {
 
     pub fn strong_count(this: &Rc<T>) -> usize {
         unsafe { (*header_of(this.ptr.as_ptr())).strong }
+    }
+
+    /// The only Rc, and no Weak exists (alloc's `is_unique`).
+    fn is_unique(this: &Rc<T>) -> bool {
+        unsafe { (*header_of(this.ptr.as_ptr())).strong == 1 && (*header_of(this.ptr.as_ptr())).weak == 1 }
     }
 
     pub fn get_mut(this: &mut Rc<T>) -> Option<&mut T> {
@@ -431,10 +458,7 @@ impl<T: ?Sized> From<crate::boxed::Box<T>> for Rc<T> {
 /// Frees a Box's allocation whose value was moved out (bytes copied, not dropped).
 pub(crate) unsafe fn free_box_allocation(p: *mut u8, size: usize, align: usize) {
     if size != 0 {
-        #[cfg(not(relax_check))]
         crate::heap::dealloc(p, crate::heap::Layout::from_size_align_unchecked(size, align));
-        #[cfg(relax_check)]
-        std::alloc::dealloc(p, std::alloc::Layout::from_size_align_unchecked(size, align));
     }
 }
 
@@ -547,6 +571,18 @@ impl<T> Weak<T> {
 }
 
 impl<T: ?Sized> Weak<T> {
+    /// The value's pointer, with this Weak's count (alloc rc.rs; sync::Weak's twin): from_raw
+    /// takes both back. An empty Weak gives its dangling sentinel, which stays empty.
+    pub fn into_raw(self) -> *const T {
+        let p = self.ptr.as_ptr() as *const T;
+        crate::mem::forget(self);
+        p
+    }
+
+    pub unsafe fn from_raw(p: *const T) -> Weak<T> {
+        Weak { ptr: unsafe { ptr::NonNull::new_unchecked(p as *mut T) } }
+    }
+
     pub fn upgrade(&self) -> Option<Rc<T>> {
         if is_dangling(self.ptr.as_ptr()) {
             return None;

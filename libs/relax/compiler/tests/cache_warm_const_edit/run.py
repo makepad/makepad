@@ -4,7 +4,7 @@ read directly or through other stored code, show the new value, or the edit asks
 a new run of the edited sources shows the new value. "Patched" with the old value is the one wrong
 answer, and a warm run with the old value the other.
 
-usage: run.py --makepad <makepad binary> [--only p1,p2] [--cold] [--window]   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary> [--only p1,p2] [--cold] [--window]   (RELAX_STD in the environment)
 
 Copies pkg/ to a temporary dir with a fresh disk cache and fills it (a run, then a warm run that must
 prelink). Then each probe gets a live session of its own (`makepad run` of a working tree), started
@@ -35,7 +35,7 @@ reaching none of the late readers, writes its own manifest (its keys are "unchan
 and the next run's first late reads must still see that the entries they find are of the old text.
 fewer_definitions: a session whose crate has fewer definitions than the cache's image (a module the
 fill had is gone): the image's types still name the old crate's, past the program's; edits land.
-const_skipped, skipped_offline: a module the boot skips (MAKEPAD_RUN_LAZY_DEFER, every run) edited,
+const_skipped, skipped_offline: a module the boot skips (RELAX_LAZY_DEFER, every run) edited,
 live or between runs: the new text's runs show the new value.
 --cold: the same sessions with the disk cache off, for comparison.
 --window: the same program with a window (hidden), so a restart keeps the process and the window: the
@@ -256,15 +256,15 @@ if window:
             name, rest = line.split("=", 1)
             patch.append('%s = { path = "%s" }' % (name.strip(), os.path.join(ROOT, rest.split('path = "', 1)[1].split('"', 1)[0])))
     open(manifest, "w").write(text + "\n[patch.crates-io]\n" + "\n".join(patch) + "\n")
-env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(tmp, "target"))
+env = dict(os.environ, RELAX_CACHE_DIR=os.path.join(tmp, "cache"), RELAX_TARGET_DIR=os.path.join(tmp, "target"))
 if window:
-    env.update(MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1")
-for k in ("MAKEPAD_RUN_CACHE", "MAKEPAD_RUN_PRELINK", "WARM_EDIT_ONCE", "WARM_EDIT_LATE"):
+    env.update(MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1")
+for k in ("RELAX_CACHE", "RELAX_PRELINK", "WARM_EDIT_ONCE", "WARM_EDIT_LATE"):
     env.pop(k, None)
 # (every run: the image's selection is the boot's)
-env["MAKEPAD_RUN_LAZY_DEFER"] = "src/skipped.rs"
+env["RELAX_LAZY_DEFER"] = "src/skipped.rs"
 if cold:
-    env["MAKEPAD_RUN_CACHE"] = "0"
+    env["RELAX_CACHE"] = "0"
 cmd = [relax, "run", "--verbose", "cache-warm-const-edit"] + (["--features", "window"] if window else [])
 
 
@@ -313,7 +313,7 @@ def session(probe, rel, old, new, want):
     for f in (ready, late):
         if os.path.exists(f):
             os.remove(f)
-    p = subprocess.Popen(cmd, cwd=pkg, env=dict(env, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_RELOAD_TRACE="1", WARM_EDIT_LATE=late, MAKEPAD_REMOTE="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    p = subprocess.Popen(cmd, cwd=pkg, env=dict(env, RELAX_LIVE_READY=ready, RELAX_RELOAD_TRACE="1", WARM_EDIT_LATE=late, MAKEPAD_REMOTE="1"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
     out, err = [], []
     def pump(f, acc):
         for line in f:
@@ -444,7 +444,7 @@ def session(probe, rel, old, new, want):
         p.wait()
         if row["outcome"] != "no start":
             open(late, "w").close()
-            r = once("fresh-" + probe, "1", MAKEPAD_RUN_CACHE="readonly", WARM_EDIT_LATE=late) if not cold else once("fresh-" + probe, "1", WARM_EDIT_LATE=late)
+            r = once("fresh-" + probe, "1", RELAX_CACHE="readonly", WARM_EDIT_LATE=late) if not cold else once("fresh-" + probe, "1", WARM_EDIT_LATE=late)
             line = next((l for l in r.stdout.splitlines() if l.startswith("out tick ")), "")
             row["fresh"] = want if shows_new(line, probe, want, FRESH_READS) else stale_reads(line, probe, want, FRESH_READS)
             if not shows_new(line, probe, want, FRESH_READS):

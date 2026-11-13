@@ -23,6 +23,8 @@ pub const SC_PAGESIZE: c_int = 0x27;
 pub const SC_NPROCESSORS_ONLN: c_int = 0x61;
 
 pub const O_CREAT: c_int = 0x40;
+/// fcntl.h (glibc and bionic): the current directory, for the *at calls.
+pub const AT_FDCWD: c_int = -100;
 pub const O_EXCL: c_int = 0x80;
 pub const O_TRUNC: c_int = 0x200;
 pub const O_APPEND: c_int = 0x400;

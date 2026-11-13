@@ -12,8 +12,8 @@ M=$T/host/makepad
 work=$(mktemp -d /tmp/prof.XXXXXX) || exit 2
 printf 'wait_frame\nsleep_frames 2\n' > "$work/quit.hal"
 printf 'wait_frame\nsleep_frames 100000\n' > "$work/stay.hal"
-env=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$work/home" TMPDIR="$work" MAKEPAD_RUN_HOME="$work/runhome" MAKEPAD_RUN_CACHE_DIR="$work/cache")
-[ "$mode" = nocodegen ] && env+=(MAKEPAD_RUN_NO_CODEGEN=1)
+env=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$work/home" TMPDIR="$work" RELAX_HOME="$work/runhome" RELAX_CACHE_DIR="$work/cache")
+[ "$mode" = nocodegen ] && env+=(RELAX_NO_CODEGEN=1)
 env "${env[@]}" MAKEPAD_HAL_SCRIPT="$work/quit.hal" perl -e 'alarm 900; exec @ARGV' "$M" run "$pkg" > "$work/cold.out" 2>&1
 echo "cold run: rc $?"
 env "${env[@]}" MAKEPAD_HAL_SCRIPT="$work/stay.hal" perl -e 'alarm 900; exec @ARGV' "$M" run "$pkg" > "$work/warm.out" 2>&1 &

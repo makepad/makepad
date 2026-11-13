@@ -1,0 +1,9 @@
+[package]
+name = "gal-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+gal-user = { path = "../user" }
+gal-wide = { path = "../wide" }

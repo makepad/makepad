@@ -1,4 +1,4 @@
-// Tier-up (run with MAKEPAD_RUN_O3=1 MAKEPAD_RUN_O3_CALLS=3): `run_from` reaches the O3 call threshold, is
+// Tier-up (run with RELAX_O3=1 RELAX_O3_CALLS=3): `run_from` reaches the O3 call threshold, is
 // rebuilt on the O3 thread, and its slot switches to the O3 code while the test keeps
 // running. O1 calls `mix` from the loop; O3 inlines it.
 // `mix` is above O1's source-size inlining gate (100 tokens, see its dead locals),

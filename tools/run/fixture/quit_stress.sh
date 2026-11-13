@@ -49,8 +49,8 @@ one_round() {
     d=$dir/$name
     mkdir -p "$d/home" "$d/shaders"
     [ "${SHADER_CACHE:-cold}" = warm ] || export __GL_SHADER_DISK_CACHE_PATH="$d/shaders" __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1
-    MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
-        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_WINDOW=1280x800@1 \
+    MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" \
+        RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache" MAKEPAD_WINDOW=1280x800@1 \
         ${PIN:+taskset -c "$PIN"} $J run "$PKG" > "$d/run.log" 2>&1 &
     pid=$!
     n=0

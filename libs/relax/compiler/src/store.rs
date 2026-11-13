@@ -884,15 +884,15 @@ fn append_inner<T: Entry>(base: &Path, mut entries: Vec<T>, drop_all: bool, orde
     Ok(())
 }
 
-/// MAKEPAD_RUN_PROFILE is set: the load timeline's spans for the image writes.
+/// RELAX_PROFILE is set: the load timeline's spans for the image writes.
 pub fn profiling() -> bool {
     static P: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *P.get_or_init(|| std::env::var_os("MAKEPAD_RUN_PROFILE").is_some())
+    *P.get_or_init(|| std::env::var_os("RELAX_PROFILE").is_some())
 }
 
 /// Makes the bytes written to `f` so far reach the disk before anything written after: an
 /// ordering barrier, not a durability flush. macOS: `F_BARRIERFSYNC` -- std's `sync_data` is
-/// `F_FULLFSYNC` there, a full flush of the drive's cache per call (a cold Stage launch made ~3.7k
+/// `F_FULLFSYNC` there, a full flush of the drive's cache per call (a large app's cold launch made ~3.7k
 /// of them); elsewhere (and where the barrier is refused) `sync_data`.
 fn order_writes(f: &std::fs::File) -> std::io::Result<()> {
     #[cfg(target_vendor = "apple")]

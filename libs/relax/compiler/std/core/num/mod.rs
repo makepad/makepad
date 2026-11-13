@@ -4,21 +4,15 @@
 
 pub mod dec2flt;
 mod dec2flt_table;
-#[cfg(not(relax_check))]
 mod float_impls;
-#[cfg(not(relax_check))]
 mod int_impls;
-#[cfg(not(relax_check))]
 mod nonzero;
-#[cfg(not(relax_check))]
 mod nonzero_impls;
 pub mod parse;
-#[cfg(not(relax_check))]
 mod prim_traits;
 mod wrapping;
 
 pub use dec2flt::ParseFloatError;
-#[cfg(not(relax_check))]
 pub use nonzero::{
     NonZero, NonZeroI128, NonZeroI16, NonZeroI32, NonZeroI64, NonZeroI8, NonZeroIsize, NonZeroU128, NonZeroU16, NonZeroU32,
     NonZeroU64, NonZeroU8, NonZeroUsize, ZeroablePrimitive,
@@ -70,7 +64,6 @@ impl fmt::Display for ParseIntError {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for ParseIntError {}
 
 /// Failed integer conversion (`u8::try_from(300u32)`); Debug shows the overflow side as in
@@ -84,11 +77,10 @@ impl fmt::Display for TryFromIntError {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for TryFromIntError {}
 
-impl From<crate::convert::Infallible> for TryFromIntError {
-    fn from(x: crate::convert::Infallible) -> TryFromIntError {
-        match x {}
+impl From<!> for TryFromIntError {
+    fn from(never: !) -> TryFromIntError {
+        never
     }
 }

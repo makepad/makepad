@@ -2,7 +2,7 @@
 // lowered. Its slot must have the final size (24 bytes: state, flags and saved locals), not the
 // layout so far: the callee wrote 24 bytes into an 8-byte slot (coro_frame lowers the body again;
 // the first lowering is not what the build takes). Found at the baseline tier with the quick
-// register allocator (MAKEPAD_RUN_O1=always), where the frame order exposed the overwrite.
+// register allocator (RELAX_O1=always), where the frame order exposed the overwrite.
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

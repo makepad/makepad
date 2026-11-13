@@ -278,6 +278,19 @@ impl Asm {
         self.byte(0x8d);
         self.modrm_mem(dst, base, disp);
     }
+    /// and dst, k (64-bit, k sign-extended)
+    fn and_ri(&mut self, dst: u8, k: i32) {
+        self.rex(true, 0, 0, dst, false);
+        if (-128..128).contains(&k) {
+            self.byte(0x83);
+            self.modrm_rr(4, dst);
+            self.byte(k as i8 as u8);
+        } else {
+            self.byte(0x81);
+            self.modrm_rr(4, dst);
+            self.u32(k as u32);
+        }
+    }
     fn imul_rr(&mut self, dst: u8, src: u8) {
         self.rex(true, dst, 0, src, false);
         self.byte(0x0f);
@@ -936,8 +949,8 @@ fn x64_int_clobbers(options: &relax_session::Options, i: &Inst) -> u64 {
     }
 }
 
-/// BMI2 (shlx / shrx / sarx) on this CPU, unless MAKEPAD_RUN_NO_BMI2: the JIT uses what the machine has.
-/// MAKEPAD_RUN_CHECK_WINDOWS=1: every read of a spill window's register checks it against the value's
+/// BMI2 (shlx / shrx / sarx) on this CPU, unless RELAX_NO_BMI2: the JIT uses what the machine has.
+/// RELAX_CHECK_WINDOWS=1: every read of a spill window's register checks it against the value's
 /// slot and traps (ud2) when they differ -- finds a window whose register something clobbered.
 fn check_windows(options: &relax_session::Options) -> bool {
     options.check_windows
@@ -1051,6 +1064,11 @@ struct Gen<'a> {
     /// rbp offset base for spills/slots: [rbp - (saved + x)]
     saved: i32,
     slot_off: Vec<i32>,
+    /// per slot: the rbp displacement of the cell that holds its aligned address when its
+    /// alignment is above the frame base's (frame::FRAME_BASE_ALIGN; 0: its slot_off is its address)
+    slot_cell: Vec<i32>,
+    /// the over-aligned storages the prologue aligns: (start displacement, alignment, cell)
+    realign: Vec<(i32, u32, i32)>,
     /// per value: its frame position when it is a slot address (frame::slot_addr_positions)
     slot_pos: Vec<i64>,
     block_pos: Vec<usize>,
@@ -1323,10 +1341,7 @@ impl<'a> Gen<'a> {
     fn remat_kind_into(&mut self, r: u8, k: Remat) {
         match k {
             Remat::Const(k) => self.a.mov_ri_nf(r, k),
-            Remat::Slot(s) => {
-                let off = self.slot_off[s as usize];
-                self.a.lea(r, RBP, -(self.saved + off));
-            }
+            Remat::Slot(s) => self.slot_addr_into(r, s),
             // mov r, [rip + pool] leaves the flags alone
             Remat::Addr(a) => self.mov_reloc(r, Reloc::Sym(a)),
             Remat::FnAddr(id) => self.mov_reloc(r, Reloc::Thunk(id)),
@@ -1336,10 +1351,22 @@ impl<'a> Gen<'a> {
             _ => self.a.mov_ri_nf(r, 0),
         }
     }
+    /// Slot `s`'s address into r: rbp's displacement, or an over-aligned storage's cell
+    /// (flags-preserving either way)
+    fn slot_addr_into(&mut self, r: u8, s: u32) {
+        match self.slot_cell[s as usize] {
+            0 => self.a.lea(r, RBP, -(self.saved + self.slot_off[s as usize])),
+            cell => self.a.load64(r, RBP, cell),
+        }
+    }
     /// A load/store base and displacement: a stack-slot address that has no register (see
-    /// Alloc::remat) folds into [rbp + disp].
+    /// Alloc::remat) folds into [rbp + disp] (an over-aligned one is its cell's address).
     fn base_disp(&mut self, options: &relax_session::Options, base: VReg, scratch: u8, off: i32) -> (u8, i32) {
         match (self.al.loc[base.0 as usize], self.al.remat[base.0 as usize]) {
+            (Loc::None, Remat::Slot(s)) if self.slot_cell[s as usize] != 0 => {
+                self.a.load64(scratch, RBP, self.slot_cell[s as usize]);
+                return (scratch, off);
+            }
             (Loc::None, Remat::Slot(s)) => {
                 let so = self.slot_off[s as usize];
                 return (RBP, off - (self.saved + so));
@@ -1612,12 +1639,30 @@ impl<'a> Gen<'a> {
         // it (frame::slot_layout)
         // (the layout counts from the frame's base, 16-aligned, so a slot's alignment holds there:
         // the saves come first and may be an odd number of words)
-        let (at, end) = crate::frame::slot_layout(self.f, (self.saved + self.al.spill_bytes as i32) as i64, !crate::stats::opt_off(options, "-slotcolor"));
+        let (at, end, over) = crate::frame::slot_layout(self.f, (self.saved + self.al.spill_bytes as i32) as i64, !crate::stats::opt_off(options, "-slotcolor"), true);
         let at: Vec<i64> = at.iter().map(|&x| x - self.saved as i64).collect();
         self.slot_off.extend(at.iter().map(|&x| x as i32));
         self.slot_pos = crate::frame::slot_addr_positions(self.f, &at);
         let mut off = (end - self.saved as i64) as i32;
         off = (off + 7) / 8 * 8;
+        // a storage aligned above rbp's 16 (laid out with room for it): its aligned address,
+        // made once by the prologue, in a cell every address of its slots loads (a load leaves
+        // the flags alone, as a rematerialised address must)
+        self.slot_cell = vec![0; at.len()];
+        for s in 0..at.len() {
+            if over[s] == 0 {
+                continue;
+            }
+            let start = -(self.saved + at[s] as i32);
+            if let Some(&(_, _, cell)) = self.realign.iter().find(|r| r.0 == start) {
+                self.slot_cell[s] = cell;
+                continue;
+            }
+            off += 8;
+            let cell = -(self.saved + off);
+            self.realign.push((start, over[s], cell));
+            self.slot_cell[s] = cell;
+        }
         // C ABI body: buffers rebuilding aggregate params from registers, the result buffer
         if let Some(sig) = &self.f.cabi {
             let plan = cabi::plan(sig, sig.conv.target());
@@ -1696,6 +1741,12 @@ impl<'a> Gen<'a> {
         }
         self.stack_probe(frame);
         self.a.sub_rsp(frame as u32);
+        // (r11: neither an argument nor rax's variadic count)
+        for (start, align, cell) in self.realign.clone() {
+            self.a.lea(R11, RBP, start + align as i32 - 1);
+            self.a.and_ri(R11, -(align as i32));
+            self.a.store64(RBP, cell, R11);
+        }
         if self.dom_read.first() == Some(&true) {
             self.dom_base();
         }
@@ -2772,7 +2823,7 @@ impl<'a> Gen<'a> {
     /// never mid-call: an unwind never walks through it, and without a loop the hang watchdog never
     /// stops it, so the frame chain only misses it as the faulting frame of undefined behaviour
     /// (Unreachable). Saves push rbp / mov rbp, rsp / pop rbp per call of small helpers.
-    /// MAKEPAD_RUN_OPT=-frameless: always a frame.
+    /// RELAX_OPT=-frameless: always a frame.
     fn frameless_leaf(&self, options: &relax_session::Options, reach: &[bool]) -> bool {
         if crate::stats::opt_off(options, "-frameless") || !self.al.used_callee_int.is_empty() || self.cplan.is_some() || self.f.cabi.is_some() || !self.dom_read.is_empty() {
             return false;
@@ -3822,8 +3873,7 @@ impl<'a> Gen<'a> {
             }
             Inst::SlotAddr(d, s) => {
                 let rd = self.def_i(*d, R10);
-                let off = self.slot_off[*s as usize];
-                self.a.lea(rd, RBP, -(self.saved + off));
+                self.slot_addr_into(rd, *s);
                 self.fin_i(*d, rd);
             }
             Inst::Addr(d, sym) => {
@@ -5916,7 +5966,7 @@ impl<'a> Gen<'a> {
             // a target whose bounds the source type holds exactly (f32: up to 16 bits, f64: up to 32;
             // i32 from f64 keeps its cvttsd2si fast path): clamp in the source precision, convert
             // once -- branchless, no f64 detour (sdf's f32 -> u8 was cvtss2sd + three compares)
-            // MAKEPAD_RUN_OPT=-f2iclamp: the f64 compare path for these too
+            // RELAX_OPT=-f2iclamp: the f64 compare path for these too
             Conv::FToInt(from64, it) if it.bits <= if from64 { 32 } else { 16 } && !(it.signed && it.bits == 32) && !crate::stats::opt_off(options, "-f2iclamp") => {
                 // a spilled source loads into XS2, the working register (XS holds the bounds)
                 let xs = self.use_f(s, XS2);
@@ -6592,7 +6642,7 @@ pub fn vx_native(options: &relax_session::Options, op: VX) -> bool {
     }
 }
 
-/// Does this CPU (and the environment: MAKEPAD_RUN_NO_AVX) allow VEX-encoded AVX instructions?
+/// Does this CPU (and the environment: RELAX_NO_AVX) allow VEX-encoded AVX instructions?
 pub fn host_avx(options: &relax_session::Options) -> bool {
     options.cpu.avx
 }
@@ -6662,7 +6712,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     };
     // vector ops without an instruction sequence here: per-lane scalar code
     let legal;
-    // (MAKEPAD_RUN_OPT=-vxnative: every expandable op, the legaliser's reference meaning)
+    // (RELAX_OPT=-vxnative: every expandable op, the legaliser's reference meaning)
     let all = crate::stats::opt_off(options, "-vxnative");
     let native = |op| !all && vx_native(options, op);
     let f = if crate::legal::needed(f, &native, !all) {
@@ -6712,7 +6762,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     let mut cfg = reg_config(options);
     cfg.sym_class = env.sym_class;
     // rax: allocatable over the instructions that keep it (keeps_rax), last of the caller-saved
-    // registers; not in C ABI bodies (their prologue / epilogue use it). MAKEPAD_RUN_OPT=-rax: off
+    // registers; not in C ABI bodies (their prologue / epilogue use it). RELAX_OPT=-rax: off
     if f.cabi.is_none() && !crate::stats::opt_off(options, "-rax") {
         cfg.int_caller.push(RAX);
     }
@@ -6728,7 +6778,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     drop(_cost_ra);
     let alloc_sig = regalloc::alloc_sig(&al);
     regalloc::trace_alloc(f, &al);
-    // the allocation checker (MAKEPAD_RUN_OPT=+checkra; gates, fuzzer): a finding fails the compile
+    // the allocation checker (RELAX_OPT=+checkra; gates, fuzzer): a finding fails the compile
     if regalloc::check_on(options) {
         regalloc::check_or_fail(options, f, &cfg, &al, env.opt_regs || f.full)?;
     }
@@ -6753,6 +6803,8 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
         al,
         saved: 0,
         slot_off: Vec::new(),
+        slot_cell: Vec::new(),
+        realign: Vec::new(),
         slot_pos: Vec::new(),
         block_pos: Vec::new(),
         fixups: Vec::new(),
@@ -6853,7 +6905,7 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     }
     // optimised code is emitted twice (GAPX6: x64 front end): the first pass places the blocks,
     // the second emits each forward jump whose first-pass distance fits in rel8 as a 2-byte jump
-    // (jcc rel32 is 6 bytes, jmp 5) -- denser hot code. MAKEPAD_RUN_OPT=-shortjmp: one pass
+    // (jcc rel32 is 6 bytes, jmp 5) -- denser hot code. RELAX_OPT=-shortjmp: one pass
     let two_pass = env.opt_regs && !crate::stats::opt_off(options, "-shortjmp");
     let first = two_pass.then(|| g.clone());
     g.gen(options);
@@ -6890,9 +6942,10 @@ pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq:
     // where the named locals are at each call (makepad inspect `locals`; side metadata)
     let mut pc_map = std::mem::take(&mut g.pc_map);
     if !g.frameless && !g.f.dbg.is_empty() {
-        let (saved, slot_off) = (g.saved, &g.slot_off);
+        let (saved, slot_off, slot_cell) = (g.saved, &g.slot_off, &g.slot_cell);
         let spill = |o: i32| -(saved + o);
-        let slot = |s: u32| -(saved + slot_off[s as usize]);
+        // (an over-aligned slot is where its cell points: no fixed home)
+        let slot = |s: u32| (slot_cell[s as usize] == 0).then(|| -(saved + slot_off[s as usize]));
         let fr = crate::dbgloc::Frame { callee_int: &cfg.int_callee, callee_flt: &cfg.flt_callee, arg_regs: &[RDI, RSI, RDX, RCX, R8, R9], captured: &[RDI, RSI, RDX, RCX, R8, R9], call_writes: &[RAX, R10, R11], spill_fp: &spill, slot_fp: &slot };
         let vars = crate::dbgloc::build(g.f, &g.al, &fr, &g.var_calls);
         let e = crate::dbgloc::pc_entries(&vars, g.f.file);

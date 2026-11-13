@@ -11,11 +11,16 @@
 //! - `exit(code)`: ends the process once Relax is done with the program (see the Windows half).
 //! - `on_battery()`.
 //! - `symbol_at(pc)`: the nearest exported symbol of the image holding `pc` (dladdr's view).
+//! - `binary_id()`: the identity the linker gave the image holding this code.
 //! - `args_bytes()`: the process arguments as bytes (`set_args`: an embedder names them).
 //! - `create_private(path)`: a new file only this user can read (O_EXCL); `ensure_private_dir`:
-//!   a directory that is safe to load code from (owned by this user, not writable by others).
+//!   a directory that is safe to load code from (owned by this user, not writable by others);
+//!   its error for another user's ends in `OTHER_USERS`.
 
 pub use imp::*;
+
+/// How `ensure_private_dir`'s error for a directory another user owns ends.
+pub const OTHER_USERS: &str = "belongs to another user";
 
 /// `name` (a C symbol) wherever this platform's loader finds one for the process: the default
 /// search of every loaded image (`find`), then the system libraries (`find_system`). Null: none.
@@ -87,6 +92,124 @@ impl Drop for KeepLastError {
 /// what dladdr reports for a shared object (exported names only).
 pub fn symbol_at(pc: u64) -> Option<(String, u64, String)> {
     symbol_at_imp(pc)
+}
+
+/// The identity the linker gave the image holding this code (the `relax` or `makepad` executable,
+/// or the library the compiler is linked into), as hex: the Mach-O LC_UUID, the ELF GNU build-id
+/// note, the PE CodeView signature (GUID and age); an image without one: a hash of the executable
+/// file. It names the binary that was built, whatever the build scripts did: a stamp a build
+/// script computes from a list of source files stays as it was whenever cargo reuses the
+/// script's output, and two different binaries then print one id. Read from the image in memory,
+/// once (the file hash reads the executable).
+pub fn binary_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        let here = binary_id as fn() -> &'static str as usize;
+        if let Some(id) = link_id(here).filter(|id| id.iter().any(|&b| b != 0)) {
+            return id.iter().map(|b| format!("{b:02x}")).collect();
+        }
+        match std::env::current_exe().and_then(std::fs::read) {
+            Ok(bytes) => format!("file-{}", &relax_base::sha256::sha256_hex(&bytes)[..32]),
+            Err(_) => "unknown".to_string(),
+        }
+    })
+}
+
+/// The linker's id of the image holding `addr` (binary_id).
+#[cfg(target_vendor = "apple")]
+fn link_id(addr: usize) -> Option<Vec<u8>> {
+    let mut info = DlInfo::default();
+    if unsafe { dladdr(addr as *const u8, &mut info) } == 0 || info.fbase.is_null() {
+        return None;
+    }
+    // SAFETY: dladdr's base is the image's mach_header_64, mapped with its load commands.
+    unsafe {
+        let h = info.fbase as *const u8;
+        let rd = |p: *const u8| std::ptr::read_unaligned(p as *const u32);
+        if rd(h) != 0xfeed_facf {
+            return None;
+        }
+        let mut c = h.add(32);
+        for _ in 0..rd(h.add(16)) {
+            // LC_UUID
+            if rd(c) == 0x1b {
+                return Some(std::slice::from_raw_parts(c.add(8), 16).to_vec());
+            }
+            c = c.add(rd(c.add(4)) as usize);
+        }
+    }
+    None
+}
+
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn link_id(addr: usize) -> Option<Vec<u8>> {
+    let mut info = DlInfo::default();
+    if unsafe { dladdr(addr as *const u8, &mut info) } == 0 || info.fbase.is_null() {
+        return None;
+    }
+    // SAFETY: dladdr's base is where the image's first segment is mapped: the ELF header and its
+    // program headers; PT_NOTE segments are loaded.
+    unsafe {
+        let h = info.fbase as *const u8;
+        let r32 = |p: *const u8| std::ptr::read_unaligned(p as *const u32);
+        let r64 = |p: *const u8| std::ptr::read_unaligned(p as *const u64);
+        if std::slice::from_raw_parts(h, 5) != b"\x7fELF\x02" {
+            return None;
+        }
+        let (phoff, phentsize, phnum) = (r64(h.add(32)) as usize, std::ptr::read_unaligned(h.add(54) as *const u16) as usize, std::ptr::read_unaligned(h.add(56) as *const u16) as usize);
+        let ph = |i: usize| h.add(phoff + i * phentsize);
+        // the load bias: the base less the address of the segment that maps the file's start
+        let start = (0..phnum).map(ph).find(|&p| r32(p) == 1 && r64(p.add(8)) == 0).map(|p| r64(p.add(16)))?;
+        let bias = (h as u64).wrapping_sub(start);
+        let align = |n: u32| (n as usize + 3) & !3;
+        for p in (0..phnum).map(ph).filter(|&p| r32(p) == 4) {
+            let mut n = bias.wrapping_add(r64(p.add(16))) as *const u8;
+            let end = n.add(r64(p.add(32)) as usize);
+            while n.add(12) <= end {
+                let (namesz, descsz, kind) = (r32(n), r32(n.add(4)), r32(n.add(8)));
+                let desc = n.add(12 + align(namesz));
+                // NT_GNU_BUILD_ID
+                if kind == 3 && namesz == 4 && std::slice::from_raw_parts(n.add(12), 4) == b"GNU\0" {
+                    return Some(std::slice::from_raw_parts(desc, descsz as usize).to_vec());
+                }
+                n = desc.add(align(descsz));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn link_id(addr: usize) -> Option<Vec<u8>> {
+    use crate::os::win32::*;
+    // FROM_ADDRESS | UNCHANGED_REFCOUNT
+    let mut module: HANDLE = 0;
+    if unsafe { GetModuleHandleExW(0x4 | 0x2, addr as *const u16, &mut module) } == 0 || module == 0 {
+        return None;
+    }
+    let base = module as usize as *const u8;
+    // SAFETY: a loaded module's headers and debug directory are mapped readable for its life.
+    unsafe {
+        let rd32 = |off: usize| std::ptr::read_unaligned(base.add(off) as *const u32) as usize;
+        let rd16 = |off: usize| std::ptr::read_unaligned(base.add(off) as *const u16) as usize;
+        if rd16(0) != 0x5a4d {
+            return None;
+        }
+        let pe = rd32(0x3c);
+        if rd32(pe) != 0x4550 || rd16(pe + 24) != 0x20b {
+            return None; // not PE32+
+        }
+        // optional header (PE32+) at pe+24; data directory 6 (debug) at +112+48; 28-byte entries
+        let (dir, size) = (rd32(pe + 24 + 160), rd32(pe + 24 + 164));
+        for e in (0..size / 28).map(|k| dir + k * 28) {
+            // IMAGE_DEBUG_TYPE_CODEVIEW, an RSDS record: GUID and age
+            let data = rd32(e + 20);
+            if rd32(e + 12) == 2 && data != 0 && rd32(data) == 0x5344_5352 {
+                return Some(std::slice::from_raw_parts(base.add(data + 4), 20).to_vec());
+            }
+        }
+    }
+    None
 }
 
 /// dladdr's answer (`Dl_info`). The process's one declaration of dladdr: the profiler and the
@@ -284,10 +407,16 @@ mod unix {
         dlsym(handle, name)
     }
 
-    /// exit(): the main thread's pthread key destructors do not run (the program's thread locals
-    /// are left as they are, as in a rustc build).
+    /// exit(): the program's atexit handlers, then the end every process takes
+    /// (`makepad_core_util::process_end::end`, a native app's too): the host's own exit work, the
+    /// flushes, `_exit`. The C library's exit handlers do not run, so neither do those a native
+    /// library registered: a GPU driver's teardown at exit joined one of its threads that never
+    /// ended (NVIDIA's Vulkan driver at a test process's exit, about 1 in 150 runs and more under
+    /// GPU load, the process hung for good). The main thread's pthread key destructors do not run
+    /// either (the program's thread locals are left as they are, as in a rustc build).
     pub fn exit(code: i32) -> ! {
         super::run_program_atexit();
+        crate::selfexe::remove();
         // An embedded run (the Android host: its library handle is named) failed: exit() would run the
         // process's atexit/static destructors on this thread while the host's UI thread still locks
         // the mutexes they destroy (FORTIFY abort, no message). The host owns the process: the failure
@@ -299,7 +428,7 @@ mod unix {
             super::EMBEDDED_FAILURE.store(code, std::sync::atomic::Ordering::Release);
             loop { std::thread::park(); }
         }
-        std::process::exit(code)
+        makepad_core_util::process_end::end(code)
     }
 
     pub fn last_error() -> i32 {
@@ -345,7 +474,7 @@ mod unix {
             fn getuid() -> u32;
         }
         if m.uid() != unsafe { getuid() } {
-            return Err(format!("{} belongs to another user", dir.display()));
+            return Err(format!("{} {}", dir.display(), crate::os::proc::OTHER_USERS));
         }
         if m.permissions().mode() & 0o022 != 0 {
             return Err(format!("{} is writable by group or others", dir.display()));
@@ -510,8 +639,8 @@ mod imp {
         unsafe { *pool.table.add(i) = target };
         let a = pool.base + 16 * i as u64;
         pool.used.insert(target, a);
-        // one stub per target, never reused: say how fast they go (Sandbox's race used up 4096)
-        if (i + 1).is_power_of_two() && i >= 1023 { eprintln!("makepad-run: {} of {} C-callable stubs in use", i + 1, pool.count); }
+        // one stub per target, never reused: say how fast they go (a game used up 4096)
+        if (i + 1).is_power_of_two() && i >= 1023 { eprintln!("relax: {} of {} C-callable stubs in use", i + 1, pool.count); }
         a
     }
 
@@ -586,7 +715,7 @@ mod imp {
             }
             let e = dlerror();
             if !e.is_null() {
-                eprintln!("makepad: cannot load {}: {}", path.trim_end_matches('\0'), std::ffi::CStr::from_ptr(e).to_string_lossy());
+                eprintln!("relax: cannot load {}: {}", path.trim_end_matches('\0'), std::ffi::CStr::from_ptr(e).to_string_lossy());
             }
             false
         }
@@ -749,29 +878,15 @@ mod imp {
     /// What unix's exit() does: the program's atexit handlers, then the process's (`_cexit`: the
     /// run's exit work, the control endpoint's cleanup). A run that returned from main or quit
     /// through its app domain did neither: no final cache, and a discovery file left behind, which
-    /// the hub reads as a crash (11-04). Then the process ends without ExitProcess, which would run
-    /// the fiber-local destructors of the exiting thread: the program's thread locals (FlsAlloc
-    /// callbacks in JIT code) would run after Relax dropped the unit, and unix's exit() does not
-    /// run the main thread's key destructors either.
+    /// the hub reads as a crash (11-04). Then the process ends without ExitProcess
+    /// (`makepad_core_util::process_end::end`), which would run the fiber-local destructors of the
+    /// exiting thread: the program's thread locals (FlsAlloc callbacks in JIT code) would run after
+    /// Relax dropped the unit, and unix's exit() does not run the main thread's key destructors
+    /// either.
     pub fn exit(code: i32) -> ! {
         super::run_program_atexit();
-        end_process(code)
-    }
-
-    /// The process's own exit work and its end, without the program's handlers (a restart, which
-    /// stands in for an exec: restart_parent.rs).
-    pub fn end_process(code: i32) -> ! {
-        use std::io::Write;
-        extern "C" {
-            fn _cexit();
-        }
-        unsafe { _cexit() };
-        let _ = std::io::stdout().flush();
-        let _ = std::io::stderr().flush();
-        unsafe {
-            TerminateProcess(GetCurrentProcess(), code as u32);
-        }
-        std::process::exit(code)
+        crate::selfexe::remove();
+        makepad_core_util::process_end::end(code)
     }
 
     pub fn last_error() -> i32 {
@@ -998,7 +1113,7 @@ mod imp {
                 &mut owner, null_mut(), &mut acl, null_mut(), &mut sd.0);
             if status != 0 { return Err(format!("{}: {}", display.display(), std::io::Error::from_raw_os_error(status as i32))); }
             if owner.is_null() || IsValidSid(owner) == 0 || (EqualSid(owner, user) == 0 && EqualSid(owner, admins) == 0) {
-                return Err(format!("{} belongs to another user", display.display()));
+                return Err(format!("{} {}", display.display(), crate::os::proc::OTHER_USERS));
             }
             if acl.is_null() || IsValidAcl(acl) == 0 { return Err(writable()); }
             // ACL header: revision, reserved byte, size, AceCount, reserved word.

@@ -244,6 +244,12 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         self.find(k).cloned()
     }
 
+    /// `f` of the value for `k`, read in place (`get` without its clone).
+    #[inline]
+    pub fn with<R>(&self, k: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+        self.find(k).map(f)
+    }
+
     #[inline]
     pub fn contains(&self, k: &K) -> bool {
         self.find(k).is_some()
@@ -296,6 +302,23 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v.clone(), next: head }));
         t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
         v
+    }
+
+    /// Inserts `v` unless the map holds a value for `k` that `keep` keeps; a new value stands
+    /// before the one it replaces (`find` takes the newest). One walk of the chain, and `v` is
+    /// moved in, not cloned.
+    pub fn put_unless(&self, k: K, v: V, keep: impl FnOnce(&V) -> bool) {
+        let h = Self::hash_of(&k);
+        let b = self.bucket(h);
+        let _l = self.locks[b % MEMO_LOCKS].lock().unwrap_or_else(|e| e.into_inner());
+        if self.find(&k).is_some_and(keep) {
+            return;
+        }
+        let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
+        let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
+        let _k = self.phase();
+        let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v, next: head }));
+        t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
     }
 
     /// Memory report: (entries, bytes) of the current table, `deep` adding each entry's own heap

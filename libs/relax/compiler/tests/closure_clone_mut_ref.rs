@@ -1,7 +1,7 @@
 // A closure is Clone when every capture is (Reference types/closure.md "Other traits"), and its
 // captures are what rustc's capture analysis makes of the places it uses (RFC 2229): a closure
 // that only reads through a `&mut T` variable captures the place behind it by shared reference
-// (`&T`, Clone), never the `&mut T` itself (a Clone shim for `&mut Scene` was refused, Stage
+// (`&T`, Clone), never the `&mut T` itself (a Clone shim for `&mut Scene` was refused, an app
 // 10-30). A `move` closure takes the `&mut T` by value and is not Clone (rustc rejects a clone).
 #[derive(Debug, PartialEq)]
 struct Scene {

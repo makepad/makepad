@@ -79,7 +79,7 @@ pub fn total_memory_mb() -> Option<u64> {
     Some(kb / 1024)
 }
 
-/// The compile-memory budget for this device (MAKEPAD_RUN_MEM_BUDGET_MB): the smaller of a quarter of the
+/// The compile-memory budget for this device (RELAX_MEM_BUDGET_MB): the smaller of a quarter of the
 /// physical RAM and 60% of what is available, at least 256 MB (/proc/meminfo).
 pub fn memory_budget_mb() -> Option<u64> {
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;

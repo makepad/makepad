@@ -112,6 +112,8 @@ pub struct UnixListener {
     sock: Socket,
 }
 
+#[derive(Debug)]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 pub struct Incoming<'a> {
     listener: &'a UnixListener,
 }
@@ -407,6 +409,19 @@ impl<'a> Iterator for Incoming<'a> {
             Ok((s, _)) => Ok(s),
             Err(e) => Err(e),
         })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::MAX, None)
+    }
+}
+
+impl<'a> IntoIterator for &'a UnixListener {
+    type Item = io::Result<UnixStream>;
+    type IntoIter = Incoming<'a>;
+
+    fn into_iter(self) -> Incoming<'a> {
+        self.incoming()
     }
 }
 

@@ -35,8 +35,8 @@ pub mod ffi {
 pub mod fmt {
     pub use core::fmt::format;
     pub use core::fmt::{
-        write, Alignment, Arguments, Binary, Debug, DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple, Display, Error,
-        Formatter, LowerExp, LowerHex, Octal, Pointer, Result, UpperExp, UpperHex, Write,
+        from_fn, write, Alignment, Arguments, Binary, Debug, DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple, Display,
+        Error, Formatter, FromFn, LowerExp, LowerHex, Octal, Pointer, Result, UpperExp, UpperHex, Write,
     };
 }
 
@@ -46,7 +46,7 @@ pub mod rc {
 
 pub mod slice {
     pub use core::slice::{
-        from_mut, from_raw_parts, from_raw_parts_mut, from_ref, Chunks, ChunksExact, ChunksExactMut, ChunksMut, Concat, Iter,
+        from_mut, from_raw_parts, from_raw_parts_mut, from_ref, ArrayWindows, Chunks, ChunksExact, ChunksExactMut, ChunksMut, Concat, Iter,
         IterMut, Join, RChunks, RSplit, RSplitN, SliceIndex, Split, SplitInclusive, SplitMut, SplitN, Windows,
     };
 }

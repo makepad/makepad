@@ -7,9 +7,9 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-export MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_BORROWCK=full MAKEPAD_RUN_GANDALF=0
-export MAKEPAD_RUN_STD="$HERE/../../std" MAKEPAD_RUN_CACHE_DIR="$TMP/target"
-unset MAKEPAD_RUN_RELAXED MAKEPAD_RUN_BORROWCK_ALL MAKEPAD_RUN_BORROWCK_ONLY MAKEPAD_RUN_BORROWCK_INSTANCES
+export RELAX_CACHE=off RELAX_BORROWCK=full RELAX_GANDALF=0
+export RELAX_STD="$HERE/../../std" RELAX_CACHE_DIR="$TMP/target"
+unset RELAX_RELAXED RELAX_BORROWCK_ALL RELAX_BORROWCK_ONLY RELAX_BORROWCK_INSTANCES
 for name in dyn_any_ptr_cast_accept never_deref_move_accept generic_call_once_accept generic_call_mut_reject raw_ptr_capture_accept raw_ptr_capture_reject closure_external_mutex_accept closure_external_downcast_accept closure_external_reborrow_accept closure_external_field_accept closure_external_nested_accept closure_external_named_accept closure_external_distinct_reject normalization_outlives_accept normalization_outlives_reject parent_predicates_accept cmp_infer_capture_accept ref_reuse_accept closure_opassign_accept box_dyn_call_coerce_accept question_box_dyn_error_accept closure_annotated_hr_dyn_named_accept closure_annotated_free_named_reject closure_annotated_hr_dyn_named_reject \
     closure_iter_annotated_named_accept closure_iter_annotated_named_reject \
     closure_iter_annotated_static_accept closure_iter_annotated_static_reject \
@@ -76,7 +76,7 @@ PY
             cat "$TMP/rustc.log"
             exit 1
         }
-        if ! MAKEPAD_RUN_BORROWCK_ALL=1 "$BIN" check --no-serve --units "$TMP/units.json" "$name" > "$TMP/check.log" 2>&1 ||
+        if ! RELAX_BORROWCK_ALL=1 "$BIN" check --no-serve --units "$TMP/units.json" "$name" > "$TMP/check.log" 2>&1 ||
            grep -Eq 'error\[|panicked at' "$TMP/check.log"; then
             cat "$TMP/check.log"
             exit 1
@@ -92,7 +92,7 @@ PY
         "$TMP/rustc"
     fi
     if [[ "$name" == generic_call_* || "$name" == raw_ptr_capture_* ]]; then
-        export MAKEPAD_RUN_BORROWCK_INSTANCES=1
+        export RELAX_BORROWCK_INSTANCES=1
         if [[ "$name" == *_reject ]]; then
             code=E0596
             if [[ "$name" == raw_ptr_capture_* ]]; then code=E0382; fi
@@ -116,7 +116,7 @@ PY
         cat "$TMP/check.log"
         exit 1
     fi
-    if ! grep -q 'makepad check: .* 0 errors' "$TMP/check.log" ||
+    if ! grep -q 'relax check: .* 0 errors' "$TMP/check.log" ||
        grep -Eq 'panicked at|borrowck unchecked|internal error in the borrow checker' "$TMP/check.log"; then
         cat "$TMP/check.log"
         exit 1

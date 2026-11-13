@@ -7,7 +7,7 @@ R=$1
 C=$(mktemp -d)
 chmod 700 "$C"
 bad=""
-(cd "$H" && env MAKEPAD_RUN_O3_TRACE=1 MAKEPAD_RUN_CACHE=0 MAKEPAD_RUN_CACHE_DIR="$C/cache" MAKEPAD_RUN_TARGET_DIR="$C/target" MAKEPAD_RUN_STD="$H/../../std" "$R" run --verbose retired-stub-rearm) > "$C/run.log" 2>&1 || bad="$bad exit $?;"
+(cd "$H" && env RELAX_O3_TRACE=1 RELAX_CACHE=0 RELAX_CACHE_DIR="$C/cache" RELAX_TARGET_DIR="$C/target" RELAX_STD="$H/../../std" "$R" run --verbose retired-stub-rearm) > "$C/run.log" 2>&1 || bad="$bad exit $?;"
 grep -q "^retired_stub_rearm calls 1" "$C/run.log" || bad="$bad no result line;"
 grep -q "^retired_stub_rearm hot" "$C/run.log" || bad="$bad no hot line;"
 sed -n '/^retired_stub_rearm hot/,$p' "$C/run.log" | grep -E "^O3b .*retired_stub_rearm::work installed" > /dev/null || bad="$bad work never reached O3 in the hot phase;"

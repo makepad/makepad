@@ -643,10 +643,10 @@ fn deserialize(bytes: &[u8], body_offset: u64) -> Option<IFunc> {
 /// A linked blob (its relocated words hold this run's values): the function is registered, and
 /// its entry (a pool thunk: the slot's table word, callable from native code) is returned.
 pub fn install(bytes: &[u8], body_offset: u64) -> Result<u64, String> {
-    let f = deserialize(bytes, body_offset).ok_or("makepad run interp: malformed interpreted code")?;
+    let f = deserialize(bytes, body_offset).ok_or("relax run interp: malformed interpreted code")?;
     let k = NEXT.fetch_add(1, Ordering::Relaxed);
     if k >= POOL {
-        return Err(format!("makepad run interp: more than {} interpreted functions (the entry thunk pool)", POOL));
+        return Err(format!("relax run interp: more than {} interpreted functions (the entry thunk pool)", POOL));
     }
     FUNCS[k].store(Box::into_raw(Box::new(f)), Ordering::Release);
     Ok(pool_base() + 8 * k as u64)

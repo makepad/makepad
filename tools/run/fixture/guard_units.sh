@@ -45,11 +45,15 @@ path = "src/main.rs"
 [dependencies]
 guard-units-codegen = { path = "../../libs/relax/codegen" }'
 put tools/run/src/main.rs '// `makepad test <package> --lib -- <filter>` or `--test <name> -- <filter>` in the package dir: one guard
-// test, failing when the source says BROKEN; each run is said in GUARD_UNITS_LOG, as `<package>` for the library,
-// `<package>@<name>` for a test target
+// test, failing when the source says BROKEN, not compiling (relax'"'"'s error lines, no test result) when it says
+// DEPBROKEN; each run is said in GUARD_UNITS_LOG, as `<package>` for the library, `<package>@<name>` for a test
+// target
 use std::io::Write;
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // the gate builds release, as makepad tests its own code (`makepad test` alone: the test profile)
+    assert!(args.iter().any(|a| a == "--release"), "not the release profile: {args:?}");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
     let pkg = args.get(2).cloned().unwrap_or_default();
     let target = match args.get(3).map(String::as_str) {
         Some("--lib") => String::new(),
@@ -59,6 +63,12 @@ fn main() {
     let src = std::fs::read_to_string("src/lib.rs").unwrap_or_default();
     if let Ok(log) = std::env::var("GUARD_UNITS_LOG") {
         writeln!(std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap(), "{pkg}{target}").unwrap();
+    }
+    if src.contains("DEPBROKEN") {
+        let here = std::env::current_dir().unwrap();
+        eprintln!("{}/src/lib.rs:2:5: E0433: failed to resolve: could not find orch in the crate root", here.display());
+        eprintln!("error: could not compile guard-units-dep (lib) due to 1 previous error");
+        std::process::exit(101);
     }
     if src.contains("BROKEN") {
         println!("test gpu_guard::zoom ... FAILED\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored");
@@ -74,6 +84,8 @@ branch() { # branch <name> <dir> <package> <lib.rs>: one change off the base
   g checkout -q -b "$1" "$base"; lib "$2" "$3" "$4"; g commit -q -am "$1"
 }
 branch scope apps/scope makepad-scope '// BROKEN
+pub fn f() {}'
+branch depbroken apps/scope makepad-scope '// DEPBROKEN
 pub fn f() {}'
 branch jit libs/relax/codegen guard-units-codegen 'pub fn f() { let _ = 1; }'
 branch fab apps/fab makepad-fab '// BROKEN
@@ -99,8 +111,11 @@ guard() {
   done
   [ -z "$5" ] || ! echo "$out" | grep -qF -- "$5" || fail="$fail $1(has \`$5\`)"
 }
-guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --lib -- gpu_guard|fail= guard-makepad-scope"
-guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab --test xr_far_face|GATEREPRO guard makepad-fab --test xr_far_face :: makepad test makepad-fab --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab@xr_far_face"
+guard scope scope makepad-scope "GATEUNIT fail guard makepad-scope|GATEREPRO guard makepad-scope :: makepad test makepad-scope --release --lib -- gpu_guard|fail= guard-makepad-scope"
+# a guard whose dependency does not compile says the compiler's errors, file:line and message, not only that it
+# could not compile (the hot bucket's makepad-scope red kept `due to 2 previous errors` alone, 11-13)
+guard depbroken depbroken makepad-scope "apps/scope/src/lib.rs:2:5: E0433: failed to resolve: could not find orch in the crate root|GATEUNIT fail guard makepad-scope|fail= guard-makepad-scope"
+guard fab fab makepad-fab@xr_far_face "GATEUNIT fail guard makepad-fab --test xr_far_face|GATEREPRO guard makepad-fab --test xr_far_face :: makepad test makepad-fab --release --test xr_far_face -- a_far_wall_face_shows_no_darker_layers_in_the_headset|fail= guard-makepad-fab@xr_far_face"
 # two guards of one package: a unit and a log each, not one `guard makepad-sandbox` the second overwrote
 guard sandbox sandbox "makepad-sandbox@penumbra_still makepad-sandbox@store_play_ready" "GATEUNIT fail guard makepad-sandbox --test store_play_ready|GATEUNIT fail guard makepad-sandbox --test penumbra_still|fail= guard-makepad-sandbox@store_play_ready guard-makepad-sandbox@penumbra_still"
 guard jit jit "makepad-fab@xr_far_face makepad-render makepad-sandbox@penumbra_still makepad-sandbox@store_play_ready makepad-scope" "GATEUNIT ok guard makepad-fab --test xr_far_face|GATEUNIT ok guard makepad-render|GATEUNIT ok guard makepad-sandbox --test penumbra_still|GATEUNIT ok guard makepad-sandbox --test store_play_ready|GATEUNIT ok guard makepad-scope|fail="

@@ -175,7 +175,7 @@ fn std_compared(tcx: &Tcx, ty: crate::types::TyId, depth: u32) -> bool {
 fn verify_polonius_sample() -> bool {
     static RATE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let rate = *RATE.get_or_init(|| std::env::var("MAKEPAD_RUN_POLONIUS_VERIFY").ok().and_then(|s| s.parse().ok()).unwrap_or(0));
+    let rate = *RATE.get_or_init(|| std::env::var("RELAX_POLONIUS_VERIFY").ok().and_then(|s| s.parse().ok()).unwrap_or(0));
     rate != 0 && COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % rate == 0
 }
 #[cfg(test)]

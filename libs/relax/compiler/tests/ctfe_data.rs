@@ -1,7 +1,7 @@
 // Constant initializers evaluated to data (libs/relax/compiler/src/ctfe.rs): the shapes of lookup
 // tables -- struct rows built by a const fn, (char, char, enum) ranges, niche-encoded Options,
 // strings, nested references, repeats, arithmetic and casts. rustc prints the same hash:
-// 3413466678543477432. MAKEPAD_RUN_CTFE=check also compiles and runs every initializer and
+// 3413466678543477432. RELAX_CTFE=check also compiles and runs every initializer and
 // compares the values.
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -331,7 +331,7 @@ pub(crate) fn levels(u: &Unit, stop: &Stop, only: Option<usize>) -> Vec<(usize, 
             let body = crate::typeck::instantiate_body(&crate::tcx::EvalCx::new(&u.prog, &u.tcx, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), &crate::tcx::EvalState::new()), &u.prog, &u.tcx, d, &args);
             let vars: Vec<(usize, &dbgloc::Var)> = table.vars.iter().enumerate().filter(|(_, v)| v.ctx as u64 == c).collect();
             if table.vars.is_empty() {
-                lvl.note = Some("this code keeps no variable locations (built without them: MAKEPAD_RUN_NO_VARS, or before they were recorded)".into());
+                lvl.note = Some("this code keeps no variable locations (built without them: RELAX_NO_VARS, or before they were recorded)".into());
             } else if !at_call {
                 lvl.note = Some("the innermost frame is not stopped at a call: values in registers are not known here (frame slots are)".into());
             }

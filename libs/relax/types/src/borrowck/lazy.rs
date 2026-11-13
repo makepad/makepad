@@ -120,11 +120,11 @@ pub fn report_checked(prog: &Program, src: usize, epoch: u64, def: DefId, args: 
     admitted
 }
 
-/// MAKEPAD_RUN_FRONT_TRACE=1: background checks that hold the front end's read lock over 200 ms
+/// RELAX_FRONT_TRACE=1: background checks that hold the front end's read lock over 200 ms
 /// (a live patch's commit waits for them), with the phase they ended in.
 fn front_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_FRONT_TRACE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RELAX_FRONT_TRACE").is_some())
 }
 
 /// A live patch moved the program from collect epoch `from` to `to` without changing what
@@ -241,7 +241,7 @@ struct Queue {
 }
 /// A live edit's checks: the person waits for its verdict. Ahead of hot code's: those are
 /// promoted keeping their place among the startup's checks, so a first edit after a cold start,
-/// at rank 0 with them, waited 9 s behind 362 promoted after it (Fab, 11-04).
+/// at rank 0 with them, waited 9 s behind 362 promoted after it (an app, 11-04).
 pub const RANK_EDIT: u32 = 0;
 /// Hot code waiting for its verdict (SPEC-V twins and callers).
 pub const RANK_HOT: u32 = 1;
@@ -377,7 +377,7 @@ static STOP: AtomicBool = AtomicBool::new(false);
 fn stopping() -> bool { STOP.load(Ordering::SeqCst) || crate::preempt::is_stopped() }
 /// The worker paces itself (`ms`) on WAKE, not in a sleep: a check queued at rank `rank` or
 /// ahead ends the wait at once. A plain sleep missed the wake of a live edit's check, which then
-/// waited out the rest of it at the front of the queue (Fab early in a session: up to 500 ms
+/// waited out the rest of it at the front of the queue (an app early in a session: up to 500 ms
 /// behind the compile-quiet pacing, verdicts 110-450 ms late, 11-04).
 fn pace(ms: u64, rank: u32) {
     let guard = QUEUE.lock().unwrap_or_else(|e| e.into_inner());
@@ -403,7 +403,7 @@ const QUIET_NS: u64 = 500_000_000;
 /// Definitions discovery looks at per item (it yields the front read lock between items).
 const DISCOVERY_BATCH: usize = 4096;
 
-/// Background mode: MAKEPAD_RUN_GANDALF=0 turns it off (default on when the checker is on).
+/// Background mode: RELAX_GANDALF=0 turns it off (default on when the checker is on).
 pub fn gandalf_enabled(options: &crate::options::Options) -> bool {
     !DISABLED.load(Ordering::Relaxed) && (super::enabled(options) && options.gandalf)
 }
@@ -529,7 +529,7 @@ pub fn print_summary(options: &crate::options::Options) {
         s.push_str(&format!(", {} dropped (queued before the program was collected again, or by a retired unit)", stale));
     }
     if panics > 0 {
-        s.push_str(&format!(", {} NOT CHECKED: the checker failed on them (makepad run bug, please report)", panics));
+        s.push_str(&format!(", {} NOT CHECKED: the checker failed on them (Relax bug, please report)", panics));
     }
     eprintln!("{}", s);
     for n in PANIC_NOTES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
@@ -635,7 +635,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     loop {
         if stopping() { return; }
         // The startup's checks wait for the runner; a live edit's do not: the person waits for its
-        // verdict (a cold Fab releases the checker 1.5 s after its first present; an edit saved
+        // verdict (a large app's cold start releases the checker 1.5 s after its first present; an edit saved
         // in that time waited for the release, 11-04).
         if !started {
             started = src.started();
@@ -666,7 +666,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                     crate::preempt::set_urgent(guard.as_ref().and_then(|q| q.order.first()).is_some_and(|a| a.0 == RANK_EDIT));
                     break item;
                 }
-                if verbose && std::env::var_os("MAKEPAD_RUN_GANDALF_STATS").is_some() && CHECKED.load(Ordering::Relaxed) > 0 && !IDLE_REPORTED.swap(true, Ordering::Relaxed) {
+                if verbose && std::env::var_os("RELAX_GANDALF_STATS").is_some() && CHECKED.load(Ordering::Relaxed) > 0 && !IDLE_REPORTED.swap(true, Ordering::Relaxed) {
                     eprintln!("gandalf: idle at t={:.0} ms: {} fns checked, {} violations, cpu {:.1} ms ({:.1} us/fn), {} clean from the cache",
                         crate::clock::wall_ns() as f64 / 1e6, CHECKED.load(Ordering::Relaxed), VIOLATIONS.load(Ordering::Relaxed),
                         CHECK_NS.load(Ordering::Relaxed) as f64 / 1e6, CHECK_NS.load(Ordering::Relaxed) as f64 / 1e3 / CHECKED.load(Ordering::Relaxed).max(1) as f64, CACHED_CLEAN.load(Ordering::Relaxed));
@@ -771,7 +771,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 let _p = crate::preempt::Preemptible::on();
                 // every other check gives way to a live edit's (hot code's too: RANK_EDIT is ahead
                 // of it): the edit's verdict waited at the front of the queue for the check
-                // running, 133-480 ms in a session's first edits (Fab, 11-04)
+                // running, 133-480 ms in a session's first edits (a large app, 11-04)
                 let _y = (rank > RANK_EDIT).then(crate::preempt::Yields::on);
                 crate::preempt::point();
                 let _origin = crate::clock::origin("gandalf");
@@ -783,7 +783,7 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
                 if !body.errors.is_empty() { phase.set("typeck (errors)"); return None; }
                 phase.set("borrowck");
                 static COUNTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                if *COUNTS.get_or_init(|| std::env::var_os("MAKEPAD_RUN_BODY_COUNTS").is_some()) { eprintln!("body-count borrowck"); }
+                if *COUNTS.get_or_init(|| std::env::var_os("RELAX_BODY_COUNTS").is_some()) { eprintln!("body-count borrowck"); }
                 Some(super::check_body(cx, prog, tcx, &body))
             }));
             if result.as_ref().is_err_and(|p| crate::preempt::is_preempted(&**p)) {
@@ -865,10 +865,10 @@ fn worker(mut src: Arc<dyn FrontSource>, verbose: bool) {
     }
 }
 
-/// MAKEPAD_RUN_SPECV_TRACE: the ranks asked for (set_ranks) and the hot checks run.
+/// RELAX_SPECV_TRACE: the ranks asked for (set_ranks) and the hot checks run.
 fn specv_trace() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SPECV_TRACE").is_some())
+    *TRACE.get_or_init(|| std::env::var_os("RELAX_SPECV_TRACE").is_some())
 }
 
 /// `makepad run` never executes a body its checker rejects (check-before-run): the verdict of

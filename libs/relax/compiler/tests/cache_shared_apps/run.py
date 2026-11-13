@@ -98,9 +98,9 @@ def run(relax, tree, std, cache, app, tag, env_extra=None, cmd="run"):
         tree, pkg = REPO, app[5:]
     else:
         pkg = "sc-" + app.replace("_", "-")
-    env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=os.path.join(cache, "cache"), MAKEPAD_RUN_STD=std, RUSTC_BOOTSTRAP="1",
-               MAKEPAD_RUN_CACHE_TRACE=os.path.join(cache, tag + ".trace"))
-    env.pop("MAKEPAD_RUN_CACHE", None)
+    env = dict(os.environ, RELAX_CACHE_DIR=os.path.join(cache, "cache"), RELAX_STD=std, RUSTC_BOOTSTRAP="1",
+               RELAX_CACHE_TRACE=os.path.join(cache, tag + ".trace"))
+    env.pop("RELAX_CACHE", None)
     env.update(env_extra or {})
     p = subprocess.run([relax, cmd, "--quiet", pkg], cwd=tree, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=900)
     out = p.stdout.decode("utf-8", "replace")

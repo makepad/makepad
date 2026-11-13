@@ -274,6 +274,10 @@ impl Pool {
         let _ = self.sink.set(sink);
     }
 
+    /// The demand plan's outline of crate `ci`: its expansion-made imports (PendingPlan::outline_expansions).
+    pub(crate) fn outline_expansions(&self, ci: u32) -> Option<Arc<crate::fxhash::HashMap<(String, String), Vec<String>>>> {
+        self.demand_plan.as_ref()?.outline_expansions(ci as usize + self.plan_offset)
+    }
     /// Set queued jobs' scope; entering the crate replaces an early snapshot with the loader's.
     pub fn start_parsing(&self, ci: u32, table: Arc<MacroTable>) {
         let mut st = self.st.lock().unwrap();
@@ -578,7 +582,10 @@ impl Pool {
         let mut inputs = Vec::new();
         let mut probes = Vec::new();
         let mut stack = vec![(c.root.clone(), crate::program::dir_of(&c.root).to_string(), c.name.clone())];
+        // each file and the module it is parsed as (its first); `walked`: every (file, module),
+        // one file declared as two modules (`#[path]`) being two modules with their own imports
         let mut seen: HashMap<String, String> = HashMap::default();
+        let mut walked: crate::fxhash::HashSet<(String, String)> = Default::default();
         let mut defs = Vec::new();
         let mut aliases = Vec::new();
         let mut macro_use: Vec<String> = Vec::new();
@@ -589,15 +596,25 @@ impl Pool {
         let mut lexed: Vec<(String, Vec<u8>, Vec<Tok>)> = Vec::new();
         let replay = crate::load_profile::span(c.cfg.session.runtime.profile, "publish-replay", &c.name);
         while let Some((path, dir, mpath)) = stack.pop() {
-            if seen.contains_key(&path) {
+            if !walked.insert((path.clone(), mpath.clone())) {
                 continue;
             }
-            seen.insert(path.clone(), mpath.clone());
-            let Some(Some(s)) = scanned.remove(&(ci, path.clone(), dir, mpath)) else {
-                complete = false;
-                continue;
+            // a file met again under another module: that module's items, imports and children
+            // count; the file's input and its parse job are the first module's
+            let first = !seen.contains_key(&path);
+            if first {
+                seen.insert(path.clone(), mpath.clone());
+            }
+            let s = match scanned.remove(&(ci, path.clone(), dir, mpath)) {
+                Some(Some(s)) => s,
+                // (a file that includes itself: the scan stopped at the repeat)
+                _ if !first => continue,
+                _ => { complete = false; continue; }
             };
-            inputs.push((path.clone(), crate::crate_image::file_hash(&path, &s.src[..s.src_len])));
+            if first {
+                inputs.push((path.clone(), crate::crate_image::file_hash(&path, &s.src[..s.src_len])));
+                inputs.extend(s.included);
+            }
             probes.extend(s.probes);
             if path == c.root && s.recursion_limit.is_some() {
                 cmods.recursion_limit = s.recursion_limit;
@@ -639,7 +656,7 @@ impl Pool {
             }
             // Stack traversal must publish sibling definitions in source order.
             stack.extend(s.children.into_iter().rev());
-            if !self.demand_plan.as_ref().is_some_and(|p| p.skips(&c.root, c.cfg.holds("test"), &path)) {
+            if first && !self.demand_plan.as_ref().is_some_and(|p| p.skips(&c.root, c.cfg.holds("test"), &path)) {
                 lexed.push((path, s.src[..s.src_len].to_vec(), s.toks.into_vec()));
             }
         }
@@ -782,7 +799,7 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool, s
     let src_len = src.len();
     let t = std::time::Instant::now();
     if trace() && crate::memstat::enabled() { eprintln!("boot-trace-job-start: {} {} src={}KB", ctx.name, path, src_len >> 10); }
-    // MAKEPAD_RUN_BOOT_TRACE with MAKEPAD_RUN_MEM_REPORT: the bytes this job retains on its thread and its peak
+    // RELAX_BOOT_TRACE with RELAX_MEM_REPORT: the bytes this job retains on its thread and its peak
     let (live0, peak) = (crate::memstat::thread_live(), crate::memstat::peak_start());
     let bctx = std::rc::Rc::new(crate::builtins::FileCtx::new(&ctx.name, &path, &mod_path, &ctx.cfg));
     let r = ctx.context.parse_input(src, Some(toks), ctx.edition, Some(crate::macros::MacroScope::new(ctx.table.clone())), bctx, crate::parser::lazy_auto());
@@ -818,25 +835,25 @@ fn parse_job(_sess: &std::sync::Arc<crate::Session>, job: Job, in_scope: bool, s
     ((krate, path), Preparsed { parsed, prep, mod_path, src_len, verify, error, image_bytes })
 }
 
-/// MAKEPAD_RUN_BOOT_TRACE=1: boot-path timing and why files were parsed again (stderr `boot-trace`).
+/// RELAX_BOOT_TRACE=1: boot-path timing and why files were parsed again (stderr `boot-trace`).
 pub fn trace() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| std::env::var("MAKEPAD_RUN_BOOT_TRACE").is_ok())
+    *T.get_or_init(|| std::env::var("RELAX_BOOT_TRACE").is_ok())
 }
 
-/// MAKEPAD_RUN_TRACE, read once (parse workers ask per expansion; std::env::var takes the env lock and
+/// RELAX_TRACE, read once (parse workers ask per expansion; std::env::var takes the env lock and
 /// allocates).
 pub fn relax_trace() -> Option<&'static str> {
     static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    relax_session::phase::env_once(&T, "MAKEPAD_RUN_TRACE")
+    relax_session::phase::env_once(&T, "RELAX_TRACE")
 }
 
-/// MAKEPAD_RUN_DERIVES=0 (derives are not expanded; measurement baseline), read once.
+/// RELAX_DERIVES=0 (derives are not expanded; measurement baseline), read once.
 pub fn derives_off(options: &crate::options::Options) -> bool {
     !options.derives
 }
 
-/// Parse-time split for MAKEPAD_RUN_BOOT_TRACE: 0 fn bodies, 1 derives, 2 macro_rules transcription,
+/// Parse-time split for RELAX_BOOT_TRACE: 0 fn bodies, 1 derives, 2 macro_rules transcription,
 /// 3 built-in macros (format family etc.), 4 hosted / native fn-like macros; outermost call per slot only.
 pub static PHASE_NS: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
 
@@ -865,7 +882,7 @@ pub fn timed<R>(slot: usize, f: impl FnOnce() -> R) -> R {
     r
 }
 
-/// Per macro name: (calls, ns) for MAKEPAD_RUN_BOOT_TRACE.
+/// Per macro name: (calls, ns) for RELAX_BOOT_TRACE.
 pub static BY_NAME: Mutex<Vec<(String, u64, u64)>> = Mutex::new(Vec::new());
 
 pub fn timed_named<R>(slot: usize, name: &str, f: impl FnOnce() -> R) -> R {
@@ -903,7 +920,7 @@ pub fn jobs() -> usize {
     if SINGLE.with(|s| s.get()) {
         return 1;
     }
-    std::env::var("MAKEPAD_RUN_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(crate::options::default_parse_jobs).clamp(1, 32)
+    std::env::var("RELAX_JOBS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(crate::options::default_parse_jobs).clamp(1, 32)
 }
 
 /// A scanned file's source bytes: its own, a mapped image's, or the registry's authored bytes
@@ -958,6 +975,38 @@ struct Scanned {
     inner_macro_use: Vec<String>,
     /// `#![recursion_limit = ".."]` in the file's leading inner attributes
     pub(crate) recursion_limit: Option<u32>,
+    /// the files `include!`d at item position, with their content hashes: inputs of the scan
+    included: Vec<(String, u128)>,
+}
+
+/// The text of a plain string literal token (`"a/b.rs"`, `r"a/b.rs"`, `r#"a/b.rs"#`); None for one
+/// with escapes or a byte or C string.
+fn plain_str(lit: &[u8]) -> Option<String> {
+    let lit = std::str::from_utf8(lit).ok()?;
+    let raw = lit.strip_prefix('r').map(|r| r.trim_matches('#'));
+    let body = raw.unwrap_or(lit).strip_prefix('"')?.strip_suffix('"')?;
+    (raw.is_some() || !body.contains('\\')).then(|| body.to_string())
+}
+
+std::thread_local! {
+    /// the files an `include!` scan is inside of on this thread (a file that includes itself, a
+    /// rustc error, stops at the repeat)
+    static INCLUDING: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The scan of a file `include!`d into module `mpath`, and its content hash. Its `mod x;` resolve
+/// in its own folder, in any module (rustc's expand_include sets the module's directory to the
+/// included file's and owns it).
+fn scan_included(path: &str, mpath: &str, krate: &str, edition: u16, cfg: &CfgSet, context: &crate::source_context::Context, surface: ScanSurface) -> Option<(u128, Scanned)> {
+    if INCLUDING.with(|c| c.borrow().iter().any(|p| p == path)) { return None; }
+    let src = context.read_source(path).ok()?.src.to_vec();
+    let hash = crate::crate_image::file_hash(path, &src);
+    let mut toks = Vec::with_capacity(src.len() / 4);
+    crate::lexer::lex(&src, edition, &mut toks).ok()?;
+    INCLUDING.with(|c| c.borrow_mut().push(path.to_string()));
+    let s = scan_tokens(path, crate::program::dir_of(path), mpath, krate, edition, cfg, src.len(), src.into(), toks, context, surface);
+    INCLUDING.with(|c| { c.borrow_mut().pop(); });
+    Some((hash, s?))
 }
 
 /// The bindings of a `use` tree in tokens `lo..hi` (after `use`, before `;`) under `prefix`.
@@ -1216,13 +1265,14 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
     let mut children = Vec::new();
     let mut probes = Vec::new();
     let mut aliases = Vec::new();
+    let mut included: Vec<(String, u128)> = Vec::new();
     let mut macro_use = Vec::new();
     let mut uses: Vec<crate::macros::UseItem> = Vec::new();
     let mut mods: Vec<String> = vec![mpath.to_string()];
     let mut mod_items: Vec<(String, crate::macros::ModItem)> = Vec::new();
     if !file_cfg_active(&src, &toks, cfg) {
         // `#![cfg(false)]` file: removed with its module; nothing in it counts
-        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), inner_macro_use: Vec::new(), recursion_limit: None });
+        return Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods: Vec::new(), mod_items: Vec::new(), inner_macro_use: Vec::new(), recursion_limit: None, included: Vec::new() });
     }
     let mut inner_macro_uses = Vec::new();
     if inner_macro_use(&src, &toks, cfg) { inner_macro_uses.push(mpath.to_string()); }
@@ -1398,9 +1448,50 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
                             mods.push(child_path.clone());
                             if inner_macro_use(&src, &toks[i + 3..], cfg) { inner_macro_uses.push(child_path.clone()); }
                         }
-                        let child_dir = pa.map_or_else(|| format!("{}/{}", cur, name), |p| crate::crates::join_path(&cur, &p));
+                        // at file level an explicit path is relative to the file, as a `mod x;`'s is, not
+                        // to the module directory a non-mod.rs file implies
+                        let child_dir = pa.map_or_else(|| format!("{}/{}", cur, name), |p| crate::crates::join_path(if dirs.len() > 1 { &cur } else { &fdir }, &p));
                         dirs.push((depth + 1, child_dir, child_path, cur_active && active));
                     }
+                }
+                // `include!("file.rs");` at item position (rustc_builtin_macros source_util.rs
+                // expand_include): the file's items are this module's, so its `use`s and `mod`
+                // declarations are scanned as the module's, and its `mod x;` resolve in the
+                // included file's folder. Its macro definitions come from the parse, as before.
+                // (A module the included file declares got no imports: relax issue 173.)
+                T::Ident
+                    if text(i) == b"include"
+                        && i + 4 < toks.len()
+                        && toks[i + 1].kind == T::Not
+                        && toks[i + 2].kind == T::OpenParen
+                        && toks[i + 3].kind == T::Str
+                        && toks[i + 4].kind == T::CloseParen
+                        && dirs.last().map_or(false, |l| l.0 == depth && l.3) =>
+                {
+                    if let Some(name) = decl_attrs(&src, &toks, i, cfg).active.then(|| plain_str(text(i + 3))).flatten() {
+                        let inc = crate::crates::join_path(&fdir, &name);
+                        let module = dirs.last().unwrap().2.clone();
+                        let inc_surface = if surface == ScanSurface::Macros { ScanSurface::Imports } else { surface };
+                        match scan_included(&inc, &module, krate, edition, cfg, context, inc_surface) {
+                            Some((hash, s)) => {
+                                probes.push((inc.clone(), true));
+                                included.push((inc, hash));
+                                included.extend(s.included);
+                                probes.extend(s.probes);
+                                children.extend(s.children);
+                                aliases.extend(s.aliases);
+                                macro_use.extend(s.macro_use);
+                                uses.extend(s.uses);
+                                for m in s.mods {
+                                    if !mods.contains(&m) { mods.push(m); }
+                                }
+                                mod_items.extend(s.mod_items);
+                            }
+                            None => probes.push((inc, false)),
+                        }
+                    }
+                    i += 5;
+                    continue;
                 }
                 T::Ident
                     if i + 2 < toks.len()
@@ -1468,7 +1559,7 @@ fn scan_tokens(path: &str, dir: &str, mpath: &str, krate: &str, edition: u16, cf
             i += 1;
         }
     }
-    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, inner_macro_use: inner_macro_uses, recursion_limit })
+    Some(Scanned { src_len, src, toks: toks.into(), defs, children, probes, aliases, macro_use, uses, mods, mod_items, inner_macro_use: inner_macro_uses, recursion_limit, included })
 }
 
 /// Starts the pipeline for `crates` (load order): scans (all crates at once, earliest crate
@@ -1559,9 +1650,9 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let count = restored.iter().flatten().count();
         let files: usize = restored.iter().flatten().map(|i| i.files.len()).sum();
         if planning {
-            eprintln!("makepad-run front: {count} crate image candidates ({files} files); selection validation on planning worker");
+            eprintln!("relax front: {count} crate image candidates ({files} files); selection validation on planning worker");
         } else {
-            eprintln!("makepad-run front: {} crates from crate images ({} files, no parse), {} crates parsed", count, files, n - count);
+            eprintln!("relax front: {} crates from crate images ({} files, no parse), {} crates parsed", count, files, n - count);
         }
     }
     let pending_images = if planning { std::mem::replace(&mut restored, (0..n).map(|_| None).collect()) }
@@ -1673,9 +1764,21 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
         let mut reachable = Vec::new();
         let root = c.root_path().to_string();
         let mut todo = vec![(root.clone(), crate::program::dir_of(&root).to_string(), name.clone())];
+        // every (file, module): one file declared as two modules (`#[path]`) is two modules with
+        // their own imports; a file that includes itself (its path an enclosing module's: rustc's
+        // error) stops at the repeat
+        let mut walked: crate::fxhash::HashSet<(String, String)> = Default::default();
+        let mut file_of: HashMap<String, String> = HashMap::default();
         while let Some((path, dir, module)) = todo.pop() {
-            if reachable.contains(&path) { continue; }
-            reachable.push(path.clone());
+            let mut up = module.rsplit_once("::").map(|(m, _)| m);
+            let mut on_chain = false;
+            while let (false, Some(m)) = (on_chain, up) {
+                on_chain = file_of.get(m) == Some(&path);
+                up = m.rsplit_once("::").map(|(m, _)| m);
+            }
+            if on_chain || !walked.insert((path.clone(), module.clone())) { continue; }
+            file_of.insert(module.clone(), path.clone());
+            if !reachable.contains(&path) { reachable.push(path.clone()); }
             let text = files.iter().find(|(f, _)| prog.file_paths[*f as usize] == path).map(|(_, t)| t.clone())
                 .or_else(|| crate::vfs::read(&path).ok());
             if let Some(scan) = text.and_then(|t| scan_text(&path, &dir, &module, &name, c.edition, &c.cfg, t.into(), &c.context)) {
@@ -1712,6 +1815,33 @@ pub fn check_macros(prog: &mut crate::program::Program, krate: u32, files: &[(u3
 #[cfg(test)]
 mod cold_tests {
     use super::*;
+
+    /// A file-level inline module's `#[path]` is relative to its file: in a non-mod.rs file the
+    /// scan finds the module's children there, and their imports (relax PR 182).
+    #[test]
+    fn inline_path_scans_imports_relative_to_the_containing_file() {
+        let dir = std::env::temp_dir().join(format!("relax-inline-path-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(dir.join("custom")).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(dir.clone());
+        let file = dir.join("module.rs").to_string_lossy().into_owned();
+        let child = dir.join("custom/leaf.rs").to_string_lossy().into_owned();
+        let source = b"#[path=\"custom\"] mod inside { mod leaf; }";
+        let imported = b"use dep::answer;";
+        std::fs::write(&file, source).unwrap();
+        std::fs::write(&child, imported).unwrap();
+        let sess = Arc::new(crate::Session::default());
+        let cfg = CfgSet::host(&sess, &[]);
+        let context = crate::source_context::Context::new(&file, Default::default(), &sess);
+        let module_dir = dir.join("module").to_string_lossy().into_owned();
+        let scan = scan_text_mode(&file, &module_dir, "app::module", "app", 2021, &cfg, source.to_vec().into(), &context, false).unwrap();
+        let expected = (child, dir.join("custom/leaf").to_string_lossy().into_owned(), "app::module::inside::leaf".to_string());
+        assert_eq!(scan.children, vec![expected.clone()], "the child is found beside the file");
+        let (path, dir, module) = expected;
+        let child = scan_text_mode(&path, &dir, &module, "app", 2021, &cfg, imported.to_vec().into(), &context, false).unwrap();
+        assert!(child.uses.iter().any(|u| u.module == module && u.bind.as_deref() == Some("answer")), "its import is scanned");
+    }
 
     #[test]
     fn configured_inner_attributes_do_not_absorb_the_next_items_cfg() {

@@ -29,7 +29,7 @@ fn version_on(options: &relax_session::Options) -> bool {
 
 fn trace() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var("MAKEPAD_RUN_VERSION_TRACE").is_ok())
+    *E.get_or_init(|| std::env::var("RELAX_VERSION_TRACE").is_ok())
 }
 
 pub use relax_backend::dom::Dom;

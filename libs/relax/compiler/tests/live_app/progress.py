@@ -24,8 +24,8 @@ fn main() {
 }
 ''')
     master, slave = pty.openpty()
-    env = dict(os.environ, MAKEPAD_RUN_CACHE="off")
-    for key in ["NO_COLOR", "MAKEPAD_RUN_REPORT_TO", "MAKEPAD_RUN_SCRIPT_DEPTH"]:
+    env = dict(os.environ, RELAX_CACHE="off")
+    for key in ["NO_COLOR", "RELAX_REPORT_TO", "RELAX_SCRIPT_DEPTH"]:
         env.pop(key, None)
     p = subprocess.Popen([binary, "run", "makepad-platform"], cwd=root, env=env, stdout=slave, stderr=slave)
     os.close(slave)

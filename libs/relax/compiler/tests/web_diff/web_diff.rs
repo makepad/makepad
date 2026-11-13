@@ -1,7 +1,7 @@
 // Web target differential program (run.sh): the same output from rustc's build of it (a
 // wasm32-unknown-unknown cdylib run in node for wasm32; a host binary for wasm64, whose data
 // layout is x86_64's) and from Relax running it as the web target in the trace host's mode
-// (MAKEPAD_RUN_CHECK_TARGET=wasm{32,64}-unknown-unknown). Output goes through the page-side
+// (RELAX_CHECK_TARGET=wasm{32,64}-unknown-unknown). Output goes through the page-side
 // import `js_console_log` (a page has no stdout). Pointer-heavy on purpose: fat pointers,
 // trait objects, vtables, statics holding pointers, Box/Rc/Vec/String, enums with pointer niches,
 // fn pointers, closures, unaligned/packed fields, 64- and 128-bit math, atomics.

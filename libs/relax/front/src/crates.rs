@@ -27,6 +27,9 @@ pub struct CrateUnit {
     /// the package comes from a registry or git source (its cargo pkg_id is not `path+`): a
     /// third-party crate, wherever its sources are stored
     pub registry: bool,
+    /// the graph has this source on the host side only (a build-dependency, a proc-macro crate
+    /// or one of their dependencies): the app has it only if one of its crates depends on it
+    pub host_only: bool,
 }
 
 pub struct HostUnit {
@@ -97,9 +100,10 @@ pub fn disambiguate_multi_version_crates(units: &mut [CrateUnit]) {
     }
 }
 
-/// Crates Relax provides itself (std/substitutes.txt: `<name> <version prefix> <root>`):
-/// a unit of that crate at a matching version loads the provided root instead of its sources
-/// (same name; deps become core/alloc/std only; features ignored); one at another version is
+/// Crates Relax provides itself (std/substitutes.txt: `<name> <version prefix> <root> <features>`):
+/// a unit of that crate at a matching version that enables none of its features but those the
+/// root implements loads the provided root instead of its sources (same name and features; deps
+/// become core/alloc/std only); one at another version or with another feature enabled is
 /// compiled from its own source, which a --verbose load says. The rustc build keeps the real crates.
 /// Also hands the graph to the proc-macro host (macro_reg::register_and_strip); `additive`: the
 /// graph of a program started into a running one joins the registered graph.
@@ -113,7 +117,7 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
     };
     for line in apply_substitute_table(units, std_dir, &table) {
         if sess.options.verbose {
-            eprintln!("makepad run: {line}");
+            eprintln!("relax run: {line}");
         }
     }
     // proc-macro crates run in the JIT proc-macro host; the app graph sees them empty
@@ -121,8 +125,10 @@ pub fn apply_substitutes(sess: &std::sync::Arc<crate::Session>, units: &mut [Cra
     Ok(())
 }
 
-/// The table's substitutions made in `units`; returns a line for each unit of a provided crate at
-/// another version (its own source is compiled).
+/// The table's substitutions made in `units`; returns a line for each unit of a provided crate
+/// whose own source is compiled: one at another version, or one with a feature enabled that the
+/// provided root does not implement (cargo enabled it for the graph, and the root would leave out
+/// what it gates: smallvec's `serde` impls).
 fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) -> Vec<String> {
     let mut own = Vec::new();
     for line in table.lines() {
@@ -131,10 +137,11 @@ fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) -
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 3 {
+        if !(3..=4).contains(&parts.len()) {
             continue;
         }
         let (name, ver, root) = (parts[0], parts[1], parts[2]);
+        let implemented: Vec<&str> = parts.get(3).map_or(Vec::new(), |f| f.split(',').collect());
         for u in units.iter_mut() {
             if base_crate_name(&u.name) != name || u.proc_macro {
                 continue;
@@ -144,9 +151,13 @@ fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) -
                 own.push(format!("crate `{}` is version {}, substitutes.txt provides {}: its own source is compiled", name, u.version, ver));
                 continue;
             }
+            let missing: Vec<&str> = u.features.iter().map(|f| f.as_str()).filter(|f| !implemented.contains(f)).collect();
+            if !missing.is_empty() {
+                own.push(format!("crate `{}` {} enables feature `{}`, which the provided {} lacks: its own source is compiled", name, u.version, missing.join("`, `"), name));
+                continue;
+            }
             u.src_path = format!("{}/{}", std_dir, root);
             u.edition = 2021;
-            u.features.clear();
             u.deps.clear();
             u.host = None;
         }
@@ -170,14 +181,24 @@ fn a_provided_crate_at_another_version_compiles_its_own_source_and_says_so() {
         build_script: false,
         version: version.to_string(),
         registry: true,
+        host_only: false,
     };
     let mut units = vec![unit("1.13.2"), unit("0.6.14")];
-    let said = apply_substitute_table(&mut units, "/std", "# comment\nsmallvec 1 smallvec/lib.rs\n");
+    let said = apply_substitute_table(&mut units, "/std", "# comment\nsmallvec 1 smallvec/lib.rs union\n");
     assert_eq!(units[0].src_path, "/std/smallvec/lib.rs");
-    assert!(units[0].features.is_empty());
+    assert_eq!(units[0].features, ["union"], "the provided crate keeps the features it implements");
     assert_eq!(units[1].src_path, "/registry/smallvec-0.6.14/src/lib.rs");
     assert_eq!(units[1].features, ["union"]);
     assert_eq!(said, ["crate `smallvec` is version 0.6.14, substitutes.txt provides 1: its own source is compiled"]);
+    // relax issue 117: a feature the provided crate does not implement (`serde` impls) keeps the
+    // crate's own source, with its features and dependencies
+    let mut units = vec![unit("1.13.2")];
+    units[0].features.push("serde".to_string());
+    units[0].deps.push((7, "serde".to_string()));
+    let said = apply_substitute_table(&mut units, "/std", "smallvec 1 smallvec/lib.rs union,write\n");
+    assert_eq!((units[0].src_path.as_str(), units[0].deps.len()), ("/registry/smallvec-1.13.2/src/lib.rs", 1));
+    assert_eq!(units[0].features, ["union", "serde"]);
+    assert_eq!(said, ["crate `smallvec` 1.13.2 enables feature `serde`, which the provided smallvec lacks: its own source is compiled"]);
 }
 
 /// Unit indices with every crate after its dependencies.
@@ -319,7 +340,7 @@ pub fn load_units(path: &str) -> Result<Vec<CrateUnit>, String> {
             None => String::new(),
         };
         map.push(out.len());
-        out.push(CrateUnit { name, src_path, edition, features, deps, host: None, proc_macro: kind_pm, bin: false, harness, build_script, version, registry: !pkg.starts_with("path+") });
+        out.push(CrateUnit { name, src_path, edition, features, deps, host: None, proc_macro: kind_pm, bin: false, harness, build_script, version, registry: !pkg.starts_with("path+"), host_only: false });
     }
     // remap dependency indices to deduplicated crate indices; drop build-script deps
     for c in out.iter_mut() {
@@ -635,6 +656,31 @@ pub fn set_program_env(env: &[(String, String)], dir: Option<&str>) {
         if let Ok(before) = std::env::current_dir() {
             if std::env::set_current_dir(dir).is_ok() && p.dir.is_none() { p.dir = Some(before); }
         }
+    }
+}
+
+/// Puts the program's environment outside the `RELAX_` namespace in this process (`start`, name and
+/// value bytes as the process was started: relax-base progenv `program_start`), in place of the
+/// build environment its host built with: each other such variable goes, each of `start` is set.
+/// Each one's previous state is kept as set_program_env keeps it. Call it with no program thread
+/// running.
+pub fn set_program_start_env(start: &[(Vec<u8>, Vec<u8>)]) {
+    let _k = crate::zone_alloc::kept();
+    let os = |b: &[u8]| unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(b) }.to_os_string();
+    let mut p = PROGRAM_PROCESS.lock().unwrap();
+    let keep = |p: &mut ProgramProcess, k: &str| {
+        if !p.env.iter().any(|(n, _)| n == k) { p.env.push((k.to_string(), std::env::var_os(k))); }
+    };
+    for (k, _) in std::env::vars_os() {
+        let Some(name) = k.to_str() else { continue };
+        if name.starts_with("RELAX_") || start.iter().any(|(s, _)| s.as_slice() == name.as_bytes()) { continue; }
+        keep(&mut p, name);
+        unsafe { std::env::remove_var(name) };
+    }
+    for (k, v) in start {
+        let Ok(name) = std::str::from_utf8(k) else { continue };
+        keep(&mut p, name);
+        unsafe { std::env::set_var(name, os(v)) };
     }
 }
 

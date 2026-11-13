@@ -5,7 +5,7 @@ Runs on an x86-64 Linux box with the source tree (a pool node). One command:
     tools/run/tools/asmcmp deflate compress_normal
     tools/run/tools/asmcmp sum_slice relax_bench_rt::sum_slice --makepad ~/cg2/frozen/makepad-t0
 
-Relax side: the bench_rt kernel runs at steady state with MAKEPAD_RUN_DUMP=<fn> + MAKEPAD_RUN_PROFILE, so Relax writes the
+Relax side: the bench_rt kernel runs at steady state with RELAX_DUMP=<fn> + RELAX_PROFILE, so Relax writes the
 tier-1 code (<base>.t1.bin), its RIR (.t1.rir), code offset -> RIR block/instruction + source position (.t1.map) and
 per-instruction sampler counts (.t1.prof). Disassembled with objdump (Intel syntax).
 rustc side: bench_rt built with `cargo build --release` (CARGO_PROFILE_RELEASE_DEBUG=line-tables-only: line info only,
@@ -21,7 +21,7 @@ Categories: stack_ld / stack_st (rsp/rbp-based memory: spills, reloads, slot tra
 copies, extensions, lea), alu, cmp (cmp/test), setcc_cmov, branch (jmp/jcc), bounds (a jcc whose target reaches a
 panic call within a few instructions), call, vector (packed SIMD on xmm/ymm), fp (scalar float), other.
 
-Options: --rustc-fn SUBSTR (rustc symbol to compare when rustc inlined <fn> into a caller), --makepad BIN (default: $MAKEPAD_RUN_BIN or `makepad` on PATH), --tree DIR (default: the checkout containing this file),
+Options: --rustc-fn SUBSTR (rustc symbol to compare when rustc inlined <fn> into a caller), --makepad BIN (default: $RELAX_BIN or `makepad` on PATH), --tree DIR (default: the checkout containing this file),
 --out DIR (default /tmp/asmcmp-$USER), --warm MS (default 3500), --no-rustc-build (reuse <out>/rustc-target).
 """
 import argparse, collections, os, re, subprocess, sys
@@ -181,7 +181,7 @@ def main():
     ap.add_argument("fn")
     here = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
     ap.add_argument("--tree", default=here)
-    ap.add_argument("--makepad", default=os.environ.get("MAKEPAD_RUN_BIN", "makepad"))
+    ap.add_argument("--makepad", default=os.environ.get("RELAX_BIN", "makepad"))
     ap.add_argument("--out", default=f"/tmp/asmcmp-{os.environ.get('USER', 'x')}")
     ap.add_argument("--warm", default="3500")
     ap.add_argument("--no-rustc-build", action="store_true")
@@ -197,9 +197,9 @@ def main():
             os.remove(os.path.join(dd, f))
 
     # ---- Relax
-    env = dict(os.environ, MAKEPAD_RUN_DUMP=a.fn, MAKEPAD_RUN_DUMP_DIR=dd, MAKEPAD_RUN_PROFILE=os.path.join(dd, "p.tsv"),
-               MAKEPAD_RUN_PROFILE_FROM_MS=str(max(0, int(a.warm) - 1000)), MAKEPAD_RUN_CACHE="0", BENCH_WARM_MS=a.warm,
-               BENCH_REPS="20", MAKEPAD_RUN_STD="../std", MAKEPAD_RUN_CACHE_DIR=os.path.join(out, "relax-target"))
+    env = dict(os.environ, RELAX_DUMP=a.fn, RELAX_DUMP_DIR=dd, RELAX_PROFILE=os.path.join(dd, "p.tsv"),
+               RELAX_PROFILE_FROM_MS=str(max(0, int(a.warm) - 1000)), RELAX_CACHE="0", BENCH_WARM_MS=a.warm,
+               BENCH_REPS="20", RELAX_STD="../std", RELAX_CACHE_DIR=os.path.join(out, "relax-target"))
     r = sh([a.makepad, "run", "--quiet", "relax-bench-rt", "--", a.kernel], cwd=bench, env=env)
     res = [l for l in r.stdout.splitlines() if l.startswith("| ")]
     bins = sorted(f for f in os.listdir(dd) if f.endswith(".t1.bin"))

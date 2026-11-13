@@ -7,7 +7,7 @@ struct Entry {
     callback: fn(u32) -> u32,
 }
 
-// MAKEPAD_RUN_LAZY_DEFER=payload.rs makes this initializer wait for the module.
+// RELAX_LAZY_DEFER=payload.rs makes this initializer wait for the module.
 static ENTRIES: [Entry; 2] = [
     Entry { name: "first", callback: { use crate::payload as functions; functions::increment } },
     Entry { name: "second", callback: { use crate::payload as functions; functions::double } },

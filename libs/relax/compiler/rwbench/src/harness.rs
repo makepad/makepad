@@ -138,7 +138,7 @@ fn run(name: &str, setup: Setup, t0: Instant, proc_ms_at_start: Option<f64>) {
     let mut starts: Vec<f64> = Vec::new(); // ms since main start, at each iteration's start
     let mut times: Vec<f64> = Vec::new();
     let mut checksum = 0u64;
-    // RW_O3_PROGRESS=<file> (Relax side; the JIT's MAKEPAD_RUN_O3_PROGRESS file `pending installs`): the
+    // RW_O3_PROGRESS=<file> (Relax side; the JIT's RELAX_O3_PROGRESS file `pending installs`): the
     // timed window starts at the first of QUIET_ITERS consecutive iterations that ran with no O3 build
     // queued or running and no install since the previous one; the run goes on until 10 iterations
     // after it (at most RW_MAX_MS). Without the file (rustc) the window starts RW_STEADY_AFTER_MS in.

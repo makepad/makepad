@@ -1,4 +1,4 @@
-//! The loader's build: MAKEPAD_RUN_PROVENANCE (build_stamp.rs: content hashes of the packages this
+//! The loader's build: RELAX_PROVENANCE (build_stamp.rs: content hashes of the packages this
 //! binary compiles, never git state) and the source identity of each provided crate.
 use std::path::PathBuf;
 
@@ -35,13 +35,13 @@ fn main() {
             println!("cargo:rustc-link-arg-bins=/STACK:8388608");
         } else {
             println!("cargo:rustc-link-arg-bins=-Wl,--stack,8388608");
-            // the #[relax_api] entries (makepad-relax-api) are reached only through the table's
+            // the #[relax_api] entries (relax-api) are reached only through the table's
             // bounds, and `#[used]` is no GC root on COFF outside MSVC: GNU ld's gc would drop
             // every object's entries that nothing else references
             println!("cargo:rustc-link-arg-bins=-Wl,--no-gc-sections");
         }
     }
-    // ELF: the #[relax_api] entries (makepad-relax-api) sit in the `relax_api` section, reached
+    // ELF: the #[relax_api] entries (relax-api) sit in the `relax_api` section, reached
     // only through __start_/__stop_relax_api; LLD's default start-stop-gc would drop every
     // object's section that nothing else references
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
@@ -55,8 +55,8 @@ fn main() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let g = build_stamp::graph(&dir);
     // the loader's closure holds the provided crates' closures: their files are watched here
-    println!("cargo:rustc-env=MAKEPAD_RUN_PROVENANCE={}", g.provenance(&[&dir.join("../../libs/relax"), &dir], ""));
-    // MAKEPAD_RUN_SRC_<crate>: the source identity (srchash.rs) of each provided crate as this build
+    println!("cargo:rustc-env=RELAX_PROVENANCE={}", g.provenance(&[&dir.join("../../libs/relax"), &dir], ""));
+    // RELAX_SRC_<crate>: the source identity (srchash.rs) of each provided crate as this build
     // compiles it (its resolved features and dependencies)
     for name in PROVIDED {
         let root = g.pkgs.iter().position(|p| p.name == *name).unwrap_or_else(|| panic!("{} is not a dependency", name));
@@ -76,6 +76,6 @@ fn main() {
                 }
             }
         }
-        println!("cargo:rustc-env=MAKEPAD_RUN_SRC_{}={:016x}", name.replace('-', "_"), srchash::manifest_hash(&manifest));
+        println!("cargo:rustc-env=RELAX_SRC_{}={:016x}", name.replace('-', "_"), srchash::manifest_hash(&manifest));
     }
 }

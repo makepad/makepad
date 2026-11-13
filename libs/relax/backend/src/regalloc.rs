@@ -55,7 +55,7 @@ pub enum Loc {
     None,
 }
 
-/// Set by drivers that compare builds (MAKEPAD_RUN_CODE_SIG): backends then report `alloc_sig`.
+/// Set by drivers that compare builds (RELAX_CODE_SIG): backends then report `alloc_sig`.
 pub static SIG_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Hash of an allocation (every vreg's location, frame, saves): address-independent, so
@@ -940,7 +940,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     // (x64/arm64 base_disp fold the chain down to the first base with a location), so every base
     // of the chain must be live at the use: `v = w + 16, w = self + 0x2938` read v in a loop where
     // the split parked `self` in a copy (a hole) while w stayed live past the loop: the load used
-    // `self`'s register, which the loop counter had taken (Sandbox race x64 fault at 0x2948).
+    // `self`'s register, which the loop counter had taken (a game x64 fault at 0x2948).
     if remat.iter().any(|r| matches!(r, Remat::Offset(..))) {
         let mut ok = vec![true; nv as usize];
         let live_at = |b: u32, p: u32| ranges.of(b).iter().any(|&(a, z)| a <= p && p <= z);
@@ -1331,7 +1331,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
             }
         }
     }
-    // MAKEPAD_RUN_RA_TRACE=<fn suffix>: why each value spilled (weight, length, unit) and which
+    // RELAX_RA_TRACE=<fn suffix>: why each value spilled (weight, length, unit) and which
     // allocated values hold each register over its ranges
     if trace_on(f) {
         for v in 0..nv as usize {
@@ -1453,7 +1453,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     }
     // spill slots shared by live range: values that are never live at once take one slot.
     // Every spilled value had a slot of its own, so baseline frames carried one 8-byte cell per
-    // spill (Scope's recursive type parser: ~800 bytes of parse_type's frame)
+    // spill (a large app's recursive type parser: ~800 bytes of parse_type's frame)
     if slot_share_on(options) {
         spill_bytes = pack_spill_slots(f, &reach, &block_start, &mut loc, &ranges, &start);
     }
@@ -1500,7 +1500,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     // the register of each value's region
     let mut region_reg: HashMap<u32, u8> = HashMap::new();
     if thorough && windows_on(options) && !crate::stats::opt_off(options, "-regionwin") {
-        // MAKEPAD_RUN_OPT=-defregion: regions leave out blocks that redefine the value;
+        // RELAX_OPT=-defregion: regions leave out blocks that redefine the value;
         // -edgeload: entry loads stay at the region block's start
         let (dr, el) = (!crate::stats::opt_off(options, "-defregion"), !crate::stats::opt_off(options, "-edgeload"));
         region_windows_alloc(f, &reach, &tab, &block_start, &block_end, &ranges, &wts, &loc, &remat, &call_pos, cfg, &used_callee_int, &mut occ, pos_words, &mut region_windows, &mut chained, &mut in_region, &mut region_reg, dr, el);
@@ -1671,7 +1671,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
                 // free over the defining instruction's operands and the one before it too (deferred
                 // fused compares read at the next instruction); saturating: the entry block's second
                 // instruction has a = 4 (a - 5 wrapped to u32::MAX and indexed far past the bit set:
-                // Stage's kernels, compute's x64 fuzzers)
+                // an app's kernels, compute's x64 fuzzers)
                 let a0 = if di > 0 { a.saturating_sub(5) } else { a - 1 };
                 for &c in &regs {
                     let o = &mut occ[c as usize];
@@ -1721,11 +1721,11 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
         }
     }
     // a value whose every read is served by its def window (a short temporary that spilled: def +
-    // a few uses in one block) needs no store home either. MAKEPAD_RUN_OPT=-defstore: only region
+    // a few uses in one block) needs no store home either. RELAX_OPT=-defstore: only region
     // values' stores are checked
     let defstore = !crate::stats::opt_off(options, "-defstore");
     windows.extend(region_windows);
-    // MAKEPAD_RUN_OPT=-exitstore: region values' stores stay at their definitions
+    // RELAX_OPT=-exitstore: region values' stores stay at their definitions
     let (store_skip, exit_stores) = if thorough && windows_on(options) && (!in_region.is_empty() || (defstore && !def_wins.is_empty())) && !crate::stats::opt_off(options, "-storeskip") {
         let sink = (!crate::stats::opt_off(options, "-exitstore")).then_some(SinkStores { ranges: &ranges, region_reg: &region_reg, wts: &wts });
         dead_spill_stores(f, &reach, &tab, &block_start, &block_end, &loc, &in_region, &windows, &chained, if defstore { &def_wins } else { &[] }, &use_count, cfg.defers, sink)
@@ -1740,7 +1740,7 @@ fn allocate_low(options: &relax_session::Options, f: &Func, cfg: &RegConfig, tho
     Alloc { loc, used_callee_int, used_callee_flt, spill_bytes, block_start, block_end, saves, start, end, uses: use_count, remat, windows, chained, save_skip, restore_skip, store_skip, exit_stores }
 }
 
-/// MAKEPAD_RUN_RA_TRACE=<fn name suffix>: the allocation as the emitter reads it (locations,
+/// RELAX_RA_TRACE=<fn name suffix>: the allocation as the emitter reads it (locations,
 /// call saves and their skips, windows), one line each -- for reading a miscompile
 /// next to its machine code.
 pub fn trace_alloc(f: &Func, al: &Alloc) {
@@ -1779,7 +1779,7 @@ pub fn trace_alloc(f: &Func, al: &Alloc) {
     eprint!("{}", o);
 }
 
-/// Whether the allocation checker runs (`+checkra` in the options or MAKEPAD_RUN_OPT): then every
+/// Whether the allocation checker runs (`+checkra` in the options or RELAX_OPT): then every
 /// finding fails the function's compile (`check_or_fail`) -- the checker is a gate, not a log.
 pub fn check_on(options: &relax_session::Options) -> bool {
     crate::stats::opt_off(options, "+checkra") || crate::stats::opt_env_off("+checkra")
@@ -1796,7 +1796,7 @@ pub fn check_or_fail(options: &relax_session::Options, f: &Func, cfg: &RegConfig
     Err(format!("{}: the register allocation check failed ({} findings):\n{}", f.name, bad.len(), bad.join("\n")))
 }
 
-/// MAKEPAD_RUN_OPT=+checkra: symbolic check of an allocation, as the emitter carries it out. A
+/// RELAX_OPT=+checkra: symbolic check of an allocation, as the emitter carries it out. A
 /// forward dataflow over which values each register (integer r0..r31, float / vector f0..f31) and
 /// each stack slot (spill homes, call save slots) holds, meeting by intersection:
 /// - a definition sets its register, or its home slot -- unless Alloc::store_skip drops that
@@ -4093,12 +4093,12 @@ fn build_ranges(f: &Func, reach: &[bool], tab: &OpTab, block_start: &[u32], bloc
 
 // ------------------------------------------------------------ live-range splitting at loops
 
-/// MAKEPAD_RUN_NO_THROUGH=1: no passed-through loop pieces (split_loops)
+/// RELAX_NO_THROUGH=1: no passed-through loop pieces (split_loops)
 fn through_on(options: &relax_session::Options) -> bool {
     !options.no_through
 }
 
-/// MAKEPAD_RUN_NO_WINDOWS=1: no spill windows (Alloc::windows)
+/// RELAX_NO_WINDOWS=1: no spill windows (Alloc::windows)
 fn windows_on(options: &relax_session::Options) -> bool {
     !options.no_windows
 }
@@ -4198,7 +4198,7 @@ fn allocate_split_inner(options: &relax_session::Options, f: &Func, cfg: &RegCon
 /// call -- an Rc drop_slow, a Vec grow inlined into the loop -- needs a callee-saved register for
 /// the whole loop or spills: x64 has five.) Returns the rewritten copy, or None.
 fn trace_on(f: &Func) -> bool {
-    match std::env::var("MAKEPAD_RUN_RA_TRACE") {
+    match std::env::var("RELAX_RA_TRACE") {
         Ok(w) => f.name.ends_with(w.as_str()),
         Err(_) => false,
     }
@@ -4352,7 +4352,7 @@ fn split_cold_calls(f: &Func, freq: &[f32], cand: &[bool]) -> Option<Func> {
             changed = true;
         }
         // a copy pair per value per cold call: a big loop with many cold calls made
-        // thousands (Stage's video_edit store worker: 10.6k vregs -> 69k after both splits,
+        // thousands (an app's video editing store worker: 10.6k vregs -> 69k after both splits,
         // 7.4 s of allocation, 1.8 MB of code): past half again the function's values the
         // split costs more than its spills, and the first allocation stands
         if g.vregs.len() - nv0 > SPLIT_GROWTH_MAX(nv0) / 2 {
@@ -4433,7 +4433,7 @@ fn allocate_split_loops_inner(options: &relax_session::Options, f: &Func, al: Al
         }
         al2 = allocate_low(options, &g, cfg, true, gfreq, Some(&through), Some(&origin));
     }
-    if let Ok(w) = std::env::var("MAKEPAD_RUN_RA_TRACE") {
+    if let Ok(w) = std::env::var("RELAX_RA_TRACE") {
         if f.name.ends_with(w.as_str()) {
             let n1 = al.loc.iter().filter(|l| matches!(l, Loc::Stack(_))).count();
             let n2 = al2.loc.iter().filter(|l| matches!(l, Loc::Stack(_))).count();
@@ -5074,7 +5074,7 @@ fn pack_spill_slots(f: &Func, reach: &[bool], block_start: &[u32], loc: &mut [Lo
     bytes
 }
 
-/// MAKEPAD_RUN_NO_SLOT_SHARE=1: every spilled value keeps a slot of its own
+/// RELAX_NO_SLOT_SHARE=1: every spilled value keeps a slot of its own
 fn slot_share_on(options: &relax_session::Options) -> bool {
     !options.no_slot_share
 }
@@ -5375,7 +5375,7 @@ pub fn share_index_bases(f: &Func) -> Option<Func> {
 /// block -- neither redefined since, no call between, and the register one still read later in the
 /// block (so its register holds it there) -- reads the register instead of loading the slot.
 /// `mov r14, [rbp-0x70]` then `cmp r10, [rbp-0x70]` (html's position after its copy) becomes
-/// `cmp r14, ...`. Keyed by (use position, vreg). MAKEPAD_RUN_OPT=-copyreuse: none (bisection).
+/// `cmp r14, ...`. Keyed by (use position, vreg). RELAX_OPT=-copyreuse: none (bisection).
 pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> HashMap<(u32, u32), u8> {
     let mut out = HashMap::new();
     if crate::stats::opt_off(options, "-copyreuse") {
@@ -5386,7 +5386,7 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
     let mut tu = Vec::new();
     // (block, use position, spilled vreg, register copy, its register): reads after the copy's
     // last read in the block, served when the copy is live out (html's `pos` copy at the loop latch:
-    // `mov r13, [rbp-0x70]; mov r10, [rbp-0x70]; cmp r10, [rbp-0x30]`). MAKEPAD_RUN_OPT=-copyliveout
+    // `mov r13, [rbp-0x70]; mov r10, [rbp-0x70]; cmp r10, [rbp-0x30]`). RELAX_OPT=-copyliveout
     let mut pending: Vec<(u32, u32, u32, u32, u8)> = Vec::new();
     let no_live_out = crate::stats::opt_off(options, "-copyliveout");
     for (bi, b) in f.blocks.iter().enumerate() {
@@ -5512,7 +5512,7 @@ pub fn copy_reuse(options: &relax_session::Options, f: &Func, al: &Alloc) -> Has
 /// where `i` still holds the same value, so the allocator joins them (`equal_copies`) and the copy
 /// `mov old, i` per iteration is gone (LLVM: one induction variable, its increment at the latch).
 /// A step is `i = i +- k` in place or `t = i +- k; i = t` (t read only by that move).
-/// MAKEPAD_RUN_OPT=-sinkinc off.
+/// RELAX_OPT=-sinkinc off.
 pub fn sink_increments(options: &relax_session::Options, f: &Func) -> Option<Func> {
     if crate::stats::opt_off(options, "-sinkinc") {
         return None;
@@ -5757,7 +5757,7 @@ pub fn branch_compare(b: &Block, uses: &[u32]) -> (Option<Cmp>, usize) {
 /// RIR is not SSA: a compare's operands must hold at the reader the values they had at the compare.
 /// In one block nothing between the two writes them; across blocks each has one definition, which
 /// runs before the compare on every path (then no path from the compare to the reader passes it).
-/// `sel_ok`: the backend's select takes that compare for that data class. MAKEPAD_RUN_OPT=-cmpread.
+/// `sel_ok`: the backend's select takes that compare for that data class. RELAX_OPT=-cmpread.
 pub fn compares_into_readers(options: &relax_session::Options, f: &Func, sel_ok: fn(&Cmp, Cls) -> bool) -> Option<Func> {
     if crate::stats::opt_off(options, "-cmpread") {
         return None;

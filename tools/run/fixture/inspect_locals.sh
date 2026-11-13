@@ -6,8 +6,8 @@
 # - outer: `scale` (an integer held across the panic call) = 3001, `p` (a struct a call takes the
 #   address of: a stack slot) = Pt { x: 1000, y: 7 }, `n` = 1000, `gone` optimised out;
 # - pick (its own inline level, or its own frame where it is not inlined): `i` = 9, `doubled` = 6002.
-# Runs at O3 (outer tiers up: pick inlined at O3), O1 (MAKEPAD_RUN_O1=always), the default O2
-# pipeline (MAKEPAD_RUN_O3=0), and warm (a second run linking the first run's cached O3 code).
+# Runs at O3 (outer tiers up: pick inlined at O3), O1 (RELAX_O1=always), the default O2
+# pipeline (RELAX_O3=0), and warm (a second run linking the first run's cached O3 code).
 # Also a breakpoint in `sink` (called from outer's O3 code): `locals break=K1` shows outer's `p`
 # and `n` in the frame above; a paused thread (`pause`, `locals thread=main`); and a thread parked
 # in a futex (`stacks thread=parked`: walked from its syscall's sp and pc, its program frames).
@@ -27,8 +27,8 @@ check() {
 # start <cache dir> <secs> <env...>: the app in the background (pid in $pid)
 start() {
     c=$1; secs=$2; shift 2
-    env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
-        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/$c" MAKEPAD_RUN_PANIC_PARK=600 \
+    env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" TMPDIR="$dir/t" \
+        RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/$c" RELAX_PANIC_PARK=600 \
         PROBE_TRIGGER="$dir/trigger" PROBE_SECS=$secs "$@" \
         $J run relax-provided-fixture --bin relax-inspect-locals > "$dir/run-$c.log" 2>&1 &
     pid=$!
@@ -93,7 +93,7 @@ stop
 
 # O1 and the default (O2) pipeline
 for tier in o1 base; do
-    case $tier in o1) e="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0" ;; *) e="MAKEPAD_RUN_O3=0" ;; esac
+    case $tier in o1) e="RELAX_O1=always RELAX_O3=0" ;; *) e="RELAX_O3=0" ;; esac
     start "cache-$tier" 300 $e
     sleep 1
     r=$(panic_locals)

@@ -80,6 +80,15 @@ fn a03_select_and_search() {
             }
             v.sort_unstable();
             println!("| select {} {} {} {}", n, index, valid, v == sorted);
+            // by a key that reorders the values (relax issue 86: the method was missing)
+            let key = |x: &i32| (*x % 7, -*x);
+            let mut by_key = input.clone();
+            by_key.sort_by_key(key);
+            let mut w = input.clone();
+            let (left, mid, right) = w.select_nth_unstable_by_key(index, key);
+            let pivot = key(mid);
+            let valid = pivot == key(&by_key[index]) && left.iter().all(|x| key(x) <= pivot) && right.iter().all(|x| key(x) >= pivot);
+            println!("| select by key {} {} {} {}", n, index, valid, left.len() + 1 + right.len() == n);
         }
         for key in [-1i32, 0, 1, 14, 28, 29] {
             println!(

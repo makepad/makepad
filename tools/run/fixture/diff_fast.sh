@@ -2,9 +2,9 @@
 # diff_fast.sh: the Relax-vs-rustc differential net (fast tier, for the landing gate).
 # Each program in tools/run/fixture/diff/*.rs (floats/trig, TLS + jump tables, struct copies, closures and
 # iterators, async, panics/unwinding, integer overflow) is built once natively with `rustc -O --test` (cached by
-# source hash + rustc version) and run under `makepad test` at O1 (MAKEPAD_RUN_O1=always: the baseline code and its quick register allocator, no O3), at the default
+# source hash + rustc version) and run under `makepad test` at O1 (RELAX_O1=always: the baseline code and its quick register allocator, no O3), at the default
 # O3=0 tier (O2 pipeline) and at O3
-# (MAKEPAD_RUN_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds).
+# (RELAX_O3=1, call threshold 1, rounds with sleeps so the async O3 code is installed for later rounds).
 # stdout lines `D ...`, the exit status and a checksum of them must equal the native run's.
 # Prints `diff: N/N equal`, or per failing program a minimal diff, and exits 1.
 # Usage (workspace root, (the JIT runs through `cargo run --profile host`)): tools/run/fixture/diff_fast.sh
@@ -24,18 +24,18 @@ J="cargo run --profile host -q --manifest-path $root/Cargo.toml -p makepad-run -
 M=$J
 # the std tree of the checkout being tested: a makepad binary whose target dir is outside its tree otherwise
 # looks for <target>/../src/libs/relax/compiler/std and every run exits 1 with no output
-export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
+export RELAX_STD=${RELAX_STD:-$root/libs/relax/compiler/std}
 cache=${DIFF_CACHE:-${TMPDIR:-/tmp}/diff_fast_cache}
 jobs=${DIFF_JOBS:-4}
 # DIFF_TIERS: the JIT tiers (default "o1 base o3"; `counted`: O3 on at call threshold 1 with every counted
-# build kept installed, MAKEPAD_RUN_PGO_HOLD=1 -- the PGO counted code itself; `nocodegen`: MAKEPAD_RUN_NO_CODEGEN=1,
+# build kept installed, RELAX_PGO_HOLD=1 -- the PGO counted code itself; `nocodegen`: RELAX_NO_CODEGEN=1,
 # no machine code, every function in the threaded interpreter, arm64 Macs only: nocodegen_leg.sh)
 difftiers=${DIFF_TIERS:-o1 base o3}
 sleepms=${DIFF_SLEEP_MS:-250}
 # DIFF_VERIFY (default 1): every tier run verifies the RIR after each pass and after the rewrites
 # past the pipeline (instrument, web32, backend rewrites, split_loops); a broken function is an
 # ICE naming the pass, so the program's output differs (JITSAFE 19). DIFF_VERIFY=0: off.
-verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=MAKEPAD_RUN_VERIFY_PASSES=1
+verify=; [ "${DIFF_VERIFY:-1}" = 0 ] || verify=RELAX_VERIFY_PASSES=1
 # (a --job run gets the parent's work dir: no dir of its own, which every job left behind empty)
 [ "${1:-}" = "--job" ] || { work=$(mktemp -d "${TMPDIR:-/tmp}/diff_fast.XXXXXX") || exit 2; }
 mkdir -p "$cache"
@@ -63,15 +63,15 @@ job() {
     *)
         d=$work/$p.$k.home; mkdir -p "$d/home" "$d/tmp"
         case $k in
-        o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
-        base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
-        nocodegen) tier="MAKEPAD_RUN_NO_CODEGEN=1"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        o1) tier="RELAX_O1=always RELAX_O3=0"; ms=0 ;;
+        base) tier="RELAX_O3=0"; ms=0 ;;
+        counted) tier="RELAX_O3=1 RELAX_PGO_HOLD=1"; ms=$sleepms ;;
+        nocodegen) tier="RELAX_NO_CODEGEN=1"; ms=0 ;;
+        *) tier="RELAX_O3=1"; ms=$sleepms ;;
         esac
-        env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify \
-            MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
-            MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
+        env $tier RELAX_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify \
+            MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
+            RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" \
             nice -n 10 $M test "$src" > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
         rm -r "$d" ;;
@@ -87,15 +87,15 @@ pkgjob() {
     *)
         d=$work/$pkg~$prog.$k.home; mkdir -p "$d/home" "$d/tmp"
         case $k in
-        o1) tier="MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0"; ms=0 ;;
-        base) tier="MAKEPAD_RUN_O3=0"; ms=0 ;;
-        counted) tier="MAKEPAD_RUN_O3=1 MAKEPAD_RUN_PGO_HOLD=1"; ms=$sleepms ;;
-        nocodegen) tier="MAKEPAD_RUN_NO_CODEGEN=1"; ms=0 ;;
-        *) tier="MAKEPAD_RUN_O3=1"; ms=$sleepms ;;
+        o1) tier="RELAX_O1=always RELAX_O3=0"; ms=0 ;;
+        base) tier="RELAX_O3=0"; ms=0 ;;
+        counted) tier="RELAX_O3=1 RELAX_PGO_HOLD=1"; ms=$sleepms ;;
+        nocodegen) tier="RELAX_NO_CODEGEN=1"; ms=0 ;;
+        *) tier="RELAX_O3=1"; ms=$sleepms ;;
         esac
-        (cd "$root" && env $tier MAKEPAD_RUN_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
-            MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
-            MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
+        (cd "$root" && env $tier RELAX_O3_CALLS=1 DIFF_SLEEP_MS=$ms $verify MAKEPAD_HAL_BACKEND=headless \
+            MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" \
+            RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" \
             nice -n 10 $M run --quiet --unattended "$pkg" -- "$prog") > "$out.raw" 2> "$out.err"
         echo $? > "$out.rc"
         rm -r "$d" ;;

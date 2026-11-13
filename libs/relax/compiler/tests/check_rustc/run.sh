@@ -9,9 +9,9 @@ set -eu
 H=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 T=$(mktemp -d)
-export MAKEPAD_RUN_CACHE=off
-export MAKEPAD_RUN_STD="$H/../../std"
-export MAKEPAD_RUN_CACHE_DIR="$T/target"
+export RELAX_CACHE=off
+export RELAX_STD="$H/../../std"
+export RELAX_CACHE_DIR="$T/target"
 # file:line:col: E<code> | file:line:col: warning: <message> (relax's ` -- help` and ` [lint]` tails dropped)
 norm() {
   python3 -c '

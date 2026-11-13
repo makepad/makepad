@@ -1151,6 +1151,17 @@ fn macho_separators_and_comments() {
     assert_eq!(words(text(&o)), vec![0xD280_0020, 0xD280_0041, 0xD280_0062, 0xD65F_03C0]);
 }
 
+/// relax #91: a `#` that starts a statement is a line comment on arm64 too (LLVM AsmLexer), operands
+/// in it included (zeroize's `asm!("# {}", in(reg) ptr)`); after an instruction it is an immediate.
+#[test]
+fn hash_at_statement_start_is_a_comment() {
+    for format in [Format::MachO, Format::Elf] {
+        let pieces = [Piece::Text("# ".to_string()), Piece::Op(0, None), Piece::Text("\n  # spaced {} line\nmov x1, #2\n#".to_string())];
+        let o = assemble(Arch::Arm64, format, Kind::Inline, &pieces, &[r(0)], false).unwrap();
+        assert_eq!(words(text(&o)), vec![0xD280_0041], "{format:?}");
+    }
+}
+
 #[test]
 fn inst_and_arch_directives() {
     let o = ours(".arch armv8.2-a\n.inst 0xd503201f\n.inst 0xd65f03c0, 0x12345678\nnop").unwrap();

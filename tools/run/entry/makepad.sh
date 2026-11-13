@@ -585,7 +585,7 @@ fi
 mkdir -p "$downloads" "$logs_dir" "$jobs" "$loader_root" || fail "Cannot create $cache"
 logs=$logs_dir
 stamp start
-export MAKEPAD_RUN_HOME="$root"
+export RELAX_HOME="$root"
 
 # Restore an unconfirmed switch before any decision about the loader already here.
 if [ -e "$loader_root/pending" ]; then
@@ -610,7 +610,7 @@ makepad=$src/target/host/makepad
 # The release service's latest licence-free `runner` release names the runner's git repositories
 # on the service's read-only git face and the loader's source cut from the same Makepad commit.
 # With no arguments the folder moves to it: each commit's pack goes into
-# $MAKEPAD_RUN_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
+# $RELAX_HOME/cache/incoming/<commit>.pack (renamed into place when complete), where makepad run
 # takes it instead of downloading, and the loader is compiled for it. With arguments a loader
 # compiled before stays as it is (the runner and the apps it recorded were made for it).
 runner_release=
@@ -1059,7 +1059,7 @@ fi
 # licence-free `runner` release, which the service serves read-only over git
 # ($service/public/git/runner/<repository>.git, one branch per release). The repository at
 # `makepad` is the workspace, the others mount at their folders inside it. makepad run keeps its
-# stores in $MAKEPAD_RUN_HOME/cache and, with --cached, starts the last one at once while it
+# stores in $RELAX_HOME/cache and, with --cached, starts the last one at once while it
 # fetches the new release for the next start. Offline, the release recorded last.
 export MAKEPAD_LOADER_ROOT="$root" MAKEPAD_LOADER_SERVICE="$service"
 if [ $# -gt 0 ]; then
@@ -1096,7 +1096,7 @@ else
     repos=$(sed -n '2,$p' "$cache/runner/release")
 fi
 git_base=$service/public/git/runner
-# The runner's launch record ($MAKEPAD_RUN_HOME/apps/runner.launch, one `key<TAB>value` line each):
+# The runner's launch record ($RELAX_HOME/apps/runner.launch, one `key<TAB>value` line each):
 # what `makepad` with no arguments runs, from here and from anywhere else (makepad launch.rs).
 launch_dir=$root/apps
 mkdir -p "$launch_dir" || fail "Cannot create $launch_dir"

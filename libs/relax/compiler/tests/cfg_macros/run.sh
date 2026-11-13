@@ -9,8 +9,8 @@ output=${2:-$compiler/local/agent_state/cfg_macros}
 mkdir -p "$output"
 output=$(cd "$output" && pwd)
 export CARGO_NET_OFFLINE=true
-export MAKEPAD_RUN_STD="$compiler/std"
-export MAKEPAD_RUN_CACHE=off
+export RELAX_STD="$compiler/std"
+export RELAX_CACHE=off
 cd "$fixture"
 for mode in off on; do
     flags=(--no-default-features)
@@ -21,7 +21,7 @@ for mode in off on; do
     }
     "$output/rustc/release/cfg-macros-app" > "$output/rustc-$mode.out"
     for jobs in 1 6; do
-        MAKEPAD_RUN_JOBS=$jobs MAKEPAD_RUN_CACHE_DIR="$output/relax-$mode-$jobs" \
+        RELAX_JOBS=$jobs RELAX_CACHE_DIR="$output/relax-$mode-$jobs" \
             "$relax_bin" run --quiet cfg-macros-app "${flags[@]}" \
             > "$output/relax-$mode-$jobs.out" 2> "$output/relax-$mode-$jobs.log" || {
                 cat "$output/relax-$mode-$jobs.log"

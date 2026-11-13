@@ -11,14 +11,14 @@ WANT="expanded macros 42 7 3 42 16 9 | 4 20"
 ok=1
 run() { # run <label> <expected> [env..]
   local label=$1 want=$2; shift 2
-  OUT=$(cd "$T/x" && env "$@" MAKEPAD_RUN_STD=$H/../../std MAKEPAD_HOME=$T/home MAKEPAD_RUN_HOME=$T MAKEPAD_RUN_CACHE_DIR=$T/cache MAKEPAD_RUN_TARGET_DIR=$T/target "$R" run --quiet xmx-app 2>>"$T/err")
+  OUT=$(cd "$T/x" && env "$@" RELAX_STD=$H/../../std MAKEPAD_HOME=$T/home RELAX_HOME=$T RELAX_CACHE_DIR=$T/cache RELAX_TARGET_DIR=$T/target "$R" run --quiet xmx-app 2>>"$T/err")
   echo "$label: $OUT"
   [ "$OUT" = "$want" ] || ok=0
 }
 R=$1
 mkdir -p "$T/x" && cp -R "$H/Cargo.toml" "$H/app" "$H/lib" "$T/x/"
 for defer in "" app_exports.rs app_defs.rs; do
-  run "uncached${defer:+, $defer deferred}" "$WANT" MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_LAZY_DEFER=$defer
+  run "uncached${defer:+, $defer deferred}" "$WANT" RELAX_CACHE=off RELAX_LAZY_DEFER=$defer
 done
 run "cold" "$WANT"
 run "warm" "$WANT"

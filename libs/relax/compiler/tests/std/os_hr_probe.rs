@@ -1,5 +1,5 @@
 // std-os lane: the std-os modules exercised with primitive-only output (no Debug/Display of
-// std types), so Relax can run them before ADT formatting lands. Differential: os_diff.sh --makepad.
+// std types), so Relax can run them before ADT formatting lands. Differential: agree.sh.
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, Once, OnceLock, RwLock};
 use std::thread;

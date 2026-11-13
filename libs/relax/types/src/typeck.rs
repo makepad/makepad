@@ -341,7 +341,7 @@ impl Body {
             args, expr_ty, expr_typed, pat_ty, pat_typed, field_uses, struct_updates, awaits, dependencies, locals, param_pats, closures, errors);
     }
 
-    /// Memory report (MAKEPAD_RUN_MEM_REPORT): per table (entries, heap bytes incl. nested vectors),
+    /// Memory report (RELAX_MEM_REPORT): per table (entries, heap bytes incl. nested vectors),
     /// accumulated into `acc` by name.
     /// Memory report: the bytes these contents took in the previous layout, counted as that
     /// layout's report counted them: a 1304 B struct; HashMap side tables grown by insertion
@@ -610,9 +610,9 @@ pub(crate) fn try_instantiate_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, 
     // Diagnostic only: sample one in N calls, including queries outside JIT scopes.
     // Keep this off for timing runs; symbolizing a backtrace is deliberately expensive.
     static SAMPLE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let sample = *SAMPLE.get_or_init(|| std::env::var("MAKEPAD_RUN_TYPECK_BACKTRACE").ok().and_then(|s| s.parse().ok()).unwrap_or(0));
+    let sample = *SAMPLE.get_or_init(|| std::env::var("RELAX_TYPECK_BACKTRACE").ok().and_then(|s| s.parse().ok()).unwrap_or(0));
     if sample != 0 && CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % sample == 0 {
-        let trace = format!("makepad-run typeck-backtrace: {} def={} args={:?} origin={} time={}\n{}\nmakepad-run typeck-backtrace-end\n",
+        let trace = format!("relax typeck-backtrace: {} def={} args={:?} origin={} time={}\n{}\nrelax typeck-backtrace-end\n",
             prog.def_path(def), def.0, args, crate::clock::TYS_ORIGIN.with(|o| o.get()),
             relax_codegen::fncost::mono(), std::backtrace::Backtrace::force_capture());
         // The app may write directly to fd 2 without Rust's stderr lock. Format
@@ -649,7 +649,7 @@ pub(crate) fn check_fn(prog: &Program, tcx: &Tcx, def: DefId) -> Body {
     let state = crate::tcx::EvalState::new();
     let cx = crate::tcx::EvalCx::new(prog, &tcx, crate::tcx::TypingEnv::fully_monomorphized(&prog), &state);
     static ST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let st = *ST.get_or_init(|| std::env::var("MAKEPAD_RUN_TYSTATS").is_ok());
+    let st = *ST.get_or_init(|| std::env::var("RELAX_TYSTATS").is_ok());
     let t0 = if st { relax_session::clock::cpu_ns() } else { 0 };
     thread_local! { static NEST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
     let child0 = if st { NEST.with(|c| c.get()) } else { 0 };
@@ -668,7 +668,7 @@ pub(crate) fn check_fn(prog: &Program, tcx: &Tcx, def: DefId) -> Body {
     b
 }
 
-/// MAKEPAD_RUN_LAZY_STATS: the fn defs whose bodies were type-checked (what a lazy parse would parse)
+/// RELAX_LAZY_STATS: the fn defs whose bodies were type-checked (what a lazy parse would parse)
 pub static CHECKED_DEFS: relax_session::sync::Mutex<Option<std::collections::HashSet<u32>>> = relax_session::sync::Mutex::new(None);
 
 fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: DefId, args: &[TyId]) -> Body {
@@ -678,7 +678,7 @@ fn check_fn_body(cx: &crate::tcx::EvalCx<'_>, prog: &Program, tcx: &Tcx, def: De
         crate::why::enter(cause)
     });
     static LAZY_STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *LAZY_STATS.get_or_init(|| std::env::var_os("MAKEPAD_RUN_LAZY_STATS").is_some()) {
+    if *LAZY_STATS.get_or_init(|| std::env::var_os("RELAX_LAZY_STATS").is_some()) {
         CHECKED_DEFS.lock().unwrap().get_or_insert_with(Default::default).insert(def.0);
     }
     let d = prog.def(def);
@@ -2003,11 +2003,11 @@ impl<'a> Fcx<'a> {
         // before fallback.
         self.try_handle_opaque_type_uses_next();
         self.retry_goals(false);
-        // diverging fallback (rustc fallback.rs): a variable only a `!` value flowed into is `()`
-        // before edition 2024 and `!` from 2024 (`f(|_| panic!())` instantiates R = ())
+        // diverging fallback (rustc fallback.rs): a variable only a `!` value flowed into is `!`, in
+        // every edition since rustc 1.100.0 (before it, `()` before edition 2024): `f(|_| panic!())`
+        // instantiates R = !
         if !self.diverging.is_empty() {
-            let ed = self.prog.crates[self.prog.def(self.b.def).krate as usize].edition;
-            let fb = if ed >= 2024 { self.tcx.tys.never } else { self.tcx.tys.unit };
+            let fb = self.tcx.tys.never;
             for v in std::mem::take(&mut self.diverging) {
                 let s = self.shallow(v);
                 if matches!(self.tcx.tys.kind(s), TyKind::Infer(_)) {
@@ -5189,7 +5189,7 @@ impl<'a> Fcx<'a> {
                 // `<Op>Assign` call (`n /= NonZero<u32>`, `x %= &big`; rustc is_builtin_binop needs
                 // both sides primitive)
                 let sb0 = self.shallow(tb);
-                if self.non_prim_operand(sb0) {
+                if self.non_prim_operand(sb0) || self.ref_to_var(sb0) {
                     self.cur_binop = e.0;
                     if self.prim_lhs_op(*op, e, sa, sb0, lo, true).is_some() {
                         return unit;
@@ -5397,8 +5397,12 @@ impl<'a> Fcx<'a> {
                     st = self.never_scrutinee(*x, st);
                 }
                 // arms coerce to a known expected type (rustc _match.rs check_match:
-                // CoerceMany starts from `ExpectHasType(ety)` unless it is `()`)
+                // CoerceMany starts from `ExpectHasType(ety)` unless it is `()`). A hint is no
+                // such type: for a match that is itself an arm of an outer match the hint is the
+                // outer match's earlier arms' type, and the two meet in the outer CoerceMany,
+                // which may coerce those arms to this one's type (`&String` arms to `&str`).
                 let target = match expected {
+                    Some(_) if soft => None,
                     Some(et) => {
                         let s = self.shallow(et);
                         if matches!(self.tcx.tys.kind(s), TyKind::Infer(_) | TyKind::Error) || s == unit || self.is_unsized_ty(s) {
@@ -5804,7 +5808,9 @@ impl<'a> Fcx<'a> {
                         TyKind::Adt(d, args, regions) => {
                             let adt = self.tcx.adts.get(&d);
                             if let Some(adt) = adt {
-                                if !adt.is_enum {
+                                // only a tuple struct has fields named by position: `owned.0` on a
+                                // struct with named fields is a field of its Deref target
+                                if !adt.is_enum && adt.variants[0].shape == 1 {
                                     if let Some(f) = adt.variants[0].fields.get(*idx as usize) {
                                         if self.field_visible(d, f) {
                                             self.b.field_idx.insert(e.0, (derefs as u32, *idx));
@@ -5874,10 +5880,13 @@ impl<'a> Fcx<'a> {
                             // (a generic index of a polymorphic body -- `I: SliceIndex<[T]>` --
                             // goes through std's `impl<T, I: SliceIndex<[T]>> Index<I> for [T]`:
                             // the result is `<I as SliceIndex<[T]>>::Output`)
+                            // only a usize (or a still-open integer) and the std range structs
+                            // index builtin; every other index type selects `Index` (rustc
+                            // lookup_indexing), std's `(Bound<usize>, Bound<usize>)` included
                             let std_range = match self.tcx.tys.kind(tis) {
                                 TyKind::Adt(..) => idx_is_range,
-                                TyKind::Param(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. }) => false,
-                                _ => true,
+                                TyKind::Int(_) | TyKind::IntVar(_) | TyKind::Infer(_) | TyKind::Never | TyKind::Error => true,
+                                _ => false,
                             };
                             if !std_range {
                                 if let Some(td) = self.lang_item(&["ops", "Index"]) {
@@ -6139,15 +6148,6 @@ impl<'a> Fcx<'a> {
                 adt_ty
             }
             ExprKind::Range(a, b, incl) => {
-                let elem = self.fresh(0);
-                if let Some(a) = a.get() {
-                    let t = self.check_expr(a, Some(elem));
-                    self.eq(t, elem);
-                }
-                if let Some(b) = b.get() {
-                    let t = self.check_expr(b, Some(elem));
-                    self.eq(t, elem);
-                }
                 let name = match (a.is_some(), b.is_some(), *incl) {
                     (true, true, false) => "Range",
                     (true, true, true) => "RangeInclusive",
@@ -6156,7 +6156,26 @@ impl<'a> Fcx<'a> {
                     (false, true, true) => "RangeToInclusive",
                     (false, false, _) => "RangeFull",
                 };
-                match self.lang_item(&["ops", name]) {
+                let range = self.lang_item(&["ops", name]);
+                let elem = self.fresh(0);
+                // rustc lowers a range to a struct literal (`a..=b` to `RangeInclusive::new(a, b)`):
+                // an expected type of the same range gives the bounds their type (expr.rs
+                // check_expr_struct_fields adt_ty_hint), and each bound is a coercion site
+                // (`*mut u8` bounds for a `Range<*const u8>` parameter)
+                if let (Some(x), Some(d)) = (expected, range) {
+                    let x = self.shallow(x);
+                    if let TyKind::Adt(xd, args, _) = self.tcx.tys.kind(x).clone() {
+                        if xd == d {
+                            if let [arg] = *self.tcx.tys.list(args) { self.eq(elem, arg); }
+                        }
+                    }
+                }
+                for bound in [a.get(), b.get()].into_iter().flatten() {
+                    let t = self.check_expr(bound, Some(elem));
+                    let pos = self.ast().expr(bound).lo;
+                    self.coerce_or_unify(t, elem, Some(bound), pos);
+                }
+                match range {
                     Some(d) => {
                         let n = self.tcx.adts.get(&d).map_or(0, |a| a.n_generics);
                         let args = if n == 0 { Vec::new() } else { vec![elem] };
@@ -6568,8 +6587,12 @@ impl<'a> Fcx<'a> {
                 // builtin path only when neither operand is a type variable, and check_overloaded_binop
                 // records the method for `?T: PartialEq<?R>` while it is ambiguous. Typing it as a
                 // built-in comparison unified both sides and made the capture analysis of
-                // `|p| *p == path` (p: &?T) consume `path` (a false E0382 in Scope's code_graph).
-                if !prim_ref && matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Slice(_) | TyKind::Str | TyKind::Dyn(..) | TyKind::Param(_) | TyKind::Infer(_) | TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { .. }, .. })) {
+                // `|p| *p == path` (p: &?T) consume `path` (a false E0382 in an app's code_graph).
+                // Every alias is one too, an opaque type (`impl PartialEq` another fn returns)
+                // included, whatever its hidden type: a built-in comparison of an aggregate hidden
+                // type found two different values equal (an app's `structure(&a) != structure(&b)`
+                // over a tuple of maps, relax PR 152)
+                if !prim_ref && matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..) | TyKind::Slice(_) | TyKind::Str | TyKind::Dyn(..) | TyKind::Param(_) | TyKind::Infer(_) | TyKind::Alias(..)) {
                     if let Some(r) = self.check_cmp_trait(e, op, sa, b, lo, None) {
                         return r;
                     }
@@ -6639,7 +6662,21 @@ impl<'a> Fcx<'a> {
                     self.cur_binop = e.0;
                     return self.check_op_trait(op, sa, b, lo, false);
                 }
-                self.check_expr(b, None);
+                // a non-primitive right operand, or a reference to one, is an operator trait call
+                // too (`256u32 >> &big` with `impl Shr<&Big> for u32`; rustc is_builtin_binop needs
+                // both operands integral): built in, the shift took the reference's address
+                let tb0 = self.check_expr(b, None);
+                let sb0 = self.shallow(tb0);
+                let non_prim = self.non_prim_operand(sb0);
+                if non_prim || self.ref_to_var(sb0) {
+                    if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo, false) {
+                        return r;
+                    }
+                    if non_prim {
+                        let (x, y) = (self.ty_str(sa), self.ty_str(sb0));
+                        self.err(lo, format!("E0277: {}", binop_unimplemented(op, &x, &y)));
+                    }
+                }
                 ta
             }
             _ => {
@@ -6678,7 +6715,7 @@ impl<'a> Fcx<'a> {
                 // a primitive left operand with a non-primitive right one is an operator trait
                 // call too (`3u32 * duration`: `impl Mul<Duration> for u32`; rustc is_builtin_binop
                 // needs both sides primitive)
-                if self.non_prim_operand(sb0) || matches!(self.tcx.tys.kind(sb0), TyKind::Infer(_)) {
+                if self.non_prim_operand(sb0) || self.ref_to_var(sb0) || matches!(self.tcx.tys.kind(sb0), TyKind::Infer(_)) {
                     let sa = self.shallow(ta);
                     if let Some(r) = self.prim_lhs_op(op, e, sa, sb0, lo, false) {
                         return r;
@@ -7383,7 +7420,7 @@ impl<'a> Fcx<'a> {
         // lifetimes are fresh.
         let mut full = self.infer_item_args(item, &gargs);
         full[..impl_full.len()].copy_from_slice(&impl_full);
-        self.write_method_user_type(e.0, item, &full);
+        self.write_method_user_type(e.0, item, &full, &tf);
         let (ps, ret) = self.instantiate_call_signature(item, &full, &sig);
         // method/confirm.rs:150-160 (add_obligations): registered once with the
         // instantiated args, before the arguments are checked.
@@ -7450,18 +7487,19 @@ impl<'a> Fcx<'a> {
         // Some(10)`, one impl); several impls (`&A: PartialEq<&B>` / `<&mut B>`, String's) leave
         // it open, as rustc's fresh variable does -- `x == &Unicode(y.as_ref())` with x:
         // &Unicode<CowStr> is `Unicode<&str>`, not `Unicode<CowStr>` (op.rs check_overloaded_binop)
-        let hint = if self.tcx.has_param(da) {
-            None
+        // `open`: the impls leave `L: Cmp<?R>` open, so rustc's ?R takes the right operand's own type
+        let (hint, open) = if self.tcx.has_param(da) {
+            (None, false)
         } else {
             let rhs = self.fresh(0);
             let mark = self.start_snapshot();
             let hint = match self.select_trait(td, da, &[rhs]) {
                 Ok(Some(_)) => {
                     let h = self.infcx.deeply_resolve_ignoring_regions(rhs);
-                    if self.tcx.tys.has_infer(h) { None } else { Some(h) }
+                    if self.tcx.tys.has_infer(h) { (None, true) } else { (Some(h), false) }
                 }
-                Ok(None) => None,
-                Err(_) => Some(ta),
+                Ok(None) => (None, true),
+                Err(_) => (Some(ta), false),
             };
             self.rollback_to(mark);
             hint
@@ -7475,6 +7513,19 @@ impl<'a> Fcx<'a> {
         let selection = self.select_trait(td, da, &[db]);
         let rhs = if selection.is_ok() {
             db
+        } else if checked_b.is_some() && open {
+            // a right operand checked as written is not coerced: rustc coerces it to ?R, which
+            // the impls left open (`&A: PartialEq<&B>` and `<&mut B>`), so ?R is its own type and
+            // `L: Cmp<R>` is unmet (op.rs check_overloaded_binop; relax issue 87: `&usize ==
+            // &&usize` compiled). The error names the innermost pair the impls for references
+            // reach: can't compare `usize` with `&usize`.
+            let (mut x, mut y) = (da, db);
+            while let (TyKind::Ref(_, i, _), TyKind::Ref(_, j, _)) = (self.tcx.tys.kind(x).clone(), self.tcx.tys.kind(y).clone()) {
+                (x, y) = (i, j);
+            }
+            let (x, y) = (self.ty_str(x), self.ty_str(y));
+            self.err(lo, format!("E0277: {}", binop_unimplemented(op, &x, &y)));
+            return Some(self.tcx.tys.bool_);
         } else if !matches!(self.select_trait(td, da, &[da]), Err(_)) {
             self.coerce_or_unify(tb, ta, Some(b), lo);
             da
@@ -7587,6 +7638,17 @@ impl<'a> Fcx<'a> {
         if let TyKind::Ref(_, inner, _) = self.tcx.tys.kind(sb).clone() {
             let si = self.shallow(inner);
             return non_prim(self.tcx.tys.kind(si));
+        }
+        false
+    }
+
+    /// A reference to a type not known yet (`|t| x - t` where `t: &?V` comes from a map whose value
+    /// type a later `insert` gives): rustc's overloaded path, where `f64: Sub<&?V>` selects core's
+    /// `Sub<&f64> for f64`; the built-in one would unify `f64` with `&?V` (E0308).
+    fn ref_to_var(&mut self, sb: TyId) -> bool {
+        if let TyKind::Ref(_, inner, _) = self.tcx.tys.kind(sb).clone() {
+            let si = self.shallow(inner);
+            return matches!(self.tcx.tys.kind(si), TyKind::Infer(_));
         }
         false
     }
@@ -7720,7 +7782,7 @@ impl<'a> Fcx<'a> {
                 if matches!(known, crate::consts::GenericArg::Lifetime(_)) { *arg = known; }
             }
         }
-        self.write_method_user_type(e.0, item, &full);
+        self.write_method_user_type(e.0, item, &full, &tf);
         let (ps, r) = self.instantiate_call_signature(item, &full, &sig);
         // A probe only establishes that the trait may hold, even when it found
         // one impl. Confirm the pick by retaining its trait obligation (nightly

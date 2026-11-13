@@ -5,13 +5,13 @@ use crate::program::Program;
 fn deferred_reexport_signatures() {
     // Forced selection and signature-miss collection are process-global. Each
     // case gets a fresh process, as do the runtime fixtures below.
-    const CHILD: &str = "MAKEPAD_RUN_REEXPORT_SIGNATURE_TEST";
+    const CHILD: &str = "RELAX_REEXPORT_SIGNATURE_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["plain", "partial"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::deferred_reexport_signatures", "--nocapture", "--test-threads=1"])
                 .env(CHILD, case)
-                .env("MAKEPAD_RUN_LAZY_DEFER", "lazy_reexport/child.rs,lazy_reexport/other.rs"));
+                .env("RELAX_LAZY_DEFER", "lazy_reexport/child.rs,lazy_reexport/other.rs"));
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         return;
@@ -73,12 +73,12 @@ fn deferred_reexport_signatures() {
 fn gandalf_live_edit_guard_and_reporting() {
     // Unit/runtime and diagnostic sinks are process-global; each guard setting gets a
     // fresh runtime, and the parent observes the actual console and JSON streams.
-    const CHILD: &str = "MAKEPAD_RUN_GANDALF_GATE_TEST";
+    const CHILD: &str = "RELAX_GANDALF_GATE_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["app", "framework", "all", "std", "std_all", "lazy"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::gandalf_live_edit_guard_and_reporting", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", if case.ends_with("all") { "1" } else { "0" }));
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", if case.ends_with("all") { "1" } else { "0" }));
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
@@ -108,7 +108,7 @@ fn gandalf_live_edit_guard_and_reporting() {
     // `makepad run --check-first` refuses a bad live edit synchronously; the default never blocks the patch
     crate::jit::CHECK_FIRST.store(case != "lazy", std::sync::atomic::Ordering::Relaxed);
     crate::diag::enable();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-gandalf-gate-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     let dependency = if case.starts_with("std") { "std" } else { "widgets" };
@@ -119,7 +119,7 @@ fn gandalf_live_edit_guard_and_reporting() {
         std::fs::write(dir.join(name).join("src/lib.rs"), "pub fn value(out: &mut u32) { *out = 11; }\n").unwrap();
     }
     let log = dir.join("live.jsonl");
-    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+    std::env::set_var("RELAX_LIVE_LOG", &log);
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let framework = dir.join(dependency).join("src/lib.rs").to_string_lossy().into_owned();
     let session = Arc::new(crate::Session::default());
@@ -200,7 +200,7 @@ fn gandalf_live_edit_guard_and_reporting() {
 #[test]
 fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
     // The checker's worker and its panic counters are process-global: each case has its process.
-    const CHILD: &str = "MAKEPAD_RUN_CHECK_PANIC_TEST";
+    const CHILD: &str = "RELAX_CHECK_PANIC_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for (case, panics_in) in [("check", "typeck_panic_probe:gandalf"), ("both", "typeck_panic_probe")] {
             // (its own home: the injected panics are no record for this machine's ledger; the body's
@@ -209,7 +209,7 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
             let home = std::env::temp_dir().join(format!("relax-check-panic-home-{}-{case}", std::process::id()));
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::a_background_check_panic_leaves_the_query_to_the_apps_compile", "--nocapture", "--test-threads=1"])
-                .env(CHILD, case).env("MAKEPAD_RUN_TEST_TYPECK_PANIC", panics_in).env("MAKEPAD_RUN_PANIC_PARK", "0").env("MAKEPAD_HOME", &home));
+                .env(CHILD, case).env("RELAX_TEST_TYPECK_PANIC", panics_in).env("RELAX_PANIC_PARK", "0").env("MAKEPAD_HOME", &home));
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{case}: {}\n{stderr}", String::from_utf8_lossy(&output.stdout));
             std::fs::remove_dir_all(&home).unwrap();
@@ -218,7 +218,7 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
         }
         return;
     };
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-check-panic-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"check_panic\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
@@ -258,7 +258,7 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
     assert_eq!(records.len(), 1, "{records:?}");
     let record = makepad_remote::hot::Record::parse(&records[0]).unwrap();
     assert_eq!(record.outcome, makepad_remote::hot::Outcome::CheckerPanic);
-    assert_eq!(record.reason, "checker panic in `check_panic::typeck_panic_probe`: MAKEPAD_RUN_TEST_TYPECK_PANIC: forced panic type-checking `typeck_panic_probe`");
+    assert_eq!(record.reason, "checker panic in `check_panic::typeck_panic_probe`: RELAX_TEST_TYPECK_PANIC: forced panic type-checking `typeck_panic_probe`");
     assert!(!record.outcome.failure());
     // call_jit returns a recovery status, so the function's output comes back via its argument.
     let call = |entry| {
@@ -282,12 +282,12 @@ fn a_background_check_panic_leaves_the_query_to_the_apps_compile() {
 /// is never promoted, is reported and reverts; a clean one is promoted with its `noalias` facts.
 #[test]
 fn specv_patch_before_verdict() {
-    const CHILD: &str = "MAKEPAD_RUN_SPECV_TEST";
+    const CHILD: &str = "RELAX_SPECV_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["bad", "clean"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::specv_patch_before_verdict", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", "0"));
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             assert!(output.status.success(), "{case}: {stdout}\n{stderr}");
@@ -299,14 +299,14 @@ fn specv_patch_before_verdict() {
     };
     use std::sync::atomic::Ordering;
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-specv-{}-{}", case, std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
     std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
     std::fs::write(dir.join("app/src/lib.rs"), "pub fn value(out: &mut u32) { *out = 11; }\n").unwrap();
     let log = dir.join("live.jsonl");
-    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+    std::env::set_var("RELAX_LIVE_LOG", &log);
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let session = Arc::new(crate::Session::default());
     let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_app", false).unwrap();
@@ -398,11 +398,11 @@ fn specv_patch_before_verdict() {
 /// shows).
 #[test]
 fn specv_aliased_call_from_unverified_body() {
-    const CHILD: &str = "MAKEPAD_RUN_SPECV_ALIAS_TEST";
+    const CHILD: &str = "RELAX_SPECV_ALIAS_TEST";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::specv_aliased_call_from_unverified_body", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
@@ -411,7 +411,7 @@ fn specv_aliased_call_from_unverified_body() {
     // `through_raw` must have its clean verdict before its first run: the checker's whole-app discovery
     // (`--ahead=aot-max`; the levels below aot check only the bodies that ran)
     crate::jit::set_ahead_level(crate::options::AheadLevel::AotMax);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-specv-alias-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -426,7 +426,7 @@ fn specv_aliased_call_from_unverified_body() {
         impl Go for S { fn go(&self, a: &mut u32, b: &mut u32) -> u32 { *a = 1; *b = 2; *a } }\n\
         pub fn value_dyn(out: &mut u32) { *out = 11; }\n";
     std::fs::write(dir.join("app/src/lib.rs"), original).unwrap();
-    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", dir.join("live.jsonl"));
+    std::env::set_var("RELAX_LIVE_LOG", dir.join("live.jsonl"));
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let session = Arc::new(crate::Session::default());
     let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_alias", false).unwrap();
@@ -531,17 +531,17 @@ fn specv_aliased_call_from_unverified_body() {
 /// SPEC-V (lane SPECHITCH): a caller that ran as unverified code (its aliasing-prone calls went to
 /// the callees' twins) and is rebuilt as verified code once its verdict is clean calls the base
 /// slots, which never had code. Before: its next call compiled them lazily on the calling thread
-/// (the Sandbox's frame path: ~550 lazy installs in one 70-560 ms frame). Now they run their twins'
+/// (a large app's frame path: ~550 lazy installs in one 70-560 ms frame). Now they run their twins'
 /// code until their own builds (background) are installed: no lazy compile on the program thread.
 /// The verdicts are held (SPECV_HOLD) so the first run is unverified whatever the checker's speed;
 #[test]
 fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
-    const CHILD: &str = "MAKEPAD_RUN_SPECV_BORROW_TEST";
+    const CHILD: &str = "RELAX_SPECV_BORROW_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["borrow"] {
             let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
             cmd.args(["--exact", "lazy_reload_tests::specv_verified_rebuild_runs_twin_code_not_lazy_compiles", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0");
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", "0");
             let output = crate::test_child::output(&mut cmd);
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
@@ -551,7 +551,7 @@ fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
     crate::jit::set_ahead_level(crate::options::AheadLevel::AotMax);
     crate::jit::SPECV_HOLD.store(1, Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-specv-borrow-{}-{}", case, std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -620,6 +620,116 @@ fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// SPEC-V: code lowered before its verdict calls twins. Once the caller's verdict is clean, its
+/// cached code may call the twins' bases (built with `noalias`) instead: when it is linked
+/// (twin_link_target) and when the startup image is written (build_image), which the next warm
+/// launch links as it is. Not when the verdict asks for a run-time disjoint-index check (Relaxed
+/// Rust D3): that code has no check, and `pair_call` passes `bump` one element twice when its
+/// indices meet. Not from a twin either: its callers may pass it aliased arguments, which it
+/// passes on. A clean caller that needs no check (`pair_locals`) does call the base.
+#[test]
+fn specv_twin_calls_reach_bases_only_from_code_that_needs_no_check() {
+    const CHILD: &str = "RELAX_SPECV_D3_LINK_TEST";
+    if std::env::var_os(CHILD).is_none() {
+        let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "lazy_reload_tests::specv_twin_calls_reach_bases_only_from_code_that_needs_no_check", "--nocapture", "--test-threads=1", "--format=terse"])
+            .env(CHILD, "1"));
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    use std::sync::atomic::Ordering;
+    crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
+    crate::jit::SPECV_HOLD.store(1, Ordering::Relaxed);
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    let dir = std::env::temp_dir().join(format!("relax-specv-d3-link-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("app/src")).unwrap();
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
+    std::fs::write(dir.join("app/Cargo.toml"), "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
+    // io = [i, j, result]
+    let src = "#[inline(never)] pub fn bump(a: &mut usize, b: &mut usize) { *a += 10; *b += 100; }\n\
+        #[inline(never)] pub fn mid(a: &mut usize, b: &mut usize) { bump(a, b) }\n\
+        pub fn pair_call(io: &mut [usize; 3]) {\n    let (i, j) = (io[0], io[1]);\n    let mut v = [1usize, 2, 3];\n    let a = &mut v[i];\n    let b = &mut v[j];\n    bump(a, b);\n    io[2] = v[0] + v[1] + v[2];\n}\n\
+        pub fn pair_locals(io: &mut [usize; 3]) { let (mut a, mut b) = (io[0], io[1]); mid(&mut a, &mut b); io[2] = a + b; }\n";
+    std::fs::write(dir.join("app/src/lib.rs"), src).unwrap();
+    let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
+    let mut session = crate::Session::default();
+    session.options.relaxed = Some("disjoint-index".to_string());
+    let session = Arc::new(session);
+    let (prog, core, app_crate) = crate::load_with_std(&session, &app, "specv_d3_link", false).unwrap();
+    let graph = format!(r#"{{"units":[{{"pkg_id":"path+file://{}/app#app@0.1.0","target":{{"name":"app","src_path":{}}}}}]}}"#, dir.display(), crate::diag::quote(&app));
+    let roots = crate::reload::gandalf_app_roots(&crate::unitgraph::Units::from_json(graph.as_bytes()).unwrap(), dir.join("app").to_str().unwrap());
+    let find = |name: &str| prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = crate::program::DefId(i as u32);
+        (d.krate == app_crate && prog.name(id) == name).then_some(id)
+    }).unwrap();
+    let defs = [find("bump"), find("mid"), find("pair_call"), find("pair_locals")];
+    let mut tcx = crate::tcx::Tcx::new();
+    tcx.collect(&prog);
+    crate::borrowck::event::set_app_scope(roots);
+    let mut u = crate::jit::Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut crate::jit::Unit;
+    crate::syms::set_unit(up);
+    let ([bump, mid, pair_call, pair_locals], pair_entry, locals_entry) = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let ids = defs.map(|d| u.fn_id(crate::jit::FnKey::Inst(d, vec![])));
+        // the bases run only as their twins until the image's compiles below: their checks queued now
+        for b in &ids[..2] { u.note_first_borrowck(*b, None); }
+        (ids, u.entry(ids[2]), u.entry(ids[3]))
+    });
+    let run = |entry: u64, i: usize, j: usize| -> usize {
+        let mut io = [i, j, 0usize];
+        unsafe { crate::jit::call_jit(up, entry, &mut io as *mut [usize; 3] as u64) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
+        io[2]
+    };
+    // held verdicts: both callers run as unverified code, calling twins (twin mid calls twin bump)
+    assert_eq!(run(pair_entry, 0, 1), 116);
+    assert_eq!(run(locals_entry, 1, 2), 113);
+    let (twin_bump, twin_mid) = (u.plain_twin_of(bump).expect("bump's twin"), u.plain_twin_of(mid).expect("mid's twin"));
+    assert!(u.fns[twin_bump as usize].compiled && u.fns[twin_mid as usize].compiled && !u.fns[bump as usize].compiled && !u.fns[mid as usize].compiled,
+        "the unverified callers ran the twins, never the bases");
+    crate::jit::specv_release();
+    let t0 = std::time::Instant::now();
+    loop {
+        crate::borrowck::settle().recv().unwrap();
+        if [bump, mid, pair_call, pair_locals].iter().all(|&i| u.verdict_clean(i)) { break; }
+        let state = |i: u32| match u.verdict_state(i) {
+            crate::jit::Verdict::Clean => "clean".to_string(),
+            crate::jit::Verdict::Failed(_) => "failed".to_string(),
+            crate::jit::Verdict::Pending => "pending".to_string(),
+            crate::jit::Verdict::Unverifiable(why) => format!("unverifiable ({why})"),
+        };
+        assert!(t0.elapsed().as_secs() < 20, "no clean verdicts: bump, mid, pair_call, pair_locals {:?}", [bump, mid, pair_call, pair_locals].map(state));
+    }
+    assert!(u.disjoint_checks(pair_call).is_some(), "pair_call is accepted with a run-time disjoint-index check");
+    assert!(u.disjoint_checks(pair_locals).is_none());
+    // the lazy link of the callers' cached code (the bases' entries stored)
+    assert_eq!(u.twin_link_target(pair_call, twin_bump, |_| true), twin_bump, "code without its disjoint-index check keeps the twin");
+    assert_eq!(u.twin_link_target(twin_mid, twin_bump, |_| true), twin_bump, "a twin's calls stay twin calls");
+    assert_eq!(u.twin_link_target(pair_locals, twin_mid, |_| true), mid, "a clean caller that needs no check calls the base");
+    // the image written now: the bases' own entries, then the startup slots (the callers' unverified
+    // code); a twin call it sends to the base is one TWIN_RETARGETS
+    let retargets = crate::owner::call(crate::owner::Class::Program, || {
+        for b in [bump, mid] {
+            let (code, pc_map, relocs) = unsafe { crate::jit::compile_fn(up, b) }.unwrap();
+            let mut cache = u.cache.take().unwrap();
+            cache.record(&u, b, &code, &relocs, &pc_map);
+            u.cache = Some(cache);
+        }
+        u.flush_cache_records();
+        let before = crate::jit::TWIN_RETARGETS.load(Ordering::Relaxed);
+        let mut cache = u.cache.take().unwrap();
+        assert!(cache.record_manifest(&u, app_crate, &[pair_call, pair_locals], 2, &|| false));
+        u.cache = Some(cache);
+        crate::jit::TWIN_RETARGETS.load(Ordering::Relaxed) - before
+    });
+    assert_eq!(retargets, 1, "the image sends pair_locals' call to mid; pair_call's and twin mid's calls stay twin calls");
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// SPEC-V (lane JITLIVEO3): a twin runs in its base's place until the base's verdict is clean, so
 /// the base's own record and counters saw none of that run. The twin gets a counted build (its
 /// unverified baseline code is its code for good), and the base's O3 build takes the twin's counts,
@@ -627,12 +737,12 @@ fn specv_verified_rebuild_runs_twin_code_not_lazy_compiles() {
 /// frequencies (the twin's heat thrown away) or waited for counts of its own.
 #[test]
 fn specv_base_o3_takes_its_twins_counts() {
-    const CHILD: &str = "MAKEPAD_RUN_SPECV_TWIN_PGO_TEST";
+    const CHILD: &str = "RELAX_SPECV_TWIN_PGO_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["twinpgo"] {
             let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
             cmd.args(["--exact", "lazy_reload_tests::specv_base_o3_takes_its_twins_counts", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0");
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", "0");
             let output = crate::test_child::output(&mut cmd);
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
@@ -642,7 +752,7 @@ fn specv_base_o3_takes_its_twins_counts() {
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
     crate::jit::set_ahead_level(crate::options::AheadLevel::AotMax);
     crate::jit::SPECV_HOLD.store(1, Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-specv-twinpgo-{}-{}", case, std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -718,12 +828,12 @@ fn specv_base_o3_takes_its_twins_counts() {
 /// the verdict is an error and no check is lowered.
 #[test]
 fn d3_disjoint_check_lowered_from_the_verdict() {
-    const CHILD: &str = "MAKEPAD_RUN_D3_TEST";
+    const CHILD: &str = "RELAX_D3_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["relaxed", "strict", "check-first"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::d3_disjoint_check_lowered_from_the_verdict", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", "0"));
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         return;
@@ -731,7 +841,7 @@ fn d3_disjoint_check_lowered_from_the_verdict() {
     use std::sync::atomic::Ordering;
     // `makepad run --check-first`: the check runs before the first lowering, so the first code has the check
     crate::jit::CHECK_FIRST.store(case == "check-first", Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-d3-{}-{}", case, std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -740,7 +850,7 @@ fn d3_disjoint_check_lowered_from_the_verdict() {
     // io = [i, j, result]; `pair` indexes an array (built-in), `pair_vec` a Vec (IndexMut)
     std::fs::write(dir.join("app/src/lib.rs"), "pub fn pair(io: &mut [usize; 3]) {\n    let (i, j) = (io[0], io[1]);\n    let mut v = [1usize, 2, 3];\n    let a = &mut v[i];\n    let b = &mut v[j];\n    *a += 10;\n    *b += 100;\n    io[2] = v[0] + v[1] + v[2];\n}\n\
         pub fn pair_vec(io: &mut [usize; 3]) {\n    let (i, j) = (io[0], io[1]);\n    let mut v = vec![1usize, 2, 3];\n    let a = &mut v[i];\n    let b = &mut v[j];\n    *a += 10;\n    *b += 100;\n    io[2] = v[0] + v[1] + v[2];\n}\n").unwrap();
-    std::env::set_var("MAKEPAD_RUN_LIVE_LOG", dir.join("live.jsonl"));
+    std::env::set_var("RELAX_LIVE_LOG", dir.join("live.jsonl"));
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let mut session = crate::Session::default();
     session.options.relaxed = Some(if case == "strict" { "none" } else { "disjoint-index" }.to_string());
@@ -842,7 +952,7 @@ fn gandalf_scope_uses_package_source_and_project_boundaries() {
 
 #[test]
 fn app_scope_live_layout_edits() {
-    const CHILD: &str = "MAKEPAD_RUN_APP_LAYOUT_TEST";
+    const CHILD: &str = "RELAX_APP_LAYOUT_TEST";
     let Ok(case) = std::env::var(CHILD) else {
         for case in ["app_lib", "path_crate", "framework", "embedded", "generic_embedded", "pointer", "bound_template", "bound_template_embedded", "enums"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
@@ -854,7 +964,7 @@ fn app_scope_live_layout_edits() {
     };
     use crate::{jit::{self, FnKey}, program::DefId, reload::{self, Edit, Rung}, types::{TyKind, RegionArgsId}};
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-app-layout-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join(if case == "path_crate" { "helper/lib.rs" } else { "lib.rs" });
@@ -1269,7 +1379,7 @@ fn gandalf_carry_keeps_only_crates_that_cannot_see_the_edit() {
 /// an edit that adds an item (collection of the new definitions makes the tables owned).
 #[test]
 fn restored_images_take_live_edits() {
-    const CHILD: &str = "MAKEPAD_RUN_RESTORED_EDIT_TEST";
+    const CHILD: &str = "RELAX_RESTORED_EDIT_TEST";
     if std::env::var(CHILD).is_err() {
         // the unit and its runtime are process-global
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
@@ -1279,7 +1389,7 @@ fn restored_images_take_live_edits() {
         return;
     }
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-restored-edit-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"restored\"\nversion = \"0.1.0\"\nedition = \"2021\"\n").unwrap();
@@ -1353,24 +1463,24 @@ fn restored_images_take_live_edits() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// std::relax::realtime for arming a machine (the Fab arms experiment): `compiled` is the strict ready (the whole
-/// reach compiled, never "the wait ran out"), `lazy` counts what would still compile on a call, and
-/// an armed root freezes live edits of real-time code (refused "frozen", applied at the disarm)
+/// std::relax::realtime for arming a machine (an app's arms experiment): `compiled` is the strict ready
+/// (the whole reach compiled, never "the wait ran out"), `lazy` counts what would still compile on a call,
+/// and an armed root freezes live edits of real-time code (refused "frozen", applied at the disarm)
 /// while edits of other code patch as usual.
 #[test]
 fn realtime_strict_ready_lazy_and_patch_freeze() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_FREEZE_TEST";
+    const CHILD: &str = "RELAX_RT_FREEZE_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_strict_ready_lazy_and_patch_freeze", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-freeze-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1447,7 +1557,7 @@ fn realtime_thread_marks_the_calling_thread() {
     assert!(!std::thread::spawn(crate::jit::is_realtime_thread).join().unwrap(), "another thread is not marked");
 }
 
-/// A Fab arms run's hole: the marked root calls through `dyn Route` (its value holds no trait object),
+/// An app's arms run's hole: the marked root calls through `dyn Route` (its value holds no trait object),
 /// and other code makes the first `Box<Ded> -> Box<dyn Route>` after the mark, and a second type's
 /// after the reach is done. The root's lowering names the trait object it calls through, so the
 /// reach follows its vtables: the strict ready is false the moment a new one is made (polled
@@ -1455,17 +1565,17 @@ fn realtime_thread_marks_the_calling_thread() {
 /// thread then meets no lazy compile.
 #[test]
 fn realtime_reach_follows_vtables_made_after_the_mark() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_DYN_TEST";
+    const CHILD: &str = "RELAX_RT_DYN_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_follows_vtables_made_after_the_mark", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-dyn-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1515,7 +1625,7 @@ fn realtime_reach_follows_vtables_made_after_the_mark() {
         id.is_some_and(|id| u.fns[id as usize].compiled)
     });
     let compiled = |t| crate::jit::__relax_realtime_compiled(t);
-    // the mark, then at once the first unsizing (a Fab arms run's order), polled right after it ran
+    // the mark, then at once the first unsizing (an app's arms run's order), polled right after it ran
     let ticket = crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::realtime_mark_slots(up, vec![root]) });
     call(start_e);
     assert!(!compiled(ticket) || next_built(), "compiled right after the first `Box<Ded> -> Box<dyn Route>`, with `<Ded as Route>::next` lazy");
@@ -1538,17 +1648,17 @@ fn realtime_reach_follows_vtables_made_after_the_mark() {
 /// thread meets no lazy compile.
 #[test]
 fn realtime_reach_follows_trait_objects_held_deep_in_the_roots_value() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_DEEP_DYN_TEST";
+    const CHILD: &str = "RELAX_RT_DEEP_DYN_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_follows_trait_objects_held_deep_in_the_roots_value", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-deep-dyn-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1591,13 +1701,13 @@ fn realtime_reach_follows_trait_objects_held_deep_in_the_roots_value() {
         unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         (unsafe { *(cp as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
-    assert_eq!((out, misses), (8, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (8, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// The fast bucket's red Sandbox present (`<ScriptErrorRecord as Debug>` built ahead, not provided):
+/// An app's red present in the fast bucket (`<ScriptErrorRecord as Debug>` built ahead, not provided):
 /// the reach followed every vtable of every trait-object type real-time code calls through, and
 /// std's own are the whole program (a formatter's `dyn Write`, derived Debug's `dyn Debug`, a
 /// `Once`'s `dyn FnMut`, a table's hasher, a thread's `dyn FnOnce`). Here the root passes its own
@@ -1606,17 +1716,17 @@ fn realtime_reach_follows_trait_objects_held_deep_in_the_roots_value() {
 /// and the real-time thread still meets no lazy compile.
 #[test]
 fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_OWN_DYN_TEST";
+    const CHILD: &str = "RELAX_RT_OWN_DYN_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_skips_trait_objects_it_only_makes_itself", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-own-dyn-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1662,13 +1772,13 @@ fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
         unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         (unsafe { *(cp as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
-    assert_eq!((out, misses), (6, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (6, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// A Fab run's misses on a node (24 lazy compiles on the real-time thread, drop glue of generic
+/// An app run's misses on a node (24 lazy compiles on the real-time thread, drop glue of generic
 /// containers and core::fmt's float path): code ran before the mark (the planner's simulation), so
 /// the reach found slots compiled already whose RIR was dropped after their install. A drop glue's
 /// references were never read again (only fns' RIR was rebuilt), and with a disk cache a lookup
@@ -1677,17 +1787,17 @@ fn realtime_reach_skips_trait_objects_it_only_makes_itself() {
 /// lazy) and formats an integer; the marked `run` drops a `Some` and formats a float.
 #[test]
 fn realtime_reach_walks_code_that_ran_before_the_mark() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_WARM_TEST";
+    const CHILD: &str = "RELAX_RT_WARM_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_walks_code_that_ran_before_the_mark", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-warm-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1735,7 +1845,7 @@ fn realtime_reach_walks_code_that_ran_before_the_mark() {
         unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
-    assert_eq!((out, misses), (3 + 5, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (3 + 5, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1750,24 +1860,24 @@ fn wait_realtime_compiled(ticket: u64) {
     }
 }
 
-/// What a Fab run's misses on a node were, on a cold store: the marked root formats floats
+/// What an app run's misses on a node were, on a cold store: the marked root formats floats
 /// (core::fmt's float path is reached through the formatter fn pointer an `Argument` holds, data the
 /// reach reads) and drops containers (`Vec`, `vec::IntoIter`, `array::IntoIter`, `Weak`: drop glue
 /// of generic types). Nothing else ran before the mark: the reach alone compiles them, and the
 /// real-time thread meets no lazy compile (the narrowed trait-object reach keeps this).
 #[test]
 fn realtime_reach_covers_float_formatting_and_container_drops() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_FMT_TEST";
+    const CHILD: &str = "RELAX_RT_FMT_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_covers_float_formatting_and_container_drops", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-fmt-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1815,7 +1925,7 @@ fn realtime_reach_covers_float_formatting_and_container_drops() {
         (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
     let want = format!("{:.3} {}", 2f64 * 1.5, 2f32 / 3.0).len() as u32 + (2 + 2 + 3) + (2 + 7);
-    assert_eq!((out, misses), (want, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (want, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
@@ -1826,15 +1936,15 @@ fn realtime_reach_covers_float_formatting_and_container_drops() {
 /// compiled before the new code is installed, the old code running meanwhile, so the real-time
 /// thread meets no lazy compile. An install whose references were not walked before it is a hole
 /// the install says and counts (realtime_holes), so a pass never rests on the walk after it
-/// winning the race against the real-time thread. (Fab's arm lab met such compiles of thread-local
+/// winning the race against the real-time thread. (An app's arm lab met such compiles of thread-local
 /// accessors in its armed loop.)
 #[test]
 fn realtime_tier_up_compiles_new_callees_before_its_install() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_TIER_UP_TEST";
+    const CHILD: &str = "RELAX_RT_TIER_UP_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_tier_up_compiles_new_callees_before_its_install", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
@@ -1842,7 +1952,7 @@ fn realtime_tier_up_compiles_new_callees_before_its_install() {
     use relax_backend::rir::{Callee, Func, Inst};
     use std::sync::atomic::Ordering;
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-tier-up-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -1929,12 +2039,12 @@ fn realtime_tier_up_compiles_new_callees_before_its_install() {
 /// of it. An earlier run stored `run`'s O2 code (the generic `twice` inlined, `more` called); this
 /// run installs baseline code for it, which calls `twice` (code built before its key's entry was
 /// there, or placed from a startup image older than the entry). The walk must follow the installed
-/// code's calls: the fab arm lab's loop met lazy compiles of closures that only the code it ran
+/// code's calls: an app's arm lab's loop met lazy compiles of closures that only the code it ran
 /// called (11-11).
 #[test]
 fn realtime_reach_reads_the_installed_code() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_INSTALLED_TEST";
-    const DIR: &str = "MAKEPAD_RUN_RT_INSTALLED_TEST_DIR";
+    const CHILD: &str = "RELAX_RT_INSTALLED_TEST";
+    const DIR: &str = "RELAX_RT_INSTALLED_TEST_DIR";
     let Ok(phase) = std::env::var(CHILD) else {
         let dir = std::env::temp_dir().join(format!("relax-rt-installed-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("app/src")).unwrap();
@@ -1948,7 +2058,7 @@ fn realtime_reach_reads_the_installed_code() {
         for phase in ["earlier", "now"] {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "lazy_reload_tests::realtime_reach_reads_the_installed_code", "--nocapture", "--test-threads=1", "--format=terse"])
-                .env(CHILD, phase).env(DIR, &dir).env("MAKEPAD_RUN_GANDALF_ALL", "0").env("MAKEPAD_RUN_SPEC", "0"));
+                .env(CHILD, phase).env(DIR, &dir).env("RELAX_GANDALF_ALL", "0").env("RELAX_SPEC", "0"));
             let out = String::from_utf8_lossy(&output.stdout);
             assert!(output.status.success() && out.contains("1 passed"), "{phase}: {out}\n{}", String::from_utf8_lossy(&output.stderr));
         }
@@ -1958,9 +2068,9 @@ fn realtime_reach_reads_the_installed_code() {
     use std::sync::atomic::Ordering;
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
     crate::borrowck::lazy::disable_gandalf();
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
-    std::env::set_var("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"));
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
     let app = dir.join("app/src/lib.rs").to_string_lossy().into_owned();
     let session = Arc::new(crate::Session::default());
     let (prog, core, app_crate) = crate::load_with_std(&session, &app, "rt_installed_app", false).unwrap();
@@ -2038,12 +2148,12 @@ fn realtime_reach_reads_the_installed_code() {
         unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
-    assert_eq!((out, misses), (27, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (27, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
 }
 
-/// Calls the root's code makes through data other code filled: a trait object in a static (Fab's
+/// Calls the root's code makes through data other code filled: a trait object in a static (an app's
 /// slicer `FAN_OUT`, set by the app, read on the cell's loop), filled after the mark, and a fn
 /// pointer in the root's value, filled before it. Neither target is named by code the reach
 /// walks; the static's type (the code names the static) and the fn pointer's signature (every
@@ -2051,17 +2161,17 @@ fn realtime_reach_reads_the_installed_code() {
 /// compile.
 #[test]
 fn realtime_reach_follows_calls_through_statics_and_fn_pointers() {
-    const CHILD: &str = "MAKEPAD_RUN_RT_DATA_CALLS_TEST";
+    const CHILD: &str = "RELAX_RT_DATA_CALLS_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::realtime_reach_follows_calls_through_statics_and_fn_pointers", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-rt-data-calls-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -2120,29 +2230,29 @@ fn realtime_reach_follows_calls_through_statics_and_fn_pointers() {
         unsafe { crate::jit::call_jit(upn as *mut crate::jit::Unit, run_e, cp) }.unwrap_or_else(|p| panic!("JIT call panicked: {}", p.message));
         (unsafe { *((cp + 4) as *const u32) }, crate::jit::__relax_realtime_misses() - before)
     }).join().unwrap();
-    assert_eq!((out, misses), (4 * 100 + 11, 0), "the real-time thread met lazy compiles (MAKEPAD_RUN_RT_TRACE=1 names them)");
+    assert_eq!((out, misses), (4 * 100 + 11, 0), "the real-time thread met lazy compiles (RELAX_RT_TRACE=1 names them)");
     assert_eq!(crate::jit::__relax_realtime_holes(), 0, "the real-time set had holes (said on stderr)");
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
-/// Fab's live edit on a node (ICEs "key in collected table", "variance declaration"): a new module
+/// An app's live edit on a node (ICEs "key in collected table", "variance declaration"): a new module
 /// file whose structs (a `#[cfg(relax)]` field of a std type among them) an existing struct holds
 /// in `Option` fields, filled through `get_or_insert_with`. The edit patches, the new code runs.
 #[test]
 fn live_new_module_types_edit() {
-    const CHILD: &str = "MAKEPAD_RUN_NEW_MODULE_EDIT_TEST";
+    const CHILD: &str = "RELAX_NEW_MODULE_EDIT_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::live_new_module_types_edit", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-new-module-edit-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -2238,24 +2348,24 @@ impl RtPath {
 }
 
 /// A live edit that renames a struct field finds the fns using it from the field uses typeck
-/// resolved. A generic fn whose body names the old field's name (`window`'s local `plans`, fab
+/// resolved. A generic fn whose body names the old field's name (`window`'s local `plans`, an app's
 /// slice's `FieldPlans::window`) is read as typeck left it: instantiating it at its own
 /// parameters for codegen has no answer (`<impl IntoIterator as IntoIterator>::IntoIter`), and
 /// the edit failed as an internal compiler error (NoSolution).
 #[test]
 fn a_renamed_field_reads_generic_fns_as_typeck_left_them() {
-    const CHILD: &str = "MAKEPAD_RUN_RENAMED_FIELD_EDIT_TEST";
+    const CHILD: &str = "RELAX_RENAMED_FIELD_EDIT_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::a_renamed_field_reads_generic_fns_as_typeck_left_them", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-renamed-field-edit-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -2308,18 +2418,18 @@ pub fn value(out: &mut u32) {
 /// file patches both, so a call through the dependency runs the new body too.
 #[test]
 fn a_live_edit_reaches_both_crates_of_a_lib_test_root() {
-    const CHILD: &str = "MAKEPAD_RUN_TWIN_CRATE_EDIT_TEST";
+    const CHILD: &str = "RELAX_TWIN_CRATE_EDIT_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::a_live_edit_reaches_both_crates_of_a_lib_test_root", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-twin-crate-edit-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("twinlib/src")).unwrap();
     std::fs::create_dir_all(dir.join("twinuser/src")).unwrap();
@@ -2379,11 +2489,11 @@ fn a_live_edit_reaches_both_crates_of_a_lib_test_root() {
 /// bring back old code); a rolled-back patch brings back the forwarders it replaced.
 #[test]
 fn stored_closure_follows_edits_with_flat_work() {
-    const CHILD: &str = "MAKEPAD_RUN_STORED_CLOSURE_TEST";
+    const CHILD: &str = "RELAX_STORED_CLOSURE_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::stored_closure_follows_edits_with_flat_work", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
@@ -2391,7 +2501,7 @@ fn stored_closure_follows_edits_with_flat_work() {
     use crate::jit::{FnKey, Unit};
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-stored-closure-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -2490,11 +2600,11 @@ pub fn value(out: &mut u32) {{
 /// its parent's frame takes the new code with its parent and holds nothing back.
 #[test]
 fn a_stored_closure_whose_captures_change_waits_for_a_restart() {
-    const CHILD: &str = "MAKEPAD_RUN_STORED_CAPTURES_TEST";
+    const CHILD: &str = "RELAX_STORED_CAPTURES_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::a_stored_closure_whose_captures_change_waits_for_a_restart", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
@@ -2502,7 +2612,7 @@ fn a_stored_closure_whose_captures_change_waits_for_a_restart() {
     use crate::jit::{FnKey, Unit};
     use crate::reload::{apply, Edit, Rung, HELD};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-stored-captures-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();
@@ -2648,18 +2758,18 @@ fn module_bodies_classify_by_item() {
 /// of a type another crate also names stays the edit's own error.
 #[test]
 fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
-    const CHILD: &str = "MAKEPAD_RUN_CROSS_ITEM_TEST";
+    const CHILD: &str = "RELAX_CROSS_ITEM_TEST";
     if std::env::var(CHILD).is_err() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "lazy_reload_tests::a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         let out = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success() && out.contains("1 passed"), "{out}\n{}", String::from_utf8_lossy(&output.stderr));
         return;
     }
     use crate::reload::{apply, Edit, Rung};
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-cross-item-{}", std::process::id()));
     std::fs::write({ std::fs::create_dir_all(&dir).unwrap(); dir.join("Cargo.toml") }, "[workspace]\nmembers = [\"app\", \"parts\"]\n").unwrap();
     let src = |name: &str, text: &str| {
@@ -2714,18 +2824,18 @@ fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
     crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[]);
     let use_later = || vec![Edit { file: app_file, path: app_path.clone(), src: app_src("later").into_bytes() }];
     let o = unsafe { apply(up, use_later()) };
-    assert_eq!(o.rung, Rung::Refuse, "a fn the provided crate lacks, with makepad's inputs unchanged: {:?}", o.lines);
+    assert_eq!(o.rung, Rung::Refuse, "a fn the provided crate lacks, with relax's inputs unchanged: {:?}", o.lines);
     // makepad's inputs changed, and this process cannot build it (no loader package here)
-    assert!(crate::reload::host::request("a provided crate changed".into(), Vec::new()).is_err(), "the test process has no makepad to rebuild");
+    assert!(crate::reload::host::request("a provided crate changed".into(), Vec::new()).is_err(), "the test process has no relax to rebuild");
     assert!(crate::reload::host::route() == crate::reload::host::Route::Plain, "nothing builds: the ring has no rebuild to offer");
     let o = unsafe { apply(up, use_later()) };
-    assert!(o.lines.iter().any(|l| l.contains("E0425") && l.contains("needs the rebuilt makepad: restart to apply")), "once makepad's inputs changed, the use waits for the rebuilt makepad: {:?} {:?}", o.rung, o.lines);
+    assert!(o.lines.iter().any(|l| l.contains("E0425") && l.contains("needs the rebuilt relax: restart to apply")), "once relax's inputs changed, the use waits for the rebuilt relax: {:?} {:?}", o.rung, o.lines);
     assert_eq!(run(), 29, "the running code stays until the restart");
     let read = |local: &str| vec![Edit { file: app_file, path: app_path.clone(), src: format!("{}{local}pub fn read(e: parts::Ev) -> u32 {{ match e {{ parts::Ev::Reset {{ n }} => parts::Info::new(n).width(), parts::Ev::Changed {{ info }} => parts::Info::from_bytes(info).0 }} }}\n", app_src("fresh")).into_bytes() }];
     let o = unsafe { apply(up, read("")) };
     assert!(!o.lines.iter().any(|l| l.contains("E0425")), "the binding of a pattern whose variant is not found still exists: {:?}", o.lines);
     for item in ["`Changed`", "`from_bytes`", "`width`"] {
-        assert!(o.lines.iter().any(|l| l.contains("E0599") && l.contains(item) && l.contains("needs the rebuilt makepad: restart to apply")), "{item}, new in the provided crate's type, waits for the rebuilt makepad: {:?}", o.lines);
+        assert!(o.lines.iter().any(|l| l.contains("E0599") && l.contains(item) && l.contains("needs the rebuilt relax: restart to apply")), "{item}, new in the provided crate's type, waits for the rebuilt relax: {:?}", o.lines);
     }
     assert_eq!(o.rung, Rung::Restart, "new items of a provided crate's types: {:?}", o.lines);
     let o = unsafe { apply(up, read("pub struct Info;\nimpl Info { pub fn width(&self) -> u32 { 0 } }\n")) };

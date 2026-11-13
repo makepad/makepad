@@ -1,10 +1,10 @@
-// rustc accepts (Scope code_view prepared_lod.rs, agent_activity compact_history, bytemuck
+// rustc accepts (an app's code_view prepared_lod.rs, agent_activity compact_history, bytemuck
 // checked.rs): a reference to a projection (`&S::File`, `&<T as Tr>::Bits`) is Copy -- in a
 // polymorphic body the projection is rigid and `&'a T: Copy` binds T to it (the solver related
 // the variable and the rigid alias as a new alias-relate goal, again and again, until overflow:
 // ambiguous, so not Copy) -- and a `&mut T` coerced to `&T` inside `Some(..)` on the right of
 // `==` is reborrowed, not moved. Generic bodies are checked polymorphically
-// (MAKEPAD_RUN_BORROWCK_ALL=1 in run_live_regressions.sh), as Gandalf does while a program runs.
+// (RELAX_BORROWCK_ALL=1 in run_live_regressions.sh), as Gandalf does while a program runs.
 use std::collections::HashMap;
 use std::path::PathBuf;
 

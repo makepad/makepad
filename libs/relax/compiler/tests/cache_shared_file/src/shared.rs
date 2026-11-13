@@ -28,7 +28,7 @@ pub fn run() -> (u64, usize) {
         }))
         .unwrap();
     }
-    // a boxed job run on another thread, as the sandbox's retirement worker does
+    // a boxed job run on another thread, as an app's retirement worker does
     let (tx, rx) = std::sync::mpsc::channel::<Box<dyn FnOnce() -> (u64, usize) + Send>>();
     let worker = std::thread::spawn(move || {
         let mut got = (0, 0);

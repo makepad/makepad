@@ -20,10 +20,10 @@ pub fn apps() -> Vec<App> {
 }
 
 fn usage() -> i32 {
-    eprintln!("usage: makepad inspect <pid|list> <command> [args]   (makepad inspect <pid> help: the commands)");
-    eprintln!("       makepad inspect <app|all> <command> [args]   (at a terminal, or the apps of your own lease; anything else is named by pid)");
-    eprintln!("       makepad inspect <host>:<pid> <command> | <host>:list | <host>:session <launch|kill> .. | hosts | all:list");
-    eprintln!("       makepad inspect <pid|app> pf <query> [s=3] [save=x.mkpf] | file=<x.mkpf> pf <query> [base=y.mkpf]   (pf help: the profiler queries)");
+    eprintln!("usage: {tool} inspect <pid|list> <command> [args]   ({tool} inspect <pid> help: the commands)", tool = crate::tool_name());
+    eprintln!("       {tool} inspect <app|all> <command> [args]   (at a terminal, or the apps of your own lease; anything else is named by pid)", tool = crate::tool_name());
+    eprintln!("       {tool} inspect <host>:<pid> <command> | <host>:list | <host>:session <launch|kill> .. | hosts | all:list", tool = crate::tool_name());
+    eprintln!("       {tool} inspect <pid|app> pf <query> [s=3] [save=x.mkpf] | file=<x.mkpf> pf <query> [base=y.mkpf]   (pf help: the profiler queries)", tool = crate::tool_name());
     2
 }
 
@@ -76,7 +76,7 @@ pub fn main(args: &[String]) -> i32 {
     let list = apps();
     if target == "all" {
         if let Some(why) = caller.all_refused(&list) {
-            eprintln!("makepad inspect: {why}");
+            eprintln!("relax inspect: {why}");
             return 2;
         }
         return all(&line, &cmd, text, &caller);
@@ -86,18 +86,18 @@ pub fn main(args: &[String]) -> i32 {
         Err(_) if list.iter().any(|a| &a.app == target) => match named(&list, target, &caller) {
             Ok(a) => Some(a),
             Err(why) => {
-                eprintln!("makepad inspect: {why}");
+                eprintln!("relax inspect: {why}");
                 return 2;
             }
         },
         Err(_) => None,
     };
     let Some(app) = &chosen else {
-        eprintln!("makepad inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
+        eprintln!("relax inspect: no running app `{}` (running: {})", target, list.iter().map(|a| format!("{} {}", a.pid, a.app)).collect::<Vec<_>>().join(", "));
         return 2;
     };
     if let Some(why) = app.unreachable() {
-        eprintln!("makepad inspect: {why}");
+        eprintln!("relax inspect: {why}");
         return 2;
     }
     if args.get(1).map(String::as_str) == Some("pf") {
@@ -128,7 +128,7 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
         Err(e) => {
-            eprintln!("makepad inspect: {} (pid {}): {}", app.app, app.pid, e);
+            eprintln!("relax inspect: {} (pid {}): {}", app.app, app.pid, e);
             2
         }
     }
@@ -255,7 +255,7 @@ mod remote {
         }) {
             Ok(()) => 0,
             Err(e) => {
-                eprintln!("makepad inspect: {e}");
+                eprintln!("relax inspect: {e}");
                 2
             }
         }
@@ -267,7 +267,7 @@ mod remote {
         }
         let (service, target, args, request) = match app {
             "" => {
-                eprintln!("makepad inspect: `{host}:` needs an app, a pid, `list` or `session`");
+                eprintln!("relax inspect: `{host}:` needs an app, a pid, `list` or `session`");
                 return 2;
             }
             "list" => ("list", host.to_string(), "", "list".to_string()),
@@ -277,7 +277,7 @@ mod remote {
         let client = match hub_client() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("makepad inspect: {e}");
+                eprintln!("relax inspect: {e}");
                 return 2;
             }
         };
@@ -297,7 +297,7 @@ mod remote {
         match r {
             Ok(had_err) => i32::from(had_err),
             Err(e) => {
-                eprintln!("makepad inspect: {host}:{app}: {e}");
+                eprintln!("relax inspect: {host}:{app}: {e}");
                 2
             }
         }
@@ -306,7 +306,7 @@ mod remote {
     /// `all:list`: the apps here, then those of every host in the registry.
     fn all(what: &str) -> i32 {
         if what != "list" {
-            eprintln!("makepad inspect: all:{what}: only `all:list` spans hosts");
+            eprintln!("relax inspect: all:{what}: only `all:list` spans hosts");
             return 2;
         }
         for a in super::apps() {
@@ -315,7 +315,7 @@ mod remote {
         let reg = match Hosts::load(&registry_path()) {
             Ok(h) => h,
             Err(e) => {
-                eprintln!("makepad inspect: {e}");
+                eprintln!("relax inspect: {e}");
                 return 2;
             }
         };
@@ -325,7 +325,7 @@ mod remote {
         let client = match hub_client() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("makepad inspect: {e}");
+                eprintln!("relax inspect: {e}");
                 return 2;
             }
         };
@@ -346,7 +346,7 @@ mod remote {
 #[cfg(not(unix))]
 mod remote {
     pub fn hosts() -> i32 {
-        eprintln!("makepad inspect: remote hosts are not available on Windows yet");
+        eprintln!("relax inspect: remote hosts are not available on Windows yet");
         2
     }
     pub fn main(_: &str, _: &str, _: &str, _: bool) -> i32 {

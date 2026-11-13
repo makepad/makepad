@@ -1,5 +1,5 @@
 // Layout queries and generated draw-layout blocks must evaluate to the same data
-// as their JIT initializers. Run with MAKEPAD_RUN_CTFE=check and rustc --test -O.
+// as their JIT initializers. Run with RELAX_CTFE=check and rustc --test -O.
 use std::marker::PhantomData;
 use std::mem::{align_of, offset_of, size_of};
 

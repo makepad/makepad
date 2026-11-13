@@ -1147,7 +1147,9 @@ fn deflate_decompress_with(
     bitsleft = bitsleft as u8 as u32;
     safety_check!(overread_count <= (bitsleft >> 3) as usize);
 
-    let actual_in_pos = in_pos - (bitsleft >> 3) as usize + overread_count;
+    // the bytes the bit buffer still holds are given back, less the zero bytes read past the end:
+    // add those first (a stream that is the whole input can hold more of them than it read)
+    let actual_in_pos = in_pos + overread_count - (bitsleft >> 3) as usize;
     Ok((actual_in_pos, out_pos - start))
 }
 
@@ -1425,5 +1427,25 @@ pub fn gzip_decompress_vec(input: &[u8]) -> Result<Vec<u8>, DecompressError> {
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stream that ends its input: the refill pads the bit buffer with zero bytes past the end,
+    /// more of them than the stream has bytes, and every byte it has is read. The position was
+    /// computed by subtracting the buffered bytes before adding the padding back, which overflowed
+    /// wherever overflow checks are on (cargo's dev and test profiles): the store and vfs tests that
+    /// read git objects panicked there.
+    #[test]
+    fn a_stream_that_is_the_whole_input_reads_all_of_it() {
+        // an empty final block with fixed codes: its 3 header bits and end-of-block's 7
+        assert_eq!(deflate_decompress(&[0x03, 0x00], &mut []), Ok((2, 0)));
+        // "a" in a final block with fixed codes
+        let mut out = [0u8; 1];
+        assert_eq!(deflate_decompress(&[0x4b, 0x04, 0x00], &mut out), Ok((3, 1)));
+        assert_eq!(&out, b"a");
     }
 }

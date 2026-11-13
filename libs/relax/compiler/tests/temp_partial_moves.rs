@@ -1,4 +1,4 @@
-// Partial moves out of temporaries (commercial lane's Stage/P(DOOM) find, 2026-10-04): what is not
+// Partial moves out of temporaries (a commercial lane's find in an app, 2026-10-04): what is not
 // moved out of a temporary drops at the end of its statement, once. "| " lines = rustc --test.
 use std::sync::atomic::{AtomicUsize, Ordering};
 static DROPS: AtomicUsize = AtomicUsize::new(0);

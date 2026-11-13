@@ -20,7 +20,7 @@ k=0
 for step in "" "" "" "line 1" "host 1" "line 2" "closure+" "host 2" "line 3" "move" "closure-" "host 3" "line 4" "" ""; do
   k=$((k + 1))
   if [ -n "$step" ]; then python3 "$H/edit.py" "$C/pkg" "$step" || { bad="$bad edit '$step' failed;"; break; }; fi
-  (cd "$C/pkg" && env -u MAKEPAD_RUN_PRELINK -u MAKEPAD_RUN_CACHE_TRACE MAKEPAD_RUN_VERBOSE=1 MAKEPAD_RUN_CACHE_DIR="$C/cache" MAKEPAD_RUN_TARGET_DIR="$C/target" MAKEPAD_RUN_STD="$H/../../std" "$R" run cache-warm-edit-ids) > "$C/run$k.out" 2> "$C/run$k.log"
+  (cd "$C/pkg" && env -u RELAX_PRELINK -u RELAX_CACHE_TRACE RELAX_VERBOSE=1 RELAX_CACHE_DIR="$C/cache" RELAX_TARGET_DIR="$C/target" RELAX_STD="$H/../../std" "$R" run cache-warm-edit-ids) > "$C/run$k.out" 2> "$C/run$k.log"
   rc=$?
   # (stdout on its own: verbose stderr lines would split the result line)
   got=$(grep -m1 "^cache_warm_edit_ids result " "$C/run$k.out")

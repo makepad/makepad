@@ -18,11 +18,11 @@
 //! stores named by the interface fingerprint; front images in the run image stores
 //! (cache/front_run.rs), which the stores named by the crate fingerprint refer to (front.rs).
 //!
-//! MAKEPAD_RUN_CACHE=on (default) | off | verify | readonly;
-//! Stores live in `<cargo target dir>/makepad-run/cache` (dirs.rs); MAKEPAD_RUN_CACHE_DIR replaces
-//! the run dir for tests and measurement. MAKEPAD_RUN_CACHE_MAX (MB) caps them (default: twice
+//! RELAX_CACHE=on (default) | off | verify | readonly;
+//! Stores live in `<cargo target dir>/relax/cache` (dirs.rs); RELAX_CACHE_DIR replaces
+//! the run dir for tests and measurement. RELAX_CACHE_MAX (MB) caps them (default: twice
 //! what the run uses, at least 4096; prune_root). The `--allow-c` builds beside them
-//! (`makepad-run/native`) have no cap: what the last build of each slot uses stays, the rest goes
+//! (`relax/native`) have no cap: what the last build of each slot uses stays, the rest goes
 //! (native.rs, roots).
 
 use crate::borrowck::lazy::StoredVerdict;
@@ -45,7 +45,7 @@ mod image;
 use image::{ManifestImage, IMAGE_MAGIC};
 pub(crate) use image::{prelink_unit, PrelinkedSlot};
 mod items;
-pub(crate) use items::FileDigest;
+pub(crate) use items::{owner_body_hash, FileDigest};
 mod deps;
 pub(crate) use deps::{user_names, CheckNode, Name, UserNames};
 mod demand;
@@ -219,7 +219,7 @@ pub fn verify_front_images() {
         }
         for p in bad {
             if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("makepad-run cache: a front image in {} does not match its checksum: the store is removed (the next run rebuilds it)", p.display());
+                eprintln!("relax cache: a front image in {} does not match its checksum: the store is removed (the next run rebuilds it)", p.display());
             }
             let _ = std::fs::remove_file(crate::store::current(&p));
         }
@@ -235,8 +235,11 @@ const LEDGER_KEY: u128 = 0;
 // follows the trait objects its roots are passed, not every one its code calls through). 32: a
 // closure is named by its owner's closure ordinal and its text (closure_ordinal), not by its
 // file version and position, in slot keys and types alike; a block-scoped item by its fn and
-// its ordinal there (stable::block_place), not its offset.
-const ENTRY_VERSION: u32 = 34;
+// its ordinal there (stable::block_place), not its offset. 35: a glue kind is a u32 (jit.rs
+// FnKey::Glue): one byte below 0xFF, else 0xFF and a u32; that byte used to be a constructor's
+// kind (GLUE_CTOR + variant 239), so an older entry is dropped rather than misread.
+// 36: a coroutine's closure type has tags of its own (enc_ty 29 for 17's form, 30 for 28's).
+const ENTRY_VERSION: u32 = 36;
 /// the level of a code entry's code (its tier byte)
 const TIER_O1: u8 = 0;
 const TIER_O3: u8 = 1;
@@ -363,13 +366,13 @@ pub(crate) fn file_iface_text(prog: &crate::program::Program, f: usize) -> Vec<u
     prog.files.get(f).map_or(Vec::new(), |pf| items::iface_text(pf))
 }
 
-/// MAKEPAD_RUN_CACHE: unset / `on` = on (the default), `off` / `0`, `verify`, `readonly`.
+/// RELAX_CACHE: unset / `on` = on (the default), `off` / `0`, `verify`, `readonly`.
 pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
     // A process-wide optimization budget depends on which functions ran before this one.
     // rustc: rustc_mir_transform/src/pass_manager.rs:298 (MIR optimization bisection).
-    if std::env::var_os("MAKEPAD_RUN_THREAD_MAX").is_some() {
+    if std::env::var_os("RELAX_THREAD_MAX").is_some() {
         if options.verbose {
-            eprintln!("makepad-run cache: disabled because MAKEPAD_RUN_THREAD_MAX uses a process-wide optimization budget");
+            eprintln!("relax cache: disabled because RELAX_THREAD_MAX uses a process-wide optimization budget");
         }
         return None;
     }
@@ -377,7 +380,7 @@ pub fn mode_from_env(options: &crate::options::Options) -> Option<Mode> {
     if crate::coverage::on() {
         return None;
     }
-    match std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref() {
+    match std::env::var("RELAX_CACHE").ok().as_deref() {
         Some("off") | Some("0") => None,
         Some("verify") => Some(Mode::Verify),
         Some("readonly") => Some(Mode::ReadOnly),
@@ -414,7 +417,7 @@ pub mod warm_count {
     pub const STORES_REJECTED: usize = 10;
     /// entries recorded this session (written by the batched record writes)
     pub const RECORDED: usize = 11;
-    /// strict runs (MAKEPAD_RUN_WARM_STRICT=1) split NO_ENTRY by the cold run's ledger: recorded
+    /// strict runs (RELAX_WARM_STRICT=1) split NO_ENTRY by the cold run's ledger: recorded
     /// under another key, recorded but its entry unavailable, never recorded (with a reason)
     pub const KEY_CHANGED: usize = 12;
     pub const ENTRY_GONE: usize = 13;
@@ -521,7 +524,7 @@ pub fn warm_summary() -> String {
             k(g(O1V_LATE)), k(g(O1V_INLINED)), k(g(O1V_BUILT)), k(g(O1V_WRITTEN)), k(g(O1V_DROPPED))));
     }
     if g(NO_ENTRY) > 0 && g(KEY_CHANGED) + g(ENTRY_GONE) + g(NOT_RECORDED) == 0 {
-        s.push_str(" (why an entry is missing -- key changed, never recorded, not flushed -- needs a MAKEPAD_RUN_WARM_STRICT=1 cold run then warm run)");
+        s.push_str(" (why an entry is missing -- key changed, never recorded, not flushed -- needs a RELAX_WARM_STRICT=1 cold run then warm run)");
     }
     s
 }
@@ -670,11 +673,17 @@ fn tls_shape(pl: &crate::jit::TlsPlace) -> u8 {
 }
 
 fn record_deps(u: &Unit, id: u32, extra: &[u32]) -> Vec<u32> {
-    let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&id).into_iter().flatten().copied()).collect();
+    // a sandboxed twin's code is its base's lowered body transformed: the base's inputs are its own
+    let src = match u.fns[id as usize].key {
+        FnKey::Sandbox(b) if (b as usize) < u.fns.len() => b,
+        _ => id,
+    };
+    let mut stack: Vec<u32> = extra.iter().copied().chain(u.body_deps.get(&src).into_iter().flatten().copied()).collect();
     let mut deps = Vec::new();
     if stack.is_empty() { return deps; }
     let mut seen = HashSet::new();
     seen.insert(id);
+    seen.insert(src);
     while let Some(c) = stack.pop() {
         if !seen.insert(c) || c as usize >= u.fns.len() { continue; }
         if let Some(v) = u.body_deps.get(&c) { stack.extend(v.iter().copied()); }
@@ -1212,12 +1221,12 @@ impl Cache {
         let t_if = std::time::Instant::now();
         // a restored collected program: the interfaces its recording run keyed code with (the
         // certified inputs are unchanged); file digests are made when a key needs one (def_body)
-        match collected.filter(|c| c.ifaces.len() == ncr && std::env::var_os("MAKEPAD_RUN_CACHE_IFACE").is_none()) {
+        match collected.filter(|c| c.ifaces.len() == ncr && std::env::var_os("RELAX_CACHE_IFACE").is_none()) {
             Some(cc) => {
                 c.digests = vec![None; prog.files.len()];
                 c.iface_plain = cc.ifaces.clone();
             }
-            None => match kept.filter(|k| k.ifaces.len() >= kept_n && std::env::var_os("MAKEPAD_RUN_CACHE_IFACE").is_none()) {
+            None => match kept.filter(|k| k.ifaces.len() >= kept_n && std::env::var_os("RELAX_CACHE_IFACE").is_none()) {
                 // the crates loaded after the kept ones: their files, on several threads (a kept
                 // file is digested when a key needs it, def_body)
                 Some(kc) => {
@@ -1248,9 +1257,9 @@ impl Cache {
         c.late_view = items::late_views(prog, &c.late);
         c.late_view.truncate(ncr);
         c.stats.iface_ns = t_if.elapsed().as_nanos() as u64;
-        // MAKEPAD_RUN_CACHE_IFACE=<file>: every file's interface hash and crate's interface
+        // RELAX_CACHE_IFACE=<file>: every file's interface hash and crate's interface
         // fingerprint (which file made an edit's crate recompile)
-        if let Ok(path) = std::env::var("MAKEPAD_RUN_CACHE_IFACE") {
+        if let Ok(path) = std::env::var("RELAX_CACHE_IFACE") {
             let mut out = String::new();
             for (ci, v) in c.iface.iter().enumerate() {
                 out.push_str(&format!("crate\t{}\t{:032x}\t{:032x}\n", prog.syms.str(prog.crates[ci].name), v, c.view.get(ci).copied().unwrap_or(0)));
@@ -1261,8 +1270,8 @@ impl Cache {
                 }
             }
             let _ = std::fs::write(&path, out);
-            // MAKEPAD_RUN_CACHE_IFACE_FILE=<path suffix>: that file's interface text too
-            if let Ok(want) = std::env::var("MAKEPAD_RUN_CACHE_IFACE_FILE") {
+            // RELAX_CACHE_IFACE_FILE=<path suffix>: that file's interface text too
+            if let Ok(want) = std::env::var("RELAX_CACHE_IFACE_FILE") {
                 for (i, p) in prog.file_paths.iter().enumerate() {
                     if p.ends_with(&want) {
                         let _ = std::fs::write(format!("{}.{}.txt", path, i), items::iface_text(&prog.files[i]));
@@ -1372,8 +1381,8 @@ impl Cache {
             let _ = crate::run_threads::spawn("run-cache-prune", move || { let _z = crate::zone_alloc::compiler_thread();
                 makepad_cpu_budget::set_thread_class(makepad_cpu_budget::BACKGROUND);
                 let (b, a) = prune_root(&r);
-                if verbose && std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() && b != a {
-                    eprintln!("makepad-run cache: pruned {} -> {} MB", b >> 20, a >> 20);
+                if verbose && std::env::var_os("RELAX_CACHE_TRACE").is_some() && b != a {
+                    eprintln!("relax cache: pruned {} -> {} MB", b >> 20, a >> 20);
                 }
             });
             }
@@ -1424,12 +1433,12 @@ impl Cache {
         c.stats.open_ns = t0.elapsed().as_nanos() as u64;
         if crate::preload::trace() {
             if let Some(index) = &c.mapped_index {
-                eprintln!("makepad-run collected: mapped cache tables: {} stores, {} entries; definition tables {}",
+                eprintln!("relax collected: mapped cache tables: {} stores, {} entries; definition tables {}",
                     index.stores.len(), index.len(), if c.mapped_definitions.is_some() { "mapped" } else { "rebuilt" });
             }
         }
-        if verbose && std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() {
-            eprintln!("makepad-run cache: open phases: fingerprints {:.1} ms (interfaces {:.1} ms), stores+index {:.1} ms ({} code stores), def maps {:.1} ms", t_fp.as_secs_f64() * 1e3, c.stats.iface_ns as f64 / 1e6, (t_packs - t_fp).as_secs_f64() * 1e3 - c.stats.iface_ns as f64 / 1e6, c.stats.code_stores, (t0.elapsed() - t_packs).as_secs_f64() * 1e3);
+        if verbose && std::env::var_os("RELAX_CACHE_TRACE").is_some() {
+            eprintln!("relax cache: open phases: fingerprints {:.1} ms (interfaces {:.1} ms), stores+index {:.1} ms ({} code stores), def maps {:.1} ms", t_fp.as_secs_f64() * 1e3, c.stats.iface_ns as f64 / 1e6, (t_packs - t_fp).as_secs_f64() * 1e3 - c.stats.iface_ns as f64 / 1e6, c.stats.code_stores, (t0.elapsed() - t_packs).as_secs_f64() * 1e3);
         }
         Ok(c)
     }
@@ -1583,7 +1592,7 @@ impl Cache {
         self.pending_bytes -= freed.min(self.pending_bytes);
         let krate = self.key_crate.get(&key).copied().unwrap_or(0);
         if self.verbose {
-            eprintln!("makepad-run cache: slot {} {} failed the borrow checker: its code entry is dropped ({} pending)", id, u.fns[id as usize].name, before - self.pending.len());
+            eprintln!("relax cache: slot {} {} failed the borrow checker: its code entry is dropped ({} pending)", id, u.fns[id as usize].name, before - self.pending.len());
         }
         self.pending_keys.insert(key);
         self.push_pending(krate, NewEntry { key, kind: KIND_CODE, payload: Vec::new() });
@@ -1602,7 +1611,7 @@ impl Cache {
     }
 
     /// The entries recorded so far, taken out for writing during the run (on the owner thread;
-    /// the write itself, `Spill::write`, runs off the unit). Memory: a cold Stage run held ~200 MB
+    /// the write itself, `Spill::write`, runs off the unit). Memory: a large app's cold run held ~200 MB
     /// of recorded code until the exit flush. The keys stay in `pending_keys` (nothing is
     /// recorded twice); the late-input ledger written with them is this run's so far (a later
     /// write or the exit flush replaces it: newest wins per key).
@@ -1719,7 +1728,7 @@ impl Cache {
     /// A file by path and text. None (nothing written): a version a live edit committed -- its
     /// parse is eager, so its expression and block ids are not those of a boot parse of the same
     /// text, and a key naming them would mean other expressions in a run that booted from it
-    /// (a warm Scope ran cached code calling `{closure#175197}`, which was no closure there:
+    /// (an app ran cached code on a warm run, calling `{closure#175197}`, which was no closure there:
     /// SIGILL). Code that names such a file's closures, sites or types is not cached.
     fn enc_file(&self, u: &Unit, file: u32, e: &mut E) -> Option<()> {
         if u.prog.is_edit_version(file) {
@@ -1760,7 +1769,7 @@ impl Cache {
         if !ok {
             self.stats.closure_mismatch += 1;
             if self.verbose && self.stats.closure_mismatch <= 8 {
-                eprintln!("makepad-run cache: entry rejected: it names expression {} of {} as a closure this program does not have there (made from another parse of the file)",
+                eprintln!("relax cache: entry rejected: it names expression {} of {} as a closure this program does not have there (made from another parse of the file)",
                     expr & !crate::tcx::ASYNC_FN_BODY, u.prog.file_paths.get(file as usize).map_or("?", |p| p.as_str()));
             }
         }
@@ -1884,7 +1893,7 @@ impl Cache {
                 self.stats.def_collisions += 1;
             }
             if self.verbose && trace_on() {
-                eprintln!("makepad-run cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_session::clock::cpu_ns() - t0) as f64 / 1e6);
+                eprintln!("relax cache: def map of crate {} ({} defs) in {:.2} ms", u.prog.syms.str(u.prog.crates[c as usize].name), m.len(), (relax_session::clock::cpu_ns() - t0) as f64 / 1e6);
             }
             self.def_maps.insert(c, m);
         }
@@ -1960,11 +1969,16 @@ impl Cache {
                 return self.enc_tys(u, u.tcx.tys.list(args), e, crates, depth);
             }
             TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state }) => {
+                // A coroutine's closure type (an async block's, an async fn body's) takes its own tag in
+                // either form (30 for 28, 29 for 17). The type itself does not say so: Tcx::coroutines
+                // does, filled by the type check of the body that holds the block. A run that takes that
+                // body's code from here never checks it, so the key carries the fact to dec_ty.
+                let coroutine = u.tcx.coroutines.contains(&(file, expr));
                 // its owner's closure ordinal (closure_ordinal): the owner's type first, which
                 // names the item the ordinal counts in
                 let def = match u.tcx.tys.kind(owner) { TyKind::FnDef(d, ..) => Some(*d), _ => None };
                 if let Some((ord, fp)) = def.filter(|_| !u.prog.is_edit_version(file)).and_then(|d| self.closure_ordinal(u, d, file, expr)) {
-                    e.u8(28);
+                    e.u8(if coroutine { 30 } else { 28 });
                     crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                     self.enc_ty(u, owner, e, crates, depth + 1)?;
                     e.u32(ord);
@@ -1972,7 +1986,7 @@ impl Cache {
                     self.enc_ty(u, closure_kind_ty, e, crates, depth + 1)?; self.enc_ty(u, sig, e, crates, depth + 1)?;
                     return self.enc_ty(u, state, e, crates, depth + 1);
                 }
-                e.u8(17);
+                e.u8(if coroutine { 29 } else { 17 });
                 crates.push(u.prog.file_crate.get(file as usize).copied().unwrap_or(0));
                 self.enc_file(u, file, e)?;
                 e.u32(expr);
@@ -2190,7 +2204,7 @@ impl Cache {
                 let regions = self.dec_regions(u, d)?;
                 TyKind::FnDef(def, u.tcx.tys.mk_list(&self.dec_tys(u, d, depth)?), regions)
             }
-            17 => {
+            tag @ (17 | 29) => {
                 let file = self.dec_file(u, d)?;
                 let expr = d.u32()?;
                 if !self.closure_fp_agrees(u, file, expr, d.u64()?) { return None; }
@@ -2198,14 +2212,22 @@ impl Cache {
                 let sig = self.dec_ty(u, d, depth + 1)?;
                 let state = self.dec_ty(u, d, depth + 1)?;
                 let owner = self.dec_ty(u, d, depth + 1)?;
+                // A coroutine is known as one before its type exists here: the body that defines it
+                // may never be type-checked in this run (its code is cached), and without the mark
+                // the type is a plain closure to the solver, with no `Future` impl: an instance whose
+                // body names `<F as Future>::Output` over it fails to normalize.
+                // (Looked up first: an insert adds a node each time, and many keys name one coroutine.)
+                if tag == 29 && !u.tcx.coroutines.contains(&(file, expr)) { u.tcx.coroutines.insert((file, expr), ()); }
                 TyKind::Closure(file, expr, crate::types::ClosureArgs { parent_args: owner, closure_kind_ty: kind, closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: state })
             }
-            28 => {
+            tag @ (28 | 30) => {
                 let owner = self.dec_ty(u, d, depth + 1)?;
                 let ord = d.u32()?;
                 let fp = d.u64()?;
                 let TyKind::FnDef(def, ..) = *u.tcx.tys.kind(owner) else { return None };
                 let (file, expr) = self.closure_at(u, def, ord, fp)?;
+                // 30: a coroutine's, marked before its type is interned (as 29 above)
+                if tag == 30 && !u.tcx.coroutines.contains(&(file, expr)) { u.tcx.coroutines.insert((file, expr), ()); }
                 let kind = self.dec_ty(u, d, depth + 1)?;
                 let sig = self.dec_ty(u, d, depth + 1)?;
                 let state = self.dec_ty(u, d, depth + 1)?;
@@ -2265,7 +2287,6 @@ impl Cache {
             return None;
         }
         match key.clone() {
-            // twins are never cached (their code depends on the sandbox layout of this run)
             FnKey::Shim(shim) => {
                 use relax_types::instance::{ShimKind, ReifyReason};
                 e.u8(KeyKind::Shim as u8);
@@ -2292,7 +2313,19 @@ impl Cache {
                 }
                 self.enc_tys(u, &shim.args, e, crates, 0)
             }
-            FnKey::Sandbox(_) => None,
+            // a sandboxed twin: its domain and its base's key. Its code names what it holds of the
+            // run's sandbox by symbols (sandbox.rs thunk_sym ..), linked again here; the domain
+            // keeps code one policy made out of another domain's units, and the kind keeps
+            // twin and base code apart (an Open macro world has no twins to share)
+            FnKey::Sandbox(base) => {
+                if base as usize >= u.fns.len() || !crate::sandbox::ready(u) {
+                    return None;
+                }
+                e.u8(KeyKind::Sandbox as u8);
+                e.str(crate::sandbox::domain(u));
+                let bk = u.fns[base as usize].key.clone();
+                self.enc_fnkey(u, &bk, e, crates, depth + 1)
+            }
             // SPEC-V: an unverified-mode twin is its base's body lowered as unverified code: keyed
             // by the base (the code that ran before its verdict, and the calls to it, are cached)
             FnKey::Plain(base) => {
@@ -2338,7 +2371,12 @@ impl Cache {
             }
             FnKey::Glue(g, t) => {
                 e.u8(KeyKind::Glue as u8);
-                e.u8(g);
+                if g < 0xFF {
+                    e.u8(g as u8);
+                } else {
+                    e.u8(0xFF);
+                    e.u32(g);
+                }
                 self.enc_ty(u, t, e, crates, 0)
             }
         }
@@ -2396,7 +2434,7 @@ impl Cache {
         e.u32(nd);
         e.0.extend_from_slice(&types.0);
         if crate::jit::rt_trace() {
-            eprintln!("makepad-run rt: recorded {} of {} slots, {} of {} trait-object types", n, ids.len(), nd, dyns.len());
+            eprintln!("relax rt: recorded {} of {} slots, {} of {} trait-object types", n, ids.len(), nd, dyns.len());
         }
         let path = self.rt_set_path(u, root);
         let tmp = path.with_extension("new");
@@ -2410,7 +2448,7 @@ impl Cache {
         self.dir.join(format!("rt-{}.set", name))
     }
 
-    /// memory report (MAKEPAD_RUN_MEM_REPORT): the recorder's and linker's tables (capacity based)
+    /// memory report (RELAX_MEM_REPORT): the recorder's and linker's tables (capacity based)
     pub(crate) fn mem_lines(&self) -> Vec<(String, u64)> {
         fn map<K, V, S>(name: &str, m: &HashMap<K, V, S>, deep: impl Fn(&V) -> usize) -> (String, u64) {
             let slot = std::mem::size_of::<(K, V)>() + 1;
@@ -2647,7 +2685,7 @@ impl Cache {
 
     /// The item graph now (deps_graph): `makepad run`'s app check beside main has it built before
     /// main, where the check before main had its first code key build it -- else main's first
-    /// compile does, half a second of a cold Fab boot on its path.
+    /// compile does, half a second of a large app's cold boot on its path.
     pub fn build_item_graph(&mut self, u: &Unit) {
         self.deps_graph(u);
     }
@@ -2656,7 +2694,7 @@ impl Cache {
     /// this program's very sources (a warm start maps it), else built over it -- the rows of the
     /// crates whose sources and dependencies are as it was built from are taken over, only the
     /// other crates' boot files are digested and walked (a restored collected program digests
-    /// files lazily) -- and recorded for the next start. MAKEPAD_RUN_DEPS_VERIFY=1: a graph built
+    /// files lazily) -- and recorded for the next start. RELAX_DEPS_VERIFY=1: a graph built
     /// over a stored one is checked against one built from scratch.
     fn deps_graph(&mut self, u: &Unit) -> std::sync::Arc<deps::Deps> {
         if let Some(g) = &self.deps {
@@ -2680,7 +2718,7 @@ impl Cache {
         if stored.as_ref().is_some_and(|g| g.built_from() == valid && g.crate_count() == prog.crates.len()) {
             let g = std::sync::Arc::new(stored.unwrap());
             if self.verbose {
-                eprintln!("makepad-run cache: item graph: {} nodes mapped in {:.1} ms", g.nodes_n, t0.elapsed().as_secs_f64() * 1e3);
+                eprintln!("relax cache: item graph: {} nodes mapped in {:.1} ms", g.nodes_n, t0.elapsed().as_secs_f64() * 1e3);
             }
             self.deps = Some(g.clone());
             return g;
@@ -2714,16 +2752,16 @@ impl Cache {
             }
         };
         if self.verbose {
-            eprintln!("makepad-run cache: item graph: {} nodes ({} walked, {} of {} crates taken over), {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
+            eprintln!("relax cache: item graph: {} nodes ({} walked, {} of {} crates taken over), {} edges, {} coarse, built in {:.1} ms (digests of {} files {:.1} ms; files to {:.1}, edges to {:.1}, components to {:.1}, hashed to {:.1})",
                 g.nodes_n, g.walked, if over { clean.iter().filter(|&&c| c).count() } else { 0 }, clean.len(), g.edges, g.coarse, t0.elapsed().as_secs_f64() * 1e3,
                 digested, t_dg.as_secs_f64() * 1e3, g.phases[0], g.phases[1], g.phases[2], g.phases[3]);
         }
-        if over && std::env::var("MAKEPAD_RUN_DEPS_VERIFY").is_ok_and(|v| v == "1") {
+        if over && std::env::var("RELAX_DEPS_VERIFY").is_ok_and(|v| v == "1") {
             digest(&[], &mut self.digests);
             let scratch = deps::Deps::build(prog, &prog.files, &[], &self.digests, &self.iface_plain, valid, None).expect("a graph built from scratch");
             match g.same_closures(&scratch) {
-                Ok(()) => eprintln!("makepad-run cache: item graph verified: built over the stored graph = built from scratch"),
-                Err(e) => eprintln!("makepad-run cache: item graph verify FAILED: {e}"),
+                Ok(()) => eprintln!("relax cache: item graph verified: built over the stored graph = built from scratch"),
+                Err(e) => eprintln!("relax cache: item graph verify FAILED: {e}"),
             }
         }
         if let Some(k) = key.filter(|_| self.mode != Mode::ReadOnly && (root as usize) < ncr) {
@@ -3179,6 +3217,31 @@ impl Cache {
                 let mut cr = Vec::new();
                 self.enc_def(u, d, e, &mut cr);
             }
+            // sandboxed code's values of the run (sandbox.rs thunk_sym ..): the twin, data,
+            // thread-local or host entry they are of; the link places each again
+            // (13 was a retired kind's)
+            SymKind::SbThunk(t) => {
+                e.u8(14);
+                let key = u.fns[t as usize].key.clone();
+                let mut cr = Vec::new();
+                if self.enc_fnkey(u, &key, e, &mut cr, 0).is_none() {
+                    self.why("sandbox thunk key");
+                    return None;
+                }
+            }
+            SymKind::SbPlace(inner) => {
+                e.u8(15);
+                self.enc_sym(u, Sym::new(inner), e, rw)?;
+            }
+            SymKind::SbTls(inner) => {
+                e.u8(16);
+                self.enc_sym(u, Sym::new(inner), e, rw)?;
+            }
+            SymKind::SbTable => e.u8(17),
+            SymKind::SbHost(n) => {
+                e.u8(18);
+                e.str(&n);
+            }
         }
         e.u64(s.off as u64);
         Some(())
@@ -3258,7 +3321,7 @@ impl Cache {
                 if n.contains(w) {
                     let hex: String = e.0.iter().map(|b| format!("{:02x}", b)).collect();
                     let ws: Vec<String> = ptrs.iter().map(|(o, t)| format!("{}:{}+{}", o, crate::syms::describe(u, *t), t.off)).collect();
-                    eprintln!("makepad-run cache: DATA {} key {:032x} ptrs {:?} enc {}", n, key, ws, hex);
+                    eprintln!("relax cache: DATA {} key {:032x} ptrs {:?} enc {}", n, key, ws, hex);
                 }
             }
             let kc = self.cur_crate;
@@ -3667,7 +3730,7 @@ impl Cache {
                 if x != id && (x as usize) < u.fns.len() && crate::jit::inline_body(&u.fns[x as usize]).is_some_and(|r| !r.pending.is_empty()) {
                     self.stats.purity_breaches += 1;
                     if self.verbose {
-                        eprintln!("makepad-run cache: purity breach: {} [{}] inlines {}, whose body is provisional", crate::syms::stable_fn_name(u, id), if level == TIER_BASE { "base" } else { "O1" }, crate::syms::stable_fn_name(u, x));
+                        eprintln!("relax cache: purity breach: {} [{}] inlines {}, whose body is provisional", crate::syms::stable_fn_name(u, id), if level == TIER_BASE { "base" } else { "O1" }, crate::syms::stable_fn_name(u, x));
                     }
                 }
             }
@@ -3746,7 +3809,7 @@ impl Cache {
                         Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
                         r => format!("{:?}", r),
                     };
-                    eprintln!("makepad-run cache: RELOCS rec {} {} {}", name, rl.at, t);
+                    eprintln!("relax cache: RELOCS rec {} {} {}", name, rl.at, t);
                 }
             }
         }
@@ -3872,7 +3935,7 @@ impl Cache {
     fn cold_linked_start(&self, u: &Unit) {
         let (linked, missed) = (self.stats.prelinked + self.stats.hits, self.stats.misses);
         if missed >= LINKED_START_MISSES && missed > linked && u.front.linked_start.swap(false, std::sync::atomic::Ordering::Relaxed) && self.verbose {
-            eprintln!("makepad-run cache: the start links little ({linked} slots linked, {missed} lookups missed): ahead checks on");
+            eprintln!("relax cache: the start links little ({linked} slots linked, {missed} lookups missed): ahead checks on");
         }
     }
 
@@ -4060,7 +4123,7 @@ impl Cache {
         // what earlier spills of this run wrote: the image takes those entries too (mid-run, as the
         // cache writer opened their stores before this request: open_written)
         if !self.index_written(crate::preempt::is_stopped()) {
-            if self.verbose { eprintln!("makepad-run cache: startup manifest waits for the stores a spill wrote since this write began"); }
+            if self.verbose { eprintln!("relax cache: startup manifest waits for the stores a spill wrote since this write began"); }
             return false;
         }
         crate::run::yield_section("manifest keys");
@@ -4081,7 +4144,7 @@ impl Cache {
                 }
             }
         }
-        if self.verbose { eprintln!("makepad-run cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
+        if self.verbose { eprintln!("relax cache: manifest phases: {} slots keyed in {:.1} ms", order.len(), t0.elapsed().as_secs_f64() * 1e3); }
         if stop() { return false; }
         crate::run::yield_section("manifest compare");
         let old: HashSet<&[u8]> = self.manifest.iter().map(|b| b.as_slice()).collect();
@@ -4095,7 +4158,7 @@ impl Cache {
             return true;
         }
         if self.verbose {
-            eprintln!("makepad-run cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}), image slots {} stale {} cached at present {}",
+            eprintln!("relax cache: startup manifest rewritten: valid {} (missing {}), {} new of {}, image rewrite {} (replacements without a stored entry {}, tier-ups {}), image slots {} stale {} cached at present {}",
                 self.startup_manifest_valid(), self.manifest_missing, new, list.len(), self.image_rewrite, self.stats.rewrite_why[0], self.stats.rewrite_why[1], self.image_slots, self.image_stale, self.manifest_present_cached);
         }
         crate::run::yield_section("manifest image");
@@ -4111,7 +4174,7 @@ impl Cache {
         let n_img = img.as_ref().map_or(0, |i| i.1 as usize);
         if crate::preempt::is_stopped() && self.image_slots > 0 && n_img * 50 < self.image_slots * 49 {
             if self.verbose {
-                eprintln!("makepad-run cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
+                eprintln!("relax cache: startup manifest kept: at exit the image would cover {} of the {} slots the loaded one has", n_img, self.image_slots);
             }
             self.manifest_done = true; self.manifest_len = order.len();
             return true;
@@ -4158,7 +4221,7 @@ impl Cache {
             self.push_pending(c as u32, NewEntry { key: o, kind: crate::store::KIND_REMOVED, payload: Vec::new() });
             removed += 1;
         }
-        if self.verbose && removed != 0 { eprintln!("makepad-run cache: {} code entries superseded by this manifest: removed", removed); }
+        if self.verbose && removed != 0 { eprintln!("relax cache: {} code entries superseded by this manifest: removed", removed); }
         self.push_pending(root, NewEntry { key, kind: KIND_MANIFEST, payload: e.0 });
         // the sources the keys above were made from (none after a live edit: this run's
         // fingerprints describe its start, not the edited files)
@@ -4203,11 +4266,11 @@ impl Cache {
 
     pub fn flush(&mut self) -> Result<usize, String> {
         if let Some(c) = self.census().filter(|_| self.verbose) {
-            eprintln!("makepad-run cache: census: {c}");
+            eprintln!("relax cache: census: {c}");
         }
         if self.verbose && self.mode == Mode::Verify {
             let s = &self.stats;
-            eprintln!("makepad-run cache: verify: {} identical, {} different ({} with other recorded inputs, {} code from the same inputs, {} only a relocation), {} of another tier, {} provisional (not compared), outside the rule (not compared): {} O2, {} O3; {} purity breaches", s.verify_same, s.verify_diff, s.verify_diff_inputs, s.verify_diff_code, s.verify_diff_reloc, s.verify_other_tier, s.verify_provisional, s.verify_outside[0], s.verify_outside[1], s.purity_breaches);
+            eprintln!("relax cache: verify: {} identical, {} different ({} with other recorded inputs, {} code from the same inputs, {} only a relocation), {} of another tier, {} provisional (not compared), outside the rule (not compared): {} O2, {} O3; {} purity breaches", s.verify_same, s.verify_diff, s.verify_diff_inputs, s.verify_diff_code, s.verify_diff_reloc, s.verify_other_tier, s.verify_provisional, s.verify_outside[0], s.verify_outside[1], s.purity_breaches);
         }
         if self.mode == Mode::ReadOnly {
             return Ok(0);
@@ -4276,6 +4339,8 @@ key_kinds! {
     Twin = 4,
     /// a closure by its owner's closure ordinal and its text (closure_ordinal)
     Closure = 5,
+    /// a sandboxed twin: its confinement domain's name and its base's key
+    Sandbox = 6,
 }
 
 impl KeyKind {
@@ -4283,7 +4348,7 @@ impl KeyKind {
     /// slots the startup image installs before their identities decode: jit arm_counters).
     pub(crate) fn counted(self) -> bool {
         match self {
-            KeyKind::Inst | KeyKind::ClosureInFile | KeyKind::Closure | KeyKind::Twin => true,
+            KeyKind::Inst | KeyKind::ClosureInFile | KeyKind::Closure | KeyKind::Twin | KeyKind::Sandbox => true,
             KeyKind::Glue | KeyKind::Shim => false,
         }
     }
@@ -4546,7 +4611,7 @@ fn ledger_current(p: &Store, present: &HashSet<String>, memo: &mut HashMap<(u8, 
         });
         if now != h {
             if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("makepad-run cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if crate::sip::late_base(k) == crate::sip::LATE_FILE { "file" } else { "env" });
+                eprintln!("relax cache: stale code store: crate {c}: late input {} `{name}` changed (stored {h:032x}, now {now:032x})", if crate::sip::late_base(k) == crate::sip::LATE_FILE { "file" } else { "env" });
             }
             return false;
         }
@@ -4632,7 +4697,7 @@ fn key_defs(u: &Unit, key: &FnKey) -> Vec<DefId> {
     for _ in 0..32 {
         match k {
             FnKey::Inst(d, _) => { out.push(d); break; }
-            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
+            FnKey::Closure(_, _, parent) | FnKey::Plain(parent) | FnKey::Sandbox(parent) if (parent as usize) < u.fns.len() => k = u.fns[parent as usize].key.clone(),
             _ => break,
         }
     }
@@ -4716,7 +4781,7 @@ pub fn app_store_files(dir: &std::path::Path, krate: &str) -> Vec<PathBuf> {
     files
 }
 
-/// The cap's floor (MB) when MAKEPAD_RUN_CACHE_MAX is unset.
+/// The cap's floor (MB) when RELAX_CACHE_MAX is unset.
 const CAP_FLOOR_MB: u64 = 4096;
 /// A store stamped this recently is taken to be in use by another run (every run stamps the
 /// stores it opens: store::mark_live).
@@ -4727,9 +4792,9 @@ const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 
 /// itself opened; a delete that fails (open elsewhere, on Windows) is retried by the next
 /// start. Other Relax builds' stores stay for when that build runs again: store names hash the
 /// codegen identity (codegen_id.rs), so no other build ever reads them, and a box whose lanes run
-/// several builds went cold each time one of them pruned (the Windows node lost a stopped Fab's
+/// several builds went cold each time one of them pruned (the Windows node lost a stopped app's
 /// 109 code stores to a test of another build, 11-04). While `<root>/cache` holds more than the
-/// cap (MAKEPAD_RUN_CACHE_MAX megabytes, else twice what this run uses (its live stores), at least
+/// cap (RELAX_CACHE_MAX megabytes, else twice what this run uses (its live stores), at least
 /// CAP_FLOOR_MB), whole store files go, least recently used first, whichever build wrote them (a
 /// run stamps the files it uses; other crate versions' files are never stamped again) -- never
 /// one this process opened or wrote, nor one another run stamped in the last IN_USE_BY_OTHERS,
@@ -4737,14 +4802,19 @@ const IN_USE_BY_OTHERS: std::time::Duration = std::time::Duration::from_secs(10 
 /// build with no store left loses its sets and its lock file. Only checked store files are ever
 /// deleted. Returns (bytes before, after).
 /// `--allow-c` build outputs (`<root>/native`) are kept by reachability, not by size: what a
-/// slot's last build uses stays (native.rs prune).
+/// slot's last build uses stays (native.rs prune). So are the outputs of the build scripts Relax
+/// runs (`<root>/build`): what a script pass's last run used stays (unitgraph.rs prune_build).
 pub fn prune_root(root: &std::path::Path) -> (u64, u64) {
-    let cap = std::env::var("MAKEPAD_RUN_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20);
+    let cap = std::env::var("RELAX_CACHE_MAX").ok().and_then(|v| v.parse::<u64>().ok()).map(|mb| mb << 20);
     let sizes = prune(root, &crate::store::live(), &crate::store::open_files(), &crate::store::programs(), cap);
     let since = std::time::SystemTime::now().checked_sub(IN_USE_BY_OTHERS).unwrap_or(std::time::UNIX_EPOCH);
-    let native = crate::native::prune(&root.join("native"), since);
-    if native > 0 && std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some() {
-        eprintln!("makepad-run cache: pruned {native} native build director(ies) no root names");
+    let native = crate::native::prune(&root.join("native"), since, false);
+    if native > 0 && std::env::var_os("RELAX_CACHE_TRACE").is_some() {
+        eprintln!("relax cache: pruned {native} native build director(ies) no root names");
+    }
+    let build = crate::unitgraph::prune_build(&root.join("build"), since, false);
+    if build > 0 && std::env::var_os("RELAX_CACHE_TRACE").is_some() {
+        eprintln!("relax cache: pruned {build} build script director(ies) no root names");
     }
     sizes
 }
@@ -4904,7 +4974,7 @@ fn prune(root: &std::path::Path, live: &HashSet<PathBuf>, open: &HashSet<PathBuf
             }
         }
         eprintln!(
-            "makepad-run cache: {} MB stays over the cap ({} MB): this run's stores {} MB, running other builds' {} MB, stores other runs used in the last {} min {} MB",
+            "relax cache: {} MB stays over the cap ({} MB): this run's stores {} MB, running other builds' {} MB, stores other runs used in the last {} min {} MB",
             total >> 20, cap >> 20, live_bytes >> 20, other_running >> 20, IN_USE_BY_OTHERS.as_secs() / 60, other_runs >> 20
         );
     }
@@ -5027,7 +5097,7 @@ fn prim_of(c: u8) -> Option<crate::program::Prim> {
 /// there (stable::block_place: its fn's key and its ordinal) -- the identity stable::def_ident
 /// gives TypeId (memoized in `memo`; parents are in
 /// the same crate).
-fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident: &[u128], memo: &mut HashMap<DefId, u128>, files: &mut HashMap<u32, u128>, d: DefId) -> u128 {
+pub(crate) fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident: &[u128], memo: &mut HashMap<DefId, u128>, files: &mut HashMap<u32, u128>, d: DefId) -> u128 {
     if let Some(&k) = memo.get(&d) {
         return k;
     }
@@ -5071,7 +5141,8 @@ fn def_key_in(prog: &crate::program::Program, tcx: &crate::tcx::Tcx, crate_ident
     k
 }
 
-fn def_kind_code(k: &DefKind) -> u32 {
+/// Stable kind tags shared by code-cache keys and the stored body-fact table's candidate index.
+pub(crate) fn def_kind_code(k: &DefKind) -> u32 {
     match k {
         DefKind::Mod => 1,
         DefKind::Fn => 2,
@@ -5099,13 +5170,13 @@ fn def_kind_code(k: &DefKind) -> u32 {
     }
 }
 
-/// MAKEPAD_RUN_CACHE_TRACE=<file>: one line per lookup (ms since start, hit/miss, thread, crate, slot
+/// RELAX_CACHE_TRACE=<file>: one line per lookup (ms since start, hit/miss, thread, crate, slot
 /// name, stable name), kept in memory and written at exit (no I/O on the compile path).
 static TRACE: relax_session::sync::Mutex<Option<String>> = relax_session::sync::Mutex::new(None);
 
 pub(crate) fn trace_on() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("MAKEPAD_RUN_CACHE_TRACE").is_some())
+    *T.get_or_init(|| std::env::var_os("RELAX_CACHE_TRACE").is_some())
 }
 
 pub(crate) fn trace_lookup(u: &Unit, id: u32, what: &str) {
@@ -5131,9 +5202,9 @@ pub(crate) fn trace_keyed(u: &Unit, id: u32, what: &str, code_key: Option<u128>)
     crate::zone_alloc::kept_with(|| TRACE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(String::new).push_str(&line));
 }
 
-/// Writes MAKEPAD_RUN_CACHE_TRACE (at exit).
+/// Writes RELAX_CACHE_TRACE (at exit).
 pub fn write_trace() {
-    if let Ok(p) = std::env::var("MAKEPAD_RUN_CACHE_TRACE") {
+    if let Ok(p) = std::env::var("RELAX_CACHE_TRACE") {
         // ({pid}: one file per process -- a program's build scripts run under the same env)
         let p = p.replace("{pid}", &std::process::id().to_string());
         // (the whole trace each time: the quit write and the exit both write it)
@@ -5276,7 +5347,7 @@ impl Cache {
         // comparison below reports the inputs.
         let only_nounwind = !same_nounwind && encodable && fresh_inputs.0[..] == [&cached[inputs_at..start], &encoded[..], &cached[end..inputs_end]].concat()[..];
         if only_nounwind {
-            eprintln!("makepad-run cache: VERIFY nounwind inputs differ: {} ({})", crate::syms::stable_fn_name(u, id), self.nounwind_diff(u, &cached[start..end], facts));
+            eprintln!("relax cache: VERIFY nounwind inputs differ: {} ({})", crate::syms::stable_fn_name(u, id), self.nounwind_diff(u, &cached[start..end], facts));
             self.stats.verify_diff_inputs += 1;
             return Some(false);
         }
@@ -5297,7 +5368,7 @@ impl Cache {
             }
             let why = if same_inputs { String::new() } else { format!(": {}", self.inputs_diff(u, id, &cached[inputs_at..inputs_end], &fresh_inputs.0)) };
             let level = ["base", "O1", "O2", "O3"][tier_level(cached[inputs_at]) as usize];
-            eprintln!("makepad-run cache: VERIFY code differs: {} [{}] ({} vs {} bytes, {}{}) cached/fresh {:?}", name, level, ccode.len(), fz.len(), inputs_word, why, diffs);
+            eprintln!("relax cache: VERIFY code differs: {} [{}] ({} vs {} bytes, {}{}) cached/fresh {:?}", name, level, ccode.len(), fz.len(), inputs_word, why, diffs);
             if same_inputs { self.stats.verify_diff_code += 1 } else { self.stats.verify_diff_inputs += 1 }
             // the fresh relocations whose encoding the cached entry does not hold (what the two
             // builds' constant pools disagree on)
@@ -5321,14 +5392,14 @@ impl Cache {
                         });
                     }
                 }
-                eprintln!("makepad-run cache: VERIFY {}: cached {} relocations, fresh {}; fresh ones the cached entry lacks: {:?}", name, n_cached, relocs.len(), missing);
+                eprintln!("relax cache: VERIFY {}: cached {} relocations, fresh {}; fresh ones the cached entry lacks: {:?}", name, n_cached, relocs.len(), missing);
                 for rl in relocs {
                     let t = match &rl.target {
                         Reloc::Sym(s) => format!("{} +{}", crate::syms::describe(u, *s), s.off),
                         Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => format!("slot {}", crate::syms::stable_fn_name(u, *x)),
                         r => format!("{:?}", r),
                     };
-                    eprintln!("makepad-run cache: RELOCS fresh {} {} {}", name, rl.at, t);
+                    eprintln!("relax cache: RELOCS fresh {} {} {}", name, rl.at, t);
                 }
             }
             return Some(false);
@@ -5364,7 +5435,7 @@ impl Cache {
                 // (what differs: the cached offset, kind and target bytes against the fresh ones)
                 let first = cbytes.as_deref().map_or(0, |b| b.iter().zip(&e.0).take_while(|(x, y)| x == y).count());
                 let hex = |b: &[u8]| format!("[{}/{}] {}", first, b.len(), b.iter().skip(first.saturating_sub(4)).take(16).map(|x| format!("{:02x}", x)).collect::<String>());
-                eprintln!("makepad-run cache: VERIFY RELOC differs: {} at {} ({:?} -> {}, {}; cached at {} kind {}, target {} / fresh {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() }, inputs_word, co, if ck == Some(rl.kind) { "same" } else { "differs" }, cbytes.as_deref().map_or(String::from("-"), |b| hex(b)), if ok { hex(&e.0) } else { String::from("unencodable") });
+                eprintln!("relax cache: VERIFY RELOC differs: {} at {} ({:?} -> {}, {}; cached at {} kind {}, target {} / fresh {})", name, o, r, match r { Reloc::Sym(s) => crate::syms::describe(u, *s), Reloc::Slot(x) | Reloc::Thunk(x) | Reloc::Call(x) => crate::syms::stable_fn_name(u, *x), _ => String::new() }, inputs_word, co, if ck == Some(rl.kind) { "same" } else { "differs" }, cbytes.as_deref().map_or(String::from("-"), |b| hex(b)), if ok { hex(&e.0) } else { String::from("unencodable") });
                 if same_inputs { self.stats.verify_diff_reloc += 1 } else { self.stats.verify_diff_inputs += 1 }
                 return Some(false);
             }
@@ -5374,10 +5445,10 @@ impl Cache {
     }
 }
 
-/// MAKEPAD_RUN_CACHE_DUMP=<name substring>: link details of matching entries (read once).
+/// RELAX_CACHE_DUMP=<name substring>: link details of matching entries (read once).
 fn dump_filter() -> Option<&'static str> {
     static F: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    relax_session::phase::env_once(&F, "MAKEPAD_RUN_CACHE_DUMP")
+    relax_session::phase::env_once(&F, "RELAX_CACHE_DUMP")
 }
 
 fn kind_code(k: RelocKind) -> u8 {
@@ -5677,7 +5748,7 @@ pub fn start_deferred_front() {
         let t = std::time::Instant::now();
         let r = flush_front_graphs();
         if crate::preload::trace() {
-            eprintln!("makepad-run front: records and graph written after the first present: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
+            eprintln!("relax front: records and graph written after the first present: {:?} in {:.1} ms (t={:.0} ms)", r, t.elapsed().as_secs_f64() * 1e3, crate::clock::ms_since_start());
         }
     });
 }
@@ -5752,7 +5823,7 @@ fn record_now_ns() -> u64 {
 
 fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     let _profile = crate::load_profile::span(job.profile, "front-graph-write", "graph writer");
-    // MAKEPAD_RUN_BOOT_TRACE: where a graph write's time goes (one line per recorded graph)
+    // RELAX_BOOT_TRACE: where a graph write's time goes (one line per recorded graph)
     let t0 = std::time::Instant::now();
     let mut marks: Vec<(&str, f64)> = Vec::new();
     let mut mark = |name: &'static str| marks.push((name, t0.elapsed().as_secs_f64() * 1e3));
@@ -5857,7 +5928,7 @@ fn write_front_graph(job: &FrontGraphWrite) -> Option<()> {
     if crate::preload::trace() {
         let mut prev = 0.0;
         let parts: Vec<String> = marks.iter().map(|&(n, t)| { let d = t - prev; prev = t; format!("{}={:.0}", n, d) }).collect();
-        eprintln!("makepad-run front: graph recorded ({} crates, {} inputs) in {:.0} ms: {}", graph.crates.len(), graph.inputs.len(), prev, parts.join(" "));
+        eprintln!("relax front: graph recorded ({} crates, {} inputs) in {:.0} ms: {}", graph.crates.len(), graph.inputs.len(), prev, parts.join(" "));
     }
     if let (Some(source), Some(written)) = (&job.demand, &graph.demand_image) { source.image.recording_written(written.parts.clone()); }
     Some(())
@@ -6003,7 +6074,7 @@ impl FrontImages {
         // A build script's run (its own small world: std plus the script's crates) keeps no
         // front images: they are read only when a script runs again, which a cached build
         // result makes rare, while they cost a second copy of the std world on disk.
-        if mode_from_env(options).is_none() || std::env::var_os("MAKEPAD_RUN_BUILD_SCRIPT").is_some() {
+        if mode_from_env(options).is_none() || std::env::var_os("RELAX_BUILD_SCRIPT").is_some() {
             return None;
         }
         let root = crate::dirs::relax_dir();
@@ -6064,7 +6135,7 @@ impl FrontImages {
             })
         })
     }
-    /// `why`: the last check reached (MAKEPAD_RUN_BOOT_TRACE names it when the image is not used)
+    /// `why`: the last check reached (RELAX_BOOT_TRACE names it when the image is not used)
     /// Crate `c`'s image from the front store at `path`. Only a store whose image is taken is
     /// marked as used by this run (store.rs mark_used): the variants a scan rejects stay unused
     /// (cache.rs prune retires replaced variants).
@@ -6382,7 +6453,7 @@ impl crate::crate_image::CrateImages for FrontImages {
         *self.probes.lock().unwrap() = Some(HashMap::new());
         self.stores.lock().unwrap().clear();
         let rejected = |why: &str| if crate::preload::trace() {
-            eprintln!("makepad-run front: graph certificate not restored: {}", why);
+            eprintln!("relax front: graph certificate not restored: {}", why);
         };
         let Some(graph) = read_front_graph(&self.dir, recipe.identity).map(std::sync::Arc::new) else { rejected("store"); return; };
         *self.graph_read.lock().unwrap() = Some(graph.clone());
@@ -6436,7 +6507,7 @@ impl crate::crate_image::CrateImages for FrontImages {
         }
         *self.certificate.lock().unwrap() = Some(graph);
         if crates.first().is_some_and(|c| c.cfg.session.runtime.profile) {
-            eprintln!("makepad-run front: graph certificate restored ({} crates)", crates.len());
+            eprintln!("relax front: graph certificate restored ({} crates)", crates.len());
         }
     }
     fn end_load(&self) {
@@ -6621,8 +6692,9 @@ impl Cache {
     }
 
     /// record_front_crates in a mid-run write: `stop` is asked before each crate still to record;
-    /// yes leaves the rest to a later write (false comes back). (A cold Fab's first mid-run write
-    /// held the owner 100-400 ms here, after its first frame: where a live session's first edits come.)
+    /// yes leaves the rest to a later write (false comes back). (A large app's first mid-run write on a
+    /// cold start held the owner 100-400 ms here, after its first frame: where a live session's first edits
+    /// come.)
     pub fn record_front_crates_until(&mut self, prog: &crate::program::Program, stop: &dyn Fn() -> bool) -> bool {
         for ci in 0..self.crate_path.len() {
             let Some(c) = prog.crates.get(ci) else { continue };
@@ -6689,10 +6761,10 @@ impl FrontRecordView {
         // each dependency as the crate its (extern alias, crate name) pair binds in c.deps --
         // the crate index the load's fingerprint (stable::loaded_crate_fingerprint) and the
         // preload's image deps use -- not the first crate of that name: a graph can hold two
-        // crates of one name (Stage: cfg-if 1.0.4 and 1.0.5), and an alias can be both std's and
+        // crates of one name (an app: cfg-if 1.0.4 and 1.0.5), and an alias can be both std's and
         // a renamed dependency's (brotli-decompressor's `alloc` = alloc-no-stdlib). Either made the
         // record's fingerprint differ from the load's every run, so no front graph certificate
-        // was ever written and every warm Stage load re-validated its 3,500 files.
+        // was ever written and each warm load of a large app re-validated its 3,500 files.
         let binds = |alias: &str, name: &str| c.deps.iter().find(|&&(a, k)| prog.syms.str(a) == alias
             && prog.crates.get(k as usize).is_some_and(|d| prog.syms.str(d.name) == name)).map(|&(_, k)| k as usize);
         let dep_fps = deps.as_ref().and_then(|deps|
@@ -6957,7 +7029,7 @@ impl ColdFront {
             // The graph itself is written now too, on that thread: every crate store it
             // certifies was joined above. Waiting for the first write after present lost it
             // to a quit soon after present (the mini's harness: SIGTERM at present + 0.5 s,
-            // KILL 5 s later; Stage's exit is busy for longer), and a relaunch without the
+            // KILL 5 s later; an app's exit is busy for longer), and a relaunch without the
             // certificate re-parsed every file although each crate's images were on disk.
             // A write that cannot record yet stays queued for the post-present or exit writer.
             if deferred {
@@ -6992,7 +7064,7 @@ impl ColdFront {
         if !prog.session.options.verbose || !Self::enabled(&prog.session.options) { return; }
         use std::sync::atomic::Ordering::Relaxed;
         use crate::source::{MAPPED_SOURCES, MAPPED_SOURCE_MISMATCH, MAPPED_SOURCE_NOT_FOUND, MAPPED_SOURCE_NO_SNAPSHOT};
-        eprintln!("makepad-run front: {} crate records written at load; sources mapped {} mismatch {} not-found {} no-snapshot {}", self.records,
+        eprintln!("relax front: {} crate records written at load; sources mapped {} mismatch {} not-found {} no-snapshot {}", self.records,
             MAPPED_SOURCES.load(Relaxed), MAPPED_SOURCE_MISMATCH.load(Relaxed), MAPPED_SOURCE_NOT_FOUND.load(Relaxed), MAPPED_SOURCE_NO_SNAPSHOT.load(Relaxed));
     }
 }
@@ -7063,10 +7135,10 @@ impl FrontWriters {
                         Ok(Ok(None)) => {}
                         Ok(Err(e)) => {
                             if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                                eprintln!("makepad-run front: crate record: {}", e);
+                                eprintln!("relax front: crate record: {}", e);
                             }
                         }
-                        Err(_) => eprintln!("makepad-run front: crate record writer panicked"),
+                        Err(_) => eprintln!("relax front: crate record writer panicked"),
                     }
                     queue.lock().unwrap_or_else(|e| e.into_inner()).active.remove(&path);
                     wake.notify_all();
@@ -7090,7 +7162,7 @@ impl FrontWriters {
         for worker in self.workers.drain(..) {
             match worker.join() {
                 Ok(cis) => recorded.extend(cis),
-                Err(_) => eprintln!("makepad-run front: crate record writer panicked"),
+                Err(_) => eprintln!("relax front: crate record writer panicked"),
             }
         }
         recorded
@@ -7920,6 +7992,11 @@ mod data_tests {
         let owner_closures = cache.item_closures(&u, owner);
         assert_eq!(owner_closures.len(), 2);
         keys.extend(owner_closures.iter().map(|&expr| FnKey::Closure(owner_file, expr, owner_slot)));
+        // glue kinds: one byte below 0xFF, else the 0xFF escape and a u32 (constructors of variant
+        // 239 and past it); the image's skip_fnkey consumes the escape too (key_crates)
+        for g in [crate::jit::GLUE_DROP, 0xFE, 0xFF, crate::jit::GLUE_CTOR + 246, crate::jit::GLUE_CTOR + 70_000] {
+            keys.push(FnKey::Glue(g, callable));
+        }
         let mut encoded = Vec::new();
         for key in keys {
             let mut bytes = E::default();
@@ -7953,6 +8030,75 @@ mod data_tests {
             for end in 0..bytes.len() {
                 assert!(unsafe { Linker::new(&mut cache).dec_fnkey(&mut u, &mut D { b: &bytes[..end], p: 0 }, 0) }.is_none());
             }
+        }
+        drop(cache);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A warm start: a key names a coroutine's type, and the body that defines the coroutine is
+    /// never type-checked (its code is cached). The decoded type is a coroutine all the same: the
+    /// key says so (enc_ty 29 or 30), where Tcx::coroutines was filled by that type check alone and an
+    /// instance over the type failed to normalize (`<F as Future>::Output`: no solution).
+    #[test]
+    fn coroutine_type_key_marks_its_coroutine() {
+        isolated_test!(coroutine_type_key_marks_its_coroutine);
+        use crate::types::{ClosureArgs, FnHeader, List, RegionArgsId};
+        let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
+        let mut session = crate::Session::default();
+        session.options.tier1 = false; session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let root = std::env::temp_dir().join(format!("relax-coroutine-key-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("lib.rs");
+        std::fs::write(&source, "#![no_std] fn method<T>() {} fn owner() { let _ = || 1u32; let _ = async { 2u32 }; }").unwrap();
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("coroutine_key", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let named = |name| u.prog.defs.iter().enumerate().find_map(|(i, _)| (u.prog.name(DefId(i as u32)) == name).then_some(DefId(i as u32))).unwrap();
+        let (method, owner) = (named("method"), named("owner"));
+        let file = u.prog.def(owner).file;
+        let exprs = crate::program::closure_exprs(&u.prog, owner);
+        assert_eq!(exprs.len(), 2, "the closure, then the async block");
+        // the two types as the type check of `owner` makes them, the async block's marked a coroutine
+        let closure_ty = |tcx: &crate::tcx::Tcx, expr: u32| {
+            let tys = &tcx.tys;
+            let sig = tys.intern(TyKind::FnPtr(List::EMPTY, tys.u32_, FnHeader::RUST, 0));
+            let parent = tys.intern(TyKind::FnDef(owner, List::EMPTY, RegionArgsId::EMPTY));
+            tys.intern(TyKind::Closure(file, expr, ClosureArgs {
+                parent_args: parent, closure_kind_ty: tys.prim(crate::program::Prim::I8), closure_sig_as_fn_ptr_ty: sig, tupled_upvars_ty: tys.unit,
+            }))
+        };
+        u.tcx.coroutines.insert((file, exprs[1]), ());
+        let mut cache = open_test_cache(&u, &root.join("cache"));
+        let mut keys = Vec::new();
+        for expr in &exprs {
+            let ty = closure_ty(&u.tcx, *expr);
+            let mut e = E::default();
+            assert!(cache.enc_fnkey(&u, &FnKey::Inst(method, vec![ty]), &mut e, &mut vec![], 0).is_some());
+            keys.push(e.0);
+        }
+        assert_ne!(keys[0][..], keys[1][..]);
+        // the next run: declarations collected, no body checked
+        let mut fresh = crate::tcx::Tcx::new(); fresh.collect(&u.prog);
+        u.tcx = fresh;
+        assert!(!u.tcx.coroutines.contains(&(file, exprs[1])));
+        let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
+        for (bytes, coroutine) in keys.iter().zip([false, true]) {
+            let mut d = D { b: bytes, p: 0 };
+            let key = unsafe { Linker::new(&mut cache).dec_fnkey(&mut u, &mut d, 0) }.unwrap();
+            assert_eq!(d.p, bytes.len());
+            let FnKey::Inst(_, args) = &key else { panic!("an instance key") };
+            assert_eq!(args[..], [closure_ty(&u.tcx, exprs[coroutine as usize])]);
+            assert_eq!(u.tcx.is_coroutine(args[0]), coroutine, "a decoded {} type", if coroutine { "coroutine's" } else { "closure's" });
+            // a query that asks (Tcx::needs_drop: a coroutine always has its state to drop)
+            assert_eq!(u.tcx.needs_drop(&u.prog, env, args[0]), coroutine);
+            // the image's skip walks the bytes the encoder wrote, and this run writes the same key
+            let mut skipped = D { b: bytes, p: 0 };
+            assert!(image::skip_fnkey(&mut skipped, 0, &mut image::no_atoms).is_some() && skipped.p == bytes.len(), "skip_fnkey stopped at {} of {}", skipped.p, bytes.len());
+            let mut again = E::default();
+            assert!(cache.enc_fnkey(&u, &key, &mut again, &mut vec![], 0).is_some());
+            assert_eq!(*bytes, again.0);
         }
         drop(cache);
         std::fs::remove_dir_all(root).unwrap();
@@ -8370,6 +8516,58 @@ mod data_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Two impls in two `const _` blocks of one file (serde-derive's shape), or in one fn body,
+    /// each with a method of one name: their borrow-check verdicts are stored apart. They had one
+    /// key, so a stored Clean verdict for one skipped the other's check on the next warm run and
+    /// its borrow error was gone (relax review B-M1).
+    #[test]
+    fn sibling_impls_keep_borrowck_verdicts_of_their_own() {
+        isolated_test!(sibling_impls_keep_borrowck_verdicts_of_their_own);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-siblings-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("siblings.rs").to_string_lossy().into_owned();
+        std::fs::write(&path, "trait Grow { fn grow(&mut self) -> usize; }\nstruct C(usize);\nstruct D(usize);\n\
+            const _: () = { impl Grow for C { fn grow(&mut self) -> usize { self.0 } } };\n\
+            const _: () = { impl Grow for D { fn grow(&mut self) -> usize { self.0 + 1 } } };\n\
+            fn in_one_body() { struct A; struct B; impl A { fn touch(&self) {} } impl B { fn touch(&self) {} } }\n").unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("siblings", &path, 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let snapshot = OwnerVerdicts::new(42, crate::stable::crate_fingerprints(&prog), vec![0; prog.crates.len()], 0, None);
+        for name in ["grow", "touch"] {
+            let methods: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| prog.def(d).kind == DefKind::AssocFn && prog.def(prog.def(d).parent).kind == DefKind::Impl && prog.syms.str(prog.def(d).name) == name).collect();
+            assert_eq!(methods.len(), 2, "the two impls' `{name}` methods");
+            let keys: Vec<u128> = methods.iter().map(|&d| snapshot.lookup(&prog, d, 0).0.expect("a verdict key")).collect();
+            assert_ne!(keys[0], keys[1], "the two `{name}` methods have one borrow-check verdict key");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Two impls one macro makes, `impl Raw<{ 1 + 1 }>` and `impl Raw<{ 2 + 2 }>`: the anonymous
+    /// constants of their headers have code-cache keys of their own, so neither takes the other's
+    /// stored value (makepad PR #1530 saw one width reuse the other's). Named by their impl
+    /// (stable::def_ident), whose header text and twin ordinal tell them apart.
+    #[test]
+    fn macro_twin_impls_key_their_header_constants_apart() {
+        isolated_test!(macro_twin_impls_key_their_header_constants_apart);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-twin-consts-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("twins.rs").to_string_lossy().into_owned();
+        std::fs::write(&path, "struct Raw<const N: usize>;\nmacro_rules! width { ($n:expr) => { impl Raw<{ $n }> { fn width() -> usize { $n } } }; }\n\
+            width!(1 + 1);\nwidth!(2 + 2);\n").unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("twins", &path, 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let consts: Vec<DefId> = (0..prog.defs.len() as u32).map(DefId).filter(|&d| prog.def(d).kind == DefKind::AnonConst && prog.def(prog.def(d).parent).kind == DefKind::Impl).collect();
+        assert_eq!(consts.len(), 2, "the two impls' header constants");
+        let (mut memo, mut files) = (HashMap::new(), HashMap::new());
+        let keys: Vec<u128> = consts.iter().map(|&d| def_key_in(&prog, &tcx, &[], &mut memo, &mut files, d)).collect();
+        assert_ne!(keys[0], keys[1], "the two header constants have one code-cache key");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn bound_crates_mark_only_the_interfaces_that_reach_them() {
         isolated_test!(bound_crates_mark_only_the_interfaces_that_reach_them);
@@ -8661,7 +8859,7 @@ mod data_tests {
     /// after it. The proc-macro world's unit, made after the program's on a warm macOS start, took
     /// over a process-wide reader: the program's O2 builds folded its loads against the world's
     /// symbol tables, so a constant slice's length (unicode-segmentation's word_cat_table) became
-    /// 0 in code the disk cache then kept -- the warm Stage panicked in its first draw.
+    /// 0 in code the disk cache then kept -- an app's warm run panicked in its first draw.
     #[test]
     fn ro_reader_reads_its_own_unit() {
         isolated_test!(ro_reader_reads_its_own_unit);
@@ -8704,7 +8902,7 @@ mod data_tests {
     /// `word_cat_table` (a `&[(char, char, WordCat)]`) has integer words that, in some runs, equal
     /// an address inside the compile domain's block: the raw word scan copied it into a writable
     /// block, word_category's cache entry named that block as tag 8 (a fresh zeroed block per
-    /// link), and every warm Stage launch then read the table's length as 0 in its first draw.
+    /// link), and each warm launch of an app then read the table's length as 0 in its first draw.
     #[test]
     fn rehome_follows_pointer_words_and_cached_copies_keep_their_value() {
         isolated_test!(rehome_follows_pointer_words_and_cached_copies_keep_their_value);
@@ -8990,7 +9188,10 @@ impl Linker {
                 FnKey::Closure(file, expr, parent)
             }
             KeyKind::Glue => {
-                let g = d.u8()?;
+                let g = match d.u8()? {
+                    0xFF => d.u32()?,
+                    b => b as u32,
+                };
                 FnKey::Glue(g, self.cache().dec_ty(u, d, 0)?)
             }
             KeyKind::Shim => {
@@ -9018,6 +9219,23 @@ impl Linker {
                     }
                 };
                 FnKey::Plain(base)
+            }
+            // a sandboxed twin of this unit's domain (none before its sandbox is set up: a startup
+            // image's key of one stays lazy), registered as its base's twin
+            KeyKind::Sandbox => {
+                let dom = d.str()?;
+                if !crate::sandbox::ready(u) || dom != crate::sandbox::domain(u) {
+                    return None;
+                }
+                let base = match self.image_slot_at(u, d) {
+                    Some(b) => b,
+                    None => {
+                        let bk = self.dec_fnkey(u, d, depth + 1)?;
+                        u.fn_id(bk)
+                    }
+                };
+                unsafe { crate::sandbox::twin(u, base) };
+                FnKey::Sandbox(base)
             }
         })
     }
@@ -9144,6 +9362,26 @@ impl Linker {
                 let name = d.str()?;
                 let value = provided_value(u, name)?;
                 u.syms.intern(SymKind::Provided(name.to_string()), value)
+            }
+            // sandboxed code's values (enc_sym): this run's, placed as the transform places them
+            14..=18 if !crate::sandbox::ready(u) => return None,
+            14 => {
+                let FnKey::Sandbox(base) = self.dec_fnkey(u, d, 0)? else { return None };
+                let t = unsafe { crate::sandbox::twin(u, base) };
+                unsafe { crate::sandbox::thunk_sym(u, t) }.ok()?
+            }
+            15 => {
+                let inner = self.link_symbol(u, d, rw)?;
+                unsafe { crate::sandbox::place_sym(u, inner.id) }.ok()?
+            }
+            16 => {
+                let inner = self.link_symbol(u, d, rw)?;
+                unsafe { crate::sandbox::tls_offset_sym(u, inner.id) }.ok()?
+            }
+            17 => crate::sandbox::table_sym(u),
+            18 => {
+                let name = d.str()?;
+                crate::sandbox::host_sym(u, name)?
             }
             _ => return None,
         };
@@ -9453,7 +9691,7 @@ impl Linker {
             }
             if let Some(w) = dump_filter().filter(|_| self.cache().verbose) {
                 if _name.contains(w) {
-                    eprintln!("makepad-run cache: link {} at {} {:?} tag {} = {:#x}", _name, o, kind, tag, u.env.reloc_value(target));
+                    eprintln!("relax cache: link {} at {} {:?} tag {} = {:#x}", _name, o, kind, tag, u.env.reloc_value(target));
                 }
             }
             relocs.push(RelocAt { at: o as u32, kind, target });
@@ -9461,7 +9699,7 @@ impl Linker {
         if let Some(w) = dump_filter().filter(|_| self.cache().verbose) {
             if _name.contains(w) {
                 let hex: String = code.iter().map(|b| format!("{:02x}", b)).collect();
-                eprintln!("makepad-run cache: code {} {}", _name, hex);
+                eprintln!("relax cache: code {} {}", _name, hex);
             }
         }
         let raw = crate::jit::PcMap::decode(d.bytes()?);
@@ -9666,7 +9904,7 @@ impl Cache {
         };
         g.file_versions = versions;
         if self.verbose {
-            eprintln!("makepad-run cache: keys follow the edit: item graph over {} nodes walked {} in {:.1} ms", g.nodes_n, g.walked, t0.elapsed().as_secs_f64() * 1e3);
+            eprintln!("relax cache: keys follow the edit: item graph over {} nodes walked {} in {:.1} ms", g.nodes_n, g.walked, t0.elapsed().as_secs_f64() * 1e3);
         }
         self.deps = Some(crate::zone_alloc::slots_with(|| std::sync::Arc::new(g)));
         self.iface = items::apply_bound(prog, &plain, &self.bound);
@@ -9713,7 +9951,7 @@ impl Cache {
             }
         }
         if self.verbose {
-            eprintln!("makepad-run cache: re-key: {} of {} linked slots read the edit ({} by key, {} by what their code took in; {} keys of those) in {:.1} ms", readers.len(), n, by_key, by_cert, keys.len(), t0.elapsed().as_secs_f64() * 1e3);
+            eprintln!("relax cache: re-key: {} of {} linked slots read the edit ({} by key, {} by what their code took in; {} keys of those) in {:.1} ms", readers.len(), n, by_key, by_cert, keys.len(), t0.elapsed().as_secs_f64() * 1e3);
         }
         readers
     }

@@ -138,6 +138,8 @@ impl AdtT {
             let current = match v.discr {
                 VariantDiscr::Explicit(def) => match self.eval_explicit_discr(tcx, prog, def) {
                     Ok(discr) => discr,
+                    // the cycle's E0391 is the report
+                    Err(ErrorHandled::Reported(crate::const_eval::ValTreeCreationError::CyclicConst)) => wrapped,
                     Err(_) => { errors.push(diagnostic(prog, def, "E0080: evaluation of enum discriminant failed")); wrapped }
                 },
                 VariantDiscr::Relative(_) => {

@@ -40,7 +40,7 @@
 //!   checked out). The commit: Cargo.lock's `git+<url>?<ref>#<commit>` source when it lists the
 //!   source (the lockfile wins); else the pin Relax recorded in `<relax dir>/git.lock` (the user's
 //!   Cargo.lock is never written); else the commit the remote's ref names now, recorded there.
-//!   Offline (Cargo's env/config, --offline/--frozen, MAKEPAD_RUN_OFFLINE or no answer), a pinned
+//!   Offline (Cargo's env/config, --offline/--frozen, RELAX_OFFLINE or no answer), a pinned
 //!   commit must be local; an unpinned ref uses the store's newest fetch of it. The package is
 //!   found in the repository as cargo does it: every Cargo.toml of the tree (not under hidden
 //!   folders, a package's `target` folder or a nested repository), the root first, the first
@@ -206,7 +206,7 @@ fn git_src(st: &TomlTable, at: &str, key: &str) -> Result<Option<GitSrc>, String
         return Err(format!("{}: dependency ({}) specification is ambiguous. Only one of `branch`, `tag` or `rev` is allowed.", at, key));
     }
     if crate::git::fetch::check_url(&url).is_err() {
-        return Err(format!("{}: `{}` is a git dependency on {}: makepad run fetches git repositories over https only", at, key, url));
+        return Err(format!("{}: `{}` is a git dependency on {}: Relax fetches git repositories over https only", at, key, url));
     }
     Ok(Some(GitSrc { url, reference: refs.pop().unwrap_or(GitRef::DefaultBranch) }))
 }
@@ -491,7 +491,7 @@ impl Workspace {
     /// Is `dir` a member? Cargo's members are the listed ones plus every path dependency of a
     /// member that lies inside the workspace root and is not excluded, transitively, through any
     /// dependency table (normal, dev, build, `[target.*]`; `workspace = true` entries by the
-    /// workspace's own path): apps/commercial names Stage's and Sandbox's crates that way.
+    /// workspace's own path): apps/commercial names two apps' crates that way.
     fn has_member(&self, dir: &str) -> bool {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut todo = self.member_dirs();
@@ -1102,7 +1102,7 @@ impl Resolver {
             let mut g = self.git.borrow_mut();
             let pins = g.pins.get_or_insert_with(BTreeMap::new);
             pins.insert(src.id(), crate::gitstore::hex(commit));
-            let mut text = String::from("# makepad run's pins of git dependencies Cargo.lock does not list: <source id>\t<commit>\n");
+            let mut text = String::from("# Relax's pins of git dependencies Cargo.lock does not list: <source id>\t<commit>\n");
             for (id, c) in pins.iter() {
                 text.push_str(&format!("{}\t{}\n", id, c));
             }
@@ -1190,7 +1190,7 @@ impl Resolver {
 /// (cargo test's order: the lib's unit tests, the bins' unit tests, then the test targets by name).
 /// The package's lib path, bins and integration tests: (name, path, harness) each. Missing
 /// required features skip implicit targets and reject explicitly named targets before any run.
-pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str, flags: &[String], bin_names: &[String], test_names: &[String]) -> Result<(Option<LibTarget>, Vec<(String, String, bool)>, Vec<(String, String, bool)>), String> {
+pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &str, flags: &[String], bin_names: &[String], test_names: &[String], example_names: &[String]) -> Result<TestTargets, String> {
     let o = parse_flags(flags)?;
     let mut r = Resolver::new(sess, dir)?;
     let i = r.find_member(package)?;
@@ -1209,7 +1209,26 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     };
     let bins = enabled(&m.bins, bin_names)?;
     let tests = enabled(&m.tests, test_names)?;
-    Ok((m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests))
+    let examples = enabled(&m.examples, example_names)?;
+    let mut all_examples = Vec::new();
+    for t in &m.examples {
+        if t.enabled(&features, false)? {
+            all_examples.push((t.name.clone(), t.path.clone(), t.harness));
+        }
+    }
+    all_examples.sort();
+    Ok(TestTargets { lib: m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests, examples, all_examples })
+}
+
+/// A package's targets as `cargo test` selects them (`test_targets`): the lib, and (name, source
+/// path, harness) of each bin, integration test and example with `test = true` or named.
+pub struct TestTargets {
+    pub lib: Option<LibTarget>,
+    pub bins: Vec<(String, String, bool)>,
+    pub tests: Vec<(String, String, bool)>,
+    pub examples: Vec<(String, String, bool)>,
+    /// every example whose required features are on (`--examples`, cargo's "all example targets")
+    pub all_examples: Vec<(String, String, bool)>,
 }
 
 /// The package's lib as `cargo test` sees it.
@@ -1228,16 +1247,19 @@ pub fn package_dir(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &s
     Ok(r.manifests[i].dir.clone())
 }
 
-/// What a package asks of its run's environment: its manifest's
-/// `[package.metadata.makepad.run-env]` table of `NAME = "value"` lines. The loader applies it to every run of the package, from a
-/// checkout or from the stores; a variable the environment already sets wins.
-pub fn run_env(manifest: &str) -> Vec<(String, String)> {
+/// What a package asks of its program's environment: its manifest's
+/// `[package.metadata.relax.run-env]` table of `NAME = "value"` lines. The loader gives it to the
+/// program of every run of the package, from a checkout or from the stores, and to the program
+/// alone (progenv `set_run_env`); a variable the environment already sets wins. A name that
+/// steers Relax or the tools it runs (`run_env_refused`) is an error naming it: a package does
+/// not grant itself `--allow-c` or load a library into the loader.
+pub fn run_env(manifest: &str) -> Result<Vec<(String, String)>, String> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in manifest.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.starts_with('[') {
-            inside = line == "[package.metadata.makepad.run-env]";
+            inside = line == "[package.metadata.relax.run-env]";
             continue;
         }
         if !inside {
@@ -1247,12 +1269,28 @@ pub fn run_env(manifest: &str) -> Vec<(String, String)> {
             let (k, v) = (k.trim(), v.trim());
             if let Some(v) = v.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
                 if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    if run_env_refused(k) {
+                        return Err(format!("[package.metadata.relax.run-env] sets {k}, which a package may not set: Relax's own settings (RELAX_*, such as RELAX_ALLOW_C: `--allow-c` is the person's) and the names the loader, the C toolchain and cargo read (LD_*, DYLD_*, CC, CXX, AR, LINKER, C/CXX/CPP/LD FLAGS, RUSTC*, RUSTFLAGS, CARGO*)"));
+                    }
                     out.push((k.to_string(), v.to_string()));
                 }
             }
         }
     }
-    out
+    Ok(out)
+}
+
+/// The names a package's run-env may not set: Relax's own (`RELAX_*`: its options, such as
+/// `RELAX_ALLOW_C`, and its run's facts), the dynamic loader's (`LD_*`, `DYLD_*`), the C
+/// toolchain's (`CC`, `CXX`, `AR`, `LINKER`, the C flags, and their per-target forms such as
+/// `CC_<target>` and `TARGET_CC`), cargo's and rustc's (`CARGO*`, `RUSTC*`, `RUSTFLAGS`,
+/// `RUSTDOC*`). Without case: a
+/// Windows name has none.
+pub fn run_env_refused(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    let tool = |t: &str| n == t || n.starts_with(&format!("{t}_")) || n.ends_with(&format!("_{t}"));
+    ["RELAX_", "LD_", "DYLD_", "RUSTC", "RUSTFLAGS", "RUSTDOC", "CARGO"].iter().any(|p| n.starts_with(p))
+        || ["CC", "CXX", "AR", "LINKER", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS"].iter().any(|t| tool(t))
 }
 
 /// The folders of a repository's tree (a commit's path table) whose Cargo.toml cargo's package
@@ -1344,7 +1382,7 @@ fn vendor_dir(dir: &str) -> Result<Option<(Vendor, String)>, String> {
     }
     match s(src, "directory") {
         Some(p) => Ok(Some((Vendor::Dir(join(d, &p)), config))),
-        None => Err(format!("{}/.cargo: [source.{}] is neither a `directory` nor a `git` source: makepad run reads vendored crates and git repositories only", d, with)),
+        None => Err(format!("{}/.cargo: [source.{}] is neither a `directory` nor a `git` source: Relax reads vendored crates and git repositories only", d, with)),
     }
 }
 
@@ -1462,6 +1500,279 @@ pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
         if force || std::env::var_os(&k).is_none() { out.push((k, value)); }
     }
     Ok(out)
+}
+
+/// What a cargo profile sets that changes what a program's code does: `debug-assertions`
+/// (cfg(debug_assertions): `debug_assert!`, and the items and tests under the cfg) and
+/// `overflow-checks` (cfg(overflow_checks), and the overflow panics of arithmetic, shifts and
+/// negation). rustc sets each cfg when its check is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ProfileChecks {
+    pub debug_assertions: bool,
+    pub overflow_checks: bool,
+}
+
+impl ProfileChecks {
+    /// The cfg names these settings turn on (rustc_session config.rs default_configuration).
+    pub fn cfgs(self) -> impl Iterator<Item = &'static str> {
+        [(self.debug_assertions, "debug_assertions"), (self.overflow_checks, "overflow_checks")].into_iter().filter_map(|(on, name)| on.then_some(name))
+    }
+}
+
+/// What a package's build script is told of the profile it builds for, as cargo tells it
+/// (custom_build.rs): PROFILE (`release` when the profile is `release` or inherits it, else
+/// `debug`), OPT_LEVEL and DEBUG (whether debug info is on) as the package's profile sets them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScriptProfile {
+    pub release: bool,
+    /// `0`-`3`, `s` or `z`
+    pub opt_level: char,
+    pub debuginfo: bool,
+}
+
+impl ScriptProfile {
+    /// A `relax run`'s: it builds as the release profile does (no debug assertions or overflow
+    /// checks), whatever `cargo run`'s dev profile would.
+    pub const RUN: ScriptProfile = ScriptProfile { release: true, opt_level: '3', debuginfo: false };
+
+    pub fn env(self) -> [(&'static str, String); 3] {
+        [("PROFILE", if self.release { "release" } else { "debug" }.to_string()), ("OPT_LEVEL", self.opt_level.to_string()), ("DEBUG", self.debuginfo.to_string())]
+    }
+}
+
+/// The settings as one profile table, or one package's override in it, sets them.
+#[derive(Clone, Copy, Default, Debug)]
+struct ChecksSet {
+    debug_assertions: Option<bool>,
+    overflow_checks: Option<bool>,
+    opt_level: Option<char>,
+    debuginfo: Option<bool>,
+}
+
+impl ChecksSet {
+    /// `self`, with what it leaves unset taken from `lower`.
+    fn over(self, lower: ChecksSet) -> ChecksSet {
+        ChecksSet {
+            debug_assertions: self.debug_assertions.or(lower.debug_assertions),
+            overflow_checks: self.overflow_checks.or(lower.overflow_checks),
+            opt_level: self.opt_level.or(lower.opt_level),
+            debuginfo: self.debuginfo.or(lower.debuginfo),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        self.debug_assertions.is_none() && self.overflow_checks.is_none() && self.opt_level.is_none() && self.debuginfo.is_none()
+    }
+
+    fn apply(self, to: ProfileChecks) -> ProfileChecks {
+        ProfileChecks { debug_assertions: self.debug_assertions.unwrap_or(to.debug_assertions), overflow_checks: self.overflow_checks.unwrap_or(to.overflow_checks) }
+    }
+
+    fn apply_script(self, to: ScriptProfile) -> ScriptProfile {
+        ScriptProfile { release: to.release, opt_level: self.opt_level.unwrap_or(to.opt_level), debuginfo: self.debuginfo.unwrap_or(to.debuginfo) }
+    }
+
+    /// The settings of a profile's table (or a package's table in it) in the file `path`.
+    fn read(t: &TomlTable, path: &str, what: &str) -> Result<ChecksSet, String> {
+        let flag = |k: &str| match t.get(k) {
+            None => Ok(None),
+            Some(Toml::Bool(x, _)) => Ok(Some(*x)),
+            Some(_) => Err(format!("{path}: {what} `{k}` is not a boolean")),
+        };
+        let opt_level = match t.get("opt-level") {
+            None => None,
+            Some(Toml::Num(n, _)) if n.fract() == 0.0 && (0.0..=3.0).contains(n) => Some(char::from(b'0' + *n as u8)),
+            Some(Toml::Str(v, _)) => Some(opt_level(v).ok_or_else(|| format!("{path}: {what} `opt-level` `{v}` is none of 0-3, s, z"))?),
+            Some(_) => return Err(format!("{path}: {what} `opt-level` is none of 0-3, s, z")),
+        };
+        let debuginfo = match t.get("debug") {
+            None => None,
+            Some(Toml::Bool(x, _)) => Some(*x),
+            Some(Toml::Num(n, _)) if n.fract() == 0.0 && (0.0..=2.0).contains(n) => Some(*n != 0.0),
+            Some(Toml::Str(v, _)) => Some(debuginfo(v).ok_or_else(|| format!("{path}: {what} `debug` `{v}` is no debug info level"))?),
+            Some(_) => return Err(format!("{path}: {what} `debug` is no debug info level")),
+        };
+        Ok(ChecksSet { debug_assertions: flag("debug-assertions")?, overflow_checks: flag("overflow-checks")?, opt_level, debuginfo })
+    }
+}
+
+/// A profile's `opt-level` as written (`3`, `"s"`).
+fn opt_level(v: &str) -> Option<char> {
+    matches!(v, "0" | "1" | "2" | "3" | "s" | "z").then(|| v.chars().next()).flatten()
+}
+
+/// Whether a profile's `debug` as written turns debug info on (cargo DebugInfo::is_turned_on).
+fn debuginfo(v: &str) -> Option<bool> {
+    match v {
+        "false" | "0" | "none" => Some(false),
+        "true" | "1" | "2" | "line-directives-only" | "line-tables-only" | "limited" | "full" => Some(true),
+        _ => None,
+    }
+}
+
+/// A cargo profile's checks for the packages of a workspace, as cargo resolves the profile
+/// (core/profiles.rs): the root profile's own values (dev: both checks on; release: both off),
+/// under each profile of the `inherits` chain up to the named one (`test` and `doc` inherit
+/// `dev`, `bench` `release`, another profile names its parent), the profile nearer the named one
+/// first. A profile's value is CARGO_PROFILE_<NAME>_<KEY>'s, else the first cargo config file's
+/// `[profile.<name>]` that sets it (the nearest first), else the workspace root manifest's. A
+/// host unit (a build script, a proc macro and what they depend on) then takes the chain's
+/// `build-override` (CARGO_PROFILE_<NAME>_BUILD_OVERRIDE_<KEY> first), a package the chain's
+/// `package."*"` overrides when it is no workspace member, then its own `package.<name>` (or
+/// `<name>@<version>`) ones.
+pub struct Profile {
+    root: String,
+    checks: ProfileChecks,
+    script: ScriptProfile,
+    build: ChecksSet,
+    any: ChecksSet,
+    /// (package name, version or any, overrides)
+    named: Vec<(String, Option<String>, ChecksSet)>,
+    /// the workspace, for whether a package is a member (`package."*"`): read when first asked
+    ws: std::cell::OnceCell<Option<Workspace>>,
+}
+
+/// The profile `name` of the workspace that the start folder `dir` belongs to (find_root).
+pub fn profile(dir: &str, name: &str) -> Result<Profile, String> {
+    let root = find_root(dir)?;
+    let manifest = format!("{}/Cargo.toml", root);
+    // the `[profile]` tables, the highest precedence first: the config files', then the manifest's
+    let mut files: Vec<(String, TomlTable)> = Vec::new();
+    for (_, path) in cargo_config_files(dir) {
+        if let Some(p) = table(&read_toml(&path)?, "profile") {
+            files.push((path, p.clone()));
+        }
+    }
+    if let Some(p) = table(&read_toml(&manifest)?, "profile") {
+        files.push((manifest, p.clone()));
+    }
+    let env = |p: &str, key: &str| {
+        let var = format!("CARGO_PROFILE_{}_{}", p.to_uppercase().replace('-', "_"), key);
+        std::env::var(&var).ok().map(|v| (var, v))
+    };
+    let env_flag = |p: &str, key: &str| match env(p, key) {
+        None => Ok(None),
+        Some((_, v)) if v == "true" => Ok(Some(true)),
+        Some((_, v)) if v == "false" => Ok(Some(false)),
+        Some((var, v)) => Err(format!("{var}: `{v}` is not a boolean")),
+    };
+    // the inherits chain, the named profile first
+    let env_value = |p: &str, key: &str, value: fn(&str) -> Option<char>| match env(p, key) {
+        None => Ok(None),
+        Some((var, v)) => value(&v).map(Some).ok_or_else(|| format!("{var}: `{v}` is none of 0-3, s, z")),
+    };
+    let env_debug = |p: &str, key: &str| match env(p, key) {
+        None => Ok(None),
+        Some((var, v)) => debuginfo(&v).map(Some).ok_or_else(|| format!("{var}: `{v}` is no debug info level")),
+    };
+    let mut chain = vec![name.to_string()];
+    loop {
+        let p = chain[chain.len() - 1].clone();
+        if p == "dev" || p == "release" {
+            break;
+        }
+        let set = env(&p, "INHERITS").map(|(_, v)| v).or_else(|| files.iter().find_map(|(_, t)| table(t, &p).and_then(|t| s(t, "inherits"))));
+        let parent = match (set, p.as_str()) {
+            (Some(parent), _) => parent,
+            (None, "test" | "doc") => "dev".to_string(),
+            (None, "bench") => "release".to_string(),
+            (None, _) if files.iter().any(|(_, t)| t.contains_key(&p)) => {
+                return Err(format!("profile `{p}` is missing an `inherits` directive (`inherits` is required for all profiles except `dev` or `release`)"));
+            }
+            (None, _) => return Err(format!("profile `{p}` is not defined")),
+        };
+        if chain.contains(&parent) {
+            return Err(format!("profile inheritance loop detected with profile `{p}` inheriting `{parent}`"));
+        }
+        chain.push(parent);
+    }
+    let on = chain[chain.len() - 1] == "dev";
+    let (mut level, mut build, mut any) = (ChecksSet::default(), ChecksSet::default(), ChecksSet::default());
+    let mut named: Vec<(String, Option<String>, ChecksSet)> = Vec::new();
+    for p in &chain {
+        let mut here = ChecksSet { debug_assertions: env_flag(p, "DEBUG_ASSERTIONS")?, overflow_checks: env_flag(p, "OVERFLOW_CHECKS")?, opt_level: env_value(p, "OPT_LEVEL", opt_level)?, debuginfo: env_debug(p, "DEBUG")? };
+        let mut host = ChecksSet {
+            debug_assertions: env_flag(p, "BUILD_OVERRIDE_DEBUG_ASSERTIONS")?,
+            overflow_checks: env_flag(p, "BUILD_OVERRIDE_OVERFLOW_CHECKS")?,
+            opt_level: env_value(p, "BUILD_OVERRIDE_OPT_LEVEL", opt_level)?,
+            debuginfo: env_debug(p, "BUILD_OVERRIDE_DEBUG")?,
+        };
+        for (path, t) in &files {
+            let Some(pt) = table(t, p) else { continue };
+            here = here.over(ChecksSet::read(pt, path, &format!("[profile.{p}]"))?);
+            if let Some(b) = table(pt, "build-override") {
+                host = host.over(ChecksSet::read(b, path, &format!("[profile.{p}.build-override]"))?);
+            }
+            for (spec, v) in table(pt, "package").into_iter().flatten() {
+                let Some(v) = v.as_table() else { continue };
+                let set = ChecksSet::read(v, path, &format!("[profile.{p}.package.\"{spec}\"]"))?;
+                if spec == "*" {
+                    any = any.over(set);
+                    continue;
+                }
+                // `<name>`, `<name>@<version>`, or a source URL's `#<name>@<version>`
+                let spec = spec.rsplit('#').next().unwrap_or(spec);
+                let (n, v) = match spec.split_once('@') {
+                    Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                    None => (spec.to_string(), None),
+                };
+                match named.iter_mut().find(|x| x.0 == n && x.1 == v) {
+                    Some(x) => x.2 = x.2.over(set),
+                    None => named.push((n, v, set)),
+                }
+            }
+        }
+        level = level.over(here);
+        build = build.over(host);
+    }
+    // dev: no optimisation, debug info; release: opt-level 3, none. A host unit's build-override
+    // defaults to opt-level 0 and no debug info (cargo profiles.rs default_build_override)
+    let script = level.apply_script(if on { ScriptProfile { release: false, opt_level: '0', debuginfo: true } } else { ScriptProfile::RUN });
+    let build = build.over(ChecksSet { opt_level: Some('0'), debuginfo: Some(false), ..ChecksSet::default() });
+    Ok(Profile { root, checks: level.apply(ProfileChecks { debug_assertions: on, overflow_checks: on }), script, build, any, named, ws: std::cell::OnceCell::new() })
+}
+
+impl Profile {
+    /// The checks of the package `name` `version` in the folder `dir`; `registry`: a registry or
+    /// git package (never a member); `host`: its unit for the host (build-override).
+    pub fn checks(&self, dir: &str, name: &str, version: &str, registry: bool, host: bool) -> ProfileChecks {
+        let mut c = self.checks;
+        if host {
+            c = self.build.apply(c);
+        }
+        if (self.any.debug_assertions.is_some() || self.any.overflow_checks.is_some()) && (registry || !self.member(dir)) {
+            c = self.any.apply(c);
+        }
+        for (n, v, set) in &self.named {
+            if n == name && v.as_deref().is_none_or(|v| v == version) {
+                c = set.apply(c);
+            }
+        }
+        c
+    }
+
+    /// What the build script of the package `name` `version` in `dir` is told of the profile
+    /// (`registry` and `host` as for `checks`: a host unit's profile is its build-override's).
+    pub fn script(&self, dir: &str, name: &str, version: &str, registry: bool, host: bool) -> ScriptProfile {
+        let mut s = self.script;
+        if host {
+            s = self.build.apply_script(s);
+        }
+        if !self.any.is_empty() && (registry || !self.member(dir)) {
+            s = self.any.apply_script(s);
+        }
+        for (n, v, set) in &self.named {
+            if n == name && v.as_deref().is_none_or(|v| v == version) {
+                s = set.apply_script(s);
+            }
+        }
+        s
+    }
+
+    fn member(&self, dir: &str) -> bool {
+        let dir = normalize(dir);
+        self.ws.get_or_init(|| Workspace::load(&self.root).ok()).as_ref().is_some_and(|ws| ws.has_member(&dir) && !ws.excluded(&dir))
+    }
 }
 
 /// What `file!()` names a source file relative to, as cargo decides it (`path_args`): a file of a
@@ -1759,9 +2070,10 @@ pub enum TestSel {
     Lib,
     /// these bin targets built with `--test` and these integration test targets, beside the plain
     /// lib: one graph, as `cargo test` builds them in one go with one feature resolution (`makepad
-    /// test` runs each target out of it in a process of its own, run.rs `--subject`). None: no
-    /// target of that kind; empty: all of them.
-    Targets { bins: Option<Vec<String>>, tests: Option<Vec<String>> },
+    /// test` runs each target out of it in a process of its own, run.rs `--subject`), and these
+    /// examples built with `--test` (`--examples`; cargo tests an example with `test = true` by
+    /// default). None: no target of that kind; empty: all of them.
+    Targets { bins: Option<Vec<String>>, tests: Option<Vec<String>>, examples: Option<Vec<String>> },
 }
 
 pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
@@ -1770,6 +2082,10 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
     let mut bins = false;
     let mut bin_names: Vec<String> = Vec::new();
     let mut tests: Option<Vec<String>> = None;
+    // `--examples` (with the names that follow it as `--example <name>`, as `makepad test` writes
+    // a test graph): examples built with `--test`; `--example <name>` alone: the one example run
+    let mut examples = false;
+    let mut example_names: Vec<String> = Vec::new();
     let mut i = 0;
     while i < flags.len() {
         let f = flags[i].as_str();
@@ -1786,7 +2102,8 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
             }
             "--bins" => bins = true,
             "--bin" => bin_names.push(value(&mut i)?),
-            "--example" => o.example = Some(value(&mut i)?),
+            "--example" => example_names.push(value(&mut i)?),
+            "--examples" => examples = true,
             "--lib" => lib = true,
             "--tests" => {
                 tests.get_or_insert_with(Vec::new);
@@ -1803,16 +2120,22 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
                 } else if let Some(v) = f.strip_prefix("--bin=") {
                     bin_names.push(v.to_string());
                 } else if let Some(v) = f.strip_prefix("--example=") {
-                    o.example = Some(v.to_string());
+                    example_names.push(v.to_string());
                 } else if let Some(v) = f.strip_prefix("--test=") {
                     tests.get_or_insert_with(Vec::new).push(v.to_string());
                 } else {
-                    return Err(format!("unit graph: flag `{}` is not supported by makepad run's resolver", f));
+                    return Err(format!("unit graph: flag `{}` is not supported by Relax's resolver", f));
                 }
             }
         }
         i += 1;
     }
+    let examples = if examples {
+        Some(example_names)
+    } else {
+        o.example = example_names.into_iter().last();
+        None
+    };
     // (cargo run takes one target: a bin or an example)
     if o.example.is_some() && (bins || !bin_names.is_empty() || lib || tests.is_some()) {
         return Err("unit graph: `--example` runs one example; it takes no other target flag (--bin, --bins, --lib, --tests, --test)".to_string());
@@ -1823,10 +2146,10 @@ pub fn parse_flags(flags: &[String]) -> Result<Options, String> {
         o.bin = bin_names.into_iter().last();
         None
     };
-    o.test = match (lib, bins, tests) {
-        (true, None, None) => Some(TestSel::Lib),
-        (false, None, None) => None,
-        (false, bins, tests) => Some(TestSel::Targets { bins, tests }),
+    o.test = match (lib, bins, tests, examples) {
+        (true, None, None, None) => Some(TestSel::Lib),
+        (false, None, None, None) => None,
+        (false, bins, tests, examples) => Some(TestSel::Targets { bins, tests, examples }),
         _ => return Err("unit graph: the lib's unit tests (--lib) are a test program of their own; select them alone".to_string()),
     };
     Ok(o)
@@ -2000,6 +2323,10 @@ pub struct GraphUnit {
     pub edition: String,
     /// a host-side unit (build-dependency / proc-macro side)
     pub host: bool,
+    /// the profile's checks the unit is built with, when its graph names them (`profile`'s
+    /// `debug_assertions` and `overflow_checks`: a build script's run, which its parent gives its
+    /// host checks, front unitgraph.rs script_units); else the run's profile decides (run.rs)
+    pub checks: Option<ProfileChecks>,
     /// build | run-custom-build
     pub mode: String,
     /// built with rustc's `--test`: libtest's generated main replaces the crate's own
@@ -2042,6 +2369,10 @@ impl Units {
                     src_path: s(t.and_then(|t| t.get("src_path"))),
                     edition: s(t.and_then(|t| t.get("edition"))),
                     host: matches!(u.get("relax_host"), Some(crate::json::Json::Bool(true))),
+                    checks: u.get("profile").and_then(|p| match (p.get("debug_assertions"), p.get("overflow_checks")) {
+                        (Some(crate::json::Json::Bool(d)), Some(crate::json::Json::Bool(o))) => Some(ProfileChecks { debug_assertions: *d, overflow_checks: *o }),
+                        _ => None,
+                    }),
                     mode: s(u.get("mode")),
                     harness: u.get("mode").is_some_and(|m| m.str() == "test"),
                     sysroot: false,
@@ -2359,6 +2690,8 @@ enum UKind {
     Test(usize),
     /// the root's example (`--example`): a bin with the dev-dependencies
     Example(usize),
+    /// the root's example built with `--test` (its unit tests; `makepad test --examples`)
+    ExampleTest(usize),
     BuildCompile,
     BuildRun,
 }
@@ -2409,7 +2742,31 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
     let rm = &r.manifests[root];
     match &o.test {
         Some(TestSel::Lib) if rm.lib.is_none() => return Err(format!("no library targets found in package `{}`", rm.name)),
-        Some(TestSel::Targets { bins, tests }) => {
+        Some(TestSel::Targets { bins, tests, examples }) => {
+            if let Some(names) = examples {
+                if rm.examples.is_empty() {
+                    return Err(format!("no example targets found in package `{}`", rm.name));
+                }
+                for n in names {
+                    if !rm.examples.iter().any(|t| &t.name == n) {
+                        return Err(format!("no example target named `{}` in package `{}`", n, rm.name));
+                    }
+                }
+                for (ei, et) in rm.examples.iter().enumerate() {
+                    if !names.is_empty() && !names.contains(&et.name) {
+                        continue;
+                    }
+                    if !et.enabled(&rn.features, !names.is_empty())? {
+                        continue;
+                    }
+                    // as the bins: `--examples` builds the harness ones; `makepad test` names
+                    // the targets it runs, `harness = false` ones included
+                    if !et.harness && names.is_empty() {
+                        continue;
+                    }
+                    roots.push(add((root, false), UKind::ExampleTest(ei), &mut units));
+                }
+            }
             if let Some(names) = bins {
                 if rm.bins.is_empty() {
                     return Err(format!("no bin targets found in package `{}`", rm.name));
@@ -2557,9 +2914,9 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 let b = &m.bins[*bi];
                 (b.kind.clone(), b.name.clone(), b.path.clone(), b.edition.clone(), if matches!(u, UKind::BinTest(_)) { "test" } else { "build" })
             }
-            UKind::Example(ei) => {
+            UKind::Example(ei) | UKind::ExampleTest(ei) => {
                 let e = &m.examples[*ei];
-                (e.kind.clone(), e.name.clone(), e.path.clone(), e.edition.clone(), "build")
+                (e.kind.clone(), e.name.clone(), e.path.clone(), e.edition.clone(), if matches!(u, UKind::ExampleTest(_)) { "test" } else { "build" })
             }
             UKind::BuildCompile | UKind::BuildRun => {
                 let p = m.build.clone().unwrap();
@@ -2572,7 +2929,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
         let mut deps: Vec<(usize, String)> = Vec::new();
         // dev-dependencies: only the test targets' and an example's (the plain lib of a test
         // graph has none)
-        let dev = matches!(u, UKind::LibTest | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_));
+        let dev = matches!(u, UKind::LibTest | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_) | UKind::ExampleTest(_));
         let normal_edges = |deps: &mut Vec<(usize, String)>, build: bool| {
             for (di, tk) in &node.edges {
                 let d = &m.deps[*di];
@@ -2594,7 +2951,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                     deps.push((bi, "build_script_build".to_string()));
                 }
             }
-            UKind::Bin(_) | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_) => {
+            UKind::Bin(_) | UKind::BinTest(_) | UKind::Test(_) | UKind::Example(_) | UKind::ExampleTest(_) => {
                 if let Some(&li) = index.get(&(*k, UKind::Lib)) {
                     deps.push((li, lib_name(k.0)));
                 }
@@ -2608,9 +2965,10 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 if let Some(&ci) = index.get(&(*k, UKind::BuildCompile)) {
                     deps.push((ci, "build_script_build".to_string()));
                 }
-                // the run units of dependencies with `links` (their DEP_* variables)
+                // the run units of the normal dependencies with `links` (their DEP_* variables;
+                // cargo connects no build- or dev-dependency's script to this one)
                 for (di, tk) in &node.edges {
-                    if m.deps[*di].build || r.manifests[tk.0].links.is_none() {
+                    if m.deps[*di].build || m.deps[*di].dev || r.manifests[tk.0].links.is_none() {
                         continue;
                     }
                     if let Some(&ri) = index.get(&(*tk, UKind::BuildRun)) {
@@ -2630,10 +2988,12 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             src_path: if cfg!(windows) { path.replace('/', "\\") } else { path },
             edition,
             host,
+            checks: None,
             mode: mode.to_string(),
             harness: match u {
                 UKind::LibTest | UKind::BinTest(_) => true,
                 UKind::Test(ti) => m.tests[*ti].harness,
+                UKind::ExampleTest(ei) => m.examples[*ei].harness,
                 _ => false,
             },
             sysroot: false,
@@ -2641,7 +3001,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
             deps,
         });
     }
-    if std::env::var("MAKEPAD_RUN_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "units")) {
+    if std::env::var("RELAX_TRACE").is_ok_and(|v| v.split(',').any(|x| x == "units")) {
         for (i, u) in out.iter().enumerate() {
             let (k, _) = &units[i];
             let m = &r.manifests[k.0];
@@ -2954,13 +3314,13 @@ required-features = ["b", "manual"]
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = tree("broken-member", &[
             ("Cargo.toml", "[workspace]\nmembers = [\"slice\", \"other\"]\n"),
-            ("slice/Cargo.toml", "[package]\nname = \"fab-slice\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nsdf = { path = \"../other\" }\nsdf = { path = \"../other\" }\n"),
+            ("slice/Cargo.toml", "[package]\nname = \"tool-a\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nsdf = { path = \"../other\" }\nsdf = { path = \"../other\" }\n"),
             ("slice/src/lib.rs", ""),
             ("other/Cargo.toml", "[package]\nname = \"other\"\nversion = \"0.1.0\"\n"),
             ("other/src/lib.rs", ""),
         ]);
         let mut r = Resolver::new(sess, &root).unwrap();
-        let e = r.find_member("fab-slice").err().unwrap();
+        let e = r.find_member("tool-a").err().unwrap();
         let path = format!("{}/slice/Cargo.toml", normalize(&root));
         assert!(e.starts_with(&format!("{path}:7:1: duplicate key `sdf`\n")), "{e}");
         assert!(!e.contains("not a member"), "{e}");
@@ -3017,7 +3377,7 @@ required-features = ["b", "manual"]
                 ("solo/Cargo.toml", "[package]\nname = \"solo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
                 ("solo/src/main.rs", "fn main() {}\n"),
                 // a members package naming a crate only as a never-built path dependency (apps/commercial
-                // and Sandbox): cargo makes that crate a member, so the workspace's inherited deps apply
+                // and an app): cargo makes that crate a member, so the workspace's inherited deps apply
                 ("hub/Cargo.toml", "[package]\nname = \"hub\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[target.'cfg(any())'.dependencies]\ngame = { path = \"game\" }\n"),
                 ("hub/src/lib.rs", ""),
                 ("hub/game/Cargo.toml", "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nlib = { workspace = true }\n"),
@@ -3078,7 +3438,7 @@ fn file_macro_paths_as_cargo_names_them() {
     std::fs::write(ws.join("Cargo.toml"), "workspace.members = [\"m\"]\nworkspace.resolver = \"2\"\n\n[workspace.dependencies]\n").unwrap();
     std::fs::write(ws.join("m/Cargo.toml"), "[package]\nname = \"m\"\nversion = \"0.1.0\"\n").unwrap();
     let ws = normalize(&ws.display().to_string());
-    let registry = format!("{}/target/makepad-run/registry", ws);
+    let registry = format!("{}/target/relax/registry", ws);
     let r = FileRoot { root: find_root(&format!("{}/m", ws)).unwrap(), not_path: vec![registry.clone()] };
     assert_eq!(r.relative(&format!("{}/m/src/main.rs", ws)).as_deref(), Some("m/src/main.rs"));
     assert_eq!(r.relative(&format!("{}/src/foo-1.0.0-0123456789abcdef/src/lib.rs", registry)), None);
@@ -3112,9 +3472,17 @@ fn unit_graph_host_side_follows_proc_macro_and_build_script_edges() {
 #[cfg(test)]
 #[test]
 fn run_env_reads_the_packages_table() {
-    let m = "[package]\nname = \"makepad-amp\"\n\n[package.metadata.makepad.run-env]\n# why\nMAKEPAD_LOG = \"0\"\nbad key = \"x\"\n\n[dependencies]\nX = \"1\"\n";
-    assert_eq!(run_env(m), vec![("MAKEPAD_LOG".to_string(), "0".to_string())]);
-    assert!(run_env("[package]\nname = \"a\"\n").is_empty());
+    let m = "[package]\nname = \"makepad-amp\"\n\n[package.metadata.relax.run-env]\n# why\nMAKEPAD_LOG = \"0\"\nbad key = \"x\"\n\n[dependencies]\nX = \"1\"\n";
+    assert_eq!(run_env(m), Ok(vec![("MAKEPAD_LOG".to_string(), "0".to_string())]));
+    assert_eq!(run_env("[package]\nname = \"a\"\n"), Ok(Vec::new()));
+    // a package grants itself nothing of Relax's or its tools': the run stops, naming the key
+    for key in ["RELAX_ALLOW_C", "relax_allow_c", "LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "CC", "CC_x86_64_unknown_linux_gnu", "TARGET_CC", "CXX", "AR", "LINKER", "CFLAGS", "RUSTC_WRAPPER", "RUSTFLAGS", "RUSTDOCFLAGS", "CARGO_HOME", "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER"] {
+        let refused = run_env(&format!("[package.metadata.relax.run-env]\nMAKEPAD_LOG = \"0\"\n{key} = \"1\"\n"));
+        assert!(refused.as_ref().is_err_and(|e| e.contains(&format!("sets {key},"))), "run-env must refuse {key}: {refused:?}");
+    }
+    for key in ["MAKEPAD_LOG", "APP_MODE", "PATH", "ACCOUNT", "SCALE", "RUST_LOG"] {
+        assert!(run_env(&format!("[package.metadata.relax.run-env]\n{key} = \"1\"\n")).is_ok(), "run-env takes {key}");
+    }
 }
 
 #[cfg(test)]
@@ -3140,18 +3508,35 @@ test = false
 name = "quiet_test"
 path = "tests/quiet_test.rs"
 test = false
+[[example]]
+name = "shown"
+test = true
 "#).unwrap();
-    for f in ["src/lib.rs", "src/quiet_bin.rs", "tests/quiet_test.rs", "tests/loud.rs"] { std::fs::write(root.join(f), "").unwrap(); }
+    std::fs::create_dir_all(root.join("examples")).unwrap();
+    for f in ["src/lib.rs", "src/quiet_bin.rs", "tests/quiet_test.rs", "tests/loud.rs", "examples/shown.rs", "examples/plain.rs"] { std::fs::write(root.join(f), "").unwrap(); }
     let sess = std::sync::Arc::new(crate::Session::default());
     let dir = root.to_str().unwrap();
     let names = |t: &[(String, String, bool)]| t.iter().map(|t| t.0.clone()).collect::<Vec<_>>();
-    let (lib, bins, tests) = test_targets(&sess, dir, "quiet", &[], &[], &[]).unwrap();
-    let lib = lib.unwrap();
+    let t = test_targets(&sess, dir, "quiet", &[], &[], &[], &[]).unwrap();
+    let lib = t.lib.unwrap();
     assert!(!lib.test && !lib.doctest);
-    assert!(bins.is_empty(), "{bins:?}");
-    assert_eq!(names(&tests), ["loud"]);
-    let (_, bins, tests) = test_targets(&sess, dir, "quiet", &[], &["quiet_bin".to_string()], &["quiet_test".to_string()]).unwrap();
-    assert_eq!(names(&bins), ["quiet_bin"]);
-    assert_eq!(names(&tests), ["loud", "quiet_test"]);
+    assert!(t.bins.is_empty(), "{:?}", t.bins);
+    assert_eq!(names(&t.tests), ["loud"]);
+    // an example runs its tests when it says `test = true` (relax issue 120: none ran), the
+    // discovered one only when named
+    assert_eq!(names(&t.examples), ["shown"], "examples by default");
+    let t = test_targets(&sess, dir, "quiet", &[], &["quiet_bin".to_string()], &["quiet_test".to_string()], &["plain".to_string()]).unwrap();
+    assert_eq!(names(&t.bins), ["quiet_bin"]);
+    assert_eq!(names(&t.tests), ["loud", "quiet_test"]);
+    assert_eq!(names(&t.examples), ["plain", "shown"], "a named example");
+    assert_eq!(names(&t.all_examples), ["plain", "shown"], "--examples");
+    // `--examples` with the names makepad test lists is a test graph's selection; `--example`
+    // alone is the example `makepad run` runs
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let o = parse_flags(&s(&["--examples", "--example", "shown", "--test", "loud"])).unwrap();
+    assert_eq!(o.test, Some(TestSel::Targets { bins: None, tests: Some(s(&["loud"])), examples: Some(s(&["shown"])) }));
+    assert_eq!(o.example, None);
+    let o = parse_flags(&s(&["--example", "plain"])).unwrap();
+    assert_eq!((o.test, o.example.as_deref()), (None, Some("plain")));
     let _ = std::fs::remove_dir_all(&root);
 }

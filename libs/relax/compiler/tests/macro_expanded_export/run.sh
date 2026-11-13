@@ -4,10 +4,10 @@ set -euo pipefail
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
+export RELAX_CACHE=off
 EXPECTED='42 11'
 RUST=$(cd "$H" && cargo run --quiet --offline -p macro-expanded-export-app)
-OUT=$(cd "$H" && MAKEPAD_RUN_STD="$H/../../std" "$1" run --quiet macro-expanded-export-app 2>>"$ERR")
+OUT=$(cd "$H" && RELAX_STD="$H/../../std" "$1" run --quiet macro-expanded-export-app 2>>"$ERR")
 echo "$OUT"
 if [ "$RUST" = "$EXPECTED" ] && [ "$OUT" = "$RUST" ]; then
     echo "macro_expanded_export: ok"

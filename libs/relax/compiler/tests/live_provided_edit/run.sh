@@ -38,9 +38,9 @@ members = ["fixture"]
 resolver = "2"
 
 [workspace.dependencies]
-makepad-relax-api = { path = "$R/libs/relax_api" }
+relax-api = { path = "$R/libs/relax_api" }
 EOF
-    (cd "$S/ws" && MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_HOME="$S/home" TMPDIR="$S/tmp" exec "$S/$2" test --live relax-provided-fixture --test relax_api_entries) > "$S/log" 2>&1 &
+    (cd "$S/ws" && RELAX_CACHE=off RELAX_HOME="$S/home" TMPDIR="$S/tmp" exec "$S/$2" test --live relax-provided-fixture --test relax_api_entries) > "$S/log" 2>&1 &
     pid=$!
     MP="$S/$2"
     for _ in $(seq 1 600); do
@@ -85,7 +85,7 @@ edit() {
     wait $w
 }
 export BIN="$1"
-unset MAKEPAD_RUN_STD
+unset RELAX_STD
 
 # 1. outside a cargo target dir: refused at once
 start box makepad
@@ -138,9 +138,9 @@ done
 asked=$("$MP" inspect "$jit" session relaunch 2>&1)
 echo "$asked" | grep -q 'rebuild makepad, then restart' || fail "relaunch: not taken by the rebuild: $asked"
 for _ in $(seq 1 120); do
-    grep -q '^makepad live: restarting (' "$S/log" && break
+    grep -q '^relax live: restarting (' "$S/log" && break
     sleep 0.5
 done
 grep -q 'restarting the app as asked' "$S/log" || fail "relaunch: the unchanged rebuild did not go on to the restart"
-grep -q '^makepad live: restarting (' "$S/log" || fail "relaunch: no restart in 60 s"
+grep -q '^relax live: restarting (' "$S/log" || fail "relaunch: no restart in 60 s"
 echo "live_provided_edit: ok"

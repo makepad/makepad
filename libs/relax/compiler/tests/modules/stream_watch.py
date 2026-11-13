@@ -13,12 +13,12 @@ with tempfile.TemporaryDirectory(prefix="module-stream-watch-") as tmp:
     p = subprocess.run(
         [os.path.abspath(sys.argv[1]), "run", "--quiet", "module-stream-watch"],
         cwd=pkg,
-        env=dict(os.environ, MAKEPAD_RUN_CACHE="0"),
+        env=dict(os.environ, RELAX_CACHE="0"),
         capture_output=True, text=True,
     )
 lines = p.stderr.splitlines()
 quiet = next((i for i, s in enumerate(lines) if s == "stream-watch: quiet window ended"), None)
-errors = [i for i, s in enumerate(lines) if s.startswith("makepad live:") and "memory/watch-stream.rs:" in s]
+errors = [i for i, s in enumerate(lines) if s.startswith("relax live:") and "memory/watch-stream.rs:" in s]
 ok = p.returncode == 0 and "out module stream watcher: true" in p.stdout and quiet is not None and errors and min(errors) > quiet
 if not ok:
     print(p.stdout)

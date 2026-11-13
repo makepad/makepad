@@ -4,7 +4,7 @@
 // the edit, the removed fn's one too: its closure's environment is the one the removed version
 // gave it, not looked up in a check of the removed fn against the names the edit took away.
 // The edit also takes a field out of a struct, so every layout is laid out again (the closure
-// environments derived so far too): "side table: no entry" ICE in a Fab walls edit.
+// environments derived so far too): "side table: no entry" ICE in an app's walls edit.
 mod grid;
 mod walls;
 

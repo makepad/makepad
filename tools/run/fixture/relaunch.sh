@@ -1,7 +1,7 @@
 #!/bin/sh
 # Regression test (JITRELAUNCH): `makepad inspect <pid> session relaunch` never leaves the app dead.
 # One hidden, muted app, restarted RELAUNCHES times (default 5): each restart is in place
-# ("makepad live: restarting", the same pid) and shows a new first frame with the window frames
+# ("relax live: restarting", the same pid) and shows a new first frame with the window frames
 # and the app's state handed over ("restart (...): kept"). The process stays alive after each
 # restart, with no crash or fault line. Cases, each its own app:
 #   in-place: the relaunches alone;
@@ -53,8 +53,8 @@ run_case() {
     fi
     # (a WM's client shows its window in the WM, which is hidden itself)
     if [ "$name" = wm ]; then hide="-u MAKEPAD_HIDE_WINDOWS"; else hide="MAKEPAD_HIDE_WINDOWS=1"; fi
-    env $hide "$@" MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_HOME="$d/home" \
-        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 $B run "$pkg" > "$d/run.log" 2>&1 &
+    env $hide "$@" MAKEPAD_MUTE=1 MAKEPAD_HOME="$d/home" \
+        RELAX_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 $B run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
     if ! wait_frame "$d/run.log" $pid 0 $((${WAIT:-200} * 2)); then
         fails="$fails $name:no-first-frame"; kill $pid 2>/dev/null; wait $pid; return
@@ -111,7 +111,7 @@ run_case() {
         until $J inspect $pid session > /dev/null 2>&1; do i=$((i + 1)); [ $i -ge 60 ] && break; sleep 0.5; done
         sleep 1
     done
-    now_inplace=$(count "makepad live: restarting (" "$d/run.log")
+    now_inplace=$(count "relax live: restarting (" "$d/run.log")
     restored=$(count "restart (.*): kept" "$d/run.log")
     bad=$(grep -aE "zone: fault|panicked|Segmentation|SIGSEGV|SIGBUS|Aborted|restart failed" "$d/run.log" | head -3)
     kill $pid 2>/dev/null; wait $pid
@@ -130,7 +130,7 @@ wm_case() {
     run=$dir/wm-run
     mkdir -p "$run" "$dir/wm-home" && chmod 700 "$run"
     env XDG_RUNTIME_DIR="$run" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/wm-home" \
-        MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 $J run makepad-app-wm -- --remote > "$dir/wm.log" 2>&1 &
+        RELAX_HOME="$dir/runhome" MAKEPAD_WINDOW=1280x800@1 $J run makepad-app-wm -- --remote > "$dir/wm.log" 2>&1 &
     wm=$!
     if ! wait_frame "$dir/wm.log" $wm 0 $((${WAIT:-200} * 2)); then
         fails="$fails wm:no-wm"; kill $wm 2>/dev/null; wait $wm; return

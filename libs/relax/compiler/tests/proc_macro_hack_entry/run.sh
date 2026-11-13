@@ -5,8 +5,8 @@
 # the declaration crate's macro takes `$crate` from that crate; prints "proc_macro_hack_entry: ok" or
 # "proc_macro_hack_entry: FAILED" (exit 1).
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off
+export RELAX_CACHE=off
 ERR=$(mktemp)
-OUT=$(cd "$H" && env -u CARGO MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet pmh-app 2>"$ERR")
+OUT=$(cd "$H" && env -u CARGO RELAX_STD=$H/../../std "$1" run --quiet pmh-app 2>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "hack entry ok, CARGO set: true, answer 42" ]; then rm -f "$ERR"; echo "proc_macro_hack_entry: ok"; else tail -5 "$ERR"; rm -f "$ERR"; echo "proc_macro_hack_entry: FAILED"; exit 1; fi

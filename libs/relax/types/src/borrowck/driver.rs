@@ -400,7 +400,7 @@ fn check_group(g: &Group<'_, '_>, owners: &[CheckedBody], anon_const: bool, v: &
     // MoveData, signature regions, inference contexts, MIR type check.
     let mut prepared: Vec<Prepared<'_>> = Vec::new();
     let item_sig = if anon_const { Some(SignatureRegions::anon_const(tcx, prog, typeck.def)) } else { SignatureRegions::function(tcx, prog, typeck.def) };
-    // an instance (MAKEPAD_RUN_BORROWCK_INSTANCES): its signature is substituted as its body and
+    // an instance (RELAX_BORROWCK_INSTANCES): its signature is substituted as its body and
     // environment are, or the generic signature meets a concrete environment
     let instance = !typeck.args.is_empty() && typeck.args[..] != tcx.generic_indices_of(prog, typeck.def).identity_types_consts(&tcx.tys)[..];
     let item_sig = item_sig.map(|s| if instance && !anon_const { s.instantiated(tcx, prog, typeck.def, &typeck.args) } else { s });

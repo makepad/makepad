@@ -4,9 +4,9 @@ it: the rest of the edit patches, and the held items wait for the restart that i
 
 usage: hold_back.py [--makepad <makepad binary>]
   (run from the workspace root; the JIT runs through `cargo run --profile host` unless a binary is
-  given; MAKEPAD_RUN_STD defaults to libs/relax/compiler/std)
+  given; RELAX_STD defaults to libs/relax/compiler/std)
 
-A program that never presents is written to a fresh dir (its own MAKEPAD_RUN_HOME, a git
+A program that never presents is written to a fresh dir (its own RELAX_HOME, a git
 repository by hand: HEAD names refs/heads/main) and runs live under `makepad run --verbose
 --ahead=minimal`, printing `out <parts::value()> <parts::reader()> <other::other()> <parts::count()>`
 when that changes:
@@ -104,10 +104,10 @@ class Run:
     def __init__(self, jit, work, home, pkg):
         self.jit, self.out, self.err = jit, [], []
         self.ready, self.stop = os.path.join(work, "ready"), os.path.join(work, "stop")
-        env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=self.ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_RUN_LIVE_LOG=os.path.join(work, "live.jsonl"),
-                   MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1", HOLD_BACK_STOP=self.stop)
-        env.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+        env = dict(os.environ, RELAX_LIVE_READY=self.ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+                   RELAX_TARGET_DIR=os.path.join(home, "target"), RELAX_LIVE_LOG=os.path.join(work, "live.jsonl"),
+                   MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", HOLD_BACK_STOP=self.stop)
+        env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
         self.p = subprocess.Popen(jit + ["run", "--quiet", "--verbose", "--ahead=minimal", "relax-hold-back"], cwd=pkg, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         threading.Thread(target=self.pump, args=(self.p.stdout, self.out), daemon=True).start()
@@ -151,7 +151,7 @@ class Run:
                 print("  | %s" % l[:240], flush=True)
 
     def said(self, since):
-        return "; ".join(l.strip()[:200] for l in self.err[since:] if "makepad live" in l or "error" in l)[:600]
+        return "; ".join(l.strip()[:200] for l in self.err[since:] if "relax live" in l or "error" in l)[:600]
 
 
 def save(path, text):

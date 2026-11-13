@@ -45,24 +45,24 @@ pub fn count(kind: usize) { add(kind, 1); }
 
 #[inline]
 pub fn add(kind: usize, amount: u64) {
-    if *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) {
+    if *ENABLED.get_or_init(|| std::env::var_os("RELAX_SOLVER_WORK_TRACE").is_some()) {
         COUNTS[kind].fetch_add(amount, Ordering::Relaxed);
     }
 }
 
 pub fn report() {
-    if !*ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) { return; }
+    if !*ENABLED.get_or_init(|| std::env::var_os("RELAX_SOLVER_WORK_TRACE").is_some()) { return; }
     let names = ["normalize", "normalize_skipped", "impl_goals", "impl_probes", "impl_rejected", "recursion_scans", "env_interns", "env_hashes", "env_hash_clauses", "env_resolve_clauses", "env_canon_clauses", "canon_goals", "canon_env_skipped", "canon_pred_skipped", "canon_ty_skipped", "result_reads", "result_clones", "anon_tasks", "anon_locks", "solver_global_locks", "solver_intern_locks", "solver_map_locks", "env_cache_locks", "search_goals", "global_hits", "provisional_hits", "new_inputs", "cycle_results", "root_goals", "reruns"];
     for (name, count) in names.iter().zip(&COUNTS) {
-        eprintln!("makepad-run solver-work: {name}={}", count.load(Ordering::Relaxed));
+        eprintln!("relax solver-work: {name}={}", count.load(Ordering::Relaxed));
     }
 }
 
-/// A counter's value (0 unless MAKEPAD_RUN_SOLVER_WORK_TRACE counts).
+/// A counter's value (0 unless RELAX_SOLVER_WORK_TRACE counts).
 pub fn get(i: usize) -> u64 { COUNTS[i].load(Ordering::Relaxed) }
 
-/// Whether the counts are on (MAKEPAD_RUN_SOLVER_WORK_TRACE).
-pub fn enabled() -> bool { *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SOLVER_WORK_TRACE").is_some()) }
+/// Whether the counts are on (RELAX_SOLVER_WORK_TRACE).
+pub fn enabled() -> bool { *ENABLED.get_or_init(|| std::env::var_os("RELAX_SOLVER_WORK_TRACE").is_some()) }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {

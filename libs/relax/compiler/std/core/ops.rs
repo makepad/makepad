@@ -8,7 +8,7 @@ use crate::option::Option::{self, None, Some};
 use crate::marker::{PointeeSized, Unsize};
 
 // library/core/src/ops/unsize.rs: pointer-like types whose pointee unsizes coerce as a whole.
-#[cfg_attr(not(relax_check), lang = "coerce_unsized")]
+#[lang = "coerce_unsized"]
 pub trait CoerceUnsized<T: ?Sized> {}
 impl<'a, 'b: 'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a U> for &'b mut T {}
 impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<&'a mut U> for &'a mut T {}
@@ -20,7 +20,7 @@ impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> f
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*const U> for *const T {}
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> CoerceUnsized<*mut U> for *mut T {}
 
-#[cfg_attr(not(relax_check), lang = "dispatch_from_dyn")]
+#[lang = "dispatch_from_dyn"]
 pub trait DispatchFromDyn<T>: Sized {}
 impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a U> for &'a T {}
 impl<'a, T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<&'a mut U> for &'a mut T {}
@@ -28,25 +28,25 @@ impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*const U> for
 impl<T: PointeeSized + Unsize<U>, U: PointeeSized> DispatchFromDyn<*mut U> for *mut T {}
 
 #[rustc_diagnostic_item = "Drop"]
-#[cfg_attr(not(relax_check), lang = "drop")]
+#[lang = "drop"]
 pub trait Drop {
     fn drop(&mut self);
 }
 
 /// Types a method may take as `self: Type` without `arbitrary_self_types` (rustc
 /// library/core/src/ops/deref.rs `LegacyReceiver`).
-#[cfg_attr(not(relax_check), lang = "legacy_receiver")]
+#[lang = "legacy_receiver"]
 pub trait LegacyReceiver {}
 impl<T: ?Sized> LegacyReceiver for &T {}
 impl<T: ?Sized> LegacyReceiver for &mut T {}
 
-#[cfg_attr(not(relax_check), lang = "deref")]
+#[lang = "deref"]
 pub trait Deref: PointeeSized {
-    #[cfg_attr(not(relax_check), lang = "deref_target")]
+    #[lang = "deref_target"]
     type Target: ?Sized;
     fn deref(&self) -> &Self::Target;
 }
-#[cfg_attr(not(relax_check), lang = "deref_mut")]
+#[lang = "deref_mut"]
 pub trait DerefMut: Deref + PointeeSized {
     fn deref_mut(&mut self) -> &mut Self::Target;
 }
@@ -73,14 +73,14 @@ impl<'a, T: ?Sized> DerefMut for &'a mut T {
     }
 }
 
-#[cfg_attr(not(relax_check), lang = "index")]
+#[lang = "index"]
 pub trait Index<Idx: ?Sized> {
     type Output: ?Sized;
     #[track_caller]
     #[rustc_no_implicit_autorefs]
     fn index(&self, index: Idx) -> &Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "index_mut")]
+#[lang = "index_mut"]
 pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
     #[track_caller]
     #[rustc_no_implicit_autorefs]
@@ -89,23 +89,23 @@ pub trait IndexMut<Idx: ?Sized>: Index<Idx> {
 
 // Closures. `F: FnMut(A, B) -> R` is sugar for `F: FnMut<(A, B), Output = R>`; Relax
 // implements these for closures, fn items and fn pointers itself.
-#[cfg_attr(not(relax_check), lang = "fn_once")]
+#[lang = "fn_once"]
 #[fundamental]
 #[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnOnce<Args> {
-    #[cfg_attr(not(relax_check), lang = "fn_once_output")]
+    #[lang = "fn_once_output"]
     type Output;
     #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_once(self, args: Args) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "fn_mut")]
+#[lang = "fn_mut"]
 #[fundamental]
 #[must_use = "closures are lazy and do nothing unless called"]
 pub trait FnMut<Args>: FnOnce<Args> {
     #[unstable(feature = "fn_traits", issue = "29625")]
     extern "rust-call" fn call_mut(&mut self, args: Args) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "fn")]
+#[lang = "fn"]
 #[fundamental]
 #[must_use = "closures are lazy and do nothing unless called"]
 pub trait Fn<Args>: FnMut<Args> {
@@ -119,16 +119,16 @@ use crate::marker::Tuple;
 
 #[rustc_paren_sugar]
 #[must_use = "async closures are lazy and do nothing unless called"]
-#[cfg_attr(not(relax_check), lang = "async_fn")]
+#[lang = "async_fn"]
 pub trait AsyncFn<Args: Tuple>: AsyncFnMut<Args> {
     extern "rust-call" fn async_call(&self, args: Args) -> Self::CallRefFuture<'_>;
 }
 
 #[rustc_paren_sugar]
 #[must_use = "async closures are lazy and do nothing unless called"]
-#[cfg_attr(not(relax_check), lang = "async_fn_mut")]
+#[lang = "async_fn_mut"]
 pub trait AsyncFnMut<Args: Tuple>: AsyncFnOnce<Args> {
-    #[cfg_attr(not(relax_check), lang = "call_ref_future")]
+    #[lang = "call_ref_future"]
     type CallRefFuture<'a>: Future<Output = Self::Output>
     where
         Self: 'a;
@@ -138,12 +138,12 @@ pub trait AsyncFnMut<Args: Tuple>: AsyncFnOnce<Args> {
 
 #[rustc_paren_sugar]
 #[must_use = "async closures are lazy and do nothing unless called"]
-#[cfg_attr(not(relax_check), lang = "async_fn_once")]
+#[lang = "async_fn_once"]
 pub trait AsyncFnOnce<Args: Tuple> {
-    #[cfg_attr(not(relax_check), lang = "call_once_future")]
+    #[lang = "call_once_future"]
     type CallOnceFuture: Future<Output = Self::Output>;
 
-    #[cfg_attr(not(relax_check), lang = "async_fn_once_output")]
+    #[lang = "async_fn_once_output"]
     type Output;
 
     extern "rust-call" fn async_call_once(self, args: Args) -> Self::CallOnceFuture;
@@ -218,119 +218,119 @@ mod impls {
 // library/core/src/ops/async_function.rs internal_implementation_detail: the solver's
 // pending closure-kind check of `AsyncFn*` (its `Upvars` belongs to coroutine-closures,
 // which Relax does not represent).
-#[cfg_attr(not(relax_check), lang = "async_fn_kind_helper")]
+#[lang = "async_fn_kind_helper"]
 pub trait AsyncFnKindHelper<GoalKind> {}
 
-#[cfg_attr(not(relax_check), lang = "add")]
+#[lang = "add"]
 pub trait Add<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn add(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "sub")]
+#[lang = "sub"]
 pub trait Sub<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn sub(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "mul")]
+#[lang = "mul"]
 pub trait Mul<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn mul(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "div")]
+#[lang = "div"]
 pub trait Div<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn div(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "rem")]
+#[lang = "rem"]
 pub trait Rem<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn rem(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "neg")]
+#[lang = "neg"]
 pub trait Neg {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn neg(self) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "not")]
+#[lang = "not"]
 pub trait Not {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn not(self) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "bitand")]
+#[lang = "bitand"]
 pub trait BitAnd<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitand(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "bitor")]
+#[lang = "bitor"]
 pub trait BitOr<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitor(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "bitxor")]
+#[lang = "bitxor"]
 pub trait BitXor<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn bitxor(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "shl")]
+#[lang = "shl"]
 pub trait Shl<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shl(self, rhs: Rhs) -> Self::Output;
 }
-#[cfg_attr(not(relax_check), lang = "shr")]
+#[lang = "shr"]
 pub trait Shr<Rhs = Self> {
     type Output;
     #[must_use = "this returns the result of the operation, without modifying the original"]
     fn shr(self, rhs: Rhs) -> Self::Output;
 }
 
-#[cfg_attr(not(relax_check), lang = "add_assign")]
+#[lang = "add_assign"]
 pub trait AddAssign<Rhs = Self> {
     fn add_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "sub_assign")]
+#[lang = "sub_assign"]
 pub trait SubAssign<Rhs = Self> {
     fn sub_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "mul_assign")]
+#[lang = "mul_assign"]
 pub trait MulAssign<Rhs = Self> {
     fn mul_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "div_assign")]
+#[lang = "div_assign"]
 pub trait DivAssign<Rhs = Self> {
     fn div_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "rem_assign")]
+#[lang = "rem_assign"]
 pub trait RemAssign<Rhs = Self> {
     fn rem_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "bitand_assign")]
+#[lang = "bitand_assign"]
 pub trait BitAndAssign<Rhs = Self> {
     fn bitand_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "bitor_assign")]
+#[lang = "bitor_assign"]
 pub trait BitOrAssign<Rhs = Self> {
     fn bitor_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "bitxor_assign")]
+#[lang = "bitxor_assign"]
 pub trait BitXorAssign<Rhs = Self> {
     fn bitxor_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "shl_assign")]
+#[lang = "shl_assign"]
 pub trait ShlAssign<Rhs = Self> {
     fn shl_assign(&mut self, rhs: Rhs);
 }
-#[cfg_attr(not(relax_check), lang = "shr_assign")]
+#[lang = "shr_assign"]
 pub trait ShrAssign<Rhs = Self> {
     fn shr_assign(&mut self, rhs: Rhs);
 }
@@ -338,37 +338,37 @@ pub trait ShrAssign<Rhs = Self> {
 // ---------------------------------------------------------------- ranges
 
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "Range")]
+#[lang = "Range"]
 pub struct Range<Idx> {
     pub start: Idx,
     pub end: Idx,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "RangeFrom")]
+#[lang = "RangeFrom"]
 pub struct RangeFrom<Idx> {
     pub start: Idx,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "RangeTo")]
+#[lang = "RangeTo"]
 pub struct RangeTo<Idx> {
     pub end: Idx,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "RangeToInclusive")]
+#[lang = "RangeToInclusive"]
 pub struct RangeToInclusive<Idx> {
     pub end: Idx,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "RangeFull")]
+#[lang = "RangeFull"]
 pub struct RangeFull;
 
 /// `start..=end`. `exhausted` is set once iteration has yielded `end` (as in real core).
 #[derive(Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(not(relax_check), lang = "RangeInclusive")]
+#[lang = "RangeInclusive"]
 pub struct RangeInclusive<Idx> {
     pub(crate) start: Idx,
     pub(crate) end: Idx,
@@ -419,7 +419,7 @@ impl<Idx: crate::fmt::Debug> crate::fmt::Debug for RangeInclusive<Idx> {
 }
 
 impl<Idx> RangeInclusive<Idx> {
-    #[cfg_attr(not(relax_check), lang = "range_inclusive_new")]
+    #[lang = "range_inclusive_new"]
     #[rustc_promotable]
     pub const fn new(start: Idx, end: Idx) -> RangeInclusive<Idx> {
         RangeInclusive { start, end, exhausted: false }
@@ -652,27 +652,28 @@ impl<T> RangeBounds<T> for RangeToInclusive<&T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ControlFlow<B, C = ()> {
-    #[cfg_attr(not(relax_check), lang = "Continue")]
+    #[lang = "Continue"]
     Continue(C),
-    #[cfg_attr(not(relax_check), lang = "Break")]
+    #[lang = "Break"]
     Break(B),
 }
 
 /// The `?` protocol as real core spells it (core::ops::try_trait): used by Iterator::try_fold /
 /// try_for_each and the `?` operator.
-#[cfg_attr(not(relax_check), lang = "Try")]
+#[lang = "Try"]
 pub trait Try: FromResidual<Self::Residual> {
     type Output;
     type Residual: Residual<Self::Output>;
-    #[cfg_attr(not(relax_check), lang = "from_output")]
+    #[lang = "from_output"]
     fn from_output(output: Self::Output) -> Self;
-    #[cfg_attr(not(relax_check), lang = "branch")]
+    #[lang = "branch"]
     fn branch(self) -> ControlFlow<Self::Residual, Self::Output>;
 }
 
 pub trait FromResidual<R> {
-    #[cfg_attr(not(relax_check), lang = "from_residual")]
+    #[lang = "from_residual"]
     fn from_residual(residual: R) -> Self;
 }
 
@@ -685,7 +686,7 @@ pub trait Residual<O>: Sized {
 // ported from library/core/src/ops/try_trait.rs:371-385 (rustc 1.99): the type a `?` in a
 // `try {}` block breaks out with follows from its residual and the block's output, not from the
 // context.
-#[cfg_attr(not(relax_check), lang = "into_try_type")]
+#[lang = "into_try_type"]
 pub fn residual_into_try_type<R: Residual<O>, O>(r: R) -> <R as Residual<O>>::TryType {
     FromResidual::from_residual(r)
 }
@@ -781,6 +782,24 @@ impl<B, C> ControlFlow<B, C> {
             ControlFlow::Continue(_) => None,
         }
     }
+    pub const fn continue_value(self) -> Option<C> {
+        match self {
+            ControlFlow::Continue(c) => Some(c),
+            ControlFlow::Break(_) => None,
+        }
+    }
+    pub fn map_break<T, F: FnOnce(B) -> T>(self, f: F) -> ControlFlow<T, C> {
+        match self {
+            ControlFlow::Continue(c) => ControlFlow::Continue(c),
+            ControlFlow::Break(b) => ControlFlow::Break(f(b)),
+        }
+    }
+    pub fn map_continue<T, F: FnOnce(C) -> T>(self, f: F) -> ControlFlow<B, T> {
+        match self {
+            ControlFlow::Continue(c) => ControlFlow::Continue(f(c)),
+            ControlFlow::Break(b) => ControlFlow::Break(b),
+        }
+    }
 }
 
 // library/core/src/ops/function.rs:258-314; selection evaluates F's nested predicate.
@@ -804,19 +823,19 @@ impl<A: crate::marker::Tuple, F: ?Sized + FnMut<A>> FnOnce<A> for &mut F {
 
 // ported from library/core/src/ops/function.rs:315-353 @8d1a764
 extern "C" {
-    #[cfg_attr(not(relax_check), lang = "code")]
+    #[lang = "code"]
     pub type Code;
 }
 
-#[cfg_attr(not(relax_check), lang = "fn_ptr_trait")]
+#[lang = "fn_ptr_trait"]
 #[fundamental]
 #[rustc_deny_explicit_impl]
 #[rustc_dyn_incompatible_trait]
 #[fundamental]
 pub trait FnPtr: Copy {
     fn addr(self) -> usize { self.as_ptr().addr().get() }
-    #[cfg_attr(not(relax_check), lang = "fn_ptr_as_ptr")]
+    #[lang = "fn_ptr_as_ptr"]
     fn as_ptr(self) -> crate::ptr::NonNull<Code>;
-    #[cfg_attr(not(relax_check), lang = "fn_ptr_from_ptr")]
+    #[lang = "fn_ptr_from_ptr"]
     unsafe fn from_ptr(ptr: crate::ptr::NonNull<Code>) -> Self;
 }

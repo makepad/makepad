@@ -2,9 +2,9 @@
 """Invalidated code never runs again (INVALID, invalid.rs), end to end in `makepad run`: the code of
 an edit the borrow checker rejects after it ran, with a thread inside it.
 
-usage: run.py --makepad <makepad binary>   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary>   (RELAX_STD in the environment)
 
-Copies pkg/ to a temporary dir, runs it live with MAKEPAD_RUN_STALE_PARK=1 and edits src/work.rs:
+Copies pkg/ to a temporary dir, runs it live with RELAX_STALE_PARK=1 and edits src/work.rs:
   1. an edit the borrow checker rejects after it ran (SPEC-V runs it before its verdict), the worker
      blocked inside it                -> REVERTED: its code is invalidated (PROT_NONE, never reused),
                                          `stale` and `inspect code` say so
@@ -26,7 +26,7 @@ pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
 work = os.path.join(pkg, "src", "work.rs")
 base = open(work).read()
-env = dict(os.environ, MAKEPAD_RUN_CACHE="0", MAKEPAD_RUN_STALE_PARK="1")
+env = dict(os.environ, RELAX_CACHE="0", RELAX_STALE_PARK="1")
 out, err = [], []
 def pump(f, acc):
     for line in f:

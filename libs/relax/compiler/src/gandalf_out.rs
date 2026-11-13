@@ -20,7 +20,7 @@ impl Console {
                 // check-before-run (Origin::Run) printed its refusal on the installing thread
                 if !quiet && !gate && ev.origin != Origin::Run {
                     if ev.origin == Origin::Background {
-                        eprintln!("makepad-run: [t={:.0} ms] borrow check failed: {} at {}:{}: {}\n{}", crate::clock::ms_since_start(), ev.error.fn_path, ev.error.file, ev.error.line, ev.error.message, ev.error.render());
+                        eprintln!("relax: [t={:.0} ms] borrow check failed: {} at {}:{}: {}\n{}", crate::clock::ms_since_start(), ev.error.fn_path, ev.error.file, ev.error.line, ev.error.message, ev.error.render());
                     } else { eprintln!("{}", ev.error.render()); }
                 }
                 if json && !gate { crate::diag::emit(&ev.error.to_diagnostic()); }

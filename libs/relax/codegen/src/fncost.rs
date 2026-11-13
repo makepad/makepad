@@ -1,4 +1,4 @@
-//! Opt-in per-function CPU accounting. MAKEPAD_RUN_FN_COST=<TSV prefix>; writes <prefix>.<pid>.
+//! Opt-in per-function CPU accounting. RELAX_FN_COST=<TSV prefix>; writes <prefix>.<pid>.
 //! Each exec gets a separate file (build scripts inherit the switch).
 //! Rows are buffered per thread, flushed every 1000 rows, once a second, and at
 //! explicit shutdown. `phase` rows partition thread CPU (nested scopes are exclusive).
@@ -18,7 +18,7 @@ pub const PHASES: [&str; 11] = [
 ];
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_FN_COST").is_some_and(|s| !s.is_empty()))
+    *ON.get_or_init(|| std::env::var_os("RELAX_FN_COST").is_some_and(|s| !s.is_empty()))
 }
 /// Absolute CLOCK_MONOTONIC on Unix, process-relative Instant elsewhere (header says so).
 pub fn mono() -> u64 {
@@ -61,10 +61,10 @@ fn types() -> &'static Mutex<std::collections::HashMap<InstanceKey, (u64, u64, u
 }
 fn init() {
     FILE.get_or_init(|| {
-        let mut path = std::env::var_os("MAKEPAD_RUN_FN_COST").unwrap();
+        let mut path = std::env::var_os("RELAX_FN_COST").unwrap();
         path.push(format!(".{}", std::process::id()));
         let mut f = match std::fs::File::create(&path) {
-            Ok(f) => Some(f), Err(e) => { eprintln!("makepad: MAKEPAD_RUN_FN_COST {:?}: {}", path, e); None }
+            Ok(f) => Some(f), Err(e) => { eprintln!("relax: RELAX_FN_COST {:?}: {}", path, e); None }
         };
         if let Some(f) = &mut f {
             let _ = writeln!(f, "# fncost-v1 pid={} clock={} phases={} passes={}\n# fn: id slot tier origin thread start end cpu_ns rir_in rir_out blocks code_bytes name phase_cpu[11] phase_wall[11] pass_cpu[16] instance_typeck_cpu_ns typed_nodes\n# phase: id thread phase start end cpu_ns\n# type: id def args nodes name start end cpu_ns\n# meta: slot name; call/hint: slot monotonic_ns; mark: name monotonic_ns", std::process::id(), if cfg!(unix) { "CLOCK_MONOTONIC" } else { "process-Instant" }, PHASES.join(","), relax_backend::stats::PASS_NAMES.join(","));

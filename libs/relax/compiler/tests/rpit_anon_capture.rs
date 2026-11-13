@@ -1,6 +1,6 @@
 // `-> impl Iterator<..> + '_` (edition 2021): the bound names the elided input lifetime, which the
 // hidden type captures (a `move` closure holding the argument). Without the bound rustc rejects it
-// (E0700), and so does the check; with it both accept. Fab's settings trees (M64) had this shape.
+// (E0700), and so does the check; with it both accept. An app's settings trees (M64) had this shape.
 const TREES: &[(&str, &[&[(&str, &str)]])] = &[("a", &[&[("k", "v")], &[("k2", "v2")]]), ("b", &[&[("x", "y")]])];
 
 fn defaults(folder: &str) -> impl Iterator<Item = (&'static str, &'static str)> + '_ {

@@ -20,7 +20,7 @@ SCENARIOS = {
     "body": ("fn speak(&self) -> u32 { 10 } // EDIT body", "fn speak(&self) -> u32 { 11 } // EDIT body",
              {3: 11}, ["speak"], ["unrelated", "use_leaf", "use_shape", "use_const", "use_loud", "stable_before", "untouched_user", "stable_after"]),
     # an inlined callee's body: the code that inlined it is not linked again. A program thread's
-    # first build is baseline code, which inlines no user-crate fn; with MAKEPAD_RUN_O1=0 it is O1
+    # first build is baseline code, which inlines no user-crate fn; with RELAX_O1=0 it is O1
     # code, and leaf_user's inlines leaf (#[inline]). After the edit that entry fails its certificate.
     "inline": ("pub fn leaf() -> u32 { 100 } // EDIT inline", "pub fn leaf() -> u32 { 200 } // EDIT inline",
                {0: 201}, [], []),
@@ -58,9 +58,9 @@ SCENARIOS = {
 
 
 def run(relax, d, cache, tag, extra_env=None):
-    env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=os.path.join(cache, "cache"),
-               MAKEPAD_RUN_STD=STD, RUSTC_BOOTSTRAP="1", MAKEPAD_RUN_CACHE_TRACE=os.path.join(cache, tag + ".trace"))
-    env.pop("MAKEPAD_RUN_CACHE", None)
+    env = dict(os.environ, RELAX_CACHE_DIR=os.path.join(cache, "cache"),
+               RELAX_STD=STD, RUSTC_BOOTSTRAP="1", RELAX_CACHE_TRACE=os.path.join(cache, tag + ".trace"))
+    env.pop("RELAX_CACHE", None)
     env.update(extra_env or {})
     p = subprocess.run([relax, "run", "--quiet", "cache-items"], cwd=os.path.join(d, "app"), env=env,
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
@@ -102,7 +102,7 @@ def scenario(relax, name):
         cache = os.path.join(tmp, "c")
         os.mkdir(cache, 0o700)
         want = list(BASE)
-        o1 = {"MAKEPAD_RUN_O1": "0"} if name == "inline" else None
+        o1 = {"RELAX_O1": "0"} if name == "inline" else None
         rc, res, out, cold = run(relax, tmp, cache, "1-cold", o1)
         if rc != 0 or res != want:
             bad.append(f"cold run: exit {rc}, result {res}, want {want}")

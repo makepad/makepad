@@ -9,7 +9,7 @@ extern "C" {
 
 /// `memory.size`: the current size of memory `MEM` in pages.
 #[inline]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(0))]
+#[rustc_legacy_const_generics(0)]
 pub fn memory_size<const MEM: u32>() -> usize {
     unsafe { relax_web_memory_size(MEM) }
 }
@@ -17,7 +17,7 @@ pub fn memory_size<const MEM: u32>() -> usize {
 /// `memory.grow`: grows memory `MEM` by `delta` pages; the previous size in pages, or
 /// `usize::MAX` when it cannot grow.
 #[inline]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(0))]
+#[rustc_legacy_const_generics(0)]
 pub fn memory_grow<const MEM: u32>(delta: usize) -> usize {
     unsafe { relax_web_memory_grow(MEM, delta) }
 }

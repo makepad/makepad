@@ -22,7 +22,7 @@ use crate::vec::Vec;
 
 #[fundamental]
 #[rustc_diagnostic_item = "Box"]
-#[cfg_attr(not(relax_check), lang = "owned_box")]
+#[lang = "owned_box"]
 #[rustc_insignificant_dtor]
 pub struct Box<T: ?Sized> {
     ptr: crate::ptr::NonNull<T>,
@@ -57,6 +57,27 @@ impl<T> Box<T> {
         let b = Box::<T>::new_uninit();
         unsafe { im::write_bytes(b.ptr.as_ptr() as *mut u8, 0, crate::mem::size_of::<T>()) };
         b
+    }
+    /// rustc 1.100.0 (box_take): the value, and its allocation left uninitialized
+    pub fn take(boxed: Self) -> (T, Box<crate::mem::MaybeUninit<T>>) {
+        unsafe {
+            let raw = Box::into_raw(boxed);
+            let value = im::ptr_read(raw as *const T);
+            let uninit = Box::from_raw(raw as *mut crate::mem::MaybeUninit<T>);
+            (value, uninit)
+        }
+    }
+    /// rustc 1.100.0 (smart_pointer_map): `f` of the value, in the same allocation when `U` fits it exactly
+    pub fn map<U>(this: Self, f: impl FnOnce(T) -> U) -> Box<U> {
+        let (value, allocation) = Box::take(this);
+        if crate::mem::size_of::<T>() == crate::mem::size_of::<U>() && crate::mem::align_of::<T>() == crate::mem::align_of::<U>() {
+            let allocation = unsafe { Box::from_raw(Box::into_raw(allocation) as *mut crate::mem::MaybeUninit<U>) };
+            Box::write(allocation, f(value))
+        } else {
+            // frees the allocation (a MaybeUninit drops nothing) before `f` runs, as alloc's deallocate does
+            drop(allocation);
+            Box::new(f(value))
+        }
     }
 }
 
@@ -125,6 +146,20 @@ impl<T, const N: usize> crate::convert::TryFrom<Box<[T]>> for Box<[T; N]> {
             Ok(unsafe { Box::from_raw(Box::into_raw(b) as *mut T as *mut [T; N]) })
         } else {
             Err(b)
+        }
+    }
+}
+
+/// `Vec<T>` of exactly N elements as `Box<[T; N]>` (its boxed slice: in place when its capacity is
+/// N, moved into one of N otherwise), else the Vec back as it was (alloc/src/boxed.rs).
+impl<T, const N: usize> crate::convert::TryFrom<Vec<T>> for Box<[T; N]> {
+    type Error = Vec<T>;
+    fn try_from(vec: Vec<T>) -> Result<Box<[T; N]>, Vec<T>> {
+        if vec.len() == N {
+            let b = vec.into_boxed_slice();
+            Ok(unsafe { Box::from_raw(Box::into_raw(b) as *mut T as *mut [T; N]) })
+        } else {
+            Err(vec)
         }
     }
 }
@@ -463,6 +498,17 @@ impl Box<dyn Any + Send> {
     pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<dyn Any + Send>> {
         if self.is::<T>() {
             let raw: *mut (dyn Any + Send) = Box::into_raw(self);
+            Ok(unsafe { Box::from_raw(raw as *mut T) })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl Box<dyn Any + Send + Sync> {
+    pub fn downcast<T: Any>(self) -> Result<Box<T>, Box<dyn Any + Send + Sync>> {
+        if self.is::<T>() {
+            let raw: *mut (dyn Any + Send + Sync) = Box::into_raw(self);
             Ok(unsafe { Box::from_raw(raw as *mut T) })
         } else {
             Err(self)

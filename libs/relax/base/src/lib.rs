@@ -8,29 +8,29 @@
 
 
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
-// log in a full tmpfs /tmp aborted a fleet Sandbox inside a lazy compile, 2026-10-23), so in this
+// log in a full tmpfs /tmp aborted a fleet run inside a lazy compile, 2026-10-23), so in this
 // crate every print is a write whose error is dropped. Test builds keep std's captured macros.
 #[cfg(not(test))]
 #[allow(unused_macros)]
 macro_rules! eprintln {
     () => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_all(b"\n"); }};
-    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+    ($($t:tt)+) => { $crate::vfs::write_err(format_args!("{}\n", format_args!($($t)+))) };
 }
 #[cfg(not(test))]
 #[allow(unused_macros)]
 macro_rules! eprint {
-    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stderr().write_fmt(format_args!($($t)+)); }};
+    ($($t:tt)+) => { $crate::vfs::write_err(format_args!($($t)+)) };
 }
 #[cfg(not(test))]
 #[allow(unused_macros)]
 macro_rules! println {
     () => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_all(b"\n"); }};
-    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!("{}\n", format_args!($($t)+))); }};
+    ($($t:tt)+) => { $crate::vfs::write_out(format_args!("{}\n", format_args!($($t)+))) };
 }
 #[cfg(not(test))]
 #[allow(unused_macros)]
 macro_rules! print {
-    ($($t:tt)+) => {{ use ::std::io::Write as _; let _ = ::std::io::stdout().write_fmt(format_args!($($t)+)); }};
+    ($($t:tt)+) => { $crate::vfs::write_out(format_args!($($t)+)) };
 }
 
 pub mod fxhash;
@@ -84,14 +84,14 @@ pub mod scc;
 pub mod solver_work;
 
 /// The command this process runs as, for the lines that tell the user what to type next
-/// (`relax inspect <pid> help`): `makepad` unless the runner set another at start (the bare
-/// `relax` binary sets `relax`). A property of the process, so reset_statics leaves it.
+/// (`relax inspect <pid> help`): `relax` unless the runner set another at start (the Makepad
+/// host sets `makepad`). A property of the process, so reset_statics leaves it.
 static TOOL_NAME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 pub fn set_tool_name(name: &'static str) {
     let _ = TOOL_NAME.set(name);
 }
 pub fn tool_name() -> &'static str {
-    TOOL_NAME.get().copied().unwrap_or("makepad")
+    TOOL_NAME.get().copied().unwrap_or("relax")
 }
 
 // This crate's source stamp (build.rs, libs/relax/self_stamp.rs): relax-compiler folds it into the codegen identity.

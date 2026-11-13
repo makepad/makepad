@@ -1,10 +1,8 @@
 //! Slices: free functions, comparison helpers, indexing, iterators, sorting.
-//! The `impl<T> [T]` methods are in inherent.rs (Relax only; the rustc shim checks the
-//! free functions they forward to).
+//! The `impl<T> [T]` methods are in inherent.rs and forward to the free functions here.
 
 pub mod memchr;
-mod index;
-#[cfg(not(relax_check))]
+pub(crate) mod index;
 mod inherent;
 mod iter;
 mod join;
@@ -12,22 +10,11 @@ pub mod sort;
 
 pub use index::SliceIndex;
 pub use iter::{
-    ChunkBy, ChunkByMut, Chunks, ChunksExact, ChunksExactMut, ChunksMut, Iter, IterMut,
+    ArrayWindows, ChunkBy, ChunkByMut, Chunks, ChunksExact, ChunksExactMut, ChunksMut, Iter, IterMut,
     RChunks, RChunksExact, RChunksExactMut, RChunksMut, RSplit, RSplitMut, RSplitN, RSplitNMut,
     Split, SplitInclusive, SplitInclusiveMut, SplitMut, SplitN, SplitNMut, Windows,
 };
 pub use join::{Concat, Join};
-/// Constructors and helpers the rustc shim's tests call directly.
-#[cfg(relax_check)]
-pub use iter::{
-    as_chunks, as_chunks_mut, as_rchunks, as_rchunks_mut, chunk_by, chunk_by_mut,
-    chunks, chunks_exact, chunks_exact_mut, chunks_mut, rchunks, rchunks_exact,
-    rchunks_exact_mut, rchunks_mut, rsplit, rsplit_mut, rsplitn, rsplitn_mut,
-    split, split_first_chunk_mut, split_inclusive, split_inclusive_mut,
-    split_last_chunk_mut, split_mut, splitn, splitn_mut, windows,
-};
-#[cfg(relax_check)]
-pub use join::{concat_str, concat_vec, join_str, join_vec};
 
 use crate::cmp::Ordering;
 use crate::fmt::Write as _;
@@ -212,7 +199,6 @@ pub fn fill<T: Clone>(s: &mut [T], value: T) {
     // Primitive byte fills are memset. Type identity is constant per instance,
     // as in Vec's slice-iterator specialization. Size alone is insufficient:
     // a one-byte Copy type can contain uninitialized storage (MaybeUninit<u8>).
-    #[cfg(not(relax_check))]
     unsafe {
         let id = (im::type_id::<T>(), im::type_id_hi::<T>());
         if id == (im::type_id::<u8>(), im::type_id_hi::<u8>())
@@ -573,31 +559,26 @@ impl<'a> crate::fmt::Debug for EscapeAscii<'a> {
 
 // ---------------------------------------------------------------- comparison impls on [T]
 
-#[cfg(not(relax_check))]
 impl<T: PartialEq<U>, U> PartialEq<[U]> for [T] {
     fn eq(&self, other: &[U]) -> bool {
         slice_eq(self, other)
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T: Eq> Eq for [T] {}
 
-#[cfg(not(relax_check))]
 impl<T: PartialOrd> PartialOrd for [T] {
     fn partial_cmp(&self, other: &[T]) -> Option<Ordering> {
         slice_partial_cmp(self, other)
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T: Ord> Ord for [T] {
     fn cmp(&self, other: &[T]) -> Ordering {
         slice_cmp(self, other)
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T> Default for &mut [T] {
     fn default() -> Self {
         &mut []

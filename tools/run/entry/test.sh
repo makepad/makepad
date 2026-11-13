@@ -64,7 +64,7 @@ LOCK
     if [ "${2:-}" = broken ]; then
         printf 'fn main() { this is not rust }\n' > "$base/zipfix/fx1/main.rs"
     else
-        printf 'fn main() {\n    let home = std::env::var("MAKEPAD_RUN_HOME").unwrap_or_default();\n    let record = std::path::Path::new(&home).join("apps/runner.launch");\n    println!("fixture loader: {} launch record present: {}", dep_a::text(), record.is_file());\n}\n' > "$base/zipfix/fx1/main.rs"
+        printf 'fn main() {\n    let home = std::env::var("RELAX_HOME").unwrap_or_default();\n    let record = std::path::Path::new(&home).join("apps/runner.launch");\n    println!("fixture loader: {} launch record present: {}", dep_a::text(), record.is_file());\n}\n' > "$base/zipfix/fx1/main.rs"
     fi
     (cd "$base/zipfix" && python3 -I -m zipfile -c "$base/www/public/app/runner/fx1/loader.zip" fx1) || exit 2
     zip=$base/www/public/app/runner/fx1/loader.zip

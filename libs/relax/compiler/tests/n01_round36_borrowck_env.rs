@@ -1,5 +1,5 @@
 // rustc_borrowck/src/lib.rs:127: borrowck consumes identity MIR with analysis
-// predicates. MAKEPAD_RUN_BORROWCK_ALL must not erase this generic environment.
+// predicates. RELAX_BORROWCK_ALL must not erase this generic environment.
 trait Source { type Item: Copy; }
 impl Source for u32 { type Item = u32; }
 fn projected<T: Source>(value: T::Item) -> (T::Item, T::Item) {

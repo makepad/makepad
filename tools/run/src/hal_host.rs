@@ -49,7 +49,7 @@ impl Host {
                     relax_compiler::hot_failure::pump();
                 }
                 if !matches!(domain::state(domain), Some(DomainState::Stopped)) {
-                    eprintln!("makepad-run domain: {}: {}", launch.app, e.join(" | "));
+                    eprintln!("relax domain: {}: {}", launch.app, e.join(" | "));
                 }
             }
         }) {
@@ -70,7 +70,7 @@ impl DomainHost for Host {
         relax_compiler::reload::domain_stopping(domain);
         relax_compiler::inspect::stop_domain(domain);
         relax_compiler::inspect::events::release_domain(domain);
-        if let Err(e) = domain::retire(domain) { eprintln!("makepad-run domain: {domain}: {e}"); }
+        if let Err(e) = domain::retire(domain) { eprintln!("relax domain: {domain}: {e}"); }
         report_stop(domain);
     }
 
@@ -87,15 +87,15 @@ impl DomainHost for Host {
     /// process again (relax_compiler::reload).
     fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> {
         let id = launch.domain;
-        self.launch(launch).inspect_err(|e| eprintln!("makepad-run domain: {id}: relaunch failed: {e}"))
+        self.launch(launch).inspect_err(|e| eprintln!("relax domain: {id}: relaunch failed: {e}"))
     }
 }
 
-/// `MAKEPAD_RUN_DOMAIN_REPORT=1`: each domain's start is measured on stderr: the process's memory
+/// `RELAX_DOMAIN_REPORT=1`: each domain's start is measured on stderr: the process's memory
 /// (RSS/PSS kB) when the start began, at the domain's first frame and 5 s later, and the time
 /// from the start to the first frame.
 fn report_start(id: domain::DomainId) {
-    if std::env::var_os("MAKEPAD_RUN_DOMAIN_REPORT").is_none() {
+    if std::env::var_os("RELAX_DOMAIN_REPORT").is_none() {
         return;
     }
     let before = domain::process_memory_kb();
@@ -106,7 +106,7 @@ fn report_start(id: domain::DomainId) {
         let settled = domain::process_memory_kb();
         let package = domain::info(id).map(|i| i.package).unwrap_or_default();
         eprintln!(
-            "makepad-run domain-report: id={id} pkg={package} first_frame_ms={} rss_kb={}/{}/{} pss_kb={}/{}/{}",
+            "relax domain-report: id={id} pkg={package} first_frame_ms={} rss_kb={}/{}/{} pss_kb={}/{}/{}",
             first.map_or("none".to_string(), |ms| format!("{ms:.0}")),
             before.0,
             at.0,
@@ -119,7 +119,7 @@ fn report_start(id: domain::DomainId) {
     });
 }
 
-/// `MAKEPAD_RUN_DOMAIN_REPORT=1`: the HAL ledger at that moment on stderr: the session's GPU bytes by
+/// `RELAX_DOMAIN_REPORT=1`: the HAL ledger at that moment on stderr: the session's GPU bytes by
 /// kind (count) and the device's own total, so the phone's GPU memory can be read from logcat.
 fn report_gpu(id: domain::DomainId) {
     let hal = Hal::global();
@@ -133,25 +133,25 @@ fn report_gpu(id: domain::DomainId) {
     );
 }
 
-/// `MAKEPAD_RUN_DOMAIN_REPORT=1`: what a stop left of the domain on stderr: its state, threads, arena and
+/// `RELAX_DOMAIN_REPORT=1`: what a stop left of the domain on stderr: its state, threads, arena and
 /// static-block bytes still held, the bytes teardown has freed in all so far, and the process memory.
 fn report_stop(id: domain::DomainId) {
-    if std::env::var_os("MAKEPAD_RUN_DOMAIN_REPORT").is_none() {
+    if std::env::var_os("RELAX_DOMAIN_REPORT").is_none() {
         return;
     }
     let Some(i) = domain::info(id) else { return };
     let (rss, pss) = domain::process_memory_kb();
     eprintln!(
-        "makepad-run domain-stop: id={id} pkg={} state={:?} threads={} arena_in_use={} arena_committed={} static_committed={} freed_by_teardown={} rss_kb={rss} pss_kb={pss}",
+        "relax domain-stop: id={id} pkg={} state={:?} threads={} arena_in_use={} arena_committed={} static_committed={} freed_by_teardown={} rss_kb={rss} pss_kb={pss}",
         i.package, i.state, i.threads, i.arena_in_use, i.arena_committed, i.static_committed, domain::freed_by_teardown()
     );
-    eprintln!("makepad-run domain-stop-heaps: id={id} {}", domain::process_breakdown());
+    eprintln!("relax domain-stop-heaps: id={id} {}", domain::process_breakdown());
     // the process's memory once the stop's own work and the next frames have settled
     let _ = std::thread::Builder::new().name(format!("domain-report-{id}")).spawn(move || {
         std::thread::sleep(Duration::from_secs(8));
         let (rss, pss) = domain::process_memory_kb();
-        eprintln!("makepad-run domain-after-stop: id={id} 8s later rss_kb={rss} pss_kb={pss}");
-        eprintln!("makepad-run domain-after-stop-heaps: id={id} {}", domain::process_breakdown());
+        eprintln!("relax domain-after-stop: id={id} 8s later rss_kb={rss} pss_kb={pss}");
+        eprintln!("relax domain-after-stop-heaps: id={id} {}", domain::process_breakdown());
     });
 }
 
@@ -159,7 +159,7 @@ fn report_stop(id: domain::DomainId) {
 fn observe(id: domain::DomainId, state: &DomainState) {
     let _kept = relax_compiler::zone_alloc::kept();
     crate::hal_run::observe(id, state);
-    if std::env::var_os("MAKEPAD_RUN_DOMAIN_REPORT").is_some() {
+    if std::env::var_os("RELAX_DOMAIN_REPORT").is_some() {
         let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() % 1_000_000);
         eprintln!("domain-step: id={id} t={t} ms state={}", match state { DomainState::Compiling(p) => format!("compiling:{p}"), DomainState::Running => "running".into(), other => format!("{other:?}") });
     }
@@ -208,7 +208,7 @@ pub fn register() {
     Hal::global().set_domain_host(Arc::new(Host::default()));
     // a callback an app registers (audio entry, fence notify, main-thread work) runs in that
     // app's domain on whatever thread the HAL calls it: its statics, its heap
-    makepad_relax_api::set_app_call(relax_compiler::jit::app_call);
+    relax_api::set_app_call(relax_compiler::jit::app_call);
     // an app's event loop waits in the HAL's pump
     domain::set_run_end_wake(|| Hal::global().wake());
     makepad_hal::call_scope::set_call_scope(makepad_hal::call_scope::CallScope {

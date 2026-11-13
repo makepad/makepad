@@ -22,7 +22,7 @@ impl History {
         };
         if let Ok(text) = std::fs::read_to_string(&history.path) {
             let mut lines = text.lines();
-            if lines.next() == Some("makepad-run-boot-timings 1") {
+            if lines.next() == Some("relax-boot-timings 1") {
                 for dst in [&mut history.cold, &mut history.warm] {
                     if let Some(values) = lines.next().and_then(|line| {
                         let v: Vec<f64> = line
@@ -45,7 +45,7 @@ impl History {
     pub fn record(&mut self, warm: bool, durations: [f64; 6]) -> String {
         *if warm { &mut self.warm } else { &mut self.cold } = durations;
         format!(
-            "makepad-run-boot-timings 1\n{}\n{}\n",
+            "relax-boot-timings 1\n{}\n{}\n",
             self.cold.map(|v| v.to_string()).join(" "),
             self.warm.map(|v| v.to_string()).join(" ")
         )

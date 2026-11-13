@@ -1,4 +1,4 @@
-"""A stale access with somebody to decide (MAKEPAD_RUN_STALE_PARK=1): the faulting thread parks,
+"""A stale access with somebody to decide (RELAX_STALE_PARK=1): the faulting thread parks,
 the app pauses, the access is listed as a parked panic, `panic` is refused, `stop` ends the process."""
 import os
 import re
@@ -8,7 +8,7 @@ import time
 
 mk = os.path.abspath(sys.argv[1])
 root = os.path.dirname(os.path.abspath(__file__))
-env = dict(os.environ, MAKEPAD_RUN_STALE_PARK="1", SAFE2_UNLOAD_CRASH="parked")
+env = dict(os.environ, RELAX_STALE_PARK="1", SAFE2_UNLOAD_CRASH="parked", RELAX_EXPECTED_CRASH="stale_park.py parks a stale access and decides it")
 p = subprocess.Popen([mk, "test", os.path.join(root, "unload_inside.rs")], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 err = []
 pid = None
@@ -48,7 +48,7 @@ try:
     assert rc != 0 and "out parked call" not in out, f"stop: rc {rc}, out {out[:300]}"
     print("modules stale access parks until stop: PASS")
     # a trusted module's fn called through a kept fn pointer after its unload: parked, named
-    env2 = dict(env, SAFE2_UNLOAD_CRASH="trusted_call", MAKEPAD_RUN_MODULES_TRUSTED="1")
+    env2 = dict(env, SAFE2_UNLOAD_CRASH="trusted_call", RELAX_MODULES_TRUSTED="1")
     q = subprocess.Popen([mk, "test", os.path.join(root, "unload_inside.rs")], env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     p = q
     err = []

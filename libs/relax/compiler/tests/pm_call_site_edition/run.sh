@@ -9,7 +9,7 @@ T=$(mktemp -d)
 WANT="block local,temp / temp,local; braces local,temp; if-let else,scrutinee / scrutinee,else; into_iter &u8 / u8; rules local,temp; 4"
 ok=1
 for run in cold warm; do
-  OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std MAKEPAD_HOME=$T/home MAKEPAD_RUN_HOME=$T MAKEPAD_RUN_CACHE_DIR=$T/cache MAKEPAD_RUN_TARGET_DIR=$T/target "$1" run --quiet pmce-app 2>>"$T/err")
+  OUT=$(cd "$H" && RELAX_STD=$H/../../std MAKEPAD_HOME=$T/home RELAX_HOME=$T RELAX_CACHE_DIR=$T/cache RELAX_TARGET_DIR=$T/target "$1" run --quiet pmce-app 2>>"$T/err")
   echo "$run: $OUT"
   [ "$OUT" = "$WANT" ] || ok=0
 done

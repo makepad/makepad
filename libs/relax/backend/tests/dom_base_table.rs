@@ -2,7 +2,7 @@
 //! the paths that use it. A jump table (`Term::Switch`) enters its case blocks straight from the
 //! dispatching block: the table's targets are its successors, so each case that names a domain
 //! static reads the base itself and no read sits in a block the other cases skip (a warm-cached
-//! `match` in Stage's parser once faulted at a small address because a read sat in a skipped link
+//! `match` in an app's parser once faulted at a small address because a read sat in a skipped link
 //! block).
 use relax_backend::regalloc;
 use relax_backend::rir::*;

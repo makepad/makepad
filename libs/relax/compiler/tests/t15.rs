@@ -1,4 +1,4 @@
-// std only (MAKEPAD_RUN_STD=libs/relax/compiler/std): format machinery on the S2 ABI, std derives
+// std only (RELAX_STD=libs/relax/compiler/std): format machinery on the S2 ABI, std derives
 // expanded by the parser, bit intrinsics, statics as places, stdout buffering, slice patterns
 use std::fmt;
 use std::fmt::Write as _;

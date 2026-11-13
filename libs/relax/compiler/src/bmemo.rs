@@ -210,7 +210,7 @@ pub(crate) static STATS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
 /// capture (they record what the back ends that run see).
 pub(crate) fn on(options: &crate::options::Options) -> bool {
     static ENV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENV.get_or_init(|| std::env::var_os("MAKEPAD_RUN_INTERP").is_none())
+    *ENV.get_or_init(|| std::env::var_os("RELAX_INTERP").is_none())
         && options.no_layout_fn.is_none()
         && options.layout_only.is_none()
         && options.unroll_only.is_none()

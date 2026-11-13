@@ -19,7 +19,7 @@ pub const ALLOWED: &[(&str, &str, &str)] = &[
     // the token-model switch itself: which `proc_macro` the parser and builder name
     ("makepad_micro_proc_macro", "src/lib.rs", "relax-tokens"),
     // the loader's runtime shim table (link sections); no macro expansion calls it
-    ("makepad_relax_api", "src/lib.rs", "host-shims"),
+    ("relax_api", "src/lib.rs", "host-shims"),
 ];
 
 /// The divergent `cfg` predicates of one Rust source: (line, the predicate's cfg name).
@@ -85,7 +85,7 @@ pub fn check_package(package: &str, files: &[(String, Vec<u8>)]) -> Vec<String> 
             Ok(hits) => {
                 for (line, name) in hits {
                     if !ALLOWED.iter().any(|(p, f, n)| *p == package && f == path && *n == name) {
-                        errors.push(format!("{package} {path}:{line}: `cfg` on `{name}` differs between relax's linked copy and rustc's proc-macro build, so `makepad check` would expand this macro differently from cargo"));
+                        errors.push(format!("{package} {path}:{line}: `cfg` on `{name}` differs between relax's linked copy and rustc's proc-macro build, so Relax would expand this macro differently from cargo"));
                     }
                 }
             }
@@ -109,7 +109,7 @@ mod tests {
         assert!(errs[0].contains("src/macro_lib.rs:2") && errs[0].contains("relax-tokens"), "{errs:?}");
         for src in ["#[cfg(all(test, not(feature = \"relax-tokens\")))] mod t {}", "fn f() -> bool { cfg!(debug_assertions) }",
                     "#![cfg_attr(debug_assertions, allow(dead_code))]", "#[cfg(any(feature = \"host-shims\", windows))] fn g() {}"] {
-            assert_eq!(check_package("makepad_script_derive_impl", &files("src/lib.rs", src)).len(), 1, "{src}");
+            assert_eq!(check_package("makepad_micro_serde_derive_impl", &files("src/lib.rs", src)).len(), 1, "{src}");
         }
     }
 
@@ -121,8 +121,8 @@ mod tests {
         assert_eq!(check_package("makepad_micro_proc_macro", &files("src/other.rs", switch)).len(), 2);
         // cfgs with one value in both builds; strings that only mention a feature
         let same = "#[cfg(test)] mod t {} #[cfg(target_os = \"macos\")] fn m() {}\nconst C: &str = \"#[cfg(feature = \\\"host-shims\\\")]\";";
-        assert!(check_package("makepad_relax_api_macro_impl", &files("src/lib.rs", same)).is_empty());
+        assert!(check_package("relax_api_macro_impl", &files("src/lib.rs", same)).is_empty());
         // any feature: the graph's features are allowlisted, not compared with the linked copy's
-        assert_eq!(check_package("makepad_derive_widget", &files("src/lib.rs", "#[cfg(feature = \"nightly\")] fn n() {}")).len(), 1);
+        assert_eq!(check_package("makepad_micro_serde_derive_impl", &files("src/lib.rs", "#[cfg(feature = \"some-feature\")] fn n() {}")).len(), 1);
     }
 }

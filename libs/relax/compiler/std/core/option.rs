@@ -4,11 +4,11 @@ use crate::ops::{Deref, DerefMut};
 use crate::result::Result::{self, Err, Ok};
 
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
-#[cfg_attr(not(relax_check), lang = "Option")]
+#[lang = "Option"]
 pub enum Option<T> {
-    #[cfg_attr(not(relax_check), lang = "None")]
+    #[lang = "None"]
     None,
-    #[cfg_attr(not(relax_check), lang = "Some")]
+    #[lang = "Some"]
     Some(T),
 }
 

@@ -1,7 +1,7 @@
 //! Lane-wise vector ops (`Inst::VX`, `Inst::VShuffle`) against a Rust reference of their RIR
 //! meaning, every lane width, edge and random inputs (NaN payloads, -0, infinities, lane limits),
 //! run on the host. Each op runs as the encoder emits it and forced through the vector legaliser
-//! (`MAKEPAD_RUN_OPT=-vxnative`); on x86-64 also without AVX.
+//! (`RELAX_OPT=-vxnative`); on x86-64 also without AVX.
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]
 use relax_backend::{exec::Code, rir::*};
 

@@ -165,7 +165,14 @@ pub mod detect {
         let fma = avx && p.ecx & (1 << 12) != 0;
         let f16c = avx && p.ecx & (1 << 29) != 0;
         // Rust's AVX-512 target feature also implies FMA and F16C.
-        let avx512 = avx && xcr0 & 0xe0 == 0xe0 && fma && f16c;
+        //
+        // Relax's asm! / global_asm! assembler (backend/src/asm/x64.rs) has no EVEX encoding, so
+        // an AVX-512 kernel that names zmm registers fails when it is assembled at run time. Crates
+        // that choose kernels by `is_x86_feature_detected!` would choose exactly those, so the
+        // AVX-512 features report what code run here can execute, not what the CPU has: none
+        // until the assembler encodes EVEX (relax PR #114).
+        const ASM_ENCODES_EVEX: bool = false;
+        let avx512 = ASM_ENCODES_EVEX && avx && xcr0 & 0xe0 == 0xe0 && fma && f16c;
         // Intel SKL052: affected non-AVX chips falsely advertise BMI1/BMI2.
         let intel = root.ebx == 0x756e6547 && root.edx == 0x49656e69 && root.ecx == 0x6c65746e;
         let bmi = !intel || avx;

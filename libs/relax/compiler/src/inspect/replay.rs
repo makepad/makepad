@@ -37,7 +37,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
     };
     let ev = |cat: &str| p.events.iter().find(|e| p.s(e.cat) == cat);
     let Some(args) = ev("run.args").map(|e| e.text.split(SEP).map(str::to_string).collect::<Vec<_>>()) else {
-        println!("{path} has no run record (not a flight recorder recording, or an older one): cannot replay\nmore: makepad inspect file={path} pf brief");
+        println!("{path} has no run record (not a flight recorder recording, or an older one): cannot replay\nmore: {tool} inspect file={path} pf brief", tool = crate::tool_name());
         return 1;
     };
     let cwd = ev("run.cwd").map(|e| e.text.clone()).unwrap_or_default();
@@ -63,7 +63,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
     }
     let injected = inputs.iter().filter(|i| i.injected).count();
     if injected > 0 {
-        notes.push(format!("{injected} of the events were injected by makepad remote (an agent), replayed as recorded"));
+        notes.push(format!("{injected} of the events were injected by {tool} remote (an agent), replayed as recorded", tool = crate::tool_name()));
     }
     let seed = ev("seed.script").map(|e| e.a).filter(|&s| s != 0);
     let window = p.events.iter().find(|e| p.s(e.cat) == "window.geom" && e.a == 0).or_else(|| ev("window.geom")).map(|e| e.text.clone());
@@ -91,7 +91,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
         }
     }
     if let Some(h) = &home {
-        cmd.env("MAKEPAD_RUN_HOME", h);
+        cmd.env("RELAX_HOME", h);
     }
     cmd.env("MAKEPAD_INPUT_REPLAY", &input_path);
     if let Some(s) = seed {
@@ -102,7 +102,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
     }
     if get("show").as_deref() != Some("1") {
         cmd.env("MAKEPAD_HIDE_WINDOWS", "1");
-        cmd.env("SANDBOX_MUTE", "1");
+        cmd.env("MAKEPAD_MUTE", "1");
     }
     let what = format!(
         "{} input events (frames {}..{}{}) into `{}`{}{}",
@@ -146,7 +146,7 @@ pub fn file_main(path: &str, words: &[String]) -> i32 {
             if first_input_frame == 0 && inputs.is_empty() {
                 println!("note: the recording has no input: the replay only starts the program");
             }
-            println!("more: makepad inspect {} input status  makepad inspect {} events  makepad inspect {} rec save  makepad inspect {} ui", child.id(), child.id(), child.id(), child.id());
+            println!("more: {tool} inspect {} input status  {tool} inspect {} events  {tool} inspect {} rec save  {tool} inspect {} ui", child.id(), child.id(), child.id(), child.id(), tool = crate::tool_name());
             0
         }
         Err(e) => {

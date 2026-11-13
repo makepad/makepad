@@ -1336,7 +1336,7 @@ mod tests {
     fn a_body_edit_renews_the_lifetime_names_of_an_owner_without_a_body() {
         // A struct's lifetime names are keyed by its file's nodes too (the anonymous `&` by its
         // type node): an edit of a body before it renumbers them, so they follow the file's
-        // version as a fn's do. A Fab edit was refused with "lifetime resolved before
+        // version as a fn's do. An app edit was refused with "lifetime resolved before
         // bound-variable collection" for a struct like S: its names stayed the version before
         // the edit's, its bound variables were resolved on the edited one.
         let text = "#![no_std] fn f() { let _x = 1u8; } struct S<'s> { h: &'s (dyn Fn(&u8) + Sync) }";

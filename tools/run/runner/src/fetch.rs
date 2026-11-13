@@ -11,7 +11,7 @@
 //! Offline, the newest kept commits run. `--cached` runs the newest kept commits at once and
 //! fetches the spec in a detached `makepad fetch` for the next start.
 //!
-//! `<home>` is $MAKEPAD_RUN_HOME, else `~/.makepad-run` (`%USERPROFILE%\.makepad-run`). Requests carry a plain
+//! `<home>` is $RELAX_HOME, else `~/.relax` (`%USERPROFILE%\.relax`). Requests carry a plain
 //! User-Agent and nothing that identifies the person.
 pub use relax_compiler::git::fetch::Repo;
 use relax_compiler::git::fetch::fetch_repo;
@@ -40,7 +40,7 @@ impl Spec {
         Ok((dir.to_string(), Repo::parse(url)?))
     }
     /// The words that name this spec on a command line (`makepad fetch` takes them back; the
-    /// loader exports them as MAKEPAD_RUN_SPEC for the programs it runs).
+    /// loader exports them as RELAX_SPEC for the programs it runs).
     pub fn args(&self) -> Vec<String> {
         let w = |r: &Repo| {
             let base = r.reference.as_ref().map_or(r.url.clone(), |x| format!("{}#{x}", r.url));
@@ -101,8 +101,8 @@ fn newest(home: &Path, spec: &Spec) -> Option<Snapshot> {
             parts.push((dir, path, pinned));
             continue;
         }
-        // the newest fetch of this ref; any ref of the repository when that one was never fetched
-        parts.push((dir, path, relax_compiler::git::fetch::newest(&s, &repo.ref_key())?));
+        // the newest fetch of this ref from this URL; any ref of it when that one was never fetched
+        parts.push((dir, path, relax_compiler::git::fetch::newest(&s, &repo.url, &repo.ref_key())?));
     }
     Some(Snapshot { label: label(spec), parts })
 }
@@ -152,14 +152,27 @@ pub fn mount(home: &Path, snap: &Snapshot) -> Result<String, String> {
     Ok(root)
 }
 
+/// Whether a path component is one some file system opens as a `.git` folder: in any case (APFS
+/// and NTFS ignore it), with trailing dots or spaces or an NTFS stream after it (`.git.`,
+/// `.git::$INDEX_ALLOCATION`), with code points HFS+ ignores inside it, or as its NTFS short name
+/// `git~1`; git's own checkout refuses the same names. A tree an export wrote one of would hand
+/// git its config (`core.fsmonitor`) or hooks, which run commands on the next `git status` there.
+fn names_git_folder(c: &str) -> bool {
+    let hfs_ignores = |ch: char| matches!(ch, '\u{200c}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{206a}'..='\u{206f}' | '\u{feff}');
+    let c = c.chars().filter(|&ch| !hfs_ignores(ch)).collect::<String>().to_ascii_lowercase();
+    let c = c.split(':').next().unwrap_or_default().trim_end_matches([' ', '.']);
+    c == ".git" || c == "git~1"
+}
+
 fn export_path(out: &Path, rel: &str) -> Result<Option<PathBuf>, String> {
     if rel == ".makepad-export" {
         return Ok(None);
     }
-    // What leads out of `out` or the manifest's lines can't hold, on any OS; the rest only where this
-    // OS can't hold it (`a:b.txt` is an ordinary file on Unix, a stream on Windows).
+    // What leads out of `out`, what the manifest's lines can't hold, or a git folder, on any OS; the
+    // rest only where this OS can't hold it (`a:b.txt` is an ordinary file on Unix, a stream on Windows).
     if rel.split('/').any(|c| c.is_empty() || c == "." || c == ".."
         || c.chars().any(char::is_control)
+        || names_git_folder(c)
         || (cfg!(windows) && makepad_core_util::file_name::windows_refuses(c)))
     {
         return Err(format!("export: unsafe relative path {rel:?}"));
@@ -178,7 +191,7 @@ fn export_path(out: &Path, rel: &str) -> Result<Option<PathBuf>, String> {
 }
 
 /// `makepad export`: writes the snapshot's files into `out` as one working tree (the mounted
-/// repositories at their folders), then the edits folder's files over them (MAKEPAD_RUN_EDITS: what
+/// repositories at their folders), then the edits folder's files over them (RELAX_EDITS: what
 /// the app's runs read instead of the store's), so a native build (cargo) sees what the app runs.
 /// Files whose bytes are already there are left alone (their times too: cargo rebuilds only what
 /// changed); files an earlier export wrote that this one does not are removed
@@ -263,7 +276,7 @@ pub fn export(snap: &Snapshot, edits: Option<&Path>, out: &Path) -> Result<(usiz
     Ok((files.len(), wrote))
 }
 
-/// The repositories a run has mounted (`MAKEPAD_RUN_VFS`) as a snapshot, each at its folder in the
+/// The repositories a run has mounted (`RELAX_VFS`) as a snapshot, each at its folder in the
 /// virtual workspace: what `makepad export --mounted` writes out for a native build of a run that
 /// stands nowhere on disk.
 pub fn mounted(table: &str, workspace: &str) -> Result<Snapshot, String> {
@@ -271,7 +284,7 @@ pub fn mounted(table: &str, workspace: &str) -> Result<Snapshot, String> {
     let workspace = normalize_path(workspace);
     let mut parts = Vec::new();
     for line in table.lines().filter(|l| !l.is_empty()) {
-        let bad = || format!("MAKEPAD_RUN_VFS: cannot export {line}");
+        let bad = || format!("RELAX_VFS: cannot export {line}");
         let mut it = line.split('\t');
         // a fourth field is a store inside a bigger file, an embedded app's and never a workspace's
         let (Some(root), Some(path), Some(commit), None) = (it.next(), it.next(), it.next(), it.next()) else { return Err(bad()) };
@@ -280,7 +293,7 @@ pub fn mounted(table: &str, workspace: &str) -> Result<Snapshot, String> {
         let commit = relax_compiler::gitstore::from_hex(commit).ok_or_else(bad)?;
         parts.push((dir.trim_start_matches('/').to_string(), PathBuf::from(path), commit));
     }
-    if parts.is_empty() { return Err("MAKEPAD_RUN_VFS: nothing is mounted".to_string()); }
+    if parts.is_empty() { return Err("RELAX_VFS: nothing is mounted".to_string()); }
     Ok(Snapshot { label: String::new(), parts })
 }
 
@@ -353,7 +366,7 @@ pub fn split_args(args: &[String]) -> Option<Result<(Vec<String>, Spec, bool, Ve
     Some(Ok((opts, Spec { root, mounts }, cached, rest)))
 }
 
-/// Whether a mount this process inherited (`table`: MAKEPAD_RUN_VFS, a parent run's virtual
+/// Whether a mount this process inherited (`table`: RELAX_VFS, a parent run's virtual
 /// workspace) serves this run, whose command line is `words` (after the executable): not when the
 /// run's workspace comes from elsewhere -- a launch record (`app <id>`, or no arguments), a git URL,
 /// or a --workspace-dir outside every root of the table. `export --mounted` exports it.
@@ -405,6 +418,22 @@ mod tests {
             assert_eq!(export_path(Path::new("out"), rel).is_err(), cfg!(windows), "{rel:?}");
         }
         assert_eq!(export_path(Path::new("out"), "src/lib.rs").unwrap(), Some(PathBuf::from("out/src/lib.rs")));
+    }
+
+    /// A fetched tree's `.git` folder, in every spelling a file system opens as `.git`, is never
+    /// written, on any OS: git would run the commands its config or hooks name in the export.
+    #[test]
+    fn export_never_writes_a_git_folder() {
+        for rel in [
+            ".git/config", "sub/.git/hooks/post-checkout", ".GIT/config", ".Git/hooks/pre-commit",
+            ".git./config", ".git . /config", ".git::$INDEX_ALLOCATION/config", "git~1/config",
+            "GIT~1/hooks/post-checkout", ".g\u{200c}it/config", "\u{feff}.git/config",
+        ] {
+            assert!(export_path(Path::new("out"), rel).is_err(), "wrote {rel:?}: a git folder");
+        }
+        for rel in [".gitignore", ".github/workflows/ci.yml", "src/.gitkeep", "git/config", ".git2/config", "my.git/config"] {
+            assert!(matches!(export_path(Path::new("out"), rel), Ok(Some(_))), "refused {rel:?}: not a git folder");
+        }
     }
 
     #[test]
@@ -557,14 +586,14 @@ mod tests {
     /// The fixtures need HTTP, while offline mode deliberately forbids every request.
     /// Give each scenario its own environment without changing parallel tests' settings.
     fn run_online_child(test: &str) -> bool {
-        if std::env::var("MAKEPAD_RUN_FETCH_TEST").as_deref() == Ok(test) {
+        if std::env::var("RELAX_FETCH_TEST").as_deref() == Ok(test) {
             return false;
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
-            .env("MAKEPAD_RUN_FETCH_TEST", test)
+            .env("RELAX_FETCH_TEST", test)
             .env("CARGO_NET_OFFLINE", "false")
-            .env("MAKEPAD_RUN_OFFLINE", "0")
+            .env("RELAX_OFFLINE", "0")
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);

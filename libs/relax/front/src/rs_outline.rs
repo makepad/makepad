@@ -40,10 +40,10 @@ pub(crate) fn expanded_index(src: &[u8], tokens: &[Tok]) -> Option<NameIndex> {
     Some(index)
 }
 
-/// MAKEPAD_RUN_VERIFY_OUTLINE: the index of the elided surface is the index of the whole one.
+/// RELAX_VERIFY_OUTLINE: the index of the elided surface is the index of the whole one.
 fn verify_elision(src: &[u8], tokens: &[Tok], got: &NameIndex) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_OUTLINE").is_some()) { return; }
+    if !*ON.get_or_init(|| std::env::var_os("RELAX_VERIFY_OUTLINE").is_some()) { return; }
     let Some(ends) = matching(tokens) else { return };
     let mut full = Vec::new();
     surface(src, tokens, &ends, 0, tokens.len(), &mut full, false);

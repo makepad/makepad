@@ -1,4 +1,4 @@
-//! The web targets run on this machine (`MAKEPAD_RUN_CHECK_TARGET=wasm32-unknown-unknown` /
+//! The web targets run on this machine (`RELAX_CHECK_TARGET=wasm32-unknown-unknown` /
 //! `wasm64-unknown-unknown`, cfg.rs `web`): what Relax itself gives such a program. The page side
 //! (the JS imports, `env.*`) is the embedder's: the trace host `makepad-web-trace` names its
 //! functions through `set_embedder_symbols`.

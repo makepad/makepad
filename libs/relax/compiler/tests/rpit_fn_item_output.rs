@@ -1,6 +1,6 @@
 // A fn item whose fn returns `impl Trait`, passed as a closure: `<fn item as FnOnce<A>>::Output`
 // is the opaque type, and codegen (PostAnalysis) must normalize it to the hidden type, as it
-// does for the closure signatures it is related to (Stage's asset store search:
+// does for the closure signatures it is related to (an app's asset store search:
 // `groups.iter().flat_map(TermGroup::all).enumerate()` -> E0599, and a segfault through
 // `.map(upto).flatten()`), and in type checking `Output == impl Iterator` failed once the
 // opaque's hidden type was known.

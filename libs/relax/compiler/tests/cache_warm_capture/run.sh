@@ -9,7 +9,7 @@ C=$(mktemp -d)
 chmod 700 "$C"
 rc=()
 for k in 1 2 3; do
-  (cd "$H" && MAKEPAD_RUN_CACHE_DIR="$C/cache" MAKEPAD_RUN_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run --quiet cache-warm-capture) > "$C/run$k.log" 2>&1
+  (cd "$H" && RELAX_CACHE_DIR="$C/cache" RELAX_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run --quiet cache-warm-capture) > "$C/run$k.log" 2>&1
   rc+=($?)
 done
 python3 - "$C" "${rc[@]}" <<'PY'

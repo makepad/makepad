@@ -10,12 +10,12 @@ use crate::regalloc::{for_defs, for_uses, reachable, term_uses, uses_defs};
 use crate::rir::*;
 use crate::stats::{opt_off, pass_clock, pass_time};
 
-/// MAKEPAD_RUN_OPT=-ifconv: no if-conversion (bisection).
+/// RELAX_OPT=-ifconv: no if-conversion (bisection).
 pub fn if_conv_on(options: &relax_session::Options) -> bool {
     !options.opt.iter().any(|p| p == "-ifconv")
 }
 
-/// MAKEPAD_RUN_OPT=-thread: no jump threading over known values (bisection).
+/// RELAX_OPT=-thread: no jump threading over known values (bisection).
 pub fn thread_on(options: &relax_session::Options) -> bool {
     !options.opt.iter().any(|p| p == "-thread")
 }
@@ -471,7 +471,7 @@ pub fn const_inst(d: VReg, k: K) -> Inst {
 /// bits) the count of a 64-bit shift (the hardware reads the count's low 6 bits). The backends then skip the
 /// result's re-extension (movzx / sxtw after every u8 / i32 operation): the bit reader's
 /// `bits_left -= n` (u8, stored back as a byte) and its `entry as u8` (a shift count).
-/// MAKEPAD_RUN_OPT=-lowbits: none (bisection).
+/// RELAX_OPT=-lowbits: none (bisection).
 pub fn low_bits_only(options: &relax_session::Options, f: &Func) -> Vec<bool> {
     let nv = f.vregs.len();
     if crate::stats::opt_off(options, "-lowbits") {
@@ -555,7 +555,7 @@ pub fn cast_is_move(z: u8, it: IntTy) -> bool {
 /// upper bits as they were). A cast of such a value to a wider type is a plain move: zero- and
 /// sign-extension of a value whose upper bits are zero are the value itself (Paeth's
 /// `i32::from(u8)` was ldrb + sxtw per pixel byte).
-/// MAKEPAD_RUN_OPT=-zeroabove: none (bisection).
+/// RELAX_OPT=-zeroabove: none (bisection).
 pub fn zero_above(options: &relax_session::Options, f: &Func, low: &[bool]) -> Vec<u8> {
     let nv = f.vregs.len();
     if crate::stats::opt_off(options, "-zeroabove") {
@@ -607,7 +607,7 @@ pub fn zero_above(options: &relax_session::Options, f: &Func, low: &[bool]) -> V
             }
         }
     }
-    // MAKEPAD_RUN_OPT=-zeromulti: single-definition values only, no copies (bisection)
+    // RELAX_OPT=-zeromulti: single-definition values only, no copies (bisection)
     let single = crate::stats::opt_off(options, "-zeromulti");
     let mut ndef = vec![0u32; if single { nv } else { 0 }];
     if single {
@@ -726,7 +726,7 @@ pub static T: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::n
 pub fn trace_opt(f: &Func, tag: &str) {
     let t = T.get_or_init(|| {
         let _k = relax_session::phase::kept();
-        std::env::var("MAKEPAD_RUN_TRACE_OPT").ok().map(|s| &*Box::leak(s.into_boxed_str()))
+        std::env::var("RELAX_TRACE_OPT").ok().map(|s| &*Box::leak(s.into_boxed_str()))
     });
     if let Some(t) = t {
         if f.name.contains(*t) {
@@ -3155,9 +3155,9 @@ pub fn thread_known(f: &mut Func) -> bool {
             continue;
         }
         {
-            // MAKEPAD_RUN_THREAD_MAX=n: only the first n threads of the process (bisection)
+            // RELAX_THREAD_MAX=n: only the first n threads of the process (bisection)
             static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-            let m = *MAX.get_or_init(|| std::env::var("MAKEPAD_RUN_THREAD_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX));
+            let m = *MAX.get_or_init(|| std::env::var("RELAX_THREAD_MAX").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX));
             if m != u64::MAX {
                 let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if k >= m {
@@ -5381,7 +5381,7 @@ pub fn local_cse(options: &relax_session::Options, f: &mut Func) -> bool {
     if !cse_can_change(f) {
         return false;
     }
-    // MAKEPAD_RUN_OPT=-cseevict: a full table takes nothing new (bisection)
+    // RELAX_OPT=-cseevict: a full table takes nothing new (bisection)
     let keep_full = crate::stats::opt_off(options, "-cseevict");
     let n = f.blocks.len();
     let nv = f.vregs.len();
@@ -5925,7 +5925,7 @@ pub fn load_key_size(k0: u64) -> i64 {
 /// result of an instruction with the same key and result class above it in the dominator tree
 /// (simplify's copy propagation then removes the copy). Constants stay: they are rematerialised
 /// and sunk to their uses. For generated code with long runs of repeated pure values: a Splash
-/// kernel's lane extracts, which LICM gathers in the element loop's preheader (Stage's largest x4
+/// kernel's lane extracts, which LICM gathers in the element loop's preheader (an app's largest x4
 /// kernel extracted each lane of one product 216 times, all live through its 14k blocks).
 /// Vector ops (VX, VX3, VFma, VSel, VShuffle) are numbered too, their constant operands by value
 /// (each use has its own constant: a table's byte indices `h * splat(0x04040404) + splat(..)` of
@@ -6179,7 +6179,7 @@ pub fn sroa(f: &mut Func) -> bool {
 
 pub fn sroa_with(f: &mut Func, tile: bool) -> bool {
     static STATS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let mut stats = STATS.get_or_init(|| std::env::var("MAKEPAD_RUN_SROA_STATS").map_or(false, |v| v == "1"))
+    let mut stats = STATS.get_or_init(|| std::env::var("RELAX_SROA_STATS").map_or(false, |v| v == "1"))
         .then(|| SroaStats { candidates: f.slots.len(), ..SroaStats::default() });
     let changed = sroa_inner(f, stats.as_mut(), tile);
     if let Some(s) = stats {
@@ -7225,7 +7225,7 @@ pub fn natural_loops(f: &Func) -> (Vec<Vec<u32>>, Vec<(u32, Vec<bool>)>) {
 /// with a and c invariant, b not, and t1 read only by t2 becomes `t1 = a + c; t2 = t1 + b`, so the
 /// invariant half hoists (a 2-D index `row + x + k`: `row + k` once per row). Integer adds wrap in
 /// their type, so the regrouping is exact. Runs at the start of licm. Returns whether any changed.
-/// MAKEPAD_RUN_OPT=-reassoc: off (bisection).
+/// RELAX_OPT=-reassoc: off (bisection).
 pub fn reassociate_invariants(options: &relax_session::Options, f: &mut Func) -> bool {
     if crate::stats::opt_off(options, "-reassoc") {
         return false;
@@ -8613,7 +8613,7 @@ pub fn set_sroa_nocapture(q: Option<Box<dyn Fn(&Callee, usize) -> bool>>) {
 /// division's `b == -1`, hoisted out of a loop, `&` the `a == MIN` of its block): the branch
 /// tests the flag first and the block's compare moves to the new block, which runs only when
 /// the flag does not decide (`test; jne` instead of `cmp; sete; movzx; and; test; jne`).
-/// MAKEPAD_RUN_OPT=-splitbr off. Returns whether anything changed.
+/// RELAX_OPT=-splitbr off. Returns whether anything changed.
 pub fn split_branch_conditions(options: &relax_session::Options, f: &mut Func) -> bool {
     if crate::stats::opt_off(options, "-splitbr") {
         return false;

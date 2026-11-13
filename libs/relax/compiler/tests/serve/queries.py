@@ -8,8 +8,8 @@ fixture = work/'fixture'
 shutil.copytree(here/'fixture',fixture)
 source = fixture/'main.rs'
 source.write_text(source.read_text().replace('Missing','i32'))
-env = dict(os.environ,MAKEPAD_RUN_CACHE_DIR=str(work/'cache'),MAKEPAD_RUN_CACHE='off',MAKEPAD_RUN_STD=str(here.parents[1]/'std'),
-           CARGO_NET_OFFLINE='true',MAKEPAD_RUN_OFFLINE='1')
+env = dict(os.environ,RELAX_CACHE_DIR=str(work/'cache'),RELAX_CACHE='off',RELAX_STD=str(here.parents[1]/'std'),
+           CARGO_NET_OFFLINE='true',RELAX_OFFLINE='1')
 def query(method,*args,pkg='serve_fixture'):
     start=time.monotonic()
     result=subprocess.run([str(relax),method,pkg,*map(str,args)],cwd=fixture,env=env,capture_output=True,text=True,timeout=180)

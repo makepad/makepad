@@ -12,7 +12,7 @@ pub fn home() -> PathBuf {
 }
 
 pub fn offline(dir: &Path) -> Result<bool, String> {
-    if std::env::var_os("MAKEPAD_RUN_OFFLINE").is_some_and(|v| v != "0") {
+    if std::env::var_os("RELAX_OFFLINE").is_some_and(|v| v != "0") {
         return Ok(true);
     }
     if let Some(v) = std::env::var_os("CARGO_NET_OFFLINE") {

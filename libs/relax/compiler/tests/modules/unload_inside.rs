@@ -72,7 +72,7 @@ fn unload_inside() {
         return;
     }
     if mode == "trusted_call" {
-        // MAKEPAD_RUN_MODULES_TRUSTED=1: the export is the module fn's own slot; after the unload its
+        // RELAX_MODULES_TRUSTED=1: the export is the module fn's own slot; after the unload its
         // code is invalidated (invalid.rs) and a call through the kept fn pointer is a stale access
         let f: fn(u64) -> u64 = parker.get("f").unwrap();
         assert_eq!(f(2), 1024);

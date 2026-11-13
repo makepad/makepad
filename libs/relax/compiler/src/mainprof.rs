@@ -1,6 +1,6 @@
-//! MAKEPAD_RUN_PROFILE_MAIN=<file>: where the program's main thread spends its time after main
+//! RELAX_PROFILE_MAIN=<file>: where the program's main thread spends its time after main
 //! (warm-start analysis; no debugger). A thread samples the main thread every millisecond for
-//! MAKEPAD_RUN_PROFILE_MAIN_MS (default 4000) ms: the pc and the return addresses of its frame
+//! RELAX_PROFILE_MAIN_MS (default 4000) ms: the pc and the return addresses of its frame
 //! record chain. At exit each sample is written as `t_ms<TAB>leaf<TAB>first JIT frame<TAB>
 //! role`, where names come from the unit's code index (JIT code) or dladdr (host code), and
 //! role is the outermost recognisable activity on the stack: compile (lazy compile / cache
@@ -25,7 +25,7 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 
 pub fn enabled() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("MAKEPAD_RUN_PROFILE_MAIN").is_some())
+    *E.get_or_init(|| std::env::var_os("RELAX_PROFILE_MAIN").is_some())
 }
 
 /// Called on the main thread right before main runs.
@@ -44,7 +44,7 @@ pub fn start() {
     let hi = unsafe { pthread_get_stackaddr_np(me) } as u64;
     let lo = hi - unsafe { pthread_get_stacksize_np(me) } as u64;
     let port = unsafe { pthread_mach_thread_np(me) };
-    let ms: u64 = std::env::var("MAKEPAD_RUN_PROFILE_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
+    let ms: u64 = std::env::var("RELAX_PROFILE_MAIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000);
     let _ = crate::run_threads::spawn("run-mainprof", move || {
         extern "C" {
             fn pthread_set_qos_class_self_np(qos: u32, rel: i32) -> i32;
@@ -122,7 +122,7 @@ pub fn write(u: &crate::jit::Unit) {
     if !enabled() {
         return;
     }
-    let path = match std::env::var("MAKEPAD_RUN_PROFILE_MAIN") {
+    let path = match std::env::var("RELAX_PROFILE_MAIN") {
         Ok(p) => p,
         Err(_) => return,
     };

@@ -39,6 +39,9 @@ mod boot_editor;
 mod boot_input;
 mod boot_probe;
 mod build_flags;
+mod change_report;
+mod devhub_cmd;
+mod script_answers;
 
 pub use relax_boot::Environment as BootEnvironment;
 
@@ -61,18 +64,73 @@ fn init() {
     }
 }
 
+/// NVIDIA's shader disk cache (GL and Vulkan) for every program this binary runs. The driver keys
+/// its files by the executable's path, and every JIT build is a new executable: each binary's first
+/// runs compiled every pipeline cold (a large app held its first frame 9 s for 109 pipelines), so they
+/// all take one name. And a folder of their own, `$XDG_CACHE_HOME/makepad/nvidia`: the driver's
+/// shared folder takes no entry once it holds its 1 GB, and every other program's per-path keys
+/// fill it (a pool box at 1025 MB: each cold start of a large app compiled its pipelines again, the first
+/// frame held 20.5 s for 177 pipelines; in a folder of its own 0.3 s). The driver trims neither: past
+/// 3/4 of its cap this one is emptied, and the next runs fill it again. It is renamed away before
+/// it is removed, so a start beside this one finds the full folder or a new empty one, never one
+/// half removed, and a running program's open files go with the old one (its writes are lost, not
+/// mixed into the new folder).
+#[cfg(target_os = "linux")]
+fn nvidia_shader_cache() {
+    if std::env::var_os("__GL_SHADER_DISK_CACHE_APP_NAME").is_none() {
+        std::env::set_var("__GL_SHADER_DISK_CACHE_APP_NAME", "makepad");
+    }
+    if std::env::var_os("__GL_SHADER_DISK_CACHE_PATH").is_some() {
+        return;
+    }
+    let abs = |v: Option<std::ffi::OsString>| v.map(std::path::PathBuf::from).filter(|p| p.is_absolute());
+    let Some(base) = abs(std::env::var_os("XDG_CACHE_HOME")).or_else(|| abs(std::env::var_os("HOME")).map(|h| h.join(".cache"))) else {
+        return;
+    };
+    let dir = base.join("makepad").join("nvidia");
+    fn bytes(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
+        entries.flatten().map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => bytes(&e.path()),
+            _ => e.metadata().map_or(0, |m| m.len()),
+        }).sum()
+    }
+    if bytes(&dir) > 768 << 20 {
+        // (one name: what a killed removal left goes with the next one)
+        let old = dir.with_extension("old");
+        let _ = std::fs::remove_dir_all(&old);
+        if std::fs::rename(&dir, &old).is_ok() {
+            let _ = std::fs::remove_dir_all(&old);
+        }
+    }
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("__GL_SHADER_DISK_CACHE_PATH", &dir);
+    }
+}
+
 pub static HOST: relax_runner::Host = relax_runner::Host {
-    provenance: env!("MAKEPAD_RUN_PROVENANCE"),
+    provenance: Some(env!("RELAX_PROVENANCE")),
     init: init,
     provide: provided,
     run_host: run_host,
     // interactive visual iteration: a bounded compile-ahead of what the UI is about to need
     ahead: relax_compiler::options::AheadLevel::Balanced,
-    // apps for users: third-party compile-time code stays sandboxed
+    // apps for users: third-party proc macros run confined (what that covers, and what it does
+    // not -- build scripts -- is in pmhost.rs's module doc)
     proc_macros: relax_compiler::pmhost::Policy::Sandboxed,
     default_launch: Some(checkout_runner),
     package: env!("CARGO_PKG_NAME"),
     manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+    commands: &[change_report::COMMAND, devhub_cmd::DEVHUB, devhub_cmd::OBSERVE, devhub_cmd::CI],
+    // Makepad's script and widget derives run natively (tools/run/native_macros)
+    native_sets: &[&makepad_run_native_macros::SET],
+    // Splash bodies: lexed by the Splash tokenizer, never as Rust
+    raw_body_macros: &["script_mod"],
+    // makepad-platform's build script, answered from the code it shares (no process)
+    script_answers: &[&script_answers::PLATFORM],
+    // makepad's shader derives: makepad_shader_derive, its derive_impl and micro_proc_macro read no
+    // filesystem, environment, clock or process state (audited 2026-10-09)
+    pure_macro_crates: &["makepad_shader_derive"],
 };
 
 /// `makepad` with no arguments and no `runner` launch record (an installation's entry script
@@ -129,17 +187,17 @@ fn source_manifest(name: &str) -> &'static [u8] {
 /// The source identity build.rs computed for a provided crate (srchash.rs).
 fn src(name: &str) -> u64 {
     let v = match name {
-        "relax_provided_fixture" => env!("MAKEPAD_RUN_SRC_relax_provided_fixture"),
-        "makepad_live_id" => env!("MAKEPAD_RUN_SRC_makepad_live_id"),
-        "makepad_script" => env!("MAKEPAD_RUN_SRC_makepad_script"),
-        "makepad_script_std" => env!("MAKEPAD_RUN_SRC_makepad_script_std"),
-        "makepad_script_census" => env!("MAKEPAD_RUN_SRC_makepad_script_census"),
-        "makepad_script_compute" => env!("MAKEPAD_RUN_SRC_makepad_script_compute"),
-        "makepad_shader" => env!("MAKEPAD_RUN_SRC_makepad_shader"),
-        "makepad_cpu_budget" => env!("MAKEPAD_RUN_SRC_makepad_cpu_budget"),
-        "makepad_tween_script" => env!("MAKEPAD_RUN_SRC_makepad_tween_script"),
-        "makepad_script_audio_aot" => env!("MAKEPAD_RUN_SRC_makepad_script_audio_aot"),
-        "makepad_hal" => env!("MAKEPAD_RUN_SRC_makepad_hal"),
+        "relax_provided_fixture" => env!("RELAX_SRC_relax_provided_fixture"),
+        "makepad_live_id" => env!("RELAX_SRC_makepad_live_id"),
+        "makepad_script" => env!("RELAX_SRC_makepad_script"),
+        "makepad_script_std" => env!("RELAX_SRC_makepad_script_std"),
+        "makepad_script_census" => env!("RELAX_SRC_makepad_script_census"),
+        "makepad_script_compute" => env!("RELAX_SRC_makepad_script_compute"),
+        "makepad_shader" => env!("RELAX_SRC_makepad_shader"),
+        "makepad_cpu_budget" => env!("RELAX_SRC_makepad_cpu_budget"),
+        "makepad_tween_script" => env!("RELAX_SRC_makepad_tween_script"),
+        "makepad_script_audio_aot" => env!("RELAX_SRC_makepad_script_audio_aot"),
+        "makepad_hal" => env!("RELAX_SRC_makepad_hal"),
         _ => panic!("unknown provided crate: {name}"),
     };
     u64::from_str_radix(v, 16).unwrap()
@@ -187,7 +245,7 @@ fn provided() {
         let mut types = HashMap::new();
         let mut layouts = HashMap::new();
         let mut per_side = std::collections::HashSet::new();
-        for e in makepad_relax_api::entries() {
+        for e in relax_api::entries() {
             if e.module.split("::").next() != Some(krate) {
                 continue;
             }
@@ -195,24 +253,24 @@ fn provided() {
                 continue;
             }
             match e.kind {
-                makepad_relax_api::OP => {
+                relax_api::OP => {
                     if let Some(f) = e.shim {
                         shims.insert(relax_compiler::provided::norm((e.key)()), relax_compiler::provided::Shim { sig: (e.sig)(), slots: e.slots, f });
                     }
                 }
-                makepad_relax_api::HANDLE => {
+                relax_api::HANDLE => {
                     types.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.drop, e.offsets));
                 }
-                makepad_relax_api::PLAIN => {
+                relax_api::PLAIN => {
                     layouts.insert(relax_compiler::provided::norm((e.key)()), (e.size, e.align, e.offsets));
                 }
-                makepad_relax_api::PER_SIDE => {
+                relax_api::PER_SIDE => {
                     per_side.insert(relax_compiler::provided::norm((e.key)()));
                 }
                 _ => {}
             }
         }
-        relax_compiler::provided::register(krate, shims, types, layouts, per_side, makepad_relax_api::last_panic, src(krate), source_manifest(krate));
+        relax_compiler::provided::register(krate, shims, types, layouts, per_side, relax_api::last_panic, src(krate), source_manifest(krate));
     }
 
     // Splash VM registry -> makepad inspect (vm list, script error events)
@@ -237,6 +295,10 @@ fn provided() {
 fn run_host() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
+        // before a program of this process loads the GPU driver (never for a build script's
+        // cargo / rustc call, which answers before this)
+        #[cfg(target_os = "linux")]
+        nvidia_shader_cache();
         // the HAL starts and stops apps as domains through this host; the boot app's privilege is the host's grant
         hal_host::register();
         relax_compiler::run::set_main_host(relax_compiler::run::MainHost {

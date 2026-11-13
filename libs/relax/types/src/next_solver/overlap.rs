@@ -66,6 +66,7 @@ pub fn overlapping_impls(tcx: &Tcx, prog: &Program, a: DefId, b: DefId, krate: u
     let mut infcx=InferCtxt::for_item(tcx,prog,TypingMode::Coherence,b);
     infcx.coherence_crate=Some(krate);
     infcx.skip_leak_check=skip_leak_check;
+    infcx.rerun_overflow_at_twice_the_limit=false;
     let a=fresh_impl_header(&infcx,prog,a,is_trait);
     let b=fresh_impl_header(&infcx,prog,b,is_trait);
     let mut goals=equate_impl_headers(&infcx,prog,&a,&b)?;
@@ -108,6 +109,17 @@ mod tests {
             if let Some(code)=code { assert!(errors.iter().any(|e|e.contains(code)),"{label}: {errors:?}"); }
             else { assert!(errors.is_empty(),"{label}: {errors:?}"); }
         }
+    }
+    #[test]
+    fn an_incoherent_traits_impls_skip_their_item_checks() {
+        // rustc check_item_type checks an impl's items against its trait only for a coherent trait:
+        // the conflicting impl is E0119 alone (no E0046 for its missing `f`), while a coherent
+        // trait's impl still reports its missing `g`
+        let (p,t,errors)=check("trait Tr { fn f(&self); } impl<T> Tr for T { fn f(&self) {} } impl Tr for u8 {} trait Ok2 { fn g(&self); } impl Ok2 for u8 {}","incoherent_items");
+        assert!(errors.iter().any(|e|e.contains("E0119")),"{errors:?}");
+        let items:Vec<String>=p.impls.iter().flat_map(|im|t.check_def_signature(&p,im.def)).collect();
+        assert!(!items.iter().any(|e|e.contains("`f`")),"the conflicting impl's items were checked: {items:?}");
+        assert!(items.iter().any(|e|e.contains("E0046")&&e.contains("`g`")),"the coherent trait's impl: {items:?}");
     }
     #[test]
     fn round34_inherent_overlap_and_duplicate_items() {

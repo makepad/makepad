@@ -1,7 +1,7 @@
 //! Generated code as tokens: the builder every built-in expansion writes (format macros, text
 //! built-ins, builtin derives). Each token is pushed with its kind over a backing text (the
 //! bytes the spans point into, like `Transcript` for `macro_rules!`); nothing is ever lexed.
-//! `MAKEPAD_RUN_VERIFY_TOKENS=1` lexes the text of every buffer and compares it with the tokens.
+//! `RELAX_VERIFY_TOKENS=1` lexes the text of every buffer and compares it with the tokens.
 //!
 //! Templates are written with `tg!`: Rust tokens are the generated tokens, `#method(args)`
 //! calls a builder method for the dynamic parts.
@@ -33,7 +33,7 @@ pub struct TokBuf {
 
 /// A verification failure: a panic in a macro worker is swallowed and hangs the run, so say it and stop.
 pub fn verify_fail(msg: &str) -> ! {
-    eprintln!("MAKEPAD_RUN_VERIFY_TOKENS: {}", msg);
+    eprintln!("RELAX_VERIFY_TOKENS: {}", msg);
     std::process::abort();
 }
 
@@ -279,7 +279,7 @@ impl TokBuf {
             let at = lexed.iter().zip(&self.toks).position(|(a, b)| !(a.lo == b.lo && a.hi == b.hi && a.kind == b.kind)).unwrap_or(lexed.len().min(self.toks.len()));
             let near = |t: Option<&Tok>| t.map(|t| (t.kind, t.lo, t.hi));
             // (a panic in a macro worker is swallowed and hangs the run: say it and stop)
-            eprintln!("MAKEPAD_RUN_VERIFY_TOKENS: generated tokens of `{}` differ from the lexed text at token {} (lexed {} tokens, generated {}): lexed {:?} generated {:?} in `{}`", what, at, lexed.len(), self.toks.len(), near(lexed.get(at)), near(self.toks.get(at)), self.s);
+            eprintln!("RELAX_VERIFY_TOKENS: generated tokens of `{}` differ from the lexed text at token {} (lexed {} tokens, generated {}): lexed {:?} generated {:?} in `{}`", what, at, lexed.len(), self.toks.len(), near(lexed.get(at)), near(self.toks.get(at)), self.s);
             std::process::abort();
         }
     }

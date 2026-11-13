@@ -17,7 +17,7 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/stderr_full.XXXXXX") || exit 1
 mkdir -p "$dir/tmp" "$dir/home"
 # a warm-up run without the limit, so the JIT cache (bigger than FILE_KB) is written before the
 # limit applies; the limited run then only has the transcript to fail
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 10 \
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 10 \
     > "$dir/warm.out" 2> "$dir/warm.err"
 # the "terminal" is a fifo whose reader starts outside the limit (a capture file under it would fail too)
 mkfifo "$dir/err.fifo" "$dir/out.fifo"
@@ -28,7 +28,7 @@ out_pid=$!
 (
     trap '' XFSZ
     ulimit -f "$FILE_KB"
-    TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- "$LINES" \
+    TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- "$LINES" \
         > "$dir/out.fifo" 2> "$dir/err.fifo"
     echo $? > "$dir/rc"
 )
@@ -39,10 +39,10 @@ done_line=$(grep -c "^flood done $LINES" "$dir/run.out")
 echo "stderr_full: rc=$rc, terminal got $got of $LINES lines, stdout done=$done_line (logs $dir)"
 grep -E 'panicked|failed printing|session log' "$dir/run.err" | head -5
 # case 2 (no limit): a panic's message reaches the terminal and the kept transcript, in order
-TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 1000 panic \
+TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" $J run --quiet relax-provided-fixture --bin relax-stderr-flood -- 1000 panic \
     > "$dir/panic.out" 2> "$dir/panic.err"
 prc=$?
-kept=$(sed -n 's/^makepad-run: session log kept at //p' "$dir/panic.err" | tail -1)
+kept=$(sed -n 's/^relax: session log kept at //p' "$dir/panic.err" | tail -1)
 p_term=$(grep -c 'flood panic after 1000 lines' "$dir/panic.err")
 p_file=0; p_lines=0
 if [ -n "$kept" ] && [ -f "$kept" ]; then

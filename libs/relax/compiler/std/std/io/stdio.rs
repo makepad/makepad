@@ -40,7 +40,26 @@ static STDERR: OnceLock<StderrCell> = OnceLock::new();
 static STDIN: OnceLock<Mutex<BufReader<Raw>>> = OnceLock::new();
 
 fn stdout_cell() -> &'static StdoutCell {
-    STDOUT.get_or_init(|| ReentrantLock::new(RefCell::new(LineWriter::new(Raw { fd: 1 }))))
+    STDOUT.get_or_init(|| {
+        // the buffered tail goes out however the process ends: main returning or panicking
+        // (rustc's lang_start runs rt::cleanup after main) or process::exit. The loader runs the
+        // program's atexit handlers at its exit (relax-compiler os/proc.rs program_atexit).
+        #[cfg(any(unix, windows))]
+        unsafe {
+            atexit(flush_at_exit);
+        }
+        ReentrantLock::new(RefCell::new(LineWriter::new(Raw { fd: 1 })))
+    })
+}
+
+#[cfg(any(unix, windows))]
+extern "C" {
+    fn atexit(f: extern "C" fn()) -> i32;
+}
+
+#[cfg(any(unix, windows))]
+extern "C" fn flush_at_exit() {
+    cleanup();
 }
 
 fn stderr_cell() -> &'static StderrCell {
@@ -277,7 +296,8 @@ pub fn _eprint(args: fmt::Arguments) {
     }
 }
 
-/// Flushes stdout; the runtime calls this at process exit (real std does it in rt::cleanup).
+/// Flushes stdout: process::exit calls it, and so does the program's exit (stdout_cell's atexit
+/// handler); real std does it in rt::cleanup.
 pub fn cleanup() {
     if let Some(cell) = STDOUT.get() {
         if let Some(guard) = cell.try_lock() {

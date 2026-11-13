@@ -7,9 +7,9 @@ use crate::option::Option::{self, None, Some};
 #[derive(Copy, Clone, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
 #[must_use]
 pub enum Result<T, E> {
-    #[cfg_attr(not(relax_check), lang = "Ok")]
+    #[lang = "Ok"]
     Ok(T),
-    #[cfg_attr(not(relax_check), lang = "Err")]
+    #[lang = "Err"]
     Err(E),
 }
 

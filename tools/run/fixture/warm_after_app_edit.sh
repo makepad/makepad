@@ -13,7 +13,7 @@
 #     splash : a number in one script_mod! of the app crate (an item macro's text)
 #     graph  : no edit: the program restored from the collected image the step before recorded (an edited
 #              start keeps the unchanged crates' collected prefix and collects the rest again) is checked
-#              against one rebuilt from the sources (MAKEPAD_RUN_COLLECTED_VERIFY=1)
+#              against one rebuilt from the sources (RELAX_COLLECTED_VERIFY=1)
 #   every edited file is restored at the end (also on failure or interrupt).
 # A step passes when its session compiles at most MAX (default 400) fns first and the JIT spinner
 # never shows. Before the fix every non-body edit renamed the app crate's interface fingerprint, which
@@ -24,7 +24,7 @@
 # (seconds, default 400), the JIT runs through `cargo run --profile host`, STEPS (default "body item splash";
 # another step name <s> takes its edits from STEP_<s>: ';;'-separated <after|before|replace|append>|<file>|<exact line>|<new line>).
 # OUT: where its run dir goes (default $TMPDIR); KEEP=1 keeps it; TRACE=1 writes each session's
-# cache lookups (MAKEPAD_RUN_CACHE_TRACE) there.
+# cache lookups (RELAX_CACHE_TRACE) there.
 # Prints "warm_after_app_edit: OK ..." or "warm_after_app_edit: FAIL ..."; exit 1 on failure.
 ROOT=$(pwd)
 # the JIT through cargo: rebuilt when its sources changed, a ~0.2 s no-op otherwise (no binary path)
@@ -55,13 +55,13 @@ restore() {
 trap 'restore; exit 1' INT TERM
 session() { # session <label>: one launch to idle and quit; prints its first-frame line and its `jit` session line
     label=$1
-    trace=""; [ -n "${TRACE:-}" ] && trace="MAKEPAD_RUN_CACHE_TRACE=$dir/trace.$label MAKEPAD_RUN_DEPS_DUMP=$dir/deps.$label"
-    [ "$label" = verify ] && trace="$trace MAKEPAD_RUN_CACHE=verify"
-    [ "$label" = graph ] && trace="$trace MAKEPAD_RUN_COLLECTED_VERIFY=1"
-    env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
-        MAKEPAD_HOME="$dir/home" SANDBOX_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" \
-        MAKEPAD_RUN_TARGET_DIR="$dir/run/target" MAKEPAD_RUN_CACHE_IFACE="$dir/iface.$label" $trace \
-        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
+    trace=""; [ -n "${TRACE:-}" ] && trace="RELAX_CACHE_TRACE=$dir/trace.$label RELAX_DEPS_DUMP=$dir/deps.$label"
+    [ "$label" = verify ] && trace="$trace RELAX_CACHE=verify"
+    [ "$label" = graph ] && trace="$trace RELAX_COLLECTED_VERIFY=1"
+    env MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" \
+        MAKEPAD_HOME="$dir/home" SANDBOX_HOME="$dir/home" RELAX_HOME="$dir/run" RELAX_CACHE_DIR="$dir/run/cache" \
+        RELAX_TARGET_DIR="$dir/run/target" RELAX_CACHE_IFACE="$dir/iface.$label" $trace \
+        RELAX_VERBOSE=1 $B run --report-to "$dir/report.$label" $(echo "$PACKAGE" | tr ',' ' ') > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do
@@ -124,7 +124,7 @@ out="$out
 s=$(session warm); check warm "$s"
 for step in $STEPS; do
     case $step in
-    verify|graph) ;;  # no edit: verify compiles every fn it would link and compares (MAKEPAD_RUN_CACHE=verify); graph above
+    verify|graph) ;;  # no edit: verify compiles every fn it would link and compares (RELAX_CACHE=verify); graph above
     body) f=${BODY%%|*}; r=${BODY#*|}; edit_after "$f" "${r%%|*}" "${r#*|}" || { restore; exit 1; };;
     item) save "$ITEM" || { restore; exit 1; }; printf '\npub fn warm_after_app_edit_probe() -> u32 { 7 }\n' >> "$ITEM";;
     splash) f=${SPLASH%%|*}; r=${SPLASH#*|}; edit_replace "$f" "${r%%|*}" "${r#*|}" || { restore; exit 1; };;

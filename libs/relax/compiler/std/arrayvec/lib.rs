@@ -691,3 +691,17 @@ impl<T: Ord, const CAP: usize> Ord for ArrayVec<T, CAP> {
         (**self).cmp(other)
     }
 }
+
+// arrayvec 0.7.6 src/arrayvec.rs, feature `std`: written data is appended, as much as fits.
+#[cfg(feature = "std")]
+impl<const CAP: usize> std::io::Write for ArrayVec<u8, CAP> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let len = cmp::min(self.remaining_capacity(), data.len());
+        let _result = self.try_extend_from_slice(&data[..len]);
+        debug_assert!(_result.is_ok());
+        Ok(len)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

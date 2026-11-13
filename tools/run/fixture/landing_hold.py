@@ -3,13 +3,13 @@
 
 usage: landing_hold.py [--makepad <makepad binary>]
   (run from the workspace root; the JIT runs through `cargo run --profile host` unless a binary is
-  given; MAKEPAD_RUN_STD defaults to libs/relax/compiler/std)
+  given; RELAX_STD defaults to libs/relax/compiler/std)
 
 devhub holds back a landing in a Mac show's JIT until the landed tip is proven for the app
 (`inspect hold files=<path>=<blob id>`, libs/devhub/src/orch/show.rs before_landing), and lets it
 in with `hold off`. The hold must never delay the person: only a file that says just what the
 landing wrote waits. A program that never presents is written to a fresh dir (its own
-MAKEPAD_RUN_HOME) and runs live under `makepad run --verbose --ahead=minimal`, printing
+RELAX_HOME) and runs live under `makepad run --verbose --ahead=minimal`, printing
 `out <landed::value()> <mine::value()> <data.txt, included> <base()>` when that changes:
   1. the landing of src/landed.rs (1 -> 2) is held, then written: the watch says it waits, and
      the program still prints 1 for it;
@@ -94,9 +94,9 @@ class Run:
     def __init__(self, jit, work, home, pkg):
         self.jit, self.out, self.err = jit, [], []
         self.ready, self.stop = os.path.join(work, "ready"), os.path.join(work, "stop")
-        env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=self.ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", LANDING_HOLD_STOP=self.stop)
-        env.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+        env = dict(os.environ, RELAX_LIVE_READY=self.ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+                   RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", LANDING_HOLD_STOP=self.stop)
+        env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
         self.p = subprocess.Popen(jit + ["run", "--quiet", "--verbose", "--ahead=minimal", "relax-landing-hold"], cwd=pkg, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         threading.Thread(target=self.pump, args=(self.p.stdout, self.out), daemon=True).start()

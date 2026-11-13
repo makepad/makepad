@@ -1,5 +1,5 @@
 //! unroll_const_loops on the loop shape of a `for` over a small array with calls in its body
-//! (sandbox reconcile's `for (shape, applied, wanted, solid) in [(..), (..)]`): the counter steps in
+//! (an app's reconcile `for (shape, applied, wanted, solid) in [(..), (..)]`): the counter steps in
 //! the block after the header test, a second test there leaves for the header's exit block (the
 //! loaded Option's tag), the body has a `continue` (two latches) and an invoked call with an unwind
 //! edge. The loop must be fully unrolled, and the RIR before and after must agree on an evaluator
@@ -217,7 +217,7 @@ fn the_gain_check_after_an_earlier_unrolled_loop_in_the_same_pass() {
 /// b6: acc = acc + 1; stop2 = acc == 5 -> b4 (latch 2) : b1
 /// b4: ret acc + 1000;  b5: ret acc
 /// Unrolled (the counter indexes the array: the copies read it at constant offsets), and the result
-/// agrees; with MAKEPAD_RUN_OPT=-unrollearly it stays rolled.
+/// agrees; with RELAX_OPT=-unrollearly it stays rolled.
 fn slab_loop() -> Func {
     let mut f = Func::new("slab".into(), 0);
     let seed = f.vreg(Cls::I);

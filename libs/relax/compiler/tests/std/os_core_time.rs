@@ -1,4 +1,4 @@
-// std-os lane: core::time::Duration (differential: os_diff.sh)
+// std-os lane: core::time::Duration (differential: agree.sh)
 use core::time::Duration;
 
 #[test]

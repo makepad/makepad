@@ -1218,7 +1218,7 @@ fn merge_stores_on(options: &relax_session::Options) -> bool {
 
 fn merge_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_MERGE_TRACE").is_ok())
+    *ON.get_or_init(|| std::env::var("RELAX_MERGE_TRACE").is_ok())
 }
 
 /// Consecutive narrow stores of one value's bytes become one wide store: in a block, byte stores
@@ -1548,7 +1548,7 @@ fn unroll_trace() -> Option<&'static str> {
     static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     VALUE.get_or_init(|| {
         let _k = relax_session::phase::kept();
-        std::env::var("MAKEPAD_RUN_UNROLL_TRACE").ok()
+        std::env::var("RELAX_UNROLL_TRACE").ok()
     }).as_deref()
 }
 
@@ -1560,7 +1560,7 @@ fn unroll_trace() -> Option<&'static str> {
 /// vreg each, so constant folding sees single definitions). Copy j's back edge enters copy j+1;
 /// the last copy's back edge enters the original loop with c restored (never taken: its compare
 /// folds to the exit). Exits from inside the body stay as they are. Run `simplify` after it.
-/// MAKEPAD_RUN_NO_FULL_UNROLL=1 off. Returns whether anything changed.
+/// RELAX_NO_FULL_UNROLL=1 off. Returns whether anything changed.
 pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> bool {
     if !full_unroll_on(options) || f.blocks.len() < 2 {
         return false;
@@ -1639,7 +1639,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         members.sort_unstable();
         // The size that runs: a counted build's blocks the counts never saw run (the rare arms of
         // a loop body, inlined) are copied but cost no time; the copies' code is O3 tier growth,
-        // capped by `all` (sandbox reconcile's loop over two borrowed shape fields: 330 insts with
+        // capped by `all` (an app's reconcile loop over two borrowed shape fields: 330 insts with
         // its never-taken create/destroy arms, about 100 that run; GAPB)
         let all: usize = members.iter().map(|b| f.blocks[*b as usize].insts.len() + 1).sum();
         let run_only = !relax_backend::stats::opt_off(options, "-unrollrun");
@@ -1660,7 +1660,7 @@ pub fn unroll_const_loops(options: &relax_session::Options, f: &mut Func) -> boo
         // do the array's borrows become constant-offset stores that forward, so `entry` stops
         // escaping and its copies join (GAPB). An invoke's unwind edge leaves for the shared
         // cleanup: each copy keeps it, it is no early exit.
-        // MAKEPAD_RUN_OPT=-unrollcalls: loops with calls stay rolled
+        // RELAX_OPT=-unrollcalls: loops with calls stay rolled
         if relax_backend::stats::opt_off(options, "-unrollcalls") && core.iter().any(|b| f.blocks[*b as usize].insts.iter().any(|i| matches!(i, Inst::Call(..))) || matches!(f.blocks[*b as usize].term, Term::Invoke(..) | Term::Resume)) {
             continue;
         }
@@ -2511,7 +2511,7 @@ fn zerofill_trace() -> Option<&'static str> {
     static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     VALUE.get_or_init(|| {
         let _k = relax_session::phase::kept();
-        std::env::var("MAKEPAD_RUN_ZEROFILL_TRACE").ok()
+        std::env::var("RELAX_ZEROFILL_TRACE").ok()
     }).as_deref()
 }
 
@@ -2519,7 +2519,7 @@ fn zerofill_dump_dir() -> Option<&'static str> {
     static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     VALUE.get_or_init(|| {
         let _k = relax_session::phase::kept();
-        std::env::var("MAKEPAD_RUN_DUMP_DIR").ok()
+        std::env::var("RELAX_DUMP_DIR").ok()
     }).as_deref()
 }
 
@@ -2530,7 +2530,7 @@ fn zerofill_dump_dir() -> Option<&'static str> {
 /// nowhere else, nothing else in the body but constants it reads) is `memset(a, 0, N * S)` in the
 /// header, which then jumps to X. `[T::default(); 64]` of an all-zero T (box3d's mover plane
 /// buffer, 1792 bytes per collide_mover call) ran 64 iterations of 7 instructions. Fills under 128
-/// bytes stay loops (unrolling and store merging make them a few wide stores). MAKEPAD_RUN_OPT=-zerofill
+/// bytes stay loops (unrolling and store merging make them a few wide stores). RELAX_OPT=-zerofill
 /// off. Returns whether anything changed; the body is left unreachable (clear_unreachable).
 pub fn zero_fill_loops(options: &relax_session::Options, f: &mut Func) -> bool {
     let Some(ms) = MEMSET.get().copied() else { return false };
@@ -2541,8 +2541,8 @@ pub fn zero_fill_loops(options: &relax_session::Options, f: &mut Func) -> bool {
     if !f.blocks.iter().any(|b| b.insts.iter().any(|i| matches!(i, Inst::Store(..) | Inst::VStore(..))) && matches!(b.term, Term::Jump(_))) {
         return false;
     }
-    // MAKEPAD_RUN_ZEROFILL_TRACE=<fn name part>: the loops looked at, appended to
-    // $MAKEPAD_RUN_DUMP_DIR/zerofill.txt (stderr of compile threads is not kept)
+    // RELAX_ZEROFILL_TRACE=<fn name part>: the loops looked at, appended to
+    // $RELAX_DUMP_DIR/zerofill.txt (stderr of compile threads is not kept)
     let tr = zerofill_trace().is_some_and(|w| f.name.contains(w));
     let mut log = String::new();
     let reach = relax_backend::regalloc::reachable(f);

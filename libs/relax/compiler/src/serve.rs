@@ -19,7 +19,9 @@ pub struct Session {
     deep: bool,
     lazy: bool,
     deep_errors: Vec<Diagnostic>,
-    files: HashMap<String, u32>,
+    /// per path, its modules' current versions in module order (one file declared as two
+    /// modules is two); the last is the path's file for lookups
+    files: HashMap<String, Vec<u32>>,
     parse_errors: HashMap<String, Diagnostic>,
     failed_probes: Vec<(String, bool)>,
     sources: HashMap<String, Vec<u8>>,
@@ -40,10 +42,15 @@ impl Session {
         paths.sort(); paths.dedup(); paths
     }
     pub fn file(&self, path: &str) -> Option<u32> {
-        self.files.get(path).copied().or_else(|| {
+        self.files.get(path).and_then(|of| of.last()).copied().or_else(|| {
             let target = crate::vfs::canonicalize(path).ok()?;
-            self.files.iter().find(|(p,_)| crate::vfs::canonicalize(p).ok().as_ref() == Some(&target)).map(|(_,f)|*f)
+            self.files.iter().find(|(p,_)| crate::vfs::canonicalize(p).ok().as_ref() == Some(&target)).and_then(|(_, of)| of.last().copied())
         })
+    }
+    /// A committed version replaces its module's previous one among the path's files.
+    fn replace_file(&mut self, path: &str, old: u32, new: u32) {
+        let of = self.files.entry(path.to_string()).or_default();
+        match of.iter_mut().find(|f| **f == old) { Some(f) => *f = new, None => of.push(new) }
     }
     pub fn contains(&self, path: &str) -> bool {
         if self.file(path).is_some() { return true; }
@@ -76,7 +83,7 @@ impl Session {
             }
         }
         let mut files = HashMap::new();
-        for (p, i) in unit.prog.current_source_files(|_| true) { files.insert(p, i); }
+        for (p, of) in unit.prog.current_source_module_files(|_| true) { files.insert(p, of); }
         let mut front: HashMap<String, Vec<Diagnostic>> = HashMap::new();
         let mut parse_errors = HashMap::new();
         for e in errors {
@@ -84,14 +91,16 @@ impl Session {
             if d.phase == "parse" { parse_errors.insert(d.file.clone(), d.clone()); }
             front.entry(d.file.clone()).or_default().push(d);
         }
-        let sources: HashMap<String, Vec<u8>> = files.iter().map(|(p, f)| {
-            let text = if unit.prog.files[*f as usize].src_len == 0 { crate::vfs::read(p).ok() } else { None };
-            (p.clone(), text.unwrap_or_else(|| unit.prog.files[*f as usize].src[..unit.prog.files[*f as usize].src_len as usize].to_vec()))
+        let sources: HashMap<String, Vec<u8>> = files.iter().filter_map(|(p, of)| Some((p, *of.last()?))).map(|(p, f)| {
+            let text = if unit.prog.files[f as usize].src_len == 0 { crate::vfs::read(p).ok() } else { None };
+            (p.clone(), text.unwrap_or_else(|| unit.prog.files[f as usize].src[..unit.prog.files[f as usize].src_len as usize].to_vec()))
         }).collect();
         // Startup parses are not reload parses. Prime expansion reuse before readiness:
         // otherwise the first body edit rebuilds the proc-macro world. Keep that world
         // warm for context-sensitive expansions whose spans move in subsequent edits.
-        let mut hot: Vec<_> = files.iter().filter(|(p, f)| p.ends_with(".rs") && own_crates.contains(&unit.prog.file_crate[**f as usize])).map(|(p, f)| (*f, p.clone())).collect();
+        // (each module's version of a path)
+        let mut hot: Vec<_> = files.iter().flat_map(|(p, of)| of.iter().map(move |&f| (p, f)))
+            .filter(|(p, f)| p.ends_with(".rs") && own_crates.contains(&unit.prog.file_crate[*f as usize])).map(|(p, f)| (f, p.clone())).collect();
         hot.sort_by_key(|(f, _)| *f);
         let mut normalize = Vec::new();
         let mut primed = Vec::new();
@@ -103,7 +112,7 @@ impl Session {
                             unit.prog.lower_body_declarations(&[], &[f]);
                             primed.push(file);
                             primed.push(f);
-                            files.insert(path, f);
+                            if let Some(old) = files.get_mut(&path).and_then(|of| of.iter_mut().find(|v| **v == file)) { *old = f; }
                         }
                     } else { normalize.push(path); }
                 } else { normalize.push(path); }
@@ -210,7 +219,7 @@ impl Session {
                 let p = &self.unit.prog;
                 let def = p.def(d);
                 let pos = p.files[def.file as usize].ast.item(def.item).lo;
-                (vec![p.record_error(def.file, pos, "typeck", format!("internal compiler error while type-checking {} -- makepad run bug, report it", p.def_path(d)))], Vec::new())
+                (vec![p.record_error(def.file, pos, "typeck", format!("internal compiler error while type-checking {} -- Relax bug, report it", p.def_path(d)))], Vec::new())
             }
         };
         edges.sort_by_key(|d| d.0); edges.dedup();
@@ -298,66 +307,73 @@ impl Session {
                     self.files.keys().find(|p| crate::vfs::canonicalize(p).ok().is_some_and(|p| p.to_string_lossy() == canonical)).cloned().unwrap_or(canonical)
                 }
             };
-            let Some(&file) = self.files.get(&path) else {
+            let Some(files) = self.files.get(&path).cloned() else {
                 self.parse_errors.insert(path.clone(), Diagnostic::new("parse", path, 0, 0, "file is not loaded in this package"));
                 continue;
             };
             let readable = src.is_ok();
             if let Ok(text) = &src { self.sources.insert(path.clone(), text.clone()); }
-            let parsed = src.map_err(|e| format!("{}:1:1: {}", path, e)).and_then(|s| self.unit.prog.parse_version(file, &path, s));
-            let v = match parsed {
-                Ok(v) => { self.parse_errors.remove(&path); v },
-                Err(e) => {
-                    let e = e.trim_end_matches(" -- fix the syntax; the running code is unchanged");
-                    self.parse_errors.insert(path.clone(), crate::diag::from_legacy(e, "parse"));
-                    // A changed macro/import can make parsing against the old macro table
-                    // fail. Retry with this crate's fresh prescan before declaring failure.
-                    if readable { rebuild.insert(self.unit.prog.file_crate[file as usize]); }
-                    continue;
-                }
-            };
-            let krate = self.unit.prog.file_crate[file as usize];
-            if self.front.get(&path).is_some_and(|v| !v.is_empty()) { rebuild.insert(krate); }
-            let plan = crate::reload::classify(&self.unit.prog, file, &v.pf, &path, &Default::default());
-            let pairs = match plan {
-                Ok(plan) => {
-                    if trace { eprintln!("makepad-run check plan: {}: {} changes, {} added, {} removed, {} uses removed", path, plan.changes.len(), plan.added.len(), plan.removed.len(), plan.removed_uses.len()); }
-                    if !plan.added.is_empty() || !plan.removed.is_empty() || !plan.removed_uses.is_empty() || plan.attributes_changed { rebuild.insert(krate); }
-                    for change in plan.changes {
-                        match change {
-                            Change::Body(d) => {
-                                legacy_owners.push(d);
-                                dirty.insert(d);
-                                let def = self.unit.prog.def(d);
-                                let pf = &self.unit.prog.files[def.file as usize];
-                                if let crate::ast::ItemKind::Fn(sig, _, _) = pf.ast.item(def.item).kind {
-                                    if pf.ast.fn_sig(sig).konst { rebuild.insert(krate); }
-                                }
-                            },
-                            Change::Const(d) | Change::StaticInit(d) => {
-                                // Consts also affect signatures, array lengths and CTFE. A
-                                // crate recollection is the conservative transitive invalidation.
-                                dirty.insert(d); rebuild.insert(krate);
-                            }
-                            Change::Layout(_) | Change::Vis(_) => { rebuild.insert(krate); }
-                            Change::Macro(_) => { rebuild.insert(krate); macro_rebuild = true; }
-                        }
+            let src = src.map_err(|e| format!("{}:1:1: {}", path, e));
+            // each module's version takes the edit: one file declared as two modules (`#[path]`)
+            // is two versions, each parsed as its module (relax issue 135); a version that does
+            // not parse keeps the path's error
+            self.parse_errors.remove(&path);
+            for file in files {
+                let parsed = src.clone().and_then(|s| self.unit.prog.parse_version(file, &path, s));
+                let v = match parsed {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let e = e.trim_end_matches(" -- fix the syntax; the running code is unchanged");
+                        self.parse_errors.insert(path.clone(), crate::diag::from_legacy(e, "parse"));
+                        // A changed macro/import can make parsing against the old macro table
+                        // fail. Retry with this crate's fresh prescan before declaring failure.
+                        if readable { rebuild.insert(self.unit.prog.file_crate[file as usize]); }
+                        continue;
                     }
-                    plan.pairs
+                };
+                let krate = self.unit.prog.file_crate[file as usize];
+                if self.front.get(&path).is_some_and(|v| !v.is_empty()) { rebuild.insert(krate); }
+                let plan = crate::reload::classify(&self.unit.prog, file, &v.pf, &path, &Default::default());
+                let pairs = match plan {
+                    Ok(plan) => {
+                        if trace { eprintln!("relax check plan: {}: {} changes, {} added, {} removed, {} uses removed", path, plan.changes.len(), plan.added.len(), plan.removed.len(), plan.removed_uses.len()); }
+                        if !plan.added.is_empty() || !plan.removed.is_empty() || !plan.removed_uses.is_empty() || plan.attributes_changed { rebuild.insert(krate); }
+                        for change in plan.changes {
+                            match change {
+                                Change::Body(d) => {
+                                    legacy_owners.push(d);
+                                    dirty.insert(d);
+                                    let def = self.unit.prog.def(d);
+                                    let pf = &self.unit.prog.files[def.file as usize];
+                                    if let crate::ast::ItemKind::Fn(sig, _, _) = pf.ast.item(def.item).kind {
+                                        if pf.ast.fn_sig(sig).konst { rebuild.insert(krate); }
+                                    }
+                                },
+                                Change::Const(d) | Change::StaticInit(d) => {
+                                    // Consts also affect signatures, array lengths and CTFE. A
+                                    // crate recollection is the conservative transitive invalidation.
+                                    dirty.insert(d); rebuild.insert(krate);
+                                }
+                                Change::Layout(_) | Change::Vis(_) => { rebuild.insert(krate); }
+                                Change::Macro(_) => { rebuild.insert(krate); macro_rebuild = true; }
+                            }
+                        }
+                        plan.pairs
+                    }
+                    Err(why) => {
+                        if trace { eprintln!("relax check rebuild: {}: {:?}", path, why); }
+                        macro_rebuild |= why.iter().any(|e| e.contains("macro"));
+                        rebuild.insert(krate);
+                        crate::reload::pair_items(&self.unit.prog.files[file as usize], &v.pf).0
+                    }
+                };
+                // Retained errors in this file need new source coordinates even if their item
+                // is unchanged. Re-derive them instead of guessing span offsets through macros.
+                for (&d, errors) in &self.items {
+                    if !errors.is_empty() && errors.iter().any(|e| e.file == path) { dirty.insert(d); }
                 }
-                Err(why) => {
-                    if trace { eprintln!("makepad-run check rebuild: {}: {:?}", path, why); }
-                    macro_rebuild |= why.iter().any(|e| e.contains("macro"));
-                    rebuild.insert(krate);
-                    crate::reload::pair_items(&self.unit.prog.files[file as usize], &v.pf).0
-                }
-            };
-            // Retained errors in this file need new source coordinates even if their item
-            // is unchanged. Re-derive them instead of guessing span offsets through macros.
-            for (&d, errors) in &self.items {
-                if !errors.is_empty() && errors.iter().any(|e| e.file == path) { dirty.insert(d); }
+                versions.push((v, pairs));
             }
-            versions.push((v, pairs));
         }
         let mut body_files = Vec::new();
         for (v, pairs) in versions {
@@ -366,7 +382,7 @@ impl Session {
             let committed = if rebuild.is_empty() { self.unit.prog.commit_body_version(v, &pairs) }
                 else { self.unit.prog.commit_version(v, &pairs) };
             match committed {
-                Ok(f) => { body_files.push(old); body_files.push(f); self.files.insert(path, f); },
+                Ok(f) => { body_files.push(old); body_files.push(f); self.replace_file(&path, old, f); },
                 Err(e) => { self.parse_errors.insert(path.clone(), crate::diag::from_legacy(&e, "parse")); }
             }
         }
@@ -427,40 +443,44 @@ impl Session {
                 let impls: Vec<_> = old.iter().copied().filter(|d| self.unit.prog.def(*d).kind == DefKind::Impl).collect();
                 self.unit.tcx.uncollect_impls(&impls);
                 self.unit.tcx.invalidate_check(&old);
-                let mut texts: Vec<_> = self.files.iter().filter(|(_, f)| self.unit.prog.file_crate[**f as usize] == krate)
-                    .filter_map(|(p, f)| self.sources.get(p).map(|t| (*f, t.clone()))).collect();
+                let mut texts: Vec<_> = self.files.iter().flat_map(|(p, of)| of.iter().map(move |&f| (p, f)))
+                    .filter(|(_, f)| self.unit.prog.file_crate[*f as usize] == krate)
+                    .filter_map(|(p, f)| self.sources.get(p).map(|t| (f, t.clone()))).collect();
                 texts.sort_by_key(|(f, _)| *f);
                 let paths: Vec<_> = texts.iter().map(|(f, _)| self.unit.prog.file_paths[*f as usize].clone()).collect();
                 crate::macro_reg::clear_derive_failures(&paths);
                 if !prescanned.contains_key(&krate) {
                     let name = self.unit.prog.crates[krate as usize].name;
-                    let inputs: Vec<_> = self.files.iter().filter(|(_, f)| self.unit.prog.crates[self.unit.prog.file_crate[**f as usize] as usize].name == name)
-                        .filter_map(|(p, f)| self.sources.get(p).map(|t| (*f, t.clone()))).collect();
+                    let inputs: Vec<_> = self.files.iter().filter_map(|(p, of)| Some((p, *of.last()?)))
+                        .filter(|(_, f)| self.unit.prog.crates[self.unit.prog.file_crate[*f as usize] as usize].name == name)
+                        .filter_map(|(p, f)| self.sources.get(p).map(|t| (f, t.clone()))).collect();
                     prescanned.extend(crate::preload::check_macros(&mut self.unit.prog, krate, &inputs));
                 }
                 let reachable = &prescanned[&krate];
                 texts.retain(|(f, _)| reachable.contains(&self.unit.prog.file_paths[*f as usize]));
-                self.parse_errors.retain(|p, _| !self.files.get(p).is_some_and(|f| self.unit.prog.file_crate[*f as usize] == krate && !reachable.contains(p)));
+                self.parse_errors.retain(|p, _| !self.files.get(p).and_then(|of| of.last()).is_some_and(|f| self.unit.prog.file_crate[*f as usize] == krate && !reachable.contains(p)));
+                // (a path's versions: one that does not parse keeps its error)
+                for (f, _) in &texts { self.parse_errors.remove(&self.unit.prog.file_paths[*f as usize]); }
                 for (f, text) in texts {
                     let path = self.unit.prog.file_paths[f as usize].clone();
                     let mut snapshot = self.unit.prog.parse_snapshot(f, &path);
                     snapshot.reuse = Default::default();
                     match snapshot.parse(text) {
                         Ok(v) => {
-                            self.parse_errors.remove(&path);
                             let pairs = crate::reload::pair_items(&self.unit.prog.files[f as usize], &v.pf).0;
                             match self.unit.prog.commit_version(v, &pairs) {
-                                Ok(n) => { self.files.insert(path, n); },
+                                Ok(n) => { self.replace_file(&path, f, n); },
                                 Err(e) => { self.parse_errors.insert(path, crate::diag::from_legacy(e.trim_end_matches(" -- fix the syntax; the running code is unchanged"), "parse")); }
                             }
                         }
                         Err(e) => { self.parse_errors.insert(path, crate::diag::from_legacy(e.trim_end_matches(" -- fix the syntax; the running code is unchanged"), "parse")); }
                     }
                 }
-                let files = self.files.iter().filter(|(_, f)| self.unit.prog.file_crate[**f as usize] == krate).map(|(p, f)| (p.clone(), *f)).collect();
+                let files = self.files.iter().map(|(p, of)| (p.clone(), of.iter().copied().filter(|f| self.unit.prog.file_crate[*f as usize] == krate).collect::<Vec<_>>()))
+                    .filter(|(_, of)| !of.is_empty()).collect();
                 match self.unit.prog.recollect_check_crate(krate, files) {
                     Ok(defs) => {
-                        self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, f)| self.unit.prog.file_crate[*f as usize] == krate && e.starts_with(p)));
+                        self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, of)| of.iter().any(|f| self.unit.prog.file_crate[*f as usize] == krate) && e.starts_with(p)));
                         self.unit.consts.clear(); self.unit.statics.clear(); self.unit.static_spans.clear(); self.unit.tls_places.clear();
                         self.unit.tcx.collect_check(&self.unit.prog, &defs);
                     }
@@ -474,12 +494,13 @@ impl Session {
                 let impls: Vec<_> = defs.iter().copied().filter(|d| self.unit.prog.def(*d).kind == DefKind::Impl).collect();
                 self.unit.tcx.uncollect_impls(&impls);
                 self.unit.tcx.invalidate_check(&defs);
-                self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, f)| self.unit.prog.file_crate[*f as usize] == krate && e.starts_with(p)));
+                self.unit.tcx.errors.retain(|e| !self.files.iter().any(|(p, of)| of.iter().any(|f| self.unit.prog.file_crate[*f as usize] == krate) && e.starts_with(p)));
                 self.unit.tcx.collect_check(&self.unit.prog, &defs);
             }
-            for (path, i) in self.unit.prog.current_source_files(|_| true) {
-                self.files.insert(path.clone(), i);
-                self.sources.entry(path).or_insert_with(|| self.unit.prog.files[i as usize].src[..self.unit.prog.files[i as usize].src_len as usize].to_vec());
+            for (path, of) in self.unit.prog.current_source_module_files(|_| true) {
+                let Some(&i) = of.last() else { continue };
+                self.sources.entry(path.clone()).or_insert_with(|| self.unit.prog.files[i as usize].src[..self.unit.prog.files[i as usize].src_len as usize].to_vec());
+                self.files.insert(path, of);
             }
             self.items.clear(); self.edges.clear(); self.dependents.clear();
             dirty = self.functions().into_iter().collect();
@@ -499,7 +520,7 @@ impl Session {
         self.ms = start.elapsed().as_secs_f64() * 1000.0;
         if trace {
             crate::parse_work::finish().print("check");
-            eprintln!("makepad-run check timing: parse/classify/commit {:.3}, invalidate/front {:.3}, check {:.3}, trim {:.3} ms",
+            eprintln!("relax check timing: parse/classify/commit {:.3}, invalidate/front {:.3}, check {:.3}, trim {:.3} ms",
                 parsed_ms, invalidated_ms - parsed_ms, checked_ms - invalidated_ms, self.ms - checked_ms);
         }
     }
@@ -581,10 +602,11 @@ impl Session {
         // replacement. Use the existing auxiliary-unit retirement protocol.
         unsafe { crate::jit::retire_unit(&mut *self.unit); }
         self.unit = Unit::new(prog, tcx, core);
-        self.files = self.unit.prog.current_source_files(|_| true).into_iter().collect();
-        for (path, file) in &self.files {
+        self.files = self.unit.prog.current_source_module_files(|_| true).into_iter().collect();
+        for (path, of) in &self.files {
+            let Some(&file) = of.last() else { continue };
             self.sources.entry(path.clone()).or_insert_with(|| {
-                let pf = &self.unit.prog.files[*file as usize]; pf.src[..pf.src_len as usize].to_vec()
+                let pf = &self.unit.prog.files[file as usize]; pf.src[..pf.src_len as usize].to_vec()
             });
         }
         self.items.clear(); self.edges.clear(); self.dependents.clear();
@@ -609,7 +631,11 @@ impl Session {
             self.front.values().chain(self.items.values()).flatten().chain(self.deep_errors.iter()).cloned().collect()
         } else { self.parse_errors.values().cloned().collect() };
         out.sort_by(|a, b| (&a.file, a.line, a.col, &a.message, a.phase).cmp(&(&b.file, b.line, b.col, &b.message, b.phase)));
-        out.dedup(); out
+        out.dedup();
+        // As in a one-shot check: typeck's cascade notes go when an error they follow is reported.
+        let follow_on = |d: &Diagnostic| crate::check::is_follow_on(&d.notes.first().map_or(d.message.clone(), |n| format!("{} -- {n}", d.message)));
+        if out.iter().any(|d| d.severity == crate::diag::Severity::Error && !follow_on(d)) { out.retain(|d| !follow_on(d)); }
+        out
     }
 
     pub fn emit_diagnostics(&self) {
@@ -625,7 +651,7 @@ impl Session {
         if crate::diag::enabled() {
             println!("{{\"type\":\"summary\",\"errors\":{},\"warnings\":0,\"ms\":{:.3},\"rechecked\":{},\"rss_mb\":{:.3},\"rss_before_trim_mb\":{:.3}}}", errors, self.ms, self.rechecked, self.rss_mb, self.rss_before_trim_mb);
         } else {
-            println!("makepad check: {} errors, {} rechecked, {:.3} ms, {:.1} MB RSS", errors, self.rechecked, self.ms, self.rss_mb);
+            println!("relax check: {} errors, {} rechecked, {:.3} ms, {:.1} MB RSS", errors, self.rechecked, self.ms, self.rss_mb);
         }
         let _ = std::io::stdout().flush();
     }
@@ -669,7 +695,7 @@ impl Session {
         let std = crate::std_dir();
         let mut watched: HashMap<String, _> = self.paths().into_iter().filter(|p| crate::vfs::relative_path(p, &std).is_none() && !p.contains("/.cargo/") && !p.contains("/rustlib/"))
             .map(|p| { let stamp = crate::reload::stamp(&p); (p, stamp) }).collect();
-        let mut hot: HashSet<String> = self.files.iter().filter(|(_, f)| self.own_crates.contains(&self.unit.prog.file_crate[**f as usize])).map(|(p, _)| p.clone()).collect();
+        let mut hot: HashSet<String> = self.files.iter().filter(|(_, of)| of.iter().any(|f| self.own_crates.contains(&self.unit.prog.file_crate[*f as usize]))).map(|(p, _)| p.clone()).collect();
         let mut tick = 0u32;
         loop {
             match context.recv_timeout(Duration::from_millis(5)) {
@@ -710,7 +736,7 @@ impl Session {
 
     fn protocol_error(&mut self, message: &str) {
         let d = Diagnostic::new("run", "", 0, 0, message);
-        if crate::diag::enabled() { crate::diag::emit(&d); } else { eprintln!("makepad check: {}", message); }
+        if crate::diag::enabled() { crate::diag::emit(&d); } else { eprintln!("relax check: {}", message); }
     }
 }
 

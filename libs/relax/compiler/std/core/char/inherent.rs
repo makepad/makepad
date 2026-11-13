@@ -1,5 +1,4 @@
-//! `impl char` (Relax only: real core owns char's inherent methods). Each method forwards
-//! to the free fns in char/mod.rs, which the rustc shim tests against real std.
+//! Relax's `impl char`. Each method forwards to the free fns in char/mod.rs.
 
 use super::*;
 

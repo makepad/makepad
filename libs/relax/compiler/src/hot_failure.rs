@@ -52,7 +52,7 @@ fn id() -> String {
 fn record(a: &Attempt, outcome: Outcome, reason: String, failure: String, logs: Vec<String>) -> Record {
     let mut all_logs = if outcome.failure() { (*a.logs).clone() } else { Vec::new() };
     all_logs.extend(logs);
-    Record { id: id(), load: a.id.clone(), at_ms: now(), app: std::env::var("MAKEPAD_RUN_PACKAGE").unwrap_or_default(), node: String::new(), pid: std::process::id(),
+    Record { id: id(), load: a.id.clone(), at_ms: now(), app: std::env::var("RELAX_PACKAGE").unwrap_or_default(), node: String::new(), pid: std::process::id(),
         outcome, reason, failure, units: if outcome.failure() { (*a.units).clone() } else { Vec::new() }, logs: all_logs }
 }
 
@@ -287,7 +287,7 @@ fn flush() -> bool {
     let mut records = std::mem::take(&mut state().pending);
     while let Some(r) = records.front() {
         if let Err(e) = makepad_remote::hot::persist(r) {
-            eprintln!("makepad hot: record {} pending: {e}", r.id);
+            eprintln!("relax hot: record {} pending: {e}", r.id);
             let mut s = state();
             records.append(&mut s.pending);
             s.pending = records;
@@ -327,7 +327,7 @@ pub(crate) fn hand_over() -> Result<Option<std::path::PathBuf>, String> {
 #[cfg(windows)]
 pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
     let Some(r) = std::fs::read_to_string(path).ok().and_then(|s| Record::parse(&s)) else {
-        eprintln!("makepad hot: cannot read the recovery record {}", path.display());
+        eprintln!("relax hot: cannot read the recovery record {}", path.display());
         return;
     };
     let _ = std::fs::remove_file(path);
@@ -336,7 +336,7 @@ pub(crate) fn next_run_failed(path: &std::path::Path, why: &str) {
     done.app = r.app;
     eprintln!("{}", Verdict::JitError { record: done.id.clone() }.line());
     if let Err(e) = makepad_remote::hot::persist(&done) {
-        eprintln!("makepad hot: record {} not written: {e}", done.id);
+        eprintln!("relax hot: record {} not written: {e}", done.id);
     }
 }
 
@@ -358,7 +358,7 @@ pub(crate) fn restore() {
             REPLACEMENT.store(true, Ordering::Release);
             let _ = std::fs::remove_file(path);
         }
-        None => eprintln!("makepad hot: cannot restore the pending recovery record"),
+        None => eprintln!("relax hot: cannot restore the pending recovery record"),
     }
 }
 

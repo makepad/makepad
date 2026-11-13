@@ -28,10 +28,10 @@ CRATES = {
     "makepad_hal": "platform/hal/src/lib.rs",
     "makepad_script": "platform/script/src/lib.rs",
     "makepad_script_compute": "platform/script/compute/src/lib.rs",
-    "makepad_relax_api": "libs/relax_api/src/lib.rs",
+    "relax_api": "libs/relax_api/src/lib.rs",
     "makepad_remote": "libs/remote/src/lib.rs",
     "makepad_font_core": "libs/font_core/src/lib.rs",
-    "makepad_cpu_budget": "platform/cpu_budget/src/lib.rs",
+    "makepad_cpu_budget": "libs/cpu_budget/src/lib.rs",
     "makepad_shared_bytes": "libs/shared_bytes/src/lib.rs",
     "makepad_alloc_phase": "libs/relax_api/phase/src/lib.rs",
     "makepad_live_id": "libs/live_id/src/lib.rs",
@@ -50,7 +50,7 @@ EXTERN = re.compile(r'^\s*(?:unsafe\s+)?extern\s*(?:"[^"]*")?\s*\{')
 INCLUDE = re.compile(r'^\s*include!\("([^"]+\.rs)"\)')
 
 
-# Crates whose code runs inside an op of the run's (makepad_relax_api run_op, or called from one):
+# Crates whose code runs inside an op of the run's (relax_api run_op, or called from one):
 # what they allocate is in the run's heap unless they say otherwise.
 RUN_REACHED = (
     "platform/script/src",
@@ -67,7 +67,7 @@ STD_LOCK = re.compile(r"\bstd::sync::(?:Mutex|Condvar)\b|\bstd::sync::\{[^}]*\b(
 
 def std_locks():
     """On macOS std's Mutex and Condvar allocate a block at their first lock: in an op it is the run's,
-    and the lock is gone with the run though what holds it stays (makepad_relax_api::sync)."""
+    and the lock is gone with the run though what holds it stays (relax_api::sync)."""
     out = []
     for d in RUN_REACHED:
         for dirpath, _, names in os.walk(os.path.join(ROOT, d)):

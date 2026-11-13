@@ -1,0 +1,12 @@
+[package]
+name = "ce-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# its own workspace: ce_dep, beside it, is a dependency, not one of the app's crates (those are
+# checked whole before they run; a dependency's code is compiled when it is called)
+[workspace]
+
+[dependencies]
+ce-dep = { path = "../ce_dep" }

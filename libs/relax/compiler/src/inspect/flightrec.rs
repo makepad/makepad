@@ -1,4 +1,4 @@
-//! The flight recorder: always on (MAKEPAD_RUN_FLIGHTREC=0: off), bounded memory, never
+//! The flight recorder: always on (RELAX_FLIGHTREC=0: off), bounded memory, never
 //! blocking the threads it records. What a session did in its last minutes stays in memory, so a
 //! hitch, a panic or a game-logic bug seen once can be read (and replayed) afterwards.
 //!
@@ -15,7 +15,7 @@
 //!
 //! A recording is a `.mkpf` profile file (makepad-prof-stream; profproto.md, kinds EVENT 16 and
 //! INPUT 17): `rec save [last=60s]`, and automatically on a hitch over DUMP_MS
-//! (MAKEPAD_RUN_FLIGHTREC_DUMP_MS, default 1000), a panic and a fatal fault, into
+//! (RELAX_FLIGHTREC_DUMP_MS, default 1000), a panic and a fatal fault, into
 //! <makepad run home>/flightrec/. `makepad inspect file=<x.mkpf> pf ...` answers on it.
 
 use makepad_prof_stream as ps;
@@ -25,7 +25,7 @@ use std::sync::atomic::{fence, AtomicBool, AtomicU64, Ordering::{Acquire, Relaxe
 
 static ON: AtomicBool = AtomicBool::new(false);
 
-/// The recorder records (inspect started it; MAKEPAD_RUN_FLIGHTREC=0 keeps it off).
+/// The recorder records (inspect started it; RELAX_FLIGHTREC=0 keeps it off).
 #[inline]
 pub fn on() -> bool {
     ON.load(Relaxed)
@@ -50,19 +50,25 @@ static THREAD: Mutex<Option<std::thread::Thread>> = Mutex::new(None);
 
 /// Starts the recorder (inspect's start).
 pub fn init() {
-    if std::env::var("MAKEPAD_RUN_FLIGHTREC").is_ok_and(|v| v == "0") {
+    if std::env::var("RELAX_FLIGHTREC").is_ok_and(|v| v == "0") {
         return;
     }
-    if let Some(ms) = std::env::var("MAKEPAD_RUN_FLIGHTREC_DUMP_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+    if let Some(ms) = std::env::var("RELAX_FLIGHTREC_DUMP_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
         DUMP_MS.store(ms, Relaxed);
     }
-    if let Some(us) = std::env::var("MAKEPAD_RUN_FLIGHTREC_ELIDE_US").ok().and_then(|v| v.parse::<u64>().ok()) {
+    if let Some(us) = std::env::var("RELAX_FLIGHTREC_ELIDE_US").ok().and_then(|v| v.parse::<u64>().ok()) {
         super::pstream::set_elide_us(us);
     }
     let _k = crate::zone_alloc::kept();
-    let args: Vec<String> = std::env::args().collect();
+    // launch arguments and environment values need not be Unicode (the program gets them as they
+    // are): the recording names them lossily
+    let args: Vec<String> = crate::os::proc::args_bytes().iter().map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
-    let env: Vec<String> = std::env::vars().filter(|(k, _)| k.starts_with("MAKEPAD") || k.starts_with("SANDBOX_")).map(|(k, v)| format!("{k}={v}")).collect();
+    let env: Vec<String> = std::env::vars_os()
+        .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
+        .filter(|(k, _)| k.starts_with("MAKEPAD") || k.starts_with("SANDBOX_"))
+        .map(|(k, v)| format!("{k}={}", v.to_string_lossy()))
+        .collect();
     *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some((args.join("\u{1f}"), cwd, env.join("\u{1f}")));
     // the rings exist before the first record (no allocation on a recording thread later)
     let _ = (events(), app_events(), inputs(), jits(), frames());
@@ -544,9 +550,9 @@ fn watch() {
                 match save(if why == Why::Hitch { HITCH_LAST_NS } else { DUMP_LAST_NS }, why, None, true) {
                     // a hitch (a cold start has some) and a no-draw (the recorder's, not the log's)
                     // are named with --verbose; panics and faults always
-                    Ok((path, n)) if !matches!(why, Why::Hitch | Why::NoDraw) || crate::run::VERBOSE.load(Relaxed) => eprintln!("makepad-run flightrec: {} recorded: {} ({} KB; makepad inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display()),
+                    Ok((path, n)) if !matches!(why, Why::Hitch | Why::NoDraw) || crate::run::VERBOSE.load(Relaxed) => eprintln!("relax flightrec: {} recorded: {} ({} KB; {tool} inspect file={} pf brief)", why.name(), path.display(), n / 1024, path.display(), tool = crate::tool_name()),
                     Ok(_) => {}
-                    Err(e) => eprintln!("makepad-run flightrec: cannot write the {} recording: {}", why.name(), e),
+                    Err(e) => eprintln!("relax flightrec: cannot write the {} recording: {}", why.name(), e),
                 }
             }
         }
@@ -891,8 +897,8 @@ pub fn fault_dump(what: &str) {
     }
     event("fault", what, 0, 0);
     match save(DUMP_LAST_NS, Why::Fault, None, false) {
-        Ok((path, n)) => eprintln!("makepad-run flightrec: fault recorded: {} ({} KB; makepad inspect file={} pf brief)", path.display(), n / 1024, path.display()),
-        Err(e) => eprintln!("makepad-run flightrec: cannot write the fault recording: {}", e),
+        Ok((path, n)) => eprintln!("relax flightrec: fault recorded: {} ({} KB; {tool} inspect file={} pf brief)", path.display(), n / 1024, path.display(), tool = crate::tool_name()),
+        Err(e) => eprintln!("relax flightrec: cannot write the fault recording: {}", e),
     }
 }
 
@@ -925,7 +931,7 @@ pub fn cmd(req: &super::Req, out: &mut super::Out) {
         "status" => status(out),
         "save" => {
             if !on() {
-                return out.err("the flight recorder is off (MAKEPAD_RUN_FLIGHTREC=0, or `rec on`)");
+                return out.err("the flight recorder is off (RELAX_FLIGHTREC=0, or `rec on`)");
             }
             let last = match req.get("last").map(parse_last).unwrap_or(Ok(DUMP_LAST_NS)) {
                 Ok(v) => v,
@@ -936,7 +942,7 @@ pub fn cmd(req: &super::Req, out: &mut super::Out) {
                     let p = path.display().to_string();
                     let span = if last == 0 { "everything the recorder holds".to_string() } else { format!("the last {:.0} s", last as f64 / 1e9) };
                     out.line(&format!("recorded {}: {} ({} MB)", span, p, mb(n)));
-                    out.line(&format!("more: makepad inspect file={p} pf brief  makepad inspect file={p} pf hitches  makepad inspect file={p} pf events  makepad inspect file={p} rec replay"));
+                    out.line(&format!("more: {tool} inspect file={p} pf brief  {tool} inspect file={p} pf hitches  {tool} inspect file={p} pf events  {tool} inspect file={p} rec replay", tool = crate::tool_name()));
                 }
                 Err(e) => out.err(&e),
             }
@@ -961,7 +967,7 @@ pub fn cmd(req: &super::Req, out: &mut super::Out) {
             super::timeline::flag_update();
             out.line("the flight recorder is off (its rings keep what they hold; `rec on` resumes)");
         }
-        "replay" => out.err("rec replay is run by the client: makepad inspect file=<x.mkpf> rec replay [until=<s>]"),
+        "replay" => out.err(&format!("rec replay is run by the client: {tool} inspect file=<x.mkpf> rec replay [until=<s>]", tool = crate::tool_name())),
         w => out.err(&format!("rec {w}? rec [status] | save [last=60s|5m|all] [path=<file>] | mark <text> | on | off")),
     }
 }
@@ -1022,7 +1028,7 @@ fn status(out: &mut super::Out) {
     out.line(&format!("| frames | {} | {} |", back(oldest(frames(), |e| e.t0)), fill(frames().fill())));
     let elided: u64 = super::pstream::rings().iter().map(|r| r.elided.load(Relaxed)).sum();
     if elided > 0 {
-        out.line(&format!("note: {} spans under {} µs with nothing inside were not kept (MAKEPAD_RUN_FLIGHTREC_ELIDE_US)", elided, super::pstream::elide_us()));
+        out.line(&format!("note: {} spans under {} µs with nothing inside were not kept (RELAX_FLIGHTREC_ELIDE_US)", elided, super::pstream::elide_us()));
     }
     let no_ring = super::pstream::NO_RING.load(Relaxed);
     if no_ring > 0 {

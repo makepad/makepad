@@ -199,8 +199,12 @@ pub fn encode_unix_abstract(buf: &mut SockaddrStorage, name: &[u8]) -> Option<so
 /// The path bytes of a sockaddr_un of length `len` (unnamed = empty).
 pub fn decode_unix(buf: &SockaddrStorage, len: socklen_t) -> alloc::vec::Vec<u8> {
     let mut out = alloc::vec::Vec::new();
-    // a Linux abstract name: a leading NUL, then exactly `len - 2` bytes (NULs included)
+    // a Linux abstract name: a leading NUL, then exactly `len - 2` bytes (NULs included); elsewhere a
+    // leading NUL is an unnamed socket (macOS gives a socketpair's end len 16 and a zeroed sun_path)
     if len as usize > 2 && get(buf, 2) == 0 {
+        if !cfg!(any(target_os = "linux", target_os = "android")) {
+            return out;
+        }
         let mut i = 2;
         while i < len as usize && i < 2 + SUN_PATH_LEN {
             out.push(get(buf, i));

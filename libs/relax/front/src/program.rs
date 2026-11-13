@@ -279,6 +279,9 @@ pub const CLASH_TYPES: u8 = 16;
 pub const CLASH_VALUES: u8 = 32;
 /// `use a::f::{self}`: only the type namespace of `f` (a module, enum or trait) is imported
 pub const BOUND_SELF_ONLY: u8 = 64;
+/// bound by a forced step of an import fixpoint run, or after one in that run
+/// (`Program::import_fixpoint`): rustc leaves the import undetermined, or resolves it through one it does
+pub const BOUND_SETTLED: u8 = 128;
 
 pub struct Module {
     pub def: DefId,
@@ -292,8 +295,9 @@ pub struct Module {
     pub types: HashMap<Sym, DefId>,
     pub values: HashMap<Sym, DefId>,
     pub macros: HashMap<Sym, DefId>,
-    /// glob imports: (target, `pub use`)
-    pub globs: Vec<(DefId, bool)>,
+    /// glob imports: (target, the `use` item's visibility: None `pub`, else the module it is
+    /// visible in -- a `pub(crate)` glob's names are not another crate's)
+    pub globs: Vec<(DefId, BindVis)>,
     /// traits imported `as _` (in scope for method calls, no name)
     pub anon_traits: Vec<(DefId, bool)>,
     /// import bindings (name, type ns) -> IMPORT_PUB (`pub use`) | IMPORT_EXTERN (`extern crate`);
@@ -436,6 +440,8 @@ pub struct CrateInfo {
     /// relaxed-Rust features this crate opts in to (relaxed.rs; empty = strict), read on first
     /// use (only a relaxable error or the borrow checker asks; strict programs never read it)
     relaxed: std::sync::OnceLock<Vec<String>>,
+    /// its package's `export-opt-level` (unitgraph.rs), read on first use (a web export asks)
+    export_opt_level: std::sync::OnceLock<Option<u8>>,
     /// the crate's `#![feature(..)]` declarations, read on first use (the check's gates)
     features: std::sync::OnceLock<crate::features::Features>,
     /// the crates whose impls this crate's solver sees (`Program::crate_sees`), a bitset over crate
@@ -481,6 +487,11 @@ impl CrateInfo {
     /// the crate's root source file
     pub fn root_path(&self) -> &str {
         &self.root_path
+    }
+    /// The opt-level its package's manifest gives its code in a web export
+    /// (`[package.metadata.relax] export-opt-level`; None: the export's default).
+    pub fn export_opt_level(&self) -> Option<u8> {
+        *self.export_opt_level.get_or_init(|| crate::unitgraph::export_opt_level(&crate::unitgraph::manifest_dir_of(&self.root_path)))
     }
     /// The relaxed-Rust features this crate opts in to (std crates: none).
     pub fn relaxed(&self, prog: &Program) -> &[String] {
@@ -558,7 +569,7 @@ fn retain_load_memos<K: Clone + std::hash::Hash + Eq, V: Clone>(
 }
 
 /// Buckets (log2) of the per-(module, name) memos, `scope_cache` and `glob_cache`: a body check
-/// of a big workspace fills each with ~1M entries (sandbox: 0.88M and 0.98M), and a chain longer
+/// of a big workspace fills each with ~1M entries (a large app: 0.88M and 0.98M), and a chain longer
 /// than a node or two is a cache miss per node on every lookup. 8 MB of buckets each, in zeroed
 /// pages that stay untouched until a bucket is used.
 const NAME_MEMO_BITS: u32 = 20;
@@ -587,13 +598,15 @@ pub struct Program {
     /// back version is not), and per committed version the boot file it is a version of.
     edit_current: HashMap<u32, u32>,
     edit_boot: HashMap<u32, u32>,
-    /// Committed files used only during a warm checker crate recollection.
-    check_files: Option<std::collections::HashMap<String, u32>>,
+    /// Committed files used only during a warm checker crate recollection: per path, each
+    /// module path it is loaded under and that module's version.
+    check_files: Option<std::collections::HashMap<String, Vec<(String, u32)>>>,
     parse_reuse: HashMap<u32, std::sync::Arc<crate::parse_work::Reuse>>,
     /// files read and lexed by the macro prescan, consumed by load_file
     pub prelexed: HashMap<String, (Vec<u8>, Vec<crate::lexer::Tok>)>,
-    /// glob lookups after import resolution: (module, name, type ns) -> result
-    pub glob_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<(DefId, BindVis)>>,
+    /// glob lookups after import resolution: (module, name, type ns) -> result, with the import
+    /// uses the lookup went through (`MemoUses`)
+    pub glob_cache: crate::conc::MemoMap<(u32, Sym, bool), (Option<(DefId, BindVis)>, MemoUses)>,
     /// `glob_ambiguity` answers once imports are resolved: (module, name, namespace, used from, skip_direct)
     pub glob_amb_cache: crate::conc::MemoMap<(u32, Sym, bool, bool), u8>,
     /// precise lookups of a name in a glob's module (what `glob_ambiguity` compares) once imports are resolved
@@ -608,8 +621,9 @@ pub struct Program {
     /// the import replay's macro namespace of the checked modules (rsim.rs `macro_table`)
     pub sim_macros: Option<HashMap<(u32, Sym), rsim::MacBinding>>,
     /// lexical lookups (`lookup_in_scope`) once imports are resolved: (module, name, ns_type);
-    /// cleared whenever a binding is defined or imports are resolved again
-    scope_cache: crate::conc::MemoMap<(u32, Sym, bool), Option<DefId>>,
+    /// cleared whenever a binding is defined or imports are resolved again; with the import uses
+    /// the lookup went through (`MemoUses`)
+    pub scope_cache: crate::conc::MemoMap<(u32, Sym, bool), (Option<DefId>, MemoUses)>,
     /// the import bindings (module, bound name, type namespace) and the glob imports (module,
     /// glob target) a name resolution went through (rustc_resolve `record_use`); recorded only
     /// while `record_import_uses` is on (`makepad check`)
@@ -625,12 +639,12 @@ pub struct Program {
     /// would cost more than it saves (set by jit::Unit::new)
     pub body_memos: std::sync::atomic::AtomicBool,
     /// traits each module's scope binds, with visibility (after import resolution)
-    trait_bind_cache: crate::conc::MemoMap<u32, std::sync::Arc<Vec<(DefId, BindVis)>>>,
+    trait_bind_cache: crate::conc::MemoMap<u32, std::sync::Arc<Vec<TraitBinding>>>,
     /// imports are resolved (glob results no longer change)
     pub imports_done: bool,
     /// Rust file selection: imports left unresolved because their lookup stops in
     /// a skipped module (or one that depends on such an import), with the name
-    /// each would bind (None: a glob). Used only by MAKEPAD_RUN_LAZY_VERIFY.
+    /// each would bind (None: a glob). Used only by RELAX_LAZY_VERIFY.
     pub deferred_imports: Vec<(u32, Option<Sym>)>,
     /// Rust file selection: modules whose file was skipped -> (file, its children's directory,
     /// is a mod.rs). load_deferred_module loads one after boot.
@@ -651,6 +665,9 @@ pub struct Program {
     /// The import fixpoint stalled: an import that found one namespace while a glob it
     /// looks through is still open takes what it found (resolve_imports_passes).
     import_settle: bool,
+    /// The imports the last import fixpoint run found to fail whatever the others bind: they make
+    /// no name wait (`import_waits`).
+    import_failed: crate::fxhash::HashSet<u32>,
     load_graph: Option<LoadGraph>,
     /// module path of the file being loaded (`module_path!()`)
     pub cur_mod_path: String,
@@ -989,6 +1006,7 @@ impl Program {
             glob_import: HashMap::default(),
             imports_of_module: HashMap::default(),
             import_settle: false,
+            import_failed: Default::default(),
             load_graph: None,
             cur_mod_path: String::new(),
             module_load_stack: Vec::new(),
@@ -1241,13 +1259,38 @@ impl Program {
         self.current_source_file_sets(keep).into_iter().filter_map(|(path, files)| Some((path, *files.last()?))).collect()
     }
 
-    /// `current_source_files` with every crate's file of a path, one per crate: a `--lib` test
-    /// root's harness crate and the plain library its dev-dependencies link are two crates of one
-    /// path (M50). The last is the one `current_source_files` names. `keep` picks the paths before
-    /// any is copied: a live session asking whether its few saved paths are sources had every
-    /// module's path (std's too) cloned into the map, 25-40 ms of the owner per edit (Fab, 11-04).
+    /// `current_source_files` with every version of a path: one per crate and module. A `--lib`
+    /// test root's harness crate and the plain library its dev-dependencies link are two crates
+    /// of one path (M50); one file declared as two modules (`#[path]` on both) is two versions,
+    /// each parsed as its module (relax issue 135). In module order; the last is the one
+    /// `current_source_files` names. `keep` picks the paths before any is copied: a live session
+    /// asking whether its few saved paths are sources had every module's path (std's too) cloned
+    /// into the map, 25-40 ms of the owner per edit (an app, 11-04).
     pub fn current_source_file_sets(&self, keep: impl Fn(&str) -> bool) -> std::collections::BTreeMap<String, Vec<u32>> {
         let mut files: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+        self.live_module_files(keep, |path, file| {
+            // the last module of a path orders its file last (an inline module is its file's:
+            // one entry)
+            let of = files.entry(path.clone()).or_default();
+            of.retain(|&f| f != file);
+            of.push(file);
+        });
+        files
+    }
+
+    /// `current_source_file_sets` in the crate `current_source_files` names: each module's
+    /// version of a path there (the check server's files).
+    pub fn current_source_module_files(&self, keep: impl Fn(&str) -> bool) -> std::collections::BTreeMap<String, Vec<u32>> {
+        let mut files = self.current_source_file_sets(keep);
+        for of in files.values_mut() {
+            let krate = of.last().and_then(|&f| self.file_crate.get(f as usize)).copied();
+            of.retain(|&f| self.file_crate.get(f as usize).copied() == krate);
+        }
+        files
+    }
+
+    /// Each live module's path and file, in module order, for the paths `keep` takes.
+    fn live_module_files(&self, keep: impl Fn(&str) -> bool, mut each: impl FnMut(&String, u32)) {
         let mut bound = Vec::with_capacity(self.mods.len());
         for module in &self.mods {
             // Refused module additions keep their definitions for old compiler
@@ -1259,14 +1302,9 @@ impl Program {
             bound.push(live);
             if !live { continue; }
             if let Some(path) = self.file_paths.get(module.file as usize).filter(|p| keep(p)) {
-                // the last module of a path names its crate's file and orders it
-                let krate = self.file_crate.get(module.file as usize);
-                let of = files.entry(path.clone()).or_default();
-                of.retain(|&f| self.file_crate.get(f as usize) != krate);
-                of.push(module.file);
+                each(path, module.file);
             }
         }
-        files
     }
 
     // ------------------------------------------------------------ loading
@@ -1298,7 +1336,7 @@ impl Program {
         let root_mod = self.new_module(root_def, None, None, krate, 0);
         self.defs[root_def.0 as usize].sub = root_mod;
         self.defs[root_def.0 as usize].scope = root_mod;
-        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, harness: false, validate: false, rustc_laid: false, relaxed: Default::default(), features: Default::default(), impl_view: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
+        self.crates.push(CrateInfo { name: cname, root_mod, edition, recursion_limit: 128, deps, cfg, proc_macro: false, is_bin: false, harness: false, validate: false, rustc_laid: false, relaxed: Default::default(), export_opt_level: Default::default(), features: Default::default(), impl_view: Default::default(), root_path: root.to_string(), context: crate::source_context::Context::new(root, self.sources.clone(), &self.session) });
         let kname = self.syms.str(cname).to_string();
         let akey = crate::preload::crate_key(&kname, root, &self.crates[krate as usize].cfg);
         if !self.ahead.contains_key(&akey) {
@@ -1536,9 +1574,9 @@ impl Program {
                         .map(|(token, (a, b))| format!(" at token {}: lazy {a:?}, eager {b:?}", token + 1)).unwrap_or_default();
                     format!("\nfirst differing source: {}{difference}", complete.file_paths[i])
                 }).unwrap_or_default();
-            return Err(format!("MAKEPAD_RUN_LAZY_VERIFY: complete program items, IDs, resolutions, or diagnostics differ from eager{detail}{source}"));
+            return Err(format!("RELAX_LAZY_VERIFY: complete program items, IDs, resolutions, or diagnostics differ from eager{detail}{source}"));
         }
-        if complete.file_paths != eager.file_paths { return Err("MAKEPAD_RUN_LAZY_VERIFY: file order differs from eager".into()); }
+        if complete.file_paths != eager.file_paths { return Err("RELAX_LAZY_VERIFY: file order differs from eager".into()); }
         for (left, right) in complete.files.iter().zip(&eager.files) { verify_file(left, right); }
         // Compare the actual lazy result as well. Completing the graph must not
         // mask a changed macro expansion, a missing import, or a different binding.
@@ -1548,7 +1586,7 @@ impl Program {
             let krate = self.file_crate[file_index];
             let occurrence = occurrences.entry((krate, path)).or_insert(0);
             let Some((i, _)) = eager.file_paths.iter().enumerate().filter(|(i, p)| *p == path && eager.file_crate[*i] == krate).nth(*occurrence) else {
-                return Err(format!("MAKEPAD_RUN_LAZY_VERIFY: lazy-only file {path}"));
+                return Err(format!("RELAX_LAZY_VERIFY: lazy-only file {path}"));
             };
             *occurrence += 1;
             verify_file(file, &eager.files[i]);
@@ -1559,14 +1597,14 @@ impl Program {
         if actual != expected {
             let first = actual.iter().find(|(key, values)| expected.get(*key) != Some(*values));
             let detail = first.map(|(key, values)| format!("\n{key}\nlazy: {values:?}\neager: {:?}", expected.get(key))).unwrap_or_default();
-            return Err(format!("MAKEPAD_RUN_LAZY_VERIFY: a reached module resolves differently from eager{detail}"));
+            return Err(format!("RELAX_LAZY_VERIFY: a reached module resolves differently from eager{detail}"));
         }
         let errors: Vec<_> = eager.errors.iter().filter(|error| reached.iter().any(|path| error.starts_with(path))).collect();
         if self.errors.iter().collect::<Vec<_>>() != errors {
-            return Err("MAKEPAD_RUN_LAZY_VERIFY: reached-file diagnostics differ from eager".into());
+            return Err("RELAX_LAZY_VERIFY: reached-file diagnostics differ from eager".into());
         }
         if self.session.options.rs_lazy && self.language_snapshot() != eager.language_snapshot() {
-            return Err("MAKEPAD_RUN_LAZY_VERIFY: global language items or their diagnostics differ from eager".into());
+            return Err("RELAX_LAZY_VERIFY: global language items or their diagnostics differ from eager".into());
         }
         let (reached, total) = plan.counts();
         eprintln!("rust-lazy-verify: passed; reached={reached} total={total}; items, IDs, ASTs, resolutions, diagnostics and available indexes match");
@@ -1619,7 +1657,7 @@ impl Program {
             for (ns, names) in ["type", "value", "macro"].iter().zip([&m.types, &m.values, &m.macros]) {
                 for (name, def) in names { if kept(*name, Some(*def)) { bindings.push(format!("{ns} {} {}", self.syms.str(*name), key(*def))); } }
             }
-            for (def, public) in &m.globs { if !skip_globs || self.def(*def).kind != DefKind::Mod || files.contains(self.file_paths.get(self.mods[self.def(*def).sub as usize].file as usize).map_or("", String::as_str)) { bindings.push(format!("glob {public} {}", key(*def))); } }
+            for (def, vis) in &m.globs { if !skip_globs || self.def(*def).kind != DefKind::Mod || files.contains(self.file_paths.get(self.mods[self.def(*def).sub as usize].file as usize).map_or("", String::as_str)) { bindings.push(format!("glob {} {}", vis.map_or_else(|| "pub".to_owned(), |v| key(self.mods[v as usize].def)), key(*def))); } }
             for (def, public) in &m.anon_traits { bindings.push(format!("trait {public} {}", key(*def))); }
             for ((name, types), public) in &m.import_pub { if kept(*name, None) { bindings.push(format!("visibility {} {types} {}", self.syms.str(*name), public & IMPORT_PUB != 0)); } }
             bindings.sort();
@@ -1689,7 +1727,9 @@ impl Program {
     fn load_file(&mut self, path: &str, edition: u16, krate: u32) -> Result<u32, String> {
         crate::why::event("load", path, 0, "", None);
         let _profile = crate::load_profile::span(self.session.runtime.profile, "load-file", path);
-        if let Some(f) = self.check_files.as_ref().and_then(|m| m.get(path)) { return Ok(*f); }
+        // a check's committed version of the module being loaded (a file declared as two
+        // modules is two versions; a module new to the edit takes the path's last)
+        if let Some(&(_, f)) = self.check_files.as_ref().and_then(|m| m.get(path)).and_then(|of| of.iter().find(|(m, _)| *m == self.cur_mod_path).or(of.last())) { return Ok(f); }
         let kname = if (krate as usize) < self.crates.len() { self.syms.str(self.crates[krate as usize].name).to_string() } else { String::new() };
         let std_file = matches!(kname.as_str(), "core" | "alloc" | "std");
         if std_file && self.std_from_shared {
@@ -1804,10 +1844,18 @@ impl Program {
         while !self.cur_image {
             // (a name the crate defines already is one its textual scope does not reach here, one
             // a `use .. as` of the crate binds resolves through that import, and a built-in's is
-            // no macro_rules!: no outline changes those, and the load does not wait for the plan)
-            let mut missing = used.failed_lookups();
+            // no macro_rules!: no outline changes those, and the load does not wait for the plan.
+            // An import the scan kept under its own name because its first segment could be a
+            // crate, `pub use other::{Subtag, subtag};` beside `mod other;`, is none of another
+            // crate's when that segment names no crate: the name is still the outline's to find)
+            let through_import = |n: &String| parse_table.aliases.get(&kname).and_then(|a| a.get(n)).is_some_and(|(first, orig)| {
+                orig != n || parse_table.crates.contains_key(first) || parse_table.crates.get(&kname).is_some_and(|c| c.externs.contains_key(first))
+            });
+            let mut missing = used.failed_lookups(|first| {
+                parse_table.crates.contains_key(first) || parse_table.crates.get(&kname).is_some_and(|c| c.externs.contains_key(first))
+            });
             missing.retain(|n| !parse_table.defs.get(n).is_some_and(|defs| defs.iter().any(|d| d.krate == kname)) && !used.local.iter().any(|d| &d.name == n)
-                && !parse_table.aliases.get(&kname).is_some_and(|a| a.contains_key(n))
+                && !through_import(n)
                 && !BUILTIN_MACROS.contains(&n.as_str()) && crate::builtins::macro_def_for(&kname, n).is_none());
             if missing.is_empty() { break; }
             let defs = outline.get_or_insert_with(|| self.pool.as_ref().and_then(|p| p.outline_macros(self.cur_ahead)));
@@ -1819,6 +1867,29 @@ impl Program {
             for d in defs.iter().filter(|d| missing.contains(&d.name) && d.def_file != path) {
                 if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
                     next.push(d.clone());
+                    added = true;
+                }
+            }
+            // A missing name may be one an expansion of another file binds: `pub use internal as
+            // name;` written beside the `macro_rules! internal` it generates (icu_locale_core's
+            // impl_tinystr_subtag!: `subtag!`, called in modules declared before `subtags`). The
+            // outline has those imports as well: take the ones of the missing names, and the
+            // definitions they name.
+            if let Some(uses) = self.pool.as_ref().and_then(|p| p.outline_expansions(self.cur_ahead)) {
+                let known = next.exp_uses.get(&kname).cloned().unwrap_or_default();
+                let renames: Vec<((String, String), Vec<String>)> = uses.iter()
+                    .filter(|(key, to)| missing.contains(&key.1) && known.get(*key) != Some(*to))
+                    .map(|(key, to)| (key.clone(), to.clone())).collect();
+                for (_, to) in &renames {
+                    let Some(target) = to.last() else { continue };
+                    for d in defs.iter().filter(|d| &d.name == target && d.def_file != path) {
+                        if !next.defs.get(&d.name).is_some_and(|known| known.iter().any(|k| k.krate == d.krate && k.def_file == d.def_file && k.def_pos == d.def_pos)) {
+                            next.push(d.clone());
+                        }
+                    }
+                }
+                if !renames.is_empty() {
+                    next.add_exp_uses(&kname, renames);
                     added = true;
                 }
             }
@@ -1932,19 +2003,29 @@ impl Program {
         self.parse_snapshot(old, path).parse(src)
     }
 
+    /// The module a file is the source of (not an inline module in it).
+    fn file_module(&self, file: u32) -> Option<u32> {
+        self.reload_files().mods.get(&file).into_iter().flatten().copied().find(|&m| self.mods[m as usize].lexical_parent.is_none())
+    }
+
+    /// The module path a file was loaded under (module_path!()): its module's, the crate's
+    /// name for a crate root.
+    fn file_module_path(&self, file: u32) -> String {
+        match self.file_module(file).map(|m| &self.mods[m as usize]) {
+            Some(m) if m.def.0 != u32::MAX && (m.def.0 as usize) < self.defs.len() && self.defs[m.def.0 as usize].kind == DefKind::Mod && self.defs[m.def.0 as usize].file != file => {
+                self.def_path(m.def)
+            }
+            _ => self.syms.str(self.crates[self.file_crate[file as usize] as usize].name).to_string(),
+        }
+    }
+
     pub fn parse_snapshot(&self, old: u32, path: &str) -> ParseSnapshot {
         let edition = self.files[old as usize].edition;
         let krate = self.file_crate[old as usize];
         let kname = self.syms.str(self.crates[krate as usize].name).to_string();
-        // the module path the file was loaded under (module_path!())
-        let own_module = self.reload_files().mods.get(&old).into_iter().flatten().copied().find(|&m| self.mods[m as usize].lexical_parent.is_none());
+        let own_module = self.file_module(old);
         let dir = own_module.map_or_else(|| dir_of(path).to_string(), |m| self.module_source_directory(m).0);
-        let mod_path = match own_module.map(|m| &self.mods[m as usize]) {
-            Some(m) if m.def.0 != u32::MAX && (m.def.0 as usize) < self.defs.len() && self.defs[m.def.0 as usize].kind == DefKind::Mod && self.defs[m.def.0 as usize].file != old => {
-                self.def_path(m.def)
-            }
-            _ => kname.clone(),
-        };
+        let mod_path = self.file_module_path(old);
         let mut macros = self.macros.clone();
         let root = self.crates[krate as usize].root_path();
         if macros.crates.get(&kname).is_some_and(|c| c.src != root) {
@@ -2003,7 +2084,8 @@ impl Program {
         let d = self.add_def(Def { kind: DefKind::Mod, name: sym, parent: pdef, file: f, item: ItemId(0), sub: 0, is_pub: false, krate, scope: parent });
         let m = self.new_module(d, Some(parent), None, krate, f);
         self.defs[d.0 as usize].sub = m;
-        self.mods[m as usize].globs.push((pdef, false));
+        let normal = self.mods[m as usize].normal;
+        self.mods[m as usize].globs.push((pdef, Some(normal)));
         if self.imports_done {
             self.forget_bindings();
         }
@@ -2147,9 +2229,10 @@ impl Program {
     pub fn memo_mem_lines(&self) -> Vec<(String, u64)> {
         let mut out = Vec::new();
         let mut push = |name: &str, (n, b): (usize, usize)| out.push((format!("program {} ({})", name, n), b as u64));
-        push("scope_cache", self.scope_cache.mem_stats(|_, _| 0));
-        push("glob_cache", self.glob_cache.mem_stats(|_, _| 0));
-        push("trait_bind_cache", self.trait_bind_cache.mem_stats(|_, v| 40 + v.capacity() * std::mem::size_of::<(DefId, BindVis)>()));
+        let uses = |v: &MemoUses| v.as_ref().map_or(0, |u| u.len() * std::mem::size_of::<MemoUse>());
+        push("scope_cache", self.scope_cache.mem_stats(|_, v| uses(&v.1)));
+        push("glob_cache", self.glob_cache.mem_stats(|_, v| uses(&v.1)));
+        push("trait_bind_cache", self.trait_bind_cache.mem_stats(|_, v| 40 + v.capacity() * std::mem::size_of::<TraitBinding>()));
         push("trait_scope", self.trait_scope.mem_stats(|_, v| 64 + v.capacity() * 5));
         out
     }
@@ -2345,7 +2428,7 @@ impl Program {
         self.declaration_versions.insert(new, declarations);
         let t_collect = std::time::Instant::now();
         let collected = self.collect_version_definitions(new, !same_scopes, true, visible);
-        if std::env::var_os("MAKEPAD_RUN_COMMIT_TRACE").is_some() {
+        if std::env::var_os("RELAX_COMMIT_TRACE").is_some() {
             eprintln!("commit-trace: save {:.2} ms, collect definitions {:.2} ms, rest {:.2} ms", save_ms, t_collect.elapsed().as_secs_f64() * 1e3, t_save.elapsed().as_secs_f64() * 1e3 - save_ms - t_collect.elapsed().as_secs_f64() * 1e3);
         }
         if let Err(error) = collected {
@@ -2568,11 +2651,16 @@ impl Program {
     /// Recollect one crate from the checker's current file versions. Other crates' ASTs
     /// and definitions stay resident. Old defs remain addressable until the caller drops
     /// their type tables and dependency edges; they are no longer bound in any namespace.
-    pub fn recollect_check_crate(&mut self, krate: u32, files: std::collections::HashMap<String, u32>) -> Result<Vec<DefId>, String> {
+    pub fn recollect_check_crate(&mut self, krate: u32, files: std::collections::HashMap<String, Vec<u32>>) -> Result<Vec<DefId>, String> {
         let root = self.crates[krate as usize].root_mod;
         let root_def = self.mods[root as usize].def;
         let path = self.crates[krate as usize].root_path.clone();
-        let file = *files.get(&path).ok_or_else(|| format!("missing committed crate root {}", path))?;
+        // each version's module path, before the recollection unbinds the crate's modules
+        let files: std::collections::HashMap<String, Vec<(String, u32)>> = files.into_iter()
+            .map(|(p, of)| { let of = of.into_iter().map(|f| (self.file_module_path(f), f)).collect(); (p, of) }).collect();
+        let kname = self.syms.str(self.crates[krate as usize].name).to_string();
+        let file = files.get(&path).and_then(|of| of.iter().find(|(m, _)| *m == kname).or(of.last())).map(|&(_, f)| f)
+            .ok_or_else(|| format!("missing committed crate root {}", path))?;
         // Imports in dependent crates may still bind an old def (including glob caches).
         for im in &self.imports {
             if let Some(name) = im.bind {
@@ -2636,7 +2724,6 @@ impl Program {
             }
         }
         self.expand_pending(krate, self.crates[krate as usize].edition);
-        let kname = self.syms.str(self.crates[krate as usize].name).to_string();
         std::sync::Arc::make_mut(&mut self.macros).seal_crate(&kname);
         let visible = self.crates_seeing_files([file].into_iter());
         self.resolve_imports_in(Some(&visible));
@@ -2745,7 +2832,7 @@ impl Program {
             }
             undo.push(UseUndo { index: i, module: m, bind: Some(name), done: true, glob: false, bound, gone });
             self.imports[i].done = false;
-            self.imports[i].bound &= !(BOUND_TYPES | BOUND_VALUES);
+            self.imports[i].bound &= !(BOUND_TYPES | BOUND_VALUES | BOUND_SETTLED);
             again.push(i);
         }
         if again.is_empty() {
@@ -2753,23 +2840,12 @@ impl Program {
         }
         self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
-        // strict passes while they make progress, then one that settles (resolve_imports_passes)
-        for settle in [false, true] {
-            self.import_settle = settle;
-            loop {
-                let mut progress = false;
-                for &i in &again {
-                    if !self.imports[i].done && self.try_import(i) {
-                        self.imports[i].done = true;
-                        progress = true;
-                    }
-                }
-                if !progress {
-                    break;
-                }
-            }
-        }
-        self.import_settle = false;
+        // (again is ascending: the imports in index order)
+        self.import_fixpoint(&again, &mut |p, i, _| {
+            let ok = p.try_import(i);
+            if ok { p.imports[i].done = true; }
+            ok
+        });
         self.forget_bindings();
         self.glob_cache.clear(); self.glob_amb_cache.clear(); self.glob_prec_cache.clear();
         let unresolved = again.iter().filter(|&&i| !self.imports[i].done).map(|&i| (self.imports[i].file, self.imports[i].pos, self.import_path(i))).collect();
@@ -3130,13 +3206,14 @@ impl Program {
                         ItemKind::Mod(Opt::Some(items)) => Some(self.files[file as usize].ast.list(*items).to_vec()),
                         _ => None,
                     };
-                    // rustc_builtin_macros source_util.rs `include!`: the items of an included file
-                    // resolve their `mod x;` in that file's folder (the module's relative
-                    // ownership is kept)
+                    // rustc_builtin_macros source_util.rs `include!` (expand_include): the items of
+                    // an included file resolve their `mod x;` in that file's folder, from a mod.rs
+                    // or a non-mod.rs file alike (rustc 1.99.1: `mod deep;` in a file client.rs
+                    // includes is src/deep.rs, not src/client/deep.rs; relax issue 173)
                     let included;
                     let dir = match self.files[file as usize].authored_path(self.files[file as usize].ast.item(iid).lo) {
                         Some(p) if p != self.file_paths[file as usize] => {
-                            included = if mod_rs { dir_of(&p).to_string() } else { format!("{}/{}", dir_of(&p), dir.rsplit('/').next().unwrap_or("")) };
+                            included = dir_of(&p).to_string();
                             included.as_str()
                         }
                         _ => dir,
@@ -3661,7 +3738,6 @@ impl Program {
     /// The import fixpoint's passes (no reporting).
     fn resolve_imports_passes(&mut self, i0: usize) {
         self.load_graph = None;
-        let tr = crate::preload::trace();
         if i0 == 0 {
             self.imports_of_module.clear();
         }
@@ -3669,40 +3745,203 @@ impl Program {
             let m = self.imports[j].module;
             self.imports_of_module.entry(m).or_default().push(j as u32);
         }
-        let mut passes = Vec::new();
+        let set: Vec<usize> = (i0..self.imports.len()).collect();
+        let run = self.import_fixpoint(&set, &mut |p, i, _| {
+            let ok = p.try_import(i);
+            if ok { p.imports[i].done = true; }
+            ok
+        });
+        if crate::preload::trace() {
+            eprintln!("boot-trace: resolve: {} imports ({} glob); passes (resolved/tried): {}; {} tries waited on an open import, {} failures determined, {} forced", self.imports.len(), self.imports.iter().filter(|i| i.glob).count(), run.passes.join(", "), run.waited, run.failed, run.forced);
+        }
+    }
+
+    /// One import fixpoint run over the open imports of `set` (ascending indices): strict passes
+    /// while they make progress. A strict pass without progress is followed by a settle pass, which
+    /// lifts the wait of an import found in one namespace (`open_binding_through_globs`). A settle
+    /// pass without progress is a stall: the imports that failed in it without waiting stop making
+    /// names wait (their failure is determined), and strict passes start again. A stall with no
+    /// such import ends in a forced step: the lowest open import that resolves with the
+    /// open-import wait (`import_waits`) lifted for it alone. That binding, and every one the run
+    /// makes after it, is marked BOUND_SETTLED: rustc leaves such an import undetermined, and the
+    /// import replay reports it. Then strict passes again; the run ends with a forced step that
+    /// resolves nothing. A program with skipped files forces nothing: an import may wait on a
+    /// file a later load brings (`defer_skipped_imports` defers it), and forcing would bind past
+    /// what that file binds. `step(p, i, settle)` tries import i, marks it done when it resolves
+    /// and does the caller's bookkeeping.
+    fn import_fixpoint(&mut self, set: &[usize], step: &mut dyn FnMut(&mut Program, usize, bool) -> bool) -> FixRun {
+        let tr = crate::preload::trace();
+        let mut run = FixRun::default();
+        let outer = IMPORT_RUN.with(|r| r.replace(ImportRun { active: true, block: true, current: usize::MAX, blocked: false }));
+        RUN_TABLES.with(|t| *t.borrow_mut() = RunTables::default());
+        self.import_failed.clear();
+        let mut forced = false;
         let mut settle = false;
+        // the imports of the last pass that failed without waiting on an open import
+        let mut failing = Vec::new();
         loop {
             self.import_settle = settle;
-            let mut progress = false;
             let t0 = std::time::Instant::now();
             let (mut tried, mut ok) = (0, 0);
-            for i in i0..self.imports.len() {
+            failing.clear();
+            for &i in set {
                 if self.imports[i].done {
                     continue;
                 }
                 tried += 1;
-                if self.try_import(i) {
-                    self.imports[i].done = true;
-                    progress = true;
+                if step(self, i, settle) {
+                    if forced { self.imports[i].bound |= BOUND_SETTLED; }
                     ok += 1;
+                } else if import_blocked() {
+                    run.waited += 1;
+                } else {
+                    failing.push(i);
                 }
             }
             if tr {
-                passes.push(format!("{}/{} {:.1}ms{}", ok, tried, t0.elapsed().as_secs_f64() * 1e3, if settle { " (settle)" } else { "" }));
+                run.passes.push(format!("{}/{} {:.1}ms{}", ok, tried, t0.elapsed().as_secs_f64() * 1e3, if settle { " (settle)" } else { "" }));
             }
-            // a pass without progress: one more that settles the imports waiting on open globs
-            // for their other namespace, then strict passes again while that makes progress
-            if progress {
+            if ok > 0 {
                 settle = false;
-            } else if settle {
-                break;
-            } else {
-                settle = true;
+                continue;
             }
+            if !settle {
+                settle = true;
+                continue;
+            }
+            // a stall: an import that failed without waiting fails whatever the others bind (rustc:
+            // its failure is determined) and makes nothing wait any more -- under a lazy load only
+            // one the deferral would not defer (a later file may still bring what it looks for)
+            let deferred = if self.skipped_files.is_empty() || failing.is_empty() {
+                crate::fxhash::HashSet::default()
+            } else {
+                let pending: Vec<usize> = (0..self.imports.len()).filter(|&i| !self.imports[i].done).collect();
+                self.deferred_by_stops(&self.deferral_stops(&pending))
+            };
+            let failed = failing.iter().filter(|&&i| !deferred.contains(&i) && self.import_failed.insert(i as u32)).count();
+            if failed > 0 {
+                run.failed += failed;
+                settle = false;
+                continue;
+            }
+            if !self.skipped_files.is_empty() {
+                break;
+            }
+            // the forced step: the lowest open import that resolves without the wait
+            let t0 = std::time::Instant::now();
+            let mut got = None;
+            for &i in set {
+                if self.imports[i].done {
+                    continue;
+                }
+                IMPORT_RUN.with(|r| r.set(ImportRun { block: false, ..r.get() }));
+                let ok = step(self, i, true);
+                IMPORT_RUN.with(|r| r.set(ImportRun { block: true, ..r.get() }));
+                if ok {
+                    got = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = got else { break };
+            self.imports[i].bound |= BOUND_SETTLED;
+            forced = true;
+            run.forced += 1;
+            if tr {
+                run.passes.push(format!("1 forced {:.1}ms", t0.elapsed().as_secs_f64() * 1e3));
+            }
+            settle = false;
         }
         self.import_settle = false;
-        if tr {
-            eprintln!("boot-trace: resolve: {} imports ({} glob); passes (resolved/tried): {}", self.imports.len(), self.imports.iter().filter(|i| i.glob).count(), passes.join(", "));
+        IMPORT_RUN.with(|r| r.set(outer));
+        run
+    }
+
+    /// Whether this thread's import fixpoint run makes `name` in module `m` wait (`m`'s own table
+    /// missed it): an import of `m` other than the one being resolved is still open, binds that
+    /// name in this namespace and is visible from the module of the one being resolved, so what
+    /// `m`'s globs or the scopes outside it give now may be shadowed (rustc ident.rs: undetermined
+    /// while such a single import may still define the name; one the lookup cannot see -- itself, or
+    /// behind a glob on the way to `m` (`via`) -- or whose failure is determined, is skipped). Marks
+    /// the try blocked.
+    fn import_waits(&self, m: u32, name: Sym, ns_type: bool, via: &[u32]) -> bool {
+        let r = IMPORT_RUN.with(|r| r.get());
+        if !r.block {
+            return false;
+        }
+        let bit = if ns_type { BOUND_TYPES } else { BOUND_VALUES };
+        let open: Vec<u32> = RUN_TABLES.with(|t| {
+            let mut t = t.borrow_mut();
+            let names = t.open.entry(m).or_insert_with(|| {
+                let mut names: HashMap<Sym, Vec<u32>> = HashMap::default();
+                for &j in self.imports_of_module.get(&m).map_or(&[][..], |v| &v[..]) {
+                    let im = &self.imports[j as usize];
+                    if let (false, false, Some(b)) = (im.done, im.glob, im.bind) {
+                        names.entry(b).or_default().push(j);
+                    }
+                }
+                names
+            });
+            names.get(&name).map_or(Vec::new(), |v| v.iter().copied().filter(|&j| {
+                let im = &self.imports[j as usize];
+                j as usize != r.current && !im.done && im.bound & bit == 0 && (ns_type || im.bound & BOUND_SELF_ONLY == 0)
+                    && !self.import_failed.contains(&j)
+            }).collect())
+        });
+        if open.is_empty() {
+            return false;
+        }
+        let from = self.imports.get(r.current).map(|im| im.module);
+        if let Some(from) = from {
+            if !self.globs_visible(via, m, from) {
+                return false;
+            }
+        }
+        let waits = open.into_iter().any(|j| from.map_or(true, |from| self.vis_visible(self.open_import_vis(j), from)));
+        if waits {
+            IMPORT_RUN.with(|c| c.set(ImportRun { blocked: true, ..r }));
+        }
+        waits
+    }
+
+    /// Whether module `from` sees what module `m` binds through the globs a lookup followed to it
+    /// (`via`: the modules whose globs it walks, outermost first): every glob on the way is `pub` or
+    /// one of a module `from` is inside.
+    fn globs_visible(&self, via: &[u32], m: u32, from: u32) -> bool {
+        via.iter().zip(via.iter().skip(1).chain(std::iter::once(&m))).all(|(&p, &x)| {
+            let pm = &self.mods[p as usize];
+            pm.globs.iter().any(|&(g, gv)| {
+                let d = self.def(g);
+                d.kind == DefKind::Mod && d.sub == x && self.vis_visible(gv, from)
+            })
+        })
+    }
+
+    /// The visibility of open import `j` for `import_waits`: a private one is its module's, a `pub`
+    /// one its item's (`import_vis`, kept for the run; a `pub(in path)` resolves its path, which
+    /// waits on nothing).
+    fn open_import_vis(&self, j: u32) -> BindVis {
+        let im = &self.imports[j as usize];
+        if !im.is_pub {
+            return Some(self.mods[im.module as usize].normal);
+        }
+        if let Some(v) = RUN_TABLES.with(|t| t.borrow().vis.get(&j).copied()) {
+            return v;
+        }
+        let r = IMPORT_RUN.with(|r| r.replace(ImportRun { block: false, ..r.get() }));
+        let v = self.import_vis(im);
+        IMPORT_RUN.with(|c| c.set(r));
+        RUN_TABLES.with(|t| t.borrow_mut().vis.insert(j, v));
+        v
+    }
+
+    /// The visibility of the `use` (or `extern crate`) item an import came from; private where the
+    /// item is not found.
+    pub fn import_vis(&self, im: &Import) -> BindVis {
+        let Some(f) = self.files.get(im.file as usize) else { return Some(self.mods[im.module as usize].normal) };
+        let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use { .. } | ItemKind::ExternCrate(_)));
+        match item {
+            Some(it) => self.vis_module(im.file, im.module, &it.vis),
+            None => Some(self.mods[im.module as usize].normal),
         }
     }
 
@@ -3721,13 +3960,27 @@ impl Program {
         let im = &self.imports[i];
         let edition = self.crates[self.mods[im.module as usize].krate as usize].edition;
         let full = if im.glob { im.segs.len() } else { im.segs.len().saturating_sub(1) };
+        // (a prefix through a name an open import may still bind stops before it, as the
+        // import's own resolution does: `import_waits`)
+        let outer = IMPORT_RUN.with(|r| r.replace(ImportRun { active: true, block: true, current: i, blocked: false }));
+        // (outside a run the tables are those of an earlier run, perhaps another program's)
+        if !outer.active {
+            RUN_TABLES.with(|t| *t.borrow_mut() = RunTables::default());
+        }
+        let mut stop = im.module;
         for k in (1..=full).rev() {
+            IMPORT_RUN.with(|r| r.set(ImportRun { blocked: false, ..r.get() }));
             if let Some(d) = self.resolve_mod_path(im.module, im.global, &im.segs[..k], edition < 2018, true) {
+                if import_blocked() {
+                    continue;
+                }
                 let def = self.def(d);
-                return if def.kind == DefKind::Mod { def.sub } else { u32::MAX };
+                stop = if def.kind == DefKind::Mod { def.sub } else { u32::MAX };
+                break;
             }
         }
-        im.module
+        IMPORT_RUN.with(|r| r.set(outer));
+        stop
     }
 
     /// Rust file selection skips modules no reached item looks into. An import
@@ -3738,18 +3991,38 @@ impl Program {
         if i0 == 0 { self.deferred_imports.clear(); }
         // a restored collected program has no plan but may still have skipped modules
         if !self.session.options.rs_lazy || (self.demand_plan.is_none() && self.skipped_files.is_empty()) { return deferred; }
-        let mut incomplete: crate::fxhash::HashSet<u32> = (0..self.mods.len() as u32).filter(|&m| self.skipped_module(m)).collect();
-        if incomplete.is_empty() { self.deferred_waits.clear(); self.deferred_binds.clear(); return deferred; }
-        // Settling can finish an import in only one namespace. Its other binding may
-        // still depend on a skipped file (for example a value found through a glob,
-        // while the explicitly re-exported type is deferred). Keep that chain in the
-        // miss graph too: rustc resolves a use independently in each namespace.
+        if !(0..self.mods.len() as u32).any(|m| self.skipped_module(m)) { self.deferred_waits.clear(); self.deferred_binds.clear(); return deferred; }
+        let stops = self.deferral_stops(pending);
+        deferred = self.deferred_by_stops(&stops);
+        for &i in &deferred {
+            self.imports[i].done = false;
+            self.deferred_imports.push((self.imports[i].module, if self.imports[i].glob { None } else { self.imports[i].bind }));
+        }
+        self.compute_deferred_waits(&stops, &deferred);
+        if i0 == 0 { self.load_graph = Some(self.load_graph_from_stops(stops)); }
+        deferred
+    }
+
+    /// The imports a deferral looks at, with their stops: `pending`, and the imports settled in one
+    /// namespace only. Settling can finish an import in only one namespace. Its other binding may
+    /// still depend on a skipped file (for example a value found through a glob, while the
+    /// explicitly re-exported type is deferred). Keep that chain in the miss graph too: rustc
+    /// resolves a use independently in each namespace.
+    fn deferral_stops(&self, pending: &[usize]) -> Vec<(usize, u32)> {
         let partial = self.imports.iter().enumerate().filter_map(|(i, im)| {
             let m = &self.mods[im.module as usize];
             (im.done && !im.glob && im.bind.is_some_and(|b| self.syms.str(b) != "_"
                 && (!m.types.contains_key(&b) || !m.values.contains_key(&b)))).then_some(i)
         });
-        let stops: Vec<(usize, u32)> = pending.iter().copied().chain(partial).map(|i| (i, self.import_stop(i))).collect();
+        pending.iter().copied().chain(partial).map(|i| (i, self.import_stop(i))).collect()
+    }
+
+    /// The imports of `stops` a lazy load defers: those that stop in an incomplete module -- a
+    /// skipped one, one with a glob of an incomplete one, the module of a deferred import.
+    fn deferred_by_stops(&self, stops: &[(usize, u32)]) -> crate::fxhash::HashSet<usize> {
+        let mut deferred = crate::fxhash::HashSet::default();
+        let mut incomplete: crate::fxhash::HashSet<u32> = (0..self.mods.len() as u32).filter(|&m| self.skipped_module(m)).collect();
+        if incomplete.is_empty() { return deferred; }
         loop {
             let mut changed = false;
             for m in 0..self.mods.len() as u32 {
@@ -3759,19 +4032,13 @@ impl Program {
                     changed = true;
                 }
             }
-            for &(i, stop) in &stops {
+            for &(i, stop) in stops {
                 if deferred.contains(&i) || !incomplete.contains(&stop) { continue; }
                 deferred.insert(i);
                 changed |= incomplete.insert(self.imports[i].module);
             }
             if !changed { break; }
         }
-        for &i in &deferred {
-            self.imports[i].done = false;
-            self.deferred_imports.push((self.imports[i].module, if self.imports[i].glob { None } else { self.imports[i].bind }));
-        }
-        self.compute_deferred_waits(&stops, &deferred);
-        if i0 == 0 { self.load_graph = Some(self.load_graph_from_stops(stops)); }
         deferred
     }
 
@@ -3869,12 +4136,12 @@ impl Program {
     /// the missed name.
     pub fn misses_to_load(&self, misses: &[(u32, String)]) -> Vec<u32> {
         let mut mods = Vec::new();
-        let trace = std::env::var_os("MAKEPAD_RUN_DEFERRED_TRACE").is_some();
+        let trace = std::env::var_os("RELAX_DEFERRED_TRACE").is_some();
         for (m, name) in misses {
             let skipped = self.skipped_files.contains_key(m);
             let declares = skipped && self.skipped_declares(*m, name);
             if trace {
-                eprintln!("makepad-run deferred: miss `{}` in {} ({})", name, self.def_path(self.mods[*m as usize].def),
+                eprintln!("relax deferred: miss `{}` in {} ({})", name, self.def_path(self.mods[*m as usize].def),
                     if !skipped { "not skipped" } else if declares { "load" } else { "outline does not bind it" });
             }
             if !mods.contains(m) && declares { mods.push(*m); }
@@ -4087,53 +4354,39 @@ impl Program {
         let (mut retried, mut settled, mut completed) = (0usize, 0usize, 0usize);
         let mut bindings_changed = self.defs.len() != d0 || self.imports.len() != i0;
         let done_before: Vec<_> = imports.iter().map(|&i| (i, self.imports[i].done)).collect();
-        let mut settle = false;
-        loop {
-            self.import_settle = settle;
-            let mut progress = false;
-            // The cone already follows every possible completion through its
-            // importers. New glob edges end in modules in that cone, so they
-            // cannot add an outside consumer during these append-only passes.
-            for &i in &imports {
-                if self.imports[i].done {
-                    continue;
-                }
-                retried += 1;
-                settled += usize::from(settle);
-                let module = self.imports[i].module;
-                let md = &self.mods[module as usize];
-                let before = (md.types.len(), md.values.len(), md.globs.len(), md.anon_traits.len());
-                if self.try_import(i) {
-                    self.imports[i].done = true;
-                    progress = true;
-                    completed += 1;
-                }
-                let md = &self.mods[module as usize];
-                let after = (md.types.len(), md.values.len(), md.globs.len(), md.anon_traits.len());
-                if before != after || self.imports[i].done {
-                    bindings_changed |= before != after;
-                    changed.insert(module);
-                    if before.2 != after.2 {
-                        // try_import inserts in source order, possibly before an
-                        // already-resolved glob. The new edge is not always last.
-                        for &(g, _) in &md.globs {
-                            let d = self.def(g);
-                            if d.kind == DefKind::Mod {
-                                graph.globs.entry(d.sub).or_default().insert(module);
-                            }
+        // The cone already follows every possible completion through its
+        // importers. New glob edges end in modules in that cone, so they
+        // cannot add an outside consumer during these append-only passes.
+        let cone: Vec<usize> = imports.iter().copied().collect();
+        self.import_fixpoint(&cone, &mut |p, i, settle| {
+            retried += 1;
+            settled += usize::from(settle);
+            let module = p.imports[i].module;
+            let md = &p.mods[module as usize];
+            let before = (md.types.len(), md.values.len(), md.globs.len(), md.anon_traits.len());
+            let ok = p.try_import(i);
+            if ok {
+                p.imports[i].done = true;
+                completed += 1;
+            }
+            let md = &p.mods[module as usize];
+            let after = (md.types.len(), md.values.len(), md.globs.len(), md.anon_traits.len());
+            if before != after || ok {
+                bindings_changed |= before != after;
+                changed.insert(module);
+                if before.2 != after.2 {
+                    // try_import inserts in source order, possibly before an
+                    // already-resolved glob. The new edge is not always last.
+                    for &(g, _) in &md.globs {
+                        let d = p.def(g);
+                        if d.kind == DefKind::Mod {
+                            graph.globs.entry(d.sub).or_default().insert(module);
                         }
                     }
                 }
             }
-            if progress {
-                settle = false;
-            } else if settle {
-                break;
-            } else {
-                settle = true;
-            }
-        }
-        self.import_settle = false;
+            ok
+        });
         for &i in &imports {
             graph.stop(i, self.import_may_wait(i).then(|| self.import_stop(i)));
         }
@@ -4143,16 +4396,16 @@ impl Program {
         // Scope/trait-scope also read the implicit prelude. A changed prelude
         // therefore invalidates those scopes even without an explicit glob edge.
         let prelude_changed = self.prelude_modules().iter().any(|m| invalid.contains(m));
-        let scope = retain_load_memos(&mut self.scope_cache, |(m, _, _), v| !prelude_changed && !invalid.contains(m) && v.is_some());
-        let glob = retain_load_memos(&mut self.glob_cache, |(m, _, _), v| !invalid.contains(m) && v.is_some());
+        let scope = retain_load_memos(&mut self.scope_cache, |(m, _, _), v| !prelude_changed && !invalid.contains(m) && v.0.is_some());
+        let glob = retain_load_memos(&mut self.glob_cache, |(m, _, _), v| !invalid.contains(m) && v.0.is_some());
         let trait_bind = retain_load_memos(&mut self.trait_bind_cache, |m, v| !invalid.contains(m) && !v.is_empty());
         let trait_scope = retain_load_memos(&mut self.trait_scope, |m, v| !prelude_changed && !invalid.contains(m) && !v.is_empty());
         self.imports_done = true;
         self.load_graph = Some(graph);
-        if std::env::var_os("MAKEPAD_RUN_DEFERRED_TRACE").is_some() {
+        if std::env::var_os("RELAX_DEFERRED_TRACE").is_some() {
             let kept = scope.0 + glob.0 + trait_bind.0 + trait_scope.0;
             let dropped = scope.1 + glob.1 + trait_bind.1 + trait_scope.1;
-            eprintln!("makepad-run deferred: front-load {} imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} trait_bind={:?} trait_scope={:?} index_built={}",
+            eprintln!("relax deferred: front-load {} imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} trait_bind={:?} trait_scope={:?} index_built={}",
                 self.def_path(self.mods[m as usize].def), retried, completed, settled, affected.len(),
                 if prelude_changed { self.mods.len() } else { invalid.len() }, kept, dropped, prelude_changed,
                 scope, glob, trait_bind, trait_scope, indexed);
@@ -4268,6 +4521,7 @@ impl Program {
     }
 
     fn try_import(&mut self, i: usize) -> bool {
+        IMPORT_RUN.with(|r| r.set(ImportRun { current: i, blocked: false, ..r.get() }));
         let module = self.imports[i].module;
         let global = self.imports[i].global;
         let glob = self.imports[i].glob;
@@ -4285,6 +4539,10 @@ impl Program {
                     None => return false,
                 }
             };
+            // (a path through a name an open import may still bind waits for it)
+            if import_blocked() {
+                return false;
+            }
             // only a module or an enum can be glob-imported (`use Alias::*` is unresolved)
             if !matches!(self.def(target).kind, DefKind::Mod | DefKind::Enum) {
                 return false;
@@ -4298,11 +4556,13 @@ impl Program {
             if self.imports[i].bound & BOUND_PREFIX_ONLY != 0 {
                 return true;
             }
-            let is_pub = self.imports[i].is_pub;
+            // the glob's names are as visible as its `use` item (relax issue 186: a dependency's
+            // `pub(crate) use crate::math::*;` gave an app's glob of that module `math`'s names)
+            let gv = self.open_import_vis(i as u32);
             self.glob_import.entry((module, target)).or_insert(i as u32);
             let order = |p: &Program, t: DefId| p.glob_import.get(&(module, t)).copied().unwrap_or(u32::MAX);
             let at = self.mods[module as usize].globs.partition_point(|(t, _)| order(self, *t) <= i as u32);
-            self.mods[module as usize].globs.insert(at, (target, is_pub));
+            self.mods[module as usize].globs.insert(at, (target, gv));
             return true;
         }
         let bind = self.imports[i].bind.unwrap_or(0);
@@ -4318,7 +4578,9 @@ impl Program {
                 tdef = self.lookup_in_scope(module, last, true);
                 vdef = if self.imports[i].bound & BOUND_SELF_ONLY != 0 { None } else { self.lookup_in_scope(module, last, false) };
             }
-        } else if segs.len() == 1 && last_kind != SegKind::Ident {
+        } else if last_kind != SegKind::Ident {
+            // a path that ends in a keyword names a module: `use super as p;`, `use crate as c;`,
+            // `use super::super as a;`, `use self::super::{self as b};`
             let m = match self.resolve_mod_path(module, global, &segs, edition < 2018, true) {
                 Some(m) => m,
                 None => return false,
@@ -4335,7 +4597,7 @@ impl Program {
                 if let Some(c) = self.extern_crate(module, last) {
                     tdef = Some(self.mods[self.crates[c as usize].root_mod as usize].def);
                 } else {
-                    return self.lookup_macro_in_container(root, last);
+                    return !import_blocked() && self.lookup_macro_in_container(root, last);
                 }
             }
         } else {
@@ -4374,13 +4636,18 @@ impl Program {
             }
             if tdef.is_none() && vdef.is_none() {
                 // macros only (e.g. `use crate::log;` for macro_rules) count as resolved
-                if self.imports[i].bound & BOUND_SELF_ONLY == 0 && self.lookup_macro_in_container(parent, last) {
+                if !import_blocked() && self.imports[i].bound & BOUND_SELF_ONLY == 0 && self.lookup_macro_in_container(parent, last) {
                     return true;
                 }
                 return false;
             }
         }
         if tdef.is_none() && vdef.is_none() {
+            return false;
+        }
+        // a name on the path, or the name itself, that an open import may still bind: nothing
+        // is bound until that import is done (`import_waits`)
+        if import_blocked() {
             return false;
         }
         // items of another proc-macro crate are invisible (only its macros are exported)
@@ -4764,7 +5031,7 @@ impl Program {
                 }
                 let sub = self.def(*t).sub;
                 let other = self.mods[sub as usize].krate != krate;
-                if *p && !(own && other) || (own && !other) {
+                if p.is_none() && !(own && other) || (own && !other) {
                     let own2 = own && !other;
                     queue.push_front((sub, path.clone(), own2));
                 }
@@ -4900,11 +5167,16 @@ impl Program {
     pub fn resolve_mod_path(&self, module: u32, global: bool, segs: &[(SegKind, Sym)], from_root: bool, in_use: bool) -> Option<DefId> {
         let krate = self.mods[module as usize].krate;
         let mut cur: Option<DefId> = None;
+        // rustc_resolve ident.rs resolve_path_with_ribs: `super` follows only `self` and other
+        // `super`s (`::super`, `crate::super` and `a::super` fail)
+        let mut allow_super = !global;
         for (i, (kind, name)) in segs.iter().enumerate() {
+            allow_super &= matches!(kind, SegKind::SelfValue | SegKind::Super);
             let next = if i == 0 {
                 match kind {
                     SegKind::Crate => Some(self.mods[self.crates[krate as usize].root_mod as usize].def),
                     SegKind::SelfValue => Some(self.mods[self.mods[module as usize].normal as usize].def),
+                    SegKind::Super if !allow_super => return None,
                     SegKind::Super => {
                         let n = self.mods[module as usize].normal;
                         let p = self.mods[n as usize].parent_mod?;
@@ -4945,7 +5217,7 @@ impl Program {
                 match kind {
                     SegKind::Super => {
                         let d = self.def(c);
-                        if d.kind != DefKind::Mod {
+                        if !allow_super || d.kind != DefKind::Mod {
                             return None;
                         }
                         let p = self.mods[d.sub as usize].parent_mod?;
@@ -4967,7 +5239,7 @@ impl Program {
         match d.kind {
             DefKind::Mod => {
                 let r = self.lookup_in_module(d.sub, name, ns_type, &mut Vec::new());
-                if r.is_none() { self.note_deferred_miss(d.sub, name); }
+                if r.is_none() && !import_blocked() { self.note_deferred_miss(d.sub, name); }
                 r
             }
             DefKind::Enum => {
@@ -5018,32 +5290,35 @@ impl Program {
         // a converged answer of an earlier query: returned as it is (inserting it again would put
         // a duplicate node at the head of its chain on every repeated lookup -- MemoMap::insert
         // does not replace -- and the chains of the fixed bucket table grew without bound)
-        let cacheable = self.imports_done && !q.precise && !self.mods[m as usize].globs.is_empty()
+        let cacheable = self.imports_done && !q.precise && !import_run_active() && !self.mods[m as usize].globs.is_empty()
             && !self.mods[m as usize].values.contains_key(&name) && !self.mods[m as usize].types.contains_key(&name);
         if cacheable {
-            if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
+            if let Some(r) = self.glob_cache.with(&(m, name, ns_type), memo_hit).flatten() {
                 return r;
             }
         }
         // first found wins between globs, so an answer can change once more after it is
         // found; the passes are bounded by the cycle (each pass settles at least one more
         // module of it) -- the bound only guards against a non-converging glob graph
-        for pass in 0.. {
-            q.memo.clear();
-            q.hits.clear();
-            q.tainted.clear();
-            let r = self.lookup_in_module_pass(m, name, ns_type, q);
-            let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
-            if !stale || pass > q.prev.len() + 1 {
-                if cacheable && !quiet_lookups() {
-                    // (a final answer of the pass is there already)
-                    self.glob_cache.insert_first((m, name, ns_type), r);
+        let (r, uses) = self.memo_lookup(|| {
+            for pass in 0.. {
+                q.memo.clear();
+                q.hits.clear();
+                q.tainted.clear();
+                let r = self.lookup_in_module_pass(m, name, ns_type, q);
+                let stale = q.hits.iter().any(|(x, given)| q.memo.get(x).map_or(false, |fin| fin != given));
+                if !stale || pass > q.prev.len() + 1 {
+                    return r;
                 }
-                return r;
+                q.prev = std::mem::take(&mut q.memo);
             }
-            q.prev = std::mem::take(&mut q.memo);
+            unreachable!()
+        });
+        if cacheable && !quiet_lookups() {
+            // (a final answer of the pass is there already)
+            memo_put(&self.glob_cache, (m, name, ns_type), (r, uses));
         }
-        unreachable!()
+        r
     }
 
     fn lookup_in_module_pass(&self, m: u32, name: Sym, ns_type: bool, q: &mut GlobQuery) -> Option<(DefId, BindVis)> {
@@ -5052,6 +5327,9 @@ impl Program {
         if let Some(&d) = direct {
             if record_import_uses() && md.import_pub.contains_key(&(name, ns_type)) && !record_import_use(|u| u.import.push((m, name, ns_type))) { self.import_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, name, ns_type)); }
             return Some((d, if q.precise { self.precise_vis(m, name, ns_type, d) } else { self.binding_vis(m, name, ns_type, d) }));
+        }
+        if self.import_waits(m, name, ns_type, &q.open) {
+            return None;
         }
         if md.globs.is_empty() {
             return None;
@@ -5066,15 +5344,15 @@ impl Program {
             return *r;
         }
         // through globs: converged answers of earlier queries (glob graphs are wide and deep)
-        let cacheable = self.imports_done && !q.precise;
+        let cacheable = self.imports_done && !q.precise && !import_run_active();
         if cacheable {
-            if let Some(r) = self.glob_cache.get(&(m, name, ns_type)) {
+            if let Some(r) = self.glob_cache.with(&(m, name, ns_type), memo_hit).flatten() {
                 return r;
             }
         }
         let (hits, taints) = (q.hits.len(), q.taints);
         q.open.push(m);
-        let r = self.lookup_in_module_globs(m, name, ns_type, q);
+        let (r, uses) = self.memo_lookup(|| self.lookup_in_module_globs(m, name, ns_type, q));
         q.open.pop();
         q.memo.insert(m, r);
         // an answer that read no module still being looked through (directly or through an
@@ -5083,7 +5361,7 @@ impl Program {
         if q.hits.len() != hits || q.taints != taints {
             q.tainted.insert(m);
         } else if cacheable && !quiet_lookups() {
-            self.glob_cache.insert_first((m, name, ns_type), r);
+            memo_put(&self.glob_cache, (m, name, ns_type), (r, uses));
         }
         r
     }
@@ -5104,7 +5382,7 @@ impl Program {
         // the most visible binding (rustc_resolve imports.rs / try_define): a module's private
         // `use` never leaks through `pub use module::*`
         let mut best: Option<(DefId, BindVis)> = None;
-        for &(g, gpub) in &md.globs {
+        for &(g, gv) in &md.globs {
             let gd = self.def(g);
             let r = match gd.kind {
                 DefKind::Mod => self.lookup_in_module_vis(gd.sub, name, ns_type, q),
@@ -5118,7 +5396,6 @@ impl Program {
                 if !self.vis_visible(v, m) {
                     continue;
                 }
-                let gv = if gpub { None } else { Some(md.normal) };
                 let v = self.vis_min(gv, v);
                 if record_import_uses() && !record_import_use(|u| u.glob.push((m, g))) { self.glob_used.lock().unwrap_or_else(|e| e.into_inner()).insert((m, g)); }
                 match best {
@@ -5169,7 +5446,7 @@ impl Program {
     /// traits_in_scope over the module's resolutions).
     fn module_traits(&self, m: u32, set: &mut crate::fxhash::HashSet<DefId>, visiting: &mut Vec<u32>) {
         let _ = visiting;
-        for &(d, _) in self.module_trait_bindings(m, &mut TraitQuery::default()).iter() {
+        for &(d, _, _) in self.module_trait_bindings(m, &mut TraitQuery::default()).iter() {
             set.insert(d);
         }
     }
@@ -5182,7 +5459,7 @@ impl Program {
     /// cycle is a fixpoint as in lookup_in_module_vis: a module still being walked gives the
     /// previous pass's set (empty in the first pass); a pass whose given sets differ from those
     /// modules' final sets runs again. Only the converged root set is cached.
-    fn module_trait_bindings(&self, m: u32, q: &mut TraitQuery) -> std::sync::Arc<Vec<(DefId, BindVis)>> {
+    fn module_trait_bindings(&self, m: u32, q: &mut TraitQuery) -> std::sync::Arc<Vec<TraitBinding>> {
         if !q.open.is_empty() {
             return self.module_trait_bindings_pass(m, q);
         }
@@ -5207,7 +5484,7 @@ impl Program {
         unreachable!()
     }
 
-    fn module_trait_bindings_pass(&self, m: u32, q: &mut TraitQuery) -> std::sync::Arc<Vec<(DefId, BindVis)>> {
+    fn module_trait_bindings_pass(&self, m: u32, q: &mut TraitQuery) -> std::sync::Arc<Vec<TraitBinding>> {
         if q.open.contains(&m) {
             let given = q.prev.get(&m).cloned().unwrap_or_default();
             q.hits.push((m, given.clone()));
@@ -5223,38 +5500,41 @@ impl Program {
         }
         q.open.push(m);
         let md = &self.mods[m as usize];
-        let mut out: Vec<(DefId, BindVis)> = Vec::new();
+        let mut out: Vec<TraitBinding> = Vec::new();
         let mut names: Vec<(&Sym, &DefId)> = md.types.iter().collect();
         names.sort_by_key(|x| *x.0);
         for (n, d) in names {
             if self.def(*d).kind == DefKind::Trait {
-                out.push((*d, self.binding_vis(m, *n, true, *d)));
+                out.push((*d, self.binding_vis(m, *n, true, *d), Some(*n)));
             }
         }
         for &(d, p) in &md.anon_traits {
-            out.push((d, if p { None } else { Some(md.normal) }));
+            out.push((d, if p { None } else { Some(md.normal) }, None));
         }
-        for &(g, gpub) in &md.globs {
+        for &(g, gv) in &md.globs {
             let gd = self.def(g);
             if gd.kind != DefKind::Mod {
                 continue;
             }
-            let gv = if gpub { None } else { Some(md.normal) };
             let inner = self.module_trait_bindings_pass(gd.sub, q);
-            for &(d, v) in inner.iter() {
-                // a glob-imported trait whose name an explicit binding of this module shadows
-                // is not in scope (rustc: its methods are unavailable)
-                if md.types.get(&self.def(d).name).is_some_and(|x| *x != d) { continue; }
+            for &(d, v, name) in inner.iter() {
+                // a glob-imported trait binding whose name an explicit binding of this module
+                // shadows is not in scope (rustc: its methods are unavailable); that is the
+                // binding's name (`use T as Ext` is shadowed by an `Ext`, not by a `T`), and an
+                // `as _` binding has none, so nothing shadows it (rustc_resolve gives an
+                // underscore import a fresh name)
+                if name.is_some_and(|n| md.types.get(&n).is_some_and(|x| *x != d)) { continue; }
                 if self.vis_visible(v, m) {
                     let v = self.vis_min(gv, v);
-                    // one entry per trait, the most visible binding
-                    match out.iter().position(|x| x.0 == d) {
+                    // one entry per trait and binding name (a named one may be shadowed further
+                    // out, an `as _` one not), the most visible binding
+                    match out.iter().position(|x| x.0 == d && x.2 == name) {
                         Some(i) => {
                             if self.vis_wider(v, out[i].1) {
                                 out[i].1 = v;
                             }
                         }
-                        None => out.push((d, v)),
+                        None => out.push((d, v, name)),
                     }
                 }
             }
@@ -5266,16 +5546,40 @@ impl Program {
     }
 
     pub fn lookup_in_scope(&self, module: u32, name: Sym, ns_type: bool) -> Option<DefId> {
-        if !self.imports_done || !self.body_memos.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.imports_done || !self.body_memos.load(std::sync::atomic::Ordering::Relaxed) || import_run_active() {
             return self.lookup_in_scope_uncached(module, name, ns_type);
         }
-        if let Some(r) = self.scope_cache.get(&(module, name, ns_type)) {
+        if let Some(r) = self.scope_cache.with(&(module, name, ns_type), memo_hit).flatten() {
             if r.is_none() { self.note_scope_miss(module, name); }
             return r;
         }
-        let r = self.lookup_in_scope_uncached(module, name, ns_type);
-        if !quiet_lookups() { self.scope_cache.insert((module, name, ns_type), r); }
+        let (r, uses) = self.memo_lookup(|| self.lookup_in_scope_uncached(module, name, ns_type));
+        if !quiet_lookups() { memo_put(&self.scope_cache, (module, name, ns_type), (r, uses)); }
         r
+    }
+
+    /// Lookup `f` for a memo: with the import uses it goes through when uses are recorded. They
+    /// go where its own records would have gone and come back for the memo entry: in this
+    /// thread's capture they are what `f` added to it (nested lookups add theirs there too);
+    /// without one, a capture of `f`'s own passes them on to the program's sets.
+    fn memo_lookup<R>(&self, f: impl FnOnce() -> R) -> (R, MemoUses) {
+        if !record_import_uses() { return (f(), None); }
+        let marks = IMPORT_USE_SINK.with(|s| s.borrow().as_ref().map(|u| (u.import.len(), u.glob.len(), u.ext.len())));
+        let Some((i, g, e)) = marks else {
+            let (r, got) = capture_import_uses(f);
+            let uses = memo_uses(&got.import, &got.glob, &got.ext);
+            self.add_import_uses(&got);
+            return (r, Some(uses));
+        };
+        let r = f();
+        // `f` leaves the capture it found in place (capture_import_uses restores it) and
+        // only appends to it
+        let uses = IMPORT_USE_SINK.with(|s| {
+            let s = s.borrow();
+            let u = s.as_ref().expect("a lookup's capture outlives the lookup");
+            memo_uses(&u.import[i..], &u.glob[g..], &u.ext[e..])
+        });
+        (r, Some(uses))
     }
 
     /// A name a lookup did not find in module `m` may be in a module the Rust selection
@@ -5326,7 +5630,7 @@ impl Program {
             }
         }
         let r = self.lookup_in_scope_outside(module, name, ns_type);
-        if r.is_none() { self.note_scope_miss(module, name); }
+        if r.is_none() && !import_blocked() { self.note_scope_miss(module, name); }
         r
     }
 
@@ -5857,7 +6161,7 @@ static RECORD_STRETCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 pub fn record_import_uses() -> bool { RECORD_IMPORT_USES.load(std::sync::atomic::Ordering::Relaxed) && !quiet_lookups() }
 
 /// Import resolutions captured by one body scope, without depending on the type layer's facts.
-#[derive(Default)]
+#[derive(Clone, Default, PartialEq, Debug)]
 pub struct ImportUses {
     /// Module, imported name and namespace, for the used-binding set.
     pub import: Vec<(u32, Sym, bool)>,
@@ -5865,6 +6169,63 @@ pub struct ImportUses {
     pub glob: Vec<(u32, DefId)>,
     /// Crate and extern-prelude name, for the used-extern set.
     pub ext: Vec<(u32, Sym)>,
+}
+
+/// One import use a memoized name lookup went through (an `ImportUses` entry).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum MemoUse {
+    Import(u32, Sym, bool),
+    Glob(u32, DefId),
+    Ext(u32, Sym),
+}
+
+/// The import uses a memoized name lookup went through, kept with its answer: every lookup that
+/// takes the answer records them, so a body's captured uses name each import its lookups go
+/// through, whichever body looked the name up first (check_bodies.rs stores them per body).
+/// None: the answer was found while uses were not recorded (the import replay's pause, a run);
+/// a lookup while they are recorded does it again.
+pub type MemoUses = Option<Box<[MemoUse]>>;
+
+/// A memo hit: its answer, its import uses recorded for this thread's capture. None: the answer
+/// holds no uses and they are recorded now (look it up again). Without a capture the program's
+/// sets have them already: the lookup that found the answer put them there or in a body's
+/// capture, which the check merges into them.
+fn memo_hit<T: Copy>(v: &(T, MemoUses)) -> Option<T> {
+    if !record_import_uses() { return Some(v.0); }
+    let uses = v.1.as_deref()?;
+    if !uses.is_empty() {
+        IMPORT_USE_SINK.with(|s| if let Some(u) = s.borrow_mut().as_mut() {
+            let _k = crate::zone_alloc::kept();
+            for x in uses {
+                match *x {
+                    MemoUse::Import(m, n, t) => u.import.push((m, n, t)),
+                    MemoUse::Glob(m, g) => u.glob.push((m, g)),
+                    MemoUse::Ext(c, n) => u.ext.push((c, n)),
+                }
+            }
+        });
+    }
+    Some(v.0)
+}
+
+/// Puts a lookup's answer in its memo: the first answer stands (racing lookups of one name find
+/// the same), except one that holds no uses, which an answer with its uses replaces.
+fn memo_put<T: Clone>(map: &crate::conc::MemoMap<(u32, Sym, bool), (T, MemoUses)>, key: (u32, Sym, bool), v: (T, MemoUses)) {
+    let unrecorded = v.1.is_none();
+    map.put_unless(key, v, |old| unrecorded || old.1.is_some());
+}
+
+/// A lookup's import uses in their memo form: each once.
+fn memo_uses(import: &[(u32, Sym, bool)], glob: &[(u32, DefId)], ext: &[(u32, Sym)]) -> Box<[MemoUse]> {
+    let mut v: Vec<MemoUse> = import.iter().map(|&(m, n, t)| MemoUse::Import(m, n, t))
+        .chain(glob.iter().map(|&(m, g)| MemoUse::Glob(m, g)))
+        .chain(ext.iter().map(|&(c, n)| MemoUse::Ext(c, n)))
+        .collect();
+    if v.len() > 1 {
+        v.sort_unstable();
+        v.dedup();
+    }
+    v.into_boxed_slice()
 }
 
 /// Captures of the same owner combine without losing resolutions made in an earlier scope.
@@ -5875,7 +6236,61 @@ impl ImportUses {
         self.glob.append(&mut other.glob);
         self.ext.append(&mut other.ext);
     }
+
+    /// Sorts each kind and keeps each use once: every reader takes them as sets (the program's
+    /// used sets, a stored verdict's canonical form), and a body's memo hits repeat them.
+    pub fn sort_dedup(&mut self) {
+        self.import.sort_unstable();
+        self.import.dedup();
+        self.glob.sort_unstable();
+        self.glob.dedup();
+        self.ext.sort_unstable();
+        self.ext.dedup();
+    }
 }
+
+/// One import fixpoint run's counts (`Program::import_fixpoint`): its passes for the boot trace
+/// ("resolved/tried ms"), the tries that waited on an open import, the imports whose failure it
+/// determined at a stall, the forced steps.
+#[derive(Default)]
+struct FixRun {
+    passes: Vec<String>,
+    waited: usize,
+    failed: usize,
+    forced: usize,
+}
+
+/// This thread's import fixpoint run: whether one is running (`active`: no memo is read or
+/// written), whether open imports make the names they bind wait (`block`: off for a forced
+/// step's try), the import being resolved, and whether a lookup of its try waited.
+#[derive(Clone, Copy)]
+struct ImportRun {
+    active: bool,
+    block: bool,
+    current: usize,
+    blocked: bool,
+}
+
+/// This thread's import fixpoint run's tables (`Program::import_waits`): each module's open single
+/// imports by the name they bind, indexed at the module's first lookup (an import never opens again
+/// within a run: a list only goes stale by closing); the visibilities of the `pub` imports asked
+/// about.
+#[derive(Default)]
+struct RunTables {
+    open: HashMap<u32, HashMap<Sym, Vec<u32>>>,
+    vis: HashMap<u32, BindVis>,
+}
+
+thread_local! {
+    static IMPORT_RUN: std::cell::Cell<ImportRun> = const { std::cell::Cell::new(ImportRun { active: false, block: false, current: usize::MAX, blocked: false }) };
+    static RUN_TABLES: std::cell::RefCell<RunTables> = std::cell::RefCell::new(RunTables::default());
+}
+
+/// Whether a lookup of the import now being resolved waited on an open import.
+fn import_blocked() -> bool { IMPORT_RUN.with(|r| r.get().blocked) }
+
+/// Whether an import fixpoint run is going on on this thread.
+fn import_run_active() -> bool { IMPORT_RUN.with(|r| r.get().active) }
 
 thread_local! {
     /// The current scope's import uses; none leaves resolution writing the program's sets.
@@ -5904,6 +6319,21 @@ pub fn capture_import_uses<R>(f: impl FnOnce() -> R) -> (R, ImportUses) {
     let prev = restore.0.take().unwrap_or_default();
     let got = IMPORT_USE_SINK.with(|s| s.replace(prev)).unwrap_or_default();
     (r, got)
+}
+
+/// Runs `f` with this thread's capture set aside: the uses `f` records go to the program's sets,
+/// as they do outside a body. Item text lowered on a cell's miss path (relax_types body_facts.rs
+/// item_text) belongs to the crate's interface, not to the body whose lookup first needed it.
+pub fn outside_capture<R>(f: impl FnOnce() -> R) -> R {
+    /// The set-aside capture, put back on return and on unwind.
+    struct Restore(Option<ImportUses>);
+    impl Drop for Restore {
+        fn drop(&mut self) { let prev = self.0.take(); IMPORT_USE_SINK.with(|s| *s.borrow_mut() = prev); }
+    }
+    let prev = IMPORT_USE_SINK.with(|s| s.borrow_mut().take());
+    if prev.is_none() { return f(); }
+    let _restore = Restore(prev);
+    f()
 }
 
 thread_local! {
@@ -6010,7 +6440,7 @@ fn shared_std_wait(path: &str) -> Option<std::sync::Arc<SharedParse>> {
         g = ng;
         if to.timed_out() && g.as_ref().map_or(true, |m| !m.contains_key(path)) {
             // never silent: a stall here is a wait cycle between the world and the load
-            eprintln!("makepad: the proc-macro world waited 10 s for the program's parse of {}; parsing it itself", path);
+            eprintln!("relax: the proc-macro world waited 10 s for the program's parse of {}; parsing it itself", path);
             return None;
         }
     }
@@ -6054,7 +6484,7 @@ impl ParseSnapshot {
             let _timing = crate::parse_work::time(1);
             old.part(&self.cfg);
         }
-        let verify = std::env::var("MAKEPAD_RUN_PARSE_VERIFY").as_deref() == Ok("1");
+        let verify = std::env::var("RELAX_PARSE_VERIFY").as_deref() == Ok("1");
         let full_src = verify.then(|| src.clone());
         let session = crate::parse_work::Session::new(self.reuse.clone());
         let mut v = self.parse_full(src)?;
@@ -6371,7 +6801,7 @@ pub static PARSE_AGAIN: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 /// A path's segments as (kind, symbol), `u32::MAX` for a name no file interned: held inline up
 /// to four segments. Built afresh on each call: two string-table probes per segment cost less
-/// than any memo of them (a per-occurrence one held 4M entries for sandbox and cost 8% of the
+/// than any memo of them (a per-occurrence one held 4M entries for a large app and cost 8% of the
 /// body checks walking its chains).
 pub struct PathSegs {
     len: usize,
@@ -6418,13 +6848,17 @@ struct GlobQuery {
     taints: usize,
 }
 
+/// A trait a module's scope binds: the trait, the binding's visibility and the binding's name
+/// (None for an `as _` import, which no other binding shadows).
+type TraitBinding = (DefId, BindVis, Option<Sym>);
+
 /// One walk of trait bindings through glob imports (see GlobQuery).
 #[derive(Default)]
 struct TraitQuery {
-    memo: HashMap<u32, std::sync::Arc<Vec<(DefId, BindVis)>>>,
-    prev: HashMap<u32, std::sync::Arc<Vec<(DefId, BindVis)>>>,
+    memo: HashMap<u32, std::sync::Arc<Vec<TraitBinding>>>,
+    prev: HashMap<u32, std::sync::Arc<Vec<TraitBinding>>>,
     open: Vec<u32>,
-    hits: Vec<(u32, std::sync::Arc<Vec<(DefId, BindVis)>>)>,
+    hits: Vec<(u32, std::sync::Arc<Vec<TraitBinding>>)>,
 }
 
 crate::memo_local! {
@@ -6626,7 +7060,7 @@ mod deferred_load_tests {
     #[test]
     fn incremental_load_matches_full_resolution() {
         const SKIP: &str = "load_late.rs,load_other.rs,load_unrelated.rs,load_nested.rs,load_empty.rs";
-        if std::env::var("MAKEPAD_RUN_LAZY_DEFER").as_deref() != Ok(SKIP) {
+        if std::env::var("RELAX_LAZY_DEFER").as_deref() != Ok(SKIP) {
             let out = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -6634,7 +7068,7 @@ mod deferred_load_tests {
                     "--nocapture",
                     "--test-threads=1",
                 ])
-                .env("MAKEPAD_RUN_LAZY_DEFER", SKIP)
+                .env("RELAX_LAZY_DEFER", SKIP)
                 .output()
                 .unwrap();
             assert!(out.status.success(), "{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -6665,6 +7099,10 @@ mod deferred_load_tests {
             pub mod isolated { pub use crate::fallback::*; }
             pub mod waiting { pub use crate::unrelated::Unrelated; }
             pub mod prelude { pub use crate::late::*; }
+            // `through` waits for `late` (the single import `shadow::shade` shadows the glob's)
+            pub mod fallback2 { pub mod shade { pub struct Lamp; } }
+            pub mod shadow { pub use crate::fallback2::*; pub use crate::late::shade; }
+            pub mod through { pub use crate::shadow::shade::Lamp; }
             pub fn main() {}
         "#,
         )
@@ -6678,6 +7116,7 @@ mod deferred_load_tests {
             pub trait Shared {}
             pub use crate::other::Next;
             pub mod inner { pub struct Thing; pub use crate::other::After; }
+            pub mod shade { pub struct Lamp; }
             #[path = "load_nested.rs"] pub mod nested;
         "#,
         )

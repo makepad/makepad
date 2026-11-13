@@ -24,6 +24,23 @@ pub enum Kind {
     OpaqueBounds = 6,
 }
 
+thread_local! {
+    /// The cycles this thread met that went on with a stand-in result (a recovery discriminant, a
+    /// zero-size layout): rustc reports E0391 and builds no program, so a constant evaluated
+    /// across one has no value (jit::Unit::const_addr compares the count before and after).
+    static STAND_INS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A cycle was reported and the computation it cut goes on with a stand-in result.
+pub fn note_stand_in() {
+    let _ = STAND_INS.try_with(|c| c.set(c.get() + 1));
+}
+
+/// This thread's count of `note_stand_in`s (a computation compares it before and after).
+pub fn stand_ins() -> u64 {
+    STAND_INS.try_with(|c| c.get()).unwrap_or(0)
+}
+
 pub struct Guard { kind: u8, a: u32, b: u32 }
 
 impl Drop for Guard {
@@ -55,14 +72,16 @@ pub fn enter(kind: Kind, a: u32, b: u32) -> Result<Guard, ()> {
 /// request inside another request's wait (the compiler's per-request frame, jit::frame_enter):
 /// what the request below has in progress is not this request's, so meeting it is no cycle (M55:
 /// a Job served in a query wait during `OnceLock<..>`'s layout was refused that layout, E0391).
-pub struct Active(Vec<(u8, u32, u32)>);
+/// The request's stand-in count goes with it: the served request's cycles are not the one below's.
+pub struct Active(Vec<(u8, u32, u32)>, u64);
 
 /// Takes this thread's computations in progress, leaving none.
 pub fn take() -> Active {
-    Active(ACTIVE.try_with(|v| std::mem::take(&mut *v.borrow_mut())).unwrap_or_default())
+    Active(ACTIVE.try_with(|v| std::mem::take(&mut *v.borrow_mut())).unwrap_or_default(), STAND_INS.try_with(|c| c.replace(0)).unwrap_or(0))
 }
 
 /// Puts back what `take` took (the computations entered since have ended).
 pub fn restore(a: Active) {
     let _ = ACTIVE.try_with(|v| *v.borrow_mut() = a.0);
+    let _ = STAND_INS.try_with(|c| c.set(a.1));
 }

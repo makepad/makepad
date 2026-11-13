@@ -414,7 +414,7 @@ pub struct Closure {
     pub reasons: Vec<(String, String)>,
     pub items: usize,
     pub used_items: usize,
-    /// MAKEPAD_RUN_ITEMS_TRACE only: per reached file, the file whose evaluated
+    /// RELAX_ITEMS_TRACE only: per reached file, the file whose evaluated
     /// reference first produced the name/member that reached it, and that key.
     pub parents: Vec<Option<(Option<usize>, String)>>,
 }
@@ -622,7 +622,7 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
     let member_start: Vec<Vec<u32>> = parsed.iter().map(|items| { let mut at = 0u32; items.iter().map(|i| { let s = at; at += i.members.len() as u32; s }).collect() }).collect();
     let mut member_used: Vec<Vec<bool>> = parsed.iter().map(|items| vec![false; items.iter().map(|i| i.members.len()).sum()]).collect();
     let cx = ReachCx { files, parsed: &parsed, item_syms: &item_syms, file_module: &file_module };
-    let trace = std::env::var_os("MAKEPAD_RUN_ITEMS_TRACE").is_some();
+    let trace = std::env::var_os("RELAX_ITEMS_TRACE").is_some();
     let started = std::time::Instant::now();
     if trace { eprintln!("rs-items-prep: {:?}", entry.elapsed()); }
     let mut causes = BTreeMap::<String, usize>::new();
@@ -918,9 +918,9 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
         text.sort_unstable();
         text.into_iter().collect()
     };
-    // MAKEPAD_RUN_PLAN_DUMP=<file>: the selection itself (reached files, used items and members, and every
+    // RELAX_PLAN_DUMP=<file>: the selection itself (reached files, used items and members, and every
     // crate's folded boundary names), sorted, to diff one planner implementation against another.
-    let dump = std::env::var_os("MAKEPAD_RUN_PLAN_DUMP");
+    let dump = std::env::var_os("RELAX_PLAN_DUMP");
     let mut dump_lines = Vec::<String>::new();
     if dump.is_some() {
         for (f, file) in files.iter().enumerate() {

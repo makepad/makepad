@@ -25,7 +25,7 @@ finish() {
     rm -rf "$T"
 }
 trap finish EXIT
-unset MAKEPAD_RUN_STD MAKEPAD_RUN_LOADER
+unset RELAX_STD RELAX_LOADER
 mkdir -p "$T/ws/fixture" "$T/home" "$T/tmp" "$T/reg" "$T/box"
 # the binary runs from a copy outside any cargo target directory (as devhub's boxes run theirs)
 cp "$BIN" "$T/box/makepad" || exit 1
@@ -36,12 +36,12 @@ members = ["fixture"]
 resolver = "2"
 
 [workspace.dependencies]
-makepad-relax-api = { path = "$R/libs/relax_api" }
+relax-api = { path = "$R/libs/relax_api" }
 EOF
 log="$T/log"
 # a live session (no --no-live), hidden; a call of code that did not compile parks it, so the run
 # is watched until it ends or parks (the panic the program catches does not park: PANIC_PARK=0)
-(cd "$T/ws" && MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_RUN_PANIC_PARK=0 MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_HOME="$T/home" MAKEPAD_REMOTE_REGISTRY="$T/reg" TMPDIR="$T/tmp" \
+(cd "$T/ws" && MAKEPAD_HIDE_WINDOWS=1 RELAX_PANIC_PARK=0 RELAX_CACHE=off RELAX_HOME="$T/home" MAKEPAD_REMOTE_REGISTRY="$T/reg" TMPDIR="$T/tmp" \
     exec "$T/box/makepad" run relax-provided-fixture --bin relax-provided-fixture) > "$log" 2>&1 &
 pid=$!
 end=""
@@ -54,7 +54,7 @@ done
 fails=""
 want() { grep -q -F -x -- "$1" "$log" || fails="$fails missing:'$1'"; }
 [ "$end" = "exit 0" ] || fails="$fails run:$end"
-grep -q 'makepad: provided type' "$log" && fails="$fails demoted"
+grep -q 'relax: provided type' "$log" && fails="$fails demoted"
 grep -q 'lives in a provided crate' "$log" && fails="$fails refused"
 want "bound true"
 want 'loc Loc { file: "src/app.rs", col: 5, line: 42 } 43 1 false'
@@ -65,8 +65,8 @@ if [ -z "$fails" ]; then
     echo "provided_live_layout: ok"
 else
     echo "---- the run ($end):"
-    grep 'makepad: provided type' "$log" | head -8 | cut -c1-400
-    grep -v 'makepad: provided type' "$log" | tail -24 | cut -c1-400
+    grep 'relax: provided type' "$log" | head -8 | cut -c1-400
+    grep -v 'relax: provided type' "$log" | tail -24 | cut -c1-400
     echo "provided_live_layout: FAILED ($fails )"
     exit 1
 fi

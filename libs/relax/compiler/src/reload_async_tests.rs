@@ -8,12 +8,12 @@ use std::sync::Arc;
 /// Runs each case of test `test` (its path in this crate) in a child process (process-global
 /// runtime state); in the child, `body(case)`.
 pub(crate) fn in_child(test: &str, cases: &[&str], body: impl FnOnce(&str)) {
-    const CHILD: &str = "MAKEPAD_RUN_RELOAD_LIVE_CASE";
+    const CHILD: &str = "RELAX_RELOAD_LIVE_CASE";
     let Ok(case) = std::env::var(CHILD) else {
         for case in cases {
             let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", test, "--nocapture", "--test-threads=1"])
-                .env(CHILD, case).env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+                .env(CHILD, case).env("RELAX_GANDALF_ALL", "0"));
             assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         return;
@@ -31,7 +31,7 @@ pub(crate) static LIVE_UNIT: std::sync::atomic::AtomicUsize = std::sync::atomic:
 pub(crate) fn live_app(tag: &str, files: &[(&str, &str)], names: &[&str], run: impl FnOnce(&dyn Fn(&str) -> u64, &mut dyn FnMut(&str, &[(&str, &str)]) -> crate::reload::Outcome)) {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
     crate::layout::LIVE_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-reload-{}-{}", tag, std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();

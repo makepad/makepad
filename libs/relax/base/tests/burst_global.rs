@@ -1,5 +1,5 @@
 //! Exercise std's allocator entrypoints and memstat together. Also run this test binary with
-//! MAKEPAD_RUN_BURST_ARENA=0 and MAKEPAD_RUN_MEM_REPORT=1 to cover the process-wide environment knobs.
+//! RELAX_BURST_ARENA=0 and RELAX_MEM_REPORT=1 to cover the process-wide environment knobs.
 use relax_base::{memstat, zone_alloc};
 
 #[global_allocator]

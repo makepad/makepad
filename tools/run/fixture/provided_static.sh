@@ -8,7 +8,7 @@
 T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/provided_static.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp"
-run() { TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_RUN_CACHE=off perl -e 'alarm 600; exec @ARGV' "$T/makepad" run --quiet relax-provided-fixture --bin relax-provided-static -- "$@"; }
+run() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" RELAX_CACHE=off perl -e 'alarm 600; exec @ARGV' "$T/makepad" run --quiet relax-provided-fixture --bin relax-provided-static -- "$@"; }
 memo=$(run memo 2>&1); memo_rc=$?
 shared=$(run shared 2>&1); shared_rc=$?
 tls=$(run tls 2>&1); tls_rc=$?

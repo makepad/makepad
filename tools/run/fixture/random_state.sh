@@ -8,11 +8,11 @@ ROOT=$(pwd)
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-export MAKEPAD_RUN_STD=${MAKEPAD_RUN_STD:-$root/libs/relax/compiler/std}
+export RELAX_STD=${RELAX_STD:-$root/libs/relax/compiler/std}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/random_state.XXXXXX") || exit 2
 for i in 1 2; do
     mkdir -p "$dir/h$i"
-    MAKEPAD_RUN_HOME=$dir/h$i MAKEPAD_RUN_CACHE_DIR=$dir/h$i/cache MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 \
+    RELAX_HOME=$dir/h$i RELAX_CACHE_DIR=$dir/h$i/cache MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 \
         $J test "$here/diff/random_state.rs" > "$dir/out$i" 2> "$dir/err$i"
 done
 k1=$(grep '^K ' "$dir/out1"); k2=$(grep '^K ' "$dir/out2")

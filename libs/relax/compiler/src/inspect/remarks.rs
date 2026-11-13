@@ -186,7 +186,7 @@ pub fn cmd_remarks(req: &Req, out: &mut Out) {
             for l in rows {
                 out.line(&l);
             }
-            out.always("more: asm <fn> vs=rustc  versions <fn>  tier <fn> o3 fresh=1");
+            out.line("more: asm <fn> vs=rustc  versions <fn>  tier <fn> o3 fresh=1");
         }
         Err(e) => out.err(&e),
     }

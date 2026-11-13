@@ -2,7 +2,7 @@
 """The exit never waits, and persistence does not depend on it: run.py /absolute/path/to/makepad.
 
 1. kill: a program idles after its start; once the run has written its cache in the background
-   (the mid-run write, MAKEPAD_RUN_CACHE_TRACE) it is SIGKILLed -- no exit work at all. The next run of
+   (the mid-run write, RELAX_CACHE_TRACE) it is SIGKILLed -- no exit work at all. The next run of
    the same program is warm: its code comes from the cache and its program from the collected
    store (written in the background too, not only by the exit).
 2. busy: a thread of the program keeps calling functions that were never compiled (each call a
@@ -93,9 +93,9 @@ with tempfile.TemporaryDirectory(prefix='relax-exit-persist-') as tmp:
     (root / 'src/main.rs').write_text(source)
 
     def launch(tag, mode, cache):
-        env = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_NET_OFFLINE='true', MAKEPAD_RUN_STD=std, MAKEPAD_RUN_CACHE='on',
-                   MAKEPAD_RUN_EXIT_TRACE='1', MAKEPAD_RUN_CACHE_TRACE=str(root / (tag + '.cache.tsv')),
-                   MAKEPAD_RUN_CACHE_DIR=str(root / cache), MAKEPAD_RUN_TARGET_DIR=str(root / ('target-' + cache)))
+        env = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_NET_OFFLINE='true', RELAX_STD=std, RELAX_CACHE='on',
+                   RELAX_EXIT_TRACE='1', RELAX_CACHE_TRACE=str(root / (tag + '.cache.tsv')),
+                   RELAX_CACHE_DIR=str(root / cache), RELAX_TARGET_DIR=str(root / ('target-' + cache)))
         log = (root / (tag + '.log')).open('w')
         p = sp.Popen([binary, 'run', '--verbose', 'exit-persist', '--', mode], cwd=root, env=env, stdout=log, stderr=sp.STDOUT,
                      start_new_session=True)
@@ -113,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix='relax-exit-persist-') as tmp:
             stop(p)
         t = text(tag)
         assert p.returncode == 0 and 'quick' in t, t[-3000:]
-        m = re.search(r'makepad-run cache: (\d+) hits, (\d+) misses', t)
+        m = re.search(r'relax cache: (\d+) hits, (\d+) misses', t)
         assert m, t[-3000:]
         hits, misses = int(m.group(1)), int(m.group(2))
         # warm: the code came from the cache -- linked one by one (hits) or with the startup image
@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='relax-exit-persist-') as tmp:
         compiled = re.search(r'compiled (\d+) fns', t)
         assert (hits > 0 and hits > misses) or (compiled and int(compiled.group(1)) <= 5), (tag, hits, misses, compiled and compiled.group(0), t[-3000:])
         # a live session (the default: edits patch in place) uses no collected program store
-        return hits, misses, 'makepad-run collected: restored' in t or 'makepad live: watching' in t
+        return hits, misses, 'relax collected: restored' in t or 'relax live: watching' in t
 
     # 1. killed after the background write: the next run is warm
     p = launch('kill-cold', 'idle', 'kill')

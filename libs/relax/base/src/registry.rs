@@ -2,7 +2,7 @@
 //! the .crate archives (static.crates.io) checked against the index's SHA-256, unpacked with
 //! Relax's own gzip and tar readers into a content-addressed cache in the workspace's relax dir
 //! (`<target>/relax/registry`, dirs.rs), offline-first: a cached index and a cached package are used as they are,
-//! the network is asked only for what is missing (Cargo offline settings or MAKEPAD_RUN_OFFLINE=1: never). The network itself is
+//! the network is asked only for what is missing (Cargo offline settings or RELAX_OFFLINE=1: never). The network itself is
 //! the embedder's ([`set_fetch`]: the makepad binary and the loader install an HTTPS GET), so this
 //! module does no I/O beyond files.
 //!
@@ -127,7 +127,7 @@ pub fn exact(name: &str, version: &str, offline: bool) -> Result<Release, String
 /// named by the package, its version and its checksum, holding `Cargo.toml`.
 pub fn sources(name: &str, r: &Release, offline: bool) -> Result<String, String> {
     let dir = root()?.join("src").join(format!("{}-{}-{}", name, r.version, &r.cksum[..16.min(r.cksum.len())]));
-    let done = dir.join(".makepad-run-unpacked");
+    let done = dir.join(".relax-unpacked");
     if !done.is_file() {
         let what = format!("`{}` {}", name, r.version);
         let body = get(&format!("{}/{}/{}-{}.crate", DOWNLOAD, name, name, r.version), &what, offline)?;

@@ -1,4 +1,4 @@
-// Compare stdout with rustc --test -O, also with MAKEPAD_RUN_O3=1 MAKEPAD_RUN_O3_CALLS=100.
+// Compare stdout with rustc --test -O, also with RELAX_O3=1 RELAX_O3_CALLS=100.
 use std::hint::black_box;
 
 #[derive(Clone, Copy)]
@@ -88,7 +88,7 @@ fn mix(h: u64, x: u128) -> u64 {
 
 macro_rules! unsigned {
     ($name:ident, $pair:ident, $ty:ty) => {
-        // Called often enough to exercise the optimised body with MAKEPAD_RUN_O3_CALLS=100.
+        // Called often enough to exercise the optimised body with RELAX_O3_CALLS=100.
         #[inline(never)]
         fn $pair(mut h: u64, a: $ty, b: $ty, repeat: usize) -> u64 {
             let (r, o) = a.overflowing_mul(b);
@@ -134,7 +134,7 @@ macro_rules! unsigned {
 }
 macro_rules! signed {
     ($name:ident, $pair:ident, $ty:ty) => {
-        // Called often enough to exercise the optimised body with MAKEPAD_RUN_O3_CALLS=100.
+        // Called often enough to exercise the optimised body with RELAX_O3_CALLS=100.
         #[inline(never)]
         fn $pair(mut h: u64, a: $ty, b: $ty, repeat: usize) -> u64 {
             let (r, o) = a.overflowing_mul(b);

@@ -5,10 +5,7 @@
 //! short path (rustc_data_structures' sip128 short_write): the same bytes, no byte slice.
 
 use super::Hasher;
-#[cfg(not(relax_check))]
 use crate::ptr;
-#[cfg(relax_check)]
-use std::ptr;
 
 #[derive(Debug, Clone, Copy)]
 struct State {

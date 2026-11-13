@@ -119,7 +119,6 @@ impl Hasher for FastHasher {
     fn write_usize(&mut self, i: usize) {
         self.write_u64(i as u64)
     }
-    #[cfg(not(relax_check))]
     fn write_str(&mut self, s: &str) {
         // the length is mixed in by mix_bytes; no 0xff terminator needed
         self.acc = mix_bytes(self.acc, self.seed, s.as_bytes());
@@ -141,10 +140,7 @@ impl RandomState {
 }
 
 // real std: `RandomState { .. }`, the keys not shown
-#[cfg(not(relax_check))]
 use crate::fmt;
-#[cfg(relax_check)]
-use std::fmt;
 impl fmt::Debug for RandomState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RandomState").finish_non_exhaustive()
@@ -240,7 +236,6 @@ impl Hasher for DefaultHasher {
             Inner::Sip(h) => h.write_usize(i),
         }
     }
-    #[cfg(not(relax_check))]
     fn write_str(&mut self, s: &str) {
         match &mut self.inner {
             Inner::Fast(h) => h.write_str(s),

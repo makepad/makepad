@@ -12,8 +12,8 @@
 # Prints one PASS/FAIL line per check and a last line `font_tier: N/M passed`.
 T=${TARGET:-target/release}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/font_tier.XXXXXX") || exit 1
-FONT_TIER_SECS=${SECS:-10} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 TMPDIR="$dir" \
-    MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_RUN_CACHE_DIR="$dir/cache" \
+FONT_TIER_SECS=${SECS:-10} MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 TMPDIR="$dir" \
+    RELAX_HOME="$dir/home" RELAX_CACHE_DIR="$dir/cache" \
     script -q -e -c "perl -e 'alarm 300; exec @ARGV' $T/relax run relax-provided-fixture --bin relax-font-tier" "$dir/tty.log" > /dev/null 2>&1
 rc=$?
 # the bar frames, one per line, escape codes off

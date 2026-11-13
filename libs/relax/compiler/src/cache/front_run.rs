@@ -70,7 +70,7 @@ impl FrontSink {
 
     fn fail(&self, e: impl std::fmt::Display) {
         if !self.off.swap(true, std::sync::atomic::Ordering::Relaxed) && crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("makepad-run front: front images not written ({}): files stay on the heap", e);
+            eprintln!("relax front: front images not written ({}): files stay on the heap", e);
         }
     }
 

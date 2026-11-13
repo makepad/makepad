@@ -1,12 +1,12 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: `makepad test` of a lib whose cfg(test) code rustc rejects (an
 # unresolved import without `--features x`) exits non-zero before any test runs and names the
-# error; with the feature it passes. MAKEPAD_RUN_STD is left unset on purpose: run from a folder
+# error; with the feature it passes. RELAX_STD is left unset on purpose: run from a folder
 # outside the makepad checkout, the loader finds std on its own (the tree it was built from).
 # Prints "test_compile_error: ok" or "test_compile_error: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off
-unset MAKEPAD_RUN_STD
+export RELAX_CACHE=off
+unset RELAX_STD
 OUT=$(cd "$H" && "$1" test test-compile-error 2>&1)
 rc=$?
 echo "$OUT"

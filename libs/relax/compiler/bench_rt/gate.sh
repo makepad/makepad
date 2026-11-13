@@ -15,7 +15,7 @@ fi
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 OUT=$(mkdir -p "$2" && cd "$2" && pwd)
 ROOT=$(cd "$(dirname "$0")/../../../.." && pwd)
-export MAKEPAD_RUN_STD="${GATE_STD:-$ROOT/libs/relax/compiler/std}"
+export RELAX_STD="${GATE_STD:-$ROOT/libs/relax/compiler/std}"
 export R OUT
 ls "$ROOT"/libs/relax/compiler/tests/*.rs "$ROOT"/libs/relax/compiler/tests/std/*.rs "$ROOT"/libs/math/src/deterministic.rs | \
   xargs -P 4 -n 1 "$ROOT/libs/relax/compiler/bench_rt/gate.sh" --one

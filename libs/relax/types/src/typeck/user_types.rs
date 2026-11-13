@@ -106,8 +106,12 @@ impl Fcx<'_> {
     }
 
     /// method/confirm.rs:496-536. The receiver's parameters are inferred, not written: replace the
-    /// parent prefix with fresh variables (under a probe) and keep the method's own arguments.
-    pub(super) fn write_method_user_type(&mut self, call: u32, def: DefId, args: &[GenericArg]) {
+    /// parent prefix with fresh variables (under a probe). The method's own type and const
+    /// parameters are what instantiate_method_args made of them before anything was inferred: the
+    /// call's turbofish arguments (`written`, in order), else fresh variables. What method probing
+    /// inferred for them is no annotation: `[&f[..], &[name]].concat()` pinned `Item` to the
+    /// `&'static str` of `f`'s literals (E0521 on `name`, relax PR 152).
+    pub(super) fn write_method_user_type(&mut self, call: u32, def: DefId, args: &[GenericArg], written: &[TyId]) {
         let parent = self.tcx.generic_indices_of(self.prog, self.prog.def(def).parent);
         let parent_count = parent.lifetimes.len() + parent.types_consts.len();
         // `!args.is_empty() && !generics.is_own_empty()`
@@ -119,6 +123,16 @@ impl Fcx<'_> {
                 GenericArg::Type(_) => GenericArg::Type(self.infcx.next_ty_var()),
                 GenericArg::Lifetime(_) => GenericArg::Lifetime(self.infcx.next_region_var()),
                 GenericArg::Const(_) => GenericArg::Const(self.infcx.next_const_var()),
+            };
+        }
+        let own = self.tcx.generic_indices_of(self.prog, def).types_consts.iter().skip(parent.types_consts.len()).map(|&p| p as usize).collect::<Vec<_>>();
+        for (i, position) in own.into_iter().enumerate() {
+            let Some(arg) = user_args.get_mut(position) else { continue };
+            *arg = match (*arg, written.get(i).map(|&t| (t, self.tcx.tys.kind(t).clone()))) {
+                (GenericArg::Const(_), Some((_, TyKind::Const(c)))) => GenericArg::Const(c),
+                (GenericArg::Const(_), _) => GenericArg::Const(self.infcx.next_const_var()),
+                (_, Some((t, _))) => GenericArg::Type(t),
+                (_, None) => GenericArg::Type(self.infcx.next_ty_var()),
             };
         }
         let user = UserType::new(UserTypeKind::TypeOf(def, UserArgs { args: user_args, user_self_ty: None }));

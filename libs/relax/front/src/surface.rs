@@ -39,7 +39,7 @@ pub struct Stats {
 }
 
 fn header(commit: &str) -> String {
-    format!("// generated from Relax std {} by `makepad std-surface` -- do not edit: regenerate (fn bodies removed; the public type surface)\n", commit)
+    format!("// generated from Relax std {} by `{tool} std-surface` -- do not edit: regenerate (fn bodies removed; the public type surface)\n", commit, tool = crate::tool_name())
 }
 
 fn returns_impl_trait(ast: &Ast, t: Option<crate::ast::TyId>) -> bool {
@@ -281,7 +281,7 @@ pub fn cmd_std_surface(sess: &std::sync::Arc<crate::Session>, args: &[String]) -
     let check = args.first().map(String::as_str) == Some("--check");
     let a = if check { &args[1..] } else { args };
     if a.len() != 3 {
-        eprintln!("usage: makepad std-surface [--check] <makepad run std dir> <out dir> <std commit>");
+        eprintln!("usage: {tool} std-surface [--check] <Relax std dir> <out dir> <std commit>", tool = crate::tool_name());
         return 2;
     }
     let (files, st) = match generate(sess, &a[0], &a[2]) {
@@ -368,6 +368,6 @@ mod tests {
     fn header() {
         let mut st = super::Stats::default();
         let out = String::from_utf8(super::surface_text(&std::sync::Arc::new(crate::Session::default()), b"fn f() {}", "abc123", &mut st).unwrap()).unwrap();
-        assert!(out.starts_with("// generated from Relax std abc123 by `makepad std-surface` -- do not edit"));
+        assert!(out.starts_with("// generated from Relax std abc123 by `relax std-surface` -- do not edit"));
     }
 }

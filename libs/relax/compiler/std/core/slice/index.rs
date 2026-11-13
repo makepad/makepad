@@ -17,7 +17,6 @@ pub trait SliceIndex<T: ?Sized> {
     fn index_mut(self, slice: &mut T) -> &mut Self::Output;
 }
 
-#[cfg(not(relax_check))]
 impl<T, I: SliceIndex<[T]>> Index<I> for [T] {
     type Output = I::Output;
     #[track_caller]
@@ -26,7 +25,6 @@ impl<T, I: SliceIndex<[T]>> Index<I> for [T] {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T, I: SliceIndex<[T]>> IndexMut<I> for [T] {
     #[track_caller]
     fn index_mut(&mut self, index: I) -> &mut I::Output {
@@ -34,7 +32,6 @@ impl<T, I: SliceIndex<[T]>> IndexMut<I> for [T] {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T, I: SliceIndex<[T]>, const N: usize> Index<I> for [T; N] {
     type Output = I::Output;
     #[track_caller]
@@ -43,7 +40,6 @@ impl<T, I: SliceIndex<[T]>, const N: usize> Index<I> for [T; N] {
     }
 }
 
-#[cfg(not(relax_check))]
 impl<T, I: SliceIndex<[T]>, const N: usize> IndexMut<I> for [T; N] {
     #[track_caller]
     fn index_mut(&mut self, index: I) -> &mut I::Output {
@@ -307,6 +303,54 @@ impl<T> SliceIndex<[T]> for RangeToInclusive<usize> {
     }
 }
 
+/// The range a bound pair names in a slice of `len`, or the (start, end) its failure reports
+/// (core slice/index.rs try_into_slice_range): the end first, then the start against it.
+pub(crate) fn try_into_slice_range(len: usize, (start, end): (Bound<usize>, Bound<usize>)) -> Result<Range<usize>, (usize, usize)> {
+    let end = match end {
+        Bound::Included(end) if end >= len => return Err((0, end)),
+        // (`end < len`: no overflow)
+        Bound::Included(end) => end + 1,
+        Bound::Excluded(end) if end > len => return Err((0, end)),
+        Bound::Excluded(end) => end,
+        Bound::Unbounded => len,
+    };
+    let start = match start {
+        Bound::Excluded(start) if start >= end => return Err((start, end)),
+        // (`start < end`: no overflow)
+        Bound::Excluded(start) => start + 1,
+        Bound::Included(start) if start > end => return Err((start, end)),
+        Bound::Included(start) => start,
+        Bound::Unbounded => 0,
+    };
+    Ok(start..end)
+}
+
+/// `try_into_slice_range`'s range, or its failure's panic (core into_slice_range).
+#[track_caller]
+pub(crate) fn into_slice_range(len: usize, bounds: (Bound<usize>, Bound<usize>)) -> Range<usize> {
+    match try_into_slice_range(len, bounds) {
+        Ok(range) => range,
+        Err((start, end)) => slice_index_fail(start, end, len),
+    }
+}
+
+/// core slice/index.rs slice_index_fail: a start past the length, else an end past it, else the
+/// order, else the end (one the length reaches: `(Unbounded, Included(len))`, or an excluded
+/// start at the end: `(Excluded(3), Excluded(3))`), as rustc 1.99's messages are.
+#[track_caller]
+fn slice_index_fail(start: usize, end: usize, len: usize) -> ! {
+    if start > len {
+        slice_start_index_len_fail(start, len)
+    }
+    if end > len {
+        slice_end_index_len_fail(end, len)
+    }
+    if start > end {
+        slice_index_order_fail(start, end)
+    }
+    slice_end_index_len_fail(end, len)
+}
+
 fn bounds_to_range(b: (Bound<usize>, Bound<usize>), len: usize) -> Range<usize> {
     let (s, e) = crate::slice::range(&b, len);
     s..e
@@ -315,30 +359,10 @@ fn bounds_to_range(b: (Bound<usize>, Bound<usize>), len: usize) -> Range<usize> 
 impl<T> SliceIndex<[T]> for (Bound<usize>, Bound<usize>) {
     type Output = [T];
     fn get(self, slice: &[T]) -> Option<&[T]> {
-        let start = match self.0 {
-            Bound::Included(s) => s,
-            Bound::Excluded(s) => s.checked_add(1)?,
-            Bound::Unbounded => 0,
-        };
-        let end = match self.1 {
-            Bound::Included(e) => e.checked_add(1)?,
-            Bound::Excluded(e) => e,
-            Bound::Unbounded => slice.len(),
-        };
-        (start..end).get(slice)
+        try_into_slice_range(slice.len(), self).ok()?.get(slice)
     }
     fn get_mut(self, slice: &mut [T]) -> Option<&mut [T]> {
-        let start = match self.0 {
-            Bound::Included(s) => s,
-            Bound::Excluded(s) => s.checked_add(1)?,
-            Bound::Unbounded => 0,
-        };
-        let end = match self.1 {
-            Bound::Included(e) => e.checked_add(1)?,
-            Bound::Excluded(e) => e,
-            Bound::Unbounded => slice.len(),
-        };
-        (start..end).get_mut(slice)
+        try_into_slice_range(slice.len(), self).ok()?.get_mut(slice)
     }
     unsafe fn get_unchecked(self, slice: *const [T]) -> *const [T] {
         bounds_to_range(self, (*slice).len()).get_unchecked(slice)
@@ -348,11 +372,11 @@ impl<T> SliceIndex<[T]> for (Bound<usize>, Bound<usize>) {
     }
     #[track_caller]
     fn index(self, slice: &[T]) -> &[T] {
-        bounds_to_range(self, slice.len()).index(slice)
+        into_slice_range(slice.len(), self).index(slice)
     }
     #[track_caller]
     fn index_mut(self, slice: &mut [T]) -> &mut [T] {
         let len = slice.len();
-        bounds_to_range(self, len).index_mut(slice)
+        into_slice_range(len, self).index_mut(slice)
     }
 }

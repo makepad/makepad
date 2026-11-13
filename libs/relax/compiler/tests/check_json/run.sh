@@ -3,9 +3,9 @@ set -eu
 H=$(cd "$(dirname "$0")" && pwd)
 BIN=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 T=$(mktemp -d)
-export MAKEPAD_RUN_CACHE=off
-export MAKEPAD_RUN_STD="$H/../../std"
-export MAKEPAD_RUN_CACHE_DIR="$T/target"
+export RELAX_CACHE=off
+export RELAX_STD="$H/../../std"
+export RELAX_CACHE_DIR="$T/target"
 : > "$T/actual"
 for source in main.rs ok.rs; do
   python3 - "$H" "$source" "$T/units.json" <<'PY'

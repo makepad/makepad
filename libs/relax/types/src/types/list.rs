@@ -182,12 +182,12 @@ impl Lists {
         let long = w.len() >= LONG as usize;
         let head_words = long as usize;
         let need = w.len() + head_words;
-        assert!(need <= LIST_CHUNK, "makepad: interned list of {} words", w.len());
+        assert!(need <= LIST_CHUNK, "relax: interned list of {} words", w.len());
         let mut p = self.end.load(Ordering::Relaxed) as usize;
         if (p & (LIST_CHUNK - 1)) + need > LIST_CHUNK {
             p = (p | (LIST_CHUNK - 1)) + 1;
         }
-        assert!(p >> LIST_CHUNK_BITS < LIST_MAX_CHUNKS, "makepad: list arena full");
+        assert!(p >> LIST_CHUNK_BITS < LIST_MAX_CHUNKS, "relax: list arena full");
         let c = self.chunk(p >> LIST_CHUNK_BITS);
         let at = unsafe { c.add(p & (LIST_CHUNK - 1)) };
         unsafe {

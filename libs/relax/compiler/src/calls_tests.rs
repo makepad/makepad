@@ -55,16 +55,16 @@ fn head_for(u: &crate::jit::Unit, id: u32, target: u64) -> u64 {
 #[test]
 fn patched_callee_while_callers_run() {
     // process-global runtime state: a child process of this test binary
-    const CHILD: &str = "MAKEPAD_RUN_CALLS_TEST";
+    const CHILD: &str = "RELAX_CALLS_TEST";
     if std::env::var_os(CHILD).is_none() {
         let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "calls_tests::patched_callee_while_callers_run", "--nocapture", "--test-threads=1"])
-            .env(CHILD, "1").env("MAKEPAD_RUN_GANDALF_ALL", "0"));
+            .env(CHILD, "1").env("RELAX_GANDALF_ALL", "0"));
         assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         return;
     }
     crate::jit::CHECK_FIRST.store(false, Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-calls-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("app/src")).unwrap();
     std::fs::write(dir.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n").unwrap();

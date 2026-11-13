@@ -4,7 +4,7 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet local-derive-app 2>>"$ERR")
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet local-derive-app 2>>"$ERR")
 echo "$OUT"
 if [ "$OUT" = "local derives ok" ]; then echo "local_derive: ok"; else tail -5 "$ERR"; echo "local_derive: FAILED"; exit 1; fi

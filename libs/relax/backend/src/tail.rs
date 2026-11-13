@@ -25,7 +25,7 @@
 //!   passed as `&mut self` escapes like any slot); a C body with aggregate parameters rebuilt in
 //!   its frame makes none.
 //!
-//! MAKEPAD_RUN_OPT=-tailcall: every call stays a call. MAKEPAD_RUN_TAIL_TRACE=<fn name suffix>: why
+//! RELAX_OPT=-tailcall: every call stays a call. RELAX_TAIL_TRACE=<fn name suffix>: why
 //! a matching fn's calls in tail position stay calls.
 
 use crate::cabi::{self, ArgPlan, PLoc, RetPlan};
@@ -146,10 +146,10 @@ pub fn returns_results(f: &Func, mut b: usize, mut at: usize, rets: &[VReg]) -> 
     false
 }
 
-/// MAKEPAD_RUN_TAIL_TRACE=<fn name suffix>: why a matching fn's calls in tail position stay calls.
+/// RELAX_TAIL_TRACE=<fn name suffix>: why a matching fn's calls in tail position stay calls.
 fn trace_on(name: &str) -> bool {
     static P: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    relax_session::phase::env_once(&P, "MAKEPAD_RUN_TAIL_TRACE").is_some_and(|p| name.ends_with(p))
+    relax_session::phase::env_once(&P, "RELAX_TAIL_TRACE").is_some_and(|p| name.ends_with(p))
 }
 
 /// The caller's own convention allows its frame to be replaced: Relax's, or a C body in a

@@ -4,7 +4,7 @@
 //! (vfs.rs) as the workspace root.
 //!
 //! The file set is what the front end READS, recorded rather than guessed: the packer runs
-//! `makepad check` of every package in a child process with a cold cache and MAKEPAD_RUN_READ_LOG set (vfs.rs
+//! `makepad check` of every package in a child process with a cold cache and RELAX_READ_LOG set (vfs.rs
 //! notes every read, probe and folder listing of the child and of the build scripts it starts), for
 //! the crate graph and cfg of `--target`. To that it adds
 //!   - the `resources/` folder of every crate it read Rust sources of (what apps load at run time),
@@ -197,7 +197,7 @@ pub fn run(opts: Options) -> Result<(), String> {
     }
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let log = work.join("reads.log");
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe = crate::dirs::loader_exe().map_err(|e| e.to_string())?;
     let work_s = crate::vfs::normalize_path(&work.canonicalize().map_err(|e| e.to_string())?.to_string_lossy());
     let work_plain = crate::vfs::normalize_path(&work.to_string_lossy());
     let t0 = std::time::Instant::now();
@@ -211,13 +211,13 @@ pub fn run(opts: Options) -> Result<(), String> {
         // the device. About 12-17 s per package on the Mac with the shared cache.
         cmd.arg("--workspace");
         cmd.arg(pkg).args(flags).current_dir(&root);
-        cmd.env("MAKEPAD_RUN_CACHE_DIR", work.join("cache"));
-        cmd.env("MAKEPAD_RUN_READ_LOG", &log);
+        cmd.env("RELAX_CACHE_DIR", work.join("cache"));
+        cmd.env("RELAX_READ_LOG", &log);
         crate::progenv::scrub_run_facts(&mut cmd);
-        cmd.env_remove("MAKEPAD_RUN_CHECK_TARGET");
-        cmd.env("MAKEPAD_RUN_OFFLINE", "1").env("MAKEPAD_CEF_OFFLINE", "1");
+        cmd.env_remove("RELAX_CHECK_TARGET");
+        cmd.env("RELAX_OFFLINE", "1").env("MAKEPAD_CEF_OFFLINE", "1");
         if let Some(t) = &opts.target {
-            cmd.env("MAKEPAD_RUN_CHECK_TARGET", t);
+            cmd.env("RELAX_CHECK_TARGET", t);
         }
         let f = std::fs::File::create(&out_log).map_err(|e| e.to_string())?;
         cmd.stdout(f.try_clone().map_err(|e| e.to_string())?).stderr(f);
@@ -232,7 +232,7 @@ pub fn run(opts: Options) -> Result<(), String> {
             return Err(format!("check of {pkg} found {diag} error line(s); log {}:\n{}", out_log.display(), errs.join("\n")));
         }
         // a check that failed to run to the end read fewer files than a run needs
-        if st.code().is_none() || !text.contains("makepad check:") {
+        if st.code().is_none() || !text.contains("relax check:") {
             let tail: Vec<&str> = text.lines().rev().take(8).collect();
             return Err(format!("check of {pkg} did not finish ({}); log {}:\n{}", st, out_log.display(), tail.into_iter().rev().collect::<Vec<_>>().join("\n")));
         }
@@ -295,7 +295,7 @@ pub fn run(opts: Options) -> Result<(), String> {
     // APK builder packages per crate (cargo makepad android): the archive holds the sources
     let assets_in_apk = opts.target.as_deref().is_some_and(|t| t.contains("android"));
     // ... except the packed apps' own `resources/`: an app reads its data there by path
-    // (CARGO_MANIFEST_DIR/resources: Sandbox's bundled games), which APK assets cannot serve (no
+    // (CARGO_MANIFEST_DIR/resources: an app's bundled games), which APK assets cannot serve (no
     // folder listing)
     let apps: BTreeSet<&str> = opts.packages.iter().map(|(name, _)| name.as_str()).collect();
     let is_app = |dir: &str| {
@@ -311,12 +311,12 @@ pub fn run(opts: Options) -> Result<(), String> {
         walk(&root, &res, &mut files)?;
     }
     // data a crate reads by a path outside its own folder, declared in its manifest:
-    // `[package.metadata.makepad] data = ["../../../engine/resources/kits"]` (Sandbox's game
+    // `[package.metadata.relax] data = ["../../../engine/resources/kits"]` (an app's game
     // script reads the engine's kits so; without them a store run's games fail to load)
     for p in graph.iter() {
         let manifest = if p.is_empty() { "Cargo.toml".to_string() } else { format!("{p}/Cargo.toml") };
         let Ok(text) = std::fs::read_to_string(root.join(&manifest)) else { continue };
-        let section = text.lines().skip_while(|l| l.trim() != "[package.metadata.makepad]").skip(1).take_while(|l| !l.trim_start().starts_with('['));
+        let section = text.lines().skip_while(|l| l.trim() != "[package.metadata.relax]").skip(1).take_while(|l| !l.trim_start().starts_with('['));
         for line in section {
             let Some((k, v)) = line.split_once('=') else { continue };
             if k.trim() != "data" { continue; }
@@ -408,7 +408,7 @@ pub fn run(opts: Options) -> Result<(), String> {
         let c = s.stored_size(oid).map_err(|e| e.to_string())?.unwrap_or(0);
         let c = *stored.entry(*oid).or_insert(c);
         let key = if path.starts_with(&format!("{STD_DIR}/")) {
-            "(makepad run std)".to_string()
+            "(Relax std)".to_string()
         } else {
             match package_of(path, &pkgs) {
                 Some("") | None => "(workspace root)".to_string(),

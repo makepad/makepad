@@ -46,7 +46,7 @@ impl Codec for DemandPart {
         Some(Self { key: Codec::get(r)?, ..Self::default() })
     }
 }
-const PART_VERSION: u32 = 12;
+const PART_VERSION: u32 = 13;
 const PART_DOMAIN: &str = "demand-part-v12";
 
 type Resolve<'a> = dyn FnMut(&str, u128) -> Option<&'static [u8]> + 'a;
@@ -111,7 +111,7 @@ impl DemandPart {
                 put_surface(path, (*hash)?, &scan.src, &scan.toks, &mut w, images)?;
                 put_defs(scan.defs.iter(), &mut w, images)?;
                 scan.children.put(&mut w); scan.aliases.put(&mut w); scan.macro_use.put(&mut w);
-                scan.uses.put(&mut w); scan.mods.put(&mut w); scan.mod_items.put(&mut w); scan.inner_macro_use.put(&mut w); scan.recursion_limit.put(&mut w);
+                scan.uses.put(&mut w); scan.mods.put(&mut w); scan.mod_items.put(&mut w); scan.inner_macro_use.put(&mut w); scan.recursion_limit.put(&mut w); scan.included.put(&mut w);
             }
             parameters.put(&mut w); positions.put(&mut w);
         }
@@ -221,7 +221,7 @@ impl DemandPart {
                 if source_path != path || Some(source_hash) != hash { return None; }
                 Some(Arc::new(Scanned { src_len, probes, src, toks,
                     defs: get_defs(&mut r, &store, images, &mut definitions)?.into_iter().map(|def| (*def).clone()).collect(), children: Codec::get(&mut r)?,
-                    aliases: Codec::get(&mut r)?, macro_use: Codec::get(&mut r)?, uses: Codec::get(&mut r)?, mods: Codec::get(&mut r)?, mod_items: Codec::get(&mut r)?, inner_macro_use: Codec::get(&mut r)?, recursion_limit: Codec::get(&mut r)? }))
+                    aliases: Codec::get(&mut r)?, macro_use: Codec::get(&mut r)?, uses: Codec::get(&mut r)?, mods: Codec::get(&mut r)?, mod_items: Codec::get(&mut r)?, inner_macro_use: Codec::get(&mut r)?, recursion_limit: Codec::get(&mut r)?, included: Codec::get(&mut r)? }))
             } else { None };
             part.scans.push((path, module, hash, scan, Codec::get(&mut r)?, Codec::get(&mut r)?));
         }
@@ -253,7 +253,7 @@ impl DemandPart {
 }
 
 // The alias and expansion maps are the table's own per-crate maps, shared: a
-// deferred file's capture copied them once per file (0.17 GB on a cold Stage).
+// deferred file's capture copied them once per file (0.17 GB on a large app's cold start).
 #[derive(Clone, Default)]
 pub(super) struct MacroPart {
     definitions: Vec<Arc<crate::macros::MacroDef>>,
@@ -266,6 +266,8 @@ pub(super) struct MacroPart {
 fields!(MacroPart, definitions, aliases, uses, modules, expansions, s2_fmt);
 impl MacroPart {
     pub(super) fn definitions(&self) -> &[Arc<crate::macros::MacroDef>] { &self.definitions }
+    /// The crate's expansion-made imports ((module, binding) -> path), as its outline found them.
+    pub(super) fn expansions(&self) -> &Arc<HashMap<(String, String), Vec<String>>> { &self.expansions }
     fn referenced_size(&self) -> usize {
         4 + self.definitions.len() * 16 + self.aliases.plain_size() + self.uses.plain_size()
             + self.modules.plain_size() + self.expansions.plain_size() + 1
@@ -416,6 +418,15 @@ impl DemandImage {
         }
         recording.ready.lock().unwrap().get(ci).map(|p| p.macros.definitions().to_vec())
     }
+    /// The imports the expansions of crate `ci`'s outline wrote (`pub use internal as name;`
+    /// beside a generated `macro_rules! internal`), under the same conditions as outline_macros.
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+        let recording = self.recording.as_ref()?;
+        if let Some((_, _, parts)) = recording.pending.lock().unwrap().as_ref() {
+            return parts.get(ci).map(|p| p.macros.expansions().clone());
+        }
+        recording.ready.lock().unwrap().get(ci).map(|p| p.macros.expansions().clone())
+    }
     pub fn recorded_parts(&self) -> Vec<Arc<DemandPart>> {
         let _mem = crate::memstat::tag(crate::memstat::Tag::Planner);
         let Some(recording) = &self.recording else { return self.parts.clone(); };
@@ -475,7 +486,7 @@ impl DemandImage {
         let t_seal = t0.elapsed();
         if let Some(first) = parts.first_mut() {
             let value = final_names.closure_delta(&names);
-            // Both namespaces end here (planner + rebuilt, ~1 GB on a cold Stage): not held
+            // Both namespaces end here (planner + rebuilt, ~1 GB on a large app's cold start): not held
             // through the delta's encode, its shrink copy and the parts' publication.
             drop((final_names, names));
             let legacy = if profile { value.legacy_size(true) } else { 0 };

@@ -15,7 +15,7 @@ const MICROS_PER_SEC: u64 = 1_000_000;
 /// The normalized fractional second, with the same scalar niche as core's Nanoseconds.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-#[cfg_attr(not(relax_check), rustc_layout_scalar_valid_range_end(999_999_999))]
+#[rustc_layout_scalar_valid_range_end(999_999_999)]
 struct Nanoseconds(u32);
 
 impl Nanoseconds {

@@ -1,9 +1,9 @@
 // ported from library/core/src/clone.rs @8d1a764
 //! Clone. Primitive impls are generated (num/prim_traits.rs); derive(Clone) is native.
 
-#[cfg_attr(not(relax_check), lang = "clone")]
+#[lang = "clone"]
 pub trait Clone: Sized {
-    #[cfg_attr(not(relax_check), lang = "clone_fn")]
+    #[lang = "clone_fn"]
     fn clone(&self) -> Self;
     fn clone_from(&mut self, source: &Self) {
         *self = source.clone();
@@ -29,7 +29,7 @@ pub use crate::clone_uninit::CloneToUninit;
 
 // :283,458,468. Derive expansion emits these declarations' ordinary bounds.
 // Const effects are outside this port.
-#[cfg_attr(not(relax_check), lang = "trivial_clone")]
+#[lang = "trivial_clone"]
 pub unsafe trait TrivialClone: Clone {}
 pub struct AssertParamIsClone<T: Clone + crate::marker::PointeeSized> { _field: crate::marker::PhantomData<T> }
 pub struct AssertParamIsCopy<T: crate::marker::Copy + crate::marker::PointeeSized> { _field: crate::marker::PhantomData<T> }

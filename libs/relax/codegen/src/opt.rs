@@ -11,7 +11,7 @@ use relax_backend::dom::{idoms, dom_numbers};
 use relax_backend::frame::slot_colors_used;
 use relax_backend::stats::opt_off;
 
-/// MAKEPAD_RUN_OPT_HIST: opt-pipeline cpu ns (0..6) and function counts (6..12) by optimised size
+/// RELAX_OPT_HIST: opt-pipeline cpu ns (0..6) and function counts (6..12) by optimised size
 pub static HIST: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
 use relax_backend::rir::*;
 use relax_backend::passes::*;
@@ -31,7 +31,7 @@ pub struct OptCfg {
 }
 
 impl OptCfg {
-    /// `MAKEPAD_RUN_OPT=none` or a comma list of passes to disable (`-inline,-fold`).
+    /// `RELAX_OPT=none` or a comma list of passes to disable (`-inline,-fold`).
     pub fn from_options(options: &relax_session::Options) -> OptCfg {
         crate::native::install_probe();
         let mut c = OptCfg { inline: true, inline_all: true, fold: true, cse: true, sroa: true, licm: true, imm: true, layout: true };
@@ -67,7 +67,7 @@ pub const INLINE_HINT_INSTS: usize = 60;
 pub const INLINE_MAX_BLOCKS: usize = 8;
 pub const INLINE_BUDGET: usize = 600;
 
-/// Leaf-inlining budget (insts, blocks); MAKEPAD_RUN_INLINE_LEAF=insts,blocks overrides.
+/// Leaf-inlining budget (insts, blocks); RELAX_INLINE_LEAF=insts,blocks overrides.
 pub fn leaf_budget(options: &relax_session::Options) -> (usize, usize) {
     options.inline_leaf
 }
@@ -224,7 +224,7 @@ pub struct InlineLimits {
 }
 
 impl InlineLimits {
-    /// O1 ("obviously inline"); MAKEPAD_RUN_INLINE_LEAF=insts,blocks overrides the leaf rule
+    /// O1 ("obviously inline"); RELAX_INLINE_LEAF=insts,blocks overrides the leaf rule
     pub fn tier0(options: &relax_session::Options) -> InlineLimits {
         let (leaf_insts, leaf_blocks) = leaf_budget(options);
         InlineLimits { budget: INLINE_BUDGET, leaf_insts, leaf_blocks, hint_insts: INLINE_HINT_INSTS, chain_insts: INLINE_CHAIN_INSTS, always_insts: 200, free_any: false, ordered: false, hot_insts: 0, growth_limit: None, cold_tiny: false, lto: false }
@@ -531,10 +531,10 @@ impl InlineStats {
 /// vs small limits, .NET's profile-boosted size tolerance): a caller the sampler found hot
 /// (its block frequencies are sampled) gets max(4x, +8000) instructions -- bottom-up inlining
 /// made that room usable, max(2x, +4000) refused html_parse's and maps' hot sites for budget
-/// (html 0.66, maps 0.97) --; every other caller max(2x, +4000): Stage's lukewarm UI functions
+/// (html 0.66, maps 0.97) --; every other caller max(2x, +4000): an app's lukewarm UI functions
 /// grew 3x in code with the big room and its O3 compile CPU went up 4x.
 /// The inlining room a single-caller body of `size` instructions brings when it moves into its
-/// caller: what its own (cold) growth ceiling allowed it compiled alone (MAKEPAD_RUN_OPT=-singleroom:
+/// caller: what its own (cold) growth ceiling allowed it compiled alone (RELAX_OPT=-singleroom:
 /// none, the body's size only).
 pub fn single_room(options: &relax_session::Options, size: usize) -> usize {
     if opt_off(options, "-singleroom") { 0 } else { growth_ceiling(size, false) - size }
@@ -725,7 +725,7 @@ fn site_rule(options: &relax_session::Options, callee: &Func, id: u32, nargs: us
     // before samples exist, preventing structural builds from spending their
     // growth allowance on large peripheral helpers. A site in a loop is no peripheral helper:
     // rustc inlines an #[inline] body there by its cost alone (LLVM's inline-hint threshold), and
-    // which loop block the samples or counts call hot varies from build to build (sandbox
+    // which loop block the samples or counts call hot varies from build to build (an app's
     // reconcile's derived `MirrorEntry::clone`, 138 insts, in the per-entity loop: inlined in one
     // O3 build, a call in the next; GAPB).
     let mut lim = *lim;
@@ -776,10 +776,10 @@ fn pgo_site_limits(lim: &InlineLimits, counted: bool, priority: u32, callee: &Fu
     }
 }
 
-/// MAKEPAD_RUN_INLINE_TRACE=<suffix>[,<suffix>...]: the callers whose site decisions (and O3 snapshot) are traced
+/// RELAX_INLINE_TRACE=<suffix>[,<suffix>...]: the callers whose site decisions (and O3 snapshot) are traced
 pub fn inline_trace(name: &str) -> bool {
     static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    relax_session::phase::env_once(&T, "MAKEPAD_RUN_INLINE_TRACE").is_some_and(|t| t.split(',').any(|p| name.ends_with(p)))
+    relax_session::phase::env_once(&T, "RELAX_INLINE_TRACE").is_some_and(|t| t.split(',').any(|p| name.ends_with(p)))
 }
 
 /// Frequencies must describe this exact RIR. New blocks inherit the site's priority.
@@ -898,7 +898,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
     for p in &f.params { kdef[p.0 as usize].0 = 1; }
     for b in 0..f.blocks.len() { note_defs(&mut kdef, &f.blocks[b].insts, f.vregs.len()); }
     let mut specialized: std::collections::HashMap<(u32, bool, Vec<Option<i64>>), Option<Box<Func>>> = std::collections::HashMap::new();
-    // MAKEPAD_RUN_INLINE_TRACE=<suffix>: every site decision of the callers whose name ends with it
+    // RELAX_INLINE_TRACE=<suffix>: every site decision of the callers whose name ends with it
     let trace = inline_trace(&f.name);
     // a split body (`patched::split_patched_path`): its fast half takes a copy a patch must reach in
     // only where an exit covers the site (one ran on every path since a frame last may have
@@ -964,7 +964,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             let free = size <= INLINE_FREE_INSTS && size <= free_budget;
             // A tiny body (no bigger than the call's own argument/return moves, or within the free
             // size) is admitted whatever the caller has grown to: refusing it keeps a call that costs
-            // more than the body (sandbox leap, a pool node: encode_cascades left core::mem::drop x130,
+            // more than the body (a game on a pool node: encode_cascades left core::mem::drop x130,
             // rc::header_of x140, slice::iter::next x26 as calls -- "budget" -- once big chains had
             // filled the growth ceiling). Only the raw free allowance is charged for it.
             let tiny = size <= INLINE_FREE_INSTS;
@@ -1019,7 +1019,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
                 });
             }
         }
-        // makepad inspect experiments (`ab <fn> b=inline:<callee>` / `noinline:`): MAKEPAD_RUN_OPT
+        // makepad inspect experiments (`ab <fn> b=inline:<callee>` / `noinline:`): RELAX_OPT
         // tokens `+inl@<slot>` / `-inl@<slot>` force or forbid this callee's sites
         if !options.opt.is_empty() {
             let tok = |p: &str| options.opt.iter().any(|t| t.strip_prefix(p).and_then(|x| x.parse::<u32>().ok()) == Some(id));
@@ -1060,7 +1060,7 @@ pub fn inline_calls_ordered(options: &relax_session::Options, f: &mut Func, self
             // had compiled alone (its size and its own room), so the calls around it (Vec::push
             // in the absorbed loop) and in it (an absorbed VM handler's #[inline] stack pops)
             // still fit -- moving a body in never shrinks the inlining it would have got on its
-            // own (P(DOOM)'s run_core: 25 single-caller opcode handlers moved in with their
+            // own (a game's run_core: 25 single-caller opcode handlers moved in with their
             // sizes only, and 47 pop_stack_resolved calls stayed calls on the growth ceiling)
             RULE_SINGLE => growth_limit = growth_limit.saturating_add(growth).saturating_add(single_room(options, size)),
             _ if no_growth => {}
@@ -2429,7 +2429,7 @@ fn promote_in_loop(f: &mut Func, preds: &[Vec<u32>], h: u32, body: &[bool]) -> b
         if ndef[p.0 as usize] != 1 || !f.params.contains(&p) {
             continue;
         }
-        // MAKEPAD_RUN_OPT=-owned: by-value argument copies as any noalias param (bisection)
+        // RELAX_OPT=-owned: by-value argument copies as any noalias param (bisection)
         let owned = f.owned.contains(&p) && !relax_backend::stats::opt_env_off("-owned");
         // the vregs based on p: moves and arithmetic on one, and call results when a based-on
         // pointer went into the call
@@ -2540,7 +2540,7 @@ fn promote_in_loop(f: &mut Func, preds: &[Vec<u32>], h: u32, body: &[bool]) -> b
         // Load-only fields alone are LLVM LICM's invariant-load hoisting: a Vec's pointer and length
         // read through `&mut self` in a loop that writes only through the heap pointer (vorbis
         // `self.spectra[i] *= self.curves[i]` reloaded both headers every iteration).
-        // MAKEPAD_RUN_OPT=-promoteld: carried fields only.
+        // RELAX_OPT=-promoteld: carried fields only.
         if !take.iter().any(|x| x.2 && x.3) && (relax_backend::stats::opt_env_off("-promoteld") || !take.iter().any(|x| x.2)) {
             continue;
         }
@@ -4016,7 +4016,7 @@ pub fn forward_slot_dests(f: &mut Func) -> bool {
 /// Stack slot sharing ("stack coloring"), as the backends lay out the frame (`slot_layout`):
 /// slots whose lifetimes cannot overlap share storage. Lowering gives every temporary, call
 /// result buffer and by-value argument copy a slot of its own, and inlining gives each inlined
-/// body its own slots, so without sharing a frame is the sum of them all (Scope's recursive
+/// body its own slots, so without sharing a frame is the sum of them all (a large app's recursive
 /// type parser: 8 KB per parse_type frame, rustc 0.5 KB; Amp: 0.9 MB O3 frames on 2 MB kernel
 /// worker stacks; rustc's stack colouring overlaps them). A slot's lifetime is approximated by
 /// the blocks between its accesses: live where some access can reach and some access can be
@@ -4802,7 +4802,7 @@ pub fn sink_loads_to_successor(f: &mut Func) -> bool {
 /// indices are. The pointer arithmetic, then read only on the non-empty edge, moves onto it (a
 /// block of its own in front of the loop): rustc builds the slice pointers only for a non-empty
 /// cell. Runs after rotate_loops (the guard is the old header, entered from one block).
-/// MAKEPAD_RUN_OPT=-emptytest. Returns whether anything changed.
+/// RELAX_OPT=-emptytest. Returns whether anything changed.
 pub fn fold_empty_tests(options: &relax_session::Options, f: &mut Func) -> bool {
     if opt_off(options, "-emptytest") {
         return false;
@@ -7525,7 +7525,8 @@ mod slot_layout_tests {
         for b in &mut f.blocks {
             b.pos = vec![0; b.insts.len()];
         }
-        slot_layout(&f, 0, true)
+        let (at, end, _) = slot_layout(&f, 0, true, true);
+        (at, end)
     }
 
     #[test]
@@ -7579,7 +7580,7 @@ mod slot_layout_tests {
         inline_site(&mut f, 0, 3, &callee, &[a], &[], &|_| false, false);
         f.verify().unwrap();
         assert!(!f.slots[s as usize].arg);
-        let (at, _) = slot_layout(&f, 0, true);
+        let (at, _, _) = slot_layout(&f, 0, true, true);
         assert_ne!(at[0], at[1]);
     }
 
@@ -7596,14 +7597,14 @@ mod slot_layout_tests {
         ];
         f.blocks[0].term = Term::Ret(vec![x]);
         f.blocks[0].pos = vec![0; 6];
-        let (at, end) = slot_layout(&f, 0, true);
+        let (at, end, _) = slot_layout(&f, 0, true, true);
         assert_eq!((at[0], end), (at[1], 128));
         // a partial copy (offset 8 into the destination) leaves them apart
         let off = f.vreg(Cls::I);
         f.blocks[0].insts[4] = Inst::Copy(off, a, 16);
         f.blocks[0].insts.insert(4, Inst::IBinI(IOp::Add, U64, off, b, 8));
         f.blocks[0].pos.push(0);
-        let (at, _) = slot_layout(&f, 0, true);
+        let (at, _, _) = slot_layout(&f, 0, true, true);
         assert_ne!(at[0], at[1]);
     }
 
@@ -8366,7 +8367,7 @@ pub fn fold_small_sets(f: &mut Func) -> bool {
 /// within the source's low bits, becomes a copy of x (then coalesced: `bitsleft -= entry & 0xff`
 /// was movzx + sub). Narrow operations re-extend their results (both backends), so a narrow
 /// result's demanded bits above its width demand its top bit (signed) or nothing (unsigned).
-/// MAKEPAD_RUN_OPT=-bdce: off (bisection).
+/// RELAX_OPT=-bdce: off (bisection).
 pub fn drop_undemanded_masks(options: &relax_session::Options, f: &mut Func) -> bool {
     if opt_off(options, "-bdce") {
         return false;
@@ -8574,7 +8575,7 @@ fn rename_operands(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
 /// block: t then dies at the copy and the allocator gives both one register.
 /// Candidates: `Mov(x, t)`, x defined more than once, t defined once in the same block before
 /// it, not a parameter and not a value the allocator recomputes (constants, addresses).
-/// MAKEPAD_RUN_OPT=-revar: off (bisection).
+/// RELAX_OPT=-revar: off (bisection).
 pub fn reuse_copied_variables(options: &relax_session::Options, f: &mut Func) -> bool {
     if opt_off(options, "-revar") {
         return false;
@@ -8709,7 +8710,7 @@ pub fn reuse_copied_variables(options: &relax_session::Options, f: &mut Func) ->
     if !ok.iter().any(|&o| o) {
         return false;
     }
-    // MAKEPAD_RUN_OPT=-revarx: indexed memory operands keep the temporary (bisection)
+    // RELAX_OPT=-revarx: indexed memory operands keep the temporary (bisection)
     let indexed = !opt_off(options, "-revarx");
     let mut any = false;
     for bi in 0..nb {
@@ -9067,17 +9068,17 @@ fn slot_conds(f: &Func, slot_of: &dyn Fn(VReg) -> Option<(u32, i64)>, near: &dyn
     (conds, branch)
 }
 
-/// MAKEPAD_RUN_SLOTCOAL_TRACE=1: coalesce_slot_copies' candidates and why copies are none
+/// RELAX_SLOTCOAL_TRACE=1: coalesce_slot_copies' candidates and why copies are none
 fn slotcoal_trace() -> bool {
     static T: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *T.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SLOTCOAL_TRACE").is_some())
+    *T.get_or_init(|| std::env::var_os("RELAX_SLOTCOAL_TRACE").is_some())
 }
 
 fn slotcoal_dump() -> Option<&'static str> {
     static VALUE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     VALUE.get_or_init(|| {
         let _k = relax_session::phase::kept();
-        std::env::var("MAKEPAD_RUN_SLOTCOAL_DUMP").ok()
+        std::env::var("RELAX_SLOTCOAL_DUMP").ok()
     }).as_deref()
 }
 
@@ -9093,7 +9094,7 @@ fn slotcoal_dump() -> Option<&'static str> {
 /// (call result -> peek slot -> current slot -> match scrutinee) on every item.
 /// A slot handed to calls only as the result buffer of an sret callee counts as fully written there
 /// (the callee writes the value; bytes it leaves are padding or an inactive variant's, which Rust
-/// leaves undefined). `prefix`: the smaller-into-larger joins too (MAKEPAD_RUN_OPT=-slotprefix
+/// leaves undefined). `prefix`: the smaller-into-larger joins too (RELAX_OPT=-slotprefix
 /// turns them off). Returns whether any copy went.
 pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
     const NONE: u32 = u32::MAX;
@@ -9810,7 +9811,7 @@ pub fn coalesce_slot_copies(f: &mut Func, prefix: bool) -> bool {
 /// Field-wise copies become one `Copy`: in one block, loads from one base whose values only go
 /// to stores at the same distance from another base, covering a contiguous byte range of at least
 /// 16 bytes, are one copy of that range at the last store (LLVM gets there with the SLP
-/// vectorizer and memcpyopt). A derived `Clone` of a struct of `Copy` fields (sandbox reconcile's
+/// vectorizer and memcpyopt). A derived `Clone` of a struct of `Copy` fields (an app's reconcile
 /// `MirrorEntry`, 208 bytes: 49 scalar stores and as many loads) is copied in 16-byte moves, and
 /// the copy is what slot forwarding and coalescing join along. Kept apart: ranges that may
 /// overlap each other, a write in between that may touch either range, a read in between that

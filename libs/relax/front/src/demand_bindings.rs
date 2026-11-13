@@ -233,7 +233,7 @@ impl Bindings {
         }
     }
     /// The spelling as an owned string, without keeping it: a snapshot renders every binding of a
-    /// crate once (1.4 M on a cold Stage) and would otherwise leave all of them cached in `text`.
+    /// crate once (1.4 M on a large app's cold start) and would otherwise leave all of them cached in `text`.
     pub fn spelling_string(&self, id: usize) -> String {
         let mut out = String::new();
         self.render(id, &mut out);

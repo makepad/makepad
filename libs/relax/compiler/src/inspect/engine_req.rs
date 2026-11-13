@@ -206,10 +206,10 @@ pub fn cmd_requests(req: &Req, out: &mut Out) {
     let q = REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
     let lines: Vec<String> = q.iter().filter(|r| r.seq > after).map(|r| r.json.clone()).collect();
     drop(q);
-    out.always(&format!("{{\"engine_requests\":{},\"node\":{},\"now_ms\":{}}}", lines.len(), json_str(&node_name()), now_ms()));
+    out.line(&format!("{{\"engine_requests\":{},\"node\":{},\"now_ms\":{}}}", lines.len(), json_str(&node_name()), now_ms()));
     for l in lines {
         // a request is up to ~25 KB: never cut one off at the reply limit
-        out.always(&l);
+        out.line(&l);
     }
 }
 
@@ -269,7 +269,7 @@ pub fn symbol(name: &[u8]) -> Option<usize> {
 mod tests {
     #[test]
     fn post_reply_and_read_back() {
-        let id = super::post("pips-leap\0add a grappling hook verb\0game.grapple(target)\0player: can I swing?\0chat:1").unwrap();
+        let id = super::post("game-a\0add a grappling hook verb\0game.grapple(target)\0player: can I swing?\0chat:1").unwrap();
         assert!(id.ends_with(&format!(".{}.1", std::process::id())) || id.contains('.'));
         assert!(super::post("g\0 \0d\0c\0r").is_err(), "a summary is required");
         assert!(super::reply(&id, "shipped", "x").is_err(), "unknown status");

@@ -337,6 +337,12 @@ impl Hash for str {
     }
 }
 
+impl Hash for ! {
+    fn hash<H: Hasher>(&self, _: &mut H) {
+        *self
+    }
+}
+
 impl Hash for () {
     fn hash<H: Hasher>(&self, _state: &mut H) {}
 }

@@ -1,5 +1,5 @@
-//! `impl<T> [T]` and `impl [u8]` (Relax only: inherent impls on primitive types). Bodies
-//! forward to the free functions of this module tree, which the rustc shim checks.
+//! Relax's `impl<T> [T]` and `impl [u8]`. Bodies forward to the free functions of this
+//! module tree.
 
 use super::iter as it;
 use super::sort;
@@ -48,7 +48,7 @@ impl<T> [T] {
         let right = crate::slice::from_raw_parts_mut(ptr.add(rest_len - ts_len), ts_len);
         (left, mid, right)
     }
-    #[cfg_attr(not(relax_check), lang = "slice_len_fn")]
+    #[lang = "slice_len_fn"]
     #[rustc_no_implicit_autorefs]
     pub const fn len(&self) -> usize {
         unsafe { im::slice_len(self) }
@@ -194,6 +194,9 @@ impl<T> [T] {
     pub const fn windows(&self, size: usize) -> Windows<'_, T> {
         it::windows(self, size)
     }
+    pub const fn array_windows<const N: usize>(&self) -> it::ArrayWindows<'_, T, N> {
+        it::array_windows(self)
+    }
     #[track_caller]
     pub const fn chunks(&self, chunk_size: usize) -> Chunks<'_, T> {
         it::chunks(self, chunk_size)
@@ -337,6 +340,33 @@ impl<T> [T] {
             None
         }
     }
+    /// rustc 1.100.0 (trim_prefix_suffix): `self` without `prefix` if it starts with it, else `self`
+    pub fn trim_prefix(&self, prefix: &[T]) -> &[T]
+    where
+        T: PartialEq,
+    {
+        let n = prefix.len();
+        if n <= self.len() {
+            let (head, tail) = self.split_at(n);
+            if head == prefix {
+                return tail;
+            }
+        }
+        self
+    }
+    pub fn trim_suffix(&self, suffix: &[T]) -> &[T]
+    where
+        T: PartialEq,
+    {
+        let (len, n) = (self.len(), suffix.len());
+        if n <= len {
+            let (head, tail) = self.split_at(len - n);
+            if tail == suffix {
+                return head;
+            }
+        }
+        self
+    }
     pub fn binary_search(&self, x: &T) -> Result<usize, usize>
     where
         T: Ord,
@@ -398,6 +428,14 @@ impl<T> [T] {
     pub fn select_nth_unstable_by<F: FnMut(&T, &T) -> Ordering>(&mut self, index: usize, compare: F) -> (&mut [T], &mut T, &mut [T]) {
         let mut compare = compare;
         sort::select_nth(self, index, &mut |a: &T, b: &T| compare(a, b) == Ordering::Less);
+        let (left, rest) = super::split_at_mut(self, index);
+        let (mid, right) = super::split_at_mut(rest, 1);
+        (left, &mut mid[0], right)
+    }
+    #[track_caller]
+    pub fn select_nth_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, index: usize, f: F) -> (&mut [T], &mut T, &mut [T]) {
+        let mut f = f;
+        sort::select_nth(self, index, &mut |a: &T, b: &T| f(a).lt(&f(b)));
         let (left, rest) = super::split_at_mut(self, index);
         let (mid, right) = super::split_at_mut(rest, 1);
         (left, &mut mid[0], right)
@@ -526,6 +564,24 @@ impl<T> [T] {
         [T]: Join<Separator>,
     {
         Join::join(self, sep)
+    }
+    /// The slice as an array reference, `None` when its length is not exactly `N` (stable since 1.93).
+    pub const fn as_array<const N: usize>(&self) -> Option<&[T; N]> {
+        if self.len() == N {
+            // SAFETY: a slice of N elements is laid out as `[T; N]`
+            Some(unsafe { &*(self.as_ptr() as *const [T; N]) })
+        } else {
+            None
+        }
+    }
+    /// The slice as a mutable array reference, `None` when its length is not exactly `N`.
+    pub const fn as_mut_array<const N: usize>(&mut self) -> Option<&mut [T; N]> {
+        if self.len() == N {
+            // SAFETY: a slice of N elements is laid out as `[T; N]`
+            Some(unsafe { &mut *(self.as_mut_ptr() as *mut [T; N]) })
+        } else {
+            None
+        }
     }
     pub const fn first_chunk<const N: usize>(&self) -> Option<&[T; N]> {
         if self.len() < N {

@@ -4,8 +4,8 @@
 H=$(cd "$(dirname "$0")" && pwd)
 ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
-export MAKEPAD_RUN_CACHE=off
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" run --quiet mv-app 2>>"$ERR")
+export RELAX_CACHE=off
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet mv-app 2>>"$ERR")
 WANT=$'v1 v2 1 20\nmvdep mvdep mvdep mvdep\n22 101 v1\nmvdep::Thing mvdep::Thing'
 echo "$OUT"
 if [ "$OUT" = "$WANT" ]; then echo "multi_version: ok"; else tail -5 "$ERR"; echo "multi_version: FAILED"; exit 1; fi

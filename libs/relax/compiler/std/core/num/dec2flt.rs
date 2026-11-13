@@ -32,7 +32,6 @@ impl fmt::Display for ParseFloatError {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for ParseFloatError {
     fn description(&self) -> &str {
         self.description_str()

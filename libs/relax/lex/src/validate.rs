@@ -2,6 +2,9 @@
 //! (`cook_lexer_literal`, `unescape_error_reporting`) and rustc_literal_escaper's unescape
 //! rules: bad escapes, bare CRs, non-ASCII in byte literals, wrong digits for a base, empty
 //! exponents, unknown prefixes and non-identifier characters. Only the first error is kept.
+//! A literal's suffix and an integer's size are judged where rustc lowers the literal
+//! (`report_lit_error`), which a cfg-stripped construct never reaches: those errors go to the
+//! parser (`validate` answers them) instead of failing the file.
 
 use crate::lexer::{Tok, T};
 use std::borrow::Cow;
@@ -31,6 +34,16 @@ type VErr = (u32, Cow<'static, str>);
 
 fn err<T>(pos: usize, msg: impl Into<Cow<'static, str>>) -> Result<T, VErr> {
     Err((pos as u32, msg.into()))
+}
+
+/// Where a literal's lowering errors go: the file's list for a literal the parser consumes, none
+/// for one in a macro's tokens (judged when an expansion's parse consumes it, cooked_*).
+type Lowered<'v> = Option<&'v mut Vec<VErr>>;
+
+fn lowered(sink: Lowered, pos: usize, msg: impl Into<Cow<'static, str>>) {
+    if let Some(v) = sink {
+        v.push((pos as u32, msg.into()));
+    }
 }
 
 fn char_at(src: &[u8], i: usize) -> Option<char> {
@@ -96,8 +109,10 @@ fn attr_start(toks: &[Tok], name: usize) -> bool {
     name >= 2 && toks[name].kind == T::Ident && toks[name - 1].kind == T::OpenBracket && (toks[name - 2].kind == T::Pound || (name >= 3 && toks[name - 2].kind == T::Not && toks[name - 3].kind == T::Pound))
 }
 
-/// Validates the tokens `toks[from..]` of `src`; the first error is returned.
-pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
+/// Validates the tokens of `src`: the first lexer error fails it; the literal errors rustc reports
+/// where it lowers a literal are the answer, by position, for the parser to report those outside
+/// cfg-stripped code.
+pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<Vec<VErr>, VErr> {
     // rustc_span source_map `read_file`: a source file is read as a `String`
     if let Err(e) = std::str::from_utf8(src) {
         return err(e.valid_up_to(), "stream did not contain valid UTF-8");
@@ -108,6 +123,7 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
     // (`report_lit_error`), so those checks are skipped there; the lexer's own (escapes, digits of a
     // base, exponents, `_` suffix, token starts) apply everywhere.
     let mut stack: Vec<bool> = Vec::new();
+    let mut lowers = Vec::new();
     for (k, t) in toks.iter().enumerate() {
         let (lo, hi) = (t.lo as usize, t.hi as usize);
         // (`#[name = value]`: rustc parses the value as an expression)
@@ -131,14 +147,15 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
             }
             _ => {}
         }
+        let sink = parse_level.then_some(&mut lowers);
         match t.kind {
-            T::Str => quoted(src, lo, hi, 0, b'"', Mode::Str, parse_level)?,
-            T::ByteStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::ByteStr, parse_level)?,
-            T::CStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::CStr, parse_level)?,
-            T::ByteStr | T::CStr | T::RawStr => raw(src, lo, hi, t.kind, parse_level)?,
-            T::Char => quoted(src, lo, hi, 0, b'\'', Mode::Char, parse_level)?,
-            T::Byte => quoted(src, lo, hi, 1, b'\'', Mode::Byte, parse_level)?,
-            T::Int | T::Float => number(src, lo, hi, t.kind == T::Float, parse_level)?,
+            T::Str => quoted(src, lo, hi, 0, b'"', Mode::Str, sink)?,
+            T::ByteStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::ByteStr, sink)?,
+            T::CStr if src[lo + 1] == b'"' => quoted(src, lo, hi, 1, b'"', Mode::CStr, sink)?,
+            T::ByteStr | T::CStr | T::RawStr => raw(src, lo, hi, t.kind, sink)?,
+            T::Char => quoted(src, lo, hi, 0, b'\'', Mode::Char, sink)?,
+            T::Byte => quoted(src, lo, hi, 1, b'\'', Mode::Byte, sink)?,
+            T::Int | T::Float => number(src, lo, hi, t.kind == T::Float, sink)?,
             T::Ident | T::RawIdent => {
                 if src[lo..hi].is_ascii() {
                     // an ASCII identifier directly followed by a quote is a reserved prefix
@@ -160,7 +177,7 @@ pub fn validate(src: &[u8], toks: &[Tok], edition: u16) -> Result<(), VErr> {
             _ => {}
         }
     }
-    Ok(())
+    Ok(lowers)
 }
 
 fn ident(src: &[u8], lo: usize, hi: usize) -> Result<(), VErr> {
@@ -204,10 +221,12 @@ fn fix_base_capitalisation(suffix: &str) -> bool {
 /// The checks rustc makes when the parser cooks a number literal (its suffix and value), for a
 /// literal the token-level validation skipped (macro arguments the parser consumes later).
 pub fn cooked_number(text: &[u8], float: bool) -> Result<(), String> {
-    number(text, 0, text.len(), float, true).map_err(|e| e.1.into_owned())
+    let mut lowers = Vec::new();
+    number(text, 0, text.len(), float, Some(&mut lowers)).map_err(|e| e.1.into_owned())?;
+    lowers.into_iter().next().map_or(Ok(()), |e| Err(e.1.into_owned()))
 }
 
-fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> Result<(), VErr> {
+fn number(src: &[u8], lo: usize, hi: usize, float: bool, sink: Lowered) -> Result<(), VErr> {
     let b = &src[lo..hi];
     // the digits of the literal (suffix excluded) and, for an integer, its value
     let body_end;
@@ -266,14 +285,19 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
     }
     // (an integer's digits are all the literal holds before the suffix)
     let suffix = std::str::from_utf8(&b[body_end..]).unwrap_or("?");
-    if parse_level && !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {
+    let Some(sink) = sink else {
+        return Ok(());
+    };
+    if !suffix.is_empty() && !NUMBER_SUFFIXES.contains(&suffix) {
         // rustc_session report_lit_error: `0X1F` is a capitalised base prefix (fix_base_capitalisation)
         if !float && &b[..body_end] == b"0" && fix_base_capitalisation(suffix) {
-            return err(lo, "invalid base prefix for number literal");
+            lowered(Some(sink), lo, "invalid base prefix for number literal");
+        } else {
+            lowered(Some(sink), lo + body_end, format!("invalid suffix `{suffix}` for {} literal", if float { "float" } else { "number" }));
         }
-        return err(lo + body_end, format!("invalid suffix `{suffix}` for {} literal", if float { "float" } else { "number" }));
+        return Ok(());
     }
-    if parse_level && !float {
+    if !float {
         let digits = if radix == 10 { &b[..body_end] } else { &b[2..body_end] };
         let mut v: u128 = 0;
         for &c in digits {
@@ -283,14 +307,17 @@ fn number(src: &[u8], lo: usize, hi: usize, float: bool, parse_level: bool) -> R
             let d = (c as char).to_digit(radix).unwrap_or(0) as u128;
             match v.checked_mul(radix as u128).and_then(|x| x.checked_add(d)) {
                 Some(x) => v = x,
-                None => return err(lo, "integer literal is too large"),
+                None => {
+                    lowered(Some(sink), lo, "integer literal is too large");
+                    return Ok(());
+                }
             }
         }
     }
     Ok(())
 }
 
-fn raw(src: &[u8], lo: usize, hi: usize, kind: T, parse_level: bool) -> Result<(), VErr> {
+fn raw(src: &[u8], lo: usize, hi: usize, kind: T, sink: Lowered) -> Result<(), VErr> {
     // prefix: r | br | cr, then #*, then the quote
     let mut i = lo;
     while src[i] != b'#' && src[i] != b'"' {
@@ -311,7 +338,7 @@ fn raw(src: &[u8], lo: usize, hi: usize, kind: T, parse_level: bool) -> Result<(
         end -= 1;
     }
     let body_hi = end.saturating_sub(1).max(body_lo);
-    suffix(src, (end + hashes).min(hi), hi, parse_level, match kind {
+    suffix(src, (end + hashes).min(hi), hi, sink, match kind {
         T::ByteStr => "byte string",
         T::CStr => "C string",
         _ => "string",
@@ -335,17 +362,15 @@ fn raw(src: &[u8], lo: usize, hi: usize, kind: T, parse_level: bool) -> Result<(
 }
 
 /// A quoted literal's suffix `src[lo..hi]`: `_` is the lexer's error, any other is judged when the
-/// parser consumes the literal (rustc_session `InvalidLiteralSuffix`, `kind` = `LitKind::descr`).
-fn suffix(src: &[u8], lo: usize, hi: usize, parse_level: bool, kind: &str) -> Result<(), VErr> {
+/// literal is lowered (rustc_session `InvalidLiteralSuffix`, `kind` = `LitKind::descr`).
+fn suffix(src: &[u8], lo: usize, hi: usize, sink: Lowered, kind: &str) -> Result<(), VErr> {
     if lo == hi {
         return Ok(());
     }
     if &src[lo..hi] == b"_" {
         return err(lo, "underscore literal suffix is not allowed");
     }
-    if parse_level {
-        return err(lo, format!("suffixes on {kind} literals are invalid"));
-    }
+    lowered(sink, lo, format!("suffixes on {kind} literals are invalid"));
     Ok(())
 }
 
@@ -363,10 +388,12 @@ pub fn cooked_quoted(text: &[u8]) -> Result<(), String> {
         (b'c', _) => "C string",
         _ => "string",
     };
-    suffix(text, lo, text.len(), true, kind).map_err(|(_, msg)| msg.into_owned())
+    let mut lowers = Vec::new();
+    suffix(text, lo, text.len(), Some(&mut lowers), kind).map_err(|(_, msg)| msg.into_owned())?;
+    lowers.into_iter().next().map_or(Ok(()), |e| Err(e.1.into_owned()))
 }
 
-fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, parse_level: bool) -> Result<(), VErr> {
+fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, sink: Lowered) -> Result<(), VErr> {
     let body_lo = lo + prefix + 1;
     // the closing quote is the last one of the token (a suffix holds no quotes)
     let mut end = hi;
@@ -374,7 +401,7 @@ fn quoted(src: &[u8], lo: usize, hi: usize, prefix: usize, q: u8, mode: Mode, pa
         end -= 1;
     }
     let body_hi = end.saturating_sub(1).max(body_lo);
-    suffix(src, end, hi, parse_level, match mode {
+    suffix(src, end, hi, sink, match mode {
         Mode::Char => "char",
         Mode::Byte => "byte",
         Mode::Str => "string",

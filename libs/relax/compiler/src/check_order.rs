@@ -374,7 +374,7 @@ pub(crate) fn print(entries: &[Entry], emit: bool, warnings: bool, json: bool) {
                 if ev.origin == Origin::Gate { continue; }
                 if ev.origin != Origin::Run {
                     if ev.origin == Origin::Background {
-                        stderr_line!("makepad-run: [t={:.0} ms] borrow check failed: {} at {}:{}: {}\n{}", crate::clock::ms_since_start(), ev.error.fn_path, ev.error.file, ev.error.line, ev.error.message, ev.error.render());
+                        stderr_line!("relax: [t={:.0} ms] borrow check failed: {} at {}:{}: {}\n{}", crate::clock::ms_since_start(), ev.error.fn_path, ev.error.file, ev.error.line, ev.error.message, ev.error.render());
                     } else { stderr_line!("{}", ev.error.render()); }
                 }
                 if json { crate::diag::emit(&ev.error.to_diagnostic()); }

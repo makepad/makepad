@@ -1,6 +1,6 @@
 //! str: UTF-8 validation, slicing with real core's panic messages, the Pattern API,
-//! splitting, trimming, escapes and parsing. The `impl str` methods (str/inherent.rs, Relax
-//! only) forward to the free fns here, which the rustc shim tests against real std.
+//! splitting, trimming, escapes and parsing. The `impl str` methods (str/inherent.rs)
+//! forward to the free fns here.
 
 pub mod pattern;
 
@@ -9,9 +9,7 @@ mod lossy;
 mod split;
 mod validations;
 
-#[cfg(not(relax_check))]
 mod inherent;
-#[cfg(not(relax_check))]
 mod traits_impls;
 
 pub use iter::{Bytes, CharIndices, Chars, EncodeUtf16, EscapeDebug, EscapeDefault, EscapeUnicode};
@@ -400,6 +398,25 @@ impl StrIndex for RangeToInclusive<usize> {
     #[track_caller]
     fn index_str_mut(self, s: &mut str) -> &mut str {
         (0..=self.end).index_str_mut(s)
+    }
+}
+
+// core str/traits.rs: `(Bound<usize>, Bound<usize>)` (stable 1.53) is the range it names, found as
+// a slice's pair is, and a pair that names none panics with the slice's message
+impl StrIndex for (crate::ops::Bound<usize>, crate::ops::Bound<usize>) {
+    fn get_str(self, s: &str) -> Option<&str> {
+        crate::slice::index::try_into_slice_range(s.len(), self).ok()?.get_str(s)
+    }
+    fn get_str_mut(self, s: &mut str) -> Option<&mut str> {
+        crate::slice::index::try_into_slice_range(s.len(), self).ok()?.get_str_mut(s)
+    }
+    #[track_caller]
+    fn index_str(self, s: &str) -> &str {
+        crate::slice::index::into_slice_range(s.len(), self).index_str(s)
+    }
+    #[track_caller]
+    fn index_str_mut(self, s: &mut str) -> &mut str {
+        crate::slice::index::into_slice_range(s.len(), self).index_str_mut(s)
     }
 }
 
@@ -819,7 +836,6 @@ impl fmt::Display for ParseBoolError {
     }
 }
 
-#[cfg(not(relax_check))]
 impl crate::error::Error for ParseBoolError {}
 
 impl FromStr for bool {

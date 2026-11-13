@@ -1,6 +1,5 @@
 // UTF-8 validation, string iteration, patterns, boundaries, escapes and case conversion.
 // Differential file: `| ` lines equal under rustc --test and makepad test.
-// Replaces the former std/check text_str.rs.
 
 struct D(u64, u32);
 impl D {

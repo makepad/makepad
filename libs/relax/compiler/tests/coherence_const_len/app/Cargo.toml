@@ -1,0 +1,7 @@
+[package]
+name = "ccl-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ccl-state = { path = "../state" }

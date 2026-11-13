@@ -1,7 +1,7 @@
 // core::arch intrinsics lowered to vector instructions (libs/relax/compiler/src/simd.rs) against
 // rustc's real ones: one line per intrinsic, "<name> <hash>" over xorshift inputs mixed with
 // edge lanes (0, all ones, sign bits, 0x7f..). rustc -O --test and `makepad test` print the
-// same lines (diff them); MAKEPAD_RUN_NO_SIMD=1 gives std's scalar versions.
+// same lines (diff them); RELAX_NO_SIMD=1 gives std's scalar versions.
 // Each intrinsic runs twice: through a closure (inlined: vector values flow between
 // intrinsics) and through a fn pointer (the intrinsic's own compiled body).
 

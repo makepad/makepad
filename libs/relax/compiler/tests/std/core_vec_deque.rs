@@ -1,6 +1,5 @@
 // VecDeque random mutations, searches, wrapped storage, draining and zero-sized values.
 // Differential file: `| ` lines equal under rustc --test and makepad test.
-// Replaces the former std/check coll_vec_deque.rs.
 
 use std::cell::Cell;
 use std::collections::VecDeque;

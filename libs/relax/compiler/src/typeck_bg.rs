@@ -36,7 +36,7 @@ pub fn running() -> bool {
 /// Starts the background check of unit `up` (`root`: the program's crate; `main`: where the
 /// reachability walk starts).
 pub fn start(up: *mut Unit, root: u32, main: Option<DefId>) {
-    if std::env::var("MAKEPAD_RUN_BG_TYPECK").is_ok_and(|v| v == "0") { return; }
+    if std::env::var("RELAX_BG_TYPECK").is_ok_and(|v| v == "0") { return; }
     let upn = up as usize;
     let _k = crate::zone_alloc::kept();
     RUNNING.store(true, Ordering::Release);
@@ -54,8 +54,10 @@ pub fn start(up: *mut Unit, root: u32, main: Option<DefId>) {
     if spawned.is_err() { RUNNING.store(false, Ordering::Release); }
 }
 
+/// The run stops, or quits: a crate's verdict is stored only once all of it is checked, and the
+/// next launch checks what this one left
 fn stopping() -> bool {
-    crate::preempt::is_stopped() || crate::owner::exit_tid() != 0
+    crate::preempt::is_stopped() || crate::owner::exit_tid() != 0 || crate::jit::QUIT_SEEN.load(Ordering::Relaxed)
 }
 
 /// The crates this check covers -- not the app's (checked before main), not a proc-macro crate,
@@ -168,7 +170,7 @@ fn finish(t0: u64, w0: u64) {
     STATS[3].store(relax_session::clock::cpu_ns() - t0, Ordering::Relaxed);
     STATS[4].store((jit::wall_ns() - w0).max(1), Ordering::Relaxed);
     if crate::run::VERBOSE.load(Ordering::Relaxed) {
-        eprintln!("makepad-run: background type check done: {} body owners checked, {} with errors, {} crates' clean verdicts stored, cpu {:.0} ms over {:.1} s",
+        eprintln!("relax: background type check done: {} body owners checked, {} with errors, {} crates' clean verdicts stored, cpu {:.0} ms over {:.1} s",
             STATS[0].load(Ordering::Relaxed), STATS[1].load(Ordering::Relaxed), STATS[2].load(Ordering::Relaxed),
             STATS[3].load(Ordering::Relaxed) as f64 / 1e6, STATS[4].load(Ordering::Relaxed) as f64 / 1e9);
     }
@@ -210,7 +212,7 @@ fn check(f: &FrontShared, d: DefId, todo: &[bool], failed: &mut HashSet<u32>) ->
                 // the checker failed on a body: a makepad run bug, reported like a build's
                 // internal error, and the crate's verdict is not stored
                 crate::hot_failure::checker_panic(&prog.def_path(d), &jit::payload_text(&*p));
-                let e = format!("internal compiler error while checking {} -- makepad run bug, report it{}", prog.def_path(d), jit::take_ice_location());
+                let e = format!("internal compiler error while checking {} -- Relax bug, report it{}", prog.def_path(d), jit::take_ice_location());
                 STATS[1].fetch_add(1, Ordering::Relaxed);
                 failed.insert(krate);
                 report(&[e]);

@@ -26,7 +26,7 @@ pub const fn forget<T>(t: T) {
 #[rustc_diagnostic_item = "mem_drop"]
 pub fn drop<T>(_x: T) {}
 
-pub fn replace<T>(dest: &mut T, src: T) -> T {
+pub const fn replace<T>(dest: &mut T, src: T) -> T {
     unsafe {
         let p = dest as *mut T;
         let old = im::ptr_read(p as *const T);
@@ -49,6 +49,14 @@ pub fn take<T: Default>(dest: &mut T) -> T {
 #[rustc_diagnostic_item = "mem_zeroed"]
 pub const unsafe fn zeroed<T>() -> T {
     im::zeroed::<T>()
+}
+/// rustc 1.100.0 (mem_conjure_zst): the value of a zero-sized type, which has nothing to initialize. The caller
+/// guarantees that `T` is inhabited (core/src/mem/mod.rs; its run-time message).
+pub const unsafe fn conjure_zst<T>() -> T {
+    if size_of::<T>() != 0 {
+        panic!("mem::conjure_zst invoked on type {}, which is not zero-sized", crate::any::type_name::<T>());
+    }
+    MaybeUninit::uninit().assume_init()
 }
 #[deprecated(since = "1.39.0", note = "use `mem::MaybeUninit` instead")]
 #[rustc_diagnostic_item = "mem_uninitialized"]
@@ -104,7 +112,7 @@ impl<T> crate::fmt::Debug for Discriminant<T> {
 /// Inhibits the compiler from calling `T`'s destructor (the lang item has no drop glue); like real core a
 /// struct, so `ManuallyDrop<dyn Trait>` is a dynamically sized type.
 #[repr(transparent)]
-#[cfg_attr(not(relax_check), lang = "manually_drop")]
+#[lang = "manually_drop"]
 #[rustc_diagnostic_item = "ManuallyDrop"]
 pub struct ManuallyDrop<T: ?Sized> {
     value: T,
@@ -169,7 +177,7 @@ impl<T: ?Sized> crate::ops::DerefMut for ManuallyDrop<T> {
 // ---------------------------------------------------------------- MaybeUninit
 
 #[repr(C)]
-#[cfg_attr(not(relax_check), lang = "maybe_uninit")]
+#[lang = "maybe_uninit"]
 pub union MaybeUninit<T> {
     uninit: (),
     value: ManuallyDrop<T>,
@@ -233,5 +241,77 @@ impl<T> MaybeUninit<T> {
     }
     pub const unsafe fn assume_init_drop(&mut self) {
         im::drop_in_place(self.as_mut_ptr())
+    }
+}
+
+// ---------------------------------------------------------------- DropGuard (rustc 1.100.0: drop_guard)
+
+/// Calls `f` on the value when the guard is dropped, unless `dismiss` takes the value back
+/// (core/src/mem/drop_guard.rs; `new` and `dismiss` are const only under the unstable const_drop_guard).
+pub struct DropGuard<T, F>
+where
+    F: FnOnce(T),
+{
+    inner: ManuallyDrop<T>,
+    f: ManuallyDrop<F>,
+}
+
+impl<T, F> DropGuard<T, F>
+where
+    F: FnOnce(T),
+{
+    #[must_use]
+    pub fn new(inner: T, f: F) -> Self {
+        Self { inner: ManuallyDrop::new(inner), f: ManuallyDrop::new(f) }
+    }
+
+    pub fn dismiss(guard: Self) -> T {
+        // the guard's own drop must not run; the value is read before the closure is dropped, so a panicking
+        // closure drop still unwinds through the value
+        let mut guard = ManuallyDrop::new(guard);
+        let value = unsafe { ManuallyDrop::take(&mut guard.inner) };
+        unsafe { ManuallyDrop::drop(&mut guard.f) };
+        value
+    }
+}
+
+impl<T, F> crate::ops::Deref for DropGuard<T, F>
+where
+    F: FnOnce(T),
+{
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T, F> crate::ops::DerefMut for DropGuard<T, F>
+where
+    F: FnOnce(T),
+{
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+}
+
+impl<T, F> Drop for DropGuard<T, F>
+where
+    F: FnOnce(T),
+{
+    fn drop(&mut self) {
+        let inner = unsafe { ManuallyDrop::take(&mut self.inner) };
+        let f = unsafe { ManuallyDrop::take(&mut self.f) };
+        f(inner);
+    }
+}
+
+impl<T, F> crate::fmt::Debug for DropGuard<T, F>
+where
+    T: crate::fmt::Debug,
+    F: FnOnce(T),
+{
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        crate::fmt::Debug::fmt(&**self, f)
     }
 }

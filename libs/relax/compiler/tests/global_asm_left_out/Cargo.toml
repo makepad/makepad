@@ -1,0 +1,6 @@
+# One crate's global_asm! that Relax cannot assemble is left out alone
+# (tools/run/fixture/modules_harness.rs). `cargo run -p gal-app` prints `app: 42`, `wide: 0`
+# and `user: 0` on x86_64 Linux.
+[workspace]
+members = ["wide", "user", "app"]
+resolver = "2"

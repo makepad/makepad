@@ -153,7 +153,7 @@ impl<'tcx> BorrowckInferCtxt<'tcx> {
         if result.is_err() {
             self.tainted_by_errors.set(true);
             self.type_op_failed.set(true);
-            if std::env::var_os("MAKEPAD_RUN_NOSOLUTION_TRACE").is_some() {
+            if std::env::var_os("RELAX_NOSOLUTION_TRACE").is_some() {
                 let show = |t| crate::typeck::ty_to_string(false, self.prog, &self.tcx, t);
                 let what = match &input_dbg {
                     crate::next_solver::type_op::TypeOpInput::Normalize(_, t) => format!("normalize {}", show(*t)),

@@ -1,4 +1,4 @@
-// std-os lane: std::thread (differential: os_diff.sh)
+// std-os lane: std::thread (differential: agree.sh)
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

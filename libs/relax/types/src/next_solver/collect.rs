@@ -59,15 +59,15 @@ static DECLARATION_ENVS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 static LOWER_BOUNDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 fn count_query(counter: &std::sync::atomic::AtomicU64) {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ENABLED.get_or_init(|| std::env::var_os("MAKEPAD_RUN_DECL_COUNTERS").is_some()) {
+    if *ENABLED.get_or_init(|| std::env::var_os("RELAX_DECL_COUNTERS").is_some()) {
         counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl Tcx {
     pub fn report_declaration_counters() {
-        if std::env::var_os("MAKEPAD_RUN_DECL_COUNTERS").is_some() {
-            eprintln!("makepad-run declarations at first present: declaration_env={} lower_bounds={}",
+        if std::env::var_os("RELAX_DECL_COUNTERS").is_some() {
+            eprintln!("relax declarations at first present: declaration_env={} lower_bounds={}",
                 DECLARATION_ENVS.load(std::sync::atomic::Ordering::Relaxed),
                 LOWER_BOUNDS.load(std::sync::atomic::Ordering::Relaxed));
         }
@@ -92,21 +92,21 @@ impl Tcx {
     }
 
     pub fn explicit_super_predicates_of(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).super_predicates.get_or_init_cyclic(||
-            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfOnly))
+        self.declaration_queries(prog, def_id).super_predicates.get_or_init_cyclic(|| crate::body_facts::item_text(prog, def_id, crate::body_facts::ItemCell::Declaration, || 
+            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfOnly)))
     }
 
     /// predicates_of.rs explicit_implied_predicates_of: the supertraits and the bounds their
     /// associated item constraints put on Self's projections (`trait B: A<X: Copy>` implies
     /// `<Self as A>::X: Copy`); what elaboration (Filter::All) adds for a `T: B`
     pub fn explicit_implied_predicates_of(&self, prog: &Program, def_id: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, def_id).implied_predicates.get_or_init_cyclic(||
-            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfAndAssociatedTypeBounds))
+        self.declaration_queries(prog, def_id).implied_predicates.get_or_init_cyclic(|| crate::body_facts::item_text(prog, def_id, crate::body_facts::ItemCell::Declaration, || 
+            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfAndAssociatedTypeBounds)))
     }
 
     pub(crate) fn explicit_supertraits_containing_assoc_item(&self, prog: &Program, def_id: DefId, name: crate::program::Sym) -> Vec<Predicate> {
-        self.declaration_queries(prog, def_id).filtered_supers(name, ||
-            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfTraitThatDefines(name)))
+        self.declaration_queries(prog, def_id).filtered_supers(name, || crate::body_facts::item_text(prog, def_id, crate::body_facts::ItemCell::Declaration, || 
+            self.implied_clauses_with_filter(prog, def_id, PredicateFilter::SelfTraitThatDefines(name))))
     }
 
     // context.rs:2090 and type_ir/elaborate.rs:324: traverse the lowered
@@ -487,7 +487,7 @@ impl Tcx {
                         }
                     }
                     let (mut own_args, mut own_regions) = (args.split_off(parent_args), rs.split_off(parent_regions));
-                    self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions);
+                    self.fit_assoc_own_args(prog, ad, &mut own_args, &mut own_regions, None);
                     args.extend(own_args); rs.extend(own_regions);
                     let alias = self.tys.intern(TyKind::Alias(IsRigid::No, AliasTy { kind: AliasTyKind::Projection { def_id: ad }, args: self.tys.mk_list(&args), regions: self.tys.intern_region_args(&rs) }));
                     match *arg {

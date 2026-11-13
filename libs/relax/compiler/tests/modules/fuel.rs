@@ -1,4 +1,4 @@
-// Fuel (hotreload.md §12.3): with MAKEPAD_RUN_MODULE_FUEL=1000000, a module call that runs more loop
+// Fuel (hotreload.md §12.3): with RELAX_MODULE_FUEL=1000000, a module call that runs more loop
 // iterations than that ends with an error (no deadline needed); a shorter one completes, and
 // the budget is per call (refilled at each entry).
 #[test]

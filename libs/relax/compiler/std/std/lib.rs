@@ -109,6 +109,10 @@ pub mod collections {
     pub use core::collections::LinkedList;
     pub use core::collections::TryReserveError;
     pub use core::collections::VecDeque;
+    /// std's old home of `ops::Bound` (library/std/src/collections/mod.rs: deprecated since 1.26,
+    /// still exported; a use of it gets no warning)
+    #[doc(hidden)]
+    pub use core::ops::Bound;
 }
 
 pub mod num {

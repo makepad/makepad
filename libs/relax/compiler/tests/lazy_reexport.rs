@@ -27,7 +27,7 @@ fn child_reexport_resolves_type_and_value_independently() {
 
 // `makepad test` itself loads single-file inputs eagerly. Exercise its lazy
 // package driver in a fresh loader; rustc checks the same Rust semantics above.
-// `$MAKEPAD_RUN_LOADER run ..` is a launch, so the variables below configure that
+// `$RELAX_LOADER run ..` is a launch, so the variables below configure that
 // loader; a spawn of current_exe() would re-run this test program instead.
 #[cfg(relax)]
 #[test]
@@ -40,12 +40,12 @@ fn lazy_package_check_retries_the_type_namespace() {
     std::fs::write(dir.join("main.rs"), source).unwrap();
     std::fs::write(dir.join("lazy_reexport/child.rs"), include_str!("lazy_reexport/child.rs")).unwrap();
     std::fs::write(dir.join("lazy_reexport/other.rs"), include_str!("lazy_reexport/other.rs")).unwrap();
-    let loader = std::env::var_os("MAKEPAD_RUN_LOADER").expect("makepad test names its loader");
+    let loader = std::env::var_os("RELAX_LOADER").expect("Relax names its test loader");
     let output = std::process::Command::new(loader)
         .args(["run", "--check", "lazy_reexport"])
         .current_dir(&dir)
-        .env("MAKEPAD_RUN_LAZY_DEFER", "lazy_reexport/child.rs,lazy_reexport/other.rs")
-        .env("MAKEPAD_RUN_DEFERRED_TRACE", "1")
+        .env("RELAX_LAZY_DEFER", "lazy_reexport/child.rs,lazy_reexport/other.rs")
+        .env("RELAX_DEFERRED_TRACE", "1")
         .output().unwrap();
     std::fs::remove_dir_all(dir).unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);

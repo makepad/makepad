@@ -2,14 +2,18 @@
 //! and after each kind of input change, and checks again the crates the change can reach. Each
 //! check runs in a child process (the lint sink is the process's) on a package on disk: crate
 //! `pkg` (lib.rs, the root) and crate `bin0` (bin.rs, a binary that uses it), the verdict store in
-//! the package's `store` folder.
+//! the package's `store` folder. The check of every crate it is compared with verifies the stored
+//! body verdicts (check_bodies.rs, Verify mode): one that differs from its body's check fails it.
 
 const CHILD: &str = "RELAX_CHECK_REUSE_CHILD";
 
 /// One check's output: its diagnostic lines (as printed), how many crates it reused, whether it
-/// reused all (nothing checked), its exit code.
+/// reused all (nothing checked), how many bodies it replayed from stored verdicts, how many
+/// stored body verdicts it verified, how many replayed bodies it checked after all for an import
+/// report their stored uses decided and how many of those candidates that cleared, how many item
+/// cells of a checked crate a body computed first, its exit code.
 #[derive(Debug)]
-struct Run { diags: Vec<String>, hits: usize, full: bool, code: i32 }
+struct Run { diags: Vec<String>, hits: usize, full: bool, replayed: usize, verified: usize, rechecked: usize, cleared: usize, in_body: usize, code: i32 }
 
 /// The check of the package in `dir` in a child (`reuse_child`), with the store when `reuse`,
 /// the variables `env` set.
@@ -21,17 +25,25 @@ fn check_in_child(dir: &std::path::Path, reuse: bool, env: &[(&str, &str)]) -> R
 fn check_in_child_store(dir: &std::path::Path, reuse: bool, store: &std::path::Path, env: &[(&str, &str)]) -> Run {
     let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
     cmd.args(["--exact", "check_reuse_tests::reuse_child", "--nocapture", "--test-threads=1", "--format=terse"])
-        .env(CHILD, dir).env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("RELAX_CHECK_REUSE_STORE");
+        .env(CHILD, dir).env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_CHECK_REUSE_STORE").env_remove("RELAX_CACHE");
     if reuse { cmd.env("RELAX_CHECK_REUSE_STORE", store); }
     for (k, v) in env { cmd.env(k, v); }
     let out = crate::test_child::output(&mut cmd);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
-    let mut run = Run { diags: Vec::new(), hits: 0, full: false, code: -1 };
+    let mut run = Run { diags: Vec::new(), hits: 0, full: false, replayed: 0, verified: 0, rechecked: 0, cleared: 0, in_body: 0, code: -1 };
     for l in stderr.lines().chain(stdout.lines()) {
-        if l.contains(": warning: ") || l.contains(": error: ") || l.contains(": E0") { run.diags.push(l.to_string()); }
+        if l.contains(": warning: ") || l.contains(": error: ") || l.contains(": E0") || l.contains("internal: ") { run.diags.push(l.to_string()); }
+        let count = |what: &str| l.strip_prefix("relax check: ").and_then(|r| r.split_once(what)).and_then(|(n, _)| n.split(' ').next()?.parse().ok());
+        if let Some(n) = count(" bodies replayed from stored verdicts") { run.replayed = n; }
+        if let Some(n) = count(" stored body verdicts verified") { run.verified = n; }
+        if let Some((_, r)) = l.strip_prefix("relax check: unused-import candidates in ").and_then(|r| r.split_once(" with replayed bodies: ")) {
+            run.rechecked = r.split(' ').next().unwrap().parse().unwrap();
+        }
+        if let Some(n) = l.strip_prefix("relax check: unused-import candidates cleared by a recheck: ") { run.cleared = n.parse().unwrap(); }
+        if let Some(n) = l.strip_prefix("relax check: items resolved in a body: ") { run.in_body = n.split(' ').next().unwrap().parse().unwrap(); }
         // "N of M crates unchanged since a passing check" (some checked), "M crates unchanged .." (none)
-        if let Some((n, _)) = l.strip_prefix("makepad check: ").and_then(|r| r.split_once(" crates unchanged since a passing check")) {
+        if let Some((n, _)) = l.strip_prefix("relax check: ").and_then(|r| r.split_once(" crates unchanged since a passing check")) {
             match n.split_once(" of ") {
                 Some((h, _)) => run.hits = h.parse().unwrap(),
                 None => (run.hits, run.full) = (n.parse().unwrap(), true),
@@ -49,7 +61,7 @@ fn check_in_child_store(dir: &std::path::Path, reuse: bool, store: &std::path::P
 fn reuse_child() {
     let Some(dir) = std::env::var_os(CHILD).map(std::path::PathBuf::from) else { return };
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let mut sess = crate::Session::default();
     sess.options.const_fuel = true;
     let sess = std::sync::Arc::new(sess);
@@ -67,8 +79,12 @@ fn reuse_child() {
     let crates = vec![root, bin];
     prog.prelude_crate = Some(core);
     prog.resolve_imports();
+    // name lookups memoized across bodies, as in the check (jit.rs: the unit's program)
+    prog.body_memos.store(true, std::sync::atomic::Ordering::Relaxed);
     let pre = std::mem::take(&mut prog.errors);
-    let mut reuse = std::env::var_os("RELAX_CHECK_REUSE_STORE").map(|s| crate::check_reuse::Reuse::open_in(&prog, root, &crates, std::path::Path::new(&s), true));
+    // the store's mode as a check reads it: RELAX_CACHE=verify, a Verify check
+    let mode = if std::env::var("RELAX_CACHE").as_deref() == Ok("verify") { crate::cache::Mode::Verify } else { crate::cache::Mode::On };
+    let mut reuse = std::env::var_os("RELAX_CHECK_REUSE_STORE").map(|s| crate::check_reuse::Reuse::open_in(&prog, root, &crates, std::path::Path::new(&s), mode));
     if let Some(r) = reuse.as_ref().filter(|r| r.full()) {
         eprintln!("reuse child exit {}", crate::check_reuse::print_reused_texts(&r.reused_texts(&prog), r.crates()));
         return;
@@ -81,6 +97,11 @@ fn reuse_child() {
         Some(r) => crate::check::check_crate_reusing(&mut u, root, &crates, pre, r).0,
         None => crate::check::check_crate(&mut u, root, &crates, pre, false).0,
     };
+    // a check memoizes every lookup with the import uses it went through: no hit can take an
+    // answer that holds none for "no uses" (memo_hit looks such an answer up again)
+    let unrecorded = u.prog.scope_cache.snapshot().values().filter(|v| v.1.is_none()).count()
+        + u.prog.glob_cache.snapshot().values().filter(|v| v.1.is_none()).count();
+    assert_eq!(unrecorded, 0, "memo answers without their import uses");
     eprintln!("reuse child exit {code}");
     std::mem::forget(u);
 }
@@ -94,6 +115,18 @@ fn package(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     dir
 }
 
+/// The check reusing verdicts, and the check of every crate verifying the stored body verdicts
+/// (with the variables `env`, and RELAX_CACHE=verify: the store's mode is no part of the
+/// keys it looks up): they print the same.
+fn reused_and_verified(dir: &std::path::Path, env: &[(&str, &str)], what: &str) -> (Run, Run) {
+    let reused = check_in_child(dir, true, env);
+    let verify: Vec<(&str, &str)> = env.iter().copied().chain([("RELAX_CACHE", "verify")]).collect();
+    let cold = check_in_child(dir, true, &verify);
+    assert!(cold.code >= 0 && !cold.diags.is_empty() && cold.hits == 0, "{what}: {cold:?}");
+    assert_eq!((&reused.diags, reused.code), (&cold.diags, cold.code), "{what}: reused {reused:?}, cold {cold:?}");
+    (reused, cold)
+}
+
 /// The check before an input change (storing verdicts), and after it: what the check after the
 /// change prints is what a check of every crate prints then, and it reuses `hits` crates.
 fn changed(name: &str, files: &[(&str, &str)], before: &[(&str, &str)], change: impl FnOnce(&std::path::Path), after: &[(&str, &str)], hits: usize) {
@@ -102,10 +135,7 @@ fn changed(name: &str, files: &[(&str, &str)], before: &[(&str, &str)], change: 
     let first = check_in_child(&dir, true, before);
     assert_eq!(first.hits, 0, "{first:?}");
     change(&dir);
-    let reused = check_in_child(&dir, true, after);
-    let cold = check_in_child(&dir, false, after);
-    assert!(cold.code >= 0 && !cold.diags.is_empty(), "{cold:?}");
-    assert_eq!((&reused.diags, reused.code), (&cold.diags, cold.code), "after the change: reused {reused:?}, cold {cold:?}");
+    let (reused, _) = reused_and_verified(&dir, after, "after the change");
     assert_eq!(reused.hits, hits, "{reused:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -124,9 +154,9 @@ fn a_copy_in_another_worktree_prints_its_own_paths() {
     let b = package("wt-b", &files);
     let store = a.join("store");
     let (a_path, b_path) = (a.to_str().unwrap(), b.to_str().unwrap());
-    let first = check_in_child_store(&a, true, &store, &[("MAKEPAD_RUN_WORKSPACE", a_path)]);
+    let first = check_in_child_store(&a, true, &store, &[("RELAX_WORKSPACE", a_path)]);
     assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
-    let env = [("MAKEPAD_RUN_WORKSPACE", b_path)];
+    let env = [("RELAX_WORKSPACE", b_path)];
     let reused = check_in_child_store(&b, true, &store, &env);
     let cold = check_in_child_store(&b, false, &store, &env);
     assert_eq!((reused.hits, reused.code, cold.code), (0, 0, 0), "{reused:?}, {cold:?}");
@@ -139,19 +169,75 @@ fn a_copy_in_another_worktree_prints_its_own_paths() {
 
 /// Warm: every crate unchanged, the stored diagnostics are the check's, nothing is checked; a
 /// body edit in the library (its lines moved) checks the library again, not the binary above it.
+/// Of the library, only the edited body and the one with a warning (its facts have a position)
+/// are checked: the others are replayed from their stored verdicts, whose references, imports
+/// and traits used keep `helper` and the imports used. An attribute on a parent module is in
+/// every body verdict's key: removed, no body is replayed and the one it allowed warns.
+/// Two bodies name one import and one glob's name: the first one checked looks them up, the other
+/// takes the memoized answers, and records the uses they went through as well. Edited, the first
+/// one stops using them, and the other, replayed, keeps them used (one job: cur_a checks first).
+/// A replayed verdict that lacks the uses (a test hook drops them) prints no false warning: the
+/// imports it would call unused hold the reports back, the crate's replayed bodies are checked
+/// after all, and the candidates clear. With the last uses edited away, the warnings print once.
+/// Item text a binary body computes first (the library's generics, bounds and signature, with the
+/// library reused, so its own check did not compute them) records its import uses in no body's
+/// verdict: the binary's verdicts stored then are the ones a check of every crate makes.
 #[test]
 fn a_dependency_body_edit_checks_only_that_dependency() {
     if std::env::var_os(CHILD).is_some() { return; }
-    let dir = package("body", &[("lib.rs", LIB), ("bin.rs", BIN)]);
+    let lib = "use std::collections::HashMap;\nuse std::fmt::Write;\npub fn f() -> u32 { 1 }\nfn helper() -> usize { 2 }\n\
+        pub fn uses() -> usize {\n    let mut s = String::new();\n    s.write_str(\"x\").unwrap();\n    HashMap::<u8, u8>::new().len() + helper() + s.len()\n}\n\
+        pub fn warned() -> usize { let unused = 1; 2 }\n#[allow(unused_variables)]\npub mod quiet {\n    pub fn hidden() -> usize { let unused = 1; 2 }\n}\n";
+    let dir = package("body", &[("lib.rs", lib), ("bin.rs", BIN)]);
     let first = check_in_child(&dir, true, &[]);
-    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    assert_eq!((first.hits, first.replayed, first.code), (0, 0, 0), "{first:?}");
     assert_eq!(first.diags.len(), 3, "{first:?}");
     let warm = check_in_child(&dir, true, &[]);
     assert!(warm.full && warm.hits == 2, "{warm:?}");
     assert_eq!((&warm.diags, warm.code), (&first.diags, first.code));
+    std::fs::write(dir.join("lib.rs"), lib.replace("pub fn f() -> u32 { 1 }", "pub fn f() -> u32 {\n    2\n}")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &[], "a body edit");
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 3, 5), "a body edit: {reused:?}, {cold:?}");
+    std::fs::write(dir.join("lib.rs"), lib.replace("#[allow(unused_variables)]\n", "")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &[], "a parent module's attribute removed");
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 0, 3), "a parent module's attribute removed: {reused:?}, {cold:?}");
     std::fs::remove_dir_all(&dir).unwrap();
-    changed("body2", &[("lib.rs", LIB), ("bin.rs", BIN)], &[],
-        |d| std::fs::write(d.join("lib.rs"), "pub fn f() -> u32 {\n    2\n}\nfn unused_in_lib() {}\n").unwrap(), &[], 1);
+    let uses = format!("use std::io::Cursor;\nuse std::sync::*;\n{LIB}pub fn cur_a() -> u64 {{ Cursor::new(Arc::new(1u8)).position() }}\n\
+        pub fn cur_b() -> u64 {{ Cursor::new(Arc::new(2u8)).position() }}\n");
+    let one = [("RELAX_JOBS", "1")];
+    let dir = package("body-uses", &[("lib.rs", &uses), ("bin.rs", BIN)]);
+    let first = check_in_child(&dir, true, &one);
+    assert_eq!((first.hits, first.code), (0, 0), "{first:?}");
+    std::fs::write(dir.join("lib.rs"), uses.replace("Cursor::new(Arc::new(1u8)).position()", "0")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &one, "the body that looked up an import first edited");
+    // replayed: f, unused_in_lib, cur_b; verified: those, cur_a's new verdict, the binary's unused_in_bin
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 3, 5), "the body that looked up an import first edited: {reused:?}, {cold:?}");
+    assert_eq!(reused.rechecked, 0, "no import report waits on a replayed body: {reused:?}");
+    std::fs::write(dir.join("lib.rs"), uses.replace("Cursor::new(Arc::new(1u8)).position()", "1")).unwrap();
+    let dropped = [("RELAX_JOBS", "1"), ("RELAX_CHECK_REUSE_DROP_USES", "cur_b")];
+    let (reused, _) = reused_and_verified(&dir, &dropped, "a replayed verdict without its uses");
+    // both imports candidates; f, unused_in_lib and cur_b checked after all
+    assert_eq!((reused.replayed, reused.rechecked, reused.cleared), (3, 3, 2), "a replayed verdict without its uses: {reused:?}");
+    std::fs::write(dir.join("lib.rs"), uses.replace("Cursor::new(Arc::new(1u8)).position()", "1").replace("Cursor::new(Arc::new(2u8)).position()", "2")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &one, "the last uses of two imports edited away");
+    // f, unused_in_lib and cur_a (stored by the check before) replayed, then checked after all
+    assert_eq!((reused.replayed, reused.rechecked, reused.cleared), (3, 3, 0), "the last uses of two imports edited away: {reused:?}");
+    assert_eq!(cold.diags.iter().filter(|d| d.contains("unused import")).count(), 2, "{cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let lib = "use std::fmt::Debug;\nuse std::io::Cursor;\npub fn show<T: Debug>(t: T) -> Cursor<T> { Cursor::new(t) }\n";
+    let bin = "fn a() -> u64 { pkg::show(1u8).position() }\nfn b() -> u64 { pkg::show(2u8).position() }\nfn main() { a(); b(); }\nfn unused_in_bin() {}\n";
+    let dir = package("item-uses", &[("lib.rs", lib), ("bin.rs", bin)]);
+    let first = check_in_child(&dir, true, &one);
+    assert_eq!((first.hits, first.code, first.diags.len()), (0, 0, 1), "{first:?}");
+    let bin = format!("{bin}pub fn g() {{}}\n");
+    std::fs::write(dir.join("bin.rs"), &bin).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &one, "the binary's interface edited");
+    // checked: the binary's five bodies, `a` computing `show`'s item text first; verified: those and `show`
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 0, 6), "the binary's interface edited: {reused:?}, {cold:?}");
+    std::fs::write(dir.join("bin.rs"), bin.replace("pkg::show(1u8).position()", "0")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &one, "the body that computed the library's item text first edited");
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 4, 6), "the body that computed the library's item text first edited: {reused:?}, {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A public item added to the library, by a name nothing above it can have seen (no glob brings
@@ -300,7 +386,7 @@ fn child_inner_macro_use_edits_invalidate_cached_scope() {
     let defs = "#![cfg_attr(all(), macro_use)]\nmacro_rules! value { () => { 7u32 }; }\n";
     let dir = package("inner-macro-use", &[("lib.rs", lib), ("defs.rs", defs), ("bin.rs", "fn main() { let _ = pkg::f(); }\n")]);
     let cache = dir.join("cache").to_string_lossy().into_owned();
-    let env = [("MAKEPAD_RUN_CACHE_DIR", cache.as_str())];
+    let env = [("RELAX_CACHE_DIR", cache.as_str())];
     let first = check_in_child(&dir, true, &env);
     assert_eq!(first.code, 0, "{first:?}");
     let warm = check_in_child(&dir, true, &env);
@@ -309,7 +395,7 @@ fn child_inner_macro_use_edits_invalidate_cached_scope() {
     std::fs::write(dir.join("defs.rs"), defs.replace("all()", "any()")).unwrap();
     let removed = check_in_child(&dir, true, &env);
     let cold_cache = dir.join("cold-cache").to_string_lossy().into_owned();
-    let cold = check_in_child(&dir, false, &[("MAKEPAD_RUN_CACHE_DIR", cold_cache.as_str())]);
+    let cold = check_in_child(&dir, false, &[("RELAX_CACHE_DIR", cold_cache.as_str())]);
     assert_ne!(cold.code, 0, "the macro must no longer escape: {cold:?}");
     assert_eq!((&removed.diags, removed.code), (&cold.diags, cold.code), "{removed:?} vs {cold:?}");
     std::fs::write(dir.join("defs.rs"), defs).unwrap();
@@ -330,8 +416,8 @@ fn a_feature_flip_checks_again() {
 /// An `env!` value is a late input of the library: changed, it and the binary are checked again.
 #[test]
 fn an_env_value_change_checks_again() {
-    let lib = format!("{LIB}pub const V: &str = env!(\"RELAX_CHECK_REUSE_V\");\n");
-    changed("env", &[("lib.rs", &lib), ("bin.rs", BIN)], &[("RELAX_CHECK_REUSE_V", "a")], |_| {}, &[("RELAX_CHECK_REUSE_V", "b")], 0);
+    let lib = format!("{LIB}pub const V: &str = env!(\"CHECK_REUSE_V\");\n");
+    changed("env", &[("lib.rs", &lib), ("bin.rs", BIN)], &[("CHECK_REUSE_V", "a")], |_| {}, &[("CHECK_REUSE_V", "b")], 0);
 }
 
 /// An `include_str!` file is a late input: edited, the crates reading it are checked again.
@@ -356,19 +442,35 @@ fn an_included_file_edit_checks_again() {
 
 /// A late input only a hole body reads (a fn body no caller's check sees: not const, not async, no
 /// `impl Trait` return) is the library's own: changed, the library is checked again, not the
-/// binary above it. Read in a const fn's body, or by an item as well (the hole's read of the same
-/// file does not hide it), it reaches the binary, whose array length rests on it.
+/// binary above it, and the body that read it is checked again too (its stored verdict rests on
+/// the value: here an array length's). Read in a const fn's body, or by an item as well (the hole's
+/// read of the same file does not hide it), it reaches the binary, whose array length rests on it.
+/// A body that includes a file (`include!`) has no stored verdict: an edit of another body of its
+/// crate replays the others, and checks it again. The package's variable is an ordinary one: every
+/// `RELAX_*` variable steers the whole check (env_key).
 #[test]
 fn a_late_input_only_a_body_reads_checks_only_its_crate() {
-    let hole = format!("{LIB}pub fn g() -> usize {{ include_str!(\"data.txt\").len() + env!(\"RELAX_CHECK_REUSE_V\").len() }}\n");
-    changed("late-hole", &[("lib.rs", &hole), ("bin.rs", BIN), ("data.txt", "one")], &[("RELAX_CHECK_REUSE_V", "a")],
-        |d| std::fs::write(d.join("data.txt"), "two").unwrap(), &[("RELAX_CHECK_REUSE_V", "b")], 1);
-    let konst = format!("{LIB}pub const fn g() -> usize {{ env!(\"RELAX_CHECK_REUSE_V\").len() }}\n");
+    let hole = format!("{LIB}pub fn g() -> usize {{\n    let a: [u8; include_str!(\"data.txt\").len()] = [0; 3];\n    a.len() + env!(\"CHECK_REUSE_V\").len()\n}}\n");
+    changed("late-hole", &[("lib.rs", &hole), ("bin.rs", BIN), ("data.txt", "one")], &[("CHECK_REUSE_V", "a")],
+        |d| std::fs::write(d.join("data.txt"), "four").unwrap(), &[("CHECK_REUSE_V", "b")], 1);
+    let konst = format!("{LIB}pub const fn g() -> usize {{ env!(\"CHECK_REUSE_V\").len() }}\n");
     let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::g()] = [0; 1]; }\nfn unused_in_bin() {}\n";
-    changed("late-const-fn", &[("lib.rs", &konst), ("bin.rs", bin)], &[("RELAX_CHECK_REUSE_V", "a")], |_| {}, &[("RELAX_CHECK_REUSE_V", "bb")], 0);
+    changed("late-const-fn", &[("lib.rs", &konst), ("bin.rs", bin)], &[("CHECK_REUSE_V", "a")], |_| {}, &[("CHECK_REUSE_V", "bb")], 0);
     let both = format!("{LIB}pub const N: usize = include!(\"n.in\");\npub fn g() -> usize {{ include_str!(\"n.in\").len() }}\n");
     let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::N] = [0; 1]; }\nfn unused_in_bin() {}\n";
     changed("late-both", &[("lib.rs", &both), ("bin.rs", bin), ("n.in", "1")], &[], |d| std::fs::write(d.join("n.in"), "2").unwrap(), &[], 0);
+    if std::env::var_os(CHILD).is_some() { return; }
+    let inc = format!("{LIB}pub fn h() -> usize {{\n    include!(\"n.in\")\n}}\npub fn k() -> usize {{ 1 }}\n");
+    let dir = package("late-include", &[("lib.rs", &inc), ("bin.rs", BIN), ("n.in", "1")]);
+    let first = check_in_child(&dir, true, &[]);
+    assert_eq!((first.hits, first.replayed), (0, 0), "{first:?}");
+    std::fs::write(dir.join("lib.rs"), inc.replace("pub fn k() -> usize { 1 }", "pub fn k() -> usize { 2 }")).unwrap();
+    let (reused, cold) = reused_and_verified(&dir, &[], "a body edit beside an include!");
+    // the library checked, the binary reused; of the library's bodies f and unused_in_lib are
+    // replayed (k was edited, h includes a file); verified: those two, k's verdict the reused
+    // check stored, and the binary's unused_in_bin (main's facts have a position)
+    assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 2, 4), "a body edit beside an include!: {reused:?}, {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A build script's output (code `include!`d from OUT_DIR, at item position): edited, its warnings
@@ -376,11 +478,11 @@ fn a_late_input_only_a_body_reads_checks_only_its_crate() {
 /// its items, is not checked again; one whose array length names a changed const is.
 #[test]
 fn a_build_output_edit_checks_again() {
-    let lib = format!("{LIB}include!(concat!(env!(\"RELAX_CHECK_REUSE_OUT\"), \"/gen.rs\"));\n");
+    let lib = format!("{LIB}include!(concat!(env!(\"CHECK_REUSE_OUT\"), \"/gen.rs\"));\n");
     let changed_out = |d: &std::path::Path| std::fs::write(d.join("gen.rs"), "fn generated_two() {}\n").unwrap();
     // (the package's folder stands for OUT_DIR)
     let out = std::env::temp_dir().join(format!("relax-check-reuse-buildout-{}", std::process::id())).display().to_string();
-    changed("buildout", &[("lib.rs", &lib), ("bin.rs", BIN), ("gen.rs", "fn generated_one() {}\n")], &[("RELAX_CHECK_REUSE_OUT", &out)], changed_out, &[("RELAX_CHECK_REUSE_OUT", &out)], 1);
+    changed("buildout", &[("lib.rs", &lib), ("bin.rs", BIN), ("gen.rs", "fn generated_one() {}\n")], &[("CHECK_REUSE_OUT", &out)], changed_out, &[("CHECK_REUSE_OUT", &out)], 1);
     let lib = format!("{LIB}include!(\"gen.rs\");\n");
     let bin = "fn main() { let x = pkg::f(); let a: [u8; pkg::N] = [0; 1]; }\nfn unused_in_bin() {}\n";
     changed("buildout-const", &[("lib.rs", &lib), ("bin.rs", bin), ("gen.rs", "pub const N: usize = 1;\n")], &[],
@@ -390,13 +492,13 @@ fn a_build_output_edit_checks_again() {
 /// A command-line lint level is in every key: set, every crate is checked again under it.
 #[test]
 fn a_lint_flag_checks_again() {
-    changed("lintflag", &[("lib.rs", LIB), ("bin.rs", BIN)], &[], |_| {}, &[("MAKEPAD_RUN_LINT_FLAGS", "-A dead_code")], 0);
+    changed("lintflag", &[("lib.rs", LIB), ("bin.rs", BIN)], &[], |_| {}, &[("RELAX_LINT_FLAGS", "-A dead_code")], 0);
 }
 
 /// Under `-D warnings` a warning fails the check: nothing is stored, the next check checks all.
 #[test]
 fn a_check_denying_its_warnings_stores_nothing() {
-    changed("denywarn", &[("lib.rs", LIB), ("bin.rs", BIN)], &[("MAKEPAD_RUN_LINT_FLAGS", "-D warnings")], |_| {}, &[("MAKEPAD_RUN_LINT_FLAGS", "-D warnings")], 0);
+    changed("denywarn", &[("lib.rs", LIB), ("bin.rs", BIN)], &[("RELAX_LINT_FLAGS", "-D warnings")], |_| {}, &[("RELAX_LINT_FLAGS", "-D warnings")], 0);
 }
 
 const EARLY_CHILD: &str = "RELAX_CHECK_EARLY_CHILD";
@@ -406,7 +508,7 @@ const EARLY_CHILD: &str = "RELAX_CHECK_EARLY_CHILD";
 #[test]
 fn early_child() {
     let Some(dir) = std::env::var_os(EARLY_CHILD).map(std::path::PathBuf::from) else { return };
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     std::env::set_current_dir(&dir).unwrap();
     let sess = std::sync::Arc::new(crate::Session::default());
     let code = crate::run::cmd_run(&sess, &["--check".to_string(), "--workspace".to_string(), "early_pkg".to_string()]);
@@ -426,18 +528,18 @@ fn an_edit_keeping_size_and_mtime_gets_a_fresh_verdict() {
     std::thread::sleep(std::time::Duration::from_nanos(crate::vfs::STAT_RACY_NS + 300_000_000));
     let check = || {
         // the child's workspace is the package folder it runs in: never the one an overlay run of
-        // this test names (MAKEPAD_RUN_WORKSPACE, the lease's virtual source root); the early record
+        // this test names (RELAX_WORKSPACE, the lease's virtual source root); the early record
         // lives in the code cache, its own here, which a run of the suite with the cache off
-        // (MAKEPAD_RUN_CACHE=off) does not turn off for the child
+        // (RELAX_CACHE=off) does not turn off for the child
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::early_child", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(EARLY_CHILD, &dir).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("MAKEPAD_RUN_CHECK_TIMES", "1")
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+            .env(EARLY_CHILD, &dir).env("RELAX_CACHE_DIR", dir.join("cache")).env("RELAX_CHECK_TIMES", "1")
+            .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("early child exit ")).map(|c| c.parse::<i32>().unwrap());
         let diags: Vec<String> = stderr.lines().filter(|l| l.contains(": warning: ") || l.contains(": error") || l.contains(": E0")).map(str::to_string).collect();
-        let replayed = stderr.lines().any(|l| l.starts_with("makepad check: early record (") && l.ends_with(": current"));
+        let replayed = stderr.lines().any(|l| l.starts_with("relax check: early record (") && l.ends_with(": current"));
         (code, diags, replayed, stderr.into_owned())
     };
     let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
@@ -475,7 +577,7 @@ const APP_CHILD: &str = "RELAX_CHECK_APP_CHILD";
 #[test]
 fn app_check_child() {
     let Some(dir) = std::env::var_os(APP_CHILD).map(std::path::PathBuf::from) else { return };
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     std::env::set_current_dir(&dir).unwrap();
     let sess = std::sync::Arc::new(crate::Session::default());
     let code = crate::run::cmd_run(&sess, &["--verbose".to_string(), "--check".to_string(), "app_pkg".to_string()]);
@@ -508,13 +610,13 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(APP_CHILD, &dir).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("MAKEPAD_RUN_BOOT_TRACE", "1")
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+            .env(APP_CHILD, &dir).env("RELAX_CACHE_DIR", dir.join("cache")).env("RELAX_BOOT_TRACE", "1")
+            .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
         let diags: Vec<String> = stderr.lines().filter(|l| l.contains(": warning: ") || l.contains(": error") || l.contains(": E0")).map(str::to_string).collect();
-        let restored = stderr.lines().any(|l| l.starts_with("makepad-run collected: restored at"));
+        let restored = stderr.lines().any(|l| l.starts_with("relax collected: restored at"));
         (code, diags, restored, stderr.into_owned())
     };
     let named = |diags: &[String], name: &str| diags.iter().any(|d| d.contains(name));
@@ -527,8 +629,8 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
     let cold = check();
     assert!(cold.0 == Some(0) && named(&cold.1, "unused_a") && !cold.2, "{}", cold.3);
     // the cold check snapshots the program before its bodies and records that as the image
-    let boot = count(&cold.3, "makepad check: boot snapshot of ", " types");
-    let checked = count(&cold.3, "makepad check: collected program recorded (true)", " types");
+    let boot = count(&cold.3, "relax check: boot snapshot of ", " types");
+    let checked = count(&cold.3, "relax check: collected program recorded (true)", " types");
     assert!(boot < checked, "the bodies made types ({boot} before, {checked} after): {}", cold.3);
     // two edits of the checked crate: both checks restore the crates below it from the image the
     // cold check recorded, the second after the first wrote its graph
@@ -536,7 +638,7 @@ fn an_app_check_restores_the_crates_its_image_holds_as_they_are() {
         write("app/lib.rs", &app(now, "dep::value() + 1"));
         let r = check();
         assert!(r.0 == Some(0) && r.2 && named(&r.1, now) && !named(&r.1, before), "the edit to {now}: {}", r.3);
-        let held = count(&r.3, "makepad-run collected: restored ", " types");
+        let held = count(&r.3, "relax collected: restored ", " types");
         assert!(held <= boot, "the image holds {held} types, the program before its bodies {boot}: {}", r.3);
     }
     // an edit of a kept crate: it loads from its source (the app's sum no longer adds up), and back
@@ -583,8 +685,8 @@ fn a_dependency_error_fails_the_check() {
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache")).env("CARGO_HOME", dir.join("cargo"))
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+            .env(APP_CHILD, dir.join("ws")).env("RELAX_CACHE_DIR", dir.join("cache")).env("CARGO_HOME", dir.join("cargo"))
+            .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
@@ -633,7 +735,9 @@ fn a_dependency_error_fails_the_check() {
 /// up alone). Debug builds compare every answer of a table with the lookup of that one name (and
 /// every proc macro name the reach filter skips with the walk for it); the verdicts are rustc's:
 /// the names resolve, and a name the app's own two globs both provide is ambiguous where it is
-/// used (E0659).
+/// used (E0659). A `pub(crate)` glob of the dependency's module brings the app nothing (relax
+/// issue 186: its `Scalar` met the app's own through the app's two globs, E0659, and in a type
+/// it named the dependency's `f32`, E0308).
 #[test]
 fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
@@ -646,21 +750,22 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     };
     write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
     write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
-    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\n");
+    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\nmod units { pub type Scalar = f32; }\npub mod prelude { pub struct Body; #[allow(unused_imports)] pub(crate) use crate::units::*; }\n");
     write("dep/inner.rs", "use super::*;\nmod b { pub struct Dup; }\npub use b::*;\npub struct Inner;\npub fn inner_fn() -> u32 { root_fn() + 1 }\n");
     write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
-    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\n{clash}");
+    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\nuse dep::prelude::*;\nmod clock {{ pub struct Scalar; }}\nuse clock::*;\npub fn body() -> Body {{ let _s: Scalar = Scalar; Body }}\n{clash}");
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
-            .env(APP_CHILD, dir.join("ws")).env("MAKEPAD_RUN_CACHE_DIR", dir.join("cache"))
-            .env_remove("MAKEPAD_RUN_LINT_FLAGS").env_remove("MAKEPAD_RUN_WORKSPACE").env_remove("MAKEPAD_RUN_CACHE"));
+            .env(APP_CHILD, dir.join("ws")).env("RELAX_CACHE_DIR", dir.join("cache"))
+            .env_remove("RELAX_LINT_FLAGS").env_remove("RELAX_WORKSPACE").env_remove("RELAX_CACHE"));
         let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && stdout.contains("1 passed"), "{stdout}\n{stderr}");
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
         (code, stderr.into_owned())
     };
-    // the dep's names through the cycle and the enum glob: no diagnostic
+    // the dep's names through the cycle and the enum glob, and the app's `Scalar` beside the dep's
+    // `pub(crate)` glob: no diagnostic
     write("ws/app/lib.rs", &app(""));
     let clean = check();
     assert!(clean.0 == Some(0) && !clean.1.contains(": error") && !clean.1.contains(": warning:"), "{}", clean.1);

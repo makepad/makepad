@@ -49,8 +49,6 @@ impl fmt::Display for TryReserveError {
     }
 }
 
-// real std's Error needs real Display in the rustc shim
-#[cfg(not(relax_check))]
 impl crate::error::Error for TryReserveError {}
 
 /// Resolves a `usize` range against a length to (start, end), panicking with real core's

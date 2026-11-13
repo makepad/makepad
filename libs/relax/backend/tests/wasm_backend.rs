@@ -473,7 +473,7 @@ fn memory_and_slots() {
 
 /// An atomic read-modify-write reads its address twice: an address computed just before it
 /// (one counted use) must stay in its local (the tee shortcut once dropped the set: the
-/// add went to address 0, P(DOOM)'s store_lock drop counter stayed 0).
+/// add went to address 0, a game's store_lock drop counter stayed 0).
 #[test]
 fn atomic_rmw_address_just_set() {
     let mut f = B::new(&[Cls::I], &[Cls::I]);

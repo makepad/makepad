@@ -145,6 +145,14 @@ impl PendingPlan {
         self.outlined.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &EarlyCrates::default(), None))
             .image.outline_macros(ci)
     }
+    /// The imports the outline's expansions of crate `ci` wrote, with outline_macros' plan.
+    pub(crate) fn outline_expansions(&self, ci: usize) -> Option<Arc<HashMap<(String, String), Vec<String>>>> {
+        if let Some(uses) = std::ops::Deref::deref(self).image.outline_expansions(ci) {
+            return Some(uses);
+        }
+        self.outlined.get_or_init(|| Plan::build(&self.pending_crates, self.pending_contexts.clone(), None, &EarlyCrates::default(), None))
+            .image.outline_expansions(ci)
+    }
     /// The crates' source contexts (the plan's own, without waiting for it).
     pub fn contexts(&self) -> &[Arc<crate::source_context::Context>] { &self.pending_contexts }
     /// The crates the plan is for (without waiting for it).
@@ -168,7 +176,7 @@ impl PendingPlan {
         let _ = self.early.notify.set(Box::new(notify));
     }
     pub fn skips(&self, root: &str, test: bool, path: &str) -> bool {
-        // MAKEPAD_RUN_LAZY_DEFER=<path suffix>,..: these files are skipped whatever the
+        // RELAX_LAZY_DEFER=<path suffix>,..: these files are skipped whatever the
         // closure says; the post-boot loader brings them in when code needs them (its test)
         if self.pending_crates.first().is_some_and(|c| c.cfg.session.options.rs_lazy) && forced_deferral(path) {
             return true;
@@ -240,7 +248,7 @@ impl Plan {
         }
         let saved = &saved;
         let mut reused_outline = BTreeSet::new();
-        let verify_restore = std::env::var_os("MAKEPAD_RUN_DEMAND_RESTORE_CHECK").is_some_and(|v| v == "1");
+        let verify_restore = std::env::var_os("RELAX_DEMAND_RESTORE_CHECK").is_some_and(|v| v == "1");
         let mut restored_surfaces = BTreeSet::new();
         let mut demands = BTreeSet::new();
         let mut origins = BTreeMap::<String, (String, String)>::new();
@@ -895,6 +903,8 @@ impl Plan {
             for (ci, part) in parts.iter_mut().enumerate() {
                 let _profile = crate::load_profile::span(profile, "rust-demand-certify-part", &crates[ci].root);
                 let mut own = part.scans.iter().filter_map(|(p, _, hash, ..)| hash.map(|h| (p.clone(), h))).collect::<BTreeMap<_, _>>();
+                // the files the scanned ones `include!` are inputs too (relax issue 173)
+                own.extend(part.scans.iter().filter_map(|(_, _, _, scan, ..)| scan.as_ref()).flat_map(|s| s.included.iter().cloned()));
                 let mut probes = part.scans.iter().filter_map(|(_, _, _, scan, ..)| scan.as_ref())
                     .flat_map(|s| s.probes.iter().cloned()).collect::<BTreeSet<_>>();
                 // Retain validated schema reads even when restored outlines did
@@ -956,11 +966,11 @@ impl Plan {
             eprintln!("source-lazy: language={extension} indexed={indexed} reached={reached} deferred={}", indexed - reached);
         }
     }
-    /// MAKEPAD_RUN_DEMAND_DUMP=<file>: the plan's observable result (per-crate selection
+    /// RELAX_DEMAND_DUMP=<file>: the plan's observable result (per-crate selection
     /// identity and deferred list, reached/indexed counts), to diff an incremental
-    /// plan against one built from scratch (MAKEPAD_RUN_LAZY_VERIFY=1) for the same sources.
+    /// plan against one built from scratch (RELAX_LAZY_VERIFY=1) for the same sources.
     fn dump(&self) {
-        let Some(path) = std::env::var_os("MAKEPAD_RUN_DEMAND_DUMP") else { return; };
+        let Some(path) = std::env::var_os("RELAX_DEMAND_DUMP") else { return; };
         use std::fmt::Write as _;
         let mut out = String::new();
         let _ = writeln!(out, "reached={} indexed={}", self.reached.len(), self.indexed.len());
@@ -1023,7 +1033,7 @@ impl Plan {
                     lo, hi, ..crate::pm_tokens::Span::DUMMY
                 }).map_err(|e| e.to_string())?;
                 let eager = crate::rs_index::of_tokens(&stream);
-                if outline.index != eager { return Err(format!("MAKEPAD_RUN_LAZY_VERIFY: Rust outline differs: {path}")); }
+                if outline.index != eager { return Err(format!("RELAX_LAZY_VERIFY: Rust outline differs: {path}")); }
             }
         }
         Ok(())
@@ -1715,7 +1725,7 @@ fn rust_eager_reason(src: &[u8], tokens: &[Tok], names: &Names, ci: usize, modul
 
 fn forced_deferral(path: &str) -> bool {
     static LIST: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| std::env::var("MAKEPAD_RUN_LAZY_DEFER").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default())
+    LIST.get_or_init(|| std::env::var("RELAX_LAZY_DEFER").map(|v| v.split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect()).unwrap_or_default())
         .iter().any(|suffix| path.ends_with(suffix.as_str()))
 }
 

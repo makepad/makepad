@@ -15,11 +15,11 @@ const RESTART_EXIT: u32 = 0x4D50_5253;
 /// The environment variable naming the file the next run's command goes to: set by the parent for
 /// the run it starts, which takes it out so the programs it starts get parents of their own.
 #[cfg(windows)]
-const FILE_ENV: &str = "MAKEPAD_RUN_RESTART_FILE";
+const FILE_ENV: &str = "RELAX_RESTART_FILE";
 
 /// The parent's pid, set and taken out with [`FILE_ENV`].
 #[cfg(windows)]
-const PARENT_ENV: &str = "MAKEPAD_RUN_RESTART_PARENT";
+const PARENT_ENV: &str = "RELAX_RESTART_PARENT";
 
 #[cfg(windows)]
 static FILE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -40,7 +40,7 @@ fn can_restart(args: &[Vec<u8>]) -> bool {
         return false;
     }
     let has = |names: &[&[u8]]| args[2..].iter().take_while(|a| a.as_slice() != b"--").any(|a| names.contains(&a.as_slice()));
-    has(&[b"--live"]) || !has(&[b"--check", b"--harness", b"--plain-test", b"--no-live", b"--silent", b"--src"]) && std::env::var_os("MAKEPAD_RUN_SCRIPT_DEPTH").is_none()
+    has(&[b"--live"]) || !has(&[b"--check", b"--harness", b"--plain-test", b"--no-live", b"--silent", b"--src"]) && std::env::var_os("RELAX_SCRIPT_DEPTH").is_none()
 }
 
 /// The next run as it is written to the file: what an exec would keep and change, the process's
@@ -146,7 +146,7 @@ pub(crate) fn request(cmd: &std::process::Command) -> String {
     let _ = unsafe { makepad_windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(ASFW_ANY) };
     // an exec does not run the program's exit handlers either; the process's own exit work does run
     // (the discovery file of this pid goes: the hub reads one left behind as a crash)
-    crate::os::proc::end_process(RESTART_EXIT as i32)
+    makepad_core_util::process_end::end(RESTART_EXIT as i32)
 }
 
 /// Windows, on entry of the loader with the resolved command line `args`: the run its parent started
@@ -179,7 +179,7 @@ fn parent(args: &[Vec<u8>]) -> ! {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("makepad: the makepad binary's path is unknown: {e}");
+            eprintln!("relax: the {tool} binary's path is unknown: {e}", tool = crate::tool_name());
             std::process::exit(1);
         }
     };
@@ -202,7 +202,7 @@ fn parent(args: &[Vec<u8>]) -> ! {
         if let Some(job) = &job {
             let handle = makepad_windows_sys::Win32::Foundation::HANDLE(child.as_raw_handle() as _);
             if unsafe { makepad_windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(*job, handle) }.is_err() {
-                eprintln!("makepad: this process's end will not end the run: it could not join the job");
+                eprintln!("relax: this process's end will not end the run: it could not join the job");
             }
         }
         let code = match child.wait() {
@@ -244,7 +244,7 @@ fn kill_on_close_job() -> Option<makepad_windows_sys::Win32::Foundation::HANDLE>
 /// The run that asked for a restart has ended and the next did not start: only this process can say.
 #[cfg(windows)]
 fn next_failed(next: &Next, why: &str) -> ! {
-    eprintln!("makepad live: restart failed: {why}");
+    eprintln!("relax live: restart failed: {why}");
     if let Some((_, path)) = next.envs.iter().find(|(k, _)| k == "MAKEPAD_JIT_RECOVERY") {
         crate::hot_failure::next_run_failed(std::path::Path::new(path), why);
     }
@@ -261,7 +261,7 @@ mod tests {
 
     #[test]
     fn only_a_run_that_can_restart_gets_a_parent() {
-        for live in [&["makepad", "run", "makepad-fab"][..], &["makepad", "run", "--quiet", "makepad-fab"], &["makepad", "run", "--harness", "--live", "p"]] {
+        for live in [&["makepad", "run", "tool-a"][..], &["makepad", "run", "--quiet", "tool-a"], &["makepad", "run", "--harness", "--live", "p"]] {
             assert!(can_restart(&words(live)), "{live:?}");
         }
         for other in [
@@ -285,7 +285,7 @@ mod tests {
             program: "C:\\a b\\makepad.exe".into(),
             args: vec!["run".into(), "pkg".into(), "".into(), "with space".into()],
             dir: "C:\\work dir".into(),
-            envs: vec![("MAKEPAD_RUN_RESTART_T0".into(), "12".into()), ("EMPTY".into(), "".into())],
+            envs: vec![("RELAX_RESTART_T0".into(), "12".into()), ("EMPTY".into(), "".into())],
         };
         let data = next.encode();
         assert_eq!(Next::decode(&data), Some(next));

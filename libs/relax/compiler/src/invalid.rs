@@ -352,7 +352,7 @@ pub(crate) fn hold_old_frames(u: &Unit, gen: u32, layout: &str, paused: bool) ->
     let caps = if affected.is_empty() { Ok(Vec::new()) } else { crate::inspect::capture_all(&crate::inspect::instrument::program_thread) };
     let mut held = Vec::new();
     match caps {
-        Err(e) => eprintln!("makepad: layout patch gen {}: the program's stacks could not be read ({}): a thread still in first-version code of a rebuilt fn is not held", gen, e),
+        Err(e) => eprintln!("relax: layout patch gen {}: the program's stacks could not be read ({}): a thread still in first-version code of a rebuilt fn is not held", gen, e),
         Ok(caps) => {
             let code = u.code.read().unwrap_or_else(|e| e.into_inner());
             for c in caps {

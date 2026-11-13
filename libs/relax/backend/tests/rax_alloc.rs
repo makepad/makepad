@@ -2,7 +2,7 @@
 //! the other registers hold, the loop body stores and loads through indexed accesses on a stack
 //! buffer (spilled indices and values take r10 / r11, never rax) and dispatches through a jump
 //! table (Term::Switch works in r10 / r11, values live into the cases may sit in rax). Results must
-//! equal the same computation in Rust with rax allocatable and without (MAKEPAD_RUN_OPT=-rax), and
+//! equal the same computation in Rust with rax allocatable and without (RELAX_OPT=-rax), and
 //! rax must change the code.
 #![cfg(all(target_arch = "x86_64", unix))]
 use relax_backend::{exec::Code, rir::*};

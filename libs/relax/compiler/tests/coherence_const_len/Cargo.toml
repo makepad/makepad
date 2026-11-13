@@ -1,0 +1,8 @@
+# Impl headers whose array length is a type-level number's associated constant
+# (`[u16; sizes::U4::USIZE]`) or a const fn's value, of a trait with a supertrait bound
+# (`where Self: Sized`), over numbers of a crate upstream (a run checked the impls while it
+# type-checked the lengths, which the checks evaluate: a false E0391 cycle, and the impls
+# ambiguous). `cargo run -p ccl-app` prints `bytes 44`.
+[workspace]
+members = ["nums", "state", "app"]
+resolver = "2"

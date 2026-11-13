@@ -8,7 +8,10 @@
 //! x86_64: the check-mode interpreter runs MIR built by the type layer, which had made every
 //! `cfg!` false (check_lint_tests covers that path). The run-time lowering reads the crate's cfg
 //! itself; this pins that it and the type layer agree. A release `debug_assert!` in a const is
-//! skipped as rustc's `if cfg!(debug_assertions)` is.
+//! skipped as rustc's `if cfg!(debug_assertions)` is. Under a cargo profile with both checks
+//! (`makepad test`'s `test` profile, relax issue 141) the crate's `cfg!(debug_assertions)` holds
+//! in run-time code and consts, its `debug_assert!` runs and its arithmetic's overflow panics, at
+//! the first tier and at O3.
 
 const CFG: &str = r#"
 pub const WIDTH: usize = if cfg!(target_pointer_width = "64") { 64 } else { 32 };
@@ -28,18 +31,44 @@ pub fn values(out: &mut [usize; 9]) {
 }
 "#;
 
+/// The test profile's checks (cargo's dev profile): a `makepad test` crate's without a manifest setting.
+const CHECKED: crate::resolve::ProfileChecks = crate::resolve::ProfileChecks { debug_assertions: true, overflow_checks: true };
+
+/// The release profile's: none (a run's crates, `makepad test --release`).
+const RELEASE: crate::resolve::ProfileChecks = crate::resolve::ProfileChecks { debug_assertions: false, overflow_checks: false };
+
+/// The checks' values: `cfg!(debug_assertions)` at run time and in a const, a failing
+/// `debug_assert!`'s panic, the overflow panics of an add, a shift and a negation, and a sum that
+/// does not overflow.
+const CHECKS: &str = r#"
+pub const ON: usize = if cfg!(debug_assertions) { 1 } else { 0 };
+fn add(a: u8, b: u8) -> u8 { a + b }
+fn shl(a: u32, b: u32) -> u32 { a << b }
+fn neg(a: i32) -> i32 { -a }
+pub fn values(out: &mut [usize; 7]) {
+    out[0] = cfg!(debug_assertions) as usize;
+    out[1] = ON;
+    out[2] = std::panic::catch_unwind(|| debug_assert!(std::hint::black_box(1) == 2)).is_err() as usize;
+    out[3] = std::panic::catch_unwind(|| add(std::hint::black_box(255), 1)).is_err() as usize;
+    out[4] = std::panic::catch_unwind(|| shl(1, std::hint::black_box(32))).is_err() as usize;
+    out[5] = std::panic::catch_unwind(|| neg(std::hint::black_box(i32::MIN))).is_err() as usize;
+    out[6] = add(std::hint::black_box(250), 5) as usize;
+}
+"#;
+
 /// Runs `pub fn values(out: &mut [usize; N])` of the program `src` and returns `out`.
 fn values<const N: usize>(src: &str, name: &str) -> [usize; N] {
-    let (mut u, krate) = unit(src, name);
+    let (mut u, krate) = unit(src, name, RELEASE);
     run(&mut u, krate)
 }
 
 /// `values` at the first tier, then again once every fn of the program that ran was rebuilt at
-/// O3 (inlined into its callers, optimized); and the fns whose O3 build was refused.
-fn values_at_o3<const N: usize>(src: &str, name: &str) -> ([usize; N], [usize; N], Vec<String>) {
+/// O3 (inlined into its callers, optimized); and the fns whose O3 build was refused. `checks`:
+/// the cargo profile's the program's crate builds with.
+fn values_at_o3<const N: usize>(src: &str, name: &str, checks: crate::resolve::ProfileChecks) -> ([usize; N], [usize; N], Vec<String>) {
     // O3 builds wait for no borrow check verdict
     crate::borrowck::lazy::disable_gandalf();
-    let (mut u, krate) = unit(src, name);
+    let (mut u, krate) = unit(src, name, checks);
     let first = run(&mut u, krate);
     assert!(u.tier1.is_some(), "the fixture needs O3");
     let up = &mut *u as *mut crate::jit::Unit;
@@ -51,17 +80,18 @@ fn values_at_o3<const N: usize>(src: &str, name: &str) -> ([usize; N], [usize; N
     (first, run(&mut u, krate), refused)
 }
 
-fn unit(src: &str, name: &str) -> (Box<crate::jit::Unit>, u32) {
+fn unit(src: &str, name: &str, checks: crate::resolve::ProfileChecks) -> (Box<crate::jit::Unit>, u32) {
     crate::jit::CHECK_FIRST.store(false, std::sync::atomic::Ordering::Relaxed);
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let dir = std::env::temp_dir().join(format!("relax-values-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("lib.rs");
     std::fs::write(&path, src).unwrap();
-    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), name, false).unwrap();
+    let (prog, core, krate) = crate::load_with_std_checks(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), name, false, checks).unwrap();
     std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(dir).unwrap();
-    assert!(!prog.crates[krate as usize].cfg.holds("debug_assertions"), "the JIT's cfg is a release one");
+    let cfg = &prog.crates[krate as usize].cfg;
+    assert_eq!((cfg.holds("debug_assertions"), cfg.holds("overflow_checks")), (checks.debug_assertions, checks.overflow_checks), "the crate's cfg is its profile's");
     let mut tcx = crate::tcx::Tcx::new();
     tcx.collect(&prog);
     (crate::jit::Unit::new(prog, tcx, core), krate)
@@ -83,6 +113,11 @@ fn cfg_macro_is_the_crates_cfg_at_run_time_and_in_consts() {
     let width = if cfg!(target_pointer_width = "64") { 64 } else { 32 };
     let arch = if cfg!(target_arch = "x86_64") { 1 } else if cfg!(target_arch = "aarch64") { 2 } else { 0 };
     assert_eq!(out, [cfg!(target_endian = "little") as usize, cfg!(target_pointer_width = "64") as usize, arch, width, width, 4, 7, width, 1]);
+    let (first, o3, refused): ([usize; 7], [usize; 7], _) = values_at_o3(CHECKS, "cfg_checked", CHECKED);
+    assert_eq!(first, [1, 1, 1, 1, 1, 1, 255], "the test profile's checks at the first tier");
+    assert_eq!(o3, first, "the test profile's checks at O3 (not built: {refused:?})");
+    let (first, o3, _): ([usize; 7], [usize; 7], _) = values_at_o3(CHECKS, "cfg_released", RELEASE);
+    assert_eq!((first, o3), ([0, 0, 0, 0, 0, 0, 255], [0, 0, 0, 0, 0, 0, 255]), "the release profile's: no check, at the first tier and at O3");
 }
 
 /// `IoSlice` / `IoSliceMut` (now real std's `iovec`-shaped wrappers, WARNZERO class 8): the
@@ -348,7 +383,7 @@ pub fn values(out: &mut [usize; 80]) {
 #[test]
 fn guards_bound_out_of_tuples_drop_where_rustc_drops_them() {
     isolated_test!(guards_bound_out_of_tuples_drop_where_rustc_drops_them);
-    let (first, o3, refused): ([usize; 80], [usize; 80], _) = values_at_o3(TUPLE_GUARDS, "tuple_guards");
+    let (first, o3, refused): ([usize; 80], [usize; 80], _) = values_at_o3(TUPLE_GUARDS, "tuple_guards", RELEASE);
     // (the logging leaves stay at their first tier)
     assert!(refused.iter().all(|f| f == "tuple_guards::log" || f.ends_with("<D as Drop>::drop")), "no O3 build of {refused:?}");
     let (n, m) = (first.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1), o3.iter().rposition(|&v| v != 0).map_or(0, |i| i + 1));
@@ -361,7 +396,7 @@ fn guards_bound_out_of_tuples_drop_where_rustc_drops_them() {
 #[path = "../../base/tests/support/vfs_store.rs"]
 pub(crate) mod vfs_store;
 
-/// Sandbox game_store (asset client cache.rs fsync_dir: `File::open(dir)?.sync_all()`): a folder
+/// A game's store (asset client cache.rs fsync_dir: `File::open(dir)?.sync_all()`): a folder
 /// opens for reading as it does on the disk (open(2) of a directory O_RDONLY succeeds; its reads
 /// fail EISDIR), so a virtual one (an overlay run's sources) is fsync'd, not refused EISDIR.
 #[test]

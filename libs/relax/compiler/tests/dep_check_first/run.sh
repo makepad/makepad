@@ -5,8 +5,8 @@
 # check ran beside the tests: they ran first, one met a compile error in its call, 11-08.)
 # Prints "dep_check_first: ok" or "dep_check_first: FAILED".
 H=$(cd "$(dirname "$0")" && pwd)
-export MAKEPAD_RUN_CACHE=off CARGO_NET_OFFLINE=true
-OUT=$(cd "$H" && MAKEPAD_RUN_STD=$H/../../std "$1" test dc-app --lib 2>&1)
+export RELAX_CACHE=off CARGO_NET_OFFLINE=true
+OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" test dc-app --lib 2>&1)
 rc=$?
 echo "$OUT"
 e0063=$(echo "$OUT" | grep -c "E0063: missing field \`b\`")

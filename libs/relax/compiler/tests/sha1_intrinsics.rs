@@ -177,7 +177,7 @@ fn sha1_known_digests() {
     assert_eq!(digest(&vec![b'a'; 1000]), [0x291e9a6c, 0x66994949, 0xb57ba5e6, 0x50361e98, 0xfc36b1ba]);
 }
 
-// The existing check_arch Arm suite also checks Intel's word ordering on Arm.
+// Intel's word ordering on Arm (tests/std/core_arch_x86_64.rs on an Arm host covers the rest).
 #[cfg(all(target_arch = "aarch64", relax))]
 #[test]
 fn intel_sha1_on_arm() {

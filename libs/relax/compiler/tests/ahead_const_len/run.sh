@@ -11,13 +11,13 @@ ERR=$(mktemp)
 trap 'rm -f "$ERR"' EXIT
 R=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 T=$(mktemp -d)
-export MAKEPAD_RUN_CACHE=off MAKEPAD_RUN_STD="$H/../../std" MAKEPAD_RUN_CACHE_DIR="$T/cache"
+export RELAX_CACHE=off RELAX_STD="$H/../../std" RELAX_CACHE_DIR="$T/cache"
 bad=()
 for k in 1 2 3; do
   (cd "$H" && ulimit -c 0 && "$R" check --root-only --no-serve ahead-const-len) > "$T/check$k.log" 2>&1
   rc=$?
   [ "$rc" -eq 0 ] || bad+=("check $k exit $rc")
-  grep -q 'makepad check: .* 0 errors' "$T/check$k.log" || bad+=("check $k: $(grep 'makepad check: .* errors' "$T/check$k.log")")
+  grep -q 'relax check: .* 0 errors' "$T/check$k.log" || bad+=("check $k: $(grep 'relax check: .* errors' "$T/check$k.log")")
   grep -Eq 'E0080|\{error\}|segfault|could not evaluate' "$T/check$k.log" && bad+=("check $k: $(grep -Em1 'E0080|\{error\}|segfault|could not evaluate' "$T/check$k.log" | cut -c1-200)")
 done
 OUT=$(cd "$H" && ulimit -c 0 && "$R" run --quiet ahead-const-len 2>>"$ERR")

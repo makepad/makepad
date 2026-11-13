@@ -1,6 +1,6 @@
 #!/bin/bash
 # usage: run.sh <makepad binary>: this program three times with one fresh disk cache (cold, then warm
-# twice) under MAKEPAD_RUN_WARM_STRICT, with O1 code from the first call (MAKEPAD_RUN_O1=0: not the baseline tier; O1
+# twice) under RELAX_WARM_STRICT, with O1 code from the first call (RELAX_O1=0: not the baseline tier; O1
 # folds an array's end address into a second relocation to the one block). Every run must exit 0 and print the cold result line (a
 # warm run once yielded a third element from `["l", "r"].iter()`). Prints "cache_warm_iter_end: ok"
 # or "cache_warm_iter_end: FAILED ...".
@@ -10,7 +10,7 @@ C=$(mktemp -d)
 chmod 700 "$C"
 bad=""
 for k in 1 2 3; do
-  (cd "$H" && MAKEPAD_RUN_O1=0 MAKEPAD_RUN_WARM_STRICT=1 MAKEPAD_RUN_CACHE_DIR="$C/cache" MAKEPAD_RUN_TARGET_DIR="$C/target" MAKEPAD_RUN_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run cache-warm-iter-end) > "$C/run$k.log" 2>&1
+  (cd "$H" && RELAX_O1=0 RELAX_WARM_STRICT=1 RELAX_CACHE_DIR="$C/cache" RELAX_TARGET_DIR="$C/target" RELAX_STD="$H/../../std" RUSTC_BOOTSTRAP=1 "$R" run cache-warm-iter-end) > "$C/run$k.log" 2>&1
   rc=$?
   if [ $rc != 0 ] || ! grep -q "^cache_warm_iter_end result 2 2 5 294 3 3 6 2 1$" "$C/run$k.log"; then
     bad="$bad run$k(rc=$rc: $(grep -m1 -E 'result|panic' "$C/run$k.log"))"

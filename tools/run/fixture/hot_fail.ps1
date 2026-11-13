@@ -3,7 +3,7 @@
 # (restart_parent.rs).
 #
 # usage: powershell -NoProfile -ExecutionPolicy Bypass -File tools/run/fixture/hot_fail.ps1
-#   (from the workspace root; MAKEPAD_RUN_STD in the environment, default libs/relax/compiler/std)
+#   (from the workspace root; RELAX_STD in the environment, default libs/relax/compiler/std)
 #
 # Runs hot_fail/ as hot_fail.py does, in its error and panic cases, with the same checks. Besides those:
 #   - the restarted run has another pid, the same parent process, and answers `inspect` at its pid
@@ -18,7 +18,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 $Makepad = Join-Path $Target 'host\makepad.exe'
 $Bad = 'parked', 'paused on a panic', 'stale access', 'FATAL', 'Segmentation'
-if (-not $env:MAKEPAD_RUN_STD) { $env:MAKEPAD_RUN_STD = Join-Path $Root 'libs\relax\compiler\std' }
+if (-not $env:RELAX_STD) { $env:RELAX_STD = Join-Path $Root 'libs\relax\compiler\std' }
 
 cargo build --profile host -q --manifest-path (Join-Path $Root 'Cargo.toml') -p makepad-run --bin makepad
 if ($LASTEXITCODE -ne 0) { 'hot_fail: FAIL no build'; exit 1 }
@@ -42,12 +42,12 @@ function Case($name, $hooks, $killParent) {
     $ready = Join-Path $tmp 'ready'
     $outFile = Join-Path $tmp 'out.txt'
     $errFile = Join-Path $tmp 'err.txt'
-    $env:MAKEPAD_RUN_LIVE_READY = $ready
-    $env:MAKEPAD_RUN_HOME = $home_
+    $env:RELAX_LIVE_READY = $ready
+    $env:RELAX_HOME = $home_
     $env:MAKEPAD_HOME = Join-Path $tmp 'makepad'
-    $env:MAKEPAD_RUN_CACHE_DIR = Join-Path $home_ 'cache'
-    $env:MAKEPAD_RUN_TARGET_DIR = Join-Path $home_ 'target'
-    $env:MAKEPAD_RUN_LIVE_TRACE = '1'
+    $env:RELAX_CACHE_DIR = Join-Path $home_ 'cache'
+    $env:RELAX_TARGET_DIR = Join-Path $home_ 'target'
+    $env:RELAX_LIVE_TRACE = '1'
     foreach ($h in $hooks) { Set-Item "env:$h" 'hot_fail_target' }
     $p = Start-Process -FilePath $Makepad -ArgumentList 'run', '--ahead=minimal', 'relax-hot-fail' -WorkingDirectory $pkg -NoNewWindow -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
     $null = $p.Handle # (ExitCode is only there with the handle taken at the start)
@@ -172,7 +172,7 @@ function Case($name, $hooks, $killParent) {
 }
 
 $ok = $true
-foreach ($c in @(@('error', @('MAKEPAD_RUN_TEST_HOT_BUILD_ERROR'), $false), @('panic', @('MAKEPAD_RUN_TEST_HOT_BUILD_ERROR', 'MAKEPAD_RUN_TEST_HOT_COMPILE_PANIC'), $true))) {
+foreach ($c in @(@('error', @('RELAX_TEST_HOT_BUILD_ERROR'), $false), @('panic', @('RELAX_TEST_HOT_BUILD_ERROR', 'RELAX_TEST_HOT_COMPILE_PANIC'), $true))) {
     foreach ($line in (Case $c[0] $c[1] $c[2])) {
         if ($line -is [bool]) { $ok = $ok -and $line } else { "$line" }
     }

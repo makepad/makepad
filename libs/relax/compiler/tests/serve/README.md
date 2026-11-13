@@ -2,9 +2,9 @@
 
 `relax serve [--workspace DIR] [--idle-min 30]` resolves and canonicalizes the workspace
 with Relax's resolver. It publishes `PORT TOKEN PID\n` in
-`<workspace>/target/makepad-run/serve/<16 lowercase hex digits>/endpoint`. Cargo target-dir overrides
-select `<target>/makepad-run`; `MAKEPAD_RUN_CACHE_DIR` explicitly replaces that directory. Run
-`relax clean` from the workspace root or a member subdirectory to remove the whole `makepad-run`
+`<workspace>/target/relax/serve/<16 lowercase hex digits>/endpoint`. Cargo target-dir overrides
+select `<target>/relax`; `RELAX_CACHE_DIR` explicitly replaces that directory. Run
+`relax clean` from the workspace root or a member subdirectory to remove the whole `relax`
 directory, including serve files and startup manifests. The directory key is the
 low 64 bits of Relax's Sip128 hash of the canonical root. The token is 32 OS-random bytes,
 hex encoded. The endpoint and lock are private files. An OS file lock prevents duplicate
@@ -58,7 +58,7 @@ Status:
 
 ```json
 {"id":4,"token":"TOKEN","method":"status","params":{}}
-{"id":4,"result":{"workspace":"/workspace","packages":[{"pkg":"serve_fixture","loaded_ms":100.0,"last_check_ms":0.123,"items":4,"rss_mb":42.0}],"uptime_s":12.0}}
+{"id":4,"result":{"workspace":"/workspace","compiler":"makepad 0123456789ab jit 0123456789ab","packages":[{"pkg":"serve_fixture","loaded_ms":100.0,"last_check_ms":0.123,"items":4,"rss_mb":42.0}],"uptime_s":12.0}}
 ```
 
 Schema:
@@ -107,6 +107,8 @@ use the same cleanup path.
 ## CLI
 
 - `relax check [--json] PKG`: connect if a live endpoint authenticates; otherwise one-shot.
+  A server whose status names another compiler (or none) is stopped by its recorded pid and
+  the check runs one-shot, with one line on stderr saying so; `--serve` then starts this one's.
 - `relax check --no-serve [--json] PKG`: always one-shot.
 - `relax check --serve [--json] PKG`: start a detached server if necessary, with stdin closed
   and stdout/stderr appended to `serve.log` beside the endpoint; wait up to 30 minutes.
@@ -122,7 +124,9 @@ watch, etc.) keep their one-shot behavior and do not implicitly connect. Explici
 
 ## Validation
 
-Run `./run.sh /absolute/path/to/target/release/relax`. The Python socket client creates an isolated copy
+Run `./run.sh /absolute/path/to/relax` with the `relax` binary (or makepad's, which runs the
+same commands). Without one, it builds makepad's host binary, which only a makepad checkout has:
+run it from that workspace root, as devhub's CI does (`live:check-server`). The Python socket client creates an isolated copy
 of the adjacent fixture, sets both Relax and Cargo offline, and retains logs and sources
 under the printed temporary directory. It compares diagnostic lines and summary fields
 with one-shot output, normalizing only milliseconds, and prints warm check/edit timings.

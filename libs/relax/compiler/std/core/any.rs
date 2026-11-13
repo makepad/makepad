@@ -3,7 +3,7 @@
 use crate::fmt;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[cfg_attr(not(relax_check), lang = "type_id")]
+#[lang = "type_id"]
 pub struct TypeId {
     // a stable 128-bit hash of the type (like rustc's), the same in every run
     hi: u64,

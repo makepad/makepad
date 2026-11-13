@@ -63,22 +63,52 @@ The runner reads std from a checkout at run time, not from the binary. When you 
 builds, point each one at its own commit's std:
 
 ```sh
-MAKEPAD_RUN_STD=/path/to/that/checkout/libs/relax/compiler/std /path/to/that/target/release/relax run ...
+RELAX_STD=/path/to/that/checkout/libs/relax/compiler/std /path/to/that/target/release/relax run ...
 ```
 
-Compiled code is kept in the workspace's run dir, `target/makepad-run` (in `CARGO_TARGET_DIR` when
-that is set); `MAKEPAD_RUN_HOME` holds only fetched git repositories. Give each side its own run dir
-with `MAKEPAD_RUN_CACHE_DIR=<dir>` so neither reuses the other's compiled code.
+Compiled code is kept in the workspace's run dir, `target/relax` (in `CARGO_TARGET_DIR` when
+that is set); `RELAX_HOME` holds only fetched git repositories. Give each side its own run dir
+with `RELAX_CACHE_DIR=<dir>` so neither reuses the other's compiled code.
 
 ## Traces
 
-- `MAKEPAD_RUN_TRACE=pmhost`: proc-macro registry and macro world (which crate serves which
+- `RELAX_TRACE=pmhost`: proc-macro registry and macro world (which crate serves which
   derive, sandbox refusals).
-- `MAKEPAD_RUN_TRACE=expand:<macro>`: each expansion of that macro, with its call site.
-- `MAKEPAD_RUN_TRACE=typeck:<fn substring>,lower:<fn substring>`: phase starts for matching fns.
-- `MAKEPAD_RUN_TRACE=bt`: backtraces of internal errors.
-- `--verbose` (or `MAKEPAD_RUN_VERBOSE=1`): phase timings.
+- `RELAX_TRACE=expand:<macro>`: each expansion of that macro, with its call site.
+- `RELAX_TRACE=typeck:<fn substring>,lower:<fn substring>`: phase starts for matching fns.
+- `RELAX_TRACE=bt`: backtraces of internal errors.
+- `--verbose` (or `RELAX_VERBOSE=1`): phase timings.
 - A running program: `relax inspect <pid> help` (panics, why-hung, probes).
+
+## Read live test results from an agent
+
+Start one harness with `relax test --live <package> --lib` (or `--test <name>`), and find its PID
+with `relax inspect list --json`. Read the first verdict with:
+
+```sh
+relax inspect <pid> events on=testverdict since=0 --json
+```
+
+Before saving an edit, keep the newest event's `seq`, then wait for the edit's outcome with:
+
+```sh
+relax inspect <pid> watch on=testverdict,patchrefused,patchfailed,patchreverted since=<seq> --json
+```
+
+A `testverdict` names the edited paths and the patch `group`, with counts and the failing tests.
+Its `results` field is the query for each test's outcome, `test-results group=<n>`:
+
+```sh
+relax inspect <pid> test-results group=<n> --json
+```
+
+The answer starts with the `group` and `test_count`, then one JSON line per test with its `name`,
+`status` (`passed`, `failed`, `ignored` or `filtered`) and `ran`. `ran` is true only when the test
+executed for this edit: a passed or failed result an earlier run left (the edit did not reach the
+test) has `ran:false`. The session keeps the latest completed run, and refuses a different `group`
+rather than answer with another edit's results. A `patchrefused` event carries the build errors
+in `reasons`. Move the `since` cursor past every event, the patch errors included.
+`libs/relax/compiler/tests/live_test_results/run.py <relax binary>` checks this interface.
 
 ## Shrinking a bug
 

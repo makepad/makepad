@@ -101,10 +101,10 @@ pub fn cmd_live(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     }
     println!("v0: first run (lazy compile on first call)");
     run_tests(&mut u, &tests);
-    // MAKEPAD_RUN_LIVE_SETTLE (a case's env): the second run starts once the first run's O3 work
+    // RELAX_LIVE_SETTLE (a case's env): the second run starts once the first run's O3 work
     // is done and stays done a moment (a thread the first run left running turns its code hot
     // meanwhile), so the edits meet settled code: O3 builds and the guarded copies they inline
-    if std::env::var_os("MAKEPAD_RUN_LIVE_SETTLE").is_some() {
+    if std::env::var_os("RELAX_LIVE_SETTLE").is_some() {
         let up: *const Unit = &*u;
         let mut quiet = 0;
         while quiet < 20 {

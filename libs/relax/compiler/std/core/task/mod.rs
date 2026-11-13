@@ -6,11 +6,11 @@ use crate::sync::Arc;
 
 #[must_use]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-#[cfg_attr(not(relax_check), lang = "Poll")]
+#[lang = "Poll"]
 pub enum Poll<T> {
-    #[cfg_attr(not(relax_check), lang = "Ready")]
+    #[lang = "Ready"]
     Ready(T),
-    #[cfg_attr(not(relax_check), lang = "Pending")]
+    #[lang = "Pending"]
     Pending,
 }
 
@@ -191,7 +191,7 @@ impl fmt::Debug for Waker {
 }
 
 /// The context of an asynchronous task.
-#[cfg_attr(not(relax_check), lang = "Context")]
+#[lang = "Context"]
 pub struct Context<'a> {
     waker: &'a Waker,
 }

@@ -89,8 +89,8 @@ fn server_thread_exit() {
     SERVER_TIDS.lock().unwrap().retain(|t| *t != me);
 }
 
-/// A test harness's endpoint: there to answer when the run hangs. A test's panic is the test's
-/// (nothing parks), and its output says nothing about the endpoint.
+/// A test harness's endpoint: there to answer when the run hangs. A test's panic and stale access
+/// are the test's (nothing parks), and its output says nothing about the endpoint.
 static TEST_RUN: AtomicBool = AtomicBool::new(false);
 
 /// [`start`] for a test run.
@@ -105,8 +105,8 @@ pub fn say_why_hung(what: &str) {
         hang::why_hung(req, out);
     }
     let _k = crate::zone_alloc::kept();
-    let (bytes, _) = makepad_remote::cmd::answer(answer, "why-hung");
-    eprintln!("makepad: {what}: where the threads wait:\n{}", String::from_utf8_lossy(&bytes));
+    let bytes = makepad_remote::cmd::answer(answer, "why-hung");
+    eprintln!("relax: {what}: where the threads wait:\n{}", String::from_utf8_lossy(&bytes));
 }
 
 /// A retiring domain's outstanding threads, using the same wait registry and
@@ -116,7 +116,7 @@ pub fn say_teardown_threads(domain: u32, pending: &[(String, u64)]) {
     let captures = match capture_all(&|t| pending.iter().any(|(_, id)| *id != 0 && *id == t.os_id)) {
         Ok(captures) => captures,
         Err(error) => {
-            eprintln!("makepad-run domain: {domain}: teardown stacks unavailable: {error}");
+            eprintln!("relax domain: {domain}: teardown stacks unavailable: {error}");
             return;
         }
     };
@@ -127,13 +127,13 @@ pub fn say_teardown_threads(domain: u32, pending: &[(String, u64)]) {
     let symbols = symbolise_within(&frames, &mut partial, 300);
     for (name, id) in pending {
         let Some(index) = captures.iter().position(|c| *id != 0 && c.t.os_id == *id) else {
-            eprintln!("makepad-run domain: {domain}: thread {name}: {}", if *id == 0 { "reserved, not entered yet" } else { "exited during capture" });
+            eprintln!("relax domain: {domain}: thread {name}: {}", if *id == 0 { "reserved, not entered yet" } else { "exited during capture" });
             continue;
         };
         let c = &captures[index];
         let blocked = waits.iter().find(|w| w.thread == c.t.handle && w.kind != crate::waits::Kind::None)
             .map(|w| wait_text(w, &threads)).unwrap_or_else(|| c.t.state.to_string());
-        eprintln!("makepad-run domain: {domain}: thread {name} ({}): {blocked}", c.t.os_id);
+        eprintln!("relax domain: {domain}: thread {name} ({}): {blocked}", c.t.os_id);
         if let Some(error) = c.err {
             eprintln!("  stack unavailable: {error}");
         }
@@ -141,12 +141,12 @@ pub fn say_teardown_threads(domain: u32, pending: &[(String, u64)]) {
             eprintln!("  {} {}", frame.name, frame.at);
         }
     }
-    for note in partial { eprintln!("makepad-run domain: {domain}: {note}"); }
+    for note in partial { eprintln!("relax domain: {domain}: {note}"); }
 }
 
-/// Starts the inspect thread for program `app` (once per process; MAKEPAD_RUN_INSPECT=0: off).
+/// Starts the inspect thread for program `app` (once per process; RELAX_INSPECT=0: off).
 pub fn start(app: &str) {
-    if std::env::var("MAKEPAD_RUN_INSPECT").map_or(false, |v| v == "0") || STARTED.swap(true, Relaxed) {
+    if std::env::var("RELAX_INSPECT").map_or(false, |v| v == "0") || STARTED.swap(true, Relaxed) {
         return;
     }
     let _k = crate::zone_alloc::kept();
@@ -203,10 +203,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("pin", "[on|off]", "pin the running app while an operation runs: no edit or landing reaches it and it does not restart; off: it catches up"),
     ("hold", "[files=<path>=<blob id or ->, one a line> | take dir=<dir> files=... | off]", "hold back a landing (devhub's show, until its tip is proven): while a file says what the landing wrote (its git blob id, - when it removes the file) its change waits; every other save applies at once; take: the held files move to a proven tip's text (<dir>/<path>, of that blob id; -: gone), the rest stays held; off: the landing goes in; no words: how many files are held"),
     ("inputs", "[match=<path substring>] [of=<paths, one per line>]", "the live session's reload source files, workspace-relative, one path per line and a count; unloaded sources are excluded; of= answers only which of those paths are inputs, which others lie in no package of the graph (`outside`), and which others the program opened, probed or listed the folder of (`read`)"),
+    ("test-results", "[group=<n>]", "the latest completed live test run: group and test count, then each test's name, status and whether it ran for that edit; group= refuses the results of another edit"),
     ("session", "relaunch", "apply the edits waiting for a restart: the process starts again (an app that restarts itself, std::relax::restart_supported, with its state and window frames)"),
     ("why-hung", "[probe_ms=200]", "is it stuck and why: verdict (deadlock / blocked / busy / idle), the wait chain or cycle, stacks of the threads in it"),
     ("capture", "[why=<text>]", "capture the JIT's state and flight recording; answers the likely cause and report path"),
-    ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / makepad run runtime / system), its hot fns, the owner's service, other busy threads"),
+    ("why-slow", "[s=3]", "where the time goes: ranked findings -- the main thread's CPU split (program / compiles / Relax runtime / system), its hot fns, the owner's service, other busy threads"),
     ("prof", "[s=3] [hz=200] [threads=all|main|owner|program|compiler|<name>] [ev=cpu|cycles|instructions|branch-misses|cache-misses] [view=top|tree|callers|flame] [focus=<fn>] [fn=<fn>] [min=1] [n=15] [save=1]", "sampling profile of JIT and host frames: per-thread CPU, activity split, top fns by self time with their hottest line, inclusive fns; view=tree: the call tree with the JIT's inline levels as frames and each frame's tier (focus= re-roots at a fn, view=callers fn= inverts); save=1 / view=flame writes folded stacks; ev= samples a hardware event (Linux)"),
     ("pf", "<summary|frames|frame F<n>|top cpu|jit|gpu|hitches|timeline F<n>|lanes|why-slow|diff> [s=3] [save=x.mkpf] [base=y.mkpf]", "the profiler for agents: the client records the app's live `prof` stream (lanes, phases, waits, compile jobs, JIT installs with tiers, GPU passes) for s seconds and answers as compact text: finding first, tables, drill-down ids; file=<x.mkpf> pf ... answers on a recording"),
     ("rec", "status | save [last=60s|5m|all] [path=<file>] | mark <text> | on | off | replay (file=<x.mkpf>: client side)", "the flight recorder (always on, bounded memory): the last minutes of frames, every thread's spans and waits, the owner's requests with requester and call site, JIT installs, events (app marks, logs, panics, script errors, hitches, zone swaps), input; save = a .mkpf recording for `pf` queries and Scope; automatic recordings on a hitch over 1 s, a panic, a fatal fault"),
@@ -217,10 +218,10 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("events", "[follow=1] [since=<seq>] [on=...]", "the recent events, ending at the newest (follow=1: stream one JSON line per new event)"),
     ("panics", "", "panics parked now, waiting for a decision"),
     ("resume", "<panic id> panic|retry|restart|return <v>[,<v>]", "decide a parked panic: unwind, retry, restart the hosted app domain (otherwise its restartable fn), or return the values"),
-    ("memory", "[compiler=1] [n=24]", "where the memory is and why: RSS by mapping kind, malloc in use vs held free, makepad run's own parts, findings, growth since the last `memory`"),
+    ("memory", "[compiler=1] [n=24]", "where the memory is and why: RSS by mapping kind, malloc in use vs held free, Relax's own parts, findings, growth since the last `memory`"),
     ("diff", "<snap a> <snap b|now>", "memory growth between two snapshots, largest first"),
     ("mem", "snap <name> | timeline [from_ms= to_ms=] | trim", "keep a named memory snapshot; resident size over time with phase markers and the peak's phase; trim: return the allocators' free pages now (RSS before/after)"),
-    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] [zone=burst|compiler|slots|other] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
+    ("heap", "start [rate=65536] [ttl_s=600] | top [by=live|alloc|freed|peak] [zone=burst|compiler|slots|cold|new|other] [group=tag] [tag=<category>] | frame [s=2] [n=12] | snap <name> | diff <a> <b|now> | path H<id> | stop | status", "program heap by allocation stack (JIT-patched allocator hooks, byte-sampled): live, allocated, freed; growth and leaks between snapshots"),
     ("top", "by=time|alloc|bytes|live [s=3] [n=15]", "the top functions by CPU time (prof) or allocation sites by allocated / live bytes (heap)"),
     ("frame", "<n|slowest>", "one frame of the last timeline: UI phases, critical path, waits and who ended them (alias of timeline frame)"),
     ("path", "<H<n>|R<n>>", "the full stack of a heap site id"),
@@ -247,7 +248,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("rm", "<G<n>|all>", "removes probe groups: the code they replaced comes back (no recompile)"),
     ("continue", "[K<n>|all]", "lets parked breakpoint hits go"),
     ("stale", "[n=8]", "stale accesses (into memory the JIT retired for good: unloaded modules, invalidated code), answer first: who touched what, where in it, when and why it was retired, the report; then the retired ranges. A stale access parks its thread and pauses the app until `resume P<n> restart | stop`"),
-    ("pause", "", "stops the program's threads (makepad run's and inspect's keep running); stacks work while paused"),
+    ("pause", "", "stops the program's threads (Relax's and inspect's keep running); stacks work while paused"),
     ("resume", "", "after pause: the program runs again (`resume P<n> panic` releases a parked panic)"),
     ("gpu", "[top [by=bytes|owner|site|churn] [n=15]|idle [frames=1800] [n=15]|snap <name>|diff <a> <b|now>|path <session>:<kind>:<index>:<generation>]", "HAL GPU memory: totals per session, kind and owner against the device (native apps: MAKEPAD_INSPECT=1 or MAKEPAD_REMOTE=1)"),
     ("hal", "pump|pace", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing"),
@@ -275,11 +276,11 @@ fn dispatch(req: &Req, out: &mut Out) {
     let _act = activity::begin(req);
     dispatch_command(req, out);
     if crate::run_threads::ending() {
-        out.always("{\"run_ended\":true,\"why\":\"the run this answers about ended while it was asked\"}");
+        out.line("{\"run_ended\":true,\"why\":\"the run this answers about ended while it was asked\"}");
     }
     // SPEC-V: the client prints the answer's rows, not its end line (which says `verified` too)
     if !crate::reload::observations_verified() && !matches!(req.cmd.as_str(), "help" | "ping" | "events" | "watch") {
-        out.always("{\"verified\":false,\"why\":\"a patched fn runs before its borrow-check verdict; a failed verdict reverts it and the patchreverted event lists the observations it invalidates\"}");
+        out.line("{\"verified\":false,\"why\":\"a patched fn runs before its borrow-check verdict; a failed verdict reverts it and the patchreverted event lists the observations it invalidates\"}");
     }
 }
 
@@ -423,29 +424,29 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "help" => help(req, out),
         "inputs" => {
             // `of`: the paths asked about, one per line (a live session's saves): only those are
-            // looked at; every input path cost the owner 25-40 ms an edit (Fab, 11-04)
+            // looked at; every input path cost the owner 25-40 ms an edit (an app, 11-04)
             let of: Vec<&str> = req.get("of").map_or_else(Vec::new, |v| v.lines().filter(|l| !l.is_empty()).collect());
             let keep = |p: &str| of.is_empty() || of.iter().any(|a| ends_with_rel(p, a.trim_start_matches("../")));
             match crate::reload::input_paths(&keep) {
                 Ok(paths) => {
                     let paths: Vec<_> = paths.into_iter().filter(|p| (of.is_empty() || of.contains(&p.as_str())) && p.contains(req.get("match").unwrap_or(""))).collect();
                     // Callers use absence to skip a patch wait: never truncate this source list.
-                    out.always(&format!("{{\"count\":{}}}", paths.len()));
+                    out.line(&format!("{{\"count\":{}}}", paths.len()));
                     for path in crate::reload::outside_packages(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a))) {
-                        out.always(&format!("{{\"outside\":{}}}", json_str(path)));
+                        out.line(&format!("{{\"outside\":{}}}", json_str(path)));
                     }
                     for path in crate::reload::read_by_program(of.iter().copied().filter(|a| !paths.iter().any(|p| p == a)), &ends_with_rel) {
-                        out.always(&format!("{{\"read\":{}}}", json_str(path)));
+                        out.line(&format!("{{\"read\":{}}}", json_str(path)));
                     }
                     for path in paths {
                         if out.cancelled() { break; }
-                        out.always(&format!("{{\"path\":{}}}", json_str(&path)));
+                        out.line(&format!("{{\"path\":{}}}", json_str(&path)));
                     }
                 }
                 Err(e) => out.err(&e),
             }
         }
-        "pf" => out.err("pf is answered by the client: makepad inspect <app> pf <query> (it attaches to the app's prof stream)"),
+        "pf" => out.err(&format!("pf is answered by the client: {tool} inspect <app> pf <query> (it attaches to the app's prof stream)", tool = crate::tool_name())),
         "ping" => out.line(&format!("{{\"pid\":{},\"app\":{},\"ms\":{}}}", std::process::id(), json_str(&APP.lock().unwrap()), now_ms())),
         "threads" => cmd_threads(out),
         "jit" => cmd_jit(req, out),
@@ -505,6 +506,7 @@ fn dispatch_command(req: &Req, out: &mut Out) {
         "locals" => eval::cmd_locals(req, out),
         "watch" => events::cmd_watch(req, out),
         "events" => events::cmd_events(req, out),
+        "test-results" => crate::harness::live::cmd_results(req, out),
         "panics" => events::cmd_panics(out),
         "stale" => crate::stale::cmd(req, out),
         "resume" if !req.pos.is_empty() => events::cmd_resume(req, out),
@@ -610,6 +612,7 @@ fn with_by(req: &Req) -> Req {
 
 fn help(req: &Req, out: &mut Out) {
     if req.pos.first().map(String::as_str) == Some("schema") {
+        // one line longer than a reply's byte limit (`line` would drop it whole): always written
         out.line(&schema());
         return;
     }
@@ -637,7 +640,7 @@ pub fn schema() -> String {
     let cmds: Vec<String> = COMMANDS.iter().chain(makepad_gpu_trace::query::COMMANDS).chain(host.iter()).map(|(n, a, w)| format!("{} {} -- {}", n, a, w)).collect();
     format!(
         "{{\"name\":\"relax_inspect\",\"description\":{},\"input_schema\":{{\"type\":\"object\",\"properties\":{{\"target\":{{\"type\":\"string\",\"description\":\"pid (an app name or all only for an app of your own lease)\"}},\"command\":{{\"type\":\"string\",\"description\":\"one request line, e.g. `why-hung` or `stacks thread=main`\"}}}},\"required\":[\"target\",\"command\"]}}}}",
-        json_str(&format!("Ask a running makepad app about itself. Run as `makepad inspect <target> <command>`. Commands:\n{}", cmds.join("\n")))
+        json_str(&format!("Ask a running program about itself. Run as `{tool} inspect <target> <command>`. Commands:\n{}", cmds.join("\n"), tool = crate::tool_name()))
     )
 }
 
@@ -659,7 +662,7 @@ fn role(name: &str, os_id: u64, handle: u64) -> &'static str {
     match name {
         n if n.starts_with("run-inspect") || n.starts_with("makepad-remote") => "inspect",
         n if n.starts_with("run-jit-") || n.starts_with("gandalf") || n.starts_with("run-check") => "compiler",
-        n if n.starts_with("run-") => "makepad run",
+        n if n.starts_with("run-") => "Relax",
         // an unnamed thread: the OS's dispatch workers, or a program thread spawned without a name
         "" => "unnamed",
         _ => "program",
@@ -1730,7 +1733,7 @@ pub fn host_file_query(path: &str, words: &[String]) -> Option<i32> {
             out.err("no provider answered");
         }
     }
-    let (bytes, _) = makepad_remote::cmd::answer(dispatch, &line);
+    let bytes = makepad_remote::cmd::answer(dispatch, &line);
     let text = String::from_utf8_lossy(&bytes);
     print!("{text}");
     Some(if text.lines().any(|l| l.starts_with("{\"err\":")) { 1 } else { 0 })
@@ -1753,11 +1756,10 @@ fn cmd_host_provided(req: &Req, out: &mut Out) -> bool {
 }
 
 /// A command the running program answers itself: `query(line, sink, ctx)` gets the request as the
-/// host received it (one flat JSON object), applies the request's own size rule (`full=1`) and
-/// writes the reply's JSON lines through `sink` as it produces them (chunks, not lines; called
-/// from the inspect thread, the program's code does its own thread hand-over). Returns whether
-/// it cut the reply at the limit.
-pub type ProgramQuery = extern "C" fn(line: *const u8, len: usize, sink: extern "C" fn(*const u8, usize, *mut std::ffi::c_void), ctx: *mut std::ffi::c_void) -> bool;
+/// host received it (one flat JSON object) and writes the reply's JSON lines through `sink` as it
+/// produces them (chunks, not lines; called from the inspect thread, the program's code does its
+/// own thread hand-over).
+pub type ProgramQuery = extern "C" fn(line: *const u8, len: usize, sink: extern "C" fn(*const u8, usize, *mut std::ffi::c_void), ctx: *mut std::ffi::c_void);
 
 static PROVIDERS: relax_session::sync::Mutex<Vec<(String, ProgramQuery, crate::domain::Callback)>> = relax_session::sync::Mutex::new(Vec::new());
 
@@ -1788,6 +1790,12 @@ pub extern "C" fn relax_inspect_asker(buf: *mut u8, cap: usize) -> usize {
     who.len()
 }
 
+/// Whether a program of the process registered command `cmd` (a host provider that stands in for
+/// an app command until the app takes it, the host's `quit`, asks).
+pub fn program_provides(cmd: &str) -> bool {
+    provider(cmd).is_some()
+}
+
 fn provider(cmd: &str) -> Option<(ProgramQuery, crate::domain::Callback)> {
     PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0 == cmd).min_by_key(|x| x.2.domain()).map(|x| (x.1, x.2))
 }
@@ -1808,21 +1816,17 @@ fn cmd_provided(req: &Req, out: &mut Out) {
         reply.pending.extend_from_slice(unsafe { std::slice::from_raw_parts(p, len) });
         while let Some(nl) = reply.pending.iter().position(|b| *b == b'\n') {
             let l: Vec<u8> = reply.pending.drain(..=nl).collect();
-            // the program applied the size rule itself: not metered again here
-            reply.out.always(String::from_utf8_lossy(&l[..nl]).as_ref());
+            reply.out.line(String::from_utf8_lossy(&l[..nl]).as_ref());
         }
     }
     let mut reply = ProvidedReply { out, pending: Vec::new() };
-    let Some(truncated) = scope.call(|| query(line.as_ptr(), line.len(), sink, &mut reply as *mut ProvidedReply as *mut std::ffi::c_void)) else {
+    let Some(()) = scope.call(|| query(line.as_ptr(), line.len(), sink, &mut reply as *mut ProvidedReply as *mut std::ffi::c_void)) else {
         reply.out.err("the app domain is not running (or its run ended while it answered)");
         return;
     };
     if !reply.pending.is_empty() {
         let rest = String::from_utf8_lossy(&reply.pending).into_owned();
-        reply.out.always(&rest);
-    }
-    if truncated {
-        reply.out.truncated = true;
+        reply.out.line(&rest);
     }
 }
 
@@ -2042,16 +2046,16 @@ mod tests {
         assert!(error.contains("unknown parameter") && error.contains("known:") && error.contains("sort"), "{error}");
         assert!(super::pf::split(&["frames".into(), "n=1".into(), "s=1".into()]).is_ok());
         for command in ["session", "timeline start", "timeline stop", "timeline frames", "timeline waits", "heap start", "heap top", "heap life", "jit", "jit queue", "prof", "watch", "mem timeline", "eval", "probe add", "src", "vm roots", "verbs on", "sprobe add"] {
-            let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, &format!("{command} typo=1"));
+            let bytes = makepad_remote::cmd::answer(super::dispatch_command, &format!("{command} typo=1"));
             let answer = String::from_utf8(bytes).unwrap();
             assert!(answer.contains("unknown parameter") && answer.contains("typo") && answer.contains("known:"), "{command}: {answer}");
         }
-        let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, "frobnicate");
+        let bytes = makepad_remote::cmd::answer(super::dispatch_command, "frobnicate");
         let unknown = String::from_utf8(bytes).unwrap();
         assert!(unknown.contains("unknown command `frobnicate`: ") && unknown.contains("why-hung, ") && unknown.contains("(`help` describes each)"), "an unknown command names the known ones: {unknown}");
         assert_eq!(unknown.matches(" session,").count(), 1, "each command's first word once: {unknown}");
         for command in ["timeline stop n=2", "jit queue ms=1", "heap stop rate=1", "vm roots depth=1"] {
-            let (bytes, _) = makepad_remote::cmd::answer(super::dispatch_command, command);
+            let bytes = makepad_remote::cmd::answer(super::dispatch_command, command);
             let answer = String::from_utf8(bytes).unwrap();
             assert!(answer.contains("unknown parameter"), "{command}: {answer}");
         }
@@ -2075,9 +2079,9 @@ mod tests {
         let home = std::env::temp_dir().join(format!("relax-view-restart-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         std::env::set_var("MAKEPAD_HOME", &home);
-        std::env::set_var("MAKEPAD_RUN_LIVE_LOG", home.join("live.jsonl"));
+        std::env::set_var("RELAX_LIVE_LOG", home.join("live.jsonl"));
         super::run_view::publish("\"over_app\":false,\"patch_failed\":false,\"patch_notice\":null".into());
-        let view = || String::from_utf8(makepad_remote::cmd::answer(super::dispatch_command, "session view").0).unwrap();
+        let view = || String::from_utf8(makepad_remote::cmd::answer(super::dispatch_command, "session view")).unwrap();
         assert!(view().contains("\"restart_waiting\":[]"), "{}", view());
         let why = "src/chat.rs: struct `Sent` changed: its layout changed; live values would be read with the old field offsets (live migration is not built yet) -- restart the app";
         crate::reload::offer_restart(why);
@@ -2091,22 +2095,22 @@ mod tests {
     #[test]
     fn a_held_landing_names_each_file_with_its_blob_id() {
         let id = "0123456789abcdef0123456789abcdef01234567";
-        let files = super::hold_files(&format!("apps/fab/src/a.rs={id}\n\napps/commercial/x=y/b.rs=-\n")).unwrap();
+        let files = super::hold_files(&format!("apps/tool-a/src/a.rs={id}\n\napps/tool-b/x=y/b.rs=-\n")).unwrap();
         assert_eq!(files.len(), 2);
-        assert_eq!((files[0].0.as_str(), files[0].1.map(|o| crate::gitstore::hex(&o))), ("apps/fab/src/a.rs", Some(id.to_string())));
-        assert_eq!((files[1].0.as_str(), files[1].1), ("apps/commercial/x=y/b.rs", None), "a path may hold `=`; `-`: removed");
-        assert!(super::hold_files("apps/fab/src/a.rs").unwrap_err().contains("no <path>=<blob id>"));
-        assert!(super::hold_files("apps/fab/src/a.rs=xyz").unwrap_err().contains("no blob id"));
+        assert_eq!((files[0].0.as_str(), files[0].1.map(|o| crate::gitstore::hex(&o))), ("apps/tool-a/src/a.rs", Some(id.to_string())));
+        assert_eq!((files[1].0.as_str(), files[1].1), ("apps/tool-b/x=y/b.rs", None), "a path may hold `=`; `-`: removed");
+        assert!(super::hold_files("apps/tool-a/src/a.rs").unwrap_err().contains("no <path>=<blob id>"));
+        assert!(super::hold_files("apps/tool-a/src/a.rs=xyz").unwrap_err().contains("no blob id"));
     }
 
     /// `inputs of=`: a saved path names an input at a whole path component, either separator.
     #[test]
     fn a_saved_path_names_an_input_at_a_whole_component() {
         use super::ends_with_rel as ends;
-        assert!(ends("/w/apps/fab/src/a.rs", "apps/fab/src/a.rs"));
-        assert!(ends("apps/fab/src/a.rs", "apps/fab/src/a.rs"));
-        assert!(ends("C:\\w\\apps\\fab\\a.rs", "apps/fab/a.rs"));
-        assert!(!ends("/w/xapps/fab/a.rs", "apps/fab/a.rs"));
+        assert!(ends("/w/apps/tool-a/src/a.rs", "apps/tool-a/src/a.rs"));
+        assert!(ends("apps/tool-a/src/a.rs", "apps/tool-a/src/a.rs"));
+        assert!(ends("C:\\w\\apps\\tool-a\\a.rs", "apps/tool-a/a.rs"));
+        assert!(!ends("/w/xapps/tool-a/a.rs", "apps/tool-a/a.rs"));
         assert!(!ends("a.rs", "src/a.rs"));
         assert!(!ends("/w/a.rs", ""));
     }

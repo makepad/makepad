@@ -5,25 +5,25 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use makepad_relax_api::{relax_api, string_from_words, string_to_words, vec_from_words, vec_to_words, Words};
+use relax_api::{relax_api, string_from_words, string_to_words, vec_from_words, vec_to_words, Words};
 
 /// true when this call ran the loader's rustc-built code
-#[relax_api]
+#[relax_api(run)]
 pub fn bound() -> bool {
     cfg!(feature = "host-shims")
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn add(a: i32, b: i64) -> i64 {
     a as i64 + b
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn mix(a: f32, b: f64, c: u8, d: bool, e: char) -> f64 {
     a as f64 * b + c as f64 + if d { 0.5 } else { 0.0 } + e as u32 as f64
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct P {
@@ -31,40 +31,40 @@ pub struct P {
     pub y: f32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn scale(p: P, k: f32) -> P {
     P { x: p.x * k, y: p.y * k }
 }
 
 /// passed and returned in memory
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Big {
     pub a: [u64; 6],
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn big_make(x: u64) -> Big {
     Big { a: [x, x + 1, x + 2, x + 3, x + 4, x + 5] }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn big_sum(b: Big) -> u64 {
     b.a.iter().sum()
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn text_len(s: &str) -> usize {
     s.chars().count()
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn sum(v: &[u32]) -> u64 {
     v.iter().map(|x| *x as u64).sum()
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Kind {
@@ -72,7 +72,7 @@ pub enum Kind {
     B = 7,
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn flip(k: Kind) -> Kind {
     match k {
         Kind::A => Kind::B,
@@ -83,26 +83,26 @@ pub fn flip(k: Kind) -> Kind {
 static DROPS: AtomicU32 = AtomicU32::new(0);
 
 /// How many Registry values rustc's code dropped.
-#[relax_api]
+#[relax_api(run)]
 pub fn drops() -> u32 {
     DROPS.load(Ordering::Relaxed)
 }
 
 /// Opaque to Relax: rustc's Vec/HashMap inside.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct Registry {
     names: Vec<String>,
     by_name: HashMap<String, u32>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl Registry {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new() -> Registry {
         Registry { names: Vec::new(), by_name: HashMap::new() }
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn add(&mut self, name: &str) -> u32 {
         if let Some(id) = self.by_name.get(name) {
             return *id;
@@ -113,17 +113,17 @@ impl Registry {
         id
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn len(&self) -> usize {
         self.names.len()
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn name_len(&self, id: u32) -> usize {
         self.names.get(id as usize).map_or(0, |n| n.len())
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn boom(&self, why: u32) -> u32 {
         if why > 0 {
             panic!("boom {} from the provided side", why);
@@ -148,7 +148,7 @@ impl Registry {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl Default for Registry {
     fn default() -> Registry {
         Registry::new()
@@ -168,7 +168,7 @@ pub fn by_name_peek<T>(r: &Registry, _t: T) -> usize {
 }
 
 /// One strong reference to a registry rustc shares, handed over as an address (`Arc::into_raw`).
-#[relax_api]
+#[relax_api(run)]
 pub fn shared_registry() -> usize {
     std::sync::Arc::into_raw(std::sync::Arc::new(Registry::new())) as usize
 }
@@ -186,12 +186,12 @@ pub fn shared_registry_retain(at: usize) -> usize {
 }
 
 /// Option<usize> by value (tag + payload in registers on Relax's side)
-#[relax_api]
+#[relax_api(run)]
 pub fn maybe(x: u32) -> Option<usize> {
     (x > 0).then_some(x as usize * 3)
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Io {
     pub kind: u8,
@@ -200,14 +200,14 @@ pub struct Io {
     pub buffer_index: Option<usize>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl Io {
     pub fn buffer_index(&self) -> Option<usize> {
         self.buffer_index
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn ios() -> &'static [Io] {
     static IOS: [Io; 2] = [Io { kind: 1, name: 7, ty: 2, buffer_index: None }, Io { kind: 2, name: 8, ty: 3, buffer_index: Some(3) }];
     &IOS
@@ -215,14 +215,14 @@ pub fn ios() -> &'static [Io] {
 
 /// opaque (a String field: rustc's layout): its Hash / Debug / Display run rustc's impls, also
 /// when Relax code hashes or formats it (jit.rs provided_fmt_hash; Stage's LiteralSite)
-#[relax_api(handle, clone, eq, hash, debug, display)]
+#[relax_api(handle, clone, eq, hash, debug, display, run)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Site {
     pub file: String,
     pub line: u32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn site(file: &str, line: u32) -> Site {
     Site { file: file.to_string(), line }
 }
@@ -236,7 +236,7 @@ impl std::fmt::Display for Site {
 /// A closure of the caller's side run on a native thread of the provided crate (the shape of
 /// `makepad_hal::dispatch_main`): `data` is the boxed closure, `run` calls and frees it,
 /// `discard` frees it unrun. Only plain values cross.
-#[relax_api]
+#[relax_api(run)]
 pub fn spawn_raw(data: usize, run: usize, discard: usize, refuse: bool) -> bool {
     // SAFETY: `run` and `discard` are `extern "C" fn(usize)` thunks of the caller (`spawn`).
     let (run, discard) = unsafe { (std::mem::transmute::<usize, extern "C" fn(usize)>(run), std::mem::transmute::<usize, extern "C" fn(usize)>(discard)) };
@@ -265,7 +265,7 @@ extern "C" fn thunk_discard<F>(data: usize) {
 
 /// A handle that is returned inside an `Option` and moved into a closure that drops it on the
 /// native thread (`keep_main_loop_alive`'s shape).
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct Token {
     _private: (),
 }
@@ -278,7 +278,7 @@ impl Drop for Token {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn token(grant: bool) -> Option<Token> {
     grant.then(|| {
         LIVE_TOKENS.fetch_add(1, Ordering::Relaxed);
@@ -286,9 +286,37 @@ pub fn token(grant: bool) -> Option<Token> {
     })
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn live_tokens() -> u32 {
     LIVE_TOKENS.load(Ordering::Relaxed)
+}
+
+// ---- the program's environment and the host's, read by rustc's code
+
+/// A variable as the program has it (relax-api `env::var`), after the side that read it (`rustc`:
+/// the loader's build): a package's run-env reaches it (modules_harness
+/// a_packages_run_env_is_its_programs_and_grants_nothing).
+#[relax_api(run)]
+pub fn program_var_raw(name: &str) -> Words {
+    string_to_words(format!("{} {}", side(), relax_api::env::var(name).unwrap_or_else(|_| "none".into())))
+}
+
+pub fn program_var(name: &str) -> String {
+    unsafe { string_from_words(program_var_raw(name)) }
+}
+
+/// The same variable as the host process has it (`std::env`): a run-env does not reach it.
+#[relax_api(run)]
+pub fn host_var_raw(name: &str) -> Words {
+    string_to_words(format!("{} {}", side(), std::env::var(name).unwrap_or_else(|_| "none".into())))
+}
+
+pub fn host_var(name: &str) -> String {
+    unsafe { string_from_words(host_var_raw(name)) }
+}
+
+fn side() -> &'static str {
+    if cfg!(feature = "host-shims") { "rustc" } else { "jit" }
 }
 
 // ---- owned heap values (String, Vec, structs of them) crossing the boundary
@@ -296,7 +324,7 @@ pub fn live_tokens() -> u32 {
 // An op moves the buffer as three words; the wrapper (not an op: compiled by the caller's side)
 // rebuilds the value with that side's own String/Vec. Both sides use the system allocator.
 
-#[relax_api]
+#[relax_api(run)]
 pub fn owned_text_raw(n: usize) -> Words {
     string_to_words((0..n).map(|i| char::from(b'a' + (i % 26) as u8)).collect::<String>() + "-é")
 }
@@ -305,7 +333,7 @@ pub fn owned_text(n: usize) -> String {
     unsafe { string_from_words(owned_text_raw(n)) }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn owned_list_raw(n: u32) -> Words {
     vec_to_words((0..n).map(|i| Item { a: i, b: i as u64 * 3, c: i % 2 == 0 }).collect::<Vec<_>>())
 }
@@ -314,7 +342,7 @@ pub fn owned_list(n: u32) -> Vec<Item> {
     unsafe { vec_from_words(owned_list_raw(n)) }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Item {
@@ -324,7 +352,7 @@ pub struct Item {
 }
 
 /// The caller's String goes in; the native side frees it (a buffer the caller's side allocated).
-#[relax_api]
+#[relax_api(run)]
 pub fn owned_consume_raw(w: Words) -> usize {
     let s = unsafe { string_from_words(w) };
     s.len() + s.capacity() * 0
@@ -342,7 +370,7 @@ pub struct Doc {
     pub closure: bool,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct DocRaw {
     pub name: Words,
@@ -350,7 +378,7 @@ pub struct DocRaw {
     pub closure: bool,
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn owned_doc_raw(n: u32, present: bool, out: &mut DocRaw) -> bool {
     if !present { return false; }
     out.name = string_to_words(format!("doc{n}"));
@@ -369,7 +397,7 @@ pub fn owned_doc(n: u32, present: bool) -> Option<Doc> {
 /// itself (a struct literal, a struct update over `Default::default()`) and hands to rustc's code,
 /// which reads, grows, frees or returns it: rustc's layout is makepad run's own on both sides
 /// (relax-compiler provided.rs same_layout_handles), so the bytes cross as they are.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Debug)]
 pub struct Note {
     pub title: String,
@@ -388,19 +416,19 @@ impl Default for Note {
 }
 
 /// rustc reads every field of a Note JIT code built
-#[relax_api]
+#[relax_api(run)]
 pub fn note_digest(n: &Note) -> String {
     format!("{}|{}|{}|{:?}|{:?}|{:?}|{}", n.title, n.tags.join(","), n.items.iter().map(|i| i.a as u64 + i.b).sum::<u64>(), n.alias, n.limit, n.kind, n.weight)
 }
 
 /// rustc takes a Note by value and frees what JIT code allocated
-#[relax_api]
+#[relax_api(run)]
 pub fn note_take(n: Note) -> usize {
     n.title.len() + n.tags.iter().map(|t| t.len()).sum::<usize>() + n.items.len() + n.alias.map_or(0, |a| a.len())
 }
 
 /// rustc grows a Note past its capacities and hands it back: JIT code reads and frees what rustc allocated
-#[relax_api]
+#[relax_api(run)]
 pub fn note_grow(mut n: Note) -> Note {
     n.title.push_str(" -- grown by rustc past its capacity");
     n.tags.extend((0..20).map(|i| format!("t{i}")));
@@ -413,7 +441,7 @@ pub fn note_grow(mut n: Note) -> Note {
 }
 
 /// rustc builds a Note
-#[relax_api]
+#[relax_api(run)]
 pub fn note_new(title: &str) -> Note {
     Note { title: title.to_string(), tags: vec![String::from("x")], alias: None, ..Note::default() }
 }
@@ -422,7 +450,7 @@ pub fn note_new(title: &str) -> Note {
 /// methods stay on the constructing side): Rust's repr and not Copy. JIT code builds it by a
 /// literal and reads it; no bound fn takes it (one that did would refuse it: a String is not
 /// C-shaped).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Loc {
     pub file: String,
@@ -463,7 +491,7 @@ pub fn peak_rss() -> i64 {
 
 /// Inline assembly is compiled by rustc only: an op of the provided crate, JIT code calls it.
 #[cfg(target_arch = "aarch64")]
-#[relax_api]
+#[relax_api(run)]
 pub fn asm_inc(v: u64) -> u64 {
     let out: u64;
     unsafe { std::arch::asm!("add {0}, {1}, #1", out(reg) out, in(reg) v, options(nomem, nostack, preserves_flags)) };
@@ -471,7 +499,7 @@ pub fn asm_inc(v: u64) -> u64 {
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-#[relax_api]
+#[relax_api(run)]
 pub fn asm_inc(v: u64) -> u64 {
     v + 1
 }
@@ -549,7 +577,7 @@ impl Drop for Guard {
 
 /// rustc's frame holding a drop guard around a call of the caller's side (`run` is an
 /// `extern "C-unwind" fn(usize) -> u32` thunk of the caller, `through_guard`).
-#[relax_api]
+#[relax_api(run)]
 pub fn guarded_call(run: usize, data: usize) -> u32 {
     // SAFETY: `run` is the caller's thunk (through_guard)
     let run = unsafe { std::mem::transmute::<usize, extern "C-unwind" fn(usize) -> u32>(run) };
@@ -558,7 +586,7 @@ pub fn guarded_call(run: usize, data: usize) -> u32 {
 }
 
 /// rustc's catch_unwind around a call of the caller's side: true when it caught a panic.
-#[relax_api]
+#[relax_api(run)]
 pub fn caught_call(run: usize, data: usize) -> bool {
     // SAFETY: `run` is the caller's thunk (catch_through)
     let run = unsafe { std::mem::transmute::<usize, extern "C-unwind" fn(usize) -> u32>(run) };
@@ -566,7 +594,7 @@ pub fn caught_call(run: usize, data: usize) -> bool {
 }
 
 /// How many of rustc's guards dropped.
-#[relax_api]
+#[relax_api(run)]
 pub fn guard_drops() -> u32 {
     GUARD_DROPS.load(Ordering::Relaxed)
 }

@@ -45,8 +45,8 @@ pub fn set_kernel_compiler(id: u64) {
 
 fn enabled() -> bool {
     KERNEL_COMPILER.get().is_some()
-        && !matches!(std::env::var("MAKEPAD_RUN_CACHE").ok().as_deref(), Some("off") | Some("0"))
-        && !matches!(std::env::var("MAKEPAD_RUN_KERNEL_CACHE").ok().as_deref(), Some("off") | Some("0"))
+        && !matches!(std::env::var("RELAX_CACHE").ok().as_deref(), Some("off") | Some("0"))
+        && !matches!(std::env::var("RELAX_KERNEL_CACHE").ok().as_deref(), Some("off") | Some("0"))
 }
 
 fn path() -> PathBuf {
@@ -114,8 +114,8 @@ fn append(batch: Vec<NewEntry>) {
     }
     let path = path();
     if let Err(e) = crate::store::append(&path, batch, false) {
-        if std::env::var_os("MAKEPAD_RUN_VERBOSE").is_some() {
-            eprintln!("makepad-run cache: kernel store {}: {e}", path.display());
+        if std::env::var_os("RELAX_VERBOSE").is_some() {
+            eprintln!("relax cache: kernel store {}: {e}", path.display());
         }
     }
 }
@@ -131,9 +131,9 @@ mod tests {
         isolated_test!(kernels_round_trip_through_the_store_and_a_torn_file_is_absent);
         let dir = std::env::temp_dir().join(format!("relax-kernel-store-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var("MAKEPAD_RUN_CACHE_DIR", &dir);
-        std::env::remove_var("MAKEPAD_RUN_CACHE");
-        std::env::remove_var("MAKEPAD_RUN_KERNEL_CACHE");
+        std::env::set_var("RELAX_CACHE_DIR", &dir);
+        std::env::remove_var("RELAX_CACHE");
+        std::env::remove_var("RELAX_KERNEL_CACHE");
         // the loader sets the kernel compiler's identity (tools/run); the store is off without it
         set_kernel_compiler(0x5eed);
         std::fs::create_dir_all(dir.join("cache")).unwrap();

@@ -4,7 +4,7 @@
 // moved it, leaves for the patched path, whose copy calls the new `step`. The loop runs in bursts
 // (`burst`, called again and again: each call enters its newest code, so the loop reaches O3 while
 // the spinner runs; a running call never moves to new code). The session settles before its second
-// run (MAKEPAD_RUN_LIVE_SETTLE), so the edit meets the settled code, and its report names `step`'s
+// run (RELAX_LIVE_SETTLE), so the edit meets the settled code, and its report names `step`'s
 // copies (expect.txt). Each run stops the spinner the previous run started, prints what it computed
 // after the run began, then starts a new one.
 //   v0: step(i) = i + 10;  v1: step(i) = i + 20

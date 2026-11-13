@@ -2,6 +2,11 @@
 """Regenerates stability.tsv: the `#[unstable(feature = ..)]` items of rustc's library (library/{core,alloc,std}/src),
 as `path<TAB>feature<TAB>reason`. Usage: gen_stability.py <rust-source-root> > stability.tsv
 
+`gen_stability.py --stabilized <rust-source-root> < stability.tsv > new.tsv` moves the current table to a newer
+toolchain's library without a full regeneration (whose paths churn when the library moves code between crates): a
+row whose feature the new library no longer gates anywhere, and names in some `#[stable(feature = ..)]`, becomes
+that path's row in the new library (stable, or the feature it is gated under now); every other row stays.
+
 A line scanner, not a parser: it follows module / inherent impl / trait nesting by brace depth and attaches a pending
 `#[unstable(..)]` to the next item header. `path` is the definition path in the real library
 (`core::intrinsics::copy`, `alloc::vec::Vec::drain_filter`); Relax's std mirrors the module layout, so the same path
@@ -122,18 +127,47 @@ def parse_attr(a):
     r = re.search(r'reason\s*=\s*"((?:[^"\\]|\\.)*)"', a)
     return (m.group(1), re.sub(r'\\\s+', '', r.group(1)).replace('\t', ' ') if r else '')
 
-def main():
-    root = sys.argv[1]
-    out = []
+def library_files(root):
     for crate in ('core', 'alloc', 'std'):
         src = os.path.join(root, 'library', crate, 'src')
         for d, _, fs in os.walk(src):
             for f in sorted(fs):
-                if f.endswith('.rs'): scan(crate, src, os.path.join(d, f), out)
+                if f.endswith('.rs'): yield crate, src, os.path.join(d, f)
+
+def table(root):
+    out = []
+    for crate, src, f in library_files(root): scan(crate, src, f, out)
     seen = set()
+    rows = []
     for p, f, r in sorted(out):
         if (p, f) in seen: continue
         seen.add((p, f))
+        rows.append((p, f, r))
+    return rows
+
+def stabilized(root):
+    """Features some `#[stable]` names and no `#[unstable]` (outside comments) gates any more."""
+    stable, unstable = set(), set()
+    for _, _, f in library_files(root):
+        text = '\n'.join(strip_comments(open(f, encoding='utf-8', errors='replace').read()))
+        stable.update(re.findall(r'#\[stable\(\s*feature\s*=\s*"([^"]+)"', text))
+        unstable.update(re.findall(r'#!?\[unstable\(\s*feature\s*=\s*"([^"]+)"', text))
+    return stable - unstable
+
+def main():
+    if sys.argv[1] == '--stabilized':
+        root = sys.argv[2]
+        done = stabilized(root)
+        new = {}
+        for p, f, r in table(root):
+            if f or p not in new: new[p] = (f, r)
+        for l in sys.stdin.read().splitlines():
+            p, f, r = (l.split('\t') + ['', ''])[:3]
+            if f in done:
+                f, r = new.get(p, ('', ''))
+            print('%s\t%s\t%s' % (p, f, r))
+        return
+    for p, f, r in table(sys.argv[1]):
         print('%s\t%s\t%s' % (p, f, r))
 
 main()

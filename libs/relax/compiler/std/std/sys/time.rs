@@ -6,7 +6,7 @@ use core::time::Duration;
 #[cfg(not(target_family = "wasm"))]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
-#[cfg_attr(not(relax_check), rustc_layout_scalar_valid_range_end(999_999_999))]
+#[rustc_layout_scalar_valid_range_end(999_999_999)]
 struct Nanoseconds(u32);
 
 #[cfg(not(target_family = "wasm"))]

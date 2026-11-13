@@ -6,7 +6,6 @@ use crate::intrinsics_int as ii;
 use crate::num::parse;
 use crate::num::ParseIntError;
 
-#[cfg(not(relax_check))]
 impl u8 {
     pub const MIN: u8 = 0;
     pub const MAX: u8 = 255;
@@ -129,7 +128,6 @@ impl u8 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u8, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, u8::MAX as u64) { Ok(v) => Ok(v as u8), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl u16 {
     pub const MIN: u16 = 0;
     pub const MAX: u16 = 65535;
@@ -252,7 +250,6 @@ impl u16 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u16, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, u16::MAX as u64) { Ok(v) => Ok(v as u16), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl u32 {
     pub const MIN: u32 = 0;
     pub const MAX: u32 = 4294967295;
@@ -375,7 +372,6 @@ impl u32 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u32, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, u32::MAX as u64) { Ok(v) => Ok(v as u32), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl u64 {
     pub const MIN: u64 = 0;
     pub const MAX: u64 = 18446744073709551615;
@@ -498,7 +494,6 @@ impl u64 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u64, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, u64::MAX as u64) { Ok(v) => Ok(v as u64), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl u128 {
     pub const MIN: u128 = 0;
     pub const MAX: u128 = 340282366920938463463374607431768211455;
@@ -635,7 +630,7 @@ impl u128 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<u128, ParseIntError> { parse::parse_u128(src.as_bytes(), radix) }
 }
 
-#[cfg(all(not(relax_check), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 impl usize {
     pub const MIN: usize = 0;
     pub const MAX: usize = 18446744073709551615;
@@ -758,7 +753,7 @@ impl usize {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<usize, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, usize::MAX as u64) { Ok(v) => Ok(v as usize), Err(e) => Err(e) } }
 }
 
-#[cfg(all(not(relax_check), target_pointer_width = "32"))]
+#[cfg(target_pointer_width = "32")]
 impl usize {
     pub const MIN: usize = 0;
     pub const MAX: usize = 4294967295;
@@ -881,7 +876,6 @@ impl usize {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<usize, ParseIntError> { match parse::parse_unsigned(src.as_bytes(), radix, usize::MAX as u64) { Ok(v) => Ok(v as usize), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl i8 {
     pub const MIN: i8 = -127 - 1;
     pub const MAX: i8 = 127;
@@ -1006,7 +1000,6 @@ impl i8 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i8, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, i8::MIN as i64, i8::MAX as i64) { Ok(v) => Ok(v as i8), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl i16 {
     pub const MIN: i16 = -32767 - 1;
     pub const MAX: i16 = 32767;
@@ -1131,7 +1124,6 @@ impl i16 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i16, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, i16::MIN as i64, i16::MAX as i64) { Ok(v) => Ok(v as i16), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl i32 {
     pub const MIN: i32 = -2147483647 - 1;
     pub const MAX: i32 = 2147483647;
@@ -1256,7 +1248,6 @@ impl i32 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i32, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, i32::MIN as i64, i32::MAX as i64) { Ok(v) => Ok(v as i32), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl i64 {
     pub const MIN: i64 = -9223372036854775807 - 1;
     pub const MAX: i64 = 9223372036854775807;
@@ -1384,7 +1375,6 @@ impl i64 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i64, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, i64::MIN as i64, i64::MAX as i64) { Ok(v) => Ok(v as i64), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl i128 {
     pub const MIN: i128 = -170141183460469231731687303715884105727 - 1;
     pub const MAX: i128 = 170141183460469231731687303715884105727;
@@ -1518,7 +1508,7 @@ impl i128 {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<i128, ParseIntError> { parse::parse_i128(src.as_bytes(), radix) }
 }
 
-#[cfg(all(not(relax_check), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 impl isize {
     pub const MIN: isize = -9223372036854775807 - 1;
     pub const MAX: isize = 9223372036854775807;
@@ -1646,7 +1636,7 @@ impl isize {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<isize, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, isize::MIN as i64, isize::MAX as i64) { Ok(v) => Ok(v as isize), Err(e) => Err(e) } }
 }
 
-#[cfg(all(not(relax_check), target_pointer_width = "32"))]
+#[cfg(target_pointer_width = "32")]
 impl isize {
     pub const MIN: isize = -2147483647 - 1;
     pub const MAX: isize = 2147483647;
@@ -1771,7 +1761,6 @@ impl isize {
     pub fn from_str_radix(src: &str, radix: u32) -> Result<isize, ParseIntError> { match parse::parse_signed(src.as_bytes(), radix, isize::MIN as i64, isize::MAX as i64) { Ok(v) => Ok(v as isize), Err(e) => Err(e) } }
 }
 
-#[cfg(not(relax_check))]
 impl u8 {
     pub const fn is_ascii(&self) -> bool { *self < 128 }
     pub const fn is_ascii_alphabetic(&self) -> bool { matches!(*self, b'A'..=b'Z' | b'a'..=b'z') }

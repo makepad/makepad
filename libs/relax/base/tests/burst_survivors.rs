@@ -15,7 +15,7 @@ fn rss_of_burst() -> Option<usize> {
     for line in text.lines() {
         let first = line.split_whitespace().next().unwrap_or("");
         if first.contains('-') && first.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
-            on = line.contains("makepad-run-burst");
+            on = line.contains("relax-burst");
             found |= on;
         } else if on {
             if let Some(v) = line.strip_prefix("Rss:") {

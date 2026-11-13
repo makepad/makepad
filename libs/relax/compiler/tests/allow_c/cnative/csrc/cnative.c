@@ -5,7 +5,7 @@
 #else
 #define CN_HIDDEN
 #endif
-CN_HIDDEN int32_t cn_offset = 7;
+CN_HIDDEN int32_t cn_offset = CN_OFFSET;
 CN_HIDDEN int32_t cn_add(int32_t a, int32_t b) { return a + b + cn_offset; }
 uint64_t cn_hash(const uint8_t *p, size_t n) {
     uint64_t h = 0xcbf29ce484222325ull;

@@ -3,7 +3,7 @@
 //! more values live at once than there are registers -- run through every tier this crate and the
 //! back end have (baseline and thorough register allocation, the spill-elision and copy-reuse
 //! knobs off and on, the O2 clean-up passes and the O3 loop passes) and compared with a direct
-//! RIR evaluator: the result, every memory word, and (MAKEPAD_RUN_OPT=+checkra, on here) the
+//! RIR evaluator: the result, every memory word, and (RELAX_OPT=+checkra, on here) the
 //! register allocation checker. A mismatch prints the seed and the knob set; `FUZZ_SEED=<n>`
 //! reruns one program, `FUZZ_N=<count>` sets how many (the gate's long run on a node).
 #![cfg(any(all(target_arch = "x86_64", unix), all(target_arch = "aarch64", unix)))]
@@ -816,11 +816,11 @@ fn random_programs_agree_across_tiers() {
                         let g = pipe(&o, &r, p);
                         eprintln!("reduced {:#x} {:?} {:?} thorough={}:\n{}", s, p, knobs, thorough, r.dump());
                         eprintln!("after the pipeline:\n{}", g.dump());
-                        // the allocation (MAKEPAD_RUN_RA_TRACE) and the code (FUZZ_CODE_OUT=<file>)
+                        // the allocation (RELAX_RA_TRACE) and the code (FUZZ_CODE_OUT=<file>)
                         // of the reduced program, for reading the miscompile
-                        std::env::set_var("MAKEPAD_RUN_RA_TRACE", &r.name);
+                        std::env::set_var("RELAX_RA_TRACE", &r.name);
                         let bytes = native(&o, &g, thorough).unwrap();
-                        std::env::remove_var("MAKEPAD_RUN_RA_TRACE");
+                        std::env::remove_var("RELAX_RA_TRACE");
                         if let Ok(path) = std::env::var("FUZZ_CODE_OUT") {
                             std::fs::write(path, &bytes).unwrap();
                         }

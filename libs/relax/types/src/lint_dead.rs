@@ -14,7 +14,9 @@
 
 use crate::ast::*;
 use crate::ast_visit::{self, Visitor};
+use crate::body_facts::{read_u8, read_u32, FactCodec, FactDecodec};
 use crate::lint::{self, Level, Lint};
+use crate::lint_imports::Judge;
 use crate::program::{DefId, DefKind, Program, NO_DEF};
 use crate::tcx::Tcx;
 use crate::typeck::{Body, Res};
@@ -28,8 +30,9 @@ pub const DEAD_CODE_PUB_IN_BINARY: Lint = lint::lint("dead_code_pub_in_binary");
 /// A field of a struct, union or enum variant: (ADT, variant index, field index).
 type FieldKey = (DefId, u32, u32);
 
-#[derive(Clone, Copy, Debug)]
-enum Ref {
+/// A live definition or field read, kept in order for the dead-code worklist and stored facts.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Ref {
     /// `check_def_id`: the definition is live and explored
     Use(DefId),
     /// a field that is read
@@ -42,6 +45,87 @@ pub(crate) struct BodyInfo {
     refs: Vec<Ref>,
     /// (position, message, attributes in scope): `useless assignment ... to itself`
     notes: Vec<(u32, String, Vec<Attr>)>,
+}
+
+/// Keeps the private reference representation behind the body-facts storage boundary.
+impl BodyInfo {
+    /// Drops refs the crate's dead-code pass cannot use; notes retain positions and cannot be stored.
+    pub(crate) fn stored(&self, prog: &Program, krate: u32) -> Option<BodyInfo> {
+        if !self.notes.is_empty() { return None; }
+        let refs = self.refs.iter().copied().filter(|r| {
+            let d = match *r { Ref::Use(d) | Ref::Field((d, _, _)) => d };
+            prog.def(d).krate == krate
+        }).collect();
+        Some(BodyInfo { refs, notes: Vec::new() })
+    }
+
+    /// Writes ordered, position-free refs using the table's stable definition indices.
+    pub(crate) fn encode(&self, c: &mut dyn FactCodec, out: &mut Vec<u8>) -> Option<()> {
+        out.extend_from_slice(&u32::try_from(self.refs.len()).ok()?.to_le_bytes());
+        for r in &self.refs {
+            match *r {
+                Ref::Use(d) => {
+                    out.push(0);
+                    out.extend_from_slice(&c.def(d)?.to_le_bytes());
+                }
+                Ref::Field((d, variant, field)) => {
+                    out.push(1);
+                    out.extend_from_slice(&c.def(d)?.to_le_bytes());
+                    out.extend_from_slice(&variant.to_le_bytes());
+                    out.extend_from_slice(&field.to_le_bytes());
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// Rebuilds refs without exposing their representation, rejecting truncated or unknown tags.
+    pub(crate) fn decode(bytes: &mut &[u8], d: &mut dyn FactDecodec) -> Option<BodyInfo> {
+        let mut refs = Vec::new();
+        for _ in 0..read_u32(bytes)? {
+            refs.push(match read_u8(bytes)? {
+                0 => Ref::Use(d.def(read_u32(bytes)?)?),
+                1 => Ref::Field((d.def(read_u32(bytes)?)?, read_u32(bytes)?, read_u32(bytes)?)),
+                _ => return None,
+            });
+        }
+        Some(BodyInfo { refs, notes: Vec::new() })
+    }
+
+    /// Compares stored references without requiring equality on position-bearing syntax attributes.
+    pub(crate) fn same_stored(&self, other: &BodyInfo) -> bool {
+        self.refs == other.refs && self.notes.is_empty() && other.notes.is_empty()
+    }
+}
+
+/// Stored references as a set: one entry per holder (an empty one kept), its refs sorted and each
+/// once. The dead-code pass's live set does not rest on their order or repetition.
+pub(crate) fn canonical_refs(refs: &[(DefId, BodyInfo)]) -> Vec<(DefId, BodyInfo)> {
+    let mut by: std::collections::BTreeMap<DefId, Vec<Ref>> = std::collections::BTreeMap::new();
+    for (holder, info) in refs { by.entry(*holder).or_default().extend_from_slice(&info.refs); }
+    by.into_iter().map(|(holder, mut refs)| {
+        refs.sort_unstable();
+        refs.dedup();
+        (holder, BodyInfo { refs, notes: Vec::new() })
+    }).collect()
+}
+
+/// Canonical refs (`canonical_refs`) as (holder, reference) pairs, sorted: the holders with no
+/// reference as (holder, None).
+pub(crate) fn ref_pairs(refs: &[(DefId, BodyInfo)]) -> Vec<(DefId, Option<Ref>)> {
+    refs.iter().flat_map(|(holder, info)| {
+        let none = info.refs.is_empty().then_some((*holder, None));
+        none.into_iter().chain(info.refs.iter().map(|r| (*holder, Some(*r))))
+    }).collect()
+}
+
+/// A reference as a difference report names it.
+pub(crate) fn describe_ref(prog: &Program, r: Option<Ref>) -> String {
+    match r {
+        None => "no reference".to_string(),
+        Some(Ref::Use(d)) => format!("`{}`", prog.def_path(d)),
+        Some(Ref::Field((d, variant, field))) => format!("field {field} of variant {variant} of `{}`", prog.def_path(d)),
+    }
 }
 
 /// Each body owner's references, from a check's `reset` to its `finish` (None otherwise: a body
@@ -1206,7 +1290,7 @@ impl<'a> Dead<'a> {
     }
 }
 
-/// MAKEPAD_RUN_CHECK_TIMES: a pass's parts of 50 ms or more, summed over the crates
+/// RELAX_CHECK_TIMES: a pass's parts of 50 ms or more, summed over the crates
 pub(crate) struct PartTimes {
     pass: &'static str,
     on: bool,
@@ -1215,7 +1299,7 @@ pub(crate) struct PartTimes {
 }
 impl PartTimes {
     pub(crate) fn new(pass: &'static str) -> Self {
-        PartTimes { pass, on: std::env::var_os("MAKEPAD_RUN_CHECK_TIMES").is_some(), t: std::time::Instant::now(), parts: Vec::new() }
+        PartTimes { pass, on: std::env::var_os("RELAX_CHECK_TIMES").is_some(), t: std::time::Instant::now(), parts: Vec::new() }
     }
     pub(crate) fn mark(&mut self, part: &'static str) {
         if !self.on { return; }
@@ -1237,7 +1321,7 @@ impl PartTimes {
     }
     pub(crate) fn report(&self, crates: usize) {
         for &(part, dt) in &self.parts {
-            if dt.as_millis() >= 50 { eprintln!("makepad check: {} {} {:.2} s ({} crates)", self.pass, part, dt.as_secs_f64(), crates); }
+            if dt.as_millis() >= 50 { eprintln!("relax check: {} {} {:.2} s ({} crates)", self.pass, part, dt.as_secs_f64(), crates); }
         }
     }
 }
@@ -1261,12 +1345,71 @@ pub struct CrateItems<'p> {
 /// required analyses passed, so rustc's misc_checking_3 runs (dead code and the late lints);
 /// without it only the unused imports are reported (rustc's resolver and check_unused_traits
 /// report them before the analyses can fail). `erroneous`: the imports (by index) the check
-/// reported an error of that never bind in rustc, besides the ones still open.
-pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, erroneous: &[usize]) {
-    if !lint::enabled() { return; }
+/// reported an error of that never bind in rustc, besides the ones still open. `replayed`: the
+/// crates with bodies replayed from stored verdicts, whose import reports wait while one is a
+/// candidate (lint_imports::Judge): those crates come back, for `finish_imports`.
+pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, erroneous: &[usize], replayed: &[bool]) -> Vec<Deferred> {
+    if !lint::enabled() { return Vec::new(); }
     let mut pt = PartTimes::new("lint_dead::finish");
     let refs = BODY_REFS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
     let mut traits = crate::lint_imports::take_method_traits();
+    let mut children: HashMap<DefId, Vec<DefId>> = HashMap::new();
+    let crates = crate_items(prog, own, erroneous, Some(&mut children));
+    pt.mark("children");
+    // the crates on the pool, the biggest first
+    let traits: Vec<HashSet<DefId>> = crates.iter().map(|c| traits.remove(&c.krate).unwrap_or_default()).collect();
+    let mut order: Vec<usize> = (0..crates.len()).collect();
+    order.sort_by_key(|&i| (std::cmp::Reverse(crates[i].defs.len()), i));
+    let parts = crate::lint::par_each(&order, |&i| {
+        let mut pt = PartTimes::new("lint_dead::finish");
+        let c = &crates[i];
+        let judge = if replayed.get(c.krate as usize).copied().unwrap_or(false) { Judge::Defer } else { Judge::Report };
+        let candidates = finish_crate(&CrateCx { prog, tcx, c, root, refs: &refs, children: &children }, &traits[i], late, judge, &mut pt);
+        (pt, (judge == Judge::Defer && !candidates.is_empty()).then_some((i, candidates)))
+    });
+    let mut deferred = Vec::new();
+    for (p, d) in parts {
+        pt.add(p);
+        if let Some((i, candidates)) = d { deferred.push(Deferred { krate: crates[i].krate, traits: traits[i].clone(), candidates }); }
+    }
+    pt.report(crates.len());
+    deferred.sort_by_key(|d| d.krate);
+    deferred
+}
+
+/// A crate whose import reports `finish` held back: the method traits its bodies used, and the
+/// candidates ("path:line:col: message") its replayed bodies' stored uses left.
+pub struct Deferred {
+    pub krate: u32,
+    traits: HashSet<DefId>,
+    pub candidates: Vec<String>,
+}
+
+/// The import reports of the crates `finish` deferred, their replayed bodies checked since:
+/// `facts` (the bodies' facts) published, the candidates the check of those bodies cleared.
+pub fn finish_imports(prog: &Program, tcx: &Tcx, deferred: Vec<Deferred>, erroneous: &[usize], facts: Vec<(DefId, crate::body_facts::BodyFacts)>) -> Vec<String> {
+    // (`finish` took the method traits: the facts' are collected anew)
+    crate::lint_imports::reset();
+    crate::body_facts::publish(prog, facts);
+    if deferred.is_empty() || !lint::enabled() { return Vec::new(); }
+    let mut more = crate::lint_imports::take_method_traits();
+    let mut own = vec![false; prog.crates.len()];
+    for d in &deferred { own[d.krate as usize] = true; }
+    let mut cleared = Vec::new();
+    // (both in crate order)
+    for (c, d) in crate_items(prog, &own, erroneous, None).iter().zip(deferred) {
+        let mut traits = d.traits;
+        traits.extend(more.remove(&c.krate).unwrap_or_default());
+        let reach = Reach::compute(prog, tcx, c);
+        let now = crate::lint_imports::check(prog, tcx, c, &reach, &traits, Judge::Recheck);
+        cleared.extend(d.candidates.into_iter().filter(|x| !now.contains(x)));
+    }
+    cleared
+}
+
+/// The items of each crate `own` names, in crate order, with its imports and the ones still open
+/// (`erroneous` besides); `children`: each definition's, filled when given.
+fn crate_items<'p>(prog: &'p Program, own: &[bool], erroneous: &[usize], mut children: Option<&mut HashMap<DefId, Vec<DefId>>>) -> Vec<CrateItems<'p>> {
     let n = prog.crates.len();
     let is_own = |k: u32| own.get(k as usize).copied().unwrap_or(false);
     let mut crates: Vec<CrateItems> = (0..n as u32).filter(|&k| is_own(k)).map(|k| {
@@ -1276,10 +1419,11 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, er
     }).collect();
     let mut slot = vec![usize::MAX; n];
     for (i, c) in crates.iter().enumerate() { slot[c.krate as usize] = i; }
-    let mut children: HashMap<DefId, Vec<DefId>> = HashMap::new();
     for i in 0..prog.defs.len() {
         let def = &prog.defs[i];
-        if def.parent != NO_DEF { children.entry(def.parent).or_default().push(DefId(i as u32)); }
+        if let Some(ch) = children.as_deref_mut() {
+            if def.parent != NO_DEF { ch.entry(def.parent).or_default().push(DefId(i as u32)); }
+        }
         if is_own(def.krate) { crates[slot[def.krate as usize]].defs.push(DefId(i as u32)); }
     }
     for (m, md) in prog.mods.iter().enumerate() {
@@ -1293,18 +1437,7 @@ pub fn finish(prog: &Program, tcx: &Tcx, own: &[bool], root: u32, late: bool, er
         c.imports.push(im);
         if open.contains(&i) { c.unresolved.push(im); }
     }
-    pt.mark("children");
-    // the crates on the pool, the biggest first
-    let traits: Vec<HashSet<DefId>> = crates.iter().map(|c| traits.remove(&c.krate).unwrap_or_default()).collect();
-    let mut order: Vec<usize> = (0..crates.len()).collect();
-    order.sort_by_key(|&i| (std::cmp::Reverse(crates[i].defs.len()), i));
-    let parts = crate::lint::par_each(&order, |&i| {
-        let mut pt = PartTimes::new("lint_dead::finish");
-        finish_crate(&CrateCx { prog, tcx, c: &crates[i], root, refs: &refs, children: &children }, &traits[i], late, &mut pt);
-        pt
-    });
-    for p in parts { pt.add(p); }
-    pt.report(crates.len());
+    crates
 }
 
 /// The shared read-only context for one checked crate's lints.
@@ -1317,14 +1450,16 @@ struct CrateCx<'a> {
     children: &'a HashMap<DefId, Vec<DefId>>,
 }
 
-/// One checked crate's dead code and reachability lints (`late`), and its unused imports.
-fn finish_crate(cx: &CrateCx<'_>, traits: &HashSet<DefId>, late: bool, pt: &mut PartTimes) {
+/// One checked crate's dead code and reachability lints (`late`), and its unused imports as
+/// `judge` says: the candidates judged.
+fn finish_crate(cx: &CrateCx<'_>, traits: &HashSet<DefId>, late: bool, judge: Judge, pt: &mut PartTimes) -> Vec<String> {
     let CrateCx { prog, tcx, c, .. } = *cx;
     let reach = Reach::compute(prog, tcx, c);
     pt.mark("Reach::compute");
     if late { late_lints(cx, &reach, pt); }
-    crate::lint_imports::check(prog, tcx, c, &reach, traits);
+    let candidates = crate::lint_imports::check(prog, tcx, c, &reach, traits, judge);
     pt.mark("lint_imports::check");
+    candidates
 }
 
 /// misc_checking_3 of one checked crate: dead code, then the late lints of its items.

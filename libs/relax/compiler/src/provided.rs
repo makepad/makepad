@@ -1,7 +1,7 @@
 //! Provided crates (local/plans/loader-core.md section 8): a crate rustc built into the binary
 //! that runs Relax (the `makepad` loader builds makepad-script into itself). Relax still loads
 //! its source (types, signatures, generic and inline bodies) but binds the fns the crate marks
-//! `#[relax_api]` (makepad-relax-api) to the compiled code: each gets a bridge body
+//! `#[relax_api]` (relax-api) to the compiled code: each gets a bridge body
 //! (lower::bridge_func) with Relax's own ABI that packs its arguments into one uniform C call,
 //! `extern "C" fn(args: *const *mut u8, ret: *mut u8) -> u32`, of the wrapper the attribute
 //! generated into the crate. Callers, fn pointers and vtables need nothing else: the slot is an
@@ -30,7 +30,7 @@ use relax_session::sync::Mutex;
 
 /// A generated shim: arguments moved out of `args[i]`, the result written to `ret`; 0 = returned,
 /// 1 = panicked (the message is then read with the crate's LastPanicFn), 2 = the calling thread's
-/// own panic unwound through it (makepad_relax_api::CallerPanic: the caller goes on with it).
+/// own panic unwound through it (relax_api::CallerPanic: the caller goes on with it).
 pub type ShimFn = unsafe extern "C" fn(*const *mut u8, *mut u8) -> u32;
 /// Writes the text of the last panic a shim caught on this thread: (ptr, len), valid until the
 /// thread's next shim call.
@@ -89,7 +89,7 @@ pub(crate) fn registered(name: &str) -> bool {
 }
 
 /// Registers a provided crate (before `cli_main`): its `#[relax_api]` entries as the loader read
-/// them from its own binary (makepad_relax_api::entries), and the panic-text accessor.
+/// them from its own binary (relax_api::entries), and the panic-text accessor.
 pub fn register(
     name: &str,
     shims: HashMap<String, Shim>,
@@ -189,7 +189,10 @@ impl From<String> for SourceCheckError {
 
 fn check_manifest(name: &str, source: u64, manifest: &[u8], current: &crate::srchash::Manifest, pkgs: &[crate::srchash::SrcPkg]) -> Result<(), SourceCheckError> {
     if crate::srchash::manifest_hash(current) == source { return Ok(()); }
-    let built = crate::srchash::decode_manifest(manifest)?;
+    // what the program's graph builds of the closure (srchash reached_by): a dependency that only
+    // the loader's host-shims brings in is no change
+    let built = crate::srchash::reached_by(&crate::srchash::decode_manifest(manifest)?, current);
+    if crate::srchash::diff_entries(&built, current).next().is_none() { return Ok(()); }
     let mut files = std::collections::BTreeSet::new();
     for (package, path) in crate::srchash::diff_entries(&built, current) {
         let package = package.strip_prefix("host:").unwrap_or(package);
@@ -240,6 +243,27 @@ mod source_tests {
         features.insert(("fixture_dep@1".into(), "\0features".into()), "enabled".into());
         assert_eq!(check_manifest("fixture", source, &encoded, &features, &pkgs), Err(SourceCheckError::Changed(ProvidedChange { crate_name: "fixture".into(), files: vec!["fixture/Cargo.toml".into()] })));
         assert!(matches!(check_manifest("fixture", source, &[1], &current, &pkgs), Err(SourceCheckError::Invalid(_))));
+    }
+
+    #[test]
+    fn a_dependency_only_the_loaders_shims_bring_in_is_no_change() {
+        use crate::srchash::closure_manifest;
+        // relax-api's makepad-alloc-phase: optional behind host-shims (the loader's build enables
+        // it, a program never does) and a dependency on Apple's targets only
+        let pkg = |name: &str, features: &[&str], deps: Vec<usize>| SrcPkg { name: name.into(), version: "1".into(), dir: format!("/.cargo/registry/{name}"),
+            features: features.iter().map(|f| f.to_string()).collect(), deps, proc_macro: false };
+        let built = closure_manifest(&[pkg("fixture", &["host-shims"], vec![1]), pkg("fixture-phase", &[], vec![])], 0);
+        let (source, encoded) = (manifest_hash(&built), encode_manifest(&built));
+        let check = |pkgs: &[SrcPkg]| check_manifest("fixture", source, &encoded, &closure_manifest(pkgs, 0), pkgs);
+        assert_eq!(check(&[pkg("fixture", &[], vec![])]), Ok(()), "Linux: the program's graph builds the crate without the dependency");
+        assert_eq!(check(&[pkg("fixture", &[], vec![1]), pkg("fixture-phase", &[], vec![])]), Ok(()), "Apple: both graphs have it");
+        // what the program builds still counts
+        let changed = |result: Result<(), SourceCheckError>| matches!(result, Err(SourceCheckError::Changed(_)));
+        assert!(changed(check(&[pkg("fixture", &[], vec![1]), pkg("fixture-other", &[], vec![])])), "a dependency only the program has");
+        let mut moved = [pkg("fixture", &[], vec![1]), pkg("fixture-phase", &[], vec![])];
+        moved[1].version = "2".into();
+        assert!(changed(check(&moved)), "another version of the dependency");
+        assert!(changed(check(&[pkg("fixture", &["other"], vec![])])), "a feature the identity keeps");
     }
 }
 
@@ -580,7 +604,7 @@ pub fn layout_deps(prog: &Program, tcx: &Tcx, krate: u32, t: TyId, out: &mut Vec
     }
 }
 
-/// The key an op is registered under, as `#[relax_api]` records it (makepad-relax-api's
+/// The key an op is registered under, as `#[relax_api]` records it (relax-api's
 /// key_code): a trait impl's method `<T as Trait>::m`, an inherent method `<T>::m` (T as
 /// `type_name` prints it), a free fn its path -- [`norm`]ed.
 pub fn key(prog: &Program, tcx: &Tcx, d: DefId) -> String {

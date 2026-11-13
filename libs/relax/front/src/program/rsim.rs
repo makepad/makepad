@@ -2,16 +2,18 @@
 //! `resolve_imports` / `finalize_imports`, ident.rs `resolve_ident_in_scope_set_inner` and the
 //! module lookups), `makepad check` only.
 //!
-//! Relax resolves a `use` optimistically: an import finds its target as soon as the target exists,
-//! whatever else could still define the name. rustc's resolution is a fixed point in which a name
-//! that a glob provides is *undetermined* while a single import of the same name may still define
-//! it, an import path through such a name is undetermined too, and an import left undetermined when
-//! no progress is made is an error ("cannot determine resolution for the import"). The same walk
-//! over the scopes (module, extern prelude, std prelude, primitive types) reports `E0659` when two
-//! scopes provide different items to an import path. This module re-runs that algorithm on the
-//! imports and items Relax collected, and reports only what rustc reports on top of Relax's own
-//! import errors; modules of crates that are not checked are answered by Relax's tables (a crate
-//! the checked crates import from is resolved completely).
+//! rustc's resolution is a fixed point in which a name that a glob provides is *undetermined* while
+//! a single import of the same name may still define it, an import path through such a name is
+//! undetermined too, and an import left undetermined when no progress is made is an error ("cannot
+//! determine resolution for the import"). Relax's fixpoint waits the same way
+//! (`Program::import_fixpoint`), but where rustc stops it forces one import through and marks what
+//! follows (BOUND_SETTLED). The same walk over the scopes (module, extern prelude, std prelude,
+//! primitive types) reports `E0659` when two scopes provide different items to an import path. This
+//! module re-runs that algorithm on the imports and items Relax collected and reports what rustc
+//! reports on top of Relax's own import errors; modules of crates that are not checked are answered
+//! by Relax's tables (a crate the checked crates import from is resolved completely). Where the two
+//! disagree on an import rustc accepts -- the replay determines another item than Relax bound, or
+//! cannot determine one Relax bound without forcing -- that is an internal error of the check.
 //!
 //! Not modelled (nothing in these crates' imports needs them): macro
 //! expansion rounds (every item exists from the start; `expansion` only orders the output of
@@ -549,9 +551,8 @@ impl<'a> Sim<'a> {
         let mut t = ExtTable::default();
         for (&n, &d) in &md.types { t.names.insert((n, true), (d, p.precise_vis(m, n, true, d))); }
         for (&n, &d) in &md.values { t.names.insert((n, false), (d, p.precise_vis(m, n, false, d))); }
-        for &(g, gpub) in &md.globs {
+        for &(g, gv) in &md.globs {
             let gd = p.def(g);
-            let gv = if gpub { None } else { Some(md.normal) };
             let mut take = |t: &mut ExtTable, k: (Sym, bool), d: DefId, v: BindVis| {
                 if own(&k) || !p.vis_visible(v, m) { return; }
                 let v = p.vis_min(gv, v);
@@ -992,13 +993,7 @@ impl<'a> Sim<'a> {
     /// The visibility and expansion of the `use` item an import came from.
     fn import_vis_exp(&self, im: &Import) -> (BindVis, u32) {
         let p = self.p;
-        let Some(f) = p.files.get(im.file as usize) else { return (Some(p.mods[im.module as usize].normal), 0) };
-        let exp = f.expansion_region_id(im.pos);
-        let item = f.ast.items.iter().find(|it| it.lo == im.pos && matches!(it.kind, ItemKind::Use { .. } | ItemKind::ExternCrate(_)));
-        match item {
-            Some(it) => (p.vis_module(im.file, im.module, &it.vis), exp),
-            None => (Some(p.mods[im.module as usize].normal), exp),
-        }
+        (p.import_vis(im), p.files.get(im.file as usize).map_or(0, |f| f.expansion_region_id(im.pos)))
     }
 
     // ------------------------------------------------------------------ globs of unchecked modules
@@ -1694,11 +1689,12 @@ impl<'a> Sim<'a> {
         for &i in &self.cannot_determine {
             if !seen.insert(i) { continue; }
             let (file, pos) = at(i);
-            // invariant: an import the replay cannot determine is one the real resolver left unresolved
-            let pim = &p.imports[self.imps[i as usize].pi];
-            debug_assert!(!pim.done || !(pim.glob || pim.bound & (BOUND_TYPES | BOUND_VALUES) != 0),
-                "replay cannot determine an import the real resolver resolved (file {file}, pos {pos})");
             out.push(SimDiag { file, pos, kind: SimKind::Error, msg: "cannot determine resolution for the import".to_string() });
+            // the resolver binds such an import only by forcing it (or after a forced one)
+            let pim = &p.imports[self.imps[i as usize].pi];
+            if pim.done && (pim.glob || pim.bound & (BOUND_TYPES | BOUND_VALUES) != 0) && pim.bound & BOUND_SETTLED == 0 {
+                out.push(SimDiag { file, pos, kind: SimKind::Error, msg: "internal error: the import resolver determined an import rustc cannot determine".to_string() });
+            }
         }
         // rustc throws the unresolved errors of the imports, and only when there are none the
         // indeterminate imports whose path has a `::`
@@ -1742,6 +1738,29 @@ impl<'a> Sim<'a> {
                 Some(Warn::Vis) => (SimKind::Lint("ambiguous_import_visibilities"), format!("ambiguous import visibility")),
             };
             out.push(SimDiag { file, pos, kind, msg });
+        }
+        // the resolver against the replay: an import with no diagnostic, no name clash and no forced
+        // binding binds, in each namespace it bound, the item rustc determines for it; another one
+        // is a wrong binding of code rustc accepts
+        let mut noisy: crate::fxhash::HashSet<u32> = self.cannot_determine.iter().chain(&self.unresolved).chain(&indet).copied().collect();
+        noisy.extend(self.priv_list.iter().map(|&(i, _, _)| i));
+        noisy.extend(self.amb.iter().map(|e| e.imp));
+        for (i, im) in self.imps.iter().enumerate() {
+            let IK::Single { decls, .. } = &im.kind else { continue };
+            let pim = &p.imports[im.pi];
+            let Some(bind) = pim.bind else { continue };
+            if noisy.contains(&(i as u32)) || pim.bound & (CLASH_TYPES | CLASH_VALUES | BOUND_SETTLED) != 0 || p.syms.str(bind) == "_" { continue; }
+            for (ns, bit) in [(0, BOUND_TYPES), (1, BOUND_VALUES)] {
+                if pim.bound & bit == 0 { continue; }
+                let Some(want) = decls[ns].decl().and_then(|d| self.dres(d)) else { continue };
+                let md = &p.mods[pim.module as usize];
+                let got = if ns == 0 { md.types.get(&bind) } else { md.values.get(&bind) }.copied();
+                if got != Some(want) {
+                    let got = got.map_or_else(|| "nothing".to_string(), |d| format!("`{}`", p.def_path(d)));
+                    out.push(SimDiag { file: pim.file, pos: pim.pos, kind: SimKind::Error,
+                        msg: format!("internal error: the import resolver bound `{}` to {got} where rustc binds `{}`", p.syms.str(bind), p.def_path(want)) });
+                }
+            }
         }
         out
     }
@@ -1821,7 +1840,11 @@ mod tests {
     use super::*;
 
     /// The diagnostics of the replay over a crate written in `source` (no std: nothing to import from it).
-    fn replay(source: &str, edition: u16) -> Vec<(String, usize)> {
+    fn replay(source: &str, edition: u16) -> Vec<(String, usize)> { replayed(source, edition).2 }
+
+    /// A crate written in `source` (no std), its imports resolved and replayed: the program, the
+    /// crate's root module and the replay's diagnostics.
+    fn replayed(source: &str, edition: u16) -> (Program, u32, Vec<(String, usize)>) {
         let sess = &std::sync::Arc::new(relax_session::Session::default());
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1836,7 +1859,9 @@ mod tests {
         prog.own_crates = own.clone();
         prog.run_import_sim(&own);
         let diags = prog.sim_diags.take().unwrap();
-        diags.into_iter().map(|d| (match d.kind { SimKind::Error => d.msg, SimKind::Lint(l) => format!("lint {l}: {}", d.msg) }, prog.files[d.file as usize].line_col(d.pos).0)).collect()
+        let diags = diags.into_iter().map(|d| (match d.kind { SimKind::Error => d.msg, SimKind::Lint(l) => format!("lint {l}: {}", d.msg) }, prog.files[d.file as usize].line_col(d.pos).0)).collect();
+        let root = prog.crates[k as usize].root_mod;
+        (prog, root, diags)
     }
 
     fn has(v: &[(String, usize)], text: &str, line: usize) -> bool { v.iter().any(|(m, l)| m.contains(text) && *l == line) }
@@ -1853,10 +1878,126 @@ mod tests {
     #[test]
     fn a_glob_shadowed_by_a_pending_import_cannot_be_determined() {
         // rustc tests/ui/imports/shadow-glob-module-resolution-1.rs
-        let d = replay("mod a { pub mod b { pub mod c {} } }\nuse a::*;\nuse b::c;\nuse c as b;\nfn main() {}\n", 2015);
+        let (p, _, d) = replayed("mod a { pub mod b { pub mod c {} } }\nuse a::*;\nuse b::c;\nuse c as b;\nfn main() {}\n", 2015);
         assert!(has(&d, "cannot determine resolution for the import", 3), "{d:?}");
         assert!(has(&d, "unresolved import `b::c`", 3), "{d:?}");
         assert!(!d.iter().any(|(_, l)| *l == 4), "{d:?}");
+        // the two single imports wait on each other: the resolver binds them by forcing one, so the
+        // replay's undetermined import is one the resolver marked forced (an internal error otherwise)
+        assert_eq!(p.imports.iter().filter(|i| i.bound & BOUND_SETTLED != 0).count(), 2);
+        assert!(d.iter().all(|(m, _)| !m.contains("internal error")), "{d:?}");
+    }
+
+    #[test]
+    fn a_name_a_single_import_may_still_define_waits_for_it() {
+        // (source, the value bound at the root, the item rustc binds it to); every order of the
+        // imports binds the same item, and none is forced
+        let ab = "mod a { pub mod t { pub fn g() {} } }\nmod b { pub mod t { pub fn g() {} } }\n";
+        let cases = [
+            // a path through a name a glob gives and a single import shadows
+            (format!("{ab}use a::*;\nuse t::g;\nuse b::t;\n"), "g", "b::t::g"),
+            (format!("{ab}use a::*;\nuse b::t;\nuse t::g;\n"), "g", "b::t::g"),
+            (format!("{ab}use t::g;\nuse a::*;\nuse b::t;\n"), "g", "b::t::g"),
+            // the shadowing import in a module a glob reaches
+            (format!("{ab}mod m {{ pub use crate::a::*; pub use crate::b::t; }}\nuse m::*;\nuse t::g;\n"), "g", "b::t::g"),
+            (format!("{ab}mod m {{ pub use crate::b::t; pub use crate::a::*; }}\nuse t::g;\nuse m::*;\n"), "g", "b::t::g"),
+            // the import being resolved does not wait on itself
+            ("mod a { pub mod t { pub fn t() {} } }\nuse a::*;\nuse t::t;\n".to_string(), "t", "a::t::t"),
+            // a renaming import binds its new name
+            ("mod a { pub mod t { pub fn g() {} } }\nmod b { pub mod u { pub fn g() {} } }\nuse a::*;\nuse t::g;\nuse b::u as t;\n".to_string(), "g", "b::u::g"),
+            // a single import of a value leaves the type namespace to the glob
+            ("mod a { pub mod t { pub fn g() {} } }\nmod b { pub fn t() {} }\nuse a::*;\nuse t::g;\nuse b::t;\n".to_string(), "g", "a::t::g"),
+            ("mod a { pub mod t { pub fn g() {} } }\nmod b { pub fn t() {} }\nuse a::*;\nuse b::t;\nuse t::g;\n".to_string(), "g", "a::t::g"),
+            // `extern crate` binds a name like a single import
+            ("mod a { pub mod t { pub fn g() {} } }\npub fn g() {}\nuse a::*;\nuse t::g as h;\nextern crate self as t;\n".to_string(), "h", "g"),
+        ];
+        for (src, name, want) in cases {
+            let src = format!("{src}fn main() {{}}\n");
+            let (p, root, d) = replayed(&src, 2018);
+            let got = p.syms.get(name).and_then(|n| p.mods[root as usize].values.get(&n)).map(|&x| p.def_path(x));
+            assert_eq!(got, Some(format!("rsim_test::{want}")), "{src}");
+            assert!(d.is_empty(), "{src}: {d:?}");
+            assert!(p.imports.iter().all(|i| i.bound & BOUND_SETTLED == 0), "{src}: a forced binding");
+        }
+        // two child modules import the same name from the root, which has it through a glob: neither
+        // private import can define a name another module sees, so neither waits on the other
+        let defs = "mod defs { pub struct Literal; }\n";
+        let kids = ["mod values { use crate::Literal; pub fn v(_: Literal) {} }\n", "mod instance { use crate::Literal; pub fn i(_: Literal) {} }\n"];
+        for src in [format!("{defs}{}{}pub use values::*;\npub use instance::*;\npub use defs::*;\nfn main() {{}}\n", kids[0], kids[1]),
+                    format!("{}{}pub use defs::*;\npub use instance::*;\npub use values::*;\n{defs}fn main() {{}}\n", kids[1], kids[0])] {
+            let (p, _, d) = replayed(&src, 2018);
+            assert!(d.is_empty(), "{src}: {d:?}");
+            assert!(p.imports.iter().all(|i| i.bound & BOUND_SETTLED == 0), "{src}: a forced binding");
+            let lit = p.syms.get("Literal").unwrap();
+            for m in ["values", "instance"] {
+                let m = (0..p.mods.len()).find(|&x| p.def_path(p.mods[x].def) == format!("rsim_test::{m}")).unwrap();
+                assert_eq!(p.mods[m].types.get(&lit).map(|&x| p.def_path(x)).as_deref(), Some("rsim_test::defs::Literal"), "{src}");
+            }
+        }
+        // the other namespace of an import found in one: its lookup goes on through a private glob of the
+        // module (back to the root) to an open import of the same name, which the importing module cannot
+        // see that way
+        let tex = "mod texture { use crate::*; pub enum ReadbackError { NotRendered } }\nmod hal { pub use crate::texture::ReadbackError; }\n";
+        for roots in ["pub use hal::*;\npub use crate::texture::ReadbackError;\n", "pub use crate::texture::ReadbackError;\npub use hal::*;\n"] {
+            let src = format!("{tex}{roots}fn main() {{}}\n");
+            let (p, root, d) = replayed(&src, 2018);
+            assert!(d.is_empty(), "{src}: {d:?}");
+            assert!(p.imports.iter().all(|i| i.bound & BOUND_SETTLED == 0), "{src}: a forced binding");
+            let e = p.syms.get("ReadbackError").unwrap();
+            let hal = (0..p.mods.len()).find(|&x| p.def_path(p.mods[x].def) == "rsim_test::hal").unwrap();
+            for m in [root as usize, hal] {
+                assert_eq!(p.mods[m].types.get(&e).map(|&x| p.def_path(x)).as_deref(), Some("rsim_test::texture::ReadbackError"), "{src}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_macro_name_a_single_import_may_still_define_waits_for_it() {
+        // the macro scopes (macros.rs CrateScope) resolve like the items: every order of the imports
+        // expands the macro of `b`
+        let ab = "mod a { macro_rules! ma { () => { pub fn from_a() {} } } pub(crate) use ma as m; }\nmod b { macro_rules! mb { () => { pub fn from_b() {} } } pub(crate) use mb as m; }\n";
+        let abt = "mod a { pub mod t { macro_rules! mc { () => { pub fn from_a() {} } } pub(crate) use mc; } }\nmod b { pub mod t { macro_rules! mc { () => { pub fn from_b() {} } } pub(crate) use mc; } }\n";
+        let cases = [
+            // a macro name a glob gives and a single import shadows
+            (ab, "use a::*;\nuse self::m as n;\nuse b::m;\nn!();\n"),
+            (ab, "use a::*;\nuse b::m;\nuse self::m as n;\nn!();\n"),
+            (ab, "use self::m as n;\nuse a::*;\nuse b::m;\nn!();\n"),
+            (ab, "use a::*;\nuse b::m;\nm!();\n"),
+            (ab, "use b::m;\nuse a::*;\nm!();\n"),
+            // a path to a macro through a module name a glob gives and a single import shadows
+            (abt, "use a::*;\nuse t::mc as n;\nuse b::t;\nn!();\n"),
+            (abt, "use a::*;\nuse b::t;\nuse t::mc as n;\nn!();\n"),
+        ];
+        for (items, uses) in cases {
+            let src = format!("{items}{uses}fn main() {{}}\n");
+            let (p, root, d) = replayed(&src, 2018);
+            let has = |n: &str| p.syms.get(n).is_some_and(|s| p.mods[root as usize].values.contains_key(&s));
+            assert!(has("from_b") && !has("from_a"), "{src}: from_a {} from_b {}", has("from_a"), has("from_b"));
+            assert!(d.is_empty() && p.errors.is_empty(), "{src}: {d:?} {:?}", p.errors);
+        }
+    }
+
+    #[test]
+    fn a_glob_trait_binding_is_shadowed_by_its_binding_name_only() {
+        // a module whose glob brings traits and which has items named like them: an `as _` import
+        // (no name) and `use T as Ext` (shadowed by an `Ext`, not by a `T`) keep their traits'
+        // methods in scope; a binding of the trait's own name is shadowed
+        let src = concat!(
+            "mod traits { pub trait Stream { fn timeout(&self) {} } pub trait Renamed { fn renamed(&self) {} } pub trait Named { fn named(&self) {} } }\n",
+            "mod prelude { pub use crate::traits::Stream as _; pub use crate::traits::Renamed as Ext; pub use crate::traits::Named; }\n",
+            "mod imp { use crate::prelude::*; pub struct Stream; pub struct Renamed; pub struct Named; }\n",
+            "mod ext { use crate::prelude::*; pub struct Ext; }\nfn main() {}\n",
+        );
+        let (p, _, d) = replayed(src, 2018);
+        assert!(d.is_empty(), "{d:?}");
+        for (m, want) in [("imp", ["traits::Stream", "traits::Renamed"]), ("ext", ["traits::Stream", "traits::Named"])] {
+            let m = (0..p.mods.len()).find(|&x| p.def_path(p.mods[x].def) == format!("rsim_test::{m}")).unwrap();
+            let mut got: Vec<String> = p.traits_in_scope(m as u32).iter().map(|&t| p.def_path(t)).collect();
+            got.sort();
+            let mut want: Vec<String> = want.iter().map(|t| format!("rsim_test::{t}")).collect();
+            want.sort();
+            assert_eq!(got, want, "the traits in scope of {}", p.def_path(p.mods[m].def));
+        }
     }
 
     #[test]

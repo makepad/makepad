@@ -77,6 +77,9 @@ fn main() {
         println!("{{\"verdict\":\"blocked\",\"why\":\"main is blocked: the stub waits\"}}");
         return;
     }
+    // the gate builds release, as makepad tests its own code (`makepad test` alone: the test profile)
+    assert!(args.iter().any(|a| a == "--release"), "not the release profile: {args:?}");
+    let args: Vec<String> = args.into_iter().filter(|a| a != "--release").collect();
     let pkg = args.get(2).cloned().unwrap_or_default();
     let list = args.iter().any(|a| a == "--list");
     let dir = format!("libs/{}", pkg.trim_start_matches("test-run-"));
@@ -196,7 +199,7 @@ order=$(echo "$gate_out" | grep -oE '^GATEUNIT ok test [a-z-]+' | paste -sd' ' -
 # a dealer whose queue is another's: the shard runs none of it and fails, saying so; no lease telling it: it fails
 GATE_QUEUE=1 DEVHUB_TOLD=$dir/told DEVHUB_LEASE=L7 DEAL_DIGEST=000000000000 GATE_TIMES=$times gate stale shape fail "" "testrun: the dealer's queue 000000000000 is not this shard's|NODEGATE-FAIL: queue"
 GATE_QUEUE=1 gate untold shape fail "" "NODEGATE-FAIL: queue (no \$DEVHUB_TOLD"
-gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
+gate plan plan fail "test-run-plan" "GATEUNIT fail test test-run-plan|GATEREPRO test test-run-plan :: makepad test test-run-plan --release|NODEGATE-FAIL: test:test-run-plan|FAILED tests::it|  panicked at libs/plan/src/lib.rs:1:1 -- broken: $(printf 'x%.0s' {1..500})|FAILED tests::other|  panicked at libs/plan/src/lib.rs:2:2 -- the \"quoted\" one"
 # every failing test named, each with its own panic whole (a passing test's caught one is no failure's)
 ! echo "$gate_out" | grep -qE 'lib.rs:9:9|its second line' || fail="$fail plan(a passing test's panic or a second line said)"
 GATE_PROVEN="test makepad-draw;check test-run-shape" gate proven shape ok "test-run-shape" "GATEUNIT proven test makepad-draw|GATEUNIT ok test test-run-shape"
@@ -236,7 +239,7 @@ lib libs/plan test-run-plan '// HANGS
 pub fn floor(w: u32) -> u32 { test_run_shape::area(w) }' '[dependencies]
 test-run-shape = { path = "../shape" }'
 g commit -q -am hang
-GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
+GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=40;test test-run-plan=30;test test-run-shape=20;test makepad-draw=10" HUNG_QUIET=3 HUNG_LOOK=1 gate hang hang fail "makepad-draw test-run-other test-run-plan test-run-shape" "GATEUNIT ok test test-run-other|GATEUNIT fail test test-run-plan|HUNG: tests::stuck; its stacks: testrun-test-run-plan.hung|main is blocked: the stub waits|GATEREPRO test test-run-plan :: makepad test test-run-plan --release -- tests::stuck --exact|GATEUNIT ok test test-run-shape|GATEUNIT ok test makepad-draw|NODEGATE-FAIL: test:test-run-plan"
 [ "$gate_ticks" -lt 100 ] || fail="$fail hang(the gate's shell took $gate_ticks ticks of CPU: it spun while its units ran)"
 ! echo "$gate_out" | grep -q "^GATETIME test test-run-plan " || fail="$fail hang(a hung unit's seconds are no measure)"
 echo "$gate_out" | grep -q "^GATETIME test test-run-shape " || fail="$fail hang(no measure of the busy unit)"

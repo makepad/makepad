@@ -1,4 +1,4 @@
-//! Structure sizes for the memory report (MAKEPAD_RUN_MEM): the unit's big arrays, RIR functions and
+//! Structure sizes for the memory report (RELAX_MEM): the unit's big arrays, RIR functions and
 //! the trees' nested vectors. memstat.rs holds the counting allocator and the tags these numbers
 //! are printed with.
 
@@ -220,7 +220,7 @@ pub fn unit_sizes(u: &crate::jit::Unit) -> Vec<(String, u64)> {
         let t = u.code.read().unwrap_or_else(|e| e.into_inner());
         out.push((format!("code index ({})", t.index.len()), vbytes(&t.index)));
     }
-    if std::env::var_os("MAKEPAD_RUN_AST_STATS").is_some() {
+    if std::env::var_os("RELAX_AST_STATS").is_some() {
         out.extend(ast_nested(&u.prog));
     }
     out
@@ -303,7 +303,7 @@ pub fn rir_bytes(f: &relax_backend::rir::Func) -> u64 {
     b
 }
 
-/// MAKEPAD_RUN_AST_STATS=1: heap bytes the trees' nested vectors and boxes hold, by node kind
+/// RELAX_AST_STATS=1: heap bytes the trees' nested vectors and boxes hold, by node kind
 /// (capacity x element size, + 16 bytes malloc overhead per block): what a flat tree saves.
 pub fn ast_nested(p: &crate::program::Program) -> Vec<(String, u64)> {
     use crate::ast::*;

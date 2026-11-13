@@ -4,8 +4,8 @@
 //! types (Box, Vec, String, Rc, Arc, collections); the `alloc` and `std` crates re-export it at
 //! their real paths (coord.md S1).
 //!
-//! Files shared with the rustc shim (std/check) gate Relax-only items with
-//! `#[cfg(not(relax_check))]`.
+//! Language items, primitive implementations and runtime hooks are defined directly
+//! for Relax.
 
 // rustc library/{core,alloc}/src/lib.rs: unsized FnOnce receivers need this
 // semantic feature even though Relax does not enforce nightly feature gates.

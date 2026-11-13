@@ -1,5 +1,5 @@
 // Differential regression for loops.rs::vectorize_byte_maps. Run with rustc -O --test
-// --edition 2021, and Relax at O1 and MAKEPAD_RUN_O3=1 MAKEPAD_RUN_O3_CALLS=100.
+// --edition 2021, and Relax at O1 and RELAX_O3=1 RELAX_O3_CALLS=100.
 // Repeated sweeps keep calling every kernel while asynchronous O3 is installed.
 // Hash the entire allocation (including untouched prefixes, suffixes and zip tails).
 

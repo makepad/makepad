@@ -265,7 +265,7 @@ struct Raw {
     keys: Vec<Name>,
     /// loud macros invoked in its text whose expansion it does not have (deps.rs file_nodes)
     invoked: Vec<Name>,
-    /// where (diagnostics: MAKEPAD_RUN_DEPS_DUMP)
+    /// where (diagnostics: RELAX_DEPS_DUMP)
     invoked_at: Vec<u32>,
     always: bool,
     /// a macro item left unexpanded: coarse whatever it invokes
@@ -1468,9 +1468,9 @@ impl Deps {
             lists.extend_from_slice(&own_macros[c]);
             crates[c].macros_at = at(&lists, s);
         }
-        // MAKEPAD_RUN_DEPS_DUMP=<file>: every item node walked (crate, file:offset, piece, closure,
+        // RELAX_DEPS_DUMP=<file>: every item node walked (crate, file:offset, piece, closure,
         // coarse and the macros that made it so): which piece an edit changed, and what reaches it
-        if let Ok(path) = std::env::var("MAKEPAD_RUN_DEPS_DUMP") {
+        if let Ok(path) = std::env::var("RELAX_DEPS_DUMP") {
             let mut out = String::new();
             for id in 0..n_items {
                 let f = node_file[id] as usize;
@@ -1584,7 +1584,7 @@ impl Deps {
     pub(crate) fn crate_count(&self) -> usize { self.crates.rows().len() }
     /// Whether a graph can be built over it (its component ids leave room for the new ones).
     pub(crate) fn ids_left(&self) -> bool { self.comp_end < 1 << 30 }
-    /// Whether the graph holds the same closures as `other` (MAKEPAD_RUN_DEPS_VERIFY: a graph built
+    /// Whether the graph holds the same closures as `other` (RELAX_DEPS_VERIFY: a graph built
     /// over a stored one against one built from scratch; component ids are not compared).
     pub(crate) fn same_closures(&self, other: &Deps) -> Result<(), String> {
         let (a, b) = (self.nodes.rows(), other.nodes.rows());
@@ -1687,6 +1687,14 @@ impl Deps {
 pub(crate) fn late_builtin(m: Name) -> bool {
     let raw = m & !QUIET_BIT;
     [&b"include"[..], b"include_str", b"include_bytes", b"env", b"option_env"].iter().any(|w| raw == name_of(w) & !QUIET_BIT)
+}
+
+/// Whether `text` invokes `include!` (as `scan` records invocations).
+pub(crate) fn invokes_include(text: &[u8]) -> bool {
+    let include = name_of(b"include") & !QUIET_BIT;
+    let mut invoked = Vec::new();
+    scan(text, &[(0, text.len() as u32)], &[], &mut Vec::new(), &mut invoked);
+    invoked.iter().any(|&m| m & !QUIET_BIT == include)
 }
 
 /// The expansion text digest and the names of the expansion text produced by macro invocations

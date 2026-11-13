@@ -63,8 +63,8 @@ watchdog() {
 }
 for round in $(seq 1 $ROUNDS); do
   d=$dir/r$round; mkdir -p "$d/home" "$d/t"
-  MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 TMPDIR="$d/t" \
-    MAKEPAD_HOME="$d/home" MAKEPAD_RUN_HOME="$d/run" MAKEPAD_RUN_CACHE_DIR="$d/run/cache" MAKEPAD_RUN_TARGET_DIR="$d/run/target" \
+  MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 TMPDIR="$d/t" \
+    MAKEPAD_HOME="$d/home" RELAX_HOME="$d/run" RELAX_CACHE_DIR="$d/run/cache" RELAX_TARGET_DIR="$d/run/target" \
     $B run --report-to "$d/report" makepad-app-calculator --no-default-features --features standalone > "$d/log" 2>&1 &
   pid=$!
   start_s=$(date +%s); t_start=$(now_ms)

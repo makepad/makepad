@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """rank: the hottest Relax functions ranked by  samples x (Relax instructions / rustc instructions),
-the work list for asm comparison (asmdiff.py). Profiles come from Relax's own sampler (MAKEPAD_RUN_PROFILE,
+the work list for asm comparison (asmdiff.py). Profiles come from Relax's own sampler (RELAX_PROFILE,
 steady state), so this works on macOS too; rustc sizes from the symbols of a native release build.
 
   rank.py --out DIR bench [--makepad R] [--native BIN] [--warm MS] [kernel ...]
         run bench_rt kernels under Relax at steady state, one profile per kernel (DIR/bench-<k>.tsv)
   rank.py --out DIR add <label> <profile.tsv> [<native binary>]
-        add another profile (an Amp / Stage steady-state run made with MAKEPAD_RUN_PROFILE=<file>)
+        add another profile (an app's steady-state run made with RELAX_PROFILE=<file>)
   rank.py --out DIR show [--min PCT] [--top N]
         the ranking over every source in DIR (each source weighs 100; a fn's share is of its source)
 
@@ -67,7 +67,7 @@ def main():
     rest = a[3:]
     srcs = load_sources(out)
     if cmd == "bench":
-        relax = os.environ.get("MAKEPAD_RUN_BIN", "makepad")
+        relax = os.environ.get("RELAX_BIN", "makepad")
         native = None
         warm = "3000"
         ks = []
@@ -88,8 +88,8 @@ def main():
             ks = re.findall(r'\("(\w+)", \w+\),', src)
         for k in ks:
             prof = os.path.abspath(os.path.join(out, "bench-%s.tsv" % k))
-            env = dict(os.environ, MAKEPAD_RUN_PROFILE=prof, BENCH_WARM_MS=warm, BENCH_REPS=os.environ.get("BENCH_REPS", "20"), SANDBOX_MUTE="1")
-            env.setdefault("MAKEPAD_RUN_STD", os.path.join(HERE, "../std"))
+            env = dict(os.environ, RELAX_PROFILE=prof, BENCH_WARM_MS=warm, BENCH_REPS=os.environ.get("BENCH_REPS", "20"), MAKEPAD_MUTE="1")
+            env.setdefault("RELAX_STD", os.path.join(HERE, "../std"))
             env.setdefault("BENCH_FONT", os.path.normpath(os.path.join(HERE, "../../../../widgets/resources/IBMPlexSans-Text.ttf")))
             r = subprocess.run(["nice", "-n", "10", relax, "run", "--quiet", "relax-bench-rt", "--", k], cwd=HERE, env=env, capture_output=True, text=True)
             ok = os.path.exists(prof)

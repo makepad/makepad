@@ -93,7 +93,7 @@ mod native {
         let now = (ts.sec as u64).wrapping_mul(1_000_000_000).wrapping_add(ts.nsec as u64).max(1);
         if let Err(first) = FIRST_NS.compare_exchange(0, now, Ordering::AcqRel, Ordering::Acquire) {
             if now.saturating_sub(first) >= SAME_REQUEST_NS {
-                const FORCED: &[u8] = b"makepad-run: a second quit signal: the process exits now\n";
+                const FORCED: &[u8] = b"relax: a second quit signal: the process exits now\n";
                 unsafe { write(2, FORCED.as_ptr().cast(), FORCED.len()) };
                 // the exit's cleanup does not run past _exit: the endpoint's files go here
                 makepad_remote::carrier::unix::withdraw_in_signal();

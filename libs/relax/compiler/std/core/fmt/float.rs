@@ -73,7 +73,7 @@ pub(crate) fn decode_f32(v: f32) -> (bool, FullDecoded) {
 // ---------------------------------------------------------------- parts
 
 #[derive(Clone, Copy)]
-enum Part<'a> {
+pub(super) enum Part<'a> {
     /// n zeros
     Zero(usize),
     /// an exponent value (decimal)
@@ -138,17 +138,17 @@ fn ascii(b: &[u8]) -> &str {
 }
 
 /// A formatted number: sign plus up to six parts.
-struct Formatted<'a> {
+pub(super) struct Formatted<'a> {
     sign: &'static str,
     parts: [Part<'a>; 6],
     n: usize,
 }
 
 impl<'a> Formatted<'a> {
-    fn new(sign: &'static str) -> Formatted<'a> {
+    pub(super) fn new(sign: &'static str) -> Formatted<'a> {
         Formatted { sign, parts: [Part::Zero(0); 6], n: 0 }
     }
-    fn push(&mut self, p: Part<'a>) {
+    pub(super) fn push(&mut self, p: Part<'a>) {
         self.parts[self.n] = p;
         self.n += 1;
     }
@@ -172,7 +172,7 @@ impl<'a> Formatted<'a> {
 }
 
 /// Pads like core's Formatter::pad_formatted_parts (zero padding goes after the sign).
-fn pad_formatted_parts(f: &mut Formatter<'_>, formatted: &Formatted<'_>) -> Result {
+pub(super) fn pad_formatted_parts(f: &mut Formatter<'_>, formatted: &Formatted<'_>) -> Result {
     let width = match f.width {
         Some(w) => w,
         None => {

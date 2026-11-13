@@ -15,15 +15,19 @@ cmp -s "$ROOT/libs/relax/compiler/tests/std/os_fork_busy.rs" "$ROOT/tools/run/fi
 J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run --bin makepad --"
 ROUNDS=${ROUNDS:-10}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/fork_busy.XXXXXX") || exit 1
-export MAKEPAD_RUN_HOME="$dir/runhome" MAKEPAD_RUN_CACHE_DIR="$dir/cache" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1
-[ -n "${AHEAD:-}" ] && export MAKEPAD_RUN_AHEAD=$AHEAD
+export RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1
+[ -n "${AHEAD:-}" ] && export RELAX_AHEAD=$AHEAD
 fails=0
 i=0
 while [ $i -lt "$ROUNDS" ]; do
     i=$((i + 1))
     $J run relax-provided-fixture --bin relax-fork-busy > "$dir/round$i.log" 2>&1
     st=$?
-    if [ $st -ne 0 ] || ! grep -q "^| forks that reached exec: 200 of 200" "$dir/round$i.log" || ! grep -q "^| concurrent spawns that reached exec: 48 of 48" "$dir/round$i.log" || ! grep -q "^| spawns that waited for another spawn's child: 0" "$dir/round$i.log"; then
+    # macOS has no pipe2: there a spawn can read another spawn's child's copy of its error pipe under real
+    # std too, so os_fork_busy.rs prints that count to stderr and only the other systems check it
+    waits=0
+    [ "$(uname -s)" = Darwin ] || grep -q "^| spawns that waited for another spawn's child: 0" "$dir/round$i.log" || waits=1
+    if [ $st -ne 0 ] || ! grep -q "^| forks that reached exec: 200 of 200" "$dir/round$i.log" || ! grep -q "^| concurrent spawns that reached exec: 48 of 48" "$dir/round$i.log" || [ $waits -ne 0 ]; then
         fails=$((fails + 1))
         echo "fork_busy: round $i FAILED (exit $st):"
         grep -E "never reached exec|forks that reached|spawns that reached|spawns that waited|panicked|fault|forked child|waits for compile jobs" "$dir/round$i.log" | head -10

@@ -1,0 +1,11 @@
+[package]
+name = "pc-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pc-native = { path = "../native" }
+
+[build-dependencies]
+pc-gen = { path = "../gen" }

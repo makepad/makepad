@@ -1,7 +1,7 @@
 //! A native panic in the compile a JIT call starts (the owner fails finishing it) must reach the
 //! program as an ordinary panic of that call, never unwind into the JIT frames (an abort without a
 //! message: "failed to initiate panic, error 5"). compile_panic.sh runs it with
-//! MAKEPAD_RUN_TEST_COMPILE_PANIC=compile_panic_target.
+//! RELAX_TEST_COMPILE_PANIC=compile_panic_target.
 use std::panic::catch_unwind;
 
 #[inline(never)]

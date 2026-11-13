@@ -21,7 +21,7 @@
 //! A compare the facts decide becomes a constant (`simplify` then folds its branch), and
 //! `d = (b + k) - b` becomes `k`. rustc's LLVM removes these checks the same way (correlated
 //! value propagation + instcombine); without it every masked index into a fixed array keeps its
-//! bounds check (deflate: four per hash-chain probe). MAKEPAD_RUN_NO_RANGES=1 turns it off.
+//! bounds check (deflate: four per hash-chain probe). RELAX_NO_RANGES=1 turns it off.
 use relax_backend::regalloc::{for_defs, reachable};
 use relax_backend::rir::*;
 /// Maps keyed by vreg numbers and block pairs: a multiply-rotate hash (SipHash's per-key cost
@@ -701,7 +701,7 @@ pub fn fold_ranges(options: &relax_session::Options, f: &mut Func) -> bool {
 
 fn iv_trace() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var("MAKEPAD_RUN_IV_TRACE").is_ok())
+    *E.get_or_init(|| std::env::var("RELAX_IV_TRACE").is_ok())
 }
 
 fn iv_off(options: &relax_session::Options) -> bool {
@@ -1026,7 +1026,7 @@ const THREAD_INSTS: usize = 8;
 /// B is never a loop header (nor entered by irreducible flow): a copy of a header would enter its
 /// loop past it.
 fn thread_decided(f: &mut Func, ed: &Edges) -> bool {
-    // MAKEPAD_RUN_OPT=-threadedge: off (bisection)
+    // RELAX_OPT=-threadedge: off (bisection)
     if relax_backend::stats::opt_env_off("-threadedge") {
         return false;
     }

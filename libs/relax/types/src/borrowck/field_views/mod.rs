@@ -511,8 +511,8 @@ fn op_note(note: &dyn Fn(&mut Vec<Summary>, &Place, bool), out: &mut Vec<Summary
     }
 }
 
-/// Relaxed Rust (field views on) for the crate of `d`: `[package.metadata.makepad-run] relaxed =
-/// true` in its Cargo.toml, or MAKEPAD_RUN_RELAXED=1 / `--relaxed` for every crate.
+/// Relaxed Rust (field views on) for the crate of `d`: `[package.metadata.relax] relaxed =
+/// true` in its Cargo.toml, or RELAX_RELAXED=1 / `--relaxed` for every crate.
 pub fn relaxed(prog: &Program, d: DefId) -> bool {
     // the crate's relaxed-Rust setting (relaxed.rs): field views and extended two-phase borrows
     let k = prog.def(d).krate as usize;

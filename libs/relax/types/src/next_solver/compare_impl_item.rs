@@ -211,6 +211,10 @@ impl Tcx {
     /// unstable default-body attributes are cut; each impl is its own leaf.
     pub fn check_impl_items_against_trait(&self, prog: &Program, imp: DefId) -> Vec<String> {
         let Some(&td) = self.impl_trait.get(&imp) else { return Vec::new(); };
+        // check.rs check_item_type: only for a coherent trait (its overlap check, as
+        // check_type_bounds asks it): conflicting impls are E0119 alone, not also the struct-tail
+        // or item errors of their headers
+        if !(crate::type_queries::Providers { tcx: self, prog }).specialization_graph((prog.def(imp).krate, td)).expect("coherent trait query") { return Vec::new(); }
         let indices = self.generic_indices_of(prog, imp);
         let trait_ref = self.impl_trait_ref(prog, imp, &indices.identity_args(&self.tys));
         if trait_ref.args.iter().any(|arg| match *arg {

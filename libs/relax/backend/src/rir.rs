@@ -1149,7 +1149,10 @@ impl SwitchTable {
 pub struct Succs {
     a: [u32; 2],
     n: u8,
-    i: u8,
+    // as wide as a switch table is long: an 8-bit position wrapped to 0 after a table's 256th
+    // successor and the iterator never ended (a derived `Debug` on a 256-variant enum is one
+    // switch with that many distinct arms; whoever collected the successors grew without bound)
+    i: u32,
     sw: Option<std::sync::Arc<SwitchTable>>,
 }
 
@@ -1162,7 +1165,7 @@ impl Iterator for Succs {
             self.i += 1;
             return r;
         }
-        if self.i < self.n {
+        if self.i < self.n as u32 {
             self.i += 1;
             Some(self.a[self.i as usize - 1])
         } else {
@@ -1946,7 +1949,7 @@ impl Func {
 
     /// Structural verifier: every use has a class-correct vreg, every target exists.
     /// Hard verification after a rewrite that runs past the last `verify` (JITSAFE 19): always in
-    /// debug builds; in release with MAKEPAD_RUN_VERIFY_PASSES (the gates' diff_fast legs set it).
+    /// debug builds; in release with RELAX_VERIFY_PASSES (the gates' diff_fast legs set it).
     /// A broken function is an error naming the pass -- never compiled.
     pub fn verify_after(&self, pass: &str) -> Result<(), String> {
         if !verify_passes_on() {
@@ -2438,12 +2441,12 @@ pub fn split_unwind_info(code: &[u8]) -> (usize, Option<UnwindInfo>) {
     }
 }
 
-/// MAKEPAD_RUN_UNWIND_STATS: bytes of cleanup pads, landing stubs, unwind trailers; invoke count.
+/// RELAX_UNWIND_STATS: bytes of cleanup pads, landing stubs, unwind trailers; invoke count.
 pub static UNWIND_STATS: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
 pub fn unwind_stats_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_UNWIND_STATS").is_ok())
+    *ON.get_or_init(|| std::env::var("RELAX_UNWIND_STATS").is_ok())
 }
 
 /// Per stack slot: whether any SlotAddr names it (the only way to reach a slot).
@@ -2496,6 +2499,24 @@ mod slot_table_tests {
 }
 
 #[cfg(test)]
+mod succs_tests {
+    use super::{SwitchTable, Term, VReg};
+
+    /// A switch lists each distinct successor once and then ends, however long its table is.
+    #[test]
+    fn a_switch_with_more_than_255_successors_ends() {
+        for n in [1u32, 2, 255, 256, 257, 300, 70_000] {
+            let t = Term::Switch(VReg(0), std::sync::Arc::new(SwitchTable::new(0, (1..=n).collect(), 0)));
+            // bounded, so that a position that wraps fails the test instead of filling memory
+            let got: Vec<u32> = t.succs().take(n as usize + 10).collect();
+            let mut want: Vec<u32> = (1..=n).collect();
+            want.push(0);
+            assert_eq!(got, want, "{} table entries", n);
+        }
+    }
+}
+
+#[cfg(test)]
 mod unwind_trailer_tests {
     /// A trailer reads back as written behind its code, with and without staged calls; a frame's
     /// pointer from sp adds the staged bytes at that call only. Without staged calls the trailer
@@ -2522,11 +2543,11 @@ mod unwind_trailer_tests {
     }
 }
 
-/// MAKEPAD_RUN_VERIFY_PASSES (any value), `force_verify_passes`, or a debug build:
+/// RELAX_VERIFY_PASSES (any value), `force_verify_passes`, or a debug build:
 /// `Func::verify_after` checks.
 pub fn verify_passes_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    cfg!(debug_assertions) || FORCE_VERIFY.load(std::sync::atomic::Ordering::Relaxed) || *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_PASSES").is_some())
+    cfg!(debug_assertions) || FORCE_VERIFY.load(std::sync::atomic::Ordering::Relaxed) || *ON.get_or_init(|| std::env::var_os("RELAX_VERIFY_PASSES").is_some())
 }
 
 static FORCE_VERIFY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

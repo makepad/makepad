@@ -1,0 +1,14 @@
+[package]
+name = "mbw-mac"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+proc-macro = true
+
+[dependencies]
+mbw-l1 = { path = "../l1" }
+mbw-l2 = { path = "../l2" }
+mbw-l3 = { path = "../l3" }
+mbw-l4 = { path = "../l4" }

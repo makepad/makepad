@@ -1,1 +1,1 @@
-MAKEPAD_RUN_RT_THREADS=rt-voice
+RELAX_RT_THREADS=rt-voice

@@ -51,18 +51,20 @@ impl<T> Iterator for IntoIter<T> {
     fn count(self) -> usize {
         self.end - self.start
     }
-    fn nth(&mut self, n: usize) -> Option<T> {
+    // alloc vec/into_iter.rs: the skipped items leave the live range first, then drop as one
+    // slice (a panicking drop leaves the others to the slice's drop); nth is the default's: this,
+    // then a next
+    fn advance_by(&mut self, n: usize) -> Result<(), usize> {
         let avail = self.end - self.start;
-        let skip = if n < avail { n } else { avail };
-        let mut i = 0;
-        while i < skip {
-            unsafe { im::drop_in_place(im::ptr_add_mut(self.buf.as_ptr(), self.start)) };
-            self.start += 1;
-            i += 1;
+        let k = if n < avail { n } else { avail };
+        let from = self.start;
+        self.start += k;
+        if crate::mem::needs_drop::<T>() {
+            // SAFETY: from..from + k were alive and are out of the live range now: dropped once
+            unsafe { crate::ptr::drop_in_place(crate::ptr::slice_from_raw_parts_mut(im::ptr_add_mut(self.buf.as_ptr(), from), k)) };
         }
-        self.next()
+        if k < n { Err(n - k) } else { Ok(()) }
     }
-    #[cfg(not(relax_check))]
     #[doc(hidden)]
     #[inline]
     unsafe fn __iterator_get_unchecked(&mut self, i: usize) -> T {
@@ -89,7 +91,6 @@ unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
 impl<T> crate::iter::FusedIterator for IntoIter<T> {}
 // real alloc: `T: NonDrop`, its marker for Copy (the indexed reads leave the items in the buffer, and
 // its drop drops start..end)
-#[cfg(not(relax_check))]
 unsafe impl<T: Copy> crate::iter::TrustedRandomAccessNoCoerce for IntoIter<T> {
     const MAY_HAVE_SIDE_EFFECT: bool = false;
 }
@@ -112,14 +113,20 @@ impl<T> Default for IntoIter<T> {
     }
 }
 
+// alloc vec/into_iter.rs: the items left drop as one slice (a panicking drop leaves the others to
+// the slice's drop), and a guard frees the buffer, on an unwind too
 unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
     fn drop(&mut self) {
-        while self.start < self.end {
-            unsafe { im::drop_in_place(im::ptr_add_mut(self.buf.as_ptr(), self.start)) };
-            self.start += 1;
+        struct DropGuard<'a, T>(&'a mut IntoIter<T>);
+        impl<T> Drop for DropGuard<'_, T> {
+            fn drop(&mut self) {
+                if crate::mem::size_of::<T>() != 0 && self.0.cap != 0 {
+                    heap::free(self.0.buf.as_ptr() as *mut u8, Vec::<T>::current_layout(self.0.cap));
+                }
+            }
         }
-        if crate::mem::size_of::<T>() != 0 && self.cap != 0 {
-            heap::free(self.buf.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap));
-        }
+        let guard = DropGuard(self);
+        // SAFETY: start..end are the items still owned; nothing reads them after this
+        unsafe { crate::ptr::drop_in_place(crate::ptr::slice_from_raw_parts_mut(im::ptr_add_mut(guard.0.buf.as_ptr(), guard.0.start), guard.0.end - guard.0.start)) };
     }
 }

@@ -331,7 +331,7 @@ fn cmd_stuck(req: &super::Req, out: &mut super::Out) {
             for l in rows {
                 out.line(&l);
             }
-            out.always("more: why-tier @<slot>");
+            out.line("more: why-tier @<slot>");
         }
         None => out.err("the owner did not answer in 10 s"),
     }
@@ -366,7 +366,7 @@ fn cmd_uncounted(req: &super::Req, out: &mut super::Out) {
             for l in rows {
                 out.line(&l);
             }
-            out.always("more: why-tier @<slot>");
+            out.line("more: why-tier @<slot>");
         }
         None => out.err("the owner did not answer in 10 s"),
     }
@@ -442,7 +442,7 @@ pub fn cmd_why_tier(req: &super::Req, out: &mut super::Out) {
             for l in rows {
                 out.line(&l);
             }
-            out.always(&format!("more: versions {q2}  remarks {q2}  tier {q2} o3  count {q2}"));
+            out.line(&format!("more: versions {q2}  remarks {q2}  tier {q2} o3  count {q2}"));
         }
         Err(e) => out.err(&e),
     }

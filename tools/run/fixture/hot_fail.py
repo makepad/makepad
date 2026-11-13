@@ -4,19 +4,19 @@ run takes the next edit, a panic of the program's there is the program's, and an
 there is the JIT's.
 
 usage: hot_fail.py [case ...]   (run from the workspace root; the JIT runs through `cargo run
-  --profile host`; MAKEPAD_RUN_STD in the environment, default libs/relax/compiler/std; every case
+  --profile host`; RELAX_STD in the environment, default libs/relax/compiler/std; every case
   when none is named)
 
 Copies hot_fail/ to a temporary dir and runs it once per case. Once it ticks, tick.rs is edited so
 that a worker thread calls a fn never built before. In a process an edit ran in, that build fails:
-  - error, program-panic, jit-error: with an internal compiler error (MAKEPAD_RUN_TEST_HOT_BUILD_ERROR):
+  - error, program-panic, jit-error: with an internal compiler error (RELAX_TEST_HOT_BUILD_ERROR):
     the call would park at a compile error;
-  - panic: the compiler panics in the call (MAKEPAD_RUN_TEST_HOT_COMPILE_PANIC): the call gets a stub
+  - panic: the compiler panics in the call (RELAX_TEST_HOT_COMPILE_PANIC): the call gets a stub
     that panics. Its builds fail too, so that nothing builds it ahead of the call.
 Then, in the restarted run (a terminal program: it never presents a frame):
   - error, panic: the next edit;
   - program-panic: a thread of the program's panics ("panic-now");
-  - jit-error: that build fails again with no edit in the run (MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR);
+  - jit-error: that build fails again with no edit in the run (RELAX_TEST_REPLACEMENT_BUILD_ERROR);
     the worker calls the fn again every tick, so calls meet the error after the run reported it too.
 Each passes when:
   - the app's state came back ("out restored <tick>" at or past the tick before the edit) and, but
@@ -49,7 +49,7 @@ BAD = ("parked", "paused on a panic", "stale access", "FATAL", "Segmentation")
 JIT_ERROR_EXIT = 86
 JIT_ERROR_LINE = "verdict: jit-error (not your change) record="
 OWN_PANIC = "hot_fail: the program's own panic"
-os.environ.setdefault("MAKEPAD_RUN_STD", os.path.abspath("libs/relax/compiler/std"))
+os.environ.setdefault("RELAX_STD", os.path.abspath("libs/relax/compiler/std"))
 
 
 def case(name, hooks, after):
@@ -58,9 +58,9 @@ def case(name, hooks, after):
     shutil.copytree(os.path.join(HERE, "hot_fail"), pkg)
     home = os.path.join(tmp, "home")
     ready = os.path.join(tmp, "ready")
-    env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_HOME=home, MAKEPAD_HOME=os.path.join(tmp, "makepad"),
-               MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"),
-               MAKEPAD_RUN_LIVE_TRACE="1", **{hook: "hot_fail_target" for hook in hooks})
+    env = dict(os.environ, RELAX_LIVE_READY=ready, RELAX_HOME=home, MAKEPAD_HOME=os.path.join(tmp, "makepad"),
+               RELAX_CACHE_DIR=os.path.join(home, "cache"), RELAX_TARGET_DIR=os.path.join(home, "target"),
+               RELAX_LIVE_TRACE="1", **{hook: "hot_fail_target" for hook in hooks})
     p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "relax-hot-fail"], cwd=pkg, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out, err = [], []
     def pump(f, acc):
@@ -204,7 +204,7 @@ def case(name, hooks, after):
             if not fails and after == "jit-error":
                 failed = [r for r in ledger() if r.get("outcome") == "restart_failed"]
                 record = failed[0].get("id", "?")
-                if "MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR" not in failed[0].get("reason", ""):
+                if "RELAX_TEST_REPLACEMENT_BUILD_ERROR" not in failed[0].get("reason", ""):
                     fails.append("jit-error-record-of-another-error: " + failed[0].get("reason", "")[:200])
                 wait(lambda: any(JIT_ERROR_LINE + record in l for l in err))
                 if not any(JIT_ERROR_LINE + record in l for l in err):
@@ -246,7 +246,7 @@ def case(name, hooks, after):
     shutil.rmtree(tmp, ignore_errors=True)
     return True
 
-ERROR, PANIC, AGAIN = "MAKEPAD_RUN_TEST_HOT_BUILD_ERROR", "MAKEPAD_RUN_TEST_HOT_COMPILE_PANIC", "MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR"
+ERROR, PANIC, AGAIN = "RELAX_TEST_HOT_BUILD_ERROR", "RELAX_TEST_HOT_COMPILE_PANIC", "RELAX_TEST_REPLACEMENT_BUILD_ERROR"
 CASES = [("error", [ERROR], "edit"), ("panic", [ERROR, PANIC], "edit"),
          ("program-panic", [ERROR], "program-panic"), ("jit-error", [ERROR, AGAIN], "jit-error")]
 asked = sys.argv[1:]

@@ -828,10 +828,8 @@ impl<'a> Gates<'a> {
                 for &x in ast.list(f.params) { self.ty(x) }
                 if let Some(r) = f.ret.get() { self.ret_ty(r); }
             }
-            Ty::Never => {
-                let pos = self.ty_pos(t);
-                self.gate("never_type", pos, "the `!` type is experimental");
-            }
+            // `!` is a type everywhere since rustc 1.100.0 (never_type stabilized)
+            Ty::Never => {}
             Ty::ImplTrait(b) | Ty::DynTrait(b, _) => self.bounds(b),
             Ty::Infer | Ty::Mac(_) | Ty::ImplicitSelf | Ty::CVarArgs => {}
         }

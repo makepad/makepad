@@ -1,4 +1,4 @@
-//! `MAKEPAD_RUN_BOOT_PROBE=1`: how the run window answers while the app boots. A thread presses,
+//! `RELAX_BOOT_PROBE=1`: how the run window answers while the app boots. A thread presses,
 //! drags and releases on the window's caption every 8 ms and resizes it every 256 ms (the
 //! events a user's window drag and resize put into session 0, pushed the way the window system
 //! pushes them); the window pump measures how long each event waited for it, the gaps between
@@ -6,7 +6,7 @@
 //! (with the boot phase), the summary when the boot ends (the app's first frame) or the run does
 //! (`drag_queries`: the caption presses the window answered, `drag_max_ms` the longest answer):
 //!
-//! `makepad-run boot-probe: boot_s=.. events=.. event_max_ms=.. event_p99_ms=.. drag_queries=..
+//! `relax boot-probe: boot_s=.. events=.. event_max_ms=.. event_p99_ms=.. drag_queries=..
 //! drag_max_ms=.. turn_max_ms=.. turn_p99_ms=.. frames=.. frame_max_ms=.. frame_p99_ms=.. stalls=..`
 use makepad_hal::{clock_ns, event_tag, session::HOST, Hal, Id, RawEvent};
 use relax_compiler::run_state::State;
@@ -41,7 +41,7 @@ pub struct Probe {
 
 impl Probe {
     pub fn from_env() -> Option<Probe> {
-        std::env::var_os("MAKEPAD_RUN_BOOT_PROBE")?;
+        std::env::var_os("RELAX_BOOT_PROBE")?;
         Some(Probe {
             start: Instant::now(),
             last_turn: None,
@@ -76,7 +76,7 @@ impl Probe {
         }
         self.stalls += 1;
         eprintln!(
-            "makepad-run boot-probe: stall {:.1} ms ({what}) at {:.2} s (last turn: pump +{:.1} ms, present {:.1} ms), phase {} {}",
+            "relax boot-probe: stall {:.1} ms ({what}) at {:.2} s (last turn: pump +{:.1} ms, present {:.1} ms), phase {} {}",
             ns as f64 / 1e6,
             self.start.elapsed().as_secs_f64(),
             self.parts.0 as f64 / 1e6,
@@ -147,7 +147,7 @@ impl Probe {
         let (turn_max, turn_p99) = spread(&mut self.turns);
         let (frame_max, frame_p99) = spread(&mut self.frames);
         eprintln!(
-            "makepad-run boot-probe: boot_s={:.2} events={} event_max_ms={} event_p99_ms={} drag_queries={} drag_max_ms={} turn_max_ms={} turn_p99_ms={} frames={} frame_max_ms={} frame_p99_ms={} stalls={}",
+            "relax boot-probe: boot_s={:.2} events={} event_max_ms={} event_p99_ms={} drag_queries={} drag_max_ms={} turn_max_ms={} turn_p99_ms={} frames={} frame_max_ms={} frame_p99_ms={} stalls={}",
             self.start.elapsed().as_secs_f64(),
             self.events.len(),
             ms(event_max),

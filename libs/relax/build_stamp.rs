@@ -1,5 +1,5 @@
 //! Build provenance, shared by the build scripts of the makepad loader and relax-compiler
-//! (#[path]; each declares `json` and `srchash` at its root): MAKEPAD_RUN_PROVENANCE =
+//! (#[path]; each declares `json` and `srchash` at its root): RELAX_PROVENANCE =
 //! "makepad <hash> jit <hash>", content hashes of the compiled files of the path packages the
 //! binary compiles, from `cargo metadata` of the package (its library-dependency closure), split into
 //! Relax's own (under libs/relax and tools/run) and the makepad crates it uses. Only file contents count:
@@ -102,7 +102,7 @@ impl Graph {
         out
     }
 
-    /// Prints MAKEPAD_RUN_PROVENANCE for the package's closure and watches every file it hashes:
+    /// Prints RELAX_PROVENANCE for the package's closure and watches every file it hashes:
     /// each path package's Rust files, Cargo.toml and literal include targets, as
     /// srchash::compiled_files lists them. Unreferenced non-Rust files do not count.
     /// `extra` joins Relax's own part: inputs the binary depends on outside those files

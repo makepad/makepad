@@ -4,7 +4,7 @@
 //! a walk (an inlined `SegGrid::nearest_with` over a local grid). The load stays when the loop
 //! writes the slot (directly or through a derived address), hands it to a call, when the slot's
 //! address is stored, handed to a call that may keep it, when the load reaches past the slot,
-//! or with MAKEPAD_RUN_OPT=-licmslot.
+//! or with RELAX_OPT=-licmslot.
 use relax_backend::passes;
 use relax_backend::rir::*;
 

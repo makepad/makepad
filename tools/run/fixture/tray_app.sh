@@ -15,8 +15,8 @@ dir=$(mktemp -d "${TMPDIR:-/tmp}/tray_app.XXXXXX") || exit 1
 mkdir -p "$dir/t"
 log=$dir/run.log
 if [ "${TRAY_APP_VISIBLE:-}" = 1 ]; then unset MAKEPAD_HIDE_WINDOWS; else export MAKEPAD_HIDE_WINDOWS=1; fi
-env TRAY_APP_OPEN=4 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HOME="$dir/home" \
-    TMPDIR="$dir/t" MAKEPAD_RUN_HOME="$dir/runhome" "$T/makepad" run relax-tray-app > "$log" 2>&1 &
+env TRAY_APP_OPEN=4 MAKEPAD_MUTE=1 MAKEPAD_HOME="$dir/home" \
+    TMPDIR="$dir/t" RELAX_HOME="$dir/runhome" "$T/makepad" run relax-tray-app > "$log" 2>&1 &
 pid=$!
 wait_for() { # wait_for <pattern> <seconds>
     local i
@@ -41,7 +41,7 @@ if grep -q "tray_app: opening its window (this desktop" "$log"; then
 else
     line=$(grep "showed itself without the run's window" "$log" | head -1)
     w=$(window)
-    echo "tray_app: ${line#makepad-run: }; the run's $w"
+    echo "tray_app: ${line#relax: }; the run's $w"
     [ -n "$line" ] || fail="$fail load-screen-stays"
     ago=$(echo "$line" | sed -n 's/.*(a tray app), \([0-9]*\) ms ago.*/\1/p')
     { [ -n "$ago" ] && [ "$ago" -lt 1000 ]; } || fail="$fail late-$ago"

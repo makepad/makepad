@@ -2,10 +2,10 @@
 """A live edit that leaves the boot text leaves no crate edited, and the next start is warm.
 
 usage: edit_undone_warm.py [--only none,refused,undone]
-  (run from the workspace root; the JIT runs through `cargo run --profile host`; MAKEPAD_RUN_STD
+  (run from the workspace root; the JIT runs through `cargo run --profile host`; RELAX_STD
    defaults to libs/relax/compiler/std)
 
-Each case copies live_kinds/ to a fresh dir with its own MAKEPAD_RUN_HOME and runs
+Each case copies live_kinds/ to a fresh dir with its own RELAX_HOME and runs
 `makepad run --verbose --ahead=minimal relax-live-kinds` (no window: a program that never presents)
 twice, hidden and muted. The first run boots cold; once its collected program is recorded it
 gets the case's edits, then it ends (its exit write runs):
@@ -17,7 +17,7 @@ What each check proves (red = which fails without which change):
     program soon after its startup goes quiet, as an app does after its first present, not only
     at its exit (red without the headless record: then it is recorded at the exit, which an edit
     before it stops, so the next start collects again);
-  - "the mark clears" (refused, undone): the edit leaves no crate edited ("makepad live: not
+  - "the mark clears" (refused, undone): the edit leaves no crate edited ("relax live: not
     edited"), so the rest of the run records and checks as an unedited run does (red without the
     marks fix: a refused edit, or one that puts the boot text back, left its crate edited);
   - "code / borrowck / keys from the cache" (refused, undone): the second run takes the crate's
@@ -39,7 +39,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "live_kinds")
 ROOT = os.path.abspath(os.path.join(HERE, "../../.."))
 JIT = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
-os.environ.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+os.environ.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
 WAIT = float(os.environ.get("EDIT_UNDONE_WAIT", "300"))
 RECORD_WAIT = float(os.environ.get("EDIT_UNDONE_RECORD_WAIT", "10"))
 # (the record lands about 2 s after the start, the edits take about 3 s more)
@@ -48,7 +48,7 @@ K = "src/kinds.rs"
 BODY = ("pub fn body() -> u64 { 1 }", "pub fn body() -> u64 { 2 }")
 BAD = ("pub fn mfile_val() -> u64 { 0 }", "pub fn mfile_val() -> u64 { (|x: u64| x)(0) + \"x\" }")
 BROKE = ("panicked", "internal compiler error", "FATAL", "the watcher stopped")
-RECORDED = "makepad-run collected: recorded "
+RECORDED = "relax collected: recorded "
 
 
 def copy_pkg(dst):
@@ -81,9 +81,9 @@ class Run:
         self.ready = os.path.join(work, "ready")
         if os.path.exists(self.ready):
             os.remove(self.ready)
-        env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=self.ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", SANDBOX_MUTE="1", MAKEPAD_MUTE="1",
-                   MUSIC_MUTE="1", LIVE_KINDS_SECS=str(secs), MAKEPAD_RUN_LIVE_TRACE="1", MAKEPAD_RUN_BOOT_TRACE="1", MAKEPAD_REMOTE="1")
+        env = dict(os.environ, RELAX_LIVE_READY=self.ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+                   RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1",
+                   LIVE_KINDS_SECS=str(secs), RELAX_LIVE_TRACE="1", RELAX_BOOT_TRACE="1", MAKEPAD_REMOTE="1")
         self.p = subprocess.Popen(JIT + ["run", "--quiet", "--verbose", "--ahead=minimal", "relax-live-kinds"], cwd=pkg, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         threading.Thread(target=self.pump, args=(self.p.stdout, self.out), daemon=True).start()
@@ -139,15 +139,15 @@ class Run:
         def num(pattern):
             m = next((re.search(pattern, l) for l in self.lines() if re.search(pattern, l)), None)
             return int(m.group(1)) if m else None
-        return (num(r"makepad-run cache: \d+ hits, (\d+) misses"), num(r"gandalf: (\d+) fns checked"),
+        return (num(r"relax cache: \d+ hits, (\d+) misses"), num(r"gandalf: (\d+) fns checked"),
                 num(r"startup manifest of \d+ slots \(\d+ before the first present, (\d+) without cached code\)"))
 
 
 def show(tag, r):
     if os.environ.get("EDIT_UNDONE_TRACE"):
         for l in r.lines():
-            if "makepad-run collected:" in l or "makepad-run cache: " in l and " hits, " in l or l.startswith("gandalf: ") \
-                    or "startup manifest of" in l or ("makepad live:" in l and "watch round" not in l and "rewatch" not in l):
+            if "relax collected:" in l or "relax cache: " in l and " hits, " in l or l.startswith("gandalf: ") \
+                    or "startup manifest of" in l or ("relax live:" in l and "watch round" not in l and "rewatch" not in l):
                 print("  %s | %s" % (tag, l[:220]), flush=True)
         print("  %s | stats (misses, checked, uncached manifest slots): %s" % (tag, r.stats()), flush=True)
 
@@ -170,7 +170,7 @@ def case(root, name, base):
             r.p.kill()
             return [why], None
     fails = []
-    if name != "none" and not r.has("makepad live: not edited"):
+    if name != "none" and not r.has("relax live: not edited"):
         fails.append("the mark did not clear: the crate stayed edited")
     broke = r.end()
     # (the main loop's last tick: the record must come before it, not in the exit write)
@@ -194,8 +194,8 @@ def case(root, name, base):
                 fails.append("second run: no %s count" % what)
             elif g > b:
                 fails.append("second run: %s %d, the unedited baseline's %d" % (what, g, b))
-    if recorded_first and not r2.has("makepad-run collected: restored "):
-        why = [l for l in r2.lines() if "makepad-run collected: not restored" in l or "makepad-run collected: prefix" in l]
+    if recorded_first and not r2.has("relax collected: restored "):
+        why = [l for l in r2.lines() if "relax collected: not restored" in l or "relax collected: prefix" in l]
         fails.append("second run: the collected program was not restored (%s)" % (why[0].strip()[:160] if why else "no restore line"))
     if not recorded_first:
         print("%s: the record did not land before the edit in %.0f s: the restore is not checked" % (name, RECORD_WAIT), flush=True)

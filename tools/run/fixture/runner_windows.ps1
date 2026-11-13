@@ -16,7 +16,7 @@ $ErrorActionPreference = 'Continue'
 $Root = (Get-Location).Path
 $Target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 $Makepad = [IO.Path]::GetFullPath((Join-Path $Target 'host\makepad.exe'))
-if (-not $env:MAKEPAD_RUN_STD) { $env:MAKEPAD_RUN_STD = Join-Path $Root 'libs\relax\compiler\std' }
+if (-not $env:RELAX_STD) { $env:RELAX_STD = Join-Path $Root 'libs\relax\compiler\std' }
 Remove-Item env:MAKEPAD_HIDE_WINDOWS -ErrorAction SilentlyContinue
 
 cargo build --profile host -q --manifest-path (Join-Path $Root 'Cargo.toml') -p makepad-run --bin makepad
@@ -27,7 +27,7 @@ $home_ = Join-Path $tmp 'home'
 $null = New-Item -ItemType Directory -Force $home_
 $outFile = Join-Path $tmp 'out.txt'
 $errFile = Join-Path $tmp 'err.txt'
-$env:MAKEPAD_RUN_HOME = $home_
+$env:RELAX_HOME = $home_
 $env:MAKEPAD_HOME = Join-Path $tmp 'makepad'
 $env:APPDATA = Join-Path $tmp 'appdata'
 $link = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Makepad\Task.lnk'

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Live edits next to an impl that matches `Self::Variant { .. }` struct variants.
 
-usage: run.py --makepad <makepad binary>   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary>   (RELAX_STD in the environment)
 
 Copies pkg/ to a temporary dir, runs it (a working tree: live) and edits src/main.rs while it runs.
 ease.rs (never edited) has `match self { Self::Pow { begin, end } => .. }`; makepad's
@@ -24,9 +24,9 @@ pkg = os.path.join(tmp, "pkg")
 shutil.copytree(os.path.join(HERE, "pkg"), pkg)
 main = os.path.join(pkg, "src", "main.rs")
 base = open(main).read()
-# the live driver writes this file once it watches the sources (MAKEPAD_RUN_LIVE_READY)
+# the live driver writes this file once it watches the sources (RELAX_LIVE_READY)
 ready = os.path.join(tmp, "live-ready")
-env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=ready, MAKEPAD_RUN_CACHE="0")
+env = dict(os.environ, RELAX_LIVE_READY=ready, RELAX_CACHE="0")
 p = subprocess.Popen([relax, "run", "--quiet", "relax-live-selfvariant"], cwd=pkg, env=env, stdout=subprocess.PIPE,
                      stderr=subprocess.PIPE, text=True, start_new_session=True)
 out, err = [], []
@@ -78,7 +78,7 @@ try:
     layout = body.replace("    pub a: u64,\n", "    pub a: u64,\n    pub b: u64,\n").replace("Pad { a: 1 }", "Pad { a: 1, b: 8 }").replace("p.a + 1 + ease(", "p.a + p.b + extra() + ease(") + "\nfn extra() -> u64 {\n    0\n}\n"
     save(layout)
     # (the running Pad's new field reads its default 0: 1 + 0 + 0 + 3)
-    ok = wait(lambda: any("makepad live: main.rs" in l for l in err[n:]))
+    ok = wait(lambda: any("relax live: main.rs" in l for l in err[n:]))
     time.sleep(0.5)
     step("layout edit next to a Self::Variant match: applied, no E0412 (%s)" % (last_value(),), ok and last_value() == 4 and no_e0412(n))
     n = len(err)

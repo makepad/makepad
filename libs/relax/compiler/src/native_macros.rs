@@ -1,6 +1,18 @@
-//! Makepad proc macros are native-only and must match the linked package closure.
+//! Source-matched native proc macros (relax_native_macros: the base set and the sets the host
+//! registered): a macro runs natively only when its package closure matches the linked one.
 use crate::macro_reg::{Entry, Reg};
-use relax_native_macros::Entry as Native;
+use relax_native_macros::{Entry as Native, Package};
+
+/// Every set's packages by crate name (relax_native_macros::sets; the first read fixes the sets).
+fn packages() -> &'static std::collections::HashMap<&'static str, &'static Package> {
+    static PACKAGES: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static Package>> = std::sync::OnceLock::new();
+    PACKAGES.get_or_init(|| relax_native_macros::sets().iter().flat_map(|s| s.packages).map(|p| (p.name, p)).collect())
+}
+
+/// Every set's entries.
+fn entries() -> impl Iterator<Item = &'static Native> {
+    relax_native_macros::sets().iter().flat_map(|s| s.entries)
+}
 
 static SOURCE_READS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub fn report(profile: bool) {
@@ -19,36 +31,26 @@ pub struct Mismatch {
 }
 impl std::fmt::Display for Mismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the proc macros in this tree differ from those built into makepad: {} [{}: {}: {}]", crate::srchash::rebuild_hint(), self.package, self.file, self.reason)
+        write!(f, "the proc macros in this tree differ from those built into {tool}: {} [{}: {}: {}]", crate::srchash::rebuild_hint(crate::tool_name()), self.package, self.file, self.reason, tool = crate::tool_name())
     }
 }
 impl std::error::Error for Mismatch {}
 
 pub fn required(name: &str) -> bool {
-    relax_native_macros::PACKAGES.iter().any(|(n, _)| *n == name)
+    packages().contains_key(name)
 }
 
 fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap<String, Vec<u8>>) -> Result<(), Mismatch> {
     let u = &reg.units[unit];
     let error = |file: String, reason: String| Mismatch { package: u.name.clone(), file, reason };
-    let Some((_, files)) = relax_native_macros::PACKAGES.iter().find(|(name, _)| *name == u.name) else {
-        return Err(error(u.src_path.clone(), "dependency is not built into makepad".into()));
+    let Some(package) = packages().get(u.name.as_str()) else {
+        return Err(error(u.src_path.clone(), format!("dependency is not built into {tool}", tool = crate::tool_name())));
     };
-    if u.proc_macro != relax_native_macros::ENTRIES.iter().any(|n| n.krate == u.name) {
+    let files = package.files;
+    if u.proc_macro != entries().any(|n| n.krate == u.name) {
         return Err(error(u.src_path.clone(), "proc-macro crate kind differs".into()));
     }
-    let features: &[&str] = match u.name.as_str() {
-        "makepad_derive_widget" => &["default", "nightly"],
-        // (the loader's own graph, `makepad check makepad-run`, asks for the build it links)
-        "makepad_live_id" => &["default", "host-shims"],
-        // see `optional` below: the target side's feature of a graph that links relax-native-macros
-        "makepad_micro_proc_macro" => &["relax-tokens"],
-        // the loader's copy is built with it (the loader links makepad-hal, which enables it): a
-        // graph that links makepad-hal (its own tests) asks for that build
-        "makepad_relax_api" => &["host-shims"],
-        _ => &[],
-    };
-    if u.edition != 2021 || !u.features.iter().all(|f| features.contains(&f.as_str())) {
+    if u.edition != 2021 || !u.features.iter().all(|f| package.features.contains(&f.as_str())) {
         return Err(error(u.src_path.clone(), format!("edition {} or features {:?} differ", u.edition, u.features)));
     }
     let root = std::path::Path::new(&u.src_path).parent().and_then(|p| p.parent())
@@ -57,7 +59,7 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
         return Err(error(u.src_path.clone(), "crate root is not src/lib.rs".into()));
     }
     let _why = crate::why::enabled().then(|| crate::why::enter(crate::why::Cause::new(&u.src_path, 1, "native-macro-validation", &u.name)));
-    for (path, expected) in *files {
+    for (path, expected) in files {
         let path = root.join(path);
         let actual = if let Some(bytes) = overlays.get(&crate::vfs::normalize_path(&path.to_string_lossy())) {
             std::sync::Arc::<[u8]>::from(bytes.as_slice())
@@ -88,7 +90,6 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
     if crate::vfs::exists(root.join("build.rs")) && !files.iter().any(|(p, _)| *p == "build.rs") {
         return Err(error(root.join("build.rs").display().to_string(), "build script was added".into()));
     }
-    let (_, expected) = relax_native_macros::DEPENDENCIES.iter().find(|(name, _)| *name == u.name).unwrap();
     // A graph that also links relax-native-macros as a library (relax-compiler's) holds
     // micro_proc_macro once, with the target side's `relax-tokens` (unitgraph: host and target
     // copies are one crate). The proc-macro side of that graph is the accepted one plus that
@@ -97,20 +98,31 @@ fn validate_package(reg: &Reg, unit: usize, overlays: &std::collections::HashMap
     // the sysroot's proc_macro (run.rs with_sysroot_proc_macro) is no Cargo dependency
     let sysroot = |dep: usize, alias: &str| alias == "proc_macro" && reg.units[dep].name == "proc_macro";
     let deps: Vec<&(usize, String)> = u.deps.iter().filter(|(dep, alias)| !optional(alias) && !sysroot(*dep, alias)).collect();
-    if deps.len() != expected.len() {
-        return Err(error(root.join("Cargo.toml").display().to_string(), "dependency count differs".into()));
-    }
-    for name in *expected {
-        let (dep, _) = deps.iter().copied().find(|(_, alias)| alias == name)
-            .ok_or_else(|| error(root.join("Cargo.toml").display().to_string(), format!("missing dependency alias {name}")))?;
-        if reg.units[*dep].name != *name {
-            return Err(error(root.join("Cargo.toml").display().to_string(), format!("dependency {name} resolves to {}", reg.units[*dep].name)));
-        }
-        if !required(&reg.units[*dep].name) {
-            return Err(error(root.join("Cargo.toml").display().to_string(), format!("dependency {name} is not built into makepad")));
-        }
-    }
+    check_deps(reg, &deps, package.deps).map_err(|reason| error(root.join("Cargo.toml").display().to_string(), reason))?;
+    Ok(())
+}
 
+/// A package's graph dependencies against its manifest's (relax_native_macros `Package::deps`,
+/// whose bytes the graph's manifest equals): each one is a dependency the manifest declares,
+/// resolves to the crate of its name and is built in; an unconditional one is in every graph, an
+/// optional or target-specific one in the graphs whose features and target select it.
+fn check_deps(reg: &Reg, deps: &[&(usize, String)], manifest: &[(&str, bool)]) -> Result<(), String> {
+    for (dep, alias) in deps.iter().copied() {
+        if !manifest.iter().any(|(name, _)| name == alias) {
+            return Err(format!("dependency alias {alias} is not in the manifest built into {tool}", tool = crate::tool_name()));
+        }
+        if reg.units[*dep].name != *alias {
+            return Err(format!("dependency {alias} resolves to {}", reg.units[*dep].name));
+        }
+        if !required(alias) {
+            return Err(format!("dependency {alias} is not built into {tool}", tool = crate::tool_name()));
+        }
+    }
+    for (name, _) in manifest.iter().filter(|(_, conditional)| !conditional) {
+        if !deps.iter().any(|(_, alias)| alias == name) {
+            return Err(format!("missing dependency alias {name}"));
+        }
+    }
     Ok(())
 }
 
@@ -131,7 +143,7 @@ impl Graph {
             entries: (0..reg.units.len()).map(|_| Default::default()).collect(), overlays: Default::default(), watch_paths: Vec::new(), reg };
         for (unit, u) in graph.reg.units.iter().enumerate().filter(|(_, u)| required(&u.name)) {
             graph.own[unit] = Some(validate_package(&graph.reg, unit, &graph.overlays));
-            graph.entries[unit].extend(relax_native_macros::ENTRIES.iter().filter(|n| n.krate == u.name).map(|n| (n.fname.to_string(), n)));
+            graph.entries[unit].extend(entries().filter(|n| n.krate == u.name).map(|n| (n.fname.to_string(), n)));
         }
         graph.propagate();
         graph.watch_paths = graph.input_paths();
@@ -162,7 +174,7 @@ impl Graph {
     }
     fn missing(&self, entry: &Entry) -> String {
         let u = &self.reg.units[entry.unit];
-        Mismatch { package: u.name.clone(), file: u.src_path.clone(), reason: format!("entry {} is not built into makepad", entry.fname) }.to_string()
+        Mismatch { package: u.name.clone(), file: u.src_path.clone(), reason: format!("entry {} is not built into {tool}", entry.fname, tool = crate::tool_name()) }.to_string()
     }
     fn verdict(&self) -> Result<(), String> { self.verdicts.iter().find(|v| v.is_err()).cloned().unwrap_or(Ok(())) }
     fn find(&self, entry: &Entry) -> Result<Option<&'static Native>, String> {
@@ -199,9 +211,8 @@ impl Graph {
         let mut paths = std::collections::BTreeSet::new();
         for (_, u) in self.reg.units.iter().enumerate().filter(|(i, _)| self.own[*i].is_some()) {
             let root = std::path::Path::new(&u.src_path).parent().unwrap().parent().unwrap();
-            let (_, inputs) = relax_native_macros::PACKAGES.iter().find(|(n, _)| *n == u.name).unwrap();
             // Watch directories too: an added source or build script has no embedded file.
-            for (relative, _) in *inputs {
+            for (relative, _) in packages()[u.name.as_str()].files {
                 let path = root.join(relative);
                 paths.insert(path.to_string_lossy().into_owned());
                 for parent in path.ancestors().skip(1).take_while(|p| p.starts_with(root)) {
@@ -283,8 +294,7 @@ mod tests {
         let _cleanup = Cleanup(root.clone());
         let mut reg = Reg::default();
         for name in ["makepad_micro_proc_macro", "makepad_micro_serde_derive_impl", "makepad_micro_serde_derive"] {
-            let (_, files) = relax_native_macros::PACKAGES.iter().find(|(n, _)| *n == name).unwrap();
-            for (path, bytes) in *files {
+            for (path, bytes) in packages()[name].files {
                 let path = root.join(name).join(path);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 std::fs::write(path, bytes).unwrap();
@@ -295,14 +305,26 @@ mod tests {
         }
         reg.units[2].deps.push((0, "makepad_micro_proc_macro".into()));
         assert!(checked(&reg).is_ok());
+        // The dependencies are the manifests' (gen.rs): an optional one is conditional, a plain one not.
+        assert_eq!(packages()["makepad_micro_proc_macro"].deps, &[("relax_lex", true)], "an optional manifest dependency");
+        assert_eq!(packages()["makepad_micro_serde_derive"].deps, &[("makepad_micro_proc_macro", false), ("makepad_micro_serde_derive_impl", false)], "plain manifest dependencies");
+        // A graph whose features or target leave out a conditional dependency passes; one without an
+        // unconditional dependency, or with one the manifest lacks, does not.
+        let manifest = [("makepad_micro_proc_macro", false), ("makepad_micro_serde_derive_impl", true)];
+        let deps = |units: &[usize]| units.iter().map(|&unit| (unit, reg.units[unit].name.clone())).collect::<Vec<_>>();
+        let check = |graph: &[(usize, String)]| check_deps(&reg, &graph.iter().collect::<Vec<_>>(), &manifest);
+        assert_eq!(check(&deps(&[0, 1])), Ok(()), "the conditional dependency selected");
+        assert_eq!(check(&deps(&[0])), Ok(()), "the conditional dependency left out");
+        assert_eq!(check(&deps(&[1])).unwrap_err(), "missing dependency alias makepad_micro_proc_macro", "an unconditional dependency left out");
+        assert!(check(&deps(&[0, 2])).unwrap_err().contains("dependency alias makepad_micro_serde_derive is not in the manifest"), "a dependency the manifest lacks");
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         let mut graph = Graph::new(reg.clone());
         assert_eq!(SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed) - before, 11);
-        let native = relax_native_macros::ENTRIES.iter().find(|n| n.krate == reg.units[2].name).unwrap();
+        let native = entries().find(|n| n.krate == reg.units[2].name).unwrap();
         let entry = Entry { unit: 2, fname: native.fname.into(), kind: crate::macro_reg::Kind::Derive };
         assert!(graph.find(&entry).unwrap().is_some());
         let missing = Entry { fname: "missing_native_entry".into(), ..entry.clone() };
-        assert!(graph.find(&missing).err().unwrap().contains("entry missing_native_entry is not built into makepad"));
+        assert!(graph.find(&missing).err().unwrap().contains("entry missing_native_entry is not built into relax"));
         let helper = root.join("makepad_micro_proc_macro/src/macro_lib.rs");
         let original = std::fs::read(&helper).unwrap();
         std::fs::write(&helper, b"// changed helper").unwrap();
@@ -319,11 +341,11 @@ mod tests {
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         assert!(graph.find(&entry).err().unwrap().contains("source bytes differ"));
         assert_eq!(SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed), before);
-        assert!(mismatch.to_string().contains("the proc macros in this tree differ from those built into makepad: rebuild makepad by starting it through cargo: cargo run --release -p makepad-run --bin makepad --"));
+        assert!(mismatch.to_string().contains("the proc macros in this tree differ from those built into relax: rebuild relax by starting it through cargo: cargo run --release -p makepad-run --bin makepad --"));
         std::fs::write(&helper, &original).unwrap();
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         graph.reload(&[(helper.to_str().unwrap(), None), (helper.to_str().unwrap(), None)]);
-        let count = relax_native_macros::PACKAGES.iter().find(|(n, _)| *n == "makepad_micro_proc_macro").unwrap().1.len();
+        let count = packages()["makepad_micro_proc_macro"].files.len();
         assert_eq!(SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed) - before, count);
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         assert!(graph.find(&entry).unwrap().is_some());

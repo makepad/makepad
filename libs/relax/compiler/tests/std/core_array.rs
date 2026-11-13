@@ -34,3 +34,40 @@ fn a03_from_fn_const_generic() {
     let d: [i8; 32] = Default::default();
     println!("| {}", d.len());
 }
+#[test]
+fn a04_vec_into_boxed_array() {
+    // relax issue 98: a Vec of N elements is a Box<[T; N]>, any other comes back as it was
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static DROPS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Debug)]
+    struct D(u8);
+    impl Drop for D {
+        fn drop(&mut self) {
+            // the sum of the dropped values: which ones dropped, each once
+            DROPS.fetch_add(self.0 as usize, Ordering::SeqCst);
+        }
+    }
+    let b: Box<[u8; 3]> = vec![1u8, 2, 3].try_into().unwrap();
+    println!("| boxed {:?}", b);
+    let big: Box<[usize; 288]> = (0..288).collect::<Vec<_>>().try_into().unwrap();
+    println!("| big {} {}", big.len(), big.iter().sum::<usize>());
+    let mut spare: Vec<u32> = Vec::with_capacity(10);
+    spare.extend([7u32, 8]);
+    let fit: Box<[u32; 2]> = spare.try_into().unwrap();
+    println!("| fit {:?}", fit);
+    let mut short: Vec<String> = Vec::with_capacity(8);
+    short.extend(["a", "b"].map(String::from));
+    let back = <Box<[String; 3]>>::try_from(short).unwrap_err();
+    println!("| back {:?} {}", back, back.capacity());
+    let zst: Box<[(); 4]> = vec![(); 4].try_into().unwrap();
+    let empty: Box<[u8; 0]> = Vec::new().try_into().unwrap();
+    println!("| zst {} empty {}", zst.len(), empty.len());
+    let owned: Box<[D; 3]> = vec![D(1), D(2), D(3)].try_into().unwrap();
+    let after_move = DROPS.load(Ordering::SeqCst);
+    println!("| owned {:?} drops {}", owned, after_move);
+    drop(owned);
+    let refused = <Box<[D; 2]>>::try_from(vec![D(4)]).unwrap_err();
+    println!("| drops {} refused {:?}", DROPS.load(Ordering::SeqCst), refused);
+    drop(refused);
+    println!("| drops {}", DROPS.load(Ordering::SeqCst));
+}

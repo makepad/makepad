@@ -1,9 +1,17 @@
 //! Literal validation of the Rust scanner (rustc_parse `cook_lexer_literal`, rustc_literal_escaper).
 use relax_lex::lexer::lex;
 
+/// A file's first error where all of it is live: a lexer error, else the first literal error rustc
+/// reports where it lowers the literal (the parser drops those of cfg-stripped code).
 fn err(src: &str, edition: u16) -> Option<String> {
     let mut toks = Vec::new();
-    lex(src.as_bytes(), edition, &mut toks).map_err(|e| e.msg.into_owned()).and_then(|_| relax_lex::lexer::validate_file(src.as_bytes(), &toks, edition).map_err(|e| e.msg.into_owned())).err()
+    if let Err(e) = lex(src.as_bytes(), edition, &mut toks) {
+        return Some(e.msg.into_owned());
+    }
+    match relax_lex::lexer::validate_file(src.as_bytes(), &toks, edition) {
+        Err(e) => Some(e.msg.into_owned()),
+        Ok(lowers) => lowers.into_iter().next().map(|e| e.msg.into_owned()),
+    }
 }
 
 #[test]

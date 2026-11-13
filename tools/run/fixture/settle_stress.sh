@@ -3,10 +3,10 @@
 # Memory is freed only by its owner's Drop, never in bulk, so this checks the runtime side of that
 # rule under the worst interleaving we can force: each package starts hidden and muted (cold cache
 # of its own) with
-#   MAKEPAD_RUN_SETTLE_STRESS=$PERIOD  a settle (settle_drop, retire, trim) every PERIOD ms while
+#   RELAX_SETTLE_STRESS=$PERIOD  a settle (settle_drop, retire, trim) every PERIOD ms while
 #                                      compiles, O3 bursts and speculation run,
-#   MAKEPAD_RUN_ZAP=1                  every freed compiler / job-arena block filled with 0xcd,
-#   MAKEPAD_RUN_JOB_CHECK=1            a line for every job that left blocks in its job arena.
+#   RELAX_ZAP=1                  every freed compiler / job-arena block filled with 0xcd,
+#   RELAX_JOB_CHECK=1            a line for every job that left blocks in its job arena.
 # Probes across the settles (the 2026-10-20 P0: inspect's records and a counted fn): `count $PROBE` is
 # installed, removed and installed again three times before the first settle; after RUNS settles the
 # counted fn must keep counting, and rm + count again must work. Then a clean quit (exit status 0).
@@ -37,16 +37,16 @@ for pkg in $PACKAGES; do
     d=$dir/$pkg
     k=$((k + 1)); td=$dir/t$k
     mkdir -p "$d/home" "$td"
-    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$td" \
-        MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 MAKEPAD_RUN_VERBOSE=1 \
-        MAKEPAD_RUN_SETTLE_STRESS="$PERIOD" MAKEPAD_RUN_ZAP=1 MAKEPAD_RUN_JOB_CHECK=1 \
+    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 MAKEPAD_HOME="$d/home" TMPDIR="$td" \
+        RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" MAKEPAD_WINDOW=1280x800@1 RELAX_VERBOSE=1 \
+        RELAX_SETTLE_STRESS="$PERIOD" RELAX_ZAP=1 RELAX_JOB_CHECK=1 \
         $J run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
     : > "$d/fixture.log"
     ask() { TMPDIR="$td" $J inspect $pid "$@" as=json >> "$d/probes.log" 2>&1; }
     drive() { for r in 1 2 3; do TMPDIR="$td" $JR app $pid $DRIVE > /dev/null 2>&1; done; }
     hits() { TMPDIR="$td" $J inspect $pid probes as=json 2>/dev/null | grep -o '"hits":[0-9]*' | head -1 | cut -d: -f2; }
-    settles() { grep -ac "makepad-run mem: settle at" "$d/run.log"; }
+    settles() { grep -ac "relax mem: settle at" "$d/run.log"; }
     n=0
     until TMPDIR="$td" $J inspect $pid ping > /dev/null 2>&1 && grep -q "first frame at" "$d/run.log"; do
         n=$((n + 1)); [ $n -ge $((WAIT * 5)) ] && break
@@ -69,7 +69,7 @@ for pkg in $PACKAGES; do
         while [ $i -lt "$AFTER" ]; do drive; sleep 1; i=$((i + 1)); done
         # and the first settle rebuild (it waits for the run's mid-run collected write)
         n=0
-        until grep -aq "makepad-run settle rebuild at" "$d/run.log"; do
+        until grep -aq "relax settle rebuild at" "$d/run.log"; do
             n=$((n + 1)); [ $n -ge $((WAIT * 5)) ] && break
             kill -0 $pid 2>/dev/null || break
             sleep 0.2
@@ -100,12 +100,12 @@ for pkg in $PACKAGES; do
     [ $alive = 1 ] && [ $rc -ne 0 ] && why="$why exit status $rc;"
     fx=$(grep -aE "no settle|stopped counting|failed" "$d/fixture.log" | head -1)
     [ -n "$fx" ] && why="$why $fx;"
-    bad=$(grep -aE "makepad-run: fault|fault (at|in) |panicked|Segmentation|Bus error|SIGSEGV|SIGBUS|SIGILL|Aborted|POISONED|run monitor ended|state may be corrupt" "$d/run.log" | head -2)
+    bad=$(grep -aE "relax: fault|fault (at|in) |panicked|Segmentation|Bus error|SIGSEGV|SIGBUS|SIGILL|Aborted|POISONED|run monitor ended|state may be corrupt" "$d/run.log" | head -2)
     [ -n "$bad" ] && why="$why $bad;"
-    jobs=$(grep -ac "^makepad-run job:" "$d/run.log")
-    rebuilds=$(grep -ac "makepad-run settle rebuild at" "$d/run.log")
+    jobs=$(grep -ac "^relax job:" "$d/run.log")
+    rebuilds=$(grep -ac "relax settle rebuild at" "$d/run.log")
     # (the last deferral names the refusing check: a restore that failed says which one)
-    [ "${NEED_REBUILD:-1}" = 1 ] && [ "$rebuilds" -eq 0 ] && why="$why no settle rebuild ($(grep -a 'settle rebuild deferred\|settle rebuild refused' "$d/run.log" | tail -1 | sed 's/^makepad-run //' | cut -c1-600));"
+    [ "${NEED_REBUILD:-1}" = 1 ] && [ "$rebuilds" -eq 0 ] && why="$why no settle rebuild ($(grep -a 'settle rebuild deferred\|settle rebuild refused' "$d/run.log" | tail -1 | sed 's/^relax //' | cut -c1-600));"
     [ "${STRICT_JOBS:-0}" = 1 ] && [ "$jobs" -gt 0 ] && why="$why $jobs jobs left survivors;"
     if [ -z "$why" ]; then
         echo "settle_stress: $pkg: ok ($(grep -a 'settles' "$d/fixture.log" | cut -c16-); $rebuilds settle rebuilds; $jobs jobs left survivors)"

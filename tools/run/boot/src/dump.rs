@@ -1,4 +1,4 @@
-//! `MAKEPAD_RUN_BOOT_DUMP=<dir>[@<ms>]`: the boot window's frames as PNG files, for looking at a
+//! `RELAX_BOOT_DUMP=<dir>[@<ms>]`: the boot window's frames as PNG files, for looking at a
 //! hidden run (the HAL's snapshot of the presented window, answered by a `Readback` event). While
 //! the JIT ring shows, the window's snapshot has it (the HAL's badge layer, as presented).
 use makepad_hal::{format, usage, Attr, CmdWriter, Id};
@@ -15,21 +15,21 @@ pub struct Dump {
     next: u32,
     pending: Vec<(u32, u128)>,
     target: Option<[u32; 2]>,
-    /// `MAKEPAD_RUN_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
+    /// `RELAX_BOOT_HOLD=1`: keep drawing (into a texture) after the app has the window
     pub hold: bool,
-    /// `MAKEPAD_RUN_BOOT_CHROME=client|wm:<family>|<x>,<y>,<w>,<h>`: the window chrome a hidden run
+    /// `RELAX_BOOT_CHROME=client|wm:<family>|<x>,<y>,<w>,<h>`: the window chrome a hidden run
     /// (which has no window system, so no window buttons) lays its caption out for: app-drawn
     /// buttons, a makepad WM's controls in that desktop family, or native ones at that rect (points)
     pub chrome: Option<crate::caption::Chrome>,
-    /// `MAKEPAD_RUN_RING_HOVER=1`: the JIT ring is drawn hovered, its tooltip showing (a hidden
-    /// run has no pointer); `MAKEPAD_RUN_RING_ALERT=stale|panic`: its dot shows
+    /// `RELAX_RING_HOVER=1`: the JIT ring is drawn hovered, its tooltip showing (a hidden
+    /// run has no pointer); `RELAX_RING_ALERT=stale|panic`: its dot shows
     pub ring_hover: bool,
     pub ring_alert: Option<crate::ring::Alert>,
 }
 
 impl Dump {
     pub fn from_env() -> Option<Self> {
-        let spec = std::env::var("MAKEPAD_RUN_BOOT_DUMP").ok()?;
+        let spec = std::env::var("RELAX_BOOT_DUMP").ok()?;
         let (dir, every) = match spec.rsplit_once('@') {
             Some((dir, ms)) => (dir, ms.parse().unwrap_or(250)),
             None => (spec.as_str(), 250),
@@ -43,8 +43,8 @@ impl Dump {
             next: 1,
             pending: Vec::new(),
             target: None,
-            hold: std::env::var_os("MAKEPAD_RUN_BOOT_HOLD").is_some(),
-            chrome: std::env::var("MAKEPAD_RUN_BOOT_CHROME").ok().and_then(|spec| {
+            hold: std::env::var_os("RELAX_BOOT_HOLD").is_some(),
+            chrome: std::env::var("RELAX_BOOT_CHROME").ok().and_then(|spec| {
                 if spec == "client" {
                     return Some(crate::caption::Chrome { client: true, ..Default::default() });
                 }
@@ -57,8 +57,8 @@ impl Dump {
                 let native: [f32; 4] = v.try_into().ok()?;
                 Some(crate::caption::Chrome { native, ..Default::default() })
             }),
-            ring_hover: std::env::var("MAKEPAD_RUN_RING_HOVER").as_deref() == Ok("1"),
-            ring_alert: match std::env::var("MAKEPAD_RUN_RING_ALERT").as_deref() {
+            ring_hover: std::env::var("RELAX_RING_HOVER").as_deref() == Ok("1"),
+            ring_alert: match std::env::var("RELAX_RING_ALERT").as_deref() {
                 Ok("stale") => Some(crate::ring::Alert::Stale),
                 Ok("panic") => Some(crate::ring::Alert::Panic),
                 _ => None,

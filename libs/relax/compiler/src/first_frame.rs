@@ -71,7 +71,7 @@ fn remember(package: &str, state: &str, ms: u64) -> std::io::Result<()> {
 /// at least the state's floor; and its basis in words.
 fn deadline(package: &str, state: &str) -> (u64, String) {
     let rows = measured().unwrap_or_else(|e| {
-        eprintln!("makepad: cannot read first-frame history {}: {e}", history().display());
+        eprintln!("relax: cannot read first-frame history {}: {e}", history().display());
         Vec::new()
     });
     deadline_of(&rows, package, state, &jit_id())
@@ -157,7 +157,7 @@ pub(crate) fn presented() {
 /// a batch program, whose main goes quiet without either. A batch program draws no frame: no
 /// deadline, no load screen. Should it start an app after all, the app has its deadline (and makes
 /// its own window). A program that presented is never taken for one: an app whose own main skipped
-/// `app_started` lost the window it drew in when its compiles went quiet (Scope, 11-06).
+/// `app_started` lost the window it drew in when its compiles went quiet (an app, 11-06).
 fn watch_app() -> f64 {
     let mut batch = false;
     loop {
@@ -169,7 +169,7 @@ fn watch_app() -> f64 {
             Some(0) => {
                 batch = true;
                 if crate::run::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-                    eprintln!("makepad-run: main went quiet without an app: a batch program, no first frame");
+                    eprintln!("relax: main went quiet without an app: a batch program, no first frame");
                 }
                 crate::jit::batch_program();
                 crate::run::batch_program();
@@ -182,7 +182,7 @@ fn watch_app() -> f64 {
 /// The first frame's watch of a program that links the platform (`watch_app`).
 pub(crate) fn arm(package: &str) {
     let _kept = crate::zone_alloc::kept();
-    let state = if std::env::var("MAKEPAD_RUN_CACHE_STATE").as_deref() == Ok("warm") { "warm" } else { "cold" };
+    let state = if std::env::var("RELAX_CACHE_STATE").as_deref() == Ok("warm") { "warm" } else { "cold" };
     let package = package.to_string();
     if let Err(e) = crate::run_threads::spawn("first-frame-watch", move || {
         let _kept = crate::zone_alloc::kept();
@@ -191,10 +191,10 @@ pub(crate) fn arm(package: &str) {
         let started = watch_app();
         if crate::run_threads::ending() { return; }
         let (secs, basis) = deadline(&package, state);
-        if !crate::run::silent() { eprintln!("makepad: first-frame timeout {secs} s ({basis})"); }
+        if !crate::run::silent() { eprintln!("relax: first-frame timeout {secs} s ({basis})"); }
         watch(&package, state, started, secs, &basis);
     }) {
-        eprintln!("makepad: cannot arm first-frame timeout: {e}");
+        eprintln!("relax: cannot arm first-frame timeout: {e}");
         crate::run::failed_run(&format!("cannot arm the first-frame timeout: {e}"));
     }
 }
@@ -229,7 +229,7 @@ pub(crate) fn arm_window(package: &str) {
         let _ = WINDOW_THREAD.set(std::thread::current());
         watch_window(&package);
     }) {
-        eprintln!("makepad: cannot arm the boot window's first-frame timeout: {e}");
+        eprintln!("relax: cannot arm the boot window's first-frame timeout: {e}");
         crate::run::failed_run(&format!("cannot arm the boot window's first-frame timeout: {e}"));
     }
 }
@@ -246,7 +246,7 @@ fn watch_window(package: &str) {
             if !compiling() { break (secs, basis); }
             if !said {
                 said = true;
-                if !crate::run::silent() { eprintln!("makepad: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+                if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
             }
             std::thread::park_timeout(Duration::from_millis(500));
             continue;
@@ -257,9 +257,9 @@ fn watch_window(package: &str) {
     };
     if WINDOW_OPEN.load(Acquire) { return; }
     let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis}): the boot window has not presented"));
-    eprintln!("makepad: first-frame timeout: {package}'s boot window presented no frame in {secs} s ({basis})");
-    eprintln!("makepad: likely cause: {}", s.cause);
-    eprintln!("makepad: report: {}", s.path.display());
+    eprintln!("relax: first-frame timeout: {package}'s boot window presented no frame in {secs} s ({basis})");
+    eprintln!("relax: likely cause: {}", s.cause);
+    eprintln!("relax: report: {}", s.path.display());
     let reason = format!("{} [report {}]", s.cause, s.path.display());
     persist("ff", Outcome::FirstFrameTimeout, package, &reason);
     crate::run::failed_run(&format!("first-frame timeout: {}", s.cause));
@@ -280,7 +280,7 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
                 // a warm start that compiled its code fresh is a cold start's sample
                 let state = if state == "warm" && cold_like() { "cold" } else { state };
                 if let Err(e) = remember(package, state, ms.round() as u64) {
-                    eprintln!("makepad: cannot write first-frame history {}: {e}", history().display());
+                    eprintln!("relax: cannot write first-frame history {}: {e}", history().display());
                 }
                 return;
             }
@@ -293,14 +293,14 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
             deadline_ms = started + secs as f64 * 1000.0;
             left = deadline_ms - crate::clock::ms_since_process_start();
             if !crate::run::silent() {
-                eprintln!("makepad: first-frame: the warm start took cached code for {linked} slots and missed {miss} lookups (an edit reached most of the program, or its entries are gone): it starts cold, timeout {secs} s ({basis})");
+                eprintln!("relax: first-frame: the warm start took cached code for {linked} slots and missed {miss} lookups (an edit reached most of the program, or its entries are gone): it starts cold, timeout {secs} s ({basis})");
             }
         }
         if left <= 0.0 {
             if !compiling() { break; }
             if !said {
                 said = true;
-                if !crate::run::silent() { eprintln!("makepad: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
+                if !crate::run::silent() { eprintln!("relax: first-frame: {secs} s passed ({basis}) and the JIT is still compiling: no timeout while it compiles"); }
             }
             // (a first present from now on still counts: the deadline moves with the compiles)
             deadline_ms = crate::clock::ms_since_process_start() + 500.0;
@@ -313,18 +313,18 @@ fn watch(package: &str, state: &str, started: f64, secs: u64, basis: &str) {
         }
     }
     if snapshot::hal_shell().as_ref().is_some_and(snapshot::all_hidden) {
-        eprintln!("makepad: {package} hid its window before its first frame; no first-frame timeout");
+        eprintln!("relax: {package} hid its window before its first frame; no first-frame timeout");
         return;
     }
     let presented = crate::jit::first_present_seen();
     let s = snapshot::capture(&format!("first-frame timeout after {secs} s ({basis})"));
     if presented {
-        eprintln!("makepad: first-frame timeout: {package} drew, but no frame of it reached the WM in {secs} s ({basis})");
+        eprintln!("relax: first-frame timeout: {package} drew, but no frame of it reached the WM in {secs} s ({basis})");
     } else {
-        eprintln!("makepad: first-frame timeout: {package} drew no frame in {secs} s ({basis})");
+        eprintln!("relax: first-frame timeout: {package} drew no frame in {secs} s ({basis})");
     }
-    eprintln!("makepad: likely cause: {}", s.cause);
-    eprintln!("makepad: report: {}", s.path.display());
+    eprintln!("relax: likely cause: {}", s.cause);
+    eprintln!("relax: report: {}", s.path.display());
     let reason = format!("{} [report {}]", s.cause, s.path.display());
     persist("ff", Outcome::FirstFrameTimeout, package, &reason);
     // An app that drew keeps running: the WM link is the suspect and ending the app shows nothing.
@@ -340,7 +340,7 @@ fn persist(prefix: &str, outcome: Outcome, package: &str, reason: &str) {
         app: package.into(), node: String::new(), pid: std::process::id(), outcome, reason: reason.into(),
         failure: String::new(), units: Vec::new(), logs: Vec::new(),
     };
-    if let Err(e) = makepad_remote::hot::persist(&record) { eprintln!("makepad: cannot persist {}: {e}", outcome.name()); }
+    if let Err(e) = makepad_remote::hot::persist(&record) { eprintln!("relax: cannot persist {}: {e}", outcome.name()); }
 }
 
 pub(crate) fn no_window(package: &str, reason: &str) {
@@ -390,7 +390,7 @@ mod tests {
 
     /// An app whose own entry never says it is one (no `app_main!`, so no `app_started`) but has
     /// presented is an app when its main goes quiet: never a batch program, whose run lets the
-    /// window go. Scope wrote its entry out by hand, and the run closed the window it drew in once
+    /// window go. An app wrote its entry out by hand, and the run closed the window it drew in once
     /// its compiles went quiet (28-109 s after each start, 11-06).
     #[test]
     fn a_program_that_presented_is_never_a_batch_program() {

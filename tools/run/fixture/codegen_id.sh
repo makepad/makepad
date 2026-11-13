@@ -5,7 +5,7 @@
 #   2. a change outside the code generator (a devhub string, libs/devhub): rebuild makepad. The binary differs,
 #      the codegen id does not, and the next warm session links the stored code: no stored entry missed
 #      (cache lookups linked + startup image slots placed >= 90% of the baseline warm session's; no more entries
-#      missed as recorded under another key or gone than the baseline warm session (MAKEPAD_RUN_WARM_STRICT
+#      missed as recorded under another key or gone than the baseline warm session (RELAX_WARM_STRICT
 #      ledger); first compiles under a quarter of the cold session's);
 #   3. a change of an RIR pass (libs/relax/codegen version.rs MAX_LOOPS): rebuild. The codegen id changes, the
 #      next session uses no stored code of the old code generator (no lookup linked, no startup image slot; first
@@ -33,14 +33,14 @@ restore() {
     cmp -s "$dir/pass.orig" "$PASS" || { cp "$dir/pass.orig" "$PASS"; build; }
 }
 trap restore EXIT
-id() { MAKEPAD_RUN_CACHE_FP=1 MAKEPAD_RUN_VERBOSE=1 $B check makepad-app-calculator 2>&1 | sed -n 's/.*codegen id \([0-9a-f]*\).*/\1/p' | head -1; }
+id() { RELAX_CACHE_FP=1 RELAX_VERBOSE=1 $B check makepad-app-calculator 2>&1 | sed -n 's/.*codegen id \([0-9a-f]*\).*/\1/p' | head -1; }
 args=$(echo "$PACKAGE" | tr ',' ' ')
 mkdir -p "$dir/home" "$dir/t"
 session() { # session <label>: one launch to idle and quit; prints its `jit` session line and its `cache` line
     label=$1
-    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MUSIC_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" MAKEPAD_RUN_WARM_STRICT=1 \
-        MAKEPAD_HOME="$dir/home" MAKEPAD_RUN_HOME="$dir/run" MAKEPAD_RUN_CACHE_DIR="$dir/run/cache" MAKEPAD_RUN_TARGET_DIR="$dir/run/target" \
-        MAKEPAD_RUN_VERBOSE=1 $B run --report-to "$dir/report.$label" $args > "$dir/log.$label" 2>&1 &
+    MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_REMOTE=1 TMPDIR="$dir/t" RELAX_WARM_STRICT=1 \
+        MAKEPAD_HOME="$dir/home" RELAX_HOME="$dir/run" RELAX_CACHE_DIR="$dir/run/cache" RELAX_TARGET_DIR="$dir/run/target" \
+        RELAX_VERBOSE=1 $B run --report-to "$dir/report.$label" $args > "$dir/log.$label" 2>&1 &
     pid=$!
     i=0
     while [ $i -lt $((WAIT * 5)) ] && kill -0 $pid 2>/dev/null && ! grep -qx present "$dir/report.$label" 2>/dev/null; do

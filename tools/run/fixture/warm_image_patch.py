@@ -4,11 +4,11 @@ is built again.
 
 usage: warm_image_patch.py [--makepad <makepad binary>]
   (run from the workspace root; the JIT runs through `cargo run --profile host` unless a binary is
-  given; MAKEPAD_RUN_STD defaults to libs/relax/compiler/std)
+  given; RELAX_STD defaults to libs/relax/compiler/std)
 
-A program that never presents is written to a fresh dir (its own MAKEPAD_RUN_HOME) and runs twice
-under `makepad run --verbose --ahead=minimal` with O3 and startup baseline code off (MAKEPAD_RUN_O3=0,
-MAKEPAD_RUN_O1=0), so the code it runs is O1:
+A program that never presents is written to a fresh dir (its own RELAX_HOME) and runs twice
+under `makepad run --verbose --ahead=minimal` with O3 and startup baseline code off (RELAX_O3=0,
+RELAX_O1=0), so the code it runs is O1:
   - `leaf` is inlined into `host` with no call and no loop before the site, so the copy runs
     unguarded (opt::unguard_prefix): a patch of `leaf` builds `host` again (reload: the slots that
     inlined it, `inlined_into`);
@@ -76,10 +76,10 @@ class Run:
         for f in (self.ready, self.stop):
             if os.path.exists(f):
                 os.remove(f)
-        env = dict(os.environ, MAKEPAD_RUN_LIVE_READY=self.ready, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-                   MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", MAKEPAD_RUN_O3="0",
-                   MAKEPAD_RUN_O1="0", WARM_IMAGE_SECS=str(secs), WARM_IMAGE_STOP=self.stop)
-        env.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+        env = dict(os.environ, RELAX_LIVE_READY=self.ready, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+                   RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", RELAX_O3="0",
+                   RELAX_O1="0", WARM_IMAGE_SECS=str(secs), WARM_IMAGE_STOP=self.stop)
+        env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
         self.p = subprocess.Popen(jit + ["run", "--quiet", "--verbose", "--ahead=minimal"] + args + ["relax-warm-image-patch"], cwd=pkg, env=env,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
         threading.Thread(target=self.pump, args=(self.p.stdout, self.out), daemon=True).start()

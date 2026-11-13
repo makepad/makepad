@@ -1176,7 +1176,7 @@ pub fn paused() -> bool {
 /// inspection goes on, so its quit runs to the end. A patch's pause ends with its install.
 pub(crate) fn quit_resumes() {
     if paused() {
-        eprintln!("makepad: a quit: the paused program goes on so that it can quit");
+        eprintln!("relax: a quit: the paused program goes on so that it can quit");
         resume_program();
     }
 }
@@ -1261,7 +1261,7 @@ static SEEN: relax_session::sync::Mutex<(Vec<Seen>, Vec<Seen>, u64)> = relax_ses
 /// new, and each runtime thread's own CPU clock (ns): about 70 us of the UI thread with 69 threads on
 /// a loaded gate box, 5 of them the clocks. Read from the full thread list (three files a
 /// thread on Linux, one of them waiting for the thread to leave its CPU) the wait's polls cost the
-/// UI thread 4-8 ms each on a loaded gate box, 8% of a core at 20 Hz: an idle Fab read as busy for
+/// UI thread 4-8 ms each on a loaded gate box, 8% of a core at 20 Hz: an idle app read as busy for
 /// two minutes.
 pub fn runtime_cpu_ns() -> u64 {
     static HOOKED: std::sync::Once = std::sync::Once::new();

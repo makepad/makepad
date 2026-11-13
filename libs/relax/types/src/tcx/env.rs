@@ -98,7 +98,7 @@ impl Envs {
         if let Some(id) = self.find(head, hash, &data) { return id; }
         let _grow = self.grow.lock().unwrap_or_else(|e| e.into_inner());
         let i = self.len.load(Relaxed) as usize;
-        assert!(i / CHUNK < MAX_CHUNKS, "makepad: environment interner full");
+        assert!(i / CHUNK < MAX_CHUNKS, "relax: environment interner full");
         let mut chunk = self.chunks[i / CHUNK].load(Relaxed);
         if chunk.is_null() {
             let layout = std::alloc::Layout::array::<Entry>(CHUNK).unwrap();

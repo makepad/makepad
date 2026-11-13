@@ -1,4 +1,4 @@
-//! Trait impls on str (Relax only: in the rustc shim these are real core's).
+//! Relax's trait impls on str.
 
 use super::{cmp_str, eq_str, StrIndex};
 use crate::cmp::Ordering;

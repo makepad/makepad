@@ -2,9 +2,9 @@
 //! notes an accepted relaxation leaves, and the write-back (`makepad fix --to-strict`) that turns
 //! the source into the plain Rust rustc accepts.
 //!
-//! Strict is the default. A crate opts in with `[package.metadata.makepad-run] relaxed = true` (every
+//! Strict is the default. A crate opts in with `[package.metadata.relax] relaxed = true` (every
 //! shipped feature) or `relaxed = ["mut", "imports"]`, minus `relaxed-deny = [..]`; the session
-//! override `MAKEPAD_RUN_RELAXED=all|none|<list>` (also `makepad run/check --relaxed[=<list>]`) replaces
+//! override `RELAX_RELAXED=all|none|<list>` (also `makepad run/check --relaxed[=<list>]`) replaces
 //! every crate's setting. Each relaxation only accepts programs strict rejects; each accepted site
 //! is recorded with the rustc error it replaces and, for write-back features, the edit.
 
@@ -76,12 +76,12 @@ pub fn finish_check() {
     if STRICT_REPORT.load(Ordering::Relaxed) {
         print_report(&notes);
     } else if !notes.is_empty() {
-        eprintln!("makepad-run relaxed: {} site(s) accepted only in relaxed mode (makepad check --strict-report lists them)", notes.len());
+        eprintln!("relax relaxed: {} site(s) accepted only in relaxed mode ({tool} check --strict-report lists them)", notes.len(), tool = crate::tool_name());
     }
     if FIX.load(Ordering::Relaxed) {
         match apply_fixes(&notes) {
-            Ok((f, e)) => eprintln!("makepad fix: {} edit(s) in {} file(s); {} site(s) without a write-back", e, f, notes.iter().filter(|n| n.fix.is_none()).count()),
-            Err(e) => eprintln!("makepad fix: {}", e),
+            Ok((f, e)) => eprintln!("relax fix: {} edit(s) in {} file(s); {} site(s) without a write-back", e, f, notes.iter().filter(|n| n.fix.is_none()).count()),
+            Err(e) => eprintln!("relax fix: {}", e),
         }
     }
 }
@@ -94,7 +94,7 @@ fn parse_list(v: &str) -> Vec<String> {
 }
 
 /// The relaxation features crate `root` (its root source file) has on: the session override if
-/// any, else its manifest's `[package.metadata.makepad-run]`.
+/// any, else its manifest's `[package.metadata.relax]`.
 pub static FEATURES_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn crate_features(options: &crate::options::Options, root: &str) -> Vec<String> {
@@ -119,7 +119,7 @@ fn crate_features_t(options: &crate::options::Options, root: &str) -> Vec<String
     Vec::new()
 }
 
-/// `[package.metadata.makepad-run]`: `relaxed = true | [..]`, `relaxed-deny = [..]`.
+/// `[package.metadata.relax]`: `relaxed = true | [..]`, `relaxed-deny = [..]`.
 fn manifest_features(toml: &str) -> Vec<String> {
     let mut in_sec = false;
     let mut on: Vec<String> = Vec::new();
@@ -127,7 +127,7 @@ fn manifest_features(toml: &str) -> Vec<String> {
     for line in toml.lines() {
         let l = line.trim();
         if l.starts_with('[') {
-            in_sec = l.trim_start_matches('[').trim_end_matches(']').trim() == "package.metadata.makepad-run";
+            in_sec = l.trim_start_matches('[').trim_end_matches(']').trim() == "package.metadata.relax";
             continue;
         }
         if !in_sec {
@@ -183,7 +183,7 @@ pub fn print_report(notes: &[Note]) {
         }
     }
     let t: Vec<String> = totals.iter().map(|(f, c)| format!("{} {}", f, c)).collect();
-    eprintln!("makepad-run strict-report: {} site(s) rustc rejects{}{}", v.len(), if t.is_empty() { "" } else { ": " }, t.join(", "));
+    eprintln!("relax strict-report: {} site(s) rustc rejects{}{}", v.len(), if t.is_empty() { "" } else { ": " }, t.join(", "));
 }
 
 /// `makepad fix --to-strict`: applies the write-back edits of every note through `apply`.
@@ -204,10 +204,10 @@ pub fn apply_fixes(notes: &[Note]) -> std::io::Result<(usize, usize)> {
         let src = std::fs::read(&f)?;
         let (out, left) = apply(&src, &es);
         for e in &left {
-            eprintln!("makepad fix: {}: edit at byte {}..{} overlaps another edit, left out", f, e.lo, e.hi);
+            eprintln!("relax fix: {}: edit at byte {}..{} overlaps another edit, left out", f, e.lo, e.hi);
         }
         edits += es.len() - left.len();
-        let tmp = format!("{}.makepad-run-fix", f);
+        let tmp = format!("{}.relax-fix", f);
         std::fs::write(&tmp, &out)?;
         std::fs::rename(&tmp, &f)?;
         files += 1;

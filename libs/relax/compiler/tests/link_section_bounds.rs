@@ -1,7 +1,7 @@
 // A table the linker collects: statics placed in one `#[link_section]`, read between the bounds
 // the linker defines for the section (ELF `__start_<name>` / `__stop_<name>`, Mach-O
 // `section$start$<seg>$<sect>` / `section$end$..`, COFF `$a` / `$z` marker statics), as
-// makepad_relax_api's `#[relax_api]` table is read. The JIT had no section layout: a hal test died
+// relax_api's `#[relax_api]` table is read. The JIT had no section layout: a hal test died
 // with "foreign static `START` not found in the loaded libraries" (JIT miss M61). Lines "| " are
 // compared with rustc --test.
 use std::sync::atomic::{AtomicU32, Ordering};

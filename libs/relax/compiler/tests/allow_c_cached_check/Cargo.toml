@@ -3,7 +3,7 @@ name = "cached-check-fixture"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "makepad check fixture: a path crate whose build script compiles C and writes an OUT_DIR file the crate includes (a -sys crate's generated bindings), so a check without --allow-c needs the native build's receipt"
+description = "relax check fixture: a path crate whose build script compiles C and writes an OUT_DIR file the crate includes (a -sys crate's generated bindings), so a check without --allow-c needs the native build's receipt"
 
 [dependencies]
 cnative = { path = "cnative" }

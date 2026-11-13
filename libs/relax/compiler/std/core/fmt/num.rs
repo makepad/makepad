@@ -1,10 +1,12 @@
 //! Integer formatting: Display (decimal), Debug ({:x?}/{:X?} aware), LowerHex, UpperHex,
-//! Octal, Binary for every integer type, through Formatter::pad_integral as in real core.
+//! Octal, Binary, LowerExp and UpperExp for every integer type, through Formatter::pad_integral as
+//! in real core.
 //! Shared non-generic helpers here; the per-type impls are generated (num/impls.rs, by
 //! gen/src/gen_fmt.rs).
 
 mod impls;
 
+use super::float::{pad_formatted_parts, Formatted, Part};
 use super::{Formatter, Result};
 
 fn ascii(b: &[u8]) -> &str {
@@ -156,3 +158,120 @@ pub(crate) fn fmt_radix_u128(x: u128, shift: u32, upper: bool, f: &mut Formatter
     }
     f.pad_integral(true, prefix(shift), ascii(&buf[i..]))
 }
+
+/// Port of real core's `impl_Exp!` formatter (library/core/src/fmt/num.rs): LowerExp/UpperExp of
+/// the magnitude `n`, through u64 for the integers up to 64 bits and u128 for i128/u128, as real
+/// core does on 64-bit targets. `$LEN` is real core's MAX_TEXT_LEN: the decimals of `$T::MAX`, the
+/// dot and "e99".
+macro_rules! exp_inner {
+    ($name:ident, $T:ty, $LEN:expr) => {
+        pub(crate) fn $name(n: $T, is_nonnegative: bool, letter_e: u8, f: &mut Formatter<'_>) -> Result {
+            // Print the integer as a coefficient in range (-10, 10).
+            let mut exp = n.checked_ilog10().unwrap_or(0) as usize;
+            // Precision is counted as the number of digits in the fraction.
+            let mut coef_prec = exp;
+            // Keep the digits as an integer (paired with its coef_prec count).
+            let mut coef = n;
+
+            // A Formatter may set the precision to a fixed number of decimals.
+            let more_prec = match f.precision() {
+                None => {
+                    // Omit any and all trailing zeroes.
+                    while coef_prec != 0 && coef % 10 == 0 {
+                        coef /= 10;
+                        coef_prec -= 1;
+                    }
+                    0
+                }
+                // Count the number of additional zeroes needed.
+                Some(fmt_prec) if fmt_prec >= coef_prec => fmt_prec - coef_prec,
+                Some(fmt_prec) => {
+                    // Scale the coefficient/precision pair down to fmt_prec decimals: any
+                    // precision below coef_prec gives a power of ten below the coefficient.
+                    let less_prec = coef_prec - fmt_prec;
+                    let scale = (10 as $T).pow(less_prec as u32);
+                    let floor = coef / scale;
+                    // Round half to even, as documented.
+                    let over = coef % scale;
+                    let half = scale / 2;
+                    let round_up = if over < half {
+                        0
+                    } else if over > half {
+                        1
+                    } else {
+                        floor & 1 // round odd up to even
+                    };
+                    // Adding one to a scale down of at least 10 won't overflow.
+                    coef = floor + round_up;
+                    coef_prec = fmt_prec;
+
+                    // The round up may make the coefficient reach 10 (anything in [9.95, 10)
+                    // becomes 10.0 at precision 1): drop one trailing zero, one power higher.
+                    if round_up != 0 && coef.checked_ilog10().unwrap_or(0) as usize > coef_prec {
+                        coef /= 10;
+                        exp += 1;
+                    }
+                    0
+                }
+            };
+
+            let mut buf = [0u8; $LEN];
+            // Encode the coefficient in buf[..coef_len].
+            let (lead_dec, coef_len) = if coef_prec == 0 && more_prec == 0 {
+                (coef, 1usize) // single digit; no fraction
+            } else {
+                buf[1] = b'.';
+                let start = 2;
+                let end = start + coef_prec;
+                // Consume the least-significant decimals, two at a time from the pair table.
+                let mut remain = coef;
+                let mut i = end;
+                while i >= start + 2 {
+                    i -= 2;
+                    let pair = (remain % 100) as usize;
+                    remain /= 100;
+                    buf[i] = DECIMAL_PAIRS[pair * 2];
+                    buf[i + 1] = DECIMAL_PAIRS[pair * 2 + 1];
+                }
+                // An odd number of digits leaves one digit remaining.
+                if coef_prec & 1 != 0 {
+                    buf[start] = b'0' + (remain % 10) as u8;
+                    remain /= 10;
+                }
+                (remain, end)
+            };
+            buf[0] = b'0' + lead_dec as u8;
+
+            // Encode the scale factor in buf[coef_len..text_len]; no integer reaches e100.
+            buf[coef_len] = letter_e;
+            let text_len = if exp < 10 {
+                buf[coef_len + 1] = b'0' + exp as u8;
+                coef_len + 2
+            } else {
+                buf[coef_len + 1] = DECIMAL_PAIRS[exp * 2];
+                buf[coef_len + 2] = DECIMAL_PAIRS[exp * 2 + 1];
+                coef_len + 3
+            };
+            let text = &buf[..text_len];
+
+            if more_prec == 0 {
+                f.pad_integral(is_nonnegative, "", ascii(text))
+            } else {
+                let sign = if !is_nonnegative {
+                    "-"
+                } else if f.sign_plus() {
+                    "+"
+                } else {
+                    ""
+                };
+                let mut formatted = Formatted::new(sign);
+                formatted.push(Part::Copy(&text[..coef_len]));
+                formatted.push(Part::Zero(more_prec));
+                formatted.push(Part::Copy(&text[coef_len..]));
+                pad_formatted_parts(f, &formatted)
+            }
+        }
+    };
+}
+exp_inner!(exp_u64, u64, 24);
+exp_inner!(exp_u128, u128, 43);

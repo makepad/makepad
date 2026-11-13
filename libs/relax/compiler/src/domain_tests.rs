@@ -53,7 +53,7 @@ fn fixture_of(source: &str, entry_name: &str) -> (Box<Unit>, u64, std::path::Pat
     let path = root.join("fixture.rs");
     std::fs::write(&path, source).unwrap();
     // the std sources of this checkout (as lazy_reload_tests.rs does: a test binary is not next to them)
-    std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
     let sess = std::sync::Arc::new(crate::Session::default());
     let (prog, core, _) = crate::load_with_std(&sess, path.to_str().unwrap(), "teardown_fixture", false).unwrap();
     let mut tcx = crate::tcx::Tcx::new();
@@ -225,98 +225,15 @@ fn teardown_fixture_cycles_and_retiring_thread() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
-// Compile the production pool, CPU budget and stop_workers into the JIT fixture,
-// with only their UI/logging/priority adapters replaced. No GPU, package resolver,
-// external tools or copied implementation of the pool is involved.
+// The CPU budget's source and an app whose task pool lives in a static (tests/static_pool/pool.rs).
+// The budget's `#[relax_api]` marks name a crate a one-file program does not have.
 fn static_pool_fixture() -> String {
-    let budget = include_str!("../../../../platform/cpu_budget/src/lib.rs")
-        .replace("use makepad_relax_api::relax_api;\n", "")
+    let budget = include_str!("../../../../libs/cpu_budget/src/lib.rs")
+        .replace("use relax_api::relax_api;\n", "")
         .replace("#[relax_api]\n", "");
-    let source = include_str!("../../../../platform/src/thread.rs");
-    let network = source.split_once("pub use makepad_network::{").unwrap().1
-        .split_once("};").unwrap().0;
-    let runtime = source.replacen("pub mod ui_hang;", r#"
-        pub mod ui_hang {
-            pub struct UiPhase;
-            pub struct UiPhaseGuard;
-            pub struct UiIdleGuard;
-            pub fn ui_phase() {}
-            pub fn ui_event_phase() {}
-            pub fn ui_idle() -> UiIdleGuard { UiIdleGuard }
-            pub mod relax_timeline {
-                pub struct Hooks {
-                    pub begin: fn(*const u8, usize),
-                    pub end: fn(*const u8, usize),
-                }
-                pub fn hooks() -> Option<&'static Hooks> { None }
-            }
-        }
-    "#, 1).replacen(&format!("pub use makepad_network::{{{network}}};"), r#"
-        pub struct SignalToUI;
-        impl SignalToUI {
-            pub fn set_ui_signal() {}
-            pub fn set_internal_signal() {}
-        }
-    "#, 1);
-    let restart = include_str!("../../../../platform/src/restart.rs");
-    let stop = restart.split_once("pub(crate) fn stop_workers(").unwrap().1
-        .split_once("\n}").unwrap().0;
-    let adapters = r#"
-        #[macro_export] macro_rules! log { ($($t:tt)*) => {} }
-        #[macro_export] macro_rules! error { ($($t:tt)*) => {} }
-        #[macro_export] macro_rules! trace { ($($t:tt)*) => {} }
-        mod os { pub fn wake_ui_event_loop() {} }
-        mod log { pub fn stop_sink() {} }
-        mod remote { pub fn stop_encoder() {} }
-        mod event {
-            #[derive(Clone, Copy)] pub struct Timer(pub u64);
-            pub struct TimerEvent { pub timer_id: u64 }
-            pub enum Event { Shutdown, Timer(TimerEvent) }
-        }
-        mod cx_api {
-            #[derive(Clone, Copy, Debug, Default)]
-            pub enum CxThreadPriority { #[default] Utility, UserInitiated, UserInteractive }
-        }
-        mod cx {
-            pub struct Cx {
-                pub thread_spawner: crate::thread::ThreadSpawner,
-                pub task_pool: std::cell::OnceCell<crate::thread::TaskPool>,
-                pub cpu_cores: usize,
-            }
-            impl Cx {
-                pub fn monotonic_now() -> f64 {
-                    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-                    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
-                }
-                pub fn set_thread_priority(_: crate::cx_api::CxThreadPriority) -> crate::thread::PriorityStatus {
-                    crate::thread::PriorityStatus::Applied
-                }
-                pub fn stop_timer(&mut self, _: crate::event::Timer) {}
-                pub fn start_timeout(&mut self, _: f64) -> crate::event::Timer { crate::event::Timer(1) }
-            }
-        }
-    "#;
-    format!("{adapters}\nmod makepad_cpu_budget {{\n{budget}\n}}\nmod thread {{\n{runtime}\nuse crate::makepad_cpu_budget;\npub(crate) fn fixture_pool(spawner: ThreadSpawner) -> TaskPool {{ let pool = TaskPool::create(spawner, 3).unwrap(); while pool.inner.workers.iter().any(|worker| !worker.idle.load(Ordering::Acquire)) {{ std::thread::yield_now(); }} pool }}\n}}\nmod restart {{\nstatic STOP_WAKER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\npub(crate) fn stop_workers({stop}\n}}\n}}\n{STATIC_POOL_APP}")
+    let app = include_str!("../tests/static_pool/pool.rs");
+    format!("mod makepad_cpu_budget {{\n{budget}\n}}\n{app}")
 }
-
-const STATIC_POOL_APP: &str = r#"
-use std::sync::{OnceLock, atomic::{AtomicU64, Ordering}};
-use thread::{TaskPool, ThreadSpawner, Class};
-static POOL: OnceLock<TaskPool> = OnceLock::new();
-fn static_pool_app(p: *mut u64) {
-    let flags = unsafe { &*(p as *const [AtomicU64; 4]) };
-    assert!(POOL.get().is_none(), "relaunch must start from its own static image");
-    let spawner = ThreadSpawner::for_current_thread(4);
-    let pool = POOL.get_or_init(|| thread::fixture_pool(spawner.clone()));
-    flags[0].store(1, Ordering::SeqCst);
-    while flags[1].load(Ordering::SeqCst) == 0 { std::thread::yield_now(); }
-    restart::stop_workers(&spawner);
-    assert!(!pool.is_open());
-    assert!(pool.submit(Class::Visible, || ()).is_err());
-    assert!(POOL.get().is_some(), "the pool handle remains in the static");
-    flags[2].store(1, Ordering::SeqCst);
-}
-"#;
 
 #[test]
 fn static_task_pool_relaunches_in_place_without_live_threads() {
@@ -332,7 +249,7 @@ fn static_task_pool_relaunches_in_place_without_live_threads() {
         wait(|| flags[0].load(Ordering::SeqCst) != 0);
         let live = info(domain).unwrap();
         for index in 0..3 {
-            assert!(live.thread_names.contains(&format!("makepad-pool-{index}")));
+            assert!(live.thread_names.contains(&format!("pool-{index}")));
         }
         flags[1].store(1, Ordering::SeqCst);
         main.join().unwrap();
@@ -1144,6 +1061,9 @@ fn a_run_ends_with_native_frames_in_it_and_no_host_lock_stays_held() {
     extern "C" fn thunk(p: *mut u8) {
         let f: extern "C" fn() = unsafe { std::mem::transmute(p) };
         f();
+        // (no tail call: a frame of its own where the build keeps frame records, as a native
+        // caller's function has)
+        std::hint::black_box(p);
     }
     // a native thread with a lock of its own, in a callback that waits
     static CALLER_LOCK: std::sync::Mutex<u32> = std::sync::Mutex::new(0);
@@ -1273,11 +1193,16 @@ fn the_next_run_finds_nothing_locked_and_its_crash_is_a_crash() {
 const HOLDS: &str = r#"
 use std::sync::atomic::{AtomicU64, Ordering};
 extern "C" fn called_after_the_end() {}
+// pthread_key_t: an unsigned long on Apple's systems, an unsigned int on the others
+#[cfg(target_vendor = "apple")]
+type Key = usize;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+type Key = u32;
 #[cfg(unix)]
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn signal(sig: i32, handler: usize) -> usize;
-    fn pthread_key_create(key: *mut u32, dtor: usize) -> i32;
+    fn pthread_key_create(key: *mut Key, dtor: usize) -> i32;
     fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
 }
 #[cfg(unix)]
@@ -1292,7 +1217,7 @@ fn platform() -> *mut u8 {
     const SIGUSR2: i32 = 31;
     unsafe {
         signal(SIGUSR2, called_after_the_end as usize);
-        let mut key = 0;
+        let mut key: Key = 0;
         pthread_key_create(&mut key, called_after_the_end as usize);
         pthread_atfork(Some(called_after_the_end), None, None);
         mmap(std::ptr::null_mut(), 1 << 20, 3, 2 | MAP_ANON, -1, 0)

@@ -131,7 +131,8 @@ pub(super) fn apply_effect(body: &Body, analysis: &dyn Analysis, state: &mut Bit
     }
 }
 
-/// Flat edge/predecessor storage; DFS postorder matches rustc's initial work queue.
+/// Flat edge/predecessor storage; the DFS postorder is rustc's (its reverse is the initial work
+/// queue).
 pub(super) struct Cfg<'a> {
     pub edges: Vec<Edge<'a>>,
     pub pred_offsets: Vec<usize>,
@@ -147,7 +148,6 @@ impl<'a> Cfg<'a> {
             edges: Vec::new(), pred_offsets: vec![0; count + 1], predecessors: Vec::new(),
             reachable: BitSet::new_empty(count), postorder: Vec::new(),
         };
-        let mut offsets = vec![0; count + 1];
         for b in 0..count {
             let term = body.basic_blocks[b].terminator.as_ref().expect("unfinished MIR block");
             let edges = TerminatorEdges::for_terminator(term);
@@ -157,7 +157,6 @@ impl<'a> Cfg<'a> {
                 cfg.pred_offsets[edge.target.0 as usize + 1] += 1;
                 cfg.edges.push(edge);
             }
-            offsets[b + 1] = cfg.edges.len();
         }
         for b in 0..count { cfg.pred_offsets[b + 1] += cfg.pred_offsets[b]; }
         cfg.predecessors.resize(cfg.edges.len(), 0);
@@ -167,16 +166,23 @@ impl<'a> Cfg<'a> {
             cfg.predecessors[next[b]] = i;
             next[b] += 1;
         }
-        let mut stack = vec![(BasicBlock(0), offsets[0])];
+        // rustc traversal.rs `Postorder`: a DFS that takes a block's successors
+        // (Terminator::successors, in that order) last first, so the reverse postorder visits a
+        // switch's first target first. An analysis whose join is not a union depends on it: const
+        // checking's qualif join (rustc rejects a `const fn` moving a local mutably borrowed in an
+        // `if`'s then-block, and accepts it borrowed in the else-block).
+        let successors = |b: BasicBlock| super::super::transform::simplify::successors(&body.basic_blocks[b.0 as usize].terminator.as_ref().expect("unfinished MIR block").kind);
+        let mut stack = vec![(BasicBlock(0), successors(BasicBlock(0)))];
         cfg.reachable.insert(0);
-        while let Some((block, edge_index)) = stack.last_mut() {
-            if *edge_index == offsets[block.0 as usize + 1] {
-                cfg.postorder.push(*block);
-                stack.pop();
-            } else {
-                let target = cfg.edges[*edge_index].target;
-                *edge_index += 1;
-                if cfg.reachable.insert(target.0 as usize) { stack.push((target, offsets[target.0 as usize])); }
+        while let Some((block, rest)) = stack.last_mut() {
+            match rest.pop() {
+                Some(target) => {
+                    if cfg.reachable.insert(target.0 as usize) { stack.push((target, successors(target))); }
+                }
+                None => {
+                    cfg.postorder.push(*block);
+                    stack.pop();
+                }
             }
         }
         cfg

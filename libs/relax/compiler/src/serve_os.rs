@@ -51,6 +51,28 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// Stops the process `pid` (a check server's recorded pid): SIGTERM, which takes the server's
+/// own cleanup path, on unix; TerminateProcess on windows, whose stale endpoint and lock the next
+/// server replaces.
+pub fn stop(pid: u32) {
+    if pid == 0 || pid > i32::MAX as u32 { return; }
+    #[cfg(unix)]
+    {
+        extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
+        unsafe { kill(pid as i32, 15); }
+    }
+    #[cfg(windows)]
+    {
+        use relax_session::win32::{CloseHandle, OpenProcess, TerminateProcess};
+        unsafe {
+            let h = OpenProcess(0x0001, 0, pid);
+            if h == 0 { return; }
+            TerminateProcess(h, 1);
+            CloseHandle(h);
+        }
+    }
+}
+
 pub fn signals() {
     STOP.store(false, Ordering::Relaxed);
     #[cfg(unix)]

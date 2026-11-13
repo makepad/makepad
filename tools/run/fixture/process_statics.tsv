@@ -171,10 +171,10 @@ makepad_hal::wm_socket::CLIENT_NAME	WM client name of this process
 makepad_hal::wm_socket::discovered::PROBE	WM socket probe
 makepad_hal::xr_remote::ENABLED	this process offers the headset slot once; stays with the HAL
 makepad_hal::xr_remote::remote::R	the headset link of the process; freeing the session clears its window and events
-makepad_relax_api::APP_CALL	host's call wrapper fn, "once per process" (relax_api lib.rs:31)
-makepad_relax_api::section::ANCHOR	section anchor in this binary, constant
-makepad_relax_api::section::START	linker section bound of this binary
-makepad_relax_api::section::STOP	linker section bound of this binary
+relax_api::APP_CALL	host's call wrapper fn, "once per process" (relax_api lib.rs:31)
+relax_api::section::ANCHOR	section anchor in this binary, constant
+relax_api::section::START	linker section bound of this binary
+relax_api::section::STOP	linker section bound of this binary
 makepad_remote::cmd::START	clock epoch of this process
 makepad_remote::conn::mono_ns::START	clock epoch of this process
 makepad_run::HOST	host of the process
@@ -187,7 +187,7 @@ makepad_run::hal_run::PUMP	run-window thread stays
 makepad_run::hal_run::RETRY	condvar
 makepad_run::hal_run::RUN	next_run, through state(); the window stays
 makepad_run::hal_run::UI_WAIT_ARMED	wake latch cleared at the window's next look
-makepad_run::hal_run::quit_trace::ON	env MAKEPAD_RUN_QUIT_TRACE read once, nothing sets it
+makepad_run::hal_run::quit_trace::ON	env RELAX_QUIT_TRACE read once, nothing sets it
 makepad_run::hal_run::quit_trace::T0	clock
 makepad_run::quit_signal::native::FIRST_NS	first quit signal, quitting is one way
 makepad_run::quit_signal::native::WAKE	signal pipe of this process
@@ -226,26 +226,26 @@ makepad_shared_bytes::MMAP_FALLBACKS	lifetime counter
 makepad_shared_bytes::MMAP_HITS	lifetime counter
 makepad_shared_bytes::OWNED_LOADS	lifetime counter with no per-run reader
 relax_backend::arm64::RIR_MAP	switch set once by the driver
-relax_backend::arm64::lse_atomics::LSE	env MAKEPAD_RUN_NO_LSE read once, nothing sets it
+relax_backend::arm64::lse_atomics::LSE	env RELAX_NO_LSE read once, nothing sets it
 relax_session::clock::cpu_ns::NS_PER_CYCLE	machine fact; cfg-off: windows
-relax_backend::dbgloc::finish::TRACE	env MAKEPAD_RUN_VARS_TRACE read once, nothing sets it
-relax_backend::dbgloc::on::ON	env MAKEPAD_RUN_VARS_STATS read once, nothing sets it
-relax_backend::dbgloc::stats_on::ON	env MAKEPAD_RUN_VARS_STATS read once, nothing sets it
+relax_backend::dbgloc::finish::TRACE	env RELAX_VARS_TRACE read once, nothing sets it
+relax_backend::dbgloc::on::ON	env RELAX_VARS_STATS read once, nothing sets it
+relax_backend::dbgloc::stats_on::ON	env RELAX_VARS_STATS read once, nothing sets it
 relax_backend::frame::slot_colors_used::TRACE	env memo
-relax_backend::pair256::pair256_trace::ON	env MAKEPAD_RUN_PAIR256_TRACE read once, nothing sets it
-relax_backend::passes::T	env MAKEPAD_RUN_TRACE_OPT read once, nothing sets it
-relax_backend::passes::sroa_with::STATS	env MAKEPAD_RUN_SROA_STATS read once, nothing sets it
-relax_backend::passes::thread_known::MAX	env MAKEPAD_RUN_THREAD_MAX read once, nothing sets it
+relax_backend::pair256::pair256_trace::ON	env RELAX_PAIR256_TRACE read once, nothing sets it
+relax_backend::passes::T	env RELAX_TRACE_OPT read once, nothing sets it
+relax_backend::passes::sroa_with::STATS	env RELAX_SROA_STATS read once, nothing sets it
+relax_backend::passes::thread_known::MAX	env RELAX_THREAD_MAX read once, nothing sets it
 relax_backend::probe::PROBE	the process's probe, first install stays
 relax_backend::regalloc::SIG_ON	switch set once by the driver
 relax_backend::rir::FORCE_VERIFY	switch set once by the driver
-relax_backend::rir::unwind_stats_on::ON	env MAKEPAD_RUN_UNWIND_STATS read once, nothing sets it
-relax_backend::rir::verify_passes_on::ON	env MAKEPAD_RUN_UNWIND_STATS read once, nothing sets it
-relax_backend::stats::fast_clock::F	env MAKEPAD_RUN_PASS_TIMES read once, nothing sets it
-relax_backend::stats::opt_env_off::T	env MAKEPAD_RUN_OPT read once, nothing sets it
+relax_backend::rir::unwind_stats_on::ON	env RELAX_UNWIND_STATS read once, nothing sets it
+relax_backend::rir::verify_passes_on::ON	env RELAX_UNWIND_STATS read once, nothing sets it
+relax_backend::stats::fast_clock::F	env RELAX_PASS_TIMES read once, nothing sets it
+relax_backend::stats::opt_env_off::T	env RELAX_OPT read once, nothing sets it
 relax_backend::stats::pass_clock::T0	clock epoch of the pass timer
 relax_backend::tail::trace_on::P	env memo
-relax_backend::wasm::ctx_bytes_on::T	env MAKEPAD_RUN_WASM_EXPORT_FNLIST read once, nothing sets it
+relax_backend::wasm::ctx_bytes_on::T	env RELAX_WASM_EXPORT_FNLIST read once, nothing sets it
 relax_backend::x64::RIR_MAP	switch set once by the driver
 relax_base::boot_stats::O3_ARMS	ring; the field reads the delta from o3_base
 relax_base::boot_stats::O3_INSTALLED	ring; the field reads the delta from o3_base
@@ -279,7 +279,7 @@ relax_base::memstat::TRACK	inspect's host heap tracker switch; the host heap sta
 relax_base::memstat::TRACK_ALLOC	process memory stats
 relax_base::memstat::TRACK_FREE	process memory stats
 relax_base::memstat::TRIMS	process memory stats and trim rate limit
-relax_base::memstat::note_big::LIM	env MAKEPAD_RUN_MEM_BIG read once, nothing sets it
+relax_base::memstat::note_big::LIM	env RELAX_MEM_BIG read once, nothing sets it
 relax_base::memstat::sites::BASE	dladdr base of this binary (memstat.rs:1040)
 relax_base::memstat::sites::COUNT	process memory stats
 relax_base::memstat::sites::FRAMES	call-site table of host allocations in this binary, Linux, under memory sites report (memstat.rs:1020)
@@ -305,10 +305,10 @@ relax_base::run_threads::LIVE	begin_run: end_all leaves it empty
 relax_base::run_threads::NEXT	ids are never reused
 relax_base::run_threads::RUN_ENDS	begin_run clears it
 relax_base::run_threads::WAKE	condvar, no value
-relax_base::solver_work::ENABLED	env MAKEPAD_RUN_SOLVER_WORK_TRACE read once, nothing sets it
+relax_base::solver_work::ENABLED	env RELAX_SOLVER_WORK_TRACE read once, nothing sets it
 relax_base::stack::SPARE_STACKS	spare stacks, reusable
 relax_base::stack::SWITCH_RETURN	native address
-relax_base::stack::program_stack_size::SIZE	env MAKEPAD_RUN_STACK_GB read once, nothing sets it
+relax_base::stack::program_stack_size::SIZE	env RELAX_STACK_GB read once, nothing sets it
 relax_base::vfs::ANY	process state by design (vfs.rs:130), same env next run
 relax_base::vfs::BIND_SEQ	sequence is never reused
 relax_base::vfs::EDITS	process state by design (vfs.rs:130), same env next run
@@ -316,7 +316,7 @@ relax_base::vfs::EDIT_LOCK	lock
 relax_base::vfs::FROZEN	process state by design (vfs.rs:130), same env next run
 relax_base::vfs::HELD_SEQ	process state by design (vfs.rs:130), same env next run
 relax_base::vfs::MOUNTS	process state by design (vfs.rs:130), same env next run
-relax_base::vfs::RECORDED	read log file and its seen set under MAKEPAD_RUN_READ_LOG: a union log, a repeat line is only skipped; sibling RECORDING process (vfs.rs:60)
+relax_base::vfs::RECORDED	read log file and its seen set under RELAX_READ_LOG: a union log, a repeat line is only skipped; sibling RECORDING process (vfs.rs:60)
 relax_base::vfs::RECORDING	process state by design (vfs.rs:130), same env next run
 relax_base::vfs::WHITEOUTS	cache validated by stat
 relax_base::waits::TABLE	row is freed by the Mine guard's drop
@@ -362,38 +362,38 @@ relax_base::zone_alloc::slots::bind_program_tls::ONCE	pthread TSD key of the pro
 relax_base::zone_alloc::system_held::SHARDS	allocator table
 relax_base::zone_alloc::test_serial::SERIAL	test only
 relax_base::zone_alloc::zone::ZONE	allocator zone of the process; cfg-off: apple
-relax_codegen::exec_census::enabled::ON	env MAKEPAD_RUN_PROFILE read once, nothing sets it
+relax_codegen::exec_census::enabled::ON	env RELAX_PROFILE read once, nothing sets it
 relax_codegen::exec_census::new_unit::NEXT	unit ids never reused, keys in the census registry (exec_census.rs:17)
 relax_codegen::fncost::BUFFERS	per-thread buffers, flushed
 relax_codegen::fncost::FILE	one file per pid
 relax_codegen::fncost::IDS	ids are never reused
-relax_codegen::fncost::enabled::ON	env MAKEPAD_RUN_FN_COST read once, nothing sets it
+relax_codegen::fncost::enabled::ON	env RELAX_FN_COST read once, nothing sets it
 relax_codegen::fncost::init::START	Once of the run-fncost-flush thread, a loop that never ends and only flushes (fncost.rs:75)
 relax_codegen::fncost::mono::T	clock epoch of fn-cost timing
 relax_codegen::interp::HOT	native hook, rewritten with the same fn
 relax_codegen::interp::STATIC_THUNKS	thunks precompiled into the binary
 relax_codegen::interp::TLS_FN	native hook, rewritten with the same fn
-relax_codegen::interp::TRACE	env MAKEPAD_RUN_INTERP_TRACE read once, nothing sets it
-relax_codegen::interp::fold_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
-relax_codegen::interp::frame_fold_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
-relax_codegen::interp::interp_stats::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
-relax_codegen::interp::no_coalesce::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
-relax_codegen::interp::no_codegen::N	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
-relax_codegen::interp::preload_on::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::TRACE	env RELAX_INTERP_TRACE read once, nothing sets it
+relax_codegen::interp::fold_on::ON	env RELAX_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::frame_fold_on::ON	env RELAX_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::interp_stats::ON	env RELAX_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::no_coalesce::ON	env RELAX_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::no_codegen::N	env RELAX_INTERP_STATS read once, nothing sets it
+relax_codegen::interp::preload_on::ON	env RELAX_INTERP_STATS read once, nothing sets it
 relax_codegen::interp::selection::S	env memo
-relax_codegen::loops::merge_trace::ON	env MAKEPAD_RUN_MERGE_TRACE read once, nothing sets it
-relax_codegen::loops::unroll_trace::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
-relax_codegen::loops::zerofill_dump_dir::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
-relax_codegen::loops::zerofill_trace::VALUE	env MAKEPAD_RUN_UNROLL_TRACE read once, nothing sets it
-relax_codegen::native::compile_freq_inner::DUMP	env MAKEPAD_RUN_DUMP read once, nothing sets it
-relax_codegen::native::compile_native::ON	env MAKEPAD_RUN_INTERP_STATS read once, nothing sets it
+relax_codegen::loops::merge_trace::ON	env RELAX_MERGE_TRACE read once, nothing sets it
+relax_codegen::loops::unroll_trace::VALUE	env RELAX_UNROLL_TRACE read once, nothing sets it
+relax_codegen::loops::zerofill_dump_dir::VALUE	env RELAX_UNROLL_TRACE read once, nothing sets it
+relax_codegen::loops::zerofill_trace::VALUE	env RELAX_UNROLL_TRACE read once, nothing sets it
+relax_codegen::native::compile_freq_inner::DUMP	env RELAX_DUMP read once, nothing sets it
+relax_codegen::native::compile_native::ON	env RELAX_INTERP_STATS read once, nothing sets it
 relax_codegen::native::install_probe::P	unit struct, probe vtable only (native.rs:64)
 relax_codegen::opt::inline_trace::T	env memo
-relax_codegen::opt::slotcoal_dump::VALUE	env MAKEPAD_RUN_SLOTCOAL_DUMP read once, nothing sets it
+relax_codegen::opt::slotcoal_dump::VALUE	env RELAX_SLOTCOAL_DUMP read once, nothing sets it
 relax_codegen::opt::slotcoal_trace::T	env memo
-relax_codegen::ranges::iv_trace::E	env MAKEPAD_RUN_IV_TRACE read once, nothing sets it
-relax_codegen::version::trace::E	env MAKEPAD_RUN_VERSION_TRACE read once, nothing sets it
-relax_codegen::warm::enabled::ON	env MAKEPAD_RUN_WARM_STRICT read once, nothing sets it
+relax_codegen::ranges::iv_trace::E	env RELAX_IV_TRACE read once, nothing sets it
+relax_codegen::version::trace::E	env RELAX_VERSION_TRACE read once, nothing sets it
+relax_codegen::warm::enabled::ON	env RELAX_WARM_STRICT read once, nothing sets it
 relax_compiler::GLOBAL_ALLOC	allocator, unit struct
 relax_compiler::PROVENANCE_MARK	constant provenance mark in the binary
 relax_compiler::boundary::AUDIT	`--boundary` audit mode, no in-place restart
@@ -404,20 +404,20 @@ relax_compiler::cache::PATHS	cache path memo
 relax_compiler::cache::RECORDS	monotone, spill_cache::SEEN compares against it
 relax_compiler::cache::RECORD_NOW_NS	cfg(test) only: the recording time a unit test sets (0 in every run)
 relax_compiler::cache::SPILL_IO	IO lock
-relax_compiler::cache::collected::new::ON	env MAKEPAD_RUN_COLLECTED_TRACE read once, nothing sets it
-relax_compiler::cache::dump_filter::F	env MAKEPAD_RUN_CACHE_DUMP read once, nothing sets it
+relax_compiler::cache::collected::new::ON	env RELAX_COLLECTED_TRACE read once, nothing sets it
+relax_compiler::cache::dump_filter::F	env RELAX_CACHE_DUMP read once, nothing sets it
 relax_compiler::cache::front_run::RUNS	per-process store, content keys
 relax_compiler::cache::front_run::SINKS	per-process store, content keys
 relax_compiler::cache::prune::REPORTED	once per process
 relax_compiler::cache::prune::RUNS_CHECKED	once per process
-relax_compiler::cache::trace_on::T	env MAKEPAD_RUN_CACHE_TRACE read once, nothing sets it
+relax_compiler::cache::trace_on::T	env RELAX_CACHE_TRACE read once, nothing sets it
 relax_compiler::check::SUBJECTS	`makepad test` only, the harness restarts by exec
 relax_compiler::check::TEST_DEPS	`makepad test` only, the harness restarts by exec
-relax_compiler::check::borrowck_unchecked::ON	env MAKEPAD_RUN_CHECK_TRACE read once, nothing sets it
-relax_compiler::check::check_trace::ON	env MAKEPAD_RUN_CHECK_TRACE read once, nothing sets it
+relax_compiler::check::borrowck_unchecked::ON	env RELAX_CHECK_TRACE read once, nothing sets it
+relax_compiler::check::check_trace::ON	env RELAX_CHECK_TRACE read once, nothing sets it
 relax_compiler::codegen_id::front_id::ID	ids of the loader build
 relax_compiler::codegen_id::id::ID	ids of the loader build
-relax_compiler::ctfe::trace_on::ON	env MAKEPAD_RUN_CTFE_TRACE read once, nothing sets it
+relax_compiler::ctfe::trace_on::ON	env RELAX_CTFE_TRACE read once, nothing sets it
 relax_compiler::domain::CALLED_IN	so-far count of threads stuck in ended runs
 relax_compiler::domain::CHANGED	observer of the host
 relax_compiler::domain::ENDING	a block stays until its last thread is gone, must span runs
@@ -430,11 +430,11 @@ relax_compiler::domain::TEST_SERIAL	test-only: fixture or lock of a test
 relax_compiler::domain_res::FORKED	atfork child latch
 relax_compiler::first_frame::WINDOW_OPEN	window stays, second arm_window returns at once; resetting trips watch_window's process-age deadline
 relax_compiler::first_frame::WINDOW_THREAD	watcher ended with WINDOW_OPEN true, nothing unparks it again
-relax_compiler::forkexec::ENV	Once reading MAKEPAD_RUN_VERBOSE into VERBOSE, nothing sets it (forkexec.rs:72)
+relax_compiler::forkexec::ENV	Once reading RELAX_VERBOSE into VERBOSE, nothing sets it (forkexec.rs:72)
 relax_compiler::forkexec::EXEC_CHILD	set in the fork child only
 relax_compiler::forkexec::VERBOSE	env switch
 relax_compiler::forkexec::table::T	pointer to the shared anonymous page for fork bookkeeping; slots follow child pids, not a Unit (forkexec.rs:56)
-relax_compiler::front::verify::ON	env MAKEPAD_RUN_FRONT_VERIFY read once, nothing sets it
+relax_compiler::front::verify::ON	env RELAX_FRONT_VERIFY read once, nothing sets it
 relax_compiler::hot_failure::ACTIVE	a recovery spans the restart: the replacement's completed restore (restored) ends it (STATE keeps recovery)
 relax_compiler::hot_failure::ERROR	a failed restart's JIT error verdict: no run follows it in place
 relax_compiler::hot_failure::PUMP	lock around pump (hot_failure.rs:240), holds no state
@@ -475,7 +475,7 @@ relax_compiler::inspect::engine_req::SEQ	request ids never reused, pid-qualified
 relax_compiler::inspect::engine_req::node_name::NODE	host name of the machine (engine_req.rs:75)
 relax_compiler::inspect::eval::NEXT	eval ids never reused (eval.rs:202)
 relax_compiler::inspect::events::EVENTS	bounded event log, consumers keep their cursor
-relax_compiler::inspect::events::MAKEPAD_RUN_RETRY_ON	derived from WATCHERS and RUN_STATE_AVAILABLE, both process; only says retry boundaries are wanted, loader symbol address stays (events.rs:141)
+relax_compiler::inspect::events::RELAX_RETRY_ON	derived from WATCHERS and RUN_STATE_AVAILABLE, both process; only says retry boundaries are wanted, loader symbol address stays (events.rs:141)
 relax_compiler::inspect::events::NEW	bounded event log, consumers keep their cursor
 relax_compiler::inspect::events::PANIC_IDS	ids must not repeat for readers with a cursor
 relax_compiler::inspect::events::RESUME	condvar
@@ -512,7 +512,7 @@ relax_compiler::inspect::heap::RUST_ALLOC_T	one-shot veneers, native addresses
 relax_compiler::inspect::heap::RUST_FREE_T	one-shot veneers, native addresses
 relax_compiler::inspect::heap::RUST_REALLOC_T	one-shot veneers, native addresses
 relax_compiler::inspect::heap::RUST_ZERO_T	one-shot veneers, native addresses
-relax_compiler::inspect::heap::host_depth::D	env MAKEPAD_RUN_HEAP_DEPTH read once, nothing sets it
+relax_compiler::inspect::heap::host_depth::D	env RELAX_HEAP_DEPTH read once, nothing sets it
 relax_compiler::inspect::heap::init_real::ONCE	one-shot veneers, native addresses
 relax_compiler::inspect::instrument::GO	condvar
 relax_compiler::inspect::instrument::NEXT_GROUP	ids are never reused
@@ -551,7 +551,7 @@ relax_compiler::inspect::timeline::HITCH_LAST_NS	timeline counters, readers diff
 relax_compiler::inspect::timeline::HITCH_NS	timeline counters, readers diff them
 relax_compiler::inspect::timeline::HITCH_SKIPPED	the timeline session stays, readers diff
 relax_compiler::inspect::timeline::HITCH_WINDOW	timeline counters, readers diff them
-relax_compiler::inspect::timeline::MAKEPAD_RUN_RECORDING	marker flag from the timeline session, which stays; address given to code via loader symbol (timeline.rs:48)
+relax_compiler::inspect::timeline::RELAX_RECORDING	marker flag from the timeline session, which stays; address given to code via loader symbol (timeline.rs:48)
 relax_compiler::inspect::timeline::QUIET	timeline counters, readers diff them
 relax_compiler::inspect::timeline::QUIET_CUT	the latest reader mark of the QUIET count
 relax_compiler::inspect::timeline::QUIET_TAKEN	timeline counters, readers diff them
@@ -590,115 +590,116 @@ relax_compiler::jit::TLS_KEY	OS key
 relax_compiler::jit::TLS_USED	fetch_max of a size, too large is safe
 relax_compiler::jit::WATCHDOG_ID	watchdog thread stays
 relax_compiler::jit::WATCHDOG_WAKE	watchdog thread stays
-relax_compiler::jit::WATCH_DUMP	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
-relax_compiler::jit::WATCH_LAST	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
-relax_compiler::jit::WATCH_PREV	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
-relax_compiler::jit::WATCH_ROUND	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
-relax_compiler::jit::WATCH_STEPS	env MAKEPAD_RUN_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
-relax_compiler::jit::ahead_check_diag::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::ahead_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::backend_bench_on::B	env MAKEPAD_RUN_PERF_MAP read once, nothing sets it
-relax_compiler::jit::bmemo::on::ENV	env MAKEPAD_RUN_INTERP read once, nothing sets it
-relax_compiler::jit::build_rir_lowered_as::SLOW	env MAKEPAD_RUN_SLOW_TYPECK_US read once, nothing sets it
+relax_compiler::jit::WATCH_DUMP	env RELAX_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_LAST	env RELAX_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_PREV	env RELAX_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_ROUND	env RELAX_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::WATCH_STEPS	env RELAX_COMPILE_WATCH: its watcher is spawned once and stays, values compared only with themselves
+relax_compiler::jit::ahead_check_diag::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::ahead_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::backend_bench_on::B	env RELAX_PERF_MAP read once, nothing sets it
+relax_compiler::jit::bmemo::on::ENV	env RELAX_INTERP read once, nothing sets it
+relax_compiler::jit::build_rir_lowered_as::SLOW	env RELAX_SLOW_TYPECK_US read once, nothing sets it
 relax_compiler::jit::busy::ACTIVITY	monotone, the latch compares tick to tick
-relax_compiler::jit::canon_slots::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::churn_on::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
-relax_compiler::jit::code_sig::F	env MAKEPAD_RUN_CODE_SIG read once, nothing sets it
-relax_compiler::jit::compile_tier1::EACH	env MAKEPAD_RUN_DUMP_EACH read once, nothing sets it
-relax_compiler::jit::compile_watch::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::debug_env::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
-relax_compiler::jit::deferred_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::canon_slots::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::churn_on::E	env RELAX_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::code_sig::F	env RELAX_CODE_SIG read once, nothing sets it
+relax_compiler::jit::compile_tier1::EACH	env RELAX_DUMP_EACH read once, nothing sets it
+relax_compiler::jit::compile_watch::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::debug_env::E	env RELAX_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::deferred_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::drain_slow_base::LAST_FORGET	rate limit on a monotonic clock
-relax_compiler::jit::dump_base::DUMP	env MAKEPAD_RUN_DUMP read once, nothing sets it
-relax_compiler::jit::dump_base::EACH	env MAKEPAD_RUN_DUMP_EACH read once, nothing sets it
+relax_compiler::jit::dump_base::DUMP	env RELAX_DUMP read once, nothing sets it
+relax_compiler::jit::dump_base::EACH	env RELAX_DUMP_EACH read once, nothing sets it
 relax_compiler::jit::dump_base::N	file-name counter never reused (jit.rs:14945)
-relax_compiler::jit::dump_canon::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
-relax_compiler::jit::dump_input::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
-relax_compiler::jit::dump_ship::VALUE	env MAKEPAD_RUN_DUMP_CANON read once, nothing sets it
-relax_compiler::jit::enter::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::dump_canon::VALUE	env RELAX_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::dump_input::VALUE	env RELAX_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::dump_ship::VALUE	env RELAX_DUMP_CANON read once, nothing sets it
+relax_compiler::jit::enter::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::exec_check::DONE	one-shot hook install
-relax_compiler::jit::field_prof_on::E	env MAKEPAD_RUN_DUMP_RIR read once, nothing sets it
+relax_compiler::jit::field_prof_on::E	env RELAX_DUMP_RIR read once, nothing sets it
 relax_compiler::jit::foreign_addr::SAID	log dedupe
 relax_compiler::jit::front_holders::SINCE	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::front_holders::SITE	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::front_holders::SITE_LEN	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::front_holders::TID	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::front_holders::UNLISTED	count of a table overflow
-relax_compiler::jit::front_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::front_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::history::EMPTY	empty constant returned when a slot has no history (jit.rs:198)
 relax_compiler::jit::install_ice_hook::DONE	one-shot hook install
-relax_compiler::jit::interp_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::rt_names::NAMES	env MAKEPAD_RUN_RT_THREADS read once, nothing sets it
+relax_compiler::jit::interp_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::rt_names::NAMES	env RELAX_RT_THREADS read once, nothing sets it
 relax_compiler::jit::job_rows::SINCE	rows freed by guard or TLS drop, diagnostics only
 relax_compiler::jit::job_rows::TID	rows freed by guard or TLS drop, diagnostics only
-relax_compiler::jit::loops_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::main_compile_log::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::loops_on::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::main_compile_log::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::new::NEXT	checker ids never reused (jit.rs:23556)
 relax_compiler::jit::new::ONCE	atexit registration once per process (jit.rs:4270)
-relax_compiler::jit::o1_inline_limits::FNS	env MAKEPAD_RUN_O1_INLINE_FN read once, nothing sets it
-relax_compiler::jit::o2_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::o1_inline_limits::FNS	env RELAX_O1_INLINE_FN read once, nothing sets it
+relax_compiler::jit::o2_trace::T	env RELAX_O2_TRACE read once, nothing sets it
 relax_compiler::jit::o3_progress_write::PATH	env
-relax_compiler::jit::optimize_rir_inner::HIST_ON	env MAKEPAD_RUN_OPT_HIST read once, nothing sets it
+relax_compiler::jit::optimize_rir_inner::HIST_ON	env RELAX_OPT_HIST read once, nothing sets it
 relax_compiler::jit::perf_map::MAP	env file
-relax_compiler::jit::perf_map_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::pgo_hold::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::prep_inline_stats::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::prep_verify::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::present_files::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::perf_map_on::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::pgo_hold::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::prep_inline_stats::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::prep_verify::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::present_files::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::profile_path::P	env memo
 relax_compiler::jit::profiled_heat::LAST	rate limit on a monotonic clock
 relax_compiler::jit::queue::FORKED	fork child latch
 relax_compiler::jit::queue::SOURCE	unit struct, drain source (jit_queue.rs:422)
-relax_compiler::jit::quit_compile_note::LOG	env MAKEPAD_RUN_QUIT_LOG read once, nothing sets it
-relax_compiler::jit::reloc_sig_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::rt_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::quit_compile_note::LOG	env RELAX_QUIT_LOG read once, nothing sets it
+relax_compiler::jit::reloc_sig_on::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::rt_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::rt_wait_ns::NS	env
 relax_compiler::jit::sample_periods::PERIODS	env
-relax_compiler::jit::sample_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::sample_trace::T	env RELAX_O2_TRACE read once, nothing sets it
 relax_compiler::jit::sampler_thread::T0	clock epoch of sampler log lines (jit.rs:15363)
-relax_compiler::jit::settle_div::D	env MAKEPAD_RUN_CODE_SIG_DIR read once, nothing sets it
-relax_compiler::jit::settle_rebuild::enabled::ON	env MAKEPAD_RUN_SETTLE_REBUILD read once, nothing sets it
-relax_compiler::jit::settle_rebuild::trace::ON	env MAKEPAD_RUN_SETTLE_REBUILD read once, nothing sets it
-relax_compiler::jit::settle_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
-relax_compiler::jit::sig_dir::D	env MAKEPAD_RUN_CODE_SIG_DIR read once, nothing sets it
+relax_compiler::jit::settle_div::D	env RELAX_CODE_SIG_DIR read once, nothing sets it
+relax_compiler::jit::settle_rebuild::enabled::ON	env RELAX_SETTLE_REBUILD read once, nothing sets it
+relax_compiler::jit::settle_rebuild::trace::ON	env RELAX_SETTLE_REBUILD read once, nothing sets it
+relax_compiler::jit::settle_trace::T	env RELAX_O2_TRACE read once, nothing sets it
+relax_compiler::jit::sig_dir::D	env RELAX_CODE_SIG_DIR read once, nothing sets it
 relax_compiler::jit::site_file::FILES	file-name memo
-relax_compiler::jit::specv_hold_ms::MS	env MAKEPAD_RUN_SPECV_HOLD read once, nothing sets it
-relax_compiler::jit::specv_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
-relax_compiler::jit::static_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::specv_hold_ms::MS	env RELAX_SPECV_HOLD read once, nothing sets it
+relax_compiler::jit::specv_trace::T	env RELAX_O2_TRACE read once, nothing sets it
+relax_compiler::jit::static_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
 relax_compiler::jit::sweep_verdicts::SWEEP_AT	rate limit on a monotonic clock
-relax_compiler::jit::test_compile_panic::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
-relax_compiler::jit::test_hot_build_error::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
-relax_compiler::jit::test_hot_build_error::WANT_REPLACEMENT	env MAKEPAD_RUN_TEST_REPLACEMENT_BUILD_ERROR read once, nothing sets it
-relax_compiler::jit::test_hot_compile_panic::WANT	env MAKEPAD_RUN_TEST_HOT_BUILD_ERROR read once, nothing sets it
-relax_compiler::jit::tier1_install_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::tier1_optimize::INLINE_STATS	env MAKEPAD_RUN_INLINE_STATS read once, nothing sets it
-relax_compiler::jit::tier1_stats_on::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::tier1_trace::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
+relax_compiler::jit::test_compile_panic::WANT	env RELAX_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_build_error::WANT	env RELAX_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_build_error::WANT_REPLACEMENT	env RELAX_TEST_REPLACEMENT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::test_hot_compile_panic::WANT	env RELAX_TEST_HOT_BUILD_ERROR read once, nothing sets it
+relax_compiler::jit::tier1_install_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::tier1_optimize::INLINE_STATS	env RELAX_INLINE_STATS read once, nothing sets it
+relax_compiler::jit::tier1_stats_on::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::tier1_trace::T	env RELAX_O2_TRACE read once, nothing sets it
 relax_compiler::jit::tls_key::CREATE	lock
-relax_compiler::jit::tls_trace::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::trace::SPEC	env MAKEPAD_RUN_TRACE read once, nothing sets it
-relax_compiler::jit::trace_on::T	env MAKEPAD_RUN_O2_TRACE read once, nothing sets it
-relax_compiler::jit::trace_stored_verdict::ON	env MAKEPAD_RUN_MAIN_COMPILE_LOG read once, nothing sets it
-relax_compiler::jit::update_sampler_settled::SETTLE_ON	env MAKEPAD_RUN_SAMPLE_MS read once, nothing sets it
+relax_compiler::jit::tls_trace::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::trace::SPEC	env RELAX_TRACE read once, nothing sets it
+relax_compiler::jit::trace_on::T	env RELAX_O2_TRACE read once, nothing sets it
+relax_compiler::jit::trace_stored_verdict::ON	env RELAX_MAIN_COMPILE_LOG read once, nothing sets it
+relax_compiler::jit::update_sampler_settled::SETTLE_ON	env RELAX_SAMPLE_MS read once, nothing sets it
 relax_compiler::jit::watchdog::START	Once of the watchdog thread, a loop that stays and reads WATCHDOG_CALLS (jit.rs:7961)
 relax_compiler::kernel_store::KERNEL_COMPILER	source identity of the compute crate of this binary (kernel_store.rs:43)
 relax_compiler::kernel_store::STATE	kernel store of the process, content keys
 relax_compiler::lifeline::BEAT	appended per thread, survivors' TLS INDEX forbids clearing; past SLOTS new threads lose beats
 relax_compiler::lifeline::REG	appended per thread, survivors' TLS INDEX forbids clearing; past SLOTS new threads lose beats
 relax_compiler::lifeline::STATE	per thread-entry state next to process-kept REG and BEAT; rows are appended, survivors keep TLS indexes (lifeline.rs:134)
-relax_compiler::lower::coro_trace::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
-relax_compiler::lower::coro_trace_level::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
-relax_compiler::lower::coro_transform_trace::ON	env MAKEPAD_RUN_TRACE read once, nothing sets it
-relax_compiler::lower::coro_verify::V	env MAKEPAD_RUN_CORO_VERIFY read once, nothing sets it
-relax_compiler::mainprof::enabled::E	env MAKEPAD_RUN_PROFILE_MAIN read once, nothing sets it
+relax_compiler::lower::coro_trace::ON	env RELAX_TRACE read once, nothing sets it
+relax_compiler::lower::coro_trace_level::ON	env RELAX_TRACE read once, nothing sets it
+relax_compiler::lower::coro_transform_trace::ON	env RELAX_TRACE read once, nothing sets it
+relax_compiler::lower::coro_verify::V	env RELAX_CORO_VERIFY read once, nothing sets it
+relax_compiler::mainprof::enabled::E	env RELAX_PROFILE_MAIN read once, nothing sets it
 relax_compiler::modules::NEXT_HOST	ids are never reused
 relax_compiler::modules::load_src_inner::N	temp file counter never reused (modules.rs:1056)
-relax_compiler::modules::module_trace::ON	env MAKEPAD_RUN_MODULE_TRACE read once, nothing sets it
+relax_compiler::modules::module_trace::ON	env RELAX_MODULE_TRACE read once, nothing sets it
 relax_compiler::native_macros::UPDATE	lock
+relax_compiler::native_macros::packages::PACKAGES	the native macro sets' packages: the host registers its sets once (set_host), they never change
 relax_compiler::os::fault::SPARE_ALTSTACKS	spare stacks, reusable
 relax_compiler::os::fault::imp::FAULT_REGS	env; cfg-off: apple
 relax_compiler::os::fault::imp::WATCHDOG	signal number chosen once; cfg-off: android
-relax_compiler::os::fault::imp::trace::T	env MAKEPAD_RUN_FAULT_TRACE read once, nothing sets it
+relax_compiler::os::fault::imp::trace::T	env RELAX_FAULT_TRACE read once, nothing sets it
 relax_compiler::os::mem::NO_CODEGEN	env
 relax_compiler::os::mem::imp::BITS	committed code granules, code only grows; siblings REGIONS process (os/mem.rs:1135)
 relax_compiler::os::mem::imp::CODE_REGIONS	region table, a slot empties only on release: 64 slots, then panic; cfg-off: apple
@@ -716,7 +717,7 @@ relax_compiler::os::mem::imp::RES_LOCK	lock; cfg-off: windows
 relax_compiler::os::mem::imp::RES_N	append-only reservation table, ended ranges must span runs; cfg-off: windows
 relax_compiler::os::mem::imp::WX_FAILED	machine fact; cfg-off: windows
 relax_compiler::os::mem::imp::code_alloc_at::ATFORK	one-shot install; cfg-off: apple
-relax_compiler::os::mem::imp::wx::ON	env MAKEPAD_RUN_WX read once, nothing sets it
+relax_compiler::os::mem::imp::wx::ON	env RELAX_WX read once, nothing sets it
 relax_compiler::os::mem::page_size::PAGE	machine fact
 relax_compiler::os::proc::ARGS	args of the process
 relax_compiler::os::proc::EMBEDDED	a host owns this process
@@ -751,7 +752,7 @@ relax_compiler::pmhost::JIT_RUNNER	unit struct, runner vtable (pmhost.rs:114)
 relax_compiler::pmhost::POLICY	one policy per process, chosen by the entry point
 relax_compiler::postframe::LOG	env log file
 relax_compiler::postframe::UI_WAIT_HOOK	native host fn
-relax_compiler::postframe::owner_long_all::ALL	env MAKEPAD_RUN_OWNER_LONG read once, nothing sets it
+relax_compiler::postframe::owner_long_all::ALL	env RELAX_OWNER_LONG read once, nothing sets it
 relax_compiler::provided::REGISTRY	registered before cli_main, native shims
 relax_compiler::reload::BEFORE_EXEC	native host hand-over fns, still used by a real exec
 relax_compiler::reload::DOMAIN_REVISION	monotone; a new watcher starts from 0 and does one extra rescan
@@ -772,9 +773,9 @@ relax_compiler::reload::host::RESTART_AFTER_BUILD	the build belongs to the proce
 relax_compiler::reload::host::loader::LOADER	path of this binary, env set only at runner start (runner/src/lib.rs:148); "what this process runs" (reload_host.rs:40)
 relax_compiler::reload::inputs::add_runner::RUNNER	facts of the loader binary, which stays
 relax_compiler::reload::live_log::LOCK	lock
-relax_compiler::reload::live_trace::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
-relax_compiler::reload::reload_trace::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
-relax_compiler::reload::stream_timing::ON	env MAKEPAD_RUN_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::live_trace::ON	env RELAX_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::reload_trace::ON	env RELAX_RELOAD_TRACE read once, nothing sets it
+relax_compiler::reload::stream_timing::ON	env RELAX_RELOAD_TRACE read once, nothing sets it
 relax_compiler::reload::trace_patch_wait::LAST	log dedupe
 relax_compiler::reload::verdict_key::VERDICT	verdict key counter never reused (reload.rs:5114)
 relax_compiler::reload::watch_events::native::KICK	wake of the OS watcher, a stale true costs one poll; cfg-off: macos
@@ -791,22 +792,22 @@ relax_compiler::run::MAIN_HOST	native host, set once
 relax_compiler::run::ONE	lock
 relax_compiler::run::QUIET	from args, same next run, only ever set true
 relax_compiler::run::REPORT_FILE	launcher FIFO, reopened by --report-to
-relax_compiler::run::REPORT_PATH	env MAKEPAD_RUN_REPORT, same next run
+relax_compiler::run::REPORT_PATH	env RELAX_REPORT, same next run
 relax_compiler::run::SILENT	from args, same next run, only ever set true
 relax_compiler::run::SOURCE_FAILURE	set only before the app's source is had (cmd_run_app), which restart skips
 relax_compiler::run::YIELD_SECTION	static label, overwritten
 relax_compiler::run::cmd_run_inner::AT_EXIT	the process's atexit handler, installed once
-relax_compiler::run::exit_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothing sets it
+relax_compiler::run::exit_trace::ON	env RELAX_LINK_TRACE read once, nothing sets it
 relax_compiler::run::flush_errors::FLUSHED	compared to monotone SERVED and RECORDS
-relax_compiler::run::link_trace::ON	env MAKEPAD_RUN_LINK_TRACE read once, nothing sets it
-relax_compiler::run::spill_cache::LIM	env MAKEPAD_RUN_CACHE_SPILL_MB read once, nothing sets it
+relax_compiler::run::link_trace::ON	env RELAX_LINK_TRACE read once, nothing sets it
+relax_compiler::run::spill_cache::LIM	env RELAX_CACHE_SPILL_MB read once, nothing sets it
 relax_compiler::run::spill_cache::SEEN	compared to monotone SERVED and RECORDS
-relax_compiler::run::start_monitor::STEP	env MAKEPAD_RUN_MEM_TRIM_GROWTH_MB read once, nothing sets it
+relax_compiler::run::start_monitor::STEP	env RELAX_MEM_TRIM_GROWTH_MB read once, nothing sets it
 relax_compiler::run_end::HANDED	the next run's inputs: the restart that starts it hands them over (run_input)
 relax_compiler::run_end::NATIVE_END	native host hook, set once
 relax_compiler::run_end::RESTARTING	run_end's own latch
 relax_compiler::run_end::leftovers::START	the test's start image
-relax_compiler::sandbox::sandbox_dump::VALUE	env MAKEPAD_RUN_SANDBOX_DUMP read once, nothing sets it
+relax_compiler::sandbox::sandbox_dump::VALUE	env RELAX_SANDBOX_DUMP read once, nothing sets it
 relax_compiler::serve_os::STOP	serve mode, stored false at its start, not a run
 relax_compiler::stale::RUN_ENDS	monotone gate of in_ended_run: the ended runs' ranges stay
 relax_compiler::stale::WAKE_R	pipe of the run-stale watcher, which its ONCE spawns once and which must stay
@@ -819,10 +820,10 @@ relax_compiler::store::HELD	shared build lock, held until process exit by design
 relax_compiler::store::LIVE	files this process opened, kept from eviction; only grows, no wrong behaviour
 relax_compiler::store::OPEN_FILES	files this process opened, kept from eviction; only grows, no wrong behaviour
 relax_compiler::store::PROGRAMS	store sets by root identity, a later call replaces the same key
-relax_compiler::store::profiling::P	env MAKEPAD_RUN_PROFILE read once, nothing sets it
-relax_compiler::syms::reloc_sig::F	env MAKEPAD_RUN_RELOC_SIG read once, nothing sets it
-relax_compiler::syms::reloc_sig_code::VALUE	env MAKEPAD_RUN_RELOC_SIG_CODE read once, nothing sets it
-relax_compiler::syms::reloc_sig_verbose::ON	env MAKEPAD_RUN_RELOC_SIG_VERBOSE read once, nothing sets it
+relax_compiler::store::profiling::P	env RELAX_PROFILE read once, nothing sets it
+relax_compiler::syms::reloc_sig::F	env RELAX_RELOC_SIG read once, nothing sets it
+relax_compiler::syms::reloc_sig_code::VALUE	env RELAX_RELOC_SIG_CODE read once, nothing sets it
+relax_compiler::syms::reloc_sig_verbose::ON	env RELAX_RELOC_SIG_VERBOSE read once, nothing sets it
 relax_compiler::tui::ABNORMAL	the session log spans the runs: a bad run's part stays kept
 relax_compiler::tui::EXIT_CODE	read once at the real exit
 relax_compiler::tui::ITEMS	per-thread item slots, overwritten
@@ -836,22 +837,22 @@ relax_compiler::tui::unix::OUT	tee and transcript stay, provided the restart pat
 relax_compiler::tui::unix::READER	tee and transcript stay, provided the restart path does not call tui::finish
 relax_compiler::tui::unix::STATE	tee and transcript stay, provided the restart path does not call tui::finish
 relax_compiler::tui::unix::TEE	tee and transcript stay, provided the restart path does not call tui::finish
-relax_compiler::wasm_export::block_profile::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::enabled::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::full_o1::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::hot_fraction::F	env MAKEPAD_RUN_WASM_EXPORT_HOT read once, nothing sets it
-relax_compiler::wasm_export::module_inline_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::block_profile::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::enabled::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::full_o1::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::hot_fraction::F	env RELAX_WASM_EXPORT_HOT read once, nothing sets it
+relax_compiler::wasm_export::module_inline_on::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::wasm_export::new_unit::NEXT	unit ids never reused (wasm_export.rs:33)
-relax_compiler::wasm_export::o1_folds::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o1_folds::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::wasm_export::o1_inline_limits::L	parsed env limits per var name, nothing sets those vars (wasm_export.rs:1446)
-relax_compiler::wasm_export::o3_cold_tiny::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o3_cold_tiny::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::wasm_export::o3_crate::C	env memo
-relax_compiler::wasm_export::o3_lto::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::o3_policy::P	env MAKEPAD_RUN_WASM_EXPORT_INLINE read once, nothing sets it
+relax_compiler::wasm_export::o3_lto::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::o3_policy::P	env RELAX_WASM_EXPORT_INLINE read once, nothing sets it
 relax_compiler::wasm_export::prepare_shipping::PROFILE	env memo
-relax_compiler::wasm_export::size_first_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::stats_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
-relax_compiler::wasm_export::untraced_on::ON	env MAKEPAD_RUN_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::size_first_on::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::stats_on::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
+relax_compiler::wasm_export::untraced_on::ON	env RELAX_WASM_EXPORT_STATS read once, nothing sets it
 relax_compiler::web::EMBEDDER	native embedder lookup
 relax_front::def_collector::NO_NAMES	empty set constant (def_collector.rs:25)
 relax_front::feature_tables::ACCEPTED	constant table
@@ -865,16 +866,17 @@ relax_front::macro_reg::RUNNER	host hook, points to JitRunner, a unit struct (ma
 relax_front::macro_reg::STATS	unit struct, access path to STATS_CELL (macro_reg.rs:323)
 relax_front::macros::LOOKUP_INPUT_IDS	lookup ids never reused (macros.rs:421)
 relax_front::macros::SCOPE_IDS	scope ids never reused (macros.rs:1071)
-relax_front::parser::lazy_stats_on::E	env MAKEPAD_RUN_LAZY_STATS read once, nothing sets it
-relax_front::parser::verify_tokens::V	env MAKEPAD_RUN_VERIFY_TOKENS read once, nothing sets it
+relax_front::parser::lazy_stats_on::E	env RELAX_LAZY_STATS read once, nothing sets it
+relax_front::parser::verify_tokens::V	env RELAX_VERIFY_TOKENS read once, nothing sets it
 relax_front::preload::VERIFY	host hook, verify_file fn set once (run.rs:1142)
-relax_front::preload::lazy::forced_deferral::LIST	env MAKEPAD_RUN_LAZY_DEFER read once, nothing sets it
+relax_front::preload::lazy::forced_deferral::LIST	env RELAX_LAZY_DEFER read once, nothing sets it
 relax_front::preload::relax_trace::T	env memo
 relax_front::preload::trace::T	env memo
 relax_front::program::SHARED_CV	condvar, no state
-relax_front::rs_outline::verify_elision::ON	env MAKEPAD_RUN_VERIFY_OUTLINE read once, nothing sets it
+relax_front::rs_outline::verify_elision::ON	env RELAX_VERIFY_OUTLINE read once, nothing sets it
 relax_front::target_features::AARCH64_FEATURES	constant table
 relax_front::target_features::X86_FEATURES	constant table
+relax_front::unitgraph::SCRIPT_ANSWERS	the host's build-script answers, registered once (set_host)
 relax_front::unitgraph::SCRIPT_FREE	condvar, no state
 relax_front::unitgraph::SELF_EXE	path of Relax's own executable, host-given on Android (unitgraph.rs:805)
 relax_front::unitgraph::TMP_SEQ	temp name counter never reused (unitgraph.rs:849)
@@ -893,7 +895,7 @@ makepad_alloc_phase::sync::macos::os_sync::WAKE_ALL	cached OS fn pointers; cfg-o
 makepad_alloc_phase::sync::macos::os_sync::WAKE_ONE	cached OS fn pointers; cfg-off: apple
 relax_trace::T	env memo
 relax_types::borrowck::check::verify_polonius_sample::COUNTER	one-in-N sample counter, any start value is right (check.rs:179)
-relax_types::borrowck::check::verify_polonius_sample::RATE	env MAKEPAD_RUN_POLONIUS_VERIFY read once, nothing sets it
+relax_types::borrowck::check::verify_polonius_sample::RATE	env RELAX_POLONIUS_VERIFY read once, nothing sets it
 relax_types::borrowck::event::CHECK_ALL	`makepad check` only
 relax_types::borrowck::lazy::DISABLED	set by `makepad check`, serve and tests only, none restart in place
 relax_types::borrowck::lazy::NEXT_SUB	ids are never reused
@@ -901,24 +903,24 @@ relax_types::borrowck::lazy::PANIC_SINK	native host hook
 relax_types::borrowck::lazy::RECORDED	monotone, paired with the SWEPT reset
 relax_types::borrowck::lazy::SEQ	event sequence never reused (lazy.rs:32)
 relax_types::borrowck::lazy::WAKE	wake handle
-relax_types::borrowck::lazy::front_trace::ON	env MAKEPAD_RUN_FRONT_TRACE read once, nothing sets it
-relax_types::borrowck::lazy::set_ranks::TRACE	env MAKEPAD_RUN_SPECV_TRACE read once, nothing sets it
-relax_types::borrowck::lazy::worker::COUNTS	env MAKEPAD_RUN_BODY_COUNTS read once, nothing sets it
+relax_types::borrowck::lazy::front_trace::ON	env RELAX_FRONT_TRACE read once, nothing sets it
+relax_types::borrowck::lazy::set_ranks::TRACE	env RELAX_SPECV_TRACE read once, nothing sets it
+relax_types::borrowck::lazy::worker::COUNTS	env RELAX_BODY_COUNTS read once, nothing sets it
 relax_types::feature_gate::stability_table::TABLE	table from include_str in the binary (feature_gate.rs:1231)
-relax_types::lint::cmdline::FLAGS	env MAKEPAD_RUN_LINT_FLAGS read once, nothing sets it
+relax_types::lint::cmdline::FLAGS	env RELAX_LINT_FLAGS read once, nothing sets it
 relax_types::lint_table::GROUPS	constant table
 relax_types::lint_table::REMOVED	constant table
 relax_types::lint_table::RENAMED	constant table
-relax_types::next_solver::collect::count_query::ENABLED	env MAKEPAD_RUN_DECL_COUNTERS read once, nothing sets it
+relax_types::next_solver::collect::count_query::ENABLED	env RELAX_DECL_COUNTERS read once, nothing sets it
 relax_types::tcx::lifetime_resolve::share::EMPTY	shared empty value
 relax_types::type_queries::TYPECK_READS_T0	env mem report clock
-relax_types::type_queries::test_typeck_panic::WANT	env MAKEPAD_RUN_TEST_TYPECK_PANIC read once, nothing sets it
+relax_types::type_queries::test_typeck_panic::WANT	env RELAX_TEST_TYPECK_PANIC read once, nothing sets it
 relax_types::type_queries::with_misses::EMPTY	shared empty value
-relax_types::typeck::check_fn::ST	env MAKEPAD_RUN_TYSTATS read once, nothing sets it
-relax_types::typeck::check_fn_body::LAZY_STATS	env MAKEPAD_RUN_LAZY_STATS read once, nothing sets it
-relax_types::typeck::instantiate::try_normalize_body::COUNTS	env MAKEPAD_RUN_BODY_COUNTS read once, nothing sets it
+relax_types::typeck::check_fn::ST	env RELAX_TYSTATS read once, nothing sets it
+relax_types::typeck::check_fn_body::LAZY_STATS	env RELAX_LAZY_STATS read once, nothing sets it
+relax_types::typeck::instantiate::try_normalize_body::COUNTS	env RELAX_BODY_COUNTS read once, nothing sets it
 relax_types::typeck::side_table::EMPTY	constant empty header (side_table.rs:36)
-relax_types::typeck::try_instantiate_body::SAMPLE	env MAKEPAD_RUN_TYPECK_BACKTRACE read once, nothing sets it
+relax_types::typeck::try_instantiate_body::SAMPLE	env RELAX_TYPECK_BACKTRACE read once, nothing sets it
 relax_types::unique_test_id::NEXT	test only
 relax_types::unique_test_suffix::NEXT	test only
 relax_compiler::jit::ENDED_LEAVE	the glue copy, for the process: a thread comes back into any run that ended
@@ -934,3 +936,5 @@ makepad_shader::shader_ir_spirv::spirv_val::SEQ	names validation files, only gro
 makepad_shader::shader_schema::POD_SWIZZLES	constant table
 relax_compiler::jit::RUNS_ENDED	counts the ends a staying thread compares with: never goes back
 relax_compiler::run_end::leftovers::ON	a test mode: set once, from the process's start
+relax_front::macro_reg::PURE_CRATES	the host's audited pure proc-macro crates, set once (set_host)
+makepad_run::script_answers::PLATFORM	immutable: makepad-platform's build-script answer entry

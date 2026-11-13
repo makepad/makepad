@@ -29,16 +29,16 @@
 //!    opened as a warm start opens it and inherits what the old one learned, and the Unit's
 //!    compile fields are replaced; the old ones are returned;
 //! 4. the old values are dropped on the monitor's thread, then the heap is trimmed.
-//! `MAKEPAD_RUN_SETTLE_REBUILD=0` turns it off.
+//! `RELAX_SETTLE_REBUILD=0` turns it off.
 
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 
-/// On unless MAKEPAD_RUN_SETTLE_REBUILD=0.
+/// On unless RELAX_SETTLE_REBUILD=0.
 pub(crate) fn enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("MAKEPAD_RUN_SETTLE_REBUILD").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RELAX_SETTLE_REBUILD").map_or(true, |v| v != "0"))
 }
 
 /// The crate list of this launch (kept: the rebuild restores against it, and the crates added
@@ -167,7 +167,7 @@ fn refuse(up: *mut Unit) -> Option<String> {
     if crate::reload::program_edits() != 0 {
         return Some("a live edit was applied (the collected image no longer describes the program)".into());
     }
-    if crate::sandbox::any_live() {
+    if crate::sandbox::any_live(unsafe { &*up }) {
         return Some("a sandbox module exists".into());
     }
     if BOOT.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
@@ -189,9 +189,6 @@ fn not_now() -> Option<String> {
     }
     if RELOADING.load(Ordering::Acquire) > 0 {
         return Some("a reload is in progress".into());
-    }
-    if crate::pmhost::world_alive() {
-        return Some("the proc-macro world is alive".into());
     }
     None
 }
@@ -215,9 +212,9 @@ fn with_added(prog: &Program, boot: &[crate::preload::PreCrate]) -> Vec<crate::p
 
 fn trace(what: &str) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_SETTLE_TRACE").is_some()) {
+    if *ON.get_or_init(|| std::env::var_os("RELAX_SETTLE_TRACE").is_some()) {
         let (rss, peak, extra) = crate::memstat::process_rss();
-        eprintln!("makepad-run settle rebuild: {what} (t={:.0} ms; rss {} MB, peak {} MB, {})", crate::clock::ms_since_start(), rss >> 20, peak >> 20, extra.split(';').next().unwrap_or(""));
+        eprintln!("relax settle rebuild: {what} (t={:.0} ms; rss {} MB, peak {} MB, {})", crate::clock::ms_since_start(), rss >> 20, peak >> 20, extra.split(';').next().unwrap_or(""));
     }
 }
 
@@ -273,7 +270,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
         return Outcome::Retry(why);
     }
     // the tier-up tail first: a rebuild drops every slot's RIR, and each O3 build still queued
-    // then lowers its callees again, which stay pinned while they tier up (Sandbox race rebuilt
+    // then lowers its callees again, which stay pinned while they tier up (a game rebuilt
     // during the tail: 18-22k RIR bodies and 190k query nodes regrown, 400 MB live, against 2k
     // and 250 MB after a rebuild behind it)
     if patient {
@@ -284,6 +281,9 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     }
     // the recipe, the session, the images: process state
     let _k = crate::zone_alloc::kept();
+    // what the rebuild keeps is the program's state loaded from its images: charged to cache-load
+    // (untagged, it was most of the "other" category after a rebuild)
+    let _mem = crate::memstat::tag(crate::memstat::Tag::CacheLoad);
     RUNNING.store(true, Ordering::Relaxed);
     let _running = Running;
     let t_all = Instant::now();
@@ -298,7 +298,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     }
     // the recorded entries go to the stores now, off the owner: the new cache opens the stores
     // as they are, and an entry recorded but not yet written would be unknown to it (every slot
-    // such entries hold compiled again: Sandbox's settled state grew back to 18k RIR bodies)
+    // such entries hold compiled again: a large app's settled state grew back to 18k RIR bodies)
     let spill = owner::publish(|| unsafe {
         (*up).flush_cache_records();
         (*up).cache.as_mut().and_then(|c| c.spill_take())
@@ -325,7 +325,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
         let r = front_read("settle rebuild encode");
         let (prog, tcx) = r.unit(up);
         let before = Counts::of(prog, tcx);
-        trace(&format!("the program {before:?}, the stored image {stored:?}"));
+        trace(&format!("the program {before:?}, the stored image {stored:?}, proc-macro world {}", if crate::pmhost::world_alive() { "alive" } else { "none" }));
         let stop = || crate::preempt::writer_waiting() || crate::preempt::is_stopped();
         // crates added at run time (app domains) are in the image too, listed after the boot's
         let pre = with_added(prog, &boot);
@@ -469,7 +469,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     let rss1 = crate::memstat::resident();
     trace("the old state dropped");
     REBUILDS.fetch_add(1, Ordering::Relaxed);
-    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("makepad-run settle rebuild at t={:.0} ms: {}, restore {:.1} ms, spill {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
+    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("relax settle rebuild at t={:.0} ms: {}, restore {:.1} ms, spill {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
         crate::clock::ms_since_start(), encode, restore_ms, spill_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0); }
     Outcome::Done
 }
@@ -495,6 +495,7 @@ pub(crate) fn replaced_fronts_alive() -> Vec<std::sync::Arc<FrontShared>> {
 /// back to be dropped elsewhere.
 unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: crate::cache::Mode, fresh: Fresh, before: Counts) -> Result<Old, String> {
     let t_r = Instant::now();
+    let _mem = crate::memstat::tag(crate::memstat::Tag::CacheLoad);
     let mut laps: Vec<(&str, f64)> = Vec::new();
     let lap = |w: &'static str, laps: &mut Vec<(&'static str, f64)>| laps.push((w, t_r.elapsed().as_secs_f64() * 1e3));
     // (the steps up to the swap give way to a waiting request: the rebuild is tried again later.
@@ -506,6 +507,15 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
         return Err(if owner::program_waiting() && !quitting() { gave_way("front write", t_r) } else { "a front reader held on for 1 s".into() });
     };
     lap("front write", &mut laps);
+    // The proc-macro world stays alive through the rebuild: it is its own unit, program, type
+    // context and cache, and nothing of the state replaced here is reachable from it. A hosted
+    // call runs as one whole program request, as this replace does, so none is in flight now. One
+    // that is breaks that rule: the rebuild waits for it, and the flight recorder says so.
+    let calls = crate::pmhost::calls_in_flight();
+    if calls != 0 {
+        crate::inspect::flightrec::event("settle.hosted-call", &format!("{calls} hosted macro call(s) in flight at the replace"), calls as u64, 0);
+        return Err(format!("{calls} hosted macro call(s) in flight"));
+    }
     let _f = crate::zone_alloc::compiler_fresh();
     let u = &mut *up;
     let now = Counts::of(&u.prog, &u.tcx);
@@ -520,6 +530,11 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let Fresh { mut prog, mut tcx, collected: _, cache: fresh_cache, added } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
     tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
+    // ... and which of those closure types are coroutines. The image holds declarations only, and
+    // the slots that stay (their keys name these types) are the only users left: without the mark
+    // an async block's type is a plain closure with no `Future` impl, and the next instance built
+    // from source over it stops at "failed to normalize body for codegen".
+    tcx.inherit_coroutines(&u.tcx);
     lap("top up", &mut laps);
     if yielded() { return Err(gave_way("top up", t_r)); }
     compare((&u.prog, &u.tcx), (&prog, &tcx))?;
@@ -571,11 +586,15 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     // the old front state names the old program: no reader may reach it after the replace (a
     // reader checks `alive` under its front read, and this runs under the front write)
     queue::retire_front(&u.front);
+    // a slot's RIR goes, and what is kept beside it, read only while that RIR is set: a baseline
+    // body's own lowering and a full body's normal RIR. All of it was built from the old program,
+    // between its blocks: kept, it held the cold chunks resident (a large app: 20 MB of RIR in
+    // 600 old chunks, 194 MB resident). A build after the rebuild lowers again from the new one.
     let mut rir = Vec::new();
     for e in u.fns.iter_mut() {
-        if let Some(r) = e.rir.take() {
-            rir.push(r);
-        }
+        rir.extend(e.rir.take());
+        rir.extend(e.lowering.take());
+        rir.extend(e.normal_rir.take());
         e.build_err = None;
     }
     let old = Old {
@@ -627,7 +646,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
         crate::inspect::flightrec::event("settle.replace", &format!("the replace held the owner {:.1} ms (ms to): {steps}", ms(t_r)), t_r.elapsed().as_micros() as u64, 0);
         if verbose {
             trace(&format!("replace steps (ms to): {steps}"));
-            eprintln!("makepad-run settle rebuild replace (ms to): {steps}");
+            eprintln!("relax settle rebuild replace (ms to): {steps}");
         }
     }
     Ok(old)

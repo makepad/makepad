@@ -825,7 +825,7 @@ fn f32_simd() -> u64 {
     h
 }
 
-/// Vec of 64..160-byte structs copied/moved through Option and pushed (the leap MirrorEntry pattern)
+/// Vec of 64..160-byte structs copied/moved through Option and pushed (a game's MirrorEntry pattern)
 #[derive(Clone)]
 struct Entry {
     id: u64,

@@ -293,7 +293,7 @@ pub const fn _MM_SHUFFLE(z: u32, y: u32, x: u32, w: u32) -> i32 {
 // rustc library/stdarch/crates/core_arch/src/x86/avx2.rs: _mm256_blend_epi32.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_blend_epi32<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -314,7 +314,7 @@ pub fn _mm256_blend_epi32<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
 // Gate target_feature by architecture: this module is also mounted on non-x86 hosts.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_shuffle_epi32<const MASK: i32>(a: __m256i) -> __m256i {
     unsafe {
         const { assert!(MASK >= 0 && MASK < 256) };
@@ -377,7 +377,7 @@ pub fn _mm256_set_epi64x(e3: i64, e2: i64, e1: i64, e0: i64) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "vpclmulqdq"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_clmulepi64_epi128<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
     unsafe {
         i_join(
@@ -389,14 +389,14 @@ pub fn _mm256_clmulepi64_epi128<const IMM8: i32>(a: __m256i, b: __m256i) -> __m2
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extractf128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
     __m128i([a.0[IMM1 as usize * 2], a.0[IMM1 as usize * 2 + 1]])
 }
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extracti128_si256<const IMM1: i32>(a: __m256i) -> __m128i {
     __m128i([a.0[IMM1 as usize * 2], a.0[IMM1 as usize * 2 + 1]])
 }
@@ -435,7 +435,7 @@ pub fn _mm256_mullo_epi32(a: __m256i, b: __m256i) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_permute2x128_si256<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
     let mut r = [0; 4];
     let mut i = 0;
@@ -458,7 +458,7 @@ pub fn _mm256_permute2x128_si256<const IMM8: i32>(a: __m256i, b: __m256i) -> __m
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_permute4x64_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
     let mut r = [0; 4];
     let mut i = 0;
@@ -886,7 +886,7 @@ pub fn _mm256_castps256_ps128(a: __m256) -> __m128 {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extractf128_ps<const IMM1: i32>(a: __m256) -> __m128 {
     unsafe {
         if IMM1 & 1 == 0 { ps_lo(&a) } else { ps_hi(&a) }
@@ -968,7 +968,7 @@ pub fn _mm256_cmpgt_epi8(a: __m256i, b: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_alignr_epi8<const IMM8: i32>(a: __m256i, b: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_alignr_epi8::<IMM8>(i_lo(&a), i_lo(&b)), _mm_alignr_epi8::<IMM8>(i_hi(&a), i_hi(&b)))
@@ -1141,11 +1141,11 @@ pub const _MM_HINT_ET0: i32 = 7;
 pub const _MM_HINT_ET1: i32 = 6;
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_prefetch<const STRATEGY: i32>(_p: *const i8) {}
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_slli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_slli_epi16::<IMM8>(i_lo(&a)), _mm_slli_epi16::<IMM8>(i_hi(&a)))
@@ -1153,7 +1153,7 @@ pub fn _mm256_slli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_slli_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_slli_epi32::<IMM8>(i_lo(&a)), _mm_slli_epi32::<IMM8>(i_hi(&a)))
@@ -1163,7 +1163,7 @@ pub fn _mm256_slli_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
 // Counts >= 64 zero every lane, rather than wrapping the count modulo 64.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_slli_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -1176,7 +1176,7 @@ pub fn _mm256_slli_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_srli_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -1189,7 +1189,7 @@ pub fn _mm256_srli_epi64<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_srai_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_srai_epi16::<IMM8>(i_lo(&a)), _mm_srai_epi16::<IMM8>(i_hi(&a)))
@@ -1197,7 +1197,7 @@ pub fn _mm256_srai_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_srai_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_srai_epi32::<IMM8>(i_lo(&a)), _mm_srai_epi32::<IMM8>(i_hi(&a)))
@@ -1205,7 +1205,7 @@ pub fn _mm256_srai_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_srli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_srli_epi16::<IMM8>(i_lo(&a)), _mm_srli_epi16::<IMM8>(i_hi(&a)))
@@ -1213,7 +1213,7 @@ pub fn _mm256_srli_epi16<const IMM8: i32>(a: __m256i) -> __m256i {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_srli_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         i_join(_mm_srli_epi32::<IMM8>(i_lo(&a)), _mm_srli_epi32::<IMM8>(i_hi(&a)))
@@ -1465,7 +1465,7 @@ pub fn _mm512_castsi512_si128(a: __m512i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm512_extracti32x4_epi32<const IMM8: i32>(a: __m512i) -> __m128i {
     let idx = ((IMM8 & 3) as usize) * 2;
     __m128i([a.0[idx], a.0[idx + 1]])
@@ -1500,7 +1500,7 @@ pub fn _mm512_xor_si512(a: __m512i, b: __m512i) -> __m512i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,vpclmulqdq"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm512_clmulepi64_epi128<const IMM8: i32>(a: __m512i, b: __m512i) -> __m512i {
     unsafe {
         let l0 = _mm_clmulepi64_si128::<IMM8>(__m128i([a.0[0], a.0[1]]), __m128i([b.0[0], b.0[1]]));
@@ -1513,7 +1513,7 @@ pub fn _mm512_clmulepi64_epi128<const IMM8: i32>(a: __m512i, b: __m512i) -> __m5
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm512_slli_epi32<const IMM8: u32>(a: __m512i) -> __m512i {
     unsafe {
         let a = lanes512_i32(a);
@@ -1597,7 +1597,7 @@ pub fn _mm_blendv_epi8(a: __m128i, b: __m128i, mask: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "pclmulqdq"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_clmulepi64_si128<const IMM8: i32>(a: __m128i, b: __m128i) -> __m128i {
     unsafe {
         vx::vx_binary(a, b, 90 + ((IMM8 & 1) | ((IMM8 >> 3) & 2)) as u32, 64)
@@ -1749,8 +1749,17 @@ pub fn _mm_mullo_epi16(a: __m128i, b: __m128i) -> __m128i {
 }
 
 #[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
+#[rustc_legacy_const_generics(1)]
+pub fn _mm_extract_epi16<const IMM8: i32>(a: __m128i) -> i32 {
+    unsafe {
+        lanes128_u16(a)[(IMM8 & 7) as usize] as i32
+    }
+}
+
+#[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_extract_epi32<const IMM8: i32>(a: __m128i) -> i32 {
     unsafe {
         lanes128_i32(a)[IMM8 as usize]
@@ -1924,7 +1933,7 @@ pub fn _mm_sha1nexte_epu32(a: __m128i, b: __m128i) -> __m128i {
 // SHA1RNDS4 adds the selected constant here (unlike Arm SHA1C/P/M).
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sha"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_sha1rnds4_epu32<const FUNC: i32>(a: __m128i, b: __m128i) -> __m128i {
     unsafe {
         vx::vx_sha1rnds4(a, b, FUNC)
@@ -1933,7 +1942,7 @@ pub fn _mm_sha1rnds4_epu32<const FUNC: i32>(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_shuffle_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 4, 32, IMM8)
@@ -1950,7 +1959,7 @@ pub fn _mm_shuffle_epi8(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_slli_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 1, 32, IMM8)
@@ -1959,7 +1968,7 @@ pub fn _mm_slli_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 5, 8, IMM8)
@@ -2042,7 +2051,7 @@ pub fn _mm_add_ss(a: __m128, b: __m128) -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "ssse3"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_alignr_epi8<const IMM8: i32>(a: __m128i, b: __m128i) -> __m128i {
     unsafe {
         let a = lanes128_u8(a);
@@ -2082,7 +2091,7 @@ pub fn _mm_andnot_ps(a: __m128, b: __m128) -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_blend_epi16<const IMM8: i32>(a: __m128i, b: __m128i) -> __m128i {
     unsafe {
         let a = lanes128_i16(a);
@@ -2400,7 +2409,7 @@ pub fn _mm_sha256rnds2_epu32(a: __m128i, b: __m128i, k: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_shuffle_ps<const MASK: i32>(a: __m128, b: __m128) -> __m128 {
     unsafe {
         // lanes 0,1 from a (fields 0..4 of MASK), lanes 2,3 from b (fields 4..8): two lane shuffles
@@ -2413,7 +2422,7 @@ pub fn _mm_shuffle_ps<const MASK: i32>(a: __m128, b: __m128) -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_slli_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 1, 16, IMM8)
@@ -2422,7 +2431,7 @@ pub fn _mm_slli_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_slli_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 1, 64, IMM8)
@@ -2431,7 +2440,7 @@ pub fn _mm_slli_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srai_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 3, 32, IMM8)
@@ -2440,7 +2449,7 @@ pub fn _mm_srai_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srli_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 2, 16, IMM8)
@@ -2449,7 +2458,7 @@ pub fn _mm_srli_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srli_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 2, 32, IMM8)
@@ -2458,7 +2467,7 @@ pub fn _mm_srli_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srli_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 2, 64, IMM8)
@@ -2987,7 +2996,7 @@ pub fn _mm_unpackhi_pd(a: __m128d, b: __m128d) -> __m128d {
 /// [a[MASK & 1], b[(MASK >> 1) & 1]]
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_shuffle_pd<const MASK: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         shuffle_pd(a, b, MASK)
@@ -3426,7 +3435,7 @@ pub unsafe fn _mm_loaddup_pd(mem_addr: *const f64) -> __m128d {
 /// lane i = bit i of IMM2 ? b[i] : a[i]
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_blend_pd<const IMM2: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         blend_pd(a, b, IMM2)
@@ -3456,7 +3465,7 @@ pub fn _mm_blendv_pd(a: __m128d, b: __m128d, mask: __m128d) -> __m128d {
 /// stored to the lanes selected by bits 0, 1 (others +0.0)
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_dp_pd<const IMM8: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         let lane = |bit: i32| if IMM8 & bit != 0 { u64::MAX } else { 0 };
@@ -3470,7 +3479,7 @@ pub fn _mm_dp_pd<const IMM8: i32>(a: __m128d, b: __m128d) -> __m128d {
 /// roundpd: ROUNDING & 3 (nearest-even, down, up, toward zero), or MXCSR's mode with bit 2
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_round_pd<const ROUNDING: i32>(a: __m128d) -> __m128d {
     unsafe {
         if ROUNDING & 4 != 0 {
@@ -3502,7 +3511,7 @@ pub fn _mm_ceil_pd(a: __m128d) -> __m128d {
 /// [round(b0), a1]
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_round_sd<const ROUNDING: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         _mm_move_sd(a, _mm_round_pd::<ROUNDING>(b))
@@ -3586,7 +3595,7 @@ pub fn _mm256_movedup_pd(a: __m256d) -> __m256d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_round_pd<const ROUNDING: i32>(a: __m256d) -> __m256d {
     unsafe {
         pd_join(_mm_round_pd::<ROUNDING>(pd_lo(&a)), _mm_round_pd::<ROUNDING>(pd_hi(&a)))
@@ -3609,7 +3618,7 @@ pub fn _mm256_ceil_pd(a: __m256d) -> __m256d {
 /// per 128-bit half: bits 0, 1 of MASK for the low half, bits 2, 3 for the high half
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_shuffle_pd<const MASK: i32>(a: __m256d, b: __m256d) -> __m256d {
     unsafe {
         pd_join(shuffle_pd(pd_lo(&a), pd_lo(&b), MASK), shuffle_pd(pd_hi(&a), pd_hi(&b), MASK >> 2))
@@ -3617,7 +3626,7 @@ pub fn _mm256_shuffle_pd<const MASK: i32>(a: __m256d, b: __m256d) -> __m256d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_blend_pd<const IMM4: i32>(a: __m256d, b: __m256d) -> __m256d {
     unsafe {
         pd_join(blend_pd(pd_lo(&a), pd_lo(&b), IMM4), blend_pd(pd_hi(&a), pd_hi(&b), IMM4 >> 2))
@@ -3633,7 +3642,7 @@ pub fn _mm256_blendv_pd(a: __m256d, b: __m256d, c: __m256d) -> __m256d {
 /// lane i = a[bit i of IMM2] (vpermilpd)
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_permute_pd<const IMM2: i32>(a: __m128d) -> __m128d {
     unsafe {
         shuffle_pd(a, a, IMM2)
@@ -3641,7 +3650,7 @@ pub fn _mm_permute_pd<const IMM2: i32>(a: __m128d) -> __m128d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_permute_pd<const IMM4: i32>(a: __m256d) -> __m256d {
     unsafe {
         let (lo, hi) = (pd_lo(&a), pd_hi(&a));
@@ -3662,7 +3671,7 @@ pub fn _mm256_permutevar_pd(a: __m256d, b: __m256i) -> __m256d {
 /// each half from IMM8 (bits 0..2 low half, 4..6 high half): 0 a.lo, 1 a.hi, 2 b.lo, 3 b.hi; bit 3 / 7 zero
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_permute2f128_pd<const IMM8: i32>(a: __m256d, b: __m256d) -> __m256d {
     unsafe {
         let pick = |c: i32| -> __m128d {
@@ -3683,7 +3692,7 @@ pub fn _mm256_permute2f128_pd<const IMM8: i32>(a: __m256d, b: __m256d) -> __m256
 /// lane i = a[(IMM8 >> 2i) & 3] (AVX2 vpermpd)
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_permute4x64_pd<const IMM8: i32>(a: __m256d) -> __m256d {
     let s = |i: i32| a.0[((IMM8 >> (2 * i)) & 3) as usize];
     __m256d([s(0), s(1), s(2), s(3)])
@@ -3692,7 +3701,7 @@ pub fn _mm256_permute4x64_pd<const IMM8: i32>(a: __m256d) -> __m256d {
 /// the 32 AVX compare predicates (IMM5 & 15; 16..31 differ only in signaling quiet NaNs)
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_cmp_pd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         match IMM5 & 15 {
@@ -3719,7 +3728,7 @@ pub fn _mm_cmp_pd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_cmp_sd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
     unsafe {
         _mm_move_sd(a, _mm_cmp_pd::<IMM5>(a, b))
@@ -3727,7 +3736,7 @@ pub fn _mm_cmp_sd<const IMM5: i32>(a: __m128d, b: __m128d) -> __m128d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_cmp_pd<const IMM5: i32>(a: __m256d, b: __m256d) -> __m256d {
     unsafe {
         pd_join(_mm_cmp_pd::<IMM5>(pd_lo(&a), pd_lo(&b)), _mm_cmp_pd::<IMM5>(pd_hi(&a), pd_hi(&b)))
@@ -3988,7 +3997,7 @@ pub fn _mm256_castpd256_pd128(a: __m256d) -> __m128d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extractf128_pd<const IMM1: i32>(a: __m256d) -> __m128d {
     unsafe {
         if IMM1 & 1 == 0 { pd_lo(&a) } else { pd_hi(&a) }
@@ -3996,7 +4005,7 @@ pub fn _mm256_extractf128_pd<const IMM1: i32>(a: __m256d) -> __m128d {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_insertf128_pd<const IMM1: i32>(a: __m256d, b: __m128d) -> __m256d {
     unsafe {
         if IMM1 & 1 == 0 { pd_join(b, pd_hi(&a)) } else { pd_join(pd_lo(&a), b) }
@@ -4046,14 +4055,14 @@ unsafe fn gather_f64(slice: *const f64, off: i64, scale: i32) -> f64 {
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub unsafe fn _mm_i32gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m128d {
     let o = lanes128_i32(offsets);
     __m128d([gather_f64(slice, o[0] as i64, SCALE), gather_f64(slice, o[1] as i64, SCALE)])
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+#[rustc_legacy_const_generics(4)]
 pub unsafe fn _mm_mask_i32gather_pd<const SCALE: i32>(src: __m128d, slice: *const f64, offsets: __m128i, mask: __m128d) -> __m128d {
     let o = lanes128_i32(offsets);
     let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, o[i] as i64, SCALE) } else { src.0[i] };
@@ -4061,7 +4070,7 @@ pub unsafe fn _mm_mask_i32gather_pd<const SCALE: i32>(src: __m128d, slice: *cons
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub unsafe fn _mm256_i32gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m256d {
     let o = lanes128_i32(offsets);
     let l = |i: usize| gather_f64(slice, o[i] as i64, SCALE);
@@ -4069,7 +4078,7 @@ pub unsafe fn _mm256_i32gather_pd<const SCALE: i32>(slice: *const f64, offsets: 
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+#[rustc_legacy_const_generics(4)]
 pub unsafe fn _mm256_mask_i32gather_pd<const SCALE: i32>(src: __m256d, slice: *const f64, offsets: __m128i, mask: __m256d) -> __m256d {
     let o = lanes128_i32(offsets);
     let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, o[i] as i64, SCALE) } else { src.0[i] };
@@ -4077,27 +4086,27 @@ pub unsafe fn _mm256_mask_i32gather_pd<const SCALE: i32>(src: __m256d, slice: *c
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub unsafe fn _mm_i64gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m128i) -> __m128d {
     __m128d([gather_f64(slice, offsets.0[0], SCALE), gather_f64(slice, offsets.0[1], SCALE)])
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+#[rustc_legacy_const_generics(4)]
 pub unsafe fn _mm_mask_i64gather_pd<const SCALE: i32>(src: __m128d, slice: *const f64, offsets: __m128i, mask: __m128d) -> __m128d {
     let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, offsets.0[i], SCALE) } else { src.0[i] };
     __m128d([l(0), l(1)])
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub unsafe fn _mm256_i64gather_pd<const SCALE: i32>(slice: *const f64, offsets: __m256i) -> __m256d {
     let l = |i: usize| gather_f64(slice, offsets.0[i], SCALE);
     __m256d([l(0), l(1), l(2), l(3)])
 }
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(4))]
+#[rustc_legacy_const_generics(4)]
 pub unsafe fn _mm256_mask_i64gather_pd<const SCALE: i32>(src: __m256d, slice: *const f64, offsets: __m256i, mask: __m256d) -> __m256d {
     let l = |i: usize| if mask.0[i].is_sign_negative() { gather_f64(slice, offsets.0[i], SCALE) } else { src.0[i] };
     __m256d([l(0), l(1), l(2), l(3)])
@@ -4450,7 +4459,7 @@ pub fn _mm256_cvtph_ps(a: __m128i) -> __m256 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "f16c"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_cvtps_ph<const IMM_ROUNDING: i32>(a: __m128) -> __m128i {
     unsafe {
         let rm = round_mode(IMM_ROUNDING);
@@ -4466,7 +4475,7 @@ pub fn _mm_cvtps_ph<const IMM_ROUNDING: i32>(a: __m128) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "f16c"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_cvtps_ph<const IMM_ROUNDING: i32>(a: __m256) -> __m128i {
     unsafe {
         let rm = round_mode(IMM_ROUNDING);
@@ -4786,7 +4795,7 @@ pub fn _mm_packus_epi32(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srai_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 3, 16, IMM8)
@@ -4804,7 +4813,7 @@ pub fn _mm_cmpneq_ps(a: __m128, b: __m128) -> __m128 {
 // SSE has no arithmetic qword shift; the backend synthesizes its sign extension.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,avx512vl"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_srai_epi64<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         vx::vx_unary(a, 3, 64, IMM8)
@@ -4851,7 +4860,7 @@ pub fn _mm_rcp_ps(a: __m128) -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_round_ps<const ROUNDING: i32>(a: __m128) -> __m128 {
     unsafe {
         if ROUNDING & 4 != 0 {
@@ -5148,7 +5157,7 @@ pub fn _mm256_sqrt_ps(a: __m256) -> __m256 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_round_ps<const ROUNDING: i32>(a: __m256) -> __m256 {
     unsafe {
         ps_join(_mm_round_ps::<ROUNDING>(ps_lo(&a)), _mm_round_ps::<ROUNDING>(ps_hi(&a)))
@@ -5190,7 +5199,7 @@ pub fn _mm256_unpackhi_ps(a: __m256, b: __m256) -> __m256 {
 /// `_mm_shuffle_ps` on each 128-bit half, with the same `MASK`.
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_shuffle_ps<const MASK: i32>(a: __m256, b: __m256) -> __m256 {
     unsafe {
         ps_join(_mm_shuffle_ps::<MASK>(ps_lo(&a), ps_lo(&b)), _mm_shuffle_ps::<MASK>(ps_hi(&a), ps_hi(&b)))
@@ -5207,7 +5216,7 @@ pub fn _mm256_movemask_ps(a: __m256) -> i32 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_permute2f128_ps<const IMM8: i32>(a: __m256, b: __m256) -> __m256 {
     unsafe {
         let pick = |c: i32| -> __m128 {
@@ -5248,7 +5257,7 @@ unsafe fn ps_ones() -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_cmp_ps<const IMM5: i32>(a: __m128, b: __m128) -> __m128 {
     unsafe {
         let ones = ps_ones();
@@ -5275,7 +5284,7 @@ pub fn _mm_cmp_ps<const IMM5: i32>(a: __m128, b: __m128) -> __m128 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_cmp_ps<const IMM5: i32>(a: __m256, b: __m256) -> __m256 {
     unsafe {
         ps_join(_mm_cmp_ps::<IMM5>(ps_lo(&a), ps_lo(&b)), _mm_cmp_ps::<IMM5>(ps_hi(&a), ps_hi(&b)))
@@ -5294,7 +5303,7 @@ pub fn _mm256_andnot_si256(a: __m256i, b: __m256i) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_inserti128_si256<const IMM1: i32>(a: __m256i, b: __m128i) -> __m256i {
     let mut r = a;
     let h = (IMM1 & 1) as usize;
@@ -5311,14 +5320,14 @@ pub fn _mm_cmpeq_epi64(a: __m128i, b: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_extract_epi64<const IMM1: i32>(a: __m128i) -> i64 {
     a.0[(IMM1 & 1) as usize]
 }
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_insert_epi32<const IMM8: i32>(a: __m128i, i: i32) -> __m128i {
     unsafe {
         let mut l = lanes128_i32(a);
@@ -5329,7 +5338,7 @@ pub fn _mm_insert_epi32<const IMM8: i32>(a: __m128i, i: i32) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.1"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm_insert_epi64<const IMM1: i32>(a: __m128i, i: i64) -> __m128i {
     let mut r = a;
     r.0[(IMM1 & 1) as usize] = i;
@@ -5344,7 +5353,7 @@ pub fn _mm_move_epi64(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_shufflehi_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         let l = lanes128_i16(a);
@@ -5360,7 +5369,7 @@ pub fn _mm_shufflehi_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_shufflelo_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         let l = lanes128_i16(a);
@@ -5376,7 +5385,7 @@ pub fn _mm_shufflelo_epi16<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse2"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_slli_si128<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         let l = lanes128_u8(a);
@@ -5435,9 +5444,9 @@ const fn aes_sboxes() -> [[u8; 256]; 2] {
     tables
 }
 
-const AES_SBOXES: [[u8; 256]; 2] = aes_sboxes();
+pub(super) const AES_SBOXES: [[u8; 256]; 2] = aes_sboxes();
 
-fn aes_mix_columns(a: [u8; 16], inverse: bool) -> [u8; 16] {
+pub(super) fn aes_mix_columns(a: [u8; 16], inverse: bool) -> [u8; 16] {
     let coefficients = if inverse { [14, 11, 13, 9] } else { [2, 3, 1, 1] };
     let mut r = [0u8; 16];
     let mut column = 0;
@@ -5523,7 +5532,7 @@ pub fn _mm_aesimc_si128(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "aes"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_aeskeygenassist_si128<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -5663,7 +5672,7 @@ pub fn _mm256_broadcastd_epi32(a: __m128i) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extract_epi32<const INDEX: i32>(a: __m256i) -> i32 {
     unsafe {
         const { assert!(INDEX >= 0 && INDEX < 8) };
@@ -5673,7 +5682,7 @@ pub fn _mm256_extract_epi32<const INDEX: i32>(a: __m256i) -> i32 {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_extract_epi64<const INDEX: i32>(a: __m256i) -> i64 {
     const { assert!(INDEX >= 0 && INDEX < 4) };
     a.0[INDEX as usize]
@@ -5710,7 +5719,7 @@ pub fn _mm256_set_m128i(hi: __m128i, lo: __m128i) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm256_insertf128_si256<const IMM1: i32>(a: __m256i, b: __m128i) -> __m256i {
     unsafe {
         const { assert!(IMM1 >= 0 && IMM1 < 2) };
@@ -5746,7 +5755,7 @@ pub fn _mm512_permutex2var_epi64(a: __m512i, idx: __m512i, b: __m512i) -> __m512
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm512_shuffle_epi32<const MASK: _MM_PERM_ENUM>(a: __m512i) -> __m512i {
     unsafe {
         const { assert!(MASK >= 0 && MASK < 256) };
@@ -5763,7 +5772,7 @@ pub fn _mm512_shuffle_epi32<const MASK: _MM_PERM_ENUM>(a: __m512i) -> __m512i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(2))]
+#[rustc_legacy_const_generics(2)]
 pub fn _mm512_shuffle_i32x4<const MASK: i32>(a: __m512i, b: __m512i) -> __m512i {
     unsafe {
         const { assert!(MASK >= 0 && MASK < 256) };
@@ -5792,7 +5801,7 @@ pub fn _mm512_add_epi64(a: __m512i, b: __m512i) -> __m512i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,avx512vl"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm_rol_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -5808,7 +5817,7 @@ pub fn _mm_rol_epi32<const IMM8: i32>(a: __m128i) -> __m128i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f,avx512vl"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm256_rol_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -5818,7 +5827,7 @@ pub fn _mm256_rol_epi32<const IMM8: i32>(a: __m256i) -> __m256i {
 
 #[inline]
 #[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "avx512f"))]
-#[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
+#[rustc_legacy_const_generics(1)]
 pub fn _mm512_rol_epi32<const IMM8: i32>(a: __m512i) -> __m512i {
     unsafe {
         const { assert!(IMM8 >= 0 && IMM8 < 256) };
@@ -5936,4 +5945,136 @@ pub fn _mm256_madd52hi_epu64(a: __m256i, b: __m256i, c: __m256i) -> __m256i {
         i += 1;
     }
     __m256i(r)
+}
+
+// jetscii 0.5.3: the SSE4.2 packed string compares with explicit lengths, element by element
+// (Intel SDM vol. 2B section 4.1 "Imm8 control byte", core_arch x86 sse42.rs)
+pub const _SIDD_UBYTE_OPS: i32 = 0b0000_0000;
+pub const _SIDD_UWORD_OPS: i32 = 0b0000_0001;
+pub const _SIDD_SBYTE_OPS: i32 = 0b0000_0010;
+pub const _SIDD_SWORD_OPS: i32 = 0b0000_0011;
+pub const _SIDD_CMP_EQUAL_ANY: i32 = 0b0000_0000;
+pub const _SIDD_CMP_RANGES: i32 = 0b0000_0100;
+pub const _SIDD_CMP_EQUAL_EACH: i32 = 0b0000_1000;
+pub const _SIDD_CMP_EQUAL_ORDERED: i32 = 0b0000_1100;
+pub const _SIDD_POSITIVE_POLARITY: i32 = 0b0000_0000;
+pub const _SIDD_NEGATIVE_POLARITY: i32 = 0b0001_0000;
+pub const _SIDD_MASKED_POSITIVE_POLARITY: i32 = 0b0010_0000;
+pub const _SIDD_MASKED_NEGATIVE_POLARITY: i32 = 0b0011_0000;
+pub const _SIDD_LEAST_SIGNIFICANT: i32 = 0b0000_0000;
+pub const _SIDD_MOST_SIGNIFICANT: i32 = 0b0100_0000;
+pub const _SIDD_BIT_MASK: i32 = 0b0000_0000;
+pub const _SIDD_UNIT_MASK: i32 = 0b0100_0000;
+
+// IntRes2 of PCMPESTRI / PCMPESTRM (one bit per element of `b`) and the element count
+unsafe fn sidd_cmpestr(a: __m128i, la: i32, b: __m128i, lb: i32, imm8: i32) -> (u32, usize) {
+    let n: usize = if imm8 & 1 != 0 { 8 } else { 16 };
+    let signed = imm8 & 2 != 0;
+    let mut ea = [0i32; 16];
+    let mut eb = [0i32; 16];
+    if n == 8 {
+        let xa = lanes128_u16(a);
+        let xb = lanes128_u16(b);
+        let mut i = 0;
+        while i < 8 {
+            ea[i] = if signed { xa[i] as i16 as i32 } else { xa[i] as i32 };
+            eb[i] = if signed { xb[i] as i16 as i32 } else { xb[i] as i32 };
+            i += 1;
+        }
+    } else {
+        let xa = lanes128_u8(a);
+        let xb = lanes128_u8(b);
+        let mut i = 0;
+        while i < 16 {
+            ea[i] = if signed { xa[i] as i8 as i32 } else { xa[i] as i32 };
+            eb[i] = if signed { xb[i] as i8 as i32 } else { xb[i] as i32 };
+            i += 1;
+        }
+    }
+    // a length is the absolute value of its register, saturated to the element count
+    let la = if la.unsigned_abs() as usize > n { n } else { la.unsigned_abs() as usize };
+    let lb = if lb.unsigned_abs() as usize > n { n } else { lb.unsigned_abs() as usize };
+    let mut res: u32 = 0;
+    let mut j = 0;
+    while j < n {
+        let mut hit;
+        match (imm8 >> 2) & 3 {
+            // equal any: b[j] is one of the valid elements of a
+            0 => {
+                hit = false;
+                let mut i = 0;
+                while j < lb && i < la {
+                    hit |= ea[i] == eb[j];
+                    i += 1;
+                }
+            }
+            // ranges: b[j] lies in one of the valid pairs a[i] ..= a[i + 1]
+            1 => {
+                hit = false;
+                let mut i = 0;
+                while j < lb && i + 1 < la {
+                    hit |= ea[i] <= eb[j] && eb[j] <= ea[i + 1];
+                    i += 2;
+                }
+            }
+            // equal each: the same element at the same place, or both strings are over
+            2 => {
+                hit = if j < la && j < lb { ea[j] == eb[j] } else { j >= la && j >= lb };
+            }
+            // equal ordered: a, as far as it is valid, matches b from j on
+            _ => {
+                hit = true;
+                let mut i = 0;
+                while i < n - j && i < la {
+                    hit &= j + i < lb && ea[i] == eb[j + i];
+                    i += 1;
+                }
+            }
+        }
+        if hit {
+            res |= 1 << j;
+        }
+        j += 1;
+    }
+    match (imm8 >> 4) & 3 {
+        1 => res ^= (1u32 << n) - 1,
+        // masked negative: only the valid elements of b are negated
+        3 => res ^= (1u32 << lb) - 1,
+        _ => {}
+    }
+    (res, n)
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.2"))]
+#[rustc_legacy_const_generics(4)]
+pub fn _mm_cmpestri<const IMM8: i32>(a: __m128i, la: i32, b: __m128i, lb: i32) -> i32 {
+    let (res, n) = unsafe { sidd_cmpestr(a, la, b, lb, IMM8) };
+    if res == 0 {
+        n as i32
+    } else if IMM8 & _SIDD_MOST_SIGNIFICANT != 0 {
+        31 - res.leading_zeros() as i32
+    } else {
+        res.trailing_zeros() as i32
+    }
+}
+
+#[inline]
+#[cfg_attr(any(target_arch = "x86", target_arch = "x86_64"), target_feature(enable = "sse4.2"))]
+#[rustc_legacy_const_generics(4)]
+pub fn _mm_cmpestrm<const IMM8: i32>(a: __m128i, la: i32, b: __m128i, lb: i32) -> __m128i {
+    let (res, n) = unsafe { sidd_cmpestr(a, la, b, lb, IMM8) };
+    if IMM8 & _SIDD_UNIT_MASK == 0 {
+        return __m128i([res as i64, 0]);
+    }
+    let width = 16 / n;
+    let mut r = [0u8; 16];
+    let mut i = 0;
+    while i < 16 {
+        if (res >> (i / width)) & 1 != 0 {
+            r[i] = 0xff;
+        }
+        i += 1;
+    }
+    unsafe { from128_u8(r) }
 }

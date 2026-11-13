@@ -11,7 +11,7 @@ use (a test run once called them unused: it recorded no import uses).
 3. A run after an edit elsewhere in the crate checks it again and prints them.
 4. `makepad test --live`: the first verdict's check prints them, and a save that adds an unused
    `let` to the test prints the test's warnings with its patch line, the new one among them.
-5. With the warnings fixed, a run prints "makepad test: 0 warnings" (a clean run reads differently
+5. With the warnings fixed, a run prints "relax test: 0 warnings" (a clean run reads differently
    from one that did not check), and so does its unchanged rerun (the stored clean verdict).
 6. `makepad test <file.rs>` (a single file, as `rustc --test`): an import its code uses is not
    reported (that form once recorded no import uses and called every import unused), one it
@@ -41,7 +41,7 @@ else:
     jit = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", str(Path.cwd() / "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
 here = Path(__file__).resolve().parent
 WANT = ["warning: unused import: `std::collections::HashMap`", "warning: unused variable: `unused`",
-         "warning: unused `Result` that must be used", "makepad test: 3 warnings"]
+         "warning: unused `Result` that must be used", "relax test: 3 warnings"]
 
 
 def fail(why, out=""):
@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix="test-warnings-") as tmp:
     pkg.mkdir()
     shutil.copy(here / "Cargo.toml", pkg / "Cargo.toml")
     shutil.copytree(here / "src", pkg / "src")
-    env = dict(os.environ, MAKEPAD_RUN_CACHE_DIR=str(Path(tmp) / "cache"))
+    env = dict(os.environ, RELAX_CACHE_DIR=str(Path(tmp) / "cache"))
 
     def run(step):
         p = sp.run(jit + ["test", "test-warnings"], cwd=pkg, env=env, stdout=sp.PIPE, stderr=sp.STDOUT, text=True)
@@ -124,8 +124,8 @@ with tempfile.TemporaryDirectory(prefix="test-warnings-") as tmp:
         out = p.stdout
         if p.returncode != 0 or "test result: ok. 1 passed" not in out:
             fail("%s: the test did not pass" % step, out)
-        if not any("makepad test: 0 warnings" in line for line in out.splitlines()):
-            fail("%s: no \"makepad test: 0 warnings\" line" % step, out)
+        if not any("relax test: 0 warnings" in line for line in out.splitlines()):
+            fail("%s: no \"relax test: 0 warnings\" line" % step, out)
         if any(": warning: " in line for line in out.splitlines()):
             fail("%s: a warning printed" % step, out)
     one = Path(tmp) / "one.rs"
@@ -134,8 +134,8 @@ with tempfile.TemporaryDirectory(prefix="test-warnings-") as tmp:
     out = p.stdout
     if p.returncode != 0 or "test result: 1 passed; 0 failed" not in out:
         fail("a single file: the test did not pass", out)
-    if missing(out, ["warning: unused import: `std::collections::BTreeMap`", "makepad test: 1 warning"]):
-        fail("a single file: no %s" % ", ".join(missing(out, ["warning: unused import: `std::collections::BTreeMap`", "makepad test: 1 warning"])), out)
+    if missing(out, ["warning: unused import: `std::collections::BTreeMap`", "relax test: 1 warning"]):
+        fail("a single file: no %s" % ", ".join(missing(out, ["warning: unused import: `std::collections::BTreeMap`", "relax test: 1 warning"])), out)
     if any("black_box" in line and "warning" in line for line in out.splitlines()):
         fail("a single file: its used import reported unused", out)
 

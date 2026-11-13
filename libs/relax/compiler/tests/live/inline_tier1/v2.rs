@@ -1,5 +1,5 @@
 // 3.4: a patched leaf that O3 (and O1) inlined: every slot that inlined it is rebuilt at
-// both tiers, and a O3 build in flight from the old source is dropped. MAKEPAD_RUN_O3_CALLS=1
+// both tiers, and a O3 build in flight from the old source is dropped. RELAX_O3_CALLS=1
 // makes `drive` hot at once; each run sleeps so its O3 build installs before the next edit.
 // v2 also edits the leaf reached through a devirtualised dyn call.
 trait Op {

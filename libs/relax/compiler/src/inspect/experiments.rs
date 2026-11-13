@@ -4,7 +4,7 @@
 //! and the answer is noise-aware: per-variant medians, the spread of the rounds, a permutation
 //! test over the rounds, a verdict. Variants:
 //! - `base`: an O3 build as the JIT makes it (inspect builds are never cached)
-//! - `opt:<tok>,<tok>`: an O3 build with these MAKEPAD_RUN_OPT tokens (`-sroa`, `-latedce`, ...:
+//! - `opt:<tok>,<tok>`: an O3 build with these RELAX_OPT tokens (`-sroa`, `-latedce`, ...:
 //!   the passes' own off switches), for this slot only
 //! - `inline:<callee>` / `noinline:<callee>`: an O3 build that inlines every site of the callee /
 //!   none (tokens `+inl@<slot>` / `-inl@<slot>`, read by the inliner)
@@ -113,7 +113,7 @@ fn install(up: *mut crate::jit::Unit, id: u32, v: &Variant, round: u32) -> Resul
             if ok {
                 Ok(())
             } else {
-                Err("the O3 build was not installed (O3 off, not verified, or failed: MAKEPAD_RUN_TIER1_TRACE=1 says why)".into())
+                Err("the O3 build was not installed (O3 off, not verified, or failed: RELAX_TIER1_TRACE=1 says why)".into())
             }
         }
     }
@@ -336,14 +336,14 @@ pub fn cmd_ab(req: &Req, out: &mut Out) {
     } else {
         format!("no difference beyond noise: {:+.1}% with spread ±{:.1}%, p={:.2}", d, noise, p)
     };
-    out.always(&format!("`{}`: {}", short(&name, 90), verdict));
+    out.line(&format!("`{}`: {}", short(&name, 90), verdict));
     out.line("");
     out.line(&format!("| variant | what | code | median {} | rounds | spread % |", unit));
     out.line("|---|---|---|---:|---|---:|");
     let fmt = |v: &[f64]| v.iter().map(|x| fmt_num(*x)).collect::<Vec<_>>().join(" ");
     out.line(&format!("| A | {} | {} {} B | {} | {} | {:.1} |", la, tiers[0], sizes[0], fmt_num(ma), fmt(&a), sa));
     out.line(&format!("| B | {} | {} {} B | {} | {} | {:.1} |", lb, tiers[1], sizes[1], fmt_num(mb), fmt(&b), sb));
-    out.always(&format!(
+    out.line(&format!(
         "note: {} rounds per variant, ABAB order, {:.1} s each after {} ms settle, metric {} ({}), permutation test over rounds; now installed: {}",
         rounds,
         secs,
@@ -353,15 +353,15 @@ pub fn cmd_ab(req: &Req, out: &mut Out) {
         if keep_b { "B" } else { "A" }
     ));
     if per_call {
-        out.always("note: per=call: each round counts the variant's build again with timed entry/exit probes (exact calls, inclusive ns per call); the probes cost the same in A and B");
+        out.line("note: per=call: each round counts the variant's build again with timed entry/exit probes (exact calls, inclusive ns per call); the probes cost the same in A and B");
     } else if !per_frame {
-        out.always("note: a rate per second of wall: right for fixed-pace work (playback, a frame-locked UI); per=frame divides by UI frames instead; a flat-out loop keeps the fn's share constant -- compare those with count <fn> time=1");
+        out.line("note: a rate per second of wall: right for fixed-pace work (playback, a frame-locked UI); per=frame divides by UI frames instead; a flat-out loop keeps the fn's share constant -- compare those with count <fn> time=1");
     }
     for n in notes {
-        out.always(&format!("note: {}", n));
+        out.line(&format!("note: {}", n));
     }
-    out.always(&format!("note: {}", super::reliability::line(true)));
-    out.always(&format!("more: asm @{} vs=rustc  remarks @{}  versions @{}", id, id, id));
+    out.line(&format!("note: {}", super::reliability::line(true)));
+    out.line(&format!("more: asm @{} vs=rustc  remarks @{}  versions @{}", id, id, id));
 }
 
 fn fmt_num(x: f64) -> String {

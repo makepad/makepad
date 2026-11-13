@@ -570,7 +570,7 @@ impl LifetimeResolver<'_> {
     /// infer their elided lifetimes: nothing is recorded for them (a use without an entry is an
     /// inference variable to every reader, as a recorded Infer is), so their paths are not
     /// resolved here at all -- most body paths are locals and calls, whose type-namespace lookup
-    /// only misses (cold Stage: 2.4% of all CPU was this lookup).
+    /// only misses (a large app's cold start: 2.4% of all CPU was this lookup).
     fn resolve_elided_lifetimes_in_path(&mut self, path: &ast::Path, inferred: bool) {
         if inferred { return; }
         let segs = self.prog.files[self.file as usize].ast.segs(path.segs);

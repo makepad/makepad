@@ -15,7 +15,7 @@
 //! (a static of the crate read from JIT-compiled code, a non-C-shaped field read or value built,
 //! an opaque enum matched, rustc's ownership operations: lower.rs provided_err) is a `violation`
 //! row; one into an audited crate fails the check (exit 1). It is the error a run reports only
-//! when the code that reaches it first runs (Stage's deck reached `shell::Shared::global`
+//! when the code that reaches it first runs (an app's deck reached `shell::Shared::global`
 //! through the unmarked `makepad_hal::screens`); the gates run the audit over the apps.
 
 use crate::types::AliasTyKind;

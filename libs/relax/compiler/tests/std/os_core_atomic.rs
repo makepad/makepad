@@ -1,4 +1,4 @@
-// std-os lane: core::sync::atomic (differential: os_diff.sh)
+// std-os lane: core::sync::atomic (differential: agree.sh)
 use core::sync::atomic::{fence, AtomicBool, AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicPtr, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);

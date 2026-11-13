@@ -70,13 +70,21 @@ pub fn def_ident(prog: &Program, d: DefId, h: &mut Sip128) {
         h.str("block of");
         def_ident(prog, o, h);
     }
+    // the ordinal counts among the parent's items alone, so a parent other than the owner names
+    // it too: an impl in a `const _` block (no fn body holds it) is told from its twin in another
+    // `const _` block by that const
+    let p = def.parent;
+    if p != NO_DEF && Some(p) != owner && prog.def(p).kind != crate::program::DefKind::Mod {
+        h.str("in");
+        def_ident(prog, p, h);
+    }
     h.u32(ord);
 }
 
 /// Where an item neither its path nor its parent names is, as rustc's DefPath disambiguates it:
-/// the fn whose body holds it (None: no fn body does -- a module's `const _`) and its ordinal
-/// among the items of its file with its name, kind and parent in that same place, in item
-/// order (one body's items are numbered in its text's order). No offset: a line added above it,
+/// the fn whose body holds it (None: no fn body does -- a module's `const _`, or an impl in its
+/// block) and its ordinal among the items of its file with its name, kind and parent in that
+/// same place, in item order (one body's items are numbered in its text's order). No offset: a line added above it,
 /// in its fn or anywhere before, leaves its identity as it was.
 pub fn block_place(prog: &Program, d: DefId) -> (Option<DefId>, u32) {
     let def = prog.def(d);
@@ -125,32 +133,35 @@ enum ParentNamed {
     /// a module-level impl: its header text (`impl<T> Trait for Type<T>`), whitespace dropped,
     /// and its ordinal among the file's impls with that header (identical twins differ)
     Impl(Vec<u8>),
-    /// an associated item or a variant: its parent's identity names it with its own path
+    /// an associated item, a variant or field, a closure, an anonymous constant or an opaque
+    /// type: its parent's identity names it with its own path
     Item(DefId),
 }
 
-/// Whether `d` is named without its position: a module-level impl by its header, an item of
-/// an impl, trait or enum so named by that parent (def_path does not tell impls apart).
+/// Whether `d` is named without its position: a module-level impl by its header, and an item
+/// that only exists inside its parent by that parent and its name, as rustc's DefPath has it:
+/// an impl's, trait's or enum's items, fields, closures, anonymous constants and opaque types
+/// (their names hold their ordinal among the parent's, `{constant#1}`). Wherever the parent is:
+/// two impls in one fn body, or in two `const _` blocks of one file, have one def_path for their
+/// methods of one name, and only the impls' places tell them apart. Named by their own place,
+/// they had one identity: one stored borrow-check verdict for both bodies, and one TypeId for
+/// the local types, closures and variants declared in them. Two impls of one trait for
+/// `[u8; FOUR]` and `[u8; TWO]` gave their lengths' constants one identity the same way. An item
+/// declared in a body (a struct, enum or impl in a fn's block) keeps its place: two enums `E`
+/// in two blocks of one fn have one parent and one name.
 fn parent_names(prog: &Program, d: DefId) -> Option<ParentNamed> {
     use crate::program::DefKind;
     let def = prog.def(d);
-    match def.kind {
-        DefKind::Impl => {
-            let m = prog.mods.get(def.scope as usize)?;
-            if m.lexical_parent.is_some() || m.def != def.parent { return None; }
-            let (head, twin) = prog.files.get(def.file as usize)?.impl_head(def.item)?;
-            let mut v = head.to_vec();
-            v.extend_from_slice(&twin.to_le_bytes());
-            Some(ParentNamed::Impl(v))
-        }
-        DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy | DefKind::Variant => {
-            let p = def.parent;
-            if p == NO_DEF { return None; }
-            let named = path_names(prog, p) || matches!(parent_names(prog, p), Some(ParentNamed::Impl(_)));
-            (named && matches!(prog.def(p).kind, DefKind::Impl | DefKind::Trait | DefKind::Enum)).then_some(ParentNamed::Item(p))
-        }
-        _ => None,
+    if def.kind == DefKind::Impl {
+        let m = prog.mods.get(def.scope as usize)?;
+        if m.lexical_parent.is_some() || m.def != def.parent { return None; }
+        let (head, twin) = prog.files.get(def.file as usize)?.impl_head(def.item)?;
+        let mut v = head.to_vec();
+        v.extend_from_slice(&twin.to_le_bytes());
+        return Some(ParentNamed::Impl(v));
     }
+    let child = matches!(def.kind, DefKind::AssocFn | DefKind::AssocConst | DefKind::AssocTy | DefKind::Variant | DefKind::Field | DefKind::Closure | DefKind::AnonConst | DefKind::OpaqueTy);
+    (child && def.parent != NO_DEF && prog.def(def.parent).kind != DefKind::Mod).then_some(ParentNamed::Item(def.parent))
 }
 
 /// Whether `d`'s identity (def_ident) carries its place (block_place): an item neither its path
@@ -493,7 +504,7 @@ mod tests {
     }
 }
 
-/// MAKEPAD_RUN_CACHE_FP=1: prints the codegen identity (`codegen_id`, relax-compiler's
+/// RELAX_CACHE_FP=1: prints the codegen identity (`codegen_id`, relax-compiler's
 /// codegen_id.rs), every crate's fingerprint and the cost (C0 check: identical across runs of the
 /// same sources; must stay a few ms).
 pub fn report_fingerprints(prog: &Program, codegen_id: u128) {
@@ -503,20 +514,20 @@ pub fn report_fingerprints(prog: &Program, codegen_id: u128) {
     let tf = t.elapsed();
     let bytes: usize = prog.files.iter().map(|f| f.src.len()).sum();
     eprintln!(
-        "makepad-run cache: codegen id {:032x}; {} crates, {} files, {:.1} MB hashed in {:.2} ms",
+        "relax cache: codegen id {:032x}; {} crates, {} files, {:.1} MB hashed in {:.2} ms",
         codegen_id,
         fps.len(),
         prog.files.len(),
         bytes as f64 / 1e6,
         tf.as_secs_f64() * 1e3
     );
-    let mode = std::env::var("MAKEPAD_RUN_CACHE_FP").unwrap_or_default();
-    if let Ok(want) = std::env::var("MAKEPAD_RUN_CACHE_FP_CRATE") {
+    let mode = std::env::var("RELAX_CACHE_FP").unwrap_or_default();
+    if let Ok(want) = std::env::var("RELAX_CACHE_FP_CRATE") {
         // diagnostics: per-file hashes of one crate (why does a fingerprint differ?)
         for (i, f) in prog.files.iter().enumerate() {
             let c = prog.file_crate.get(i).copied().unwrap_or(u32::MAX) as usize;
             if prog.crates.get(c).map_or(false, |ci| prog.syms.str(ci.name) == want) {
-                eprintln!("makepad-run cache: file {} {:032x} src_len {} len {} {}", i, hash_bytes(&f.src), f.src_len, f.src.len(), prog.file_paths.get(i).map_or("", |p| p.as_str()));
+                eprintln!("relax cache: file {} {:032x} src_len {} len {} {}", i, hash_bytes(&f.src), f.src_len, f.src.len(), prog.file_paths.get(i).map_or("", |p| p.as_str()));
             }
         }
     }
@@ -527,9 +538,9 @@ pub fn report_fingerprints(prog: &Program, codegen_id: u128) {
                 let mut f: Vec<&str> = ci.cfg.set.iter().map(|x| x.as_str()).collect();
                 f.sort();
                 let deps: Vec<String> = ci.deps.iter().map(|(n, d)| format!("{}={}", prog.syms.str(*n), prog.syms.str(prog.crates[*d as usize].name))).collect();
-                eprintln!("makepad-run cache: crate {:032x} {} [{}] deps [{}]", fp, prog.syms.str(ci.name), f.join(" "), deps.join(" "));
+                eprintln!("relax cache: crate {:032x} {} [{}] deps [{}]", fp, prog.syms.str(ci.name), f.join(" "), deps.join(" "));
             } else {
-                eprintln!("makepad-run cache: crate {:032x} {}", fp, prog.syms.str(ci.name));
+                eprintln!("relax cache: crate {:032x} {}", fp, prog.syms.str(ci.name));
             }
         }
     }

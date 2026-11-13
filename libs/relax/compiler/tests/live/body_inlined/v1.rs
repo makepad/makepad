@@ -1,5 +1,5 @@
 // M46: an ordinary fn B that A's code inlined is edited while a frame of A is on another thread's
-// stack (parked inside A after A's first B call). A is built at O3 (MAKEPAD_RUN_O3_CALLS=1 makes
+// stack (parked inside A after A's first B call). A is built at O3 (RELAX_O3_CALLS=1 makes
 // it hot at once; each run sleeps so its O3 code installs before the thread parks in it), which
 // inlines B: the parked frame's next B is the old copy inside old A. Each run releases the thread
 // the previous run parked inside A, prints what that A call returned, then parks a new one.

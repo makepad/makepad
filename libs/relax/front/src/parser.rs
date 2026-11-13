@@ -49,11 +49,11 @@ const STD_PRELUDE_MACROS: &[&str] = &[
     "eprint", "eprintln", "format", "print", "println", "thread_local", "vec", "panic",
 ];
 
-/// MAKEPAD_RUN_VERIFY_TOKENS: every macro_rules expansion's transcribed tokens are compared with the
+/// RELAX_VERIFY_TOKENS: every macro_rules expansion's transcribed tokens are compared with the
 /// lexed text.
 pub(crate) fn verify_tokens() -> bool {
     static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var_os("MAKEPAD_RUN_VERIFY_TOKENS").is_some())
+    *V.get_or_init(|| std::env::var_os("RELAX_VERIFY_TOKENS").is_some())
 }
 
 /// Text with the tokens over it, built piece by piece (no lexing).
@@ -147,6 +147,8 @@ pub struct Parser<'a> {
     pub(crate) meta_frags: crate::fxhash::HashMap<u32, &'static str>,
     /// starts of the `$b:block` substitutions of expansion text (check only)
     pub(crate) block_frags: crate::fxhash::HashSet<u32>,
+    /// Starts of opaque statement fragments; their complete extent is in frag_groups.
+    pub(crate) stmt_frags: crate::fxhash::HashSet<u32>,
     /// Offsets of the parens a transcription added around multi-token `$e:expr` fragments.
     pub(super) synth_parens: crate::fxhash::HashSet<u32>,
     /// file context for built-in macros (file!, module_path!, env!, cfg of derive inputs)
@@ -185,11 +187,17 @@ pub struct Parser<'a> {
     /// where the name of the last macro call stands that names an import of the crate out of the
     /// calling module's scope (rules_macro_inner; u32::MAX: none): rustc's "cannot find macro"
     macro_scope_miss: std::cell::Cell<u32>,
+    /// the unbraced arms (`pred => expr,`) of the `cfg_select!` about to be expanded: (first token, end)
+    pub cfg_select_ends: std::cell::RefCell<Vec<(usize, usize)>>,
     /// the `include!` being expanded is an expression or statement: its file keeps a leading `#!`
     pub include_as_expr: bool,
     foreign_abi: Option<Option<Ident>>,
     /// inside a cfg'd-out item (parse_cfg_out): nothing is generated
     cfg_out: u32,
+    /// the file's literal errors rustc reports where it lowers a literal (a suffix, an integer's
+    /// size: lexer validate_file), by position; a cfg-stripped construct drops those inside it
+    /// (lift_lit_errs), and the first one left is the file's error once it parsed (relax issue 125)
+    lit_errs: Vec<(u32, String)>,
     /// the statement macro whose expansion is being parsed was called with a `;` after it: its
     /// last statement gets that `;` (rustc add_trailing_semicolon), so it is not a trailing macro
     expansion_semi: bool,
@@ -255,6 +263,7 @@ impl<'a> Parser<'a> {
             path_frags: Default::default(),
             meta_frags: Default::default(),
             block_frags: Default::default(),
+            stmt_frags: Default::default(),
             synth_parens: Default::default(),
             bctx: None,
             mod_stack: Vec::new(),
@@ -272,9 +281,11 @@ impl<'a> Parser<'a> {
             stmt_ctx: false,
             cfg_select_rest: Default::default(),
             macro_scope_miss: std::cell::Cell::new(u32::MAX),
+            cfg_select_ends: Default::default(),
             include_as_expr: false,
             foreign_abi: None,
             cfg_out: 0,
+            lit_errs: Vec::new(),
             expansion_semi: false,
             list_elem_at: (u32::MAX, ELEM_LIST),
             expn_attrs_ungated: false,
@@ -428,6 +439,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ident_tok(&mut self) -> PResult<Ident> {
+        if self.at_stmt_frag() { return self.err("expected identifier, found statement metavariable"); }
         match self.kind() {
             T::Ident | T::RawIdent => {
                 let t = self.tok();
@@ -628,10 +640,18 @@ impl<'a> Parser<'a> {
         let mut i = self.pos + 1;
         while i < self.toks.len() {
             let k = self.toks.kind_at(i);
-            // parse_part has no invisible type/path-fragment boundaries (rustc_parse
-            // parser/{ty,path}.rs: parse_ty_common/parse_path); consume these with their expansion.
+            // parse_part has no invisible type/path/statement boundaries (rustc_parse
+            // interpolated nonterminals): consume these while their expansion's metadata is live.
             if (!self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.toks.at(i).lo }))
-                || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo })) {
+                || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo }))
+                || (!self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ self.toks.at(i).lo })) {
+                return BodyOutline::Eager(5);
+            }
+            // Nor the invisible parentheses of an expression fragment (synth_parens): there a false
+            // `#[cfg]` at the fragment's start would leave `()` for the list element it removes
+            // (list_elem), stringify! would print the parentheses, and a fragment written after
+            // an expression would be its call arguments.
+            if k == T::OpenParen && !self.synth_parens.is_empty() && self.synth_parens.contains(&{ self.toks.at(i).lo }) {
                 return BodyOutline::Eager(5);
             }
             match k {
@@ -646,6 +666,9 @@ impl<'a> Parser<'a> {
                         // just as when delim_tt scanned a second time after it.
                         return match mismatched {
                             Some(pos) => BodyOutline::Mismatched(pos),
+                            // (a literal error in it is reported unless a cfg-stripped part of
+                            // it holds it: that takes its parse)
+                            None if self.lit_err_in(self.lo(), self.toks.at(i).lo) => BodyOutline::Eager(8),
                             None => BodyOutline::Deferred(TokRange { lo: self.pos as u32 + 1, hi: i as u32 }),
                         };
                     }
@@ -999,8 +1022,13 @@ impl<'a> Parser<'a> {
     /// `parse_cfg_entry`, `parse_cfg_attr`): a cfg predicate is `name`, `name = "str"`,
     /// `all(..)`, `any(..)`, `not(..)` or a boolean.
     /// `cfg` / `cfg_attr` are read (and so checked) while the configuration is evaluated; the other
-    /// attributes only once their item is known to be configured in.
+    /// attributes only once their item is known to be configured in. Inside code that is already
+    /// configured out nothing is evaluated, so nothing is checked: rustc's StripUnconfigured never
+    /// visits a stripped node's attributes (`#[cfg(any())] { #[cfg(version("1.76"))] .. }`), and
+    /// rustc expands nothing there (`#[link_section = concat!(dep::name!(..))]`, whose call only
+    /// configured-in code resolves).
     fn attr_shape_now_or_later(&mut self, toks: TokRange) -> PResult<()> {
+        if self.cfg_out > 0 { return Ok(()); }
         let first = if (toks.lo as usize) < self.toks.len() { self.tok_text(self.toks.at(toks.lo as usize)) } else { b"" };
         if first == b"cfg" || first == b"cfg_attr" {
             return self.check_attr_shape(toks);
@@ -1293,6 +1321,7 @@ impl<'a> Parser<'a> {
         // config.rs): nothing in it is parsed or expanded
         if !self.cfg_active(&attrs) {
             self.ast.root_attrs = attrs.into();
+            self.lit_errs.clear();
             return Ok(());
         }
         self.ast.root_attrs = attrs.into();
@@ -1408,6 +1437,16 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether the prescan read this file: its module is in its crate's tree (CrateMods::mods),
+    /// which holds the file's `use` items. A module a macro declares (`decl!(leaf)` expanding to
+    /// `mod leaf;`) is not, and its file's imports reach a macro lookup only as this parse
+    /// records them (relax issue 183: `use crate::macros::h3;` in such a file, then `h3!()`: "macro
+    /// `h3!` is not supported"). A crate the prescan has no tree of is taken as read.
+    fn file_prescanned(&self) -> bool {
+        let (Some(m), Some(c)) = (self.macros.as_ref(), self.bctx.as_ref()) else { return true };
+        m.table.crates.get(&self.krate).is_none_or(|t| t.mods.contains(&c.module_path))
     }
 
     /// A `use` item's bindings for macro lookups in this parse (MacroScope::add_use).
@@ -1598,15 +1637,59 @@ impl<'a> Parser<'a> {
             && !self.name_imported(&name, self.pos)
     }
 
+    /// Where each unbraced arm (`pred => expr,`) of the `cfg_select!` in tokens `[lo, hi)` ends. rustc
+    /// parses the arm as an expression (cfg_select.rs `parse_token_tree`), so a comma inside it (generic
+    /// arguments, closure parameters) does not end the arm. An arm that does not parse is left out: the
+    /// expansion then reads it up to its first comma and the parse of that reports the error.
+    fn cfg_select_arm_ends(&mut self, lo: usize, hi: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut i = lo;
+        while i < hi {
+            while i < hi && self.toks.at(i).kind != T::FatArrow { i += 1; }
+            i += 1;
+            if i >= hi { break; }
+            if self.toks.at(i).kind == T::OpenBrace {
+                match self.tok_close_of(i, hi) {
+                    Some(c) => i = c + 1,
+                    None => break,
+                }
+            } else {
+                // a look ahead: the measuring parse leaves nothing behind (its AST nodes, the items
+                // and scopes a macro call in the arm would add, the `>>` it splits)
+                let at = i;
+                let (ok, end) = self.look_ahead(|p| {
+                    p.pos = at;
+                    let ok = p.parse_stripped(|p| p.expr().map(|_| ())).is_ok();
+                    (ok, p.pos)
+                });
+                if !ok || end <= i || end > hi { break; }
+                out.push((i, end));
+                i = end;
+            }
+            if i < hi && self.toks.at(i).kind == T::Comma { i += 1; }
+        }
+        out
+    }
+
     /// The arms of a `cfg_select!` that were not chosen are parsed as the chosen one is (rustc cfg_select.rs):
-    /// their syntax errors are reported. `how`: 0 an expression, 1 statements, 2 items.
+    /// their syntax errors are reported. `how`: 0 an expression, 1 statements, 2 items. An arm
+    /// written without braces (`pred => expr,`) is one expression, ended by its comma or the call's
+    /// end wherever the call stands (rustc parses it with `parse_expr` before it knows the position;
+    /// parsed as statements it ran into the comma: relax issue 121); anything after it is an error.
     fn parse_cfg_select_rest(&mut self, rest: Vec<(usize, usize)>, how: u8) -> PResult<()> {
         if rest.is_empty() || self.cfg_out > 0 { return Ok(()); }
         for (lo, hi) in rest {
             let save = self.pos;
+            let unbraced = lo > 0 && self.toks.at(lo - 1).kind == T::FatArrow;
             self.pos = lo;
             let r = self.parse_stripped(|p| {
                 match how {
+                    _ if unbraced => {
+                        if lo < hi {
+                            p.expr()?;
+                            if p.pos < hi { return p.err("expected `,` after a `cfg_select!` arm's expression"); }
+                        }
+                    }
                     0 => { p.expr()?; }
                     1 => { let mut v = Vec::new(); while p.pos < hi { p.block_stmts_step(&mut v)?; } }
                     _ => { p.items_until(T::CloseBrace)?; }
@@ -1671,7 +1754,7 @@ impl<'a> Parser<'a> {
 
     fn rules_macro(&self, path: &Path) -> Option<crate::macros::MacroRef> {
         let r = self.rules_macro_inner(path);
-        // MAKEPAD_RUN_TRACE=macnone:<name>: every unresolved call of a macro whose name contains <name>
+        // RELAX_TRACE=macnone:<name>: every unresolved call of a macro whose name contains <name>
         if r.is_none() {
             if let Some(want) = crate::preload::relax_trace().and_then(|t| t.split(',').find_map(|x| x.strip_prefix("macnone:"))) {
                 if let Some(seg) = self.ast.segs(path.segs).last() {
@@ -1820,7 +1903,7 @@ impl<'a> Parser<'a> {
                 .and_then(|entry| crate::builtins::hosted_macro_def(&entry));
             renamed.or_else(|| crate::builtins::macro_def_for(scope_krate, &name))
         };
-        // MAKEPAD_RUN_TRACE=macmiss: a qualified macro path that resolves to nothing (the call stays
+        // RELAX_TRACE=macmiss: a qualified macro path that resolves to nothing (the call stays
         // unexpanded and its body's check reports it as not supported)
         if r.is_none() && bdef.is_none() && qual.is_some() && crate::preload::relax_trace().is_some_and(|t| t.split(',').any(|x| x == "macmiss")) {
             eprintln!("macmiss {}! in crate {} module {:?} path {:?} lazy_part {} externs {:?}", name, self.krate, module, mpath, self.lazy_part,
@@ -1837,12 +1920,17 @@ impl<'a> Parser<'a> {
                 // name). A macro the crate root re-exports is not in scope in a module that does
                 // not import it: rustc says "cannot find macro" there.
                 if !m.import_binds(&self.krate, &module, &mpath, &name) {
-                    // MAKEPAD_RUN_TRACE=macscope: each call the crate's import of the name does not reach
+                    // RELAX_TRACE=macscope: each call the crate's import of the name does not reach
                     if (seg.name.lo as usize) < self.src.len() && crate::preload::relax_trace().is_some_and(|t| t.split(',').any(|x| x == "macscope")) {
                         let line = self.src[..seg.name.lo as usize].iter().filter(|&&b| b == b'\n').count() + 1;
                         eprintln!("macscope {}:{}: {}! in module {} of crate {}: its import is not in scope here", self.bctx.as_ref().map_or("?", |c| c.path.as_str()), line, name, module, self.krate);
                     }
-                    self.macro_scope_miss.set(seg.name.lo);
+                    // A path names its module: the import there may be one an expansion of a file
+                    // the load has not read yet writes (`crate::made::inner::seven!()` before
+                    // `made`'s `pub(crate) use seven_inner as seven;`). That call is a lookup that
+                    // found nothing, left for the load's parse with the crate outline, as
+                    // `made::inner::seven!()` is; a plain name's scope is the module's own.
+                    if qual.is_none() && !path.global() { self.macro_scope_miss.set(seg.name.lo); }
                     return None;
                 }
                 let q2 = match q.as_str() {
@@ -2044,6 +2132,10 @@ impl<'a> Parser<'a> {
         if def.builtin != 0 {
             // built-in / hosted proc macro: tokens (its output is not re-lexed)
             let b = def.builtin;
+            if b < crate::builtins::HOSTED && crate::builtins::from_id(b) == B::CfgSelect {
+                let ends = self.cfg_select_arm_ends(toks.lo as usize, toks.hi as usize);
+                *self.cfg_select_ends.borrow_mut() = ends;
+            }
             let x = match crate::preload::timed_named(4, &def.name, || crate::builtins::expand(self, b, toks.lo as usize, toks.hi as usize, call_lo, call_hi)) {
                 Ok(x) => x,
                 // the error stays at the call (`compile_error!`): an expression's with the fn
@@ -2053,7 +2145,7 @@ impl<'a> Parser<'a> {
                     crate::builtins::Expansion::from_buf(crate::tokbuf::TokBuf::compile_error(self.edition, &format!("`{}!`: {}", def.name, m), !semi.is_empty()))
                 }
             };
-            // MAKEPAD_RUN_TRACE=expand:<macro name> prints expansions (debugger-free macro debugging)
+            // RELAX_TRACE=expand:<macro name> prints expansions (debugger-free macro debugging)
             if trace {
                 eprintln!("expand {}! => {}", def.name, x.text);
             }
@@ -2077,7 +2169,7 @@ impl<'a> Parser<'a> {
             x
         };
         if trace {
-            // MAKEPAD_RUN_TRACE=expand:<macro name>: the expansion, where it was called, at what depth and
+            // RELAX_TRACE=expand:<macro name>: the expansion, where it was called, at what depth and
             // on which thread; `bt` among the trace words adds a backtrace (which pass expands it)
             let thr = std::thread::current();
             eprintln!("expand {}! @{} base={} depth={} thr={} => {}", def.name, call_lo, self.src.len() + self.ext.len(), self.exp_depth, thr.name().unwrap_or("?"), text);
@@ -2113,7 +2205,9 @@ impl<'a> Parser<'a> {
             if b & crate::macros::BLOCK_FRAG != 0 {
                 self.block_frags.insert(base + a);
             }
-            if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 {
+            if b & crate::macros::STMT_FRAG == crate::macros::STMT_FRAG {
+                self.stmt_frags.insert(base + a);
+            } else if b & (crate::macros::EXPR_FRAG | crate::macros::LIT_FRAG) != 0 {
                 self.meta_frags.insert(base + a, if b & crate::macros::EXPR_FRAG != 0 { "expr" } else { "literal" });
             }
             if b & crate::macros::WRAP_PAREN != 0 {
@@ -2271,9 +2365,11 @@ impl<'a> Parser<'a> {
         let (pos, undo, mark) = (self.pos, self.tok_undo.len(), self.ast.mark());
         let lens = (self.item_start.len(), self.lazy_mods.len(), self.mod_stack.len(), self.scope_stack.len(), self.rule_scopes.len(), self.extra_items.len(), self.extra_assoc_items.len(), self.pending_shape.len());
         let flags = (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated);
-        let (pending_inner, cfg_select_rest) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone());
+        let (pending_inner, cfg_select_rest, cfg_select_ends) = (self.pending_inner.clone(), self.cfg_select_rest.borrow().clone(), self.cfg_select_ends.borrow().clone());
         let macro_scope_miss = self.macro_scope_miss.get();
+        let lit_errs = (!self.lit_errs.is_empty()).then(|| self.lit_errs.clone());
         let r = f(self);
+        if let Some(v) = lit_errs { self.lit_errs = v; }
         self.pos = pos;
         // the `>>` / `>=` it split are whole again
         while self.tok_undo.len() > undo {
@@ -2292,6 +2388,7 @@ impl<'a> Parser<'a> {
         (self.next_scope, self.no_prelude, self.in_assoc, self.in_trait, self.stmt_ctx, self.range_dots, self.include_as_expr, self.foreign_abi, self.cfg_out, self.expansion_semi, self.exp_depth, self.list_elem_at, self.expn_attrs_ungated) = flags;
         self.pending_inner = pending_inner;
         *self.cfg_select_rest.borrow_mut() = cfg_select_rest;
+        *self.cfg_select_ends.borrow_mut() = cfg_select_ends;
         self.macro_scope_miss.set(macro_scope_miss);
         #[cfg(test)]
         assert_eq!(before, self.trace(), "Parser::look_ahead left a trace");
@@ -2311,15 +2408,16 @@ impl<'a> Parser<'a> {
             rec_limit: _, import_summary: _,
             toks, pos, edition, ast, item_start, lazy_bodies, lazy_auto, lazy_part, hole_body, item_macro, lazy_mods, macros, krate,
             ext, exp_map, tok_origin, token_origins, token_input, exp_depth, rules_exp, body_origin,
-            pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, synth_parens,
+            pm_editions, tok_undo, frag_groups, empty_vis, ty_frags, path_frags, meta_frags, block_frags, stmt_frags, synth_parens,
             mod_stack, scope_stack, no_prelude, range_dots, next_scope, rule_scopes, foreign_rules, interp, extra_items,
             extra_assoc_items, pending_inner, in_assoc, in_trait, stmt_ctx, cfg_select_rest,
-            include_as_expr, foreign_abi, cfg_out, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss,
+            include_as_expr, foreign_abi, cfg_out, lit_errs, expansion_semi, list_elem_at, expn_attrs_ungated, pending_shape, macro_scope_miss,
+            cfg_select_ends,
         } = self;
         fn sorted<T: Ord>(mut v: Vec<T>) -> Vec<T> { v.sort(); v }
         let toks: Vec<Tok> = (0..toks.len()).map(|i| toks.at(i)).collect();
         let frags = (sorted(frag_groups.iter().collect::<Vec<_>>()), sorted(ty_frags.iter().collect::<Vec<_>>()), sorted(path_frags.iter().collect::<Vec<_>>()),
-            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
+            sorted(meta_frags.iter().collect::<Vec<_>>()), sorted(block_frags.iter().collect::<Vec<_>>()), sorted(stmt_frags.iter().collect::<Vec<_>>()), sorted(synth_parens.iter().collect::<Vec<_>>()), sorted(empty_vis.iter().collect::<Vec<_>>()));
         let interp = sorted(interp.iter().map(|(k, e)| (*k, e.0)).collect::<Vec<_>>());
         let tables = (ext.len(), exp_map.len(), tok_origin.len(), token_origins.len(), rules_exp.len(), body_origin.len(), pm_editions.len(), foreign_rules.len());
         let shapes: Vec<_> = pending_shape.iter().map(|(r, e)| (*r, e.as_ref().map(|e| (e.pos, e.msg.clone())))).collect();
@@ -2327,8 +2425,8 @@ impl<'a> Parser<'a> {
             tables {tables:?} token_input {token_input} exp_depth {exp_depth} tok_undo {tok_undo:?} frags {frags:?} interp {interp:?}\n\
             mods {mod_stack:?} scopes {scope_stack:?} {next_scope} {rule_scopes:?} no_prelude {no_prelude} range_dots {range_dots}\n\
             items {item_start:?} {extra_items:?} {extra_assoc_items:?} {pending_inner:?} {in_assoc} {in_trait} {foreign_abi:?}\n\
-            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
-            macros.is_some(), cfg_select_rest.borrow(), macro_scope_miss.get())
+            stmt {stmt_ctx} {include_as_expr} {expansion_semi} {list_elem_at:?} {expn_attrs_ungated} cfg {cfg_out} {:?} {:?} {lit_errs:?} shapes {shapes:?} macro_scope_miss {}\nast {ast:?}",
+            macros.is_some(), cfg_select_rest.borrow(), cfg_select_ends.borrow(), macro_scope_miss.get())
     }
 
     /// After the one expression of an `include!` in expression position: tokens left are the
@@ -2349,9 +2447,35 @@ impl<'a> Parser<'a> {
 
     /// One statement of a block, or all statements of a statement-position macro call.
     fn block_stmts_step(&mut self, stmts: &mut Vec<Stmt>) -> PResult<()> {
+        if !self.at_stmt_frag() { return self.block_stmts_inner(stmts, false); }
+        let lo = self.lo();
+        // rustc_parse returns an interpolated NtStmt without extending it with the next
+        // statement's tokens. Reparse its exact extent, as ty_inner does for NtTy. Keep a
+        // statement-position macro's full statement list, including empty expansions.
+        let Some(&hi) = self.frag_groups.get(&lo) else { return self.err("statement fragment without its extent"); };
+        let Some(last) = (self.pos..self.toks.len()).find(|&i| self.toks.at(i).hi == hi) else {
+            return self.err("incomplete statement fragment");
+        };
+        let end = last + 1;
+        if end >= self.toks.len() { return self.err("incomplete statement fragment"); }
+        let next = self.toks.at(end);
+        self.toks.edit(end, |t| *t = Tok { kind: T::Eof, lo: hi, hi });
+        self.stmt_frags.remove(&lo);
+        let result = self.block_stmts_inner(stmts, true);
+        let complete = self.pos == end;
+        self.toks.edit(end, |t| *t = next);
+        self.stmt_frags.insert(lo);
+        result?;
+        if !complete { return self.err("unexpected token in statement fragment"); }
+        // A written `;` after NtStmt is a separate empty statement, not permission to
+        // discard its value (rustc_parse parse_full_stmt). Leave it to the next step.
+        Ok(())
+    }
+
+    fn block_stmts_inner(&mut self, stmts: &mut Vec<Stmt>, interpolated: bool) -> PResult<()> {
         if self.macros.is_some() && self.mac_ahead() {
             let save = self.pos;
-            if self.stmt_macro(stmts)? {
+            if self.stmt_macro(stmts, interpolated)? {
                 return Ok(());
             }
             self.pos = save;
@@ -2378,7 +2502,7 @@ impl<'a> Parser<'a> {
                     } else {
                         self.pos = at;
                         self.record_mac_call_attrs(&attrs);
-                        if self.stmt_macro(stmts)? {
+                        if self.stmt_macro(stmts, interpolated)? {
                             return Ok(());
                         }
                     }
@@ -2387,7 +2511,7 @@ impl<'a> Parser<'a> {
             self.pending_shape.truncate(pend0);
             self.pos = save;
         }
-        let s = self.stmt()?;
+        let s = self.stmt(interpolated)?;
         // generated items go before the statement (item order does not matter in a block; a
         // tail expression must stay last)
         for id in std::mem::take(&mut self.extra_items) {
@@ -2414,11 +2538,11 @@ impl<'a> Parser<'a> {
     /// A statement-position `macro_rules!` call at the cursor: its statements splice into the
     /// block (a `;` after the call ends a tail expression). False (cursor unspecified) when it
     /// is not one.
-    fn stmt_macro(&mut self, stmts: &mut Vec<Stmt>) -> PResult<bool> {
+    fn stmt_macro(&mut self, stmts: &mut Vec<Stmt>, interpolated: bool) -> PResult<bool> {
         self.stmt_ctx = true;
         let r = self.try_expand_rules(|p, include, tail_expr| {
             let mut v = Vec::new();
-            if tail_expr {
+            if tail_expr && !interpolated {
                 return p.tail_expansion();
             }
             // `include!` in statement position is an expression: its first one, the rest of the
@@ -2688,14 +2812,73 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Where a cfg-stripped construct that starts at the current token begins: the attributes and
+    /// doc comments right before it (`#[..]`, `#![..]`) go with it.
+    fn stripped_from(&self) -> u32 {
+        if self.lit_errs.is_empty() {
+            return 0;
+        }
+        let mut i = self.pos;
+        loop {
+            if i > 0 && self.toks.kind_at(i - 1) == T::DocComment {
+                i -= 1;
+                continue;
+            }
+            if i > 0 && self.toks.kind_at(i - 1) == T::CloseBracket {
+                let mut depth = 0i32;
+                let mut j = i - 1;
+                let open = loop {
+                    match self.toks.kind_at(j) {
+                        T::CloseParen | T::CloseBracket | T::CloseBrace => depth += 1,
+                        T::OpenParen | T::OpenBracket | T::OpenBrace => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 { break Some(j); }
+                    if j == 0 { break None; }
+                    j -= 1;
+                };
+                if let Some(j) = open {
+                    if j >= 1 && self.toks.kind_at(j - 1) == T::Pound {
+                        i = j - 1;
+                        continue;
+                    }
+                    if j >= 2 && self.toks.kind_at(j - 1) == T::Not && self.toks.kind_at(j - 2) == T::Pound {
+                        i = j - 2;
+                        continue;
+                    }
+                }
+            }
+            return self.toks.at(i).lo;
+        }
+    }
+
+    /// A cfg-stripped construct, from `from` to the current token, is never lowered: rustc reports
+    /// none of its literals' suffix or size errors (lit_errs; `#[cfg(any())] compile_error!("a "b"
+    /// c")` holds the string `"a "b` with the suffix `b`, relax issue 125).
+    fn lift_lit_errs(&mut self, from: u32) {
+        if self.lit_errs.is_empty() {
+            return;
+        }
+        let to = self.lo();
+        self.lit_errs.retain(|e| e.0 < from || e.0 >= to);
+    }
+
+    /// Whether a literal error of lit_errs stands in [lo, hi).
+    fn lit_err_in(&self, lo: u32, hi: u32) -> bool {
+        let k = self.lit_errs.partition_point(|e| e.0 < lo);
+        self.lit_errs.get(k).is_some_and(|e| e.0 < hi)
+    }
+
     fn with_cfg_active<R>(&mut self, active: bool, pend0: usize, f: impl FnOnce(&mut Self) -> PResult<R>) -> PResult<R> {
         if active {
             return f(self);
         }
+        let from = self.stripped_from();
         let macros = self.macros.take();
         self.cfg_out += 1;
         let r = f(self);
         self.cfg_out -= 1;
+        self.lift_lit_errs(from);
         self.macros = macros;
         self.pending_shape.truncate(pend0);
         r
@@ -2706,10 +2889,12 @@ impl<'a> Parser<'a> {
     fn parse_stripped<R>(&mut self, parse: impl FnOnce(&mut Self) -> PResult<R>) -> PResult<R> {
         let lens = (self.ast.exprs.len(), self.ast.pats.len(), self.ast.tys.len(), self.ast.items.len(), self.ast.blocks.len(), self.ast.mac_args.len(), self.extra_items.len());
         let ends = self.ast.ends();
+        let from = self.stripped_from();
         let macros = self.macros.take();
         self.cfg_out += 1;
         let r = parse(self);
         self.cfg_out -= 1;
+        self.lift_lit_errs(from);
         self.macros = macros;
         self.ast.exprs.truncate(lens.0);
         self.ast.pats.truncate(lens.1);
@@ -2840,6 +3025,7 @@ impl<'a> Parser<'a> {
     /// An item, also one inside a fn body: its own text is not the body's (an impl or a const in
     /// a hole body is seen by other crates), so it is no hole until a fn of its own says so.
     fn item(&mut self, attrs: Vec<Attr>) -> PResult<Option<ItemId>> {
+        if self.at_stmt_frag() { return self.err("expected item, found statement metavariable"); }
         let outer = std::mem::replace(&mut self.hole_body, false);
         let r = self.item_here(attrs);
         self.hole_body = outer;
@@ -2904,8 +3090,9 @@ impl<'a> Parser<'a> {
                 let global = self.eat(T::PathSep) || self.at_dollar_crate();
                 let tree = self.use_tree()?;
                 self.expect(T::Semi)?;
-                // imports a macro expansion wrote (the file's own are in the prescan's tree)
-                if self.macros.is_some() && use_lo as usize >= self.src.len() {
+                // imports a macro expansion wrote, and those of a file the prescan did not read
+                // (the file's own are in the prescan's tree otherwise)
+                if self.macros.is_some() && (use_lo as usize >= self.src.len() || !self.file_prescanned()) {
                     self.record_use(global, &tree);
                 }
                 ItemKind::Use(self.ast.push_row(UseItem { global, tree }))
@@ -3091,6 +3278,7 @@ impl<'a> Parser<'a> {
                     let mut inner = Vec::new();
                     self.inner_attrs(&mut inner)?;
                     let active = self.cfg_active(&inner);
+                    let from = self.stripped_from();
                     let macros = if !active {
                         self.cfg_out += 1;
                         self.macros.take()
@@ -3115,6 +3303,7 @@ impl<'a> Parser<'a> {
                     self.mod_stack.pop();
                     if !active {
                         self.cfg_out -= 1;
+                        self.lift_lit_errs(from);
                         self.macros = macros;
                     }
                     let items = items?;
@@ -3319,7 +3508,8 @@ impl<'a> Parser<'a> {
         let mut lazy_body = None;
         let body = if self.eat(T::Semi) {
             None
-        } else if self.lazy_bodies && self.kind() == T::OpenBrace {
+        } else if self.lazy_bodies && self.kind() == T::OpenBrace && !self.lit_err_in(self.lo(), u32::MAX) {
+            // (with a literal error ahead the bodies parse: a cfg-stripped part of one may hold it)
             let (_, r) = self.delim_tt()?;
             lazy_body = Some(r);
             None
@@ -3352,6 +3542,7 @@ impl<'a> Parser<'a> {
                     4 => "parse-body-array-length",
                     5 => "parse-body-fragment",
                     6 => "parse-body-other-macro",
+                    8 => "parse-body-literal-error",
                     _ => "parse-body-no-scope",
                 };
                 let _profile = crate::load_profile::span(profile, phase, self.bctx.as_ref().map_or("", |c| c.path.as_str()));
@@ -4191,8 +4382,8 @@ impl<'a> Parser<'a> {
             _ => return self.err("expected literal"),
         };
         // a literal of an expansion was not cooked by the file's token validation (it was a macro
-        // argument): rustc reports its suffix when the parser consumes it
-        if self.exp_depth > 0 {
+        // argument): rustc reports its suffix where it lowers it, which cfg-stripped code is not
+        if self.exp_depth > 0 && self.cfg_out == 0 {
             let t = self.tok();
             let cooked = match k {
                 LitKind::Int | LitKind::Float => crate::lexer::validate_number(self.tok_text(t), k == LitKind::Float),
@@ -4216,6 +4407,12 @@ impl<'a> Parser<'a> {
         self.ty_inner(true)
     }
 
+    /// The cursor is at the start of a `$s:stmt` fragment (rustc's `MetaVarKind::Stmt` invisible
+    /// group): only a statement parses there.
+    fn at_stmt_frag(&self) -> bool {
+        !self.stmt_frags.is_empty() && self.stmt_frags.contains(&self.lo())
+    }
+
     pub(super) fn ty_fragment_end(&self, lo: u32) -> Option<u32> {
         if self.ty_frags.contains(&lo) { self.frag_groups.get(&lo).copied() } else { None }
     }
@@ -4230,6 +4427,7 @@ impl<'a> Parser<'a> {
         if self.ty_frags.contains(&lo) { flags |= crate::macros::TY_FRAG; }
         if self.path_frags.contains(&lo) { flags |= crate::macros::PATH_FRAG; }
         if self.block_frags.contains(&lo) { flags |= crate::macros::BLOCK_FRAG; }
+        if self.stmt_frags.contains(&lo) { flags |= crate::macros::STMT_FRAG; }
         match self.meta_frags.get(&lo) {
             Some(&"expr") => flags |= crate::macros::EXPR_FRAG,
             Some(&"literal") => flags |= crate::macros::LIT_FRAG,
@@ -4239,6 +4437,7 @@ impl<'a> Parser<'a> {
     }
 
     fn ty_inner(&mut self, plus: bool) -> PResult<TyId> {
+        if self.at_stmt_frag() { return self.err("expected type, found statement metavariable"); }
         // rustc_parse parser/ty.rs: parse_ty_common; parser/mod.rs: eat_metavar_seq.
         // Reparse a captured type inside invisible delimiters (`as $t << n`).
         if let Some(hi) = self.ty_fragment_end(self.tok().lo) {
@@ -4529,6 +4728,7 @@ impl<'a> Parser<'a> {
     }
 
     pub fn pat_no_or(&mut self) -> PResult<PatId> {
+        if self.at_stmt_frag() { return self.err("expected pattern, found statement metavariable"); }
         if self.exp_depth > 0 && (!self.meta_frags.is_empty() || self.kind() == T::OpenParen) {
             self.expr_fragment_pat()?;
         }
@@ -4760,7 +4960,7 @@ impl<'a> Parser<'a> {
         Ok(BlockId(self.ast.base[3] + self.ast.blocks.len() as u32 - 1))
     }
 
-    fn stmt(&mut self) -> PResult<Stmt> {
+    fn stmt(&mut self, interpolated: bool) -> PResult<Stmt> {
         if self.kind() == T::Semi && self.doc_before() {
             return self.err("E0585: found a documentation comment that doesn't document anything");
         }
@@ -4793,7 +4993,7 @@ impl<'a> Parser<'a> {
         }
         let mut attrs = attrs;
         self.normalize_builtin_test_attrs(&mut attrs);
-        let s = self.with_cfg_active(active, pend0, |p| p.stmt_after_attrs(attrs.clone(), item_tok))?;
+        let s = self.with_cfg_active(active, pend0, |p| p.stmt_after_attrs(attrs.clone(), interpolated))?;
         if matches!(s, Stmt::Item(_)) {
             if !active {
                 self.pending_shape.truncate(pend0);
@@ -4813,8 +5013,8 @@ impl<'a> Parser<'a> {
         Ok(s)
     }
 
-    /// `start`: the token the statement's attributes began at.
-    fn stmt_after_attrs(&mut self, attrs: Vec<Attr>, start: usize) -> PResult<Stmt> {
+    /// Interpolated statements already carry their boundary, including a let without `;`.
+    fn stmt_after_attrs(&mut self, attrs: Vec<Attr>, interpolated: bool) -> PResult<Stmt> {
         if self.kind() == T::KwLet {
             self.pos += 1;
             let pat = self.pat_top()?;
@@ -4837,8 +5037,6 @@ impl<'a> Parser<'a> {
                 (None, None)
             };
             // a `$s:stmt` fragment forwarded into a block is a whole statement, its `;` not part of it
-            let start_lo = self.toks.at(start).lo;
-            let interpolated = self.frag_groups.get(&start_lo).is_some_and(|&end| end == self.prev_hi());
             if !interpolated {
                 self.expect(T::Semi)?;
             }
@@ -5379,6 +5577,35 @@ impl<'a> Parser<'a> {
             self.pending_shape.truncate(pend0);
             return Ok(None);
         }
+        // An `$e:expr` fragment keeps the attributes it was matched with (rustc_parse nonterminal.rs
+        // matches it with parse_expr_force_collect, attributes included), so a false `#[cfg]` at its
+        // start removes the element it is transcribed as: `&[$($scope,)+]` over
+        // `#[cfg(a)] Scope::A, #[cfg(not(a))] Scope::B`. Each transcription put the fragment in
+        // invisible parentheses (one pair per macro it was forwarded through); a true `#[cfg]` is
+        // left to the parenthesised expression.
+        let mut depth = 0;
+        while attrs.is_empty() && self.nth(depth) == T::OpenParen && self.synth_parens.contains(&{ self.toks.at(self.pos + depth).lo }) { depth += 1; }
+        if depth > 0 && self.nth(depth) == T::Pound && self.nth(depth + 1) == T::OpenBracket && self.nth(depth + 2) != T::Eof
+            && matches!(self.tok_text(self.toks.at(self.pos + depth + 2)), b"cfg" | b"cfg_attr")
+        {
+            // the fragment is the whole element: its outermost `)` ends the element
+            let end = self.tok_close_of(self.pos, self.toks.len()).filter(|&close| matches!(self.nth(close + 1 - self.pos), T::Comma | T::CloseParen | T::CloseBracket));
+            if let Some(end) = end {
+                let start = self.pos;
+                self.pos += depth;
+                let inner = self.outer_attrs()?;
+                if !self.cfg_present(&inner) {
+                    self.parse_stripped(|p| p.expr_bp(0, r))?;
+                    if self.pos + depth == end + 1 && (0..depth).all(|i| self.nth(i) == T::CloseParen) {
+                        self.pos = end + 1;
+                        self.pending_shape.truncate(pend0);
+                        return Ok(None);
+                    }
+                }
+                self.pos = start;
+                self.pending_shape.truncate(pend0);
+            }
+        }
         self.closure_attrs(&attrs)?;
         let at = self.lo();
         let outer = std::mem::replace(&mut self.list_elem_at, (at, if paren { ELEM_PAREN_FIRST } else { ELEM_LIST }));
@@ -5432,6 +5659,7 @@ impl<'a> Parser<'a> {
     }
 
     fn primary(&mut self, r: u8) -> PResult<ExprId> {
+        if self.at_stmt_frag() { return self.err("expected expression, found statement metavariable"); }
         let lo = self.lo();
         // rustc_parse parser/expr.rs: parse_expr_bottom returns a Path expression
         // for MetaVarKind::Path; calls follow, but `{ .. }` and `::` do not extend it.
@@ -5905,10 +6133,14 @@ pub fn parse_source<'a>(sess: &'a std::sync::Arc<crate::Session>, src: &'a [u8],
 pub fn parse_source_mode<'a>(sess: &'a std::sync::Arc<crate::Session>, src: &'a [u8], edition: u16, lazy: bool) -> Result<Parser<'a>, (u32, String)> {
     let mut toks = Vec::with_capacity(src.len() / 4);
     crate::lexer::lex(src, edition, &mut toks).map_err(|e| (e.pos, e.msg.to_string()))?;
-    crate::lexer::validate_file(src, &toks, edition).map_err(|e| (e.pos, e.msg.to_string()))?;
+    let lowers = crate::lexer::validate_file(src, &toks, edition).map_err(|e| (e.pos, e.msg.to_string()))?;
     let mut p = Parser::new(sess, src, toks, edition);
+    p.lit_errs = lowers.into_iter().map(|e| (e.pos, e.msg.into_owned())).collect();
     p.lazy_bodies = lazy;
     p.parse_file().map_err(|e| (e.pos, e.msg))?;
+    if let Some((pos, msg)) = p.lit_errs.first() {
+        return Err((*pos, msg.clone()));
+    }
     Ok(p)
 }
 
@@ -6805,10 +7037,11 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
                 toks
             }
         }};
-        if !token_input {
-            crate::lexer::validate_file(&src, &toks, edition).map_err(|e| (SourceSpan { file: 0, lo: e.pos, hi: e.pos }, e.msg.to_string()))?;
-        }
+        let lowers = if token_input { Vec::new() } else {
+            crate::lexer::validate_file(&src, &toks, edition).map_err(|e| (SourceSpan { file: 0, lo: e.pos, hi: e.pos }, e.msg.to_string()))?
+        };
         let mut p = Parser::new(sess, &src, toks, edition);
+        p.lit_errs = lowers.into_iter().map(|e| (e.pos, e.msg.into_owned())).collect();
         if let Some(input) = input {
             p.ext = input.text.into_bytes().into();
             p.toks = input.toks.into_iter().map(|t| Tok { kind: t.kind, lo: t.lo + src_len, hi: t.hi + src_len }).collect::<Vec<_>>().into();
@@ -6845,6 +7078,9 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
             }
             return Err((SourceSpan { file: 0, lo: pos, hi: pos }, e.msg));
         }
+        if let Some(&(pos, ref msg)) = p.lit_errs.first() {
+            return Err((SourceSpan { file: 0, lo: pos, hi: pos }, msg.clone()));
+        }
         let s2_fmt = p.macros.as_ref().map_or(false, |m| m.table.s2_fmt);
         let skipped = p.ast.items.iter().any(|it| matches!(&it.kind, ItemKind::Fn(sig, body, _) if body.is_none() && p.ast.fn_sig(*sig).lazy_body.is_some()));
         let lazy = match lazy_ctx {
@@ -6860,22 +7096,22 @@ pub(crate) fn parse_owned_input(sess: &std::sync::Arc<crate::Session>, mut src: 
     Ok((pf, used))
 }
 
-/// MAKEPAD_RUN_LAZY_STATS=1 (measurement): per fn body parsed, whether a lazy parse could skip it;
+/// RELAX_LAZY_STATS=1 (measurement): per fn body parsed, whether a lazy parse could skip it;
 /// [n, arena bytes, nested bytes] for skippable bodies, then for the others
-pub static LAZY_STATS: [std::sync::atomic::AtomicU64; 16] = [const { std::sync::atomic::AtomicU64::new(0) }; 16];
-/// MAKEPAD_RUN_LAZY_STATS: the macros that kept bodies eager (`other macro`), by name
+pub static LAZY_STATS: [std::sync::atomic::AtomicU64; 18] = [const { std::sync::atomic::AtomicU64::new(0) }; 18];
+/// RELAX_LAZY_STATS: the macros that kept bodies eager (`other macro`), by name
 pub static LAZY_MACROS: relax_session::sync::Mutex<std::collections::BTreeMap<String, u64>> = relax_session::sync::Mutex::new(std::collections::BTreeMap::new());
-/// MAKEPAD_RUN_LAZY_STATS: what made a file's skipped bodies parse (type-check origin, thread)
+/// RELAX_LAZY_STATS: what made a file's skipped bodies parse (type-check origin, thread)
 pub static LAZY_WHY_PARSED: relax_session::sync::Mutex<std::collections::BTreeMap<String, u64>> = relax_session::sync::Mutex::new(std::collections::BTreeMap::new());
 /// why a body is parsed at load (Parser::body_outline)
-pub const LAZY_WHY: [&str; 8] = ["skippable", "macro output", "item inside", "macro_rules call", "array length", "fragment", "other macro", "no macro scope"];
+pub const LAZY_WHY: [&str; 9] = ["skippable", "macro output", "item inside", "macro_rules call", "array length", "fragment", "other macro", "no macro scope", "literal error"];
 
 fn lazy_stats_on() -> bool {
     static E: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *E.get_or_init(|| std::env::var_os("MAKEPAD_RUN_LAZY_STATS").is_some())
+    *E.get_or_init(|| std::env::var_os("RELAX_LAZY_STATS").is_some())
 }
 
-/// MAKEPAD_RUN_LAZY_BODIES (default on for `makepad run`; 0: off): fn bodies a later parse can do
+/// RELAX_LAZY_BODIES (default on for `makepad run`; 0: off): fn bodies a later parse can do
 /// alone are skipped at load and parsed on the first need (ParsedFile::part). Set by the run
 /// driver before loading.
 pub static LAZY_AUTO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -6965,7 +7201,7 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
     if !p.ast.items.is_empty() {
         // body_outline let an item through: every body of the file fails loudly instead of
         // compiling against an item list that misses it
-        let msg = format!("{}: a lazily parsed fn body defined an item (makepad run bug; MAKEPAD_RUN_LAZY_BODIES=0 works around it)", ctx.path);
+        let msg = format!("{}: a lazily parsed fn body defined an item (Relax bug; RELAX_LAZY_BODIES=0 works around it)", ctx.path);
         for b in bodies.iter_mut() {
             b.1 = Err(msg.clone());
         }
@@ -6999,7 +7235,7 @@ pub fn parse_part(pf: &ParsedFile, cfg: &crate::cfg::CfgSet) -> (FilePart, Ast) 
         next: Default::default(), ext: ext.into(), toks: toks.into(), exp_map, tok_origin, token_origins, bodies: PartBodies::Parsed(bodies), image: None }, ast)
 }
 
-/// MAKEPAD_RUN_LAZY_MACRO_OUTPUT=0: fn bodies in macro output (derives) stay eager.
+/// RELAX_LAZY_MACRO_OUTPUT=0: fn bodies in macro output (derives) stay eager.
 
 
 #[cfg(test)]
@@ -7036,6 +7272,35 @@ mod diagnostic_tests {
         let call = source.windows(9).rposition(|s| s == b"outer!();").unwrap() as u32;
         let result = parse_owned_ctx(sess, source,None,2021,Some(crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()))),"test",None,false);
         match result { Err((pos,_)) => assert_eq!(pos,call), Ok(_) => panic!("expected a parse error") }
+    }
+
+    /// relax issue 111: a cfg predicate inside configured-out code is never evaluated, so its
+    /// shape is not checked either (rustc only needs the stripped code to parse).
+    #[test]
+    fn cfg_predicates_inside_configured_out_code_are_not_checked() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", "/fake/cfg_out.rs", "test", &crate::cfg::CfgSet::host(sess, &[])));
+        let parse = |src: &str| {
+            let scope = crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()));
+            parse_owned_ctx(sess, src.as_bytes().to_vec(), None, 2021, Some(scope), "test", Some(ctx.clone()), false).map(|_| ()).map_err(|(_, msg)| msg)
+        };
+        let stripped = "fn main() {\n    #[cfg(any())]\n    {\n        #[cfg(version(\"1.76\"))]\n        let unused = 1;\n    }\n}\n#[cfg(any())]\nfn gone() { #[cfg(version(\"1.76\"))] let unused = 1; }\n";
+        assert_eq!(parse(stripped), Ok(()), "a predicate in stripped code");
+        let live = "fn main() {\n    #[cfg(all())]\n    {\n        #[cfg(version(\"1.76\"))]\n        let unused = 1;\n    }\n}\n";
+        let msg = parse(live).expect_err("a predicate in configured-in code is still checked");
+        assert!(msg.contains("invalid predicate"), "{msg}");
+    }
+
+    /// relax issue 112: an attribute's value in configured-out code is not expanded (no macro
+    /// resolves there): a built-in around a macro call stopped the load with "expected a literal".
+    #[test]
+    fn attribute_values_inside_configured_out_code_are_not_expanded() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let ctx = std::rc::Rc::new(crate::builtins::FileCtx::new("test", "/fake/cfg_out_value.rs", "test", &crate::cfg::CfgSet::host(sess, &[])));
+        let scope = crate::macros::MacroScope::new(std::sync::Arc::new(crate::macros::MacroTable::default()));
+        let src = "macro_rules! name { () => { \".data.relax\" } }\n#[cfg(any())]\nmod gone {\n    #[link_section = concat!(name!())]\n    static S: u32 = 0;\n}\n#[link_section = concat!(name!())]\nstatic LIVE: u32 = 0;\n";
+        let r = parse_owned_ctx(sess, src.as_bytes().to_vec(), None, 2021, Some(scope), "test", Some(ctx), false).map(|_| ()).map_err(|(_, msg)| msg);
+        assert_eq!(r, Ok(()), "a value macro in a configured-out module");
     }
 
     fn parse_error_with_macros(source: &str) -> (usize, usize, String) {
@@ -7114,7 +7379,7 @@ mod diagnostic_tests {
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
-    reset(&LAZY_STATS, [const { std::sync::atomic::AtomicU64::new(0) }; 16]);
+    reset(&LAZY_STATS, [const { std::sync::atomic::AtomicU64::new(0) }; 18]);
     reset(&LAZY_MACROS, relax_session::sync::Mutex::new(std::collections::BTreeMap::new()));
     reset(&LAZY_WHY_PARSED, relax_session::sync::Mutex::new(std::collections::BTreeMap::new()));
     reset(&LAZY_AUTO, std::sync::atomic::AtomicBool::new(false));

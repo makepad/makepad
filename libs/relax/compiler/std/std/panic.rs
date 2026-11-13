@@ -76,13 +76,13 @@ type Hook = Box<dyn Fn(&PanicHookInfo<'_>) + Sync + Send + 'static>;
 static HOOK: RwLock<Option<Hook>> = RwLock::new(None);
 
 fn trampoline(message: &str, location: &Location<'_>) {
-    #[cfg(not(any(relax_web, relax_shim)))]
+    #[cfg(not(relax_web))]
     {
         let payload = take_payload();
         run_hook(&*payload, message, location);
         store_payload(payload);
     }
-    #[cfg(any(relax_web, relax_shim))]
+    #[cfg(relax_web)]
     run_hook(&String::from(message), message, location);
 }
 

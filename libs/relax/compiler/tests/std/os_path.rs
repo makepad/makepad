@@ -1,4 +1,4 @@
-// std-os lane: std::path (differential: os_diff.sh)
+// std-os lane: std::path (differential: agree.sh)
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 

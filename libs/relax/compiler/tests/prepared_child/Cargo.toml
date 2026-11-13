@@ -1,0 +1,3 @@
+[workspace]
+members = ["cc", "native", "gen", "app"]
+resolver = "2"

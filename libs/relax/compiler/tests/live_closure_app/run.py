@@ -4,7 +4,7 @@ driver of a working tree), with the closures and their generic instances first b
 another thread. The user's Amp parked its worker thread on "internal compiler error in
 {closure#N}@S: side table: no entry" after exactly this sequence.
 
-usage: run.py --makepad <makepad binary> [--warm]   (MAKEPAD_RUN_STD in the environment)
+usage: run.py --makepad <makepad binary> [--warm]   (RELAX_STD in the environment)
 
 Copies pkg/ to a temporary dir, runs it and edits src/helper.rs while it runs:
   1. `parse` calls `first_end` before it exists      -> "NOT applied" (E0425), the app keeps running
@@ -54,9 +54,9 @@ def expect(n, version):
 
 # minimal ahead: no speculative builds before the edits (the closures stay unbuilt until `go`, as
 # they were in the user's Amp; balanced ahead builds them early and hides the bug)
-base_env = dict(os.environ, MAKEPAD_RUN_AHEAD="minimal")
+base_env = dict(os.environ, RELAX_AHEAD="minimal")
 if warm:
-    env = dict(base_env, MAKEPAD_RUN_CACHE_DIR=os.path.join(tmp, "cache"), MAKEPAD_RUN_TARGET_DIR=os.path.join(tmp, "target"))
+    env = dict(base_env, RELAX_CACHE_DIR=os.path.join(tmp, "cache"), RELAX_TARGET_DIR=os.path.join(tmp, "target"))
     open(os.path.join(pkg, "go"), "w").close()
     open(os.path.join(pkg, "stop"), "w").close()
     fill = subprocess.run([relax, "run", "--quiet", "relax-live-closure-app"], cwd=pkg, env=env, capture_output=True, text=True, timeout=600)
@@ -65,7 +65,7 @@ if warm:
     if fill.returncode != 0:
         print(fill.stderr[-3000:]); sys.exit(1)
 else:
-    env = dict(base_env, MAKEPAD_RUN_CACHE="0")
+    env = dict(base_env, RELAX_CACHE="0")
 p = subprocess.Popen([relax, "run", "--verbose", "relax-live-closure-app"], cwd=pkg, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 out, err = [], []
 def pump(f, acc):

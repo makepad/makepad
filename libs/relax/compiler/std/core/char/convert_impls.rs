@@ -1,5 +1,5 @@
-//! Conversion trait impls between char and integers (Relax only: in the rustc shim these
-//! are real core's). Integer<->integer conversions are generated in num/.
+//! Relax's conversion trait impls between char and integers.
+//! Integer<->integer conversions are generated in num/.
 
 use super::{try_from_u32, CharTryFromError, TryFromCharError};
 use crate::convert::{From, TryFrom};

@@ -1,6 +1,6 @@
 // CommandExt::process_group (std os/unix/process.rs): the child leads a new process group
 // (pgroup 0) or joins the given one; without it the child stays in the parent's group.
-// Lines starting with "| " must equal real std's (os_diff.sh / core_diff.sh).
+// Lines starting with "| " must equal real std's (agree.sh).
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 

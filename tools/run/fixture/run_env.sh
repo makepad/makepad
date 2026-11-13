@@ -27,7 +27,7 @@ for v in $(env | grep -oE '^(CARGO_MANIFEST_[A-Z_]*|CARGO_PKG_[A-Z_]*|CARGO_CRAT
     unset "$v"
 done
 export RUN_ENV_CONFIG_KEPT=outer RUN_ENV_CONFIG_FORCED=outer
-export TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1
+export TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1
 cd "$dir/ws" || exit 1
 fail=""
 out=$("$J" test relax-run-env 2>&1); rc=$?

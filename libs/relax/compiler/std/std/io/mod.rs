@@ -9,7 +9,7 @@ mod cursor;
 mod error;
 mod stdio;
 
-pub use self::buffered::{BufReader, BufWriter, IntoInnerError, LineWriter};
+pub use self::buffered::{BufReader, BufWriter, IntoInnerError, LineWriter, WriterPanicked};
 pub use self::cursor::Cursor;
 mod pipe;
 pub use self::pipe::{pipe, PipeReader, PipeWriter};
@@ -86,7 +86,7 @@ pub trait Read {
     where
         Self: Sized,
     {
-        Take { inner: self, limit }
+        Take { inner: self, len: limit, limit }
     }
 
     fn chain<R: Read>(self, next: R) -> Chain<Self, R>
@@ -286,6 +286,7 @@ fn read_until<R: BufRead + ?Sized>(r: &mut R, delim: u8, buf: &mut Vec<u8>) -> R
     }
 }
 
+#[derive(Debug)]
 pub struct Bytes<R> {
     inner: R,
 }
@@ -309,8 +310,12 @@ impl<R: Read> Iterator for Bytes<R> {
     }
 }
 
+/// Real std's fields: `len` the limit as last set, `limit` what is left of it (its derived Debug
+/// prints both).
+#[derive(Debug)]
 pub struct Take<T> {
     inner: T,
+    len: u64,
     limit: u64,
 }
 
@@ -319,6 +324,7 @@ impl<T> Take<T> {
         self.limit
     }
     pub fn set_limit(&mut self, limit: u64) {
+        self.len = limit;
         self.limit = limit;
     }
     pub fn into_inner(self) -> T {
@@ -364,6 +370,51 @@ impl<T: BufRead> BufRead for Take<T> {
     }
 }
 
+impl<T> Take<T> {
+    /// Where the Take is, from where it began (real std's unstable `Take::position`).
+    fn position(&self) -> u64 {
+        self.len - self.limit
+    }
+}
+
+/// Real std's (seek_io_take): a position counts from where the Take began and stays within its
+/// `len`, else InvalidInput; the inner reader moves by seek_relative, in i64 steps when the
+/// distance is wider.
+impl<T: Seek> Seek for Take<T> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        let new_position = match pos {
+            SeekFrom::Start(v) => Some(v),
+            SeekFrom::Current(v) => self.position().checked_add_signed(v),
+            SeekFrom::End(v) => self.len.checked_add_signed(v),
+        };
+        let new_position = match new_position {
+            Some(v) if v <= self.len => v,
+            _ => return Err(ErrorKind::InvalidInput.into()),
+        };
+        while new_position != self.position() {
+            let distance = new_position as i128 - self.position() as i128;
+            let offset = distance.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+            self.inner.seek_relative(offset)?;
+            self.limit = self.limit.wrapping_sub(offset as u64);
+        }
+        Ok(new_position)
+    }
+
+    fn stream_position(&mut self) -> Result<u64> {
+        Ok(self.position())
+    }
+
+    fn seek_relative(&mut self, offset: i64) -> Result<()> {
+        if !self.position().checked_add_signed(offset).is_some_and(|p| p <= self.len) {
+            return Err(ErrorKind::InvalidInput.into());
+        }
+        self.inner.seek_relative(offset)?;
+        self.limit = self.limit.wrapping_sub(offset as u64);
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub struct Chain<T, U> {
     first: T,
     second: U,
@@ -391,6 +442,44 @@ impl<T: Read, U: Read> Read for Chain<T, U> {
     }
 }
 
+/// As real std: the first reader's buffer until it comes back empty, then the second's for good.
+/// read_until stays in the first reader while its result ends in `byte`; read_line keeps the
+/// default, since a UTF-8 sequence can span the two readers.
+impl<T: BufRead, U: BufRead> BufRead for Chain<T, U> {
+    fn fill_buf(&mut self) -> Result<&[u8]> {
+        if !self.done_first {
+            match self.first.fill_buf()? {
+                buf if buf.is_empty() => self.done_first = true,
+                buf => return Ok(buf),
+            }
+        }
+        self.second.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        if !self.done_first {
+            self.first.consume(amt)
+        } else {
+            self.second.consume(amt)
+        }
+    }
+
+    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> Result<usize> {
+        let mut read = 0;
+        if !self.done_first {
+            let n = self.first.read_until(byte, buf)?;
+            read += n;
+            match buf.last() {
+                Some(b) if *b == byte && n != 0 => return Ok(read),
+                _ => self.done_first = true,
+            }
+        }
+        read += self.second.read_until(byte, buf)?;
+        Ok(read)
+    }
+}
+
+#[derive(Debug)]
 pub struct Split<B> {
     buf: B,
     delim: u8,
@@ -400,7 +489,7 @@ impl<B: BufRead> Iterator for Split<B> {
     type Item = Result<Vec<u8>>;
     fn next(&mut self) -> Option<Result<Vec<u8>>> {
         let mut buf = Vec::new();
-        match read_until(&mut self.buf, self.delim, &mut buf) {
+        match self.buf.read_until(self.delim, &mut buf) {
             Ok(0) => None,
             Ok(_n) => {
                 if buf[buf.len() - 1] == self.delim {
@@ -413,6 +502,7 @@ impl<B: BufRead> Iterator for Split<B> {
     }
 }
 
+#[derive(Debug)]
 pub struct Lines<B> {
     buf: B,
 }
@@ -442,6 +532,15 @@ impl<B: BufRead> Iterator for Lines<B> {
 impl<S: Seek + ?Sized> Seek for alloc::boxed::Box<S> {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         (**self).seek(pos)
+    }
+    fn rewind(&mut self) -> Result<()> {
+        (**self).rewind()
+    }
+    fn stream_position(&mut self) -> Result<u64> {
+        (**self).stream_position()
+    }
+    fn seek_relative(&mut self, offset: i64) -> Result<()> {
+        (**self).seek_relative(offset)
     }
 }
 impl<R: Read + ?Sized> Read for &mut R {
@@ -498,9 +597,21 @@ impl<B: BufRead + ?Sized> BufRead for alloc::boxed::Box<B> {
     }
 }
 
+// library/std/src/io/impls.rs: a reference seeks as its target does (as a box does, above),
+// every method forwarded so the target's own rewind / stream_position / seek_relative are the
+// ones that run (image's GenericReader seeks a `BufReader<Box<dyn ReadSeek>>`)
 impl<S: Seek + ?Sized> Seek for &mut S {
     fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
         (**self).seek(pos)
+    }
+    fn rewind(&mut self) -> Result<()> {
+        (**self).rewind()
+    }
+    fn stream_position(&mut self) -> Result<u64> {
+        (**self).stream_position()
+    }
+    fn seek_relative(&mut self, offset: i64) -> Result<()> {
+        (**self).seek_relative(offset)
     }
 }
 

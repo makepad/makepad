@@ -1,4 +1,4 @@
-//! Derived Clone builds a memory result in place (COMMERCIAL BLOCKER, Stage VJ effects: a deep
+//! Derived Clone builds a memory result in place (COMMERCIAL BLOCKER, an app's VJ effects: a deep
 //! Expr tree clone overflowed the 8 MB stack). 20,000 levels on an 8 MB thread pass under rustc
 //! (rustc's limit is between 30,000 and 45,000); Relax overflowed at 10,000 before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

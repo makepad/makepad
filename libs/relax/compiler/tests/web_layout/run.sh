@@ -3,7 +3,7 @@
 # The reference is rustc's: a wasm32-unknown-unknown cdylib of wasm_ref.rs run in node (w32), or a
 # host build (w64: wasm64's data layout aligns integers, floats and pointers as x86_64 does).
 # Relax checks check.rs (gen_check.py: one const assertion per size, align and field offset) under
-# MAKEPAD_RUN_CHECK_TARGET=wasm{32,64}-unknown-unknown. Prints "web_layout <w>: N rows equal"
+# RELAX_CHECK_TARGET=wasm{32,64}-unknown-unknown. Prints "web_layout <w>: N rows equal"
 # or the failing assertions.
 set -u
 H=$(cd "$(dirname "$0")" && pwd)
@@ -32,7 +32,7 @@ mkdir -p "$T/u"
 cat > "$T/u/units.json" <<J
 {"version":1,"roots":[0],"units":[{"pkg_id":"path+file://$T#web_layout@0.0.0","target":{"kind":["bin"],"name":"web_layout","src_path":"$T/check.rs","edition":"2021"},"mode":"build","features":[],"dependencies":[]}]}
 J
-MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt "$B" check --no-serve --units "$T/u/units.json" web_layout --release > "$T/relax.out" 2>"$T/relax.err"
+RELAX_CHECK_TARGET=$TRIPLE RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt "$B" check --no-serve --units "$T/u/units.json" web_layout --release > "$T/relax.out" 2>"$T/relax.err"
 rc=$?
 n=$(grep -c . "$T/table.txt")
 if [ $rc -eq 0 ] && ! grep -q "E[0-9]" "$T/relax.out"; then
@@ -44,7 +44,7 @@ else
   exit 1
 fi
 # Execute the same rustc-derived assertions in the exported module as well.
-MAKEPAD_RUN_WASM_EXPORT=$T/relax.wasm MAKEPAD_RUN_SPEC=0 MAKEPAD_RUN_O1=always MAKEPAD_RUN_O3=0 MAKEPAD_RUN_CHECK_TARGET=$TRIPLE MAKEPAD_RUN_STD=$H/../../std MAKEPAD_RUN_CACHE_DIR=$T/tgt-export "$B" run --quiet --no-live --units "$T/u/units.json" web_layout --release > "$T/export.out" 2> "$T/export.err" || { tail -40 "$T/export.err"; exit 1; }
+RELAX_WASM_EXPORT=$T/relax.wasm RELAX_SPEC=0 RELAX_O1=always RELAX_O3=0 RELAX_CHECK_TARGET=$TRIPLE RELAX_STD=$H/../../std RELAX_CACHE_DIR=$T/tgt-export "$B" run --quiet --no-live --units "$T/u/units.json" web_layout --release > "$T/export.out" 2> "$T/export.err" || { tail -40 "$T/export.err"; exit 1; }
 node - "$T/relax.wasm" <<'JS' || exit 1
 const fs = require('fs');
 const module_ = new WebAssembly.Module(fs.readFileSync(process.argv[2]));

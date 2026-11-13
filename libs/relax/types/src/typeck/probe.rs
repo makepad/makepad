@@ -13,7 +13,7 @@ enum CandidateKind {
     InherentImplCandidate(DefId),
     ObjectCandidate(Predicate),
     WhereClauseCandidate(Predicate),
-    TraitCandidate(Option<Predicate>),
+    TraitCandidate,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct Candidate { item: DefId, kind: CandidateKind }
@@ -90,18 +90,14 @@ pub(super) struct Pick {
 }
 
 impl Fcx<'_> {
-    fn assemble_candidates_for_bounds(&self, clauses: Vec<Predicate>, name: Sym, kind: u8, candidates: &mut Vec<Candidate>) {
+    fn assemble_candidates_for_bounds(&self, clauses: Vec<Predicate>, name: Sym, object: bool, candidates: &mut Vec<Candidate>) {
         for clause in clauses {
             let PredicateKind::Clause(ClauseKind::Trait(ref tr)) = clause.kind else { continue; };
             if tr.polarity != ClausePolarity::Positive { continue; }
             for &item in &self.prog.traits[self.prog.def(tr.trait_ref.def_id).sub as usize] {
                 if self.prog.def(item).name != name || self.prog.def(item).kind != DefKind::AssocFn { continue; }
                 if !self.tcx.fn_sig(self.prog, item).is_some_and(|s| s.self_kind != 0) { continue; }
-                let kind = match kind {
-                    0 => CandidateKind::WhereClauseCandidate(clause.clone()),
-                    1 => CandidateKind::ObjectCandidate(clause.clone()),
-                    _ => CandidateKind::TraitCandidate(Some(clause.clone())),
-                };
+                let kind = if object { CandidateKind::ObjectCandidate(clause.clone()) } else { CandidateKind::WhereClauseCandidate(clause.clone()) };
                 let candidate = Candidate { item, kind };
                 if !candidates.contains(&candidate) { candidates.push(candidate); }
             }
@@ -109,8 +105,10 @@ impl Fcx<'_> {
     }
 
     /// :880-1203: collect candidates before testing receiver adjustments. Bounds on
-    /// a parameter and object methods have inherent priority; alias bounds extend
-    /// the trait candidates. All predicates retain their binders and lifetime args.
+    /// a parameter and object methods have inherent priority. An alias receiver
+    /// (projection or opaque) gets no candidates from its item bounds or from
+    /// where-clauses on it, only the traits in scope, as in rustc's assemble_probe.
+    /// All predicates retain their binders and lifetime args.
     fn assemble_probe_candidates(&self, steps: &[CandidateStep], name: Sym) -> (Vec<Candidate>, Vec<Candidate>) {
         let mut inherent = Vec::new();
         let mut extension = Vec::new();
@@ -135,15 +133,14 @@ impl Fcx<'_> {
                             if tr.trait_ref.args.first() == Some(&GenericArg::Type(ty)) { clauses.push(p.clone()); }
                         }
                     }
-                    self.assemble_candidates_for_bounds(clauses, name, 0, &mut inherent);
+                    self.assemble_candidates_for_bounds(clauses, name, false, &mut inherent);
                 }
                 TyKind::Dyn(td, args, _, regions, _, bound, _) if *td != NO_DEF => {
                     let mut compact = vec![ty]; compact.extend_from_slice(self.tcx.tys.list(*args));
                     let mut p = crate::next_solver::collect::trait_predicate(*td, self.tcx.complete_args(self.prog, *td, &compact, *regions));
                     p.bound_vars = vec![crate::next_solver::BoundVariableKind::Region(crate::types::BoundRegionKind::Anon); *bound as usize].into();
-                    self.assemble_candidates_for_bounds(self.tcx.supertraits(self.prog, p), name, 1, &mut inherent);
+                    self.assemble_candidates_for_bounds(self.tcx.supertraits(self.prog, p), name, true, &mut inherent);
                 }
-                TyKind::Alias(..) => self.assemble_candidates_for_bounds(self.alias_bound_clauses(ty), name, 2, &mut extension),
                 _ => {}
             }
         }
@@ -152,7 +149,7 @@ impl Fcx<'_> {
             for &item in &self.prog.traits[self.prog.def(td).sub as usize] {
                 if self.prog.def(item).name != name || self.prog.def(item).kind != DefKind::AssocFn { continue; }
                 if !self.tcx.fn_sig(self.prog, item).is_some_and(|s| s.self_kind != 0) { continue; }
-                let candidate = Candidate { item, kind: CandidateKind::TraitCandidate(None) };
+                let candidate = Candidate { item, kind: CandidateKind::TraitCandidate };
                 if !extension.contains(&candidate) { extension.push(candidate); }
             }
         }
@@ -194,7 +191,7 @@ impl Fcx<'_> {
                 let self_ty = self.tcx.instantiate_ty(self.prog, *imp, &args, self.tcx.impl_self[imp]);
                 (self_ty, args, *imp)
             }
-            CandidateKind::ObjectCandidate(p) | CandidateKind::WhereClauseCandidate(p) | CandidateKind::TraitCandidate(Some(p)) => {
+            CandidateKind::ObjectCandidate(p) | CandidateKind::WhereClauseCandidate(p) => {
                 let PredicateKind::Clause(ClauseKind::Trait(tr)) = self.infcx.instantiate_predicate_binder_with_infer(p) else { unreachable!() };
                 let GenericArg::Type(self_ty) = tr.trait_ref.args[0] else { unreachable!() };
                 if matches!(candidate.kind, CandidateKind::WhereClauseCandidate(_)) {
@@ -203,14 +200,14 @@ impl Fcx<'_> {
                 }
                 (self_ty, tr.trait_ref.args, tr.trait_ref.def_id)
             }
-            CandidateKind::TraitCandidate(None) => {
+            CandidateKind::TraitCandidate => {
                 let td = self.prog.def(candidate.item).parent;
                 let args = self.infcx.fresh_args_for_item(self.prog, td);
                 let GenericArg::Type(self_ty) = args[0] else { unreachable!() };
                 (self_ty, args, td)
             }
         };
-        if matches!(candidate.kind, CandidateKind::TraitCandidate(_)) && self.skip_during_method_dispatch(parent, receiver) { return None; }
+        if matches!(candidate.kind, CandidateKind::TraitCandidate) && self.skip_during_method_dispatch(parent, receiver) { return None; }
         let mut full = self.infcx.fresh_args_for_item(self.prog, candidate.item);
         full[..parent_args.len()].copy_from_slice(&parent_args);
         // :2604-2640: probe erases only the method's own lifetime arguments
@@ -247,7 +244,7 @@ impl Fcx<'_> {
                     ocx.register_obligation(Goal { param_env: self.param_env, predicate: p });
                 }
             }
-            CandidateKind::TraitCandidate(_) => {
+            CandidateKind::TraitCandidate => {
                 let goal = Goal { param_env: self.param_env, predicate: crate::next_solver::collect::trait_predicate(parent, parent_args) };
                 trait_goal = Some(goal.clone()); ocx.register_obligation(goal);
             }
@@ -293,7 +290,7 @@ impl Fcx<'_> {
         let td = self.prog.def(candidates[0].item).parent;
         if self.prog.def(td).kind != DefKind::Trait { return None; }
         for candidate in &candidates[1..] { if self.prog.def(candidate.item).parent != td { return None; } }
-        Some(Candidate { item: candidates[0].item, kind: CandidateKind::TraitCandidate(None) })
+        Some(Candidate { item: candidates[0].item, kind: CandidateKind::TraitCandidate })
     }
 
     /// method/confirm.rs:366-406: a typed receiver may still be Arc<dyn Tr>,
@@ -382,7 +379,6 @@ impl Fcx<'_> {
         // confirm.rs fresh_receiver_args reconstructs object and trait picks;
         // only a where-clause pick retains the caller's original predicate.
         match candidate.kind {
-            CandidateKind::TraitCandidate(_) => candidate.kind = CandidateKind::TraitCandidate(None),
             CandidateKind::ObjectCandidate(_) => {
                 let parent = self.prog.def(candidate.item).parent;
                 if !self.tcx.dyn_compatibility_violations(self.prog, parent).is_empty() || self.tcx.tys.has_error(adjusted) {

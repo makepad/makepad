@@ -1,5 +1,5 @@
 //! pair256: V128 halves fused into 256-bit AVX instructions compute bit-for-bit what the halves
-//! compute. Each function runs with the pass and without it (`MAKEPAD_RUN_OPT=-pair256`) on the
+//! compute. Each function runs with the pass and without it (`RELAX_OPT=-pair256`) on the
 //! host; the pass must fire (a V256 vreg appears) where the halves pair up.
 #![cfg(all(target_arch = "x86_64", unix))]
 use relax_backend::{exec::Code, rir::*};

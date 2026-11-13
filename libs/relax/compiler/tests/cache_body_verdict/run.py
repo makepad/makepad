@@ -69,9 +69,9 @@ with tempfile.TemporaryDirectory(prefix='relax-body-verdict-') as tmp:
                                       ('warm-interface', 19, '#[inline(never)]', set())]:
         (root / 'src/main.rs').write_text(source.replace('VALUE', str(value)).replace('HEADER', header))
         env = dict(os.environ, CARGO_INCREMENTAL='0', CARGO_NET_OFFLINE='true',
-                   MAKEPAD_RUN_STD=std, MAKEPAD_RUN_CACHE='on', MAKEPAD_RUN_GANDALF='1', MAKEPAD_RUN_GANDALF_TRACE='1',
-                   MAKEPAD_RUN_STARTUP_PHASE='0', MAKEPAD_RUN_CACHE_DIR=str(root / 'cache'),
-                   MAKEPAD_RUN_FN_COST=str(root / tag))
+                   RELAX_STD=std, RELAX_CACHE='on', RELAX_GANDALF='1', RELAX_GANDALF_TRACE='1',
+                   RELAX_STARTUP_PHASE='0', RELAX_CACHE_DIR=str(root / 'cache'),
+                   RELAX_FN_COST=str(root / tag))
         with (root / (tag + '.log')).open('w') as log:
             p = sp.Popen([binary, 'run', '--verbose', 'body-verdict'], cwd=root,
                          env=env, stdout=log, stderr=sp.STDOUT, start_new_session=True)

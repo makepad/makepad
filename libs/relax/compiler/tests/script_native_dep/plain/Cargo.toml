@@ -1,0 +1,7 @@
+[package]
+name = "snd-plain"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "snd_plain"
+build = "build.rs"

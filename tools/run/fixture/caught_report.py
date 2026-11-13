@@ -5,9 +5,9 @@ test_failures, which reads `  report: ` lines) and jit_misses take only those.
 
 usage: caught_report.py [--makepad <makepad binary>]
   (run from the workspace root; the JIT runs through `cargo run --profile host` unless a binary is
-  given; MAKEPAD_RUN_STD defaults to libs/relax/compiler/std)
+  given; RELAX_STD defaults to libs/relax/compiler/std)
 
-A package is written to a fresh dir (its own MAKEPAD_RUN_HOME):
+A package is written to a fresh dir (its own RELAX_HOME):
   1. `makepad run`: main catches a panic with catch_unwind ("caught on purpose": tagged), and a
      thread it joins panics ("a thread ends": not tagged);
   2. `makepad test`: one test catches a panic ("caught in a test": tagged), a #[should_panic] test
@@ -73,9 +73,9 @@ def check(jit, work):
     os.makedirs(os.path.join(pkg, "src"))
     open(os.path.join(pkg, "Cargo.toml"), "w").write(CARGO)
     open(os.path.join(pkg, "src", "main.rs"), "w").write(MAIN)
-    env = dict(os.environ, MAKEPAD_RUN_HOME=home, MAKEPAD_RUN_CACHE_DIR=os.path.join(home, "cache"),
-               MAKEPAD_RUN_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1", SANDBOX_MUTE="1", MUSIC_MUTE="1")
-    env.setdefault("MAKEPAD_RUN_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
+    env = dict(os.environ, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
+               RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1")
+    env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
     # 1. a run
     p = subprocess.run(jit + ["run", "--quiet", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
     if "main done" not in p.stdout:

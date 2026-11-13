@@ -3,7 +3,9 @@
 //! cannot absorb restarts in place without a rebuild: reload.rs restart_in_place). A running app
 //! offers the update ([`offer`]): each landing built makepad in every app on the person's machine,
 //! whether or not they meant to restart (96 min of builds in 13 h, 11-04). The person's restart,
-//! or the next `cargo run`, builds it. A live test session and a dock app's sync build at once.
+//! or the next `cargo run`, builds it; a dock app's sync is offered too, devhub's deploy having built
+//! it already (sync/build.rs prebuild), so that cargo finds makepad current. A live test session
+//! builds at once.
 //! The loader is rebuilt with cargo while the app keeps running the code it has (at low priority
 //! when nobody waits for it, at the person's when they asked for the restart: [`Priority`], and
 //! their build goes before the low ones: [`Gate`]), then the process truly restarts: the rebuilt binary replaces it (exec) with the same command line, and an app that
@@ -30,13 +32,14 @@ pub fn set_loader_package(package: &'static str, manifest: &'static str) {
     *PACKAGE.lock().unwrap_or_else(|e| e.into_inner()) = Some((package, manifest));
 }
 
-/// The loader binary (MAKEPAD_RUN_LOADER, set by the runner; else this executable), as it was
+/// The loader binary (RELAX_LOADER, set by the runner; else this executable), as it was
 /// at startup: cargo replaces the file, and Linux's current_exe then names a deleted inode.
 pub(crate) fn loader() -> Option<PathBuf> {
     static LOADER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     LOADER.get_or_init(|| {
         let _k = crate::zone_alloc::kept();
-        let p = std::env::var_os("MAKEPAD_RUN_LOADER").map(PathBuf::from).or_else(|| std::env::current_exe().ok());
+        // (never a run's own executable: dirs::loader_exe)
+        let p = crate::dirs::loader_exe().ok();
         // what this process runs: a rebuild that leaves the same file changed nothing it runs
         let _ = LOADED.set(p.as_deref().and_then(identity));
         p
@@ -96,7 +99,7 @@ enum Priority {
     /// a live test session). On macOS at background QoS (efficiency cores, throttled I/O; cargo's
     /// rustc inherit it, and nothing can lift that clamp from a running process), never at full
     /// width beside the app the person works in: three running apps' rebuilds after a landing took
-    /// rustc to ~1080% of a core on the person's Mac while they tweaked Fab (11-03). Elsewhere,
+    /// rustc to ~1080% of a core on the person's Mac while they tweaked an app (11-03). Elsewhere,
     /// nice 10.
     Background,
     /// A boot waits for it: nice 10.
@@ -112,9 +115,9 @@ enum Priority {
 /// and their cargo then finds makepad current.
 fn command(priority: Priority) -> Result<(std::process::Command, String), String> {
     if !cfg!(unix) {
-        return Err("this platform cannot replace a running makepad binary".into());
+        return Err(format!("this platform cannot replace a running {tool} binary", tool = crate::tool_name()));
     }
-    let exe = loader().ok_or("the makepad binary's path is unknown")?;
+    let exe = loader().ok_or_else(|| format!("the {tool} binary's path is unknown", tool = crate::tool_name()))?;
     if picked(&exe) {
         return Err(format!("{} was picked for this tree by its inputs' content: cargo never writes it, and its run picks the JIT again", exe.display()));
     }
@@ -142,7 +145,7 @@ fn command(priority: Priority) -> Result<(std::process::Command, String), String
     };
     let line: Vec<&str> = low.iter().copied().chain(args.iter().map(String::as_str)).collect();
     let mut cmd = std::process::Command::new(line[0]);
-    cmd.args(&line[1..]).env_remove("MAKEPAD_RUN_RESTORE").env_remove("MAKEPAD_RUN_RESTART_T0").stdin(std::process::Stdio::null());
+    cmd.args(&line[1..]).env_remove("RELAX_RESTORE").env_remove("RELAX_RESTART_T0").stdin(std::process::Stdio::null());
     Ok((cmd, shown))
 }
 
@@ -260,7 +263,7 @@ pub(crate) fn offer_provided(change: crate::provided::ProvidedChange, domain: Op
 
 /// The pid of a process that became the rebuilt makepad at boot (`apply_at_boot`): a process
 /// started by the program has another pid, and rebuilds for its own boot.
-const REBUILT_ENV: &str = "MAKEPAD_RUN_BOOT_REBUILT";
+const REBUILT_ENV: &str = "RELAX_BOOT_REBUILT";
 
 /// A boot whose provided crates changed, with nobody to take the offer: no run window, a hidden
 /// one, or a run that is no live session (a command-line program, a test's child). The update is
@@ -275,45 +278,47 @@ pub(crate) fn apply_at_boot(change: &crate::provided::ProvidedChange) -> i32 {
     what.push(')');
     let failed = |e: String| -> i32 {
         let message = format!("{what}: {e}; the program did not run");
-        eprintln!("makepad-run: {message}");
+        eprintln!("relax: {message}");
         crate::run::report_failed(&message, 1);
         1
     };
     // this process is that rebuild already (the exec below keeps the pid): makepad is built from
     // other sources than the program's copy of the crate, and building again cannot change that
     if std::env::var(REBUILT_ENV).ok().and_then(|v| v.parse::<u32>().ok()) == Some(std::process::id()) {
-        return failed("the rebuilt makepad differs from the program's copy too (makepad is built from other sources than the program uses)".into());
+        return failed(format!("the rebuilt {tool} differs from the program's copy too ({tool} is built from other sources than the program uses)", tool = crate::tool_name()));
     }
     let (mut cmd, shown) = match command(Priority::Boot) {
         Ok(c) => c,
-        Err(e) => return failed(format!("this makepad cannot rebuild itself ({e}): build it again, then run")),
+        Err(e) => return failed(format!("this {tool} cannot rebuild itself ({e}): build it again, then run", tool = crate::tool_name())),
     };
-    eprintln!("makepad-run: {what}: makepad builds again first (`{shown}`), then runs this");
+    eprintln!("relax: {what}: {tool} builds again first (`{shown}`), then runs this", tool = crate::tool_name());
     let t0 = Instant::now();
     match cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::inherit()).status() {
         Ok(s) if s.success() => {}
-        Ok(s) => return failed(format!("rebuilding makepad FAILED ({s})")),
+        Ok(s) => return failed(format!("rebuilding {tool} FAILED ({s})", tool = crate::tool_name())),
         Err(e) => return failed(format!("cannot start `{shown}`: {e}")),
     }
-    let Some(exe) = loader() else { return failed("the makepad binary's path is unknown".into()) };
+    let Some(exe) = loader() else { return failed(format!("the {tool} binary's path is unknown", tool = crate::tool_name())) };
     // cargo left the binary this process runs: running it again would find the same change
     if LOADED.get().copied().flatten().is_some_and(|id| identity(&exe) == Some(id)) {
-        return failed("rebuilding makepad changed nothing (cargo builds it from other sources than the program uses)".into());
+        return failed(format!("rebuilding {tool} changed nothing (cargo builds it from other sources than the program uses)", tool = crate::tool_name()));
     }
-    eprintln!("makepad-run: makepad rebuilt in {:.0} s; the program runs on it", t0.elapsed().as_secs_f64());
+    eprintln!("relax: {tool} rebuilt in {:.0} s; the program runs on it", t0.elapsed().as_secs_f64(), tool = crate::tool_name());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(std::env::args_os().skip(1)).env(REBUILT_ENV, std::process::id().to_string());
+        // the rebuilt loader builds the program's native packages as a restart does (NATIVE_RECEIPTS)
+        for name in super::NATIVE_RECEIPTS { cmd.env_remove(name); }
         // fd 2 back to the terminal before the exec (the transcript tee is a thread of this process)
         crate::tui::exit_code(0);
         crate::tui::finish(false);
         let e = cmd.exec();
-        failed(format!("cannot start the rebuilt makepad: {e}"))
+        failed(format!("cannot start the rebuilt {tool}: {e}", tool = crate::tool_name()))
     }
     #[cfg(not(unix))]
-    failed("this platform cannot start the rebuilt makepad in place".into())
+    failed(format!("this platform cannot start the rebuilt {tool} in place", tool = crate::tool_name()))
 }
 
 /// Cached text only: no manifest scan or git process on the UI thread.
@@ -323,7 +328,7 @@ pub fn update_message() -> Option<std::sync::Arc<str>> {
 
 /// The ring button and `session relaunch` both arrive here. A source-check offer starts the
 /// existing background build; a build already running finishes before requesting a safe point.
-pub(super) fn relaunch() -> Option<Result<&'static str, String>> {
+pub(super) fn relaunch() -> Option<Result<String, String>> {
     let (phase, why, paths) = {
         let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         if st.phase == Phase::Idle && st.provided.is_none() && !st.offered { return None; }
@@ -331,42 +336,42 @@ pub(super) fn relaunch() -> Option<Result<&'static str, String>> {
             RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
             // a build nobody waited for: it goes on at the person's priority now
             end_low_cargo(&mut st);
-            return Some(Ok("rebuild makepad, then restart with the program's state"));
+            return Some(Ok(format!("rebuild {tool}, then restart with the program's state", tool = crate::tool_name())));
         }
         (st.phase, st.why.clone(), st.paths.clone())
     };
     if phase == Phase::Restarting { return Some(apply_ready(why)); }
     RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
-    Some(request(why, paths).map(|()| "rebuild makepad, then restart with the program's state").map_err(|e| {
+    Some(request(why, paths).map(|()| format!("rebuild {tool}, then restart with the program's state", tool = crate::tool_name())).map_err(|e| {
         RESTART_AFTER_BUILD.store(false, std::sync::atomic::Ordering::SeqCst);
         fail(e.clone());
         e
     }))
 }
 
-fn apply_ready(why: String) -> Result<&'static str, String> {
+fn apply_ready(why: String) -> Result<String, String> {
     {
         let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         // Another landing can supersede the ready binary between the click and this call.
         if st.phase == Phase::Building {
             RESTART_AFTER_BUILD.store(true, std::sync::atomic::Ordering::SeqCst);
-            return Ok("rebuild makepad, then restart with the program's state");
+            return Ok(format!("rebuild {tool}, then restart with the program's state", tool = crate::tool_name()));
         }
     }
     super::RESTART_CONFIRMED.store(true, std::sync::atomic::Ordering::SeqCst);
     *super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()) = why.clone();
-    if super::pinned() { return Ok("restart waits until unpinned"); }
+    if super::pinned() { return Ok("restart waits until unpinned".into()); }
     if super::RESTART_SUPPORTED.load(std::sync::atomic::Ordering::SeqCst) {
         match super::handover_blocked() {
             // This asks AppMain::can_restart and the unsaved registry at the next app event.
-            None => return super::restart_in_place(why),
-            Some(blocked) => eprintln!("makepad live: the restart into the rebuilt makepad does not wait for the app's state: {blocked}"),
+            None => return super::restart_in_place(why).map(str::to_string),
+            Some(blocked) => eprintln!("relax live: the restart into the rebuilt {tool} does not wait for the app's state: {blocked}", tool = crate::tool_name()),
         }
     }
-    let h = take().ok_or("the rebuilt makepad is not ready")?;
+    let h = take().ok_or_else(|| format!("the rebuilt {tool} is not ready", tool = crate::tool_name()))?;
     // (an app before its first event: the state its run was started with)
     restart(h, super::start_state().as_deref().map(str::as_bytes));
-    Ok("restart into the rebuilt makepad")
+    Ok(format!("restart into the rebuilt {tool}", tool = crate::tool_name()))
 }
 
 /// A built binary waiting for the program's safe point: the stamps it was built against.
@@ -518,7 +523,7 @@ pub(crate) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
     match st.phase {
         Phase::Building => {
             st.again = true;
-            eprintln!("makepad live: {}; makepad builds again once the running build ends", st.why);
+            eprintln!("relax live: {}; {tool} builds again once the running build ends", st.why, tool = crate::tool_name());
             return Ok(());
         }
         // a newer change than the binary waiting for the app's safe point: build again first
@@ -536,7 +541,7 @@ pub(crate) fn request(why: String, paths: Vec<String>) -> Result<(), String> {
 fn fail(message: String) {
     let _at_the_run = crate::run_threads::process_work();
     let asked = RESTART_AFTER_BUILD.swap(false, std::sync::atomic::Ordering::SeqCst);
-    eprintln!("makepad live: {message}");
+    eprintln!("relax live: {message}");
     super::note_restart_pending(&message);
     super::live_log(&format!("{{\"event\":\"host_rebuild\",\"ok\":false,\"message\":{}}}", super::json_str(&message)));
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -646,7 +651,7 @@ impl Gate {
 }
 
 /// `pid` leads a process group (`run_cargo`): the group ends.
-fn end_group(pid: u32) {
+pub(crate) fn end_group(pid: u32) {
     #[cfg(unix)]
     {
         extern "C" { fn kill(pid: i32, sig: i32) -> i32; }
@@ -693,7 +698,7 @@ fn run_cargo(cmd: &mut std::process::Command, started: impl FnOnce(u32)) -> std:
             CargoLine::Waiting(what) => {
                 st.progress.waiting = what.to_string();
                 drop(st);
-                eprintln!("makepad live: its cargo waits for another build (file lock on {what})");
+                eprintln!("relax live: its cargo waits for another build (file lock on {what})");
             }
             CargoLine::Other if !text.trim().is_empty() => {
                 st.progress.waiting.clear();
@@ -731,16 +736,16 @@ fn build_loop() {
         let asked = RESTART_AFTER_BUILD.load(std::sync::atomic::Ordering::SeqCst);
         let (mut cmd, shown) = match command(if asked { Priority::Asked } else { Priority::Background }) {
             Ok(c) => c,
-            Err(e) => return fail(format!("{why}; cannot rebuild makepad: {e}; the app runs the previous code -- restart it by hand")),
+            Err(e) => return fail(format!("{why}; cannot rebuild {tool}: {e}; the app runs the previous code -- restart it by hand", tool = crate::tool_name())),
         };
-        let Some(dir) = loader().as_deref().and_then(Path::parent).map(|d| d.join(".makepad-rebuilds")) else { return fail("the makepad binary's path is unknown".into()) };
+        let Some(dir) = loader().as_deref().and_then(Path::parent).map(|d| d.join(".makepad-rebuilds")) else { return fail(format!("the {tool} binary's path is unknown", tool = crate::tool_name())) };
         let waits = || STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.waiting = "another restart's build".into();
         let mut gate = match Gate::enter(&dir, asked, waits) {
             Ok(g) => g,
-            Err(e) => return fail(format!("{why}; cannot rebuild makepad: {}: {e}; the app runs the previous code", dir.display())),
+            Err(e) => return fail(format!("{why}; cannot rebuild {tool}: {}: {e}; the app runs the previous code", dir.display(), tool = crate::tool_name())),
         };
         STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.waiting.clear();
-        eprintln!("makepad live: {why}; restarting makepad: it builds first in the background (`{shown}`, a no-op when makepad is current); the app keeps running the previous code");
+        eprintln!("relax live: {why}; restarting {tool}: it builds first in the background (`{shown}`, a no-op when {tool} is current); the app keeps running the previous code", tool = crate::tool_name());
         super::live_log(&format!("{{\"event\":\"host_rebuild\",\"started\":true,\"why\":{}}}", super::json_str(&why)));
         let t0 = Instant::now();
         let started = |pid: u32| {
@@ -753,26 +758,26 @@ fn build_loop() {
         };
         let (status, log) = match run_cargo(&mut cmd, started) {
             Ok(done) => done,
-            Err(e) => return fail(format!("rebuilding makepad: cannot start `{shown}`: {e}; the app runs the previous code")),
+            Err(e) => return fail(format!("rebuilding {tool}: cannot start `{shown}`: {e}; the app runs the previous code", tool = crate::tool_name())),
         };
         STATE.lock().unwrap_or_else(|e| e.into_inner()).low_cargo = None;
         if gate.ended_for_asked() {
-            eprintln!("makepad live: a restart was asked for: its build goes first, at the person's priority");
+            eprintln!("relax live: a restart was asked for: its build goes first, at the person's priority");
             continue;
         }
         if !status.success() {
-            return fail(format!("rebuilding makepad FAILED ({status}); the app runs the previous code; fix and save to build again:\n  {}", errors(&log)));
+            return fail(format!("rebuilding {tool} FAILED ({status}); the app runs the previous code; fix and save to build again:\n  {}", errors(&log), tool = crate::tool_name()));
         }
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).again || stamps(&paths) != before {
-            eprintln!("makepad live: sources changed during the build; building again");
+            eprintln!("relax live: sources changed during the build; building again");
             continue;
         }
-        let Some(loader) = loader() else { return fail("the makepad binary's path is unknown".into()) };
+        let Some(loader) = loader() else { return fail(format!("the {tool} binary's path is unknown", tool = crate::tool_name())) };
         // the new binary starts at all (its own codegen identity and provenance)
         match std::process::Command::new(&loader).arg("--version").stdin(std::process::Stdio::null()).output() {
             Ok(o) if o.status.success() => {}
-            Ok(o) => return fail(format!("the rebuilt makepad does not start ({}): {}; the app runs the previous code", o.status, String::from_utf8_lossy(&o.stderr).trim())),
-            Err(e) => return fail(format!("the rebuilt makepad does not start: {e}; the app runs the previous code")),
+            Ok(o) => return fail(format!("the rebuilt {tool} does not start ({}): {}; the app runs the previous code", o.status, String::from_utf8_lossy(&o.stderr).trim(), tool = crate::tool_name())),
+            Err(e) => return fail(format!("the rebuilt {tool} does not start: {e}; the app runs the previous code", tool = crate::tool_name())),
         }
         let secs = t0.elapsed().as_secs_f64();
         let at_the_run = crate::run_threads::process_work();
@@ -780,7 +785,7 @@ fn build_loop() {
         // build), so there is nothing to restart into
         if STATE.lock().unwrap_or_else(|e| e.into_inner()).provided.is_none()
             && LOADED.get().copied().flatten().is_some_and(|id| identity(&loader).is_some_and(|now| now == id)) {
-            let what = "rebuild produced no change: cargo left the makepad this process runs as it was (the edit is not in what makepad is built from, or was undone)".to_string();
+            let what = format!("rebuild produced no change: cargo left the {tool} this process runs as it was (the edit is not in what {tool} is built from, or was undone)", tool = crate::tool_name());
             // a live test session's tests already ran on this binary: no run answers it but this
             if crate::harness::live::enabled() { super::patch_refused_event(&why, true, std::slice::from_ref(&what)); }
             else { super::patch_verified_event(&format!("{why}: {what}"), 0, &[]); }
@@ -797,13 +802,13 @@ fn build_loop() {
             // app's restart still wait (a struct's layout, a const in a type).
             super::drop_restart_pending(&why);
             if !asked {
-                eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); no restart");
+                eprintln!("relax live: {why}: {tool} is unchanged (built in {secs:.0} s); no restart", tool = crate::tool_name());
                 return;
             }
             // the relaunch the person asked for restarts the app, as one with no makepad change
             let rest = super::restart_pending().join("; ");
             let rest = if rest.is_empty() { "session relaunch".to_string() } else { rest };
-            eprintln!("makepad live: {why}: makepad is unchanged (built in {secs:.0} s); restarting the app as asked ({rest})");
+            eprintln!("relax live: {why}: {tool} is unchanged (built in {secs:.0} s); restarting the app as asked ({rest})", tool = crate::tool_name());
             drop(at_the_run);
             if let Err(e) = super::restart_in_place(rest) { fail(format!("the relaunch cannot restart the app: {e}")); }
             return;
@@ -820,10 +825,10 @@ fn build_loop() {
             st.since = Some(Instant::now());
             asked
         };
-        let reason = format!("makepad was rebuilt ({why})");
+        let reason = format!("{tool} was rebuilt ({why})", tool = crate::tool_name());
         // a live test session restarts its tests into it at once (its verdict: the restarted run)
         if crate::harness::live::enabled() {
-            eprintln!("makepad live: makepad rebuilt in {secs:.0} s; the tests restart into it");
+            eprintln!("relax live: {tool} rebuilt in {secs:.0} s; the tests restart into it", tool = crate::tool_name());
             *HARNESS_RESTART.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
             super::watch_events::kick();
             return;
@@ -835,7 +840,7 @@ fn build_loop() {
             super::patch_refused_event(&reason, false, std::slice::from_ref(&reason));
             return;
         }
-        eprintln!("makepad live: makepad rebuilt in {secs:.0} s; applying the requested restart");
+        eprintln!("relax live: {tool} rebuilt in {secs:.0} s; applying the requested restart", tool = crate::tool_name());
         drop(at_the_run);
         if let Err(e) = apply_ready(reason) { fail(e); }
         return;
@@ -871,7 +876,7 @@ pub(super) fn restart_now(state: &[u8]) -> bool {
             // a restart into a rebuilt makepad waits for the person (`session relaunch`)
             *HANDOVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
             super::RESTART_REQUESTED.store(false, std::sync::atomic::Ordering::SeqCst);
-            eprintln!("makepad live: the app reached a restart point; the rebuilt makepad waits for `session relaunch`");
+            eprintln!("relax live: the app reached a restart point; the rebuilt {tool} waits for `session relaunch`", tool = crate::tool_name());
             true
         }
         Some(h) => { restart(h, Some(state)); true }
@@ -917,13 +922,16 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         cmd.args(&args);
         match state {
             Some(st) => match super::restart_state_file(st) {
-                Ok(path) => { cmd.env("MAKEPAD_RUN_RESTORE", &path); }
-                Err(e) => return fail(format!("restart into the rebuilt makepad: {e}; the app runs the previous code")),
+                Ok(path) => { cmd.env("RELAX_RESTORE", &path); }
+                Err(e) => return fail(format!("restart into the rebuilt {tool}: {e}; the app runs the previous code", tool = crate::tool_name())),
             },
-            None => { cmd.env_remove("MAKEPAD_RUN_RESTORE"); }
+            None => { cmd.env_remove("RELAX_RESTORE"); }
         }
         let reason = super::RESTART_REASON.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        cmd.env("MAKEPAD_RUN_RESTART_T0", super::RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        cmd.env("RELAX_RESTART_T0", super::RESTART_SAVED_MS.load(std::sync::atomic::Ordering::Relaxed).to_string());
+        // the restart compiles the edited inputs: no native build this run took or made stands
+        // for the next one (NATIVE_RECEIPTS)
+        for name in super::NATIVE_RECEIPTS { cmd.env_remove(name); }
         super::restart_begins();
         // the run ends as at exit (exec skips the exit handlers); fd 2 goes back to the terminal
         // now (the transcript tee is a thread of this process: the new one starts its own), so
@@ -932,16 +940,16 @@ fn restart(h: Handover, state: Option<&[u8]>) {
         // a restart is a clean end of this process (its transcript is not kept)
         crate::tui::exit_code(0);
         crate::tui::finish(false);
-        eprintln!("makepad live: restarting: {reason}");
+        eprintln!("relax live: restarting: {reason}");
         super::hand_over(&mut cmd);
         let e = cmd.exec();
         super::hand_back();
-        fail(format!("restart into the rebuilt makepad failed: {e}; the app runs the previous code"));
+        fail(format!("restart into the rebuilt {tool} failed: {e}; the app runs the previous code", tool = crate::tool_name()));
     }
     #[cfg(not(unix))]
     {
         let _ = (h, state);
-        fail("this platform cannot restart into a rebuilt makepad; restart it by hand".into());
+        fail(format!("this platform cannot restart into a rebuilt {tool}; restart it by hand", tool = crate::tool_name()));
     }
 }
 
@@ -949,15 +957,72 @@ fn restart(h: Handover, state: Option<&[u8]>) {
 mod tests {
     use super::*;
 
+    /// The next run takes none of this run's native builds: a run's end in place forgets the
+    /// native libraries it noted (they stay loaded; run.rs reset_statics), and a restart into a
+    /// rebuilt loader hands it neither receipt (reload.rs NATIVE_RECEIPTS) and the rest of the
+    /// environment as it was. This test runs again as the child that does both, and restarts into
+    /// a loader that prints what it was given.
+    #[cfg(unix)]
+    #[test]
+    fn the_next_run_takes_none_of_the_run_s_native_builds() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "RELAX_TEST_RESTART_LOADER";
+        if let Some(dir) = std::env::var_os(CHILD) {
+            // a handle no library has stands for one: noting it loads nothing
+            crate::run::note_native_bundle(usize::MAX, "/relax-test/libnative.so");
+            let noted = crate::run::native_bundle_count();
+            unsafe { crate::run::reset_statics() };
+            println!("native libraries noted {noted}, after the run's end {}", crate::run::native_bundle_count());
+            std::env::set_var("RELAX_RUN_NATIVE", "run-native");
+            std::env::set_var(crate::unitgraph::BIN_NATIVE_RECEIPT, "bin-native");
+            std::env::set_var("RELAX_TEST_RESTART_KEPT", "kept");
+            restart(Handover { loader: PathBuf::from(dir).join("loader"), stamps: Vec::new() }, None);
+            panic!("the restart did not exec the rebuilt loader");
+        }
+        let dir = std::env::temp_dir().join(format!("relax-restart-loader-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let loader = dir.join("loader");
+        std::fs::write(&loader, "#!/bin/sh\necho \"loader got [${RELAX_RUN_NATIVE-}] [${RELAX_BIN_NATIVE_RECEIPT-}] [${RELAX_TEST_RESTART_KEPT-}]\"\n").unwrap();
+        std::fs::set_permissions(&loader, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "reload::host::tests::the_next_run_takes_none_of_the_run_s_native_builds", "--nocapture"])
+            .env(CHILD, &dir));
+        let _ = std::fs::remove_dir_all(&dir);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "the restarting child: {stdout}\n{}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains("native libraries noted 1, after the run's end 0"), "a run's end in place kept the native libraries it noted: {stdout}");
+        assert!(stdout.contains("loader got [] [] [kept]"), "the rebuilt loader got a native build of the run, or lost the rest of its environment: {stdout}");
+    }
+
+    /// The gate's locks are flock locks, which a forked process holds with its parent until its
+    /// exec or exit. Among the suite's tests, another test's child forked while the low build held
+    /// the turn kept it held past mark_low, and the person's build found it taken ("the low build
+    /// gave the turn up", once under the full suite's load). So the gate runs in a child of this
+    /// test binary that runs this test alone: its only forks are its own children, whose spawn
+    /// returns after their exec closed the gate's files (opened close-on-exec).
     #[cfg(unix)]
     #[test]
     fn the_person_s_build_ends_the_low_ones_and_goes_first() {
         use std::os::unix::process::{CommandExt, ExitStatusExt};
+        const CHILD: &str = "RELAX_TEST_GATE_ALONE";
+        if std::env::var_os(CHILD).is_none() {
+            let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "reload::host::tests::the_person_s_build_ends_the_low_ones_and_goes_first", "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1"));
+            let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            assert!(out.status.success() && stdout.contains(" 1 passed;"), "the gate's run alone: {stdout}\n{stderr}");
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("relax-gate-test-{}", std::process::id()));
-        let sleep = || std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        // a process that lives until it is ended (`cat` on a pipe this test keeps open), not for a
+        // time: a `sleep 30` could end on its own under load before the checks below
+        let sleep = || std::process::Command::new("cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).process_group(0).spawn().unwrap();
         // a low-priority build, marked, and a marker a crashed makepad left behind
         let mut low = Gate::enter(&dir, false, || panic!("nothing holds the turn")).unwrap();
         let mut running = sleep();
+        // (held here: `wait` would close it, and the build must end by the person's signal alone)
+        let _running_input = running.stdin.take();
         low.mark_low(running.id()).unwrap();
         let mut unrelated = sleep();
         std::fs::write(dir.join(format!("low.{}", unrelated.id())), "").unwrap();

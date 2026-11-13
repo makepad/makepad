@@ -1,4 +1,4 @@
-// std-os lane: std::net and std::os::unix::net (differential: os_diff.sh)
+// std-os lane: std::net and std::os::unix::net (differential: agree.sh)
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, SocketAddrV4, SocketAddrV6, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::net::{UnixListener, UnixStream};

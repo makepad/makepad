@@ -9,7 +9,7 @@ T=${TARGET:-${CARGO_TARGET_DIR:-target}/release}
 dir=$(mktemp -d "${TMPDIR:-/tmp}/unwind_through.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp" "$dir/reg"
 native=$(cargo run --release -q -p relax-provided-fixture --bin relax-unwind-through 2>&1); native_rc=$?
-out=$(TMPDIR="$dir/tmp" MAKEPAD_RUN_HOME="$dir/home" MAKEPAD_REMOTE_REGISTRY="$dir/reg" MAKEPAD_RUN_PANIC_PARK=0 MAKEPAD_RUN_CACHE=off "$T/makepad" run --quiet --no-live relax-provided-fixture --bin relax-unwind-through 2>&1); rc=$?
+out=$(TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_REMOTE_REGISTRY="$dir/reg" RELAX_PANIC_PARK=0 RELAX_CACHE=off "$T/makepad" run --quiet --no-live relax-provided-fixture --bin relax-unwind-through 2>&1); rc=$?
 rm -rf "$dir"
 want=$(echo "$native" | tail -1)
 if [ $native_rc = 0 ] && [ $rc = 0 ] && [ -n "$want" ] && echo "$out" | grep -F -x -q -- "$want"; then

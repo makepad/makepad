@@ -121,17 +121,17 @@ fn unseen() -> bool {
     std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
 }
 
-/// Whether this run shows the JIT ring: `MAKEPAD_RUN_SETTLE_HUD=0` never, `=1` always, else not
-/// in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, MAKEPAD_RUN_O3_PROGRESS,
-/// MAKEPAD_RUN_BOOT_DUMP).
+/// Whether this run shows the JIT ring: `RELAX_SETTLE_HUD=0` never, `=1` always, else not
+/// in hidden or benchmark runs (MAKEPAD_HIDE_WINDOWS, RELAX_O3_PROGRESS,
+/// RELAX_BOOT_DUMP).
 fn ring_on() -> bool {
-    match std::env::var("MAKEPAD_RUN_SETTLE_HUD").as_deref() {
+    match std::env::var("RELAX_SETTLE_HUD").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
         _ => {
             std::env::var("MAKEPAD_HIDE_WINDOWS").as_deref() != Ok("1")
-                && std::env::var_os("MAKEPAD_RUN_O3_PROGRESS").is_none()
-                && std::env::var_os("MAKEPAD_RUN_BOOT_DUMP").is_none()
+                && std::env::var_os("RELAX_O3_PROGRESS").is_none()
+                && std::env::var_os("RELAX_BOOT_DUMP").is_none()
         }
     }
 }
@@ -230,9 +230,9 @@ impl Watch {
         }
         if self.trace && block != self.blocked {
             if block {
-                eprintln!("makepad-run: jit ring: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
+                eprintln!("relax: jit ring: UI block (the UI waited {:.0} ms on the JIT)", stalled.as_secs_f64() * 1000.0);
             } else {
-                eprintln!("makepad-run: jit ring: UI block over");
+                eprintln!("relax: jit ring: UI block over");
             }
         }
         self.blocked = block;
@@ -267,7 +267,7 @@ impl Watch {
                 "tier-up"
             };
             eprintln!(
-                "makepad-run: jit ring{at}: {state} ({}, ui duty {:.2}){}",
+                "relax: jit ring{at}: {state} ({}, ui duty {:.2}){}",
                 relax_boot::ring_summary(Some(want), None),
                 self.duty,
                 if block { " UI BLOCK" } else { "" }
@@ -460,20 +460,20 @@ fn post(update: Update) {
 /// app's "the last window closed", read as the person's close (Scope on the Mac, 11-06).
 fn end_run(why: &str) {
     if !QUIT.swap(true, Ordering::AcqRel) {
-        eprintln!("makepad-run: the run ends: {why}");
+        eprintln!("relax: the run ends: {why}");
     }
 }
 
-/// MAKEPAD_RUN_QUIT_TRACE=1: each step of the run's end on stderr (thread, ms since the quit
+/// RELAX_QUIT_TRACE=1: each step of the run's end on stderr (thread, ms since the quit
 /// began): where a quit that never exits stops.
 fn quit_trace(step: &str) {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_QUIT_TRACE").is_some()) {
+    if !*ON.get_or_init(|| std::env::var_os("RELAX_QUIT_TRACE").is_some()) {
         return;
     }
     let ms = T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1e3;
-    eprintln!("makepad-run quit: {step} (+{ms:.0} ms, thread `{}`)", std::thread::current().name().unwrap_or("?"));
+    eprintln!("relax quit: {step} (+{ms:.0} ms, thread `{}`)", std::thread::current().name().unwrap_or("?"));
 }
 
 fn panic_changed() {
@@ -646,6 +646,24 @@ fn wait_for_retry(mut guard: MutexGuard<'static, Option<Run>>) -> bool {
     true
 }
 
+/// `quit` before the app answers it. The endpoint (and the startup line naming it) is the host's
+/// from the run's start, and the app registers its own commands only once its main runs: a quit
+/// sent right after that line, a cold start still compiling, was answered "unknown command" and
+/// the app went on (a harness's hub ran on to its kill). Until the app has its `quit`, the host
+/// ends the run as a SIGTERM does (quit_signal.rs): the quit write, then the app domain stops
+/// with QUIT and the window closes. False once the app registered one: the app's own answers.
+fn host_quit(_req: &makepad_remote::Req, out: &mut makepad_remote::Out) -> bool {
+    if relax_compiler::inspect::program_provides("quit") {
+        return false;
+    }
+    relax_compiler::run::quit_requested();
+    end_run("a remote quit before the app took commands");
+    RETRY.notify_all();
+    Hal::global().wake_session(HOST);
+    out.line("{\"ok\":1,\"by\":\"host\"}");
+    true
+}
+
 pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     // Java owns Android's UI loop; this boot thread compiles and runs domain 0.
     if cfg!(target_os = "android") {
@@ -655,6 +673,7 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     }
     makepad_hal::expect_main_loop();
     *COMPILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(compile);
+    relax_compiler::inspect::register_host_inspect("quit", host_quit);
     start_compile_thread();
     // the app is a domain of this host: its platform installs no termination handler, so the
     // host answers SIGINT/SIGTERM/SIGHUP (quit_signal.rs): the cache's quit write, then the run
@@ -806,8 +825,8 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     // Inside a makepad window manager the run is one of its windows: it is named by the app.
     #[cfg(target_os = "linux")]
     makepad_hal::wm_socket::set_client_name(package);
-    // MAKEPAD_RUN_DPI: the scale of a hidden window (tests of how the boot window looks on a HiDPI screen)
-    let dpi_hint = std::env::var("MAKEPAD_RUN_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    // RELAX_DPI: the scale of a hidden window (tests of how the boot window looks on a HiDPI screen)
+    let dpi_hint = std::env::var("RELAX_DPI").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
     let info = hal.open_host(&OpenReq::from_env(0, flags, dpi_hint));
     if info.backend == makepad_hal::backend_id::NONE {
         return Err("could not open the host HAL session".into());
@@ -986,7 +1005,7 @@ static LEFT: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::n
 const VEIL_IN: Duration = Duration::from_millis(250);
 const VEIL_OUT: Duration = Duration::from_millis(500);
 /// A restarted run whose window went to the start screen before the restart: "1".
-const RESTART_SCREEN: &str = "MAKEPAD_RUN_RESTART_SCREEN";
+const RESTART_SCREEN: &str = "RELAX_RESTART_SCREEN";
 
 /// The restart itself begins (on the thread that restarts, the run's end still to do): the app's
 /// content fades to the start screen in the same window; this returns when it covers the app. A
@@ -1223,9 +1242,9 @@ fn work(rx: std::sync::mpsc::Receiver<Work>, package_dir: PathBuf, document: Doc
                 value,
             } => {
                 // Reuse inspect's validation and its domain-restart / restartable-fn logic.
-                let (reply, _) = makepad_remote::cmd::answer(
+                let reply = makepad_remote::cmd::answer(
                     relax_compiler::inspect::events::cmd_resume,
-                    &format!("resume {panic} {choice} {value} full=1"),
+                    &format!("resume {panic} {choice} {value}"),
                 );
                 for line in reply.split(|b| *b == b'\n') {
                     if let Ok(json) = relax_compiler::json::parse(line) {
@@ -1335,13 +1354,13 @@ fn close_run_window(host: &mut HostWindow, why: &str) -> WindowGone {
         Hal::global().with_world(|w| w.session(HOST).and_then(|s| s.windows.get(HOST, window).ok()).is_some_and(|e| e.lent_to != 0))
     });
     if lent {
-        eprintln!("makepad-run: the run's window stays ({why}): the app draws in it");
+        eprintln!("relax: the run's window stays ({why}): the app draws in it");
         return WindowGone::Apps;
     }
     if !host.close_window() {
         return WindowGone::Tile;
     }
-    eprintln!("makepad-run: the run's window closes: {why}");
+    eprintln!("relax: the run's window closes: {why}");
     relax_compiler::inspect::events::run_state_available(false);
     if let Some(r) = state().as_mut() {
         r.window = Id::NONE;
@@ -1379,7 +1398,7 @@ fn pump(
     // the window's first present (there is none before the app's): the window is open now. A restart
     // the person asked for went to the start screen first (`restart_begins`): that run shows it
     // from its first frame, as a first start does.
-    let restart_t0 = relax_compiler::run_end::run_input("MAKEPAD_RUN_RESTART_T0").is_some();
+    let restart_t0 = relax_compiler::run_end::run_input("RELAX_RESTART_T0").is_some();
     let mut restarted = restart_t0 && std::env::var_os(RESTART_SCREEN).is_none_or(|v| v != "1");
     if !restarted && restart_t0 {
         host.continues_start_screen();
@@ -1421,8 +1440,8 @@ fn pump(
     let ring = ring_on();
     // A dump-only preview: after the running app's first half second, show a UI wait's look
     // for three seconds and fade it out. No synthetic JIT wait or input change. Works hidden
-    // even with the ring disabled: MAKEPAD_RUN_WAIT_PREVIEW=1.
-    let wait_preview = host.dumping() && std::env::var_os("MAKEPAD_RUN_WAIT_PREVIEW").is_some();
+    // even with the ring disabled: RELAX_WAIT_PREVIEW=1.
+    let wait_preview = host.dumping() && std::env::var_os("RELAX_WAIT_PREVIEW").is_some();
     let mut wait_preview_at: Option<Instant> = None;
     // the run's inspect view (the halted view over the app without a stop): opened by
     // `makepad inspect <app> session view open` (the JIT ring is display only)
@@ -1435,8 +1454,8 @@ fn pump(
     let mut warm_up_at: Option<Instant> = None;
     // a sustained UI wait's look over the app came on at (the log says how long it stayed)
     let mut wait_at: Option<Instant> = None;
-    // MAKEPAD_RUN_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
-    let mut watch = Watch::new(std::env::var_os("MAKEPAD_RUN_POSTFRAME_LOG").is_some());
+    // RELAX_POSTFRAME_LOG (the responsiveness trace): the JIT ring's UI blocks too
+    let mut watch = Watch::new(std::env::var_os("RELAX_POSTFRAME_LOG").is_some());
     relax_compiler::postframe::on_ui_wait(ui_wait_began);
     // (it is at the run's state except while it waits for the window)
     let mut gate = Some(relax_compiler::run_threads::process_work());
@@ -1774,7 +1793,7 @@ fn pump(
                     }
                 };
                 eprintln!(
-                    "makepad-run: the app showed itself without the run's window (a tray app), {:.0} ms ago: the load screen {gone}",
+                    "relax: the app showed itself without the run's window (a tray app), {:.0} ms ago: the load screen {gone}",
                     ago.as_secs_f64() * 1000.0
                 );
             }
@@ -1864,12 +1883,12 @@ fn pump(
                 host.raise();
             }
             match why {
-                Some(why) if ui_parked => eprintln!("makepad-run: the run's view is over the app: {why}; its UI thread is parked, so the view stays until a choice is made"),
+                Some(why) if ui_parked => eprintln!("relax: the run's view is over the app: {why}; its UI thread is parked, so the view stays until a choice is made"),
                 Some(why) => eprintln!(
-                    "makepad-run: the run's view is over the app: {why}; Esc or `makepad inspect {} session view dismiss` dismisses it",
+                    "relax: the run's view is over the app: {why}; Esc or `makepad inspect {} session view dismiss` dismisses it",
                     std::process::id()
                 ),
-                None if was_over => eprintln!("makepad-run: the run's view is off the app"),
+                None if was_over => eprintln!("relax: the run's view is off the app"),
                 None => {}
             }
             relax_compiler::inspect::run_view::publish(shown.clone());
@@ -1909,7 +1928,7 @@ fn pump(
             Stage::WarmUp if relax_compiler::postframe::ready(READY_QUIET_NS) => {
                 if let Some(at) = warm_up_at.take() {
                     eprintln!(
-                        "makepad-run: warm-up {:.0} ms after the first present ({})",
+                        "relax: warm-up {:.0} ms after the first present ({})",
                         at.elapsed().as_secs_f64() * 1000.0,
                         if data.warm { "warm" } else { "cold" }
                     );
@@ -2007,11 +2026,11 @@ fn pump(
                 Some(at) => {
                     // (a view that takes the window, an alert, a failure: the look gives way to it)
                     let why = if can_wait { "the UI is free again: the load screen fades out" } else { "the load screen gives way to the run's view" };
-                    eprintln!("makepad-run: after {:.0} ms {why}", at.elapsed().as_secs_f64() * 1000.0);
+                    eprintln!("relax: after {:.0} ms {why}", at.elapsed().as_secs_f64() * 1000.0);
                 }
                 None => {
                     wait_at = Some(Instant::now());
-                    eprintln!("makepad-run: the UI waits on the JIT ({:.0} ms): the load screen fades in", relax_compiler::postframe::ui_blocked_ns() as f64 / 1e6);
+                    eprintln!("relax: the UI waits on the JIT ({:.0} ms): the load screen fades in", relax_compiler::postframe::ui_blocked_ns() as f64 / 1e6);
                 }
             }
         }
@@ -2318,7 +2337,7 @@ fn pump(
                         });
                     if let Some(text) = text {
                         let mut cmd = CmdWriter::new(HOST);
-                        cmd.clip_set(text.as_bytes());
+                        cmd.clip_set(&makepad_hal::clipboard::ClipboardData { text, ..Default::default() }.pack());
                         hal.submit(&cmd.buf());
                     }
                 }
@@ -2517,10 +2536,10 @@ mod crash_offer_tests {
     #[test]
     fn a_crashed_apps_changed_sources_wait_for_its_restart() {
         let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-        let home = std::env::temp_dir().join(format!("makepad-run-crash-offer-{}", std::process::id()));
+        let home = std::env::temp_dir().join(format!("relax-crash-offer-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let log = home.join("live.jsonl");
-        std::env::set_var("MAKEPAD_RUN_LIVE_LOG", &log);
+        std::env::set_var("RELAX_LIVE_LOG", &log);
         let run = |domain, initial_failed| Some(Run { window: Id::NONE, spec: None, domain, initial_failed, retry: false, unnamed: false });
         *state() = run(7, false);
         for _ in 0..2 {

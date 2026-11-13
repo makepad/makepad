@@ -48,7 +48,7 @@ const STARTUP: Duration = Duration::from_secs(300);
 /// first frames, with a floor): a leg shares its box, and elapsed time there says nothing of a
 /// boot that goes on (4 of 16 legs of one run read as hung, the 12 others took 16 to 55 s).
 const FIRST_FRAME: Duration = Duration::from_secs(60);
-/// From a close's quit request to the end of the app's exit work: its `makepad-run exit:` line, or
+/// From a close's quit request to the end of the app's exit work: its `relax exit:` line, or
 /// for an app that prints none (not under the JIT) the process gone. The grab before it does not
 /// count: a slow frame of a big cold window is not a slow exit.
 const CLOSE_EXIT: Duration = Duration::from_secs(10);
@@ -514,11 +514,9 @@ impl Runtime {
             .arg("--remote")
             .current_dir(cwd)
             .env("MAKEPAD_HIDE_WINDOWS", "1")
-            .env("SANDBOX_MUTE", "1")
             .env("MAKEPAD_MUTE", "1")
-            .env("MUSIC_MUTE", "1")
             // a close's bound ends at the line this prints
-            .env("MAKEPAD_RUN_EXIT_TRACE", "1")
+            .env("RELAX_EXIT_TRACE", "1")
             .env_remove("MAKEPAD_FOCUS")
             .env_remove("MAKEPAD_LAN")
             // the smoke boots this tree: a WM it starts runs its apps from here, not from the
@@ -568,7 +566,7 @@ impl Runtime {
         let gpu_reply = startup_gpu(socket, remote_up + STARTUP);
         let mut gpu_seen = false;
         let mut slow_said = false;
-        let first_frame_line = format!("makepad: {} first frame at ", target.package);
+        let first_frame_line = format!("relax: {} first frame at ", target.package);
         loop {
             if !self.alive(index)? {
                 return Err(format!("app died before its first frame\n{}", tail(&self.apps[index].child.text, 30)));
@@ -938,7 +936,7 @@ impl Runtime {
         let mut grab_failed = None;
         let mut grabbing = asked.is_some();
         let mut answered = asked.is_none();
-        let exit_line = format!("makepad-run exit: pid={} ", self.apps[i].run_pid);
+        let exit_line = format!("relax exit: pid={} ", self.apps[i].run_pid);
         let mut exit_done = None;
         let mut quit_at = Instant::now();
         let mut end = quit_at + if grabbing { last_grab + close_exit } else { close_exit };
@@ -1825,12 +1823,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_close_bounds_the_exit_line_and_then_the_tree_gone_apart() {
-        let line = "echo \"makepad-run exit: pid=$$ total_ms=1\"\n";
+        let line = "echo \"relax exit: pid=$$ total_ms=1\"\n";
         let long = Duration::from_secs(20);
         assert_eq!(close_script("late-gone", &format!("{line}sleep 1\n"), long), Ok(()), "past the first limit, after its line");
         let e = close_script("no-line", "sleep 30\n", long).unwrap_err();
         assert!(e.contains("required forced cleanup"), "{e}");
-        let e = close_script("other-pid", "echo 'makepad-run exit: pid=1 total_ms=1'\nsleep 30\n", long).unwrap_err();
+        let e = close_script("other-pid", "echo 'relax exit: pid=1 total_ms=1'\nsleep 30\n", long).unwrap_err();
         assert!(e.contains("required forced cleanup"), "another process's line says nothing of this one: {e}");
         let e = close_script("never-gone", &format!("{line}sleep 30\n"), Duration::from_millis(300)).unwrap_err();
         assert!(e.contains("ended its exit work, then was still there"), "{e}");
@@ -1895,7 +1893,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ci-leg-parks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("log");
-        std::fs::write(dir.join("app.sh"), "sleep 600 & echo $! > child; echo 'makepad: panic parked on thread main (boom) for 600 s'; sleep 600").unwrap();
+        std::fs::write(dir.join("app.sh"), "sleep 600 & echo $! > child; echo 'relax: panic parked on thread main (boom) for 600 s'; sleep 600").unwrap();
         let mut app = ChildLog::spawn(Command::new("/bin/sh").arg("app.sh").current_dir(&dir), path.clone()).unwrap();
         let parked = Arc::new(Mutex::new(None));
         let t = Instant::now();
@@ -2011,7 +2009,7 @@ mod tests {
 
     #[test]
     fn panics_and_jit_compile_errors_fail_an_app() {
-        let out = "ok\nmakepad-run: [t=5251 ms] compile error in glue4: x\nmakepad: panic parked on thread model (boom) for 30 s\n[E] bad\nfine";
+        let out = "ok\nrelax: [t=5251 ms] compile error in glue4: x\nrelax: panic parked on thread model (boom) for 30 s\n[E] bad\nfine";
         assert_eq!(error_lines(out).len(), 3);
         assert!(error_lines("all good\n[I] info").is_empty());
         assert_eq!(Target::parse("makepad-scope:scope:apps/commercial/scope"), Some(Target { package: "makepad-scope".into(), binary: "scope".into(), cwd: "apps/commercial/scope".into() }));

@@ -1,0 +1,4 @@
+[env]
+# a name the test's run has (not forced: its own value stands) and one forced for every build
+PATH = "no-tools-for-this-fixture"
+HOME = { value = "configured-home", relative = true, force = true }

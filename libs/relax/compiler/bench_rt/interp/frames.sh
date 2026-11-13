@@ -22,17 +22,17 @@ stats() { # stats <label> <file of build_us values>
 }
 for pkg in $pkgs; do
     for mode in jit nocodegen; do
-        env=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 SANDBOX_MUTE=1 MAKEPAD_HAL_FRAME_LOG=1 MAKEPAD_HAL_SCRIPT=$PWD/$here/resize30.hal)
-        [ $mode = nocodegen ] && env+=(MAKEPAD_RUN_NO_CODEGEN=1)
-        # FRAMES_PHASES=1: the warm run's boot phases (MAKEPAD_RUN_VERBOSE's timed lines)
-        [ "${FRAMES_PHASES:-}" = 1 ] && env+=(MAKEPAD_RUN_VERBOSE=1)
+        env=(MAKEPAD_HAL_BACKEND=offscreen MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 MAKEPAD_HAL_FRAME_LOG=1 MAKEPAD_HAL_SCRIPT=$PWD/$here/resize30.hal)
+        [ $mode = nocodegen ] && env+=(RELAX_NO_CODEGEN=1)
+        # FRAMES_PHASES=1: the warm run's boot phases (RELAX_VERBOSE's timed lines)
+        [ "${FRAMES_PHASES:-}" = 1 ] && env+=(RELAX_VERBOSE=1)
         d=$work/$pkg.$mode; mkdir -p "$d/home" "$d/tmp"
         for run in cold warm; do
             t0=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
             prof=()
             # FRAMES_PROFILE=1: the warm run's main thread sampled (mainprof.rs), its leaves summed
-            [ "${FRAMES_PROFILE:-}" = 1 ] && [ $run = warm ] && prof=(MAKEPAD_RUN_PROFILE_MAIN=$d/prof.tsv MAKEPAD_RUN_PROFILE_MAIN_MS=8000)
-            env "${env[@]}" ${prof[@]+"${prof[@]}"} MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" MAKEPAD_RUN_HOME="$d/runhome" MAKEPAD_RUN_CACHE_DIR="$d/cache" \
+            [ "${FRAMES_PROFILE:-}" = 1 ] && [ $run = warm ] && prof=(RELAX_PROFILE_MAIN=$d/prof.tsv RELAX_PROFILE_MAIN_MS=8000)
+            env "${env[@]}" ${prof[@]+"${prof[@]}"} MAKEPAD_HOME="$d/home" TMPDIR="$d/tmp" RELAX_HOME="$d/runhome" RELAX_CACHE_DIR="$d/cache" \
                 perl -e 'alarm 900; exec @ARGV' "$T/host/makepad" run "$pkg" > "$d/$run.out" 2>&1
             rc=$?
             t1=$(perl -MTime::HiRes=time -e 'printf "%.3f", time')
@@ -44,7 +44,7 @@ for pkg in $pkgs; do
         awk 'NR > 11 { print $2 }' "$d/frames" > "$d/resize"
         stats "$mode idle" "$d/idle"
         stats "$mode resize" "$d/resize"
-        [ "${FRAMES_PHASES:-}" = 1 ] && grep -a -E 'makepad-run: .*[0-9.]+ ms|boot-trace|first (frame|present)' "$d/warm.out" | head -40 | cut -c1-200
+        [ "${FRAMES_PHASES:-}" = 1 ] && grep -a -E 'relax: .*[0-9.]+ ms|boot-trace|first (frame|present)' "$d/warm.out" | head -40 | cut -c1-200
         if [ -s "$d/prof.tsv" ]; then
             echo "  $mode main thread, warm: $(wc -l < "$d/prof.tsv" | tr -d ' ') samples; by role: $(cut -f4 "$d/prof.tsv" | sort | uniq -c | sort -rn | tr '\n' ' ')"
             cut -f2 "$d/prof.tsv" | sort | uniq -c | sort -rn | head -25 | cut -c1-180

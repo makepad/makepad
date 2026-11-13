@@ -1,7 +1,7 @@
 // Every integer method on edge and random values, as real core: one `| ` line per type and
 // method, the number of results and a digest of them (FNV-1a over their bytes), equal under
-// rustc --test and makepad test. Also the integer parsing of the former std/check core_num.rs:
-// its edge strings, the radix panic and its random strings over every radix for its seven types
+// rustc --test and makepad test. Also integer parsing: edge strings, the radix panic and random
+// strings over every radix for seven types
 // (core_parse_int.rs parses others). Tests are a01.. so rustc's order is the file's.
 
 struct D(u64, u32);

@@ -1,4 +1,4 @@
-// Precompiled runtime glue for no-codegen mode (`MAKEPAD_RUN_NO_CODEGEN`, the platforms without
+// Precompiled runtime glue for no-codegen mode (`RELAX_NO_CODEGEN`, the platforms without
 // writable+executable memory): every piece of glue the runtime otherwise emits into code memory
 // at startup (codegen arm64.rs: lazy_entry, enter_leave, panic_tramp, land, thunk, stub) as code
 // in this binary, with the same register contracts. Included into jit.rs (`#[path]` module), so
@@ -20,7 +20,7 @@ const _: () = assert!(super::NC_STRIDE == 8);
 
 /// The function table of segment 0 (one word per slot: its current code).
 #[no_mangle]
-static mut MAKEPAD_RUN_SG_TABLE: [u64; SLOTS] = [0; SLOTS];
+static mut RELAX_SG_TABLE: [u64; SLOTS] = [0; SLOTS];
 
 std::arch::global_asm!(
     ".text",
@@ -216,7 +216,7 @@ std::arch::global_asm!(
     "  mov x29, x1",
     "  mov sp, x2",
     "  br x3",
-    table = sym MAKEPAD_RUN_SG_TABLE,
+    table = sym RELAX_SG_TABLE,
     rt_compile = sym rt_compile_global,
     rt_hot = sym rt_hot,
     panic_site = sym rt_panic_site,
@@ -263,7 +263,7 @@ pub(super) fn glue() -> Glue {
         Glue {
             thunks: a(&makepad_run_sg_thunks),
             stubs: a(&makepad_run_sg_stubs),
-            table: std::ptr::addr_of!(MAKEPAD_RUN_SG_TABLE) as u64,
+            table: std::ptr::addr_of!(RELAX_SG_TABLE) as u64,
             lazy_entry: a(&makepad_run_sg_lazy_entry),
             hot_entry: a(&makepad_run_sg_hot_entry),
             enter: a(&makepad_run_sg_enter),
@@ -284,5 +284,5 @@ pub(super) extern "C" fn tls_block_c() -> u64 {
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
 pub(crate) unsafe fn reset_statics() {
-    MAKEPAD_RUN_SG_TABLE = [0; SLOTS];
+    RELAX_SG_TABLE = [0; SLOTS];
 }

@@ -263,7 +263,7 @@ pub struct Stats {
     pub n_folded: usize,
     /// (slot id, function name, body bytes) of every chosen function
     pub fn_sizes: Vec<(u32, String, usize)>,
-    /// MAKEPAD_RUN_WASM_EXPORT_FNLIST: (slot id, [(inline context, code bytes)]) of every chosen body
+    /// RELAX_WASM_EXPORT_FNLIST: (slot id, [(inline context, code bytes)]) of every chosen body
     pub fn_ctx_bytes: Vec<(u32, Vec<(u64, i64)>)>,
     /// (slot id, absolute module offset, encoded body length), including final
     /// relocation encodings. Folded aliases own no bytes: (slot, 0, 0).
@@ -1128,6 +1128,7 @@ const I32_EQZ: u8 = 0x45;
 const I64_EQZ: u8 = 0x50;
 const I32_ADD: u8 = 0x6A;
 const I32_SUB: u8 = 0x6B;
+const I32_AND: u8 = 0x71;
 const I64_AND: u8 = 0x83;
 const I64_ADD: u8 = 0x7C;
 const I64_SUB: u8 = 0x7D;
@@ -1575,7 +1576,7 @@ struct Fx<'a> {
     me: usize,
     /// per vreg: every definition is below 32 (a 5-bit mask or such a constant): a shift count
     small5: Vec<bool>,
-    /// MAKEPAD_RUN_WASM_EXPORT_FNLIST: code bytes per inline context (rir::pos_ctx of the
+    /// RELAX_WASM_EXPORT_FNLIST: code bytes per inline context (rir::pos_ctx of the
     /// statement's position; a block's terminator counts with its last statement)
     ctx_bytes: Option<HashMap<u64, i64>>,
     /// bytes attributed so far (a terminator emits its nested blocks: they claim their own)
@@ -1585,7 +1586,7 @@ struct Fx<'a> {
 /// Whether bodies attribute their bytes to inline contexts (size analysis only).
 fn ctx_bytes_on() -> bool {
     static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    relax_session::phase::env_once(&T, "MAKEPAD_RUN_WASM_EXPORT_FNLIST").is_some()
+    relax_session::phase::env_once(&T, "RELAX_WASM_EXPORT_FNLIST").is_some()
 }
 
 /// Whether a call's arguments are pushed for the call itself (a direct call of a module
@@ -1974,14 +1975,18 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
         }
     }
     // the frame first: rematerialising a slot address prices its offset (plan_remat)
-    let (slot_at, end) = crate::frame::slot_layout(f, 0, true);
-    let frame = ((end + 15) & !15) as u32;
+    // (a slot aligned above 16: the frame pointer is aligned to the largest such alignment, the
+    // caller's stack pointer kept in a local to restore it, and the frame a multiple of it)
+    let (slot_at, end, over) = crate::frame::slot_layout(f, 0, true, false);
+    let realign = over.iter().copied().max().unwrap_or(0) as i64;
+    let to = realign.max(16);
+    let frame = ((end + to - 1) / to * to) as u32;
     fx.slot_at = slot_at;
     fx.frame = frame;
     fx.plan_folds();
     let has_invoke = f.blocks.iter().any(|b| matches!(b.term, Term::Invoke(..)));
     let n_ret = fx.cfg.rpo.iter().filter(|b| matches!(f.blocks[**b as usize].term, Term::Ret(_))).count();
-    let want_sp0 = o.sp0 && frame > 0 && n_ret >= 2;
+    let want_sp0 = frame > 0 && (o.sp0 && n_ret >= 2 || realign > 0);
     let locals = fx.colour(frame > 0 || has_invoke, want_sp0)?;
     // locals declaration
     let mut body = Vec::new();
@@ -2008,6 +2013,10 @@ fn lower_func(o: &Options, options: &relax_session::Options, f: &Func, me: usize
         }
         fx.aconst(frame as i64);
         fx.a_op(I32_SUB, I64_SUB);
+        if realign > 0 {
+            fx.aconst(-realign);
+            fx.a_op(I32_AND, I64_AND);
+        }
         fx.out.push(LTEE);
         let fp = fx.fp;
         uleb(&mut fx.out, fp as u64);
