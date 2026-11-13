@@ -594,6 +594,17 @@ pub fn vmlal_high_u16(a: uint32x4_t, b: uint16x8_t, c: uint16x8_t) -> uint32x4_t
     uint32x4_t(r)
 }
 
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_high_u32(a: uint64x2_t, b: uint32x4_t, c: uint32x4_t) -> uint64x2_t {
+    let mut r = [0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = a.0[i].wrapping_add((b.0[i + 2] as u64) * (c.0[i + 2] as u64));
+        i += 1;
+    }
+    uint64x2_t(r)
+}
+
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(3))]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vmlal_laneq_s16<const LANE: i32>(
@@ -611,6 +622,17 @@ pub fn vmlal_laneq_s16<const LANE: i32>(
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_s16(a: int32x4_t, b: int16x4_t, c: int16x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].wrapping_add((b.0[i] as i32) * (c.0[i] as i32));
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vmlal_u16(a: uint32x4_t, b: uint16x4_t, c: uint16x4_t) -> uint32x4_t {
     let mut r = [0; 4];
     let mut i = 0;
@@ -619,6 +641,17 @@ pub fn vmlal_u16(a: uint32x4_t, b: uint16x4_t, c: uint16x4_t) -> uint32x4_t {
         i += 1;
     }
     uint32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vmlal_u32(a: uint64x2_t, b: uint32x2_t, c: uint32x2_t) -> uint64x2_t {
+    let mut r = [0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = a.0[i].wrapping_add((b.0[i] as u64) * (c.0[i] as u64));
+        i += 1;
+    }
+    uint64x2_t(r)
 }
 
 #[inline]
@@ -966,6 +999,101 @@ pub fn vsha256su1q_u32(tw0_3: uint32x4_t, w8_11: uint32x4_t, w12_15: uint32x4_t)
     unsafe {
         vx::vx_ternary(tw0_3, w8_11, w12_15, 7)
     }
+}
+
+// ---- SHA-512 (FEAT_SHA512), as the Arm ARM pseudocode defines SHA512H / SHA512H2 / SHA512SU0 /
+// SHA512SU1, with its names: W is Vd (`a`, the register the instruction overwrites), X is Vn (`b`)
+// and Y is Vm (`c`). Lane 0 is bits 63:0.
+
+/// The XOR of three right rotations: SHA-512's Sigma0 (28, 34, 39) and Sigma1 (14, 18, 41).
+#[inline(always)]
+fn sha512_sigma(x: u64, r: [u32; 3]) -> u64 {
+    x.rotate_right(r[0]) ^ x.rotate_right(r[1]) ^ x.rotate_right(r[2])
+}
+
+/// SHA512H: Sigma1 and Ch of two rounds added to `a`; the low lane's round takes the high lane's.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512hq_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    let ch = (y[1] & x[0]) ^ (!y[1] & x[1]);
+    let hi = ch.wrapping_add(sha512_sigma(y[1], [14, 18, 41])).wrapping_add(w[1]);
+    let t = hi.wrapping_add(y[0]);
+    let ch = (t & y[1]) ^ (!t & x[0]);
+    let lo = ch.wrapping_add(sha512_sigma(t, [14, 18, 41])).wrapping_add(w[0]);
+    uint64x2_t([lo, hi])
+}
+
+/// SHA512H2: Sigma0 and Maj of the same two rounds added to `a`.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512h2q_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    let maj = (x[0] & y[1]) ^ (x[0] & y[0]) ^ (y[1] & y[0]);
+    let hi = maj.wrapping_add(sha512_sigma(y[0], [28, 34, 39])).wrapping_add(w[1]);
+    let maj = (hi & y[0]) ^ (hi & y[1]) ^ (y[1] & y[0]);
+    let lo = maj.wrapping_add(sha512_sigma(hi, [28, 34, 39])).wrapping_add(w[0]);
+    uint64x2_t([lo, hi])
+}
+
+/// SHA512SU0: message schedule, first part (sigma0 of the next word added to each lane).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512su0q_u64(a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+    let (w, x) = (a.0, b.0);
+    uint64x2_t([
+        w[0].wrapping_add(w[1].rotate_right(1) ^ w[1].rotate_right(8) ^ (w[1] >> 7)),
+        w[1].wrapping_add(x[0].rotate_right(1) ^ x[0].rotate_right(8) ^ (x[0] >> 7)),
+    ])
+}
+
+/// SHA512SU1: message schedule, second part (sigma1 of `b` and the words of `c` added to each lane).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon,sha3"))]
+pub fn vsha512su1q_u64(a: uint64x2_t, b: uint64x2_t, c: uint64x2_t) -> uint64x2_t {
+    let (w, x, y) = (a.0, b.0, c.0);
+    uint64x2_t([
+        w[0].wrapping_add(x[0].rotate_right(19) ^ x[0].rotate_right(61) ^ (x[0] >> 6)).wrapping_add(y[0]),
+        w[1].wrapping_add(x[1].rotate_right(19) ^ x[1].rotate_right(61) ^ (x[1] >> 6)).wrapping_add(y[1]),
+    ])
+}
+
+// ---- AES (FEAT_AES), as the Arm ARM pseudocode defines AESE / AESD / AESMC / AESIMC. A state is
+// FIPS-197's in column-major memory order: byte i is row i % 4 of column i / 4. The S-boxes and
+// MixColumns are x86_64.rs's (both modules compile on every target).
+
+/// SubBytes(ShiftRows(data ^ key)), or their inverses.
+fn neon_aes_sub_shift(data: uint8x16_t, key: uint8x16_t, inverse: bool) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        let row = i % 4;
+        let column = if inverse { (i / 4 + 4 - row) % 4 } else { (i / 4 + row) % 4 };
+        let from = column * 4 + row;
+        r[i] = super::x86_64::AES_SBOXES[inverse as usize][(data.0[from] ^ key.0[from]) as usize];
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+/// AESE: SubBytes(ShiftRows(data ^ key)). The round's MixColumns is AESMC.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaeseq_u8(data: uint8x16_t, key: uint8x16_t) -> uint8x16_t {
+    neon_aes_sub_shift(data, key, false)
+}
+
+/// AESD: InvSubBytes(InvShiftRows(data ^ key)). The round's InvMixColumns is AESIMC.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesdq_u8(data: uint8x16_t, key: uint8x16_t) -> uint8x16_t {
+    neon_aes_sub_shift(data, key, true)
+}
+
+/// AESMC: MixColumns.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesmcq_u8(data: uint8x16_t) -> uint8x16_t {
+    uint8x16_t(super::x86_64::aes_mix_columns(data.0, false))
+}
+
+/// AESIMC: InvMixColumns.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "aes"))]
+pub fn vaesimcq_u8(data: uint8x16_t) -> uint8x16_t {
+    uint8x16_t(super::x86_64::aes_mix_columns(data.0, true))
 }
 
 #[derive(Copy, Clone)]
@@ -1812,6 +1940,14 @@ pub fn vbslq_f32(a: uint32x4_t, b: float32x4_t, c: float32x4_t) -> float32x4_t {
 
 #[inline]
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vbslq_f64(a: uint64x2_t, b: float64x2_t, c: float64x2_t) -> float64x2_t {
+    unsafe {
+        vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint64x2_t as *const float64x2_t), b, c, 10)
+    }
+}
+
+#[inline]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vbslq_s16(a: uint16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
     unsafe {
         vx::vx_ternary(crate::ptr::read_unaligned(&a as *const uint16x8_t as *const int16x8_t), b, c, 10)
@@ -2141,6 +2277,18 @@ pub fn vcombine_u32(a: uint32x2_t, b: uint32x2_t) -> uint32x4_t {
     uint32x4_t(r)
 }
 
+/// FCVTAU: to nearest, ties away from zero.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vcvtaq_u32_f32(a: float32x4_t) -> uint32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].round() as u32;
+        i += 1;
+    }
+    uint32x4_t(r)
+}
+
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vcvtnq_s32_f32(a: float32x4_t) -> int32x4_t {
     let mut r = [0; 4];
@@ -2154,6 +2302,17 @@ pub fn vcvtnq_s32_f32(a: float32x4_t) -> int32x4_t {
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vcvtq_f32_s32(a: int32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i] as f32;
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vcvtq_f32_u32(a: uint32x4_t) -> float32x4_t {
     let mut r = [0.0; 4];
     let mut i = 0;
     while i < 4 {
@@ -2183,6 +2342,28 @@ pub fn vcvtq_s32_f32(a: float32x4_t) -> int32x4_t {
         i += 1;
     }
     int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vcvtq_s64_f64(a: float64x2_t) -> int64x2_t {
+    let mut r = [0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = a.0[i] as i64;
+        i += 1;
+    }
+    int64x2_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vcvtq_u32_f32(a: float32x4_t) -> uint32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i] as u32;
+        i += 1;
+    }
+    uint32x4_t(r)
 }
 
 #[inline]
@@ -2379,6 +2560,18 @@ pub fn vfmsq_f32(a: float32x4_t, b: float32x4_t, c: float32x4_t) -> float32x4_t 
     unsafe {
         vx::vx_ternary(a, b, c, 9)
     }
+}
+
+// a - b * c: stdarch negates `b`, then vfmaq_f64 (a NaN taken from `b` comes back negated).
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vfmsq_f64(a: float64x2_t, b: float64x2_t, c: float64x2_t) -> float64x2_t {
+    let mut r = [0.0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = neon_fma_f64(a.0[i], c.0[i], -b.0[i]);
+        i += 1;
+    }
+    float64x2_t(r)
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
@@ -3239,6 +3432,82 @@ pub fn vqmovun_s16(a: int16x8_t) -> uint8x8_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vqmovun_s32(a: int32x4_t) -> uint16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[i].max(0).min(65535) as u16;
+        i += 1;
+    }
+    uint16x4_t(r)
+}
+
+/// SQRDMLAH / SQRDMLSH (FEAT_RDM) on one i16 lane: the high half of (a << 16) + 2 * b * c (minus
+/// for SQRDMLSH), rounded, saturated once at the end.
+fn neon_qrdmlah_s16(a: i16, b: i16, c: i16, subtract: bool) -> i16 {
+    let product = b as i64 * c as i64 * 2;
+    let sum = ((a as i64) << 16) + if subtract { -product } else { product } + (1 << 15);
+    (sum >> 16).max(i16::MIN as i64).min(i16::MAX as i64) as i16
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlah_s16(a: int16x4_t, b: int16x4_t, c: int16x4_t) -> int16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], false);
+        i += 1;
+    }
+    int16x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlahq_s16(a: int16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], false);
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlahq_s32(a: int32x4_t, b: int32x4_t, c: int32x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = ((((a.0[i] as i128) << 32) + b.0[i] as i128 * c.0[i] as i128 * 2 + (1 << 31)) >> 32)
+            .max(i32::MIN as i128)
+            .min(i32::MAX as i128) as i32;
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlsh_s16(a: int16x4_t, b: int16x4_t, c: int16x4_t) -> int16x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], true);
+        i += 1;
+    }
+    int16x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "rdm"))]
+pub fn vqrdmlshq_s16(a: int16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = neon_qrdmlah_s16(a.0[i], b.0[i], c.0[i], true);
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vqrdmulhq_n_s16(a: int16x8_t, b: i16) -> int16x8_t {
     let mut r = [0; 8];
     let mut i = 0;
@@ -3459,6 +3728,17 @@ pub fn vrndnq_f32(a: float32x4_t) -> float32x4_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrndnq_f64(a: float64x2_t) -> float64x2_t {
+    let mut r = [0.0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = neon_result_f64(a.0[i], a.0[i], a.0[i].round_ties_even());
+        i += 1;
+    }
+    float64x2_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vrndpq_f32(a: float32x4_t) -> float32x4_t {
     let mut r = [0.0; 4];
     let mut i = 0;
@@ -3486,6 +3766,115 @@ pub fn vrndq_f32(a: float32x4_t) -> float32x4_t {
     let mut i = 0;
     while i < 4 {
         r[i] = neon_result_f32(a.0[i], a.0[i], a.0[i].trunc());
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrndq_f64(a: float64x2_t) -> float64x2_t {
+    let mut r = [0.0; 2];
+    let mut i = 0;
+    while i < 2 {
+        r[i] = neon_result_f64(a.0[i], a.0[i], a.0[i].trunc());
+        i += 1;
+    }
+    float64x2_t(r)
+}
+
+/// Arm's RecipSqrtEstimate for each 9-bit operand 128..=511 (0.25 to 1 in 1/512 steps): the low
+/// eight bits of its estimate 256..=511 (1 to 2 in 1/256 steps).
+const fn neon_rsqrt_estimates() -> [u8; 384] {
+    let mut table = [0u8; 384];
+    let mut i = 0;
+    while i < 384 {
+        let a = i as u32 + 128;
+        // the middle of the operand's interval: in 1/1024 steps below 0.5, in 1/512 steps from it
+        let a = if a < 256 { a * 2 + 1 } else { (a | 1) * 2 };
+        // the largest b below 2^14 / sqrt(a), then halved to nearest
+        let mut b = 512;
+        while a * (b + 1) * (b + 1) < 1 << 28 {
+            b += 1;
+        }
+        table[i] = ((b + 1) / 2) as u8;
+        i += 1;
+    }
+    table
+}
+
+const NEON_RSQRT_ESTIMATES: [u8; 384] = neon_rsqrt_estimates();
+
+/// FRSQRTE on one f32: Arm's FPRSqrtEstimate under the FPCR every OS sets (round to nearest, no
+/// flush to zero, NaNs kept): an 8-bit estimate of 1/sqrt(x) from the top 8 bits of x's fraction
+/// and the parity of its exponent.
+fn neon_rsqrte_f32(x: f32) -> f32 {
+    let bits = x.to_bits();
+    let sign = bits & 0x8000_0000;
+    let mut exp = ((bits >> 23) & 0xff) as i32;
+    let mut frac = bits & 0x7f_ffff;
+    if exp == 0xff && frac != 0 {
+        // a NaN comes back quieted
+        return f32::from_bits(bits | 0x40_0000);
+    }
+    if exp == 0 && frac == 0 {
+        // a zero gives the infinity of its sign
+        return f32::from_bits(sign | 0x7f80_0000);
+    }
+    if sign != 0 {
+        // any other negative operand gives the default NaN
+        return f32::from_bits(0x7fc0_0000);
+    }
+    if exp == 0xff {
+        return 0.0;
+    }
+    // a subnormal is normalised first
+    if exp == 0 {
+        while frac & 0x40_0000 == 0 {
+            frac <<= 1;
+            exp -= 1;
+        }
+        frac = (frac << 1) & 0x7f_ffff;
+    }
+    // the operand scaled to [0.5, 1) when its exponent is even, to [0.25, 0.5) when it is odd
+    let scaled = if exp & 1 == 0 { 256 | (frac >> 15) } else { 128 | (frac >> 16) };
+    let estimate = NEON_RSQRT_ESTIMATES[(scaled - 128) as usize] as u32;
+    f32::from_bits((((380 - exp) / 2) as u32) << 23 | estimate << 15)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrsqrteq_f32(a: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_rsqrte_f32(a.0[i]);
+        i += 1;
+    }
+    float32x4_t(r)
+}
+
+/// FRSQRTS on one f32 pair: Arm's FPRSqrtStepFused, (3 - a * b) / 2 rounded once (the Newton step
+/// that refines FRSQRTE's estimate); an infinity times a zero is 1.5. `a` is negated before the
+/// NaN rules, so a NaN taken from it comes back with its sign flipped.
+fn neon_rsqrts_f32(a: f32, b: f32) -> f32 {
+    let a = -a;
+    if a.is_nan() || b.is_nan() {
+        return neon_result_f32(a, b, 0.0);
+    }
+    if (a.is_infinite() && b == 0.0) || (a == 0.0 && b.is_infinite()) {
+        return 1.5;
+    }
+    // 1.5 + (a / 2) * b in one rounding. Halving the larger operand is exact unless it is below
+    // 2^-125, and then the product is far below 1.5's last place whichever way the half rounds.
+    let (a, b) = if a.abs() >= b.abs() { (a * 0.5, b) } else { (a, b * 0.5) };
+    a.mul_add(b, 1.5)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vrsqrtsq_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
+    let mut r = [0.0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = neon_rsqrts_f32(a.0[i], b.0[i]);
         i += 1;
     }
     float32x4_t(r)
@@ -3583,6 +3972,28 @@ pub fn vshlq_s64(a: int64x2_t, b: int64x2_t) -> int64x2_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vshlq_s8(a: int8x16_t, b: int8x16_t) -> int8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = {
+            let shift = b.0[i] as i32;
+            if shift >= 8 {
+                0
+            } else if shift >= 0 {
+                a.0[i] << shift
+            } else if shift <= -8 {
+                a.0[i] >> 7
+            } else {
+                a.0[i] >> -shift
+            }
+        };
+        i += 1;
+    }
+    int8x16_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vshlq_u16(a: uint16x8_t, b: int16x8_t) -> uint16x8_t {
     let mut r = [0; 8];
     let mut i = 0;
@@ -3646,6 +4057,28 @@ pub fn vshlq_u64(a: uint64x2_t, b: int64x2_t) -> uint64x2_t {
         i += 1;
     }
     uint64x2_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vshlq_u8(a: uint8x16_t, b: int8x16_t) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = {
+            let shift = b.0[i] as i32;
+            if shift >= 8 {
+                0
+            } else if shift >= 0 {
+                a.0[i] << shift
+            } else if shift <= -8 {
+                0
+            } else {
+                a.0[i] >> -shift
+            }
+        };
+        i += 1;
+    }
+    uint8x16_t(r)
 }
 
 #[cfg_attr(not(relax_check), rustc_legacy_const_generics(1))]
@@ -3891,6 +4324,101 @@ pub fn vuzp1q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    float64x2_t([a.0[0], b.0[0]])
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_s16(a: int16x8_t, b: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = if i < 4 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 4) * 2]
+        };
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_s32(a: int32x4_t, b: int32x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = if i < 2 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 2) * 2]
+        };
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_s8(a: int8x16_t, b: int8x16_t) -> int8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if i < 8 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 8) * 2]
+        };
+        i += 1;
+    }
+    int8x16_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = if i < 4 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 4) * 2]
+        };
+        i += 1;
+    }
+    uint16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = if i < 2 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 2) * 2]
+        };
+        i += 1;
+    }
+    uint32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1q_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if i < 8 {
+            a.0[i * 2]
+        } else {
+            b.0[(i - 8) * 2]
+        };
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vuzp2q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
     let mut r = [0.0; 4];
     let mut i = 0;
@@ -3903,6 +4431,101 @@ pub fn vuzp2q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
         i += 1;
     }
     float32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    float64x2_t([a.0[1], b.0[1]])
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_s16(a: int16x8_t, b: int16x8_t) -> int16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = if i < 4 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 4) * 2 + 1]
+        };
+        i += 1;
+    }
+    int16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_s32(a: int32x4_t, b: int32x4_t) -> int32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = if i < 2 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 2) * 2 + 1]
+        };
+        i += 1;
+    }
+    int32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_s8(a: int8x16_t, b: int8x16_t) -> int8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if i < 8 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 8) * 2 + 1]
+        };
+        i += 1;
+    }
+    int8x16_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        r[i] = if i < 4 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 4) * 2 + 1]
+        };
+        i += 1;
+    }
+    uint16x8_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4_t {
+    let mut r = [0; 4];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = if i < 2 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 2) * 2 + 1]
+        };
+        i += 1;
+    }
+    uint32x4_t(r)
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2q_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        r[i] = if i < 8 {
+            a.0[i * 2 + 1]
+        } else {
+            b.0[(i - 8) * 2 + 1]
+        };
+        i += 1;
+    }
+    uint8x16_t(r)
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
@@ -3938,9 +4561,25 @@ pub fn vuzpq_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8x2_t {
 }
 
 #[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzpq_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4x2_t {
+    uint32x4x2_t(
+        uint32x4_t([a.0[0], a.0[2], b.0[0], b.0[2]]),
+        uint32x4_t([a.0[1], a.0[3], b.0[1], b.0[3]]),
+    )
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
 pub fn vzip1q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
     unsafe {
         vx::vx_binary(a, b, 17, 32)
+    }
+}
+
+#[inline]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vzip1q_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    unsafe {
+        vx::vx_binary(a, b, 17, 64)
     }
 }
 
@@ -3948,6 +4587,14 @@ pub fn vzip1q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
 pub fn vzip2q_f32(a: float32x4_t, b: float32x4_t) -> float32x4_t {
     unsafe {
         vx::vx_binary(a, b, 18, 32)
+    }
+}
+
+#[inline]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vzip2q_f64(a: float64x2_t, b: float64x2_t) -> float64x2_t {
+    unsafe {
+        vx::vx_binary(a, b, 18, 64)
     }
 }
 

@@ -402,6 +402,65 @@ fn arch() {
     b!(vmulq_p8, poly8x16_t, poly8x16_t);
     b!(vmull_p8, poly8x8_t, poly8x8_t);
     b!(vmull_high_p8, poly8x16_t, poly8x16_t);
+    // sha2's SHA-512 backend (FEAT_SHA512 is not on every aarch64 CPU)
+    if std::arch::is_aarch64_feature_detected!("sha3") {
+        t!(vsha512hq_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+        t!(vsha512h2q_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+        b!(vsha512su0q_u64, uint64x2_t, uint64x2_t);
+        t!(vsha512su1q_u64, uint64x2_t, uint64x2_t, uint64x2_t);
+    }
+    // the aes crate's aarch64 backend, and one full round each way as it chains them
+    b!(vaeseq_u8, uint8x16_t, uint8x16_t);
+    b!(vaesdq_u8, uint8x16_t, uint8x16_t);
+    u!(vaesmcq_u8, uint8x16_t);
+    u!(vaesimcq_u8, uint8x16_t);
+    bin("chain_aes", |a: uint8x16_t, k: uint8x16_t| unsafe { [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))] }, |a: uint8x16_t, k: uint8x16_t| unsafe {
+        [vaesmcq_u8(vaeseq_u8(a, k)), vaesimcq_u8(vaesdq_u8(a, k))]
+    });
+    // xxh3's stripe loop (xxhash-rust)
+    t!(vmlal_u32, uint64x2_t, uint32x2_t, uint32x2_t);
+    t!(vmlal_high_u32, uint64x2_t, uint32x4_t, uint32x4_t);
+    b!(vuzpq_u32, uint32x4_t, uint32x4_t);
+    // tiny-skia's 1 / sqrt(x): the estimate and its Newton step
+    u!(vrsqrteq_f32, float32x4_t);
+    b!(vrsqrtsq_f32, float32x4_t, float32x4_t);
+    // fearless_simd's NEON level (vello_cpu). vfmsq_f64 is in std/core_arch_neon_fearless_simd.rs:
+    // which operand's NaN rustc negates depends on its optimisation level
+    t!(vbslq_f64, uint64x2_t, float64x2_t, float64x2_t);
+    u!(vcvtq_f32_u32, uint32x4_t);
+    u!(vcvtq_s64_f64, float64x2_t);
+    u!(vcvtq_u32_f32, float32x4_t);
+    u!(vrndnq_f64, float64x2_t);
+    u!(vrndq_f64, float64x2_t);
+    b!(vshlq_s8, int8x16_t, int8x16_t);
+    b!(vshlq_u8, uint8x16_t, int8x16_t);
+    b!(vuzp1q_f64, float64x2_t, float64x2_t);
+    b!(vuzp1q_s8, int8x16_t, int8x16_t);
+    b!(vuzp1q_s16, int16x8_t, int16x8_t);
+    b!(vuzp1q_s32, int32x4_t, int32x4_t);
+    b!(vuzp1q_u8, uint8x16_t, uint8x16_t);
+    b!(vuzp1q_u16, uint16x8_t, uint16x8_t);
+    b!(vuzp1q_u32, uint32x4_t, uint32x4_t);
+    b!(vuzp2q_f64, float64x2_t, float64x2_t);
+    b!(vuzp2q_s8, int8x16_t, int8x16_t);
+    b!(vuzp2q_s16, int16x8_t, int16x8_t);
+    b!(vuzp2q_s32, int32x4_t, int32x4_t);
+    b!(vuzp2q_u8, uint8x16_t, uint8x16_t);
+    b!(vuzp2q_u16, uint16x8_t, uint16x8_t);
+    b!(vuzp2q_u32, uint32x4_t, uint32x4_t);
+    b!(vzip1q_f64, float64x2_t, float64x2_t);
+    b!(vzip2q_f64, float64x2_t, float64x2_t);
+    // moxcms's fixed-point paths (FEAT_RDM is not on every aarch64 CPU)
+    u!(vcvtaq_u32_f32, float32x4_t);
+    t!(vmlal_s16, int32x4_t, int16x4_t, int16x4_t);
+    u!(vqmovun_s32, int32x4_t);
+    if std::arch::is_aarch64_feature_detected!("rdm") {
+        t!(vqrdmlah_s16, int16x4_t, int16x4_t, int16x4_t);
+        t!(vqrdmlahq_s16, int16x8_t, int16x8_t, int16x8_t);
+        t!(vqrdmlahq_s32, int32x4_t, int32x4_t, int32x4_t);
+        t!(vqrdmlsh_s16, int16x4_t, int16x4_t, int16x4_t);
+        t!(vqrdmlshq_s16, int16x8_t, int16x8_t, int16x8_t);
+    }
     // a chain in a loop: adler32-style sums (vector values across iterations)
     bin(
         "chain_adler",
