@@ -280,6 +280,7 @@ fn test_page(st: &Style) -> String {
     p.blank();
     p.text("Runs the crate's tests in-process; the optional filter is passed to the");
     p.text("test harness.");
+    p.row("-- --precompile", "Prepare package tests and cold callees before running them (keeps JIT work outside async deadlines)");
     p.out
 }
 

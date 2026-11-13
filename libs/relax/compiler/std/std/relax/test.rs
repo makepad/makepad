@@ -2,7 +2,8 @@
 //! (library/test: lib.rs run_test, test_result.rs calc_result, console.rs, cli.rs), running in
 //! the program. The loader collects the crate's `#[test]` fns and hands their table to `main`;
 //! the command line after `--` is libtest's (filters, --exact, --skip, --ignored,
-//! --include-ignored, --test-threads, --list, --nocapture, -q).
+//! --include-ignored, --test-threads, --list, --nocapture, -q). `--precompile` builds selected
+//! tests and their callees before starting any test, keeping JIT work outside async deadlines.
 //! Not here: output capture (every test prints as under --nocapture), benches, --format.
 
 use crate::string::String;
@@ -77,6 +78,7 @@ struct Opts {
     /// libtest OutputFormat::Terse (`-q` / `--format=terse`): one character per test
     quiet: bool,
     threads: usize,
+    precompile: bool,
 }
 
 /// libtest cli.rs get_format: `--format` (pretty, terse; json and junit only on nightly with
@@ -91,11 +93,12 @@ fn format_terse(v: &str) -> Result<bool, String> {
 }
 
 fn parse_args() -> Result<Opts, String> {
-    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0 };
+    let mut o = Opts { filters: Vec::new(), skip: Vec::new(), exact: false, ignored: false, include_ignored: false, list: false, quiet: false, threads: 0, precompile: false };
     let mut format: Option<bool> = None;
     let mut args = crate::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--precompile" => o.precompile = true,
             "--exact" => o.exact = true,
             "--ignored" => o.ignored = true,
             "--include-ignored" => o.include_ignored = true,
@@ -228,6 +231,18 @@ fn run(t: &Tests) -> i32 {
             println!("{} tests, 0 benchmarks", all.len());
         }
         return 0;
+    }
+    // Prepare every selected test before starting any of them: preparation alongside a
+    // running async test would still consume that test's real deadlines.
+    if opts.precompile {
+        extern "C" { fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64; }
+        let mut roots = Vec::with_capacity(all.len() * 2);
+        for d in &all {
+            if d.ignore { continue; }
+            roots.push(d.run);
+            if d.start != 0 { roots.push(d.start); }
+        }
+        unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true); }
     }
     let started = crate::time::Instant::now();
     println!();

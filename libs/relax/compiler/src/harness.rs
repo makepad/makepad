@@ -161,3 +161,108 @@ fn run_crate(u: &mut Unit, up: *mut Unit, krate: u32) -> Result<i32, String> {
         Err(p) => Err(format!("the test harness {}: {}", p.kind, p.message)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SOURCE: &str = r#"
+static mut FLAGS: [u8; 2] = [0; 2];
+#[test]
+fn chosen_a() {
+    extern "C" { fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64; }
+    // Supplied by the host, so these addresses are not statically reachable from this body.
+    let roots: Vec<usize> = std::env::args().next().unwrap().split(',').map(|s| s.parse().unwrap()).collect();
+    assert_eq!(unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true) }, 0,
+        "selected tests and their Termination adapter must be prepared before any test starts");
+    unsafe { FLAGS[0] += 1; }
+}
+#[test]
+fn chosen_result() -> Result<(), ()> { unsafe { FLAGS[1] += 1; } Ok(()) }
+#[test]
+#[ignore]
+fn chosen_ignored() { panic!("ignored test ran"); }
+#[test]
+fn excluded() { panic!("filtered test ran"); }
+pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
+"#;
+
+    fn fixture(args: &[&str]) -> (Box<Unit>, u32, std::path::PathBuf) {
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+        let root = std::env::temp_dir().join(format!("relax-harness-prepare-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("lib.rs");
+        std::fs::write(&path, SOURCE).unwrap();
+        let mut session = crate::Session::default();
+        session.options.tier1 = false;
+        session.options.tyck_ahead = false;
+        let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(session), path.to_str().unwrap(), "harness_fixture", true).unwrap();
+        crate::layout::set_root_crate(krate);
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        let mut u = Unit::new(prog, tcx, core);
+        unsafe { jit::UNIT = &mut *u; }
+        let first_arg = crate::owner::call(crate::owner::Class::Program, || {
+            let result = find_fn(&u, "harness_fixture::chosen_result").unwrap();
+            let ret = u.tcx.fn_sig(&u.prog, result).unwrap().ret;
+            let start = find_fn(&u, "std::relax::test::__relax_test_start").unwrap();
+            let adapter = u.fn_id(FnKey::Inst(start, vec![ret]));
+            let selected = u.fn_id(FnKey::Inst(result, Vec::new()));
+            format!("{},{}", u.entry(adapter), u.entry(selected)).into_bytes()
+        });
+        let mut argv = vec![first_arg];
+        argv.extend(args.iter().map(|s| s.as_bytes().to_vec()));
+        jit::set_program_args(argv);
+        (u, krate, root)
+    }
+
+    fn finish(mut u: Box<Unit>, root: std::path::PathBuf, executed: [u8; 2]) {
+        crate::owner::call(crate::owner::Class::Program, || {
+            for name in ["harness_fixture::chosen_ignored", "harness_fixture::excluded"] {
+                let def = find_fn(&u, name).unwrap();
+                let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
+                assert!(!u.fns[slot as usize].compiled, "unselected body was prepared: {name}");
+            }
+        });
+        let entry = crate::owner::call(crate::owner::Class::Program, || {
+            let def = find_fn(&u, "harness_fixture::flags").unwrap();
+            let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
+            u.entry(slot)
+        });
+        let up = &mut *u as *mut Unit;
+        let mut flags = [0u8; 2];
+        unsafe { jit::call_jit(up, entry, &mut flags as *mut [u8; 2] as u64) }.map_err(|p| p.message).unwrap();
+        assert_eq!(flags, executed);
+        // The one-shot CLI keeps its unit alive while worker threads retire after reporting.
+        Box::leak(u);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn precompile_respects_filter_ignore_and_return_values() {
+        isolated_test!(precompile_respects_filter_ignore_and_return_values);
+        let (mut u, krate, root) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
+        let found = collect(&u.prog, &[krate]);
+        assert_eq!(found.len(), 4);
+        assert_eq!(found.iter().filter(|t| t.ignore).count(), 1);
+        let up = &mut *u as *mut Unit;
+        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
+        finish(u, root, [1, 1]); // each selected body ran exactly once; none ran as a warm-up
+    }
+
+    #[test]
+    fn precompile_list_does_not_prepare_or_run_test_bodies() {
+        isolated_test!(precompile_list_does_not_prepare_or_run_test_bodies);
+        let (mut u, krate, root) = fixture(&["chosen", "--list", "--precompile"]);
+        let up = &mut *u as *mut Unit;
+        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
+        crate::owner::call(crate::owner::Class::Program, || {
+            for t in collect(&u.prog, &[krate]) {
+                let slot = u.fn_id(FnKey::Inst(t.def, Vec::new()));
+                assert!(!u.fns[slot as usize].compiled, "--list prepared {}", t.name);
+            }
+        });
+        finish(u, root, [0, 0]);
+    }
+}

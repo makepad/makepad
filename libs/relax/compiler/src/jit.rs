@@ -1611,45 +1611,51 @@ pub(crate) fn fork_child() {
 /// Most functions one `__relax_precompile` builds (a pre_exec closure reaching a large library
 /// stops there; the rest compiles in the parent on first use, and a forked child that reaches
 /// it ends with its name: forkexec.rs).
-#[cfg(unix)]
 const FORK_PRECOMPILE_MAX: usize = 4096;
 
-/// `__relax_precompile(addr)` (Relax std's fork_exec, before its fork): builds the function at
-/// `addr` (its code, thunk or lazy stub) and every function its code calls or takes the address
+/// `__relax_precompile(roots, len, exhaustive)` builds each root (its code, thunk or lazy stub)
+/// and every function its code calls or takes the address
 /// of, transitively, on the calling thread as its lazy compiles would. Returns how many were
-/// built. A forked child runs only code built before the fork (forkexec.rs).
-#[cfg(unix)]
-pub(crate) extern "C" fn relax_precompile(addr: u64) -> u64 {
+/// built. Tests request the whole graph before their clocks start; fork_exec keeps its
+/// bounded preparation (a forked child runs only code built before the fork: forkexec.rs).
+/// # Safety
+/// `roots` must point to `len` initialized addresses for this synchronous call.
+pub(crate) unsafe extern "C" fn relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64 {
+    let addr = roots as usize;
     crate::jit::host_boundary("relax_precompile", move || {
         let _keep = os::proc::KeepLastError::new();
         let up = cur_unit();
-        if up.is_null() || addr == 0 || crate::forkexec::exec_child() {
+        if up.is_null() || addr == 0 || len == 0 {
             return 0;
         }
+        #[cfg(unix)]
+        if crate::forkexec::exec_child() { return 0; }
         ensure_altstack();
-        let root = owner::publish(|| unsafe {
+        // The caller keeps this immutable address table alive until the synchronous return.
+        let addresses = unsafe { std::slice::from_raw_parts(addr as *const usize, len) };
+        let roots: Vec<u32> = owner::publish(|| unsafe {
             let u = &*up;
-            u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len())
+            addresses.iter().filter_map(|&addr| {
+                let addr = addr as u64;
+                u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len())
+            }).collect()
         });
-        match root {
-            Some(root) => precompile_from(root),
-            None => 0,
-        }
+        precompile_from(&roots, exhaustive)
     })
 }
 
-/// `relax_precompile` from slot `root`.
-#[cfg(unix)]
-pub(crate) fn precompile_from(root: u32) -> u64 {
+/// `relax_precompile` from the root slots.
+pub(crate) fn precompile_from(roots: &[u32], exhaustive: bool) -> u64 {
     let up = cur_unit();
     if up.is_null() {
         return 0;
     }
-    let mut todo = vec![root];
+    let limit = if exhaustive { usize::MAX } else { FORK_PRECOMPILE_MAX };
+    let mut todo = roots.to_vec();
     let mut seen = std::collections::HashSet::new();
     let mut built = 0u64;
     while let Some(id) = todo.pop() {
-        if seen.len() >= FORK_PRECOMPILE_MAX {
+        if seen.len() >= limit {
             break;
         }
         if !seen.insert(id) {
@@ -1686,6 +1692,51 @@ pub(crate) fn precompile_from(root: u32) -> u64 {
         todo.extend(next.into_iter().filter(|c| !seen.contains(c)));
     }
     built
+}
+
+#[cfg(test)]
+mod precompile_tests {
+    use super::*;
+
+    #[test]
+    fn exhaustive_precompile_reaches_beyond_the_fork_budget() {
+        isolated_test!(exhaustive_precompile_reaches_beyond_the_fork_budget);
+        const LEAVES: usize = FORK_PRECOMPILE_MAX + 4;
+        let root = std::env::temp_dir().join(format!("relax-precompile-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("lib.rs");
+        let mut source = String::from("#![no_std] pub fn root(out: *mut usize) {");
+        for i in 0..LEAVES { source.push_str(&format!("leaf_{i}(out);")); }
+        source.push('}');
+        for i in 0..LEAVES {
+            source.push_str(&format!("#[inline(never)] fn leaf_{i}(out: *mut usize) {{ unsafe {{ *out = {i}; }} }}"));
+        }
+        std::fs::write(&path, source).unwrap();
+        let mut session = crate::Session::default();
+        session.options.tier1 = false;
+        session.options.tyck_ahead = false;
+        let session = std::sync::Arc::new(session);
+        let mut prog = crate::program::Program::new(&session);
+        prog.load_crate("precompile", path.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(&session, &[]), vec![]).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let def = crate::program::DefId(prog.defs.iter().position(|d| prog.syms.str(d.name) == "root").unwrap() as u32);
+        let mut u = Unit::new(prog, tcx, 0);
+        let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
+        let entry = u.entry(slot);
+        let up = &mut *u as *mut Unit;
+        let previous = CUR_UNIT.with(|c| c.replace(up));
+        let roots = [entry as usize, entry as usize];
+        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), false) }, FORK_PRECOMPILE_MAX as u64);
+        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), true) }, (LEAVES + 1 - FORK_PRECOMPILE_MAX) as u64);
+        assert_eq!(unsafe { relax_precompile(roots.as_ptr(), roots.len(), true) }, 0, "prepared code is reused");
+        CUR_UNIT.with(|c| c.set(previous));
+        let mut value = 0usize;
+        unsafe { call_jit(up, entry, &mut value as *mut usize as u64) }.map_err(|p| p.message).unwrap();
+        assert_eq!(value, LEAVES - 1);
+        drop(u);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// A thread-local of the runtime that program code reaches (format buffers, the panic being
@@ -20689,7 +20740,6 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         // locals are gone, where a lazy compile of it cannot run: makepad-remote's socket cleanup)
         #[cfg(unix)]
         b"atexit" => Some(os::proc::program_atexit as *const () as usize),
-        #[cfg(unix)]
         b"__relax_precompile" => Some(relax_precompile as *const () as usize),
         #[cfg(unix)]
         b"__relax_fork_exec" => Some(crate::forkexec::relax_fork_exec as *const () as usize),
