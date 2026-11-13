@@ -626,6 +626,61 @@ fn a_macro_world_crate_resolves_macros_through_its_host_dependencies() {
     assert_eq!(world, Some(3), "the macro world's shared reaches the derive through its host dependencies");
 }
 
+/// phf_codegen in a build script: the crate and what only it reaches (phf_generator) are the
+/// host's, while `rand`, which the app has too, stays the app's with the app's features.
+#[cfg(test)]
+#[test]
+fn a_crate_only_a_build_script_links_is_no_root_of_the_app() {
+    use crate::resolve::{GraphUnit, Units};
+    let root = std::env::temp_dir().join(format!("relax-build-dep-units-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("proc_macro")).unwrap();
+    std::fs::write(root.join("proc_macro/empty.rs"), "").unwrap();
+    let dir = root.display().to_string();
+    let unit = |name: &str, kind: &str, mode: &str, file: &str, host, features: &[&str], deps: &[(usize, &str)]| GraphUnit {
+        pkg_id: format!("path+file://{dir}/{name}#0.1.0"),
+        name: name.to_string(), kind: vec![kind.to_string()],
+        src_path: format!("{dir}/{name}/{file}"), edition: "2021".to_string(),
+        host, mode: mode.to_string(), harness: false, sysroot: false, features: features.iter().map(|s| s.to_string()).collect(),
+        deps: deps.iter().map(|(d, n)| (*d, n.to_string())).collect(),
+    };
+    let units = Units { units: vec![
+        unit("app", "bin", "build", "src/main.rs", false, &[], &[(1, "rand"), (2, "build_script_build")]),
+        unit("rand", "lib", "build", "src/lib.rs", false, &["std"], &[]),
+        unit("app", "custom-build", "run-custom-build", "build.rs", true, &[], &[(3, "build_script_build")]),
+        unit("app", "custom-build", "build", "build.rs", true, &[], &[(4, "codegen")]),
+        unit("codegen", "lib", "build", "src/lib.rs", true, &[], &[(5, "generator")]),
+        unit("generator", "lib", "build", "src/lib.rs", true, &[], &[(6, "rand")]),
+        unit("rand", "lib", "build", "src/lib.rs", true, &["small_rng", "std"], &[]),
+    ], roots: vec![0], bins: Vec::new() };
+    let mut g = crate::unitgraph::load(&units, false).unwrap();
+    let sess = &std::sync::Arc::new(crate::Session::default());
+    let saved = REG.with(|r| r.borrow_mut().take());
+    register_and_strip(sess, &mut g.crates, &dir, false).unwrap();
+    let empty = format!("{dir}/proc_macro/empty.rs");
+    let by_name = |n: &str| g.crates.iter().find(|u| u.name == n).unwrap();
+    for name in ["codegen", "generator"] {
+        let c = by_name(name);
+        assert!(c.host_only, "{name}");
+        assert_eq!(c.src_path, empty, "{name} is compiled for the app");
+        assert!(c.deps.is_empty());
+    }
+    let rand = by_name("rand");
+    assert!(!rand.host_only);
+    assert_eq!(rand.src_path, format!("{dir}/rand/src/lib.rs"));
+    assert_eq!(rand.features, ["std"]);
+    let app = &g.crates[g.root];
+    assert_eq!(app.src_path, format!("{dir}/app/src/main.rs"));
+    assert_eq!(app.deps.iter().map(|d| g.crates[d.0].name.as_str()).collect::<Vec<_>>(), ["rand"]);
+    // the script still gets its build-dependency, from the units as cargo lists them
+    assert_eq!(g.build_scripts.len(), 1);
+    assert_eq!(g.build_scripts[0].build_deps, [(4, "codegen".to_string())]);
+    assert_eq!(g.raw[4].src_path, format!("{dir}/codegen/src/lib.rs"));
+    assert_eq!(g.raw[5].deps, [(6, "rand".to_string())]);
+    assert_eq!(g.raw[6].features, ["small_rng", "std"]);
+    REG.with(|r| *r.borrow_mut() = saved);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Updates registered units with build-script `cfgs` and `env` outputs (`run.rs` after
 /// `run_build_scripts`), and re-scans proc-macro units whose `cfgs` changed.
 pub fn set_build_outputs(sess: &std::sync::Arc<crate::Session>, units: &[CrateUnit], cfgs: &[Vec<String>], env: &[Vec<(String, String)>]) {
@@ -720,7 +775,11 @@ pub fn register_and_strip(sess: &std::sync::Arc<crate::Session>, units: &mut [Cr
             is_dep[*d] = true;
         }
     }
-    stack.retain(|&i| !is_dep[i]);
+    // (a host-only unit no unit depends on is a build-dependency: a build script links it, the
+    // host rustc compiles it for that, and no crate of the app can name it. As a root it was
+    // compiled for the app against the target side of what it shares with the app: phf_generator
+    // against a `rand` without the `small_rng` feature only the host side enables.)
+    stack.retain(|&i| !is_dep[i] && !units[i].host_only);
     while let Some(i) = stack.pop() {
         if app[i] || units[i].proc_macro {
             continue;
