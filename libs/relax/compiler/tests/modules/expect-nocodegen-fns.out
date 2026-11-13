@@ -1,0 +1,6 @@
+out fn items: 42 63
+out closures behind dyn: 35
+out formatting: 7-Some(7)
+out a host fn's address traps: true (host fn ran 0 times)
+out an arbitrary address traps: true
+out still callable: 8
