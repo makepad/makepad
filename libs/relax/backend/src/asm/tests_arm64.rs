@@ -1151,6 +1151,20 @@ fn macho_separators_and_comments() {
     assert_eq!(words(text(&o)), vec![0xD280_0020, 0xD280_0041, 0xD280_0062, 0xD65F_03C0]);
 }
 
+/// zeroize 1.9's optimization barrier `asm!("# {}", in(reg) ptr)`: a `#` that starts a
+/// statement is a line comment (operand included) on Mach-O and ELF alike; `#` before an
+/// immediate stays one.
+#[test]
+fn hash_at_statement_start_is_a_comment() {
+    for format in [Format::MachO, Format::Elf] {
+        let o = assemble(Arch::Arm64, format, Kind::Inline, &[Piece::Text("# ".to_string()), Piece::Op(0, None)], &[r(3)], false).unwrap();
+        assert!(text(&o).is_empty());
+        let src = "  # a comment\nmov x0, #1\n# 2 \"file.c\"\nret";
+        let o = assemble(Arch::Arm64, format, Kind::Inline, &[Piece::Text(src.to_string())], &[], false).unwrap();
+        assert_eq!(words(text(&o)), vec![0xD280_0020, 0xD65F_03C0]);
+    }
+}
+
 #[test]
 fn inst_and_arch_directives() {
     let o = ours(".arch armv8.2-a\n.inst 0xd503201f\n.inst 0xd65f03c0, 0x12345678\nnop").unwrap();
