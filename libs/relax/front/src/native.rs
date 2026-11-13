@@ -600,6 +600,10 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
     // ---- what cargo's scripts produced
     let mut scripts = Vec::new();
     let mut statics: Vec<String> = Vec::new();
+    // each static library with the search paths of the script that named it: the copy that script
+    // built (a bundled sqlite in its OUT_DIR) wins over one of the same name in a path another
+    // script added (on Linux, the system's non-PIC libsqlite3.a in the path fontconfig's script adds)
+    let mut static_homes: Vec<(String, Vec<String>)> = Vec::new();
     let mut archives: Vec<String> = Vec::new();
     let mut search: Vec<String> = Vec::new();
     let mut fw_search: Vec<String> = Vec::new();
@@ -632,11 +636,18 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
             scripts.push(out);
             continue;
         }
+        let mut own_search: Vec<String> = Vec::new();
         for p in strs("linked_paths") {
             match p.split_once('=') {
                 Some(("framework", d)) => fw_search.push(d.to_string()),
-                Some((_, d)) => search.push(d.to_string()),
-                None => search.push(p),
+                Some((_, d)) => {
+                    search.push(d.to_string());
+                    own_search.push(d.to_string());
+                }
+                None => {
+                    search.push(p.clone());
+                    own_search.push(p);
+                }
             }
         }
         for l in strs("linked_libs") {
@@ -645,7 +656,10 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
                 None => (String::new(), l.clone()),
             };
             match kind.as_str() {
-                "static" => statics.push(name),
+                "static" => {
+                    static_homes.push((name.clone(), own_search.clone()));
+                    statics.push(name);
+                }
                 "framework" => {
                     frameworks.push(name.clone());
                     out.system.push((name, true));
@@ -659,9 +673,9 @@ fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<Stri
         scripts.push(ScriptOut { ..out });
     }
     // the out dirs of the scripts hold archives too (cc's output is `native=<out_dir>`)
-    for name in &statics {
+    for (name, own_search) in &static_homes {
         let file = format!("lib{}.a", name);
-        match search.iter().map(|d| format!("{}/{}", d, file)).find(|p| std::path::Path::new(p).is_file()) {
+        match own_search.iter().chain(search.iter()).map(|d| format!("{}/{}", d, file)).find(|p| std::path::Path::new(p).is_file()) {
             Some(p) => {
                 if !archives.contains(&p) {
                     archives.push(p);
@@ -1453,6 +1467,32 @@ pub fn wrapper() -> Option<i32> {
         }
     }
     Some(0)
+}
+
+#[cfg(test)]
+#[test]
+fn a_static_library_comes_from_the_script_that_built_it() {
+    // two scripts: the first only adds a search path that happens to hold a library of the
+    // second's name (a system dev package); the second builds its own copy into its OUT_DIR
+    let root = std::env::temp_dir().join(format!("relax-native-static-home-{}", std::process::id()));
+    let (system, bundled) = (root.join("system"), root.join("bundled"));
+    for d in [&system, &bundled] {
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(d.join("libsqlite3.a"), b"!<arch>\n").unwrap();
+    }
+    let pkg = vec![
+        (String::new(), "fontish-sys".to_string(), "1.0.0".to_string()),
+        (String::new(), "sqlite-sys".to_string(), "1.0.0".to_string()),
+    ];
+    let scripts = vec![(0usize, Vec::new()), (1usize, Vec::new())];
+    let line = |name: &str, paths: &str, libs: &str| format!(
+        r#"{{"reason":"build-script-executed","package_id":"registry+https://github.com/rust-lang/crates.io-index#{name}@1.0.0","linked_libs":[{libs}],"linked_paths":[{paths}],"cfgs":[],"env":[],"out_dir":""}}"#);
+    let messages = format!("{}\n{}\n",
+        line("fontish-sys", &format!(r#""native={}""#, system.display()), r#""fontish""#),
+        line("sqlite-sys", &format!(r#""native={}""#, bundled.display()), r#""static=sqlite3""#));
+    let out = outputs_with(&pkg, &scripts, &[0, 1], &messages).unwrap_or_else(|e| panic!("{e}"));
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(out.archives, vec![format!("{}/libsqlite3.a", bundled.display())]);
 }
 
 #[cfg(test)]
