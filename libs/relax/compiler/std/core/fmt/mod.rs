@@ -542,6 +542,13 @@ impl<'a> Formatter<'a> {
     pub fn sign_aware_zero_pad(&self) -> bool {
         self.flags & rt::FLAG_ZERO_PAD != 0
     }
+    /// library/core/src/fmt/mod.rs: the six flags in their pre-1.87 positions (sign plus 1, sign
+    /// minus 2, alternate 4, zero pad 8, debug lower hex 16, debug upper hex 32), which are the
+    /// positions the flags have here.
+    #[deprecated(since = "1.24.0", note = "use the `sign_plus`, `sign_minus`, `alternate`, or `sign_aware_zero_pad` methods instead")]
+    pub fn flags(&self) -> u32 {
+        self.flags & 0x3F
+    }
     pub(crate) fn debug_lower_hex(&self) -> bool {
         self.flags & rt::FLAG_DEBUG_LOWER_HEX != 0
     }

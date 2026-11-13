@@ -112,6 +112,16 @@ impl<T> crate::ops::DerefMut for AssertUnwindSafe<T> {
         &mut self.0
     }
 }
+impl<T: fmt::Debug> fmt::Debug for AssertUnwindSafe<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AssertUnwindSafe").field(&self.0).finish()
+    }
+}
+impl<T: crate::default::Default> crate::default::Default for AssertUnwindSafe<T> {
+    fn default() -> AssertUnwindSafe<T> {
+        AssertUnwindSafe(T::default())
+    }
+}
 /// As real std (library/core/src/panic/unwind_safe.rs): `catch_unwind(AssertUnwindSafe(|| ..))`
 /// learns its result type R from this impl's Output.
 impl<R, F: FnOnce() -> R> crate::ops::FnOnce<()> for AssertUnwindSafe<F> {

@@ -123,8 +123,8 @@ pub fn run(core: &str) {
     std::fs::write(format!("{}/num/prim_traits.rs", core), p).expect("write prim_traits.rs");
 
     let mut z = String::new();
-    header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr), as real core's nonzero.rs macros generate it.");
-    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Rem, RemAssign};\n\n");
+    header(&mut z, "Per-type NonZero<T> API (constants, bit queries, checked/saturating arithmetic, conversions, BitOr, Neg), as real core's nonzero.rs macros generate it.");
+    z.push_str("use super::nonzero::NonZero;\nuse crate::num::TryFromIntError;\nuse crate::ops::{BitOr, BitOrAssign, Div, DivAssign, Neg, Rem, RemAssign};\n\n");
     for t in INTS.iter().filter(|t| t.pw != 32) {
         gen_nonzero(&mut z, t);
     }
@@ -200,6 +200,11 @@ fn gen_nonzero(o: &mut String, t: &Int) {
     let _ = writeln!(o, "impl BitOr<NonZero<{n}>> for {n} {{ type Output = NonZero<{n}>; fn bitor(self, rhs: NonZero<{n}>) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(self | rhs.get()) }} }} }}");
     let _ = writeln!(o, "impl BitOrAssign for NonZero<{n}> {{ fn bitor_assign(&mut self, rhs: NonZero<{n}>) {{ *self = *self | rhs; }} }}");
     let _ = writeln!(o, "impl BitOrAssign<{n}> for NonZero<{n}> {{ fn bitor_assign(&mut self, rhs: {n}) {{ *self = *self | rhs; }} }}");
+    if t.signed {
+        // negating a nonzero value never gives zero (MIN overflows as the primitive's `-` does)
+        let _ = writeln!(o, "impl Neg for NonZero<{n}> {{ type Output = NonZero<{n}>; fn neg(self) -> NonZero<{n}> {{ unsafe {{ NonZero::new_unchecked(-self.get()) }} }} }}");
+        let _ = writeln!(o, "impl<'a> Neg for &'a NonZero<{n}> {{ type Output = NonZero<{n}>; fn neg(self) -> NonZero<{n}> {{ -*self }} }}");
+    }
     o.push('\n');
 }
 
@@ -687,7 +692,12 @@ fn op_impls(o: &mut String, n: &str, ops: &[(&str, &str, &str)]) {
 fn shift_impls(o: &mut String, n: &str, r: &str) {
     for (tr, m, sym) in [("Shl", "shl", "<<"), ("Shr", "shr", ">>")] {
         let _ = writeln!(o, "impl {tr}<{r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ self {sym} rhs }} }}");
+        // core's forward_ref_binop! / forward_ref_op_assign!: either side by reference
+        let _ = writeln!(o, "impl<'a> {tr}<&'a {r}> for {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ self {sym} *rhs }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}<{r}> for &'a {n} {{ type Output = {n}; fn {m}(self, rhs: {r}) -> {n} {{ *self {sym} rhs }} }}");
+        let _ = writeln!(o, "impl<'a, 'b> {tr}<&'a {r}> for &'b {n} {{ type Output = {n}; fn {m}(self, rhs: &'a {r}) -> {n} {{ *self {sym} *rhs }} }}");
         let _ = writeln!(o, "impl {tr}Assign<{r}> for {n} {{ fn {m}_assign(&mut self, rhs: {r}) {{ *self = *self {sym} rhs; }} }}");
+        let _ = writeln!(o, "impl<'a> {tr}Assign<&'a {r}> for {n} {{ fn {m}_assign(&mut self, rhs: &'a {r}) {{ *self = *self {sym} *rhs; }} }}");
     }
 }
 

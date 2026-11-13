@@ -1,10 +1,11 @@
 //! Integer formatting: Display (decimal), Debug ({:x?}/{:X?} aware), LowerHex, UpperHex,
-//! Octal, Binary for every integer type, through Formatter::pad_integral as in real core.
-//! Shared non-generic helpers here; the per-type impls are generated (num/impls.rs, by
-//! gen/src/gen_fmt.rs).
+//! Octal, Binary, LowerExp, UpperExp for every integer type, through Formatter::pad_integral
+//! as in real core. Shared non-generic helpers here; the per-type impls are generated
+//! (num/impls.rs, by gen/src/gen_fmt.rs).
 
 mod impls;
 
+use super::float::{pad_formatted_parts, Formatted, Part};
 use super::{Formatter, Result};
 
 fn ascii(b: &[u8]) -> &str {
@@ -156,3 +157,90 @@ pub(crate) fn fmt_radix_u128(x: u128, shift: u32, upper: bool, f: &mut Formatter
     }
     f.pad_integral(true, prefix(shift), ascii(&buf[i..]))
 }
+
+/// Port of real core's `impl_Exp` (library/core/src/fmt/num.rs): `n` as a coefficient in [1, 10)
+/// and its power of ten, `1.234e3`. Without a precision the trailing zeros are dropped; a
+/// precision below the digit count rounds the coefficient half to even, one above it appends
+/// zeros. `$LEN`: the type's decimal digits, the point and `e99`.
+macro_rules! exp_inner {
+    ($name:ident, $T:ty, $LEN:expr) => {
+        pub(crate) fn $name(n: $T, is_nonnegative: bool, upper: bool, f: &mut Formatter<'_>) -> Result {
+            let mut exp = n.checked_ilog10().unwrap_or(0) as usize;
+            // the digits as an integer, coef_prec of them after the point
+            let mut coef = n;
+            let mut coef_prec = exp;
+            let more_prec = match f.precision {
+                None => {
+                    while coef_prec != 0 && coef % 10 == 0 {
+                        coef /= 10;
+                        coef_prec -= 1;
+                    }
+                    0
+                }
+                Some(fmt_prec) if fmt_prec >= coef_prec => fmt_prec - coef_prec,
+                Some(fmt_prec) => {
+                    // fewer than exp digits to drop: the power of ten stays below n
+                    let scale = (10 as $T).pow((coef_prec - fmt_prec) as u32);
+                    let floor = coef / scale;
+                    let over = coef % scale;
+                    let half = scale / 2;
+                    let round_up = if over < half {
+                        0
+                    } else if over > half {
+                        1
+                    } else {
+                        floor & 1
+                    };
+                    coef = floor + round_up;
+                    coef_prec = fmt_prec;
+                    // 9.95 to one decimal is 10.0: drop that zero for one more power of ten
+                    if round_up != 0 && coef.checked_ilog10().unwrap_or(0) as usize > coef_prec {
+                        coef /= 10;
+                        exp += 1;
+                    }
+                    0
+                }
+            };
+            let mut buf = [0u8; $LEN];
+            let coef_len = if coef_prec == 0 && more_prec == 0 {
+                1
+            } else {
+                buf[1] = b'.';
+                let mut i = 2 + coef_prec;
+                while i > 2 {
+                    i -= 1;
+                    buf[i] = b'0' + (coef % 10) as u8;
+                    coef /= 10;
+                }
+                2 + coef_prec
+            };
+            buf[0] = b'0' + coef as u8;
+            buf[coef_len] = if upper { b'E' } else { b'e' };
+            let text_len = if exp < 10 {
+                buf[coef_len + 1] = b'0' + exp as u8;
+                coef_len + 2
+            } else {
+                buf[coef_len + 1] = b'0' + (exp / 10) as u8;
+                buf[coef_len + 2] = b'0' + (exp % 10) as u8;
+                coef_len + 3
+            };
+            if more_prec == 0 {
+                return f.pad_integral(is_nonnegative, "", ascii(&buf[..text_len]));
+            }
+            let sign = if !is_nonnegative {
+                "-"
+            } else if f.sign_plus() {
+                "+"
+            } else {
+                ""
+            };
+            let mut out = Formatted::new(sign);
+            out.push(Part::Copy(&buf[..coef_len]));
+            out.push(Part::Zero(more_prec));
+            out.push(Part::Copy(&buf[coef_len..text_len]));
+            pad_formatted_parts(f, &out)
+        }
+    };
+}
+exp_inner!(fmt_exp_u64, u64, 24);
+exp_inner!(fmt_exp_u128, u128, 43);
