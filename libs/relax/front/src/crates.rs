@@ -99,7 +99,8 @@ pub fn disambiguate_multi_version_crates(units: &mut [CrateUnit]) {
 
 /// Crates Relax provides itself (std/substitutes.txt: `<name> <version prefix> <root>`):
 /// a unit of that crate at a matching version loads the provided root instead of its sources
-/// (same name; deps become core/alloc/std only; features ignored); one at another version is
+/// (same name; deps become core/alloc/std only; features ignored, except the ones the table says
+/// the provided root implements, each with the dependency it names); one at another version is
 /// compiled from its own source, which a --verbose load says. The rustc build keeps the real crates.
 /// Also hands the graph to the proc-macro host (macro_reg::register_and_strip); `additive`: the
 /// graph of a program started into a running one joins the registered graph.
@@ -131,10 +132,15 @@ fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) -
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 {
             continue;
         }
         let (name, ver, root) = (parts[0], parts[1], parts[2]);
+        // the features the provided root implements: (feature, the extern crate it needs)
+        let provided: Vec<(&str, Option<&str>)> = parts[3..].iter().map(|f| match f.split_once('=') {
+            Some((feature, dep)) => (feature, Some(dep)),
+            None => (*f, None),
+        }).collect();
         for u in units.iter_mut() {
             if base_crate_name(&u.name) != name || u.proc_macro {
                 continue;
@@ -146,8 +152,11 @@ fn apply_substitute_table(units: &mut [CrateUnit], std_dir: &str, table: &str) -
             }
             u.src_path = format!("{}/{}", std_dir, root);
             u.edition = 2021;
-            u.features.clear();
-            u.deps.clear();
+            // `ArrayVec<T, N>: Serialize` is part of what a dependent asked the crate for: a
+            // provided root without it fails that dependent's own impls (vodozemac's pickles).
+            u.features.retain(|f| provided.iter().any(|(feature, _)| feature == f));
+            let features = &u.features;
+            u.deps.retain(|(_, dep)| provided.iter().any(|(feature, needs)| *needs == Some(dep.as_str()) && features.iter().any(|f| f == feature)));
             u.host = None;
         }
     }
@@ -178,6 +187,39 @@ fn a_provided_crate_at_another_version_compiles_its_own_source_and_says_so() {
     assert_eq!(units[1].src_path, "/registry/smallvec-0.6.14/src/lib.rs");
     assert_eq!(units[1].features, ["union"]);
     assert_eq!(said, ["crate `smallvec` is version 0.6.14, substitutes.txt provides 1: its own source is compiled"]);
+}
+
+#[cfg(test)]
+#[test]
+fn a_provided_crate_keeps_the_features_its_root_implements_and_their_dependency() {
+    let unit = |features: &[&str]| CrateUnit {
+        name: "arrayvec".to_string(),
+        src_path: "/registry/arrayvec-0.7.8/src/lib.rs".to_string(),
+        edition: 2018,
+        features: features.iter().map(|f| f.to_string()).collect(),
+        deps: vec![(7, "serde".to_string()), (9, "zeroize".to_string())],
+        host: None,
+        proc_macro: false,
+        bin: false,
+        harness: false,
+        build_script: false,
+        version: "0.7.8".to_string(),
+        registry: true,
+    };
+    let mut units = vec![unit(&["default", "serde", "std", "zeroize"]), unit(&["default", "std"])];
+    let said = apply_substitute_table(&mut units, "/std", "arrayvec 0.7 arrayvec/lib.rs serde=serde\n");
+    assert!(said.is_empty());
+    assert_eq!(units[0].src_path, "/std/arrayvec/lib.rs");
+    assert_eq!(units[0].features, ["serde"]);
+    assert_eq!(units[0].deps, [(7, "serde".to_string())]);
+    // a unit that did not ask for the feature gets neither it nor the dependency
+    assert!(units[1].features.is_empty());
+    assert!(units[1].deps.is_empty());
+    // a feature without a dependency of its own
+    let mut units = vec![unit(&["write", "union"])];
+    apply_substitute_table(&mut units, "/std", "arrayvec 0.7 arrayvec/lib.rs write serde=serde\n");
+    assert_eq!(units[0].features, ["write"]);
+    assert!(units[0].deps.is_empty());
 }
 
 /// Unit indices with every crate after its dependencies.
