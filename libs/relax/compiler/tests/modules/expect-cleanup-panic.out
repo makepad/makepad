@@ -1,0 +1,6 @@
+out fuel spent under a destructor: 32 of 32 calls stopped
+out callable after fuel: true
+out no bombs: Ok(2)
+out destructor panics while unwinding: Err("index out of bounds: the len is 3 but the index is 9")
+out callable after bombs: Ok(2)
+out host frames cleaned up: 33

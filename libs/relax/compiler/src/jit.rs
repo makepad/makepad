@@ -3451,6 +3451,8 @@ fn raise_runtime_panic(mut message: String, site: u64, use_site_message: bool, r
     if let Some(msg) = constant {
         message = msg.to_string();
     }
+    // (before std's hook: the panic that started the unwind stays the one recorded)
+    module_cleanup_panicked(&message, regs);
     let hook = unsafe { (*cur_unit()).panic_hook.load(Ordering::Acquire) };
     if hook != 0 && !in_const_eval() {
         let msg = constant.unwrap_or(&message);
@@ -3546,12 +3548,53 @@ thread_local! {
     /// is running on this thread; 0 = none. A panic raised while it runs, under the same
     /// recovery point, is a panic during cleanup: rustc aborts (panic_in_cleanup).
     static CLEANING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// whose pad that cleanup is (unwind_walk's landing): host code's, a sandboxed module's (the
+    /// frame is a twin), or the interpreter's boundary (PAD_*)
+    static CLEANING_PAD: std::cell::Cell<u8> = const { std::cell::Cell::new(PAD_HOST) };
+}
+
+const PAD_HOST: u8 = 0;
+const PAD_TWIN: u8 = 1;
+/// the interpreter runs its frames' pads itself: the walk sees none of them
+const PAD_INTERP: u8 = 2;
+
+/// A panic raised while a cleanup pad of a sandboxed module runs. For host code that is a panic
+/// during cleanup and the process aborts, as rustc's does (raise_unwinding). A module's
+/// destructors are the module's code: one may panic, and none can run once the call's fuel is
+/// spent (every block of a twin pays before it runs, a pad's too), so the abort would let any
+/// module end the process. Its frame's cleanup ends here instead and the unwind goes on with the
+/// frame's caller, whose pads run as before. The panic that started the unwind stays the one
+/// recorded, reported and caught; this one is only said, and not when it repeats the first (spent
+/// fuel stops every pad on the way out with the same message).
+///
+/// Returns when the pad is not a module's. Under the interpreter the pads between its boundary
+/// and the recovery point are not known here: inside a module's call they count as the module's.
+fn module_cleanup_panicked(message: &str, regs: *const u64) {
+    let ctx = unsafe { *ctx_ptr() };
+    if ctx == 0 || CLEANING.with(|c| c.get()) != ctx {
+        return;
+    }
+    let module = match CLEANING_PAD.with(|c| c.get()) {
+        PAD_TWIN => true,
+        PAD_INTERP => crate::sandbox::current_module().is_some(),
+        _ => false,
+    };
+    if !module {
+        return;
+    }
+    let first = PANIC.with(|p| p.borrow().as_ref().map(|i| i.message.clone())).unwrap_or_default();
+    if first != message {
+        eprintln!("relax: a sandboxed module panicked while its frames were unwinding: {}\n  the rest of that frame's cleanup is skipped and the unwind goes on (first panic: {})", message, first);
+    }
+    CLEANING.with(|c| c.set(0));
+    unsafe { unwind_walk(regs) }
 }
 
 /// A panic from JIT code (panic trampoline): the report as `raise` makes it, then the frames'
 /// cleanup pads run on the way to the recovery point.
 fn raise_unwinding(kind: &str, message: String, site: u64, regs: *const u64) -> ! {
     let (rbp, ret) = unsafe { (*regs, *regs.add(1)) };
+    module_cleanup_panicked(&message, regs);
     let ctx = unsafe { *ctx_ptr() };
     if ctx != 0 && CLEANING.with(|c| c.get()) == ctx {
         let frames = collect_frames(rbp, ret, true);
@@ -3596,6 +3639,8 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
     let u = &*cur_unit();
     let tables = u.code.read().unwrap_or_else(|e| e.into_inner());
     let mut target: Option<(u64, u64, u64)> = None;
+    // whose pad the target is (module_cleanup_panicked)
+    let mut pad = PAD_HOST;
     // the sp of the frame (fp, ret) names, at its call
     let mut sp = regs as u64 + BLOCK_CALLER_SP;
     let mut native = None;
@@ -3620,9 +3665,10 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
         }
         if let Some((land_pc, sp_below)) = boundary {
             target = Some((fp, fp - sp_below, land_pc));
+            pad = PAD_INTERP;
             break;
         }
-        let Some((start, _, _)) = entry else { break };
+        let Some((start, _, slot)) = entry else { break };
         let image_info;
         let info = match tables.unwind.get(&start) {
             Some(i) => i,
@@ -3637,6 +3683,9 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
         let off = (ret - start) as u32;
         if let Some(&(_, stub)) = info.pads.iter().find(|p| p.0 == off) {
             target = Some((fp, fp - info.sp_off as u64, start + stub as u64));
+            if (slot as usize) < u.fns.len() && matches!(u.fns[slot as usize].key, FnKey::Sandbox(_)) {
+                pad = PAD_TWIN;
+            }
             break;
         }
         // this frame has no cleanup here: the caller's callee-saved registers come back from
@@ -3667,6 +3716,7 @@ unsafe fn unwind_walk(regs: *const u64) -> ! {
     match target {
         Some((fp, sp, pc)) => {
             CLEANING.with(|c| c.set(*ctx_ptr()));
+            CLEANING_PAD.with(|c| c.set(pad));
             // the block outlives this frame: land() reads it after sp moved up past it, so it
             // goes in a thread-local
             LAND_REGS.with(|b| {
