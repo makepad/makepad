@@ -42,7 +42,7 @@ pub(crate) fn blended_vertex(mesh:&Mesh,a:VertexId,b:VertexId,t:f64,ctx:&mut Con
 }
 fn factor(t:f64)->Result<()> {if t.is_finite()&&t>0.&&t<1. {Ok(())}else{Err(invalid("edge factor must be strictly between zero and one"))}}
 fn selected_edges(mesh:&Mesh,edges:&[EdgeKey],ctx:&mut Context<'_>)->Result<(Adjacency,BTreeSet<EdgeKey>)> {
-    ctx.limit("selected edges",edges.len() as u64,ctx.limits.max_edges as u64)?;ctx.checkpoint(edges.len() as u64)?;
+    ctx.checkpoint(edges.len() as u64)?;
     let set=edges.iter().copied().collect::<BTreeSet<_>>();
     if set.is_empty()||set.len()!=edges.len(){return Err(invalid("edge selection must be nonempty and unique"));}
     let adj=mesh.adjacency(ctx)?;

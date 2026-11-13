@@ -12,7 +12,8 @@ impl Renderer {
     /// at the successful world-replacement boundary, before submitting the
     /// new realm's first frame. It invalidates every cache derived from the
     /// old world while retaining uploaded asset geometry/textures, shader
-    /// and pass pools, stage policy, bake settings, shadow budget, and the
+    /// and pass pools, stage policy, bake settings, shadow budget, the
+    /// local shadow atlas (its cache is keyed on content, below), and the
     /// adaptive-quality history owned by this device.
     pub fn enter_realm(&mut self) {
         self.volume_fog.reset();
@@ -70,15 +71,18 @@ impl Renderer {
         self.lamp_cache.clear();
         self.lamp_cache_rev = None;
         self.light_grid = LightGrid::default();
+        // The local shadow atlas stays. A face is kept only for the same
+        // light in the same tile with the same camera, the same static
+        // casters (geometry ids and transforms) and the same movers inside,
+        // so a new world's faces miss by themselves and a restart of the same
+        // one finds its static faces; the atlas targets, pass and depth
+        // shaders are the device's. Rebuilding them cost every new world's
+        // first frame 1-2 ms.
         let cluster_config = self.clustered.config();
-        let shadow_config = self.clustered.shadows.config();
-        let soft_filter = self.clustered.shadows.soft_filter;
-        let shadow_source_radius = self.clustered.shadows.source_radius;
+        let shadows = std::mem::take(&mut self.clustered.shadows);
         self.clustered = crate::clustered::ClusteredLights::default();
         self.clustered.set_config(cluster_config);
-        self.clustered.shadows.set_config(shadow_config);
-        self.clustered.shadows.soft_filter=soft_filter;
-        self.clustered.shadows.source_radius=shadow_source_radius;
+        self.clustered.shadows = shadows;
         self.clustered_frames = 0;
         self.light_rank.clear();
         self.gi.reset();
@@ -553,6 +557,8 @@ impl Renderer {
         review.host_lights = self.host_lights.clone();
         review.host_asset_lights = self.host_asset_lights.clone();
         review.sky_time = self.sky_time;
+        review.wind = self.wind;
+        review.wind_clock = self.wind_clock;
         review.sky_clock = self.sky_clock;
         review.sky_hour = self.sky_hour;
         review.set_hdr_output(self.hdr_output);
@@ -626,9 +632,12 @@ impl Renderer {
         self.set_world_attachments(live.world_attachments.clone());
         self.model_anim_state = live.model_anim_state.clone();
         self.sky_time = live.sky_time;
+        self.wind = live.wind;
+        self.wind_clock = live.wind_clock;
         self.sky_clock = live.sky_clock;
         self.sky_hour = live.sky_hour;
         self.review_lights = Some(live.frame_lights.clone());
+        self.trample.mirror_from(&live.trample);
         self.grade = live.grade;
         self.bloom = live.bloom;
         self.fxaa = live.fxaa;
@@ -735,14 +744,16 @@ impl Renderer {
 
     /// The terrain paint pass (shaders/splat.rs): the same instance list,
     /// taking only the models with a painted layer. Until its pipeline
-    /// exists they stay on the PBR lane (their main layer).
+    /// exists they stay on the PBR lane (their main layer). `focal_px`: the
+    /// view's, for the grass's far carpet (`set_grass_carpet`).
     pub(super) fn draw_splat_models(
         &mut self, cx: &mut Cx3d, eye: Vec3f, lod_scale: f32, instances: &[ModelInstance],
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
-        frustum: Option<&Frustum>, stats: &mut RenderStats,
+        frustum: Option<&Frustum>, focal_px: f32, stats: &mut RenderStats,
     ) {
         if !self.splat_ready { return; }
         let Some(mut draw) = self.splat_draw.take() else { return };
+        self.set_grass_carpet(cx.cx, &mut draw, focal_px);
         self.draw_models_inner(cx, ModelDraw::Splat(&mut draw), LayerPhase::Opaque, eye, lod_scale, instances, lane, fog, sun, frustum, stats);
         self.splat_draw = Some(draw);
     }

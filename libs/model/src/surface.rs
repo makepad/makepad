@@ -135,7 +135,7 @@ impl SurfaceDerivation {
         if !matches!(channel, SurfaceChannel::Normal | SurfaceChannel::MetallicRoughness)
             || self.source_channel == SurfaceChannel::Normal
             || self.source_layer.as_ref().is_some_and(|name| !name_valid(name, limits))
-            || !self.strength.is_finite() || !(0.0..=16.0).contains(&self.strength)
+            || !self.strength.is_finite() || self.strength < 0.
             || !unit(self.roughness_min) || !unit(self.roughness_max)
             || self.roughness_min > self.roughness_max || !unit(self.metallic)
         { return Err(Error::Invalid("surface derivation")); }
@@ -375,18 +375,24 @@ fn unit(v: f64) -> bool {
 fn color_valid(v: &[f64]) -> bool {
     v.iter().all(|x| unit(*x))
 }
-fn name_valid(v: &str, limits: &Limits) -> bool {
-    !v.is_empty() && v.len() <= limits.max_name_bytes && !v.chars().any(char::is_control)
+fn name_valid(v: &str, _limits: &Limits) -> bool {
+    !v.is_empty() && !v.chars().any(char::is_control)
 }
 fn pattern_valid(p: &SurfacePattern) -> bool {
+    // surface_pattern uses i64 lattice coordinates: plank detail multiplies
+    // coordinates by six, then the fourth noise octave by eight. A strict
+    // inequality leaves representable room for neighbour and warp offsets.
+    let lattice_scale = i64::MAX as f64 / (6. * 8.);
     color_valid(&p.color_a)
         && color_valid(&p.color_b)
         && p.scale
             .iter()
-            .all(|x| x.is_finite() && *x > 0. && *x <= 4096.)
+            .all(|x| x.is_finite() && *x > 0. && *x < lattice_scale)
 }
 impl SurfaceMaterial {
     pub fn validate(&self, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<()> {
+        // These structs validate the glTF material contract consumed by the
+        // fur and shading shaders, independently of layer or stroke counts.
         if self.fur.is_some_and(|fur| !fur.valid()) {
             return Err(Error::Invalid("fur material: length 0.001..0.05m, density 0.05..1, scale 20..1000, seed 0..65535"));
         }
@@ -400,16 +406,13 @@ impl SurfaceMaterial {
             || !color_valid(&self.emissive)
             || !unit(self.alpha_cutoff)
             || !self.normal_scale.is_finite()
-            || !(0.0..=16.0).contains(&self.normal_scale)
+            || self.normal_scale < 0.
             || !self.emissive_strength.is_finite()
-            || !(0.0..=100000.0).contains(&self.emissive_strength)
+            || self.emissive_strength < 0.
         {
             return Err(Error::Invalid("surface material factors"));
         }
         for (channel, layers) in &self.channels {
-            if layers.len() > 32 {
-                return Err(Error::Budget("surface layers"));
-            }
             let mut ids = std::collections::BTreeSet::new();
             for layer in layers {
                 ctx.checkpoint(1)?;
@@ -446,9 +449,6 @@ impl SurfaceMaterial {
                     return Err(Error::Invalid("incomplete mip chain"));
                 }
             }
-        }
-        if self.memory_bytes() > limits.max_source_bytes {
-            return Err(Error::Budget("surface source bytes"));
         }
         Ok(())
     }
@@ -556,14 +556,8 @@ impl SurfaceState {
         Ok(())
     }
     fn validate_storage(&self, limits: &Limits) -> Result<()> {
-        if self.materials.len() > limits.max_materials
-            || self.vertex_colors.len() > limits.mesh.max_vertices
-        {
-            return Err(Error::Budget("surface entries"));
-        }
         let bytes = self.memory_bytes();
-        if bytes > limits.max_source_bytes
-            || bytes > limits.mesh.max_bytes
+        if bytes > limits.mesh.max_bytes
         {
             return Err(Error::Budget("surface bytes"));
         }
@@ -808,11 +802,10 @@ impl SurfaceState {
             } => {
                 brush_validate(*radius, *hardness, *opacity, color)?;
                 if points.is_empty()
-                    || points.len() > 256
                     || points
                         .iter()
                         .flatten()
-                        .any(|x| !x.is_finite() || x.abs() > 16.)
+                        .any(|x| !x.is_finite())
                 {
                     return Err(Error::Invalid("stroke points"));
                 }
@@ -854,7 +847,6 @@ impl SurfaceState {
                 if !color_valid(color)
                     || !unit(*opacity)
                     || vertices.is_empty()
-                    || vertices.len() > limits.mesh.max_vertices
                 {
                     return Err(Error::Invalid("vertex paint"));
                 }
@@ -875,7 +867,7 @@ impl SurfaceState {
                 }
             }
             VertexColors { object, vertices, colors } => {
-                if vertices.len() != colors.len() || vertices.is_empty() || vertices.len() > limits.mesh.max_vertices || !colors.iter().all(|c| color_valid(c)) {
+                if vertices.len() != colors.len() || vertices.is_empty()  || !colors.iter().all(|c| color_valid(c)) {
                     return Err(Error::Invalid("vertex colors"));
                 }
                 let mesh = objects.get(object).ok_or(Error::Invalid("unknown paint object"))?;

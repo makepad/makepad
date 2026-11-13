@@ -64,7 +64,7 @@ fn decompose(m: Matrix4) -> ([f64; 3], [f64; 4], [f64; 3]) {
     (t, quat_normalize(q).unwrap_or([0., 0., 0., 1.]), s)
 }
 fn clean_name(s: &str) -> String {
-    let s: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).take(40).collect();
+    let s: String = s.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' { c } else { '_' }).collect();
     if s.is_empty() { "part".into() } else { s }
 }
 fn num(v: &JsonValue) -> Option<f64> { match v { JsonValue::U64(n) => Some(*n as f64), JsonValue::I64(n) => Some(*n as f64), JsonValue::F64(n) => Some(*n), _ => None } }
@@ -103,7 +103,7 @@ fn read_accessor(loaded: &LoadedGltf, accessor: usize) -> Result<(Vec<f32>, usiz
 
 struct Rig { ordinal: HashMap<usize, u32>, skeleton: Skeleton, rests: Vec<Matrix4>, root_parent: HashMap<usize, Matrix4> }
 
-fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worlds: &[Matrix4], limits: &Limits, warnings: &mut Vec<String>) -> Result<Option<Rig>> {
+fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worlds: &[Matrix4], _limits: &Limits, warnings: &mut Vec<String>) -> Result<Option<Rig>> {
     let skins = loaded.document.skins.as_deref().unwrap_or(&[]);
     let Some(skin) = skins.first() else { return Ok(None) };
     if skins.len() > 1 { warnings.push("import_glb: only the first skin is imported".into()); }
@@ -132,7 +132,6 @@ fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worl
         kids.reverse(); stack.extend(kids);
     }
     let offset = synthetic as usize;
-    if order.len() + offset > limits.max_joints { return Err(Error::Budget("import_glb joints (raise the document joint limit)")); }
     let ordinal: HashMap<usize, u32> = order.iter().enumerate().map(|(i, n)| (*n, (i + offset) as u32)).collect();
     let nodes = loaded.document.nodes.as_deref().unwrap_or(&[]);
     let mut skeleton = Skeleton { joints: Vec::new() };
@@ -154,7 +153,7 @@ fn build_rig(loaded: &LoadedGltf, root: Matrix4, parents: &[Option<usize>], worl
     Ok(Some(Rig { ordinal, skeleton, rests, root_parent }))
 }
 
-fn read_clips(loaded: &LoadedGltf, rig: &Rig, limits: &Limits, warnings: &mut Vec<String>) -> Vec<AnimationClip> {
+fn read_clips(loaded: &LoadedGltf, rig: &Rig, _limits: &Limits, _warnings: &mut Vec<String>) -> Vec<AnimationClip> {
     let mut clips = Vec::new();
     for (ai, anim) in loaded.document.animations.as_deref().unwrap_or(&[]).iter().enumerate() {
         let samplers = array(anim.key("samplers"));
@@ -186,14 +185,13 @@ fn read_clips(loaded: &LoadedGltf, rig: &Rig, limits: &Limits, warnings: &mut Ve
                 if keys.last().is_some_and(|l| t <= l.time) { continue; }
                 keys.push(Keyframe { time: t, value });
             }
-            if keys.len() >= 2 && keys.last().unwrap().time <= limits.max_clip_duration { channels.push(AnimationChannel { joint, path, keys }); }
+            channels.push(AnimationChannel { joint, path, keys });
         }
         if channels.is_empty() { continue; }
         let base = clean_name(anim.key("name").and_then(JsonValue::string).map(String::as_str).unwrap_or("clip")).to_lowercase();
         let name = if clips.iter().any(|c: &AnimationClip| c.name == base) { format!("{base}_{ai}") } else { base };
         clips.push(AnimationClip { name, channels });
     }
-    if clips.len() > limits.max_clips { warnings.push(format!("import_glb: kept {} of {} clips", limits.max_clips, clips.len())); clips.truncate(limits.max_clips); }
     clips
 }
 
@@ -212,7 +210,11 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
     let mut done = vec![false; nodes.len()];
     for start in 0..nodes.len() {
         let mut chain = Vec::new(); let mut at = Some(start);
-        while let Some(i) = at { if done[i] || chain.len() > 256 { break; } chain.push(i); at = parents[i]; }
+        while let Some(i) = at {
+            if done[i] { break; }
+            if chain.len() == nodes.len() { return Err(Error::Invalid("import_glb: node hierarchy cycle")); }
+            chain.push(i); at = parents[i];
+        }
         while let Some(i) = chain.pop() { worlds[i] = matrix_mul(parents[i].map_or(IDENTITY_MATRIX, |p| worlds[p]), node_matrix(&nodes[i])); done[i] = true; }
     }
     let rig = build_rig(&loaded, root, &parents, &worlds, limits, &mut warnings)?;
@@ -288,7 +290,6 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
         let base = format!("{prefix}_{}", clean_name(node.name.as_deref().unwrap_or("part")));
         let n = names.entry(base.clone()).or_insert(0); *n += 1;
         let object = if *n == 1 { base } else { format!("{base}_{n}") };
-        if object.len() > limits.max_name_bytes { return Err(Error::Invalid("import_glb: object name too long; use a shorter prefix")); }
         operations.push(Operation::ImportMesh { object: object.clone(), source: m.to_bytes(&mut ctx)? });
         objects.push(object);
     }
@@ -308,7 +309,6 @@ pub fn import_glb(glb: &[u8], prefix: &str, material_base: u32, root: Matrix4, l
         joint_names = r.skeleton.joints.iter().map(|j| j.name.clone()).collect();
     }
     for (source, ordinal) in &used_materials {
-        if *ordinal as usize >= limits.max_materials { return Err(Error::Budget("import_glb materials")); }
         let gm = source.and_then(|i| materials.get(i));
         let pbr = gm.and_then(|m| m.pbr_metallic_roughness.as_ref());
         let factor = pbr.and_then(|p| p.base_color_factor).unwrap_or([1.; 4]).map(|v| v as f64);

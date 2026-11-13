@@ -261,7 +261,25 @@ pub fn inverse_skip(m: &Model, d: &mut Data, skipstage: i32, skipsensor: i32) {
     // implicit effective metric (built in inv_position): the forward dynamics solved (M+K)*qacc = qfrc + c +
     // J'*f, so the discrete-consistent inverse adds K*qacc - c
     if d.efm_active != 0 {
-        crate::unported!("mj_inverseSkip (active metric)");
+        metric::eff_mul_add(m, d, &mut ma, &d.qacc, 1);
+
+        // decoupled standalone free bodies took the local gyroscopic solve in the forward pass
+        // (discrete_gyro): mirror it, overwriting their rows with the local product
+        for j in 0..m.njnt {
+            let mut a = [0.0; 36];
+            if derivative::d_free_gyro_possible(m, d, j) == 0
+                || derivative::d_free_mhat(m, d, j, m.opt.timestep, &mut a, 1) == 0
+            {
+                continue;
+            }
+            let adr = m.jnt_dofadr[j] as usize;
+            blas::mul_mat_vec(&mut ma[adr..], &a, &d.qacc[adr..], 6, 6);
+        }
+
+        blas::sub_from(&mut ma, &d.efm_c, nv);
+        if !d.efm_ca.is_empty() {
+            blas::sub_from(&mut ma, &d.efm_ca, nv);
+        }
     }
 
     // qfrc_inverse += Ma - qfrc_passive - qfrc_constraint

@@ -48,4 +48,18 @@ fn source_roundtrip_preserves_uv_material_and_export() {
     assert_eq!(opened.materials()[&7].base_color_png,png); assert_eq!(opened.compile(None).unwrap().glb,compiled.glb);
     for n in [0,1,7,12,bytes.len()-1] { assert!(Document::from_bytes(&bytes[..n],Limits::default(),None).is_err()); }
     let mut extra=bytes; extra.push(0); assert!(Document::from_bytes(&extra,Limits::default(),None).is_err());
+    // A mirror (x -> -x) negates zero normal components and a literal may be
+    // -0.0; the source writes +0.0. The edited document holds the decoded
+    // values, so it compiles the bytes its reopened source compiles (after a
+    // checkpoint, the source holds the state itself, not edits to replay).
+    let mut doc=opened;
+    apply(&mut doc,"tyre",vec![Operation::Construction(ConstructionOperation { object:"tyre".into(),
+        kind:Construction::Shape { shape:Shape::Cone { bottom:0.3,top:0.3,height:0.2,segments:12,smooth:true },material:0 } })]);
+    let vertices=doc.object("tyre").unwrap().vertices().iter().map(|v|v.id).collect();
+    let mirror=[[-1.,0.,0.,0.],[0.,1.,0.,0.],[0.,0.,1.,0.],[0.,0.,0.,1.]];
+    apply(&mut doc,"mirror",vec![Operation::Transform { object:"tyre".into(),vertices,matrix:mirror },
+        Operation::Scene(SceneOperation::Node { object:"tyre".into(),node:SceneNode { transform:Transform { translation:[-0.0,0.5,0.0],..Default::default() },..Default::default() } })]);
+    doc.checkpoint(doc.head()).unwrap();
+    let reopened=Document::from_bytes(&doc.to_bytes(None).unwrap(),Limits::default(),None).unwrap();
+    assert!(doc.compile(None).unwrap().glb==reopened.compile(None).unwrap().glb,"a mirrored edit compiles the bytes of its reopened source");
 }

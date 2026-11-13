@@ -483,6 +483,10 @@ impl DynWorld {
         spec.option.gravity = gravity;
         spec.option.timestep = dt;
         spec.option.cone = CONE_PYRAMIDAL;
+        // A flex joint's spring on a small part is stiffer than an explicit substep holds (a jellyfish's needs 35
+        // substeps of a 240 Hz step): the discrete integrator takes the joints' springs implicitly in position and
+        // holds them at the substeps a jointed piece runs at.
+        if asm.joints.iter().any(|j| matches!(j.kind, JointKind::Flex { .. })) { spec.option.integrator = INT_DISCRETE; }
         spec.option.enableflags |= ENBL_SPECULATIVE;
         spec.option.sdf_initpoints = SDF_INITPOINTS;
         spec.option.sdf_iterations = SDF_ITERATIONS;
@@ -1023,6 +1027,27 @@ impl DynWorld {
 
     /// Sets joint `j`'s motor: a servo's angle or travel to go to (B relative to A from where it printed, within
     /// the joint's range), a drive's speed. A joint without a motor, or a target that is not finite, is left as it is.
+    /// Each joint at its angle from the print pose (radians; a slider's travel, mm), every part at rest. As on box3d
+    /// ([`crate::sim::MechWorld::pose`]), a ball turns about the line across its axis and the print's up.
+    pub fn pose(&mut self, asm: &Assembly, angles: &[f64]) {
+        for (i,(j,&angle)) in asm.joints.iter().zip(angles).enumerate() {
+            let Some(id)=self.joints[i] else { continue };
+            let adr=self.model.jnt_qposadr[id] as usize;
+            if self.model.jnt_type[id]==JNT_BALL {
+                // the ball turns its child, the side its axis was turned to (joint_spec): b turns by the angle from a
+                let sign=dot(triple(&self.model.jnt_axis,id),norm(j.axis)).signum();
+                let t=crate::sim::tilt_axis(norm(j.axis),asm.up);
+                let (s,c)=(0.5*sign*angle).sin_cos();
+                self.data.qpos[adr..adr+4].copy_from_slice(&[c,t[0]*s,t[1]*s,t[2]*s]);
+            } else {
+                self.data.qpos[adr]=angle;
+            }
+        }
+        self.data.qvel.fill(0.0);
+        self.wake_all();
+        forward::forward(&self.model,&mut self.data);
+    }
+
     pub fn set_motor(&mut self, j: usize, target: f64) {
         let Some(k) = self.motors.iter().position(|m| m.joint == j) else { return };
         let Some(id) = self.joints[j] else { return };

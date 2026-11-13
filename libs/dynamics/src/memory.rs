@@ -24,6 +24,9 @@ pub struct Scratch {
     contact_counts: Vec<Vec<i32>>,
     contact_infos: Vec<Vec<ContactInfo>>,
     ccd_buffers: Vec<(usize, CcdBuffer)>,
+    /// The primal solver's context, kept from one solve to the next (its arrays as the reference's arena keeps
+    /// its memory); a solve takes it and puts it back.
+    pub(crate) primal: Option<Box<crate::solver::PrimalContext>>,
 }
 
 /// Pooled vectors by size class: class c holds the vectors of capacity 2^c up to 2^(c+1) - 1. Taking and

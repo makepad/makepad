@@ -672,6 +672,9 @@ impl LocalShadows {
         self.next_owners.sort_unstable();
         std::mem::swap(&mut self.owners, &mut self.next_owners);
         self.stats.faces = self.faces.len();
+        if (self.stats.omitted_lights > 0 || self.stats.downsized_lights > 0) && first_report(live_id!(local_shadow_light_budget).0) {
+            log!("local shadow atlas budget: {} lights use smaller tiles, {} lights draw unshadowed; the strongest contributions for this view retain shadows", self.stats.downsized_lights, self.stats.omitted_lights);
+        }
     }
 
     /// Match this frame's faces against last frame's: a face keeps its

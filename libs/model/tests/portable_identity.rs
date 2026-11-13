@@ -75,7 +75,7 @@ fn programs() -> Vec<(&'static str, Vec<ProgramOp>)> {
 const GOLDEN: &[(&str, u64)] = &[
     ("sphere+cylinder", 0x73f3_858b_4f3d_f1cd),
     ("lathe+sweep", 0x0dc2_4fc8_8b97_c245),
-    ("shapes", 0x4e83_3371_811a_a309),
+    ("shapes", 0x5ab4_22fe_2c4c_dd09),
     ("character", 0x1f51_f2ba_c194_bafe),
 ];
 

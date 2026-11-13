@@ -2,43 +2,34 @@ use super::*;
 fn finite(values: &[f64]) -> Result<()> {
     if values.iter().any(|v| !v.is_finite()) { Err(Error::Invalid("expected finite number")) } else { Ok(()) }
 }
-fn bounded(len: usize, max: usize) -> Result<()> {
-    if len > max { Err(Error::Budget("authoring array")) } else { Ok(()) }
-}
-fn check_joint(joint: u32, l: &Limits) -> Result<()> {
-    if joint as usize >= l.max_joints { Err(Error::Budget("joint index")) } else { Ok(()) }
+fn check_joint(joint: u32, _limits: &Limits) -> Result<()> {
+    if joint as usize >= crate::rig::GLTF_JOINT_COUNT { Err(Error::Budget("glTF u16 joint index")) } else { Ok(()) }
 }
 fn check_map(joints: &BTreeMap<u32, u32>, l: &Limits) -> Result<()> {
-    bounded(joints.len(), l.max_joints)?;
     for (&a, &b) in joints { check_joint(a, l)?; check_joint(b, l)?; }
     Ok(())
 }
 fn check_fps(value: f64) -> Result<()> {
     finite(&[value])?;
-    if (1.0..=120.0).contains(&value) { Ok(()) } else { Err(Error::Invalid("fps must be1..120")) }
+    if value.is_finite() && value > 0. { Ok(()) } else { Err(Error::Invalid("fps must be finite and positive")) }
 }
 impl ClipOptions {
     fn check(&self, l: &Limits) -> Result<()> {
-        bounded(self.events.len(), 1024)?;
         let mut previous = 0.;
         for e in &self.events {
             finite(&[e.time])?;
-            if e.time < previous || e.time > l.max_clip_duration { return Err(Error::Invalid("clip event order/time")); }
-            if e.payload.len() > 4096 { return Err(Error::Invalid("clip event payload")); }
+            if e.time < previous { return Err(Error::Invalid("clip event order/time")); }
             name(&e.name, l)?; previous = e.time;
         }
-        bounded(self.morph_keys.len(), 32)?;
-        let mut total = 0usize;
         for (morph, keys) in &self.morph_keys {
-            bounded(keys.len(), l.max_keyframes.saturating_sub(total))?;
             if keys.is_empty() { return Err(Error::Invalid("empty morph keys")); }
             let mut previous = -1f64;
             for k in keys {
                 finite(&[k.time, k.weight])?; valid_weight(k.weight)?;
-                if k.time < 0. || k.time > l.max_clip_duration || k.time as f32 <= previous as f32 { return Err(Error::Invalid("morph key order/time")); }
+                if k.time < 0. || k.time as f32 <= previous as f32 { return Err(Error::Invalid("morph key order/time")); }
                 previous = k.time;
             }
-            total += keys.len(); name(morph, l)?;
+            name(morph, l)?;
         }
         Ok(())
     }
@@ -49,7 +40,6 @@ impl RigOperation {
         match self {
             MirrorJoints { joints, axis, names } => {
                 if *axis > 2 { return Err(Error::Invalid("mirror axis")); }
-                bounded(joints.len(), l.max_joints)?; bounded(names.len(), l.max_joints)?;
                 for &j in joints { check_joint(j, l)?; }
                 for (&j, n) in names { check_joint(j, l)?; name(n, l)?; }
                 if joints.windows(2).any(|p| p[0] >= p[1]) { return Err(Error::Invalid("duplicate joint")); }
@@ -60,7 +50,6 @@ impl RigOperation {
             ReparentJoint { joint, parent } => { check_joint(*joint, l)?; if let Some(p) = parent { check_joint(*p, l)?; } }
             Roll { joint, angle } => { check_joint(*joint, l)?; finite(&[*angle])?; }
             Pose(p) => {
-                bounded(p.joints.len(), l.max_joints)?;
                 for (&j, t) in &p.joints { check_joint(j, l)?; t.validate()?; }
                 name(&p.name, l)?;
             }
@@ -78,31 +67,30 @@ impl RigOperation {
                         check_joint(*middle, l)?; check_joint(*end, l)?; check_joint(*target, l)?; finite(pole)?;
                     }
                 }
-                name(&c.name, l)?; check_joint(c.joint, l)?; c.validate(l.max_joints)?;
+                name(&c.name, l)?; check_joint(c.joint, l)?; c.validate(crate::rig::GLTF_JOINT_COUNT)?;
             }
             SolvePose { pose } => name(pose, l)?,
             Ik { pose, root, middle, end, target, pole, .. } => {
                 name(pose, l)?; check_joint(*root, l)?; check_joint(*middle, l)?; check_joint(*end, l)?; finite(target)?; finite(pole)?;
             }
             BakeClip { name: n, poses, fps, .. } => {
-                bounded(poses.len(), l.max_keyframes)?;
                 for (time, pose) in poses { finite(&[*time])?; name(pose, l)?; }
                 name(n, l)?; check_fps(*fps)?; name_check_keys(n, poses, *fps, l)?;
             }
             BlendClip { name: n, a, b, weight, fps } => { name(n, l)?; name(a, l)?; name(b, l)?; finite(&[*weight])?; unit(*weight)?; check_fps(*fps)?; }
             RetargetClip { name: n, source, joints, translation_scale } => { name(n, l)?; name(source, l)?; check_map(joints, l)?; finite(&[*translation_scale])?; positive(*translation_scale)?; }
             ClipOptions { name: n, options } => { name(n, l)?; options.check(l)?; }
-            WeightLocks { object, joints } => { name(object, l)?; bounded(joints.len(), l.max_joints)?; for &j in joints { check_joint(j, l)?; } }
+            WeightLocks { object, joints } => { name(object, l)?;  for &j in joints { check_joint(j, l)?; } }
             Weights { object, vertices, edit } => {
                 match edit {
-                    WeightEdit::Assign { joint } => if *joint as usize >= l.max_joints { return Err(Error::Budget("weight assignment joint")); },
+                    WeightEdit::Assign { joint } => check_joint(*joint, l)?,
                     WeightEdit::Normalize { max_influences } | WeightEdit::Bind { max_influences, .. } => {
                         if *max_influences > u32::MAX as usize { return Err(Error::Invalid("expected u32 integer")); }
-                        if *max_influences == 0 || *max_influences > l.mesh.max_weights_per_vertex { return Err(Error::Budget("weight influences")); }
-                        if let WeightEdit::Bind { power, .. } = edit { finite(&[*power])?; positive(*power)?; if *power > 8. { return Err(Error::Invalid("binding power must be at most8")); } }
+                        if *max_influences == 0 { return Err(Error::Budget("weight influences")); }
+                        if let WeightEdit::Bind { power, .. } = edit { finite(&[*power])?; positive(*power)?; }
                     }
                     WeightEdit::Smooth { iterations, factor } => {
-                        if *iterations == 0 || *iterations > 64 { return Err(Error::Budget("weight smooth iterations")); }
+                        if *iterations == 0 { return Err(Error::Budget("weight smooth iterations")); }
                         finite(&[*factor])?; unit(*factor)?;
                     }
                     WeightEdit::Mirror { axis, joints, tolerance } => {
@@ -112,19 +100,16 @@ impl RigOperation {
                     WeightEdit::Transfer { source, max_distance } => { name(source, l)?; finite(&[*max_distance])?; positive(*max_distance)?; }
                 }
                 name(object, l)?;
-                if vertices.len() > l.mesh.max_vertices { return Err(Error::Budget("selection size")); }
                 let mut seen = BTreeSet::new();
                 if vertices.iter().any(|v| v.0 == 0 || !seen.insert(v)) { return Err(Error::Invalid("duplicate/zero vertex ID")); }
             }
             Morph { name: n, object, deltas, weight } => {
-                bounded(deltas.len(), l.mesh.max_vertices)?;
                 for (id, delta) in deltas { finite(delta)?; if id.0 == 0 || delta.iter().any(|v| !(*v as f32).is_finite()) { return Err(Error::Invalid("morph vertex/delta")); } }
                 finite(&[*weight])?; valid_weight(*weight)?; name(n, l)?; name(object, l)?;
             }
             CaptureMorph { name: n, object, target, weight } => { finite(&[*weight])?; valid_weight(*weight)?; name(n, l)?; name(object, l)?; name(target, l)?; }
             MorphWeight { name: n, weight } => { finite(&[*weight])?; valid_weight(*weight)?; name(n, l)?; }
         }
-        if self.memory_bytes() > l.max_transaction_bytes { return Err(Error::Budget("rig operation bytes")); }
         Ok(())
     }
 }
@@ -633,11 +618,11 @@ mod tests {
         ];
         for op in operations {
             op.check(&l).unwrap();
-            let mut w=crate::canon::Writer::new(usize::MAX);op.write(&mut w).unwrap();
+            let mut w=crate::canon::Writer::new();op.write(&mut w).unwrap();
             let mut r=crate::canon::Reader::new(&w.bytes);
             let again=RigOperation::read(&mut r,&l).unwrap();r.end().unwrap();
             assert_eq!(op,again);
-            let mut canonical=crate::canon::Writer::new(usize::MAX);again.write(&mut canonical).unwrap();
+            let mut canonical=crate::canon::Writer::new();again.write(&mut canonical).unwrap();
             assert_eq!(w.bytes,canonical.bytes);
         }
     }
@@ -660,10 +645,12 @@ mod tests {
                 kind: ConstraintKind::Aim { axis: [0.0, 0.0, 0.0], influence: 1.0, target: 1 }
             }),
             RigOperation::Weights { object: "x".into(), vertices: vec![], edit: WeightEdit::Normalize { max_influences: 0 } },
-            RigOperation::Morph { name: "x".into(), object: "o".into(), deltas: std::collections::BTreeMap::from([]), weight: 3.0 },
         ] {
             assert!(op.check(&l).is_err(),"{op:?}");
         }
+        // A morph weight has no range cap: overdriven weights are finite and valid.
+        let overdriven = RigOperation::Morph { name: "x".into(), object: "o".into(), deltas: std::collections::BTreeMap::from([]), weight: 3.0 };
+        assert!(overdriven.check(&l).is_ok(), "{overdriven:?}");
     }
 }
 

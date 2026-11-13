@@ -656,6 +656,16 @@ impl Renderer {
         live || s.wanted.is_some_and(|w| s.prepared_for != Some(w) && s.failed_for != Some(w))
     }
 
+    /// Whether the environment waits for the host's next draw: a preparation
+    /// that ended is taken there, or the next one submitted
+    /// (`environment_pending` turns false then, unless a newer key prepares
+    /// next). A job's end wakes the UI (`Event::Signal`), so a host that
+    /// waits on `items_ready` asks this after its draw and on a signal, and
+    /// draws again only then, never every frame while a job runs.
+    pub fn environment_needs_draw(&self) -> bool {
+        self.environment_pending() && self.ibl.job.as_ref().is_none_or(|job| job.handle.is_finished())
+    }
+
     /// How many preparations were submitted so far, the synchronous ones of
     /// a closed pool included (tests: a key change prepares exactly once).
     pub fn environment_preparations(&self) -> u64 {

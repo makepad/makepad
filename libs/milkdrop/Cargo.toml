@@ -12,7 +12,6 @@ version = "0.1.0"
 edition = "2021"
 description = "MilkDrop (projectM-compatible) preset renderer for makepad"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

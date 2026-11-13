@@ -820,6 +820,102 @@ pub fn d_flex_interp_mul(
     d_flex_interp_kernel(m, d, Some(res), Some(vec), s1, s2, k_rot_cache, None, 0, m.nflex);
 }
 
+// precompute unscaled K_rot for all elements into cache (same layout as m->flex_stiffness)
+pub fn d_flex_interp_cache_krot(m: &Model, d: &Data, k_rot_out: &mut [f64]) {
+    // use s1=1, s2=0 so scale=1 and K_rot_out gets unscaled values
+    d_flex_interp_kernel(m, d, None, None, 1.0, 0.0, None, Some(k_rot_out), 0, m.nflex);
+}
+
+// does flex f carry 1D rod bending stiffness
+fn flex_rod_active(m: &Model, f: usize) -> bool {
+    m.flex_dim[f] == 1 && m.flex_rigid[f] == 0 && m.flex_bendingadr[f] >= 0
+}
+
+// returns true if the interpolated flex is processed by mjd_flexInterp_mul
+pub fn d_flex_interp_processed(m: &Model, f: usize) -> bool {
+    if m.flex_interp[f] == 0 {
+        return false;
+    }
+    // strain constraints present: stiffness handled by the constraint solver
+    if m.flex_edgeequality[f] == 3 {
+        return false;
+    }
+    // element 0 may be an empty cell with zero stiffness
+    if m.flex_rigid[f] != 0 || core_util::flex_has_stiffness(m, f) == 0 {
+        return false;
+    }
+    true
+}
+
+// can ALL operator-processed interp flexes be assembled to dof-level CSR? Every node sits on a
+// simple slider body (body_simple == 2) or is fixed (0 dofs); a node on a jointless child is
+// classified by the body it is welded to
+pub fn d_flex_interp_assemblable(m: &Model) -> bool {
+    for f in 0..m.nflex {
+        if !d_flex_interp_processed(m, f) {
+            continue;
+        }
+        let bodyid = &m.flex_nodebodyid[m.flex_nodeadr[f] as usize..];
+        for n in 0..m.flex_nodenum[f] as usize {
+            let b = m.body_weldid[bodyid[n] as usize] as usize;
+            let dofnum = m.body_dofnum[b];
+            if dofnum == 0 {
+                continue;
+            }
+            if m.body_simple[b] != 2 || dofnum != 3 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// does any flex use the passive contact path?
+pub fn d_flex_passive_contact_any(m: &Model) -> bool {
+    for f in 0..m.nflex {
+        if core_util::eff_flex_contact_possible(m, f) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+// does ANY flex contribute assemblable implicit stiffness?
+pub fn d_flex_stiff_any(m: &Model, flg_interp: bool) -> bool {
+    for f in 0..m.nflex {
+        if flg_interp && d_flex_interp_processed(m, f) {
+            return true;
+        }
+        if m.flex_interp[f] == 0 && m.flex_rigid[f] == 0 && m.flex_dim[f] >= 2
+            && m.flex_stiffnessadr[f] >= 0 && m.flex_stiffness[m.flex_stiffnessadr[f] as usize] != 0.0
+            && core_util::flex_simple(m, f) != 0
+        {
+            return true;
+        }
+        if flex_rod_active(m, f) && core_util::flex_simple(m, f) != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+// does this standard flex contribute implicit stiffness under the given term flags? 1D rod
+// bending is state-dependent and therefore follows flg_stretch
+pub fn d_flex_stiff_active_gen(m: &Model, f: usize, flg_bend: bool, flg_stretch: bool, flg_general: bool) -> bool {
+    if flex_rod_active(m, f) {
+        return flg_stretch && (flg_general || core_util::flex_simple(m, f) != 0);
+    }
+    if m.flex_interp[f] != 0 || m.flex_rigid[f] != 0 || m.flex_dim[f] < 2
+        || (!flg_general && core_util::flex_simple(m, f) == 0)
+    {
+        return false;
+    }
+    let bend = flg_bend && m.flex_bendingadr[f] >= 0;
+    let stretch = flg_stretch && m.flex_stiffnessadr[f] >= 0
+        && m.flex_stiffness[m.flex_stiffnessadr[f] as usize] != 0.0;
+    bend || stretch
+}
+
 fn dcmotor_inputs(m: &Model, d: &Data, i: usize, u4: &mut [f64; 4]) {
     let ctrlnum = m.actuator_ctrlnum[i] as usize;
     let mut u = [0.0; 4];

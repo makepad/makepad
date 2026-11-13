@@ -4,7 +4,6 @@ use std::collections::{BTreeMap,BTreeSet,VecDeque};
 
 impl Mesh {
     pub fn pin_uv(&mut self,corners:&[CornerId],pinned:bool,ctx:&mut Context<'_>)->Result<ChangeSet>{
-        ctx.limit("UV pin selection",corners.len()as u64,ctx.limits.max_corners as u64)?;
         let set=corners.iter().copied().collect::<BTreeSet<_>>();if set.len()!=corners.len(){return Err(invalid("duplicate UV pin selection"));}
         let valid=self.corners.iter().map(|c|c.id).collect::<BTreeSet<_>>();for &id in &set{ctx.checkpoint(1)?;if !valid.contains(&id){return Err(MeshError::UnknownElement(ElementId::Corner(id)));}}
         Ok(self.edit(ctx,corners.len().saturating_mul(128),|m,ctx|{for &c in &set{ctx.checkpoint(1)?;if pinned{m.uv_pins.insert(c);}else{m.uv_pins.remove(&c);}}Ok(((),Vec::new()))})?.1)

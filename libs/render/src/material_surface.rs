@@ -67,11 +67,38 @@ pub const SPLAT_LAYERS: usize = 8;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SplatSurface {
     pub layers: Vec<SplatLayer>,
+    /// The weight map, or a worn road part's band map ([`SplatBand`]).
     pub weights_png: Vec<u8>,
     pub origin: [f32; 2],
     pub cell: f32,
     pub width: f32,
     pub rows: f32,
+    pub band: Option<SplatBand>,
+}
+
+/// A worn road part's paint (gen level road.rs, glb.rs `band`): the
+/// renderer's band masks (shaders/splat.rs), drawn from its vertices'
+/// band coordinates (the AO lane, model.rs `MODEL_VERTEX_FLOATS`) and its
+/// band map, which rides the weight-map slot (`weights_png`): a single
+/// mesh surface reads no weights.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SplatBand {
+    /// Arc of the part's first band coordinate, and the spans its two
+    /// coordinates decode over (arc past `base`; lateral centred on the
+    /// centre line), metres.
+    pub base: f32,
+    pub span: f32,
+    pub lateral: f32,
+    /// The map: metres of arc per texel, texels per row (each row starts
+    /// on the previous row's last texel), rows.
+    pub cell: f32,
+    pub row: f32,
+    pub rows: f32,
+    /// The carriageway's half width; a closed road's arc (0: open).
+    pub half: f32,
+    pub length: f32,
+    /// Amounts 0..1: the worn line, sealant seams, repairs, dirty edges.
+    pub wear: [f32; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +139,16 @@ pub fn lamp_gain(role: makepad_gltf::GlbLamp, signals: makepad_scene::light::Lam
     }
 }
 impl MaterialSurface {
+    /// Leave a worn road part's band off (its vertices' AO lane carries
+    /// something else: model.rs `PrimSpan::band`): the paint draws plain.
+    pub fn drop_band(&mut self) {
+        if let Some(splat) = self.splat.as_ref().filter(|s| s.band.is_some()) {
+            let mut plain = (**splat).clone();
+            plain.band = None;
+            plain.weights_png = Vec::new();
+            self.splat = Some(std::sync::Arc::new(plain));
+        }
+    }
     pub fn base_semantic(&self) -> PixelSemantic {
         if self.msdf.is_some() { PixelSemantic::Data }
         else if self.alpha_mode == 1 { PixelSemantic::MaskedColor }
@@ -171,6 +208,57 @@ pub struct PreparedTexture {pub width:usize,pub height:usize,pub data:Vec<u32>,p
     /// the stored Basis/UASTC form), when the host enabled a compression
     /// target. `data` is then empty: only the blocks go to the GPU.
     pub compressed:Option<(CompressedTextureFormat,Vec<u8>)>}
+/// A binding's content-cached GPU texture, including every uploaded mip and array layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextureCharge {
+    pub key: u64,
+    pub bytes: usize,
+    pub width: usize,
+    pub height: usize,
+    pub layers: usize,
+    pub mips: usize,
+    pub compressed: Option<CompressedTextureFormat>,
+    pub slot: TextureSlot,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureSlot {
+    Base, Detail, Orm, Normal, Occlusion, Emissive,
+    SplatAlbedo, SplatNormal, SplatWeights,
+}
+
+impl TextureCharge {
+    pub fn rgba_compressible(&self) -> bool {
+        self.compressed.is_none() && self.width * self.height >= COMPRESS_MIN_TEXELS
+    }
+}
+
+/// Arrays share only when their layer content and order agree with the upload.
+pub fn splat_array_key(layers: &[std::sync::Arc<PreparedTexture>]) -> u64 {
+    layers.iter().fold(0x5b1a_7a77_u64 ^ layers.len() as u64, |h, t| {
+        (h ^ t.hash).wrapping_mul(0x100_0000_01b3).rotate_left(29)
+    })
+}
+
+fn splat_array_format(layers: &[std::sync::Arc<PreparedTexture>]) -> Option<CompressedTextureFormat> {
+    let format = layers[0].compressed.as_ref()?.0;
+    layers.iter().all(|t| t.compressed.as_ref().is_some_and(|(f, _)| *f == format)).then_some(format)
+}
+
+pub(crate) fn splat_array_charge(layers: &[std::sync::Arc<PreparedTexture>], slot: TextureSlot) -> TextureCharge {
+    let first = &layers[0];
+    TextureCharge {
+        key: splat_array_key(layers),
+        bytes: layers.iter().map(|t| t.bytes()).sum(),
+        width: first.width,
+        height: first.height,
+        layers: layers.len(),
+        mips: first.max_level + 1,
+        compressed: splat_array_format(layers),
+        slot,
+    }
+}
+
 /// The lowest alpha (0..255) any texel of one BC7 block can decode to: the
 /// smaller alpha endpoint (texels interpolate between the two). Modes 0-3
 /// carry no alpha; in modes 4 and 5 `rotation` swaps a colour channel into
@@ -496,6 +584,13 @@ impl PreparedTexture {
         if let Ok(mut memo)=MEMO.lock() {memo.get_or_insert_with(Default::default).insert(self.hash,cutout);}
         cutout
     }
+    pub(crate) fn charge(&self, slot: TextureSlot) -> TextureCharge {
+        TextureCharge {
+            key: self.hash, bytes: self.bytes(), width: self.width, height: self.height,
+            layers: 1, mips: self.max_level + 1,
+            compressed: self.compressed.as_ref().map(|(format, _)| *format), slot,
+        }
+    }
     /// Bytes this texture takes on the GPU.
     pub fn bytes(&self)->usize{match &self.compressed {Some((_,blocks))=>blocks.len(),None=>self.data.len()*4}}
     /// Replace the RGBA chain with `target` blocks transcoded from `uastc`
@@ -599,6 +694,9 @@ pub struct PreparedSplat {
     pub stochastic: [[f32; 4]; 2],
     pub map: [f32; 4],
     pub size: [f32; 4],
+    /// A worn road part's band uniforms (`splat_band`, `splat_band_map`,
+    /// `splat_wear`); all zero without one.
+    pub band: [[f32; 4]; 3],
 }
 
 /// The splat lane's bindings (shaders/splat.rs): the albedo and normal
@@ -621,6 +719,10 @@ pub struct UploadedSplat {
     pub map: [f32; 4],
     /// Weight map: texels per row, rows per page, pages, layers.
     pub size: [f32; 4],
+    /// A worn road part's band: (base, span, lateral span, half width),
+    /// (metres per texel, texels per row, rows, closed length), wear
+    /// amounts. All zero: no band.
+    pub band: [[f32; 4]; 3],
 }
 
 /// One kind's layers at a common size: the first texture's (a layer
@@ -716,23 +818,33 @@ impl PreparedSplat {
         let mut stochastic = [[0.0f32; 4]; 2];
         for (i, l) in layers.iter().enumerate() { stochastic[i / 4][i % 4] = if l.stochastic { 1.0 } else { 0.0 }; }
         let pages = layers.len().div_ceil(4) as f32;
-        Ok(Self { albedo, normal, weights, params, surface, macro_variation, stochastic, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32] })
+        let band = splat.band.as_ref().map_or([[0.0; 4]; 3], |b| [[b.base, b.span, b.lateral, b.half], [b.cell, b.row, b.rows, b.length], b.wear]);
+        Ok(Self { albedo, normal, weights, params, surface, macro_variation, stochastic, map: [splat.origin[0], splat.origin[1], 1.0 / splat.cell.max(1e-6), 0.0], size: [splat.width, splat.rows, pages, layers.len() as f32], band })
     }
 
     /// Upload, sharing the arrays (by their layers' content) and the
     /// weight map (by its own) through the renderer's texture cache.
     pub fn upload(self, cx: &mut Cx, cache: &mut std::collections::HashMap<u64, Texture>) -> UploadedSplat {
-        let array = |cx: &mut Cx, cache: &mut std::collections::HashMap<u64, Texture>, layers: &[std::sync::Arc<PreparedTexture>]| -> Texture {
-            let key = layers.iter().fold(0x5b1a_7a77_u64 ^ layers.len() as u64, |h, t| (h ^ t.hash).wrapping_mul(0x100_0000_01b3).rotate_left(29));
+        // The layers go into one array buffer of its final size by block
+        // copies: this runs on the frame that uploads the model, and an
+        // element-by-element collect of a splat's megabytes cost that frame
+        // several milliseconds.
+        fn concat<'a, T: Copy + 'a>(parts: impl Iterator<Item = &'a [T]> + Clone) -> Vec<T> {
+            let mut out = Vec::with_capacity(parts.clone().map(<[T]>::len).sum());
+            for part in parts { out.extend_from_slice(part); }
+            out
+        }
+        let array =|cx: &mut Cx, cache: &mut std::collections::HashMap<u64, Texture>, layers: &[std::sync::Arc<PreparedTexture>]| -> Texture {
+            let key = splat_array_key(layers);
             if let Some(t) = cache.get(&key) { return t.clone(); }
             let first = &layers[0];
-            let texture = match &first.compressed {
-                Some((format, _)) if layers.iter().all(|t| t.compressed.as_ref().is_some_and(|(f, _)| f == format)) => {
-                    let data = layers.iter().flat_map(|t| t.compressed.as_ref().map(|(_, b)| b.iter().copied()).into_iter().flatten()).collect();
-                    Texture::new_with_format(cx, TextureFormat::VecArrayMipCompressed { width: first.width, height: first.height, layers: layers.len(), format: *format, data: Some(data), max_level: Some(first.max_level), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full })
+            let texture = match splat_array_format(layers) {
+                Some(format) => {
+                    let data = concat(layers.iter().map(|t| t.compressed.as_ref().map_or(&[][..], |(_, b)| b.as_slice())));
+                    Texture::new_with_format(cx, TextureFormat::VecArrayMipCompressed { width: first.width, height: first.height, layers: layers.len(), format, data: Some(data), max_level: Some(first.max_level), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full })
                 }
                 _ => {
-                    let data = layers.iter().flat_map(|t| t.data.iter().copied()).collect();
+                    let data = concat(layers.iter().map(|t| t.data.as_slice()));
                     Texture::new_with_format(cx, TextureFormat::VecArrayMipBGRAu8_32 { width: first.width, height: first.height, layers: layers.len(), data: Some(data), max_level: Some(first.max_level), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full })
                 }
             };
@@ -742,7 +854,7 @@ impl PreparedSplat {
         let albedo = array(cx, cache, &self.albedo);
         let normal = array(cx, cache, &self.normal);
         let weights = self.weights.upload_cached(cx, cache);
-        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, macro_variation: self.macro_variation, stochastic: self.stochastic, map: self.map, size: self.size }
+        UploadedSplat { albedo, normal, weights, params: self.params, surface: self.surface, macro_variation: self.macro_variation, stochastic: self.stochastic, map: self.map, size: self.size, band: self.band }
     }
 
     pub fn bytes(&self) -> usize { self.albedo.iter().chain(&self.normal).map(|t| t.bytes()).sum::<usize>() + self.weights.bytes() }
@@ -792,7 +904,7 @@ mod tests{
             normal_png: Some(Cx::encode_rgba_as_png(2, 2, &normal).unwrap()),
             scale: 0.5, roughness: 0.7, metallic: 0.0, bump: 0.0, relief: 0.04, wet: 0.6, puddles: 0.25, macro_variation: [0.2, 0.05, 0.1, 14.0], stochastic: true,
         };
-        let source = SplatSurface { layers: vec![layer], weights_png: Vec::new(), origin: [0.0; 2], cell: 1.0, width: 1.0, rows: 1.0 };
+        let source = SplatSurface { layers: vec![layer], weights_png: Vec::new(), origin: [0.0; 2], cell: 1.0, width: 1.0, rows: 1.0, band: None };
         let prepared = PreparedSplat::prepare(&source, &mut 4096).unwrap();
         assert_eq!(prepared.params[0], [0.5, 0.7, 0.0, 0.0], "roughness remains available with bump zero");
         assert_eq!(prepared.surface[0], [0.04, 0.6, 0.25, 32.0 / 255.0], "puddle share selects the lowest quarter");

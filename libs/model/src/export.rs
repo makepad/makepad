@@ -28,7 +28,7 @@ struct CachedObject {
 struct CachedTexture {
     msdf: bool,
     layers: Vec<crate::SurfaceLayer>,
-    limits: (u32, usize, usize, usize),
+    limits: (u32, usize),
     texture: Option<makepad_gltf::GlbPbrTexture>,
 }
 
@@ -93,8 +93,8 @@ impl Document {
     /// Skinned output bakes a shared image and remaps derived UVs so consumers
     /// using the first embedded image render every source material correctly.
     /// A document skeleton adds skinning to every primitive; every rendered
-    /// vertex must then have one to four known influences. Greater influence
-    /// counts are refused rather than silently pruned. Editable rest TRS is
+    /// vertex must then have known influences. Export keeps the four strongest
+    /// influences and renormalizes them, with a diagnostic per affected mesh. Editable rest TRS is
     /// applied by the final authoring pass; cubic controls bake at 60 Hz.
     /// Bounds are bind-pose bounds, not a conservative animated-motion envelope.
     /// Existing GLB augmentation stages are bounded and cancellation is checked
@@ -126,9 +126,6 @@ impl Document {
             )
             .ok_or(Error::Budget("compiled triangles"))
         })?;
-        if predicted_triangles > self.limits().mesh.max_triangles {
-            return Err(Error::Budget("compiled triangles"));
-        }
         let texture_bytes = self
             .materials()
             .values()
@@ -155,6 +152,11 @@ impl Document {
         }
         for (name, mesh) in self.objects() {
             ctx.checkpoint(1)?;
+            // augment_glb_skin packs JOINTS_0/WEIGHTS_0 as four lanes, keeping
+            // the strongest influences and renormalizing them. Editable weights stay intact.
+            if joint_count > 0 && mesh.vertices().iter().any(|v| v.weights.len() > 4) {
+                eprintln!("model mesh {name}: exported four strongest joint influences per vertex, renormalized");
+            }
             // Skinned export remaps UVs and weights, and morphs keep distinct
             // corners. Cache only the static, welded representation.
             let reusable = cache.is_some() && joint_count == 0 && weld_corners;
@@ -187,9 +189,6 @@ impl Document {
             triangles = triangles
                 .checked_add(triangulated.triangles.len())
                 .ok_or(Error::Budget("compiled triangles"))?;
-            if triangles > self.limits().mesh.max_triangles {
-                return Err(Error::Budget("compiled triangles"));
-            }
             // Conservative bound includes temporary writer copies and accessors.
             if triangles.saturating_mul(384) > self.limits().mesh.max_bytes {
                 return Err(Error::Budget("compile working bytes"));
@@ -242,9 +241,6 @@ impl Document {
                             return Err(Error::Invalid(
                                 "skinned compile requires weights on every rendered vertex",
                             ));
-                        }
-                        if v.weights.len() > 4 {
-                            return Err(Error::Invalid("skinned compile supports at most four influences; reduce weights explicitly"));
                         }
                         let start = part.weights.len();
                         part.weights.resize(start + joint_count, 0.);
@@ -449,7 +445,6 @@ impl Document {
                         let mut values = Vec::with_capacity(channel.keys.len() * lanes);
                         if self.rig().clip_options.get(&clip.name).is_some_and(|o|o.interpolation==crate::Interpolation::Cubic) {
                             let steps=(clip.duration()*60.).ceil()as usize;
-                            if steps.saturating_add(1).saturating_mul(clip.channels.len())>self.limits().max_keyframes{return Err(Error::Budget("baked cubic clip frames"));}
                             for i in 0..=steps {ctx.checkpoint(1)?;let time=(i as f64/60.).min(clip.duration());let pose=self.rig().sample_clip(skeleton,clip,time)?;
                                 let t=pose[channel.joint as usize];let value=match channel.path{AnimationPath::Translation=>[t.translation[0],t.translation[1],t.translation[2],0.],AnimationPath::Rotation=>t.rotation,AnimationPath::Scale=>[t.scale[0],t.scale[1],t.scale[2],0.]};
                                 times.push(f32_value(time)?);for &v in &value[..lanes]{values.push(f32_value(v)?);}
@@ -474,9 +469,6 @@ impl Document {
             }
         }
         glb = crate::authoring_export::finish(self, glb, &primitives, delivery, &mut ctx)?;
-        if glb.len() > self.limits().max_source_bytes {
-            return Err(Error::Budget("compiled GLB"));
-        }
         ctx.checkpoint(glb.len() as u64)?;
         Ok(CompiledModel {
             warnings: delivery.map_or_else(Vec::new, |d| d.warnings.clone()),
@@ -548,8 +540,7 @@ fn export_surface(
                 }
                 let layers = source.channels.get(&channel).map(Vec::as_slice).unwrap_or(&[]);
                 let msdf = channel == SurfaceChannel::BaseColor && source.shading.is_some_and(|s| s.msdf > 0.0);
-                let limits = (doc.limits().max_texture_dimension, doc.limits().max_texture_bytes,
-                    doc.limits().mesh.max_bytes, doc.limits().max_source_bytes);
+                let limits = (doc.limits().max_texture_dimension, doc.limits().mesh.max_bytes);
                 let hit = cache.as_deref().and_then(|c| c.textures.get(&(*id, channel)))
                     .filter(|c| c.msdf == msdf && c.limits == limits && c.layers == layers
                         && c.layers.iter().zip(layers).all(|(a, b)| a.opacity.to_bits() == b.opacity.to_bits()));

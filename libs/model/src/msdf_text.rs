@@ -1,5 +1,6 @@
 //! Shaped, embedded vector text for material textures and vector canvases.
 //! RGB is a distance field, never colour; A is an independent badge SDF.
+use crate::Limits;
 use makepad_font_core::{
     font::{Font, FontId},
     font_face::{FontData, FontFace},
@@ -145,7 +146,7 @@ pub struct MsdfTextSpec {
     pub weight: Option<f32>,
     pub width: Option<f32>,
     pub letter_spacing: f32,
-    /// Texels per em, 16..=256.
+    /// Texels per em, at least 16; the completed image must fit the glyph atlas.
     pub resolution: u32,
     pub badge: Option<String>,
     /// Additional margin in ems (rect/text margin by default).
@@ -178,11 +179,10 @@ pub struct MsdfTextImage {
 
 pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
     let count = spec.text.chars().count();
-    if count > 64 || spec.text.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
-        return Err("text needs one line of at most 64 characters".into());
+    if spec.text.chars().any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+        return Err("text needs one line without control characters".into());
     }
-    if spec.plate && count > 4 { return Err("plate prefix needs at most 4 characters".into()); }
-    if !(16..=256).contains(&spec.resolution) { return Err("resolution must be 16..=256 texels per em".into()); }
+    if spec.resolution < 16 { return Err("resolution must be at least 16 texels per em".into()); }
     if !spec.letter_spacing.is_finite() || !spec.padding.is_finite() || spec.padding < 0.0
         || !spec.border_width.is_finite() || spec.border_width < 0.0 {
         return Err("letter_spacing must be finite; padding and border_width must be finite, nonnegative ems".into());
@@ -219,8 +219,9 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
     let mut settings = Settings::default().msdfer;
     settings.cutoff = 0.5;
     settings.radius = settings.radius.max(2.0 * (spec.border_width * res + 1.0));
+    // Match the document texture atlas limit; resolution itself is a UI hint.
     // The guard alone must fit the texture limit before converting to usize.
-    if !settings.radius.is_finite() || settings.radius + 2.0 > 4096.0 {
+    if !settings.radius.is_finite() || settings.radius + 2.0 > Limits::default().max_texture_dimension as f32 {
         return Err(format!("resolution {} with text length {count} exceeds the 4096 texel texture side", spec.resolution));
     }
     settings.padding = (settings.radius * 0.5).ceil() as usize + 1;
@@ -239,7 +240,7 @@ pub fn msdf_text(spec: &MsdfTextSpec) -> Result<MsdfTextImage, String> {
     let width = (bw + guard * 2.0).ceil();
     let row_height = (bh + guard * 2.0).ceil();
     let height = row_height * if spec.plate { 2.0 } else { 1.0 };
-    if !width.is_finite() || !height.is_finite() || width.max(height) > 4096.0 {
+    if !width.is_finite() || !height.is_finite() || width.max(height) > Limits::default().max_texture_dimension as f32 {
         return Err(format!("resolution {} with text length {count} exceeds the 4096 texel texture side", spec.resolution));
     }
     let (w, rh, h) = (width as u32, row_height as u32, height as u32);
@@ -338,6 +339,9 @@ mod tests {
 
     #[test]
     fn plate_has_three_blank_cells_and_ten_drawn_digits() {
+        assert!(msdf_text(&MsdfTextSpec { text: "I".into(), resolution: 257, ..Default::default() }).is_ok());
+        assert!(msdf_text(&MsdfTextSpec { text: "I".repeat(65), resolution: 16, ..Default::default() }).is_ok());
+        assert!(msdf_text(&MsdfTextSpec { text: "ABCDE".into(), resolution: 16, plate: true, ..Default::default() }).is_ok());
         let image = msdf_text(&MsdfTextSpec { text: "AB".into(), resolution: 16, plate: true, ..Default::default() }).unwrap();
         let [blank, cell, strip, strip_cell] = image.plate_cells.unwrap();
         let has_ink = |start: f32, end: f32, row: u32| {

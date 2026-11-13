@@ -558,6 +558,9 @@ pub fn add_to_scl_sparse_inc(
     if nnzdst == 0 || nnzsrc == 0 {
         return;
     }
+    // Cut inputs to their lengths once so the merge indexes without a check per element.
+    let (dst, inddst) = (&mut dst[..nnzdst], &inddst[..nnzdst]);
+    let (src, indsrc) = (&src[..nnzsrc], &indsrc[..nnzsrc]);
     let (mut adrs, mut adrd) = (0, 0);
     while adrs < nnzsrc && adrd < nnzdst {
         let inds = indsrc[adrs];

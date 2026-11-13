@@ -194,9 +194,10 @@ impl CharacterSpec {
         if v.text().is_none() && v.keys().is_none() {
             return Err("a character spec is a preset name or a spec object".into());
         }
-        // Presets may build on presets.
+        // Presets may build on presets; reject cycles, not long valid chains.
+        let mut visited = std::collections::BTreeSet::new();
         while let Some(name) = next.take() {
-            if layers.len() > 8 { return Err(format!("character preset '{name}': presets nest too deep")); }
+            if !visited.insert(name.clone()) { return Err(format!("character preset '{name}': preset cycle")); }
             let preset = presets(&name).ok_or_else(|| format!("unknown character preset '{name}'"))?;
             next = preset.get("preset").and_then(|p| p.text()).filter(|p| *p != name);
             layers.push(preset);
@@ -446,7 +447,7 @@ mod tests {
 
     use super::test_spec::*;
     fn build(ops: &[crate::ProgramOp]) -> crate::BuiltProgram {
-        let limits = Limits { max_joints: 128, ..Default::default() };
+        let limits = Limits::default();
         crate::build_program(ops, limits, &mut |_| Err("no imports".into()), None).unwrap_or_else(|e| panic!("{}", e.message))
     }
 
@@ -583,7 +584,7 @@ mod tests {
     #[test]
     fn vertex_tints_are_one_op_covering_every_vertex() {
         let spec = armoured();
-        let built = build_from_spec(&spec, &Limits { max_joints: 128, ..Default::default() }).unwrap();
+        let built = build_from_spec(&spec, &Limits::default()).unwrap();
         use crate::{Operation, SurfaceOperation};
         let tints: Vec<&SurfaceOperation> = built.late.iter().filter_map(|o| match o { Operation::Surface(s @ (SurfaceOperation::VertexColors { .. } | SurfaceOperation::VertexPaint { .. })) => Some(s), _ => None }).collect();
         assert_eq!(tints.len(), 1);

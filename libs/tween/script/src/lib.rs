@@ -10,7 +10,7 @@
 //! does not depend on the tween engine: hosts call [`install_ease`] after
 //! `register_shared_std` (until then the two names raise an error naming
 //! this function).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use makepad_script::*;
 use makepad_tween::named::{Curve, Ease};
@@ -18,7 +18,7 @@ use makepad_tween::named::{Curve, Ease};
 /// Installs `ease` and `ease_id` into `mod.shared`, replacing the
 /// placeholders `register_shared_std` puts there. Panics when `mod.shared`
 /// is not registered yet.
-#[relax_api]
+#[relax_api(run)]
 pub fn install_ease(vm: &mut ScriptVm) {
     let modules = vm.modules();
     let shared = vm.value(modules, id!(shared))

@@ -504,10 +504,6 @@ fn hostile_counts_are_bounded_before_install() {
     header.extend_from_slice(&u32::MAX.to_le_bytes());
     header.extend_from_slice(&u32::MAX.to_le_bytes());
     let mut limits = Limits::default();
-    limits.max_vertices = 8;
-    limits.max_faces = 8;
-    limits.max_corners = 32;
-    limits.max_edges = 32;
     limits.max_bytes = 4096;
     match Mesh::from_bytes(&header, &mut Context::new(limits, None)) {
         Err(MeshError::Budget { .. } | MeshError::CorruptData(_)) => {}
@@ -516,23 +512,13 @@ fn hostile_counts_are_bounded_before_install() {
 }
 
 #[test]
-fn preflight_limits_reject_growth_without_mutating() {
+fn growth_completes_without_count_or_work_limits() {
     let mut mesh = Mesh::plane([1., 1.], &mut ctx()).unwrap();
-    let snapshot = bytes_of(&mesh);
-    let mut limits = Limits::default();
-    limits.max_vertices = mesh.vertices().len();
-    limits.max_faces = mesh.faces().len();
-    limits.max_corners = mesh.corners().len();
+    let before = mesh.vertices().len();
     let face = mesh.faces()[0].id;
-    assert!(matches!(
-        mesh.extrude_face(face, [0., 1., 0.], &mut Context::new(limits, None)),
-        Err(MeshError::Budget { .. })
-    ));
-    assert_eq!(bytes_of(&mesh), snapshot);
-
-    let mut tiny = Limits::default();
-    tiny.max_work = 1;
-    assert!(Mesh::cube([1., 1., 1.], &mut Context::new(tiny, None)).is_err());
+    mesh.extrude_face(face, [0., 1., 0.], &mut Context::default()).unwrap();
+    assert!(mesh.vertices().len() > before);
+    assert!(Mesh::cube([1.; 3], &mut Context::default()).is_ok());
 }
 
 #[test]

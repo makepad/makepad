@@ -102,11 +102,6 @@ impl Mesh {
         }
         for p in polygons {
             ctx.checkpoint(p.vertices.len() as u64)?;
-            ctx.limit(
-                "face corners",
-                p.vertices.len() as u64,
-                ctx.limits.max_face_corners as u64,
-            )?;
             if p.vertices.len() < 3 {
                 return Err(invalid("a face needs at least three corners"));
             }
@@ -198,11 +193,6 @@ impl Mesh {
         let mut total = 0usize;
         for w in weights {
             ctx.checkpoint(1)?;
-            ctx.limit(
-                "weights per vertex",
-                w.len() as u64,
-                ctx.limits.max_weights_per_vertex as u64,
-            )?;
             total = total.saturating_add(w.len());
         }
         let mut mesh = Self::from_polygons(positions, polygons, ctx)?;
@@ -299,7 +289,6 @@ impl Mesh {
                 a.edges.entry(edge).or_default();
             }
         }
-        ctx.limit("edges", a.edges.len() as u64, ctx.limits.max_edges as u64)?;
         for &edge in a.edges.keys() {
             ctx.checkpoint(1)?;
             a.vertex_edges
@@ -325,7 +314,6 @@ impl Mesh {
             .iter()
             .map(|f| f.corner_count as usize - 2)
             .sum::<usize>();
-        ctx.limit("triangles", nt as u64, ctx.limits.max_triangles as u64)?;
         let weights = self
             .corners
             .iter()
@@ -479,11 +467,6 @@ impl Mesh {
             if f.first_corner as usize != offset || f.corner_count < 3 {
                 return Err(MeshError::CorruptData("invalid face corner range"));
             }
-            ctx.limit(
-                "face corners",
-                f.corner_count as u64,
-                ctx.limits.max_face_corners as u64,
-            )?;
             offset = offset
                 .checked_add(f.corner_count as usize)
                 .ok_or(MeshError::CorruptData("corner range overflow"))?;
@@ -536,16 +519,6 @@ impl Mesh {
                 return Err(MeshError::CorruptData("redundant default edge record"));
             }
         }
-        ctx.limit(
-            "edges",
-            used_edges.len().saturating_add(
-                self.edge_data
-                    .iter()
-                    .filter(|(e, d)| d.loose && !used_edges.contains(e))
-                    .count(),
-            ) as u64,
-            ctx.limits.max_edges as u64,
-        )?;
         Ok(())
     }
 }
@@ -584,11 +557,8 @@ pub(crate) fn check_edge_attributes(a: EdgeAttributes) -> Result<()> {
     }
 }
 pub(crate) fn check_weights(weights: &[JointWeight], ctx: &mut Context<'_>) -> Result<()> {
-    ctx.limit(
-        "weights per vertex",
-        weights.len() as u64,
-        ctx.limits.max_weights_per_vertex as u64,
-    )?;
+    // The mesh source stores each weight count in a u32.
+    ctx.limit("mesh source weight count", weights.len() as u64, u32::MAX as u64)?;
     let mut prev = None;
     let mut sum = 0.;
     for w in weights {

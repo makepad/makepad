@@ -409,16 +409,16 @@ impl Renderer {
     }
 
     /// Spend what `tier` allows (quality_tier.rs): impostor distances,
-    /// grass reach and density, the sun cascades. Screen-space occlusion and
+    /// the grass's screen density, the trampled-grass field, the sun cascades. Screen-space occlusion and
     /// the render scale are the host's passes: it reads them from the same
     /// [`crate::quality_tier::TierBudget`].
     pub fn set_graphics_tier(&mut self, tier: crate::quality_tier::GraphicsTier) {
         let b = tier.budget();
         self.graphics_tier = tier;
         self.impostor_scale = b.impostor_scale;
-        self.grass_radius_scale = b.grass_radius;
-        self.grass_density = b.grass_density;
+        self.grass_pixels = b.grass_pixels;
         self.terrain_blend_reach = b.terrain_blend_reach;
+        self.trample.set_budget(b.trample);
         self.set_csm_config(b.csm_resolution, b.csm_range);
     }
 

@@ -23,6 +23,19 @@ fn car_headlights_and_socket_survive_source_and_glb_scene_graph(){
     for name in ["left","right","roof"]{let i=nodes.iter().position(|n|n.name.as_deref()==Some(name)).unwrap();assert!(nodes[car].children.as_ref().unwrap().contains(&i));}
     assert!(product.bounds[0][0]>3. && product.bounds[1][0]<7.);
 }
+/// Every socket exports, past the GLB writer's former 128-socket limit.
+#[test]
+fn sockets_past_former_writer_limit_all_export(){
+    for count in [129,1280]{
+        let mut doc=Document::new(Limits::default()).unwrap();
+        apply(&mut doc,"car",vec![Operation::Cube{object:"car".into(),size:[2.,1.,4.]}]);
+        apply(&mut doc,"sockets",(0..count).map(|i|Operation::Scene(SceneOperation::Socket(Socket{name:format!("s{i}"),attachment:Attachment::Object("car".into()),
+            transform:Transform{translation:[0.,i as f64*0.01,0.],..Default::default()}}))).collect());
+        let glb=makepad_gltf::parse_glb_bytes(&doc.compile(None).unwrap().glb).unwrap();
+        let sockets:Vec<&str>=glb.document.nodes_slice().iter().filter(|n|n.extras.as_ref().and_then(|e|e.key("MAKEPAD_socket"))==Some(&JsonValue::Bool(true))).filter_map(|n|n.name.as_deref()).collect();
+        assert_eq!(sockets.len(),count,"{count} sockets all export");assert!((0..count).all(|i|sockets.contains(&format!("s{i}").as_str())),"every one of {count} sockets keeps its name");
+    }
+}
 #[test]
 fn linked_geometry_tracks_source_and_cycles_or_bad_lights_roll_back(){
     let mut doc=Document::new(Limits::default()).unwrap();apply(&mut doc,"base",vec![Operation::Cube{object:"source".into(),size:[1.;3]},
@@ -35,4 +48,17 @@ fn linked_geometry_tracks_source_and_cycles_or_bad_lights_roll_back(){
     assert!(doc.apply(Transaction{request_id:"cycle".into(),expected:doc.head(),operations:vec![bad]},None).is_err());assert_eq!(doc.to_bytes(None).unwrap(),before);
     let bad=Operation::Scene(SceneOperation::Light(LightEmitter{name:"bad".into(),attachment:Attachment::Root,transform:Transform::default(),kind:LightKind::Spot{inner:0.5,outer:0.2},color:[1.;3],intensity:1.,range:10.}));
     assert!(doc.apply(Transaction{request_id:"cone".into(),expected:doc.head(),operations:vec![bad]},None).is_err());assert_eq!(doc.to_bytes(None).unwrap(),before);
+}
+
+#[test]
+fn thirty_three_punctual_lights_compile_and_export(){
+    let mut doc=Document::new(Limits::default()).unwrap();
+    apply(&mut doc,"body",vec![Operation::Cube{object:"body".into(),size:[1.;3]}]);
+    apply(&mut doc,"lights",(0..33).map(|i|Operation::Scene(SceneOperation::Light(LightEmitter{
+        name:format!("light{i}"),attachment:Attachment::Root,transform:Transform::default(),kind:LightKind::Point,color:[1.;3],intensity:1.,range:10.,
+    }))).collect());
+    let glb=makepad_gltf::parse_glb_bytes(&doc.compile(None).unwrap().glb).unwrap();
+    let lights=array(field(field(glb.document.extensions.as_ref().unwrap(),"KHR_lights_punctual"),"lights"));
+    assert_eq!(lights.len(),33);
+    assert_eq!(glb.document.nodes_slice().iter().filter(|n|n.extensions.as_ref().and_then(|e|e.key("KHR_lights_punctual")).is_some()).count(),33);
 }

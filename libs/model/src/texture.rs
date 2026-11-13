@@ -28,9 +28,6 @@ impl Texture {
         Ok(Self { width, height, rgb })
     }
     pub fn from_png(bytes: &[u8], limits: &Limits) -> Result<Self> {
-        if bytes.len() > limits.max_texture_bytes {
-            return Err(Error::Budget("texture bytes"));
-        }
         let options = DecoderOptions::default()
             .set_max_width(limits.max_texture_dimension as usize)
             .set_max_height(limits.max_texture_dimension as usize)
@@ -100,9 +97,6 @@ impl Texture {
         PngEncoder::new(&self.rgb, options)
             .encode(&mut out)
             .map_err(|_| Error::Invalid("PNG encode"))?;
-        if out.len() > limits.max_texture_bytes {
-            return Err(Error::Budget("encoded texture bytes"));
-        }
         Ok(out)
     }
     /// Deterministic filled UV-space disk. Pixels are top-left origin; UV V is
@@ -164,9 +158,6 @@ fn dimensions(width: u32, height: u32, limits: &Limits) -> Result<usize> {
         .checked_mul(height as usize)
         .and_then(|v| v.checked_mul(3))
         .ok_or(Error::Budget("texture pixels"))?;
-    if len > limits.max_texture_bytes {
-        return Err(Error::Budget("texture pixels"));
-    }
     Ok(len)
 }
 
@@ -204,9 +195,6 @@ impl RgbaImage {
         Ok(())
     }
     pub fn from_png(bytes: &[u8], limits: &Limits) -> Result<Self> {
-        if bytes.len() > limits.max_texture_bytes {
-            return Err(Error::Budget("PNG bytes"));
-        }
         let options = DecoderOptions::default()
             .set_max_width(limits.max_texture_dimension as usize)
             .set_max_height(limits.max_texture_dimension as usize)
@@ -264,9 +252,6 @@ impl RgbaImage {
         PngEncoder::new(&self.pixels, options)
             .encode(&mut bytes)
             .map_err(|_| Error::Invalid("PNG encode"))?;
-        if bytes.len() > limits.max_texture_bytes {
-            return Err(Error::Budget("PNG encoded bytes"));
-        }
         Ok(bytes)
     }
     pub fn memory_bytes(&self) -> usize {
@@ -282,9 +267,6 @@ impl RgbaImage {
         ctx: &mut crate::mesh::Context<'_>,
     ) -> Result<()> {
         self.validate(limits)?;
-        if iterations > 64 {
-            return Err(Error::Budget("dilation iterations"));
-        }
         if self.pixels.len().saturating_mul(3) > limits.mesh.max_bytes {
             return Err(Error::Budget("dilation working bytes"));
         }
@@ -482,8 +464,5 @@ fn rgba_dimensions(w: u32, h: u32, limits: &Limits) -> Result<usize> {
         .checked_mul(h as usize)
         .and_then(|v| v.checked_mul(4))
         .ok_or(Error::Budget("RGBA dimensions"))?;
-    if len > limits.max_texture_bytes {
-        return Err(Error::Budget("RGBA pixels"));
-    }
     Ok(len)
 }

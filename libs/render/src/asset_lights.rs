@@ -1,9 +1,10 @@
-//! Bounded KHR_lights_punctual import. Node transforms place the emitter;
+//! KHR_lights_punctual import. Node transforms place the emitter;
 //! they never scale its photometric intensity, cone angles, or range.
 use makepad_draw::makepad_math::{Mat4f, Quat, Vec3f, vec3f, vec4};
 use makepad_gltf::{GltfDocument, JsonValue};
 
-pub const MAX_ASSET_LIGHTS: usize = 32;
+/// Authored lights one frame keeps: past it the frame keeps the ones that
+/// matter most at the eye and fades the tail out.
 pub const MAX_ASSET_FRAME_LIGHTS: usize = 256;
 
 #[derive(Clone, Debug)]
@@ -54,9 +55,7 @@ fn array(value: &JsonValue) -> Option<&[JsonValue]> { match value { JsonValue::A
 pub fn parse_asset_lights(document: &GltfDocument) -> Result<Vec<AssetLightEmitter>, String> {
     let Some(extension) = document.extensions.as_ref().and_then(|e| e.key("KHR_lights_punctual")) else { return Ok(Vec::new()) };
     let definitions = extension.key("lights").and_then(array).ok_or("punctual extension has no lights array")?;
-    if definitions.len() > MAX_ASSET_LIGHTS { return Err("asset exceeds 32 punctual lights".into()); }
     let nodes = document.nodes_slice();
-    if nodes.len() > 4096 { return Err("light attachment graph exceeds 4096 nodes".into()); }
     let mut parents = vec![None; nodes.len()];
     for (parent, node) in nodes.iter().enumerate() {
         for &child in node.children.as_deref().unwrap_or(&[]) {
@@ -105,7 +104,6 @@ pub fn parse_asset_lights(document: &GltfDocument) -> Result<Vec<AssetLightEmitt
         }
         if rest_transform.v.iter().any(|v|!v.is_finite()) { return Err("non-finite light attachment transform".into()); }
         out.push(AssetLightEmitter { animation:None,node:node_index, rest_transform, color,intensity,range,kind });
-        if out.len() > MAX_ASSET_LIGHTS { return Err("asset exceeds 32 light attachments".into()); }
     }
     Ok(out)
 }
@@ -131,12 +129,14 @@ mod tests {
         assert_eq!(lights[0].placed(&instance,Some(sampled)).pos,vec3f(10.0,12.0,0.0));
     }
     #[test]
-    fn malformed_cones_cycles_and_attachment_overflow_are_rejected() {
+    fn malformed_cones_and_cycles_are_rejected_but_all_attachments_are_kept() {
         let nodes=r#"[{"extensions":{"KHR_lights_punctual":{"light":0}}}]"#;
         assert!(parse_asset_lights(&document(r#"{"type":"spot","spot":{"innerConeAngle":0.8,"outerConeAngle":0.4}}"#,nodes)).is_err());
         assert!(parse_asset_lights(&document(r#"{"type":"point"}"#,r#"[{"children":[0],"extensions":{"KHR_lights_punctual":{"light":0}}}]"#)).is_err());
         let repeated=format!("[{}]",std::iter::repeat(r#"{"extensions":{"KHR_lights_punctual":{"light":0}}}"#).take(33).collect::<Vec<_>>().join(","));
-        assert!(parse_asset_lights(&document(r#"{"type":"point"}"#,&repeated)).is_err());
+        assert_eq!(parse_asset_lights(&document(r#"{"type":"point"}"#,&repeated)).unwrap().len(),33);
+        let definitions=std::iter::repeat(r#"{"type":"point"}"#).take(33).collect::<Vec<_>>().join(",");
+        assert_eq!(parse_asset_lights(&document(&definitions,nodes)).unwrap().len(),1);
     }
 }
 

@@ -448,6 +448,13 @@ impl MeshRaycaster {
         Self { positions, indices, min, max, grid }
     }
 
+    /// Retained geometry and acceleration-grid buffers, excluding spare capacity.
+    pub fn bytes(&self) -> usize {
+        self.positions.len() * std::mem::size_of::<Vec3f>()
+            + (self.indices.len() + self.grid.items.len() + self.grid.starts.len())
+                * std::mem::size_of::<u32>()
+    }
+
     pub fn positions(&self) -> &[Vec3f] {
         &self.positions
     }

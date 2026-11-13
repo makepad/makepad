@@ -783,7 +783,7 @@ pub(super) fn lm_probe_report(
     let px_count = (bytes.len() / 4).max(1) as f64;
     log!(
         "lm probe: bake {k} — {w}x{h}, {regions} regions, {lamps} lamp(s), hash {hash:016x}, \
-         mean BGRA {:.3} {:.3} {:.3} {:.1}, max {:?}",
+         mean RGBA {:.3} {:.3} {:.3} {:.1}, max {:?}",
         sum[0] as f64 / px_count,
         sum[1] as f64 / px_count,
         sum[2] as f64 / px_count,

@@ -2,7 +2,7 @@ use crate::{Document,PrimitiveSource,Result,Error,mesh,transform::*,Interpolatio
 use makepad_gltf::*;
 
 fn num(v:f64)->Result<f32>{let out=v as f32;if out.is_finite(){Ok(out)}else{Err(Error::Invalid("morph render precision"))}}
-pub(crate) fn source<'a>(doc:&'a Document,name:&'a str)->Result<&'a str>{let mut name=name;for _ in 0..=doc.limits().max_objects{
+pub(crate) fn source<'a>(doc:&'a Document,name:&'a str)->Result<&'a str>{let mut name=name;for _ in 0..=doc.scene().nodes.len(){
     match doc.scene().nodes.get(name).and_then(|n|n.linked_to.as_deref()){Some(next)=>name=next,None=>return Ok(name)}
 }Err(Error::Invalid("linked morph cycle"))}
 fn json_value(value:json::Value)->Result<JsonValue>{Ok(match value{
@@ -36,10 +36,9 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],ctx
         let mut times=Vec::new();let mut weights=Vec::new();
         if !options.morph_keys.is_empty(){
             let duration=clip.duration();
-            if options.interpolation==Interpolation::Cubic{let steps=(duration*60.).ceil()as usize;if steps>doc.limits().max_keyframes{return Err(Error::Budget("baked morph frames"));}
+            if options.interpolation==Interpolation::Cubic{let steps=(duration*60.).ceil()as usize;
                 for i in 0..=steps{times.push((i as f64/60.).min(duration));}}
             else{times.push(0.);times.push(duration);for keys in options.morph_keys.values(){times.extend(keys.iter().map(|k|k.time));}times.sort_by(f64::total_cmp);times.dedup();}
-            if times.len().saturating_mul(targets.len())>doc.limits().max_keyframes{return Err(Error::Budget("morph weight tracks"));}
             for &time in &times{for morph in doc.rig().morphs.values(){ctx.checkpoint(1)?;
                 let weight=options.morph_keys.get(&morph.name).map(|keys|{
                     let hi=keys.partition_point(|k|k.time<=time).min(keys.len()-1);let lo=hi.saturating_sub(1);let a=&keys[lo];let b=&keys[hi];

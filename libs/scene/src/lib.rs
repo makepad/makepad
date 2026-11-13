@@ -16,6 +16,7 @@ pub mod vfx;
 pub mod view;
 pub mod voxel;
 pub mod water;
+pub mod wind;
 pub mod world;
 
 pub use anchor::*;
@@ -33,5 +34,6 @@ pub use terrain::*;
 pub use vfx::*;
 pub use view::*;
 pub use voxel::{ChunkKey, ChunkMesh, VoxelView};
+pub use wind::{wind_at, WindClock, WorldWind};
 pub use water::{SeaLook, WaterMesh, WaterSurface, WaterView, WaterWave, DETAIL_N, MAX_WAVES};
 pub use world::*;

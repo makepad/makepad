@@ -3,7 +3,7 @@
 use crate::{canon::{Reader,Writer},document::State,mesh,schema,transform::*,Error,Limits,Result,Joint,Skeleton,OperationResult};
 use makepad_soft_body as physics;
 pub use makepad_gltf::{SoftBodyMetadata,SoftBodySettings,SoftBodyBinding,SoftBodyAttachment};
-use makepad_gltf::{SOFT_BODY_TETRAHEDRA,SOFT_BODY_PARTICLES};
+use makepad_gltf::{SOFT_BODY_TETRAHEDRA,SOFT_BODY_PARTICLES,SOFT_BODY_MAX_JOINTS};
 use crate::mesh_editing::codec::*;
 use std::collections::BTreeSet;
 
@@ -32,10 +32,13 @@ fn core_binding(b:SoftBodyBinding)->physics::SoftBodyBinding{physics::SoftBodyBi
 pub(crate) fn definition(m:&SoftBodyMetadata)->physics::SoftBodyDefinition{physics::SoftBodyDefinition{
     rest_positions:m.rest_positions.clone(),tetrahedra:m.tetrahedra.clone(),surface_samples:m.surface_samples.iter().copied().map(core_binding).collect(),anchors:m.anchors.clone(),
 }}
-fn point32(p:[f64;3])->Result<[f32;3]>{let p=p.map(|v|v as f32);if p.iter().any(|v|!v.is_finite()||v.abs()>1.0e6){return Err(Error::Invalid("soft-body position exceeds render precision"));}Ok(p)}
+// gltf::soft_body metadata and soft_body runtime frames/colliders use this
+// coordinate envelope, independently of authoring group sizes.
+const SOFT_BODY_RUNTIME_COORDINATE: f32 = 1.0e6;
+fn point32(p:[f64;3])->Result<[f32;3]>{let p=p.map(|v|v as f32);if p.iter().any(|v|!v.is_finite()||v.abs()>SOFT_BODY_RUNTIME_COORDINATE){return Err(Error::Invalid("soft-body position exceeds render precision"));}Ok(p)}
 
 impl SoftBodyBind {
-    pub(crate) fn memory_bytes(&self)->usize{let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(3)}
+    pub(crate) fn memory_bytes(&self)->usize{let mut w=Writer::new();if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(3)}
     pub(crate) fn apply(&self,state:&mut State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<OperationResult>{
         self.check(limits)?;
         if state.soft_body.is_some(){return Err(Error::Invalid("soft body already bound; use soft_body_unbind before editing and rebinding"));}
@@ -48,11 +51,11 @@ impl SoftBodyBind {
         let reusing=reused_tets.is_some();
         let new_frames=self.attachments.iter().filter(|a|!reusing||!skeleton.joints.iter().any(|j|j.name==a.name)).count();
         let total=skeleton.joints.len()+if reusing{0}else{SOFT_BODY_TETRAHEDRA}+new_frames;
-        if total>limits.max_joints.min(128){return Err(Error::Budget("soft-body joints; use an explicit max_joints=128 document"));}
+        // The soft-body v1 metadata format and affine palette use this bound.
+        if total>SOFT_BODY_MAX_JOINTS{return Err(Error::Budget("soft-body v1 joint palette"));}
         let body=state.objects.get(&self.object).ok_or_else(||Error::MissingObject(self.object.clone()))?;
         if !body.validate(ctx)?.is_closed_manifold{return Err(Error::Invalid("soft-body body must be a closed manifold"));}
         let mut groups=BTreeSet::from([self.object.as_str()]);let mut names=BTreeSet::new();
-        if self.deform_objects.len()>32||self.attachments.len()>32{return Err(Error::Budget("soft-body object groups"));}
         for object in &self.deform_objects {schema::name(object,limits)?;if !groups.insert(object.as_str()){return Err(Error::Invalid("duplicate soft-body deform object"));}}
         for a in &self.attachments {
             schema::name(&a.name,limits)?;
@@ -196,7 +199,10 @@ fn world_points(state:&State,object:&str,ctx:&mut mesh::Context<'_>)->Result<Vec
 fn bounds(points:impl Iterator<Item=[f64;3]>)->Result<[[f64;3];2]>{let mut b=[[f64::INFINITY;3],[f64::NEG_INFINITY;3]];for p in points{for i in 0..3{b[0][i]=b[0][i].min(p[i]);b[1][i]=b[1][i].max(p[i]);}}if b.iter().flatten().any(|v|!v.is_finite()){return Err(Error::Invalid("empty soft-body geometry"));}Ok(b)}
 
 fn sample_surface(binder:&physics::SoftBodyBinder<'_>,points:&[(mesh::VertexId,[f64;3])],ctx:&mut mesh::Context<'_>)->Result<Vec<physics::SoftBodyBinding>>{
-    let count=points.len().min(128);let mut chosen=Vec::with_capacity(count);let mut distances=vec![f64::INFINITY;points.len()];
+    // The solver's contact sample array is a separate runtime bound.
+    let count=points.len().min(physics::MAX_SOFT_CONTACT_SAMPLES);
+    if points.len()>count { eprintln!("model soft body: sampled {} surface points into {count} collision contacts",points.len()); }
+    let mut chosen=Vec::with_capacity(count);let mut distances=vec![f64::INFINITY;points.len()];
     // Deterministic farthest-point sampling includes only original visible
     // vertices, spreading contacts without making the cage the collider.
     let mut next=0;
@@ -208,9 +214,9 @@ fn sample_surface(binder:&physics::SoftBodyBinder<'_>,points:&[(mesh::VertexId,[
     chosen.into_iter().map(|i|{ctx.checkpoint(80)?;binder.bind_point(point32(points[i].1)?).map_err(|_|Error::Invalid("soft-body surface contact embedding"))}).collect()
 }
 
-fn geometry_hash(state:&State,metadata:&SoftBodyMetadata,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<String>{
+fn geometry_hash(state:&State,metadata:&SoftBodyMetadata,_limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<String>{
     let objects=std::iter::once(&metadata.object).chain(&metadata.deform_objects).chain(metadata.attachments.iter().flat_map(|a|a.objects.iter())).collect::<BTreeSet<_>>();
-    let mut w=Writer::new(limits.max_source_bytes);w.raw(b"soft-body-geometry-v1\0")?;
+    let mut w=Writer::new();w.raw(b"soft-body-geometry-v1\0")?;
     for object in objects{check_geometry(state,object)?;w.string(object)?;let mesh=&state.objects[object];w.raw(&crate::rig_control::topology(mesh))?;
         for (id,p) in world_points(state,object,ctx)?{w.u64(id.0)?;for v in p{w.f64(v)?;}}
     }
@@ -236,7 +242,7 @@ pub(crate) fn validate(state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->
             return Err(Error::Invalid("soft-body affine joint rest changed"));
         }
     }
-    let mut tet_for_joint=[None;128];for(index,joint)in m.tet_joints.iter().enumerate(){tet_for_joint[*joint as usize]=Some(index);}
+    let mut tet_for_joint=[None;SOFT_BODY_MAX_JOINTS];for(index,joint)in m.tet_joints.iter().enumerate(){tet_for_joint[*joint as usize]=Some(index);}
     for (object,mesh) in &state.objects{
         let required=object==&m.object||m.deform_objects.contains(object);
         let world=state.scene.world_matrix(object)?;
@@ -268,22 +274,21 @@ pub(crate) fn validate(state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->
 fn write_softbodysettings(w:&mut Writer,value:&SoftBodySettings)->Result<()>{w.f64(value.mass as f64)?;w.f64(value.edge_compliance as f64)?;w.f64(value.volume_compliance as f64)?;w.f64(value.pose_compliance as f64)?;w.f64(value.damping as f64)?;for item in &value.gravity{w.f64(*item as f64)?;}w.f64(value.contact_radius as f64)?;w.f64(value.friction as f64)?;w.u8(value.substeps)?;w.u8(value.iterations)?;w.f64(value.max_speed as f64)?;w.f64(value.max_displacement as f64)?;Ok(())}
 fn read_softbodysettings(r:&mut Reader,limits:&Limits)->Result<SoftBodySettings>{let _=limits;Ok(SoftBodySettings{mass:read_f32(r)?,edge_compliance:read_f32(r)?,volume_compliance:read_f32(r)?,pose_compliance:read_f32(r)?,damping:read_f32(r)?,gravity:[read_f32(r)?,read_f32(r)?,read_f32(r)?],contact_radius:read_f32(r)?,friction:read_f32(r)?,substeps:r.u8()?,iterations:r.u8()?,max_speed:read_f32(r)?,max_displacement:read_f32(r)?})}
 fn write_softbodyattachmentrequest(w:&mut Writer,value:&SoftBodyAttachmentRequest)->Result<()>{w.string(&value.name)?;w.count(value.objects.len())?;for item in &value.objects{w.string(item)?;}if let Some(item)=&value.pivot{w.u8(1)?;for item in item{w.f64(*item)?;}}else{w.u8(0)?;}Ok(())}
-fn read_softbodyattachmentrequest(r:&mut Reader,limits:&Limits)->Result<SoftBodyAttachmentRequest>{let _=limits;Ok(SoftBodyAttachmentRequest{name:r.string(limits.max_name_bytes)?,objects:{let mut values=Vec::new();for _ in 0..r.count(64)?{values.push(r.string(limits.max_name_bytes)?);}values},pivot:if read_bool(r)?{Some([r.f64()?,r.f64()?,r.f64()?])}else{None}})}
+fn read_softbodyattachmentrequest(r:&mut Reader,limits:&Limits)->Result<SoftBodyAttachmentRequest>{let _=limits;Ok(SoftBodyAttachmentRequest{name:r.string()?,objects:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.string()?);}values},pivot:if read_bool(r)?{Some([r.f64()?,r.f64()?,r.f64()?])}else{None}})}
 fn write_softbodybind(w:&mut Writer,value:&SoftBodyBind)->Result<()>{w.string(&value.object)?;w.count(value.deform_objects.len())?;for item in &value.deform_objects{w.string(item)?;}w.count(value.attachments.len())?;for item in &value.attachments{write_softbodyattachmentrequest(w,item)?;}write_softbodysettings(w,&value.settings)?;Ok(())}
-fn read_softbodybind(r:&mut Reader,limits:&Limits)->Result<SoftBodyBind>{let _=limits;Ok(SoftBodyBind{object:r.string(limits.max_name_bytes)?,deform_objects:{let mut values=Vec::new();for _ in 0..r.count(32)?{values.push(r.string(limits.max_name_bytes)?);}values},attachments:{let mut values=Vec::new();for _ in 0..r.count(32)?{values.push(read_softbodyattachmentrequest(r,limits)?);}values},settings:read_softbodysettings(r,limits)?})}
+fn read_softbodybind(r:&mut Reader,limits:&Limits)->Result<SoftBodyBind>{let _=limits;Ok(SoftBodyBind{object:r.string()?,deform_objects:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.string()?);}values},attachments:{let mut values=Vec::new();for _ in 0..r.count(9)?{values.push(read_softbodyattachmentrequest(r,limits)?);}values},settings:read_softbodysettings(r,limits)?})}
 fn write_softbodybinding(w:&mut Writer,value:&SoftBodyBinding)->Result<()>{w.u32(value.tetrahedron as u32)?;for item in &value.weights{w.f64(*item as f64)?;}Ok(())}
 fn read_softbodybinding(r:&mut Reader,limits:&Limits)->Result<SoftBodyBinding>{let _=limits;Ok(SoftBodyBinding{tetrahedron:r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,weights:[read_f32(r)?,read_f32(r)?,read_f32(r)?,read_f32(r)?]})}
 fn write_softbodyattachment(w:&mut Writer,value:&SoftBodyAttachment)->Result<()>{w.string(&value.name)?;w.u32(value.joint as u32)?;write_softbodybinding(w,&value.binding)?;for item in &value.rest_pivot{w.f64(*item as f64)?;}w.count(value.objects.len())?;for item in &value.objects{w.string(item)?;}Ok(())}
-fn read_softbodyattachment(r:&mut Reader,limits:&Limits)->Result<SoftBodyAttachment>{let _=limits;Ok(SoftBodyAttachment{name:r.string(128)?,joint:r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,binding:read_softbodybinding(r,limits)?,rest_pivot:[read_f32(r)?,read_f32(r)?,read_f32(r)?],objects:{let mut values=Vec::new();for _ in 0..r.count(64)?{values.push(r.string(128)?);}values}})}
+fn read_softbodyattachment(r:&mut Reader,limits:&Limits)->Result<SoftBodyAttachment>{let _=limits;Ok(SoftBodyAttachment{name:r.string()?,joint:r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,binding:read_softbodybinding(r,limits)?,rest_pivot:[read_f32(r)?,read_f32(r)?,read_f32(r)?],objects:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.string()?);}values}})}
 fn write_softbodymetadata(w:&mut Writer,value:&SoftBodyMetadata)->Result<()>{w.u32(value.version)?;w.string(&value.object)?;w.count(value.deform_objects.len())?;for item in &value.deform_objects{w.string(item)?;}w.u32(value.root_joint as u32)?;w.count(value.rest_positions.len())?;for item in &value.rest_positions{for item in item{w.f64(*item as f64)?;}}w.count(value.tetrahedra.len())?;for item in &value.tetrahedra{for item in item{w.u32(*item as u32)?;}}w.count(value.surface_samples.len())?;for item in &value.surface_samples{write_softbodybinding(w,item)?;}w.count(value.anchors.len())?;for item in &value.anchors{w.u32(*item as u32)?;}write_softbodysettings(w,&value.settings)?;w.count(value.tet_joints.len())?;for item in &value.tet_joints{w.u32(*item as u32)?;}w.count(value.attachments.len())?;for item in &value.attachments{write_softbodyattachment(w,item)?;}w.string(&value.geometry_hash)?;Ok(())}
-fn read_softbodymetadata(r:&mut Reader,limits:&Limits)->Result<SoftBodyMetadata>{let _=limits;Ok(SoftBodyMetadata{version:r.u32()?,object:r.string(128)?,deform_objects:{let mut values=Vec::new();for _ in 0..r.count(32)?{values.push(r.string(128)?);}values},root_joint:r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,rest_positions:{let mut values=Vec::new();for _ in 0..r.count(SOFT_BODY_PARTICLES)?{values.push([read_f32(r)?,read_f32(r)?,read_f32(r)?]);}values},tetrahedra:{let mut values=Vec::new();for _ in 0..r.count(SOFT_BODY_TETRAHEDRA)?{values.push([r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?]);}values},surface_samples:{let mut values=Vec::new();for _ in 0..r.count(128)?{values.push(read_softbodybinding(r,limits)?);}values},anchors:{let mut values=Vec::new();for _ in 0..r.count(SOFT_BODY_PARTICLES)?{values.push(r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?);}values},settings:read_softbodysettings(r,limits)?,tet_joints:{let mut values=Vec::new();for _ in 0..r.count(SOFT_BODY_TETRAHEDRA)?{values.push(r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?);}values},attachments:{let mut values=Vec::new();for _ in 0..r.count(32)?{values.push(read_softbodyattachment(r,limits)?);}values},geometry_hash:r.string(64)?})}
+fn read_softbodymetadata(r:&mut Reader,limits:&Limits)->Result<SoftBodyMetadata>{let _=limits;Ok(SoftBodyMetadata{version:r.u32()?,object:r.string()?,deform_objects:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.string()?);}values},root_joint:r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,rest_positions:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([read_f32(r)?,read_f32(r)?,read_f32(r)?]);}values},tetrahedra:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push([r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?,r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?]);}values},surface_samples:{let mut values=Vec::new();for _ in 0..r.count(36)?{values.push(read_softbodybinding(r,limits)?);}values},anchors:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?);}values},settings:read_softbodysettings(r,limits)?,tet_joints:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push(r.u32()?.try_into().map_err(|_|Error::Corrupt("u16 overflow"))?);}values},attachments:{let mut values=Vec::new();for _ in 0..r.count(72)?{values.push(read_softbodyattachment(r,limits)?);}values},geometry_hash:r.string()?})}
 impl SoftBodyBind {
     pub fn check(&self,limits:&Limits)->Result<()>{
         schema::name(&self.object,limits)?;
-        if self.deform_objects.len()>32||self.attachments.len()>32{return Err(Error::Budget("authoring array"));}
         for object in &self.deform_objects{schema::name(object,limits)?;}
-        for a in &self.attachments{schema::name(&a.name,limits)?;if a.objects.len()>64{return Err(Error::Budget("authoring array"));}if a.objects.is_empty(){return Err(Error::Invalid("empty soft-body attachment objects"));}for object in &a.objects{schema::name(object,limits)?;}if let Some(p)=a.pivot{finite(p)?;}}
-        if 1+SOFT_BODY_TETRAHEDRA+self.attachments.len()>limits.max_joints.min(128){return Err(Error::Budget("soft-body joints; use an explicit max_joints=128 document"));}
+        for a in &self.attachments{schema::name(&a.name,limits)?;if a.objects.is_empty(){return Err(Error::Invalid("empty soft-body attachment objects"));}for object in &a.objects{schema::name(object,limits)?;}if let Some(p)=a.pivot{finite(p)?;}}
+        if 1+SOFT_BODY_TETRAHEDRA+self.attachments.len()>SOFT_BODY_MAX_JOINTS{return Err(Error::Budget("soft-body v1 joint palette"));}
         self.settings.validate().map_err(|_|Error::Invalid("soft-body settings"))?;
         core_settings(self.settings).validate().map_err(|_|Error::Invalid("soft-body settings"))
     }
@@ -291,7 +296,7 @@ impl SoftBodyBind {
     pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let value=read_softbodybind(r,limits)?;value.check(limits)?;Ok(value)}
 }
 pub(crate) fn write(w:&mut Writer,m:&SoftBodyMetadata)->Result<()>{write_softbodymetadata(w,m)}
-pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<SoftBodyMetadata>{let value=read_softbodymetadata(r,limits)?;value.validate(limits.max_joints.min(128)).map_err(|_|Error::Corrupt("soft-body metadata"))?;Ok(value)}
+pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<SoftBodyMetadata>{let value=read_softbodymetadata(r,limits)?;value.validate(SOFT_BODY_MAX_JOINTS).map_err(|_|Error::Corrupt("soft-body metadata"))?;Ok(value)}
 
 #[cfg(test)]
 mod typed_tests {
@@ -303,20 +308,31 @@ mod typed_tests {
     use super::*;
     #[test]
     fn bind_literals_and_settings_defaults(){
-        let limits=Limits{max_joints:128,..Limits::default()};let mut preset=physics::SoftBodySettings::default();preset.edge_compliance=0.001;preset.pose_compliance=0.001;preset.damping=22.;
+        let limits=Limits::default();let mut preset=physics::SoftBodySettings::default();preset.edge_compliance=0.001;preset.pose_compliance=0.001;preset.damping=22.;
         let plain=SoftBodyBind{object:"body".into(),deform_objects:vec![],attachments:vec![],settings:settings(physics::SoftBodySettings::default())};
-        let grouped=SoftBodyBind{object:"body".into(),deform_objects:vec!["fibers".into()],attachments:vec![SoftBodyAttachmentRequest{name:"frame".into(),objects:vec!["button".into()],pivot:Some([0.25,0.5,1.])},SoftBodyAttachmentRequest{name:"other".into(),objects:vec!["other".into()],pivot:None}],settings:settings(preset)};
-        for op in [&plain,&grouped]{op.check(&limits).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(SoftBodyBind::read(&mut r,&limits).unwrap(),*op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*3);}
-        let mut bad=plain.clone();bad.settings.mass=0.;assert!(bad.check(&limits).is_err());bad=plain.clone();bad.object.clear();assert!(bad.check(&limits).is_err());let mut bad=grouped;bad.attachments[0].objects.clear();assert!(bad.check(&limits).is_err());assert!(plain.check(&Limits::default()).is_err());
-        let mut w=Writer::new(usize::MAX);bad.write(&mut w).unwrap();assert!(SoftBodyBind::read(&mut Reader::new(&w.bytes),&limits).is_err());
+        let mut grouped=SoftBodyBind{object:"body".into(),deform_objects:vec!["fibers".into()],attachments:vec![SoftBodyAttachmentRequest{name:"frame".into(),objects:vec!["button".into()],pivot:Some([0.25,0.5,1.])},SoftBodyAttachmentRequest{name:"other".into(),objects:vec!["other".into()],pivot:None}],settings:settings(preset)};
+        grouped.deform_objects = (0..33).map(|i|format!("deform-{i}")).collect();
+        grouped.attachments[0].objects = (0..65).map(|i|format!("part-{i}")).collect();
+        for i in 2..33 { grouped.attachments.push(SoftBodyAttachmentRequest {name:format!("attach-{i}"),objects:vec![format!("attached-{i}")],pivot:None}); }
+        for op in [&plain,&grouped]{op.check(&limits).unwrap();let mut w=Writer::new();op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(SoftBodyBind::read(&mut r,&limits).unwrap(),*op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*3);}
+        let mut bad=plain.clone();bad.settings.mass=0.;assert!(bad.check(&limits).is_err());bad=plain.clone();bad.object.clear();assert!(bad.check(&limits).is_err());let mut bad=grouped;bad.attachments[0].objects.clear();assert!(bad.check(&limits).is_err());assert!(plain.check(&Limits::default()).is_ok());
+        let mut w=Writer::new();bad.write(&mut w).unwrap();assert!(SoftBodyBind::read(&mut Reader::new(&w.bytes),&limits).is_err());
     }
     #[test]
     fn metadata_binary_roundtrip_and_exact_f32(){
-        let limits=Limits{max_joints:128,..Limits::default()};let cage=physics::SoftBodyDefinition::ellipsoid([0.;3],[1.;3]).unwrap();let binder=cage.binder().unwrap();let bind=binding(binder.bind_point([0.;3]).unwrap());drop(binder);
-        let metadata=SoftBodyMetadata{version:1,object:"body".into(),deform_objects:vec!["fibers".into()],root_joint:0,rest_positions:cage.rest_positions,tetrahedra:cage.tetrahedra,surface_samples:vec![bind],anchors:cage.anchors,settings:settings(physics::SoftBodySettings::default()),tet_joints:(1..=80).collect(),attachments:vec![SoftBodyAttachment{name:"frame".into(),joint:81,binding:bind,rest_pivot:[0.;3],objects:vec!["button".into()]}],geometry_hash:"0".repeat(64)};
-        metadata.validate(128).unwrap();let mut w=Writer::new(usize::MAX);write(&mut w,&metadata).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(read(&mut r,&limits).unwrap(),metadata);r.end().unwrap();
-        let mut bad=metadata;bad.version=2;let mut w=Writer::new(usize::MAX);write(&mut w,&bad).unwrap();assert!(matches!(read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("soft-body metadata"))));
-        let mut w=Writer::new(64);w.f64(0.1).unwrap();assert!(matches!(read_f32(&mut Reader::new(&w.bytes)),Err(Error::Corrupt("noncanonical f32"))));
+        let limits=Limits::default();let cage=physics::SoftBodyDefinition::ellipsoid([0.;3],[1.;3]).unwrap();let binder=cage.binder().unwrap();let bind=binding(binder.bind_point([0.;3]).unwrap());drop(binder);
+        let mut metadata=SoftBodyMetadata{version:1,object:"body".into(),deform_objects:vec!["fibers".into()],root_joint:0,rest_positions:cage.rest_positions,tetrahedra:cage.tetrahedra,surface_samples:vec![bind],anchors:cage.anchors,settings:settings(physics::SoftBodySettings::default()),tet_joints:(1..=80).collect(),attachments:vec![SoftBodyAttachment{name:"frame".into(),joint:81,binding:bind,rest_pivot:[0.;3],objects:vec!["button".into()]}],geometry_hash:"0".repeat(64)};
+        metadata.deform_objects=(0..33).map(|i|format!("deform-{i}")).collect();
+        metadata.attachments[0].objects=(0..65).map(|i|format!("part-{i}")).collect();
+        for i in 1..33 {
+            let mut attachment=metadata.attachments[0].clone();
+            attachment.name=format!("attachment-{i}"); attachment.joint=81+i;
+            attachment.objects=vec![format!("attached-{i}")]; metadata.attachments.push(attachment);
+        }
+        assert_eq!(SoftBodyMetadata::from_value(&metadata.to_value(),SOFT_BODY_MAX_JOINTS).unwrap(),metadata);
+        metadata.validate(128).unwrap();let mut w=Writer::new();write(&mut w,&metadata).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(read(&mut r,&limits).unwrap(),metadata);r.end().unwrap();
+        let mut bad=metadata;bad.version=2;let mut w=Writer::new();write(&mut w,&bad).unwrap();assert!(matches!(read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("soft-body metadata"))));
+        let mut w=Writer::new();w.f64(0.1).unwrap();assert!(matches!(read_f32(&mut Reader::new(&w.bytes)),Err(Error::Corrupt("noncanonical f32"))));
         assert!(matches!(read_bool(&mut Reader::new(&[2])),Err(Error::Corrupt("boolean tag"))));
     }
 }

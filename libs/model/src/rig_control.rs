@@ -67,7 +67,6 @@ impl RigState {
     }
     pub fn global_rest(&self,skeleton:&Skeleton)->Result<Vec<Matrix4>> {globals(skeleton,&self.local_pose(skeleton,None)?).map(|v|v.0)}
     pub(crate) fn validate(&self,state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {
-        if self.memory_bytes()>limits.max_source_bytes||self.poses.len()>64||self.constraints.len()>128||self.morphs.len()>32||self.clip_options.len()>limits.max_clips||self.locked_groups.len()>limits.max_objects{return Err(Error::Budget("rig authoring state"));}
         let count=state.skeleton.as_ref().map_or(0,|s|s.joints.len());
         for (&joint,rest) in &self.rests {ctx.checkpoint(1)?;if joint as usize>=count{return Err(Error::Invalid("rest joint"));}rest.validate()?;}
         for pose in self.poses.values(){name(&pose.name,limits)?;if pose.joints.len()>count{return Err(Error::Budget("pose joints"));}
@@ -83,12 +82,9 @@ impl RigState {
         }
         for (clip,options) in &self.clip_options {
             let clip=state.clips.get(clip).ok_or(Error::Invalid("clip options target"))?;let duration=clip.duration();
-            if options.events.len()>1024||options.morph_keys.len()>32{return Err(Error::Budget("clip metadata"));}
-            let mut previous=0.;for e in &options.events{name(&e.name,limits)?;if !e.time.is_finite()||e.time<previous||e.time>duration||e.payload.len()>4096{return Err(Error::Invalid("clip event"));}previous=e.time;}
-            let mut total=0;for (name,keys) in &options.morph_keys{if !self.morphs.contains_key(name){return Err(Error::Invalid("morph animation target"));}
+            let mut previous=0.;for e in &options.events{name(&e.name,limits)?;if !e.time.is_finite()||e.time<previous||e.time>duration{return Err(Error::Invalid("clip event"));}previous=e.time;}for (name,keys) in &options.morph_keys{if !self.morphs.contains_key(name){return Err(Error::Invalid("morph animation target"));}
                 if keys.is_empty(){return Err(Error::Invalid("empty morph keys"));}let mut previous=-1.;for k in keys{ctx.checkpoint(1)?;valid_weight(k.weight)?;
-                    if !k.time.is_finite()||k.time<0.||k.time as f32<=previous as f32||k.time>duration{return Err(Error::Invalid("morph key time"));}previous=k.time;total+=1;}}
-            if total>limits.max_keyframes{return Err(Error::Budget("morph keyframes"));}
+                    if !k.time.is_finite()||k.time<0.||k.time as f32<=previous as f32||k.time>duration{return Err(Error::Invalid("morph key time"));}previous=k.time;}}
         }
         for (object,joints) in &self.locked_groups{if !state.objects.contains_key(object)||joints.iter().any(|j|*j as usize>=count){return Err(Error::Invalid("locked weight group"));}}
         Ok(())
@@ -172,7 +168,7 @@ pub(crate) fn globals(skeleton:&Skeleton,local:&[Transform])->Result<(Vec<Matrix
     Ok((world,rotations))
 }
 fn validate_solver(skeleton:&Skeleton,local:&[Transform])->Result<()> {
-    if skeleton.joints.is_empty()||skeleton.joints.len()>128||local.len()!=skeleton.joints.len(){return Err(Error::Invalid("solver skeleton/pose size"));}
+    if skeleton.joints.is_empty()||skeleton.joints.len()>crate::rig::GLTF_JOINT_COUNT||local.len()!=skeleton.joints.len(){return Err(Error::Invalid("solver skeleton/pose size"));}
     for(i,joint)in skeleton.joints.iter().enumerate(){if joint.parent.is_some_and(|p|p as usize>=i)||joint.translation.iter().any(|v|!v.is_finite()){return Err(Error::Invalid("solver parent hierarchy/rest"));}local[i].validate()?;}Ok(())
 }
 /// Atomic public IK: invalid hierarchy/pose, unreachable or degenerate inputs
@@ -198,7 +194,7 @@ fn solve_ik_inner(skeleton:&Skeleton,local:&mut [Transform],root:usize,middle:us
     let (world,rot)=globals(skeleton,local)?;let m=transform_point(world[middle],[0.;3]);let e=transform_point(world[end],[0.;3]);
     let turn=quat_from_to(sub(e,m),sub(target,m))?;local[middle].rotation=quat_normalize(quat_mul(quat_inverse(rot[root]),quat_mul(turn,rot[middle])))?;Ok(())
 }
-fn valid_weight(v:f64)->Result<()> {if v.is_finite()&&(-2.0..=2.0).contains(&v){Ok(())}else{Err(Error::Invalid("morph weight range"))}}
+fn valid_weight(v:f64)->Result<()> {if v.is_finite(){Ok(())}else{Err(Error::Invalid("morph weight range"))}}
 
 impl RigState {
     pub(crate) fn apply(op:&RigOperation,state:&mut State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<OperationResult>{
@@ -229,7 +225,8 @@ impl RigState {
                 let s=state.skeleton.as_ref().ok_or(Error::Invalid("bake requires skeleton"))?;name_check_keys(name,poses,*fps,limits)?;
                 let mut inputs=Vec::new();for (time,key) in poses{ctx.checkpoint(1)?;let pose=state.rig.poses.get(key).ok_or(Error::Invalid("bake pose missing"))?;
                     inputs.push((*time,state.rig.local_pose(s,Some(pose))?));}
-                let count=frame_count(poses.last().unwrap().0,*fps,s.joints.len(),limits)?;let mut samples=Vec::new();
+                let count=frame_count(poses.last().unwrap().0,*fps,s.joints.len(),limits)?;
+                admit_samples(count.saturating_add(poses.len()),s.joints.len(),ctx)?;let mut samples=Vec::new();
                 for i in 0..count{ctx.checkpoint(s.joints.len() as u64)?;let time=i as f64/(count-1) as f64*poses.last().unwrap().0;
                     let hi=inputs.partition_point(|(t,_)|*t<=time).min(inputs.len()-1);let lo=hi.saturating_sub(1);
                     let t=if inputs[hi].0>inputs[lo].0{((time-inputs[lo].0)/(inputs[hi].0-inputs[lo].0)).clamp(0.,1.)}else{0.};
@@ -242,7 +239,8 @@ impl RigState {
             RigOperation::BlendClip{name,a,b,weight,fps}=>{
                 if !weight.is_finite()||!(0.0..=1.0).contains(weight){return Err(Error::Invalid("clip blend weight"));}
                 let skeleton=state.skeleton.as_ref().ok_or(Error::Invalid("blend requires skeleton"))?;let a=state.clips.get(a).ok_or(Error::Invalid("blend source clip"))?;let b=state.clips.get(b).ok_or(Error::Invalid("blend source clip"))?;
-                let duration=a.duration().max(b.duration());let count=frame_count(duration,*fps,skeleton.joints.len(),limits)?;let mut samples=Vec::new();
+                let duration=a.duration().max(b.duration());let count=frame_count(duration,*fps,skeleton.joints.len(),limits)?;
+                admit_samples(count,skeleton.joints.len(),ctx)?;let mut samples=Vec::new();
                 for i in 0..count{ctx.checkpoint(skeleton.joints.len() as u64)?;let time=i as f64/(count-1) as f64*duration;
                     let left=state.rig.sample_clip(skeleton,a,time*a.duration()/duration)?;let right=state.rig.sample_clip(skeleton,b,time*b.duration()/duration)?;
                     samples.push((time,left.iter().zip(right).map(|(a,b)|a.interpolate(b,*weight)).collect()));}
@@ -287,12 +285,22 @@ impl RigState {
         }Ok(local)
     }
 }
-fn frame_count(duration:f64,fps:f64,joints:usize,limits:&Limits)->Result<usize>{
-    if !duration.is_finite()||duration<=0.||duration>limits.max_clip_duration||!fps.is_finite()||!(1.0..=120.0).contains(&fps){return Err(Error::Invalid("animation bake duration/fps"));}
-    let count=(duration*fps).ceil() as usize+1;if count.saturating_mul(joints).saturating_mul(3)>limits.max_keyframes{return Err(Error::Budget("baked animation keys"));}Ok(count)
+fn frame_count(duration:f64,fps:f64,_joints:usize,_limits:&Limits)->Result<usize>{
+    if !duration.is_finite()||duration<=0.||!fps.is_finite()||fps<=0.{return Err(Error::Invalid("animation bake duration/fps"));}
+    // Each channel stores its key count as u32 in the model source format.
+    let intervals=(duration*fps).ceil().max(1.);
+    if intervals>=u32::MAX as f64{return Err(Error::Budget("model source u32 keyframe count"));}
+    Ok(intervals as usize+1)
+}
+// Samples coexist with three animation channels per joint and their staging.
+fn admit_samples(count:usize,joints:usize,ctx:&mesh::Context<'_>)->Result<()>{
+    let row=joints.checked_mul(std::mem::size_of::<Transform>()*2+std::mem::size_of::<Keyframe>()*6)
+        .and_then(|n|n.checked_add(64)).ok_or(Error::Budget("animation sample storage overflow"))?;
+    ctx.bytes(count.checked_mul(row).ok_or(Error::Budget("animation sample storage overflow"))?)?;
+    Ok(())
 }
 fn name_check_keys(name_:&str,poses:&[(f64,String)],fps:f64,limits:&Limits)->Result<()>{
-    name(name_,limits)?;if poses.len()<2||poses.len()>limits.max_keyframes||poses[0].0!=0.{return Err(Error::Invalid("pose keys start at zero and require two keys"));}
+    name(name_,limits)?;if poses.len()<2||poses[0].0!=0.{return Err(Error::Invalid("pose keys start at zero and require two keys"));}
     for pair in poses.windows(2){if !pair[1].0.is_finite()||pair[1].0<=pair[0].0{return Err(Error::Invalid("pose key order"));}}
     frame_count(poses.last().unwrap().0,fps,1,limits)?;Ok(())
 }
@@ -304,7 +312,7 @@ fn clip_from_samples(name:&str,samples:&[(f64,Vec<Transform>)])->AnimationClip{
     AnimationClip{name:name.into(),channels}
 }
 fn normalized_weights(mut proposed:BTreeMap<u32,f64>,old:&[mesh::JointWeight],locks:&BTreeSet<u32>,max:usize)->Result<Vec<mesh::JointWeight>>{
-    if max==0||max>64{return Err(Error::Invalid("weight influence limit"));}
+    if max==0{return Err(Error::Invalid("weight influence limit"));}
     let fixed=old.iter().filter(|w|locks.contains(&w.joint)).cloned().collect::<Vec<_>>();let fixed_sum=fixed.iter().map(|w|w.weight).sum::<f64>();
     if fixed.len()>max||fixed_sum>1.+1e-8{return Err(Error::Invalid("locked weights exceed influence budget"));}
     proposed.retain(|joint,value|!locks.contains(joint)&&value.is_finite()&&*value>0.);
@@ -313,16 +321,16 @@ fn normalized_weights(mut proposed:BTreeMap<u32,f64>,old:&[mesh::JointWeight],lo
     let mut out=fixed;for (joint,weight) in free{if remainder>1e-12{out.push(mesh::JointWeight{joint,weight:weight/sum*remainder});}}
     out.sort_by_key(|w|w.joint);Ok(out)
 }
-fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&WeightEdit,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<Vec<mesh::VertexId>>{
+fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&WeightEdit,_limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<Vec<mesh::VertexId>>{
     let skeleton=state.skeleton.as_ref().ok_or(Error::Invalid("weight edit requires skeleton"))?;
     if let WeightEdit::Assign{joint}=edit{if *joint as usize>=skeleton.joints.len(){return Err(Error::Invalid("weight assignment target joint"));}}
     let mesh=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;let ids=if vertices.is_empty(){mesh.vertices().iter().map(|v|v.id).collect::<Vec<_>>()}else{vertices.to_vec()};
     let selected=ids.iter().copied().collect::<BTreeSet<_>>();if selected.len()!=ids.len()||ids.iter().any(|id|mesh.vertex(*id).is_none()){return Err(Error::Invalid("weight vertices"));}
     let locks=state.rig.locked_groups.get(object).cloned().unwrap_or_default();let mut rows=mesh.vertices().iter().map(|v|(v.id,v.weights.clone())).collect::<BTreeMap<_,_>>();
-    let count=match edit{WeightEdit::Smooth{iterations,factor}=>{if *iterations==0||*iterations>64||!factor.is_finite()||!(0.0..=1.0).contains(factor){return Err(Error::Invalid("weight smoothing"));}*iterations},_=>1};
+    let count=match edit{WeightEdit::Smooth{iterations,factor}=>{if *iterations==0||!factor.is_finite()||!(0.0..=1.0).contains(factor){return Err(Error::Invalid("weight smoothing"));}*iterations},_=>1};
     let adjacency=if matches!(edit,WeightEdit::Smooth{..}){Some(mesh.adjacency(ctx)?)}else{None};
     let global=state.rig.global_rest(skeleton)?;
-    for _ in 0..count{let mut next=rows.clone();for id in &ids{ctx.checkpoint(1)?;let vertex=mesh.vertex(*id).unwrap();let mut proposed=BTreeMap::new();let mut max=limits.mesh.max_weights_per_vertex.min(64);
+    for _ in 0..count{let mut next=rows.clone();for id in &ids{ctx.checkpoint(1)?;let vertex=mesh.vertex(*id).unwrap();let mut proposed=BTreeMap::new();let mut max=skeleton.joints.len();
         match edit{
             WeightEdit::Assign{joint}=>{if rows[id].iter().any(|w|w.joint!=*joint&&w.weight>0.&&locks.contains(&w.joint)){return Err(Error::Invalid("rigid weight assignment conflicts with locked influence"));}max=1;proposed.insert(*joint,1.);}
             WeightEdit::Normalize{max_influences}=>{max=*max_influences;for w in &rows[id]{*proposed.entry(w.joint).or_insert(0.)+=w.weight;}}
@@ -346,7 +354,7 @@ fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&We
                 for w in &source.weights{proposed.insert(w.joint,w.weight);}
             }
             WeightEdit::Bind{max_influences,power}=>{
-                if !power.is_finite()||*power<=0.||*power>8.{return Err(Error::Invalid("binding power"));}max=*max_influences;
+                if !power.is_finite()||*power<=0.{return Err(Error::Invalid("binding power"));}max=*max_influences;
                 for (j,bone) in skeleton.joints.iter().enumerate(){ctx.checkpoint(1)?;let b=transform_point(global[j],[0.;3]);let a=bone.parent.map(|p|transform_point(global[p as usize],[0.;3])).unwrap_or(b);
                     let ab=sub(b,a);let t=if dot(ab,ab)>1e-20{(dot(sub(vertex.position,a),ab)/dot(ab,ab)).clamp(0.,1.)}else{0.};let distance=length(sub(vertex.position,add(a,mul(ab,t))));
                     proposed.insert(j as u32,1./distance.max(1e-6).ppowf(*power));}

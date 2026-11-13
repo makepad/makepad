@@ -166,7 +166,6 @@ fn inventory_totals(doc:&Document)->[(&'static str,usize);5] {
         ("clips",doc.clips().len()),("clip_keys",doc.clips().values().map(clip_key_count).sum())]
 }
 fn document_overview(mut response:Value,doc:&Document,totals:[(&'static str,usize);5],ctx:&mut mesh::Context<'_>)->Result<Value> {
-    put(&mut response,"max_joints",num(doc.limits().max_joints));
     // Give the author the complete measured size in the first response. Local
     // object bounds alone otherwise invite repeated inventory/SQL lookups.
     let mut bounds=[[f64::INFINITY;3],[f64::NEG_INFINITY;3]];

@@ -5,14 +5,10 @@ use makepad_csg_math::portable::PortableFloat;
 use crate::{mesh::Context, Error, Limits, Material, Result, Texture};
 use std::collections::BTreeMap;
 
-const MAX_ATLAS_SIDE: u32 = 1024;
-const MAX_REPEAT_TILES: i32 = 8;
-const MAX_REPEAT_COORDINATE: f32 = 16.0;
-
 pub(crate) type UvBounds = BTreeMap<u32, [[f32; 2]; 2]>;
 struct Region {
     origin: [u32; 2],
-    low: [i32; 2],
+    low: [f64; 2],
     pixel_size: [u32; 2],
     constant: bool,
 }
@@ -28,18 +24,15 @@ impl Atlas {
         let region = &self.regions[&material];
         std::array::from_fn(|axis| {
             let pixel = if region.constant { 0.5 }
-                else { (uv[axis] as f64 - region.low[axis] as f64) * region.pixel_size[axis] as f64 };
+                else { (uv[axis] as f64 - region.low[axis]) * region.pixel_size[axis] as f64 };
             ((region.origin[axis] as f64 + pixel) / self.size[axis] as f64) as f32
         })
     }
 }
 
-struct Tile { id: u32, image: Texture, low: [i32; 2], size: [u32; 2], origin: [u32; 2] }
+struct Tile { id: u32, image: Texture, low: [f64; 2], size: [u32; 2], origin: [u32; 2] }
 fn decode(material: &Material, limits: &Limits, ctx: &mut Context<'_>) -> Result<Texture> {
     ctx.checkpoint(1)?;
-    let mut limits = limits.clone();
-    limits.max_texture_bytes = limits.max_texture_bytes.min(limits.mesh.max_bytes / 4);
-    let limits = &limits;
     let mut image = if material.base_color_png.is_empty() {
         Texture::solid(1, 1, [255; 3], limits)?
     } else { Texture::from_png(&material.base_color_png, limits)? };
@@ -62,7 +55,6 @@ fn decode(material: &Material, limits: &Limits, ctx: &mut Context<'_>) -> Result
 
 pub(crate) fn bake(materials: &BTreeMap<u32, Material>, ranges: &UvBounds, limits: &Limits, ctx: &mut Context<'_>) -> Result<Atlas> {
     if ranges.is_empty() { return Err(Error::Invalid("skin atlas has no materials")); }
-    if ranges.len() > limits.max_materials { return Err(Error::Budget("skin atlas materials")); }
     // With one image there are no neighboring tiles to bleed into. Preserve
     // arbitrary original repeat coordinates and resolution, baking only color.
     if ranges.len() == 1 {
@@ -72,31 +64,31 @@ pub(crate) fn bake(materials: &BTreeMap<u32, Material>, ranges: &UvBounds, limit
         ctx.checkpoint(png.len() as u64)?;
         return Ok(Atlas { png, size: [image.width, image.height], regions: BTreeMap::new(), whole_image: true });
     }
-    let side = MAX_ATLAS_SIDE.min(limits.max_texture_dimension);
+    let side = limits.max_texture_dimension;
     let mut tiles = Vec::new();
     let mut decoded_bytes = 0usize;
-    let mut decode_limits = limits.clone();
     for (&id, bounds) in ranges {
-        decode_limits.max_texture_bytes = limits.max_texture_bytes.saturating_sub(decoded_bytes);
-        let image = decode(materials.get(&id).ok_or(Error::Invalid("unknown atlas material"))?, &decode_limits, ctx)?;
+        let image = decode(materials.get(&id).ok_or(Error::Invalid("unknown atlas material"))?, limits, ctx)?;
         decoded_bytes = decoded_bytes.checked_add(image.rgb.len()).ok_or(Error::Budget("skin atlas decoded bytes"))?;
+        if decoded_bytes > ctx.limits.max_bytes { return Err(Error::Budget("skin atlas decoded bytes")); }
         let constant = image.width == 1 && image.height == 1;
-        let mut low = [0; 2];
-        let mut repeats = [1; 2];
+        let mut low = [0.; 2];
+        let mut repeats = [1u32; 2];
         if !constant {
             for axis in 0..2 {
                 let min = bounds[0][axis]; let max = bounds[1][axis];
-                if !min.is_finite() || !max.is_finite() || min.abs() > MAX_REPEAT_COORDINATE || max.abs() > MAX_REPEAT_COORDINATE {
-                    return Err(Error::Invalid("multi-material skin UV coordinates exceed bounded repeat domain"));
+                if !min.is_finite() || !max.is_finite() {
+                    return Err(Error::Invalid("skin UV coordinates must be finite"));
                 }
-                low[axis] = min.floor() as i32;
-                let high = (max.ceil() as i32).max(low[axis] + 1);
-                repeats[axis] = high - low[axis];
-                if repeats[axis] > MAX_REPEAT_TILES { return Err(Error::Budget("skin atlas repeat tiles")); }
+                low[axis] = (min as f64).floor();
+                let span = ((max as f64).ceil() - low[axis]).max(1.);
+                // The repeat image must fit the host texture dimensions.
+                if span > side as f64 { return Err(Error::Budget("skin atlas tile dimensions")); }
+                repeats[axis] = span as u32;
             }
         }
-        let size = [image.width.checked_mul(repeats[0] as u32).and_then(|v|v.checked_add(2)),
-            image.height.checked_mul(repeats[1] as u32).and_then(|v|v.checked_add(2))];
+        let size = [image.width.checked_mul(repeats[0]).and_then(|v|v.checked_add(2)),
+            image.height.checked_mul(repeats[1]).and_then(|v|v.checked_add(2))];
         let size = [size[0].ok_or(Error::Budget("skin atlas width"))?, size[1].ok_or(Error::Budget("skin atlas height"))?];
         if size.iter().any(|&v| v > side) { return Err(Error::Budget("skin atlas tile dimensions")); }
         tiles.push(Tile { id, image, low, size, origin: [0; 2] });

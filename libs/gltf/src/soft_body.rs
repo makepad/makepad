@@ -63,7 +63,12 @@ pub struct SoftBodyMetadata {
     pub geometry_hash: String,
 }
 
-fn name(s: &str) -> bool { !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control) }
+// Variable authoring groups have no format count bound. The parsed array
+// itself supplies the decoder bound; joint references are validated below.
+fn array_rows(v: &Value) -> Result<&[Value], String> {
+    v.as_arr().ok_or_else(||"expected array".into())
+}
+fn name(s: &str) -> bool { !s.is_empty() && !s.chars().any(char::is_control) }
 fn finite(v: f32) -> bool { v.is_finite() && v.abs() <= 1.0e6 }
 fn range(v: f32, min: f32, max: f32) -> bool { v.is_finite() && (min..=max).contains(&v) }
 
@@ -107,7 +112,7 @@ impl SoftBodyMetadata {
         }
         if self.rest_positions.len()!=SOFT_BODY_PARTICLES || self.tetrahedra.len()!=SOFT_BODY_TETRAHEDRA
             || self.tet_joints.len()!=self.tetrahedra.len() || self.surface_samples.is_empty() || self.surface_samples.len()>128
-            || self.anchors.is_empty() || self.anchors.len()>self.rest_positions.len() || self.attachments.len()>32 {
+            || self.anchors.is_empty() || self.anchors.len()>self.rest_positions.len() {
             return Err("unsupported soft-body cage or binding budget".into());
         }
         if self.rest_positions.iter().flatten().any(|v|!finite(*v)) {return Err("non-finite soft-body rest position".into());}
@@ -133,11 +138,10 @@ impl SoftBodyMetadata {
         }
         for sample in &self.surface_samples {self.validate_binding(*sample)?;}
         let mut names=BTreeSet::new();let mut objects=BTreeSet::from([self.object.as_str()]);
-        if self.deform_objects.len()>32 {return Err("soft-body deform object budget".into());}
         for object in &self.deform_objects {if !name(object)||!objects.insert(object.as_str()){return Err("duplicate/invalid soft-body deform object".into());}}
         for attachment in &self.attachments {
             if !name(&attachment.name) || !names.insert(attachment.name.as_str()) || attachment.joint as usize>=joint_count
-                || !joints.insert(attachment.joint) || attachment.objects.is_empty() || attachment.objects.len()>64
+                || !joints.insert(attachment.joint) || attachment.objects.is_empty()
                 || attachment.rest_pivot.iter().any(|v|!finite(*v)) {
                 return Err("invalid soft-body rigid attachment".into());
             }
@@ -181,16 +185,16 @@ impl SoftBodyMetadata {
         fields(v,&["version","object","deform_objects","root_joint","rest_positions","tetrahedra","surface_samples","anchors","settings","tet_joints","attachments","geometry_hash"])?;
         let out=Self {
             version:integer(need(v,"version")?)?,object:text(v,"object")?.into(),root_joint:integer(need(v,"root_joint")?)?,
-            deform_objects:rows(need(v,"deform_objects")?,32)?.iter().map(|v|v.as_str().map(str::to_owned).ok_or_else(||"deform object must be a string".into())).collect::<Result<_,String>>()?,
+            deform_objects:array_rows(need(v,"deform_objects")?)?.iter().map(|v|v.as_str().map(str::to_owned).ok_or_else(||"deform object must be a string".into())).collect::<Result<_,String>>()?,
             rest_positions:rows(need(v,"rest_positions")?,43)?.iter().map(array).collect::<Result<_,_>>()?,
             tetrahedra:rows(need(v,"tetrahedra")?,80)?.iter().map(|v|{let v=rows(v,4)?;if v.len()!=4{return Err("tetrahedron width".into());}Ok([integer(&v[0])?,integer(&v[1])?,integer(&v[2])?,integer(&v[3])?])}).collect::<Result<_,String>>()?,
             surface_samples:rows(need(v,"surface_samples")?,128)?.iter().map(binding).collect::<Result<_,_>>()?,
             anchors:rows(need(v,"anchors")?,43)?.iter().map(integer).collect::<Result<_,_>>()?,
             settings:SoftBodySettings::from_value(need(v,"settings")?)?,
             tet_joints:rows(need(v,"tet_joints")?,80)?.iter().map(integer).collect::<Result<_,_>>()?,
-            attachments:rows(need(v,"attachments")?,32)?.iter().map(|v|{fields(v,&["name","joint","binding","rest_pivot","objects"])?;
+            attachments:array_rows(need(v,"attachments")?)?.iter().map(|v|{fields(v,&["name","joint","binding","rest_pivot","objects"])?;
                 Ok(SoftBodyAttachment{name:text(v,"name")?.into(),joint:integer(need(v,"joint")?)?,binding:binding(need(v,"binding")?)?,rest_pivot:array(need(v,"rest_pivot")?)?,
-                    objects:rows(need(v,"objects")?,64)?.iter().map(|v|v.as_str().map(str::to_owned).ok_or_else(||"attachment object must be a string".into())).collect::<Result<_,String>>()?})}).collect::<Result<_,String>>()?,
+                    objects:array_rows(need(v,"objects")?)?.iter().map(|v|v.as_str().map(str::to_owned).ok_or_else(||"attachment object must be a string".into())).collect::<Result<_,String>>()?})}).collect::<Result<_,String>>()?,
             geometry_hash:text(v,"geometry_hash")?.into(),
         };out.validate(joint_count)?;Ok(out)
     }

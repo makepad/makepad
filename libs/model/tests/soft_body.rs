@@ -7,7 +7,7 @@ fn apply(d: &mut Document, id: &str, operations: Vec<Operation>) -> Result<Appli
     d.apply(Transaction { request_id: id.into(), expected: d.head(), operations }, None)
 }
 fn fixture() -> Document {
-    let mut d = Document::new(Limits { max_joints: 128, ..Default::default() }).unwrap();
+    let mut d = Document::new(Limits::default()).unwrap();
     apply(&mut d, "geometry", vec![
         Operation::sphere("body", 0.45, 16, 8, true, &Limits::default()).unwrap(),
         Operation::sphere("eye", 0.14, 8, 4, true, &Limits::default()).unwrap(),
@@ -203,8 +203,8 @@ fn imported_glb_rejects_metadata_skin_drift_before_model_publication() {
 }
 
 #[test]
-fn joint_budget_is_explicit_per_document_and_required_for_source_reopen() {
-    let limits=Limits{max_joints:128,..Default::default()};
+fn soft_body_source_reopens_with_default_limits() {
+    let limits=Limits::default();
     let mut doc=Document::new(limits.clone()).unwrap();
     let ops=vec![
         Operation::sphere("body",0.4,8,4,true,doc.limits()).unwrap(),
@@ -213,13 +213,12 @@ fn joint_budget_is_explicit_per_document_and_required_for_source_reopen() {
     apply(&mut doc,"bind",ops).unwrap();
     let source=doc.to_bytes(None).unwrap();
     let reopened=Document::from_bytes(&source,limits.clone(),None).unwrap();
-    assert_eq!(reopened.limits().max_joints,128);
+    assert_eq!(reopened.skeleton(), doc.skeleton());
     assert_eq!(reopened.head(),doc.head());
     assert_eq!(reopened.soft_body(),doc.soft_body());
     let snapshot=reopened.to_snapshot_bytes(None).unwrap();
-    assert_eq!(Document::new(Limits::default()).unwrap().limits().max_joints,64);
-    assert!(Document::from_bytes(&source,Limits::default(),None).is_err());
-    assert!(Document::from_bytes(&snapshot,Limits::default(),None).is_err());
+    assert!(Document::from_bytes(&source,Limits::default(),None).is_ok());
+    assert!(Document::from_bytes(&snapshot,Limits::default(),None).is_ok());
     let published=Document::from_bytes(&snapshot,limits,None).unwrap();
     assert_eq!(published.head(),reopened.head());
     assert_eq!(published.soft_body(),reopened.soft_body());

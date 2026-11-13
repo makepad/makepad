@@ -226,6 +226,11 @@ impl Renderer {
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
         self.prepare_stock_ibl(cx.cx);
         self.push_item_instances(cx.cx, world);
+        // The trampled-grass field once per host update, for the scene's
+        // own draw (an aux draw's camera never moves it).
+        if matches!(scope, EnvScope::Scene) {
+            self.record_trample(cx);
+        }
         let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
         self.pop_item_instances();
         stats
@@ -1616,6 +1621,10 @@ impl Renderer {
                 self.model_ground.push(receiver.sample(x, z).0);
             }
             let instances = std::mem::take(&mut self.placed_models);
+            // The view's focal length in pixels: the grass's density (and its
+            // far carpet on the terrain) follows the image.
+            let focal_px = 0.5 * scene_state.projection.v[5].abs()
+                * (scene_state.viewport_rect.size.y * cx.current_dpi_factor()).max(1.0) as f32;
             self.prepare_foliage_lane(cx.cx);
             self.prepare_splat_lane(cx.cx);
             self.draw_models_inner(
@@ -1643,7 +1652,7 @@ impl Renderer {
                 &mut stats,
             );
             self.draw_splat_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
-                (fog_color, fog_density), &sun, frustum, &mut stats);
+                (fog_color, fog_density), &sun, frustum, focal_px, &mut stats);
             self.draw_foliage_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
                 (fog_color, fog_density), &sun, frustum, &mut stats);
             self.draw_custom_models(cx, eye_pos, lod_scale, &instances, WorldModelLane::Placed,
@@ -1653,7 +1662,7 @@ impl Renderer {
             self.draw_stream(cx, draw, camera_pos, (fog_color, fog_density), &sun);
             cx.exit_draw_label(owner);
             let owner = cx.enter_draw_name("grass");
-            self.draw_grass(cx, eye_pos, (fog_color, fog_density), &sun, frustum, &mut stats);
+            self.draw_grass(cx, eye_pos, focal_px, (fog_color, fog_density), &sun, frustum, &mut stats);
             cx.exit_draw_label(owner);
 
             // Actor-attached props share the world material/depth pass;

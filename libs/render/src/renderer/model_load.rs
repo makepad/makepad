@@ -3,6 +3,11 @@
 use super::*;
 
 impl Renderer {
+    /// Keys held by this renderer's content cache, for host residency reconciliation.
+    pub fn cached_texture_keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.texture_cache.keys().copied()
+    }
+
     /// Load a stock prop onto the GPU under `id`, idempotent. `png` is the
     /// pack atlas, shared by every model in that pack.
     pub fn load_model(

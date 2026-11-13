@@ -711,9 +711,13 @@ pub fn sol_no_slip_island(m: &Model, d: &mut Data, island: usize, maxiter: i32) 
 // solve apart. M/J and their structures below own scratch only for islands;
 // monolithic calls borrow Model/Data. fm/fd are explicit m/d arguments. qfrc_eff
 // owns the optional shifted qfrc_smooth. Hessian input views own scratch copies;
-// all other vectors are C stack allocations.
-#[derive(Default)]
-struct PrimalContext {
+// all other vectors are C stack allocations. The context stays in the solve's
+// scratch from one solve to the next, as the C's arena keeps its memory: each
+// solve sizes its arrays in place (their elements hold what an earlier solve left,
+// as the arena's do), and the arrays the solve tests for presence (C's null
+// pointers) come from the pool and go back to it at the end of the solve.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct PrimalContext {
     is_sparse: i32,  // 1: sparse, 0: dense
     is_elliptic: i32,  // 1: elliptic, 0: pyramidal
     island: i32,  // current island index, -1 if monolithic
@@ -803,86 +807,41 @@ struct PrimalContext {
 }
 
 impl PrimalContext {
-    // Counterpart of the caller's mj_freeStack: consume the context and return
-    // every owned allocation, including arrays filled by the later Hessian code.
-    fn release(self, scratch: &mut Scratch) {
-        if self.m_rownnz.capacity() != 0 { scratch.put_int(self.m_rownnz); }
-        if self.m_rowadr.capacity() != 0 { scratch.put_int(self.m_rowadr); }
-        if self.m_colind.capacity() != 0 { scratch.put_int(self.m_colind); }
-        if self.m.capacity() != 0 { scratch.put_num(self.m); }
-        if self.q_ld.capacity() != 0 { scratch.put_num(self.q_ld); }
-        if self.q_ldiag_inv.capacity() != 0 { scratch.put_num(self.q_ldiag_inv); }
-        put_pattern(scratch, self.j_pat.into_buf());
-        if self.j.capacity() != 0 { scratch.put_num(self.j); }
-        put_pattern(scratch, self.jt_pat.into_buf());
-        if self.jt.capacity() != 0 { scratch.put_num(self.jt); }
-        if self.jaref.capacity() != 0 { scratch.put_num(self.jaref); }
-        if self.jv.capacity() != 0 { scratch.put_num(self.jv); }
-        if self.ma.capacity() != 0 { scratch.put_num(self.ma); }
-        if self.mv.capacity() != 0 { scratch.put_num(self.mv); }
-        if self.grad.capacity() != 0 { scratch.put_num(self.grad); }
-        if self.mgrad.capacity() != 0 { scratch.put_num(self.mgrad); }
-        if self.search.capacity() != 0 { scratch.put_num(self.search); }
-        if self.quad.capacity() != 0 { scratch.put_num(self.quad); }
-        if self.oldstate.capacity() != 0 { scratch.put_int(self.oldstate); }
-        if self.gradold.capacity() != 0 { scratch.put_num(self.gradold); }
-        if self.mgradold.capacity() != 0 { scratch.put_num(self.mgradold); }
-        if self.graddif.capacity() != 0 { scratch.put_num(self.graddif); }
-        if self.mgraddif.capacity() != 0 { scratch.put_num(self.mgraddif); }
-        if self.d.capacity() != 0 { scratch.put_num(self.d); }
-        if self.cholupd.capacity() != 0 { scratch.put_num(self.cholupd); }
-        if self.cholscratch.capacity() != 0 { scratch.put_num(self.cholscratch); }
-        if self.ltj.capacity() != 0 { scratch.put_num(self.ltj); }
-        put_pattern(scratch, self.h_buf);
-        put_pattern(scratch, self.h_pat.into_buf());
-        put_pattern(scratch, self.ht_buf);
-        put_pattern(scratch, self.ht_pat.into_buf());
-        put_pattern(scratch, self.l_buf);
-        put_pattern(scratch, self.l_pat.into_buf());
-        if self.lt_rownnz.capacity() != 0 { scratch.put_int(self.lt_rownnz); }
-        if self.lt_rowadr.capacity() != 0 { scratch.put_int(self.lt_rowadr); }
-        if self.h.capacity() != 0 { scratch.put_num(self.h); }
-        if self.lt_colind.capacity() != 0 { scratch.put_int(self.lt_colind); }
-        if self.lt_map.capacity() != 0 { scratch.put_int(self.lt_map); }
-        if self.l.capacity() != 0 { scratch.put_num(self.l); }
-        if self.lcone.capacity() != 0 { scratch.put_num(self.lcone); }
-        if self.perm.capacity() != 0 { scratch.put_int(self.perm); }
-        put_pattern(scratch, self.hj_pat.into_buf());
-        if self.hj.capacity() != 0 { scratch.put_num(self.hj); }
-        put_pattern(scratch, self.hjt_pat.into_buf());
-        if self.hjt.capacity() != 0 { scratch.put_num(self.hjt); }
-        if self.hm_rownnz.capacity() != 0 { scratch.put_int(self.hm_rownnz); }
-        if self.hm_rowadr.capacity() != 0 { scratch.put_int(self.hm_rowadr); }
-        if self.hm_colind.capacity() != 0 { scratch.put_int(self.hm_colind); }
-        if self.hm.capacity() != 0 { scratch.put_num(self.hm); }
-        if self.ep_l.capacity() != 0 { scratch.put_num(self.ep_l); }
-        if self.s_rownnz.capacity() != 0 { scratch.put_int(self.s_rownnz); }
-        if self.s_rowadr.capacity() != 0 { scratch.put_int(self.s_rowadr); }
-        if self.s_colind.capacity() != 0 { scratch.put_int(self.s_colind); }
-        if self.s_val.capacity() != 0 { scratch.put_num(self.s_val); }
-        if self.pathcost.capacity() != 0 { scratch.put_int(self.pathcost); }
-        if self.hcone.capacity() != 0 { scratch.put_num(self.hcone); }
-        if self.qfrc_eff.capacity() != 0 { scratch.put_num(self.qfrc_eff); }
+    // Counterpart of the caller's mj_freeStack: the arrays the next solve tests for presence go back to the
+    // pool, so it finds them absent (C's null pointers after PrimalPointers); the context keeps the rest.
+    fn free_stack(&mut self, scratch: &mut Scratch) {
+        for v in [&mut self.ep_l, &mut self.hcone, &mut self.lcone, &mut self.ltj] {
+            if v.capacity() != 0 { scratch.put_num(std::mem::take(v)); }
+        }
+        if self.perm.capacity() != 0 { scratch.put_int(std::mem::take(&mut self.perm)); }
     }
 }
 
-// Gives a pattern's arrays back to the solve's scratch.
-fn put_pattern(scratch: &mut Scratch, buf: PatternBuf) {
-    for v in buf.into_parts() {
-        if v.capacity() != 0 { scratch.put_int(v); }
+// A context array sized to `n` in place, as C carves it from the arena: the elements it keeps hold what an
+// earlier solve left (as a pooled vector's do), and every caller writes before it reads.
+fn fit<T: Copy + Default>(v: &mut Vec<T>, n: usize) {
+    v.truncate(n);
+    v.resize(n, T::default());
+}
+
+// A context array holding the first n entries of src.
+fn fit_from(v: &mut Vec<i32>, src: &[i32], n: usize) {
+    v.clear();
+    v.extend_from_slice(&src[..n]);
+}
+
+// A built pattern's arrays back in its build buffer, for the next solve to size in place; where the buffer
+// still holds an array (a solve that carved it and built no pattern), the roomier of the two stays.
+fn reclaim(buf: &mut PatternBuf, pat: &mut Pattern) {
+    let old = std::mem::take(pat).into_buf();
+    for (mine, theirs) in [(&mut buf.rownnz, old.rownnz), (&mut buf.rowadr, old.rowadr), (&mut buf.colind, old.colind), (&mut buf.rowsuper, old.rowsuper)] {
+        if theirs.capacity() > mine.capacity() { *mine = theirs; }
     }
 }
 
 // Checks a pattern the solver built (`what` names it): a refusal is a bug in the code that built it.
 fn checked(buf: PatternBuf, nr: usize, nc: usize, has_super: bool, what: &str) -> Pattern {
     Pattern::new(buf, nr, nc, has_super).unwrap_or_else(|(e, _)| panic!("solver: the {what} pattern is malformed: {e:?}"))
-}
-
-// The first n entries of src in a vector from the pool.
-fn copied(pool: &mut Scratch, src: &[i32], n: usize) -> Vec<i32> {
-    let mut v = pool.int(n);
-    v.copy_from_slice(&src[..n]);
-    v
 }
 
 /// What one CG or Newton solve writes: its island's part of the island-ordered outputs (the whole arrays for
@@ -1123,10 +1082,33 @@ impl<'a> Iterator for IslandOuts<'_, 'a> {
 impl ExactSizeIterator for IslandOuts<'_, '_> {}
 
 
-// Set sizes and Data-array offsets, clearing all context state as in C.
-// The caller releases an allocated context before rebinding it.
+// Set sizes and Data-array offsets, clearing the context's state as C's memset does; its arrays stay for
+// primal_allocate to size in place, the built Hessian and factor patterns back in their build buffers.
 fn primal_pointers(m: &Model, d: &Data, ctx: &mut PrimalContext, island: i32) {
-    *ctx = PrimalContext::default();
+    ctx.n_j = 0;
+    ctx.n_h = 0;
+    ctx.n_l = 0;
+    ctx.flg_metric = 0;
+    ctx.n_s = 0;
+    ctx.s_tcap = 0;
+    ctx.cost = 0.0;
+    ctx.quad_gauss = [0.0; 3];
+    ctx.scale = 0.0;
+    ctx.nactive = 0;
+    ctx.ncone = 0;
+    ctx.nupdate = 0;
+    ctx.lflops = 0;
+    ctx.flg_lvalid = 0;
+    ctx.flg_hdirty = 0;
+    ctx.ndowndate = 0;
+    ctx.lsiter = 0;
+    ctx.lsresult = 0;
+    ctx.lsslope = 0.0;
+    ctx.idofadr = 0;
+    ctx.iefcadr = 0;
+    reclaim(&mut ctx.h_buf, &mut ctx.h_pat);
+    reclaim(&mut ctx.ht_buf, &mut ctx.ht_pat);
+    reclaim(&mut ctx.l_buf, &mut ctx.l_pat);
     ctx.is_sparse = is_sparse(m);
     ctx.is_elliptic = (m.opt.cone == CONE_ELLIPTIC) as i32;
     ctx.island = island;
@@ -1205,8 +1187,8 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
 
     // Keep C's two counting/carving passes and allocation order. Each carved
     // array is an owned scratch vector instead of a pointer into a single block.
-    let mut j_buf = PatternBuf::default();
-    let mut jt_buf = PatternBuf::default();
+    let mut j_buf = std::mem::take(&mut ctx.j_pat).into_buf();
+    let mut jt_buf = std::mem::take(&mut ctx.jt_pat).into_buf();
     let mut n_num = 0;
     let mut n_int = 0;
     let mut nep = if flg_newton == 0 { crate::metric::eff_fold_diag_size(m, d, ctx.island) } else { 0 };
@@ -1227,17 +1209,23 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
         }
         macro_rules! carve_num {
             ($field:ident, $count:expr) => {
+                if pass != 0 { fit(&mut ctx.$field, $count); } else { n_num += $count; }
+            };
+        }
+        // an array the solve tests for presence, from the pool
+        macro_rules! carve_num_pooled {
+            ($field:ident, $count:expr) => {
                 if pass != 0 { ctx.$field = io.scratch.num($count); } else { n_num += $count; }
             };
         }
         macro_rules! carve_int {
             ($field:ident, $count:expr) => {
-                if pass != 0 { ctx.$field = io.scratch.int($count); } else { n_int += $count; }
+                if pass != 0 { fit(&mut ctx.$field, $count); } else { n_int += $count; }
             };
         }
         macro_rules! carve_part {
             ($place:expr, $count:expr) => {
-                if pass != 0 { $place = io.scratch.int($count); } else { n_int += $count; }
+                if pass != 0 { fit(&mut $place, $count); } else { n_int += $count; }
             };
         }
         if ctx.island >= 0 {
@@ -1267,13 +1255,13 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
         if flg_newton != 0 {
             carve_num!(d, nefc);
             carve_num!(cholupd, nv);
-            if is_elliptic != 0 { carve_num!(ltj, 6 * nv); }
+            if is_elliptic != 0 { carve_num_pooled!(ltj, 6 * nv); }
             if is_sparse != 0 {
                 carve_num!(cholscratch, nv);
             } else {
                 ctx.n_l = nv * nv;
                 carve_num!(l, ctx.n_l);
-                if is_elliptic != 0 { carve_num!(lcone, ctx.n_l); }
+                if is_elliptic != 0 { carve_num_pooled!(lcone, ctx.n_l); }
             }
         } else {
             carve_num!(gradold, nv);
@@ -1307,7 +1295,7 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
             }
             carve_num!(qfrc_eff, nv);
             ctx.ep_l = Vec::new();
-            if nep != 0 { carve_num!(ep_l, nep); }
+            if nep != 0 { carve_num_pooled!(ep_l, nep); }
         }
     }
 
@@ -1336,12 +1324,10 @@ fn primal_allocate(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContex
         }
     } else if is_sparse != 0 {
         // the whole problem's J pattern, copied into the context to be checked there (as an island's is)
-        j_buf = PatternBuf {
-            rownnz: copied(io.scratch, &d.efc_j_rownnz, nefc),
-            rowadr: copied(io.scratch, &d.efc_j_rowadr, nefc),
-            rowsuper: copied(io.scratch, &d.efc_j_rowsuper, nefc),
-            colind: copied(io.scratch, &d.efc_j_colind, ctx.n_j),
-        };
+        fit_from(&mut j_buf.rownnz, &d.efc_j_rownnz, nefc);
+        fit_from(&mut j_buf.rowadr, &d.efc_j_rowadr, nefc);
+        fit_from(&mut j_buf.rowsuper, &d.efc_j_rowsuper, nefc);
+        fit_from(&mut j_buf.colind, &d.efc_j_colind, ctx.n_j);
     }
     if is_sparse != 0 {
         ctx.j_pat = checked(j_buf, nefc, nv, true, "J");
@@ -2297,14 +2283,19 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
     }
     ctx.perm = perm;
     // the permuted copies the Hessian reads from here on
-    let mut hj_colind = pool.int(n_j);
-    ctx.hj = pool.num(n_j);
-    let mut hjt = PatternBuf { rownnz: pool.int(nv), rowadr: pool.int(nv), rowsuper: pool.int(nv), colind: pool.int(n_j) };
-    ctx.hjt = pool.num(n_j);
-    ctx.hm_rownnz = pool.int(nv);
-    ctx.hm_rowadr = pool.int(nv);
-    ctx.hm_colind = pool.int(n_m);
-    ctx.hm = pool.num(n_m);
+    let mut hj = std::mem::take(&mut ctx.hj_pat).into_buf();
+    fit(&mut hj.colind, n_j);
+    fit(&mut ctx.hj, n_j);
+    let mut hjt = std::mem::take(&mut ctx.hjt_pat).into_buf();
+    fit(&mut hjt.rownnz, nv);
+    fit(&mut hjt.rowadr, nv);
+    fit(&mut hjt.rowsuper, nv);
+    fit(&mut hjt.colind, n_j);
+    fit(&mut ctx.hjt, n_j);
+    fit(&mut ctx.hm_rownnz, nv);
+    fit(&mut ctx.hm_rowadr, nv);
+    fit(&mut ctx.hm_colind, n_m);
+    fit(&mut ctx.hm, n_m);
     if nefc != 0 {
         let mut scratch = pool.int(nv + nefc);
         let (invperm, hj_pos) = scratch.split_at_mut(nv);
@@ -2330,7 +2321,7 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
                 dst_val[k] = v;
                 let w = hj_pos[i] as usize;
                 hj_pos[i] += 1;
-                hj_colind[w] = r as i32;
+                hj.colind[w] = r as i32;
                 ctx.hj[w] = v;
             }
             hjt_adr += nnz;
@@ -2358,12 +2349,9 @@ fn primal_try_reorder(m: &Model, d: &Data, pool: &mut Scratch, ctx: &mut PrimalC
     ctx.hjt_pat = checked(hjt, nv, nefc, true, "J' in Hessian order");
     // J's rows with their columns in Hessian order
     let jp = &ctx.j_pat;
-    let hj = PatternBuf {
-        rownnz: copied(pool, jp.rownnz(), nefc),
-        rowadr: copied(pool, jp.rowadr(), nefc),
-        rowsuper: copied(pool, jp.rowsuper().expect("solver: J has supernodes"), nefc),
-        colind: hj_colind,
-    };
+    fit_from(&mut hj.rownnz, jp.rownnz(), nefc);
+    fit_from(&mut hj.rowadr, jp.rowadr(), nefc);
+    fit_from(&mut hj.rowsuper, jp.rowsuper().expect("solver: J has supernodes"), nefc);
     ctx.hj_pat = checked(hj, nefc, nv, true, "J in Hessian order");
     let (m_rownnz, m_rowadr, m_colind, m_mat) = if ctx.island < 0 {
         (&m.m_rownnz, &m.m_rowadr, &m.m_colind, &d.m)
@@ -2428,9 +2416,9 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
         if stack_bytes_available(d) < h_bytes + cg_bytes + chol_count_bytes.max(loop_bytes) {
             io.warnings.push((WARN_CNSTRFULL, d.narena as i32)); return 0;
         }
-        ctx.h = io.scratch.num(ctx.n_h);
-        ctx.h_buf.colind = io.scratch.int(ctx.n_h);
-        ctx.ht_buf.colind = io.scratch.int(ctx.n_h);
+        fit(&mut ctx.h, ctx.n_h);
+        fit(&mut ctx.h_buf.colind, ctx.n_h);
+        fit(&mut ctx.ht_buf.colind, ctx.n_h);
         let (hj, hjp) = hessian_j!(d, ctx);
         let (hjt, hjtp) = hessian_jt!(ctx);
         let (hm, hm_rownnz, hm_rowadr, hm_colind) = hessian_m!(m, d, ctx);
@@ -2464,11 +2452,11 @@ fn make_hessian(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalContext) 
         if stack_bytes_available(d) < l_bytes + chol_fill_bytes.max(loop_bytes) {
             io.warnings.push((WARN_CNSTRFULL, d.narena as i32)); return 0;
         }
-        ctx.l_buf.colind = io.scratch.int(ctx.n_l);
-        ctx.lt_colind = io.scratch.int(ctx.n_l);
-        ctx.lt_map = io.scratch.int(ctx.n_l);
-        ctx.pathcost = io.scratch.int(nv);
-        ctx.l = io.scratch.num(ctx.n_l);
+        fit(&mut ctx.l_buf.colind, ctx.n_l);
+        fit(&mut ctx.lt_colind, ctx.n_l);
+        fit(&mut ctx.lt_map, ctx.n_l);
+        fit(&mut ctx.pathcost, nv);
+        fit(&mut ctx.l, ctx.n_l);
         if ctx.is_elliptic != 0 { ctx.lcone = io.scratch.num(ctx.n_l); }
         crate::util_solve::chol_factor_symbolic(Some(&mut ctx.l_buf.colind), &mut ctx.l_buf.rownnz, &mut ctx.l_buf.rowadr, &mut ctx.lt_colind,
             &mut ctx.lt_rownnz, &mut ctx.lt_rowadr, &mut ctx.lt_map, ctx.ht_pat.view(), Some(&mut *io.scratch), &mut []);
@@ -2782,14 +2770,15 @@ fn hessian_incremental(m: &Model, d: &Data, io: &mut SolveIo, ctx: &mut PrimalCo
 
 fn sol_primal(m: &Model, d: &Data, io: &mut SolveIo, island: i32, maxiter: i32, mut flg_newton: i32) {
     let mut iter = 0;
-    let mut ctx = PrimalContext::default();
+    let mut ctx = io.scratch.primal.take().unwrap_or_default();
     primal_pointers(m, d, &mut ctx, island);
     if island >= 0 && ctx.nefc == 0 {
         let b = ctx.idofadr;
         copy(&mut io.acc[..], &d.iacc_smooth[b..], ctx.nv);
         zero(&mut io.frc_constraint[..], ctx.nv);
         if let Some(stats) = &mut io.stats { *stats.niter = 0; }
-        ctx.release(io.scratch);
+        ctx.free_stack(io.scratch);
+        io.scratch.primal = Some(ctx);
         return;
     }
     primal_allocate(m, d, io, &mut ctx, flg_newton);
@@ -2833,13 +2822,15 @@ fn sol_primal(m: &Model, d: &Data, io: &mut SolveIo, island: i32, maxiter: i32, 
             flg_newton = 0;
             flg_done = flg_gap && (ctx.flg_metric == 0 || flg_gradient);
             if !flg_done {
-                ctx.gradold = std::mem::take(&mut ctx.cholupd);
-                ctx.mgradold = if ctx.is_sparse != 0 { std::mem::take(&mut ctx.cholscratch) } else { std::mem::take(&mut ctx.l) };
+                // C points gradold at cholupd and mgradold at cholscratch (or L when dense)
+                std::mem::swap(&mut ctx.gradold, &mut ctx.cholupd);
+                if ctx.is_sparse != 0 { std::mem::swap(&mut ctx.mgradold, &mut ctx.cholscratch); }
+                else { std::mem::swap(&mut ctx.mgradold, &mut ctx.l); }
                 // C carves two vectors from LTJ. Owned Vecs cannot share that
-                // allocation, so recycle it and take the two views from Scratch.
+                // allocation, so recycle it and size the context's own two.
                 if !ctx.ltj.is_empty() { io.scratch.put_num(std::mem::take(&mut ctx.ltj)); }
-                ctx.graddif = io.scratch.num(nv);
-                ctx.mgraddif = io.scratch.num(nv);
+                fit(&mut ctx.graddif, nv);
+                fit(&mut ctx.mgraddif, nv);
             }
         }
     }
@@ -2899,7 +2890,8 @@ fn sol_primal(m: &Model, d: &Data, io: &mut SolveIo, island: i32, maxiter: i32, 
         } else { *stats.nnz = ctx.n_j as i32; }
     }
     ctx.oldstate = oldstate;
-    ctx.release(io.scratch);
+    ctx.free_stack(io.scratch);
+    io.scratch.primal = Some(ctx);
 }
 
 // CG (flg_newton 0) or Newton on the whole problem, its outputs taken from Data for the solve.

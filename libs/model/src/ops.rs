@@ -252,7 +252,6 @@ impl Operation {
     /// against the document (missing objects, stale ids) come later.
     pub fn check(&self, limits: &crate::Limits) -> crate::Result<()> {
         use crate::Error;
-        let budget = |n: usize, max: usize, what: &'static str| if n > max { Err(Error::Budget(what)) } else { Ok(()) };
         let axis = |a: u8| if a > 2 { Err(Error::Invalid("axis must be 0, 1 or 2")) } else { Ok(()) };
         match self {
             Self::SoftBody(op) => return op.check(limits),
@@ -264,25 +263,8 @@ impl Operation {
             Self::MeshEditing(op) => return op.check(limits),
             _ => {}
         }
-        if let Some(object) = self.object_name() {
-            budget(object.len(), limits.max_name_bytes, "object name")?;
-        }
         match self {
-            Self::Transform { vertices, .. } | Self::Weld { vertices, .. } | Self::Smooth { vertices, .. } | Self::Brush { vertices, .. } => budget(vertices.len(), limits.mesh.max_vertices, "selection size"),
-            Self::DeleteFaces { faces, .. } | Self::AssignMaterial { faces, .. } => budget(faces.len(), limits.mesh.max_faces, "selection size"),
-            Self::ProjectUv { faces, axis: a, .. } => { budget(faces.len(), limits.mesh.max_faces, "selection size")?; axis(*a) }
-            Self::Mirror { axis: a, .. } => axis(*a),
-            Self::SetWeights { weights, .. } => budget(weights.len(), limits.mesh.max_weights_per_vertex, "joint influences"),
-            Self::SetSkeleton { skeleton } => {
-                budget(skeleton.joints.len(), limits.max_joints, "joints")?;
-                skeleton.joints.iter().try_for_each(|j| budget(j.name.len(), limits.max_name_bytes, "joint name"))
-            }
-            Self::SetClip { clip } => {
-                budget(clip.name.len(), limits.max_name_bytes, "clip name")?;
-                budget(clip.channels.len(), limits.max_joints.saturating_mul(3), "clip channels")?;
-                budget(clip.channels.iter().map(|c| c.keys.len()).sum(), limits.max_keyframes, "keyframes")
-            }
-            Self::ImportMesh { source, .. } => budget(source.len(), limits.max_transaction_bytes, "generated transaction bytes"),
+            Self::ProjectUv { axis: a, .. } | Self::Mirror { axis: a, .. } => axis(*a),
             _ => Ok(()),
         }
     }
@@ -305,6 +287,5 @@ impl Operation {
 }
 
 pub(crate) fn polygon_mesh(positions: &[[f64; 3]], polygons: &[crate::mesh::Polygon], ctx: &mut crate::mesh::Context<'_>) -> crate::Result<crate::mesh::Mesh> {
-    if positions.len() > ctx.limits.max_vertices || polygons.len() > ctx.limits.max_faces { return Err(crate::Error::Budget("polygon mesh size")); }
     Ok(crate::mesh::Mesh::from_polygons(positions, polygons, ctx)?)
 }

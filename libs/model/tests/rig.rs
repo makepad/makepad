@@ -200,7 +200,7 @@ fn character_roundtrip_preserves_materials_skin_bind_and_animation_accessors() {
 }
 
 #[test]
-fn invalid_rig_and_animation_roll_back_and_compile_never_prunes_weights() {
+fn invalid_rig_and_animation_roll_back_and_export_keeps_strongest_weights() {
     let mut doc = Document::new(Limits::default()).unwrap();
     apply(
         &mut doc,
@@ -250,11 +250,30 @@ fn invalid_rig_and_animation_roll_back_and_compile_never_prunes_weights() {
             object: "body".into(),
             vertex,
             weights: (0..5)
-                .map(|joint| mesh::JointWeight { joint, weight: 0.2 })
+                .map(|joint| mesh::JointWeight { joint, weight: [0.05, 0.1, 0.2, 0.25, 0.4][joint as usize] })
                 .collect(),
         }],
     );
-    assert!(matches!(doc.compile(None), Err(Error::Invalid(_))));
+    let compiled = doc.compile(None).unwrap();
+    let parsed = makepad_gltf::parse_glb_bytes(&compiled.glb).unwrap();
+    let mut found_reduced = false;
+    for mesh in parsed.document.meshes.as_deref().unwrap_or(&[]) {
+        for primitive in &mesh.primitives {
+            let accessor = primitive.attributes["WEIGHTS_0"];
+            let count = parsed.document.accessors_slice()[accessor].count;
+            assert_eq!(parsed.document.accessors_slice()[primitive.attributes["JOINTS_0"]].component_type, 5121, "joints export as u8 lanes");
+            let joints = accessor_bytes(&parsed, primitive.attributes["JOINTS_0"]);
+            for (row, weights) in f32s(&parsed, accessor, count * 4).chunks_exact(4).enumerate() {
+                assert!((weights.iter().sum::<f32>() - 1.).abs() < 1e-6);
+                if weights.iter().zip([0.4, 0.25, 0.2, 0.1]).all(|(w, expected)| (*w - expected / 0.95).abs() < 1e-6) {
+                    let indices: [u8; 4] = std::array::from_fn(|lane| joints[row * 4 + lane]);
+                    assert_eq!(indices, [4, 3, 2, 1], "export retains the strongest joints");
+                    found_reduced = true;
+                }
+            }
+        }
+    }
+    assert!(found_reduced, "five editable weights export as the four strongest normalized lanes");
     assert_eq!(
         doc.object("body")
             .unwrap()

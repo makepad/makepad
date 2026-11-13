@@ -1,4 +1,5 @@
-//! Shared scene-shader mixins: fur shells, colour adjustment and output dither.
+//! Shared scene-shader mixins: fur shells, colour adjustment, output dither
+//! and the world wind.
 
 use super::*;
 
@@ -66,6 +67,56 @@ script_mod! {
             let luma = dot(rotated, vec3(0.2126, 0.7152, 0.0722))
             let saturated = mix(vec3(luma, luma, luma), rotated, max(adjust.y, 0.0))
             return max(saturated * max(adjust.z, 0.0), vec3(0.0, 0.0, 0.0)) * tint.xyz
+        }
+    }
+
+    // The world wind (makepad-scene wind.rs, whose `wind_at` is this
+    // field's CPU twin): two layers of value noise, 40 m and 9 m cells,
+    // carried downwind; their sum scales the mean speed (gusts and lulls)
+    // and the small one turns it a little. state = (mean velocity x, z in
+    // m/s, gust, oscillator clock / its period); scroll = each layer's
+    // offset (x, z) in cells. The noise repeats every 256 cells and the
+    // scroll wraps there, so the field is continuous in place and time.
+    mod.draw.SceneWind = {
+        wind_hash: fn(p: vec2) -> float {
+            let p3 = fract(vec3(p.x, p.y, p.x) * 0.1031)
+            let q = p3 + dot(p3, vec3(p3.y, p3.z, p3.x) + vec3(33.33, 33.33, 33.33))
+            return fract((q.x + q.y) * q.z)
+        }
+        wind_noise: fn(p: vec2) -> float {
+            let i = floor(p)
+            let f = p - i
+            let u = f * f * (vec2(3.0, 3.0) - f * 2.0)
+            let c0 = i - floor(i / 256.0) * 256.0
+            let c1 = c0 + vec2(1.0, 1.0) - step(vec2(255.0, 255.0), c0) * 256.0
+            let a = self.wind_hash(c0)
+            let b = self.wind_hash(vec2(c1.x, c0.y))
+            let c = self.wind_hash(vec2(c0.x, c1.y))
+            let d = self.wind_hash(c1)
+            return mix(mix(a, b, u.x), mix(c, d, u.x), u.y)
+        }
+        // The wind at ground position p (x, z): velocity x, z in m/s and the
+        // gust level there (0..1, 0.5 on average).
+        scene_wind: fn(p: vec2, state: vec4, scroll: vec4) -> vec3 {
+            let n1 = self.wind_noise(p / 40.0 - scroll.xy)
+            let n2 = self.wind_noise(p / 9.0 - scroll.zw)
+            let g = 0.65 * n1 + 0.35 * n2
+            let m = 1.0 - state.z + state.z * 2.0 * g
+            let turn = (n2 - 0.5) * 0.5
+            let c = cos(turn)
+            let s = sin(turn)
+            return vec3((state.x * c - state.y * s) * m, (state.x * s + state.y * c) * m, g)
+        }
+        // How hard a wind pushes a plant: 1 at 6 m/s, easing off in a gale
+        // so a storm flattens without stretching.
+        wind_push: fn(v: vec2) -> vec2 {
+            let f = v / 6.0
+            return f / sqrt(1.0 + 0.15 * dot(f, f))
+        }
+        // An oscillator of k whole cycles per clock period (state.w), offset
+        // by phase cycles: continuous through the clock's wrap.
+        wind_wave: fn(clock: float, k: float, phase: float) -> float {
+            return sin(6.2831853 * fract(k * clock + phase))
         }
     }
 }

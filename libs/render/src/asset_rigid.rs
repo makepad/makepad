@@ -48,12 +48,44 @@ impl RigidChannel{
         }else{let v=vec3f(a[0]+(b[0]-a[0])*f,a[1]+(b[1]-a[1])*f,a[2]+(b[2]-a[2])*f);if self.path==0{trs.t=v}else{trs.s=v}}
     }
 }
+/// What a GLB declares, from its JSON alone (no geometry or animation buffers are read):
+/// its node count, the key and value bytes over every rigid (translation,
+/// rotation, scale) animation channel, the longest rigid key stream, the most LOD ids on any
+/// node, and the distinct authored LOD thresholds across all LOD nodes.
+/// Preparation has no bound on any of them; a host that bounds untrusted
+/// content checks this before preparing it.
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq)]
+pub struct GlbCensus{pub nodes:usize,pub rigid_animation_bytes:usize,pub rigid_stream_keys:usize,pub lod_levels:usize,pub lod_thresholds:usize}
+pub fn glb_census(glb:&[u8])->Result<GlbCensus,String>{
+    let(json,_)=crate::asset_morph::chunks(glb)?;
+    let accessors=json.get("accessors").map(Val::arr).unwrap_or(&[]);
+    let mut census=GlbCensus{nodes:json.get("nodes").map(Val::arr).unwrap_or(&[]).len(),..Default::default()};
+    let mut thresholds=Vec::new();
+    for node in json.get("nodes").map(Val::arr).unwrap_or(&[]){
+        let Some(lod)=node.get("extensions").and_then(|e|e.get("MSFT_lod"))else{continue};
+        census.lod_levels=census.lod_levels.max(lod.get("ids").map(Val::arr).unwrap_or(&[]).len());
+        for distance in node.get("extras").and_then(|e|e.get("MAKEPAD_lod_distances")).map(Val::arr).unwrap_or(&[]){
+            thresholds.push(distance.f64().ok_or("LOD distance must be a number")? as f32);
+        }
+    }
+    thresholds.sort_by(f32::total_cmp);thresholds.dedup();census.lod_thresholds=thresholds.len();
+    for animation in json.get("animations").map(Val::arr).unwrap_or(&[]){
+        for channel in animation.get("channels").map(Val::arr).unwrap_or(&[]){
+            let lanes=match channel.get("target").and_then(|t|t.get("path")).and_then(Val::str){Some("translation"|"scale")=>3,Some("rotation")=>4,_=>continue};
+            let sampler=channel.get("sampler").and_then(Val::usize).and_then(|s|animation.get("samplers")?.idx(s)).ok_or("rigid animation sampler")?;
+            let keys=sampler.get("input").and_then(Val::usize).and_then(|i|accessors.get(i)?.get("count")?.usize()).ok_or("rigid times")?;
+            census.rigid_animation_bytes=census.rigid_animation_bytes.saturating_add(keys.saturating_mul((1+lanes)*4));
+            census.rigid_stream_keys=census.rigid_stream_keys.max(keys);
+        }
+    }
+    Ok(census)
+}
 pub(crate) fn automatic_clips(json:&Val,acc:&Accessors,rests:&[NodeTrs],existing:&[usize])->Result<Vec<(usize,Arc<RigidHierarchy>)>,String>{node_clips(json,acc,rests,existing,&[])}
 pub(crate) fn node_clips(json:&Val,acc:&Accessors,rests:&[NodeTrs],existing:&[usize],forced:&[usize])->Result<Vec<(usize,Arc<RigidHierarchy>)>,String>{
     let nodes=json.get("nodes").map(Val::arr).unwrap_or(&[]);let active=crate::asset_morph::active_nodes(json)?;let mut parents=vec![None;nodes.len()];
     for(i,n)in nodes.iter().enumerate(){for c in n.get("children").map(Val::arr).unwrap_or(&[]){let c=c.usize().ok_or("rigid child index")?;if c>=nodes.len()||parents[c].replace(i).is_some(){return Err("rigid parent graph".into())}}}
-    let animations=json.get("animations").map(Val::arr).unwrap_or(&[]);if animations.len()>128{return Err("rigid clip count exceeds128".into())}
-    let mut prepared=Vec::new();let mut bytes=0usize;
+    let animations=json.get("animations").map(Val::arr).unwrap_or(&[]);
+    let mut prepared=Vec::new();
     for(index,animation)in animations.iter().enumerate(){
         let name=animation.get("name").and_then(Val::str).map(str::to_string).unwrap_or_else(||format!("clip_{index}"));
         let mut channels:Vec<Vec<RigidChannel>>=vec![Vec::new();nodes.len()];let mut times=Vec::new();
@@ -61,8 +93,7 @@ pub(crate) fn node_clips(json:&Val,acc:&Accessors,rests:&[NodeTrs],existing:&[us
             let sampler=channel.get("sampler").and_then(Val::usize).and_then(|s|animation.get("samplers")?.idx(s)).ok_or("rigid animation sampler")?;
             let (keys,lanes)=acc.read_f32(sampler.get("input").and_then(Val::usize).ok_or("rigid times")?)?;
             let (values,value_lanes)=acc.read_f32(sampler.get("output").and_then(Val::usize).ok_or("rigid values")?)?;
-            if lanes!=1||keys.is_empty()||keys.len()>36_001||keys.iter().any(|v|!v.is_finite()||*v<0.0)||keys.windows(2).any(|w|w[0]>=w[1])||value_lanes!=if path==1{4}else{3}||values.len()!=keys.len()*value_lanes||values.iter().any(|v|!v.is_finite()){return Err("invalid rigid animation stream".into())}
-            bytes+=(keys.len()+values.len())*4;if bytes>16*1024*1024{return Err("rigid animation exceeds16MiB".into())}
+            if lanes!=1||keys.is_empty()||keys.iter().any(|v|!v.is_finite()||*v<0.0)||keys.windows(2).any(|w|w[0]>=w[1])||value_lanes!=if path==1{4}else{3}||values.len()!=keys.len()*value_lanes||values.iter().any(|v|!v.is_finite()){return Err("invalid rigid animation stream".into())}
             let step=match sampler.get("interpolation").and_then(Val::str).unwrap_or("LINEAR"){"LINEAR"=>false,"STEP"=>true,_=>return Err("rigid cubic tracks require baked export".into())};
             times.extend(keys.iter().copied());channels[node].push(RigidChannel{path,times:keys,values,step});
         }
@@ -79,7 +110,7 @@ pub(crate) fn node_clips(json:&Val,acc:&Accessors,rests:&[NodeTrs],existing:&[us
             if first.is_none(){first=Some((name.clone(),times.clone(),hierarchy.clone()));}
             variants.insert(name.clone(),(*times.last().unwrap(),hierarchy));
         }
-        let(name,times,nodes)=first.unwrap();out.push((i,Arc::new(RigidHierarchy{times,clip_name:name,nodes,clips:variants})));if out.len()>128{return Err("animated rigid mesh count exceeds128".into())}
+        let(name,times,nodes)=first.unwrap();out.push((i,Arc::new(RigidHierarchy{times,clip_name:name,nodes,clips:variants})));
     }Ok(out)
 }
 
@@ -87,3 +118,37 @@ pub(crate) fn rest_nodes(json:&Val)->Vec<NodeTrs>{json.get("nodes").map(Val::arr
     let component=|field:&str,i,default|node.get(field).and_then(|v|v.idx(i)).and_then(Val::f64).unwrap_or(default)as f32;
     NodeTrs{t:vec3f(component("translation",0,0.0),component("translation",1,0.0),component("translation",2,0.0)),s:vec3f(component("scale",0,1.0),component("scale",1,1.0),component("scale",2,1.0)),r:Quat{x:component("rotation",0,0.0),y:component("rotation",1,0.0),z:component("rotation",2,0.0),w:component("rotation",3,1.0)}}
 }).collect()}
+
+#[cfg(test)]
+mod tests{
+    fn accessor(bin:&mut Vec<u8>,views:&mut Vec<String>,accessors:&mut Vec<String>,values:impl Iterator<Item=f32>,lanes:usize)->usize{
+        let offset=bin.len();for v in values{bin.extend_from_slice(&v.to_le_bytes());}let len=bin.len()-offset;
+        views.push(format!(r#"{{"buffer":0,"byteOffset":{offset},"byteLength":{len}}}"#));
+        accessors.push(format!(r#"{{"bufferView":{},"componentType":5126,"count":{},"type":"{}"}}"#,views.len()-1,len/4/lanes,if lanes==1{"SCALAR"}else{"VEC3"}));
+        accessors.len()-1
+    }
+    /// A triangle under a parent whose translation has `keys` LINEAR keys,
+    /// key k at time k moving the parent to x = k, beside `empty` empty nodes.
+    fn animated_parent(keys:usize,empty:usize)->Vec<u8>{
+        let(mut bin,mut views,mut accessors)=(Vec::new(),Vec::new(),Vec::new());
+        let positions=accessor(&mut bin,&mut views,&mut accessors,[0.,0.,0.,1.,0.,0.,0.,1.,0.].into_iter(),3);
+        let normals=accessor(&mut bin,&mut views,&mut accessors,[0.,0.,1.,0.,0.,1.,0.,0.,1.].into_iter(),3);
+        let times=accessor(&mut bin,&mut views,&mut accessors,(0..keys).map(|k|k as f32),1);
+        let moves=accessor(&mut bin,&mut views,&mut accessors,(0..keys).flat_map(|k|[k as f32,0.,0.]),3);
+        let json=format!(r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0{}]}}],"nodes":[{{"children":[1]}},{{"name":"body","mesh":0}}{}],"buffers":[{{"byteLength":{}}}],"bufferViews":[{}],"accessors":[{}],"meshes":[{{"primitives":[{{"attributes":{{"POSITION":{positions},"NORMAL":{normals}}}}}]}}],"animations":[{{"name":"long","samplers":[{{"input":{times},"output":{moves},"interpolation":"LINEAR"}}],"channels":[{{"sampler":0,"target":{{"node":0,"path":"translation"}}}}]}}]}}"#,(2..2+empty).map(|n|format!(",{n}")).collect::<String>(),",{}".repeat(empty),bin.len(),views.join(","),accessors.join(","));
+        let mut json=json.into_bytes();while json.len()%4!=0{json.push(b' ')}
+        let mut glb=Vec::new();glb.extend_from_slice(b"glTF");glb.extend_from_slice(&2u32.to_le_bytes());glb.extend_from_slice(&((20+json.len()+8+bin.len())as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len()as u32).to_le_bytes());glb.extend_from_slice(b"JSON");glb.extend(json);glb.extend_from_slice(&(bin.len()as u32).to_le_bytes());glb.extend_from_slice(b"BIN\0");glb.extend(bin);glb
+    }
+    #[test]
+    fn a_model_past_the_former_node_and_rigid_bounds_prepares_and_its_census_counts_it(){
+        // 4,097 nodes (the former limit was 4,096), and one stream of
+        // 1,048,577 translation keys: 16 MiB + 16 bytes of keys and values,
+        // 29 times the former 36,001-key stream limit.
+        let keys=1024*1024+1;let glb=animated_parent(keys,4095);
+        assert_eq!(super::glb_census(&glb).unwrap(),super::GlbCensus{nodes:4097,rigid_animation_bytes:16*1024*1024+16,rigid_stream_keys:keys,lod_levels:0,lod_thresholds:0});
+        let model=crate::StaticModel::parse_glb(&glb).unwrap();
+        assert_eq!(model.anim_parts.len(),1,"the animated part prepares");
+        assert_eq!(model.anim_parts[0].transform_at((keys-1) as f32).v[12],(keys-1) as f32,"its last key is kept");
+    }
+}

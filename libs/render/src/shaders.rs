@@ -1542,6 +1542,7 @@ mod shader_registration_tests {
             // here it is registered explicitly (builtin's mat_ibl_* are in
             // by custom_material::register).
             crate::renderer::ibl::script_mod(vm);
+            crate::trample::script_mod(vm);
 
             // These shaders write numeric payloads (including negatives and
             // triangle ids), not display colors. A successful shader compile
@@ -1629,6 +1630,18 @@ mod shader_registration_tests {
                 let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("gi_"),"{name}: missing GI code");
+            }
+            // The trampled-grass field's passes (crate::trample) on every backend.
+            for (name,result) in [
+                ("trample feedback GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleFeedback,"glsl",false)})),
+                ("trample feedback HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleFeedback,"hlsl",false)})),
+                ("trample feedback Metal",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleFeedback,"metal",false)})),
+                ("trample stamp GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleStamp,"glsl",false)})),
+                ("trample stamp HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleStamp,"hlsl",false)})),
+                ("trample stamp Metal",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawTrampleStamp,"metal",false)})),
+            ] {
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
             }
             for (name,result) in [
                 ("sun depth GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmSunDepth,"glsl",false)})),

@@ -364,7 +364,7 @@ impl Renderer {
                             pgm.extend(bytes.chunks_exact(4).map(|px| px[3]));
                             let _ = std::fs::write(format!("{prefix}.a.pgm"), pgm);
                             let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-                            for px in bytes.chunks_exact(4) { ppm.extend([px[2], px[1], px[0]]); }
+                            for px in bytes.chunks_exact(4) { ppm.extend([px[0], px[1], px[2]]); }
                             let _ = std::fs::write(format!("{prefix}.rgb.ppm"), ppm);
                             log!("gpu lightmap: dumped {w}x{h} atlas to {prefix}.a.pgm/.rgb.ppm");
                         }) { log!("gpu lightmap: {error}"); }
@@ -375,11 +375,11 @@ impl Renderer {
                         if let Err(error) = cx.cx.read_render_texture(&tex, move |result| {
                             let Ok((w, h, bytes)) = result else { log!("gpu lightmap: {name} readback failed"); return };
                             if name.contains("depth") {
-                                let _ = std::fs::write(format!("{prefix}.{name}.{w}x{h}.f32"), &bytes);
+                                let _ = std::fs::write(format!("{prefix}.{name}.{w}x{h}.f32"), bytes.as_slice());
                                 return;
                             }
                             let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-                            for px in bytes.chunks_exact(4) { ppm.extend([px[2], px[1], px[0]]); }
+                            for px in bytes.chunks_exact(4) { ppm.extend([px[0], px[1], px[2]]); }
                             let _ = std::fs::write(format!("{prefix}.{name}.ppm"), ppm);
                         }) { log!("gpu lightmap: {error}"); }
                     }

@@ -8,9 +8,6 @@ use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
-pub(super) const MAX_PROFILE: usize = 512;
-const MAX_OPENINGS: usize = 64;
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct Opening {
     pub at: f64, pub width: f64, pub height: f64, pub sill: f64,
@@ -44,10 +41,28 @@ pub enum Shape {
     Roof(Roof),
 }
 
-fn positive(v: f64, what: &'static str) -> Result<f64> { if v.is_finite() && v > 0. && v <= 1e5 { Ok(v) } else { Err(Error::Invalid(what)) } }
-fn in_range(v: u32, lo: u32, hi: u32, what: &'static str) -> Result<u32> { if (lo..=hi).contains(&v) { Ok(v) } else { Err(Error::Invalid(what)) } }
+fn positive(v: f64, what: &'static str) -> Result<f64> { if v.is_finite() && v > 0. { Ok(v) } else { Err(Error::Invalid(what)) } }
+fn at_least(v: u32, lo: u32, what: &'static str) -> Result<u32> { if v >= lo { Ok(v) } else { Err(Error::Invalid(what)) } }
 impl Shape {
     pub(super) fn generate(&self, material: u32, ctx: &mut Context<'_>) -> Result<Mesh> {
+        // Admit the parameter-sized polygon soup, normals and construction
+        // scratch before any generator allocates them. finish admits the mesh.
+        let samples = match self {
+            Self::Box { radius, segments, .. } => if *radius <= 1e-9 { 8 } else { (*segments as usize).saturating_add(3).saturating_pow(2).saturating_mul(6) },
+            Self::Capsule { segments, rings, .. } => (*segments as usize).saturating_mul((*rings as usize).saturating_add(1)).saturating_mul(2),
+            Self::Cone { segments, .. } => (*segments as usize).saturating_mul(2),
+            Self::Torus { segments, sides, .. } => (*segments as usize).saturating_mul(*sides as usize),
+            Self::Extrude { profile, corner_radius, corner_segments, bevel, bevel_segments, .. } => profile.len()
+                .saturating_mul(if *corner_radius > 0. { (*corner_segments as usize).saturating_add(1) } else { 1 })
+                .saturating_mul(if *bevel > 0. { (*bevel_segments as usize).saturating_add(1).saturating_mul(2) } else { 2 }),
+            Self::Tube { path, segments, .. } => path.len().saturating_mul(*segments as usize),
+            Self::Wall(w) => w.path.len().saturating_mul(w.openings.len().saturating_mul(2).saturating_add(2).saturating_pow(2))
+                .saturating_mul(2).saturating_add(w.openings.len().saturating_mul(64)),
+            Self::Stair { steps, .. } => (*steps as usize).saturating_add(1).saturating_mul(8),
+            Self::Wedge { .. } | Self::Roof(_) => 128,
+        };
+        ctx.bytes(samples.checked_mul(1024).ok_or(Error::Budget("shape storage overflow"))?)?;
+        ctx.checkpoint(samples as u64)?;
         let mut b = Builder::default();
         match self {
             Shape::Box { size, radius, segments } => rounded_box(&mut b, *size, *radius, *segments, material)?,
@@ -282,7 +297,7 @@ fn area2(p: &[[f64; 2]]) -> f64 { (0..p.len()).map(|i| { let (a, b) = (p[i], p[(
 fn clean_profile(profile: &[[f64; 2]]) -> Result<Vec<[f64; 2]>> {
     let mut p: Vec<[f64; 2]> = Vec::with_capacity(profile.len());
     for &q in profile {
-        if q.iter().any(|v| !v.is_finite() || v.abs() > 1e5) { return Err(Error::Invalid("profile point out of range")); }
+        if q.iter().any(|v| !v.is_finite()) { return Err(Error::Invalid("profile point out of range")); }
         if p.last().is_none_or(|l: &[f64; 2]| (l[0] - q[0]).phypot(l[1] - q[1]) > 1e-7) { p.push(q); }
     }
     while p.len() > 1 && (p[0][0] - p[p.len() - 1][0]).phypot(p[0][1] - p[p.len() - 1][1]) <= 1e-7 { p.pop(); }
@@ -627,8 +642,8 @@ pub(super) fn read_shape(r:&mut Reader,limits:&Limits)->Result<Shape>{let _=limi
     2=>Shape::Cone{bottom:r.f64()?,top:r.f64()?,height:r.f64()?,segments:r.u32()?,smooth:read_bool(r)?},
     3=>Shape::Torus{radius:r.f64()?,tube:r.f64()?,segments:r.u32()?,sides:r.u32()?},
     4=>Shape::Wedge{size:[r.f64()?,r.f64()?,r.f64()?]},
-    5=>Shape::Extrude{profile:{let mut values=Vec::new();for _ in 0..r.count(MAX_PROFILE)?{values.push([r.f64()?,r.f64()?]);}values},depth:r.f64()?,axis:r.u32()? as usize,center:read_bool(r)?,corner_radius:r.f64()?,corner_segments:r.u32()?,bevel:r.f64()?,bevel_segments:r.u32()?},
-    6=>Shape::Tube{path:{let mut values=Vec::new();for _ in 0..r.count(MAX_PROFILE)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},radius:r.f64()?,segments:r.u32()?,caps:read_bool(r)?},
+    5=>Shape::Extrude{profile:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push([r.f64()?,r.f64()?]);}values},depth:r.f64()?,axis:r.u32()? as usize,center:read_bool(r)?,corner_radius:r.f64()?,corner_segments:r.u32()?,bevel:r.f64()?,bevel_segments:r.u32()?},
+    6=>Shape::Tube{path:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},radius:r.f64()?,segments:r.u32()?,caps:read_bool(r)?},
     7=>Shape::Wall(read_wall(r,limits)?),
     8=>Shape::Stair{from:[r.f64()?,r.f64()?,r.f64()?],to:[r.f64()?,r.f64()?,r.f64()?],width:r.f64()?,steps:r.u32()?,thickness:r.f64()?},
     9=>Shape::Roof(read_roof(r,limits)?),
@@ -648,32 +663,31 @@ fn read_roofkind(r:&mut Reader,limits:&Limits)->Result<RoofKind>{let _=limits;Ok
 fn write_opening(w:&mut Writer,value:&Opening)->Result<()>{w.f64(value.at)?;w.f64(value.width)?;w.f64(value.height)?;w.f64(value.sill)?;w.f64(value.frame)?;w.f64(value.frame_depth)?;w.u32(value.frame_material)?;if let Some(item)=&value.glass{w.u8(1)?;w.u32(*item)?;}else{w.u8(0)?;}w.u8(value.mullions as u8)?;Ok(())}
 fn read_opening(r:&mut Reader,limits:&Limits)->Result<Opening>{let _=limits;Ok(Opening{at:r.f64()?,width:r.f64()?,height:r.f64()?,sill:r.f64()?,frame:r.f64()?,frame_depth:r.f64()?,frame_material:r.u32()?,glass:if read_bool(r)?{Some(r.u32()?)}else{None},mullions:read_bool(r)?})}
 fn write_wall(w:&mut Writer,value:&Wall)->Result<()>{w.count(value.path.len())?;for item in &value.path{for item in item{w.f64(*item)?;}}w.u8(value.closed as u8)?;w.f64(value.height)?;w.f64(value.thickness)?;w.f64(value.base)?;w.count(value.openings.len())?;for item in &value.openings{write_opening(w,item)?;}if let Some(item)=&value.inner_material{w.u8(1)?;w.u32(*item)?;}else{w.u8(0)?;}if let Some(item)=&value.trim_material{w.u8(1)?;w.u32(*item)?;}else{w.u8(0)?;}Ok(())}
-fn read_wall(r:&mut Reader,limits:&Limits)->Result<Wall>{let _=limits;Ok(Wall{path:{let mut values=Vec::new();for _ in 0..r.count(MAX_PROFILE)?{values.push([r.f64()?,r.f64()?]);}values},closed:read_bool(r)?,height:r.f64()?,thickness:r.f64()?,base:r.f64()?,openings:{let mut values=Vec::new();for _ in 0..r.count(MAX_OPENINGS)?{values.push(read_opening(r,limits)?);}values},inner_material:if read_bool(r)?{Some(r.u32()?)}else{None},trim_material:if read_bool(r)?{Some(r.u32()?)}else{None}})}
+fn read_wall(r:&mut Reader,limits:&Limits)->Result<Wall>{let _=limits;Ok(Wall{path:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push([r.f64()?,r.f64()?]);}values},closed:read_bool(r)?,height:r.f64()?,thickness:r.f64()?,base:r.f64()?,openings:{let mut values=Vec::new();for _ in 0..r.count(54)?{values.push(read_opening(r,limits)?);}values},inner_material:if read_bool(r)?{Some(r.u32()?)}else{None},trim_material:if read_bool(r)?{Some(r.u32()?)}else{None}})}
 fn write_roof(w:&mut Writer,value:&Roof)->Result<()>{write_roofkind(w,&value.kind)?;for item in &value.center{w.f64(*item)?;}for item in &value.size{w.f64(*item)?;}w.f64(value.pitch)?;w.f64(value.overhang)?;w.f64(value.thickness)?;w.u32((value.ridge).try_into().map_err(|_|Error::Budget("count"))?)?;if let Some(item)=&value.trim_material{w.u8(1)?;w.u32(*item)?;}else{w.u8(0)?;}if let Some(item)=&value.gable_material{w.u8(1)?;w.u32(*item)?;}else{w.u8(0)?;}w.f64(value.gable_thickness)?;Ok(())}
 fn read_roof(r:&mut Reader,limits:&Limits)->Result<Roof>{let _=limits;Ok(Roof{kind:read_roofkind(r,limits)?,center:[r.f64()?,r.f64()?,r.f64()?],size:[r.f64()?,r.f64()?],pitch:r.f64()?,overhang:r.f64()?,thickness:r.f64()?,ridge:r.u32()? as usize,trim_material:if read_bool(r)?{Some(r.u32()?)}else{None},gable_material:if read_bool(r)?{Some(r.u32()?)}else{None},gable_thickness:r.f64()?})}
 
 impl Shape {
     pub fn check(&self,_limits:&Limits)->Result<()>{
         match self{
-            Self::Box{size,radius,segments}=>{finite(*size)?;for s in size{positive(*s,"box size must be positive")?;}finite([*radius])?;if *radius<0.{return Err(Error::Invalid("box radius"));}in_range(*segments,1,16,"box segments 1..16")?;},
-            Self::Capsule{radius,height,segments,rings}=>{finite([*radius,*height])?;positive(*radius,"capsule radius")?;if *height<radius*2.-1e-9{return Err(Error::Invalid("capsule height must be at least twice its radius"));}in_range(*segments,3,128,"capsule segments")?;in_range(*rings,1,64,"capsule rings")?;},
-            Self::Cone{bottom,top,height,segments,..}=>{finite([*bottom,*top,*height])?;if *bottom<0.||*top<0.||bottom+top<=0.{return Err(Error::Invalid("cone radii"));}positive(*height,"cone height")?;in_range(*segments,3,128,"cone segments")?;},
-            Self::Torus{radius,tube,segments,sides}=>{finite([*radius,*tube])?;positive(*radius,"torus radius")?;positive(*tube,"torus tube")?;if tube>=radius{return Err(Error::Invalid("torus tube must be thinner than its radius"));}in_range(*segments,3,128,"torus segments")?;in_range(*sides,3,64,"torus sides")?;},
+            Self::Box{size,radius,segments}=>{finite(*size)?;for s in size{positive(*s,"box size must be positive")?;}finite([*radius])?;if *radius<0.{return Err(Error::Invalid("box radius"));}at_least(*segments,1,"box segments must be positive")?;},
+            Self::Capsule{radius,height,segments,rings}=>{finite([*radius,*height])?;positive(*radius,"capsule radius")?;if *height<radius*2.-1e-9{return Err(Error::Invalid("capsule height must be at least twice its radius"));}at_least(*segments,3,"capsule segments")?;at_least(*rings,1,"capsule rings")?;},
+            Self::Cone{bottom,top,height,segments,..}=>{finite([*bottom,*top,*height])?;if *bottom<0.||*top<0.||bottom+top<=0.{return Err(Error::Invalid("cone radii"));}positive(*height,"cone height")?;at_least(*segments,3,"cone segments")?;},
+            Self::Torus{radius,tube,segments,sides}=>{finite([*radius,*tube])?;positive(*radius,"torus radius")?;positive(*tube,"torus tube")?;if tube>=radius{return Err(Error::Invalid("torus tube must be thinner than its radius"));}at_least(*segments,3,"torus segments")?;at_least(*sides,3,"torus sides")?;},
             Self::Wedge{size}=>{finite(*size)?;for s in size{positive(*s,"wedge size must be positive")?;}},
-            Self::Extrude{profile,depth,axis,corner_radius,corner_segments,bevel,bevel_segments,..}=>{check_points2(profile)?;if *axis>2{return Err(Error::Invalid("extrude axis must be 0, 1 or 2"));}finite([*depth,*corner_radius,*bevel])?;if *corner_radius<0.||*bevel<0.{return Err(Error::Invalid("extrude corner_radius/bevel"));}positive(*depth,"extrude depth")?;in_range(*corner_segments,1,32,"extrude corner_segments")?;in_range(*bevel_segments,1,16,"extrude bevel_segments")?;},
-            Self::Tube{path,radius,segments,..}=>{if !(2..=MAX_PROFILE).contains(&path.len()){return Err(Error::Invalid("tube path needs 2..512 points"));}finite(path.iter().flatten().copied())?;finite([*radius])?;positive(*radius,"tube radius")?;in_range(*segments,3,64,"tube segments")?;},
+            Self::Extrude{profile,depth,axis,corner_radius,corner_segments,bevel,bevel_segments,..}=>{check_points2(profile)?;if *axis>2{return Err(Error::Invalid("extrude axis must be 0, 1 or 2"));}finite([*depth,*corner_radius,*bevel])?;if *corner_radius<0.||*bevel<0.{return Err(Error::Invalid("extrude corner_radius/bevel"));}positive(*depth,"extrude depth")?;at_least(*corner_segments,1,"extrude corner_segments")?;at_least(*bevel_segments,1,"extrude bevel_segments")?;},
+            Self::Tube{path,radius,segments,..}=>{if path.len()<2{return Err(Error::Invalid("tube path needs at least two points"));}finite(path.iter().flatten().copied())?;finite([*radius])?;positive(*radius,"tube radius")?;at_least(*segments,3,"tube segments")?;},
             Self::Wall(w)=>{check_points2(&w.path)?;if w.path.len()<if w.closed{3}else{2}{return Err(Error::Invalid("wall path needs two points (three when closed)"));}finite([w.height,w.thickness,w.base])?;positive(w.height,"wall height")?;positive(w.thickness,"wall thickness")?;
-                if w.openings.len()>MAX_OPENINGS{return Err(Error::Invalid("wall openings must be an array of at most 64"));}
                 for o in &w.openings{finite([o.at,o.width,o.height,o.sill,o.frame,o.frame_depth])?;if o.sill<0.||o.frame<0.||o.frame_depth<0.{return Err(Error::Invalid("opening sill/frame"));}positive(o.width,"opening width")?;positive(o.height,"opening height")?;}
             },
-            Self::Stair{from,to,width,steps,thickness}=>{finite(*from)?;finite(*to)?;let rise=to[1]-from[1];if !(rise.is_finite()&&rise>0.05)||(to[0]-from[0]).phypot(to[2]-from[2])<0.1{return Err(Error::Invalid("stair must climb from `from` up to a higher, horizontally distant `to`"));}finite([*width,*thickness])?;positive(*width,"stair width")?;in_range(*steps,1,256,"stair steps 1..256")?;positive(*thickness,"stair thickness")?;},
+            Self::Stair{from,to,width,steps,thickness}=>{finite(*from)?;finite(*to)?;let rise=to[1]-from[1];if !(rise.is_finite()&&rise>0.)||(to[0]-from[0]).phypot(to[2]-from[2])<=0.{return Err(Error::Invalid("stair must climb from `from` up to a higher, horizontally distant `to`"));}finite([*width,*thickness])?;positive(*width,"stair width")?;at_least(*steps,1,"stair steps must be positive")?;positive(*thickness,"stair thickness")?;},
             Self::Roof(r)=>{finite(r.center)?;finite(r.size)?;for s in r.size{positive(s,"roof size")?;}finite([r.pitch,r.overhang,r.thickness,r.gable_thickness])?;
-                if !(0. ..=75.).contains(&r.pitch)||(r.kind!=RoofKind::Flat&&r.pitch<1.){return Err(Error::Invalid("roof pitch must be 1..75 degrees"));}if r.overhang<0.{return Err(Error::Invalid("roof overhang"));}if r.ridge!=0&&r.ridge!=2{return Err(Error::Invalid("roof ridge must be \"x\" or \"z\""));}positive(r.thickness,"roof thickness")?;if r.gable_thickness<0.{return Err(Error::Invalid("roof gable_thickness"));}
+                if !(0. ..90.).contains(&r.pitch)||(r.kind!=RoofKind::Flat&&r.pitch<=0.){return Err(Error::Invalid("roof pitch must be positive and below 90 degrees (zero for flat roofs)"));}if r.overhang<0.{return Err(Error::Invalid("roof overhang"));}if r.ridge!=0&&r.ridge!=2{return Err(Error::Invalid("roof ridge must be \"x\" or \"z\""));}positive(r.thickness,"roof thickness")?;if r.gable_thickness<0.{return Err(Error::Invalid("roof gable_thickness"));}
             },
         }Ok(())
     }
 }
-fn check_points2(v:&[[f64;2]])->Result<()>{if !(2..=MAX_PROFILE).contains(&v.len()){return Err(Error::Invalid("2D point list needs 2..512 points"));}finite(v.iter().flatten().copied())}
+fn check_points2(v:&[[f64;2]])->Result<()>{if v.len()<2{return Err(Error::Invalid("2D point list needs at least two points"));}finite(v.iter().flatten().copied())}
 
 #[cfg(test)]
 mod typed_tests {
@@ -682,15 +696,18 @@ mod typed_tests {
     fn shape_literals_cover_variants_and_optional_fields(){
         let limits=Limits::default();let path=vec![[0.,0.],[2.,0.],[2.,2.]];
         let mut shapes=vec![
-            Shape::Box{size:[1.,2.,3.],radius:0.1,segments:3},Shape::Capsule{radius:0.5,height:2.,segments:24,rings:6},
-            Shape::Cone{bottom:1.,top:0.,height:2.,segments:16,smooth:true},Shape::Torus{radius:2.,tube:0.25,segments:32,sides:12},Shape::Wedge{size:[1.;3]},
-            Shape::Extrude{profile:path.clone(),depth:0.5,axis:2,center:true,corner_radius:0.1,corner_segments:4,bevel:0.01,bevel_segments:3},
-            Shape::Tube{path:vec![[0.;3],[1.,0.,0.]],radius:0.1,segments:12,caps:true},
+            Shape::Box{size:[1.,2.,3.],radius:0.1,segments:17},Shape::Capsule{radius:0.5,height:2.,segments:129,rings:65},
+            Shape::Cone{bottom:1.,top:0.,height:2.,segments:129,smooth:true},Shape::Torus{radius:2.,tube:0.25,segments:129,sides:65},Shape::Wedge{size:[1.;3]},
+            Shape::Extrude{profile:path.clone(),depth:0.5,axis:2,center:true,corner_radius:0.1,corner_segments:33,bevel:0.01,bevel_segments:17},
+            Shape::Tube{path:(0..513).map(|i|[i as f64,0.,0.]).collect(),radius:0.1,segments:65,caps:true},
             Shape::Wall(Wall{path:path.clone(),closed:true,height:3.,thickness:0.2,base:0.1,openings:vec![Opening{at:0.5,width:0.5,height:1.,sill:0.3,frame:0.05,frame_depth:0.1,frame_material:2,glass:Some(3),mullions:true}],inner_material:Some(4),trim_material:None}),
             Shape::Wall(Wall{path,closed:false,height:3.,thickness:0.2,base:0.,openings:vec![Opening{at:0.5,width:0.5,height:1.,sill:0.,frame:0.,frame_depth:0.,frame_material:0,glass:None,mullions:false}],inner_material:None,trim_material:Some(4)}),
-            Shape::Stair{from:[0.;3],to:[1.,1.,0.],width:1.,steps:6,thickness:0.15},
+            Shape::Stair{from:[0.;3],to:[1.,1.,0.],width:1.,steps:257,thickness:0.15},
         ];for kind in [RoofKind::Gable,RoofKind::Hip,RoofKind::Flat]{shapes.push(Shape::Roof(Roof{kind,center:[0.,3.,0.],size:[4.,6.],pitch:35.,overhang:0.3,thickness:0.12,ridge:2,trim_material:Some(2),gable_material:Some(3),gable_thickness:0.2}));}
-        for shape in shapes{shape.check(&limits).unwrap();let mut w=Writer::new(usize::MAX);write_shape(&mut w,&shape).unwrap();let mut r=Reader::new(&w.bytes);let decoded=read_shape(&mut r,&limits).unwrap();decoded.check(&limits).unwrap();assert_eq!(decoded,shape);r.end().unwrap();}
+        if let Shape::Wall(wall)=&mut shapes[7] {
+            let opening=wall.openings[0].clone(); wall.openings=(0..65).map(|i|Opening {at:i as f64,..opening.clone()}).collect();
+        }
+        for shape in shapes{shape.check(&limits).unwrap();let mut w=Writer::new();write_shape(&mut w,&shape).unwrap();let mut r=Reader::new(&w.bytes);let decoded=read_shape(&mut r,&limits).unwrap();decoded.check(&limits).unwrap();assert_eq!(decoded,shape);r.end().unwrap();}
     }
     #[test]
     fn invalid_shape_literals(){

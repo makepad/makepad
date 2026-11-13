@@ -121,15 +121,20 @@ fn single_material_keeps_arbitrary_repeat_uvs_and_bakes_linear_color_factor() {
 }
 
 #[test]
-fn unsafe_repeat_domains_and_atlas_budgets_refuse_without_source_mutation() {
+fn extended_repeat_domains_and_atlas_budgets_preserve_source() {
     for doc in [document(true,2.0,40.0), document(true,9.0,0.0)] {
         let before=doc.to_bytes(None).unwrap();
-        assert!(doc.compile(None).is_err());
+        compare_first_image(&doc,&doc.compile(None).unwrap());
         assert_eq!(doc.to_bytes(None).unwrap(),before);
     }
     let mut doc=document(true,1.0,0.0);
     let png=Texture::solid(1024,1,[120,30,90],doc.limits()).unwrap().to_png(doc.limits()).unwrap();
     apply(&mut doc,"large",vec![Operation::SetMaterial {material:7,value:Material {color:[1.;3],base_color_png:png}}]);
+    let before=doc.to_bytes(None).unwrap();
+    compare_first_image(&doc,&doc.compile(None).unwrap());
+    assert_eq!(doc.to_bytes(None).unwrap(),before);
+    let png=Texture::solid(doc.limits().max_texture_dimension,1,[120,30,90],doc.limits()).unwrap().to_png(doc.limits()).unwrap();
+    apply(&mut doc,"atlas-side",vec![Operation::SetMaterial {material:7,value:Material {color:[1.;3],base_color_png:png}}]);
     let before=doc.to_bytes(None).unwrap();
     assert!(matches!(doc.compile(None),Err(Error::Budget("skin atlas tile dimensions"))));
     assert_eq!(doc.to_bytes(None).unwrap(),before);

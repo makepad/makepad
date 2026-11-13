@@ -154,6 +154,13 @@ pub(super) struct SdfMeta {
 /// SDF shadow edge softness, sprite units: the base half-width at the feet
 /// and the extra per unit of source height (contact hardening — the tip of
 /// a shadow is cast by the head and blurs wider than the feet's contact).
+/// The paint lane's map slot: a terrain tile's weight map, or a worn road
+/// part's band map (material_surface.rs `SplatBand`). It is the PBR lane's
+/// occlusion slot, which the paint lane never reads as occlusion
+/// (occlusion_strength stays 0); shaders/splat.rs reads it only through
+/// the weight lookup and `splat_band_texel`.
+const SPLAT_MAP_SLOT: LiveId = live_id!(occlusion_map);
+
 pub(super) const SDF_SOFT_BASE: f32 = 0.05;
 pub(super) const SDF_SOFT_HARDEN: f32 = 0.10;
 
@@ -541,8 +548,12 @@ impl ModelDraw<'_> {
             }
             vars.set_uniform(cx, live_id!(splat_hex_a), &p.stochastic[0]);
             vars.set_uniform(cx, live_id!(splat_hex_b), &p.stochastic[1]);
+            // A worn road part's band (zero: none, the masks are skipped).
+            vars.set_uniform(cx, live_id!(splat_band), &p.band[0]);
+            vars.set_uniform(cx, live_id!(splat_band_map), &p.band[1]);
+            vars.set_uniform(cx, live_id!(splat_wear), &p.band[2]);
             if let Some(id) = vars.draw_shader_id {
-                for (name, texture) in [(live_id!(normal_map), &p.normal), (live_id!(occlusion_map), &p.weights)] {
+                for (name, texture) in [(live_id!(normal_map), &p.normal), (SPLAT_MAP_SLOT, &p.weights)] {
                     if let Some(slot) = cx.draw_shaders[id.index].mapping.textures.iter().position(|t| t.id == name).filter(|slot| *slot < vars.texture_slots.len()) {
                         vars.set_texture(slot, texture);
                     }

@@ -4,9 +4,9 @@ fn map_write(w: &mut Writer, map: &BTreeMap<u32, u32>) -> Result<()> {
     for (&a, &b) in map { w.u32(a)?; w.u32(b)?; }
     Ok(())
 }
-fn map_read(r: &mut Reader, l: &Limits) -> Result<BTreeMap<u32, u32>> {
+fn map_read(r: &mut Reader, _l: &Limits) -> Result<BTreeMap<u32, u32>> {
     let mut map = BTreeMap::new();
-    for _ in 0..r.count(l.max_joints)? {
+    for _ in 0..r.count(8)? {
         let key = r.u32()?;
         if map.last_key_value().is_some_and(|(&last, _)| last >= key) { return Err(Error::Corrupt("rig joint map order")); }
         map.insert(key, r.u32()?);
@@ -81,10 +81,10 @@ impl RigOperation {
         use RigOperation::*;
         let value = match r.u8()? {
             0 => {
-                let mut joints = Vec::new(); for _ in 0..r.count(l.max_joints)? { joints.push(r.u32()?); }
+                let mut joints = Vec::new(); for _ in 0..r.count(4)? { joints.push(r.u32()?); }
                 let axis = r.u32()? as usize;
                 let mut names = BTreeMap::new();
-                for _ in 0..r.count(l.max_joints)? {
+                for _ in 0..r.count(8)? {
                     let j = r.u32()?;
                     if names.last_key_value().is_some_and(|(&last, _)| last >= j) { return Err(Error::Corrupt("mirror name order")); }
                     names.insert(j, name_read(r, l)?);
@@ -103,7 +103,7 @@ impl RigOperation {
             10 => Ik { pose: name_read(r, l)?, root: r.u32()?, middle: r.u32()?, end: r.u32()?, target: array_read(r)?, pole: array_read(r)?, clamp_reach: flag(r)? },
             11 => {
                 let name = name_read(r, l)?; let mut poses = Vec::new();
-                for _ in 0..r.count(l.max_keyframes)? { poses.push((r.f64()?, name_read(r, l)?)); }
+                for _ in 0..r.count(12)? { poses.push((r.f64()?, name_read(r, l)?)); }
                 BakeClip { name, poses, fps: r.f64()?, solve_constraints: flag(r)? }
             }
             12 => BlendClip { name: name_read(r, l)?, a: name_read(r, l)?, b: name_read(r, l)?, weight: r.f64()?, fps: r.f64()? },
@@ -111,19 +111,19 @@ impl RigOperation {
             14 => ClipOptions { name: name_read(r, l)?, options: options_read(r, l)? },
             15 => {
                 let object = name_read(r, l)?; let mut joints = BTreeSet::new();
-                for _ in 0..r.count(l.max_joints)? {
+                for _ in 0..r.count(4)? {
                     let j = r.u32()?; if joints.last().is_some_and(|last| *last >= j) { return Err(Error::Corrupt("locked joint order")); } joints.insert(j);
                 }
                 WeightLocks { object, joints }
             }
             16 => {
                 let object = name_read(r, l)?; let mut vertices = Vec::new();
-                for _ in 0..r.count(l.mesh.max_vertices)? { vertices.push(mesh::VertexId(r.u64()?)); }
+                for _ in 0..r.count(8)? { vertices.push(mesh::VertexId(r.u64()?)); }
                 Weights { object, vertices, edit: weight_read(r, l)? }
             }
             17 => {
                 let name = name_read(r, l)?; let object = name_read(r, l)?; let mut deltas = BTreeMap::new();
-                for _ in 0..r.count(l.mesh.max_vertices)? {
+                for _ in 0..r.count(32)? {
                     let id = mesh::VertexId(r.u64()?);
                     if deltas.last_key_value().is_some_and(|(last, _)| *last >= id) { return Err(Error::Corrupt("morph delta order")); }
                     deltas.insert(id, array_read(r)?);
@@ -175,7 +175,7 @@ fn flag(r: &mut Reader<'_>) -> Result<bool> {
     }
 }
 fn name_read(r: &mut Reader<'_>, l: &Limits) -> Result<String> {
-    let n = r.string(l.max_name_bytes)?;
+    let n = r.string()?;
     name(&n, l)?;
     Ok(n)
 }
@@ -191,7 +191,7 @@ fn pose_write(w: &mut Writer, p: &Pose) -> Result<()> {
 fn pose_read(r: &mut Reader<'_>, l: &Limits) -> Result<Pose> {
     let name = name_read(r, l)?;
     let mut joints = BTreeMap::new();
-    for _ in 0..r.count(l.max_joints)? {
+    for _ in 0..r.count(84)? {
         let joint = r.u32()?;
         if joints.last_key_value().is_some_and(|(&last, _)| last >= joint) {
             return Err(Error::Corrupt("pose joint order"));
@@ -301,7 +301,7 @@ fn constraint_read(r: &mut Reader<'_>, l: &Limits) -> Result<RigConstraint> {
         enabled,
         kind,
     };
-    c.validate(l.max_joints)?;
+    c.validate(crate::rig::GLTF_JOINT_COUNT)?;
     Ok(c)
 }
 fn options_write(w: &mut Writer, o: &ClipOptions) -> Result<()> {
@@ -338,11 +338,11 @@ fn options_read(r: &mut Reader<'_>, l: &Limits) -> Result<ClipOptions> {
     let root_motion = flag(r)?;
     let mut events = Vec::new();
     let mut previous = 0.;
-    for _ in 0..r.count(1024)? {
+    for _ in 0..r.count(16)? {
         let time = r.f64()?;
         let name = name_read(r, l)?;
-        let payload = r.string(4096)?;
-        if time < previous || time > l.max_clip_duration {
+        let payload = r.string()?;
+        if time < previous {
             return Err(Error::Corrupt("event time order"));
         }
         previous = time;
@@ -353,24 +353,22 @@ fn options_read(r: &mut Reader<'_>, l: &Limits) -> Result<ClipOptions> {
         });
     }
     let mut morph_keys = BTreeMap::new();
-    let mut total = 0usize;
-    for _ in 0..r.count(32)? {
+    for _ in 0..r.count(8)? {
         let name = name_read(r, l)?;
         if morph_keys.last_key_value().is_some_and(|(last, _)| last >= &name) {
             return Err(Error::Corrupt("morph animation order"));
         }
         let mut keys = Vec::new();
         let mut previous = -1f64;
-        for _ in 0..r.count(l.max_keyframes.saturating_sub(total))? {
+        for _ in 0..r.count(16)? {
             let time = r.f64()?;
             let weight = r.f64()?;
             valid_weight(weight)?;
-            if time < 0. || time > l.max_clip_duration || time as f32 <= previous as f32 {
+            if time < 0. || time as f32 <= previous as f32 {
                 return Err(Error::Corrupt("morph key time order"));
             }
             previous = time;
             keys.push(MorphKey { time, weight });
-            total += 1;
         }
         if keys.is_empty() || morph_keys.insert(name, keys).is_some() {
             return Err(Error::Corrupt("empty/duplicate morph keys"));
@@ -438,35 +436,35 @@ impl RigState {
     }
     pub(crate) fn read(r: &mut Reader<'_>, l: &Limits) -> Result<Self> {
         let mut s = Self::default();
-        for _ in 0..r.count(l.max_joints)? {
+        for _ in 0..r.count(84)? {
             let joint = r.u32()?;
-            if joint as usize >= l.max_joints || s.rests.insert(joint, transform_read(r)?).is_some()
+            if joint as usize >= crate::rig::GLTF_JOINT_COUNT || s.rests.insert(joint, transform_read(r)?).is_some()
             {
                 return Err(Error::Corrupt("rest joint"));
             }
         }
-        for _ in 0..r.count(64)? {
+        for _ in 0..r.count(8)? {
             let p = pose_read(r, l)?;
             if s.poses.insert(p.name.clone(), p).is_some() {
                 return Err(Error::Corrupt("duplicate pose"));
             }
             size(&s, l)?;
         }
-        for _ in 0..r.count(128)? {
+        for _ in 0..r.count(25)? {
             let c = constraint_read(r, l)?;
             if s.constraints.insert(c.name.clone(), c).is_some() {
                 return Err(Error::Corrupt("duplicate constraint"));
             }
             size(&s, l)?;
         }
-        for _ in 0..r.count(32)? {
+        for _ in 0..r.count(52)? {
             let name = name_read(r, l)?;
             let object = name_read(r, l)?;
             let topology = r.raw(32)?.try_into().unwrap();
             let weight = r.f64()?;
             valid_weight(weight)?;
             let mut deltas = BTreeMap::new();
-            for _ in 0..r.count(l.mesh.max_vertices)? {
+            for _ in 0..r.count(32)? {
                 let id = mesh::VertexId(r.u64()?);
                 let delta: [f64; 3] = array_read(r)?;
                 if id.0 == 0
@@ -488,19 +486,19 @@ impl RigState {
             }
             size(&s, l)?;
         }
-        for _ in 0..r.count(l.max_clips)? {
+        for _ in 0..r.count(14)? {
             let name = name_read(r, l)?;
             if s.clip_options.insert(name, options_read(r, l)?).is_some() {
                 return Err(Error::Corrupt("duplicate clip options"));
             }
             size(&s, l)?;
         }
-        for _ in 0..r.count(l.max_objects)? {
+        for _ in 0..r.count(8)? {
             let object = name_read(r, l)?;
             let mut joints = BTreeSet::new();
-            for _ in 0..r.count(l.max_joints)? {
+            for _ in 0..r.count(4)? {
                 let j = r.u32()?;
-                if j as usize >= l.max_joints || !joints.insert(j) {
+                if j as usize >= crate::rig::GLTF_JOINT_COUNT || !joints.insert(j) {
                     return Err(Error::Corrupt("locked joint"));
                 }
             }
@@ -513,7 +511,7 @@ impl RigState {
     }
 }
 fn size(s: &RigState, l: &Limits) -> Result<()> {
-    if s.memory_bytes() > l.max_source_bytes || s.memory_bytes() > l.mesh.max_bytes {
+    if s.memory_bytes() > l.mesh.max_bytes {
         Err(Error::Budget("rig decoded bytes"))
     } else {
         Ok(())
@@ -525,10 +523,10 @@ mod tests {
     use super::*;
     fn roundtrip(op: &RigOperation, l: &Limits) {
         op.check(l).unwrap();
-        let mut w = Writer::new(usize::MAX); op.write(&mut w).unwrap();
+        let mut w = Writer::new(); op.write(&mut w).unwrap();
         let mut r = Reader::new(&w.bytes); let decoded = RigOperation::read(&mut r, l).unwrap(); r.end().unwrap();
         assert_eq!(&decoded, op);
-        let mut out = Writer::new(usize::MAX); decoded.write(&mut out).unwrap(); assert_eq!(out.bytes, w.bytes);
+        let mut out = Writer::new(); decoded.write(&mut out).unwrap(); assert_eq!(out.bytes, w.bytes);
         for cut in [0, 1, w.bytes.len() - 1] { assert!(RigOperation::read(&mut Reader::new(&w.bytes[..cut]), l).is_err()); }
     }
     fn options() -> ClipOptions {
@@ -565,7 +563,7 @@ mod tests {
             RigOperation::MorphWeight { name: "smile".into(), weight: 0.25 },
         ];
         for (tag, op) in ops.iter().enumerate() {
-            roundtrip(op, &l); let mut w = Writer::new(usize::MAX); op.write(&mut w).unwrap(); assert_eq!(w.bytes[0], tag as u8);
+            roundtrip(op, &l); let mut w = Writer::new(); op.write(&mut w).unwrap(); assert_eq!(w.bytes[0], tag as u8);
         }
         for edit in [
             WeightEdit::Normalize { max_influences: 4 }, WeightEdit::Smooth { iterations: 2, factor: 0.5 },
@@ -589,34 +587,37 @@ mod tests {
             RigOperation::MirrorJoints { joints: vec![1, 2], axis: 0, names: BTreeMap::from([(1, "a".into()), (2, "b".into())]) },
             RigOperation::Weights { object: "body".into(), vertices: vec![], edit: WeightEdit::Smooth { iterations: 1, factor: 0.5 } },
             RigOperation::ClipOptions { name: "walk".into(), options: ClipOptions::default() },
+            RigOperation::MorphWeight { name: "shape".into(), weight: 3. },
+            RigOperation::Weights { object: "body".into(), vertices: vec![], edit: WeightEdit::Smooth { iterations: 65, factor: 0.5 } },
+            RigOperation::Weights { object: "body".into(), vertices: vec![], edit: WeightEdit::Bind { max_influences: 4, power: 9. } },
+            RigOperation::BakeClip { name: "walk".into(), poses: vec![(0., "a".into()), (1., "b".into())], fps: 121., solve_constraints: true },
             RigOperation::Rest { joint: 0, transform: Transform::default() },
         ] { roundtrip(&op, &l); }
         for op in [
             RigOperation::MirrorJoints { joints: vec![2, 1], axis: 0, names: BTreeMap::from([(1, "a".into()), (2, "b".into())]) },
-            RigOperation::Roll { joint: l.max_joints as u32, angle: 0. },
+            RigOperation::Roll { joint: crate::rig::GLTF_JOINT_COUNT as u32, angle: 0. },
             RigOperation::Roll { joint: 0, angle: f64::NAN },
             RigOperation::RenameJoint { joint: 0, name: "bad\nname".into() },
             RigOperation::Rest { joint: 0, transform: Transform { scale: [0.; 3], ..Default::default() } },
             RigOperation::BakeClip { name: "walk".into(), poses: vec![(0., "a".into()), (0., "b".into())], fps: 30., solve_constraints: true },
             RigOperation::BlendClip { name: "blend".into(), a: "a".into(), b: "b".into(), weight: 2., fps: 30. },
             RigOperation::Morph { name: "shape".into(), object: "body".into(), deltas: BTreeMap::from([(mesh::VertexId(0), [0.; 3])]), weight: 0. },
-            RigOperation::MorphWeight { name: "shape".into(), weight: 3. },
             RigOperation::ClipOptions { name: "walk".into(), options: ClipOptions { events: vec![ClipEvent { time: -1., name: "event".into(), payload: String::new() }], ..Default::default() } },
         ] { assert!(op.check(&l).is_err()); }
         for edit in [
-            WeightEdit::Assign { joint: l.max_joints as u32 }, WeightEdit::Normalize { max_influences: 0 },
-            WeightEdit::Smooth { iterations: 65, factor: 0.5 }, WeightEdit::Smooth { iterations: 1, factor: 2. },
+            WeightEdit::Assign { joint: crate::rig::GLTF_JOINT_COUNT as u32 }, WeightEdit::Normalize { max_influences: 0 },
+            WeightEdit::Smooth { iterations: 1, factor: 2. },
             WeightEdit::Mirror { axis: 3, joints: BTreeMap::new(), tolerance: 0.1 },
-            WeightEdit::Transfer { source: "source".into(), max_distance: 0. }, WeightEdit::Bind { max_influences: 4, power: 9. },
+            WeightEdit::Transfer { source: "source".into(), max_distance: 0. },
         ] { assert!(RigOperation::Weights { object: "body".into(), vertices: vec![], edit }.check(&l).is_err()); }
         for vertices in [vec![mesh::VertexId(0)], vec![mesh::VertexId(1); 2]] {
             assert!(RigOperation::Weights { object: "body".into(), vertices, edit: WeightEdit::Assign { joint: 0 } }.check(&l).is_err());
         }
         let op = RigOperation::ClipOptions { name: "walk".into(), options: options() };
-        let tiny = Limits { max_keyframes: 1, ..l.clone() }; assert!(op.check(&tiny).is_err());
-        let tiny = Limits { max_transaction_bytes: 1, ..l.clone() }; assert!(op.check(&tiny).is_err());
+        assert!(op.check(&l).is_ok(), "clip metadata has no key or transaction byte cap");
+        roundtrip(&op, &l);
         assert!(matches!(RigOperation::read(&mut Reader::new(&[255]), &l), Err(Error::Corrupt(_))));
-        let mut w = Writer::new(32); w.u8(3).unwrap(); w.u32(1).unwrap(); w.u8(2).unwrap();
+        let mut w = Writer::new(); w.u8(3).unwrap(); w.u32(1).unwrap(); w.u8(2).unwrap();
         assert!(matches!(RigOperation::read(&mut Reader::new(&w.bytes), &l), Err(Error::Corrupt(_))));
     }
     #[test]
@@ -727,27 +728,25 @@ mod tests {
         );
         s.locked_groups
             .insert("body".into(), BTreeSet::from([0, 2]));
-        let mut w = Writer::new(l.max_source_bytes);
+        let mut w = Writer::new();
         s.write(&mut w).unwrap();
         let bytes = w.bytes;
         let mut reader = Reader::new(&bytes);
         let decoded = RigState::read(&mut reader, &l).unwrap();
         reader.end().unwrap();
         assert_eq!(decoded, s);
-        let mut out = Writer::new(l.max_source_bytes);
+        let mut out = Writer::new();
         decoded.write(&mut out).unwrap();
         assert_eq!(out.bytes, bytes);
         for cut in [0, 1, 4, bytes.len() / 2, bytes.len() - 1] {
             assert!(RigState::read(&mut Reader::new(&bytes[..cut]), &l).is_err());
         }
-        let mut tiny = l;
-        tiny.max_source_bytes = 128;
-        assert!(RigState::read(&mut Reader::new(&bytes), &tiny).is_err());
+        assert_eq!(RigState::read(&mut Reader::new(&bytes), &Limits::default()).unwrap(), s);
     }
     #[test]
     fn malformed_rig_boolean_tag_duplicates_are_rejected() {
         let l = Limits::default();
-        let mut w = Writer::new(2048);
+        let mut w = Writer::new();
         w.count(0).unwrap();
         w.count(0).unwrap();
         w.count(1).unwrap();
@@ -755,7 +754,7 @@ mod tests {
         w.u32(1).unwrap();
         w.u8(2).unwrap();
         assert!(RigState::read(&mut Reader::new(&w.bytes), &l).is_err());
-        let mut w = Writer::new(2048);
+        let mut w = Writer::new();
         w.count(2).unwrap();
         for _ in 0..2 {
             w.u32(0).unwrap();

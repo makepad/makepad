@@ -3,8 +3,6 @@
 //! game's authored fixtures; both reach the same clustered light list.
 use makepad_math::*;
 
-pub const MAX_WORLD_LIGHTS: usize = 256;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShadowSpec {
     pub enabled: bool,

@@ -34,7 +34,7 @@ impl MeshEditingOperation {
         if !self.is_modifier_safe(){return Err(Error::Invalid("modifier cannot depend on fixed element selections"));}let mut operation=self.retarget(object);
         match &mut operation.action{Action::Deform{vertices,..}|Action::Lattice{vertices,..}|Action::Shrinkwrap{vertices,..}=>*vertices=mesh.vertices().iter().map(|v|v.id).collect(),_=>{}}Ok(operation)
     }
-    pub fn memory_bytes(&self)->usize{let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(4).saturating_add(256)}
+    pub fn memory_bytes(&self)->usize{let mut w=Writer::new();if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(4).saturating_add(256)}
     pub fn value(&self)->Value{
         let (op,mut args):(&str,Vec<(&str,Value)>)=match &self.action{
             Action::Subdivide{levels}=>("subdivide",vec![("levels",Value::Int(*levels as i64))]),
@@ -103,7 +103,7 @@ impl MeshEditingOperation {
         Ok(result)
     }
 }
-fn checked_name(name:&str,limits:&Limits)->Result<()>{if name.is_empty()||name.len()>limits.max_name_bytes||name.chars().any(char::is_control){Err(Error::Invalid("mesh object name"))}else{Ok(())}}
+fn checked_name(name:&str,_limits:&Limits)->Result<()>{if name.is_empty()||name.chars().any(char::is_control){Err(Error::Invalid("mesh object name"))}else{Ok(())}}
 fn vector(v:&[f64])->Value{Value::Arr(v.iter().copied().map(Value::F64).collect())}
 fn vertex_ids(v:&[VertexId])->Value{Value::Arr(v.iter().map(|v|json::s(v.0.to_string())).collect())}
 fn face_ids(v:&[FaceId])->Value{Value::Arr(v.iter().map(|v|json::s(v.0.to_string())).collect())}
@@ -117,13 +117,17 @@ mod tests {
     fn strict_canonical_roundtrip_and_local_failure_atomicity(){
         let limits=Limits::default();let mut ctx=Context::default();let mesh=Mesh::cube([2.;3],&mut ctx).unwrap();let edge=*mesh.adjacency(&mut ctx).unwrap().edges.keys().next().unwrap();
         let op=MeshEditingOperation {object:"body".into(),action:Action::Bevel {edges:vec![edge],width:0.2}};
-        let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();
+        let mut w=Writer::new();op.write(&mut w).unwrap();
         let mut r=Reader::new(&w.bytes);assert_eq!(MeshEditingOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();
         let mut objects=BTreeMap::from([("body".into(),mesh)]);op.apply(&mut objects,&limits,&mut ctx).unwrap();assert_eq!(objects["body"].faces().len(),7);
         let before=objects.clone();let bad=MeshEditingOperation { object: "body".into(), action: Action::Solidify { thickness: -1.0 } };assert!(bad.apply(&mut objects,&limits,&mut ctx).is_err());assert_eq!(objects,before);
         assert!(MeshEditingOperation {object:"body".into(),action:Action::Split {
             edges:vec![EdgeKey(VertexId(2),VertexId(1))],factor:0.5,
         }}.check(&limits).is_err());
+        let mut rounded=BTreeMap::from([("body".into(),Mesh::cube([2.;3],&mut ctx).unwrap())]);
+        MeshEditingOperation {object:"body".into(),action:Action::RoundBevel {angle:0.5,width:0.1,segments:17}}
+            .apply(&mut rounded,&limits,&mut ctx).unwrap();
+        assert!(rounded["body"].validate(&mut ctx).unwrap().is_closed_manifold);
     }
     #[test]
     fn decimation_metrics_are_explicit_when_seams_block_reduction(){
@@ -163,31 +167,31 @@ fn write_action(w:&mut Writer,value:&Action)->Result<()>{match value{
     Action::Crease{angle,weight}=>{w.u8(27)?;w.f64(*angle)?;w.f64(*weight)?;},
 }Ok(())}
 fn read_action(r:&mut Reader,limits:&Limits)->Result<Action>{let _=limits;Ok(match r.u8()?{
-    0=>Action::Region{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},offset:[r.f64()?,r.f64()?,r.f64()?]},
-    1=>Action::Split{edges:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_edges)?{values.push(EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)));}values},factor:r.f64()?},
+    0=>Action::Region{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},offset:[r.f64()?,r.f64()?,r.f64()?]},
+    1=>Action::Split{edges:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push(EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)));}values},factor:r.f64()?},
     2=>Action::Collapse{edge:EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)),factor:r.f64()?},
     3=>Action::Dissolve{edge:EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?))},
-    4=>Action::Fill{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},material:r.u32()?},
-    5=>Action::Bridge{a:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},b:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},material:r.u32()?},
+    4=>Action::Fill{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},material:r.u32()?},
+    5=>Action::Bridge{a:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},b:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},material:r.u32()?},
     6=>Action::LoopCut{edge:EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)),factor:r.f64()?},
-    7=>Action::Slide{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},towards:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},factor:r.f64()?},
-    8=>Action::Bevel{edges:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_edges)?{values.push(EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)));}values},width:r.f64()?},
+    7=>Action::Slide{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},towards:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},factor:r.f64()?},
+    8=>Action::Bevel{edges:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push(EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)));}values},width:r.f64()?},
     9=>Action::Solidify{thickness:r.f64()?},
     10=>Action::Array{count:r.u32()?,offset:[r.f64()?,r.f64()?,r.f64()?]},
-    11=>Action::Deform{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},deformation:read_deformation(r,limits)?},
-    12=>Action::Lattice{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},bounds:[[r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?]],divisions:[r.u32()?,r.u32()?,r.u32()?],displacements:{let mut values=Vec::new();for _ in 0..r.count(512)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values}},
-    13=>Action::Shrinkwrap{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},reference:r.string(limits.max_name_bytes)?,max_distance:r.f64()?,offset:r.f64()?},
+    11=>Action::Deform{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},deformation:read_deformation(r,limits)?},
+    12=>Action::Lattice{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},bounds:[[r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?]],divisions:[r.u32()?,r.u32()?,r.u32()?],displacements:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values}},
+    13=>Action::Shrinkwrap{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},reference:r.string()?,max_distance:r.f64()?,offset:r.f64()?},
     14=>Action::Decimate{target_faces:r.u32()? as usize,max_error:r.f64()?},
-    15=>Action::Sculpt{vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},brush:read_sculptbrush(r,limits)?},
-    16=>Action::BoxUv{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
-    17=>Action::CylinderUv{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},axis:r.u32()? as usize,scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
+    15=>Action::Sculpt{vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},brush:read_sculptbrush(r,limits)?},
+    16=>Action::BoxUv{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
+    17=>Action::CylinderUv{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},axis:r.u32()? as usize,scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
     18=>Action::Subdivide{levels:r.u32()?},
     19=>Action::Mirror{axis:r.u32()? as usize,offset:r.f64()?},
-    20=>Action::FlipFaces{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values}},
-    21=>Action::Unwrap{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values}},
-    22=>Action::Pack{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},padding:r.f64()?},
-    23=>Action::Relax{faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},iterations:r.u32()?,factor:r.f64()?},
-    24=>Action::Pin{corners:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_corners)?{values.push(CornerId(r.u64()?));}values},pinned:read_bool(r)?},
+    20=>Action::FlipFaces{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values}},
+    21=>Action::Unwrap{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values}},
+    22=>Action::Pack{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},padding:r.f64()?},
+    23=>Action::Relax{faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},iterations:r.u32()?,factor:r.f64()?},
+    24=>Action::Pin{corners:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(CornerId(r.u64()?));}values},pinned:read_bool(r)?},
     25=>Action::Normals{smooth:read_bool(r)?,angle:r.f64()?},
     26=>Action::RoundBevel{angle:r.f64()?,width:r.f64()?,segments:r.u32()?},
     27=>Action::Crease{angle:r.f64()?,weight:r.f64()?},
@@ -216,7 +220,7 @@ fn read_sculptkind(r:&mut Reader,limits:&Limits)->Result<SculptKind>{let _=limit
     _=>return Err(Error::Corrupt("SculptKind tag")),
 })}
 fn write_sculptbrush(w:&mut Writer,value:&SculptBrush)->Result<()>{write_sculptkind(w,&value.kind)?;for item in &value.center{w.f64(*item)?;}for item in &value.normal{w.f64(*item)?;}w.f64(value.radius)?;w.f64(value.strength)?;w.f64(value.max_displacement)?;w.count(value.masks.len())?;for item in &value.masks{w.u64(item.0.0)?;w.f64(item.1)?;}w.u8(value.symmetry)?;Ok(())}
-fn read_sculptbrush(r:&mut Reader,limits:&Limits)->Result<SculptBrush>{let _=limits;Ok(SculptBrush{kind:read_sculptkind(r,limits)?,center:[r.f64()?,r.f64()?,r.f64()?],normal:[r.f64()?,r.f64()?,r.f64()?],radius:r.f64()?,strength:r.f64()?,max_displacement:r.f64()?,masks:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push((VertexId(r.u64()?),r.f64()?));}values},symmetry:r.u8()?})}
+fn read_sculptbrush(r:&mut Reader,limits:&Limits)->Result<SculptBrush>{let _=limits;Ok(SculptBrush{kind:read_sculptkind(r,limits)?,center:[r.f64()?,r.f64()?,r.f64()?],normal:[r.f64()?,r.f64()?,r.f64()?],radius:r.f64()?,strength:r.f64()?,max_displacement:r.f64()?,masks:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push((VertexId(r.u64()?),r.f64()?));}values},symmetry:r.u8()?})}
 
 // Shared binary field primitives; callers supply typed collection bounds.
 pub(crate) mod codec {
@@ -224,50 +228,47 @@ pub(crate) mod codec {
     pub fn read_bool(r:&mut Reader)->Result<bool>{match r.u8()?{0=>Ok(false),1=>Ok(true),_=>Err(Error::Corrupt("boolean tag"))}}
     pub fn read_f32(r:&mut Reader)->Result<f32>{let v=r.f64()?;let f=v as f32;if f as f64!=v{return Err(Error::Corrupt("noncanonical f32"));}Ok(f)}
     pub fn finite(v:impl IntoIterator<Item=f64>)->Result<()>{if v.into_iter().any(|v|!v.is_finite()){return Err(Error::Invalid("expected finite number"));}Ok(())}
-    pub fn read_ids<T>(r:&mut Reader,max:usize,id:impl Fn(u64)->T)->Result<Vec<T>>{let mut out=Vec::new();for _ in 0..r.count(max)?{out.push(id(r.u64()?));}Ok(out)}
-    pub fn check_count(n:usize,max:usize)->Result<()>{if n>max{return Err(Error::Budget("selection size"));}Ok(())}
+    pub fn read_ids<T>(r:&mut Reader,id:impl Fn(u64)->T)->Result<Vec<T>>{let mut out=Vec::new();for _ in 0..r.count(8)?{out.push(id(r.u64()?));}Ok(out)}
 }
 
 impl MeshEditingOperation {
     pub fn check(&self,limits:&Limits)->Result<()>{
         checked_name(&self.object,limits)?;
-        let vertices=|v:&[VertexId]|check_count(v.len(),limits.mesh.max_vertices);
-        let faces=|v:&[FaceId]|check_count(v.len(),limits.mesh.max_faces);
         let edge=|e:EdgeKey|if e.0>=e.1{Err(Error::Invalid("edge endpoint IDs must be strictly increasing"))}else{Ok(())};
         match &self.action{
-            Action::Region{faces:f,offset}=>{faces(f)?;finite(*offset)?;},
-            Action::Split{edges,factor}=>{if edges.len()>limits.mesh.max_edges{return Err(Error::Budget("edge selection"));}for e in edges{edge(*e)?;}finite([*factor])?;},
+            Action::Region{offset,..}=>{finite(*offset)?;},
+            Action::Split{edges,factor}=>{for e in edges{edge(*e)?;}finite([*factor])?;},
             Action::Collapse{edge:e,factor}|Action::LoopCut{edge:e,factor}=>{edge(*e)?;finite([*factor])?;},
             Action::Dissolve{edge:e}=>edge(*e)?,
-            Action::Fill{vertices:v,..}=>vertices(v)?,Action::Bridge{a,b,..}=>{vertices(a)?;vertices(b)?;},
-            Action::Slide{vertices:v,towards,factor}=>{vertices(v)?;vertices(towards)?;finite([*factor])?;},
-            Action::Bevel{edges,width}=>{if edges.len()>limits.mesh.max_edges{return Err(Error::Budget("edge selection"));}for e in edges{edge(*e)?;}finite([*width])?;},
+            Action::Fill{..}=>{},Action::Bridge{..}=>{},
+            Action::Slide{factor,..}=>{finite([*factor])?;},
+            Action::Bevel{edges,width}=>{for e in edges{edge(*e)?;}finite([*width])?;},
             Action::Solidify{thickness}=>finite([*thickness])?,Action::Array{offset,..}=>finite(*offset)?,
-            Action::Deform{vertices:v,deformation}=>{vertices(v)?;match deformation{
+            Action::Deform{deformation,..}=>{match deformation{
                 Deformation::Bend{axis,range,angle}|Deformation::Twist{axis,range,angle}=>{u32::try_from(*axis).map_err(|_|Error::Invalid("expected u32 integer"))?;finite(*range)?;finite([*angle])?;},
                 Deformation::Taper{axis,range,scales}=>{u32::try_from(*axis).map_err(|_|Error::Invalid("expected u32 integer"))?;finite(*range)?;finite(*scales)?;}
             }},
-            Action::Lattice{vertices:v,bounds,divisions,displacements}=>{vertices(v)?;
-                if divisions.iter().any(|d|!(2..=8).contains(d)){return Err(Error::Invalid("lattice divisions must be 2..8"));}
-                if displacements.len()!=divisions.iter().product::<u32>()as usize{return Err(Error::Invalid("lattice control count mismatch"));}
+            Action::Lattice{bounds,divisions,displacements,..}=>{
+                if divisions.iter().any(|d|*d<2){return Err(Error::Invalid("lattice divisions must be at least two"));}
+                if displacements.len()!=divisions.iter().try_fold(1usize,|n,d|n.checked_mul(*d as usize)).ok_or(Error::Invalid("lattice control count overflow"))?{return Err(Error::Invalid("lattice control count mismatch"));}
                 finite(bounds.iter().flatten().copied())?;finite(displacements.iter().flatten().copied())?;
             },
-            Action::Shrinkwrap{vertices:v,reference,max_distance,offset}=>{vertices(v)?;checked_name(reference,limits)?;finite([*max_distance,*offset])?;},
+            Action::Shrinkwrap{reference,max_distance,offset,..}=>{checked_name(reference,limits)?;finite([*max_distance,*offset])?;},
             Action::Decimate{target_faces,max_error}=>{u32::try_from(*target_faces).map_err(|_|Error::Invalid("expected u32 integer"))?;finite([*max_error])?;},
-            Action::Sculpt{vertices:v,brush}=>{vertices(v)?;if brush.masks.len()>limits.mesh.max_vertices{return Err(Error::Budget("sculpt masks"));}if brush.symmetry>7{return Err(Error::Invalid("symmetry bits must be 0..7"));}
+            Action::Sculpt{brush,..}=>{if brush.symmetry>7{return Err(Error::Invalid("symmetry bits must be 0..7"));}
                 finite(brush.center)?;finite(brush.normal)?;finite([brush.radius,brush.strength,brush.max_displacement])?;finite(brush.masks.iter().map(|(_,v)|*v))?;},
-            Action::BoxUv{faces:f,scale,offset}=>{faces(f)?;finite(*scale)?;finite(*offset)?;},
-            Action::CylinderUv{faces:f,axis,scale,offset}=>{faces(f)?;u32::try_from(*axis).map_err(|_|Error::Invalid("expected u32 integer"))?;finite(*scale)?;finite(*offset)?;},
+            Action::BoxUv{scale,offset,..}=>{finite(*scale)?;finite(*offset)?;},
+            Action::CylinderUv{axis,scale,offset,..}=>{u32::try_from(*axis).map_err(|_|Error::Invalid("expected u32 integer"))?;finite(*scale)?;finite(*offset)?;},
             Action::Mirror{axis,offset}=>{u32::try_from(*axis).map_err(|_|Error::Invalid("expected u32 integer"))?;finite([*offset])?;},
-            Action::FlipFaces{faces:f}|Action::Unwrap{faces:f}=>faces(f)?,
-            Action::Pack{faces:f,padding}=>{faces(f)?;finite([*padding])?;},Action::Relax{faces:f,factor,..}=>{faces(f)?;finite([*factor])?;},
-            Action::Pin{corners,..}=>check_count(corners.len(),limits.mesh.max_corners)?,Action::Normals{angle,..}=>finite([*angle])?,
+            Action::FlipFaces{..}|Action::Unwrap{..}=>{},
+            Action::Pack{padding,..}=>{finite([*padding])?;},Action::Relax{factor,..}=>{finite([*factor])?;},
+            Action::Pin{..}=>{},Action::Normals{angle,..}=>finite([*angle])?,
             Action::RoundBevel{angle,width,..}=>finite([*angle,*width])?,Action::Crease{angle,weight}=>finite([*angle,*weight])?,Action::Subdivide{..}=>{},
         }Ok(())
     }
     pub(crate) fn write(&self,w:&mut Writer)->Result<()>{w.string(&self.object)?;write_action(w,&self.action)}
     pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let value=Self::read_template(r,limits)?;value.check(limits)?;Ok(value)}
-    pub(crate) fn read_template(r:&mut Reader,limits:&Limits)->Result<Self>{Ok(Self{object:r.string(limits.max_name_bytes)?,action:read_action(r,limits)?})}
+    pub(crate) fn read_template(r:&mut Reader,limits:&Limits)->Result<Self>{Ok(Self{object:r.string()?,action:read_action(r,limits)?})}
 }
 
 #[cfg(test)]
@@ -279,7 +280,7 @@ pub(crate) mod typed_tests {
             Action::Region{faces:f.clone(),offset:[1.,2.,3.]},Action::Split{edges:vec![e],factor:0.5},Action::Collapse{edge:e,factor:0.25},Action::Dissolve{edge:e},
             Action::Fill{vertices:v.clone(),material:7},Action::Bridge{a:v.clone(),b:vec![VertexId(4),VertexId(5)],material:8},Action::LoopCut{edge:e,factor:0.5},
             Action::Slide{vertices:v.clone(),towards:vec![VertexId(4),VertexId(5)],factor:0.2},Action::Bevel{edges:vec![e],width:0.1},Action::Solidify{thickness:0.1},Action::Array{count:3,offset:[1.,0.,0.]},
-            Action::Lattice{vertices:v.clone(),bounds:[[0.;3],[1.;3]],divisions:[2;3],displacements:vec![[0.1,0.2,0.3];8]},
+            Action::Lattice{vertices:v.clone(),bounds:[[0.;3],[1.;3]],divisions:[9,2,2],displacements:vec![[0.1,0.2,0.3];36]},
             Action::Shrinkwrap{vertices:v.clone(),reference:"reference".into(),max_distance:1.,offset:0.01},Action::Decimate{target_faces:4,max_error:0.1},
             Action::BoxUv{faces:f.clone(),scale:[2.;2],offset:[0.1;2]},Action::CylinderUv{faces:f.clone(),axis:1,scale:[1.;2],offset:[0.;2]},
             Action::Subdivide{levels:2},Action::Mirror{axis:2,offset:0.5},Action::FlipFaces{faces:f.clone()},Action::Unwrap{faces:f.clone()},
@@ -293,16 +294,16 @@ pub(crate) mod typed_tests {
     #[test]
     fn literal_variants_have_canonical_binary_roundtrips(){
         let limits=Limits::default();
-        for action in actions(){let op=MeshEditingOperation{object:"body".into(),action};op.check(&limits).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(MeshEditingOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*4+256);}
+        for action in actions(){let op=MeshEditingOperation{object:"body".into(),action};op.check(&limits).unwrap();let mut w=Writer::new();op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(MeshEditingOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*4+256);}
     }
     #[test]
     fn validation_and_corrupt_input(){
         let limits=Limits::default();
         for action in [Action::Split{edges:vec![EdgeKey(VertexId(2),VertexId(1))],factor:0.5},Action::Solidify{thickness:f64::NAN},Action::Lattice{vertices:vec![],bounds:[[0.;3],[1.;3]],divisions:[u32::MAX;3],displacements:vec![]},Action::Lattice{vertices:vec![],bounds:[[0.;3],[1.;3]],divisions:[2;3],displacements:vec![]}]{assert!(MeshEditingOperation{object:"body".into(),action}.check(&limits).is_err());}
-        let mut limits=limits;limits.mesh.max_vertices=1;assert!(MeshEditingOperation{object:"body".into(),action:Action::Fill{vertices:vec![VertexId(1),VertexId(2)],material:0}}.check(&limits).is_err());
+        assert!(MeshEditingOperation{object:"body".into(),action:Action::Fill{vertices:vec![VertexId(1),VertexId(2)],material:0}}.check(&limits).is_ok());
         assert!(MeshEditingOperation{object:"".into(),action:Action::Subdivide{levels:1}}.check(&limits).is_err());
-        let mut w=Writer::new(1024);w.string("body").unwrap();w.u8(255).unwrap();assert!(matches!(MeshEditingOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("Action tag"))));
-        let mut w=Writer::new(1024);w.string("body").unwrap();w.u8(25).unwrap();w.u8(2).unwrap();w.f64(0.5).unwrap();assert!(matches!(MeshEditingOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("boolean tag"))));
+        let mut w=Writer::new();w.string("body").unwrap();w.u8(255).unwrap();assert!(matches!(MeshEditingOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("Action tag"))));
+        let mut w=Writer::new();w.string("body").unwrap();w.u8(25).unwrap();w.u8(2).unwrap();w.f64(0.5).unwrap();assert!(matches!(MeshEditingOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("boolean tag"))));
         assert!(MeshEditingOperation::read(&mut Reader::new(&[]),&limits).is_err());
     }
 }

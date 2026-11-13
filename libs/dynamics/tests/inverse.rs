@@ -85,7 +85,7 @@ fn forward_and_inverse_agree_for_every_solver() {
 fn discrete_inverse_recovers_the_step_and_keeps_the_factorizations() {
     let base = fixture();
     let nv = base.nv;
-    for (integrator, name) in [(INT_EULER, "Euler"), (INT_IMPLICIT, "implicit"), (INT_IMPLICITFAST, "implicitfast")] {
+    for (integrator, name) in [(INT_EULER, "Euler"), (INT_IMPLICIT, "implicit"), (INT_IMPLICITFAST, "implicitfast"), (INT_DISCRETE, "discrete")] {
         let mut residual = [0.0; 2];
         for invdiscrete in [false, true] {
             let mut m = base.clone();
@@ -106,11 +106,17 @@ fn discrete_inverse_recovers_the_step_and_keeps_the_factorizations() {
             let (q_lu, q_h) = (d.q_lu.clone(), d.q_h.clone());
             d.qacc.copy_from_slice(&qacc_fd);
             compare_fwd_inv(&m, &mut d);
-            assert!(d.q_lu == q_lu && d.q_h == q_h, "{name} invdiscrete {invdiscrete}: the forward factorizations are unchanged");
+            // the discrete inverse rebuilds its metric's backbone unfactored in qH, as the reference does
+            assert!(d.q_lu == q_lu && (integrator == INT_DISCRETE || d.q_h == q_h), "{name} invdiscrete {invdiscrete}: the forward factorizations are unchanged");
             residual[invdiscrete as usize] = d.solver_fwdinv[0].max(d.solver_fwdinv[1]);
         }
         assert!(residual[1] < 5e-7, "{name}: the discrete inverse recovers the step's forces, residual {}", residual[1]);
-        assert!(residual[0] > 1e3 * residual[1], "{name}: the continuous inverse does not ({} against {})", residual[0], residual[1]);
+        if integrator == INT_DISCRETE {
+            // qacc is the discrete step map: the inverse carries the metric with or without invdiscrete
+            assert!(residual[0] < 5e-7, "{name}: the inverse recovers the step's forces without invdiscrete, residual {}", residual[0]);
+        } else {
+            assert!(residual[0] > 1e3 * residual[1], "{name}: the continuous inverse does not ({} against {})", residual[0], residual[1]);
+        }
     }
 }
 

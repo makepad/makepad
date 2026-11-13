@@ -88,6 +88,44 @@ impl Renderer {
         self.sky_time
     }
 
+    /// The world wind: direction, mean speed and gustiness (default: a
+    /// light, gusty breeze). The shown wind eases toward a changed one.
+    pub fn set_wind(&mut self, wind: makepad_scene::WorldWind) {
+        self.wind = wind;
+    }
+
+    /// Carry the wind to the host's presentation time in seconds (a paused
+    /// game passes the same time and its wind stands still; an earlier time
+    /// than the last, a reloaded world, restarts the clock). Foliage and
+    /// grass sway only in a host that calls this every frame.
+    pub fn advance_wind(&mut self, time: f64) {
+        self.wind_clock.advance(&self.wind, time);
+    }
+
+    /// Show the wind as it blows `time` seconds into its pattern
+    /// ([`makepad_scene::WindClock::at`]): the same picture whenever it is
+    /// drawn. Returns the clock it replaced, for [`Self::set_wind_clock`] to
+    /// put back after the still.
+    pub fn show_wind_at(&mut self, time: f64) -> makepad_scene::WindClock {
+        std::mem::replace(&mut self.wind_clock, makepad_scene::WindClock::at(&self.wind, time))
+    }
+
+    pub fn set_wind_clock(&mut self, clock: makepad_scene::WindClock) {
+        self.wind_clock = clock;
+    }
+
+    /// The next [`Self::advance_wind`] takes the wind as it is: for a host
+    /// whose world was replaced.
+    pub fn restart_wind(&mut self) {
+        self.wind_clock.restart();
+    }
+
+    /// The wind as shown this frame ([`makepad_scene::WindClock::wind_at`]
+    /// reads it anywhere).
+    pub fn wind_clock(&self) -> &makepad_scene::WindClock {
+        &self.wind_clock
+    }
+
     /// The map's sky definition (projection, layer count, repeat, speeds),
     /// for a host that wants to report or drive it.
     pub fn model_sky(&self, id: &str) -> Option<&crate::model::SkyPart> {

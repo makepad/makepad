@@ -64,17 +64,13 @@ impl World {
         }
     }
     /// Check the generic half of the frame before the renderer sees it:
-    /// every value finite and in range, every item's materials present,
-    /// the light count bounded. The first problem is reported with where
-    /// it is.
+    /// every value finite and in range, every item's materials present.
+    /// The first problem is reported with where it is.
     pub fn validate_frame(&self) -> Result<(), String> {
         if let Some(camera) = &self.view.camera {
             camera.validate().map_err(|e| format!("view: {e}"))?;
         }
         self.environment.validate().map_err(|e| format!("environment: {e}"))?;
-        if self.lights.len() > MAX_WORLD_LIGHTS {
-            return Err(format!("{} lights; at most {MAX_WORLD_LIGHTS}", self.lights.len()));
-        }
         for (i, light) in self.lights.iter().enumerate() {
             light.validate().map_err(|e| format!("lights[{i}]: {e}"))?;
         }
@@ -118,6 +114,13 @@ mod tests {
         w.mark_render_dirty();
         assert_eq!(w.render_rev, render.wrapping_add(1));
         assert_eq!(w.paint_rev, paint.wrapping_add(1));
+    }
+
+    #[test]
+    fn a_frame_with_257_lights_validates() {
+        let mut w = World::new();
+        w.lights = vec![Light::Lamp { pos: makepad_math::vec3f(0.0, 2.0, 0.0), color: makepad_math::vec3f(1.0, 1.0, 1.0), intensity: 1.0, range: 8.0, shadow: false }; 257];
+        assert!(w.validate_frame().is_ok());
     }
 
     #[test]

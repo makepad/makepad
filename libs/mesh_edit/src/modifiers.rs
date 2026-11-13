@@ -270,11 +270,6 @@ impl Mesh {
 
 pub(crate) fn select_faces(mesh: &Mesh, faces: &[FaceId], ctx: &mut Context<'_>) -> Result<BTreeSet<FaceId>> {
     ctx.checkpoint(faces.len() as u64)?;
-    ctx.limit(
-        "selected faces",
-        faces.len() as u64,
-        ctx.limits.max_faces as u64,
-    )?;
     ctx.bytes(
         mesh.memory_bytes()
             .saturating_add(faces.len().saturating_mul(64)),

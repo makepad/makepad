@@ -14,19 +14,18 @@ use crate::{canon::{Reader,Writer},mesh_editing::{Action,codec::*},mesh::{Vertex
 impl SelectionState{
     pub fn memory_bytes(&self)->usize{self.groups.values().map(|g|g.object.len()+g.name.len()+(g.vertices.len()+g.faces.len())*8+256).sum()}
     pub(crate) fn reconcile(&mut self,objects:&BTreeMap<String,mesh::Mesh>){self.groups.retain(|(object,_),_|objects.contains_key(object));for g in self.groups.values_mut(){let m=&objects[&g.object];if g.vertices.iter().any(|id|m.vertex(*id).is_none())||g.faces.iter().any(|id|m.face(*id).is_none()){g.stale=true;}}}
-    pub(crate) fn validate(&self,state:&State,limits:&Limits)->Result<()>{if self.groups.len()>128||self.memory_bytes()>limits.mesh.max_bytes/4{return Err(Error::Budget("selection groups"));}
+    pub(crate) fn validate(&self,state:&State,limits:&Limits)->Result<()>{if self.memory_bytes()>limits.mesh.max_bytes/4{return Err(Error::Budget("selection groups"));}
         for ((object,n),g) in &self.groups{name(object,limits)?;name(n,limits)?;if object!=&g.object||n!=&g.name{return Err(Error::Invalid("selection identity"));}let m=state.objects.get(object).ok_or_else(||Error::MissingObject(object.clone()))?;
-            if g.vertices.len()>limits.mesh.max_vertices||g.faces.len()>limits.mesh.max_faces{return Err(Error::Budget("named selection IDs"));}
             if g.vertices.windows(2).any(|w|w[0]>=w[1])||g.faces.windows(2).any(|w|w[0]>=w[1]){return Err(Error::Invalid("selection IDs must be unique and ordered"));}
             if !g.stale&&(g.vertices.iter().any(|id|m.vertex(*id).is_none())||g.faces.iter().any(|id|m.face(*id).is_none())){return Err(Error::Invalid("named selection references missing elements"));}
         }Ok(())
     }
     pub(crate) fn write(&self,w:&mut crate::canon::Writer)->Result<()>{w.count(self.groups.len())?;for g in self.groups.values(){w.string(&g.object)?;w.string(&g.name)?;w.u8(g.stale as u8)?;w.count(g.vertices.len())?;for v in &g.vertices{w.u64(v.0)?;}w.count(g.faces.len())?;for f in &g.faces{w.u64(f.0)?;}}Ok(())}
-    pub(crate) fn read(r:&mut crate::canon::Reader,limits:&Limits)->Result<Self>{let mut out=Self::default();for _ in 0..r.count(128)?{let object=r.string(limits.max_name_bytes)?;let name=r.string(limits.max_name_bytes)?;let stale=match r.u8()?{0=>false,1=>true,_=>return Err(Error::Corrupt("selection stale flag"))};let mut vertices=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{vertices.push(mesh::VertexId(r.u64()?));}let mut faces=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{faces.push(mesh::FaceId(r.u64()?));}let g=SelectionGroup{object:object.clone(),name:name.clone(),vertices,faces,stale};if out.groups.insert((object,name),g).is_some(){return Err(Error::Corrupt("duplicate selection"));}}Ok(out)}
+    pub(crate) fn read(r:&mut crate::canon::Reader,_limits:&Limits)->Result<Self>{let mut out=Self::default();for _ in 0..r.count(17)?{let object=r.string()?;let name=r.string()?;let stale=match r.u8()?{0=>false,1=>true,_=>return Err(Error::Corrupt("selection stale flag"))};let mut vertices=Vec::new();for _ in 0..r.count(8)?{vertices.push(mesh::VertexId(r.u64()?));}let mut faces=Vec::new();for _ in 0..r.count(8)?{faces.push(mesh::FaceId(r.u64()?));}let g=SelectionGroup{object:object.clone(),name:name.clone(),vertices,faces,stale};if out.groups.insert((object,name),g).is_some(){return Err(Error::Corrupt("duplicate selection"));}}Ok(out)}
 }
 impl SelectionOperation{
     pub fn object_name(&self)->&str{match self{Self::Set{object,..}|Self::Query{object,..}|Self::Delete{object,..}|Self::Use{object,..}=>object}}
-    pub fn memory_bytes(&self)->usize{let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(3).saturating_add(128)}
+    pub fn memory_bytes(&self)->usize{let mut w=Writer::new();if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(3).saturating_add(128)}
     pub(crate) fn apply(&self,state:&mut State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<OperationResult>{
         self.check(limits)?;
         let object=self.object_name();let m=state.objects.get(object).ok_or_else(||Error::MissingObject(object.into()))?;
@@ -41,7 +40,7 @@ impl SelectionOperation{
             }
             Self::Delete{name,..}=>{if state.selections.groups.remove(&(object.into(),name.clone())).is_none(){return Err(Error::Invalid("unknown named selection"));}Ok(OperationResult::default())}
             Self::Set{name,vertices,faces,..}=>save(state,object,name,vertices.clone(),faces.clone(),limits),
-            Self::Query{name,query,element,min,max,..}=>{if min>max||*max>limits.mesh.max_vertices.max(limits.mesh.max_faces)||!["vertices","faces"].contains(&element.as_str()){return Err(Error::Invalid("selection query cardinality"));}let(vertices,faces)=query.evaluate(state,object,ctx)?;let count=if element=="vertices"{vertices.len()}else{faces.len()};if count<*min||count>*max{return Err(Error::Invalid("selection cardinality mismatch"));}save(state,object,name,vertices,faces,limits)}
+            Self::Query{name,query,element,min,max,..}=>{let(vertices,faces)=query.evaluate(state,object,ctx)?;let count=if element=="vertices"{vertices.len()}else{faces.len()};if count<*min||count>*max{return Err(Error::Invalid("selection cardinality mismatch"));}save(state,object,name,vertices,faces,limits)}
         }
     }
 }
@@ -49,7 +48,6 @@ fn save(state:&mut State,object:&str,name:&str,mut vertices:Vec<mesh::VertexId>,
     // Earlier edits in this atomic batch may have removed elements belonging
     // to other groups. Mark those stale before validating the fresh query.
     state.selections.reconcile(&state.objects);
-    if state.selections.groups.len()>=128&&!state.selections.groups.contains_key(&(object.into(),name.into())){return Err(Error::Budget("named selections"));}
     let result=OperationResult{object:object.into(),vertices:vertices.clone(),faces:faces.clone(),..Default::default()};state.selections.groups.insert((object.into(),name.into()),SelectionGroup{object:object.into(),name:name.into(),vertices,faces,stale:false});state.selections.validate(state,limits)?;Ok(result)}
 impl SelectionQuery{
     fn evaluate(&self,state:&State,object:&str,ctx:&mut mesh::Context<'_>)->Result<(Vec<mesh::VertexId>,Vec<mesh::FaceId>)>{
@@ -96,7 +94,7 @@ mod loop_accounting_tests{
         let query=SelectionQuery::Loop{edge:mesh::EdgeKey::new(a,b),ring:false};let mut ctx=mesh::Context::default();let (vertices,faces)=query.evaluate(&state,"grid",&mut ctx).unwrap();
         assert_eq!(vertices.len(),n);assert_eq!(faces.len(),2*(n-1));
         let walk_work=ctx.work_used()-adjacency_work;assert!(walk_work>20*n as u64,"candidate comparisons must be charged: {walk_work}");assert!(walk_work<100*n as u64,"walk should depend on adjacent edges: {walk_work}");
-        let mut limited=mesh::Context::new(mesh::Limits{max_work:ctx.work_used()-1,..mesh::Limits::default()},None);assert!(matches!(query.evaluate(&state,"grid",&mut limited),Err(Error::Mesh(mesh::MeshError::Budget{resource:"work",..}))));
+        let mut unlimited=mesh::Context::default();assert!(query.evaluate(&state,"grid",&mut unlimited).is_ok());
     }
 }
 
@@ -122,9 +120,9 @@ impl SelectionOperation {
     pub fn check(&self,limits:&Limits)->Result<()>{
         name(self.object_name(),limits)?;
         match self{
-            Self::Set{name:n,vertices,faces,..}=>{name(n,limits)?;check_count(vertices.len(),limits.mesh.max_vertices)?;check_count(faces.len(),limits.mesh.max_faces)?;},
+            Self::Set{name:n,..}=>{name(n,limits)?;},
             Self::Delete{name:n,..}=>name(n,limits)?,
-            Self::Query{name:n,query,element,min,max,..}=>{name(n,limits)?;if !["vertices","faces"].contains(&element.as_str()){return Err(Error::Invalid("query element"));}if min>max||*max>limits.mesh.max_vertices.max(limits.mesh.max_faces)||u32::try_from(*max).is_err(){return Err(Error::Invalid("selection cardinality"));}query.check(limits)?;},
+            Self::Query{name:n,query,element,min,max,..}=>{name(n,limits)?;if !["vertices","faces"].contains(&element.as_str()){return Err(Error::Invalid("query element"));}if min>max||u32::try_from(*max).is_err(){return Err(Error::Invalid("selection cardinality"));}query.check(limits)?;},
             Self::Use{name:n,element,operation,..}=>{name(n,limits)?;if !["vertices","faces","face"].contains(&element.as_str()){return Err(Error::Invalid("selection element"));}if !has_target(operation,element){return Err(Error::Invalid("selection template must be direct mesh edit"));}},
         }Ok(())
     }
@@ -134,10 +132,10 @@ impl SelectionOperation {
         Self::Delete{object,name}=>{w.u8(2)?;w.string(object)?;w.string(name)?;},
         Self::Use{object,name,element,operation}=>{w.u8(3)?;w.string(object)?;w.string(name)?;w.string(element)?;operation.write(w)?;},
     }Ok(())}
-    pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let tag=r.u8()?;let object=r.string(limits.max_name_bytes)?;let name=r.string(limits.max_name_bytes)?;let value=match tag{
-        0=>Self::Set{object,name,vertices:read_ids(r,limits.mesh.max_vertices,VertexId)?,faces:read_ids(r,limits.mesh.max_faces,FaceId)?},
-        1=>Self::Query{object,name,query:read_selectionquery(r,limits)?,element:r.string(8)?,min:r.u32()? as usize,max:r.u32()? as usize},
-        2=>Self::Delete{object,name},3=>Self::Use{object,name,element:r.string(8)?,operation:Box::new(read_template(r,limits)?)},
+    pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let tag=r.u8()?;let object=r.string()?;let name=r.string()?;let value=match tag{
+        0=>Self::Set{object,name,vertices:read_ids(r,VertexId)?,faces:read_ids(r,FaceId)?},
+        1=>Self::Query{object,name,query:read_selectionquery(r,limits)?,element:r.string()?,min:r.u32()? as usize,max:r.u32()? as usize},
+        2=>Self::Delete{object,name},3=>Self::Use{object,name,element:r.string()?,operation:Box::new(read_template(r,limits)?)},
         _=>return Err(Error::Corrupt("selection operation tag")),
     };value.check(limits)?;Ok(value)}
 }
@@ -179,16 +177,16 @@ fn read_template(r:&mut Reader,limits:&Limits)->Result<Operation>{
     let tag=r.u8()?;
     if tag==28{return Ok(Operation::MeshEditing(crate::MeshEditingOperation::read_template(r,limits)?));}
     if ![4,5,6,10,12,13,14,22,24,25].contains(&tag){return Err(Error::Corrupt("selection template tag"));}
-    let object=r.string(limits.max_name_bytes)?;Ok(match tag{
-        4=>Operation::Transform{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},matrix:[[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?]]},
+    let object=r.string()?;Ok(match tag{
+        4=>Operation::Transform{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},matrix:[[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?],[r.f64()?,r.f64()?,r.f64()?,r.f64()?]]},
         5=>Operation::Extrude{object,face:FaceId(r.u64()?),offset:[r.f64()?,r.f64()?,r.f64()?]},
-        6=>Operation::DeleteFaces{object,faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values}},
-        10=>Operation::AssignMaterial{object,faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},material:r.u32()?},
+        6=>Operation::DeleteFaces{object,faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values}},
+        10=>Operation::AssignMaterial{object,faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},material:r.u32()?},
         12=>Operation::Inset{object,face:FaceId(r.u64()?),distance:r.f64()?},
-        13=>Operation::Weld{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},distance:r.f64()?},
-        22=>Operation::Smooth{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},iterations:r.u32()?,factor:r.f64()?,preserve_boundary:read_bool(r)?},
-        24=>Operation::ProjectUv{object,faces:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_faces)?{values.push(FaceId(r.u64()?));}values},axis:r.u8()?,scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
-        25=>Operation::Brush{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(limits.mesh.max_vertices)?{values.push(VertexId(r.u64()?));}values},center:[r.f64()?,r.f64()?,r.f64()?],radius:r.f64()?,delta:[r.f64()?,r.f64()?,r.f64()?],max_displacement:r.f64()?},
+        13=>Operation::Weld{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},distance:r.f64()?},
+        22=>Operation::Smooth{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},iterations:r.u32()?,factor:r.f64()?,preserve_boundary:read_bool(r)?},
+        24=>Operation::ProjectUv{object,faces:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(FaceId(r.u64()?));}values},axis:r.u8()?,scale:[r.f64()?,r.f64()?],offset:[r.f64()?,r.f64()?]},
+        25=>Operation::Brush{object,vertices:{let mut values=Vec::new();for _ in 0..r.count(8)?{values.push(VertexId(r.u64()?));}values},center:[r.f64()?,r.f64()?,r.f64()?],radius:r.f64()?,delta:[r.f64()?,r.f64()?,r.f64()?],max_displacement:r.f64()?},
         14=>Operation::EdgeAttributes{object,edge:EdgeKey(VertexId(r.u64()?),VertexId(r.u64()?)),attributes:mesh::EdgeAttributes{seam:read_bool(r)?,crease:r.f64()?}},
         _=>unreachable!(),
     })
@@ -197,14 +195,14 @@ fn read_template(r:&mut Reader,limits:&Limits)->Result<Operation>{
 fn check_resolved(op:&Operation,limits:&Limits)->Result<()>{
     match op{
         Operation::MeshEditing(op)=>op.check(limits)?,
-        Operation::Transform{vertices,matrix,..}=>{check_count(vertices.len(),limits.mesh.max_vertices)?;finite(matrix.iter().flatten().copied())?;},
+        Operation::Transform{matrix,..}=>{finite(matrix.iter().flatten().copied())?;},
         Operation::Extrude{offset,..}=>finite(*offset)?,Operation::Inset{distance,..}=>finite([*distance])?,
-        Operation::DeleteFaces{faces,..}|Operation::AssignMaterial{faces,..}=>check_count(faces.len(),limits.mesh.max_faces)?,
-        Operation::Weld{vertices,distance,..}=>{check_count(vertices.len(),limits.mesh.max_vertices)?;finite([*distance])?;},
+        Operation::DeleteFaces{..}|Operation::AssignMaterial{..}=>{},
+        Operation::Weld{distance,..}=>{finite([*distance])?;},
         Operation::EdgeAttributes{attributes,..}=>finite([attributes.crease])?,
-        Operation::Smooth{vertices,factor,..}=>{check_count(vertices.len(),limits.mesh.max_vertices)?;finite([*factor])?;},
-        Operation::ProjectUv{faces,axis,scale,offset,..}=>{if *axis>2{return Err(Error::Invalid("projection axis must be 0, 1 or 2"));}check_count(faces.len(),limits.mesh.max_faces)?;finite(*scale)?;finite(*offset)?;},
-        Operation::Brush{vertices,center,radius,delta,max_displacement,..}=>{check_count(vertices.len(),limits.mesh.max_vertices)?;finite(*center)?;finite([*radius,*max_displacement])?;finite(*delta)?;},
+        Operation::Smooth{factor,..}=>{finite([*factor])?;},
+        Operation::ProjectUv{axis,scale,offset,..}=>{if *axis>2{return Err(Error::Invalid("projection axis must be 0, 1 or 2"));};finite(*scale)?;finite(*offset)?;},
+        Operation::Brush{center,radius,delta,max_displacement,..}=>{finite(*center)?;finite([*radius,*max_displacement])?;finite(*delta)?;},
         _=>return Err(Error::Invalid("selection template must be direct mesh edit")),
     }Ok(())
 }
@@ -212,10 +210,18 @@ fn check_resolved(op:&Operation,limits:&Limits)->Result<()>{
 #[cfg(test)]
 mod typed_tests {
     use super::*;
-    fn roundtrip(op:SelectionOperation){let limits=Limits::default();op.check(&limits).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(SelectionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*3+128);}
+    fn roundtrip(op:SelectionOperation){let limits=Limits::default();op.check(&limits).unwrap();let mut w=Writer::new();op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(SelectionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*3+128);}
     fn using(op:Operation,element:&str)->SelectionOperation{SelectionOperation::Use{object:"body".into(),name:"group".into(),element:element.into(),operation:Box::new(op)}}
     #[test]
     fn selection_literals_and_query_variants(){
+        let mut state = State::default();
+        state.objects.insert("body".into(), mesh::Mesh::cube([1.;3], &mut mesh::Context::default()).unwrap());
+        for i in 0..129 {
+            let name = format!("group-{i}");
+            let group = SelectionGroup {object:"body".into(),name:name.clone(),vertices:vec![],faces:vec![],stale:false};
+            state.selections.groups.insert(("body".into(),name),group);
+        }
+        state.selections.validate(&state,&Limits::default()).unwrap();
         roundtrip(SelectionOperation::Set{object:"body".into(),name:"group".into(),vertices:vec![VertexId(u64::MAX),VertexId(1)],faces:vec![FaceId(3)]});
         roundtrip(SelectionOperation::Delete{object:"body".into(),name:"group".into()});
         for query in [SelectionQuery::All,SelectionQuery::Material(u32::MAX),SelectionQuery::Bounds{min:[-1.;3],max:[1.;3],world:true},SelectionQuery::Connected{face:FaceId(u64::MAX),stop_seams:true},SelectionQuery::Loop{edge:EdgeKey(VertexId(1),VertexId(u64::MAX)),ring:true},SelectionQuery::Ray{origin:[0.,0.,5.],direction:[0.,0.,-2.],world:false}]{roundtrip(SelectionOperation::Query{object:"body".into(),name:"group".into(),query,element:"vertices".into(),min:0,max:100});}
@@ -238,7 +244,7 @@ mod typed_tests {
             ("vertices",Operation::Brush{object:"placeholder".into(),vertices:vec![],center:[0.;3],radius:1.,delta:[0.,1.,0.],max_displacement:0.5}),
         ];
         for action in crate::mesh_editing::typed_tests::actions(){let op=Operation::MeshEditing(crate::MeshEditingOperation{object:"placeholder".into(),action});for element in ["vertices","faces"]{if has_target(&op,element){templates.push((element,op.clone()));}}}
-        for (element,op) in templates{let ids=if element=="face"{vec![7]}else{vec![7,8]};let resolved=retarget(&op,"body",element,&ids).unwrap();assert_eq!(resolved.object_name(),Some("body"));check_resolved(&resolved,&Limits::default()).unwrap();let mut w=Writer::new(usize::MAX);resolved.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(Operation::read(&mut r,&Limits::default()).unwrap(),resolved);r.end().unwrap();roundtrip(using(op,element));roundtrip(using(resolved,element));}
+        for (element,op) in templates{let ids=if element=="face"{vec![7]}else{vec![7,8]};let resolved=retarget(&op,"body",element,&ids).unwrap();assert_eq!(resolved.object_name(),Some("body"));check_resolved(&resolved,&Limits::default()).unwrap();let mut w=Writer::new();resolved.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(Operation::read(&mut r,&Limits::default()).unwrap(),resolved);r.end().unwrap();roundtrip(using(op,element));roundtrip(using(resolved,element));}
     }
     #[test]
     fn template_validation_is_deferred_until_apply(){
@@ -252,6 +258,6 @@ mod typed_tests {
         assert!(using(Operation::DeleteFaces{object:"body".into(),faces:vec![]},"vertices").check(&limits).is_err());
         assert!(SelectionQuery::Ray{origin:[0.;3],direction:[0.;3],world:false}.check(&limits).is_err());
         assert!(SelectionQuery::Bounds{min:[1.;3],max:[0.;3],world:false}.check(&limits).is_err());
-        let mut w=Writer::new(1024);w.u8(3).unwrap();w.string("body").unwrap();w.string("group").unwrap();w.string("faces").unwrap();w.u8(31).unwrap();assert!(matches!(SelectionOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("selection template tag"))));
+        let mut w=Writer::new();w.u8(3).unwrap();w.string("body").unwrap();w.string("group").unwrap();w.string("faces").unwrap();w.u8(31).unwrap();assert!(matches!(SelectionOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("selection template tag"))));
     }
 }

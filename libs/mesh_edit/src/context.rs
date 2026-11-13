@@ -38,32 +38,15 @@ impl fmt::Display for MeshError {
 }
 impl std::error::Error for MeshError {}
 
-/// Provisional worker limits, not claims about device performance. `max_bytes`
-/// bounds conservative working storage estimates as well as serialized input.
+/// Host-supplied working memory budget; unbounded unless the host supplies one.
 #[derive(Clone, Debug)]
 pub struct Limits {
-    pub max_vertices: usize,
-    pub max_faces: usize,
-    pub max_corners: usize,
-    pub max_edges: usize,
-    pub max_face_corners: usize,
-    pub max_triangles: usize,
-    pub max_weights_per_vertex: usize,
     pub max_bytes: usize,
-    pub max_work: u64,
 }
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_vertices: 2_000_000,
-            max_faces: 1_000_000,
-            max_corners: 4_000_000,
-            max_edges: 6_000_000,
-            max_face_corners: 4096,
-            max_triangles: 4_000_000,
-            max_weights_per_vertex: 64,
-            max_bytes: 2 * 1024 * 1024 * 1024,
-            max_work: 10_000_000_000,
+            max_bytes: usize::MAX,
         }
     }
 }
@@ -95,7 +78,7 @@ impl<'a> Context<'a> {
             return Err(MeshError::Cancelled);
         }
         self.work = self.work.saturating_add(work);
-        self.limit("work", self.work, self.limits.max_work)
+        Ok(())
     }
     pub(crate) fn limit(&self, resource: &'static str, requested: u64, limit: u64) -> Result<()> {
         if requested > limit {
@@ -108,7 +91,8 @@ impl<'a> Context<'a> {
             Ok(())
         }
     }
-    pub(crate) fn bytes(&self, bytes: usize) -> Result<()> {
+    /// Admit working storage before a caller allocates it.
+    pub fn bytes(&self, bytes: usize) -> Result<()> {
         self.limit("bytes", bytes as u64, self.limits.max_bytes as u64)
     }
     pub(crate) fn counts(
@@ -118,13 +102,9 @@ impl<'a> Context<'a> {
         corners: usize,
         edges: usize,
     ) -> Result<()> {
-        for (what, n, max) in [
-            ("vertices", vertices, self.limits.max_vertices),
-            ("faces", faces, self.limits.max_faces),
-            ("corners", corners, self.limits.max_corners),
-            ("edges", edges, self.limits.max_edges),
-        ] {
-            self.limit(what, n as u64, max.min(u32::MAX as usize) as u64)?;
+        // Mesh counts and corner offsets are u32 in the mesh source format.
+        for (what, n) in [("vertices", vertices), ("faces", faces), ("corners", corners), ("edges", edges)] {
+            self.limit(what, n as u64, u32::MAX as u64)?;
         }
         Ok(())
     }

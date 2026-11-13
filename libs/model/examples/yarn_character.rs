@@ -74,7 +74,7 @@ fn blink(joint:u32,duration:f64)->AnimationChannel {
 }
 
 fn character()->Result<Document> {
-    let mut d=Document::new(Limits{max_joints:128,..Default::default()})?;
+    let mut d=Document::new(Limits::default())?;
     for(id,color,roughness)in[(0,[1.,0.82,0.9,1.],0.95),(1,[1.,0.98,0.96,1.],0.25),(2,[0.10,0.62,1.,1.],0.35),(3,[0.006,0.008,0.018,1.],0.13),(4,[1.,1.,1.,1.],0.1),(5,[0.105,0.008,0.025,1.],0.84),(6,[1.,0.15,0.28,1.],0.75),(7,[0.48,0.025,0.12,1.],0.95),(8,[0.96,0.35,0.57,1.],0.98)] {material(&mut d,id,color,roughness)?;}
     body(&mut d)?;
     let yarn=SurfaceLayer::new("yarn",RgbaImage::new(512,512,[255;4],d.limits())?);

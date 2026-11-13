@@ -3,6 +3,10 @@
 use crate::{*,transform::*};
 use std::collections::BTreeMap;
 
+// Match the VisualWheelMotion contract in gltf::vehicle_visual.
+const RUNTIME_WHEEL_STEERING: f64 = 1.2;
+const RUNTIME_WHEEL_TRAVEL: f64 = 5.;
+
 #[derive(Clone,Debug)]
 pub enum ReviewPose {
     SoftBody{scenario:String},
@@ -20,12 +24,13 @@ impl ReviewPose {
         let allowed:&[&str]=match kind{"vehicle"=>&["kind","steer","suspension"],"pose"=>&["kind","name"],"clip"=>&["kind","name","time"],"soft_body"=>&["kind","scenario"],_=>return Err(Error::Invalid("motion kind must be vehicle, pose, clip or soft_body"))};
         if fields.iter().any(|(key,_)|!allowed.contains(&key.as_str())){return Err(Error::Invalid("unknown motion sample field"));}
         let number=|key:&str|->Result<f64>{match value.get(key){Some(Value::Int(v))=>Ok(*v as f64),Some(Value::F64(v)) if v.is_finite()=>Ok(*v),_=>Err(Error::Invalid("motion sample needs a finite number"))}};
-        let name=||->Result<String>{value.get("name").and_then(Value::as_str).filter(|s|!s.is_empty()&&s.len()<=96).map(str::to_string).ok_or(Error::Invalid("motion sample name"))};
+        let name=||->Result<String>{value.get("name").and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_string).ok_or(Error::Invalid("motion sample name"))};
         match kind{
             "soft_body"=>{let scenario=value.get("scenario").and_then(Value::as_str).filter(|s|["acceleration","landing","wall"].contains(s)).ok_or(Error::Invalid("soft-body scenario"))?;Ok(Self::SoftBody{scenario:scenario.into()})},
-            "vehicle"=>{let steer=number("steer")?;let suspension=number("suspension")?;if steer.abs()>1.2||suspension.abs()>5.{return Err(Error::Invalid("motion steering/travel budget"));}Ok(Self::Vehicle{steer,suspension})},
+            // These are the VisualWheelMotion runtime envelopes in gltf::vehicle_visual.
+            "vehicle"=>{let steer=number("steer")?;let suspension=number("suspension")?;if steer.abs()>RUNTIME_WHEEL_STEERING||suspension.abs()>RUNTIME_WHEEL_TRAVEL{return Err(Error::Invalid("motion steering/travel budget"));}Ok(Self::Vehicle{steer,suspension})},
             "pose"=>Ok(Self::Pose{name:name()?}),
-            _=>{let time=number("time")?;if time<0.||time>3600.{return Err(Error::Invalid("motion clip time"));}Ok(Self::Clip{name:name()?,time})}
+            _=>{let time=number("time")?;if time<0.{return Err(Error::Invalid("motion clip time"));}Ok(Self::Clip{name:name()?,time})}
         }
     }
     pub fn label(&self)->String{match self{
@@ -41,9 +46,9 @@ impl Document {
         if self.soft_body().is_some(){return ["acceleration","landing","wall"].into_iter().map(|scenario|ReviewPose::SoftBody{scenario:scenario.into()}).collect();}
 
         if self.scene().wheels.values().any(|w|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())){
-            let steering=self.scene().wheels.values().filter(|w|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())).map(|w|w.visual.map_or(0.55,|v|if v.steer_gain>0.{(v.steer_max/v.steer_gain).min(1.2)}else{0.})).fold(0.,f64::max);
-            let compression=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,5.),|v|v.compression)).fold(0.,f64::max);
-            let droop=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,5.),|v|v.droop)).fold(0.,f64::max);
+            let steering=self.scene().wheels.values().filter(|w|crate::VEHICLE_WHEEL_CONNECTIONS.contains(&w.connection.as_str())).map(|w|w.visual.map_or(0.55,|v|if v.steer_gain>0.{(v.steer_max/v.steer_gain).min(RUNTIME_WHEEL_STEERING)}else{0.})).fold(0.,f64::max);
+            let compression=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,RUNTIME_WHEEL_TRAVEL),|v|v.compression)).fold(0.,f64::max);
+            let droop=self.scene().wheels.values().map(|w|w.visual.map_or((w.radius*0.8).clamp(0.01,RUNTIME_WHEEL_TRAVEL),|v|v.droop)).fold(0.,f64::max);
             return [(-steering,compression),(steering,compression),(-steering,-droop),(steering,-droop)].into_iter().map(|(steer,suspension)|ReviewPose::Vehicle{steer,suspension}).collect();
         }
         if self.skeleton().is_some(){
@@ -65,7 +70,7 @@ impl Document {
         match pose{
             ReviewPose::SoftBody{scenario}=>{let result=crate::soft_review::sample(self,scenario,cancelled)?;palette=result.0;joints=result.1;},
             ReviewPose::Vehicle{steer,suspension}=>{
-                if !steer.is_finite()||steer.abs()>1.2||!suspension.is_finite()||suspension.abs()>5.{return Err(Error::Invalid("motion steering/travel budget"));}
+                if !steer.is_finite()||steer.abs()>RUNTIME_WHEEL_STEERING||!suspension.is_finite()||suspension.abs()>RUNTIME_WHEEL_TRAVEL{return Err(Error::Invalid("motion steering/travel budget"));}
                 if self.scene().wheels.is_empty()||self.skeleton().is_some(){return Err(Error::Invalid("wheel review requires rigid wheel connections"));}
                 for (object,wheel) in &self.scene().wheels{
                     let (visual_steer,visual_travel)=wheel.visual.map_or((*steer,*suspension),|v|v.pose(*steer,*suspension));

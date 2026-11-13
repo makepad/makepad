@@ -88,6 +88,8 @@ pub struct App {
     reported: usize,
     #[rust]
     readback: Option<ReadbackTicket>,
+    #[rust]
+    readback_wait_logged: bool,
 }
 
 impl App {
@@ -237,8 +239,20 @@ impl App {
                     return true;
                 };
                 match tex.read_back(cx, ReadbackRequest::default()) {
-                    Ok(ticket) => { self.readback = Some(ticket); ticket }
+                    Ok(ticket) => {
+                        self.readback_wait_logged = false;
+                        self.readback = Some(ticket);
+                        ticket
+                    }
+                    Err(ReadbackError::Backpressure) => {
+                        if !self.readback_wait_logged {
+                            log!("tween_gate: context readback request limit reached; {} frame waits", mode.label());
+                            self.readback_wait_logged = true;
+                        }
+                        return false;
+                    }
                     Err(error) => {
+                        self.readback_wait_logged = false;
                         log!("FAIL {:<10} render target readback: {error}", mode.label());
                         self.failures += 1;
                         self.reported += 1;

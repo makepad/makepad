@@ -37,7 +37,10 @@ pub use makepad_strict_json as json;
 /// bounded by sampled world-space surface deviation. 6: automatic LODs add a
 /// third level at 100 radii, and an authored empty level alone hides a part
 /// from its distance while keeping nearer automatic levels.
-pub const MODEL_GENERATOR_VERSION: u32 = 6;
+/// 7: LOD bounds are certified (every point, both directions), not sampled.
+/// 8: a document holds canonical zeros (-0.0 is +0.0), so a product built in
+/// memory is the one its reopened source builds.
+pub const MODEL_GENERATOR_VERSION: u32 = 8;
 pub use makepad_mesh_edit as mesh;
 
 mod schema;

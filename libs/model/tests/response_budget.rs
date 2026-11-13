@@ -2,7 +2,7 @@ use makepad_model::*;
 
 fn escaped_name(index: usize) -> String {
     let name = format!("{}{:04}", "\"\\".repeat(46), index);
-    assert_eq!(name.len(), Limits::default().max_name_bytes);
+    assert_eq!(name.len(), 96);
     name
 }
 fn apply(doc: &mut Document, operations: Vec<Operation>) {

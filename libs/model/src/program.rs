@@ -228,7 +228,7 @@ impl ProgramOp {
 
 /// The canonical encoding of a program: equal programs, equal bytes (the build cache key).
 pub fn program_bytes(ops: &[ProgramOp]) -> crate::Result<Vec<u8>> {
-    let mut w = Writer::new(usize::MAX);
+    let mut w = Writer::new();
     w.raw(b"MPPROG\0\x01")?;
     w.count(ops.len())?;
     for op in ops { op.write(&mut w)?; }
@@ -313,14 +313,9 @@ impl Runner<'_> {
     }
     fn flush(&mut self, names: &[String]) -> Result<(), ProgramFailure> {
         let _flush = crate::build_detail::GeometryTimer::new(crate::build_detail::GeometryPhase::FlushApply);
-        let chunk = CHUNK.min(self.limits.max_operations);
-        if chunk == 0 && !self.pending.is_empty() {
-            let index = self.pending[0].0;
-            return Err(ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message: "transaction operations budget exceeded".into() });
-        }
         let mut pending = std::mem::take(&mut self.pending).into_iter();
         loop {
-            let (indices, operations): (Vec<_>, Vec<_>) = pending.by_ref().take(chunk).unzip();
+            let (indices, operations): (Vec<_>, Vec<_>) = pending.by_ref().take(CHUNK).unzip();
             if operations.is_empty() { break; }
             if let Err((failed, error)) = self.doc.execute_program(&operations, self.replay_bytes, self.cancelled) {
                 let failure = |at: usize, error: Error| {
@@ -404,9 +399,6 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
         }
     }).collect();
     let fail = |index: usize, message: String| ProgramFailure { index, op: names.get(index).cloned().unwrap_or_default(), message };
-    if limits.max_materials == 0 || limits.max_receipts == 0 {
-        return Err(fail(0, describe_error(&Error::Invalid("zero material or receipt limit"))));
-    }
     let doc = Workspace::new(limits.clone()).map_err(|e| fail(0, describe_error(&e)))?;
     let mut run = Runner { doc, limits: limits.clone(), program: ops, pending: Vec::new(), generation: 0, replay_batches: Vec::new(), replay_bytes: 0, cancelled };
     let mut warnings = Vec::new();
@@ -465,7 +457,7 @@ fn build_program_inner(ops: &[ProgramOp], limits: Limits, fetch: &mut dyn FnMut(
             }
             ProgramOp::HumanoidRig { height, clips, sockets } => {
                 let height = *height;
-                if !(0.2..=20.).contains(&height) { return Err(fail(index, "humanoid height must be 0.2..20 m".into())); }
+                if !height.is_finite() || height <= 0. { return Err(fail(index, "humanoid height must be finite and positive".into())); }
                 run.pending.push((index, Operation::SetSkeleton { skeleton: crate::templates::humanoid_skeleton(height) }));
                 let clips: Vec<String> = clips.clone().unwrap_or_else(|| crate::templates::HUMANOID_CLIPS.iter().map(|s| s.to_string()).collect());
                 for clip in clips {
@@ -646,8 +638,7 @@ mod tests {
         }
         // A colour operation can fall in the next transaction. Error replay must
         // not expand either half twice or lose the original failure attribution.
-        let mut limits = Limits::default();
-        limits.max_operations = 1;
+        let limits = Limits::default();
         let mut ops = vec![ProgramOp::Mesh(primitive(normals.clone(), colors.clone()))];
         build(&ops, limits.clone()).unwrap();
         ops.push(ProgramOp::Op(Operation::DeleteObject { object: "missing".into() }));

@@ -83,7 +83,7 @@ impl Renderer {
     /// reduction pass and an asynchronous readback; it never waits for the GPU.
     /// Returns false when a request is already in flight; a deferred reduction
     /// is reattached on this draw. Poll before retrying on a later draw/report.
-    /// Backpressure should be retried on a later report/draw, not a tight loop.
+    /// Requests waiting for a ticket are retained and retried on later draws.
     pub fn request_gi_probe_counts(&mut self, cx: &mut CxDraw) -> Result<bool, makepad_platform::ReadbackError> {
         self.gi.request_probe_counts(cx)
     }

@@ -3,7 +3,7 @@
 //!
 //! A tier sets the static budgets that cost GPU time in an outdoor scene:
 //! where trees turn into impostors (a mesh tree costs far more than its
-//! stand-in), how far and how thickly the grass grows, the sun cascades'
+//! stand-in), how thickly the grass grows on screen, the sun cascades'
 //! resolution and reach, screen-space occlusion and the render scale cap.
 //! The adaptive governor (thermometer.rs) still trims decoration on top of
 //! the tier when the frame time runs over; the tier is where it starts.
@@ -26,10 +26,10 @@ pub enum GraphicsTier {
 pub struct TierBudget {
     /// Multiplier on every model's impostor distance.
     pub impostor_scale: f32,
-    /// Multiplier on the grass field's radius.
-    pub grass_radius: f32,
-    /// Fraction of the grass blades kept (sparser rings closer in).
-    pub grass_density: f32,
+    /// The narrowest a far grass blade is drawn, in screen pixels: every
+    /// blade grows out to where one is this wide, then they thin and widen
+    /// (crate::grass::GrassLod), so the blade count follows the image.
+    pub grass_pixels: f32,
     /// One sun cascade's edge, texels, and the detail range, metres.
     pub csm_resolution: usize,
     pub csm_range: f32,
@@ -41,6 +41,9 @@ pub struct TierBudget {
     /// lane's per-pixel layer walk, a texture read per candidate layer);
     /// beyond it the heaviest layer alone.
     pub terrain_blend_reach: f32,
+    /// The trampled-grass field around the focus (crate::trample): its side
+    /// in metres and texels; None: the blades are never pressed.
+    pub trample: Option<crate::trample::TrampleBudget>,
 }
 
 impl GraphicsTier {
@@ -57,10 +60,10 @@ impl GraphicsTier {
 
     pub fn budget(self) -> TierBudget {
         match self {
-            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_radius: 0.55, grass_density: 0.5, csm_resolution: 1024, csm_range: 40.0, ssao: false, render_scale: 0.75, terrain_blend_reach: 150.0 },
-            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_radius: 0.8, grass_density: 0.75, csm_resolution: 1536, csm_range: 60.0, ssao: false, render_scale: 1.0, terrain_blend_reach: 450.0 },
-            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_radius: 1.0, grass_density: 1.0, csm_resolution: 2048, csm_range: 80.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX },
-            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_radius: 1.4, grass_density: 1.0, csm_resolution: 4096, csm_range: 120.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX },
+            GraphicsTier::Low => TierBudget { impostor_scale: 0.8, grass_pixels: 6.0, csm_resolution: 1024, csm_range: 40.0, ssao: false, render_scale: 0.75, terrain_blend_reach: 150.0, trample: None },
+            GraphicsTier::Medium => TierBudget { impostor_scale: 1.25, grass_pixels: 4.0, csm_resolution: 1536, csm_range: 60.0, ssao: false, render_scale: 1.0, terrain_blend_reach: 450.0, trample: Some(crate::trample::TrampleBudget { extent: 64.0, texels: 512 }) },
+            GraphicsTier::High => TierBudget { impostor_scale: 1.6, grass_pixels: 2.5, csm_resolution: 2048, csm_range: 80.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
+            GraphicsTier::Ultra => TierBudget { impostor_scale: 2.4, grass_pixels: 1.6, csm_resolution: 4096, csm_range: 120.0, ssao: true, render_scale: 1.0, terrain_blend_reach: f32::MAX, trample: Some(crate::trample::TrampleBudget { extent: 96.0, texels: 1024 }) },
         }
     }
 
@@ -117,7 +120,7 @@ mod tests {
     fn tiers_spend_more_as_they_rise() {
         for w in GraphicsTier::ALL.windows(2) {
             let (a, b) = (w[0].budget(), w[1].budget());
-            assert!(a.impostor_scale < b.impostor_scale && a.grass_radius <= b.grass_radius && a.csm_resolution < b.csm_resolution, "{:?} -> {:?}", w[0], w[1]);
+            assert!(a.impostor_scale < b.impostor_scale && a.grass_pixels > b.grass_pixels && a.csm_resolution < b.csm_resolution, "{:?} -> {:?}", w[0], w[1]);
         }
     }
 }

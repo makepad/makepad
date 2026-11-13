@@ -724,23 +724,28 @@ fn a_piece_on_a_pin_loads_at_rest_and_swings_once_pushed() {
 }
 
 // The engine puts a blown-up state back at the print pose by itself: the world keeps a record of it, with the
-// part it saw it on. A spring far stiffer than the substep can hold blows up; a soft one never does.
+// part it saw it on. A flex spring far stiffer than an explicit substep holds stays whole on the discrete
+// integrator, kicked hard; a kick past the engine's bound on a speed blows the state up.
 #[test]
 fn a_state_that_blows_up_is_on_record() {
-    let run=|stiffness: f64| {
+    let run=|kick: f64| {
         let pivot=[0.0,0.0,0.0];
         let mut asm=Assembly {bodies:vec![cuboid("base",[-5.0,0.0,0.0],[5.0,5.0,5.0],1.0),cuboid("bead",[6.0,0.0,0.0],[5.0,5.0,5.0],1.0)],
-            joints:vec![JointSpec {kind:JointKind::Flex {stiffness,damping:0.0,one_way:true},..hinge(0,1,pivot)}],substeps:1,..Assembly::default()};
+            joints:vec![JointSpec {kind:JointKind::Flex {stiffness:1e6,damping:0.0,one_way:true},..hinge(0,1,pivot)}],substeps:1,..Assembly::default()};
         fixed(&mut asm,0);
         let mut world=DynWorld::new(&asm,[0.0,0.0,-GRAVITY],None).unwrap();
-        for _ in 0..240 { world.step(DT); }
-        world.resets().to_vec()
+        for _ in 0..120 { world.step(DT); }
+        world.poke(1,[6.0,0.0,0.0],[0.0,0.0,kick]);
+        for _ in 0..120 { world.step(DT); }
+        (world.resets().to_vec(),world.poses()[1].com)
     };
-    assert!(run(0.001).is_empty(),"a soft spring holds");
-    let resets=run(1e6);
-    let first=resets.first().expect("a spring far too stiff for its substep blows up");
+    let (resets,_)=run(1e3);
+    assert!(resets.is_empty(),"a stiff flex kicked at 1 m/s holds: {} resets",resets.len());
+    let (resets,at)=run(1e14);
+    let first=resets.first().expect("a kick past the engine's bound on a speed blows the state up");
     assert_eq!(first.part,Some(1),"the part on the spring");
     assert!(first.time>0.0 && first.time<1.0,"when it did: {}",first.time);
+    assert!(len(sub(at,[6.0,0.0,0.0]))<0.01,"put back at the print pose: {at:?}");
 }
 
 // Motors on one base: a servo lifts its arm and holds it there, a servo too weak for its arm's weight lets it

@@ -14,10 +14,7 @@ fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) {
     .unwrap();
 }
 fn fixture() -> Document {
-    let mut doc = Document::new(Limits {
-        max_joints: 128,
-        ..Default::default()
-    })
+    let mut doc = Document::new(Limits::default())
     .unwrap();
     apply(
         &mut doc,

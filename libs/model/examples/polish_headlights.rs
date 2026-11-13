@@ -4,7 +4,7 @@ use makepad_model::*;
 fn main()->std::result::Result<(),Box<dyn std::error::Error>>{
     let args=std::env::args().skip(1).collect::<Vec<_>>();
     if args.len()!=2{return Err("usage: polish_headlights <source.mpmodel> <output.mpmodel>".into());}
-    let mut doc=Document::from_bytes(&std::fs::read(&args[0])?,Limits{max_joints:128,..Default::default()},None)?;
+    let mut doc=Document::from_bytes(&std::fs::read(&args[0])?,Limits::default(),None)?;
     let before=doc.head();let scene=doc.scene().clone();
     let before_positions=doc.objects().map(|(name,m)|(name.to_string(),m.vertices().iter().map(|v|(v.id,v.position)).collect::<Vec<_>>())).collect::<Vec<_>>();
     let lens=doc.object("headlamp-lens").ok_or("expected headlamp-lens source object")?;

@@ -49,7 +49,7 @@ fn outward(mesh: &mesh::Mesh) {
 
 #[test]
 fn sphere_normals_are_analytic_at_poles_and_uv_seams_without_changing_topology() {
-    for (segments, rings) in [(3, 2), (12, 6), (31, 15)] {
+    for (segments, rings) in [(3, 2), (12, 6), (31, 15), (129, 2), (3, 129)] {
         let doc = primitive("sphere", None, segments, rings);
         let explicit = primitive("sphere", Some(true), segments, rings);
         let flat = primitive("sphere", Some(false), segments, rings);
@@ -92,7 +92,7 @@ fn sphere_normals_are_analytic_at_poles_and_uv_seams_without_changing_topology()
 
 #[test]
 fn cylinder_sides_are_radial_with_seam_continuity_and_hard_flat_caps() {
-    for segments in [3, 12, 31] {
+    for segments in [3, 12, 31, 129] {
         let doc = primitive("cylinder", None, segments, 0);
         let explicit = primitive("cylinder", Some(true), segments, 0);
         let mesh = doc.object("shape").unwrap();
@@ -310,11 +310,10 @@ fn glossy_primitives_export_stored_normals_uvs_and_low_roughness_pbr_without_sou
 }
 
 #[test]
-fn smooth_is_a_strict_optional_boolean_and_primitive_budgets_still_apply() {
-    let mut limits = Limits::default();
-    limits.mesh.max_corners = 8;
-    assert!(Operation::sphere("shape", 1., 12, 6, true, &limits).is_err());
-    assert!(Operation::cylinder("shape", 1., 2., 12, true, &limits).is_err());
+fn primitives_accept_geometry_beyond_former_count_limits() {
+    let limits = Limits::default();
+    assert!(Operation::sphere("shape", 1., 12, 6, true, &limits).is_ok());
+    assert!(Operation::cylinder("shape", 1., 2., 12, true, &limits).is_ok());
 }
 
 #[test]

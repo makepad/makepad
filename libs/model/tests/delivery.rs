@@ -56,6 +56,7 @@ fn verify(skinned:bool){let d=make(skinned);let before=d.to_bytes(None).unwrap()
     let owner=nodes.iter().find(|n|n.name.as_deref()==Some("ball")).unwrap();assert!(matches!(field(field(owner.extras.as_ref().unwrap(),"MAKEPAD_collision"),"kind"),JsonValue::String(s)if s=="sphere"));
     let mut d=d;
     apply(&mut d,"repeat-and-drop",vec![Operation::Scene(SceneOperation::Node{object:"ball".into(),node:SceneNode{transform:Transform{translation:[3.,2.,1.],scale:[2.;3],..Default::default()},..Default::default()}}),
+        Operation::Scene(SceneOperation::Collider{object:"ball".into(),proxy:CollisionProxy::Mesh{object:"ball".into()}}),
         Operation::Scene(SceneOperation::Lods{object:"ball".into(),levels:vec![
             LodLevel{target_faces:120,max_error:0.,distance:10.},
             LodLevel{target_faces:120,max_error:2.,distance:20.},
@@ -63,7 +64,13 @@ fn verify(skinned:bool){let d=make(skinned);let before=d.to_bytes(None).unwrap()
             LodLevel{target_faces:0,max_error:0.,distance:40.},
         ]})]);
     let product=d.compile(None).unwrap();assert!(product.warnings.is_empty(),"an unreducible level is data, not a warning: {:?}",product.warnings);
-    let g=makepad_gltf::parse_glb_bytes(&product.glb).unwrap();let nodes=g.document.nodes_slice();
+    let g=makepad_gltf::load_gltf_from_bytes(&product.glb,None).unwrap();let nodes=g.document.nodes_slice();
+    let collision=field(nodes.iter().find(|n|n.name.as_deref()==Some("ball")).unwrap().extras.as_ref().unwrap(),"MAKEPAD_collision");
+    assert!(matches!(field(collision,"kind"),JsonValue::String(s)if s=="mesh"));
+    let positions=makepad_gltf::read_accessor_f32x3(&g,idx(field(collision,"positions"))).unwrap();
+    let indices=makepad_gltf::read_accessor_indices_u32(&g,idx(field(collision,"indices"))).unwrap();
+    assert!(positions.len()>=3&&!indices.is_empty()&&indices.len()%3==0,"collision accessors contain a triangle list");
+    assert!(indices.iter().all(|&i|(i as usize)<positions.len()),"collision indices stay within positions");
     let owner=nodes.iter().find(|n|n.extensions.as_ref().is_some_and(|e|e.key("MSFT_lod").is_some())).unwrap();
     let levels=arr(field(field(owner.extensions.as_ref().unwrap(),"MSFT_lod"),"ids")).iter().map(|i|&nodes[idx(i)]).collect::<Vec<_>>();
     assert_eq!(levels[0].mesh,owner.mesh,"unreducible first level shares the base mesh");
@@ -458,6 +465,108 @@ fn world_space_error_does_not_shrink_with_node_scale(){
 
 #[test]
 fn hard_edges_keep_each_face_normal_on_derived_levels() {
+    // Test-local Voronoi-region oracle, independent of the simplifier's
+    // triangle grid and witness lists. All distances use world space.
+    fn minus(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|i| a[i] - b[i])
+    }
+
+    fn inner(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    struct OracleTriangle {
+        p: [[f64; 3]; 3],
+        ab: [f64; 3],
+        ac: [f64; 3],
+        aa: f64,
+        ab_ac: f64,
+        cc: f64,
+    }
+
+    impl OracleTriangle {
+        fn new(p: [[f64; 3]; 3]) -> Self {
+            let ab = minus(p[1], p[0]);
+            let ac = minus(p[2], p[0]);
+            Self {
+                p,
+                ab,
+                ac,
+                aa: inner(ab, ab),
+                ab_ac: inner(ab, ac),
+                cc: inner(ac, ac),
+            }
+        }
+
+        fn point(&self, weights: [f64; 3]) -> [f64; 3] {
+            std::array::from_fn(|a| {
+                self.p[0][a] * weights[0] + self.p[1][a] * weights[1] + self.p[2][a] * weights[2]
+            })
+        }
+
+        fn distance_sq(&self, p: [f64; 3]) -> f64 {
+            let ap = minus(p, self.p[0]);
+            let d1 = inner(self.ab, ap);
+            let d2 = inner(self.ac, ap);
+            let (v, w);
+            if d1 <= 0.0 && d2 <= 0.0 {
+                return inner(ap, ap);
+            }
+            let d3 = d1 - self.aa;
+            let d4 = d2 - self.ab_ac;
+            if d3 >= 0.0 && d4 <= d3 {
+                let bp = minus(p, self.p[1]);
+                return inner(bp, bp);
+            }
+            let vc = d1 * d4 - d3 * d2;
+            if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+                v = d1 / (d1 - d3);
+                w = 0.0;
+            } else {
+                let d5 = d1 - self.ab_ac;
+                let d6 = d2 - self.cc;
+                if d6 >= 0.0 && d5 <= d6 {
+                    let cp = minus(p, self.p[2]);
+                    return inner(cp, cp);
+                }
+                let vb = d5 * d2 - d1 * d6;
+                if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+                    v = 0.0;
+                    w = d2 / (d2 - d6);
+                } else {
+                    let va = d3 * d6 - d5 * d4;
+                    if va <= 0.0 && d4 >= d3 && d5 >= d6 {
+                        w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+                        v = 1.0 - w;
+                    } else {
+                        let inv = 1.0 / (va + vb + vc);
+                        v = vb * inv;
+                        w = vc * inv;
+                    }
+                }
+            }
+            let delta = std::array::from_fn(|a| ap[a] - v * self.ab[a] - w * self.ac[a]);
+            inner(delta, delta)
+        }
+    }
+
+    fn dense_distance(from: &[OracleTriangle], to: &[OracleTriangle], weights: &[[f64; 3]]) -> f64 {
+        let mut maximum: f64 = 0.0;
+        for triangle in from {
+            for &w in weights {
+                let p = triangle.point(w);
+                let mut nearest = f64::INFINITY;
+                // Every other triangle is tested, without a spatial index,
+                // distance threshold, or early exit at a small distance.
+                for other in to {
+                    nearest = nearest.min(other.distance_sq(p));
+                }
+                maximum = maximum.max(nearest);
+            }
+        }
+        maximum.sqrt()
+    }
+
     let mut doc = Document::new(Limits::default()).unwrap();
     let ball = Operation::sphere("ball", 1.0, 24, 16, false, doc.limits()).unwrap();
     apply(&mut doc, "faceted", vec![ball]);
@@ -475,29 +584,74 @@ fn hard_edges_keep_each_face_normal_on_derived_levels() {
         originals.insert(ids);
     }
     assert!(normals_at.values().all(|n| n.len() > 1), "fixture is faceted: every vertex is on hard edges");
-    let target_faces = before.triangles.len() * 9 / 10;
-    apply(&mut doc, "lod", vec![Operation::Scene(SceneOperation::Lods {
-        object: "ball".into(),
-        levels: vec![LodLevel { target_faces, max_error: 0.05, distance: 20. }],
-    })]);
-    let product = doc.compile(None).unwrap();
-    assert!(product.warnings.is_empty(), "{:?}", product.warnings);
-    let derived = product.primitives.iter().find(|p| p.object != "ball").expect("a derived level");
-    assert!(derived.source_vertices.len() / 3 < before.triangles.len(), "the level reduces");
-    let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
-    let mut kept = 0;
-    for ((ids, p), n) in derived.source_vertices.chunks_exact(3).zip(derived.positions.chunks_exact(3)).zip(derived.normals.chunks_exact(3)) {
-        let mut key = [ids[0], ids[1], ids[2]];
-        key.sort();
-        if !originals.contains(&key) { continue; }
-        kept += 1;
-        let (u, v) = (sub(p[1], p[0]), sub(p[2], p[0]));
-        let face = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
-        let len = face.iter().map(|x| x * x).sum::<f32>().sqrt();
-        for corner in n {
-            let along = (corner[0] * face[0] + corner[1] * face[1] + corner[2] * face[2]) / len;
-            assert!(along > 0.999, "an unchanged faceted triangle keeps its own face normal on every corner ({along})");
+    let count = before.triangles.len();
+    // Modest reductions keep enough unchanged faces to check every source normal.
+    let levels = vec![
+        LodLevel { target_faces: count * 9 / 10, max_error: 0.05, distance: 20. },
+        LodLevel { target_faces: count * 7 / 8, max_error: 0.075, distance: 40. },
+        LodLevel { target_faces: count * 17 / 20, max_error: 0.1, distance: 60. },
+    ];
+    apply(&mut doc, "lod", vec![
+        Operation::Scene(SceneOperation::Node {
+            object: "ball".into(),
+            node: SceneNode {
+                transform: Transform { translation: [3., -2., 1.], scale: [1.5, 0.75, 2.], ..Default::default() },
+                ..Default::default()
+            },
+        }),
+        Operation::Scene(SceneOperation::Lods { object: "ball".into(), levels: levels.clone() }),
+    ]);
+    let world = doc.scene().world_matrix("ball").unwrap();
+    let source: Vec<_> = before.triangles.iter().map(|tri| OracleTriangle::new(
+        tri.indices.map(|i| transform::transform_point(world, before.vertices[i as usize].position))
+    )).collect();
+    // Ten subdivisions give 66 barycentric samples per triangle, including edges.
+    let mut weights = Vec::new();
+    for i in 0..=10 {
+        for j in 0..=10 - i {
+            weights.push([(10 - i - j) as f64 / 10.0, i as f64 / 10.0, j as f64 / 10.0]);
         }
     }
-    assert!(kept * 2 > derived.source_vertices.len() / 3, "most triangles are unchanged originals ({kept})");
+    let product = doc.compile(None).unwrap();
+    assert!(product.warnings.is_empty(), "{:?}", product.warnings);
+    let gltf = makepad_gltf::parse_glb_bytes(&product.glb).unwrap();
+    let nodes = gltf.document.nodes_slice();
+    let owner = nodes.iter().find(|n| n.name.as_deref() == Some("ball")).unwrap();
+    let delivered = arr(field(field(owner.extensions.as_ref().unwrap(), "MSFT_lod"), "ids"));
+    assert_eq!(delivered.len(), levels.len(), "all three LOD levels are delivered");
+    let mut previous = count;
+    for (level, (node, options)) in delivered.iter().zip(&levels).enumerate() {
+        let name = nodes[idx(node)].name.as_deref().unwrap();
+        let derived = product.primitives.iter().find(|p| p.object == name).expect("a derived level");
+        let triangles = derived.source_vertices.len() / 3;
+        assert!(triangles < count, "level {} reduces the full part", level + 1);
+        assert!(triangles <= previous, "delivered triangle counts cannot increase at level {}", level + 1);
+        previous = triangles;
+        let reduced: Vec<_> = derived.positions.chunks_exact(3).map(|p| OracleTriangle::new(
+            [p[0], p[1], p[2]].map(|p| transform::transform_point(world, p.map(f64::from)))
+        )).collect();
+        for (direction, distance) in [
+            ("forward", dense_distance(&reduced, &source, &weights)),
+            ("backward", dense_distance(&source, &reduced, &weights)),
+        ] {
+            assert!(distance <= options.max_error + 1e-9 * options.max_error,
+                "level {}: dense {direction} world-space source distance {distance} exceeds {}", level + 1, options.max_error);
+        }
+        let sub = |a: [f32; 3], b: [f32; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+        let mut kept = 0;
+        for ((ids, p), n) in derived.source_vertices.chunks_exact(3).zip(derived.positions.chunks_exact(3)).zip(derived.normals.chunks_exact(3)) {
+            let mut key = [ids[0], ids[1], ids[2]];
+            key.sort();
+            if !originals.contains(&key) { continue; }
+            kept += 1;
+            let (u, v) = (sub(p[1], p[0]), sub(p[2], p[0]));
+            let face = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            let len = face.iter().map(|x| x * x).sum::<f32>().sqrt();
+            for corner in n {
+                let along = (corner[0] * face[0] + corner[1] * face[1] + corner[2] * face[2]) / len;
+                assert!(along > 0.999, "an unchanged faceted triangle keeps its own face normal on every corner ({along})");
+            }
+        }
+        assert!(kept * 2 > derived.source_vertices.len() / 3, "most triangles are unchanged originals ({kept})");
+    }
 }

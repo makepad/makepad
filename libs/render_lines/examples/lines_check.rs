@@ -120,6 +120,8 @@ pub struct LinesHost {
     #[rust]
     next_frame: NextFrame,
     #[rust]
+    readback_wait_logged: bool,
+    #[rust]
     jobs: VecDeque<Job>,
     #[rust]
     checks: Vec<(String, usize, Check)>,
@@ -471,8 +473,17 @@ impl LinesHost {
                 }
                 let out = self.textures.as_ref().unwrap().2.clone();
                 match out.read_back(cx, ReadbackRequest::default()) {
-                    Ok(ticket) => self.state = Some(State::Reading(ticket)),
-                    Err(ReadbackError::Backpressure) => self.attach(cx),
+                    Ok(ticket) => {
+                        self.readback_wait_logged = false;
+                        self.state = Some(State::Reading(ticket));
+                    }
+                    Err(ReadbackError::Backpressure) => {
+                        if !self.readback_wait_logged {
+                            log!("lines_check: context readback request limit reached; frame waits");
+                            self.readback_wait_logged = true;
+                        }
+                        self.attach(cx);
+                    }
                     Err(e) => finish(Err(format!("readback: {e}"))),
                 }
             }

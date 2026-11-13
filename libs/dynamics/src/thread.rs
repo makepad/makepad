@@ -54,6 +54,11 @@ pub fn bind_thread_pool(d: &mut Data, pool: Option<Arc<dyn TaskPool>>) {
     d.threadpool = ThreadPool(pool);
 }
 
+// C's `d->threadpool` test: is a pool bound?
+pub(crate) fn has_pool(d: &Data) -> bool {
+    d.threadpool.0.is_some()
+}
+
 pub fn num_thread(d: &Data) -> usize {
     d.threadpool.0.as_ref().map_or(1, |pool| pool.threads().max(1))
 }

@@ -6,9 +6,8 @@ fn apply(doc: &mut Document, id: &str, operations: Vec<Operation>) {
 }
 
 #[test]
-fn authored_detail_can_fill_128_objects_and_excess_refuses_atomically() {
-    let mut doc = Document::new(Limits { max_objects: 128, ..Limits::default() }).unwrap();
-    assert_eq!(doc.limits().max_objects, 128);
+fn authored_detail_accepts_more_objects_without_limit_overrides() {
+    let mut doc = Document::new(Limits::default()).unwrap();
     let mut operations = Vec::new();
     for i in 0..128 {
         let object = format!("detail_{i:03}");
@@ -25,10 +24,10 @@ fn authored_detail_can_fill_128_objects_and_excess_refuses_atomically() {
     assert_eq!(product.triangles, 128 * 12);
     assert_eq!(product.primitives.len(), 128);
     assert_eq!(StaticModel::parse_glb(&product.glb).unwrap().indices.len(), 128 * 36);
-    let error = doc.apply(Transaction {request_id: "excess".into(), expected: doc.head(),
-        operations: vec![Operation::Cube {object: "excess".into(), size: [1.; 3]}]}, None).unwrap_err();
-    assert_eq!(error, Error::Budget("objects"));
-    assert_eq!(doc.to_bytes(None).unwrap(), bytes);
+    doc.apply(Transaction {request_id: "excess".into(), expected: doc.head(),
+        operations: vec![Operation::Cube {object: "excess".into(), size: [1.; 3]}]}, None).unwrap();
+    assert_eq!(doc.objects().count(), 129);
+    assert!(doc.object("excess").is_some());
 }
 
 #[test]
@@ -37,18 +36,7 @@ fn captured_astra_saloon_batches_compile_and_keep_the_authored_components() {
     let mut doc = Document::new(Limits::default()).unwrap();
     let batches = astra_saloon(doc.limits());
     assert_eq!(batches.len(), 3);
-    let mut old_limits = Limits::default();
-    old_limits.max_objects = 32;
-    let mut old = Document::new(old_limits).unwrap();
-    for (index, (request_id, operations)) in batches.into_iter().enumerate() {
-        let old_source = old.to_bytes(None).unwrap();
-        let old_result = old.apply(Transaction {
-            request_id: request_id.into(), expected: old.head(), operations: operations.clone()
-        }, None);
-        if index < 2 {old_result.unwrap();} else {
-            assert_eq!(old_result.unwrap_err(), Error::Budget("objects"));
-            assert_eq!(old.to_bytes(None).unwrap(), old_source);
-        }
+    for (request_id, operations) in batches {
         apply(&mut doc, request_id, operations);
         let head = doc.head();
         let draft = doc.compile_preview(None).unwrap();
@@ -138,13 +126,12 @@ fn incomplete_rig_draft_preserves_textures_shape_weights_and_joint_light_rest_pl
 }
 
 #[test]
-fn draft_keeps_geometry_budget_admission() {
-    let mut limits = Limits::default();
-    limits.mesh.max_triangles = 12;
+fn draft_accepts_all_compiled_triangles() {
+    let limits = Limits::default();
     let mut doc = Document::new(limits).unwrap();
     apply(&mut doc, "two", vec![Operation::Cube {object: "a".into(), size: [1.; 3]}, Operation::Cube {object: "b".into(), size: [1.; 3]}]);
     let head = doc.head();
-    assert_eq!(doc.compile_preview(None).unwrap_err(), Error::Budget("compiled triangles"));
+    assert_eq!(doc.compile_preview(None).unwrap().triangles, 24);
     assert_eq!(doc.head(), head);
 }
 

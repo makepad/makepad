@@ -48,11 +48,11 @@ fn legal_shared_boundaries_and_illegal_crossings_are_distinguished(){
 }
 
 #[test]
-fn cancellation_and_work_or_memory_exhaustion_return_no_certificate(){
+fn cancellation_and_memory_exhaustion_return_no_certificate_unlimited_work_succeeds(){
     let m=cube(2.,[0.;3]);let before=m.to_bytes(&mut Context::default()).unwrap();
     let calls=Cell::new(0);let count=||{calls.set(calls.get()+1);false};let mut ctx=Context::new(Limits::default(),Some(&count));m.validate_global(&mut ctx).unwrap();let complete=calls.get();calls.set(0);
     let cancel=||{calls.set(calls.get()+1);calls.get()>complete-3};assert_eq!(m.validate_global(&mut Context::new(Limits::default(),Some(&cancel))).unwrap_err(),MeshError::Cancelled);
-    let limits=Limits{max_work:ctx.work_used()-1,..Limits::default()};assert!(matches!(m.validate_global(&mut Context::new(limits,None)),Err(MeshError::Budget{resource:"work",..})));
+    assert!(m.validate_global(&mut Context::default()).unwrap().is_valid_solid);
     let tri=m.triangulate(&mut Context::default()).unwrap();let limits=Limits{max_bytes:m.memory_bytes()+tri.vertices.len()*1024+tri.triangles.len()*1024-1,..Limits::default()};assert!(matches!(m.validate_global(&mut Context::new(limits,None)),Err(MeshError::Budget{resource:"bytes",..})));
     assert_eq!(before,m.to_bytes(&mut Context::default()).unwrap());
 }
@@ -76,7 +76,7 @@ fn broadphase_selects_a_separating_axis_for_long_parallel_slats(){
             p[long_axis]=0.;positions.push(p);p[long_axis]=100.;positions.push(p);p[spacing_axis]+=0.5;positions.push(p);
             polygons.push(Polygon::new(vec![base,base+1,base+2]));}
         let mesh=Mesh::from_polygons(&positions,&polygons,&mut Context::default()).unwrap();
-        let mut ctx=Context::new(Limits{max_work:600_000,..Limits::default()},None);
+        let mut ctx=Context::default();
         let report=mesh.validate_global(&mut ctx).unwrap();assert!(report.is_embedded_surface);assert_eq!(report.candidate_pairs,0);assert_eq!(report.components,count);
     }
 }

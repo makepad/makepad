@@ -950,6 +950,7 @@ impl Renderer {
                 if !std::ptr::eq(held_material, material) || matches!(draw, ModelDraw::Custom(..)) {
                     draw.set_material(cx.cx, material);
                     held_material = material;
+                    if splat_lane { self.bind_grass_cover(cx.cx, &mut draw); }
                 }
                 draw.light_lamp(cx.cx, material, inst.lamps, self.lamp_level);
                 if phase == LayerPhase::Opaque && draw.base().draw_vars.options.alpha_blend {
@@ -967,15 +968,18 @@ impl Renderer {
                     held_material = std::ptr::null();
                 }
                 if let Some(s) = material.surface.as_ref().filter(|s| s.definition.wind > 0.0) {
-                    // Sway in metres at the top at wind 1; leaves (cut-out
-                    // layers) flutter on top of the sway.
+                    // Sway in metres at the top at wind 1 in a 6 m/s wind;
+                    // leaves (cut-out layers) flutter on top of the sway.
                     let d = &s.definition;
                     let flutter = if d.alpha_mode == 1 { d.wind * 0.035 } else { 0.0 };
                     // A morphing model never sways (the lanes are shared).
                     let morph_ctl = draw.base().uniform_value(cx.cx, live_id!(morph_ctl));
                     if morph_ctl[3] < 0.5 {
                         draw.base().draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[morph_ctl[0], morph_ctl[1], morph_ctl[2], -1.0]);
-                        draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
+                        let (state, scroll) = (self.wind_clock.state(), self.wind_clock.scroll());
+                        draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, 0.0, flutter);
+                        draw.base().morph_weights1 = vec4(state[0], state[1], state[2], state[3]);
+                        draw.base().morph_weights2 = vec4(scroll[0], scroll[1], scroll[2], scroll[3]);
                     }
                 }
                 let cut = screen_clip || stand_in || layer_window > 0.0 || self.clip_plane.is_some() || self.host_box.is_some() || match &material.surface {

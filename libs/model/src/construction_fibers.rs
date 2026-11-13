@@ -3,8 +3,10 @@
 use makepad_csg_math::portable::PortableFloat;
 use super::*;
 
-pub(super) const MAX_STRANDS: u32 = 32_768;
 use std::collections::{BTreeSet,HashMap};
+
+/// Random placements a strand tries before it is placed overlapping its neighbours.
+const PLACEMENT_ATTEMPTS: usize = 64;
 
 #[derive(Clone,Copy)]
 struct Capsule {a:[f64;3],b:[f64;3],radius:f64}
@@ -25,14 +27,18 @@ impl Spacing {
         }}}
         let cell=|p:[f64;3]|->Result<[i64;3]> {
             let p=p.map(|v|(v/self.cell_size).floor());
-            // Refuse ranges where f64 arithmetic cannot preserve useful
-            // sub-cell distances. Saturating float casts must not alias bins.
-            if p.iter().any(|v|!v.is_finite()||v.abs()>1e9){return Err(Error::Invalid("fiber_shell spacing coordinate range"));}
+            // Hash-grid bins use i64 coordinates; do not saturate and alias
+            // distinct bins at the integer representation boundary.
+            if p.iter().any(|v|!v.is_finite()||*v<i64::MIN as f64||*v>=-(i64::MIN as f64)){return Err(Error::Invalid("fiber_shell i64 spacing coordinate"));}
             Ok(p.map(|v|v as i64))
         };
         let low=cell(low)?;let high=cell(high)?;
-        if (0..3).any(|i|high[i]-low[i]>2){return Err(Error::Budget("fiber_shell spacing cells"));}
-        let mut keys=Vec::with_capacity(27);let mut neighbors=BTreeSet::new();
+        let cells = (0..3).try_fold(1usize, |n,i| {
+            let width = usize::try_from(high[i] as i128 - low[i] as i128 + 1).ok()?;
+            n.checked_mul(width)
+        }).ok_or(Error::Budget("fiber_shell spacing storage overflow"))?;
+        ctx.bytes(cells.checked_mul(128).and_then(|n|n.checked_add(self.cells.len().saturating_mul(128))).ok_or(Error::Budget("fiber_shell spacing storage overflow"))?)?;
+        let mut keys=Vec::with_capacity(cells);let mut neighbors=BTreeSet::new();
         for x in low[0]..=high[0] {for y in low[1]..=high[1] {for z in low[2]..=high[2] {
             ctx.checkpoint(1)?;let key=[x,y,z];keys.push(key);
             if let Some(entries)=self.cells.get(&key) {
@@ -83,14 +89,14 @@ impl Random {
     }
 }
 pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,material:u32,ctx:&mut Context<'_>)->Result<Mesh> {
-    if !(1..=MAX_STRANDS).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5 {
+    if count==0||!length.is_finite()||length<=0.||!width.is_finite()||width<=0.||width>length*0.5 {
         return Err(Error::Invalid("fiber_shell count/length/width"));
     }
-    let count=count as usize;admit(count*7,count*7,count*24,ctx)?;
+    let count=count as usize;admit(count.saturating_mul(7),count.saturating_mul(7),count.saturating_mul(24),ctx)?;
     let packed=source.triangulate(ctx)?;
     // Triangulation already enforces the document triangle and work limits.
     let working=count.saturating_mul(31*1024+27*64+512).saturating_add(source.memory_bytes()).saturating_add(packed.triangles.len().saturating_mul(512));
-    if working>ctx.limits.max_bytes{return Err(Error::Budget("fiber_shell spacing working bytes"));}
+    ctx.bytes(working)?;
     let triangles=packed.triangles.iter().map(|t|SourceTriangle{
         points:t.indices.map(|i|packed.vertices[i as usize].position),
         uv:t.indices.map(|i|packed.vertices[i as usize].uv),
@@ -106,9 +112,11 @@ pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,mate
     let mut random=Random(seed as u64);let mut positions=Vec::with_capacity(count*7);let mut polygons=Vec::with_capacity(count*7);
     let mut root_weights=Vec::with_capacity(count);
     let mut spacing=Spacing{cell_size:length*2.+width*2.,cells:HashMap::new(),strands:Vec::with_capacity(count)};
+    let mut reported_packing = false;
     for _ in 0..count {
-        let mut accepted=None;
-        for _ in 0..64 {
+        let mut attempts = 0usize;
+        let (i,weights,uv,t,b,angle,radius,centers) = loop {
+            attempts = attempts.saturating_add(1);
             ctx.checkpoint(24)?;
             let chosen=(random.next()*total).min(total-f64::EPSILON);
             let i=cumulative.partition_point(|&area|area<=chosen).min(triangles.len()-1);
@@ -122,9 +130,17 @@ pub(super) fn generate(source:&Mesh,count:u32,length:f64,width:f64,seed:u32,mate
             let centers=[-0.06,0.52,1.].map(|along|add(root,add(mul(n,height*along),mul(bend,height*0.18*along*along))));
             let padding=1e-9*(1.+centers.iter().flatten().map(|v|v.abs()).fold(0.,f64::max));
             let capsules=[Capsule{a:centers[0],b:centers[1],radius:radius+padding},Capsule{a:centers[1],b:centers[2],radius:radius*0.6+padding}];
-            if spacing.accept(capsules,ctx)? {accepted=Some((i,weights,uv,t,b,angle,radius,centers));break;}
-        }
-        let (i,weights,uv,t,b,angle,radius,centers)=accepted.ok_or(Error::Budget("fiber_shell packing: could not place requested count within 64 attempts per strand; reduce count, width or length"))?;
+            if spacing.accept(capsules,ctx)? {break (i,weights,uv,t,b,angle,radius,centers);}
+            // Too dense to keep every strand apart: place this one where it is, overlapping
+            // its neighbours, rather than refuse the shell or search without end.
+            if attempts >= PLACEMENT_ATTEMPTS {
+                if !reported_packing {
+                    eprintln!("model fibers: too dense to keep strands apart; overlapping strands are placed");
+                    reported_packing = true;
+                }
+                break (i,weights,uv,t,b,angle,radius,centers);
+            }
+        };
         let triangle=&triangles[i];
         let first=positions.len() as u32;
         for (center,size) in [(centers[0],1.),(centers[1],0.6)] {
@@ -238,11 +254,14 @@ mod tests {
     }
 
     #[test]
-    fn impossible_packing_and_cancellation_refuse_without_a_partial_shell() {
+    fn impossible_packing_places_every_strand_and_cancellation_leaves_no_partial_shell() {
         let source=Mesh::cube([0.001;3],&mut Context::default()).unwrap();
         let before=source.to_bytes(&mut Context::default()).unwrap();
-        let error=generate(&source,2,0.1,0.05,42,0,&mut Context::default()).unwrap_err();
-        assert!(matches!(error,Error::Budget(message)if message.contains("packing")));
+        let packed=generate(&source,2,0.1,0.05,42,0,&mut Context::default()).unwrap();
+        let single=generate(&source,1,0.1,0.05,42,0,&mut Context::default()).unwrap();
+        assert_eq!(packed.faces().len(),2*single.faces().len(),"a strand that cannot keep apart is placed, not dropped");
+        let roomy = Mesh::cube([10.;3], &mut Context::default()).unwrap();
+        assert!(generate(&roomy,2,1.01,0.101,42,0,&mut Context::default()).is_ok());
         let error=generate(&source,2,0.01,0.001,42,0,&mut Context::new(Default::default(),Some(&||true))).unwrap_err();
         assert!(matches!(error,Error::Mesh(crate::mesh::MeshError::Cancelled)));
         assert_eq!(source.to_bytes(&mut Context::default()).unwrap(),before);

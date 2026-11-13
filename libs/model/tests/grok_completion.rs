@@ -977,25 +977,23 @@ fn budget_cancel_and_atomic_failures() {
             }))
         })
         .collect();
-    let before = snap(&doc);
-    let err = try_apply(&mut doc, "too-many-lights", lights).unwrap_err();
-    assert!(matches!(err, Error::Budget(_)), "{err:?}");
-    assert_unchanged(&doc, &before);
+    // Scene attachments have no count cap: 33 lights are accepted.
+    let mut lit = Document::new(Limits::default()).unwrap();
+    try_apply(&mut lit, "many-lights", lights).unwrap();
+    assert_eq!(lit.scene().emitters.len(), 33, "every light is kept");
 
+    // A modifier stack has no count cap. Disabled entries keep evaluation cheap.
     let mods = (0..17).map(|i| Operation::Scene(SceneOperation::Modifier {
         object: "body".into(), modifier: NamedModifier {
-            name: format!("m{i}"), enabled: true, operation: MeshEditingOperation {
+            name: format!("m{i}"), enabled: false, operation: MeshEditingOperation {
                 object: "body".into(), action: Action::Array { count: 2, offset: [0.01, 0., 0.] },
             },
         },
     })).collect();
-    let before = snap(&doc);
-    let err = try_apply(&mut doc, "too-many-mods", mods).unwrap_err();
-    assert!(
-        matches!(err, Error::Budget(_) | Error::Invalid(_)),
-        "{err:?}"
-    );
-    assert_unchanged(&doc, &before);
+    let mut stacked = Document::new(Limits::default()).unwrap();
+    apply(&mut stacked, "body", vec![cube("body", [1.; 3])]);
+    try_apply(&mut stacked, "many-mods", mods).unwrap();
+    assert_eq!(stacked.scene().modifiers["body"].len(), 17, "every modifier is kept");
 
     {
         let mut lod_doc = Document::new(Limits::default()).unwrap();

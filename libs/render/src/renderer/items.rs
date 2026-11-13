@@ -284,6 +284,28 @@ impl Renderer {
         custom && pbr && self.stock_ibl_ready(cx)
     }
 
+    /// What `items_ready` waits for, by name (empty: nothing), for a host's
+    /// log when a wait goes on: the environment, a custom material, the PBR
+    /// lane's shader or the stock IBL program's.
+    pub fn items_waiting_on(&self, cx: &Cx) -> Vec<String> {
+        let mut waits = Vec::new();
+        if self.environment_pending() {
+            waits.push(if self.environment_needs_draw() { "the environment (waits for a draw)" } else { "the environment (preparing)" }.to_string());
+        }
+        for name in &self.items.used_custom {
+            if self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_some_and(|id| !cx.draw_shader_ready(id, self.hdr_output)) {
+                waits.push(format!("material {name}'s pipeline"));
+            }
+        }
+        if self.pbr_draw.as_ref().is_some_and(|d| !d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output))) {
+            waits.push("the PBR lane's pipeline".to_string());
+        }
+        if !self.stock_ibl_ready(cx) {
+            waits.push("the stock IBL program's pipeline".to_string());
+        }
+        waits
+    }
+
     /// Items the model lanes skipped last frame (lines, points, cards,
     /// models, unresolved kernel buffers).
     pub fn skipped_items(&self) -> usize {

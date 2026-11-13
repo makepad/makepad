@@ -2734,26 +2734,28 @@ fn compute_y_backsub(
     for r in 0..nefc {
         let nnz_y = y_rownnz[r] as usize;
         let adr_y = y_rowadr[r] as usize;
-        for i in (adr_y..adr_y + nnz_y).rev() {
-            let val = y[i];
+        // Cut the row once.
+        let row = &mut y[adr_y..adr_y + nnz_y];
+        let cols = &y_colind[adr_y..adr_y + nnz_y];
+        for i in (0..nnz_y).rev() {
+            let val = row[i];
             if val == 0.0 {
                 continue;
             }
-            let j = y_colind[i] as usize;
+            let j = cols[i] as usize;
             let adr_m = m_rowadr[j] as usize;
             util_sparse::add_to_scl_sparse_inc(
-                &mut y[adr_y..],
+                &mut *row,
                 &q_ld[adr_m..],
                 nnz_y,
-                &y_colind[adr_y..],
+                cols,
                 (m_rownnz[j] - 1) as usize,
                 &m_colind[adr_m..],
                 -val,
             );
         }
-        for i in adr_y..adr_y + nnz_y {
-            let j = y_colind[i] as usize;
-            y[i] *= sqrt_inv_d[j];
+        for (v, &j) in row.iter_mut().zip(cols) {
+            *v *= sqrt_inv_d[j as usize];
         }
     }
 }

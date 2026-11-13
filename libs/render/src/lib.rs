@@ -63,6 +63,7 @@ pub mod vfx;
 pub mod ssao;
 pub mod volume_fog;
 pub mod ssr;
+pub mod trample;
 pub mod still_aa;
 pub mod stream;
 pub mod sun;
@@ -124,5 +125,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     shaders::script_mod(vm);
     volume_fog::script_mod(vm);
     ssr::script_mod(vm);
+    trample::script_mod(vm);
     local_shadows::script_mod(vm)
 }

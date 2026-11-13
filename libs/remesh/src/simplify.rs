@@ -1,7 +1,9 @@
-//! Half-edge LOD simplification with sampled, two-sided source-surface bounds.
-//! Positions and wedges in the result always refer to the immutable input.
+//! Half-edge LOD simplification with certified two-sided Hausdorff bounds to
+//! the input surface per group, and texture deviation bounds for textured groups.
+//! Every level's positions and wedges always refer to the immutable input.
+//! The subdivision floor refuses a collapse it cannot certify, never errors.
 
-use crate::spatial::{tri_distance_sq, BinGrid, BIN_DILATE, BIN_SIZE, GRID_RES};
+use crate::spatial::{BinGrid, BIN_DILATE, BIN_SIZE, GRID_RES};
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, BinaryHeap, HashMap};
 
@@ -24,11 +26,19 @@ pub struct SimplifyOutput {
     pub report: SimplifyReport,
 }
 
+pub struct SimplifyLevel {
+    pub max_error: f64,
+    pub target_faces: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SimplifyReport {
     pub faces: usize,
+    /// Certified forward upper bound, a running maximum over all collapses
+    /// through this level, in input units.
     pub max_forward: f64,
-    /// Includes texture deviation and source-curve distance where applicable.
+    /// Certified backward upper bound, a running maximum including texture
+    /// deviation and source-curve distance where applicable, in input units.
     pub max_backward: f64,
     pub stop: SimplifyStop,
 }
@@ -71,6 +81,23 @@ fn normal(t: [Point; 3]) -> Point {
     cross(sub(t[1], t[0]), sub(t[2], t[0]))
 }
 
+/// A face a collapse creates must stand clear of its longest edge by this
+/// fraction of that edge. Mesh validation refuses a face whose area is within
+/// 1e-12 of its extent squared, and a cut line leaves rows of collinear source
+/// vertices that a collapse can join into such a face; the margin covers the
+/// caller's round trip back to object space.
+const MIN_HEIGHT_RATIO: f64 = 1e-9;
+
+/// `n` is the triangle's unnormalized normal: its length is the longest edge
+/// times the height over it.
+fn sliver(t: [Point; 3], n: Point) -> bool {
+    let longest = [sub(t[1], t[0]), sub(t[2], t[1]), sub(t[0], t[2])]
+        .into_iter()
+        .map(|e| dot(e, e))
+        .fold(0.0, f64::max);
+    dot(n, n) <= (MIN_HEIGHT_RATIO * longest).powi(2)
+}
+
 fn segment_distance_sq(p: Point, a: Point, b: Point) -> f64 {
     let ab = sub(b, a);
     let ap = sub(p, a);
@@ -97,10 +124,107 @@ fn distance_sq(p: Point, t: [Point; 3]) -> f64 {
     }
 }
 
+/// The distance from a point to a fixed set of triangles.
+trait Field {
+    /// The nearest distance and triangle id, or None when none is within reach.
+    /// Err(()) cancels.
+    fn nearest(&mut self, p: Point) -> Result<Option<(f64, usize)>, ()>;
+    /// The distance from `p` to triangle `id` of the set.
+    fn distance(&mut self, p: Point, id: usize) -> f64;
+}
+
+/// Sound: every point of `t` is within the returned `u <= bound` of the set.
+/// Complete to (15/16) bound: it accepts every triangle whose true distance is
+/// at most (15/16) bound, since a floor cell has U_lip <= max f + bound/16.
+/// The floor refuses one collapse, never errors; `ctl` runs through `nearest`
+/// so cancellation works throughout subdivision.
+fn certify(
+    t: [Point; 3],
+    bound: f64,
+    field: &mut dyn Field,
+    witnesses: &mut Vec<usize>,
+) -> Result<Option<f64>, ()> {
+    #[derive(Clone, Copy)]
+    struct Corner {
+        p: Point,
+        f: f64,
+        id: usize,
+    }
+
+    fn query(p: Point, bound: f64, field: &mut dyn Field) -> Result<Option<Corner>, ()> {
+        Ok(match field.nearest(p)? {
+            Some((f, id)) if f <= bound => Some(Corner { p, f, id }),
+            _ => None,
+        })
+    }
+
+    witnesses.clear();
+    let mut root = [Corner { p: [0.0; 3], f: 0.0, id: 0 }; 3];
+    for (corner, p) in root.iter_mut().zip(t) {
+        let Some(value) = query(p, bound, field)? else {
+            return Ok(None);
+        };
+        *corner = value;
+    }
+    let mut stack = vec![root];
+    let mut upper: f64 = 0.0;
+    while let Some(cell) = stack.pop() {
+        let longest = (0..3)
+            .map(|i| {
+                let e = sub(cell[i].p, cell[(i + 1) % 3].p);
+                dot(e, e).sqrt()
+            })
+            .fold(0.0, f64::max);
+        let radius = longest / 3f64.sqrt();
+        let lip = cell.iter().map(|c| c.f).fold(0.0, f64::max) + radius;
+        let mut ids = cell.map(|c| c.id);
+        ids.sort_unstable();
+        let mut convex = f64::INFINITY;
+        for i in 0..3 {
+            if i > 0 && ids[i] == ids[i - 1] {
+                continue;
+            }
+            let id = ids[i];
+            let farthest = cell.iter().map(|c| {
+                if c.id == id { c.f } else { field.distance(c.p, id) }
+            }).fold(0.0, f64::max);
+            convex = convex.min(farthest);
+        }
+        let u = lip.min(convex);
+        if u <= bound {
+            upper = upper.max(u);
+            witnesses.extend_from_slice(&ids);
+        } else if bound == 0.0 || radius <= bound / 16.0 {
+            return Ok(None);
+        } else {
+            let mut mid = cell;
+            for i in 0..3 {
+                let p = std::array::from_fn(|a| (cell[i].p[a] + cell[(i + 1) % 3].p[a]) * 0.5);
+                let Some(value) = query(p, bound, field)? else {
+                    return Ok(None);
+                };
+                mid[i] = value;
+            }
+            // Each midpoint is queried once and shared by all four children.
+            stack.extend([
+                [cell[0], mid[0], mid[2]],
+                [mid[0], cell[1], mid[1]],
+                [mid[2], mid[1], cell[2]],
+                [mid[0], mid[1], mid[2]],
+            ]);
+        }
+    }
+    witnesses.sort_unstable();
+    witnesses.dedup();
+    Ok(Some(upper))
+}
+
+fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Affine UV weights, without clamping to the triangle.
 fn uv_weights(p: [f64; 2], t: [[f64; 2]; 3]) -> Option<[f64; 3]> {
-    let orient = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
-        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    };
     let det = orient(t[0], t[1], t[2]);
     if det == 0.0 || !det.is_finite() {
         return None;
@@ -110,7 +234,48 @@ fn uv_weights(p: [f64; 2], t: [[f64; 2]; 3]) -> Option<[f64; 3]> {
         orient(t[2], t[0], p) / det,
         orient(t[0], t[1], p) / det,
     ];
-    w.iter().all(|v| v.is_finite() && *v >= 0.0).then_some(w)
+    w.iter().all(|v| v.is_finite()).then_some(w)
+}
+
+fn uv_overlap(mut subject: [[f64; 2]; 3], mut clip: [[f64; 2]; 3]) -> Vec<[f64; 2]> {
+    if orient(subject[0], subject[1], subject[2]) < 0.0 {
+        subject.swap(1, 2);
+    }
+    if orient(clip[0], clip[1], clip[2]) < 0.0 {
+        clip.swap(1, 2);
+    }
+    let mut polygon = subject.to_vec();
+    let mut output = Vec::new();
+    for i in 0..3 {
+        let Some(&last) = polygon.last() else {
+            break;
+        };
+        let (a, b) = (clip[i], clip[(i + 1) % 3]);
+        let mut previous = last;
+        let mut previous_side = orient(a, b, previous);
+        for &p in &polygon {
+            let side = orient(a, b, p);
+            if (side >= 0.0) != (previous_side >= 0.0) {
+                let t = previous_side / (previous_side - side);
+                output.push(std::array::from_fn(|a| previous[a] + t * (p[a] - previous[a])));
+            }
+            if side >= 0.0 {
+                output.push(p);
+            }
+            previous = p;
+            previous_side = side;
+        }
+        std::mem::swap(&mut polygon, &mut output);
+        output.clear();
+    }
+    polygon
+}
+
+fn uv_area(polygon: &[[f64; 2]]) -> f64 {
+    (1..polygon.len().saturating_sub(1))
+        .map(|i| orient(polygon[0], polygon[i], polygon[i + 1]))
+        .sum::<f64>()
+        .abs() * 0.5
 }
 
 #[derive(Clone, Copy, Default)]
@@ -190,20 +355,15 @@ struct Face {
     corners: Corners,
     group: u32,
     alive: bool,
-    samples: Vec<usize>,
-}
-
-struct Sample {
-    vertex: u32,
-    wedge: u32,
-    group: u32,
-    face: usize,
+    /// Sorted source triangle ids whose certificates use this face.
+    witnessed: Vec<usize>,
 }
 
 /// One grid for the immutable source, with a group filter at query time.
 struct Source {
     grid: BinGrid,
-    triangles: Vec<[[f32; 3]; 3]>,
+    /// Normalized f64 geometry; the f32 grid only supplies candidates.
+    exact: Vec<[Point; 3]>,
     seen: Vec<bool>,
     visited: Vec<usize>,
 }
@@ -213,7 +373,7 @@ impl Source {
         (((x + 1.0) / BIN_SIZE).floor() as i64).clamp(0, GRID_RES - 1)
     }
 
-    fn distance(
+    fn nearest(
         &mut self,
         point: Point,
         group: u32,
@@ -221,13 +381,13 @@ impl Source {
         bound: f64,
         faces: usize,
         ctl: &mut dyn FnMut(usize) -> bool,
-    ) -> Result<f64, ()> {
+    ) -> Result<Option<(f64, usize)>, ()> {
         for id in self.visited.drain(..) {
             self.seen[id] = false;
         }
-        let p = point.map(|v| v as f32);
-        let pb = p.map(|v| Self::bin(v as f64));
+        let pb = point.map(Self::bin);
         let mut best = f64::INFINITY;
+        let mut nearest = None;
         let mut previous: Option<([i64; 3], [i64; 3])> = None;
         for radius in 0..GRID_RES {
             let lo = pb.map(|v| (v - radius).max(0));
@@ -254,9 +414,10 @@ impl Source {
                             }
                             self.seen[id] = true;
                             self.visited.push(id);
-                            let d = tri_distance_sq(p, &self.triangles[id]) as f64;
-                            if d.is_finite() {
-                                best = best.min(d);
+                            let d = distance_sq(point, self.exact[id]);
+                            if d < best {
+                                best = d;
+                                nearest = Some(id);
                             }
                         }
                     }
@@ -265,10 +426,10 @@ impl Source {
             let mut boundary = f64::INFINITY;
             for a in 0..3 {
                 if lo[a] > 0 {
-                    boundary = boundary.min(p[a] as f64 - (-1.0 + lo[a] as f64 * BIN_SIZE));
+                    boundary = boundary.min(point[a] - (-1.0 + lo[a] as f64 * BIN_SIZE));
                 }
                 if hi[a] < GRID_RES - 1 {
-                    boundary = boundary.min((-1.0 + (hi[a] + 1) as f64 * BIN_SIZE) - p[a] as f64);
+                    boundary = boundary.min((-1.0 + (hi[a] + 1) as f64 * BIN_SIZE) - point[a]);
                 }
             }
             let guaranteed = (boundary - BIN_DILATE).max(0.0);
@@ -280,7 +441,47 @@ impl Source {
             }
             previous = Some((lo, hi));
         }
-        Ok(best.sqrt())
+        Ok(nearest.map(|id| (best.sqrt(), id)))
+    }
+}
+
+struct SourceField<'a> {
+    source: &'a mut Source,
+    group: u32,
+    groups: &'a [u32],
+    bound: f64,
+    faces: usize,
+    ctl: &'a mut dyn FnMut(usize) -> bool,
+}
+
+impl Field for SourceField<'_> {
+    fn nearest(&mut self, p: Point) -> Result<Option<(f64, usize)>, ()> {
+        self.source.nearest(p, self.group, self.groups, self.bound, self.faces, self.ctl)
+    }
+
+    fn distance(&mut self, p: Point, id: usize) -> f64 {
+        distance_sq(p, self.source.exact[id]).sqrt()
+    }
+}
+
+struct RingField<'a> {
+    triangles: &'a [[Point; 3]],
+    faces: usize,
+    ctl: &'a mut dyn FnMut(usize) -> bool,
+}
+
+impl Field for RingField<'_> {
+    fn nearest(&mut self, p: Point) -> Result<Option<(f64, usize)>, ()> {
+        if !(self.ctl)(self.faces) {
+            return Err(());
+        }
+        Ok(self.triangles.iter().enumerate()
+            .map(|(id, &t)| (distance_sq(p, t).sqrt(), id))
+            .min_by(|a, b| a.0.total_cmp(&b.0)))
+    }
+
+    fn distance(&mut self, p: Point, id: usize) -> f64 {
+        distance_sq(p, self.triangles[id]).sqrt()
     }
 }
 
@@ -291,17 +492,19 @@ struct State<'a> {
     rings: Vec<BTreeSet<usize>>,
     edges: HashMap<Edge, BTreeSet<usize>>,
     spans: HashMap<Edge, Vec<u32>>,
-    samples: Vec<Sample>,
-    vertex_samples: Vec<Vec<usize>>,
+    /// Sorted live face ids used by each source triangle's certificate.
+    witnesses: Vec<Vec<usize>>,
     quadrics: Vec<Quadric>,
     versions: Vec<u64>,
     alive: Vec<bool>,
     count: usize,
 }
 
-fn validate(input: &SimplifyInput, max_error: f64) -> Result<(Vec<Point>, f64), String> {
-    if !max_error.is_finite() || max_error < 0.0 {
-        return Err("max_error must be finite and nonnegative".into());
+fn validate(input: &SimplifyInput, levels: &[SimplifyLevel]) -> Result<(Vec<Point>, f64), String> {
+    for level in levels {
+        if !level.max_error.is_finite() || level.max_error < 0.0 {
+            return Err("max_error must be finite and nonnegative".into());
+        }
     }
     if input.wedges.len() != input.triangles.len() {
         return Err("wedges must have one entry per triangle".into());
@@ -385,14 +588,12 @@ impl<'a> State<'a> {
             rings: vec![BTreeSet::new(); input.positions.len()],
             edges: HashMap::new(),
             spans: HashMap::new(),
-            samples: Vec::new(),
-            vertex_samples: vec![Vec::new(); input.positions.len()],
+            witnesses: Vec::with_capacity(count),
             quadrics: vec![Quadric::default(); input.positions.len()],
             versions: vec![0; input.positions.len()],
             alive: vec![true; input.positions.len()],
             count,
         };
-        let mut sample_ids = HashMap::new();
         for (id, tri) in input.triangles.iter().enumerate() {
             if !ctl(count) {
                 return None;
@@ -403,8 +604,9 @@ impl<'a> State<'a> {
                 corners,
                 group,
                 alive: true,
-                samples: Vec::new(),
+                witnessed: vec![id],
             });
+            state.witnesses.push(vec![id]);
             state.attach(id);
             let t = state.geometry(corners);
             let n = normal(t);
@@ -414,30 +616,6 @@ impl<'a> State<'a> {
                 for &v in tri {
                     state.quadrics[v as usize].add(q);
                 }
-            }
-            for (vertex, wedge) in corners {
-                // A seam vertex needs a sample for each UV and each group.
-                let key = (
-                    vertex,
-                    group,
-                    if input.uv_bound[group as usize] {
-                        wedge
-                    } else {
-                        0
-                    },
-                );
-                sample_ids.entry(key).or_insert_with(|| {
-                    let sample_id = state.samples.len();
-                    state.samples.push(Sample {
-                        vertex,
-                        wedge,
-                        group,
-                        face: id,
-                    });
-                    state.faces[id].samples.push(sample_id);
-                    state.vertex_samples[vertex as usize].push(sample_id);
-                    sample_id
-                });
             }
         }
         // Hash iteration must not determine the order of floating-point sums.
@@ -552,13 +730,87 @@ impl<'a> State<'a> {
 
 struct Collapse {
     ring: Vec<(usize, Corners)>,
-    assignments: Vec<(usize, usize)>,
+    /// Source triangle id and its sorted new witness face ids.
+    assignments: Vec<(usize, Vec<usize>)>,
     curve: Option<(Edge, Vec<u32>)>,
     forward: f64,
     backward: f64,
 }
 
+/// A source triangle a collapse must re-witness, with the candidate faces
+/// (ring faces of its group, then its other witnesses) as they would be.
+struct Recheck {
+    s: usize,
+    ids: Vec<usize>,
+    geometry: Vec<[Point; 3]>,
+    source_uv: [[f64; 2]; 3],
+    area: f64,
+    textured: bool,
+    candidate_uv: Vec<Option<[[f64; 2]; 3]>>,
+}
+
 impl State<'_> {
+    /// The source triangles witnessed by `from`'s ring, in source order, each
+    /// with its candidates. `None`: a textured one has a non-finite UV area.
+    fn rechecks(
+        &self,
+        from: u32,
+        ring: &[(usize, Corners)],
+        ctl: &mut dyn FnMut(usize) -> bool,
+    ) -> Result<Option<Vec<Recheck>>, ()> {
+        let mut recheck = BTreeSet::new();
+        for &id in &self.rings[from as usize] {
+            for &s in &self.faces[id].witnessed {
+                if !ctl(self.count) {
+                    return Err(());
+                }
+                recheck.insert(s);
+            }
+        }
+        let mut rechecks = Vec::with_capacity(recheck.len());
+        for s in recheck {
+            if !ctl(self.count) {
+                return Err(());
+            }
+            let group = self.input.groups[s];
+            let mut ids: Vec<_> = ring.iter()
+                .filter_map(|&(id, _)| (self.faces[id].group == group).then_some(id))
+                .collect();
+            ids.extend(self.witnesses[s].iter().copied()
+                .filter(|id| !self.rings[from as usize].contains(id)));
+            ids.sort_unstable();
+            ids.dedup();
+            let candidates: Vec<_> = ids.iter().map(|&id| {
+                match ring.binary_search_by_key(&id, |entry| entry.0) {
+                    Ok(i) => ring[i].1,
+                    Err(_) => self.faces[id].corners,
+                }
+            }).collect();
+            let geometry: Vec<_> = candidates.iter().map(|&c| self.geometry(c)).collect();
+            let source_uv = self.input.wedges[s].map(|w| self.input.wedge_uv[w as usize]);
+            let area = uv_area(&source_uv);
+            let textured = self.input.uv_bound[group as usize] && area != 0.0;
+            if textured && !area.is_finite() {
+                return Ok(None);
+            }
+            let candidate_uv = if textured {
+                candidates
+                    .iter()
+                    .map(|corners| {
+                        let uv = corners.map(|c| self.input.wedge_uv[c.1 as usize]);
+                        (uv_area(&uv) != 0.0).then_some(uv)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            rechecks.push(Recheck {
+                s, ids, geometry, source_uv, area, textured, candidate_uv,
+            });
+        }
+        Ok(Some(rechecks))
+    }
+
     fn target_wedge(&self, from: u32, to: u32, wedge: u32, group: u32) -> Option<u32> {
         // Prefer the same chart across the collapsing edge. Where a group has
         // several other wedges at the target, choose its lowest id.
@@ -656,89 +908,151 @@ impl State<'_> {
                 let area_sq = dot(n, n);
                 let orientation = dot(normal(self.geometry(old.corners)), n);
                 if !area_sq.is_finite()
-                    || area_sq <= 0.0
+                    || sliver(t, n)
                     || !orientation.is_finite()
                     || orientation <= 0.0
                 {
                     return Ok(None);
                 }
-                for weights in [
-                    [0.5, 0.5, 0.0],
-                    [0.0, 0.5, 0.5],
-                    [0.5, 0.0, 0.5],
-                    [1.0 / 3.0; 3],
-                ] {
-                    let d = source.distance(
-                        mix(t, weights),
-                        old.group,
-                        self.input.groups,
-                        bound,
-                        self.count,
-                        ctl,
-                    )?;
-                    if !d.is_finite() || d > bound {
-                        return Ok(None);
-                    }
-                    result.forward = result.forward.max(d);
-                }
             }
             result.ring.push((id, corners));
         }
 
-        let mut samples = BTreeSet::new();
-        for &id in &self.rings[from as usize] {
-            for &sample in &self.faces[id].samples {
-                if !ctl(self.count) {
-                    return Err(());
-                }
-                samples.insert(sample);
-            }
-        }
-        samples.extend(self.vertex_samples[from as usize].iter().copied());
-        for sample_id in samples {
-            let sample = &self.samples[sample_id];
-            let p = self.positions[sample.vertex as usize];
-            let textured = self.input.uv_bound[sample.group as usize];
-            let mut nearest = None;
-            let mut best = f64::INFINITY;
-            for &(id, corners) in &result.ring {
-                if !ctl(self.count) {
-                    return Err(());
-                }
-                if self.faces[id].group != sample.group {
-                    continue;
-                }
-                let t = self.geometry(corners);
-                let d = if textured {
-                    let uv = corners.map(|c| self.input.wedge_uv[c.1 as usize]);
-                    if let Some(weights) =
-                        uv_weights(self.input.wedge_uv[sample.wedge as usize], uv)
-                    {
-                        let delta = sub(p, mix(t, weights));
-                        dot(delta, delta)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    distance_sq(p, t)
-                };
-                if d < best {
-                    best = d;
-                    nearest = Some(id);
-                }
-            }
-            let d = best.sqrt();
-            if !d.is_finite() || d > bound {
-                return Ok(None);
-            }
-            let Some(nearest) = nearest else {
+        // A textured ring re-witnesses its source by UV, the cheapest
+        // rejection: those checks run before any spatial query. An
+        // untextured ring keeps the point samples first, so their rejections
+        // never build the recheck lists.
+        let textured_ring = self.rings[from as usize].iter()
+            .any(|&id| self.input.uv_bound[self.faces[id].group as usize]);
+        let mut rechecks = Vec::new();
+        if textured_ring {
+            let Some(built) = self.rechecks(from, &result.ring, ctl)? else {
                 return Ok(None);
             };
-            result.backward = result.backward.max(d);
-            // Keep the owner that supplied the bound. For textured groups it
-            // must contain this UV, so a later change to that mapping rechecks
-            // the sample even when a different face is geometrically closer.
-            result.assignments.push((sample_id, nearest));
+            rechecks = built;
+            result.assignments = rechecks.iter().map(|r| (r.s, Vec::new())).collect();
+        }
+
+        // A source corner/centroid strictly inside a candidate is a vertex/interior point of their positive-area UV piece.
+        // Deviation is the norm of an affine map, hence convex: its maximum is at a piece vertex, so the exact check rejects too.
+        for r in rechecks.iter().filter(|r| r.textured) {
+            let source_uv = r.source_uv;
+            let centroid = std::array::from_fn(|a| {
+                (source_uv[0][a] + source_uv[1][a] + source_uv[2][a]) / 3.0
+            });
+            for q in [source_uv[0], source_uv[1], source_uv[2], centroid] {
+                if !ctl(self.count) {
+                    return Err(());
+                }
+                let Some(source_weights) = uv_weights(q, source_uv) else {
+                    continue;
+                };
+                let source_point = mix(source.exact[r.s], source_weights);
+                for (i, uv) in r.candidate_uv.iter().enumerate() {
+                    let Some(uv) = *uv else {
+                        continue;
+                    };
+                    let Some(weights) = uv_weights(q, uv) else {
+                        continue;
+                    };
+                    if !weights.iter().all(|&w| w > 1e-9) {
+                        continue;
+                    }
+                    let delta = sub(source_point, mix(r.geometry[i], weights));
+                    let d = dot(delta, delta).sqrt();
+                    if !(d <= bound) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+
+        let mut scratch = Vec::new();
+        for (index, r) in rechecks.iter().enumerate() {
+            if !r.textured {
+                continue;
+            }
+            scratch.clear();
+            let mut covered = 0.0;
+            let mut deviation: f64 = 0.0;
+            for (i, uv) in r.candidate_uv.iter().enumerate() {
+                if !ctl(self.count) {
+                    return Err(());
+                }
+                let Some(uv) = *uv else {
+                    continue;
+                };
+                let piece = uv_overlap(r.source_uv, uv);
+                let piece_area = uv_area(&piece);
+                if piece_area <= 0.0 {
+                    continue;
+                }
+                for q in piece {
+                    let (Some(source_weights), Some(weights)) =
+                        (uv_weights(q, r.source_uv), uv_weights(q, uv)) else {
+                            return Ok(None);
+                        };
+                    let delta = sub(mix(source.exact[r.s], source_weights), mix(r.geometry[i], weights));
+                    let d = dot(delta, delta).sqrt();
+                    if !(d <= bound) {
+                        return Ok(None);
+                    }
+                    deviation = deviation.max(d);
+                }
+                covered += piece_area;
+                scratch.push(i);
+            }
+            // Less area leaves source UV uncovered; more means the
+            // candidate faces overlap in UV. Refuse either case.
+            if !((covered - r.area).abs() <= 1e-9 * r.area) {
+                return Ok(None);
+            }
+            result.backward = result.backward.max(deviation);
+            result.assignments[index].1 = scratch.iter().map(|&i| r.ids[i]).collect();
+        }
+
+        // These points only reject; the forward whole-face certificate runs last.
+        for &(id, corners) in &result.ring {
+            if !self.rings[from as usize].contains(&id) {
+                continue;
+            }
+            let t = self.geometry(corners);
+            for weights in [
+                [0.5, 0.5, 0.0],
+                [0.0, 0.5, 0.5],
+                [0.5, 0.0, 0.5],
+                [1.0 / 3.0; 3],
+            ] {
+                let Some((d, _)) = source.nearest(
+                    mix(t, weights), self.faces[id].group, self.input.groups,
+                    bound, self.count, ctl,
+                )? else {
+                    return Ok(None);
+                };
+                if !(d <= bound) {
+                    return Ok(None);
+                }
+            }
+        }
+
+        if !textured_ring {
+            let Some(built) = self.rechecks(from, &result.ring, ctl)? else {
+                return Ok(None);
+            };
+            rechecks = built;
+            result.assignments = rechecks.iter().map(|r| (r.s, Vec::new())).collect();
+        }
+        for (index, r) in rechecks.iter().enumerate() {
+            if r.textured {
+                continue;
+            }
+            let Some(u) = certify(source.exact[r.s], bound, &mut RingField {
+                triangles: &r.geometry, faces: self.count, ctl,
+            }, &mut scratch)? else {
+                return Ok(None);
+            };
+            result.backward = result.backward.max(u);
+            result.assignments[index].1 = scratch.iter().map(|&i| r.ids[i]).collect();
         }
 
         if !curve.is_empty() {
@@ -782,6 +1096,18 @@ impl State<'_> {
             }
             result.curve = Some((new_edge, span.into_iter().collect()));
         }
+        for &(id, corners) in &result.ring {
+            if !self.rings[from as usize].contains(&id) {
+                continue;
+            }
+            let Some(u) = certify(self.geometry(corners), bound, &mut SourceField {
+                source, group: self.faces[id].group, groups: self.input.groups,
+                bound, faces: self.count, ctl,
+            }, &mut scratch)? else {
+                return Ok(None);
+            };
+            result.forward = result.forward.max(u);
+        }
         Ok(Some(result))
     }
 
@@ -818,21 +1144,19 @@ impl State<'_> {
             }
         }
 
-        let moving: BTreeSet<_> = collapse
-            .assignments
-            .iter()
-            .map(|&(sample, _)| sample)
-            .collect();
-        let owners: BTreeSet<_> = moving.iter().map(|&id| self.samples[id].face).collect();
-        for id in owners {
-            affected.extend(self.faces[id].corners.map(|c| c.0));
-            self.faces[id]
-                .samples
-                .retain(|sample| !moving.contains(sample));
-        }
-        for (sample, face) in collapse.assignments {
-            self.samples[sample].face = face;
-            self.faces[face].samples.push(sample);
+        for (s, faces) in collapse.assignments {
+            for &id in &self.witnesses[s] {
+                affected.extend(self.faces[id].corners.map(|c| c.0));
+                self.faces[id].witnessed.retain(|&source| source != s);
+            }
+            self.witnesses[s] = faces;
+            for &id in &self.witnesses[s] {
+                affected.extend(self.faces[id].corners.map(|c| c.0));
+                let witnessed = &mut self.faces[id].witnessed;
+                if let Err(i) = witnessed.binary_search(&s) {
+                    witnessed.insert(i, s);
+                }
+            }
         }
         for e in touched_edges {
             if self.feature(e) {
@@ -850,9 +1174,11 @@ impl State<'_> {
         for &v in &affected {
             self.versions[v as usize] += 1;
         }
-        // Endpoints of changed faces, sample owners, and the new target ring
-        // cover every local dependency of check(). Rejections are requeued only
-        // here, after such a dependency changes, never immediately on rejection.
+        // Endpoints of changed faces, witness lists, and the new target ring
+        // cover every local dependency of check(). Rejections are requeued
+        // after such a dependency changes, never immediately on rejection.
+        // The rising level bound is another dependency: each level boundary
+        // requeues every live directed edge, including previously rejected ones.
         let mut candidates = BTreeSet::new();
         for v in affected {
             if self.alive[v as usize] {
@@ -868,118 +1194,127 @@ impl State<'_> {
     }
 }
 
-/// Simplify one welded part. The error is the specified sampled surface bound,
-/// not a bound on vertex displacement or on quadric cost. `ctl` may cancel;
-/// invalid inputs are always errors, even when no reduction was requested.
-pub fn simplify(
+/// Simplify one welded part progressively, returning one snapshot per level.
+/// Each error certifies the two-sided Hausdorff distance to the immutable input
+/// surface per group, and texture deviation for textured groups. The subdivision
+/// floor refuses an uncertified collapse, never errors. The effective bound is the
+/// minimum max_error in that level and all later levels, so bounds never decrease
+/// and each snapshot meets its own requested bound even when authored bounds shrink.
+/// `ctl` may cancel; invalid inputs are always errors, even when no reduction
+/// or no levels were requested.
+pub fn simplify_levels(
     input: &SimplifyInput,
-    max_error: f64,
-    target_faces: usize,
+    levels: &[SimplifyLevel],
     ctl: &mut dyn FnMut(usize) -> bool,
-) -> Result<Option<SimplifyOutput>, String> {
-    let (positions, scale) = validate(input, max_error)?;
-    let bound = max_error * scale;
+) -> Result<Option<Vec<SimplifyOutput>>, String> {
+    let (positions, scale) = validate(input, levels)?;
     if !ctl(input.triangles.len()) {
         return Ok(None);
     }
-    let mut report = SimplifyReport {
-        faces: input.triangles.len(),
-        max_forward: 0.0,
-        max_backward: 0.0,
-        stop: SimplifyStop::Target,
-    };
-    if input.triangles.len() <= target_faces {
-        return Ok(Some(SimplifyOutput {
-            triangles: input
-                .triangles
-                .iter()
-                .zip(input.wedges)
-                .map(|(t, w)| std::array::from_fn(|i| (t[i], w[i])))
-                .collect(),
-            groups: input.groups.to_vec(),
-            report,
-        }));
+    if levels.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let mut bounds: Vec<_> = levels.iter().map(|level| level.max_error).collect();
+    for i in (0..bounds.len() - 1).rev() {
+        bounds[i] = bounds[i].min(bounds[i + 1]);
     }
     let Some(mut state) = State::new(input, positions, ctl) else {
         return Ok(None);
     };
-    let mut triangles = Vec::with_capacity(input.triangles.len());
+    let mut exact = Vec::with_capacity(input.triangles.len());
     for tri in input.triangles {
         if !ctl(state.count) {
             return Ok(None);
         }
-        triangles.push(tri.map(|v| state.positions[v as usize].map(|p| p as f32)));
+        exact.push(tri.map(|v| state.positions[v as usize]));
     }
+    let grid = {
+        let triangles: Vec<_> = exact.iter().map(|t| t.map(|p| p.map(|v| v as f32))).collect();
+        BinGrid::build(&triangles)
+    };
     let mut source = Source {
-        grid: BinGrid::build(&triangles),
-        seen: vec![false; triangles.len()],
+        grid,
+        seen: vec![false; exact.len()],
         visited: Vec::new(),
-        triangles,
+        exact,
     };
     let mut heap = BinaryHeap::new();
-    let mut edges: Vec<_> = state.edges.keys().copied().collect();
-    edges.sort_unstable();
-    for (a, b) in edges {
-        if !ctl(state.count) {
-            return Ok(None);
+    let mut outputs = Vec::with_capacity(levels.len());
+    let mut max_forward: f64 = 0.0;
+    let mut max_backward: f64 = 0.0;
+    for (level, bound) in levels.iter().zip(bounds) {
+        let bound = bound * scale;
+        // A larger bound can admit an edge rejected at the preceding level.
+        // Use the same sorted order for the initial heap and every rebuild.
+        heap.clear();
+        let mut edges: Vec<_> = state.edges.keys().copied().collect();
+        edges.sort_unstable();
+        for (a, b) in edges {
+            if !ctl(state.count) {
+                return Ok(None);
+            }
+            state.enqueue(a, b, &mut heap);
+            state.enqueue(b, a, &mut heap);
         }
-        state.enqueue(a, b, &mut heap);
-        state.enqueue(b, a, &mut heap);
-    }
-    while state.count > target_faces {
-        if !ctl(state.count) {
-            return Ok(None);
-        }
-        let Some(candidate) = heap.pop() else {
-            report.stop = SimplifyStop::NoCandidate;
-            break;
-        };
-        let Candidate {
-            from,
-            to,
-            versions,
-            cost,
-        } = candidate;
-        if !state.alive[from as usize]
-            || !state.alive[to as usize]
-            || versions != [state.versions[from as usize], state.versions[to as usize]]
-            || !cost.is_finite()
-        {
-            continue;
-        }
-        match state.check(from, to, &mut source, bound, ctl) {
-            Err(()) => return Ok(None),
-            Ok(None) => (),
-            Ok(Some(collapse)) => {
-                report.max_forward = report.max_forward.max(collapse.forward);
-                report.max_backward = report.max_backward.max(collapse.backward);
-                state.commit(from, to, collapse, &mut heap);
+        let mut stop = SimplifyStop::Target;
+        while state.count > level.target_faces {
+            if !ctl(state.count) {
+                return Ok(None);
+            }
+            let Some(candidate) = heap.pop() else {
+                stop = SimplifyStop::NoCandidate;
+                break;
+            };
+            let Candidate {
+                from,
+                to,
+                versions,
+                cost,
+            } = candidate;
+            if !state.alive[from as usize]
+                || !state.alive[to as usize]
+                || versions != [state.versions[from as usize], state.versions[to as usize]]
+                || !cost.is_finite()
+            {
+                continue;
+            }
+            match state.check(from, to, &mut source, bound, ctl) {
+                Err(()) => return Ok(None),
+                Ok(None) => (),
+                Ok(Some(collapse)) => {
+                    max_forward = max_forward.max(collapse.forward);
+                    max_backward = max_backward.max(collapse.backward);
+                    state.commit(from, to, collapse, &mut heap);
+                }
             }
         }
-    }
-    if !ctl(state.count) {
-        return Ok(None);
-    }
-    report.faces = state.count;
-    report.max_forward /= scale;
-    report.max_backward /= scale;
-    let mut output = SimplifyOutput {
-        triangles: Vec::with_capacity(state.count),
-        groups: Vec::with_capacity(state.count),
-        report,
-    };
-    for face in state.faces {
-        if face.alive {
-            output.triangles.push(face.corners);
-            output.groups.push(face.group);
+        if !ctl(state.count) {
+            return Ok(None);
         }
+        let mut output = SimplifyOutput {
+            triangles: Vec::with_capacity(state.count),
+            groups: Vec::with_capacity(state.count),
+            report: SimplifyReport {
+                faces: state.count,
+                max_forward: max_forward / scale,
+                max_backward: max_backward / scale,
+                stop,
+            },
+        };
+        for face in &state.faces {
+            if face.alive {
+                output.triangles.push(face.corners);
+                output.groups.push(face.group);
+            }
+        }
+        outputs.push(output);
     }
-    Ok(Some(output))
+    Ok(Some(outputs))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{simplify, SimplifyInput, SimplifyStop};
+    use super::{certify, simplify_levels, Field, SimplifyInput, SimplifyLevel, SimplifyStop};
     use crate::post::audit_mesh_topology;
     use std::collections::BTreeMap;
     use std::f64::consts::{PI, TAU};
@@ -1209,6 +1544,50 @@ mod tests {
         f
     }
 
+    fn saddle() -> Fixture {
+        let n = 6;
+        let mut positions = Vec::new();
+        let mut triangles = Vec::new();
+        for j in 0..=n {
+            for i in 0..=n {
+                let (x, y) = (i as f64 / n as f64 - 0.5, j as f64 / n as f64 - 0.5);
+                positions.push([x, y, 0.3 * (x * x - y * y)]);
+            }
+        }
+        for j in 0..n {
+            for i in 0..n {
+                let a = j * (n + 1) + i;
+                let b = a + 1;
+                let d = a + n + 1;
+                let c = d + 1;
+                // Split along the valley: the diagonal with the lower midpoint.
+                let ac = (positions[a][2] + positions[c][2]) * 0.5;
+                let bd = (positions[b][2] + positions[d][2]) * 0.5;
+                let quad = if ac <= bd { [[a, b, c], [a, c, d]] }
+                    else { [[a, b, d], [b, c, d]] };
+                triangles.extend(quad.map(|t| t.map(|v| v as u32)));
+            }
+        }
+        Fixture::new("saddle", positions, triangles, false, 0)
+    }
+
+    // A flat ring around an inner diamond. Every inner vertex collapses at
+    // zero cost, so ids order them: 0 into 1 comes first and would join 1, 4
+    // and 2 (a cut line's collinear vertices, 2 sits 1e-12 off the line) into
+    // a face mesh validation refuses; 0 into 2 reduces cleanly.
+    fn sliver_fan() -> Fixture {
+        let positions = vec![
+            [0.0, 0.3, 0.0], [1.0, 0.0, 0.0], [0.0, -1e-12, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0],
+            [2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [-2.0, 0.0, 0.0], [0.0, -2.0, 0.0],
+        ];
+        let mut triangles = vec![[0, 2, 1], [0, 1, 3], [0, 3, 4], [0, 4, 2], [2, 5, 1], [2, 4, 5]];
+        for (inner, outer) in [(1, 6), (3, 7), (4, 8), (5, 9)] {
+            let (next_inner, next_outer) = match inner { 1 => (3, 7), 3 => (4, 8), 4 => (5, 9), _ => (1, 6) };
+            triangles.extend([[inner, outer, next_outer], [inner, next_outer, next_inner]]);
+        }
+        Fixture::new("sliver fan", positions, triangles, false, 12)
+    }
+
     // The oracle deliberately uses a different point/triangle algorithm:
     // Voronoi regions, with precomputed edge dot products. It shares neither
     // the simplifier's distance/UV routines nor its grid or assignments.
@@ -1295,16 +1674,37 @@ mod tests {
         }
     }
 
-    fn dense_distance(from: &[OracleTriangle], to: &[OracleTriangle], weights: &[[f64; 3]]) -> f64 {
+    /// The triangles of `to` whose bounding box is within `reach` of `from`'s
+    /// on every axis: every triangle that can hold a point within `reach` of a
+    /// point of `from`. Restricting the nearest search to them is exact for any
+    /// distance up to `reach`, and can only raise a distance beyond it, so
+    /// checks of the form `distance <= bound <= reach` keep their strength.
+    fn within_reach(from: &OracleTriangle, to: &[OracleTriangle], reach: f64) -> Vec<usize> {
+        let bounds = |t: &OracleTriangle| {
+            let lo: [f64; 3] = std::array::from_fn(|a| t.p[0][a].min(t.p[1][a]).min(t.p[2][a]));
+            let hi: [f64; 3] = std::array::from_fn(|a| t.p[0][a].max(t.p[1][a]).max(t.p[2][a]));
+            (lo, hi)
+        };
+        let (lo, hi) = bounds(from);
+        (0..to.len())
+            .filter(|&j| {
+                let (tlo, thi) = bounds(&to[j]);
+                (0..3).all(|a| tlo[a] - hi[a] <= reach && lo[a] - thi[a] <= reach)
+            })
+            .collect()
+    }
+
+    fn dense_distance(from: &[OracleTriangle], to: &[OracleTriangle], weights: &[[f64; 3]], reach: f64) -> f64 {
         let mut maximum: f64 = 0.0;
         for triangle in from {
+            // Every triangle within reach is tested, without the simplifier's
+            // grid, a distance threshold, or an early exit at a small distance.
+            let near = within_reach(triangle, to, reach);
             for &w in weights {
                 let p = triangle.point(w);
                 let mut nearest = f64::INFINITY;
-                // Every other triangle is tested, without a spatial index,
-                // distance threshold, or early exit at a small distance.
-                for other in to {
-                    nearest = nearest.min(other.distance_sq(p));
+                for &j in &near {
+                    nearest = nearest.min(to[j].distance_sq(p));
                 }
                 maximum = maximum.max(nearest);
             }
@@ -1334,17 +1734,21 @@ mod tests {
         to: &[OracleTriangle],
         to_uv: &[[[f64; 2]; 3]],
         weights: &[[f64; 3]],
+        reach: f64,
     ) -> f64 {
         let mut maximum: f64 = 0.0;
         for (tri, uv) in from.iter().zip(from_uv) {
+            // A deviation is at least the distance to that face: the reach
+            // filter is exact here too.
+            let near = within_reach(tri, to, reach);
             for &w in weights {
                 let p = tri.point(w);
                 let sample_uv =
                     std::array::from_fn(|a| uv[0][a] * w[0] + uv[1][a] * w[1] + uv[2][a] * w[2]);
                 let mut nearest = f64::INFINITY;
-                for (other, other_uv) in to.iter().zip(to_uv) {
-                    if let Some(bary) = oracle_uv_weights(sample_uv, *other_uv) {
-                        let delta = minus(p, other.point(bary));
+                for &j in &near {
+                    if let Some(bary) = oracle_uv_weights(sample_uv, to_uv[j]) {
+                        let delta = minus(p, to[j].point(bary));
                         nearest = nearest.min(inner(delta, delta));
                     }
                 }
@@ -1354,250 +1758,519 @@ mod tests {
         maximum.sqrt()
     }
 
+    /// Brute force over a fixed set with the oracle's own point-triangle
+    /// distance, counting the nearest-triangle queries.
+    struct Brute {
+        set: Vec<OracleTriangle>,
+        queries: usize,
+    }
+
+    impl Field for Brute {
+        fn nearest(&mut self, p: [f64; 3]) -> Result<Option<(f64, usize)>, ()> {
+            self.queries += 1;
+            Ok(self
+                .set
+                .iter()
+                .enumerate()
+                .map(|(j, t)| (t.distance_sq(p).sqrt(), j))
+                .min_by(|a, b| a.0.total_cmp(&b.0)))
+        }
+
+        fn distance(&mut self, p: [f64; 3], id: usize) -> f64 {
+            self.set[id].distance_sq(p).sqrt()
+        }
+    }
+
+    fn brute(set: &[[[f64; 3]; 3]]) -> Brute {
+        Brute {
+            set: set.iter().map(|&t| OracleTriangle::new(t)).collect(),
+            queries: 0,
+        }
+    }
+
+    /// The largest distance to `set` over an `n`-subdivision lattice of `t`,
+    /// and an upper bound of it over all of `t`: the distance is 1-Lipschitz,
+    /// and every point of a lattice cell is within the cell's longest edge
+    /// over sqrt(3) of one of its corners.
+    fn lattice_bounds(t: [[f64; 3]; 3], set: &[[[f64; 3]; 3]], n: usize) -> (f64, f64) {
+        let triangle = OracleTriangle::new(t);
+        let set: Vec<_> = set.iter().map(|&s| OracleTriangle::new(s)).collect();
+        let mut low: f64 = 0.0;
+        for i in 0..=n {
+            for j in 0..=n - i {
+                let p = triangle.point([
+                    (n - i - j) as f64 / n as f64,
+                    i as f64 / n as f64,
+                    j as f64 / n as f64,
+                ]);
+                let d = set
+                    .iter()
+                    .map(|s| s.distance_sq(p))
+                    .fold(f64::INFINITY, f64::min)
+                    .sqrt();
+                low = low.max(d);
+            }
+        }
+        let longest = [minus(t[1], t[0]), minus(t[2], t[1]), minus(t[0], t[2])]
+            .map(|e| inner(e, e).sqrt())
+            .into_iter()
+            .fold(0.0, f64::max);
+        (low, low + longest / n as f64 / 3f64.sqrt())
+    }
+
     #[test]
-    fn simplify_sampled_source_bound() {
+    fn certify_bounds_every_point_of_the_triangle() {
+        let mut witnesses = Vec::new();
+
+        // A flat triangle over a plate with a V groove. The groove line
+        // x = 0.2 sqrt(2) is off every dyadic point of the triangle, so no
+        // cell corner lies on it, and the edge midpoints and the centroid
+        // (the early-reject points) all lie on the plate.
+        let (g, w, h) = (0.2 * 2f64.sqrt(), 0.05, 0.05);
+        let strip = |x0: f64, z0: f64, x1: f64, z1: f64| {
+            [
+                [[x0, -1.0, z0], [x1, -1.0, z1], [x1, 1.0, z1]],
+                [[x0, -1.0, z0], [x1, 1.0, z1], [x0, 1.0, z0]],
+            ]
+        };
+        let groove: Vec<_> = [
+            strip(-1.0, 0.0, g - w, 0.0),
+            strip(g - w, 0.0, g, -h),
+            strip(g, -h, g + w, 0.0),
+            strip(g + w, 0.0, 1.0, 0.0),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let flat = [[-0.8, -0.8, 0.0], [0.8, -0.8, 0.0], [0.0, 0.8, 0.0]];
+        // The distance from the groove line to a wall: h / sqrt(1 + slope^2).
+        let depth = h / (1.0 + (h / w).powi(2)).sqrt();
+        let mut field = brute(&groove);
+        for weights in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [1.0 / 3.0; 3],
+        ] {
+            let p = OracleTriangle::new(flat).point(weights);
+            let (d, _) = field.nearest(p).unwrap().unwrap();
+            assert!(d < 1e-12, "V groove: the sample at {weights:?} reads {d}, not 0");
+        }
+        assert_eq!(
+            certify(flat, 0.99 * depth, &mut brute(&groove), &mut witnesses),
+            Ok(None),
+            "V groove: a bound under the groove's depth {depth} must be refused"
+        );
+        let bound = 1.1 * depth;
+        let u = certify(flat, bound, &mut brute(&groove), &mut witnesses)
+            .unwrap()
+            .unwrap_or_else(|| panic!("V groove: a bound over the depth {depth} must be certified"));
+        assert!(
+            depth - 1e-12 <= u && u <= bound,
+            "V groove: the certified {u} must lie in [{depth}, {bound}]"
+        );
+        assert!(
+            !witnesses.is_empty() && witnesses.iter().all(|&j| j < groove.len()),
+            "V groove: witnesses {witnesses:?} are ids of the set"
+        );
+
+        // A twisted quad: the source triangle lies on the valley diagonal a-c,
+        // the reduced faces on the other diagonal. All of its vertices lie on
+        // the reduced faces; the middle of a-c is about half the twist away.
+        let tau = 0.2;
+        let (a, b, c, d) = (
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, tau],
+            [0.0, 1.0, 0.0],
+        );
+        let source = [a, b, c];
+        let reduced = [[a, b, d], [b, c, d]];
+        for p in source {
+            let (d, _) = brute(&reduced).nearest(p).unwrap().unwrap();
+            assert!(d < 1e-12, "twisted quad: vertex {p:?} reads {d}, not 0");
+        }
+        let (low, high) = lattice_bounds(source, &reduced, 300);
+        assert!(low > 0.4 * tau, "twisted quad: the lattice finds the twist ({low})");
+        assert_eq!(
+            certify(source, 0.99 * low, &mut brute(&reduced), &mut witnesses),
+            Ok(None),
+            "twisted quad: a bound under the distance {low} must be refused"
+        );
+        let bound = 1.1 * high;
+        let u = certify(source, bound, &mut brute(&reduced), &mut witnesses)
+            .unwrap()
+            .unwrap_or_else(|| panic!("twisted quad: a bound over the distance {high} must be certified"));
+        assert!(
+            low <= u && u <= bound,
+            "twisted quad: the certified {u} must lie in [{low}, {bound}]"
+        );
+        assert_eq!(witnesses, [0, 1], "twisted quad: both reduced faces bound the source");
+
+        // A triangle spanning coplanar source triangles: the work follows the
+        // source edges under it (linear in size over bound), not its area
+        // (quadratic), and the result stays within the bound.
+        let square = [
+            [[-1.0, -1.0, 0.0], [1.0, -1.0, 0.0], [1.0, 1.0, 0.0]],
+            [[-1.0, -1.0, 0.0], [1.0, 1.0, 0.0], [-1.0, 1.0, 0.0]],
+        ];
+        let span = [[-0.8, -0.7, 0.0], [0.9, -0.6, 0.0], [-0.5, 0.85, 0.0]];
+        let mut queries = [0; 2];
+        for (k, bound) in [2e-3, 1e-3].into_iter().enumerate() {
+            let mut field = brute(&square);
+            let u = certify(span, bound, &mut field, &mut witnesses)
+                .unwrap()
+                .unwrap_or_else(|| panic!("coplanar span: certified at {bound}"));
+            assert!(u <= bound, "coplanar span: certified {u} over {bound}");
+            queries[k] = field.queries;
+        }
+        assert!(
+            queries[1] <= 3 * queries[0],
+            "coplanar span: halving the bound took {} queries after {}; the work must grow \
+             with the source edges (x2), not with the area (x4)",
+            queries[1],
+            queries[0]
+        );
+    }
+
+    const ERROR: f64 = 0.027;
+    const EPSILON: f64 = 1e-9;
+
+    /// Every snapshot's own checks: counts, provenance, slivers, the dense
+    /// two-sided oracle against the report and the bound, topology, the
+    /// material edge, texture deviation, and the fixtures' counts.
+    fn check_snapshot(f: &Fixture, output: &super::SimplifyOutput, error: f64, level: usize, last: bool) {
+        let epsilon = EPSILON;
+        // Eleven subdivisions along both barycentric axes, including all edges
+        // and vertices (78 lattice points, independent of dyadic cell corners).
+        let mut weights = Vec::new();
+        for i in 0..=11 {
+            for j in 0..=11 - i {
+                weights.push([(11 - i - j) as f64 / 11.0, i as f64 / 11.0, j as f64 / 11.0]);
+            }
+        }
+        // Past the bound the oracle may only overstate: see within_reach.
+        let reach = error * (1.0 + 1e-6) + epsilon;
+        assert_eq!(
+            output.report.faces,
+            output.triangles.len(),
+            "{}: reported face count",
+            f.name
+        );
+        assert_eq!(
+            output.groups.len(),
+            output.triangles.len(),
+            "{}: output group count",
+            f.name
+        );
+        assert!(
+            output.report.max_forward <= error,
+            "{}: level {level}: reported forward bound {} exceeds {error}",
+            f.name, output.report.max_forward
+        );
+        assert!(
+            output.report.max_backward <= error,
+            "{}: level {level}: reported backward bound {} exceeds {error}",
+            f.name, output.report.max_backward
+        );
+        for (triangle, &group) in output.triangles.iter().zip(&output.groups) {
+            for &(v, w) in triangle {
+                assert!(
+                    (v as usize) < f.positions.len() && (w as usize) < f.uv.len(),
+                    "{}: output source indices",
+                    f.name
+                );
+                assert!(
+                    f.triangles.iter().zip(&f.wedges).zip(&f.groups).any(
+                        |((t, wedges), &g)| {
+                            g == group && (0..3).any(|i| t[i] == v && wedges[i] == w)
+                        }
+                    ),
+                    "{}: corner wedge belongs to its source vertex and group",
+                    f.name
+                );
+            }
+            // Mesh validation refuses a face whose height over its longest
+            // edge is within 1e-12 of that edge.
+            let p = triangle.map(|c| f.positions[c.0 as usize]);
+            let (ab, ac) = (minus(p[1], p[0]), minus(p[2], p[0]));
+            let n = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+            let longest = [ab, ac, minus(p[2], p[1])].map(|e| inner(e, e)).into_iter().fold(0.0, f64::max);
+            assert!(
+                inner(n, n).sqrt() > 1e-12 * longest,
+                "{}: output face {triangle:?} is a sliver",
+                f.name
+            );
+        }
+        let source: Vec<_> = f
+            .triangles
+            .iter()
+            .map(|t| OracleTriangle::new(t.map(|v| f.positions[v as usize])))
+            .collect();
+        let reduced: Vec<_> = output
+            .triangles
+            .iter()
+            .map(|t| OracleTriangle::new(t.map(|c| f.positions[c.0 as usize])))
+            .collect();
+        let forward = dense_distance(&reduced, &source, &weights, reach);
+        let backward = dense_distance(&source, &reduced, &weights, reach);
+        assert!(
+            forward <= output.report.max_forward + epsilon,
+            "{}: level {level}: dense forward surface error {forward} exceeds reported {}",
+            f.name, output.report.max_forward
+        );
+        assert!(
+            forward <= error + epsilon,
+            "{}: level {level}: dense forward surface error {forward} exceeds {error}",
+            f.name
+        );
+        assert!(
+            backward <= output.report.max_backward + epsilon,
+            "{}: level {level}: dense backward surface error {backward} exceeds reported {}",
+            f.name, output.report.max_backward
+        );
+        assert!(
+            backward <= error + epsilon,
+            "{}: level {level}: dense backward surface error {backward} exceeds {error}",
+            f.name
+        );
+        if f.closed {
+            let positions: Vec<_> = f.positions.iter().map(|p| p.map(|v| v as f32)).collect();
+            let original: Vec<_> = f.triangles.iter().flatten().copied().collect();
+            let indices: Vec<_> = output.triangles.iter().flatten().map(|c| c.0).collect();
+            let before = audit_mesh_topology(&positions, &original);
+            let after = audit_mesh_topology(&positions, &indices);
+            assert_eq!(
+                (before.boundary_edges, before.nonmanifold_edges),
+                (0, 0),
+                "{}: closed fixture construction",
+                f.name
+            );
+            assert_eq!(
+                after.boundary_edges, 0,
+                "{}: closed output has boundary edges",
+                f.name
+            );
+            assert_eq!(
+                after.nonmanifold_edges, 0,
+                "{}: closed output has non-manifold edges",
+                f.name
+            );
+            assert_eq!(
+                after.inconsistent_edges, 0,
+                "{}: output winding consistency",
+                f.name
+            );
+        }
+        if last && f.name == "torus" {
+            assert_eq!(f.triangles.len(), 1152, "torus: source resolution");
+            assert!(
+                output.triangles.len() <= 120,
+                "torus: reduction count {} exceeds 120",
+                output.triangles.len()
+            );
+            assert_eq!(
+                output.report.stop,
+                SimplifyStop::Target,
+                "torus: target stop reason"
+            );
+        }
+        if last && f.name == "sliver fan" {
+            assert_eq!(output.triangles.len(), 12, "sliver fan: one collapse, without the sliver");
+        }
+        if last && f.name == "rounded box" {
+            assert_eq!(
+                output.triangles.len(),
+                12,
+                "rounded box: reduction count must be 12"
+            );
+            assert_eq!(
+                output.report.stop,
+                SimplifyStop::Target,
+                "rounded box: target stop reason"
+            );
+        }
+        if f.name == "two-material plate" {
+            let mut edges: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
+            for (t, &group) in output.triangles.iter().zip(&output.groups) {
+                for i in 0..3 {
+                    let (a, b) = (t[i].0, t[(i + 1) % 3].0);
+                    edges.entry((a.min(b), a.max(b))).or_default().push(group);
+                }
+            }
+            let mut boundary_vertices = 0;
+            for ((a, b), groups) in edges {
+                if groups.len() == 2 && groups[0] != groups[1] {
+                    for v in [a, b] {
+                        let p = f.positions[v as usize];
+                        let d = p[0].hypot(p[2]);
+                        assert!(
+                            d <= error + epsilon,
+                            "two-material plate: material boundary distance {d}"
+                        );
+                        boundary_vertices += 1;
+                    }
+                }
+            }
+            assert!(
+                boundary_vertices > 0,
+                "two-material plate: material boundary disappeared"
+            );
+        }
+        if f.uv_bound.iter().any(|&v| v) {
+            let source_uv: Vec<_> = f
+                .wedges
+                .iter()
+                .map(|t| t.map(|w| f.uv[w as usize]))
+                .collect();
+            let reduced_uv: Vec<_> = output
+                .triangles
+                .iter()
+                .map(|t| t.map(|c| f.uv[c.1 as usize]))
+                .collect();
+            let forward =
+                texture_distance(&reduced, &reduced_uv, &source, &source_uv, &weights, reach);
+            let backward =
+                texture_distance(&source, &source_uv, &reduced, &reduced_uv, &weights, reach);
+            // The backward report holds the UV-overlap certificate. Its
+            // affine deviation also bounds the reverse texture mapping.
+            assert!(
+                forward <= output.report.max_backward + epsilon,
+                "{}: level {level}: dense forward texture deviation {forward} exceeds reported {}",
+                f.name, output.report.max_backward
+            );
+            assert!(
+                forward <= error + epsilon,
+                "{}: level {level}: dense forward texture deviation {forward} exceeds {error}",
+                f.name
+            );
+            assert!(
+                backward <= output.report.max_backward + epsilon,
+                "{}: level {level}: dense backward texture deviation {backward} exceeds reported {}",
+                f.name, output.report.max_backward
+            );
+            assert!(
+                backward <= error + epsilon,
+                "{}: level {level}: dense backward texture deviation {backward} exceeds {error}",
+                f.name
+            );
+        }
+    }
+
+    /// One fixture through three rising bounds: every snapshot's checks, the
+    /// running maxima, the re-queue of edges a smaller bound rejected, and,
+    /// with `scaled`, invariance under a uniform scale.
+    fn check_levels(f: &Fixture, scaled: bool) {
+        let error = ERROR;
+        // Equal targets deliberately exhaust the tighter-bound passes on
+        // the torus and sphere, so the next pass must retry rejected edges.
+        let levels = [
+            SimplifyLevel { max_error: error / 4.0, target_faces: f.target },
+            SimplifyLevel { max_error: error / 2.0, target_faces: f.target },
+            SimplifyLevel { max_error: error, target_faces: f.target },
+        ];
+        let outputs = simplify_levels(&f.input(), &levels, &mut |_| true)
+            .unwrap_or_else(|err| panic!("{}: valid input rejected: {err}", f.name))
+            .unwrap_or_else(|| panic!("{}: unexpected cancellation", f.name));
+        assert_eq!(outputs.len(), levels.len(), "{}: one snapshot per level", f.name);
+        let mut previous = f.triangles.len();
+        for (i, (output, level)) in outputs.iter().zip(&levels).enumerate() {
+            assert!(output.report.faces <= previous, "{}: face counts cannot increase at level {}", f.name, i + 1);
+            if i > 0 {
+                assert!(output.report.max_forward >= outputs[i - 1].report.max_forward,
+                    "{}: level {} keeps the running forward maximum", f.name, i + 1);
+                assert!(output.report.max_backward >= outputs[i - 1].report.max_backward,
+                    "{}: level {} keeps the running backward maximum", f.name, i + 1);
+            }
+            if previous <= level.target_faces {
+                assert_eq!(output.report.stop, SimplifyStop::Target, "{}: already-met target at level {}", f.name, i + 1);
+            }
+            previous = output.report.faces;
+            check_snapshot(f, output, level.max_error, i + 1, i + 1 == levels.len());
+        }
+        if f.name == "torus" || f.name == "UV sphere" {
+            assert_eq!(outputs[0].report.stop, SimplifyStop::NoCandidate,
+                "{}: level 1 must exhaust the smaller bound", f.name);
+            assert!(outputs[0].report.faces > levels[0].target_faces,
+                "{}: level 1 must stop above its target", f.name);
+            assert!(outputs[1].report.faces < outputs[0].report.faces,
+                "{}: an edge rejected under the smaller bound was re-queued and collapsed under the larger one", f.name);
+        }
+        // One uniform scale: normalization makes every power of two alike.
+        if scaled {
+            let k = 16.0;
+            let positions: Vec<_> = f.positions.iter().map(|p| p.map(|v| v * k)).collect();
+            let input = SimplifyInput { positions: &positions, ..f.input() };
+            let scaled_levels: Vec<_> = levels.iter().map(|level| SimplifyLevel {
+                max_error: level.max_error * k, target_faces: level.target_faces,
+            }).collect();
+            let scaled = simplify_levels(&input, &scaled_levels, &mut |_| true)
+                .unwrap_or_else(|err| panic!("{}: scaled input rejected at scale {k}: {err}", f.name))
+                .unwrap_or_else(|| panic!("{}: unexpected cancellation at scale {k}", f.name));
+            assert_eq!(scaled.len(), outputs.len(), "{}: scaled snapshot count", f.name);
+            for (i, (scaled, output)) in scaled.iter().zip(&outputs).enumerate() {
+                assert_eq!(scaled.triangles, output.triangles,
+                    "{}: level {} is invariant under uniform scale {k}: triangles", f.name, i + 1);
+                assert_eq!(scaled.groups, output.groups,
+                    "{}: level {} is invariant under uniform scale {k}: groups", f.name, i + 1);
+                assert_eq!((scaled.report.faces, scaled.report.stop), (output.report.faces, output.report.stop),
+                    "{}: level {} is invariant under uniform scale {k}: count and stop", f.name, i + 1);
+                for (name, actual, expected) in [
+                    ("forward", scaled.report.max_forward, output.report.max_forward * k),
+                    ("backward", scaled.report.max_backward, output.report.max_backward * k),
+                ] {
+                    assert!((actual - expected).abs() <= 1e-9 * expected.abs(),
+                        "{}: level {} is invariant under uniform scale {k}: {name} report {actual} differs from {expected}", f.name, i + 1);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simplify_certified_source_bound() {
         let fixtures = [
-            torus(),
             rounded_box(),
             sphere(),
             washer(),
             patch(false),
             patch(true),
+            sliver_fan(),
+            saddle(),
         ];
-        let error = 0.027;
-        let epsilon = 1e-6;
-        // Ten subdivisions along both barycentric axes, including all edges
-        // and vertices (66 lattice points in each triangular 10 x 10 grid).
-        let mut weights = Vec::new();
-        for i in 0..=10 {
-            for j in 0..=10 - i {
-                weights.push([(10 - i - j) as f64 / 10.0, i as f64 / 10.0, j as f64 / 10.0]);
-            }
-        }
+        let error = ERROR;
+        // Scale invariance runs on the small fixtures, which between them
+        // cover every path (UV charts, materials, slivers, curvature); the
+        // sphere and the torus repeat it at many times the cost.
         for f in &fixtures {
-            let output = simplify(&f.input(), error, f.target, &mut |_| true)
-                .unwrap_or_else(|err| panic!("{}: valid input rejected: {err}", f.name))
-                .unwrap_or_else(|| panic!("{}: unexpected cancellation", f.name));
-            if f.name == "two-material plate" || f.name == "torus" {
-                for k in [0.0625, 16.0] {
-                    let positions: Vec<_> = f.positions.iter().map(|p| p.map(|v| v * k)).collect();
-                    let input = SimplifyInput {
-                        positions: &positions,
-                        ..f.input()
-                    };
-                    let scaled = simplify(&input, error * k, f.target, &mut |_| true)
-                        .unwrap_or_else(|err| {
-                            panic!("{}: scaled input rejected at scale {k}: {err}", f.name)
-                        })
-                        .unwrap_or_else(|| {
-                            panic!("{}: unexpected cancellation at scale {k}", f.name)
-                        });
-                    assert_eq!(
-                        scaled.triangles, output.triangles,
-                        "{}: simplification is invariant under uniform scale {k}: triangles",
-                        f.name
-                    );
-                    assert_eq!(
-                        scaled.groups, output.groups,
-                        "{}: simplification is invariant under uniform scale {k}: groups",
-                        f.name
-                    );
-                    assert_eq!(
-                        (scaled.report.faces, scaled.report.stop),
-                        (output.report.faces, output.report.stop),
-                        "{}: simplification is invariant under uniform scale {k}: count and stop",
-                        f.name
-                    );
-                    for (name, actual, expected) in [
-                        ("forward", scaled.report.max_forward, output.report.max_forward * k),
-                        ("backward", scaled.report.max_backward, output.report.max_backward * k),
-                    ] {
-                        assert!(
-                            (actual - expected).abs() <= 1e-9 * expected.abs(),
-                            "{}: simplification is invariant under uniform scale {k}: {name} report {actual} differs from {expected}",
-                            f.name
-                        );
-                    }
-                }
-            }
-            assert_eq!(
-                output.report.faces,
-                output.triangles.len(),
-                "{}: reported face count",
-                f.name
-            );
-            assert_eq!(
-                output.groups.len(),
-                output.triangles.len(),
-                "{}: output group count",
-                f.name
-            );
-            assert!(
-                output.report.max_forward <= error,
-                "{}: reported forward bound",
-                f.name
-            );
-            assert!(
-                output.report.max_backward <= error,
-                "{}: reported backward bound",
-                f.name
-            );
-            for (triangle, &group) in output.triangles.iter().zip(&output.groups) {
-                for &(v, w) in triangle {
-                    assert!(
-                        (v as usize) < f.positions.len() && (w as usize) < f.uv.len(),
-                        "{}: output source indices",
-                        f.name
-                    );
-                    assert!(
-                        f.triangles.iter().zip(&f.wedges).zip(&f.groups).any(
-                            |((t, wedges), &g)| {
-                                g == group && (0..3).any(|i| t[i] == v && wedges[i] == w)
-                            }
-                        ),
-                        "{}: corner wedge belongs to its source vertex and group",
-                        f.name
-                    );
-                }
-            }
-            let source: Vec<_> = f
-                .triangles
-                .iter()
-                .map(|t| OracleTriangle::new(t.map(|v| f.positions[v as usize])))
-                .collect();
-            let reduced: Vec<_> = output
-                .triangles
-                .iter()
-                .map(|t| OracleTriangle::new(t.map(|c| f.positions[c.0 as usize])))
-                .collect();
-            let forward = dense_distance(&reduced, &source, &weights);
-            let backward = dense_distance(&source, &reduced, &weights);
-            assert!(
-                forward <= error + epsilon,
-                "{}: dense forward surface error {forward} exceeds {error}",
-                f.name
-            );
-            assert!(
-                backward <= error + epsilon,
-                "{}: dense backward surface error {backward} exceeds {error}",
-                f.name
-            );
-            if f.closed {
-                let positions: Vec<_> = f.positions.iter().map(|p| p.map(|v| v as f32)).collect();
-                let original: Vec<_> = f.triangles.iter().flatten().copied().collect();
-                let indices: Vec<_> = output.triangles.iter().flatten().map(|c| c.0).collect();
-                let before = audit_mesh_topology(&positions, &original);
-                let after = audit_mesh_topology(&positions, &indices);
-                assert_eq!(
-                    (before.boundary_edges, before.nonmanifold_edges),
-                    (0, 0),
-                    "{}: closed fixture construction",
-                    f.name
-                );
-                assert_eq!(
-                    after.boundary_edges, 0,
-                    "{}: closed output has boundary edges",
-                    f.name
-                );
-                assert_eq!(
-                    after.nonmanifold_edges, 0,
-                    "{}: closed output has non-manifold edges",
-                    f.name
-                );
-                assert_eq!(
-                    after.inconsistent_edges, 0,
-                    "{}: output winding consistency",
-                    f.name
-                );
-            }
-            if f.name == "torus" {
-                assert_eq!(f.triangles.len(), 1152, "torus: source resolution");
-                assert!(
-                    output.triangles.len() <= 120,
-                    "torus: reduction count {} exceeds 120",
-                    output.triangles.len()
-                );
-                assert_eq!(
-                    output.report.stop,
-                    SimplifyStop::Target,
-                    "torus: target stop reason"
-                );
-            }
-            if f.name == "rounded box" {
-                assert_eq!(
-                    output.triangles.len(),
-                    12,
-                    "rounded box: reduction count must be 12"
-                );
-                assert_eq!(
-                    output.report.stop,
-                    SimplifyStop::Target,
-                    "rounded box: target stop reason"
-                );
-            }
-            if f.name == "two-material plate" {
-                let mut edges: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
-                for (t, &group) in output.triangles.iter().zip(&output.groups) {
-                    for i in 0..3 {
-                        let (a, b) = (t[i].0, t[(i + 1) % 3].0);
-                        edges.entry((a.min(b), a.max(b))).or_default().push(group);
-                    }
-                }
-                let mut boundary_vertices = 0;
-                for ((a, b), groups) in edges {
-                    if groups.len() == 2 && groups[0] != groups[1] {
-                        for v in [a, b] {
-                            let p = f.positions[v as usize];
-                            let d = p[0].hypot(p[2]);
-                            assert!(
-                                d <= error + epsilon,
-                                "two-material plate: material boundary distance {d}"
-                            );
-                            boundary_vertices += 1;
-                        }
-                    }
-                }
-                assert!(
-                    boundary_vertices > 0,
-                    "two-material plate: material boundary disappeared"
-                );
-            }
-            if f.uv_bound.iter().any(|&v| v) {
-                let source_uv: Vec<_> = f
-                    .wedges
-                    .iter()
-                    .map(|t| t.map(|w| f.uv[w as usize]))
-                    .collect();
-                let reduced_uv: Vec<_> = output
-                    .triangles
-                    .iter()
-                    .map(|t| t.map(|c| f.uv[c.1 as usize]))
-                    .collect();
-                let forward =
-                    texture_distance(&reduced, &reduced_uv, &source, &source_uv, &weights);
-                let backward =
-                    texture_distance(&source, &source_uv, &reduced, &reduced_uv, &weights);
-                assert!(
-                    forward <= error + epsilon,
-                    "textured chart: dense forward texture deviation {forward}"
-                );
-                assert!(
-                    backward <= error + epsilon,
-                    "textured chart: dense backward texture deviation {backward}"
-                );
-            }
+            check_levels(f, f.name != "UV sphere");
         }
 
-        let f = &fixtures[4];
+        // Shrinking authored bounds tighten the earlier snapshot too.
+        let f = &fixtures[1];
+        let shrinking = [
+            SimplifyLevel { max_error: error, target_faces: f.target },
+            SimplifyLevel { max_error: error / 2.0, target_faces: f.target },
+        ];
+        let outputs = simplify_levels(&f.input(), &shrinking, &mut |_| true).unwrap().unwrap();
+        assert_eq!(outputs.len(), shrinking.len(), "{}: shrinking-bound snapshot count", f.name);
+        for (i, output) in outputs.iter().enumerate() {
+            check_snapshot(f, output, error / 2.0, i + 1, false);
+        }
+        assert!(outputs[1].report.faces <= outputs[0].report.faces, "{}: shrinking bounds cannot increase the face count", f.name);
+
+        let f = &fixtures[3];
         assert!(
-            simplify(&f.input(), error, 0, &mut |_| false)
+            simplify_levels(&f.input(), &[SimplifyLevel { max_error: error, target_faces: 0 }], &mut |_| false)
                 .unwrap()
                 .is_none(),
             "two-material plate: immediate cancellation"
         );
         let mut calls = 0;
         assert!(
-            simplify(&f.input(), error, 0, &mut |_| {
+            simplify_levels(&f.input(), &[SimplifyLevel { max_error: error, target_faces: 0 }], &mut |_| {
                 calls += 1;
                 calls < 8
             })
@@ -1606,15 +2279,15 @@ mod tests {
             "two-material plate: cancellation during setup"
         );
         assert!(
-            simplify(&f.input(), error, 0, &mut |faces| faces
+            simplify_levels(&f.input(), &[SimplifyLevel { max_error: error, target_faces: 0 }], &mut |faces| faces
                 == f.triangles.len())
             .unwrap()
             .is_none(),
             "two-material plate: cancellation after a committed collapse"
         );
-        let unchanged = simplify(&f.input(), 0.0, f.triangles.len(), &mut |_| true)
+        let unchanged = simplify_levels(&f.input(), &[SimplifyLevel { max_error: 0.0, target_faces: f.triangles.len() }], &mut |_| true)
             .unwrap()
-            .unwrap();
+            .unwrap().remove(0);
         assert_eq!(
             unchanged.report.stop,
             SimplifyStop::Target,
@@ -1640,7 +2313,7 @@ mod tests {
             0,
         );
         assert!(
-            simplify(&nonmanifold.input(), error, 0, &mut |_| true)
+            simplify_levels(&nonmanifold.input(), &[SimplifyLevel { max_error: error, target_faces: 0 }], &mut |_| true)
                 .unwrap()
                 .is_some(),
             "non-manifold fan: valid input must not error or cancel"
@@ -1652,9 +2325,9 @@ mod tests {
             false,
             0,
         );
-        let exhausted = simplify(&triangle.input(), error, 0, &mut |_| true)
+        let exhausted = simplify_levels(&triangle.input(), &[SimplifyLevel { max_error: error, target_faces: 0 }], &mut |_| true)
             .unwrap()
-            .unwrap();
+            .unwrap().remove(0);
         assert_eq!(
             exhausted.report.stop,
             SimplifyStop::NoCandidate,
@@ -1667,14 +2340,17 @@ mod tests {
         );
         for invalid_error in [-1.0, f64::NAN, f64::INFINITY] {
             assert!(
-                simplify(&f.input(), invalid_error, usize::MAX, &mut |_| true).is_err(),
+                simplify_levels(&f.input(), &[
+                    SimplifyLevel { max_error: error, target_faces: usize::MAX },
+                    SimplifyLevel { max_error: invalid_error, target_faces: usize::MAX },
+                ], &mut |_| panic!("all level bounds must be validated before cancellation")).is_err(),
                 "two-material plate: invalid error bound must fail validation"
             );
         }
         let mut invalid = f.input();
         invalid.wedges = &[];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| panic!(
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| panic!(
                 "two-material plate: validation must precede cancellation"
             ))
             .is_err(),
@@ -1683,38 +2359,45 @@ mod tests {
         let mut invalid = f.input();
         invalid.groups = &[];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: mismatched groups must be an error"
         );
         let mut invalid = f.input();
         invalid.positions = &[[f64::NAN, 0.0, 0.0]];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: non-finite position must be an error"
         );
         let mut invalid = f.input();
         invalid.wedge_uv = &[[f64::INFINITY, 0.0]];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: non-finite UV must be an error"
         );
         let mut invalid = f.input();
         invalid.positions = &f.positions[..1];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: out-of-range position must be an error"
         );
         let mut invalid = f.input();
         invalid.wedge_uv = &f.uv[..1];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: out-of-range wedge must be an error"
         );
         let mut invalid = f.input();
         invalid.uv_bound = &[false];
         assert!(
-            simplify(&invalid, error, usize::MAX, &mut |_| true).is_err(),
+            simplify_levels(&invalid, &[SimplifyLevel { max_error: error, target_faces: usize::MAX }], &mut |_| true).is_err(),
             "two-material plate: uncovered group must be an error"
         );
+    }
+
+    /// The torus alone: its 48 x 12 grid is what the count <= 120 and its
+    /// Target stop are about, and it exhausts the smallest bound at level 1.
+    #[test]
+    fn simplify_certified_torus_meets_its_count() {
+        check_levels(&torus(), false);
     }
 }

@@ -10,7 +10,6 @@ impl Mesh {
     /// half each flank edge. Shared-face selections and reflex edges are refused.
     pub fn bevel_edges(&mut self,edges:&[EdgeKey],width:f64,ctx:&mut Context<'_>)->Result<ChangeSet>{
         if !width.is_finite()||width<=0.{return Err(invalid("bevel width must be positive"));}
-        ctx.limit("bevel edges",edges.len()as u64,ctx.limits.max_edges as u64)?;
         let selected=edges.iter().copied().collect::<BTreeSet<_>>();if selected.len()!=edges.len()||selected.is_empty(){return Err(invalid("bevel selection must be nonempty and unique"));}
         let adj=surface(self,ctx)?;let mut affected=BTreeSet::new();let mut removed=BTreeSet::new();let mut flanks=BTreeMap::<EdgeKey,(VertexId,f64)>::new();
         for &edge in &selected{ctx.checkpoint(1)?;let uses=adj.radial(edge);if uses.len()!=2{return Err(invalid("bevel requires two-sided edges"));}

@@ -521,6 +521,7 @@ impl FastGi {
     }
 
     pub fn run(&mut self,cx:&mut CxDraw,center:Vec3f,sun:&crate::sun::SunLight,clustered:&crate::clustered::ClusteredLights) {
+        self.probe_counts.retry(cx.cx);
         if self.mode==GiMode::Off{return;}
         let center=self.config.anchor.unwrap_or(center);
         let previous_batch=self.stats.batch;

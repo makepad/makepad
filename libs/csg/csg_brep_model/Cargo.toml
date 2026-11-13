@@ -13,6 +13,6 @@ makepad-csg-graph = { path = "../csg_graph" }
 makepad-csg-math = { path = "../csg_math" }
 makepad-csg-mesh = { path = "../csg_mesh" }
 # The worker runs under the process's one CPU budget, at its callers' classes.
-makepad-cpu-budget = { path = "../../../platform/cpu_budget" }
+makepad-cpu-budget = { path = "../../cpu_budget" }
 # Steps report on the caller's job (the status bar's "fillets 3/7").
 makepad-jobs = { path = "../../jobs" }

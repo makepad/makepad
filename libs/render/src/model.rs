@@ -23,7 +23,19 @@ use std::collections::BTreeMap;
 /// Matches `geom.GameMeshVertexAo` — a separate POD from GameMeshVertex so
 /// the shadow mesh, which shares that layout and has no AO, does not pay four
 /// bytes a vertex for a lane it never reads.
+///
+/// The last float, the AO lane ([`AO_LANE`], `geom.ao_uv`), carries one of:
+/// the AO-atlas chart (unorm16 x 2, [`pack_ao_uv`]; the lightmap reuses it),
+/// a morph source index (a model with morph targets), a CAD element index
+/// (the skinned lane's `elem_ctl`, a host's opt-in), or, on a primitive whose
+/// paint material carries a band (a worn road part: `makepadSplat.band`),
+/// its band coordinates from TEXCOORD_1 (unorm16 x 2, read only by the paint
+/// lane: shaders/splat.rs `splat_band_coords`). A band never takes the lane
+/// from an atlas or morphs: such a model keeps its AO and draws without the
+/// band ([`PrimSpan::band`]).
 pub const MODEL_VERTEX_FLOATS: usize = 7;
+/// The AO lane's float in a packed vertex ([`MODEL_VERTEX_FLOATS`]).
+pub const AO_LANE: usize = 6;
 
 /// A loaded prop: packed vertices ready for upload, plus where its texture
 /// lives relative to the GLB.
@@ -1192,6 +1204,9 @@ impl StaticModel {
         let mut raw_alpha: Vec<f32> = Vec::new();
         let mut raw_source:Vec<usize>=Vec::new();
         let mut raw_uv: Vec<[f32; 2]> = Vec::new();
+        // Per vertex: a worn road primitive's band coordinates (0 elsewhere).
+        let mut raw_band: Vec<[f32; 2]> = Vec::new();
+        let mut band_lane_reported = false;
         // (image, detail_image, detail_scale, v0, v1, i0, i1)
         let mut prim_spans: Vec<PrimSpan> = Vec::new();
 
@@ -1256,6 +1271,17 @@ impl StaticModel {
                     .map(|a| acc.read_f32(a))
                     .transpose()?
                     .map(|(v, _)| v);
+                // A worn road part's band coordinates ride the AO lane, when
+                // the model leaves it free (see MODEL_VERTEX_FLOATS).
+                let prim_band = prim.get("material").and_then(Val::usize).is_some_and(|i| gltf_material_has_band(&json, i));
+                if prim_band && (ao_atlas.is_some() || has_morphs) && !band_lane_reported {
+                    band_lane_reported = true;
+                    makepad_draw::log!("model: a worn road primitive's band left off: the model's AO lane carries {}", if has_morphs { "morph indices" } else { "its AO atlas" });
+                }
+                let prim_band = prim_band && ao_atlas.is_none() && !has_morphs;
+                let band_uv = if prim_band {
+                    attrs.get("TEXCOORD_1").and_then(Val::usize).map(|a| acc.read_f32(a)).transpose()?.map(|(v, _)| v)
+                } else { None };
                 // COLOR_0 vertex colors (e.g. trellis-generated meshes carry
                 // their PBR base color here): multiplied into the material
                 // tint per vertex, exactly like the shader multiplies tint
@@ -1342,6 +1368,7 @@ impl StaticModel {
                     let surface=prim.get("material").and_then(Val::usize).is_some_and(|i|gltf_material_is_surface(&json,i));
                     raw_alpha.push(if surface { vcolor.as_ref().and_then(|(values,lanes)|(*lanes==4).then(||values.get(i*lanes+3).copied()).flatten()).unwrap_or(1.0) }else{1.0});
                     raw_uv.push([g(&uv, 2, 0, 0.0), g(&uv, 2, 1, 0.0)]);
+                    raw_band.push([g(&band_uv, 2, 0, 0.0), g(&band_uv, 2, 1, 0.0)]);
                     vertices.extend_from_slice(&[
                         p.x,
                         p.y,
@@ -1384,6 +1411,7 @@ impl StaticModel {
                     parts.push((pmin, pmax));
                     prim_spans.push(PrimSpan {
                         material: prim.get("material").and_then(Val::usize),
+                        band: band_uv.is_some(),
                         image: prim_image,
                         detail_image,
                         detail_scale,
@@ -1534,7 +1562,8 @@ impl StaticModel {
                 raw_tint = tint;
                 (baked.ao_uv, baked.vertex_ao, baked.ground)
             }
-            None => (vec![[0.0, 0.0]; raw_pos.len()], vec![1.0; raw_pos.len()], None),
+            // No atlas: the lane is neutral, or a worn road part's band.
+            None => (raw_band.clone(), vec![1.0; raw_pos.len()], None),
         };
 
         vertices.clear();
@@ -1646,6 +1675,10 @@ impl StaticModel {
 #[derive(Clone)]
 struct PrimSpan {
     material: Option<usize>,
+    /// Its vertices carry their band coordinates in the AO lane (a worn
+    /// road part on a model whose lane is free): its paint keeps its band.
+    /// Otherwise a band its material declares is left off.
+    band: bool,
     image: usize,
     detail_image: Option<usize>,
     detail_scale: [f32; 2],
@@ -1661,6 +1694,11 @@ struct PrimSpan {
     i1: usize,
     /// A liquid node's primitive: drawn by the water renderer, not here.
     liquid: bool,
+}
+
+/// Does material `index` paint a worn road part (`makepadSplat.band`)?
+fn gltf_material_has_band(json:&Val,index:usize)->bool {
+    json.get("materials").and_then(|m|m.idx(index)).and_then(|m|m.get("extras")).and_then(|e|e.get("makepadSplat")).and_then(|s|s.get("band")).is_some()
 }
 
 pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
@@ -1753,6 +1791,11 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
 /// (1/metres), `roughness`, `metallic`, and `macro` [brightness, hue,
 /// roughness, size metres] (world macro variation; absent = none), plus
 /// `tiling` ("stochastic" for hex-tiled reads; absent or "repeat" = repeat).
+/// A worn road part adds `band` (gen level glb.rs): its band map (`map`, a
+/// texture index), the spans its TEXCOORD_1 decodes over (`lateral`,
+/// `span` past `base`), the map's layout (`cell` metres per texel, `row`,
+/// `rows`), the carriageway's `half` width, a closed road's `length` (0:
+/// open) and the `wear` amounts (line, seams, repairs, edges).
 fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::SplatSurface> {
     let texture=|v:Option<&Val>|v.and_then(Val::usize).and_then(|i|json.get("textures")?.idx(i)?.get("source")?.usize()).and_then(|i|gltf_embedded_png(json,bin,i));
     let num=|v:&Val,key:&str,default:f32|v.get(key).and_then(Val::f64).map_or(default,|f|f as f32);
@@ -1770,7 +1813,15 @@ fn gltf_splat(json:&Val,bin:&[u8],splat:&Val)->Option<crate::material_surface::S
         },
         stochastic:l.get("tiling").and_then(Val::str)==Some("stochastic"),
     }).collect::<Vec<_>>();
-    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(splat.get("weights")).unwrap_or_default(),origin:[m(0,0.0),m(1,0.0)],cell:m(2,1.0),width:m(3,1.0),rows:m(4,1.0)})
+    // A worn road part: its band (the map rides the weight slot: a single
+    // mesh surface reads no weights).
+    let band=splat.get("band").map(|b|crate::material_surface::SplatBand{
+        base:num(b,"base",0.0),span:num(b,"span",0.0),lateral:num(b,"lateral",0.0),cell:num(b,"cell",1.0).max(1e-3),
+        row:num(b,"row",1.0).max(2.0),rows:num(b,"rows",1.0).max(1.0),half:num(b,"half",0.0),length:num(b,"length",0.0),
+        wear:std::array::from_fn(|i|b.get("wear").and_then(|w|w.idx(i)).and_then(Val::f64).map_or(0.0,|v|(v as f32).clamp(0.0,1.0))),
+    });
+    let weights=band.as_ref().map_or(splat.get("weights"),|_|splat.get("band").and_then(|b|b.get("map")));
+    Some(crate::material_surface::SplatSurface{layers,weights_png:texture(weights).unwrap_or_default(),origin:[m(0,0.0),m(1,0.0)],cell:m(2,1.0),width:m(3,1.0),rows:m(4,1.0),band})
 }
 
 impl PrimSpan {
@@ -1778,7 +1829,10 @@ impl PrimSpan {
     /// chunk once (see [`PbrMaterial`]).
     fn pbr(&self, json: &Val, bin: &[u8]) -> PbrMaterial {
         PbrMaterial {
-            surface: self.material.and_then(|i|gltf_material_surface(json,bin,i)).map(std::sync::Arc::new),
+            surface: self.material.and_then(|i|gltf_material_surface(json,bin,i)).map(|mut surface| {
+                if !self.band { surface.drop_band(); }
+                std::sync::Arc::new(surface)
+            }),
             metallic: self.metallic,
             roughness: self.roughness,
             orm_png: self.orm_image.and_then(|i| gltf_embedded_png(json, bin, i)),
@@ -2402,6 +2456,7 @@ fn pack_node_stream(
             let (metallic, roughness, orm_image) = gltf_prim_pbr(json, prim);
             out.spans.push(PrimSpan {
                 material: prim.get("material").and_then(Val::usize),
+                band: false,
                 image: gltf_prim_image_index(json, prim),
                 detail_image,
                 detail_scale,
@@ -2651,6 +2706,18 @@ fn build_driven_parts(
             pack_node_stream(json, acc, node, &local, mirrored, &mut stream)?;
         }
         if !stream.is_drawable() {
+            // A distance level that hides the part's geometry (an LOD owner
+            // without its mesh) leaves it out of this level only: its pivot
+            // and drive stay with the full-detail model, which the owning
+            // object queries and poses. Anything else is an authoring error.
+            let hidden = node_vals.iter().enumerate().any(|(node_index, node)| {
+                owner_of.get(node_index).copied().flatten() == Some(part_index)
+                    && node.get("mesh").is_none()
+                    && node.get("extensions").and_then(|e| e.get("MSFT_lod")).is_some()
+            });
+            if hidden {
+                continue;
+            }
             return Err(format!(
                 "driven part {} has no drawable geometry",
                 def.connection

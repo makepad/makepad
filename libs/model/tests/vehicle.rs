@@ -75,6 +75,18 @@ fn textured_editable_vehicle_roundtrips_into_four_driven_wheels(){
         assert!((wheel.max.x-wheel.min.x-0.24).abs()<1e-5,"wheel axle geometry is X");
     }
     assert!(makepad_render::model::embedded_base_color_png(&product.glb).is_some());
+    // A distance level that hides a driven part leaves it out of that level
+    // only: the full-detail model keeps all four pivots and drives.
+    let mut hidden=doc.clone();
+    apply(&mut hidden,"hide",vec![Operation::Scene(SceneOperation::Lods{object:"tire_0".into(),levels:vec![LodLevel{target_faces:0,max_error:0.,distance:50.}]})]);
+    let glb=hidden.compile(None).unwrap().glb;
+    assert_eq!(StaticModel::parse_glb(&glb).unwrap().driven_parts.len(),4);
+    let mut plan=makepad_render::asset_lod::AssetLodPlan::parse(&glb,usize::MAX).unwrap().expect("the hide is a distance level");
+    assert_eq!(plan.distances(),&[50.]);
+    let far=StaticModel::parse_glb(&plan.variant_glb(0,usize::MAX).unwrap()).expect("a hidden driven part loads");
+    assert_eq!(far.driven_parts.len(),3);
+    assert!(far.driven_parts.iter().all(|p|&*p.connection!=VEHICLE_WHEEL_CONNECTIONS[0]),"only the hidden wheel leaves the far level");
+    assert_eq!(far.indices.len(),36,"the chassis stream is unchanged");
 }
 
 #[test]

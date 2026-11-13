@@ -1,4 +1,4 @@
-//! Bounded mesh factories and explicit derived-geometry construction. Factories
+//! Mesh factories and explicit derived-geometry construction. Factories
 //! return a new named object; existing sources are never destructively replaced.
 use makepad_csg_math::portable::PortableFloat;
 use crate::{mesh::{Context,Mesh,Polygon,JointWeight},Error,Limits,OperationResult,Result};
@@ -85,7 +85,7 @@ impl ConstructionCache {
 }
 impl ConstructionOperation {
     pub fn object_name(&self)->&str{&self.object}
-    pub fn memory_bytes(&self)->usize{let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(4).saturating_add(256)}
+    pub fn memory_bytes(&self)->usize{let mut w=Writer::new();if self.write(&mut w).is_err(){return usize::MAX;}w.bytes.len().saturating_mul(4).saturating_add(256)}
     pub fn apply(&self,objects:&mut BTreeMap<String,Mesh>,limits:&Limits,ctx:&mut Context<'_>)->Result<OperationResult>{
         self.apply_in_scene(objects,&crate::SceneState::default(),limits,ctx)
     }
@@ -97,7 +97,7 @@ impl ConstructionOperation {
     }
     fn apply_inner(&self,objects:&mut BTreeMap<String,Mesh>,scene:&crate::SceneState,limits:&Limits,ctx:&mut Context<'_>,cache:Option<&mut ConstructionCache>)->Result<OperationResult>{
         self.check(limits)?;
-        if objects.contains_key(&self.object){return Err(Error::DuplicateObject(self.object.clone()));}if objects.len()>=limits.max_objects{return Err(Error::Budget("objects"));}
+        if objects.contains_key(&self.object){return Err(Error::DuplicateObject(self.object.clone()));}
         ctx.checkpoint(0)?;let mesh=match &self.kind{
             Construction::Fibers{source,count,length,width,seed,material}=>fibers::generate(objects.get(source).ok_or_else(||Error::MissingObject(source.clone()))?,*count,*length,*width,*seed,*material,ctx)?,
             Construction::Sweep{profile,path,caps,material}=>sweep(profile,path,*caps,*material,ctx)?,
@@ -131,7 +131,7 @@ fn world_source(objects:&BTreeMap<String,Mesh>,scene:&crate::SceneState,name:&st
     let mut source=source.clone();let vertices=source.vertices().iter().map(|v|v.id).collect::<Vec<_>>();
     source.transform(&vertices,scene.world_matrix(name)?,ctx)?;Ok(source)
 }
-fn name(v:&str,l:&Limits)->Result<()>{if v.is_empty()||v.len()>l.max_name_bytes||v.chars().any(char::is_control){Err(Error::Invalid("construction object name"))}else{Ok(())}}
+fn name(v:&str,_l:&Limits)->Result<()>{if v.is_empty()||v.chars().any(char::is_control){Err(Error::Invalid("construction object name"))}else{Ok(())}}
 fn add(a:[f64;3],b:[f64;3])->[f64;3]{std::array::from_fn(|d|a[d]+b[d])}
 fn sub(a:[f64;3],b:[f64;3])->[f64;3]{std::array::from_fn(|d|a[d]-b[d])}
 fn mul(a:[f64;3],s:f64)->[f64;3]{a.map(|v|v*s)}
@@ -139,10 +139,10 @@ fn dot(a:[f64;3],b:[f64;3])->f64{a.iter().zip(b).map(|(a,b)|a*b).sum()}
 fn cross(a:[f64;3],b:[f64;3])->[f64;3]{[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
 fn length(a:[f64;3])->f64{a[0].phypot(a[1]).phypot(a[2])}
 fn unit(a:[f64;3])->Result<[f64;3]>{let n=length(a);if !n.is_finite()||n<=1e-12{Err(Error::Invalid("degenerate construction direction"))}else{Ok(mul(a,1./n))}}
-fn admit(vertices:usize,faces:usize,corners:usize,ctx:&mut Context<'_>)->Result<()>{ctx.checkpoint((vertices+corners)as u64)?;if vertices>ctx.limits.max_vertices||faces>ctx.limits.max_faces||corners>ctx.limits.max_corners||vertices.saturating_mul(1024).saturating_add(corners.saturating_mul(1024))>ctx.limits.max_bytes{return Err(Error::Budget("construction geometry"));}Ok(())}
+fn admit(vertices:usize,faces:usize,corners:usize,ctx:&mut Context<'_>)->Result<()>{ctx.checkpoint(vertices.saturating_add(corners)as u64)?;for n in [vertices,faces,corners]{u32::try_from(n).map_err(|_|Error::Budget("mesh source u32 count"))?;}ctx.bytes(vertices.checked_add(corners).and_then(|n|n.checked_mul(1024)).ok_or(Error::Budget("construction storage overflow"))?)?;Ok(())}
 fn loft(profiles:&[Vec<[f64;3]>],closed:bool,caps:bool,material:u32,ctx:&mut Context<'_>)->Result<Mesh>{
     let n=profiles[0].len();if profiles.iter().any(|p|p.len()!=n)||(closed&&n<3)||(caps&&!closed){return Err(Error::Invalid("loft needs equal profile counts; caps need closed profiles"));}
-    let strips=if closed{n}else{n-1};let faces=(profiles.len()-1)*strips+if caps{2}else{0};admit(profiles.len()*n,faces,4*faces+2*n,ctx)?;
+    let strips=if closed{n}else{n-1};let faces=(profiles.len()-1).saturating_mul(strips).saturating_add(if caps{2}else{0});admit(profiles.len().saturating_mul(n),faces,faces.saturating_mul(4).saturating_add(n.saturating_mul(2)),ctx)?;
     let positions=profiles.iter().flatten().copied().collect::<Vec<_>>();let mut polygons=Vec::new();
     for ring in 0..profiles.len()-1{for j in 0..strips{ctx.checkpoint(1)?;let k=(j+1)%n;let u=j as f64/strips as f64;let u1=(j+1)as f64/strips as f64;let v=ring as f64/(profiles.len()-1)as f64;let v1=(ring+1)as f64/(profiles.len()-1)as f64;
         polygons.push(Polygon{vertices:vec![(ring*n+j)as u32,(ring*n+k)as u32,((ring+1)*n+k)as u32,((ring+1)*n+j)as u32],uvs:vec![[u,v],[u1,v],[u1,v1],[u,v1]],material});}}
@@ -155,10 +155,10 @@ fn loft(profiles:&[Vec<[f64;3]>],closed:bool,caps:bool,material:u32,ctx:&mut Con
 fn cap_polygon(positions:&[[f64;3]],indices:Vec<u32>,material:u32)->Result<Polygon>{let mut normal=[0.;3];for i in 0..indices.len(){normal=add(normal,cross(positions[indices[i]as usize],positions[indices[(i+1)%indices.len()]as usize]));}let normal=unit(normal)?;let axis=(0..3).max_by(|&a,&b|normal[a].abs().total_cmp(&normal[b].abs())).unwrap();
     let uvs=indices.iter().map(|&i|[positions[i as usize][(axis+1)%3],positions[i as usize][(axis+2)%3]]).collect();Ok(Polygon{vertices:indices,uvs,material})}
 fn quad_strip(a:&[[f64;3]],b:&[[f64;3]],closed:bool,material:u32,ctx:&mut Context<'_>)->Result<Mesh>{
-    if a.len()!=b.len()||(closed&&a.len()<3){return Err(Error::Invalid("quad strip rails must have equal lengths"));}let profiles=vec![a.to_vec(),b.to_vec()];loft(&profiles,closed,false,material,ctx)
+    if a.len()!=b.len()||(closed&&a.len()<3){return Err(Error::Invalid("quad strip rails must have equal lengths"));}ctx.bytes(a.len().checked_mul(2*std::mem::size_of::<[f64;3]>()).ok_or(Error::Budget("quad strip storage overflow"))?)?;let profiles=vec![a.to_vec(),b.to_vec()];loft(&profiles,closed,false,material,ctx)
 }
 fn sweep(profile:&[[f64;2]],path:&[[f64;3]],caps:bool,material:u32,ctx:&mut Context<'_>)->Result<Mesh>{
-    admit(profile.len()*path.len(),profile.len()*(path.len()-1)+2,4*profile.len()*path.len(),ctx)?;
+    admit(profile.len().saturating_mul(path.len()),profile.len().saturating_mul(path.len()-1).saturating_add(2),profile.len().saturating_mul(path.len()).saturating_mul(4),ctx)?;
     let mut rings=Vec::new();let mut previous_normal=None;let mut previous_tangent=None;
     for i in 0..path.len(){ctx.checkpoint(1)?;let tangent=unit(sub(path[(i+1).min(path.len()-1)],path[i.saturating_sub(1)]))?;
         if previous_tangent.is_some_and(|p|dot(p,tangent)< -0.999){return Err(Error::Invalid("sweep path reverses direction"));}
@@ -173,7 +173,7 @@ fn frame_normal(tangent:[f64;3])->Result<[f64;3]>{let axis=(0..3).min_by(|&a,&b|
 /// top-down was inside out: a mushroom cap showed its underside and the
 /// stem through its dome. Off keeps older documents' meshes exactly.
 fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,outward:bool,ctx:&mut Context<'_>)->Result<Mesh>{
-    let n=segments as usize;admit(n*profile.len(),n*(profile.len()-1)+2,4*n*profile.len(),ctx)?;let mut positions=Vec::new();let mut rings=Vec::new();
+    let n=segments as usize;admit(n.saturating_mul(profile.len()),n.saturating_mul(profile.len()-1).saturating_add(2),n.saturating_mul(profile.len()).saturating_mul(4),ctx)?;let mut positions=Vec::new();let mut rings=Vec::new();
     for (i,&[radius,height]) in profile.iter().enumerate(){ctx.checkpoint(1)?;if radius<0.||(radius==0.&&i!=0&&i+1!=profile.len()){return Err(Error::Invalid("lathe radius must be positive except at endpoint poles"));}
         let count=if radius==0.{1}else{n};let mut ring=Vec::new();for j in 0..count{let theta=j as f64/n as f64*std::f64::consts::TAU;let mut p=[0.;3];p[axis]=height;p[(axis+1)%3]=radius*theta.pcos();p[(axis+2)%3]=radius*theta.psin();ring.push(positions.len()as u32);positions.push(p);}rings.push(ring);
     }
@@ -193,7 +193,7 @@ fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,outwa
 #[derive(Clone)]
 struct SourceTriangle {points:[[f64;3];3],uv:[[f64;2];3],normals:[[f64;3];3],weights:[Vec<JointWeight>;3],material:u32}
 fn source_triangles(mesh:&Mesh,ctx:&mut Context<'_>)->Result<Vec<SourceTriangle>>{
-    let tri=mesh.triangulate(ctx)?;if tri.triangles.len()>16384{return Err(Error::Budget("derived construction input triangles"));}
+    let tri=mesh.triangulate(ctx)?;
     tri.triangles.iter().map(|t|{ctx.checkpoint(1)?;Ok(SourceTriangle{points:t.indices.map(|i|tri.vertices[i as usize].position),uv:t.indices.map(|i|tri.vertices[i as usize].uv),normals:t.indices.map(|i|tri.vertices[i as usize].normal),weights:t.indices.map(|i|tri.vertices[i as usize].weights.clone()),material:t.material})}).collect()
 }
 fn derived_source(mesh:&Mesh,ctx:&mut Context<'_>)->Result<()> {
@@ -203,8 +203,10 @@ fn derived_source(mesh:&Mesh,ctx:&mut Context<'_>)->Result<()> {
 fn boolean_mesh(a:&Mesh,b:&Mesh,mode:BooleanMode,ctx:&mut Context<'_>)->Result<Mesh>{
     derived_source(a,ctx)?;derived_source(b,ctx)?;
     if a.vertices().iter().chain(b.vertices()).any(|v|!v.weights.is_empty()){return Err(Error::Invalid("boolean refuses ambiguous skin weights at new intersections"));}
+    // csg_boolean::corefine materializes BVH overlaps as Vec<(u32, u32)>.
+    const CANDIDATE_PAIR_BYTES: usize = std::mem::size_of::<(u32, u32)>();
     let mut sources=source_triangles(a,ctx)?;let other=source_triangles(b,ctx)?;let pairs=sources.len().saturating_mul(other.len());
-    if pairs.saturating_mul(2048).saturating_add(a.memory_bytes()+b.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("boolean candidate pairs"));}
+    if pairs.saturating_mul(CANDIDATE_PAIR_BYTES).saturating_add(a.memory_bytes()).saturating_add(b.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("boolean candidate pairs"));}
     ctx.checkpoint(pairs.saturating_mul(64)as u64)?;sources.extend(other);
     let convert=|m:&Mesh,ctx:&mut Context<'_>|->Result<makepad_csg_mesh::TriMesh>{let tri=m.triangulate(ctx)?;let indices=m.vertices().iter().enumerate().map(|(i,v)|(v.id,i as u32)).collect::<BTreeMap<_,_>>();
         Ok(makepad_csg_mesh::TriMesh{vertices:m.vertices().iter().map(|v|makepad_csg_math::dvec3(v.position[0],v.position[1],v.position[2])).collect(),triangles:tri.triangles.iter().map(|t|t.indices.map(|i|indices[&tri.vertices[i as usize].source_vertex])).collect(),corner_normals:Vec::new()})};
@@ -215,8 +217,8 @@ fn boolean_mesh(a:&Mesh,b:&Mesh,mode:BooleanMode,ctx:&mut Context<'_>)->Result<M
     transfer_surface(&positions,&output.triangles,&sources,true,ctx)
 }
 fn voxel_mesh(source:&Mesh,resolution:u32,ctx:&mut Context<'_>)->Result<Mesh>{
-    derived_source(source,ctx)?;let sources=source_triangles(source,ctx)?;let cells=(resolution as usize).pow(3);
-    if cells.saturating_mul(2048).saturating_add(source.memory_bytes())>ctx.limits.max_bytes{return Err(Error::Budget("voxel working storage"));}ctx.checkpoint(cells.saturating_mul(128)as u64)?;
+    derived_source(source,ctx)?;let sources=source_triangles(source,ctx)?;let cells=(resolution as usize).checked_pow(3).ok_or(Error::Budget("voxel storage overflow"))?;
+    ctx.bytes(cells.checked_mul(2048).and_then(|n|n.checked_add(source.memory_bytes())).ok_or(Error::Budget("voxel storage overflow"))?)?;ctx.checkpoint(cells.saturating_mul(128)as u64)?;
     let mut bounds=[[f64::INFINITY;3],[f64::NEG_INFINITY;3]];for v in source.vertices(){for d in 0..3{bounds[0][d]=bounds[0][d].min(v.position[d]);bounds[1][d]=bounds[1][d].max(v.position[d]);}}
     let center=std::array::from_fn::<_,3,_>(|d|(bounds[0][d]+bounds[1][d])*0.5);let span=(0..3).map(|d|bounds[1][d]-bounds[0][d]).fold(0f64,f64::max);
     if span<=0.||!span.is_finite(){return Err(Error::Invalid("voxel source bounds"));}let scale=1.9/span;
@@ -292,7 +294,7 @@ fn transfer_surface(positions:&[[f64;3]],faces:&[[u32;3]],sources:&[SourceTriang
 }
 fn interpolate_weights(source:&SourceTriangle,b:[f64;3],ctx:&mut Context<'_>)->Result<Vec<JointWeight>>{
     let mut weights=BTreeMap::<u32,f64>::new();for i in 0..3{for w in &source.weights[i]{ctx.checkpoint(1)?;*weights.entry(w.joint).or_default()+=w.weight*b[i].max(0.);}}
-    weights.retain(|_,v|*v>0.);if weights.len()>ctx.limits.max_weights_per_vertex{return Err(Error::Budget("reprojected influences"));}let sum=weights.values().sum::<f64>();Ok(weights.into_iter().map(|(joint,weight)|JointWeight{joint,weight:weight/sum}).collect())
+    weights.retain(|_,v|*v>0.);let sum=weights.values().sum::<f64>();Ok(weights.into_iter().map(|(joint,weight)|JointWeight{joint,weight:weight/sum}).collect())
 }
 fn barycentric(p:[f64;3],t:[[f64;3];3])->([f64;3],f64){
     let scale=length(sub(t[1],t[0])).max(length(sub(t[2],t[0])));if scale==0.{return ([1.,0.,0.],f64::INFINITY);}
@@ -356,7 +358,7 @@ mod tests {
             },
         ] {
             op.check(&limits).unwrap();
-            let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();
+            let mut w=Writer::new();op.write(&mut w).unwrap();
             let mut r=Reader::new(&w.bytes);assert_eq!(ConstructionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();
             op.apply(&mut objects,&limits,&mut ctx).unwrap();
         }
@@ -373,7 +375,7 @@ mod tests {
             let op=ConstructionOperation {object:name.into(),kind:Construction::Lathe {
                 profile:cap.clone(),axis:1,segments:20,caps:true,material:0,outward,
             }};
-            let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();
+            let mut w=Writer::new();op.write(&mut w).unwrap();
             let mut r=Reader::new(&w.bytes);assert_eq!(ConstructionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();
             op.apply(&mut objects,&limits,&mut ctx).unwrap();
         }
@@ -412,13 +414,13 @@ fn write_construction(w:&mut Writer,value:&Construction)->Result<()>{match value
     Construction::Decal{decal,material}=>{w.u8(8)?;write_decal(w,decal)?;w.u32(*material)?;},
 }Ok(())}
 fn read_construction(r:&mut Reader,limits:&Limits)->Result<Construction>{let _=limits;Ok(match r.u8()?{
-    0=>Construction::Fibers{source:r.string(limits.max_name_bytes)?,count:r.u32()?,length:r.f64()?,width:r.f64()?,seed:r.u32()?,material:r.u32()?},
-    1=>Construction::Sweep{profile:{let mut values=Vec::new();for _ in 0..r.count(128)?{values.push([r.f64()?,r.f64()?]);}values},path:{let mut values=Vec::new();for _ in 0..r.count(128)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},caps:read_bool(r)?,material:r.u32()?},
-    2=>Construction::Lathe{profile:{let mut values=Vec::new();for _ in 0..r.count(128)?{values.push([r.f64()?,r.f64()?]);}values},axis:r.u32()? as usize,segments:r.u32()?,caps:read_bool(r)?,material:r.u32()?,outward:read_bool(r)?},
-    3=>Construction::Loft{profiles:{let mut values=Vec::new();for _ in 0..r.count(128)?{values.push({let mut values=Vec::new();for _ in 0..r.count(128)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values});}values},closed:read_bool(r)?,caps:read_bool(r)?,material:r.u32()?},
-    4=>Construction::QuadStrip{a:{let mut values=Vec::new();for _ in 0..r.count(4096)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},b:{let mut values=Vec::new();for _ in 0..r.count(4096)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},closed:read_bool(r)?,material:r.u32()?},
-    5=>Construction::Boolean{a:r.string(limits.max_name_bytes)?,b:r.string(limits.max_name_bytes)?,mode:read_booleanmode(r,limits)?},
-    6=>Construction::Voxel{source:r.string(limits.max_name_bytes)?,resolution:r.u32()?},
+    0=>Construction::Fibers{source:r.string()?,count:r.u32()?,length:r.f64()?,width:r.f64()?,seed:r.u32()?,material:r.u32()?},
+    1=>Construction::Sweep{profile:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push([r.f64()?,r.f64()?]);}values},path:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},caps:read_bool(r)?,material:r.u32()?},
+    2=>Construction::Lathe{profile:{let mut values=Vec::new();for _ in 0..r.count(16)?{values.push([r.f64()?,r.f64()?]);}values},axis:r.u32()? as usize,segments:r.u32()?,caps:read_bool(r)?,material:r.u32()?,outward:read_bool(r)?},
+    3=>Construction::Loft{profiles:{let mut values=Vec::new();for _ in 0..r.count(4)?{values.push({let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values});}values},closed:read_bool(r)?,caps:read_bool(r)?,material:r.u32()?},
+    4=>Construction::QuadStrip{a:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},b:{let mut values=Vec::new();for _ in 0..r.count(24)?{values.push([r.f64()?,r.f64()?,r.f64()?]);}values},closed:read_bool(r)?,material:r.u32()?},
+    5=>Construction::Boolean{a:r.string()?,b:r.string()?,mode:read_booleanmode(r,limits)?},
+    6=>Construction::Voxel{source:r.string()?,resolution:r.u32()?},
     7=>Construction::Shape{shape:read_shape(r,limits)?,material:r.u32()?},
     8=>Construction::Decal{decal:read_decal(r,limits)?,material:r.u32()?},
     _=>return Err(Error::Corrupt("Construction tag")),
@@ -439,40 +441,40 @@ impl ConstructionOperation {
     pub fn check(&self,limits:&Limits)->Result<()>{
         name(&self.object,limits)?;
         match &self.kind{
-            Construction::Fibers{source,count,length,width,..}=>{name(source,limits)?;finite([*length,*width])?;if !(1..=fibers::MAX_STRANDS).contains(count)||!(0.0001..=1.).contains(length)||!(0.00001..=0.1).contains(width)||*width>*length*0.5{return Err(Error::Invalid("fiber_shell count/length/width"));}},
-            Construction::Sweep{profile,path,..}=>{check_vectors(profile,3,128)?;check_vectors(path,2,128)?;},
-            Construction::Lathe{profile,axis,segments,..}=>{if !(3..=128).contains(segments)||*axis>2{return Err(Error::Invalid("lathe axis or segments"));}check_vectors(profile,2,128)?;},
-            Construction::Loft{profiles,..}=>{if !(2..=128).contains(&profiles.len()){return Err(Error::Invalid("loft profile count"));}for p in profiles{check_vectors(p,2,128)?;}},
-            Construction::QuadStrip{a,b,..}=>{check_vectors(a,2,4096)?;check_vectors(b,2,4096)?;},
+            Construction::Fibers{source,count,length,width,..}=>{name(source,limits)?;finite([*length,*width])?;if *count==0||*length<=0.||*width<=0.||*width>*length*0.5{return Err(Error::Invalid("fiber_shell count/length/width"));}},
+            Construction::Sweep{profile,path,..}=>{check_vectors(profile,3)?;check_vectors(path,2)?;},
+            Construction::Lathe{profile,axis,segments,..}=>{if *segments<3||*axis>2{return Err(Error::Invalid("lathe axis or segments"));}check_vectors(profile,2)?;},
+            Construction::Loft{profiles,..}=>{if profiles.len()<2{return Err(Error::Invalid("loft profile count"));}for p in profiles{check_vectors(p,2)?;}},
+            Construction::QuadStrip{a,b,..}=>{check_vectors(a,2)?;check_vectors(b,2)?;},
             Construction::Boolean{a,b,..}=>{name(a,limits)?;name(b,limits)?;},
-            Construction::Voxel{source,resolution}=>{if !(8..=32).contains(resolution)||!resolution.is_power_of_two(){return Err(Error::Invalid("voxel resolution must be 8,16,32"));}name(source,limits)?;},
+            Construction::Voxel{source,resolution}=>{if *resolution<2||!resolution.is_power_of_two(){return Err(Error::Invalid("voxel resolution must be a power of two >= 2"));}name(source,limits)?;},
             Construction::Shape{shape,..}=>shape.check(limits)?,Construction::Decal{decal,..}=>decal.check(limits)?,
         }Ok(())
     }
     pub(crate) fn write(&self,w:&mut Writer)->Result<()>{w.string(&self.object)?;write_construction(w,&self.kind)}
-    pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let value=Self{object:r.string(limits.max_name_bytes)?,kind:read_construction(r,limits)?};value.check(limits)?;Ok(value)}
+    pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{let value=Self{object:r.string()?,kind:read_construction(r,limits)?};value.check(limits)?;Ok(value)}
 }
-fn check_vectors<const N:usize>(v:&[[f64;N]],min:usize,max:usize)->Result<()>{if !(min..=max).contains(&v.len()){return Err(Error::Invalid("construction vector count"));}finite(v.iter().flatten().copied())}
+fn check_vectors<const N:usize>(v:&[[f64;N]],min:usize)->Result<()>{if v.len()<min{return Err(Error::Invalid("construction vector count"));}finite(v.iter().flatten().copied())}
 
 #[cfg(test)]
 mod typed_tests {
     use super::*;
     #[test]
     fn construction_literals_roundtrip(){
-        let limits=Limits::default();let p=vec![[0.,0.],[1.,0.],[0.,1.]];let path=vec![[0.;3],[0.,1.,0.]];
+        let limits=Limits::default();let p=vec![[0.,0.],[1.,0.],[0.,1.]];
         let mut kinds=vec![
-            Construction::Fibers{source:"source".into(),count:4,length:0.1,width:0.01,seed:17,material:2},
-            Construction::Sweep{profile:p.clone(),path:path.clone(),caps:true,material:3},Construction::Lathe{profile:p,axis:1,segments:12,caps:false,material:4,outward:true},
-            Construction::Loft{profiles:vec![path.clone(),path.clone()],closed:false,caps:false,material:5},Construction::QuadStrip{a:path.clone(),b:path,closed:false,material:6},
-            Construction::Voxel{source:"source".into(),resolution:8},Construction::Shape{shape:Shape::Box{size:[1.;3],radius:0.,segments:3},material:7},
+            Construction::Fibers{source:"source".into(),count:32769,length:0.1,width:0.01,seed:17,material:2},
+            Construction::Sweep{profile:vec![[1.,0.];129],path:vec![[0.,1.,0.];129],caps:true,material:3},Construction::Lathe{profile:p,axis:1,segments:129,caps:false,material:4,outward:true},
+            Construction::Loft{profiles:vec![vec![[0.;3];2];129],closed:false,caps:false,material:5},Construction::QuadStrip{a:vec![[0.;3];4097],b:vec![[1.;3];4097],closed:false,material:6},
+            Construction::Voxel{source:"source".into(),resolution:64},Construction::Shape{shape:Shape::Box{size:[1.;3],radius:0.,segments:3},material:7},
             Construction::Decal{decal:Decal{target:"target".into(),center:[0.;3],normal:[0.,0.,1.],up:[0.,1.,0.],size:[1.;2],depth:0.5,offset:0.0015},material:8},
         ];for mode in [BooleanMode::Union,BooleanMode::Difference,BooleanMode::Intersection]{kinds.push(Construction::Boolean{a:"a".into(),b:"b".into(),mode});}
-        for kind in kinds{let op=ConstructionOperation{object:"out".into(),kind};op.check(&limits).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(ConstructionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*4+256);}
+        for kind in kinds{let op=ConstructionOperation{object:"out".into(),kind};op.check(&limits).unwrap();let mut w=Writer::new();op.write(&mut w).unwrap();let mut r=Reader::new(&w.bytes);assert_eq!(ConstructionOperation::read(&mut r,&limits).unwrap(),op);r.end().unwrap();assert_eq!(op.memory_bytes(),w.bytes.len()*4+256);}
     }
     #[test]
     fn invalid_construction_literals_and_tags(){
-        let limits=Limits::default();for kind in [Construction::Fibers{source:"a".into(),count:0,length:0.1,width:0.01,seed:0,material:0},Construction::Sweep{profile:vec![[0.;2]],path:vec![[0.;3];2],caps:false,material:0},Construction::Lathe{profile:vec![[0.;2];2],axis:3,segments:16,caps:false,material:0,outward:false},Construction::Loft{profiles:vec![],closed:false,caps:false,material:0},Construction::Voxel{source:"a".into(),resolution:9},Construction::Boolean{a:"".into(),b:"b".into(),mode:BooleanMode::Union}]{assert!(ConstructionOperation{object:"out".into(),kind}.check(&limits).is_err());}
-        let mut w=Writer::new(1024);w.string("out").unwrap();w.u8(255).unwrap();assert!(matches!(ConstructionOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("Construction tag"))));
-        let op=ConstructionOperation{object:"out".into(),kind:Construction::Voxel{source:"a".into(),resolution:9}};let mut w=Writer::new(1024);op.write(&mut w).unwrap();assert!(ConstructionOperation::read(&mut Reader::new(&w.bytes),&limits).is_err());
+        let limits=Limits::default();for kind in [Construction::Fibers{source:"a".into(),count:0,length:0.1,width:0.01,seed:0,material:0},Construction::Sweep{profile:vec![[0.;2]],path:vec![[0.;3];2],caps:false,material:0},Construction::Lathe{profile:vec![[0.;2];2],axis:3,segments:129,caps:false,material:0,outward:false},Construction::Loft{profiles:vec![],closed:false,caps:false,material:0},Construction::Voxel{source:"a".into(),resolution:9},Construction::Boolean{a:"".into(),b:"b".into(),mode:BooleanMode::Union}]{assert!(ConstructionOperation{object:"out".into(),kind}.check(&limits).is_err());}
+        let mut w=Writer::new();w.string("out").unwrap();w.u8(255).unwrap();assert!(matches!(ConstructionOperation::read(&mut Reader::new(&w.bytes),&limits),Err(Error::Corrupt("Construction tag"))));
+        let op=ConstructionOperation{object:"out".into(),kind:Construction::Voxel{source:"a".into(),resolution:9}};let mut w=Writer::new();op.write(&mut w).unwrap();assert!(ConstructionOperation::read(&mut Reader::new(&w.bytes),&limits).is_err());
     }
 }

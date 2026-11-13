@@ -306,6 +306,12 @@ pub struct Renderer {
     /// Advanced by [`Renderer::tick_sky`]; deliberately not wall-clock, so a
     /// paused game has a still sky and a capture is reproducible.
     sky_time: f32,
+    /// The wind a host asked for ([`Renderer::set_wind`]) and the wind as
+    /// shown, carried through the host's presentation time by
+    /// [`Renderer::advance_wind`]: what swaying foliage and grass read. A
+    /// host that never advances it shows calm.
+    wind: makepad_scene::WorldWind,
+    wind_clock: makepad_scene::WindClock,
     /// Per model id: does this model cast into the GPU bake's sun-depth
     /// passes when it has no AO layout of its own? Absent = decided by size
     /// ([`casts_as_caster_only`]). The explicit answer exists because only
@@ -447,6 +453,9 @@ pub struct Renderer {
     /// visible patches per ring.
     grass: Option<crate::grass::GrassGpu>,
     grass_draw: Option<Box<crate::shaders::DrawSceneGrass>>,
+    /// Where wheels and feet pressed the grass (crate::trample), fed by
+    /// `set_ground_stamps`.
+    trample: crate::trample::TrampleField,
     /// The swaying-foliage lane's shader, and whether it can draw this
     /// frame (else foliage stays on the PBR lane).
     foliage_draw: Option<Box<crate::shaders::DrawSceneFoliageLit>>,
@@ -458,13 +467,12 @@ pub struct Renderer {
     /// Multiplier on every model's stand-in distance (`makepadShading.impostor`):
     /// the quality tier's say in where trees turn into impostors.
     impostor_scale: f32,
-    /// The tier's grass radius multiplier and kept blade fraction.
-    grass_radius_scale: f32,
-    grass_density: f32,
+    /// The tier's narrowest far grass blade, screen pixels.
+    grass_pixels: f32,
     /// The tier's reach of terrain paint blending (quality_tier.rs).
     terrain_blend_reach: f32,
     graphics_tier: crate::quality_tier::GraphicsTier,
-    grass_rings: [Vec<(f32, f32)>; 3],
+    grass_rings: [Vec<(f32, f32)>; crate::grass::LEVELS],
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
     pbr_ready: bool,
     /// A secondary camera may borrow the live probe field for sampling only.
@@ -753,6 +761,8 @@ impl Default for Renderer {
             decal_draw: None,
             sky_draw_wait_logged: false,
             sky_time: 0.0,
+            wind: Default::default(),
+            wind_clock: Default::default(),
             model_casts_shadow: std::collections::BTreeMap::new(),
             model_lod_chains: std::collections::BTreeMap::new(),
             model_lod_chains_dirty: false,
@@ -804,13 +814,13 @@ impl Default for Renderer {
             city_draw: None,
             grass: None,
             grass_draw: None,
+            trample: crate::trample::TrampleField::new(crate::quality_tier::GraphicsTier::High.budget().trample),
             foliage_draw: None,
             foliage_ready: false,
             splat_draw: None,
             splat_ready: false,
             impostor_scale: crate::quality_tier::GraphicsTier::High.budget().impostor_scale,
-            grass_radius_scale: 1.0,
-            grass_density: 1.0,
+            grass_pixels: crate::quality_tier::GraphicsTier::High.budget().grass_pixels,
             terrain_blend_reach: f32::MAX,
             graphics_tier: crate::quality_tier::GraphicsTier::High,
             grass_rings: Default::default(),

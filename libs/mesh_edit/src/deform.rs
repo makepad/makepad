@@ -32,8 +32,8 @@ impl Mesh {
     /// Trilinear lattice displacement with x-fastest controls. Every selected
     /// point must lie inside bounds; no hidden extrapolation or clamping occurs.
     pub fn lattice(&mut self,vertices:&[VertexId],bounds:[[f64;3];2],divisions:[u32;3],displacements:&[[f64;3]],ctx:&mut Context<'_>)->Result<ChangeSet>{
-        check_position(bounds[0])?;check_position(bounds[1])?;for d in 0..3{if bounds[1][d]<=bounds[0][d]||!(2..=8).contains(&divisions[d]){return Err(invalid("lattice requires increasing bounds and 2..8 controls per axis"));}}
-        let count=divisions.iter().product::<u32>() as usize;if displacements.len()!=count{return Err(invalid("lattice control count mismatch"));}
+        check_position(bounds[0])?;check_position(bounds[1])?;for d in 0..3{if bounds[1][d]<=bounds[0][d]||divisions[d]<2{return Err(invalid("lattice requires increasing bounds and at least two controls per axis"));}}
+        let count=divisions.iter().try_fold(1usize,|n,d|n.checked_mul(*d as usize)).ok_or_else(||invalid("lattice control count overflow"))?;if displacements.len()!=count{return Err(invalid("lattice control count mismatch"));}
         for &p in displacements{ctx.checkpoint(1)?;check_position(p)?;}let selected=self.selected_vertices(vertices,ctx)?;
         Ok(self.edit(ctx,vertices.len().saturating_mul(128),|m,ctx|{
             for v in &mut m.vertices{ctx.checkpoint(1)?;if !selected.contains(&v.id){continue;}let mut cell=[0;3];let mut fraction=[0.;3];

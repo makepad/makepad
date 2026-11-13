@@ -2,7 +2,7 @@
 //! no cached transforms or geometry revisions, and no per-frame script writes.
 use crate::{lightmap::LmLight, Renderer};
 use makepad_draw::*;
-use makepad_scene::{Entity, EntityLight, World, MAX_ENTITY_LIGHTS};
+use makepad_scene::{Entity, EntityLight, World};
 
 pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight> {
     if !light.enabled || light.intensity <= 0.0 || light.validate().is_err() {
@@ -37,7 +37,7 @@ pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight
 /// [`append_entity_lights_with_model_headlights`].
 pub fn append_entity_lights(world: &World, out: &mut Vec<LmLight>) {
     for entity in &world.entities {
-        for light in entity.lights.iter().take(MAX_ENTITY_LIGHTS) {
+        for light in entity.lights.iter() {
             out.extend(place_entity_light(entity, light));
         }
     }
@@ -80,7 +80,7 @@ pub fn append_entity_lights_with_model_headlights(
     for (i, entity) in world.entities.iter().enumerate() {
         // Hidden chassis still own visible models and fixtures.
         let mut lamps = false;
-        for light in entity.lights.iter().take(MAX_ENTITY_LIGHTS) {
+        for light in entity.lights.iter() {
             if makepad_scene::light::is_vehicle_lamp(&light.name) {
                 lamps |= light.enabled && light.intensity > 0.0;
                 continue;
@@ -110,7 +110,7 @@ pub fn append_entity_lights_with_model_headlights(
         }
         let entity = &world.entities[i];
         let tail_fade = ((TAIL_RANGE - d) / (TAIL_RANGE * 0.25)).clamp(0.0, 1.0);
-        for light in entity.lights.iter().take(MAX_ENTITY_LIGHTS) {
+        for light in entity.lights.iter() {
             let level = match light.name.as_str() {
                 "headlight_left" | "headlight_right" if model_owners.contains(&entity.id) => continue,
                 "headlight_left" | "headlight_right" => fade,

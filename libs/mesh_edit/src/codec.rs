@@ -7,6 +7,24 @@ const MAGIC: &[u8; 8] = b"MPMESH01";
 const PIN_MAGIC: &[u8; 8] = b"MPMESH02";
 
 impl Mesh {
+    /// Store every value as the codec encodes it: negative zero becomes +0
+    /// (the rule `to_bytes` writes), so the mesh in memory holds the bits the
+    /// mesh decoded from its bytes holds. Negating a 0 (a mirror, a flipped
+    /// normal) yields -0; float bits key vertices on export. The patterns
+    /// name every field, so a new float field must be added here.
+    pub fn canonicalize_zeros(&mut self) {
+        fn zero(v: &mut f64) { if v.to_bits() == 1 << 63 { *v = 0.0; } }
+        let Self { vertices, faces: _, corners, edge_data, uv_pins: _, next_id: _ } = self;
+        for Vertex { id: _, position, weights } in vertices {
+            position.iter_mut().for_each(zero);
+            for JointWeight { joint: _, weight } in weights { zero(weight); }
+        }
+        for Corner { id: _, vertex: _, uv, normal } in corners {
+            uv.iter_mut().for_each(zero);
+            if let Some(normal) = normal { normal.iter_mut().for_each(zero); }
+        }
+        for EdgeData { attributes: EdgeAttributes { seam: _, crease }, loose: _ } in edge_data.values_mut() { zero(crease); }
+    }
     pub fn to_bytes(&self, ctx: &mut Context<'_>) -> Result<Vec<u8>> {
         self.check_structure(ctx)?;
         let size = 32usize
@@ -126,11 +144,6 @@ impl Mesh {
             let id = VertexId(r.u64()?);
             let position = [r.f64()?, r.f64()?, r.f64()?];
             let nw = r.u32()? as usize;
-            ctx.limit(
-                "weights per vertex",
-                nw as u64,
-                ctx.limits.max_weights_per_vertex as u64,
-            )?;
             if nw.saturating_mul(12) > r.remaining() {
                 return Err(MeshError::CorruptData("weight count exceeds input"));
             }

@@ -72,6 +72,7 @@ script_mod! {
         ..mod.draw.SceneFurSurface,
         ..mod.draw.SceneMsdfText,
         ..mod.draw.SceneColorAdjust,
+        ..mod.draw.SceneWind,
         alpha_blend: false
         // Imported model layers may be deliberate sheets (roof soffits,
         // glazing, CAD faces). The shadow depth path is already two-sided;
@@ -457,27 +458,42 @@ script_mod! {
 
         // Foliage wind (a layer with makepadShading.wind). A swaying layer
         // never morphs, so it rides the morph lanes: morph_ctl.w = -1 turns
-        // it on (morph_delta only reads w > 0.5) and morph_weights0 = (sway
-        // metres at the top, 1 / model height, wind clock s, leaf flutter).
-        // No new instance lane: the model stream is at the vertex-attribute
-        // limit. One world-space breeze for the whole forest: a slow sway
-        // plus a faster gust, both phased by the copy's position so
-        // neighbours never move in lockstep, bending more toward the top
-        // (flex = height^2), and a flutter on the leaves. The bend is taken
-        // into model space through the copy's own axes, so a yawed or
-        // scaled tree leans the same way as its neighbours.
+        // it on (morph_delta only reads w > 0.5); morph_weights0 = (sway
+        // metres at the top in a 6 m/s wind, 1 / model height, 0, leaf
+        // flutter metres), morph_weights1 and 2 = the world wind's state and
+        // scroll (SceneWind). No new instance lane: the model stream is at
+        // the vertex-attribute limit.
+        //
+        // The trunk leans with the wind where the copy stands, so a gust
+        // reaches each tree as it crosses the forest, and sways about that
+        // lean (more along the wind than across it); branches bob on a phase
+        // of their own, more toward their tips; leaves flutter along their
+        // card normal. All of it grows toward the top (flex = height^2) and
+        // with the local wind. The bend is taken into model space through
+        // the copy's own axes, so a yawed or scaled tree leans the same way
+        // as its neighbours.
         wind_bend: fn(pos: vec3) -> vec3 {
             let ax = (self.transform * vec4(1.0, 0.0, 0.0, 0.0)).xyz
             let ay = (self.transform * vec4(0.0, 1.0, 0.0, 0.0)).xyz
             let az = (self.transform * vec4(0.0, 0.0, 1.0, 0.0)).xyz
             let origin = (self.transform * vec4(0.0, 0.0, 0.0, 1.0)).xyz
-            let phase = origin.x * 0.11 + origin.z * 0.07
             let w = self.morph_weights0
-            let t = w.z
+            let clock = self.morph_weights1.w
+            let f = self.wind_push(self.scene_wind(origin.xz, self.morph_weights1, self.morph_weights2).xy)
+            let fl = length(f)
+            let fd = f / max(fl, 0.0001)
+            // Neighbours never sway in lockstep: a phase from where the copy
+            // stands (smooth, so a carried copy never jumps).
+            let phase = fract(origin.x * 0.071 + origin.z * 0.113)
             let h = clamp(pos.y * w.y, 0.0, 1.4)
-            let sway = (sin(t * 0.83 + phase) * 0.7 + sin(t * 2.1 + phase * 1.9) * 0.3 + 0.35) * h * h
-            let flutter = sin(t * 6.3 + dot(pos, vec3(3.7, 2.3, 4.1)) + phase) * w.w * h
-            let wd = vec3(0.8, 0.0, 0.6) * (sway * w.x)
+            let along = self.wind_wave(clock, 103.0, phase)
+            let across = self.wind_wave(clock, 79.0, phase + 0.37)
+            let lean = (f * (1.0 + 0.35 * along) + vec2(0.0 - fd.y, fd.x) * (0.15 * fl * across)) * (w.x * h * h)
+            let reach = clamp(length(pos.xz) * w.y * 2.0, 0.0, 1.0)
+            let bob = self.wind_wave(clock, 241.0, phase + dot(pos, vec3(0.19, 0.13, 0.17))) * (0.2 * fl * reach * h * w.x)
+            let wd = vec3(lean.x + fd.x * bob * 0.4, bob, lean.y + fd.y * bob * 0.4)
+            let flutter = self.wind_wave(clock, 523.0, phase + dot(pos, vec3(0.61, 0.37, 0.67))) * (w.w * fl * h)
+            let card = self.oct_decode(unpack2f16(self.geom.nrm))
             // Stepped-through grass and flowers lean away from the feet.
             var pd = vec3(0.0, 0.0, 0.0)
             if self.occ_eye.w > 0.0 {
@@ -488,7 +504,7 @@ script_mod! {
             }
             let s2 = max(dot(ax, ax), 0.000001)
             let bend = vec3(dot(ax, wd + pd), dot(ay, wd + pd), dot(az, wd + pd)) / s2
-            return pos + bend + vec3(flutter * 0.6, flutter * 0.4, flutter * 0.5) - vec3(0.0, abs(sway * w.x) * 0.12, 0.0)
+            return pos + bend + card * flutter - vec3(0.0, length(lean) * 0.12, 0.0)
         }
 
         vertex: fn() {

@@ -4,14 +4,11 @@ impl SurfaceOperation {
         fn finite(values: &[f64]) -> Result<()> {
             if values.iter().any(|v| !v.is_finite()) { Err(Error::Invalid("expected finite number")) } else { Ok(()) }
         }
-        fn mask_bytes(mask: &Option<Vec<u8>>, limits: &Limits) -> Result<()> {
-            if mask.as_ref().is_some_and(|m| m.len() > limits.max_texture_bytes / 4) { Err(Error::Budget("surface image bytes")) } else { Ok(()) }
-        }
         use SurfaceOperation::*;
         match self {
             Material { value, .. } => value.validate(limits, &mut mesh::Context::new(limits.mesh.clone(), None))?,
             Layer { channel, layer, .. } => {
-                layer.image.validate(limits)?; finite(&[layer.opacity])?; mask_bytes(&layer.mask, limits)?;
+                layer.image.validate(limits)?; finite(&[layer.opacity])?;
                 if layer.pattern.as_ref().is_some_and(|p| !pattern_valid(p)) { return Err(Error::Invalid("surface pattern")); }
                 if let Some(recipe) = &layer.derived { recipe.validate(*channel, limits)?; }
                 let (mut width, mut height) = (layer.image.width, layer.image.height);
@@ -22,32 +19,28 @@ impl SurfaceOperation {
                 }
                 if !layer.mips.is_empty() && (width, height) != (1, 1) { return Err(Error::Invalid("incomplete mip chain")); }
             }
-            Mask { mask, .. } => mask_bytes(mask, limits)?,
             Pattern { pattern, .. } => {
                 finite(&pattern.color_a)?; finite(&pattern.color_b)?; finite(&pattern.scale)?;
                 if !pattern_valid(pattern) { return Err(Error::Invalid("surface pattern")); }
             }
             Derive { channel, recipe, .. } => recipe.validate(*channel, limits)?,
             Stroke { points, radius, hardness, opacity, color, .. } => {
-                if points.is_empty() || points.len() > 256 { return Err(Error::Budget("stroke points")); }
+                if points.is_empty() { return Err(Error::Budget("stroke points")); }
                 for p in points { finite(p)?; } finite(&[*radius, *hardness, *opacity])?; finite(color)?;
             }
             ProjectedStroke { origin, direction, radius, depth, hardness, opacity, color, .. } => {
                 finite(origin)?; finite(direction)?; finite(&[*radius, *depth, *hardness, *opacity])?; finite(color)?;
             }
-            VertexPaint { vertices, color, opacity, .. } => {
-                if vertices.len() > limits.mesh.max_vertices { return Err(Error::Budget("selection size")); }
+            VertexPaint { color, opacity, .. } => {
                 finite(color)?; finite(&[*opacity])?;
             }
-            VertexColors { vertices, colors, .. } => {
-                if vertices.len() > limits.mesh.max_vertices { return Err(Error::Budget("selection size")); }
+            VertexColors { colors, .. } => {
                 for color in colors { finite(color)?; }
             }
             Bake { max_distance, ao_distance, .. } => finite(&[*max_distance, *ao_distance])?,
             MoveLayer { index, .. } => if *index > u32::MAX as usize { return Err(Error::Invalid("expected u32 integer")); },
             _ => {}
         }
-        if self.memory_bytes() > limits.max_transaction_bytes { return Err(Error::Budget("surface operation bytes")); }
         Ok(())
     }
 }
@@ -59,12 +52,13 @@ mod typed_tests {
     fn recipe() -> SurfaceDerivation { SurfaceDerivation { source_channel: SurfaceChannel::BaseColor, source_layer: Some("height".into()), strength: 1., roughness_min: 0.2, roughness_max: 0.9, metallic: 0., wrap: true } }
     fn roundtrip(op: &SurfaceOperation, l: &Limits) {
         op.check(l).unwrap();
-        let mut w = Writer::new(usize::MAX); write_surface_operation(&mut w, op).unwrap();
+        let mut w = Writer::new(); write_surface_operation(&mut w, op).unwrap();
         let mut r = Reader::new(&w.bytes); let decoded = read_surface_operation(&mut r, l).unwrap(); r.end().unwrap(); assert_eq!(&decoded, op);
-        let mut out = Writer::new(usize::MAX); write_surface_operation(&mut out, &decoded).unwrap(); assert_eq!(w.bytes, out.bytes);
+        let mut out = Writer::new(); write_surface_operation(&mut out, &decoded).unwrap(); assert_eq!(w.bytes, out.bytes);
     }
     #[test]
     fn literal_operations_use_existing_codec() {
+        SurfaceOperation::Stroke { material:0, channel:SurfaceChannel::BaseColor, layer:"paint".into(), points:vec![[0.5;2];257], radius:0.1, hardness:0.5, opacity:1., color:[1.;4], mask:false }.check(&Limits::default()).unwrap();
         let l = Limits::default(); let channel = SurfaceChannel::BaseColor;
         let image = RgbaImage { width: 1, height: 1, pixels: vec![128, 64, 32, 255] };
         let layer = SurfaceLayer { id: "paint".into(), image, mask: Some(vec![255]), opacity: 0.5, blend: SurfaceBlend::Multiply, visible: true, pattern: Some(pattern()), derived: None, mips: vec![] };
@@ -115,9 +109,8 @@ mod typed_tests {
             SurfaceOperation::Stroke { material: 0, channel: SurfaceChannel::BaseColor, layer: "paint".into(), points: vec![], radius: 1., hardness: 0.5, opacity: 1., color: [1.; 4], mask: false },
             SurfaceOperation::VertexPaint { object: "body".into(), vertices: vec![], color: [f64::NAN; 4], opacity: 1. },
         ] { assert!(op.check(&l).is_err()); }
-        let tiny = Limits { max_texture_bytes: 4, max_transaction_bytes: 1, ..l.clone() };
-        assert!(SurfaceOperation::Mask { material: 0, channel: SurfaceChannel::BaseColor, layer: "paint".into(), mask: Some(vec![255; 2]) }.check(&tiny).is_err());
-        assert!(SurfaceOperation::RemoveMaterial { material: 0 }.check(&tiny).is_err());
+        assert!(SurfaceOperation::Mask { material: 0, channel: SurfaceChannel::BaseColor, layer: "paint".into(), mask: Some(vec![255; 2]) }.check(&l).is_ok());
+        assert!(SurfaceOperation::RemoveMaterial { material: 0 }.check(&l).is_ok());
         assert!(matches!(read_surface_operation(&mut Reader::new(&[255]), &l), Err(Error::Corrupt(_))));
     }
 }

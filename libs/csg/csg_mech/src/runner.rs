@@ -65,9 +65,15 @@ pub enum Command {
     Release { velocity: Option<P3> },
     /// Shake the held anchors (on/off).
     Shake(bool),
+    /// A hand takes the held anchors where they are: the next [`Command::Carry`] is where it has
+    /// them, and each one after moves them from there as the hand has moved since. A view shows
+    /// the sim a step or two late, and what it saw at the take (a part on its way up, say) is not
+    /// where the sim has it: the hand's first pose is never one to go back to.
+    Take,
     /// Carry the held anchors, as a hand does: from their start, this turn about `axis` through
-    /// the origin, then this move. They stay where the last one left them and no longer lift until
-    /// a reset; a shake shakes them there.
+    /// the origin, then this move; after a [`Command::Take`], from where the take found them, as
+    /// the hand's poses have gone since its first. They stay where the last one left them and no
+    /// longer lift until a reset; a shake shakes them there.
     Carry { at: P3, axis: P3, angle: f64 },
     /// One step while paused.
     Step,
@@ -151,19 +157,67 @@ pub struct Runner {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-/// What the dynamics engine steps: parts on joints or strings, or held by a hand (a jointed piece as
-/// Mechanics shows it), weaves (chains and mail), and parts that meet through their fields (exactly, as
-/// two distance fields). Balls meet fields on box3d (a support check's pieces against the part). A flex joint's spring is integrated explicitly on
-/// the engine, and on a small part it is stiffer than a substep can hold (a jellyfish's needs 35 substeps of
-/// a 240 Hz step), so a piece with one stays on box3d, whole, until the engine's position-implicit
-/// integrator is ported.
+/// A rigid motion, a turn (a unit quaternion: w, x, y, z) and then a move, as the held ground
+/// goes from the start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Rigid {
+    q: [f64; 4],
+    t: P3,
+}
+
+impl Rigid {
+    const IDENTITY: Rigid = Rigid { q: [1.0, 0.0, 0.0, 0.0], t: [0.0; 3] };
+
+    /// A turn by `angle` about `axis` through the origin, then the move `at` (a Carry's terms).
+    fn of(at: P3, axis: P3, angle: f64) -> Rigid {
+        let a = norm(axis);
+        let (s, c) = (0.5 * angle).sin_cos();
+        Rigid { q: [c, a[0] * s, a[1] * s, a[2] * s], t: at }
+    }
+
+    fn turn(&self, p: P3) -> P3 {
+        let (w, v) = (self.q[0], [self.q[1], self.q[2], self.q[3]]);
+        let u = scale(cross(v, p), 2.0);
+        add(add(p, scale(u, w)), cross(v, u))
+    }
+
+    /// `next` done after `self`.
+    fn then(&self, next: &Rigid) -> Rigid {
+        let (a, b) = (next.q, self.q);
+        let q = [
+            a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+            a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+            a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+        ];
+        let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+        Rigid { q: q.map(|v| v / n), t: add(next.turn(self.t), next.t) }
+    }
+
+    fn inverse(&self) -> Rigid {
+        let back = Rigid { q: [self.q[0], -self.q[1], -self.q[2], -self.q[3]], t: [0.0; 3] };
+        Rigid { t: scale(back.turn(self.t), -1.0), ..back }
+    }
+
+    /// In a Carry's terms: the move, and the turn's axis and angle.
+    fn carry(&self) -> (P3, P3, f64) {
+        let v = [self.q[1], self.q[2], self.q[3]];
+        let s = len(v);
+        if s == 0.0 {
+            return (self.t, [0.0, 0.0, 1.0], 0.0);
+        }
+        (self.t, scale(v, 1.0 / s), 2.0 * s.atan2(self.q[0]))
+    }
+}
+
+/// What the dynamics engine steps: parts on joints (flex joints too) or strings, or held by a hand (a jointed
+/// piece as Mechanics shows it), weaves (chains and mail), and parts that meet through their fields (exactly,
+/// as two distance fields). Balls meet fields on box3d (a support check's pieces against the part).
 pub fn on_dynamics(asm: &Assembly) -> bool {
     let woven = asm.bodies.iter().any(|b| !b.tubes.is_empty());
     let fields = asm.bodies.iter().any(|b| b.field.is_some());
     let moving = !asm.joints.is_empty() || !asm.strings.is_empty() || asm.anchors.iter().any(|a| a.kind == AnchorKind::Held);
-    (moving || woven || fields)
-        && asm.joints.iter().all(|j| !matches!(j.kind, JointKind::Flex { .. }))
-        && asm.bodies.iter().all(|b| b.balls.is_empty())
+    (moving || woven || fields) && asm.bodies.iter().all(|b| b.balls.is_empty())
 }
 
 /// Mail: a weave with a link that holds more than two others (a chain's hold one or two).
@@ -313,6 +367,30 @@ impl Engine {
         on!(self, w => w.poses())
     }
 
+    pub(crate) fn angles(&mut self, asm: &Assembly) -> Vec<f64> {
+        on!(self, w => w.angles(asm))
+    }
+
+    pub(crate) fn pose(&mut self, asm: &Assembly, angles: &[f64]) {
+        on!(self, w => w.pose(asm, angles))
+    }
+
+    pub(crate) fn move_ground(&mut self, at: P3, axis: P3, ang: f64, dt: f64) {
+        on!(self, w => w.move_ground(at, axis, ang, dt))
+    }
+
+    pub(crate) fn contact_begins(&self) -> Vec<(usize, Option<usize>, f64)> {
+        on!(self, w => w.contact_begins())
+    }
+
+    pub(crate) fn joint_force(&self, j: usize) -> f64 {
+        on!(self, w => w.joint_force(j))
+    }
+
+    pub(crate) fn max_angular_speed(&self) -> f64 {
+        on!(self, w => w.max_angular_speed())
+    }
+
     /// The dynamics engine's parallel work on `pool` (box3d keeps its own).
     fn bind_pool(&mut self, pool: &Option<Arc<dyn TaskPool>>) {
         if let Engine::Dynamics(w) = self {
@@ -323,8 +401,11 @@ impl Engine {
     pub(crate) fn new(asm: &Assembly, gravity: P3, floor: Option<f64>) -> Result<Engine, String> {
         if on_dynamics(asm) {
             dynamics_world(asm, gravity, floor).map(|w| Engine::Dynamics(Box::new(w)))
-        } else if !asm.strings.is_empty() || asm.anchors.iter().any(|a| a.kind == AnchorKind::Held) || asm.joints.iter().any(|j| j.motor.is_some()) {
-            Err("strings, held parts and motors run only on the dynamics engine, and flex joints run on box3d".into())
+        } else if !asm.strings.is_empty()
+            || asm.anchors.iter().any(|a| a.kind == AnchorKind::Held)
+            || asm.joints.iter().any(|j| j.motor.is_some() || matches!(j.kind, JointKind::Flex { .. }))
+        {
+            Err("strings, held parts, motors and flex joints run only on the dynamics engine, and balls only on box3d".into())
         } else {
             Ok(Engine::Mech(MechWorld::new(asm, gravity, floor)))
         }
@@ -498,6 +579,12 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
     let mut pending: Vec<Event> = Vec::new();
     let mut drag_target: Option<P3> = None;
     let mut carry: Option<(P3, P3, f64)> = None;
+    // Where the runner last put the held ground, less its shake: a turn and a move from the start.
+    let mut held = Rigid::IDENTITY;
+    // A take's first carry is still to come; and what each carry is applied to (the held ground
+    // as the take found it, less the hand's first pose then): a carry goes on from the take.
+    let mut taken = false;
+    let mut from_take = Rigid::IDENTITY;
     let mut following = false;
     let mut behind = 0.0;
     let mut behind_logged = Instant::now();
@@ -528,6 +615,9 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                     base = [0.0; 3];
                     hanging = false;
                     carry = None;
+                    held = Rigid::IDENTITY;
+                    taken = false;
+                    from_take = Rigid::IDENTITY;
                     following = false;
                     drag_target = None;
                 }
@@ -565,6 +655,7 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                     if let Engine::Dynamics(d) = &w {
                         if d.carrying() {
                             base = sub(d.ground_at(), scale(norm(asm.up), lift));
+                            held.t = d.ground_at();
                         }
                     }
                     if let Some(v) = velocity {
@@ -574,7 +665,12 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                     drag_target = None;
                 }
                 Command::Shake(on) => shake = on,
+                Command::Take => taken = true,
                 Command::Carry { at, axis, angle } => {
+                    if taken {
+                        taken = false;
+                        from_take = held.then(&Rigid::of(at, axis, angle).inverse());
+                    }
                     carry = Some((at, axis, angle));
                     following = true;
                 }
@@ -655,8 +751,14 @@ fn run(mut asm: Assembly, gravity: P3, floor: Option<f64>, pool: Option<Arc<dyn 
                 let ang = shaking * 18f64.to_radians() * (std::f64::consts::TAU * 1.6 * t).sin();
                 let by = add(scale(side, shaking * 12.0 * (std::f64::consts::TAU * 2.2 * tempo * t).sin()), sub(asm.shake_about, rotate(asm.shake_about, up, ang)));
                 match carry {
-                    Some(hand) => following = on!(&mut w, w => w.carry_ground(hand, (by, up, ang), CARRY_EASE, dt)),
-                    None => on!(&mut w, w => w.move_ground(add(base, add(by, scale(up, lift))), up, ang, dt)),
+                    Some((at, axis, angle)) => {
+                        held = from_take.then(&Rigid::of(at, axis, angle));
+                        following = on!(&mut w, w => w.carry_ground(held.carry(), (by, up, ang), CARRY_EASE, dt));
+                    }
+                    None => {
+                        held = Rigid::of(add(base, scale(up, lift)), up, 0.0);
+                        on!(&mut w, w => w.move_ground(add(base, add(by, scale(up, lift))), up, ang, dt));
+                    }
                 }
             }
             let started = Instant::now();

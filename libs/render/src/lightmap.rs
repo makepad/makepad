@@ -498,6 +498,17 @@ impl Default for LmLight {
 }
 
 impl LmLight {
+    /// Contribution near the view: inverse-square intensity, with a soft
+    /// penalty beyond the light's reach. No eye (XR world grid) ranks by intensity.
+    pub(crate) fn view_contribution(&self, eye: Option<Vec3f>) -> f32 {
+        let intensity = self.color.x.max(self.color.y).max(self.color.z).max(0.0);
+        let Some(eye) = eye else { return intensity };
+        let d2 = (self.pos - eye).length_squared();
+        let r2 = self.radius * self.radius;
+        let reach = r2 / d2.max(r2).max(f32::MIN_POSITIVE);
+        intensity * reach / d2.max(0.0001)
+    }
+
     /// An omnidirectional light.
     pub fn omni(pos: Vec3f, color: Vec3f, radius: f32) -> Self {
         LmLight { pos, color, radius, dir: Vec3f { x: 0.0, y: -1.0, z: 0.0 }, spot: 0.0, cone: None, shadows: false, volumetric: false, area: None }

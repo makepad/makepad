@@ -4,8 +4,6 @@ use crate::asset_metadata::{parse_asset_lods,AssetLod};
 use makepad_draw::makepad_math::{Mat4f,Vec3f};
 use std::ops::Range;
 
-pub const MAX_LOD_THRESHOLDS:usize=8;
-
 pub struct AssetLodPlan<'a>{
     json:&'a[u8],
     mesh_spans:Vec<MeshSpan>,
@@ -18,7 +16,7 @@ impl<'a> AssetLodPlan<'a>{
     pub fn parse(bytes:&'a[u8],byte_limit:usize)->Result<Option<Self>,String>{
         if bytes.len()>byte_limit{return Err("LOD source byte budget exceeded".into());}
         let parsed=makepad_gltf::parse_glb_bytes(bytes).map_err(|e|format!("LOD GLB: {e:?}"))?;
-        let mut groups=parse_asset_lods(&parsed.document)?;if groups.is_empty(){return Ok(None);}
+        let groups=parse_asset_lods(&parsed.document)?;if groups.is_empty(){return Ok(None);}
         let (json,_)=crate::asset_morph::chunks(bytes)?;
         if json.get("scenes").is_none(){return Err("LOD variants require an explicit default scene".into());}
         let active=crate::asset_morph::active_nodes(&json)?;let nodes=parsed.document.nodes_slice();
@@ -32,7 +30,8 @@ impl<'a> AssetLodPlan<'a>{
                 }
             }
         }
-        let distances=coalesce_distances(&mut groups);
+        let mut distances=groups.iter().flat_map(|group|group.distances.iter().copied()).collect::<Vec<_>>();
+        distances.sort_by(f32::total_cmp);distances.dedup();
         let meshes=nodes.iter().map(|n|n.mesh).collect();
         let json_size=u32::from_le_bytes(bytes[12..16].try_into().unwrap())as usize;
         let json=&bytes[20..20+json_size];let mesh_spans=mesh_spans(json)?;
@@ -50,8 +49,8 @@ impl<'a> AssetLodPlan<'a>{
             changes.push(match self.meshes[selected]{Some(mesh)=>(span.value.clone(),mesh.to_string()),None=>(span.member.clone(),String::new())});
         }
         changes.sort_by_key(|(span,_)|span.start);
-        let estimate=self.json.len().saturating_add(changes.len()*20).saturating_add(self.tail.len()).saturating_add(23);if estimate>byte_limit{return Err("LOD variant byte budget exceeded".into());}
-        let mut json=Vec::with_capacity(self.json.len()+changes.len()*20);let mut cursor=0;
+        let estimate=self.json.len().saturating_add(changes.len().saturating_mul(20)).saturating_add(self.tail.len()).saturating_add(23);if estimate>byte_limit{return Err("LOD variant byte budget exceeded".into());}
+        let mut json=Vec::with_capacity(self.json.len().saturating_add(changes.len().saturating_mul(20)));let mut cursor=0;
         for(span,value)in changes{json.extend_from_slice(&self.json[cursor..span.start]);json.extend_from_slice(value.as_bytes());cursor=span.end;}json.extend_from_slice(&self.json[cursor..]);
         while json.len()%4!=0{json.push(b' ');}
         let size=20usize.checked_add(json.len()).and_then(|n|n.checked_add(self.tail.len())).ok_or("LOD GLB size overflow")?;
@@ -59,33 +58,6 @@ impl<'a> AssetLodPlan<'a>{
         let mut out=Vec::with_capacity(size);out.extend_from_slice(b"glTF");out.extend_from_slice(&2u32.to_le_bytes());out.extend_from_slice(&(size as u32).to_le_bytes());
         out.extend_from_slice(&(json.len()as u32).to_le_bytes());out.extend_from_slice(b"JSON");out.extend_from_slice(&json);out.extend_from_slice(self.tail);Ok(out)
     }
-}
-
-// Each group votes once per distance. Keep the most shared thresholds, then
-// snap the rest to their nearest retained distance (smaller wins a tie).
-fn coalesce_distances(groups:&mut [AssetLod])->Vec<f32>{
-    let mut counts=std::collections::BTreeMap::<u32,usize>::new();
-    for group in groups.iter(){for distance in &group.distances{*counts.entry(distance.to_bits()).or_default()+=1;}}
-    let mut ranked=counts.iter().map(|(&bits,&count)|(f32::from_bits(bits),count)).collect::<Vec<_>>();
-    ranked.sort_by(|a,b|b.1.cmp(&a.1).then(a.0.total_cmp(&b.0)));
-    let mut kept=ranked.iter().take(MAX_LOD_THRESHOLDS).map(|&(distance,_)|distance).collect::<Vec<_>>();kept.sort_by(f32::total_cmp);
-    if ranked.len()<=MAX_LOD_THRESHOLDS{return kept;}
-    let mut snapped=std::collections::BTreeMap::new();
-    for &(distance,_) in &ranked[MAX_LOD_THRESHOLDS..]{
-        let nearest=*kept.iter().min_by(|a,b|(**a-distance).abs().total_cmp(&(**b-distance).abs()).then(a.total_cmp(b))).unwrap();
-        snapped.insert(distance.to_bits(),nearest);
-    }
-    let changes=snapped.iter().map(|(&from,&to)|format!("{} -> {to}",f32::from_bits(from))).collect::<Vec<_>>().join(", ");
-    makepad_draw::log!("asset LOD distances snapped: {}",changes);
-    for group in groups{
-        let mut levels=Vec::new();let mut distances=Vec::new();
-        for (&level,&distance) in group.levels.iter().zip(&group.distances){
-            let distance=snapped.get(&distance.to_bits()).copied().unwrap_or(distance);
-            if distances.last()==Some(&distance){*levels.last_mut().unwrap()=level;}else{distances.push(distance);levels.push(level);}
-        }
-        group.levels=levels;group.distances=distances;
-    }
-    kept
 }
 
 /// Camera distance in world units, measured from the asset instance origin.
@@ -98,7 +70,7 @@ pub fn selected_level(distances:&[f32],distance:f32)->usize{
     if distance.is_finite()&&distance>=0.{distances.partition_point(|d|*d<=distance)}else{0}
 }
 pub fn validate_distances(distances:impl IntoIterator<Item=f32>)->Result<(),String>{
-    let mut previous=0.;let mut count=0;for distance in distances{count+=1;if count>MAX_LOD_THRESHOLDS||!distance.is_finite()||distance<=previous{return Err("LOD distances must be finite, positive, increasing and at most eight".into());}previous=distance;}Ok(())
+    let mut previous=0.;for distance in distances{if !distance.is_finite()||distance<=previous{return Err("LOD distances must be finite, positive and increasing".into());}previous=distance;}Ok(())
 }
 
 // Locate mesh value and whole-member spans (including a separating comma). Copy every other original JSON byte,
@@ -179,19 +151,21 @@ mod tests{
         }
     }
     #[test]
-    fn frequent_thresholds_win_and_collapsed_levels_keep_lower_geometry(){
-        let mut groups=(1..=6).map(|i|AssetLod{node:i,levels:vec![i+10],distances:vec![i as f32*10.]}).collect::<Vec<_>>();
-        groups.extend([AssetLod{node:20,levels:vec![21,22],distances:vec![100.,200.]},AssetLod{node:30,levels:vec![31,32],distances:vec![100.,200.]},
-            AssetLod{node:40,levels:vec![41,42,43],distances:vec![70.,80.,90.]}]);
-        let mut reversed=groups.iter().cloned().rev().collect::<Vec<_>>();
-        let kept=coalesce_distances(&mut groups);assert_eq!(kept,vec![10.,20.,30.,40.,50.,60.,100.,200.]);
-        assert_eq!(coalesce_distances(&mut reversed),kept,"frequency ties prefer smaller distances independent of group order");
-        let override_=&groups[8];assert_eq!(override_.distances,vec![60.,100.]);assert_eq!(override_.levels,vec![42,43]);
-        assert_eq!(override_.select(60.).unwrap(),42,"equal-distance levels keep the lower one, and nearest ties snap downward");
+    fn nine_authored_thresholds_and_all_group_levels_survive(){
+        let first=r#"{"mesh":0,"extensions":{"MSFT_lod":{"ids":[1,2,3,4,5]}},"extras":{"MAKEPAD_lod_distances":[1,3,5,7,9]}}"#;
+        let second=r#"{"mesh":0,"extensions":{"MSFT_lod":{"ids":[7,8,9,10,11]}},"extras":{"MAKEPAD_lod_distances":[2,4,6,8,9]}}"#;
+        let mut json=format!(r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[0,6]}}],"nodes":[{first}{},{second}{}],"meshes":[{{"primitives":[]}}]}}"#,",{\"mesh\":0}".repeat(5),",{\"mesh\":0}".repeat(5)).into_bytes();
+        while json.len()%4!=0{json.push(b' ');}
+        let mut glb=b"glTF".to_vec();glb.extend_from_slice(&2u32.to_le_bytes());glb.extend_from_slice(&((20+json.len())as u32).to_le_bytes());
+        glb.extend_from_slice(&(json.len()as u32).to_le_bytes());glb.extend_from_slice(b"JSON");glb.extend(json);
+        let plan=AssetLodPlan::parse(&glb,usize::MAX).unwrap().unwrap();
+        assert_eq!(plan.distances(),&[1.,2.,3.,4.,5.,6.,7.,8.,9.],"every distinct authored threshold survives");
+        assert_eq!(plan.groups[0].levels,vec![1,2,3,4,5]);assert_eq!(plan.groups[0].distances,vec![1.,3.,5.,7.,9.]);
+        assert_eq!(plan.groups[1].levels,vec![7,8,9,10,11]);assert_eq!(plan.groups[1].distances,vec![2.,4.,6.,8.,9.]);
     }
     #[test]
     fn unsupported_neighborhood_and_budget_are_explicit_errors(){
         assert!(AssetLodPlan::parse(&fixture(false,true,false),1024*1024).is_err());let source=fixture(false,false,false);assert!(AssetLodPlan::parse(&source,source.len()-1).is_err());let mut plan=AssetLodPlan::parse(&source,1024*1024).unwrap().unwrap();assert!(plan.variant_glb(1,1024*1024).is_err());assert!(plan.variant_glb(0,16).is_err());
-        assert!(validate_distances([10.,10.]).is_err());assert!(validate_distances((1..=9).map(|n|n as f32)).is_err());assert_eq!(selected_level(&[10.,30.],10.),1);assert_eq!(selected_level(&[10.,30.],30.),2);assert_eq!(selected_level(&[10.,30.],f32::NAN),0);
+        assert!(validate_distances([10.,10.]).is_err());assert!(validate_distances((1..=9).map(|n|n as f32)).is_ok());assert_eq!(selected_level(&[10.,30.],10.),1);assert_eq!(selected_level(&[10.,30.],30.),2);assert_eq!(selected_level(&[10.,30.],f32::NAN),0);
     }
 }

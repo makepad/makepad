@@ -3,7 +3,7 @@ use crate::{Document,Result,Error,mesh,CompiledModel,PrimitiveSource,Attachment,
 use makepad_gltf::*;
 use std::collections::BTreeMap;
 
-fn f32_value(v:f64)->Result<f32>{let f=v as f32;if f.is_finite(){Ok(f)}else{Err(Error::Invalid("authoring export exceeds render precision"))}}
+pub(crate) fn f32_value(v:f64)->Result<f32>{let f=v as f32;if f.is_finite(){Ok(f)}else{Err(Error::Invalid("authoring export exceeds render precision"))}}
 fn trs(t:Transform)->Result<GlbTransform>{t.validate()?;Ok(GlbTransform{
     translation:[f32_value(t.translation[0])?,f32_value(t.translation[1])?,f32_value(t.translation[2])?],
     rotation:[f32_value(t.rotation[0])?,f32_value(t.rotation[1])?,f32_value(t.rotation[2])?,f32_value(t.rotation[3])?],
@@ -117,7 +117,10 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],del
         ctx.checkpoint(1)?;let mut node=scene.nodes.get(name).cloned().unwrap_or_default();
         if node.parent.is_none(){node.transform=face(node.transform);}
         let mut extras=std::collections::HashMap::new();
-        if let Some(collision)=crate::delivery::collision(doc,name,ctx)?{extras.insert("MAKEPAD_collision".into(),collision);}
+        let collision_mesh=match crate::delivery::collision(doc,name,ctx)?{
+            Some(crate::delivery::Collision::Shape(value))=>{extras.insert("MAKEPAD_collision".into(),value);None},
+            Some(crate::delivery::Collision::Mesh(mesh))=>Some(mesh),None=>None,
+        };
         if let Some(wheel)=scene.wheels.get(name){
             if !primitives.iter().any(|p|p.object==name){return Err(Error::Invalid("vehicle wheel object has no exported geometry"));}
             let vector=|values:[f64;3]|->Result<JsonValue>{Ok(JsonValue::Array(values.into_iter().map(|v|f32_value(v).map(|v|JsonValue::F64(v as f64))).collect::<Result<_>>()?))};
@@ -138,7 +141,7 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],del
             }
         }
         export.objects.push(GlbAuthoringObject{name:name.into(),parent:node.parent.as_ref().map(|n|names.get(n).copied().ok_or_else(||Error::MissingObject(n.clone()))).transpose()?,
-            transform:trs(node.transform)?,primitives:primitives.iter().enumerate().filter_map(|(i,p)|(p.object==name).then_some(i)).collect(),extras:(!extras.is_empty()).then_some(JsonValue::Object(extras)),lods:Vec::new(),lod_distances:Vec::new()});
+            transform:trs(node.transform)?,primitives:primitives.iter().enumerate().filter_map(|(i,p)|(p.object==name).then_some(i)).collect(),extras:(!extras.is_empty()).then_some(JsonValue::Object(extras)),collision_mesh,lods:Vec::new(),lod_distances:Vec::new()});
     }
     if let Some(delivery)=delivery{for(name,outcomes)in &delivery.levels{
         let base=*names.get(name).ok_or(Error::Invalid("LOD base object"))?;
@@ -147,11 +150,11 @@ pub(crate) fn finish(doc:&Document,glb:Vec<u8>,primitives:&[PrimitiveSource],del
                 crate::delivery::LodGeometry::Derived(name)=>*names.get(name).ok_or(Error::Invalid("LOD geometry absent"))?,
                 crate::delivery::LodGeometry::Previous(name)=>{
                     let source=*names.get(name).ok_or(Error::Invalid("LOD previous geometry absent"))?;
-                    let mut node=export.objects[base].clone();node.name=format!("{name}__repeat_{level}");node.parent=None;node.extras=None;node.lods.clear();node.lod_distances.clear();node.primitives=export.objects[source].primitives.clone();
+                    let mut node=export.objects[base].clone();node.name=format!("{name}__repeat_{level}");node.parent=None;node.extras=None;node.collision_mesh=None;node.lods.clear();node.lod_distances.clear();node.primitives=export.objects[source].primitives.clone();
                     let target=export.objects.len();export.objects.push(node);target
                 },
                 crate::delivery::LodGeometry::Empty=>{
-                    let mut node=export.objects[base].clone();node.name=format!("{name}__empty_{level}");node.parent=None;node.extras=None;node.lods.clear();node.lod_distances.clear();node.primitives.clear();
+                    let mut node=export.objects[base].clone();node.name=format!("{name}__empty_{level}");node.parent=None;node.extras=None;node.collision_mesh=None;node.lods.clear();node.lod_distances.clear();node.primitives.clear();
                     let target=export.objects.len();export.objects.push(node);target
                 },
             };

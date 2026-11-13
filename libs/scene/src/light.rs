@@ -2,7 +2,6 @@
 //! belong to the device, not the authoritative simulation.
 use makepad_math::*;
 
-pub const MAX_ENTITY_LIGHTS: usize = 16;
 pub const MAX_LIGHT_NAME_BYTES: usize = 64;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -89,9 +88,6 @@ pub fn set_light(lights: &mut Vec<EntityLight>, light: EntityLight) -> Result<()
     if let Some(old) = lights.iter_mut().find(|l| l.name == light.name) {
         *old = light;
     } else {
-        if lights.len() >= MAX_ENTITY_LIGHTS {
-            return Err("at most 16 lights per entity");
-        }
         lights.push(light);
     }
     Ok(())
@@ -124,10 +120,6 @@ const BRAKE_INTENSITY: f32 = 1.8;
 /// the model's lamps are; reach and intensity do not scale. `shadows`
 /// makes the headlights cast (a player's car), never the taillights.
 pub fn set_vehicle_lamps(lights: &mut Vec<EntityLight>, half: Vec3f, enabled: bool, shadows: bool) -> Result<(), &'static str> {
-    let missing = LAMP_NAMES.iter().filter(|name| !lights.iter().any(|l| l.name == **name)).count();
-    if lights.len() + missing > MAX_ENTITY_LIGHTS {
-        return Err("not enough light slots for the vehicle lamps");
-    }
     for (i, name) in LAMP_NAMES.iter().enumerate() {
         if let Some(light) = lights.iter_mut().find(|l| l.name == *name) {
             light.enabled = enabled;
@@ -248,7 +240,7 @@ mod tests {
         assert_eq!(snap.entities[0].lights.len(), 1);
     }
     #[test]
-    fn headlights_are_two_named_forward_spots_and_budget_is_bounded() {
+    fn headlights_are_two_named_forward_spots_and_a_seventeenth_light_is_kept() {
         let mut e = crate::Entity {
             half: vec3f(1.0, 0.5, 2.0),
             ..Default::default()
@@ -268,19 +260,21 @@ mod tests {
         set_lamp_points(&mut e.lights, Some([vec3f(-0.4, 0.1, -2.3), vec3f(0.4, 0.1, -2.3)]), None);
         assert_eq!(e.lights[0].pos, vec3f(-0.4, 0.1, -2.3));
         assert!(lamp_level(0.9, 0.0) < 1e-6 && lamp_level(-0.3, 0.0) > 0.99 && lamp_level(0.9, 0.05) > 0.99);
-        for i in 4..MAX_ENTITY_LIGHTS {
+        for i in 4..16 {
             e.set_light(EntityLight {
                 name: format!("l{i}"),
                 ..Default::default()
             })
             .unwrap();
         }
-        assert!(e.set_light(EntityLight::default()).is_err());
+        e.set_light(EntityLight::default()).unwrap();
+        assert_eq!(e.lights.len(), 17);
+        assert_eq!(e.lights[16].name, "light");
     }
     #[test]
-    fn headlights_capacity_failure_is_atomic() {
+    fn vehicle_lamps_are_added_to_sixteen_existing_lights() {
         let mut e = crate::Entity::default();
-        for i in 0..MAX_ENTITY_LIGHTS - 3 {
+        for i in 0..16 {
             e.set_light(EntityLight {
                 name: format!("l{i}"),
                 ..Default::default()
@@ -288,7 +282,9 @@ mod tests {
             .unwrap();
         }
         let before = e.lights.clone();
-        assert!(e.set_headlights(true).is_err());
-        assert_eq!(e.lights, before);
+        set_vehicle_lamps(&mut e.lights, e.half, true, true).unwrap();
+        assert_eq!(e.lights.len(), 20);
+        assert_eq!(e.lights[..16], before);
+        assert!(LAMP_NAMES.iter().all(|name| e.lights[16..].iter().any(|l| l.name == *name)));
     }
 }

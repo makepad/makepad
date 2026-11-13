@@ -1,6 +1,7 @@
 //! Off-thread prepared model payloads and their uploaded/loaded GPU forms.
 
 use super::*;
+pub use crate::material_surface::{TextureCharge, TextureSlot};
 
 /// Decode generated PNG pixels with limits enforced by the decoder before
 /// allocation. Animated PNGs are decoded as a single frame in this lane.
@@ -129,7 +130,68 @@ pub struct PreparedStaticPreview {
 }
 
 impl PreparedStaticPreview {
+    /// Bytes this asset keeps on the CPU once uploaded: the picking and shadow-ray geometry
+    /// (positions, indices), the lightmap source and the authored collision meshes, over every
+    /// LOD level. The upload copies are dropped at upload and are not counted.
+    pub fn retained_cpu_bytes(&self) -> usize {
+        // Cloned level products may share buffers, so each retained Arc is charged once.
+        let mut positions = std::collections::HashSet::new();
+        let mut indices = std::collections::HashSet::new();
+        let mut lightmaps = std::collections::HashSet::new();
+        let mut collisions = std::collections::HashSet::new();
+        let mut bytes = 0;
+        for model in std::iter::once(self).chain(self.lods.iter().map(|(_, model)| model)) {
+            if positions.insert(std::sync::Arc::as_ptr(&model.positions)) {
+                bytes += model.positions.len() * std::mem::size_of::<Vec3f>();
+            }
+            if indices.insert(std::sync::Arc::as_ptr(&model.mesh_indices)) {
+                bytes += model.mesh_indices.len() * std::mem::size_of::<u32>();
+            }
+            if let Some(source) = &model.lm_source {
+                if lightmaps.insert(std::sync::Arc::as_ptr(source)) {
+                    bytes += source.ao_uv.len() * 8 + source.albedo.len() * 12 + source.caster.bytes();
+                }
+            }
+            for collision in model.authored_collisions.iter() {
+                if collisions.insert(std::sync::Arc::as_ptr(&collision.mesh)) {
+                    bytes += collision.mesh.positions.len() * 12 + collision.mesh.indices.len() * 4;
+                }
+            }
+        }
+        bytes
+    }
+
     pub fn lod_distances(&self)->impl Iterator<Item=f32>+'_ {self.lods.iter().map(|(distance,_)|*distance)}
+    /// Geometry per distance level, finest first. Model-owned sidecars stay on
+    /// `[0]`: morph, AO, shadow SDF, bake streams and sky (including its two images)
+    /// are not shared through the content cache or replaced by distance layers.
+    pub fn level_geometry_bytes(&self) -> Vec<usize> {
+        let mut levels: Vec<usize> = std::iter::once(self).chain(self.lods.iter().map(|(_, m)| m))
+            .map(|m| m.layers().map(|l| (l.vertices.len() + l.indices.len()) * 4).sum())
+            .collect();
+        levels[0] += std::iter::once(self).chain(self.lods.iter().map(|(_, m)| m))
+            .map(|m| {
+                m.morph.as_ref().map_or(0, |v| v.pixels.len() * 4)
+                    + m.ao.as_ref().map_or(0, |v| v.data.len() * 4)
+                    + m.sdf.as_ref().map_or(0, |v| v.pixels.len())
+                    + m.bake_stream.as_ref().map_or(0, |(i, v)| (i.len() + v.len()) * 4)
+                    + m.sky.as_ref().map_or(0, |s| (s.vertices.len() + s.indices.len() + s.tex0.data.len() + s.tex1.data.len()) * 4)
+            }).sum::<usize>();
+        levels
+    }
+
+    /// Content-cache keys bound by each distance level, once per key per level.
+    pub fn level_texture_keys(&self) -> Vec<Vec<u64>> {
+        std::iter::once(self).chain(self.lods.iter().map(|(_, m)| m)).map(|m| {
+            let mut seen = std::collections::HashSet::new();
+            let mut keys = Vec::new();
+            m.visit_texture_charges(&mut |charge| {
+                if seen.insert(charge.key) { keys.push(charge.key); }
+            });
+            keys
+        }).collect()
+    }
+
     pub fn triangles_at_distance(&self,distance:f32)->usize{
         let n=if distance.is_finite()&&distance>=0.{self.lods.partition_point(|(d,_)|*d<=distance)}else{0};
         let m=if n==0{self}else{&self.lods[n-1].1};
@@ -148,7 +210,7 @@ impl PreparedStaticPreview {
     /// work. The corresponding upload only consumes validated vectors.
     pub fn prepare(model: StaticModel) -> Result<Self, String> { Self::prepare_with_sidecars(model,None,None) }
     pub fn prepare_with_sidecars(mut model:StaticModel,ao_png:Option<&[u8]>,sdf_bytes:Option<&[u8]>)->Result<Self,String>{
-        let ao=ao_png.map(|bytes|decode_generated_png(bytes,4096,32*1024*1024)).transpose()?;
+        let ao=ao_png.map(|bytes|decode_generated_png(bytes,4096,usize::MAX)).transpose()?;
         let sdf=sdf_bytes.and_then(|bytes|crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v|v.0));
         if model.texture_uri.is_some() && model.texture_png.is_none() { return Err("model references an external texture without supplied pixels".into()); }
         let stride = crate::model::MODEL_VERTEX_FLOATS;
@@ -268,29 +330,47 @@ impl PreparedStaticPreview {
             authored_collisions:Default::default(),collider_parts,occluder_parts,anim_parts,driven_parts,sky,liquids:std::sync::Arc::new(std::mem::take(&mut model.liquids)),
             min:model.min,max:model.max,prelit:model.prelit})
     }
-    /// The GPU textures this asset uploads, as (content hash, bytes), each
-    /// once: identical images share one GPU texture across assets (see
-    /// `upload_static_preview`), so a host charging memory per asset can
-    /// charge a shared texture once.
-    pub fn texture_charges(&self)->Vec<(u64,usize)> {
-        let mut out=Vec::new();
-        self.collect_texture_charges(&mut out);
+    /// GPU textures shared through the renderer's content cache, once per key
+    /// across every distance level. A key used in several slots keeps its first slot.
+    pub fn texture_charges(&self) -> Vec<TextureCharge> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for model in std::iter::once(self).chain(self.lods.iter().map(|(_, m)| m)) {
+            model.visit_texture_charges(&mut |charge| {
+                if seen.insert(charge.key) { out.push(charge); }
+            });
+        }
         out
     }
-    fn collect_texture_charges(&self,out:&mut Vec<(u64,usize)>) {
-        for (_,lod) in &self.lods { lod.collect_texture_charges(out); }
-        for l in std::iter::once(&self.main).chain(&self.extra).chain(self.anim_parts.iter().flat_map(|p|&p.draws)).chain(self.driven_parts.iter().flat_map(|p|&p.draws)) {
-            let surface=l.surface.iter().flat_map(|s|[&s.normal,&s.occlusion,&s.emissive]);
-            let splat=l.surface.iter().filter_map(|s|s.splat.as_ref()).flat_map(|p|p.albedo.iter().chain(&p.normal).map(|t|&**t).chain(std::iter::once(&p.weights)));
-            for t in [&*l.texture,&*l.detail,&*l.orm].into_iter().chain(surface).chain(splat) {
-                if !out.iter().any(|(h,_)|*h==t.hash) { out.push((t.hash,t.bytes())); }
+
+    fn layers(&self) -> impl Iterator<Item = &PreparedStaticLayer> {
+        std::iter::once(&self.main).chain(&self.extra)
+            .chain(self.anim_parts.iter().flat_map(|p| &p.draws))
+            .chain(self.driven_parts.iter().flat_map(|p| &p.draws))
+    }
+
+    fn visit_texture_charges(&self, visit: &mut impl FnMut(TextureCharge)) {
+        use crate::material_surface::splat_array_charge;
+        for layer in self.layers() {
+            visit(layer.texture.charge(TextureSlot::Base));
+            visit(layer.detail.charge(TextureSlot::Detail));
+            visit(layer.orm.charge(TextureSlot::Orm));
+            if let Some(surface) = &layer.surface {
+                visit(surface.normal.charge(TextureSlot::Normal));
+                visit(surface.occlusion.charge(TextureSlot::Occlusion));
+                visit(surface.emissive.charge(TextureSlot::Emissive));
+                if let Some(splat) = &surface.splat {
+                    visit(splat_array_charge(&splat.albedo, TextureSlot::SplatAlbedo));
+                    visit(splat_array_charge(&splat.normal, TextureSlot::SplatNormal));
+                    visit(splat.weights.charge(TextureSlot::SplatWeights));
+                }
             }
         }
     }
-    pub fn upload_bytes(&self)->usize {
-        self.lods.iter().map(|(_,m)|m.upload_bytes()).sum::<usize>()+self.morph.as_ref().map_or(0,|m|m.pixels.len()*4)+self.ao.as_ref().map_or(0,|v|v.data.len()*4)+self.sdf.as_ref().map_or(0,|v|v.pixels.len())+self.bake_stream.as_ref().map_or(0,|(i,v)|(i.len()+v.len())*4)
-            +{let mut seen=std::collections::HashSet::new();std::iter::once(&self.main).chain(&self.extra).chain(self.anim_parts.iter().flat_map(|p|&p.draws)).chain(self.driven_parts.iter().flat_map(|p|&p.draws)).map(|l|l.bytes_unique(&mut seen)).sum::<usize>()}
-            +self.sky.as_ref().map_or(0,|s|(s.vertices.len()+s.indices.len()+s.tex0.data.len()+s.tex1.data.len())*4)
+
+    pub fn upload_bytes(&self) -> usize {
+        self.level_geometry_bytes().iter().sum::<usize>()
+            + self.texture_charges().iter().map(|t| t.bytes).sum::<usize>()
     }
 }
 #[derive(Clone)]
@@ -299,15 +379,6 @@ pub(super) struct PreparedStaticLayer {
     pub(super) orm:std::sync::Arc<crate::material_surface::PreparedTexture>,pub(super) orm_on:bool,pub(super) surface:Option<crate::material_surface::PreparedSurface>,pub(super) pbr:crate::model::PbrMaterial,
     /// The base texture can fail the alpha test (found on the worker; opaque.rs).
     pub(super) cutout:bool,
-}
-impl PreparedStaticLayer {
-    /// Geometry and surface bytes, plus each image not already in `seen`
-    /// (layers share images; a shared atlas is uploaded and counted once).
-    pub(super) fn bytes_unique(&self,seen:&mut std::collections::HashSet<*const crate::material_surface::PreparedTexture>)->usize{
-        let mut images=0;
-        for t in [&self.texture,&self.detail,&self.orm]{if seen.insert(std::sync::Arc::as_ptr(t)){images+=t.bytes();}}
-        (self.vertices.len()+self.indices.len())*4+images+self.surface.as_ref().map_or(0,|s|s.bytes())
-    }
 }
 #[derive(Clone)]
 pub(super) struct PreparedAnimPreview {pub(super) def:std::sync::Arc<crate::model::AnimPart>,pub(super) draws:Vec<PreparedStaticLayer>,pub(super) collider:std::sync::Arc<Vec<(Vec3f,Vec3f)>>}

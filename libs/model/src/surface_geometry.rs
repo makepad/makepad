@@ -473,8 +473,6 @@ pub(super) fn bake(
         || !ao_distance.is_finite()
         || *ao_distance <= 0.
         || *ao_samples == 0
-        || *ao_samples > 64
-        || *dilation > 64
     {
         return Err(Error::Invalid("surface bake settings"));
     }
@@ -700,11 +698,7 @@ pub(super) fn transfer_vertex_colors(
     }
     // Include the pending color map and a conservative triangulation/BVH
     // allowance before allocating. Retained material bitmaps are not cloned.
-    let color_bytes = target.vertices().len().saturating_mul(limits.max_name_bytes + 96);
-    if state.vertex_colors.len().saturating_add(target.vertices().len()) > limits.mesh.max_vertices
-        || state.memory_bytes().saturating_add(color_bytes) > limits.max_source_bytes {
-        return Err(Error::Budget("derived vertex colors"));
-    }
+    let color_bytes = target.vertices().len().saturating_mul(target_name.len() + 96);
     let scratch = color_bytes
         .saturating_add(source.corners().len().saturating_mul(1024));
     if state.memory_bytes().saturating_add(scratch) > limits.mesh.max_bytes {
@@ -778,8 +772,8 @@ pub(super) fn reconcile(
         }
     }
     if colors
-        .len()
-        .saturating_mul(limits.max_name_bytes + 96)
+        .keys()
+        .fold(0usize, |bytes, (name, _)| bytes.saturating_add(name.len() + 96))
         .saturating_add(state.memory_bytes())
         > limits.mesh.max_bytes
     {

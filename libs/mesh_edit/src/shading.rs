@@ -8,7 +8,6 @@ impl Mesh {
     /// not guess an outside or silently reorient neighboring unselected faces.
     pub fn flip_faces(&mut self,faces:&[FaceId],ctx:&mut Context<'_>)->Result<ChangeSet>{
         ctx.checkpoint(faces.len() as u64)?;
-        ctx.limit("selected faces",faces.len() as u64,ctx.limits.max_faces as u64)?;
         ctx.bytes(self.memory_bytes().saturating_add(faces.len().saturating_mul(96)))?;
         let selected=faces.iter().copied().collect::<BTreeSet<_>>();
         if selected.len()!=faces.len(){return Err(invalid("face selection contains duplicates"));}
@@ -66,7 +65,7 @@ impl Mesh {
         Ok(faces.len())
     }
     pub fn set_corner_normals_bulk(&mut self,values:&[(CornerId,Option<[f64;3]>)],ctx:&mut Context<'_>)->Result<ChangeSet>{
-        ctx.limit("corner normals",values.len()as u64,ctx.limits.max_corners as u64)?;let valid=self.corners.iter().map(|c|c.id).collect::<BTreeSet<_>>();let mut normals=BTreeMap::new();
+        let valid=self.corners.iter().map(|c|c.id).collect::<BTreeSet<_>>();let mut normals=BTreeMap::new();
         for &(id,normal) in values{ctx.checkpoint(1)?;if !valid.contains(&id){return Err(MeshError::UnknownElement(ElementId::Corner(id)));}let normal=normal.map(|n|{crate::mesh::check_position(n)?;let len=length(n);if len<=1e-12{return Err(invalid("zero corner normal"));}Ok(mul(n,1./len))}).transpose()?;
             if normals.insert(id,normal).is_some(){return Err(invalid("duplicate corner normal"));}}
         Ok(self.edit(ctx,values.len().saturating_mul(128),|m,ctx|{for c in &mut m.corners{ctx.checkpoint(1)?;if let Some(&n)=normals.get(&c.id){c.normal=n;}}Ok(((),Vec::new()))})?.1)
@@ -102,8 +101,8 @@ fn normal_values(mesh:&Mesh,smooth:bool,angle:f64,ctx:&mut Context<'_>)->Result<
     ctx.bytes(mesh.estimated_bytes().saturating_add(mesh.vertices.len().saturating_mul(192))
         .saturating_add(mesh.corners.len().saturating_mul(768))
         .saturating_add(mesh.edge_data.len().saturating_mul(256)))?;
-    for vertex in &mesh.vertices{ctx.checkpoint(1)?;ctx.limit("weights per vertex",vertex.weights.len()as u64,ctx.limits.max_weights_per_vertex as u64)?;}
-    for face in &mesh.faces{ctx.checkpoint(1)?;ctx.limit("face corners",face.corner_count as u64,ctx.limits.max_face_corners as u64)?;}
+    for _ in &mesh.vertices{ctx.checkpoint(1)?;}
+    for _ in &mesh.faces{ctx.checkpoint(1)?;}
     let adj=mesh.adjacency(ctx)?;let normals=mesh.faces.iter().map(|f|Ok((f.id,face_geometry(mesh,f.id,ctx)?.normal))).collect::<Result<BTreeMap<_,_>>>()?;
     let mut results=BTreeMap::new();let cosine=angle.pcos();
     for (&vertex,faces) in &adj.vertex_faces{let mut remaining=faces.iter().copied().collect::<BTreeSet<_>>();

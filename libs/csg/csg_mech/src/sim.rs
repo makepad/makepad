@@ -10,12 +10,13 @@
 
 use crate::geom::*;
 use crate::mass::MassProps;
+use crate::runner::{dynamics_world, Engine};
 use makepad_box3d::body::*;
 use makepad_box3d::field::DistanceField;
 use makepad_box3d::hull::create_hull;
 use makepad_box3d::id::{BodyId, JointId};
 use makepad_box3d::joint::*;
-use makepad_box3d::math_functions::{conjugate, length, make_quat_from_axis_angle, mul_quat, rotate_vector, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform, AABB};
+use makepad_box3d::math_functions::{conjugate, length, mul_quat, rotate_vector, to_pos, to_vec3, vec3, Matrix3, Quat, Transform, Vec3, WorldTransform, AABB};
 use makepad_box3d::physics_world::*;
 use makepad_box3d::prismatic_joint::*;
 use makepad_box3d::revolute_joint::*;
@@ -60,15 +61,6 @@ pub const CONTACT_HERTZ: f64 = 240.0;
 /// higher to that), as stiff as it holds steadily: at [`JOINT_SUBSTEPS`] a slider's end stop holds
 /// a firm grab within a print gap.
 pub const JOINT_HERTZ: f64 = f32::MAX as f64;
-/// A flex's joint stiffness (Hz): the step rate ([`crate::runner::HZ`]), a sixteenth of the
-/// substep rate at [`JOINT_SUBSTEPS`]. Every other joint is as stiff as box3d holds, a quarter of
-/// it ([`JOINT_HERTZ`]): that is for an end stop holding a grab, and a flex has none. It also makes
-/// the soft step unstable round a light hub: the quarter-rate cap holds one joint on its own, but
-/// several joints locking a hub lighter than the parts they hold turn it faster (by the root of how
-/// many and how much lighter). A flower's heart on six one-way ribbons blew up from rest at the cap,
-/// and a bare hub on six hinges at half of it; at the step rate both hold and every flex springs
-/// back (`a_heart_on_four_flat_ribbons_springs_back`).
-pub const FLEX_HERTZ: f64 = crate::runner::HZ;
 /// Solver substeps of a jointed assembly's step: its joints are as stiff as a quarter of the substep
 /// rate, 960 Hz at a 240 Hz step. At half that a firm grab pulled a hinge 2 degrees past its limit
 /// and a head swinging on a light collar 4 past, more than a hinge's clearance gives; at this they
@@ -491,15 +483,13 @@ fn pf(v: Vec3) -> P3 {
     [v.x as f64, v.y as f64, v.z as f64]
 }
 
-/// A body's moment of inertia about `n` through its centre of mass (g mm^2).
-fn inertia_about(m: &crate::mass::MassProps, n: P3) -> f64 {
-    (0..3).map(|a| (0..3).map(|b| n[a] * m.inertia[a][b] * n[b]).sum::<f64>()).sum::<f64>().max(1e-9)
-}
-
-/// The hertz of a box3d spring as stiff as `stiffness` (N mm per radian) over `inertia` (g mm^2):
-/// the sim's torques are g mm^2 / s^2, a millionth of a N mm.
-pub fn spring_hertz(stiffness: f64, inertia: f64) -> f64 {
-    (stiffness * 1e6 / inertia).sqrt() / (2.0 * std::f64::consts::PI)
+/// The turn by `angle` (radians) about the unit `axis`, from exact trigonometry. box3d's own
+/// (`make_quat_from_axis_angle`) takes the half angle's sine and cosine from a fast approximation:
+/// a hand's turn of 30 degrees came out 30.18, which left a held part 250 mm from the grip 0.65 mm
+/// off the hand, and a joint's frame turned onto its axis came out tilted off it.
+fn quat_axis_angle(axis: P3, angle: f64) -> Quat {
+    let (s, c) = (0.5 * angle).sin_cos();
+    Quat { v: vf(scale(axis, s)), s: c as f32 }
 }
 
 /// A quaternion turning +X onto `axis` (a prismatic joint's frame: box3d slides along its x).
@@ -511,10 +501,10 @@ fn quat_x_to(axis: P3) -> Quat {
         return Quat::IDENTITY;
     }
     if c < -1.0 + 1e-9 {
-        return make_quat_from_axis_angle(vec3(0.0, 0.0, 1.0), std::f32::consts::PI);
+        return quat_axis_angle([0.0, 0.0, 1.0], std::f64::consts::PI);
     }
     let k = norm(cross(x, a));
-    make_quat_from_axis_angle(vf(k), c.clamp(-1.0, 1.0).acos() as f32)
+    quat_axis_angle(k, c.clamp(-1.0, 1.0).acos())
 }
 
 /// A quaternion turning +Z onto `axis`.
@@ -526,10 +516,10 @@ fn quat_z_to(axis: P3) -> Quat {
         return Quat::IDENTITY;
     }
     if c < -1.0 + 1e-9 {
-        return make_quat_from_axis_angle(vec3(1.0, 0.0, 0.0), std::f32::consts::PI);
+        return quat_axis_angle([1.0, 0.0, 0.0], std::f64::consts::PI);
     }
     let k = norm(cross(z, a));
-    make_quat_from_axis_angle(vf(k), c.clamp(-1.0, 1.0).acos() as f32)
+    quat_axis_angle(k, c.clamp(-1.0, 1.0).acos())
 }
 
 fn quat_to_euler_deg(q: Quat) -> P3 {
@@ -783,35 +773,7 @@ impl MechWorld {
                     d.upper_translation = *upper as f32;
                     create_prismatic_joint(&mut world, &d)
                 }
-                JointKind::Flex { stiffness, damping, one_way } => {
-                    // box3d's springs are in hertz over the two bodies' inertia about the bend
-                    let about = |n: P3| 1.0 / (1.0 / inertia_about(&asm.bodies[j.a].mass, n) + 1.0 / inertia_about(&asm.bodies[j.b].mass, n));
-                    let axis = norm(j.axis);
-                    let inertia = if *one_way {
-                        about(axis)
-                    } else {
-                        let (u, v) = basis(axis);
-                        0.5 * (about(u) + about(v))
-                    };
-                    let hertz = spring_hertz(*stiffness, inertia) as f32;
-                    if *one_way {
-                        let mut d = default_revolute_joint_def();
-                        base.fill(&mut d.base);
-                        d.enable_spring = true;
-                        d.hertz = hertz;
-                        d.damping_ratio = *damping as f32;
-                        d.base.constraint_hertz = FLEX_HERTZ as f32;
-                        create_revolute_joint(&mut world, &d)
-                    } else {
-                        let mut d = default_spherical_joint_def();
-                        base.fill(&mut d.base);
-                        d.enable_spring = true;
-                        d.hertz = hertz;
-                        d.damping_ratio = *damping as f32;
-                        d.base.constraint_hertz = FLEX_HERTZ as f32;
-                        create_spherical_joint(&mut world, &d)
-                    }
-                }
+                JointKind::Flex { .. } => unreachable!("a flex joint runs on the dynamics engine (runner::on_dynamics, simulate)"),
                 JointKind::Weld => {
                     let mut d = default_weld_joint_def();
                     base.fill(&mut d.base);
@@ -979,7 +941,7 @@ impl MechWorld {
     }
 
     /// Joint angles: revolute angle, or a spherical joint's cone angle (radians); a slider's
-    /// travel (mm); a flex joint's bend (radians: about its axis one way, else every way).
+    /// travel (mm).
     pub fn angles(&mut self, asm: &Assembly) -> Vec<f64> {
         asm.joints
             .iter()
@@ -988,16 +950,23 @@ impl MechWorld {
                 JointKind::Revolute { .. } => revolute_joint_get_angle(&mut self.world, id) as f64,
                 JointKind::Spherical { .. } => spherical_joint_get_cone_angle(&mut self.world, id) as f64,
                 JointKind::Prismatic { .. } => prismatic_joint_get_translation(&mut self.world, id) as f64,
-                JointKind::Flex { one_way: true, .. } => revolute_joint_get_angle(&mut self.world, id) as f64,
-                JointKind::Flex { one_way: false, .. } => spherical_joint_get_cone_angle(&mut self.world, id) as f64,
+                JointKind::Flex { .. } => unreachable!("a flex joint runs on the dynamics engine"),
                 JointKind::Weld => 0.0,
             })
             .collect()
     }
 
+    /// Each joint at its angle (a slider at its travel), turning each joint's moving side about it in joint
+    /// order ([`Scenario::Pose`]).
+    pub fn pose(&mut self, asm: &Assembly, angles: &[f64]) {
+        for (i, (c, r)) in pose_bodies(asm, angles).into_iter().enumerate() {
+            body_set_transform(&mut self.world, self.bodies[i], to_pos(vf(c)), mat_to_quat(&r));
+        }
+    }
+
     /// Move the held ground (anchors): a translation and a turn about `axis` through the origin.
     pub fn move_ground(&mut self, at: P3, axis: P3, ang: f64, dt: f64) {
-        self.set_ground(at, make_quat_from_axis_angle(vf(norm(axis)), ang as f32), dt);
+        self.set_ground(at, quat_axis_angle(norm(axis), ang), dt);
     }
 
     /// The held ground where a hand has it (`hand`: a move, and a turn about an axis through the
@@ -1007,7 +976,7 @@ impl MechWorld {
     /// this step and one more such call stops it.
     pub fn carry_ground(&mut self, hand: (P3, P3, f64), shake: (P3, P3, f64), ease: f64, dt: f64) -> bool {
         let (at, axis, ang) = (hand.0, norm(hand.1), hand.2);
-        let turn = |axis: P3, ang: f64| make_quat_from_axis_angle(vf(norm(axis)), ang as f32);
+        let turn = |axis: P3, ang: f64| quat_axis_angle(norm(axis), ang);
         let (at, q) = (add(at, rotate(shake.0, axis, ang)), mul_quat(turn(axis, ang), turn(shake.1, shake.2)));
         let left = self.held_move(WorldTransform { p: to_pos(vf(at)), q });
         let time = if left < CARRY_THERE {
@@ -1476,6 +1445,17 @@ fn moving_side(asm: &Assembly, j: usize) -> Vec<usize> {
     }
 }
 
+/// The line a ball joint about `axis` is posed about: across its axis and the print's `up` (any line across
+/// the axis when the two are one).
+pub(crate) fn tilt_axis(axis: P3, up: P3) -> P3 {
+    let t = cross(axis, norm(up));
+    if len(t) > 1e-6 {
+        norm(t)
+    } else {
+        basis(axis).0
+    }
+}
+
 /// Set joints to angles by turning each joint's moving side about it (in joint order).
 fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
     let mut out: Vec<(P3, [[f64; 3]; 3])> = asm.bodies.iter().map(|b| (b.mass.com, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])).collect();
@@ -1507,14 +1487,7 @@ fn pose_bodies(asm: &Assembly, angles: &[f64]) -> Vec<(P3, [[f64; 3]; 3])> {
         }
         let turn_axis = match js.kind {
             JointKind::Revolute { .. } | JointKind::Prismatic { .. } | JointKind::Flex { one_way: true, .. } | JointKind::Weld => axis,
-            JointKind::Spherical { .. } | JointKind::Flex { one_way: false, .. } => {
-                let t = cross(axis, norm(asm.up));
-                if len(t) > 1e-6 {
-                    norm(t)
-                } else {
-                    basis(axis).0
-                }
-            }
+            JointKind::Spherical { .. } | JointKind::Flex { one_way: false, .. } => tilt_axis(axis, asm.up),
         };
         for &i in &mv {
             let (c, r) = out[i];
@@ -1585,7 +1558,7 @@ pub const MAX_SECONDS: f64 = 30.0;
 /// Run a scenario headless. `cancelled` is polled every 60 steps.
 pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool) -> Result<SimReport, String> {
     if !asm.strings.is_empty() {
-        return Err("strings run only on the dynamics engine, and the joint check runs on box3d".into());
+        return Err("strings run only on the dynamics engine, and the joint check runs a piece without flex joints on box3d".into());
     }
     if asm.bodies.len() > MAX_BODIES {
         return Err(format!("{} parts: the sim budget is {MAX_BODIES}", asm.bodies.len()));
@@ -1608,11 +1581,14 @@ pub fn simulate(asm: &Assembly, opts: &SimOptions, cancelled: &dyn Fn() -> bool)
     } else {
         None
     };
-    let mut w = MechWorld::new(&held, gravity, floor);
+    // a flex joint is the dynamics engine's, as in the live sim (runner::on_dynamics)
+    let mut w = if asm.joints.iter().any(|j| matches!(j.kind, JointKind::Flex { .. })) {
+        Engine::Dynamics(Box::new(dynamics_world(&held, gravity, floor)?))
+    } else {
+        Engine::Mech(MechWorld::new(&held, gravity, floor))
+    };
     if let Scenario::Pose(angles) = &opts.scenario {
-        for (i, (c, r)) in pose_bodies(asm, angles).into_iter().enumerate() {
-            body_set_transform(&mut w.world, w.bodies[i], to_pos(vf(c)), mat_to_quat(&r));
-        }
+        w.pose(asm, angles);
     }
     let dt = 1.0 / opts.hz.max(60.0);
     let steps = (seconds / dt).round() as u64;

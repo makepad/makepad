@@ -6,6 +6,11 @@ use std::collections::{BTreeMap,BTreeSet};
 use std::sync::Arc;
 pub use makepad_gltf::VisualWheelMotion;
 
+// Runtime admission in render::asset_lights and asset_metadata respectively.
+const RUNTIME_LIGHT_INTENSITY: f64 = 1e9;
+const RUNTIME_LIGHT_RANGE: f64 = 10_000.;
+const RUNTIME_LOD_DISTANCE: f64 = 1e6;
+
 #[derive(Clone,Debug,PartialEq,Default)]
 pub struct SceneNode { pub parent:Option<String>, pub linked_to:Option<String>, pub transform:Transform }
 #[derive(Clone,Debug,PartialEq)]
@@ -30,13 +35,11 @@ pub struct VehicleWheel {
     pub visual:Option<VisualWheelMotion>,
 }
 pub const VEHICLE_WHEEL_CONNECTIONS:[&str;4]=["wheel_front_left","wheel_front_right","wheel_rear_left","wheel_rear_right"];
-/// How many generic driven parts (non-wheel connections) one model may bind.
-pub const MAX_DRIVEN_PARTS:usize=48;
 #[derive(Clone,Debug,PartialEq)]
 /// A zero face target drops the part from this distance and must be last.
 pub struct LodLevel {
     pub target_faces: usize,
-    /// Maximum sampled two-sided surface deviation in world-space metres,
+    /// Maximum certified two-sided surface deviation in world-space metres,
     /// including authored LOD levels.
     pub max_error: f64,
     pub distance: f64,
@@ -75,11 +78,8 @@ pub enum SceneOperation {
 }
 impl SceneState {
     pub fn is_empty(&self)->bool {self==&Self::default()}
-    pub fn memory_bytes(&self)->usize {let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
+    pub fn memory_bytes(&self)->usize {let mut w=Writer::new();if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
     pub(crate) fn validate(&self,state:&State,limits:&Limits,ctx:&mut mesh::Context<'_>)->Result<()> {
-        if self.nodes.len()>limits.max_objects||self.emitters.len()>32||self.sockets.len()>128||self.lods.len()>limits.max_objects||self.colliders.len()>limits.max_objects||self.modifiers.len()>limits.max_objects||self.modifiers.values().map(Vec::len).sum::<usize>()>128 {
-            return Err(Error::Budget("scene attachments"));
-        }
         for (object,node) in &self.nodes {
             ctx.checkpoint(1)?;name(object,limits)?;node.transform.validate()?;
             if !state.objects.contains_key(object) {return Err(Error::MissingObject(object.clone()));}
@@ -89,7 +89,7 @@ impl SceneState {
         }
         for (object,stack) in &self.modifiers {
             name(object,limits)?;if !state.objects.contains_key(object){return Err(Error::MissingObject(object.clone()));}
-            if stack.is_empty()||stack.len()>16{return Err(Error::Budget("object modifier count"));}let mut unique=BTreeSet::new();
+            if stack.is_empty(){return Err(Error::Budget("object modifier count"));}let mut unique=BTreeSet::new();
             for modifier in stack {ctx.checkpoint(1)?;name(&modifier.name,limits)?;
                 if !unique.insert(&modifier.name)||!modifier.operation.is_modifier_safe()||modifier.operation.object_name()!=object{return Err(Error::Invalid("invalid, duplicate, or wrongly targeted modifier"));}
                 for dependency in modifier.operation.dependencies(){if !state.objects.contains_key(dependency){return Err(Error::MissingObject(dependency.into()));}}
@@ -99,8 +99,8 @@ impl SceneState {
         for light in self.emitters.values() {
             name(&light.name,limits)?;light.transform.validate()?;self.attachment(&light.attachment,state)?;
             if light.color.iter().any(|v|!v.is_finite()||!(0.0..=1.0).contains(v))
-                || !light.intensity.is_finite()||!(0.0..=1e6).contains(&light.intensity)
-                || !light.range.is_finite()||light.range<=0.||light.range>10000. {
+                || !light.intensity.is_finite()||!(0. ..=RUNTIME_LIGHT_INTENSITY).contains(&light.intensity)
+                || !light.range.is_finite()||light.range<=0.||light.range>RUNTIME_LIGHT_RANGE {
                 return Err(Error::Invalid("light color/intensity/range"));
             }
             if let LightKind::Spot{inner,outer}=light.kind {
@@ -114,8 +114,7 @@ impl SceneState {
         // other connection is a generic DRIVEN PART (a control surface, a
         // gear leg, a canopy) posed by the host through the same contract.
         let is_wheel=|c:&str|VEHICLE_WHEEL_CONNECTIONS.contains(&c);
-        if self.wheels.values().filter(|w|is_wheel(&w.connection)).count()>4{return Err(Error::Budget("vehicle wheel bindings"));}
-        if self.wheels.values().filter(|w|!is_wheel(&w.connection)).count()>MAX_DRIVEN_PARTS{return Err(Error::Budget("driven part bindings"));}
+        if self.wheels.values().filter(|w|is_wheel(&w.connection)).count()>VEHICLE_WHEEL_CONNECTIONS.len(){return Err(Error::Invalid("vehicle wheel connection count"));}
         let mut connections=BTreeSet::new();
         for (object,wheel) in &self.wheels {
             ctx.checkpoint(1)?;name(object,limits)?;
@@ -123,7 +122,7 @@ impl SceneState {
             if wheel.connection.starts_with("wheel_")&&!is_wheel(&wheel.connection){return Err(Error::Invalid("unknown vehicle wheel connection"));}
             name(&wheel.connection,limits)?;
             if !connections.insert(&wheel.connection){return Err(Error::Invalid("duplicate vehicle wheel or driven part connection"));}
-            if wheel.pivot.iter().any(|v|!v.is_finite()||v.abs()>1e6)||[wheel.radius,wheel.width].iter().any(|v|!v.is_finite()||(*v as f32)<=0.||*v>10000.){return Err(Error::Invalid("wheel requires finite pivot and positive bounded renderable radius/width"));}
+            if wheel.pivot.iter().any(|v|!v.is_finite()||!(*v as f32).is_finite())||[wheel.radius,wheel.width].iter().any(|v|!v.is_finite()||(*v as f32)<=0.||!(*v as f32).is_finite()){return Err(Error::Invalid("wheel requires finite pivot and positive renderable radius/width"));}
             if wheel.visual.is_some_and(|visual|!visual.is_valid()){return Err(Error::Invalid("wheel visual requires steer_gain 0..1, steer_max 0..1.2 radians, compression/droop 0..5 model metres"));}
             let world=self.world_matrix(object)?;let scale=world[0][0];
             if scale<=0.||(0..3).any(|r|(0..3).any(|c|(world[r][c]-if r==c{scale}else{0.}).abs()>1e-8*scale.max(1.))){return Err(Error::Invalid("wheel nodes require positive uniform scale and no rotation; rotate axle geometry onto local X before binding"));}
@@ -131,11 +130,11 @@ impl SceneState {
             while let Some(p)=parent{if self.wheels.contains_key(p){return Err(Error::Invalid("wheel geometry cannot contain another wheel binding"));}parent=self.nodes.get(p).and_then(|n|n.parent.as_deref());}
         }
         for (object,levels) in &self.lods {
-            if !state.objects.contains_key(object)||levels.is_empty()||levels.len()>4 {return Err(Error::Invalid("LOD object/levels"));}
+            if !state.objects.contains_key(object)||levels.is_empty() {return Err(Error::Invalid("LOD object/levels"));}
             check_lods(levels)?;
             let mut prev=(usize::MAX,0.);
             for level in levels {
-                if level.target_faces>prev.0||!level.distance.is_finite()||level.distance<=prev.1||level.distance>1e6||!level.max_error.is_finite()||level.max_error<0. {return Err(Error::Invalid("LOD order or error"));}
+                if level.target_faces>prev.0||!level.distance.is_finite()||level.distance<=prev.1||level.distance>RUNTIME_LOD_DISTANCE||!level.max_error.is_finite()||level.max_error<0. {return Err(Error::Invalid("LOD order or error"));}
                 prev=(level.target_faces,level.distance);
             }
         }
@@ -209,7 +208,7 @@ impl SceneState {
             }
             SceneOperation::Join{object,sources}=>{
                 create_name(state,object,limits)?;
-                if sources.is_empty()||sources.len()>limits.max_objects {return Err(Error::Budget("join objects"));}
+                if sources.is_empty() {return Err(Error::Budget("join objects"));}
                 let mut joined=mesh::Mesh::new();let mut unique=BTreeSet::new();let evaluated=state.scene.evaluated_meshes(state,ctx)?;
                 for source in sources {
                     if !unique.insert(source){return Err(Error::Invalid("duplicate join source"));}
@@ -261,7 +260,7 @@ impl SceneState {
             SceneOperation::DeleteVehicleWheel{object}=>{if state.scene.wheels.remove(object).is_none(){return Err(Error::Invalid("unknown vehicle wheel binding"));}}
             SceneOperation::Lods{object,levels}=>{state.scene.lods.insert(object.clone(),levels.clone());}
             SceneOperation::Collider{object,proxy}=>{state.scene.colliders.insert(object.clone(),proxy.clone());}
-            SceneOperation::Modifier{object,modifier}=>{let stack=state.scene.modifiers.entry(object.clone()).or_default();if let Some(old)=stack.iter_mut().find(|m|m.name==modifier.name){*old=modifier.clone();}else{if stack.len()>=16{return Err(Error::Budget("object modifiers"));}stack.push(modifier.clone());}}
+            SceneOperation::Modifier{object,modifier}=>{let stack=state.scene.modifiers.entry(object.clone()).or_default();if let Some(old)=stack.iter_mut().find(|m|m.name==modifier.name){*old=modifier.clone();}else{stack.push(modifier.clone());}}
             SceneOperation::RemoveModifier{object,name}=>{let stack=state.scene.modifiers.get_mut(object).ok_or(Error::Invalid("unknown modifier"))?;let index=stack.iter().position(|m|&m.name==name).ok_or(Error::Invalid("unknown modifier"))?;stack.remove(index);if stack.is_empty(){state.scene.modifiers.remove(object);}}
             SceneOperation::ModifierOrder{object,names}=>{let stack=state.scene.modifiers.get_mut(object).ok_or(Error::Invalid("unknown modifier stack"))?;
                 if names.len()!=stack.len()||names.iter().collect::<BTreeSet<_>>().len()!=names.len(){return Err(Error::Invalid("modifier order must be an exact permutation"));}
@@ -430,7 +429,7 @@ mod modifier_tests {
 }
 fn create_name(state:&State,object:&str,limits:&Limits)->Result<()> {
     name(object,limits)?;if state.objects.contains_key(object){return Err(Error::DuplicateObject(object.into()));}
-    if state.objects.len()>=limits.max_objects{Err(Error::Budget("objects"))}else{Ok(())}
+    Ok(())
 }
 fn cache_bytes(cache:&BTreeMap<String,Arc<mesh::Mesh>>)->usize{let mut seen=BTreeSet::new();cache.values().filter(|m|seen.insert(Arc::as_ptr(m)as usize)).fold(0usize,|n,m|n.saturating_add(m.memory_bytes()))}
 
@@ -443,13 +442,13 @@ impl SceneOperation {
         |Self::MakeUnique{object}|Self::Join{object,..}|Self::Separate{object,..}|Self::Pivot{object,..}|Self::Snap{object,..}|Self::Dimensions{object,..}
         |Self::Lods{object,..}|Self::Collider{object,..}|Self::Modifier{object,..}|Self::RemoveModifier{object,..}|Self::ModifierOrder{object,..}|Self::ApplyModifiers{object}
         |Self::VehicleWheel{object,..}|Self::DeleteVehicleWheel{object}=>Some(object),_=>None}}
-    pub fn memory_bytes(&self)->usize {let mut w=Writer::new(usize::MAX);if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
+    pub fn memory_bytes(&self)->usize {let mut w=Writer::new();if self.write(&mut w).is_err(){usize::MAX}else{w.bytes.len().saturating_mul(3)}}
     pub fn check(&self,limits:&Limits)->Result<()> {
         match self {
             Self::Node{node,..}=>node.transform.validate()?,
             Self::Instance{transform,..}=>transform.validate()?,
-            Self::Join{sources,..}=>check_count(sources.len(),limits.max_objects)?,
-            Self::Separate{faces,..}=>if faces.len()>limits.mesh.max_faces{return Err(Error::Budget("selection size"));},
+            Self::Join{sources,..}=>if sources.is_empty(){return Err(Error::Invalid("empty join"));},
+            Self::Separate{..}=>{},
             Self::Snap{grid,..}=>finite(&[*grid])?,
             Self::Pivot{position,..}=>finite(position)?,
             Self::Dimensions{size,..}=>finite(size)?,
@@ -457,7 +456,7 @@ impl SceneOperation {
             Self::Socket(socket)=>socket.transform.validate()?,
             Self::Lods{levels,..}=>check_lods(levels)?,
             Self::Modifier{object,modifier}=>check_modifier(object,modifier,limits)?,
-            Self::ModifierOrder{names,..}=>check_count(names.len(),16)?,
+            Self::ModifierOrder{..}=>{},
             Self::VehicleWheel{wheel,..}=>check_wheel(wheel)?,
             _=>{}
         }
@@ -499,17 +498,13 @@ impl SceneOperation {
 }
 impl SceneState {
     pub fn check(&self,limits:&Limits)->Result<()> {
-        if self.nodes.len()>limits.max_objects||self.emitters.len()>32||self.sockets.len()>128||self.lods.len()>limits.max_objects||self.colliders.len()>limits.max_objects||self.modifiers.len()>limits.max_objects||self.modifiers.values().map(Vec::len).sum::<usize>()>128 {
-            return Err(Error::Budget("scene attachments"));
-        }
-        if self.wheels.len()>4+MAX_DRIVEN_PARTS{return Err(Error::Budget("driven part bindings"));}
         for (object,node) in &self.nodes{name(object,limits)?;node.transform.validate()?;}
         for light in self.emitters.values(){check_light(light)?;}
         for socket in self.sockets.values(){socket.transform.validate()?;}
         for (object,levels) in &self.lods{name(object,limits)?;check_lods(levels)?;}
         for object in self.colliders.keys(){name(object,limits)?;}
         for (object,stack) in &self.modifiers{
-            name(object,limits)?;if stack.is_empty()||stack.len()>16{return Err(Error::Budget("object modifier count"));}
+            name(object,limits)?;if stack.is_empty(){return Err(Error::Budget("object modifier count"));}
             let mut seen=BTreeSet::new();for m in stack{check_modifier(object,m,limits)?;if !seen.insert(&m.name){return Err(Error::Corrupt("duplicate scene entry"));}}
         }
         for (object,wheel) in &self.wheels{name(object,limits)?;check_wheel(wheel)?;}
@@ -526,24 +521,23 @@ impl SceneState {
     }
     pub(crate) fn read(r:&mut Reader,limits:&Limits)->Result<Self>{
         let value=Self{
-            nodes:read_map(r,limits.max_objects,limits.max_name_bytes,|r|read_node(r,limits))?,
-            emitters:read_map(r,32,limits.max_source_bytes,|r|read_light(r,limits))?,
-            sockets:read_map(r,128,limits.max_source_bytes,|r|read_socket(r,limits))?,
-            lods:read_map(r,limits.max_objects,limits.max_name_bytes,read_lods)?,
-            colliders:read_map(r,limits.max_objects,limits.max_name_bytes,|r|read_proxy(r,limits))?,
-            modifiers:read_map(r,limits.max_objects,limits.max_name_bytes,|r|{let mut stack=Vec::new();for _ in 0..r.count(16)?{stack.push(read_modifier(r,limits)?);}Ok(stack)})?,
-            wheels:read_map(r,4+MAX_DRIVEN_PARTS,limits.max_name_bytes,|r|read_wheel(r,limits))?,
+            nodes:read_map(r,86,|r|read_node(r,limits))?,
+            emitters:read_map(r,130,|r|read_light(r,limits))?,
+            sockets:read_map(r,89,|r|read_socket(r,limits))?,
+            lods:read_map(r,8,read_lods)?,
+            colliders:read_map(r,5,|r|read_proxy(r,limits))?,
+            modifiers:read_map(r,8,|r|{let mut stack=Vec::new();for _ in 0..r.count(14)?{stack.push(read_modifier(r,limits)?);}Ok(stack)})?,
+            wheels:read_map(r,49,|r|read_wheel(r,limits))?,
         };value.check(limits)?;Ok(value)
     }
 }
 
 fn finite(v:&[f64])->Result<()>{if v.iter().any(|v|!v.is_finite()){Err(Error::Invalid("expected finite number"))}else{Ok(())}}
-fn check_count(n:usize,max:usize)->Result<()>{if n>max{Err(Error::Budget("authoring array"))}else{Ok(())}}
 fn check_light(light:&LightEmitter)->Result<()>{
     light.transform.validate()?;finite(&light.color)?;finite(&[light.intensity,light.range])?;
     if let LightKind::Spot{inner,outer}=light.kind{finite(&[inner,outer])?;}Ok(())
 }
-fn check_lods(levels:&[LodLevel])->Result<()>{check_count(levels.len(),4)?;for (i,l) in levels.iter().enumerate(){
+fn check_lods(levels:&[LodLevel])->Result<()>{for (i,l) in levels.iter().enumerate(){
     if l.target_faces==0&&i+1!=levels.len(){return Err(Error::Invalid("empty LOD must be last"));}
     if l.target_faces>u32::MAX as usize{return Err(Error::Invalid("expected u32 integer"));}finite(&[l.max_error,l.distance])?;
 }Ok(())}
@@ -560,14 +554,14 @@ fn write_transform(w:&mut Writer,t:&Transform)->Result<()>{write_array(w,&t.tran
 fn read_transform(r:&mut Reader)->Result<Transform>{Ok(Transform{translation:read_array(r)?,rotation:read_array(r)?,scale:read_array(r)?})}
 fn flag(r:&mut Reader)->Result<bool>{match r.u8()?{0=>Ok(false),1=>Ok(true),_=>Err(Error::Corrupt("scene boolean"))}}
 fn write_optional(w:&mut Writer,s:&Option<String>)->Result<()>{w.u8(s.is_some() as u8)?;if let Some(s)=s{w.string(s)?;}Ok(())}
-fn read_optional(r:&mut Reader,l:&Limits)->Result<Option<String>>{Ok(if flag(r)?{Some(r.string(l.max_source_bytes)?)}else{None})}
+fn read_optional(r:&mut Reader,_l:&Limits)->Result<Option<String>>{Ok(if flag(r)?{Some(r.string()?)}else{None})}
 fn write_node(w:&mut Writer,n:&SceneNode)->Result<()>{write_optional(w,&n.parent)?;write_optional(w,&n.linked_to)?;write_transform(w,&n.transform)}
 fn read_node(r:&mut Reader,l:&Limits)->Result<SceneNode>{Ok(SceneNode{parent:read_optional(r,l)?,linked_to:read_optional(r,l)?,transform:read_transform(r)?})}
 fn write_attachment(w:&mut Writer,a:&Attachment)->Result<()>{match a{
     Attachment::Root=>w.u8(0),Attachment::Object(n)=>{w.u8(1)?;w.string(n)},Attachment::Joint(j)=>{w.u8(2)?;w.u32(*j)}
 }}
-fn read_attachment(r:&mut Reader,l:&Limits)->Result<Attachment>{Ok(match r.u8()?{
-    0=>Attachment::Root,1=>Attachment::Object(r.string(l.max_source_bytes)?),2=>Attachment::Joint(r.u32()?),_=>return Err(Error::Corrupt("scene attachment tag")),
+fn read_attachment(r:&mut Reader,_l:&Limits)->Result<Attachment>{Ok(match r.u8()?{
+    0=>Attachment::Root,1=>Attachment::Object(r.string()?),2=>Attachment::Joint(r.u32()?),_=>return Err(Error::Corrupt("scene attachment tag")),
 })}
 fn write_light(w:&mut Writer,l:&LightEmitter)->Result<()>{
     w.string(&l.name)?;write_attachment(w,&l.attachment)?;write_transform(w,&l.transform)?;
@@ -575,35 +569,35 @@ fn write_light(w:&mut Writer,l:&LightEmitter)->Result<()>{
     write_array(w,&l.color)?;w.f64(l.intensity)?;w.f64(l.range)
 }
 fn read_light(r:&mut Reader,l:&Limits)->Result<LightEmitter>{Ok(LightEmitter{
-    name:r.string(l.max_source_bytes)?,attachment:read_attachment(r,l)?,transform:read_transform(r)?,
+    name:r.string()?,attachment:read_attachment(r,l)?,transform:read_transform(r)?,
     kind:match r.u8()?{0=>LightKind::Point,1=>LightKind::Spot{inner:r.f64()?,outer:r.f64()?},_=>return Err(Error::Corrupt("light kind tag"))},
     color:read_array(r)?,intensity:r.f64()?,range:r.f64()?,
 })}
 fn write_socket(w:&mut Writer,s:&Socket)->Result<()>{w.string(&s.name)?;write_attachment(w,&s.attachment)?;write_transform(w,&s.transform)}
-fn read_socket(r:&mut Reader,l:&Limits)->Result<Socket>{Ok(Socket{name:r.string(l.max_source_bytes)?,attachment:read_attachment(r,l)?,transform:read_transform(r)?})}
+fn read_socket(r:&mut Reader,l:&Limits)->Result<Socket>{Ok(Socket{name:r.string()?,attachment:read_attachment(r,l)?,transform:read_transform(r)?})}
 fn write_lods(w:&mut Writer,levels:&[LodLevel])->Result<()>{w.count(levels.len())?;for l in levels{w.count(l.target_faces)?;w.f64(l.max_error)?;w.f64(l.distance)?;}Ok(())}
-fn read_lods(r:&mut Reader)->Result<Vec<LodLevel>>{let mut levels=Vec::new();for _ in 0..r.count(4)?{levels.push(LodLevel{target_faces:r.u32()? as usize,max_error:r.f64()?,distance:r.f64()?});}Ok(levels)}
+fn read_lods(r:&mut Reader)->Result<Vec<LodLevel>>{let mut levels=Vec::new();for _ in 0..r.count(20)?{levels.push(LodLevel{target_faces:r.u32()? as usize,max_error:r.f64()?,distance:r.f64()?});}Ok(levels)}
 fn write_proxy(w:&mut Writer,p:&CollisionProxy)->Result<()>{match p{
     CollisionProxy::Box=>w.u8(0),CollisionProxy::Sphere=>w.u8(1),CollisionProxy::Mesh{object}=>{w.u8(2)?;w.string(object)},CollisionProxy::Hull=>w.u8(3),CollisionProxy::Capsule=>w.u8(4),
 }}
-fn read_proxy(r:&mut Reader,l:&Limits)->Result<CollisionProxy>{Ok(match r.u8()?{
-    0=>CollisionProxy::Box,1=>CollisionProxy::Sphere,2=>CollisionProxy::Mesh{object:r.string(l.max_source_bytes)?},3=>CollisionProxy::Hull,4=>CollisionProxy::Capsule,_=>return Err(Error::Corrupt("collision proxy tag")),
+fn read_proxy(r:&mut Reader,_l:&Limits)->Result<CollisionProxy>{Ok(match r.u8()?{
+    0=>CollisionProxy::Box,1=>CollisionProxy::Sphere,2=>CollisionProxy::Mesh{object:r.string()?},3=>CollisionProxy::Hull,4=>CollisionProxy::Capsule,_=>return Err(Error::Corrupt("collision proxy tag")),
 })}
 fn write_modifier(w:&mut Writer,m:&NamedModifier)->Result<()>{w.string(&m.name)?;w.u8(m.enabled as u8)?;m.operation.write(w)}
-fn read_modifier(r:&mut Reader,l:&Limits)->Result<NamedModifier>{Ok(NamedModifier{name:r.string(l.max_name_bytes)?,enabled:flag(r)?,operation:MeshEditingOperation::read(r,l)?})}
+fn read_modifier(r:&mut Reader,l:&Limits)->Result<NamedModifier>{Ok(NamedModifier{name:r.string()?,enabled:flag(r)?,operation:MeshEditingOperation::read(r,l)?})}
 fn write_wheel(w:&mut Writer,v:&VehicleWheel)->Result<()>{
     w.string(&v.connection)?;write_array(w,&v.pivot)?;w.f64(v.radius)?;w.f64(v.width)?;w.u8(v.visual.is_some() as u8)?;
     if let Some(v)=v.visual{write_array(w,&[v.steer_gain,v.steer_max,v.compression,v.droop])?;}Ok(())
 }
-fn read_wheel(r:&mut Reader,l:&Limits)->Result<VehicleWheel>{Ok(VehicleWheel{
-    connection:r.string(l.max_source_bytes)?,pivot:read_array(r)?,radius:r.f64()?,width:r.f64()?,
+fn read_wheel(r:&mut Reader,_l:&Limits)->Result<VehicleWheel>{Ok(VehicleWheel{
+    connection:r.string()?,pivot:read_array(r)?,radius:r.f64()?,width:r.f64()?,
     visual:if flag(r)?{Some(VisualWheelMotion{steer_gain:r.f64()?,steer_max:r.f64()?,compression:r.f64()?,droop:r.f64()?})}else{None},
 })}
 fn write_map<T>(w:&mut Writer,map:&BTreeMap<String,T>,mut item:impl FnMut(&mut Writer,&T)->Result<()>)->Result<()>{
     w.count(map.len())?;for (key,value) in map{w.string(key)?;item(w,value)?;}Ok(())
 }
-fn read_map<T>(r:&mut Reader,max:usize,max_name:usize,mut item:impl FnMut(&mut Reader)->Result<T>)->Result<BTreeMap<String,T>>{
-    let mut map=BTreeMap::new();for _ in 0..r.count(max)?{let key=r.string(max_name)?;
+fn read_map<T>(r:&mut Reader,min_record_bytes:usize,mut item:impl FnMut(&mut Reader)->Result<T>)->Result<BTreeMap<String,T>>{
+    let mut map=BTreeMap::new();for _ in 0..r.count(min_record_bytes)?{let key=r.string()?;
         if map.last_key_value().is_some_and(|(last,_)|last>=&key){return Err(Error::Corrupt("scene map order"));}map.insert(key,item(r)?);
     }Ok(map)
 }
@@ -635,27 +629,27 @@ impl SceneOperation {
     }
     pub(crate) fn read(r:&mut Reader,l:&Limits)->Result<Self>{
         let value=match r.u8()?{
-            0=>Self::Node{object:r.string(l.max_name_bytes)?,node:read_node(r,l)?},
-            1=>Self::Instance{object:r.string(l.max_name_bytes)?,source:r.string(l.max_source_bytes)?,transform:read_transform(r)?},
-            2=>Self::Duplicate{object:r.string(l.max_name_bytes)?,source:r.string(l.max_source_bytes)?},
-            3=>Self::MakeUnique{object:r.string(l.max_name_bytes)?},
-            4=>{let object=r.string(l.max_name_bytes)?;let mut sources=Vec::new();for _ in 0..r.count(l.max_objects)?{sources.push(r.string(l.max_source_bytes)?);}Self::Join{object,sources}}
-            5=>{let object=r.string(l.max_name_bytes)?;let name=r.string(l.max_source_bytes)?;let mut faces=Vec::new();for _ in 0..r.count(l.mesh.max_faces)?{faces.push(mesh::FaceId(r.u64()?));}Self::Separate{object,name,faces}}
-            6=>Self::Snap{object:r.string(l.max_name_bytes)?,grid:r.f64()?},
-            7=>Self::Pivot{object:r.string(l.max_name_bytes)?,position:read_array(r)?},
-            8=>Self::Dimensions{object:r.string(l.max_name_bytes)?,size:read_array(r)?},
+            0=>Self::Node{object:r.string()?,node:read_node(r,l)?},
+            1=>Self::Instance{object:r.string()?,source:r.string()?,transform:read_transform(r)?},
+            2=>Self::Duplicate{object:r.string()?,source:r.string()?},
+            3=>Self::MakeUnique{object:r.string()?},
+            4=>{let object=r.string()?;let mut sources=Vec::new();for _ in 0..r.count(4)?{sources.push(r.string()?);}Self::Join{object,sources}}
+            5=>{let object=r.string()?;let name=r.string()?;let mut faces=Vec::new();for _ in 0..r.count(8)?{faces.push(mesh::FaceId(r.u64()?));}Self::Separate{object,name,faces}}
+            6=>Self::Snap{object:r.string()?,grid:r.f64()?},
+            7=>Self::Pivot{object:r.string()?,position:read_array(r)?},
+            8=>Self::Dimensions{object:r.string()?,size:read_array(r)?},
             9=>Self::Light(read_light(r,l)?),
-            10=>Self::DeleteLight{name:r.string(l.max_source_bytes)?},
+            10=>Self::DeleteLight{name:r.string()?},
             11=>Self::Socket(read_socket(r,l)?),
-            12=>Self::DeleteSocket{name:r.string(l.max_source_bytes)?},
-            13=>Self::Lods{object:r.string(l.max_name_bytes)?,levels:read_lods(r)?},
-            14=>Self::Collider{object:r.string(l.max_name_bytes)?,proxy:read_proxy(r,l)?},
-            15=>Self::Modifier{object:r.string(l.max_name_bytes)?,modifier:read_modifier(r,l)?},
-            16=>Self::RemoveModifier{object:r.string(l.max_name_bytes)?,name:r.string(l.max_source_bytes)?},
-            17=>{let object=r.string(l.max_name_bytes)?;let mut names=Vec::new();for _ in 0..r.count(16)?{names.push(r.string(l.max_source_bytes)?);}Self::ModifierOrder{object,names}}
-            18=>Self::ApplyModifiers{object:r.string(l.max_name_bytes)?},
-            19=>Self::VehicleWheel{object:r.string(l.max_name_bytes)?,wheel:read_wheel(r,l)?},
-            20=>Self::DeleteVehicleWheel{object:r.string(l.max_name_bytes)?},
+            12=>Self::DeleteSocket{name:r.string()?},
+            13=>Self::Lods{object:r.string()?,levels:read_lods(r)?},
+            14=>Self::Collider{object:r.string()?,proxy:read_proxy(r,l)?},
+            15=>Self::Modifier{object:r.string()?,modifier:read_modifier(r,l)?},
+            16=>Self::RemoveModifier{object:r.string()?,name:r.string()?},
+            17=>{let object=r.string()?;let mut names=Vec::new();for _ in 0..r.count(4)?{names.push(r.string()?);}Self::ModifierOrder{object,names}}
+            18=>Self::ApplyModifiers{object:r.string()?},
+            19=>Self::VehicleWheel{object:r.string()?,wheel:read_wheel(r,l)?},
+            20=>Self::DeleteVehicleWheel{object:r.string()?},
             _=>return Err(Error::Corrupt("scene operation tag")),
         };value.check(l)?;Ok(value)
     }
@@ -672,10 +666,10 @@ mod typed_tests {
     }}
     fn wheel(visual:Option<VisualWheelMotion>)->VehicleWheel{VehicleWheel{connection:"wheel_front_left".into(),pivot:[1.,0.,0.],radius:0.5,width:0.2,visual}}
     fn roundtrip(op:&SceneOperation,l:&Limits){
-        op.check(l).unwrap();let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();
+        op.check(l).unwrap();let mut w=Writer::new();op.write(&mut w).unwrap();
         assert_eq!(op.memory_bytes(),w.bytes.len()*3);
         let mut r=Reader::new(&w.bytes);let decoded=SceneOperation::read(&mut r,l).unwrap();r.end().unwrap();assert_eq!(&decoded,op);
-        let mut out=Writer::new(usize::MAX);decoded.write(&mut out).unwrap();assert_eq!(out.bytes,w.bytes);
+        let mut out=Writer::new();decoded.write(&mut out).unwrap();assert_eq!(out.bytes,w.bytes);
         for cut in [0,1,w.bytes.len()-1]{assert!(SceneOperation::read(&mut Reader::new(&w.bytes[..cut]),l).is_err());}
     }
     #[test]
@@ -704,7 +698,7 @@ mod typed_tests {
             SceneOperation::VehicleWheel{object:"body".into(),wheel:wheel(None)},
             SceneOperation::DeleteVehicleWheel{object:"body".into()},
         ];
-        for (tag,op) in ops.iter().enumerate(){roundtrip(op,&l);let mut w=Writer::new(usize::MAX);op.write(&mut w).unwrap();assert_eq!(w.bytes[0],tag as u8);}
+        for (tag,op) in ops.iter().enumerate(){roundtrip(op,&l);let mut w=Writer::new();op.write(&mut w).unwrap();assert_eq!(w.bytes[0],tag as u8);}
         for proxy in [CollisionProxy::Sphere,CollisionProxy::Mesh{object:"proxy".into()},CollisionProxy::Hull,CollisionProxy::Capsule]{roundtrip(&SceneOperation::Collider{object:"body".into(),proxy},&l);}
         roundtrip(&SceneOperation::Node{object:"body".into(),node:SceneNode::default()},&l);
         roundtrip(&SceneOperation::Light(light(LightKind::Spot{inner:0.1,outer:0.5},Attachment::Object("body".into()))),&l);
@@ -722,16 +716,15 @@ mod typed_tests {
             SceneOperation::Snap{object:String::new(),grid:1.},
             SceneOperation::Pivot{object:"body".into(),position:[f64::NAN,0.,0.]},
             SceneOperation::Node{object:"body".into(),node:SceneNode{transform:Transform{rotation:[0.;4],..Default::default()},..Default::default()}},
-            SceneOperation::Lods{object:"body".into(),levels:vec![LodLevel{target_faces:1,max_error:0.,distance:1.};5]},
             SceneOperation::Lods{object:"body".into(),levels:vec![LodLevel{target_faces:0,max_error:0.,distance:1.};2]},
-            SceneOperation::ModifierOrder{object:"body".into(),names:vec!["m".into();17]},
             SceneOperation::Modifier{object:"other".into(),modifier:modifier()},
         ]{assert!(op.check(&l).is_err());}
-        let tiny=Limits{max_objects:0,mesh:mesh::Limits{max_faces:0,..l.mesh.clone()},..l.clone()};
-        assert!(SceneOperation::Join{object:"body".into(),sources:vec!["source".into()]}.check(&tiny).is_err());
-        assert!(SceneOperation::Separate{object:"body".into(),name:"cap".into(),faces:vec![mesh::FaceId(1)]}.check(&tiny).is_err());
+        roundtrip(&SceneOperation::Lods{object:"body".into(),levels:(1..=5).map(|i|LodLevel{target_faces:1,max_error:0.,distance:i as f64}).collect()}, &l);
+        roundtrip(&SceneOperation::ModifierOrder{object:"body".into(),names:(0..17).map(|i|format!("modifier_{i}")).collect()}, &l);
+        assert!(SceneOperation::Join{object:"body".into(),sources:vec!["source".into()]}.check(&l).is_ok());
+        assert!(SceneOperation::Separate{object:"body".into(),name:"cap".into(),faces:vec![mesh::FaceId(1)]}.check(&l).is_ok());
         assert!(matches!(SceneOperation::read(&mut Reader::new(&[255]),&l),Err(Error::Corrupt(_))));
-        let mut w=Writer::new(64);w.u8(0).unwrap();w.string("body").unwrap();w.u8(2).unwrap();
+        let mut w=Writer::new();w.u8(0).unwrap();w.string("body").unwrap();w.u8(2).unwrap();
         assert!(matches!(SceneOperation::read(&mut Reader::new(&w.bytes),&l),Err(Error::Corrupt(_))));
     }
     #[test]
@@ -746,11 +739,11 @@ mod typed_tests {
             wheels:BTreeMap::from([("body".into(),wheel(None))]),
         };
         for state in [SceneState::default(),state]{
-            state.check(&l).unwrap();let mut w=Writer::new(usize::MAX);state.write(&mut w).unwrap();assert_eq!(state.memory_bytes(),w.bytes.len()*3);
+            state.check(&l).unwrap();let mut w=Writer::new();state.write(&mut w).unwrap();assert_eq!(state.memory_bytes(),w.bytes.len()*3);
             let mut r=Reader::new(&w.bytes);assert_eq!(SceneState::read(&mut r,&l).unwrap(),state);r.end().unwrap();
             assert!(SceneState::read(&mut Reader::new(&w.bytes[..w.bytes.len()-1]),&l).is_err());
         }
-        let mut w=Writer::new(1024);w.count(2).unwrap();for _ in 0..2{w.string("body").unwrap();write_node(&mut w,&SceneNode::default()).unwrap();}
+        let mut w=Writer::new();w.count(2).unwrap();for _ in 0..2{w.string("body").unwrap();write_node(&mut w,&SceneNode::default()).unwrap();}
         assert!(matches!(SceneState::read(&mut Reader::new(&w.bytes),&l),Err(Error::Corrupt(_))));
     }
 }

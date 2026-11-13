@@ -71,7 +71,11 @@ pub(crate) fn crease(mesh: &mut Mesh, angle: f64, weight: f64, ctx: &mut Context
 }
 
 pub(crate) fn bevel(mesh: &Mesh, angle: f64, width: f64, segments: u32, ctx: &mut Context<'_>) -> Result<Mesh> {
-    if !(width.is_finite() && width > 0.) || !(1..=16).contains(&segments) || !(angle.is_finite() && angle >= 0.) { return Err(Error::Invalid("bevel needs width > 0, segments 1..16, angle >= 0")); }
+    if !(width.is_finite() && width > 0.) || segments==0 || !(angle.is_finite() && angle >= 0.) { return Err(Error::Invalid("bevel needs width > 0, segments >= 1, angle >= 0")); }
+    let working=mesh.corners().len().checked_mul(segments as usize).and_then(|n|n.checked_mul(2048))
+        .and_then(|n|mesh.memory_bytes().checked_mul(3).and_then(|m|n.checked_add(m)))
+        .ok_or(Error::Budget("bevel storage overflow"))?;
+    ctx.bytes(working)?;
     let (faces, pos) = read_faces(mesh)?;
     let weights: BTreeMap<VertexId, Vec<JointWeight>> = mesh.vertices().iter().map(|v| (v.id, v.weights.clone())).collect();
     let (uses, sharp) = sharp_edges(&faces, &pos, angle);
@@ -233,7 +237,9 @@ pub(crate) fn bevel(mesh: &Mesh, angle: f64, width: f64, segments: u32, ctx: &mu
         let mut seq: Vec<u32> = Vec::new(); let mut normals_sum = [0.; 3];
         let mut f = start; let mut guard = 0;
         loop {
-            guard += 1; if guard > 256 { return Err(Error::Invalid("bevel vertex fan too large")); }
+            guard += 1; ctx.checkpoint(1)?;
+            // A valid fan visits each input face at most once.
+            if guard > faces.len() { return Err(Error::Invalid("bevel vertex fan does not close")); }
             let face = &faces[f]; let n = face.verts.len(); let i = corner_of[&(f, v)];
             normals_sum = add(normals_sum, face.normal);
             let (a, b) = repl[&(f, i)];

@@ -1102,9 +1102,6 @@ pub fn check_supported(m: &Model) -> Result<(), String> {
     if m.nflex != 0 {
         return refuse("flexes");
     }
-    if m.opt.integrator == INT_DISCRETE {
-        return refuse("the discrete integrator");
-    }
     if enabled(m, ENBL_IPC) {
         return refuse("IPC contacts");
     }

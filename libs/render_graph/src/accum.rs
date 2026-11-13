@@ -223,6 +223,7 @@ pub struct Accumulator {
     max: Option<Texture>,
     avg: Option<Texture>,
     ticket: Option<ReadbackTicket>,
+    readback_wait_logged: bool,
     /// The slots the last recording used, in chain order.
     last_chain: Vec<usize>,
     /// The frame's exposure for the display proxy of the error estimate.
@@ -246,6 +247,7 @@ impl Accumulator {
         self.base_valid = false;
         self.new_valid = false;
         self.ticket = None;
+        self.readback_wait_logged = false;
         if self.exposure <= 0.0 {
             self.exposure = 1.0;
         }
@@ -270,6 +272,9 @@ impl Accumulator {
 
     /// What to do this paint. Polls a pending measurement.
     pub fn step(&mut self, cx: &mut Cx) -> Step {
+        if self.readback_wait_logged {
+            self.ask_measure(cx, false);
+        }
         if let Some(ticket) = self.ticket {
             let Some(r) = cx.try_take_texture_readbacks_for(&[ticket]).into_iter().next() else {
                 return Step::Wait;
@@ -372,17 +377,7 @@ impl Accumulator {
         if let Some(Next::Measure { n }) = next {
             self.record_measure(cx, size, n);
             chain.extend([1, 2, 3]);
-            match self.max.as_ref().unwrap().read_back(cx.cx, ReadbackRequest { next_render: true }) {
-                Ok(t) => self.ticket = Some(t),
-                Err(e) => {
-                    // No readback on this backend: the minimum count.
-                    self.readback_error = Some(e.to_string());
-                    if let Some(s) = &mut self.schedule {
-                        s.measured(0.0);
-                        self.upcoming = Some(s.next());
-                    }
-                }
-            }
+            self.ask_measure(cx.cx, true);
         }
         let ids: Vec<DrawPassId> = chain.iter().map(|&i| self.slots[i].pass.draw_pass_id()).collect();
         for w in ids.windows(2) {
@@ -391,6 +386,32 @@ impl Accumulator {
         attach(cx, &self.slots[*chain.last().unwrap()].pass, parent);
         self.last_chain = chain;
         Some(ids[0])
+    }
+
+    fn ask_measure(&mut self, cx: &mut Cx, next_render: bool) {
+        match self.max.as_ref().unwrap().read_back(cx, ReadbackRequest { next_render }) {
+            Ok(ticket) => {
+                self.readback_wait_logged = false;
+                self.ticket = Some(ticket);
+            }
+            Err(ReadbackError::Backpressure) => {
+                if !self.readback_wait_logged {
+                    log!("accumulator: context readback request limit reached; error measurement waits");
+                    self.readback_wait_logged = true;
+                }
+                // Step::Wait retains the measurement and its host redraws the chain.
+                cx.redraw_all();
+            }
+            Err(e) => {
+                self.readback_wait_logged = false;
+                // No readback on this backend: the minimum count.
+                self.readback_error = Some(e.to_string());
+                if let Some(s) = &mut self.schedule {
+                    s.measured(0.0);
+                    self.upcoming = Some(s.next());
+                }
+            }
+        }
     }
 
     fn record_measure(&mut self, cx: &mut Cx2d, size: (u32, u32), n: u32) {

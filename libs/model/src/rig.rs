@@ -9,6 +9,8 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+/// Maximum joint count representable by glTF unsigned-short joint indices.
+pub(crate) const GLTF_JOINT_COUNT: usize = u16::MAX as usize + 1;
 /// Parent-local rest translation; this tranche deliberately supports identity
 /// rest rotation/scale. The index is a weight/animation joint ordinal.
 #[derive(Clone, Debug, PartialEq)]
@@ -44,9 +46,8 @@ pub struct AnimationClip {
     pub channels: Vec<AnimationChannel>,
 }
 
-fn name(value: &str, limits: &Limits) -> Result<()> {
+fn name(value: &str, _limits: &Limits) -> Result<()> {
     if value.is_empty()
-        || value.len() > limits.max_name_bytes
         || value.chars().any(char::is_control)
     {
         Err(Error::Invalid("rig name"))
@@ -72,8 +73,8 @@ impl Skeleton {
             .saturating_mul(2)
     }
     pub fn validate(&self, limits: &Limits, ctx: &mut mesh::Context<'_>) -> Result<()> {
-        if self.joints.is_empty() || self.joints.len() > limits.max_joints.min(128) {
-            return Err(Error::Budget("skeleton joints"));
+        if self.joints.is_empty() || self.joints.len() > GLTF_JOINT_COUNT {
+            return Err(Error::Budget("glTF u16 skeleton joints"));
         }
         let mut names = BTreeSet::new();
         for (i, joint) in self.joints.iter().enumerate() {
@@ -99,8 +100,8 @@ impl Skeleton {
         Ok(())
     }
     pub fn global_translations(&self) -> Result<Vec<[f64; 3]>> {
-        if self.joints.is_empty() || self.joints.len() > 128 {
-            return Err(Error::Budget("skeleton joints"));
+        if self.joints.is_empty() || self.joints.len() > GLTF_JOINT_COUNT {
+            return Err(Error::Budget("glTF u16 skeleton joints"));
         }
         let mut global = Vec::<[f64; 3]>::with_capacity(self.joints.len());
         for (i, j) in self.joints.iter().enumerate() {
@@ -220,7 +221,6 @@ impl AnimationClip {
             return Err(Error::Budget("animation channels"));
         }
         let mut targets = BTreeSet::new();
-        let mut total = 0usize;
         for channel in &self.channels {
             ctx.checkpoint(1)?;
             if channel.joint as usize >= skeleton.joints.len() {
@@ -229,8 +229,7 @@ impl AnimationClip {
             if !targets.insert((channel.joint, channel.path)) {
                 return Err(Error::Invalid("duplicate animation target"));
             }
-            total = total.saturating_add(channel.keys.len());
-            if channel.keys.is_empty() || total > limits.max_keyframes {
+            if channel.keys.is_empty() {
                 return Err(Error::Budget("animation keyframes"));
             }
             let mut previous = None;
@@ -238,11 +237,10 @@ impl AnimationClip {
                 ctx.checkpoint(1)?;
                 render_number(key.time)?;
                 if key.time < 0.
-                    || key.time > limits.max_clip_duration
                     || previous.is_some_and(|t| key.time as f32 <= t)
                 {
                     return Err(Error::Invalid(
-                        "key times must be increasing at f32 precision and within duration limit",
+                        "key times must be increasing at f32 precision",
                     ));
                 }
                 previous = Some(key.time as f32);
@@ -286,10 +284,10 @@ pub(crate) fn write_skeleton(w: &mut Writer, skeleton: &Skeleton) -> Result<()> 
     }
     Ok(())
 }
-pub(crate) fn read_skeleton(r: &mut Reader<'_>, limits: &Limits) -> Result<Skeleton> {
+pub(crate) fn read_skeleton(r: &mut Reader<'_>, _limits: &Limits) -> Result<Skeleton> {
     let mut joints = Vec::new();
-    for _ in 0..r.count(limits.max_joints.min(128))? {
-        let name = r.string(limits.max_name_bytes)?;
+    for _ in 0..r.count(32)? {
+        let name = r.string()?;
         let parent = r.u32()?;
         joints.push(Joint {
             name,
@@ -323,11 +321,10 @@ pub(crate) fn write_clip(w: &mut Writer, clip: &AnimationClip) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn read_clip(r: &mut Reader<'_>, limits: &Limits) -> Result<AnimationClip> {
-    let name = r.string(limits.max_name_bytes)?;
+pub(crate) fn read_clip(r: &mut Reader<'_>, _limits: &Limits) -> Result<AnimationClip> {
+    let name = r.string()?;
     let mut channels = Vec::new();
-    let mut total = 0usize;
-    for _ in 0..r.count(limits.max_joints.min(128).saturating_mul(3))? {
+    for _ in 0..r.count(9)? {
         let joint = r.u32()?;
         let path = match r.u8()? {
             0 => AnimationPath::Translation,
@@ -335,8 +332,7 @@ pub(crate) fn read_clip(r: &mut Reader<'_>, limits: &Limits) -> Result<Animation
             2 => AnimationPath::Scale,
             _ => return Err(Error::Corrupt("animation path")),
         };
-        let count = r.count(limits.max_keyframes.saturating_sub(total))?;
-        total += count;
+        let count = r.count(40)?;
         let mut keys = Vec::new();
         for _ in 0..count {
             keys.push(Keyframe {

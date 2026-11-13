@@ -1,4 +1,4 @@
-//! On-demand GPU state counts. Nothing here runs in the per-frame GI loop.
+//! On-demand GPU state counts. Only a refused request is retried in the per-frame GI loop.
 use super::*;
 use makepad_platform::{ReadbackError, ReadbackRequest, ReadbackTicket};
 
@@ -10,7 +10,9 @@ struct CountGpu {
 }
 
 struct Sample {
-    ticket: ReadbackTicket,
+    ticket: Option<ReadbackTicket>,
+    texture: Texture,
+    error: Option<ReadbackError>,
     generation: u64,
     frame: u64,
     config: GiConfig,
@@ -25,12 +27,42 @@ pub(super) struct ProbeCounts {
     gpu: Option<CountGpu>,
     pending: Option<Sample>,
     empty_reported: bool,
+    wait_logged: bool,
 }
 
 impl ProbeCounts {
     #[cfg(test)]
     pub(super) fn pass(&self) -> Option<&DrawPass> {
         self.gpu.as_ref().map(|gpu| &gpu.pass)
+    }
+
+    fn ask(&mut self, cx: &mut Cx, next_render: bool) -> Result<(), ReadbackError> {
+        let Some(sample) = &mut self.pending else { return Ok(()) };
+        if sample.ticket.is_some() || sample.error.is_some() { return Ok(()); }
+        match sample.texture.read_back(cx, ReadbackRequest { next_render }) {
+            Ok(ticket) => {
+                self.wait_logged = false;
+                sample.ticket = Some(ticket);
+            }
+            Err(ReadbackError::Backpressure) => {
+                if !self.wait_logged {
+                    log!("fast GI: context readback request limit reached; probe counts wait");
+                    self.wait_logged = true;
+                }
+                cx.redraw_all();
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    /// A refused request is retried before the next GI draw, even between reports.
+    pub(super) fn retry(&mut self, cx: &mut Cx) {
+        if !self.wait_logged { return; }
+        if let Err(error) = self.ask(cx, false) {
+            self.wait_logged = false;
+            if let Some(sample) = &mut self.pending { sample.error = Some(error); }
+        }
     }
 
     pub fn release(&mut self, retired: &mut Vec<Texture>) {
@@ -106,17 +138,27 @@ impl FastGi {
         cx2.end_pass_sized_turtle();
         counts.list.end(&mut cx2);
         cx2.end_pass(&counts.pass);
-        let ticket = counts.texture.read_back(cx2.cx, ReadbackRequest { next_render: true })?;
         self.probe_counts.pending = Some(Sample {
-            ticket, generation: self.generation, frame: self.frame, config, swept,
+            ticket: None, texture: counts.texture.clone(), error: None,
+            generation: self.generation, frame: self.frame, config, swept,
             scene_key: self.scene_key, voxel_jobs: self.stats.voxel_jobs,
         });
+        if let Err(error) = self.probe_counts.ask(cx2.cx, true) {
+            self.probe_counts.pending = None;
+            return Err(error);
+        }
         Ok(true)
     }
 
     pub fn poll_probe_counts(&mut self, cx: &mut Cx) -> Result<Option<GiStats>, ReadbackError> {
+        self.probe_counts.retry(cx);
         let Some(sample) = &self.probe_counts.pending else { return Ok(None) };
-        let Some(result) = cx.try_take_texture_readbacks_for(&[sample.ticket]).into_iter().next() else {
+        if let Some(error) = sample.error {
+            self.probe_counts.pending = None;
+            return Err(error);
+        }
+        let Some(ticket) = sample.ticket else { return Ok(None) };
+        let Some(result) = cx.try_take_texture_readbacks_for(&[ticket]).into_iter().next() else {
             return Ok(None);
         };
         let sample = self.probe_counts.pending.take().unwrap();

@@ -389,18 +389,9 @@ fn cancellation_and_budget_failures_leave_complete_surface_unchanged() {
         )
         .is_err());
     assert_eq!(state, before);
-    let mut tiny = l.clone();
-    tiny.mesh.max_work = 5;
-    assert!(state
-        .apply(
-            &op,
-            &objects,
-            &legacy,
-            &tiny,
-            &mut mesh::Context::new(tiny.mesh.clone(), None)
-        )
-        .is_err());
-    assert_eq!(state, before);
+    state.apply(&op, &objects, &legacy, &l, &mut mesh::Context::default()).unwrap();
+    assert_ne!(state, before, "uncancelled work completes without a work budget");
+    let before = state.clone();
     let bad = SurfaceOperation::Mask {
         material: 0,
         channel: SurfaceChannel::BaseColor,
@@ -835,12 +826,12 @@ fn derive_rejects_invalid_recipes_and_rolls_back_unknown_sources() {
     let recipe=SurfaceDerivation {source_channel:SurfaceChannel::BaseColor,source_layer:None,
         strength:1.,roughness_min:0.2,roughness_max:0.9,metallic:0.,wrap:true};
     for invalid in [
-        SurfaceDerivation {strength:17.,..recipe.clone()},
         SurfaceDerivation {roughness_min:0.9,roughness_max:0.2,..recipe.clone()},
         SurfaceDerivation {source_layer:Some("".into()),..recipe.clone()},
     ] {
         assert!(SurfaceOperation::Derive {material:0,channel:SurfaceChannel::Normal,layer:"n".into(),recipe:invalid}.check(&limits).is_err());
     }
+    assert!(SurfaceOperation::Derive {material:0,channel:SurfaceChannel::Normal,layer:"n".into(),recipe:SurfaceDerivation {strength:17.,..recipe.clone()}}.check(&limits).is_ok());
     let mut d = document();
     let before = d.to_bytes(None).unwrap();
     let operation=SurfaceOperation::Derive {material:0,channel:SurfaceChannel::Normal,layer:"n".into(),

@@ -19,7 +19,6 @@ makepad-render-graph = { path = "../render_graph" }
 makepad-soft-body = { path = "../soft_body" }
 # Generated skin material-atlas preparation uses the shared GLB reader.
 makepad-gltf = { path = "../gltf" }
-makepad-raytrace = { path = "../raytrace" }
 # Inflate for the baked AO textures' zlib streams (tools/ao_bake writes
 # them); in-repo, so the no-external-crates rule holds.
 makepad-fast-inflate = { path = "../fast_inflate" }

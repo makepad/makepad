@@ -23,7 +23,7 @@ use crate::solver;
 use crate::support;
 use crate::types::*;
 use crate::util_blas as blas;
-use crate::util_errmem::warning;
+use crate::util_errmem::{error, warning};
 use crate::util_misc as misc;
 use crate::util_solve as solve;
 use crate::util_sparse as sparse;
@@ -620,9 +620,38 @@ fn warmstart(m: &Model, d: &mut Data) {
     }
 }
 
+// discrete: reinstate the free-body gyroscopic derivative for decoupled standalone free
+// bodies, re-solving their rows of qacc against the local unsymmetric metric. Guarded by
+// mjd_freeGyroPossible: no constraint Jacobian support and no off-diagonal metric coupling
+// on the 6 dofs, so the overwrite leaves all other rows and the constraint solution intact
 fn discrete_gyro(m: &Model, d: &mut Data) {
     if m.opt.integrator != INT_DISCRETE || d.efm_active == 0 { return; }
-    crate::unported!("mj_discreteGyro");
+    for j in 0..m.njnt {
+        let mut a = [0.0; 36];
+        let mut rhs = [0.0; 6];
+        let mut x = [0.0; 6];
+
+        // skip if the joint cannot take the decoupled local treatment
+        if derivative::d_free_gyro_possible(m, d, j) == 0
+            || derivative::d_free_mhat(m, d, j, m.opt.timestep, &mut a, 1) == 0
+        {
+            continue;
+        }
+
+        // rhs = qfrc_smooth + smooth-force shifts
+        let adr = m.jnt_dofadr[j] as usize;
+        blas::add(&mut rhs, &d.qfrc_smooth[adr..], &d.efm_c[adr..], 6);
+        if !d.efm_ca.is_empty() {
+            blas::add_to(&mut rhs, &d.efm_ca[adr..], 6);
+        }
+
+        // overwrite the joint's rows of qacc with the local solve
+        let mut pivot = [0; 6];
+        if solve::factor_lu6(&mut a, &mut pivot) != 0 {
+            solve::solve_lu6(&mut x, &a, &rhs, &pivot);
+            inline::copy6(inline::at6_mut(&mut d.qacc, adr), &x);
+        }
+    }
 }
 
 // C's static fwdConstraint differs from its public mj_fwdConstraint wrapper.
@@ -953,7 +982,17 @@ pub fn euler_skip(m: &Model, d: &mut Data, skipfactor: i32) {
 
 pub fn euler(m: &Model, d: &mut Data) { euler_skip(m, d, 0); }
 
-pub fn discrete(_m: &Model, _d: &mut Data) { crate::unported!("mj_discrete"); }
+// discrete integrator: the solver's qacc is the step map, advance directly
+pub fn discrete(m: &Model, d: &mut Data) {
+    // advance reads act_dot and qacc while it writes the state (it never writes either)
+    let mut act_dot = d.scratch.num(m.na);
+    let mut qacc = d.scratch.num(m.nv);
+    blas::copy(&mut act_dot, &d.act_dot, m.na);
+    blas::copy(&mut qacc, &d.qacc, m.nv);
+    advance(m, d, &act_dot, &qacc, None);
+    d.scratch.put_num(qacc);
+    d.scratch.put_num(act_dot);
+}
 
 const RK4_A: [f64; 9] = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 1.0];
 const RK4_B: [f64; 4] = [1.0/6.0, 1.0/3.0, 1.0/3.0, 1.0/6.0];
@@ -1100,9 +1139,75 @@ pub fn runge_kutta(m: &Model, d: &mut Data, n: i32) {
 }
 
 pub fn check_discrete(m: &Model) {
-    // Supported models take the non-metric early return; IPC/flex/discrete validation is out.
-    if !enabled(m, ENBL_IPC) && core_util::is_metric(m) == 0 && m.nflex == 0 { return; }
-    crate::unported!("mj_checkDiscrete");
+    // the IPC contact mode is a mode of the discrete integrator: its inner solves are the
+    // discrete solve, so no other integrator can host it
+    if enabled(m, ENBL_IPC) && m.opt.integrator != INT_DISCRETE {
+        error("mj_checkDiscrete: flag ipc requires integrator='discrete'");
+    }
+
+    // the inner solves use a primal solver (Newton or CG) over the monolithic problem
+    if enabled(m, ENBL_IPC) && m.opt.solver != SOL_NEWTON && m.opt.solver != SOL_CG {
+        error("mj_checkDiscrete: flag ipc requires solver='Newton' or 'CG'");
+    }
+
+    // inverse dynamics is not supported under the flag (mj_discreteAcc), and this option runs it
+    // on every step
+    if enabled(m, ENBL_IPC) && enabled(m, ENBL_FWDINV) {
+        error("mj_checkDiscrete: flag ipc does not support flag fwdinv: inverse dynamics is not available");
+    }
+
+    // the IPC step appends every articulated tree to its solve and writes the result back, with no
+    // notion of a sleeping tree; sleeping bodies are also invisible to its flex broad phase
+    if enabled(m, ENBL_IPC) && enabled(m, ENBL_SLEEP) {
+        error("mj_checkDiscrete: flag ipc does not support flag sleep");
+    }
+
+    // SNH and passive flex contact require the discrete integrator's effective metric
+    if core_util::is_metric(m) == 0 {
+        for f in 0..m.nflex {
+            let stiffnessadr = m.flex_stiffnessadr[f];
+            if m.flex_interp[f] == 0 && m.flex_dim[f] == 3 && stiffnessadr >= 0
+                && m.flex_stiffness[stiffnessadr as usize + 21] != 0.0
+            {
+                error("mj_checkDiscrete: stable Neo-Hookean elasticity requires integrator='discrete'");
+            }
+            if core_util::eff_flex_contact_possible(m, f) != 0 {
+                error("mj_checkDiscrete: passive flex contact requires an integrator with the effective metric: \
+                       set integrator='discrete'");
+            }
+        }
+
+        // until the discrete integrator, flex elasticity was integrated implicitly under
+        // implicit and implicitfast; those models need the metric. Euler and RK4 always
+        // integrated it explicitly and still do
+        if m.opt.integrator == INT_IMPLICIT || m.opt.integrator == INT_IMPLICITFAST {
+            for f in 0..m.nflex {
+                if core_util::eff_flex_stiff_possible(m, f) != 0 {
+                    error("mj_checkDiscrete: flex elasticity is no longer integrated implicitly under \
+                           integrator='implicit' and 'implicitfast': set \
+                           integrator='discrete', or 'Euler' with a small timestep");
+                }
+            }
+        }
+        return;
+    }
+    for f in 0..m.nflex {
+        if m.flex_rigid[f] == 0 && (m.flex_edgestiffness[f] > 0.0 || m.flex_edgedamping[f] > 0.0) {
+            error("mj_checkDiscrete: discrete integrator: flex edge stiffness and damping are not supported; \
+                   use <elasticity> or <edge equality> instead");
+        }
+    }
+    if m.opt.solver == SOL_PGS || m.opt.noslip_iterations > 0 {
+        // the dual solvers assemble the constraint-space AR from an explicit factorization of
+        // the metric, and the only factor is the qH backbone. Flex cannot be excluded: explicit
+        // flex elasticity is the divergence the metric exists to prevent
+        if core_util::eff_flex_any(m) != 0 {
+            error("mj_checkDiscrete: discrete integrator: PGS and noslip not yet supported with flex");
+        }
+    }
+    if enabled(m, ENBL_SLEEP) && disabled(m, DSBL_ISLAND) {
+        error("mj_checkDiscrete: discrete integrator: sleep without islands not yet supported");
+    }
 }
 
 pub fn implicit_skip(m: &Model, d: &mut Data, skipfactor: i32) {
@@ -1232,7 +1337,7 @@ pub fn step(m: &Model, d: &mut Data) {
         INT_IMPLICIT | INT_IMPLICITFAST => implicit(m, d),
         INT_DISCRETE => {
             if enabled(m, ENBL_IPC) { crate::unported!("mj_ipc"); }
-            else { crate::unported!("mj_discrete"); }
+            else { discrete(m, d); }
         }
         _ => panic!("invalid integrator"),
     }
@@ -1269,7 +1374,7 @@ pub fn step2(m: &Model, d: &mut Data) {
     if enabled(m, ENBL_FWDINV) { inverse::compare_fwd_inv(m, d); }
     if m.opt.integrator == INT_DISCRETE {
         if enabled(m, ENBL_IPC) { crate::unported!("mj_ipc"); }
-        else { crate::unported!("mj_discrete"); }
+        else { discrete(m, d); }
     } else if m.opt.integrator == INT_IMPLICIT || m.opt.integrator == INT_IMPLICITFAST {
         implicit(m, d);
     } else { euler(m, d); }

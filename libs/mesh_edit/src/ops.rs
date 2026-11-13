@@ -132,11 +132,6 @@ impl Mesh {
         ctx: &mut Context<'_>,
     ) -> Result<BTreeSet<VertexId>> {
         ctx.checkpoint(ids.len() as u64)?;
-        ctx.limit(
-            "selected vertices",
-            ids.len() as u64,
-            ctx.limits.max_vertices as u64,
-        )?;
         ctx.bytes(
             self.estimated_bytes()
                 .saturating_add(ids.len().saturating_mul(64)),
@@ -177,11 +172,6 @@ impl Mesh {
         ctx: &mut Context<'_>,
     ) -> Result<ChangeSet> {
         ctx.checkpoint(weights.len() as u64)?;
-        ctx.limit(
-            "selected vertices",
-            weights.len() as u64,
-            ctx.limits.max_vertices as u64,
-        )?;
         let count = weights
             .iter()
             .fold(0usize, |n, (_, w)| n.saturating_add(w.len()));
@@ -379,11 +369,6 @@ impl Mesh {
     /// unreferenced non-loose edge attributes are discarded.
     pub fn delete_faces(&mut self, faces: &[FaceId], ctx: &mut Context<'_>) -> Result<ChangeSet> {
         ctx.checkpoint(faces.len() as u64)?;
-        ctx.limit(
-            "selected faces",
-            faces.len() as u64,
-            ctx.limits.max_faces as u64,
-        )?;
         ctx.bytes(
             self.estimated_bytes()
                 .saturating_add(faces.len().saturating_mul(64)),
@@ -846,11 +831,6 @@ pub(crate) fn normalize_weights(
     weights: &[JointWeight],
     ctx: &mut Context<'_>,
 ) -> Result<Vec<JointWeight>> {
-    ctx.limit(
-        "weights per vertex",
-        weights.len() as u64,
-        ctx.limits.max_weights_per_vertex as u64,
-    )?;
     let mut merged = BTreeMap::<u32, f64>::new();
     for w in weights {
         ctx.checkpoint(1)?;

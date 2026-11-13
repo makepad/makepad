@@ -596,6 +596,8 @@ fn clip_samples_bake_interpolated_joints_and_morphs_and_preserve_source() {
 
 #[test]
 fn malformed_motion_requests_are_rejected() {
+    let late = makepad_model::json::parse(b"{\"kind\":\"clip\",\"name\":\"long-clip\",\"time\":3601}").unwrap();
+    assert!(matches!(ReviewPose::from_json(&late).unwrap(), ReviewPose::Clip { time: 3601., .. }));
     let car = vehicle();
     let person = character(true);
     for pose in [

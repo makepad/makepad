@@ -694,7 +694,8 @@ fn a_check_reports_each_step_in_order_and_stops_within_one() {
 #[test]
 fn blocks_bonded_to_a_tpu_ribbon_bend_about_it() {
     use makepad_csg_mech::flex;
-    use makepad_csg_mech::sim::{JointKind, MechWorld, GRAVITY};
+    use makepad_csg_mech::runner::dynamics_world;
+    use makepad_csg_mech::sim::{JointKind, GRAVITY};
     let profile = Profile::default();
     // the ribbon along X, 1.2 mm thin (Z) and 4 mm tall (Y); the blocks 6 mm apart on it
     let ribbon = PartBox { min: [-1.0, 1.0, -0.6], max: [55.0, 5.0, 0.6] };
@@ -738,7 +739,7 @@ fn blocks_bonded_to_a_tpu_ribbon_bend_about_it() {
     assert!(asm.joints.iter().any(|j| j.kind == JointKind::Weld && j.a == 1 && j.b == 0), "the ribbon rides the first block");
     // gravity across the ribbon: the second block's weight about the pivot against the spring
     let sag = |asm: &makepad_csg_mech::sim::Assembly| {
-        let mut w = MechWorld::new(asm, [0.0, 0.0, -GRAVITY], None);
+        let mut w = dynamics_world(asm, [0.0, 0.0, -GRAVITY], None).unwrap();
         for _ in 0..720 {
             w.step(1.0 / 240.0);
         }

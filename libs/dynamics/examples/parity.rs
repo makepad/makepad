@@ -1,9 +1,9 @@
 //! Parity traces: step a model file and write what each step computed, or compare two traces
 //! bit for bit (this crate's against the reference engine's, CREDITS.md).
 //!
-//!   parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]]
+//!   parity trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator> [<solver> [<cone> [<enable flags>]]]]]
 //!   parity diff <a> <b>
-//!   parity speed <model file> <steps> <qvel scale> <runs>
+//!   parity speed <model file> <steps> <qvel scale> <runs> [<integrator>]
 //!   parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags>
 //!
 //! `parity threads <n> <mode> ...` runs a mode with a pool of n threads bound to its Data.
@@ -311,10 +311,19 @@ fn start(m: &Model, scale: f64) -> Data {
     d
 }
 
-fn run_trace(model: &str, steps: usize, scale: f64, out_path: &str, ctrl: Option<f64>, integrator: Option<i32>) -> Result<bool, String> {
+fn run_trace(model: &str, steps: usize, scale: f64, out_path: &str, ctrl: Option<f64>, integrator: Option<i32>, solver: Option<i32>, cone: Option<i32>, flags: Option<i32>) -> Result<bool, String> {
     let mut m = load_model_with(Path::new(model), attach)?;
     if let Some(i) = integrator {
         m.opt.integrator = i;
+    }
+    if let Some(s) = solver {
+        m.opt.solver = s;
+    }
+    if let Some(c) = cone {
+        m.opt.cone = c;
+    }
+    if let Some(f) = flags {
+        m.opt.enableflags |= f;
     }
     let mut d = start(&m, scale);
     let mut out = Vec::new();
@@ -491,8 +500,11 @@ fn run_history(model: &str, steps: usize, scale: f64, out_path: &str, integrator
 }
 
 /// Step rate: 100 warm-up steps, then `steps` timed, `runs` times, as the reference driver does.
-fn run_speed(model: &str, steps: usize, scale: f64, runs: usize) -> Result<bool, String> {
-    let m = load_model_with(Path::new(model), attach)?;
+fn run_speed(model: &str, steps: usize, scale: f64, runs: usize, integrator: Option<i32>) -> Result<bool, String> {
+    let mut m = load_model_with(Path::new(model), attach)?;
+    if let Some(i) = integrator {
+        m.opt.integrator = i;
+    }
     for r in 0..runs {
         let mut d = start(&m, scale);
         for _ in 0..100 {
@@ -508,36 +520,49 @@ fn run_speed(model: &str, steps: usize, scale: f64, runs: usize) -> Result<bool,
     Ok(true)
 }
 
-/// The step's stages timed one by one (sensors left out), after 100 warm-up steps.
-fn run_stage_speed(model: &str, steps: usize, scale: f64) -> Result<bool, String> {
-    use makepad_dynamics::types::{INT_EULER, INT_RK4};
-    let m = load_model_with(Path::new(model), attach)?;
+/// The step's stages timed one by one (sensors left out), after 100 warm-up steps, in the step's order; the
+/// acceleration stage takes the effective metric's actuation and the metric constraint terms before it.
+fn run_stage_speed(model: &str, steps: usize, scale: f64, integrator: Option<i32>) -> Result<bool, String> {
+    use makepad_dynamics::types::{INT_DISCRETE, INT_EULER, INT_RK4};
+    use makepad_dynamics::{core_constraint, core_util, metric};
+    let mut m = load_model_with(Path::new(model), attach)?;
+    if let Some(i) = integrator {
+        m.opt.integrator = i;
+    }
     let mut d = start(&m, scale);
     for _ in 0..100 {
         forward::step(&m, &mut d);
     }
     let mut t = [0.0f64; 6];
     for _ in 0..steps {
-        let t0 = std::time::Instant::now();
+        forward::check_discrete(&m);
         forward::check_pos(&m, &mut d);
         forward::check_vel(&m, &mut d);
+        let t0 = std::time::Instant::now();
         forward::fwd_position(&m, &mut d);
         let t1 = std::time::Instant::now();
         forward::fwd_velocity(&m, &mut d);
         let t2 = std::time::Instant::now();
         forward::fwd_actuation(&m, &mut d);
         let t3 = std::time::Instant::now();
+        metric::eff_actuation(&m, &mut d, 1);
+        if core_util::is_metric(&m) != 0 {
+            core_constraint::regularize_constraint(&m, &mut d, 1);
+            core_constraint::reference_constraint(&m, &mut d);
+        }
         forward::fwd_acceleration(&m, &mut d);
         let t4 = std::time::Instant::now();
         forward::fwd_constraint(&m, &mut d);
-        forward::check_acc(&m, &mut d);
         let t5 = std::time::Instant::now();
+        forward::check_acc(&m, &mut d);
+        let t6s = std::time::Instant::now();
         match m.opt.integrator {
             INT_EULER => forward::euler(&m, &mut d),
             INT_RK4 => forward::runge_kutta(&m, &mut d, 4),
+            INT_DISCRETE => forward::discrete(&m, &mut d),
             _ => forward::implicit(&m, &mut d),
         }
-        let t6 = std::time::Instant::now();
+        let t6 = t5 + (std::time::Instant::now() - t6s);
         for (i, (a, b)) in [(t0, t1), (t1, t2), (t2, t3), (t3, t4), (t4, t5), (t5, t6)].iter().enumerate() {
             t[i] += (*b - *a).as_secs_f64();
         }
@@ -605,16 +630,28 @@ fn main() {
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["diff", a, b] => run_diff(a, b),
         ["trace", model, steps, scale, out] => match (steps.parse(), scale.parse()) {
-            (Ok(n), Ok(q)) => run_trace(model, n, q, out, None, None),
+            (Ok(n), Ok(q)) => run_trace(model, n, q, out, None, None, None, None, None),
             _ => Err("trace: steps and qvel scale are numbers".to_string()),
         },
         ["trace", model, steps, scale, out, ctrl] => match (steps.parse(), scale.parse(), ctrl.parse()) {
-            (Ok(n), Ok(q), Ok(c)) => run_trace(model, n, q, out, Some(c), None),
+            (Ok(n), Ok(q), Ok(c)) => run_trace(model, n, q, out, Some(c), None, None, None, None),
             _ => Err("trace: steps, qvel scale and ctrl scale are numbers".to_string()),
         },
         ["trace", model, steps, scale, out, ctrl, integrator] => match (steps.parse(), scale.parse(), ctrl.parse(), integrator.parse()) {
-            (Ok(n), Ok(q), Ok(c), Ok(i)) => run_trace(model, n, q, out, Some(c), Some(i)),
+            (Ok(n), Ok(q), Ok(c), Ok(i)) => run_trace(model, n, q, out, Some(c), Some(i), None, None, None),
             _ => Err("trace: steps, qvel scale, ctrl scale and integrator are numbers".to_string()),
+        },
+        ["trace", model, steps, scale, out, ctrl, integrator, solver] => match (steps.parse(), scale.parse(), ctrl.parse(), integrator.parse(), solver.parse()) {
+            (Ok(n), Ok(q), Ok(c), Ok(i), Ok(s)) => run_trace(model, n, q, out, Some(c), Some(i), Some(s), None, None),
+            _ => Err("trace: steps, qvel scale, ctrl scale, integrator and solver are numbers".to_string()),
+        },
+        ["trace", model, steps, scale, out, ctrl, integrator, solver, cone] => match (steps.parse(), scale.parse(), ctrl.parse(), integrator.parse(), solver.parse(), cone.parse()) {
+            (Ok(n), Ok(q), Ok(c), Ok(i), Ok(s), Ok(k)) => run_trace(model, n, q, out, Some(c), Some(i), Some(s), Some(k), None),
+            _ => Err("trace: steps, qvel scale, ctrl scale, integrator, solver and cone are numbers".to_string()),
+        },
+        ["trace", model, steps, scale, out, ctrl, integrator, solver, cone, flags] => match (steps.parse(), scale.parse(), ctrl.parse(), integrator.parse(), solver.parse(), cone.parse(), flags.parse()) {
+            (Ok(n), Ok(q), Ok(c), Ok(i), Ok(s), Ok(k), Ok(f)) => run_trace(model, n, q, out, Some(c), Some(i), Some(s), Some(k), Some(f)),
+            _ => Err("trace: steps, qvel scale, ctrl scale, integrator, solver, cone and enable flags are numbers".to_string()),
         },
         ["inverse", model, steps, scale, out, integrator, flags] => match (steps.parse(), scale.parse(), integrator.parse(), flags.parse()) {
             (Ok(n), Ok(q), Ok(i), Ok(f)) => run_inverse(model, n, q, out, i, f),
@@ -629,18 +666,26 @@ fn main() {
             _ => Err("history: steps, qvel scale and integrator are numbers".to_string()),
         },
         ["speed", model, steps, scale, runs] => match (steps.parse(), scale.parse(), runs.parse()) {
-            (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r),
+            (Ok(n), Ok(q), Ok(r)) => run_speed(model, n, q, r, None),
             _ => Err("speed: steps, qvel scale and runs are numbers".to_string()),
+        },
+        ["speed", model, steps, scale, runs, integrator] => match (steps.parse(), scale.parse(), runs.parse(), integrator.parse()) {
+            (Ok(n), Ok(q), Ok(r), Ok(i)) => run_speed(model, n, q, r, Some(i)),
+            _ => Err("speed: steps, qvel scale, runs and integrator are numbers".to_string()),
         },
         ["kernelspeed", model, steps, scale] => match (steps.parse(), scale.parse()) {
             (Ok(n), Ok(q)) => run_kernel_speed(model, n, q),
             _ => Err("kernelspeed: steps and qvel scale are numbers".to_string()),
         },
         ["stagespeed", model, steps, scale] => match (steps.parse(), scale.parse()) {
-            (Ok(n), Ok(q)) => run_stage_speed(model, n, q),
+            (Ok(n), Ok(q)) => run_stage_speed(model, n, q, None),
             _ => Err("stagespeed: steps and qvel scale are numbers".to_string()),
         },
-        _ => Err("usage: parity [threads <n>] trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator>]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity rays <model file> <steps> <ray interval> <qvel scale> <out> | parity history <model file> <steps> <qvel scale> <out> <integrator> | parity speed <model file> <steps> <qvel scale> <runs> | parity stagespeed <model file> <steps> <qvel scale> | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
+        ["stagespeed", model, steps, scale, integrator] => match (steps.parse(), scale.parse(), integrator.parse()) {
+            (Ok(n), Ok(q), Ok(i)) => run_stage_speed(model, n, q, Some(i)),
+            _ => Err("stagespeed: steps, qvel scale and integrator are numbers".to_string()),
+        },
+        _ => Err("usage: parity [threads <n>] trace <model file> <steps> <qvel scale> <out> [<ctrl scale> [<integrator> [<solver> [<cone> [<enable flags>]]]]] | parity diff <a> <b> | parity inverse <model file> <steps> <qvel scale> <out> <integrator> <enable flags> | parity rays <model file> <steps> <ray interval> <qvel scale> <out> | parity history <model file> <steps> <qvel scale> <out> <integrator> | parity speed <model file> <steps> <qvel scale> <runs> [<integrator>] | parity stagespeed <model file> <steps> <qvel scale> [<integrator>] | parity kernelspeed <model file> <steps> <qvel scale>".to_string()),
     };
     match result {
         Ok(true) => {}

@@ -1,11 +1,11 @@
 use crate::{mesh::{self, Polygon}, Error, Limits, Result};
 
 pub(crate) fn sphere(radius:f64,segments:u32,rings:u32,smooth:bool,limits:&Limits)->Result<Vec<u8>> {
-    if !radius.is_finite() || radius<=0.0 || !(3..=128).contains(&segments) || !(2..=128).contains(&rings) {
-        return Err(Error::Invalid("sphere needs positive radius, 3..128 segments and 2..128 rings"));
+    if !radius.is_finite() || radius<=0.0 || segments<3 || rings<2 {
+        return Err(Error::Invalid("sphere needs positive radius, at least 3 segments and 2 rings"));
     }
     let n=segments as usize; let r=rings as usize;
-    preflight((r-1)*n+2,r*n,n*(4*r-2),limits)?;
+    preflight((r-1).saturating_mul(n).saturating_add(2),r.saturating_mul(n),n.saturating_mul(r.saturating_mul(4).saturating_sub(2)),limits)?;
     let mut positions=Vec::with_capacity((r-1)*n+2); positions.push([0.,radius,0.]);
     for row in 1..r {
         let (theta_cos,theta_sin)=turn(row,2*r);
@@ -43,11 +43,11 @@ pub(crate) fn sphere(radius:f64,segments:u32,rings:u32,smooth:bool,limits:&Limit
 }
 
 pub(crate) fn cylinder(radius:f64,height:f64,segments:u32,smooth:bool,limits:&Limits)->Result<Vec<u8>> {
-    if !radius.is_finite() || radius<=0.0 || !height.is_finite() || height<=0.0 || !(3..=128).contains(&segments) {
-        return Err(Error::Invalid("cylinder needs positive radius/height and 3..128 segments"));
+    if !radius.is_finite() || radius<=0.0 || !height.is_finite() || height<=0.0 || segments<3 {
+        return Err(Error::Invalid("cylinder needs positive radius/height and at least 3 segments"));
     }
     let n=segments as usize;
-    preflight(n*2,n+2,n*6,limits)?;
+    preflight(n.saturating_mul(2),n.saturating_add(2),n.saturating_mul(6),limits)?;
     let mut positions=Vec::with_capacity(n*2);
     for y in [-height*0.5,height*0.5] { for col in 0..n {
         let (cos,sin)=turn(col,n);
@@ -97,10 +97,10 @@ pub(crate) fn turn(k:usize,n:usize)->(f64,f64) {
     match octant/2 {0=>(c,s),1=>(-s,c),2=>(-c,-s),_=>(s,-c)}
 }
 fn preflight(vertices:usize,faces:usize,corners:usize,limits:&Limits)->Result<()> {
-    if vertices>limits.mesh.max_vertices || faces>limits.mesh.max_faces || corners>limits.mesh.max_corners
-        || vertices.saturating_mul(128).saturating_add(corners.saturating_mul(160))>limits.mesh.max_bytes {
-        return Err(Error::Budget("primitive geometry"));
-    }
+    // Polygon indices and serialized mesh counts are u32.
+    for n in [vertices,faces,corners] { u32::try_from(n).map_err(|_|Error::Budget("mesh source u32 count"))?; }
+    let bytes=vertices.checked_mul(128).and_then(|n|corners.checked_mul(160).and_then(|c|n.checked_add(c))).ok_or(Error::Budget("primitive storage overflow"))?;
+    mesh::Context::new(limits.mesh.clone(),None).bytes(bytes)?;
     Ok(())
 }
 
