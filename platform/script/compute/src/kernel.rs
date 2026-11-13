@@ -14,7 +14,7 @@
 //! The host scheduler runs fixed chunks; a reduce kernel combines its
 //! chunk partials in chunk order, so every result is bit-identical whatever
 //! the backend, thread count or scheduling.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::ir::{self, Program};
 pub use crate::boundary::KernelRef;
@@ -609,11 +609,11 @@ pub struct Recorded {
     pub modules: Vec<(String, String)>,
 }
 
-fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, makepad_relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
-    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Recorded>, makepad_relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>)> = std::sync::OnceLock::new();
+fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
+    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Recorded>, relax_api::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>)> = std::sync::OnceLock::new();
     Q.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
-        (tx, makepad_relax_api::sync::Mutex::new(rx))
+        (tx, relax_api::sync::Mutex::new(rx))
     })
 }
 

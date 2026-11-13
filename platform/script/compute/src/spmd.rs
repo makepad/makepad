@@ -16,7 +16,7 @@
 //! code's 0/1 words, [`steps`] which integers are arithmetic sequences
 //! across lanes (contiguous and strided memory fast paths), and
 //! [`supported`] what the four-wide form declines (the scalar code runs).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Un, Val, Var};
 use crate::lower::kernel::ELEMENT_CAP;

@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::function::*;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -11,7 +11,7 @@ use crate::*;
 use ::std::fmt;
 //use std::collections::btree_map::BTreeMap;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Clone, Copy)]
 pub struct ScriptObjectTag(u64);
 
@@ -19,7 +19,7 @@ pub type ScriptObjectMap = ValueMap<ScriptValue, ScriptMapValue>;
 
 /// One `key: value` of an object's map as it crosses out of the VM (C-shaped: the VM is the
 /// rustc-built part of the makepad loader, loader-core.md section 8).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ScriptMapEntry {
@@ -28,7 +28,7 @@ pub struct ScriptMapEntry {
 }
 
 /// A caller-owned `Vec<ScriptObject>` the VM appends to (as ScriptEntriesOut).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptObjectsOut<'a> {
     ctx: *mut u8,
@@ -55,7 +55,7 @@ impl<'a> ScriptObjectsOut<'a> {
 
 /// A caller-owned `Vec<ScriptMapEntry>` the VM appends to through a C call made on the
 /// caller's side ([`ScriptEntriesOut::new`] is inline), as ScriptTextOut does for text.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptEntriesOut<'a> {
     ctx: *mut u8,
@@ -88,7 +88,7 @@ impl<'a> ScriptEntriesOut<'a> {
 
 /// A Rust-held reference to a script object: a GC root while it lives (roots.rs). C-shaped:
 /// Clone and Drop are retain/release calls on the heap's root table.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptObjectRef {
     /// the root table of the heap that made it; null: not a root
@@ -696,7 +696,7 @@ impl fmt::Display for ScriptObjectTag {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct ScriptMapTag(u64);
 
@@ -747,14 +747,14 @@ impl ScriptMapTag {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 pub struct ScriptMapValue {
     pub tag: ScriptMapTag,
     pub value: ScriptValue,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptVecValue {
@@ -762,7 +762,7 @@ pub struct ScriptVecValue {
     pub value: ScriptValue,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Debug)]
 pub struct ScriptObjectData {
     pub tag: ScriptObjectTag,

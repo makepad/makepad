@@ -18,7 +18,7 @@
 //! Inputs `time` (f32), `seed` and `count` (i32) are always available.
 //! Buffer accesses clamp to the host buffer's real length, so a kernel
 //! cannot read or write outside what the host bound.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use super::*;
 

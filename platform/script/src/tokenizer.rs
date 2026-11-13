@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 // Makepad script streaming tokenizer
 
 use crate::colorhex::hex_bytes_to_u32;
@@ -7,7 +7,7 @@ use crate::makepad_live_id::LiveId;
 use crate::makepad_live_id_macros::*;
 use crate::value::*;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C, u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum ScriptToken {
@@ -34,7 +34,7 @@ pub enum ScriptToken {
     RustValue(u32),
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptTokenTag { End, StreamEnd, Identifier, Operator, Separator, OpenCurly, CloseCurly, OpenRound, CloseRound, OpenSquare, CloseSquare, StringUnfinished, String, F32, U32, I32, F16, F64, U40, Color, RustValue }
 
@@ -257,7 +257,7 @@ impl ScriptToken {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct ScriptTokenPos {
@@ -284,7 +284,7 @@ pub struct ScriptTokenPos {
 /// control by it). The token's value is in the base unit: seconds for time,
 /// radians for angles (`deg` and `°` are degrees), virtual pixels for screen
 /// lengths, metres for physical lengths (`m`, `cm`, `mm`).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScriptUnit {
     /// `0.12s`: seconds.
@@ -442,7 +442,7 @@ impl State {
     }
 }
 
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Default)]
 pub struct ScriptTokenizer {
     pos: usize,
@@ -483,7 +483,7 @@ pub struct ScriptLoc {
     pub col: usize,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptTokenizer {
     /// A tokenizer holding tokens another VM read from `original` (their
     /// positions are characters of `original`): what an adopted fn's body
@@ -505,7 +505,7 @@ impl ScriptTokenizer {
 
     /// Reads the tokenizer: its tokens, and the zero-based row and column (characters) of token
     /// `tok_index` (`found` false when it lies past the lexed source).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self, tok_index: u32) -> TokenizerView<'_> {
         let mut v = TokenizerView { tokens: &self.tokens, row: 0, col: 0, found: false };
         if let Some(t) = self.tokens.get(tok_index as usize) {
@@ -944,7 +944,7 @@ impl ScriptTokenizer {
 
     /// Lexes `new_chars` (`tokenize`: the tokens it added), or with `finish` ends the source
     /// (`finish`: no text, an empty slice).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn run(&mut self, finish: bool, new_chars: &str, heap: &mut ScriptHeap) -> &[ScriptTokenPos] {
         if finish {
             if self.state != State::Whitespace && !self.in_string() {
@@ -1629,7 +1629,7 @@ impl ScriptTokenizer {
 
 /// One token of a source as the real tokenizer reads it, with the bytes it
 /// was written in. Nothing is evaluated or parsed.
-#[relax_api(handle, clone)]
+#[relax_api(handle, clone, run)]
 #[derive(Clone, Debug)]
 pub struct LexedToken {
     pub token: ScriptToken,
@@ -1642,7 +1642,7 @@ pub struct LexedToken {
 }
 
 /// What a lexed token reads as (LexedToken::view).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct LexedTokenView<'a> {
     pub token: &'a ScriptToken,
@@ -1655,7 +1655,7 @@ pub struct LexedTokenView<'a> {
 }
 
 /// What ScriptTokenizer::view answers.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct TokenizerView<'a> {
     pub tokens: &'a [ScriptTokenPos],
@@ -1664,9 +1664,9 @@ pub struct TokenizerView<'a> {
     pub found: bool,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl LexedToken {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> LexedTokenView<'_> {
         LexedTokenView {
             token: &self.token,
@@ -1706,7 +1706,7 @@ pub fn lex(source: &str) -> Vec<LexedToken> {
     lex_into(source, &mut ScriptLexedOut::new(&mut out));
     out
 }
-#[relax_api]
+#[relax_api(run)]
 pub fn lex_into(source: &str, out: &mut ScriptLexedOut) {
     let mut heap = ScriptHeap::default();
     let mut tokenizer = ScriptTokenizer::default();
@@ -1846,7 +1846,7 @@ mod tests {
 }
 
 /// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptLexedOut<'a> {
     ctx: *mut u8,

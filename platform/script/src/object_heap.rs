@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::apply::Apply;
 use crate::heap::*;
 use crate::makepad_live_id::*;
@@ -11,7 +11,7 @@ use crate::*;
 
 /// An object's header (obj_info): the tag, the prototype, the construction site and the sizes of
 /// its vec and map.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ObjInfo {
@@ -23,7 +23,7 @@ pub struct ObjInfo {
 }
 
 /// What obj_get answers: the value, and whether an optional lookup found anything.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ObjGot {
@@ -32,7 +32,7 @@ pub struct ObjGot {
 }
 
 /// What obj_iter_at answers: the entry (when `found`) and the object's vec and map sizes.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ObjIterAt {
@@ -105,7 +105,7 @@ pub const OBJ_MODE_MADE_AT: u32 = 12;
 pub const OBJ_MODE_REFFED: u32 = 13;
 pub const OBJ_MODE_TYPE_DEFAULT: u32 = 14;
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptHeap {
     // New objects
 
@@ -245,7 +245,7 @@ impl ScriptHeap {
 
     /// Header of `obj`: its tag, proto, made_at and the sizes of its vec and map.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_info(&self, obj: ScriptObject) -> ObjInfo {
         let object = &self.objects[obj];
         ObjInfo {
@@ -259,7 +259,7 @@ impl ScriptHeap {
 
     /// Reads from `obj` by `mode` (OBJ_GET_*): `found` is false when an optional lookup missed.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_get(&self, mode: u32, obj: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ObjGot {
         let at = match &trap {
             ScriptTrap::Inner(inner) => Some(inner.ip),
@@ -297,7 +297,7 @@ impl ScriptHeap {
     /// Writes to `obj` by `mode` (OBJ_SET_*). The result is the mode's: an error value or NIL, or
     /// a bool for the poke and rebind modes.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_set(&mut self, mode: u32, obj: ScriptObject, key: ScriptValue, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         match mode {
             OBJ_SET_VALUE => self.set_value_impl(obj, key, value, trap),
@@ -326,7 +326,7 @@ impl ScriptHeap {
 
     /// The `index`-th entry of `obj` across its vec then its map (a `for k, v in obj` step).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_iter_at(&self, obj: ScriptObject, index: usize) -> ObjIterAt {
         self.touch_obj(obj);
         let object = &self.objects[obj];
@@ -344,7 +344,7 @@ impl ScriptHeap {
     /// A new object by `mode` (OBJ_NEW*). `proto` is the prototype, or for OBJ_NEW_MODULE the
     /// module's name as an id value.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_new(&mut self, mode: u32, proto: ScriptValue) -> ScriptObject {
         match mode {
             OBJ_NEW => self.new_object_impl(),
@@ -363,7 +363,7 @@ impl ScriptHeap {
     /// Changes the tag or header of `obj` by `mode` (OBJ_MODE_*); `arg` is the mode's operand.
     /// OBJ_MODE_TYPE_DEFAULT answers whether `obj` has a type (1) to be the default of.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn obj_mode(&mut self, obj: ScriptObject, mode: u32, arg: u64) -> u64 {
         let object = &mut self.objects[obj];
         match mode {
@@ -1200,7 +1200,7 @@ impl ScriptHeap {
         self.made_at_sites_into(body, &mut ScriptIpsOut::new(&mut out));
         out
     }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn made_at_sites_into(&self, body: u16, sink: &mut ScriptIpsOut) {
         let mut out: Vec<ScriptIp> = (0..self.objects.len())
             .map(|i| self.objects.get_at(i))
@@ -1218,7 +1218,7 @@ impl ScriptHeap {
     /// record's field written as a literal), where the records that literal
     /// built already exist. A field that holds something else (set again
     /// since) is left. How many changed.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn poke_made_at_field(&mut self, made_at: ScriptIp, key: LiveId, was: ScriptValue, value: ScriptValue) -> usize {
         self.escape_value(value);
         let key: ScriptValue = key.into();
@@ -1256,7 +1256,7 @@ impl ScriptHeap {
         self.places_holding_into(was, &mut ScriptPlacesOut::new(&mut out));
         out
     }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn places_holding_into(&self, was: ScriptValue, out: &mut ScriptPlacesOut) {
         for i in 0..self.objects.len() {
             let object = self.objects.get_at(i);
@@ -1293,7 +1293,7 @@ impl ScriptHeap {
     /// `was` (and is still the object built where it was) to `value`, in
     /// place, frozen objects too. A place that holds something else now
     /// (set again, or its slot reused) is left. How many changed.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn set_places(&mut self, places: &[ScriptValuePlace], was: ScriptValue, value: ScriptValue) -> usize {
         self.escape_value(value);
         let mut changed = 0;
@@ -1898,7 +1898,7 @@ impl ScriptHeap {
 
     /// `object`'s own map entries (no prototype chain) in map order, appended to `out`;
     /// `ordered`: in definition order (the map tag's order) instead.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn map_entries_into(&self, object: ScriptObject, ordered: bool, out: &mut ScriptEntriesOut) {
         self.touch_obj(object);
         let map = &self.objects[object].map;
@@ -2084,7 +2084,7 @@ impl ScriptHeap {
 
     /// The vec part of `ptr`, a view into the heap.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn vec_ref(&self, ptr: ScriptObject) -> &[ScriptVecValue] {
         self.touch_obj(ptr);
         let object = &self.objects[ptr];
@@ -2429,7 +2429,7 @@ mod tests {
 
 /// A place in the heap a value is held: an object's field (by key) or
 /// entry (by slot), or a list's item. See [`ScriptHeap::places_holding`].
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug)]
 #[repr(C, u8)]
 pub enum ScriptValuePlace {
@@ -2443,7 +2443,7 @@ impl ScriptValuePlace {
 }
 
 /// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptPlacesOut<'a> {
     ctx: *mut u8,
@@ -2464,7 +2464,7 @@ impl<'a> ScriptPlacesOut<'a> {
 }
 
 /// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptIpsOut<'a> {
     ctx: *mut u8,

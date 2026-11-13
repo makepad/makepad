@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::native::*;
 use crate::value::*;
@@ -6,7 +6,7 @@ use crate::value::*;
 use crate::*;
 use makepad_live_id::*;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ShaderIoType(pub(crate) u32);
 

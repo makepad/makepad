@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::trap::*;
 use crate::value::*;
@@ -29,7 +29,7 @@ pub const ARR_EDIT_FREEZE: u32 = 3;
 /// (the storage is a ring buffer: `ptr`/`len` then `ptr2`/`len2`, of `ScriptValue`); a typed array
 /// is the one run (`ptr`/`len`, of f32, u32, u16 or u8 by `kind`). Borrowed from the heap: valid
 /// until the next change to the array.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ArrView {
@@ -75,13 +75,13 @@ impl ArrView {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptHeap {
     // Arrays
 
     /// The array as a view into the heap.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn arr_view(&self, array: ScriptArray) -> ArrView {
         let data = &self.arrays[array];
         let tag = data.tag;
@@ -99,7 +99,7 @@ impl ScriptHeap {
 
     /// Changes an array by `op` (ARR_EDIT_*): the result is the op's (an error value or NIL).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn arr_edit(&mut self, op: u32, array: ScriptArray, index: usize, value: ScriptValue, trap: ScriptTrap) -> ScriptValue {
         match op {
             ARR_EDIT_PUSH => {
@@ -126,7 +126,7 @@ impl ScriptHeap {
     /// `len` and `cap` satisfy Vec::from_raw_parts with the global allocator, and the caller
     /// relinquishes the allocation even when the VM rejects the charge.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn arr_new(&mut self, kind: u32, ptr: *mut u8, len: usize, cap: usize) -> ScriptArray {
         match kind {
             ARR_NEW_EMPTY => self.new_array_impl(),

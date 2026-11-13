@@ -71,7 +71,7 @@
 //! but host calls) and four-wide ([`simd`]: SIMD128, the
 //! NEON ×4 backend's masked SPMD over element-local kernels; see
 //! [`crate::spmd`]).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::ir::{self, Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Ty, Un, Val};
 

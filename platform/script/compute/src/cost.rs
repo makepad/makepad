@@ -1,5 +1,5 @@
 //! Compiled, cached cost analysis. The host decides admission policy.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::ir::{Block, Op, Program, Stmt};
 use crate::kernel::{Kernel, KernelBody, KernelCtl};
 

@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::task;
 use makepad_script::*;
 use std::cell::Cell;
@@ -30,13 +30,13 @@ struct VmCaller {
 /// The canonical re-entrancy bug is holding a raw `vm.cx_mut()` borrow (which
 /// leaves `Cx::script_vm` swapped off) and then reaching `cx.with_vm`; the fix
 /// is `vm.with_cx_mut(|cx| ...)`, which parks the VM back onto `Cx` first.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct VmHolderGuard {
     prev: VmCaller,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl VmHolderGuard {
     /// `vm_available` is `Cx::script_vm.is_some()` evaluated at the call site.
     /// When it's `false` the VM is already held (re-entrancy) and we panic with
@@ -51,7 +51,7 @@ impl VmHolderGuard {
     /// C-shaped entry: Location and thread-local storage stay on their owning
     /// side of a provided-crate boundary. The source filename is static, so
     /// recording an entry needs no allocation or caller-owned Rust value.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn enter_at(
         vm_available: bool,
         file: &'static str,
@@ -75,7 +75,7 @@ impl VmHolderGuard {
     }
 
     /// Restore the previous holder inside the crate that owns the TLS slot.
-    #[relax_api]
+    #[relax_api(run)]
     pub(crate) fn restore(&mut self) {
         VM_HELD_AT.with(|c| c.set(self.prev));
     }
@@ -116,7 +116,7 @@ const TAKEN_MSG: &str = "re-entrant script VM access: the VM is already `take()`
 /// panic cannot unwind through a compiled frame, it leaves to the JIT's
 /// nearest catch above it, past `run_parked`, and the VM was lost with the
 /// frame that held it (every later entry then read as re-entrant).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptVmCall<'a> {
     context: *mut u8,
@@ -217,7 +217,7 @@ fn run_parked(
 /// True when `f` panicked: its panic waits in `f`, and the script tasks
 /// were not run.
 #[inline]
-#[relax_api]
+#[relax_api(run)]
 pub fn with_vm_and_async_with(host: &mut ScriptHostContext, f: &mut ScriptVmCall) -> bool {
     let mut bx = host.take_vm().expect(TAKEN_MSG);
     bx.select_first_unpaused_thread();
@@ -231,7 +231,7 @@ pub fn with_vm_and_async_with(host: &mut ScriptHostContext, f: &mut ScriptVmCall
 /// False only when try_ is set and the VM is already held. A panic of `f`
 /// waits in `f` (`resume_if_panicked`).
 #[inline]
-#[relax_api]
+#[relax_api(run)]
 pub fn with_vm_with(host: &mut ScriptHostContext, try_: bool, f: &mut ScriptVmCall) -> bool {
     let mut bx = match host.take_vm() {
         Some(bx) => bx,
@@ -245,7 +245,7 @@ pub fn with_vm_with(host: &mut ScriptHostContext, try_: bool, f: &mut ScriptVmCa
 
 /// A panic of `f` waits in `f` (`resume_if_panicked`).
 #[inline]
-#[relax_api]
+#[relax_api(run)]
 pub fn with_vm_thread_with(
     host: &mut ScriptHostContext,
     thread_id: ScriptThreadId,
@@ -308,7 +308,7 @@ pub fn with_vm_thread<F: FnOnce(&mut ScriptVm) -> R, R>(
     call.resume_if_panicked();
     out.unwrap()
 }
-#[relax_api]
+#[relax_api(run)]
 pub fn eval(host: &mut ScriptHostContext, script_mod: &ScriptModView) -> ScriptValue {
     with_vm_and_async(host, |vm| {
         vm.eval_with_source_view(script_mod, ScriptObject::ZERO)

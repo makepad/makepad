@@ -1,10 +1,10 @@
 //! Splash compilation state: VM provenance around the shared backend output.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::object::ScriptMapEntry;
 use crate::{heap::*, value::*, vm::*, shader_backend::*};
 use makepad_live_id::*;
 pub use makepad_shader::shader_output::{SamplerFilter, SamplerAddress, SamplerCoord, ShaderSampler, ShaderSamplerOptions, ShaderStorageFlags, TextureType, ShaderIoKind, ShaderIo, ShaderMode, ShaderIoKindTag, UniformBufferBindings};
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone)]
 pub struct ScopeUniformSource {
     /// The source object to read the value from
@@ -27,7 +27,7 @@ pub struct ScopeUniformSource {
 /// into the code, so its value can be hot-patched with zero recompiles. The
 /// source is never rewritten by a patch — the span is context for whoever
 /// eventually edits it (the ledger hands it to the AI).
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Debug, Clone)]
 pub struct ShaderTableConst {
     /// The scope-uniform io name this constant occupies (`ct0`, `ct1`, …).
@@ -52,7 +52,7 @@ pub struct ShaderTableConst {
 
 /// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
 /// This is distinct from uniform buffers on io_self - these come from the surrounding scope.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone)]
 pub struct ScopeUniformBufferSource {
     /// The uniform buffer ScriptObject itself (needed for runtime buffer binding)
@@ -65,7 +65,7 @@ pub struct ScopeUniformBufferSource {
 
 /// Tracks a texture defined in the script scope (e.g., `let tex = shader.texture_2d(float)`)
 /// This is distinct from textures on io_self - these come from the surrounding scope.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone)]
 pub struct ScopeTextureSource {
     /// The texture ScriptObject itself (needed for runtime texture binding)
@@ -76,7 +76,7 @@ pub struct ScopeTextureSource {
     pub shader_name: LiveId,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default, Debug)]
 pub struct ShaderOutput {
     function_ids: std::collections::HashMap<ScriptObject, makepad_shader::shader_ids::ShaderFnId>,
@@ -364,7 +364,7 @@ impl ScopeUniformSource {
     pub fn table_const(&self) -> Option<usize> { self.table_const }
 }
 /// What a table constant reads as (ShaderTableConst::view); the colour is meaningful when `has_color`.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ShaderTableConstView<'a> {
     pub shader_name: LiveId,
@@ -377,9 +377,9 @@ pub struct ShaderTableConstView<'a> {
     pub site: *const crate::literal::LiteralSite,
     pub _view: std::marker::PhantomData<&'a ()>,
 }
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ShaderTableConst {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ShaderTableConstView<'_> {
         ShaderTableConstView {
             shader_name: self.shader_name,

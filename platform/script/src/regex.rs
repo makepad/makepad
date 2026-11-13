@@ -1,10 +1,10 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_regex;
 use makepad_regex::ParseOptions;
 use makepad_regex::Regex as InnerRegex;
 
 /// Tag for GC marking of regex objects (same pattern as StringTag)
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 pub struct RegexTag(u64);
 
@@ -34,7 +34,7 @@ impl RegexTag {
 }
 
 /// Flags parsed from the flags string "gims"
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct RegexFlags {
     pub global: bool,
@@ -96,7 +96,7 @@ pub struct RegexInternKey {
 }
 
 /// Data stored per regex on the heap
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptRegexData {
     pub tag: RegexTag,
     pub inner: InnerRegex,

@@ -36,7 +36,7 @@
 //! The registry is append-only: built-in functions first, then any the host
 //! registers at start-up (a text crate registering `text.outline`), before
 //! kernels that call them compile.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::ir::{RawBuf, Ty};
 use std::sync::RwLock;

@@ -13,7 +13,7 @@ use super::kernel::{Access, BufferDecl, KernelLowered, K_COUNT, K_PARAMS};
 use super::*;
 use crate::boundary::forever;
 use crate::ir;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::sync::Arc;
 
 /// What a value's definition is, as far as a reader of the AIR needs: a constant of the program,

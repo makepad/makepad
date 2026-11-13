@@ -8,14 +8,14 @@
 //! templates looked up by name), through protos, map and vec values and
 //! arrays, with the module scopes and preludes as walls (a name merely
 //! bound is not a use). A build tool blanks the unused ones in a web build.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use makepad_script::makepad_live_id::*;
 use makepad_script::value::*;
 use makepad_script::heap::ScriptHeap;
 use makepad_script::vm::*;
 use std::collections::{HashMap, HashSet};
-use makepad_relax_api::sync::Mutex;
+use relax_api::sync::Mutex;
 
 /// A top-level statement of a Splash block: its byte range (from the end
 /// of the previous statement, so the comments above it are its own) and

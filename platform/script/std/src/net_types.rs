@@ -4,14 +4,14 @@
 //! with the script crate); the `net` script module converts between these
 //! mirrors and the network types at the boundary. The mirrors keep the type
 //! and field names scripts see (`net.HttpRequest{...}`, `res.status_code`).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::makepad_network as network;
 use makepad_script::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WebSocketTransport {
     #[pick]
@@ -31,7 +31,7 @@ impl From<WebSocketTransport> for network::WebSocketTransport {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum HttpMethod {

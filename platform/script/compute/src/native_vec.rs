@@ -65,7 +65,7 @@ pub fn host_lanes() -> u32 {
 /// (this host's lanes, whether MAKEPAD_KERNEL_LANES set them)
 fn host() -> (u32, bool) {
     static L: std::sync::OnceLock<(u32, bool)> = std::sync::OnceLock::new();
-    *L.get_or_init(|| match std::env::var("MAKEPAD_KERNEL_LANES").ok().as_deref() {
+    *L.get_or_init(|| match relax_api::env::var("MAKEPAD_KERNEL_LANES").ok().as_deref() {
         Some("4") => (4, true),
         Some("8") => (8, true),
         _ => (if cfg!(target_arch = "x86_64") { 8 } else { 4 }, false),

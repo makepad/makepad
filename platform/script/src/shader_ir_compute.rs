@@ -32,16 +32,16 @@ use crate::{
     vm::ScriptVm,
 };
 use makepad_live_id::{id, LiveId};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 /// `compile_compute_kernel` as an op (makepad run): the result stays in this crate, JIT code
 /// reads it through `view` and builds its own `CompiledKernel` (`CompiledKernelView::to_kernel`).
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct CompiledKernelResult {
     result: Result<CompiledKernel, String>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn compile_compute_kernel_result(vm: &mut ScriptVm, kernel: ScriptObject, target: ComputeTarget) -> CompiledKernelResult {
     CompiledKernelResult { result: compile_compute_kernel(vm, kernel, target) }
 }
@@ -52,10 +52,10 @@ impl CompiledKernelResult {
         CompiledKernelResult { result }
     }
 }
-#[relax_api]
+#[relax_api(run)]
 impl CompiledKernelResult {
     /// Target code and complete binding/layout reflection as plain data, or the error.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> CompiledKernelView<'_> {
         match &self.result {
             Ok(k) => CompiledKernelView {
@@ -83,7 +83,7 @@ impl CompiledKernelResult {
 }
 
 /// [`CompiledKernelResult::view`].
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct CompiledKernelView<'a> {

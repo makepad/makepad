@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 pub use makepad_network;
 pub use makepad_script;
 
@@ -20,7 +20,7 @@ pub use vm::*;
 
 use makepad_script::*;
 
-#[relax_api]
+#[relax_api(run)]
 pub fn script_mod(vm: &mut ScriptVm) {
     crate::fs::script_mod(vm);
     crate::run::script_mod(vm);
@@ -28,7 +28,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::net::script_mod(vm);
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn pump(host: &mut ScriptHostContext) {
     crate::run::handle_script_child_processes(host);
     crate::net::handle_script_socket_streams(host);

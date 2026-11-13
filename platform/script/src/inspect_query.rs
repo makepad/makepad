@@ -15,7 +15,7 @@ use crate::trap::*;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use makepad_relax_api::sync::Mutex;
+use relax_api::sync::Mutex;
 use std::sync::mpsc::{channel, Sender};
 
 // ------------------------------------------------------------------ safe points
@@ -63,14 +63,14 @@ fn serve(base: &ScriptVmBase) {
     for (_, _, job, tx) in mine {
         let lines = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(base))).unwrap_or_else(|_| vec![err("the query panicked while reading the VM")]);
         // (the asker reads the answer past this program's end)
-        let _ = tx.send(makepad_relax_api::process_heap(|| lines.clone()));
+        let _ = tx.send(relax_api::process_heap(|| lines.clone()));
     }
 }
 
 /// The app's event loop is between events (makepad-platform calls this every loop turn): the
 /// queries waiting for a VM this thread owns and is not evaluating are answered now, so an idle
 /// VM (a game between ticks, a paused UI) answers too. One relaxed load when nothing waits.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn serve_idle() {
     if !ANY_PENDING.load(Relaxed) {
         return;
@@ -92,17 +92,17 @@ pub fn serve_idle() {
 static WAKERS: Mutex<Vec<(extern "C" fn(u32), u32)>> = Mutex::new(Vec::new());
 
 /// An event loop that calls `serve_idle` is open: `wake(arg)` wakes it.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn add_idle_waker(wake: extern "C" fn(u32), arg: u32) {
     if let Ok(mut w) = WAKERS.lock() {
         if !w.contains(&(wake, arg)) {
-            makepad_relax_api::process_heap(|| w.push((wake, arg)));
+            relax_api::process_heap(|| w.push((wake, arg)));
         }
     }
 }
 
 /// The loop `add_idle_waker` named has ended.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn remove_idle_waker(wake: extern "C" fn(u32), arg: u32) {
     if let Ok(mut w) = WAKERS.lock() {
         w.retain(|x| *x != (wake, arg));
@@ -119,7 +119,7 @@ fn run_on(id: u32, wait_ms: u64, job: Job) -> Vec<String> {
     }
     let wakers: Vec<(extern "C" fn(u32), u32)> = WAKERS.lock().map(|w| w.clone()).unwrap_or_default();
     for (wake, arg) in wakers {
-        if !makepad_relax_api::app_call(|| wake(arg)) {
+        if !relax_api::app_call(|| wake(arg)) {
             // its code's run has ended
             if let Ok(mut w) = WAKERS.lock() {
                 w.retain(|x| *x != (wake, arg));
@@ -454,7 +454,7 @@ pub(crate) fn trace_wants(type_name: &str, method: LiveId) -> Option<String> {
 #[cold]
 pub(crate) fn trace_record(base: &ScriptVmBase, verb: String, ip: ScriptIp, args: ScriptObject, ret: ScriptValue) {
     // (what the trace keeps is read past this program's end)
-    makepad_relax_api::process_heap(|| trace_record_here(base, verb.clone(), ip, args, ret))
+    relax_api::process_heap(|| trace_record_here(base, verb.clone(), ip, args, ret))
 }
 
 fn trace_record_here(base: &ScriptVmBase, verb: String, ip: ScriptIp, args: ScriptObject, ret: ScriptValue) {

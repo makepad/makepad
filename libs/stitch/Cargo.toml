@@ -9,7 +9,6 @@ description = "Makepad stitch, a WebAssembly interpreter"
 # license file from outside the package root into the published crate.
 license = "MIT OR Apache-2.0"
 license-file = "../../LICENSE"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [profile.dev]

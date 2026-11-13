@@ -11,7 +11,7 @@
 //! Errors: an expander that panics leaves its group lazy (re-registered), so the next touch
 //! retries and reports again.
 use makepad_live_id::LiveId;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::value::{ScriptObject, ScriptValue};
 use crate::vm::ScriptVm;
 use std::cell::Cell;
@@ -130,24 +130,24 @@ impl LazyModules {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVm<'_> {
     /// Declares `keys` of `mod` as one lazily expanded group: absent until a script reads one of
     /// them, then `expander` (the modules' ordinary registration) runs once in this heap.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn declare_lazy_modules(&mut self, name: &str, keys: &[LiveId], expander: LazyExpander) {
         self.bx.heap.lazy.declare(name, keys, LazyRun::Whole(expander));
     }
 
     /// [`Self::declare_lazy_modules`] for a registration in steps (`stepper`, see [`LazyStepper`]).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn declare_lazy_modules_stepped(&mut self, name: &str, keys: &[LiveId], stepper: LazyStepper) {
         self.bx.heap.lazy.declare(name, keys, LazyRun::Stepped(stepper));
     }
 
     /// The lazy-module ops (`LAZY_*`), in the VM: expansion runs the VM's own code on the VM's
     /// own state, never code compiled elsewhere reading the heap's fields.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn vm_lazy(&mut self, mode: u32, key: LiveId, name: &str) -> bool {
         match mode {
             LAZY_EXPAND_PENDING => match self.bx.heap.lazy.take_pending() {

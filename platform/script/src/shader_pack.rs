@@ -49,7 +49,7 @@
 //! object (its methods, then scope lookups), which needs only heap lookups.
 //! Where recording finds no such path, or the running heap no longer has
 //! it, the value recorded with the shader is used.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{heap::ScriptHeap, pod::*, shader::*, tokenizer::ScriptTokenTag, value::*, shader_reflection::*, *};
 use makepad_live_id::*;
 use std::collections::{HashMap, HashSet};
@@ -59,7 +59,7 @@ const SHADER_PACK_VERSION: u32 = 4;
 const SHADER_PACK_MAGIC: &[u8; 4] = b"MPSP";
 
 /// One draw shader of a pack: its GLSL ES 3.0 code and reflection.
-#[relax_api(handle, eq, clone)]
+#[relax_api(handle, eq, clone, run)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShaderPackEntry {
     /// [`shader_pack_key`] of the shader objects it serves.
@@ -552,7 +552,7 @@ fn shader_key_walk<'a>(bx: &'a ScriptVmBase, io_self: ScriptObject, const_table:
 /// The key a draw shader object's pack entry is found by: the same in
 /// every process, on every target, in any load order (see the module
 /// docs for what it covers).
-#[relax_api]
+#[relax_api(run)]
 pub fn shader_pack_key(vm: &ScriptVm, io_self: ScriptObject, const_table: bool) -> u64 {
     shader_key_walk(&vm.bx, io_self, const_table).h.0
 }
@@ -560,12 +560,12 @@ pub fn shader_pack_key(vm: &ScriptVm, io_self: ScriptObject, const_table: bool) 
 // ---------------------------------------------------------------------------
 // Entry <-> reflection.
 
-#[relax_api]
+#[relax_api(run)]
 impl ShaderPackEntry {
     /// The reflection of this shader for the shader object `io_self` of
     /// this heap (its scope uniforms are found again from it), for
     /// `CxDrawShaderMapping::from_desc`.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn to_desc(&self, heap: &ScriptHeap, io_self: ScriptObject) -> DrawShaderDesc {
         let tys: Vec<ScriptPodTy> = (0..self.pod_types.len()).map(|i| pod_from_pack(&self.pod_types, i as u32)).collect();
         let io = self
@@ -1163,7 +1163,7 @@ pub fn write_shader_pack(entries: &[ShaderPackEntry]) -> Vec<u8> {
 
 /// Entries as pack bytes, written by this crate's build (an op: JIT-compiled code reads no
 /// entry's reflection itself).
-#[relax_api]
+#[relax_api(run)]
 pub fn shader_pack_bytes(entries: &[ShaderPackEntry]) -> ShaderPackBytes {
     ShaderPackBytes(write_pack(entries))
 }
@@ -1444,16 +1444,16 @@ fn read_index(bytes: &[u8]) -> Result<Vec<(u64, usize)>, String> {
 }
 
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ShaderPackBytes(Vec<u8>);
-#[relax_api]
+#[relax_api(run)]
 impl ShaderPackBytes { pub fn bytes(&self) -> &[u8] { &self.0 } }
 
 pub struct ShaderPackLookup(Option<ShaderPackEntry>);
 impl ShaderPackLookup { pub fn entry(&self) -> Option<&ShaderPackEntry> { self.0.as_ref() } }
 
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Default)]
 pub struct ShaderPacks {
     packs: Vec<Vec<u8>>,
@@ -1464,7 +1464,7 @@ pub struct ShaderPacks {
     recorder: Option<ShaderPackRecorder>,
 }
 /// What ShaderPacks::view answers.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ShaderPacksView<'a> {
     pub error: &'a str,
@@ -1476,11 +1476,11 @@ pub struct ShaderPacksView<'a> {
 pub const SHADER_PACKS_INSTALL: u32 = 0;
 pub const SHADER_PACKS_RECORD_ENABLED: u32 = 1;
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ShaderPacks {
     pub fn new() -> Self { Self::default() }
     pub fn is_empty(&self) -> bool { self.index.is_empty() }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ShaderPacksView<'_> {
         #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
         let recording = self.recorder.is_some();
@@ -1502,7 +1502,7 @@ impl ShaderPacks {
     pub fn record_enabled(&mut self, on: bool) { self.control(SHADER_PACKS_RECORD_ENABLED, &[], on); }
     /// Changes the packs by `mode`: SHADER_PACKS_INSTALL adds the pack `bytes` (false: it does not
     /// read, see `view().error`); SHADER_PACKS_RECORD_ENABLED turns recording `on` or off.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn control(&mut self, mode: u32, bytes: &[u8], on: bool) -> bool {
         if mode == SHADER_PACKS_RECORD_ENABLED {
             #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
@@ -1537,7 +1537,7 @@ impl ShaderPacks {
         ShaderPackLookup(entry)
     }
     #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn take_recording(&mut self) -> ShaderPackBytes {
         let entries = match &mut self.recorder {
             Some(recorder) => { recorder.keys.clear(); std::mem::take(&mut recorder.entries) }
@@ -1546,7 +1546,7 @@ impl ShaderPacks {
         ShaderPackBytes(write_pack(&entries))
     }
     #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn record(&mut self, vm: &mut ScriptVm, shader: ScriptObject) {
         self.error.clear();
         let Some(recorder) = self.recorder.as_mut() else { return; };
@@ -1570,10 +1570,10 @@ struct ShaderPackRecorder {
     entries: Vec<ShaderPackEntry>, keys: HashSet<u64>, objects: HashSet<(usize, ScriptObject)>, epoch: u64,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ShaderPackRecord(Result<ShaderPackEntry, String>);
 /// What ShaderPackRecord::view answers: the entry, or the error.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ShaderPackRecordView<'a> {
     pub entry: *const ShaderPackEntry,
@@ -1581,9 +1581,9 @@ pub struct ShaderPackRecordView<'a> {
     pub failed: bool,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ShaderPackRecord {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ShaderPackRecordView<'_> {
         match &self.0 {
             Ok(entry) => ShaderPackRecordView { entry, error: "", failed: false },
@@ -1597,13 +1597,13 @@ impl ShaderPackRecord {
     }
     #[inline]
     pub fn error(&self) -> Option<&str> { let v = self.view(); v.failed.then_some(v.error) }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn bytes(&self) -> ShaderPackBytes {
         ShaderPackBytes(match self.0.as_ref().ok() { Some(entry) => write_pack(std::slice::from_ref(entry)), None => Vec::new() })
     }
 }
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
-#[relax_api]
+#[relax_api(run)]
 pub fn record_shader(vm: &mut ScriptVm, shader: ScriptObject) -> ShaderPackRecord {
     let walk = shader_key_walk(&vm.bx, shader, false);
     let key = walk.h.0;
@@ -1626,7 +1626,7 @@ fn record_shader_with_key(vm: &mut ScriptVm, shader: ScriptObject, key: u64, mut
     ShaderPackRecord(pack_entry_from_desc(vm, shader, key, name, src.vertex().to_owned(), src.fragment().to_owned(), &desc, &fns))
 }
 /// What ShaderPackEntry::view answers.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ShaderPackEntryView<'a> {
     pub key: u64,
@@ -1634,9 +1634,9 @@ pub struct ShaderPackEntryView<'a> {
     pub vertex: &'a str,
     pub fragment: &'a str,
 }
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ShaderPackEntry {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ShaderPackEntryView<'_> {
         ShaderPackEntryView { key: self.key, name: &self.name, vertex: &self.vertex, fragment: &self.fragment }
     }
@@ -1650,19 +1650,19 @@ impl ShaderPackEntry {
     pub fn fragment(&self) -> &str { self.view().fragment }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ShaderPackContents(Result<Vec<ShaderPackEntry>, String>);
 /// What ShaderPackContents::view answers.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ShaderPackContentsView<'a> {
     pub entries: &'a [ShaderPackEntry],
     pub error: &'a str,
     pub failed: bool,
 }
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ShaderPackContents {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ShaderPackContentsView<'_> {
         match &self.0 {
             Ok(entries) => ShaderPackContentsView { entries, error: "", failed: false },
@@ -1676,7 +1676,7 @@ impl ShaderPackContents {
     #[inline]
     pub fn error(&self) -> Option<&str> { let v = self.view(); v.failed.then_some(v.error) }
 }
-#[relax_api]
+#[relax_api(run)]
 pub fn inspect_shader_pack(bytes: &[u8]) -> ShaderPackContents { ShaderPackContents(read_pack(bytes)) }
 
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
@@ -1918,5 +1918,5 @@ fn write_value_to_f32_slots(
 fn write_pack_value(heap: &ScriptHeap, value: ScriptValue, output: &mut [f32]) { write_value_to_f32_slots(heap, value, output, 0, output.len()); }
 
 /// Compare reflected POD layouts without exporting the pack serialization model.
-#[relax_api]
+#[relax_api(run)]
 pub fn same_pod_structure(a: &ScriptPodTy, b: &ScriptPodTy) -> bool { pod_structure(None, a) == pod_structure(None, b) }

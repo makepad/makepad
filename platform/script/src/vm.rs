@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::function::*;
 use crate::heap::*;
 pub use crate::host::*;
@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-#[relax_api(handle, clone, eq, hash, debug)]
+#[relax_api(handle, clone, eq, hash, debug, run)]
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct ScriptModKey {
     pub file: String,
@@ -48,7 +48,7 @@ impl std::hash::Hash for ScriptModKey {
 }
 
 /// What a [`ScriptModKey`] holds, as views.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptModKeyView<'a> {
@@ -57,11 +57,11 @@ pub struct ScriptModKeyView<'a> {
     pub column: usize,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptModKey {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new(file: &str, line: usize, column: usize) -> Self { Self { file: file.to_owned(), line, column } }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptModKeyView<'_> { ScriptModKeyView { file: &self.file, line: self.line, column: self.column } }
 }
 
@@ -79,7 +79,7 @@ impl ScriptModKey {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default, Debug)]
 pub struct ScriptMod {
     pub cargo_manifest_path: String,
@@ -92,7 +92,7 @@ pub struct ScriptMod {
 }
 
 /// A pinned heap string's text (ScriptVm::string_pin): valid until its string_unpin.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptStrPin {
@@ -114,7 +114,7 @@ impl ScriptStrPin {
 /// fat pointers and scalars (C-shaped: in the makepad loader the VM is rustc-built and the
 /// ScriptMod's owner Rapid-built, local/plans/loader-core.md section 8). The VM copies what it
 /// keeps.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptModView<'a> {
@@ -127,15 +127,15 @@ pub struct ScriptModView<'a> {
     pub values: &'a [ScriptValue],
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptMod {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new(manifest: &str, module: &str, file: &str, line: usize, column: usize, code: &str, values: &[ScriptValue]) -> Self {
         Self { cargo_manifest_path: manifest.to_owned(), module_path: module.to_owned(), file: file.to_owned(), line, column, code: code.to_owned(), values: values.to_vec() }
     }
 
     /// Where the block is reported to start (a macro that wraps `script!` names its own call site).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn set_line_column(&mut self, line: usize, column: usize) {
         self.line = line;
         self.column = column;
@@ -150,7 +150,7 @@ impl ScriptMod {
     }
 
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptModView<'_> {
         ScriptModView {
             cargo_manifest_path: &self.cargo_manifest_path,
@@ -182,7 +182,7 @@ pub const CALL_TRANSFORM: u32 = 2;
 /// Run the paused thread on.
 pub const CALL_RESUME: u32 = 3;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptCallReq<'a> {
     pub mode: u32,
@@ -216,7 +216,7 @@ pub const EVAL_APPEND: u32 = 5;
 /// `image`: another VM's fn, `scope` its parent; the result is the fn object or nil.
 pub const EVAL_ADOPT: u32 = 6;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptEvalReq<'a> {
     pub mode: u32,
@@ -382,14 +382,14 @@ impl ScriptBody {
 /// A module borrowed from the body's table. The borrow guard stays opaque so callers
 /// can inspect source views without copying the entire module or laying out RefCell state;
 /// [`Self::view`] is the one door, the readers below are inline code over it.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptModuleRead<'a> {
     bodies: Ref<'a, Vec<ScriptBody>>,
     index: usize,
 }
 
 /// What a [`ScriptModuleRead`] shows of its body, as views into it.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptModuleView<'a> {
     pub exists: bool,
@@ -429,9 +429,9 @@ fn module_view(bodies: &[ScriptBody], index: usize) -> ScriptModuleView<'_> {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptModuleRead<'_> {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptModuleView<'_> {
         module_view(&self.bodies, self.index)
     }
@@ -465,14 +465,14 @@ impl ScriptModuleRead<'_> {
 
 /// Mutable body-table borrow whose representation stays inside the VM: [`Self::view`] shows a
 /// body, [`Self::set_opcode_value`] changes one of its opcodes.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptModulesMut<'a> { bodies: std::cell::RefMut<'a, Vec<ScriptBody>> }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptModulesMut<'_> {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self, index: usize) -> ScriptModuleView<'_> { module_view(&self.bodies, index) }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn set_opcode_value(&mut self, index: usize, at: usize, value: ScriptValue) { self.bodies[index].parser.opcodes[at] = value; }
 }
 
@@ -496,9 +496,9 @@ impl ScriptModulesMut<'_> {
     pub fn end_or_initial_scope(&self, index: usize) -> ScriptObject { self.view(index).end_scope }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptCode {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn modules_mut(&self) -> ScriptModulesMut<'_> { ScriptModulesMut { bodies: self.bodies.borrow_mut() } }
 }
 
@@ -512,7 +512,7 @@ impl ScriptBody {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 pub struct ScriptBuiltins {
     pub range: ScriptObject,
@@ -539,7 +539,7 @@ impl ScriptBuiltins {
 /// thing that can move or free a body's opcode buffer (a native call can
 /// re-enter `eval` and reload the very body that is running), and `run_core`
 /// compares the epoch before it trusts its cached pointer into that buffer.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptBodies {
     bodies: RefCell<Vec<ScriptBody>>,
@@ -568,7 +568,7 @@ impl ScriptBodies {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptCode {
     pub builtins: ScriptBuiltins,
@@ -600,7 +600,7 @@ pub(crate) struct ShaderFnNamespace {
 }
 
 /// One rename of a [`ShaderFnNamespace`]: `self.<from>` is `self.<to>`.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ShaderFnRename {
@@ -609,7 +609,7 @@ pub struct ShaderFnRename {
 }
 
 /// See [`ShaderFnNamespace::input`].
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct ShaderFnInput {
@@ -640,7 +640,7 @@ impl ScriptLoc {
 }
 
 /// Caller-owned source location. All methods stay on the constructing side.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptLoc {
     pub file: String,
     pub col: u32,
@@ -658,8 +658,8 @@ pub struct ScriptFnTokens {
 }
 
 /// [`ScriptFnTokens`] in flight across the relax boundary: its String and Vec as the words of
-/// their buffers (`makepad_relax_api::Words`); `ScriptVm::fn_tokens_placed` rebuilds them.
-#[relax_api(plain)]
+/// their buffers (`relax_api::Words`); `ScriptVm::fn_tokens_placed` rebuilds them.
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptFnTokensRaw {
     pub file: [usize; 3],
@@ -670,7 +670,7 @@ pub struct ScriptFnTokensRaw {
 /// One token of a script fn: as the VM read it, whether a newline
 /// preceded it, its characters in its body's code (`start` first, `end`
 /// one past the last) and where it is written (1-based line and column).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptFnToken {
@@ -691,7 +691,7 @@ pub struct ScriptFnToken {
 /// To Relax-compiled code it is an opaque handle: the crate drops, clones and
 /// reads it (relax_api.txt ops); an empty image ([`Self::is_empty`]) stands
 /// for "no fn" where a handle crosses by value.
-#[relax_api(handle, clone, debug)]
+#[relax_api(handle, clone, debug, run)]
 #[repr(transparent)]
 pub struct ScriptFnImage(Option<Box<ScriptFnImageData>>);
 
@@ -706,7 +706,7 @@ struct ScriptFnImageData {
     hash: u64,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptFnImage {
     fn new(file: String, line: u32, col: u32, text: String, tokens: Vec<ScriptTokenPos>, strings: Vec<(usize, String)>) -> Self {
         let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -725,7 +725,7 @@ impl ScriptFnImage {
     pub(crate) fn empty() -> Self { Self(None) }
 
     /// What the image holds, as views.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptFnImageView<'_> {
         match self.data() {
             Some(d) => ScriptFnImageView { empty: false, file: &d.file, text: &d.text, line: d.line, col: d.col, hash: d.hash, tokens: &d.tokens },
@@ -736,7 +736,7 @@ impl ScriptFnImage {
 }
 
 /// What a [`ScriptFnImage`] holds, as views ([`ScriptFnImage::view`]).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptFnImageView<'a> {
@@ -815,7 +815,7 @@ impl std::fmt::Debug for ScriptFnImage {
 
 /// Rustc-owned location storage inside an error record. Rapid callers obtain a
 /// caller-owned `ScriptLoc` through `ScriptErrorRecord::loc`, never this layout.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone)]
 pub struct ScriptErrorLoc {
     pub file: String,
@@ -827,7 +827,7 @@ pub struct ScriptErrorLoc {
 /// source location (zero-based line and column, like [`ScriptLoc`]) and
 /// its message apart, and the text the VM has always reported it as
 /// (`file:line:col: message (origin)`), which `Display` prints.
-#[relax_api(handle, clone, debug, display)]
+#[relax_api(handle, clone, debug, display, run)]
 #[derive(Clone)]
 pub struct ScriptErrorRecord {
     pub loc: Option<ScriptErrorLoc>,
@@ -855,7 +855,7 @@ impl std::fmt::Debug for ScriptErrorRecord {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptErrorRecord {
     #[inline(always)]
     pub fn new(loc: Option<&ScriptLoc>, message: &str, text: &str) -> Self {
@@ -863,13 +863,13 @@ impl ScriptErrorRecord {
         Self::from_parts(loc.map(|l| l.file.as_str()), &at, message, text)
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn from_parts(file: Option<&str>, at: &crate::vm_api::ScriptLineCol, message: &str, text: &str) -> Self {
         Self { loc: file.map(|file| ScriptErrorLoc { file: file.to_owned(), line: at.line, col: at.col }), message: message.to_owned(), text: text.to_owned() }
     }
 
     /// What the record holds, as views.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptErrorRecordView<'_> {
         match &self.loc {
             Some(loc) => ScriptErrorRecordView { text: &self.text, message: &self.message, has_loc: true, file: &loc.file, line: loc.line, col: loc.col },
@@ -879,7 +879,7 @@ impl ScriptErrorRecord {
 }
 
 /// What a [`ScriptErrorRecord`] holds, as views ([`ScriptErrorRecord::view`]).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptErrorRecordView<'a> {
@@ -1635,14 +1635,14 @@ impl ScriptCode {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptVm<'a> {
     pub host: ScriptHostContext<'a>,
     pub bx: Box<ScriptVmBase>,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
 pub struct ScriptRunBudget {
@@ -1680,7 +1680,7 @@ enum ScriptRunBudgetHit {
     Hard,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl<'a> ScriptVm<'a> {
     /// Where the running code is: the current instruction, then the return
     /// sites of the calls it is inside, innermost first, at most `max`. A
@@ -2079,7 +2079,7 @@ impl<'a> ScriptVm<'a> {
 
     /// The one entry into running script from the host (the op `call`, `resume` and
     /// the like are inline decoders of): `req.mode` says what, see [`ScriptCallReq`].
-    #[relax_api]
+    #[relax_api(run)]
     pub fn vm_call(&mut self, req: &mut ScriptCallReq) -> ScriptValue {
         crate::inspect_query::safe_point(&self.bx);
         match req.mode {
@@ -2098,7 +2098,9 @@ impl<'a> ScriptVm<'a> {
             CALL_RESUME => {
                 let thread = self.bx.threads.cur();
                 thread.is_paused = false;
-                if std::mem::take(&mut thread.yielded) {
+                // A run that yielded, or one a native paused under an entry that owes its end.
+                let yielded = std::mem::take(&mut thread.yielded);
+                if yielded || !thread.completions.is_empty() {
                     self.resume_yielded()
                 } else {
                     self.run_core()
@@ -2688,7 +2690,7 @@ impl<'a> ScriptVm<'a> {
         // the main interpreter loop
         self.drain_stale_errors();
         let value = self.run_core();
-        if self.bx.threads.cur_ref().yielded {
+        if self.bx.threads.cur_ref().run_unfinished() {
             self.bx.threads.cur().completions.push(RunCompletion::RootEnd { body_id });
             return value;
         }
@@ -2722,7 +2724,8 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
-    /// `resume` of a run that yielded (a sliced run): runs on under the budget installed now,
+    /// `resume` of a run that yielded (a sliced run) or that a native paused under an entry that
+    /// owes its end: runs on under the budget installed now,
     /// as silenced as the entry that started it; when it ends, what those entries left owed.
     fn resume_yielded(&mut self) -> ScriptValue {
         let streaming = self.bx.threads.cur_ref().completions.iter().any(|c| matches!(c, RunCompletion::Streaming));
@@ -2738,7 +2741,7 @@ impl<'a> ScriptVm<'a> {
         if streaming {
             self.bx.silence_errors = false;
         }
-        if self.bx.threads.cur_ref().yielded {
+        if self.bx.threads.cur_ref().run_unfinished() {
             return value;
         }
         for completion in std::mem::take(&mut self.bx.threads.cur().completions) {
@@ -3403,7 +3406,7 @@ impl<'a> ScriptVm<'a> {
 
     /// The one entry into evaluating source (the op the `eval_*` methods are inline
     /// decoders of): `req.mode` picks what to do with the module, see [`ScriptEvalReq`].
-    #[relax_api]
+    #[relax_api(run)]
     pub fn vm_eval(&mut self, req: &mut ScriptEvalReq) -> ScriptValue {
         match req.mode {
             EVAL_ADD => {
@@ -3499,7 +3502,7 @@ impl<'a> ScriptVm<'a> {
             }
             // lets point our thread to it
             let result = self.run_root(body_id);
-            if self.bx.threads.cur_ref().yielded {
+            if self.bx.threads.cur_ref().run_unfinished() {
                 self.bx.threads.cur().completions.push(RunCompletion::EvalBody { body_id });
                 return result;
             }
@@ -3650,7 +3653,7 @@ impl<'a> ScriptVm<'a> {
             self.bx.silence_errors = true;
             let result = self.run_root(body_id);
             self.bx.silence_errors = false;
-            if self.bx.threads.cur_ref().yielded {
+            if self.bx.threads.cur_ref().run_unfinished() {
                 self.bx.threads.cur().completions.push(RunCompletion::Streaming);
                 return result;
             }
@@ -3664,7 +3667,7 @@ impl<'a> ScriptVm<'a> {
 
 /// The arithmetic operators a host may give meaning to for its own objects
 /// (see [`ScriptVmBase::object_op_hook`]).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptBinOp {
     Add,
@@ -3686,7 +3689,7 @@ pub type ScriptObjectOpHook = fn(&mut ScriptHeap, ScriptBinOp, ScriptValue, Scri
 pub type ScriptLetHook = fn(&ScriptHeap, ScriptIp, LiveId, ScriptValue);
 
 /// Caller-owned function pointers are only interpreted by their caller-side trampoline.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptLetHookAbi {
@@ -3694,7 +3697,7 @@ pub struct ScriptLetHookAbi {
     pub call: unsafe extern "C-unwind" fn(*const (), *const ScriptHeap, ScriptIp, LiveId, ScriptValue),
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptObjectOpHookAbi {
@@ -3702,7 +3705,7 @@ pub struct ScriptObjectOpHookAbi {
     pub call: unsafe extern "C-unwind" fn(*const (), *mut ScriptHeap, *const ScriptBinOp, ScriptValue, ScriptValue, ScriptIp, *mut ScriptValue) -> bool,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptVmBase {
     pub void: usize,
     pub code: ScriptCode,
@@ -3774,7 +3777,7 @@ impl Drop for ScriptVmBase {
     fn drop(&mut self) { crate::inspect_registry::unregister(self); }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVmBase {
     pub(crate) fn notify_let_hook(&self, id: LiveId, value: ScriptValue) {
         if let Some(hook) = self.let_hook {
@@ -3790,20 +3793,20 @@ impl ScriptVmBase {
     #[inline(always)]
     pub fn gc_if_needed(&mut self) { self.vm_ctl(&mut ScriptCtlReq::new(CTL_GC_IF_NEEDED)); }
     /// A handle another thread uses to stop this VM's runs ([`crate::interrupt`]).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn interrupt_handle(&self) -> crate::interrupt::ScriptInterrupt { self.interrupt.clone() }
     /// The host's own end of the run, from a native it is in: the VM is stopped
     /// ([`crate::interrupt::ScriptInterrupt::stop`]) and the running thread bails here with nil,
     /// uncatchably and with no error. One call across the API: a host built by another compiler
     /// than the VM never touches the trap's fields itself.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn stop_run(&mut self) {
         self.interrupt.stop();
         self.threads.cur_ref().trap.set_on(Some(ScriptTrapOn::Bail(NIL)));
     }
     #[inline(always)]
     pub fn body_count(&self) -> usize { self.vm_stat(&mut ScriptCtlReq::new(STAT_BODY_COUNT)) as usize }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn body_module_read(&self, index: usize) -> ScriptModuleRead<'_> {
         ScriptModuleRead { bodies: self.code.bodies.borrow(), index }
     }
@@ -3828,7 +3831,7 @@ impl ScriptVmBase {
         self.parts().code
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn empty() -> Self {
         Self {
             void: 0,
@@ -3860,7 +3863,7 @@ impl ScriptVmBase {
         }
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new() -> Self {
         let mut heap = ScriptHeap::empty();
         let mut native = ScriptNative::new(&mut heap);

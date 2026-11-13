@@ -19,7 +19,7 @@
 //! work ran beside it, and a runaway loop still stops at its instruction count.
 //! A write into a frozen object is an ordinary script error (`Immutable`),
 //! reported with its source location.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::array::ScriptArrayStorage;
 use crate::heap::{ScriptAllocationReport, ScriptHeap};
@@ -27,7 +27,7 @@ use crate::value::ScriptValue;
 use crate::vm::ScriptVm;
 
 /// The limits of one evaluation.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalLimits {
     pub instructions: u64,
@@ -60,7 +60,7 @@ impl EvalLimits {
 }
 
 /// What a bounded evaluation used, and the limit it hit, if any.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EvalReport {
     pub instructions: u64,
@@ -69,9 +69,9 @@ pub struct EvalReport {
     pub limit: Option<String>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl EvalReport {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn limit(&self) -> Option<&str> { self.limit.as_deref() }
 }
 
@@ -91,7 +91,7 @@ fn limit_message(error: &str) -> bool {
     .any(|k| error.contains(k))
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVm<'_> {
     /// Runs `f` (one evaluation of document code) under `limits`. Nested
     /// bounds only narrow. Errors are captured, not printed: the report's
@@ -114,7 +114,7 @@ impl ScriptVm<'_> {
     /// Runs the callback synchronously under the same limits as `eval_bounded`.
     /// # Safety
     /// `ctx` must be valid for `run`, which is called exactly once and must not retain the VM pointer.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn eval_bounded_with(&mut self, limits: &EvalLimits, ctx: *mut u8, run: unsafe extern "C-unwind" fn(*mut u8, *mut ScriptVm)) -> EvalReport {
         if self.bx.captured_errors.is_none() {
             self.bx.captured_errors = Some(Vec::new());
@@ -154,7 +154,7 @@ impl ScriptVm<'_> {
     /// loaded (a kit built on first use adds its shaders to `mod.draw`),
     /// and a module frozen here would refuse that write.
     /// Returns how many objects and arrays were frozen.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn freeze_document(&mut self, roots: &[ScriptValue]) -> (usize, usize) {
         let mut stop: Vec<ScriptValue> = self.bx.injected_globals.values().copied().collect();
         let heap = &self.bx.heap;

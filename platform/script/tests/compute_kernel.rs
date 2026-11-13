@@ -224,6 +224,8 @@ fn draw_storage_buffers_both_stages() {
             if vulkan {
                 let compiled = makepad_shader::shader_ir_draw::draw_spirv(&output, &vm).unwrap();
                 assert_eq!(output.storage_push_size, 16);
+                let masks = compiled[0].info.sampler_textures();
+                assert!(masks.contains(&1) && masks.iter().all(|m| *m <= 1), "the sampler that reads tex names texture 0 alone (the Vulkan backend picks a blend-free twin by it): {masks:?}");
                 for compiled in compiled { validate_spirv(&compiled.vertex); validate_spirv(&compiled.fragment); }
             } else if backend == ShaderBackend::Metal {
                 let (source, info) = makepad_shader::shader_ir_metal::metal_draw(&output, &vm, true);

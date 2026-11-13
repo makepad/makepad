@@ -19,17 +19,17 @@
 //! sink says so in [`LiteralReach::reload`] and the editor reloads then.
 //! Off (no edited files), nothing is lifted, nothing is recorded, and
 //! compiled code is byte-identical to a build without the map.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use makepad_relax_api::sync::Mutex;
+use relax_api::sync::Mutex;
 use std::sync::{Arc, RwLock, Weak};
 
 /// Where a literal is written: a file and the zero-based line and column
 /// (in characters) of its first character (a number's digits, past any
 /// sign; a colour's `#`).
-#[relax_api(handle, clone, eq, debug)]
+#[relax_api(handle, clone, eq, debug, run)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct LiteralSite {
     pub file: String,
@@ -39,7 +39,7 @@ pub struct LiteralSite {
 
 /// A literal's new value, as an editor writes it: a number (the digits as
 /// written, without a sign before them) or a colour's four channels (0..1).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(u8)]
 pub enum LiteralValue {
@@ -50,7 +50,7 @@ pub enum LiteralValue {
 /// What a patch reached: how many places now hold the new value, and why a
 /// reload is still needed when the literal also fed something that cannot
 /// be patched (a value computed from it while the program loaded).
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LiteralReach {
     pub places: usize,
@@ -58,7 +58,7 @@ pub struct LiteralReach {
 }
 
 /// What a [`LiteralSite`] holds, as views.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LiteralSiteView<'a> {
@@ -67,11 +67,11 @@ pub struct LiteralSiteView<'a> {
     pub col: u32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl LiteralSite {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new(file: &str, line: u32, col: u32) -> Self { Self { file: file.to_owned(), line, col } }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> LiteralSiteView<'_> { LiteralSiteView { file: &self.file, line: self.line, col: self.col } }
 }
 
@@ -85,7 +85,7 @@ impl LiteralSite {
 }
 
 /// What a [`LiteralReach`] holds, as views ([`LiteralReach::view`]).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct LiteralReachView<'a> {
@@ -99,15 +99,15 @@ pub struct LiteralReachView<'a> {
 pub const REACH_SET_PLACES: u32 = 0;
 pub const REACH_ADD_RELOAD: u32 = 1;
 
-#[relax_api]
+#[relax_api(run)]
 impl LiteralReach {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self, reason_index: usize) -> LiteralReachView<'_> {
         LiteralReachView { places: self.places, reload_count: self.reload.len(), reason: self.reload.get(reason_index).map_or("", |s| s.as_str()) }
     }
 
     /// [`REACH_SET_PLACES`]: the places `n`; [`REACH_ADD_RELOAD`]: the reason `text`, unless it is there.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn edit(&mut self, op: u32, n: usize, text: &str) {
         match op {
             REACH_SET_PLACES => self.places = n,
@@ -152,7 +152,7 @@ impl LiteralReach {
 /// counts them) are a copy of `file` from `line`, `col` on: the copy begins
 /// at column `code_col` of its first row (text before it there is the
 /// host's), and the rows after it are the file's lines as written.
-#[relax_api(handle, clone)]
+#[relax_api(handle, clone, run)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiteralOrigin {
     pub rows: std::ops::Range<u32>,
@@ -162,9 +162,9 @@ pub struct LiteralOrigin {
     pub col: u32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl LiteralOrigin {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new(row_start: u32, row_end: u32, code_col: u32, file: &str, line: u32, col: u32) -> Self {
         Self { rows: row_start..row_end, code_col, file: file.to_owned(), line, col }
     }
@@ -182,7 +182,7 @@ impl LiteralOrigin {
         Self::of_copy_into(code, copy, file, line, col, &mut ScriptOriginsOut::new(&mut out));
         out
     }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn of_copy_into(code: &str, copy: &str, file: &str, line: u32, col: u32, sink: &mut ScriptOriginsOut) {
         let rows: Vec<&str> = code.split('\n').collect();
         let lines: Vec<&str> = copy.split('\n').collect();
@@ -218,7 +218,7 @@ impl LiteralOrigin {
 /// Edit mode's state: the files being edited, and the compiled texts (by
 /// the module name they are compiled under) whose rows are copies of a
 /// file. A literal on such a row of an edited file is live.
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Clone, Debug, Default)]
 pub struct LiveLiterals {
     pub edited: Vec<String>,
@@ -272,7 +272,7 @@ pub const LIT_PATCH: u32 = 4;
 /// What [`literal`] works on, by op: LIT_SET_EDITED reads `edited`; LIT_SET_SOURCE `module` and
 /// `origins`; LIT_REGISTER_SINK moves in the record at `sink`; LIT_PATCH patches `site` with
 /// `value` and writes what it reached to `reach`.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct LiteralReq<'a> {
     pub edited: *const LiveLiterals,
@@ -302,7 +302,7 @@ impl<'a> LiteralReq<'a> {
 /// The edit-mode state: LIT_EDIT_MODE whether it is on (one atomic load: what hot paths check);
 /// LIT_SET_EDITED, LIT_SET_SOURCE whether the state changed; LIT_REGISTER_SINK adds the sink
 /// (true); LIT_PATCH patches every live sink (dropped ones are forgotten; true).
-#[relax_api]
+#[relax_api(run)]
 pub fn literal(op: u32, req: &mut LiteralReq) -> bool {
     match op {
         LIT_EDIT_MODE => ON.load(Ordering::Relaxed),
@@ -334,7 +334,7 @@ pub fn literal(op: u32, req: &mut LiteralReq) -> bool {
         }
         LIT_REGISTER_SINK => {
             // SAFETY: the record is moved in by the caller
-            makepad_relax_api::process_heap(|| {
+            relax_api::process_heap(|| {
                 let entry = Arc::new(LiteralSinkEntry(unsafe { std::ptr::read(req.sink) }));
                 if let Ok(mut sinks) = SINKS.lock() {
                     sinks.retain(|s| unsafe { (s.0.alive)(s.0.data) });
@@ -385,7 +385,7 @@ pub fn live_into() -> *const LiveLiterals {
 }
 
 fn update(f: impl FnOnce(&mut LiveLiterals) -> bool) -> bool {
-    makepad_relax_api::process_heap(|| update_here(f))
+    relax_api::process_heap(|| update_here(f))
 }
 
 fn update_here(f: impl FnOnce(&mut LiveLiterals) -> bool) -> bool {
@@ -437,7 +437,7 @@ pub trait LiteralSink: Send + Sync {
 /// A sink as its caller made it: the caller's own data and the operations on it, all of which
 /// stay in the compiler that built them. [`register_sink`] takes the record and calls `release`
 /// on it exactly once, when the sink is forgotten (it is no longer alive, or the process ends).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct LiteralSinkRegistration {
     data: *mut u8,
@@ -540,7 +540,7 @@ pub fn row_col(text: &str, at: usize) -> (u32, u32) {
 
 /// The literal immediates a program's load ran (body, opcode index): what
 /// the VM records while [`crate::vm::ScriptVmBase::literal_trace`] is set.
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Clone, Debug, Default)]
 pub struct LoadTrace {
     pub ran: std::collections::HashSet<(u16, u32)>,
@@ -558,12 +558,12 @@ pub struct LoadTrace {
     pub(crate) ran_seen: SiteSeen,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl LoadTrace {
     /// Visits matching reads synchronously in the trace's iteration order.
     /// # Safety
     /// `ctx` must be valid for `visit` until this call returns.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn read_sites_with(&self, key: crate::makepad_live_id::LiveId, site: Option<crate::value::ScriptIp>, ctx: *mut u8, visit: unsafe extern "C-unwind" fn(*mut u8, u16, u32)) {
         if let Some(site) = site {
             for &(made, k, body, at) in &self.field_reads { if k == key && made == site { visit(ctx, body, at); } }
@@ -581,7 +581,7 @@ impl LoadTrace {
 }
 
 /// Sites (body, instruction) seen while tracing a load: one bit each.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SiteSeen {
     bodies: Vec<Vec<u64>>,
@@ -609,7 +609,7 @@ impl SiteSeen {
 /// The names a load read, and where, as the thread records them: the set,
 /// and per site the name last recorded there (a site read again for the
 /// same name is not hashed again).
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct NameReads {
     pub(crate) set: std::collections::HashSet<(crate::makepad_live_id::LiveId, u16, u32)>,
@@ -634,7 +634,7 @@ impl NameReads {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl crate::vm::ScriptVm<'_> {
     /// Start tracing a load (edit mode): the literals it runs, the names
     /// and record fields it reads.
@@ -652,7 +652,7 @@ impl crate::vm::ScriptVm<'_> {
     }
 
     /// Begins a load trace, or (`end`) ends it into `out`: whether there was one.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn literal_trace(&mut self, end: bool, out: &mut LoadTrace) -> bool {
         if !end {
             self.bx.literal_trace = Some(Box::default());
@@ -689,7 +689,7 @@ pub fn named_copy(code: &crate::vm::ScriptCode, id: crate::makepad_live_id::Live
 }
 
 /// Where a literal's value went in a program that has loaded.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LiteralUse {
     /// Its code did not run at load: per-frame code pushes it each time it
@@ -720,7 +720,7 @@ impl LiteralUse {
 /// What became of the literal immediate at `index` of code body `body`, given
 /// what the load ran: its next instruction says (a `-` before it is applied
 /// after the immediate and still counts as the literal as written).
-#[relax_api]
+#[relax_api(run)]
 pub fn load_use(code: &crate::vm::ScriptCode, trace: &LoadTrace, body: u16, index: u32) -> LiteralUse {
     use crate::opcode::Opcode;
     if !trace.ran.contains(&(body, index)) {
@@ -744,7 +744,7 @@ pub fn load_use(code: &crate::vm::ScriptCode, trace: &LoadTrace, body: u16, inde
 /// One literal an edit changed: where it is in the text before (zero-based
 /// line and column of its first character, the digits past a sign or the
 /// `#`) and what it says now (a number in its unit's base unit).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiteralEdit {
     pub line: u32,
@@ -976,11 +976,11 @@ impl LiteralValue {
     pub fn as_color(&self) -> Option<[f32; 4]> { if let Self::Color(v) = self { Some(*v) } else { None } }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl LiveLiterals { pub fn push_edited(&mut self, file: &str) { self.edited.push(file.to_owned()); } }
 
 /// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptOriginsOut<'a> {
     ctx: *mut u8,
@@ -1001,7 +1001,7 @@ impl<'a> ScriptOriginsOut<'a> {
 }
 
 /// Synchronous output into a caller-owned vector; opaque elements are cloned natively.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptLiteralEditsOut<'a> {
     ctx: *mut u8,

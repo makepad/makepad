@@ -1,5 +1,5 @@
 #![allow(unused)]
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::mod_pod::*;
 use crate::trap::*;
@@ -7,7 +7,7 @@ use crate::value::*;
 use crate::value::*;
 use makepad_live_id::*;
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScriptPodField {
     pub name: LiveId,
@@ -29,7 +29,7 @@ pub enum ScriptPodEnumVariant {
 }
 
 // we're going to try to follow std140 datamapping for wgsl
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct ScriptPodTypeData {
     pub name: Option<LiveId>,
@@ -39,7 +39,7 @@ pub struct ScriptPodTypeData {
     pub ty: ScriptPodTy,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct ScriptPodTypeInline {
     pub self_ref: ScriptPodType,
@@ -47,7 +47,7 @@ pub struct ScriptPodTypeInline {
 }
 
 /// A pod type's header (ScriptPodTypeData::view).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptPodTypeDataView<'a> {
     pub name: LiveId,
@@ -58,7 +58,7 @@ pub struct ScriptPodTypeDataView<'a> {
 }
 
 /// An inline pod type (ScriptPodTypeInline::view).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptPodTypeInlineView<'a> {
     pub self_ref: ScriptPodType,
@@ -66,7 +66,7 @@ pub struct ScriptPodTypeInlineView<'a> {
 }
 
 /// A struct field (ScriptPodField::view).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptPodFieldView<'a> {
     pub name: LiveId,
@@ -74,9 +74,9 @@ pub struct ScriptPodFieldView<'a> {
     pub ty: &'a ScriptPodTypeInline,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptPodTypeData {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptPodTypeDataView<'_> {
         ScriptPodTypeDataView { name: self.name.unwrap_or(LiveId(0)), has_name: self.name.is_some(), object: self.object, default: self.default, ty: &self.ty }
     }
@@ -90,9 +90,9 @@ impl ScriptPodTypeData {
     pub fn default_value(&self) -> ScriptValue { self.view().default }
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptPodTypeInline {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptPodTypeInlineView<'_> { ScriptPodTypeInlineView { self_ref: self.self_ref, data: &self.data } }
     #[inline]
     pub fn data(&self) -> &ScriptPodTypeData { self.view().data }
@@ -100,9 +100,9 @@ impl ScriptPodTypeInline {
     pub fn self_ref(&self) -> ScriptPodType { self.view().self_ref }
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptPodField {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptPodFieldView<'_> { ScriptPodFieldView { name: self.name, default: self.default, ty: &self.ty } }
     #[inline]
     pub fn name(&self) -> LiveId { self.view().name }
@@ -112,7 +112,7 @@ impl ScriptPodField {
     pub fn default_value(&self) -> ScriptValue { self.view().default }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodVec {
     Vec2f,
@@ -131,7 +131,7 @@ pub enum ScriptPodVec {
     Vec3b,
     Vec4b,
 }
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodMat {
     Mat2x2f,
@@ -425,7 +425,7 @@ impl ScriptPodMat {
     }
 }
 
-#[relax_api(handle, clone, debug, default)]
+#[relax_api(handle, clone, debug, default, run)]
 #[derive(Default, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy {
     #[default]
@@ -468,7 +468,7 @@ pub enum ScriptPodTy {
 }
 
 /// Compact GPU fetch formats used in `#[repr(C)]` vertex/instance structs.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ScriptPodPacked {
     F16x2,
@@ -526,7 +526,7 @@ impl ScriptPodPacked {
 
 /// The data-free pod types, for building one without a variant literal (provided-crate
 /// boundary, loader-core.md section 8).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ScriptPodScalar {
@@ -708,7 +708,7 @@ impl ScriptPodTy {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct ScriptPodOffset {
     pub offset_of: usize,
@@ -721,7 +721,7 @@ pub const POD_TY_VIEW_COMPACT: u32 = 1;
 
 /// What a pod type reads as (ScriptPodTy::view): its kind, the payload of a vec, mat or packed
 /// type (the others' fields are only meaningful for their kind), its layout and its fields.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptPodTyView<'a> {
     pub tag: ScriptPodTyTag,
@@ -735,9 +735,9 @@ pub struct ScriptPodTyView<'a> {
     pub fields: &'a [ScriptPodField],
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptPodTy {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self, mode: u32) -> ScriptPodTyView<'_> {
         ScriptPodTyView {
             tag: self.kind_impl(),
@@ -816,7 +816,7 @@ impl ScriptPodTy {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug)]
 pub struct ScriptPodTag(u64);
 
@@ -872,7 +872,7 @@ impl ScriptPodTag {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptPodData {
     pub tag: ScriptPodTag,
@@ -887,7 +887,7 @@ impl ScriptPodData {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScriptPodTyTag { Void, ArrayBuilder, UndefinedStruct, F32, F16, U32, I32, Bool, AtomicU32, AtomicI32, Vec, Mat, Struct, Enum, FixedArray, VariableArray, Packed }
 impl ScriptPodTy {

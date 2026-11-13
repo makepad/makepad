@@ -9,7 +9,7 @@
 //! descriptor sets from: dyn uniforms at 2, uniform buffers at their
 //! `buffer_index`, the scope uniforms after them, then textures, samplers,
 //! the XR depth texture and the instance-record storage buffer.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::shader_ids::*;
 use crate::shader_schema::{ShaderPacked, ShaderTypeKind, ShaderTypeInline};
@@ -34,6 +34,36 @@ pub struct IrDrawInfo {
     pub instance_slots: usize,
     pub pick_binding: Option<u32>,
     pub pick_texture_base: Option<u32>,
+    /// Which of the draw's textures each sampler reads, sampler by sampler (bit i: texture i;
+    /// all bits: not known, a sampler past these or one reading a texture that is not a draw
+    /// texture global): what a backend needs to pick a sampler the bound texture's format can
+    /// be read with.
+    pub sampler_textures: [u32; SAMPLER_TEXTURE_MASKS],
+}
+
+/// Samplers whose textures [`IrDrawInfo::sampler_textures`] names.
+pub const SAMPLER_TEXTURE_MASKS: usize = 16;
+
+/// Which of the draw's textures (`ShaderIoKind::Texture`, bound from `texture_base` up) each
+/// sampler reads, over every sample in the module.
+fn sampler_textures(ir: &IrModule, output: &ShaderOutput, texture_base: u32) -> [u32; SAMPLER_TEXTURE_MASKS] {
+    let textures = output.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_))).count() as u32;
+    let mut masks = [0u32; SAMPLER_TEXTURE_MASKS];
+    for f in &ir.functions {
+        for e in &f.exprs {
+            let ExprKind::Sample(s) = &e.kind else { continue };
+            let Some(mask) = masks.get_mut(s.sampler as usize) else { continue };
+            let index = match f.exprs[s.tex as usize].kind {
+                ExprKind::Global(g) => ir.globals[g as usize].binding.map(|b| b.wrapping_sub(texture_base)),
+                _ => None,
+            };
+            *mask |= match index {
+                Some(i) if i < textures.min(32) => 1 << i,
+                _ => u32::MAX,
+            };
+        }
+    }
+    masks
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -1184,6 +1214,7 @@ fn draw_variant_spirv_with_pick(output: &ShaderOutput, types: &impl crate::shade
     crate::shader_ir_precise::lower_precise(&mut ir, true);
     let mut info = build_draw_entries(output, &mut ir, types, xr);
     if pick { spirv_pick::apply(output, &mut ir, &mut info)?; }
+    info.sampler_textures = sampler_textures(&ir, output, info.texture_binding_base);
     let (Some(v), Some(f)) = (ir.function_by_name("vertex_main"), ir.function_by_name("fragment_main")) else {
         return Err("draw shader has no entry points".to_string());
     };
@@ -2042,6 +2073,7 @@ impl IrDrawInfo {
     pub fn instance_slots(&self) -> usize { self.instance_slots }
     pub fn pick_binding(&self) -> Option<u32> { self.pick_binding }
     pub fn pick_texture_base(&self) -> Option<u32> { self.pick_texture_base }
+    pub fn sampler_textures(&self) -> &[u32; SAMPLER_TEXTURE_MASKS] { &self.sampler_textures }
 }
 
 /// What the Metal printer needs beyond the IR.

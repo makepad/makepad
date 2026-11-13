@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "The Splash compute core: a typed Splash subset with logic, compiled to a structured SSA IR with a reference interpreter and native ARM64 backends (scalar and 4-lane NEON); front ends for audio shaders and geometry kernels"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [features]
@@ -16,7 +15,7 @@ host-shims = []
 vm = ["dep:makepad-script"]
 
 [dependencies]
-makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
+relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
 makepad-script = { path = "..", optional = true }
 
 # The shared back end (Relax's RIR with vectors, tier-0 passes, register allocation, x64/arm64

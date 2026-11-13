@@ -7,7 +7,7 @@
 
 use crate::shader_ir::*;
 use makepad_live_id::LiveId;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 #[relax_api(plain)]
 #[repr(u32)]

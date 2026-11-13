@@ -18,7 +18,7 @@
 //! Entry ABI (the same as compute's arm64 backend): `extern "C" fn(ctx, state, shared,
 //! io, n)` (`extern "sysv64"` on x86-64, on every OS), io = [in_l, in_r, out_l, out_r] for audio programs and the (pointer, length)
 //! buffer table for kernels.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::ir::{Bin, Block, Cmp, Fma, Op, Program, Region, SliceArg, Stmt, Ty, Un, Val};
 use relax_backend::exec;
@@ -200,13 +200,13 @@ pub(crate) fn load(key: u128) -> Option<Code> {
 
 static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// The back end's options, read once per process from the environment (`MAKEPAD_RUN_OPT`,
-/// `MAKEPAD_RUN_NO_AVX`, ...), with the host CPU's features. (Registers go by weighted references
+/// The back end's options, read once per process from the environment (`RELAX_OPT`,
+/// `RELAX_NO_AVX`, ...), with the host CPU's features. (Registers go by weighted references
 /// over the square root of the live range's length, regalloc prio: by references alone a kernel's
 /// long-lived values took every register and its short temporaries -- a noise hash, x64's 12
 /// vector registers -- went through spill slots; x64 cycles per element: one-pass heightfield
 /// x4 -23%, instances scalar -12%, x4 -13%; no kernel slower.) On AArch64 the quick round
-/// (four-wide kernels) coalesces copies too (`MAKEPAD_RUN_NO_COALESCE` turns it off): a loop
+/// (four-wide kernels) coalesces copies too (`RELAX_NO_COALESCE` turns it off): a loop
 /// variable's update `x' = x * k; x = x'` and the fbm accumulator kept two registers and a copy
 /// per iteration (instructions per element, x4 heights 211 -> 199, one pass 612 -> 580). Not on
 /// x86-64: there it removed register moves the core eliminates anyway (heights x4 -3%
@@ -248,7 +248,7 @@ pub(crate) fn reloc_value(r: rir::Reloc) -> u64 {
 /// is the same with the quick round (bench_kernels, arm64 mini and x64).
 pub(crate) fn emit_keyed(f: &Func, key: Option<u128>, thorough: bool) -> Option<Code> {
     if options().no_codegen {
-        // MAKEPAD_RUN_NO_CODEGEN: no executable memory; the interpreter runs the program
+        // RELAX_NO_CODEGEN: no executable memory; the interpreter runs the program
         return None;
     }
     let env = target::Env { slots: rir::SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: thorough, syms: 0, sym_class: 0, near: false };
@@ -309,7 +309,7 @@ pub fn rir_of(p: &Program, writable: u64) -> Func {
 
 /// The tier-0 passes as Relax's baseline runs them: folding, copy propagation, CSE, DCE, SROA
 /// of the frame, LICM, block layout, address modes, loop rotation; after LICM, value numbering
-/// of pure values (passes::gvn_pure). No fusion, no float reassociation. `MAKEPAD_RUN_OPT=none` (or `-fold`, `-cse`, `-sroa`, `-licm`, `-imm`,
+/// of pure values (passes::gvn_pure). No fusion, no float reassociation. `RELAX_OPT=none` (or `-fold`, `-cse`, `-sroa`, `-licm`, `-imm`,
 /// `-layout`) turns passes off.
 pub(crate) fn optimise_for_codegen(f: &mut Func) {
     use relax_backend::passes;

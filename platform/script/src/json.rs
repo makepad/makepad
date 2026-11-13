@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -15,7 +15,7 @@ pub(crate) enum State {
     Array(ScriptArray),
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct JsonParser {
     index: u32,
@@ -379,16 +379,16 @@ impl JsonParser {
     }
 }
 
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Default)]
 pub struct JsonParserThread {
     pub tokenizer: ScriptTokenizer,
     pub parser: JsonParser,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl JsonParserThread {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn read_json(&mut self, json: &str, heap: &mut ScriptHeap) -> ScriptValue {
         self.tokenizer.clear();
         self.parser.clear();

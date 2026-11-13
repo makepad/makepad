@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::array::*;
 use crate::gc::*;
 use crate::gen_index::{GenSlot, GenVec};
@@ -17,7 +17,7 @@ use std::fmt::Write;
 use std::mem::size_of;
 
 /// Result of one execution-scoped script allocation budget.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScriptAllocationReport {
     /// Logical heap bytes charged while the budget was installed.
@@ -26,7 +26,7 @@ pub struct ScriptAllocationReport {
     pub exceeded: bool,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug)]
 pub(crate) struct ScriptAllocationBudget {
     remaining: usize,
@@ -114,7 +114,7 @@ pub const TYPE_NAME_IN_CHAIN: u32 = 3;
 pub const TYPE_NAME_BY_ID: u32 = 4;
 
 /// What type_info answers (by its mode).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct TypeInfo {
     pub check: *const ScriptTypeCheck,
@@ -139,7 +139,7 @@ impl TypeInfo {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptHeap {
     pub modules: ScriptObject,
@@ -237,12 +237,12 @@ pub struct ScriptHeap {
     pub(crate) touch: Option<Box<crate::touch::ScriptTouch>>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptHeap {
     /// Declare metadata accepted by a registered component without making it a
     /// child in the object's ordered vector. The metadata has no Rust field. An op of the
     /// provided crate: JIT'd widget registration calls it, never reads the heap's fields.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn define_type_property(&mut self, object: ScriptObject, name: LiveId, ty: ScriptTypeId) {
         let Some(index) = self.object_type_index(object) else { return };
         let props = &mut self.type_check[index.0 as usize].props;
@@ -382,7 +382,7 @@ impl ScriptHeap {
     /// HEAP_CHARGE_MAP_ENTRY charges one new entry of `ptr`'s map for `key` (nothing when the key
     /// is there already). False: refused, nothing to allocate.
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub(crate) fn heap_charge(&mut self, mode: u32, ptr: ScriptObject, key: ScriptValue, bytes: usize, operation: &'static str) -> bool {
         match mode {
             HEAP_CHARGE_BYTES => self.charge_allocation_impl(bytes, operation),
@@ -497,7 +497,7 @@ impl ScriptHeap {
     /// retained capacity of script strings, arrays, objects, slots, and intern
     /// tables; it intentionally cannot account for opaque host handles,
     /// adapter-owned Rust allocations, or the process allocator's metadata.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn set_max_heap_bytes(&mut self, maximum_bytes: Option<usize>) {
         self.max_heap_bytes = maximum_bytes;
         self.heap_limit_exceeded = false;
@@ -517,7 +517,7 @@ impl ScriptHeap {
     /// Returns the retained-capacity estimate at the last reconcile plus the
     /// logical bytes charged against the cap since. Without a cap this is the
     /// last reconciled estimate only.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn accounted_heap_bytes(&self) -> usize {
         let charged = self.heap_cap.as_ref().map_or(0, |cap| cap.allocated);
         self.heap_baseline_bytes.saturating_add(charged)
@@ -528,7 +528,7 @@ impl ScriptHeap {
     /// VM configuration, host-side value injection, or garbage collection.
     /// Normal script allocation paths update the cached amount in constant
     /// time instead of scanning the heap on every instruction.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn reconcile_heap_bytes(&mut self) {
         self.heap_baseline_bytes = self.estimated_heap_bytes();
         let Some(maximum) = self.max_heap_bytes else {
@@ -554,7 +554,7 @@ impl ScriptHeap {
     /// allocation path. Clearing also re-opens the cap for later charges; a
     /// host that wants the refusal to persist re-checks `accounted_heap_bytes`
     /// against its limit before running more script.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn take_heap_limit_exceeded(&mut self) -> bool {
         let exceeded = std::mem::take(&mut self.heap_limit_exceeded);
         if let Some(cap) = self.heap_cap.as_mut() {
@@ -768,7 +768,7 @@ impl ScriptHeap {
     /// the id of the type of `obj` (`type_id`, `found`); TYPE_NAME_IN_CHAIN the registered name of
     /// `obj` or of its nearest typed prototype (`name`, `found`); TYPE_NAME_BY_ID the script name
     /// the type `id` is registered under (`name`, `found`).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn type_info(&self, mode: u32, id: ScriptTypeId, obj: ScriptObject) -> TypeInfo {
         let mut r = TypeInfo { check: std::ptr::null(), object: ScriptObject::ZERO, type_id: id, name: LiveId(0), found: false, has_object: false, proto: NIL, name_ptr: std::ptr::null(), name_len: 0 };
         match mode {
@@ -837,7 +837,7 @@ impl ScriptHeap {
     /// the derive registers an enum's named variants that way -- takes the
     /// slot of any earlier registration with the same props: those carry no
     /// object, so nothing about them differs between runs but the slot.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn register_type(
         &mut self,
         type_id: Option<ScriptTypeId>,
@@ -910,7 +910,7 @@ impl ScriptHeap {
     ///
     /// # Safety
     /// `ctx` must remain valid for `push` throughout this synchronous walk.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn heap_walk(&self, kind: u32, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, bool, ScriptObject)) {
         match kind {
             HEAP_WALK_TYPE_ROOTS => {
@@ -1000,7 +1000,7 @@ impl ScriptHeap {
 
     /// Counts of the heap, by `which` (HEAP_STAT_*).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn heap_stat(&self, which: u32) -> u64 {
         match which {
             HEAP_STAT_KEY => self.roots.ptr() as usize as u64,
@@ -1193,7 +1193,7 @@ impl ScriptHeap {
     }
 
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn cast_to_f64(&self, v: ScriptValue, ip: ScriptIp) -> f64 {
         if let Some(v) = v.as_f64() {
             return v;
@@ -1314,7 +1314,7 @@ impl ScriptHeap {
     /// Writes `value` as text into `out` by `mode`: TEXT_DEBUG its debug format (`recur` the
     /// recursion guards, unchanged on return; `formatted`, `depth` as to_debug_string), TEXT_JSON
     /// its JSON.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn value_text(&self, mode: u32, value: ScriptValue, recur: &[ScriptValue], formatted: bool, depth: usize, out: &mut crate::vm_api::ScriptTextOut) {
         let mut text = String::new();
         if mode == TEXT_DEBUG {
@@ -1519,7 +1519,7 @@ impl ScriptHeap {
         }
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn to_json(&mut self, value: ScriptValue) -> ScriptValue {
         if !self.has_allocation_budget() {
             return self.new_string_with(|heap, s| {

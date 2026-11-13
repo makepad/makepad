@@ -11,7 +11,7 @@
 //! The table outlives its heap while refs exist (a ref may be dropped after its VM, as with the
 //! `Rc`'d root maps before): `owners` counts the heap plus every live ref, and the last one
 //! frees it. Not `Send`/`Sync`, as the refs never were.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use std::cell::{Cell, UnsafeCell};
 
@@ -20,7 +20,7 @@ pub const ROOT_OBJECT: u8 = 0;
 pub const ROOT_ARRAY: u8 = 1;
 pub const ROOT_HANDLE: u8 = 2;
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptRoots {
     /// the owning heap (until it drops) plus every live ref
     owners: Cell<usize>,
@@ -115,7 +115,7 @@ pub fn script_root_release(roots: *const ScriptRoots, kind: u8, index: u32) {
 /// A new ref to slot `index` of `kind` (`release` false: the ref owns the table until its
 /// release), or a ref to it is gone (`release` true).
 #[inline(never)]
-#[relax_api]
+#[relax_api(run)]
 pub fn script_root(roots: *const ScriptRoots, kind: u8, index: u32, release: bool) {
     if roots.is_null() {
         return;
@@ -135,7 +135,7 @@ pub fn script_root(roots: *const ScriptRoots, kind: u8, index: u32, release: boo
 }
 
 /// The heap's ownership of its root table.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptRootsOwner(*const ScriptRoots);
 
 impl Default for ScriptRootsOwner {

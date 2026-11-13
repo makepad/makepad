@@ -1,16 +1,16 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::suggest::format_value_type;
 use crate::trap::*;
 use crate::value::*;
 use crate::*;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone, Copy)]
 pub struct NativeId {
     pub index: u32,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone)]
 pub struct ScriptFnRef(pub(crate) ScriptObjectRef);
 
@@ -35,7 +35,7 @@ impl ScriptFnRef {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone, Copy)]
 #[repr(C, u8)]
 pub enum ScriptFnPtr {

@@ -4,7 +4,7 @@
 //! [`ScriptQueryOut`] as bytes on numbered channels (text, or the bytes of a repr(C) record);
 //! the `ScriptVm` methods that used to be one op each keep their names and are inline decoders
 //! of it, so the text and the records land in the caller's own `String`s and `Vec`s.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::docs::ScriptFieldDocsOut;
 use crate::makepad_live_id::LiveId;
@@ -55,7 +55,7 @@ pub const CH_FIELD_ID: u32 = 3;
 pub const CH_FIELD_TEXT: u32 = 4;
 
 /// What [`QUERY_LOOP_VALUES`] writes per loop variable.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptLoopValue {
@@ -64,7 +64,7 @@ pub struct ScriptLoopValue {
 }
 
 /// Where a query writes: `write(ctx, channel, bytes, len)`, made on the caller's side.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptQueryOut<'a> {
     ctx: *mut u8,
@@ -97,7 +97,7 @@ impl<'a> ScriptQueryOut<'a> {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptQueryReq<'a> {
     pub kind: u32,
@@ -273,13 +273,13 @@ macro_rules! text_channels {
     };
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVmBase {
     /// Answers a question about the running threads and the heap by `req.kind` (QUERY_*): the
     /// formats, the loops and calls running now, the threads' footprints, the injected globals.
     /// The answer's text and records go to `req.out`, its scalars to the request. The result:
     /// whether there was an answer.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn vm_query(&self, req: &mut ScriptQueryReq) -> bool {
         text_channels!(req, text0, text1);
         match req.kind {
@@ -349,13 +349,13 @@ impl ScriptVmBase {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptCode {
     /// Answers a question about the compiled code by `req.kind` (QUERY_*): where an instruction
     /// is written, a fn's text, a literal's docs, the manifests, the bodies and their scopes.
     /// The answer's text and records go to `req.out`, its scalars to the request. The result:
     /// whether there was an answer.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn code_query(&self, req: &mut ScriptQueryReq) -> bool {
         text_channels!(req, text0, text1);
         match req.kind {

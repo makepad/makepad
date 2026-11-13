@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::base64;
 use crate::function::*;
 use crate::heap::*;
@@ -43,7 +43,7 @@ pub(crate) fn append_utf8_lossy<S: ScriptStringSink>(mut bytes: &[u8], out: &mut
 }
 
 /// A Rust-held reference to a script array: a GC root while it lives (roots.rs).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug)]
 #[repr(C)]
 pub struct ScriptArrayRef {
@@ -79,7 +79,7 @@ impl Drop for ScriptArrayRef {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Clone, Copy)]
 pub struct ScriptArrayTag(u64);
 
@@ -174,7 +174,7 @@ impl ScriptArrayTag {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(PartialEq)]
 pub enum ScriptArrayStorage {
     ScriptValue(VecDeque<ScriptValue>),
@@ -467,7 +467,7 @@ impl ScriptArrayStorage {
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptArrayData {
     pub tag: ScriptArrayTag,
     pub storage: ScriptArrayStorage,

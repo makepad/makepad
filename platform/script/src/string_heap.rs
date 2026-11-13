@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::array::*;
 use crate::heap::*;
 use crate::string::*;
@@ -142,7 +142,7 @@ pub const STR_CAST: u32 = 2;
 pub const STR_LEN: u32 = 3;
 
 /// What str_read answers (by its mode).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct StrRead {
@@ -152,7 +152,7 @@ pub struct StrRead {
     pub found: bool,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptHeap {
     // Strings
 
@@ -311,7 +311,7 @@ impl ScriptHeap {
     /// false when it is no heap string); STR_INTERN the value an existing string `text` has
     /// (`value`, `found` false when none); STR_CAST writes `value` as text into `out`; STR_LEN the
     /// length of `value` as text (`len`).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn str_read(&self, mode: u32, value: ScriptValue, text: &str, out: &mut ScriptTextOut) -> StrRead {
         let mut r = StrRead { value: NIL, ptr: std::ptr::null(), len: 0, found: false };
         match mode {
@@ -361,7 +361,7 @@ impl ScriptHeap {
         self.charge_allocation(len, operation)
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn new_string_from_str(&mut self, value: &str) -> ScriptValue {
         if self.exceeds_string_limit(value.len()) {
             self.note_string_limit_exceeded(value.len(), "creating a string");

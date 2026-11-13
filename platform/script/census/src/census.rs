@@ -13,7 +13,7 @@
 //! then all that module made is walked too, until nothing is added. A name
 //! merely bound (`use mod.widgets.*`, a prelude's spread) is not a use; the
 //! module scopes and the preludes are walls.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use makepad_script::census::{ScriptCensus, CENSUS_OTHER_VM};
 use makepad_script::heap::*;
@@ -26,7 +26,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// Some VM records a census: registrations in other VMs are noted.
 static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The modules other VMs registered while one recorded.
-static OTHER_VMS: makepad_relax_api::sync::Mutex<BTreeSet<&'static str>> = makepad_relax_api::sync::Mutex::new(BTreeSet::new());
+static OTHER_VMS: relax_api::sync::Mutex<BTreeSet<&'static str>> = relax_api::sync::Mutex::new(BTreeSet::new());
 
 /// (`crate::end_run`)
 #[cfg(not(target_arch = "wasm32"))]

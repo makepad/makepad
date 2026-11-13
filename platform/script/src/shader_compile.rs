@@ -1,5 +1,5 @@
 //! Complete shader operations. Compiler state never leaves this module's result.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{
     heap::ScriptHeap,
     shader_backend::ShaderBackend,
@@ -26,7 +26,7 @@ pub trait ShaderIrFn {
 }
 
 /// Platform policy; all compiler work executes on the owning side.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ShaderCompileOptions {
@@ -72,7 +72,7 @@ impl ShaderCompileOptions {
 
 /// Finished code and reflection, with no public path back to AST/IR state.
 /// References returned by accessors borrow this owner.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct CompiledShader {
     state: ShaderOutput,
     diagnostics: String,
@@ -88,7 +88,7 @@ pub struct CompiledShader {
 }
 
 /// [`CompiledShader::view`]: a finished compile as plain data (borrowed from the owner).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CompiledShaderView<'a> {
@@ -111,7 +111,7 @@ pub struct CompiledShaderView<'a> {
 }
 
 #[inline]
-#[relax_api]
+#[relax_api(run)]
 pub fn compile_shader(
     vm: &mut ScriptVm,
     shader: ScriptObject,
@@ -203,7 +203,7 @@ pub fn compile_shader(
     result
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl CompiledShader {
     /// Say when a shader inlines to more source than a D3D compile handles
     /// quickly. ANGLE on D3D (Windows browsers) and native D3D inline every
@@ -213,7 +213,7 @@ impl CompiledShader {
     /// first draws it. The fix is in the shader: one call site in a loop over
     /// its arguments instead of several (a normal from 4 offsets, two rays a
     /// pixel), so the heaviest functions are named with their copy counts.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn warn_inline_size(&self, vm: &ScriptVm, io_self: ScriptObject) {
         const WARN_INLINED_BYTES: usize = 128 * 1024;
         let Some(src) = self.glsl() else {
@@ -248,7 +248,7 @@ impl CompiledShader {
     }
 
     /// The SPIR-V a `defer_spirv` compile left out, with the XR stages when `xr`.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn build_spirv(&mut self, vm: &ScriptVm, xr: bool) {
         if self.state.has_errors() {
             return;
@@ -263,7 +263,7 @@ impl CompiledShader {
     /// constants a platform needs (the accessors below read it; under Relax they are compiled on
     /// the caller's side, so this is the only crossing).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> CompiledShaderView<'_> {
         CompiledShaderView {
             storage_buffers: &self.state.storage_buffers,
@@ -349,7 +349,7 @@ impl CompiledShader {
     pub(crate) fn uses_time(&self) -> bool {
         self.state.uses_time()
     }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn find_vertex_buffer_object(
         &self,
         vm: &ScriptVm,
@@ -370,7 +370,7 @@ impl CompiledShader {
     /// object's own functions (`shader_functions_hash`) also depends on (a helper fn in another
     /// module is reached, but not in that hash).
     #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn reached_bodies_into(&self, heap: &ScriptHeap, out: &mut crate::object_heap::ScriptIpsOut) {
         let mut bodies = Vec::new();
         for ip in self.reached_functions().filter_map(|f| heap.as_fn(f)?.script_ip()) {
@@ -385,7 +385,7 @@ impl CompiledShader {
 /// What the code at `ips` is now (`ScriptCode::fn_content_key` of each, folded): equal to the
 /// key taken at a compile while none of their bodies got new text since
 /// (`CompiledShader::reached_bodies_into`).
-#[relax_api]
+#[relax_api(run)]
 pub fn shader_reached_key(code: &crate::vm::ScriptCode, ips: &[crate::value::ScriptIp]) -> u64 {
     let mut key = LiveId(LiveId::SEED);
     for &ip in ips {
@@ -394,7 +394,7 @@ pub fn shader_reached_key(code: &crate::vm::ScriptCode, ips: &[crate::value::Scr
     key.0
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn shader_functions_hash(
     heap: &ScriptHeap,
     code: &crate::vm::ScriptCode,

@@ -1,5 +1,5 @@
 //! Owned GPU type schemas, layouts and swizzles.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{shader_ids::*};
 use makepad_live_id::*;
 

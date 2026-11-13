@@ -15,7 +15,7 @@
 //! exactly specified, and math functions are polynomials made of those ops
 //! (no libm on the audio path), so a score renders the same samples on
 //! every machine, offline or live.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 pub mod boundary;
 pub use boundary::AudioShaderRef;

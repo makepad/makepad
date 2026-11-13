@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::shader_ids::*;
 use crate::shader_types::ShaderTypes;
 use crate::shader_schema::*;

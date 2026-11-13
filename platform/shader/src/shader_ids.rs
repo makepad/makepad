@@ -1,5 +1,5 @@
 //! Registry-owned shader identities. Zero is the absent declaration/function/scope.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 #[relax_api(plain)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]

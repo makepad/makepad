@@ -1,5 +1,5 @@
 //! Slot placement shared by shader host code and platform uniform buffers.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 #[relax_api(plain)]
 #[repr(u8)]
 #[derive(Clone, Copy)]

@@ -1,6 +1,6 @@
 //! Host capabilities belong to the compiler that owns the host. Only the
 //! context and its C callback table cross the VM boundary.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{LiveId, ScriptVmBase};
 use std::marker::PhantomData;
 
@@ -26,7 +26,7 @@ unsafe impl ScriptHostCapability for usize {
 
 pub const SCRIPT_HOST_VM_BASE: LiveId = LiveId::from_str("makepad.script.host.vm_base.v1");
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHostOps {
     query: unsafe extern "C-unwind" fn(*mut u8, LiveId, bool) -> *mut u8,
@@ -36,7 +36,7 @@ pub struct ScriptHostOps {
 
 /// An exclusive, non-owning borrow of the host. Reborrow it for nested calls;
 /// never copy the descriptor or keep its capabilities past the borrow.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHostContext<'a> {
     owner: *mut u8,

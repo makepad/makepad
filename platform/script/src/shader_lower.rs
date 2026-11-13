@@ -5,7 +5,7 @@
 //! collection on `ShaderOutput`, scope uniforms, table constants and live
 //! literals, function memoisation and the loop-cost accounting are the
 //! text compiler's, unchanged.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::makepad_error_log::*;
 use crate::mod_shader::*;
@@ -168,7 +168,7 @@ pub(crate) enum IrMe {
     },
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub(crate) struct IrLoopFrame {
     pub literal: Option<u64>,
     /// The `_mp_iter` charge literal, patched when the loop closes.
@@ -203,7 +203,7 @@ pub struct IrFnCompiler {
     pub(crate) ns_input_mark: Option<NsInputMark>,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy)]
 pub(crate) struct NsInputMark {
     pub tex: ExprId,

@@ -2,7 +2,7 @@
 //! syntax of a text backend. The module around them (declarations, entry
 //! points, preambles) is each backend's own (shader_ir_wgsl.rs,
 //! shader_ir_glsl.rs, ...).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::shader_ir::*;
 use crate::shader_output::TextureType;

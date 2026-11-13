@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::array::*;
 use crate::function::*;
 use crate::heap::*;
@@ -105,7 +105,7 @@ macro_rules! script_args_def{
 macro_rules! native_callable {
     ($(#[$m:meta])* $name:ident, $view:ident, ($($arg:ident: $ty:ty),*)) => {
         $(#[$m])*
-        #[relax_api(plain)]
+        #[relax_api(plain, run)]
         #[repr(C)]
         pub struct $name {
             data: *mut u8,
@@ -115,7 +115,7 @@ macro_rules! native_callable {
 
         /// A copy of a native's entry that outlives the borrow of the native table (the
         /// closure lives as long as its table entry).
-        #[relax_api(plain)]
+        #[relax_api(plain, run)]
         #[derive(Clone, Copy)]
         #[repr(C)]
         pub struct $view {

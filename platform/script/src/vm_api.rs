@@ -6,7 +6,7 @@
 //! `*_trap` forms report failures at the current thread's trap (as
 //! `vm.bx.threads.cur().trap.pass()` did); the plain forms report nothing (NoTrap).
 //! `vm.heap()` / `vm.heap_mut()` cover the remaining heap calls.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::heap::ScriptHeap;
 use crate::object::*;
@@ -22,7 +22,7 @@ use crate::vm_query::*;
 /// the caller's side ([`ScriptTextOut::new`] is inline) so the caller's own `String` grows; the
 /// VM only calls `write` with views of its text. No owned string crosses (loader-core.md
 /// section 8: the VM is rustc-built, its callers may be Rapid-built).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptTextOut<'a> {
     ctx: *mut u8,
@@ -61,7 +61,7 @@ impl<'a> ScriptTextOut<'a> {
 }
 
 /// A source line and column (1-based as ScriptLoc's), an out-parameter of the `*_into` calls.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ScriptLineCol {
@@ -69,7 +69,7 @@ pub struct ScriptLineCol {
     pub col: u32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVm<'_> {
     #[inline(always)]
     pub fn set_type_getter_native(&mut self, ty: ScriptTypeRedux, f: crate::native::NativeGetterFn) {
@@ -435,7 +435,17 @@ impl ScriptVm<'_> {
         self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_RUN_YIELDED)) != 0
     }
 
-    /// Pauses the current thread (a native waiting on something); its id resumes it.
+    /// Whether the native running now may [`Self::pause`]: the outermost run called it. A
+    /// native that script called from inside another native (a closure `array.map` runs) must
+    /// not: that native would get nil for the closure's value. It does its work at once instead.
+    #[inline(always)]
+    pub fn can_pause(&self) -> bool {
+        self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_CAN_PAUSE)) != 0
+    }
+
+    /// Pauses the current thread (a native waiting on something); its id resumes it. The paused
+    /// call runs again on `resume` (it is re-executed, not continued), so a pausing native is a
+    /// poll; what it returned when it paused is discarded.
     #[inline(always)]
     pub fn pause(&mut self) -> ScriptThreadId {
         ScriptThreadId(self.bx.vm_ctl(&mut ScriptCtlReq::new(CTL_PAUSE)) as u32)
@@ -561,7 +571,7 @@ impl ScriptVm<'_> {
 
     /// [`Self::fn_image`] as the handle crosses to Relax-compiled code: an
     /// empty image when `f` is no script fn.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn fn_image_of(&self, f: ScriptObject) -> ScriptFnImage {
         self.bx.heap.fn_script_ip(f).and_then(|ip| self.bx.code.fn_image(&self.bx.heap, ip)).unwrap_or_else(ScriptFnImage::empty)
     }
@@ -569,12 +579,12 @@ impl ScriptVm<'_> {
     /// The tokens of the script fn whose code holds `ip`, each with its
     /// document place (ScriptCode::fn_tokens_placed). None when there is none.
     // (an op: marked one by one in this impl, and not inline(always), which compiles on the caller's side)
-    #[relax_api]
+    #[relax_api(run)]
     pub fn fn_tokens_placed_raw(&self, ip: ScriptIp, out: &mut ScriptFnTokensRaw) -> bool {
         match self.bx.code.fn_tokens_placed(ip) {
             Some(t) => {
-                out.file = makepad_relax_api::string_to_words(t.file);
-                out.tokens = makepad_relax_api::vec_to_words(t.tokens);
+                out.file = relax_api::string_to_words(t.file);
+                out.tokens = relax_api::vec_to_words(t.tokens);
                 out.closure = t.closure;
                 true
             }
@@ -792,7 +802,7 @@ impl ScriptVm<'_> {
 
 /// Shared live-reload overrides. The collection stays on the VM side; snapshots are
 /// built by callbacks on the caller side, so no Rust collection layout crosses the boundary.
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Clone, Default)]
 pub struct ScriptModOverrides(std::rc::Rc<std::cell::RefCell<std::collections::HashMap<ScriptModKey, String>>>);
 
@@ -807,7 +817,7 @@ pub const OVR_REPLACE_FROM: u32 = 3;
 /// Calls `push(ctx, key, text, len)` for each override; the key and text are borrowed for the call.
 pub const OVR_SNAPSHOT: u32 = 4;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptModOverridesReq<'a> {
     pub op: u32,
@@ -826,10 +836,10 @@ impl<'a> ScriptModOverridesReq<'a> {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptModOverrides {
     /// Reads or changes the overrides by `req.op` (OVR_*).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn edit(&self, req: &ScriptModOverridesReq) -> u64 {
         // SAFETY: the request's pointers are the caller's borrows for this call
         match req.op {
@@ -901,7 +911,7 @@ impl ScriptModOverrides {
 }
 
 /// Shared manifest lookup, available even while the host has parked its VM.
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Clone, Default)]
 pub struct ScriptCrateManifests(std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, String>>>);
 
@@ -928,11 +938,11 @@ impl ScriptCrateManifests {
 
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVmBase {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn shared_crate_manifests(&self) -> ScriptCrateManifests { ScriptCrateManifests(self.code.crate_manifests.clone()) }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn shared_mod_overrides(&self) -> ScriptModOverrides { ScriptModOverrides(self.code.script_mod_overrides.clone()) }
 }
 
@@ -948,9 +958,9 @@ impl ScriptVm<'_> {
         // SAFETY: the words came from string_to_words / vec_to_words in the op just above.
         Some(unsafe {
             ScriptFnTokens {
-                file: makepad_relax_api::string_from_words(raw.file),
+                file: relax_api::string_from_words(raw.file),
                 closure: raw.closure,
-                tokens: makepad_relax_api::vec_from_words(raw.tokens),
+                tokens: relax_api::vec_from_words(raw.tokens),
             }
         })
     }

@@ -1,5 +1,5 @@
 //! Compiler-owned audio programs and diagnostics at the host boundary.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::{AudioShader, AudioShaderBody, Backend, ShaderError};
 use makepad_script_compute::boundary::ErrorView;

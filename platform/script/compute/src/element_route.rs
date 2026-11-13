@@ -17,7 +17,7 @@ use crate::air_shader::{Io, Tr};
 use crate::boundary::KernelRef;
 use crate::ir as air;
 use crate::lower::kernel::{K_BASE, K_COUNT, K_PARAMS, K_SEED, K_TIME};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use makepad_script::shader_ir::*;
 use makepad_script::shader_ir_compute::{CompiledKernel, CompiledKernelResult, ComputeTarget};
 use makepad_script::*;

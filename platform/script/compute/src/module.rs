@@ -20,7 +20,7 @@
 //! module needs no `use` (`curve.sample(..)`), and the stdlib shared with
 //! shaders (`std.shared`) is glob-imported by default at the lowest
 //! priority (below the kernel prelude).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::parse::*;
 use crate::ShaderError;

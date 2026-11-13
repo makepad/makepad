@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::apply::*;
 use crate::heap::*;
 use crate::value::*;
@@ -19,7 +19,7 @@ pub trait ScriptDeriveMarker {}
 /// `script_type_id_static` gets the id of `core::any::type_name::<Self>()` (such types exist
 /// only in the code of the compiler that names them). Registration checks for collisions
 /// (ScriptHeap::register_type).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ScriptTypeId {
@@ -237,14 +237,14 @@ pub extern "C-unwind" fn script_on_proto_methods_c<T: ScriptHook + ?Sized>(vm: &
     T::on_proto_methods(vm, object)
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy, Debug)]
 pub struct ScriptTypeProp {
     pub order: u32,
     pub ty: ScriptTypeId,
 }
 
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Default, Debug)]
 pub struct ScriptTypeProps {
     pub props: LiveIdMap<LiveId, ScriptTypeProp>,
@@ -259,12 +259,12 @@ pub struct ScriptTypeProps {
 pub const PROPS_INSERT: u32 = 0;
 pub const PROPS_MARK_RUST_INSTANCE_START: u32 = 1;
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptTypeProps {
     /// Edits the props by `op`: [`PROPS_INSERT`] adds field `id` of type `ty`;
     /// [`PROPS_MARK_RUST_INSTANCE_START`] marks the current position as where Rust instance
     /// fields begin.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn edit(&mut self, op: u32, id: LiveId, ty: ScriptTypeId) {
         match op {
             PROPS_INSERT => {
@@ -309,7 +309,7 @@ impl ScriptTypeProps {
 
     /// # Safety
     /// `ctx` must remain valid for each synchronous invocation of `push`.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn ordered_with(&self, rust_only: bool, ctx: *mut u8, push: unsafe extern "C-unwind" fn(*mut u8, LiveId, ScriptTypeId)) {
         let mut ordered: Vec<_> = self.props.iter().filter(|(_, prop)| !rust_only || prop.order >= self.rust_instance_start).collect();
         ordered.sort_by_key(|(_, prop)| prop.order);
@@ -317,7 +317,7 @@ impl ScriptTypeProps {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptTypeObject {
     pub(crate) type_id: ScriptTypeId,
     pub(crate) check: ScriptTypeCheckFn,
@@ -345,13 +345,13 @@ pub(crate) fn script_type_id_collision(id: ScriptTypeId, have: Option<&str>, new
     panic!("ScriptTypeId collision: {:?} is registered for `{}` and now for `{}`", id, have.unwrap_or("?"), new.unwrap_or("?"))
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptTypeCheck {
     /// A check holding `props` (taken), `object` (moved in; null: none) and `is_repr_u32_enum`.
     ///
     /// # Safety
     /// `object` is null or a readable `ScriptTypeObject` the caller relinquishes.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn build(props: &mut ScriptTypeProps, object: *const ScriptTypeObject, is_repr_u32_enum: bool) -> Self {
         let object = if object.is_null() { None } else { Some(std::ptr::read(object)) };
         Self { props: std::mem::take(props), object, is_repr_u32_enum }
@@ -361,11 +361,11 @@ impl ScriptTypeCheck {
         // SAFETY: no object
         unsafe { Self::build(props, std::ptr::null(), false) }
     }
-    #[relax_api]
+    #[relax_api(run)]
     pub fn props(&self) -> &ScriptTypeProps { &self.props }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptTypeCheck {
     pub props: ScriptTypeProps,
     pub object: Option<ScriptTypeObject>,
@@ -373,7 +373,7 @@ pub struct ScriptTypeCheck {
     pub is_repr_u32_enum: bool,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct ScriptTypeIndex(pub(crate) u32);
 
@@ -490,14 +490,14 @@ pub fn script_type_check_inner(
 // one call here instead of an inline block, so the per-field work is compiled
 // once per field TYPE (or not generic at all) rather than once per struct and
 // field. Not meant to be called by hand.
-#[relax_api]
+#[relax_api(run)]
 impl ScriptVm<'_> {
     /// The `#[live]` / `#[apply_default]` fields of one derived `script_apply`, resolved in one
     /// call (ScriptHeap::resolve_fields): `fields` sorted by id with each field's slot, `out` the
     /// slots in declaration order; a field set nowhere holds `ScriptValue::NOT_FOUND`. Eval applies
     /// read only the object's own map.
     #[doc(hidden)]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn script_derive_resolve(&mut self, apply: &Apply, value: ScriptValue, fields: &[(LiveId, u32)], out: &mut [ScriptValue]) {
         self.heap().resolve_fields(value, apply.is_eval(), fields, out)
     }
@@ -505,7 +505,7 @@ impl ScriptVm<'_> {
     /// A live edit keeps runtime state when the old and new templates resolve the same value,
     /// including a field set nowhere in either template.
     #[doc(hidden)]
-    #[relax_api]
+    #[relax_api(run)]
     #[inline(never)]
     pub fn script_derive_unchanged(&mut self, apply: &Apply, old: ScriptValue, key: LiveId, slot: ScriptValue) -> bool {
         if !apply.is_live_edit_reload() || !old.is_object() {
@@ -757,7 +757,7 @@ impl ScriptVm<'_> {
 /// Non-generic body of the default `ScriptNew::script_pod`: the pod struct type of a registered
 /// type (`type_name` for the layout assertions' messages).
 #[inline(never)]
-#[relax_api]
+#[relax_api(run)]
 pub fn script_pod_inner(vm: &mut ScriptVm, type_id: ScriptTypeId, type_name: &str) -> Option<ScriptPodType> {
     use crate::pod::*;
     // one pod type per Rust type (`ScriptHeap::rust_pod_types`)

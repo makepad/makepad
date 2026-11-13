@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::any::Any;
 
 // ============================================================================
@@ -7,25 +7,25 @@ use std::any::Any;
 
 /// The scope's props: laid out the same by rustc and Rapid (a provided VM's apply impls read
 /// the scope Rapid-compiled widgets built), so the trait object rides in a repr(C) struct.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 #[repr(transparent)]
 pub struct ScopeDataRef<'a>(Option<ScopeAnyRef<'a>>);
 
 /// The scope's data (see ScopeDataRef).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 #[repr(transparent)]
 pub struct ScopeDataMut<'a>(Option<ScopeAnyMut<'a>>);
 
 /// A borrowed trait object carried through the native boundary without calling its vtable.
 /// Downcasting stays on the caller side, where that vtable was made.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScopeAnyRef<'a> { value: &'a dyn Any }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScopeAnyMut<'a> { value: &'a mut dyn Any }
 
@@ -56,7 +56,7 @@ impl<'a> ScopeDataMut<'a> {
 // Scope - Context passed during apply operations
 // ============================================================================
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 #[repr(C)]
 pub struct Scope<'a, 'b> {
@@ -134,7 +134,7 @@ impl<'a, 'b> Scope<'a, 'b> {
 // Apply - Source of apply operation
 // ============================================================================
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Clone, Default)]
 #[repr(C, u8)]
 pub enum Apply {

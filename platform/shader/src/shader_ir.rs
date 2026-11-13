@@ -6,7 +6,7 @@
 //! kind says what they are (an instance field, a uniform, a varying ...).
 //!
 //! The design is in local/plans/shader-ir.md.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::shader_ids::*;
 use crate::shader_types::ShaderTypes;

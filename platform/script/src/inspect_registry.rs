@@ -7,8 +7,8 @@
 use crate::heap::ScriptHeap;
 use crate::vm::ScriptVmBase;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering::Relaxed};
-use makepad_relax_api::relax_api;
-use makepad_relax_api::sync::Mutex;
+use relax_api::relax_api;
+use relax_api::sync::Mutex;
 use std::sync::Arc;
 
 struct Entry {
@@ -75,7 +75,7 @@ fn now_ms() -> u64 {
 }
 
 fn note_diag(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str) {
-    makepad_relax_api::process_heap(|| note_diag_here(e, kind, at, text))
+    relax_api::process_heap(|| note_diag_here(e, kind, at, text))
 }
 
 fn note_diag_here(e: &Entry, kind: &'static str, at: Option<(&str, u32)>, text: &str) {
@@ -138,13 +138,13 @@ pub fn unreported<R>(f: impl FnOnce() -> R) -> R {
 /// source there, and the VM's ops file their errors in the loader. A thread-local that either
 /// side touched itself would be that side's own copy: thread-locals are never shared across the
 /// boundary.
-#[relax_api]
+#[relax_api(run)]
 pub fn set_unreported(on: bool) -> bool {
     UNREPORTED.with(|u| u.replace(on))
 }
 
 /// Whether this thread's evaluations are unreported ([`set_unreported`]).
-#[relax_api]
+#[relax_api(run)]
 pub fn is_unreported() -> bool {
     UNREPORTED.with(|u| u.get())
 }
@@ -180,7 +180,7 @@ fn find(addr: usize, by_heap: bool) -> Option<Arc<Entry>> {
 
 /// Register a VM base (its address must be stable: it is boxed). A second call is a no-op.
 pub fn register(base: *const ScriptVmBase, label: &'static str) {
-    makepad_relax_api::process_heap(|| register_here(base, label))
+    relax_api::process_heap(|| register_here(base, label))
 }
 
 fn register_here(base: *const ScriptVmBase, label: &'static str) {
@@ -419,7 +419,7 @@ pub(crate) fn eval_guard(base: &ScriptVmBase) -> EvalGuard {
                     e.1 = base as *const ScriptVmBase as usize;
                     e.2 += 1;
                 }
-                None => makepad_relax_api::process_heap(|| v.push((key, base as *const ScriptVmBase as usize, 1))),
+                None => relax_api::process_heap(|| v.push((key, base as *const ScriptVmBase as usize, 1))),
             }
         }
     }

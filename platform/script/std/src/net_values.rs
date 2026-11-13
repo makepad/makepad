@@ -1,28 +1,28 @@
 //! VM-owned values built from borrowed network fields. Collection traversal
 //! stays with the network owner; no Rust String, Vec, map or Arc crosses here.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_network::runtime_handle::{
     HttpServerHeadersView, HttpServerResponseBuffers, NetworkResponseView,
 };
 use crate::net_types::{HttpError, HttpResponse, HttpServerHeaders, HttpServerResponse};
 use makepad_script::*;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHttpResponseValue {
     object: ScriptObject,
     headers: ScriptObject,
 }
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHttpHeaderValue {
     key: ScriptValue,
     values: ScriptArray,
 }
-#[relax_api]
+#[relax_api(run)]
 impl ScriptHttpResponseValue {
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn begin(vm: &mut ScriptVm, metadata_id: LiveId, status_code: u16) -> Self {
         let proto = HttpResponse::script_proto(vm);
         let object = vm.new_with_proto(proto);
@@ -50,7 +50,7 @@ impl ScriptHttpResponseValue {
             .map_insert_converted(self.headers, header.key, header.values.into());
     }
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn finish(self, vm: &mut ScriptVm, response: &NetworkResponseView) -> ScriptValue {
         vm.script_derive_set_prop(self.object, "headers", self.headers.into());
         let body = if response.has_body {
@@ -71,7 +71,7 @@ impl ScriptHttpHeaderValue {
 }
 
 #[inline]
-#[relax_api]
+#[relax_api(run)]
 pub fn http_error_value(vm: &mut ScriptVm, error: &NetworkResponseView) -> ScriptValue {
     let proto = HttpError::script_proto(vm);
     let object = vm.new_with_proto(proto);
@@ -82,7 +82,7 @@ pub fn http_error_value(vm: &mut ScriptVm, error: &NetworkResponseView) -> Scrip
     object.into()
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHttpServerHeadersValue {
     object: ScriptObject,

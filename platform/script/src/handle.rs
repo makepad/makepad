@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::value::*;
 use std::any::{Any, TypeId};
@@ -6,7 +6,7 @@ use std::fmt;
 use std::fmt::Debug;
 
 /// A Rust-held reference to a script handle: a GC root while it lives (roots.rs).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct ScriptHandleRef {
@@ -54,16 +54,16 @@ pub const HANDLE_EDIT_NEW: u32 = 0;
 pub const HANDLE_EDIT_MUT: u32 = 1;
 
 /// What handle_edit answers: the handle, and its box (null when the handle is not live).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct HandleEdit {
     pub handle: ScriptHandle,
     pub boxed: *mut ScriptHandleBox,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptHeap {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn handle_box_ref(&self, handle: ScriptHandle) -> Option<&ScriptHandleBox> {
         self.handles[handle].as_ref().map(|h| &h.handle)
     }
@@ -74,7 +74,7 @@ impl ScriptHeap {
     }
 
     /// The handle interned under `key` (`intern_handle`).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn interned_handle(&self, key: u64) -> Option<ScriptHandle> {
         self.interned_handles.get(&key).copied()
     }
@@ -83,7 +83,7 @@ impl ScriptHeap {
     /// heap's life (a Cx-owned shared geometry): static, so it is never collected, and a module's
     /// `#(..)` that names it gives the same value on every run (`ScriptHeap::rust_pod_types` says
     /// why that matters).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn intern_handle(&mut self, key: u64, handle: ScriptHandle) {
         if let Some(h) = self.handles[handle].as_mut() {
             h.tag.set_static();
@@ -109,7 +109,7 @@ impl ScriptHeap {
     ///
     /// # Safety
     /// For NEW, `hgc` is a readable box the caller relinquishes.
-    #[relax_api]
+    #[relax_api(run)]
     pub unsafe fn handle_edit(&mut self, mode: u32, handle: ScriptHandle, ty: ScriptHandleType, hgc: *const ScriptHandleBox) -> HandleEdit {
         if mode == HANDLE_EDIT_MUT {
             let boxed = self.handles[handle].as_mut().map_or(std::ptr::null_mut(), |h| &mut h.handle as *mut ScriptHandleBox);
@@ -152,7 +152,7 @@ impl ScriptHeap {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default)]
 pub struct HandleTag(u64);
 
@@ -181,7 +181,7 @@ impl HandleTag {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptHandleData {
     pub tag: HandleTag,
     pub handle: ScriptHandleBox,
@@ -203,7 +203,7 @@ pub trait ScriptHandleGc: Any {
 
 /// The C-ABI table of one handle type: the VM calls a handle object only through it (the
 /// object may come from code another compiler built: local/plans/loader-core.md section 8).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHandleVtable {
     gc: unsafe extern "C-unwind" fn(*mut u8),
@@ -224,7 +224,7 @@ fn type_key<T: 'static>() -> u64 {
 }
 
 /// Opaque adapter whose formatting callback and formatter belong to the same compiler.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptHandleDebug {
     data: *const u8,
     format: unsafe extern "C-unwind" fn(*const u8, *mut u8) -> bool,
@@ -277,7 +277,7 @@ impl<T: ScriptHandleGc> HandleVt<T> {
 }
 
 /// A handle object owned by the heap: `{data, vtable}` with a C-ABI vtable.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptHandleBox {
     data: *mut u8,

@@ -1,9 +1,9 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_network::{NetworkRuntime, NetworkRuntimeHandle};
 use crate::{net::*, run::*, task::*};
 use std::sync::Arc;
 
-#[relax_api(handle, default)]
+#[relax_api(handle, default, run)]
 #[derive(Default)]
 pub struct ScriptStd {
     pub net: Option<NetworkRuntimeHandle>,
@@ -11,7 +11,7 @@ pub struct ScriptStd {
     host_io_only: bool,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptStd {
     pub fn new() -> Self {
         Self::default()
@@ -22,7 +22,7 @@ impl ScriptStd {
         Self::with_network_handle(net.into())
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn with_network_handle(net: NetworkRuntimeHandle) -> Self {
         Self {
             net: Some(net),
@@ -46,13 +46,13 @@ impl ScriptStd {
     ///
     /// This cannot be relaxed by script code. Call before evaluating guest code;
     /// callers must not transfer existing network/process handles into the context.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn restrict_to_host_io(&mut self) {
         self.net = None;
         self.host_io_only = true;
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn host_io_only(&self) -> bool {
         self.host_io_only
     }
@@ -61,13 +61,13 @@ impl ScriptStd {
     /// restricted context after it was restricted (a Splash isolate's lazily registered widget
     /// library loads its fonts); returns the previous value to put back. The network handle is
     /// not given back. Never call it around guest code.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn set_host_io_only_for_host_code(&mut self, host_io_only: bool) -> bool {
         std::mem::replace(&mut self.host_io_only, host_io_only)
     }
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptData {
     pub tasks: ScriptTasks,

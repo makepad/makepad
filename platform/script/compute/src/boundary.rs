@@ -2,7 +2,7 @@
 //!
 //! Collections stay with the compiler that allocated them. A view borrows
 //! only for the call; an owned reference retains and releases in this crate.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::kernel::{Kernel, KernelBody, Layout, LayoutField};
 use crate::{Backend, ShaderError};
@@ -524,7 +524,7 @@ pub fn kernels_compiling() -> Vec<String> {
     COMPILING.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, what)| what.clone()).collect()
 }
 
-static COMPILING: makepad_relax_api::sync::Mutex<Vec<(u64, String)>> = makepad_relax_api::sync::Mutex::new(Vec::new());
+static COMPILING: relax_api::sync::Mutex<Vec<(u64, String)>> = relax_api::sync::Mutex::new(Vec::new());
 
 /// A run of this process's app ended in place (`makepad run`): a compile that ended with its thread
 /// never removed its row.
@@ -797,9 +797,9 @@ impl<'a> BorrowedBuffer<'a> {
 }
 
 /// The record layouts apps registered as their own tables, by name.
-fn registry() -> &'static makepad_relax_api::sync::Mutex<Vec<Layout>> {
-    static REGISTRY: std::sync::OnceLock<makepad_relax_api::sync::Mutex<Vec<Layout>>> = std::sync::OnceLock::new();
-    REGISTRY.get_or_init(|| makepad_relax_api::sync::Mutex::new(Vec::new()))
+fn registry() -> &'static relax_api::sync::Mutex<Vec<Layout>> {
+    static REGISTRY: std::sync::OnceLock<relax_api::sync::Mutex<Vec<Layout>>> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| relax_api::sync::Mutex::new(Vec::new()))
 }
 
 fn owned(layout: &LayoutView<'_>) -> Layout {

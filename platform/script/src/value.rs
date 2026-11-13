@@ -1,10 +1,10 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::gen_index::GenRef;
 use crate::makepad_live_id::*;
 use crate::opcode::*;
 use std::fmt;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(PartialEq, Eq, Clone, Copy, Hash, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct ScriptValue(u64);
@@ -19,7 +19,7 @@ impl Default for ScriptValue {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(C)]
 pub struct ScriptIp {
@@ -80,7 +80,7 @@ pub const HEAP_INDEX_BITS: u32 = 24;
 /// Default generation value for new allocations
 pub const GENERATION_ZERO: Generation = 0;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(C)]
 pub struct ScriptPod {
@@ -110,7 +110,7 @@ impl From<ScriptPod> for ScriptValue {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(C)]
 pub struct ScriptPodType {
@@ -121,7 +121,7 @@ impl ScriptPodType {
     pub const VOID: ScriptPodType = ScriptPodType { index: 0 };
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(C)]
 pub struct ScriptObject {
@@ -129,7 +129,7 @@ pub struct ScriptObject {
     pub(crate) generation: Generation,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(C)]
 pub struct ScriptArray {
@@ -217,7 +217,7 @@ impl GenRef for ScriptPod {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct ScriptHandleType(pub(crate) u8);
@@ -229,7 +229,7 @@ impl ScriptHandleType {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(transparent)]
 pub struct ScriptTypeRedux(u8);
@@ -281,7 +281,7 @@ impl fmt::Display for ScriptTypeRedux {
 
 /// repr(C) with `index` first (8 bytes, one register at the C boundary); ordering, hashing and
 /// Debug keep the logical order (ty, index, generation).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Default, Copy, Clone, Eq, PartialEq)]
 #[repr(C)]
 pub struct ScriptHandle {
@@ -421,7 +421,7 @@ impl From<ScriptValue> for ScriptHandle {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptRegex {
     pub(crate) index: u32,
@@ -465,7 +465,7 @@ impl From<ScriptRegex> for ScriptValue {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(C)]
 pub struct ScriptString {
@@ -633,14 +633,14 @@ impl From<Opcode> for ScriptValue {
 }
 // NaN box value
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ValueError {
     pub ty: ScriptValueType,
     pub ip: ScriptIp,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
 #[repr(transparent)]
 pub struct ScriptValueType(u8);

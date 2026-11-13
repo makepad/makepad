@@ -31,7 +31,7 @@
 //! buffers, make the record the element type, or write its values through
 //! views of one buffer at the record's stride (`output(ty, stride, offset,
 //! buffer)`, every view the same stride).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 pub mod cost;
 pub mod boundary;

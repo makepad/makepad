@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{vm, ScriptStd, ScriptVmStdExt};
 use makepad_network::{FromUISender, ToUIReceiver};
 use makepad_script::*;
@@ -37,7 +37,7 @@ pub struct ScriptChildProcessState {
     pub events: ScriptChildEvents,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook)]
 pub struct ScriptChildEvents {
     #[live]

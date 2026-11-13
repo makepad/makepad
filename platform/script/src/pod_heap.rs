@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::heap::*;
 use crate::mod_pod::*;
 use crate::pod::*;
@@ -17,7 +17,7 @@ pub const POD_EDIT_DATA_MUT: u32 = 1;
 pub const POD_EDIT_NAME_SET: u32 = 2;
 
 /// What pod_view answers: the type and the data words (borrowed from the heap).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct PodView<'a> {
     /// the pod's type (POD_VIEW_DATA), or the type asked for
@@ -28,7 +28,7 @@ pub struct PodView<'a> {
 }
 
 /// What pod_edit answers (by its mode).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct PodEdit {
     pub pod: ScriptPod,
@@ -36,7 +36,7 @@ pub struct PodEdit {
     pub len: usize,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptHeap {
     // POD TYPES
 
@@ -110,7 +110,7 @@ impl ScriptHeap {
 
     /// Reads a pod by `mode`: POD_VIEW_DATA the pod's type and data words; POD_VIEW_TYPE the type
     /// `ty` (no words).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn pod_view(&self, mode: u32, pod: ScriptPod, ty: ScriptPodType) -> PodView<'_> {
         match mode {
             POD_VIEW_DATA => {
@@ -134,7 +134,7 @@ impl ScriptHeap {
 
     /// Changes pods by `mode`: POD_EDIT_NEW a new pod of type `ty` (`pod`); POD_EDIT_DATA_MUT
     /// the words of `pod` (`ptr`/`len`); POD_EDIT_NAME_SET names type `ty` `name`.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn pod_edit(&mut self, mode: u32, pod: ScriptPod, ty: ScriptPodType, name: LiveId) -> PodEdit {
         match mode {
             POD_EDIT_NEW => PodEdit { pod: self.new_pod_impl(ty), ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 },

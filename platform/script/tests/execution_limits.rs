@@ -311,3 +311,98 @@ fn a_lazy_module_touched_in_a_sliced_run_expands_whole_and_the_run_slices_on() {
     assert!(take_errors(vm).is_empty());
     assert!(!vm.is_paused());
 }
+
+// ---------------------------------------------------------------------------
+// a native that pauses a sliced run
+
+thread_local! {
+    /// The probe's pauses still to make, and what `can_pause` answered at each of its calls.
+    static WAIT: std::cell::RefCell<(usize, Vec<bool>)> = const { std::cell::RefCell::new((0, Vec::new())) };
+}
+
+/// `mod.probe.wait()`: pauses its thread while pauses remain and it may, else answers 7. A
+/// paused call is executed again by the resume, so it is a poll.
+fn add_wait_probe(vm: &mut ScriptVm) {
+    let m = vm.new_module(id!(probe));
+    vm.add_method(m, id_lut!(wait), script_args_def!(), |vm, _| {
+        let can = vm.can_pause();
+        let pause = WAIT.with(|w| {
+            let mut w = w.borrow_mut();
+            w.1.push(can);
+            let pause = can && w.0 > 0;
+            w.0 -= pause as usize;
+            pause
+        });
+        if pause {
+            vm.pause();
+            return NIL;
+        }
+        7.0.into()
+    });
+}
+
+/// Starts `start` under a sliced run's budget past its deadline (read every 97 instructions)
+/// with `pauses` pauses for the probe to make, and resumes the run's thread while it is paused,
+/// by a yield or by the probe, as a host's eval steps do: the run's value and its resumes.
+fn run_paused(vm: &mut ScriptVm, pauses: usize, start: impl FnOnce(&mut ScriptVm) -> ScriptValue) -> (ScriptValue, usize) {
+    WAIT.with(|w| *w.borrow_mut() = (pauses, Vec::new()));
+    let slice = || Some(ScriptRunBudget::slice(Duration::ZERO, 97));
+    vm.set_run_budget(slice());
+    let thread = vm.current_thread();
+    let mut value = start(vm);
+    let mut resumes = 0;
+    loop {
+        vm.set_current_thread(thread);
+        if !vm.is_paused() {
+            break;
+        }
+        resumes += 1;
+        assert!(resumes < 1_000_000, "a paused run that never ends");
+        vm.set_run_budget(slice());
+        value = vm.resume();
+    }
+    vm.set_run_budget(None);
+    (value, resumes)
+}
+
+fn append_source(file: &str) -> ScriptMod {
+    ScriptMod::new("", "", file, 1, 0, "", &[])
+}
+
+#[test]
+fn a_native_pausing_a_sliced_streaming_eval_leaves_the_eval_end_to_the_resume() {
+    let code = "let a = 20\nlet w = mod.probe.wait()\nlet m = [1, 2].map(fn(v) { return mod.probe.wait() + v })\nlet b = a + w + m[0] + m[1]\n{b: b}\n;";
+    let vm = &mut test_vm();
+    add_wait_probe(vm);
+    let (value, resumes) = run_paused(vm, 3, |vm| vm.eval_with_append_source(append_source("pause_streaming.splash"), code, ScriptObject::ZERO));
+    let calls = WAIT.with(|w| w.borrow().1.clone());
+    assert_eq!(calls, [true, true, true, true, false, false], "can_pause: the outermost run's call may pause, a closure's inside `map` may not");
+    assert!(resumes >= 3, "resumed {resumes} times for three pauses");
+    let obj = value.as_object().unwrap_or_else(|| panic!("the run's value: {value:?} {:#?}", take_errors(vm)));
+    assert_eq!(vm.heap().value(obj, id!(b).into(), NoTrap).as_number(), Some(44.0), "the paused call's answer after its pauses");
+    assert!(vm.heap().is_from_eval(obj), "the streaming eval's end ran at the run's real end");
+    assert!(!vm.bx.silence_errors, "the streaming eval left errors silenced");
+    let end = vm.end_scope_of("pause_streaming.splash").expect("the body kept the scope it ended in");
+    assert_eq!(vm.heap().value(end, id!(b).into(), NoTrap).as_number(), Some(44.0), "the end scope holds the body's last lets");
+    assert!(take_errors(vm).is_empty());
+}
+
+#[test]
+fn a_paused_sliced_run_still_ends_on_its_instruction_and_heap_limits() {
+    let vm = &mut test_vm();
+    add_wait_probe(vm);
+    let (previous, applied) = vm.instruction_limit_begin(5_000);
+    let (value, _) = run_paused(vm, 3, |vm| vm.eval_with_append_source(append_source("pause_limit.splash"), "mod.probe.wait()\nloop {}\n;", ScriptObject::ZERO));
+    vm.instruction_limit_end(previous, applied);
+    assert!(value.is_err() || value.is_nil(), "{value:?}");
+    assert!(errors_mention(vm, "instruction limit exceeded"), "the instruction limit across pauses");
+
+    let vm = &mut test_vm();
+    add_wait_probe(vm);
+    vm.heap_allocation_limit_begin(32 * 1024);
+    let code = "mod.probe.wait()\nlet text = \"abcdefgh\"\nfor i in 0..20 { text = text + text }\ntext\n;";
+    let _ = run_paused(vm, 3, |vm| vm.eval_with_append_source(append_source("pause_heap.splash"), code, ScriptObject::ZERO));
+    let report = vm.heap_allocation_limit_end();
+    assert!(report.exceeded, "the heap limit across pauses");
+    assert!(errors_mention(vm, "concatenating strings"), "the heap limit's error");
+}

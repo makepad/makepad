@@ -28,11 +28,11 @@ pub fn install(hook: Hook) -> bool {
     HOOK.set(hook).is_ok()
 }
 
-/// `MAKEPAD_RUN_KERNEL_CACHE=verify`: every kernel found in the store is also compiled and the two
+/// `RELAX_KERNEL_CACHE=verify`: every kernel found in the store is also compiled and the two
 /// machine codes compared (they must be the same bytes; the process ends on a difference).
 pub(crate) fn verify() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("MAKEPAD_RUN_KERNEL_CACHE").is_ok_and(|v| v == "verify"))
+    *V.get_or_init(|| std::env::var("RELAX_KERNEL_CACHE").is_ok_and(|v| v == "verify"))
 }
 
 pub(crate) fn same(back_end: &str, stored: &[u8], fresh: &[u8]) {

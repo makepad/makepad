@@ -1,7 +1,7 @@
 //! Complete compilation preparation for a VM kernel object. Application rules
 //! arrive as descriptors; declarations, dependency discovery and source maps
 //! never leave this owner. Backend compilation can be deferred to a worker.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::vm_kernel::{self, Decl, Entry, KernelProgram, VmKernel};
 use crate::boundary::{kernel_compile, CompileReq, KernelCompilation};
 use crate::kernel::MathMode;

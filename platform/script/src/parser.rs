@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_error_log::*;
 use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -855,7 +855,7 @@ pub(crate) struct SlotCtx {
     loop_marks: Vec<usize>,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ScriptParser {
     /// Keep every number literal a pushed value of its own (no folding into
     /// an operator's argument): a host can then set one in place while the
@@ -931,9 +931,9 @@ pub struct ScriptParser {
     pub(crate) slot_frames: Vec<(u32, Vec<LiveId>)>,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl Default for ScriptParser {
-    #[relax_api]
+    #[relax_api(run)]
     fn default() -> Self {
         Self {
             keep_numbers: false,
@@ -966,7 +966,7 @@ impl Default for ScriptParser {
 /// Snapshot of parser state that can be restored for incremental parsing.
 /// Captures the state before auto-close so we can undo those synthetic closings
 /// when more source arrives.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 pub struct ParserCheckpoint {
     pub opcodes_len: usize,
     pub source_map_len: usize,
@@ -987,7 +987,7 @@ pub struct ParserCheckpoint {
     slot_frames_len: usize,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptParser {
     /// A parser that keeps number literals as values of their own, or not
     /// ([`Self::keep_numbers`]).
@@ -5397,7 +5397,7 @@ impl ScriptParser {
         0
     }
 
-    #[relax_api]
+    #[relax_api(run)]
     pub fn parse(
         &mut self,
         tokenizer: &ScriptTokenizer,
@@ -5647,7 +5647,7 @@ impl ScriptParser {
 
     /// Restore parser state from a checkpoint, undoing any auto-close opcodes
     /// that were appended after the checkpoint was taken.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn restore_checkpoint(&mut self, cp: ParserCheckpoint) {
         self.opcodes.truncate(cp.opcodes_len);
         self.source_map.truncate(cp.source_map_len);
@@ -5677,7 +5677,7 @@ impl ScriptParser {
     /// pass the interned value here so the parser emits the real partial string
     /// into opcodes (for incremental UI rendering). The tokenizer token is NOT
     /// modified, preserving its state machine for the next `tokenize()` call.
-    #[relax_api]
+    #[relax_api(run)]
     pub fn parse_streaming(
         &mut self,
         tokenizer: &ScriptTokenizer,
@@ -6088,7 +6088,7 @@ mod tests {
 }
 
 /// What ScriptParser::errors answers.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ParserErrors<'a> {
     pub had_error: bool,
@@ -6096,9 +6096,9 @@ pub struct ParserErrors<'a> {
     pub has_first: bool,
 }
 
-#[relax_api(marked)]
+#[relax_api(marked, run)]
 impl ScriptParser {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn errors(&self) -> ParserErrors<'_> {
         let first = self.parse_errors.first().map(String::as_str);
         ParserErrors { had_error: self.had_error, first: first.unwrap_or(""), has_first: first.is_some() }

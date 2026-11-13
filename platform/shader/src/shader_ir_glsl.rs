@@ -8,7 +8,7 @@ use crate::shader_ir_draw::{build_gl_entries, GlDrawInfo};
 use crate::shader_ir_text::*;
 use crate::shader_output::*;
 use makepad_live_id::LiveId;
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::fmt::Write;
 
 pub struct GlslDrawSources {

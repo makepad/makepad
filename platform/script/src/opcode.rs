@@ -1,7 +1,7 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use std::fmt;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Copy, Clone, PartialEq, Eq, Default)]
 pub struct OpcodeArgs(pub(crate) u32);
 
@@ -94,7 +94,7 @@ impl OpcodeArgs {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Opcode(pub u8);
 impl Opcode {

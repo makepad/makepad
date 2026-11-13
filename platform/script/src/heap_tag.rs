@@ -50,7 +50,7 @@ impl Drop for HeapTag {
 }
 
 /// How many heaps are alive, for the heap census.
-#[makepad_relax_api::relax_api]
+#[relax_api::relax_api]
 pub fn live_heaps() -> usize {
     LIVE.load(Ordering::Relaxed)
 }

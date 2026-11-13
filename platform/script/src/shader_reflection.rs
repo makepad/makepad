@@ -1,5 +1,5 @@
 //! Finished draw reflection shared by live compilation and shader packs.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{
     heap::ScriptHeap,
     literal::LiteralSite,
@@ -10,7 +10,7 @@ use crate::{
 use makepad_live_id::LiveId;
 /// One io row. Plain data (fixed-layout fields, the pod type boxed): JIT code reads it
 /// without crossing into the VM (relax_api.txt `jit`).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug)]
 pub struct DrawShaderDescIo {
     pub(crate) kind: ShaderIoKind,
@@ -29,7 +29,7 @@ pub struct DrawShaderDescIo {
 }
 
 /// Where a scope uniform's value comes from.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug)]
 #[repr(C, u8)]
 pub enum DrawShaderDescScope {
@@ -41,7 +41,7 @@ pub enum DrawShaderDescScope {
     Fixed(Box<[f32]>),
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Debug)]
 pub struct DrawShaderDescScopeUniform {
     pub(crate) shader_name: LiveId,
@@ -53,7 +53,7 @@ pub struct DrawShaderDescScopeUniform {
 /// code: the io in the compiler's order, samplers, scope uniforms (in io
 /// order), table constants and uniform buffer bindings. A compile makes one
 /// ([`DrawShaderDesc::from_output`]); a prebuilt shader carries one.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug, Default)]
 pub struct DrawShaderDesc {
     pub(crate) io: Vec<DrawShaderDescIo>,
@@ -67,11 +67,11 @@ pub struct DrawShaderDesc {
     pub(crate) uses_time: bool,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl DrawShaderDesc {
     /// The description of a finished compile (after
     /// `assign_uniform_buffer_indices`).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn from_output(heap: &ScriptHeap, output: &crate::shader_compile::CompiledShader) -> Self {
         let io = output
             .io()
@@ -133,7 +133,7 @@ impl DrawShaderDesc {
 }
 
 /// [`DrawShaderDesc::view`]: the description as slices of plain rows, borrowed.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DrawShaderDescView<'a> {
@@ -146,12 +146,12 @@ pub struct DrawShaderDescView<'a> {
     pub uses_time: bool,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl DrawShaderDesc {
     /// Every part of the description in one call (the accessors below read it; under Relax
     /// they are compiled on the caller's side).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> DrawShaderDescView<'_> {
         DrawShaderDescView {
             io: &self.io,

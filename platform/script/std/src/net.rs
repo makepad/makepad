@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_network::{
     http_server::{HttpServer, HttpServerRequest, HttpServerResponse as NetHttpServerResponse},
     FromUIReceiver, FromUISender, NetworkResponse, SocketStream, ToUIReceiver, ToUISender,
@@ -14,7 +14,7 @@ use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptWebSocket {
     #[allow(unused)]
     pub id: LiveId,
@@ -29,7 +29,7 @@ pub struct ScriptServerWebSocket {
     pub events: WebSocketEvents,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 pub struct ScriptHttp {
     pub id: LiveId,
     pub events: HttpEvents,
@@ -91,7 +91,7 @@ pub struct HttpServerOptions {
     pub listen: String,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook)]
 pub struct HttpServerEvents {
     #[live]
@@ -102,7 +102,7 @@ pub struct HttpServerEvents {
     pub on_connect_websocket: Option<ScriptFnRef>,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook)]
 pub struct HttpEvents {
     #[live]
@@ -117,7 +117,7 @@ pub struct HttpEvents {
     pub on_progress: Option<ScriptFnRef>,
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Script, ScriptHook)]
 pub struct WebSocketEvents {
     #[live]
@@ -543,7 +543,7 @@ pub fn handle_script_http_servers(host: &mut ScriptHostContext) {
 
 /// Selected before constructing a payload. Indices deliberately remain the
 /// pre-callback indices: removal follows the existing callback/async-pump order.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptNetworkEvent {
     kind: crate::makepad_network::runtime_handle::NetworkResponseKind,
@@ -552,10 +552,10 @@ pub struct ScriptNetworkEvent {
     remove: bool,
     websocket: bool,
 }
-#[relax_api]
+#[relax_api(run)]
 impl ScriptNetworkEvent {
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn begin(
         host: &mut ScriptHostContext,
         kind: crate::makepad_network::runtime_handle::NetworkResponseKind,
@@ -617,7 +617,7 @@ impl ScriptNetworkEvent {
     /// A panic of the handler restores the VM and returns before any
     /// request/socket removal; the caller resumes it (`resume_if_panicked`).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn dispatch(&self, host: &mut ScriptHostContext, payload: &mut crate::ScriptVmCall) {
         if !self.handler.is_nil() && vm::with_vm_and_async_with(host, payload) {
             return;

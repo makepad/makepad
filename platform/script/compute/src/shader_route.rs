@@ -19,7 +19,7 @@
 use crate::air_shader::{Io, Tr};
 use crate::boundary::KernelRef;
 use crate::ir::{self as air, Op, Region, Ty};
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use makepad_script::shader_compile::ShaderIrFn;
 use makepad_script::shader_ir::*;
 use makepad_script::*;

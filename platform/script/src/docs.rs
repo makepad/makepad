@@ -38,7 +38,7 @@
 //! constructed, its docs, and the keys it sets itself. Rust-built objects
 //! (made_at == ScriptIp::UNKNOWN) appear as levels with no location — the
 //! tweaker renders those as "native".
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::makepad_live_id::*;
 use crate::opcode::*;
@@ -56,7 +56,7 @@ use crate::vm_query::*;
 const DOC_ATTACH_WINDOW: u32 = 256;
 
 /// A caller-owned `Vec<(LiveId, String)>` of field docs the VM appends to (as ScriptTextOut).
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 pub struct ScriptFieldDocsOut<'a> {
     ctx: *mut u8,
@@ -334,7 +334,7 @@ pub fn resolve_docs(
 /// clamps: the UI may scrub past a bound (expanding it) or type anything.
 /// Unrecognized words stay part of the name. Applies to value-position
 /// annotations and to field/definition docs alike.
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Clone, Debug)]
 pub struct ScriptDocHint {
     pub name: String,
@@ -344,7 +344,7 @@ pub struct ScriptDocHint {
 }
 
 /// Parse the hint micro-grammar out of a doc text, leniently.
-#[relax_api]
+#[relax_api(run)]
 pub fn parse_doc_hint(text: &str) -> ScriptDocHint {
     let mut name_parts: Vec<&str> = Vec::new();
     let (mut min, mut max, mut step) = (None, None, None);
@@ -591,7 +591,7 @@ impl<'a> ScriptVm<'a> {
 
 /// What a [`ScriptDocHint`] holds, as plain data ([`ScriptDocHint::view`]); the min, max and
 /// step are valid where `has` has bit 0, 1 and 2 set.
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptDocHintView<'a> {
@@ -602,9 +602,9 @@ pub struct ScriptDocHintView<'a> {
     pub has: u32,
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptDocHint {
-    #[relax_api]
+    #[relax_api(run)]
     pub fn view(&self) -> ScriptDocHintView<'_> {
         ScriptDocHintView {
             name: &self.name,

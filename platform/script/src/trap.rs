@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::makepad_script_derive::*;
 use crate::value::*;
 use std::cell::RefCell;
@@ -26,7 +26,7 @@ pub const TRAP_PENDING_ERR: u8 = 1;
 /// Bit set in `pending` when `on` holds a trap (pause/return/bail/yield).
 pub const TRAP_PENDING_ON: u8 = 2;
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default, Debug)]
 pub struct ScriptTrapInner {
     err: RefCell<VecDeque<ScriptError>>,
@@ -120,7 +120,7 @@ impl ScriptTrapInner {
     }
 }
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[derive(Clone, Copy)]
 pub enum ScriptTrap<'a> {
     NoTrap,
@@ -143,11 +143,11 @@ impl ScriptTrapInner {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 impl ScriptTrapInner {
     /// Queues an error at this trap (text as views: the script_err_*! macros call this from
     /// app code built by another compiler than the VM, loader-core.md section 8).
-    #[relax_api]
+    #[relax_api(run)]
     pub fn push_err(&self, value: ScriptValue, message: &str, origin_file: &str, origin_line: u32) -> ScriptValue {
         self.pending.set(self.pending.get() | TRAP_PENDING_ERR);
         self.err.borrow_mut().push_back(ScriptError {
@@ -161,7 +161,7 @@ impl ScriptTrapInner {
 
     /// Where this trap's thread is (the site errors raised now report).
     #[inline]
-    #[relax_api]
+    #[relax_api(run)]
     pub fn cur_ip(&self) -> ScriptIp {
         self.ip
     }

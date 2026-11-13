@@ -1,4 +1,4 @@
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 use crate::{vm, ScriptStd, ScriptVmStdExt};
 use makepad_script::id;
 use makepad_script::*;
@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptTaskOnThreadCompletedHook {
@@ -18,7 +18,7 @@ pub struct ScriptTaskOnThreadCompletedHook {
         ScriptValue,
     ) -> bool,
 }
-#[relax_api(plain)]
+#[relax_api(plain, run)]
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ScriptTaskPumpHook {
@@ -54,7 +54,7 @@ impl ScriptTaskPumpHook {
     }
 }
 
-#[relax_api(handle, clone)]
+#[relax_api(handle, clone, run)]
 #[derive(Default, Clone)]
 pub struct ScriptTaskHooks {
     pub on_thread_completed: Vec<ScriptTaskOnThreadCompletedHook>,
@@ -72,7 +72,7 @@ pub struct ScriptTask {
     pub recv_pause: VecDeque<ScriptThreadId>,
 }
 
-#[relax_api(handle)]
+#[relax_api(handle, run)]
 #[derive(Default)]
 pub struct ScriptTasks {
     pub tasks: Rc<RefCell<Vec<ScriptTask>>>,
@@ -95,7 +95,7 @@ impl ScriptHandleGc for ScriptTaskGc {
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn add_script_task_on_thread_completed_hook(
     std: &mut ScriptStd,
     hook: ScriptTaskOnThreadCompletedHook,
@@ -112,7 +112,7 @@ pub fn add_script_task_on_thread_completed_hook(
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn add_script_task_pump_hook(std: &mut ScriptStd, hook: ScriptTaskPumpHook) {
     if !std
         .data
@@ -126,7 +126,7 @@ pub fn add_script_task_pump_hook(std: &mut ScriptStd, hook: ScriptTaskPumpHook) 
     }
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn queue_script_thread_resume(std: &mut ScriptStd, thread_id: ScriptThreadId) {
     std.data.tasks.pending_resumes.push_back(thread_id);
 }
@@ -169,7 +169,7 @@ fn run_script_task_pump_hooks(host: &mut ScriptHostContext) -> bool {
     progressed
 }
 
-#[relax_api]
+#[relax_api(run)]
 pub fn handle_script_tasks(host: &mut ScriptHostContext) {
     loop {
         let mut progressed = false;

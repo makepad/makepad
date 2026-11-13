@@ -21,7 +21,7 @@
 //! - Every op is total and has one exact meaning (IEEE f32 without
 //!   fusion except the explicit [`Op::Fma`], wrapping i32, division by zero gives 0, min/max are selects),
 //!   so backends are held BIT-IDENTICAL to [`run`], the reference.
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 #[repr(u8)]

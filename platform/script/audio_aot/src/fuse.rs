@@ -8,7 +8,7 @@
 //! A graph is either an effect graph (every node an effect; `Port::Input`
 //! is the graph's stereo input) or an instrument chain (node 0 a voice,
 //! the rest effects run per voice, with per-voice state).
-use makepad_relax_api::relax_api;
+use relax_api::relax_api;
 
 use crate::parse::*;
 use crate::{Backend, ShaderError};
