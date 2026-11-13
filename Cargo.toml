@@ -304,6 +304,7 @@ workspace.members = [
     # and its host crates; Relax's Rust JIT library crates live in libs/relax ===
     "tools/run",
     "tools/run/runner",
+    "tools/run/native_macros",
     "tools/run/boot",
     "tools/run/fixture/diffpkg",
     "tools/run/fixture/diffpkg/tables",
@@ -338,7 +339,7 @@ workspace.members = [
     "platform/script/test",
     "platform/script/audio_aot",
     "platform/hal",
-    "platform/cpu_budget",
+    "libs/cpu_budget",
     "platform/script/compute",
     "platform/script/imports",
     "platform/script/compute_sched",
@@ -494,9 +495,9 @@ unicode-segmentation = { path = "libs/unicode/unicode-segmentation" }
 # Paths of Relax's JIT libraries (libs/relax), the host crates (tools/run), and their makepad dependencies:
 # members say `name = { workspace = true }`.
 [workspace.dependencies]
-makepad-cpu-budget = { path = "platform/cpu_budget", version = "1.0.0" }
+makepad-cpu-budget = { path = "libs/cpu_budget", version = "1.0.0" }
 relax-lex = { path = "libs/relax/lex", version = "0.1.0" }
-makepad-relax = { path = "libs/relax/attr", version = "1.0.0" }
+relax-attr = { path = "libs/relax/attr", version = "1.0.0" }
 relax-base = { path = "libs/relax/base", version = "0.1.0" }
 relax-backend = { path = "libs/relax/backend", version = "0.1.0" }
 relax-codegen = { path = "libs/relax/codegen", version = "0.1.0" }
@@ -514,8 +515,8 @@ makepad-strict-json = { path = "libs/strict_json", version = "0.1.0" }
 makepad-gpu-trace = { path = "libs/gpu_trace", version = "1.0.0" }
 makepad-prof-stream = { path = "libs/prof_stream", version = "1.0.0" }
 makepad-prof-view = { path = "libs/prof_view", version = "0.1.0" }
-makepad-relax-api = { path = "libs/relax_api", version = "1.0.0" }
-makepad-relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
+relax-api = { path = "libs/relax_api", version = "1.0.0" }
+relax-api-macro-impl = { path = "libs/relax_api/macro_impl", version = "1.0.0" }
 makepad-live-id-macros-impl = { path = "libs/live_id/id_macros_impl", version = "1.0.0" }
 makepad-derive-widget-impl = { path = "widgets/derive_widget_impl", version = "1.0.0" }
 makepad-micro-serde-derive-impl = { path = "libs/micro_serde/derive_impl", version = "1.0.0" }
@@ -654,4 +655,6 @@ incremental = false
 [profile.release.package.relax-session]
 incremental = false
 [profile.release.package.relax-native-macros]
+incremental = false
+[profile.release.package.makepad-run-native-macros]
 incremental = false

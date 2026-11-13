@@ -5,10 +5,8 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Makepad rust tokenizer"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "oD0L5c3G2VuWsqkFkpgKSat_PMo="
 
 [dependencies]
 makepad-live-id = { path = "../live_id", version = "1.0.0" }
-makepad-error-log = { path = "../error_log", version = "1.0.0" }

@@ -7,9 +7,13 @@ use std::ops::Range;
 
 pub use crate::cut::{backspace, cut, delete_forward};
 pub use crate::format::{
-    indent_items, link_at, set_block, set_link, toggle_inline, toggle_task, BlockStyle, Mark,
+    indent_items, link_at, picture, picture_at, set_block, set_link, set_picture, toggle_inline, toggle_task,
+    BlockStyle, Mark,
 };
-pub use crate::table::{cell_at, cell_below, delete_column, delete_row, insert_column, insert_row, insert_table, table_from_header, table_step, Cell, Step};
+pub use crate::table::{
+    block_text, cell_at, cell_below, cell_block, clear_block, delete_block, delete_column, delete_row, insert_column, insert_row,
+    insert_table, table_from_header, table_step, Cell, CellBlock, Step,
+};
 
 /// An edit as source replacements: ascending, disjoint ranges in the old
 /// text, and the caret's offset in the resulting text.
@@ -330,6 +334,30 @@ pub fn type_text(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize,
         return Plan { edits: Vec::new(), caret }.checked(text);
     }
     let typed = if in_cell { typed.replace('|', "\\|") } else { typed.to_string() };
+    // A blank line is where the final view shows an empty paragraph (the
+    // line after the document's last one, say): text typed there is a
+    // paragraph of its own, unless the block around it goes on below it
+    // (the gap between two items of a list). Written next to a line with
+    // text it would continue that block (a paragraph, an item or a quote
+    // lazily, a table as a row), so a blank line goes between them.
+    if !typed.trim().is_empty()
+        && !matches!(containers.leaf, Leaf::Code { .. } | Leaf::Html)
+        && text[containers.line.clone()].trim().is_empty()
+        && !goes_on(text, events, caret, containers.line.end)
+    {
+        let filled = |at: usize| !text[line_at(text, at)].trim().is_empty();
+        let above = containers.line.start > 0 && filled(containers.line.start - 1);
+        let below = containers.line.end < text.len() && filled(containers.line.end + 1) && !typed.ends_with('\n');
+        if above || below {
+            let before = if above { "\n" } else { "" };
+            let after = if below { "\n" } else { "" };
+            return Plan {
+                caret: caret + before.len() + typed.len(),
+                edits: vec![(caret..caret, format!("{before}{typed}{after}"))],
+            }
+            .checked(text);
+        }
+    }
     let mut plan = Plan::insert(caret, typed.clone());
     if matches!(typed.as_str(), "`" | "~") && !matches!(containers.leaf, Leaf::Code { .. }) {
         let start = containers.content_start(text);
@@ -344,6 +372,22 @@ pub fn type_text(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize,
         }
     }
     plan.checked(text)
+}
+
+/// Whether a block holding `at` also holds the first line with text after
+/// `line_end`: the block goes on past a blank line at `at`.
+fn goes_on(text: &str, events: &[(Event<'_>, Range<usize>)], at: usize, line_end: usize) -> bool {
+    let mut next = line_end;
+    while next < text.len() {
+        let line = line_at(text, next + 1);
+        if !text[line.clone()].trim().is_empty() {
+            return events.iter().any(|(event, range)| {
+                matches!(event, Event::Start(_)) && holds(text, range, at) && holds(text, range, line.start)
+            });
+        }
+        next = line.end;
+    }
+    false
 }
 
 fn code_enter(text: &str, caret: usize, containers: &Containers) -> Plan {
@@ -497,6 +541,17 @@ mod tests {
             ("space on a blank line does nothing", "a\n\n‸\n", " ", "a\n\n‸\n"),
             ("space after text", "a‸\n", " ", "a ‸\n"),
             ("indent in code", "```\n‸a\n```\n", " ", "```\n ‸a\n```\n"),
+            // Text typed on a blank line is its own paragraph, never a lazy
+            // continuation of a neighbour; in code it stays as typed.
+            ("after the last paragraph", "a\n‸\n", "b", "a\n\nb‸\n"),
+            ("after a list", "- a\n‸\n", "b", "- a\n\nb‸\n"),
+            ("after a quote", "> a\n‸\n", "b", "> a\n\nb‸\n"),
+            ("after a table", "| a |\n| - |\n‸\n", "b", "| a |\n| - |\n\nb‸\n"),
+            ("before a paragraph", "‸\nb\n", "a", "a‸\n\nb\n"),
+            ("between paragraphs", "a\n‸\nb\n", "x", "a\n\nx‸\n\nb\n"),
+            ("pasted lines before a paragraph", "‸\nb\n", "a\n", "a\n‸\nb\n"),
+            ("between blank lines stays", "a\n\n‸\n\nb\n", "x", "a\n\nx‸\n\nb\n"),
+            ("blank code line stays", "```\na\n‸\nb\n```\n", "x", "```\na\nx‸\nb\n```\n"),
         ] {
             case(rule, before, after, |text, events, caret| {
                 Some(type_text(text, events, caret, typed)).filter(|plan| !plan.edits.is_empty())

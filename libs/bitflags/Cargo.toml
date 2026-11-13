@@ -28,7 +28,6 @@ autobenches = false
 description = """
 A macro to generate structures which behave like bitflags.
 """
-homepage = "https://github.com/bitflags/bitflags"
 documentation = "https://docs.rs/bitflags"
 readme = "README.md"
 keywords = [

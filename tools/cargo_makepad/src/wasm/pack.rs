@@ -112,7 +112,7 @@ pub fn collect(cwd: &Path, build_crate: &str, build_bin: &str, args: &[String], 
         .env("MAKEPAD_RUN", "collect-web")
         .env("MAKEPAD_COLLECT", &dir)
         .env("MAKEPAD_HIDE_WINDOWS", "1")
-        .env("SANDBOX_MUTE", "1")
+        .env("MAKEPAD_MUTE", "1")
         .status()
         .map_err(|e| format!("starting {}: {e}", exe.display()))?;
     if !Manifest::is_done(&dir) {

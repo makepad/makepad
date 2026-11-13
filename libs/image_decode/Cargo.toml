@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Pictures decoded to RGBA (PNG, JPEG, WebP, GIF, BMP, QOI, ICO; an animation's frames; upright as their EXIF says), with no platform"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

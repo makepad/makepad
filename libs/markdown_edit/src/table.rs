@@ -1,7 +1,7 @@
 //! GFM table commands over source lines, with parser events defining the table's extent.
 
 use crate::plan::{content_start, line_at, Containers, Leaf, Plan};
-use pulldown_cmark::{Event, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, Tag, TagEnd};
 use std::ops::Range;
 
 /// A table cell: its place and its content's source range.
@@ -15,6 +15,27 @@ pub struct Cell {
     /// The header's cell count.
     pub columns: usize,
     pub content: Range<usize>,
+}
+
+/// Whole cells of one table: what a selection from one of its cells to
+/// another covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellBlock {
+    /// A place in the table (its header's start), which finds it again.
+    pub table: usize,
+    /// Zero for the header, then the body rows.
+    pub rows: Range<usize>,
+    pub columns: Range<usize>,
+    /// The table's header plus body rows, and its columns.
+    pub table_rows: usize,
+    pub table_columns: usize,
+}
+
+impl CellBlock {
+    /// Whether the block holds every column of its rows.
+    pub fn whole_rows(&self) -> bool {
+        self.columns.start == 0 && self.columns.end >= self.table_columns
+    }
 }
 
 /// An optional source edit, then a selection in the resulting text.
@@ -145,17 +166,19 @@ struct Table {
     rows: Vec<Row>,
     delimiter: Row,
     columns: usize,
+    aligns: Vec<Alignment>,
     containers: Containers,
 }
 
 impl Table {
     fn at(text: &str, events: &[(Event<'_>, Range<usize>)], at: usize) -> Option<Self> {
         debug_assert!(text.is_char_boundary(at));
-        let (index, columns, start) = events.iter().enumerate().find_map(|(index, (event, range))| {
+        let (index, aligns, start) = events.iter().enumerate().find_map(|(index, (event, range))| {
             let Event::Start(Tag::Table(aligns)) = event else { return None };
             (line_at(text, range.start).start <= at && at < range.end)
-                .then_some((index, aligns.len(), range.start))
+                .then(|| (index, aligns.clone(), range.start))
         })?;
+        let columns = aligns.len();
         if columns == 0 {
             return None;
         }
@@ -176,7 +199,7 @@ impl Table {
         let line = line_at(text, after_line(text, &header.line));
         let start = content_start(text, line.clone(), &containers.stack);
         let delimiter = Row::read(text, line, start);
-        Some(Self { rows, delimiter, columns, containers })
+        Some(Self { rows, delimiter, columns, aligns, containers })
     }
 
     fn locate(&self, at: usize) -> Option<(usize, usize)> {
@@ -462,6 +485,113 @@ pub fn delete_column(text: &str, events: &[(Event<'_>, Range<usize>)], at: usize
     Some(finish(text, edits, destination, Placement::Start))
 }
 
+/// The cells from `anchor`'s to `caret`'s when the two are in different cells
+/// of one table. None within one cell, or with either outside the table's
+/// rows (its delimiter line included).
+pub fn cell_block(text: &str, events: &[(Event<'_>, Range<usize>)], anchor: usize, caret: usize) -> Option<CellBlock> {
+    let table = Table::at(text, events, anchor)?;
+    let from = table.locate(anchor)?;
+    let to = table.locate(caret)?;
+    if from == to {
+        return None;
+    }
+    Some(CellBlock {
+        table: table.rows[0].source.start,
+        rows: from.0.min(to.0)..from.0.max(to.0) + 1,
+        columns: from.1.min(to.1)..from.1.max(to.1) + 1,
+        table_rows: table.rows.len(),
+        table_columns: table.columns,
+    })
+}
+
+/// The block's cells as a table of their own: its first row the header,
+/// under it the table's alignments for those columns.
+pub fn block_text(text: &str, events: &[(Event<'_>, Range<usize>)], block: &CellBlock) -> Option<String> {
+    let table = Table::at(text, events, block.table)?;
+    let style = Style { leading: true, trailing: true };
+    let columns = block.columns.start.min(table.columns)..block.columns.end.min(table.columns);
+    let mut out = String::new();
+    for (index, row) in block.rows.clone().enumerate() {
+        let values = table.rows.get(row)?.values(text, table.columns);
+        out.push_str(&write_row(&values[columns.clone()], style).text);
+        out.push('\n');
+        if index == 0 {
+            let marks: Vec<&str> = columns
+                .clone()
+                .map(|column| match table.aligns.get(column) {
+                    Some(Alignment::Left) => ":--",
+                    Some(Alignment::Center) => ":-:",
+                    Some(Alignment::Right) => "--:",
+                    _ => "---",
+                })
+                .collect();
+            out.push_str(&write_row(&marks, style).text);
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+/// Empties the block's cells, keeping the table's shape and spacing; the
+/// caret goes to the first cell.
+pub fn clear_block(text: &str, events: &[(Event<'_>, Range<usize>)], block: &CellBlock) -> Option<Step> {
+    let table = Table::at(text, events, block.table)?;
+    let first = table.rows.get(block.rows.start)?.content(text, block.columns.start);
+    let mut edits = Vec::new();
+    for row in block.rows.clone() {
+        let source = table.rows.get(row)?;
+        for column in block.columns.clone().filter(|&column| column < source.raw.len()) {
+            let content = source.content(text, column);
+            if !content.is_empty() {
+                edits.push((content, String::new()));
+            }
+        }
+    }
+    Some(finish(text, edits, Destination::Existing(first), Placement::Start))
+}
+
+/// Deletes the block: every row and column takes the table, whole body rows
+/// go (the caret to the row after, else before), whole columns go from every
+/// row; any other block is emptied ([`clear_block`]).
+pub fn delete_block(text: &str, events: &[(Event<'_>, Range<usize>)], block: &CellBlock) -> Option<Step> {
+    let table = Table::at(text, events, block.table)?;
+    let all_rows = block.rows.start == 0 && block.rows.end >= table.rows.len();
+    let all_columns = block.columns.start == 0 && block.columns.end >= table.columns;
+    if all_rows && all_columns {
+        let start = table.rows[0].line.start;
+        let edits = vec![(start..table.end(text), String::new())];
+        return Some(finish(text, edits, Destination::Existing(start..start), Placement::Start));
+    }
+    if all_columns && block.rows.start > 0 {
+        let first = &table.rows[block.rows.start];
+        let last = &table.rows[(block.rows.end - 1).min(table.rows.len() - 1)];
+        let edits = vec![(first.line.start..after_line(text, &last.line), String::new())];
+        let next = if block.rows.end < table.rows.len() { block.rows.end } else { block.rows.start - 1 };
+        return Some(go_to(text, &table, next, 0, edits, Placement::Start));
+    }
+    if all_rows {
+        let next = block.columns.start.min(table.columns - block.columns.len() - 1);
+        let mut edits = Vec::new();
+        let mut destination = None;
+        for (index, row) in table.rows.iter().enumerate().chain(std::iter::once((table.rows.len(), &table.delimiter))) {
+            let mut values = row.values(text, table.columns.min(row.raw.len()));
+            let len = values.len();
+            if block.columns.start >= len {
+                continue;
+            }
+            values.drain(block.columns.start..block.columns.end.min(len));
+            let written = row.write(text, table.columns, &values, table.style());
+            if index == 0 {
+                let content = written.cells.get(next).cloned().unwrap_or(written.text.len()..written.text.len());
+                destination = Some(Destination::Written(row.source.start, content));
+            }
+            edits.push((row.source.clone(), written.text));
+        }
+        return Some(finish(text, edits, destination?, Placement::Start));
+    }
+    clear_block(text, events, block)
+}
+
 /// Enter at the end of a one-line pipe paragraph adds its delimiter and an empty body row.
 /// The header must start with a pipe and have at least two cells.
 pub fn table_from_header(text: &str, events: &[(Event<'_>, Range<usize>)], at: usize) -> Option<Step> {
@@ -709,5 +839,37 @@ mod tests {
             ("tight list prefix", ("- | a | b |‸\n", Some("- | a | b |\n  | --- | --- |\n  | ‸ |  |\n"))),
             ("escaped pipes do not add columns", ("| a\\|b | `c\\|d` |‸\n", Some("| a\\|b | `c\\|d` |\n| --- | --- |\n| ‸ |  |\n"))),
         ], |rule, (before, expected)| step_case(rule, before, expected, table_from_header));
+    }
+
+    #[test]
+    fn cell_blocks_select_copy_clear_and_delete() {
+        let text = "| a | b | c |\n|:--|:-:|--:|\n| d | e | f |\n| g | h | i |\n\nafter\n";
+        let mut parser = Parser::new_ext(text, parse_options());
+        parser.assume_footnote_labels_defined();
+        let events: Vec<_> = parser.into_offset_iter().collect();
+        let at = |s: &str| text.find(s).unwrap();
+        let block = |from: &str, to: &str| cell_block(text, &events, at(from), at(to));
+        // The result of a step, its caret marked.
+        let applied = |step: Option<Step>| {
+            let step = step.expect("a step");
+            let mut out = step.plan.map_or_else(|| text.to_string(), |plan| plan.apply(text));
+            out.insert(step.select.end, '‸');
+            out
+        };
+        assert_eq!(cell_block(text, &events, at("a"), at("a") + 1), None, "a selection in one cell stays text");
+        assert_eq!(block("e", "after"), None, "a selection leaving the table stays text");
+        assert_eq!(block("e", "|:-:"), None, "the delimiter line holds no cells");
+        let up = block("e", "b").expect("two cells make a block");
+        assert_eq!((up.rows, up.columns), (0..2, 1..2), "the block runs from either end");
+        let corner = block("e", "i").unwrap();
+        assert!(!corner.whole_rows(), "two of three columns");
+        assert_eq!(block_text(text, &events, &corner).unwrap(), "| e | f |\n| :-: | --: |\n| h | i |\n", "copied as a table, alignments kept");
+        assert_eq!(applied(clear_block(text, &events, &corner)), "| a | b | c |\n|:--|:-:|--:|\n| d | ‸ |  |\n| g |  |  |\n\nafter\n", "cleared cells keep the pipes");
+        assert_eq!(applied(delete_block(text, &events, &corner)), applied(clear_block(text, &events, &corner)), "a part of rows is cleared, not removed");
+        let body = block("d", "i").unwrap();
+        assert!(body.whole_rows(), "every column");
+        assert_eq!(applied(delete_block(text, &events, &body)), "| ‸a | b | c |\n|:--|:-:|--:|\n\nafter\n", "whole body rows go");
+        assert_eq!(applied(delete_block(text, &events, &block("a", "h").unwrap())), "| ‸c |\n| --: |\n| f |\n| i |\n\nafter\n", "whole columns go from every row");
+        assert_eq!(applied(delete_block(text, &events, &block("a", "i").unwrap())), "‸\nafter\n", "every cell takes the table");
     }
 }

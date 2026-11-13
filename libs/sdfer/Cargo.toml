@@ -14,7 +14,6 @@ edition = "2021"
 name = "sdfer"
 version = "0.2.1"
 description = "SDF (Signed Distance Field) generation algorithms"
-homepage = "https://github.com/LykenSol/sdfer"
 documentation = "https://docs.rs/sdfer"
 readme = "README.md"
 keywords = ["sdf"]

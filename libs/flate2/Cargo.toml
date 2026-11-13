@@ -30,7 +30,6 @@ DEFLATE compression and decompression exposed as Read/BufRead/Write streams.
 Supports miniz_oxide and multiple zlib implementations. Supports zlib, gzip,
 and raw deflate streams.
 """
-homepage = "https://github.com/rust-lang/flate2-rs"
 documentation = "https://docs.rs/flate2"
 readme = "README.md"
 keywords = [

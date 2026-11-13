@@ -568,16 +568,29 @@ impl Index {
     /// resolve through the document's reference definitions and footnote
     /// references through its footnote labels.
     pub fn parse_slice<'s>(&self, slice: &'s Slice) -> Vec<(Event<'s>, Range<usize>)> {
+        let mut parser =
+            Parser::new_with_broken_link_callback(&slice.text, parse_options(), Some(self.resolve()));
+        parser.declare_footnote_labels(self.footnotes.iter().map(String::as_str));
+        parser.into_offset_iter().collect()
+    }
+
+    /// Parses Markdown cut from the document (a copy) as the document
+    /// reads it: its links resolve through the document's reference
+    /// definitions, its footnote references through its footnote labels.
+    pub fn parse_fragment<'s>(&self, text: &'s str) -> Vec<Event<'s>> {
+        let mut parser = Parser::new_with_broken_link_callback(text, parse_options(), Some(self.resolve()));
+        parser.declare_footnote_labels(self.footnotes.iter().map(String::as_str));
+        parser.collect()
+    }
+
+    /// Resolves a reference link through the document's definitions.
+    fn resolve<'s>(&self) -> impl FnMut(BrokenLink<'s>) -> Option<(CowStr<'s>, CowStr<'s>)> + '_ {
         let links = &self.links;
-        let callback = move |link: BrokenLink<'s>| {
+        move |link: BrokenLink<'s>| {
             links
                 .get(&normalize_label(&link.reference))
                 .map(|(dest, title)| (CowStr::from(dest.clone()), CowStr::from(title.clone())))
-        };
-        let mut parser =
-            Parser::new_with_broken_link_callback(&slice.text, parse_options(), Some(callback));
-        parser.declare_footnote_labels(self.footnotes.iter().map(String::as_str));
-        parser.into_offset_iter().collect()
+        }
     }
 
     /// Brings the index up to date with `lines` after `edits` (in the order

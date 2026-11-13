@@ -6,6 +6,7 @@
 mod font;
 mod object;
 mod outline;
+mod type3;
 
 #[cfg(test)]
 mod tests;
@@ -14,7 +15,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use font::Font;
 use makepad_fast_inflate::ZlibCompressor;
-use object::{number, string, uri, Objects};
+use object::{number, string, uri, utf16_hex, Objects};
 
 /// Document metadata.
 pub struct DocInfo {
@@ -93,11 +94,8 @@ pub struct PageImage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FontId(pub usize);
 
-/// An sfnt font with metrics supplied by the caller.
-pub struct FontProgram {
-    /// Complete TrueType `glyf` or OpenType `CFF ` sfnt, optionally subset by the caller.
-    /// Run glyph ids refer to this font; the writer never renumbers them.
-    pub data: Vec<u8>,
+/// Font metrics supplied by the caller, independently of the font program.
+pub struct FontMetrics {
     /// PostScript name, sanitised to ASCII letters, digits and hyphens and given a subset tag.
     pub postscript_name: String,
     /// Font units per em; must be nonzero.
@@ -112,13 +110,47 @@ pub struct FontProgram {
     pub bbox: [i16; 4],
 }
 
+/// A Type 3 glyph drawn in font units, with y increasing upward.
+pub enum Type3Glyph {
+    /// An uncoloured outline, filled with the run's colour using the nonzero winding rule.
+    Outline(Vec<PathCommand>),
+    /// A colour image, including per-pixel alpha.
+    Image {
+        /// Tightly packed RGBA8 rows, top to bottom.
+        rgba: Vec<u8>,
+        /// Image width in pixels; must be nonzero.
+        width_px: u32,
+        /// Image height in pixels; must be nonzero.
+        height_px: u32,
+        /// Placement [x_min, y_min, x_max, y_max] in font units.
+        rect: [f32; 4],
+    },
+}
+
+/// An outline operation in font units, with y increasing upward.
+#[derive(Clone, Copy, Debug)]
+pub enum PathCommand {
+    /// Starts a contour at (x, y).
+    MoveTo(f32, f32),
+    /// Draws a line to (x, y).
+    LineTo(f32, f32),
+    /// Draws a quadratic through control (cx, cy) to (x, y).
+    QuadTo(f32, f32, f32, f32),
+    /// Draws a cubic through controls (cx1, cy1), (cx2, cy2) to (x, y).
+    CurveTo(f32, f32, f32, f32, f32, f32),
+    /// Closes the current contour.
+    Close,
+}
+
 /// A positioned glyph with its extraction text.
 pub struct Glyph {
     /// Glyph id in the registered font.
     pub id: u16,
     /// Pen x in points relative to the run origin.
     pub x: f32,
-    /// Advance in font units from hmtx, used in the PDF width array.
+    /// Offset from the run baseline in points, positive downward.
+    pub y: f32,
+    /// Advance in font units, used in the PDF width array (the first glyph with an id gives its width).
     pub advance: u16,
     /// Cluster text on its first glyph, or an empty string on the remaining glyphs.
     pub text: String,
@@ -133,16 +165,18 @@ pub enum TextMode {
     Invisible,
 }
 
-/// A single baseline of positioned text.
+/// Positioned text anchored at a baseline, with optional per-glyph offsets.
 pub struct TextRun {
     /// Registered font to use.
     pub font: FontId,
     /// Font size in points.
     pub size: f32,
-    /// RGB fill components in 0..1.
-    pub color: [f32; 3],
+    /// RGBA fill components in 0..1.
+    pub color: [f32; 4],
     /// Baseline start in top-left page coordinates.
     pub origin: [f32; 2],
+    /// Optional clipping rectangle in top-left page coordinates.
+    pub clip: Option<Rect>,
     /// Visible fill or invisible searchable text.
     pub mode: TextMode,
     /// Glyphs in drawing order.
@@ -232,12 +266,44 @@ impl PdfWriter {
         }
     }
 
-    /// Registers a font for later runs. Its objects are written in finish().
-    pub fn add_font(&mut self, font: FontProgram) -> FontId {
+    /// Registers an sfnt font whose program is supplied before finish().
+    /// Unused fonts allocate no PDF objects and need no program.
+    pub fn add_font(&mut self, metrics: FontMetrics) -> FontId {
         let id = FontId(self.fonts.len());
-        let object = self.objects.reserve();
-        self.fonts.push(Font::new(object, font));
+        self.fonts.push(Font::new(metrics, false));
         id
+    }
+
+    /// Registers a Type 3 font whose used glyph procedures are supplied before finish().
+    pub fn add_type3_font(&mut self, metrics: FontMetrics) -> FontId {
+        let id = FontId(self.fonts.len());
+        self.fonts.push(Font::new(metrics, true));
+        id
+    }
+
+    /// Returns the glyph ids used so far by a registered font, in ascending order.
+    pub fn used_glyphs(&self, font: FontId) -> Vec<u16> {
+        self.fonts
+            .get(font.0)
+            .expect("font must be registered")
+            .used_glyphs()
+    }
+
+    /// Sets or replaces a registered sfnt font's TrueType `glyf` or OpenType `CFF ` program.
+    /// The caller may subset it, preserving the glyph ids used by runs.
+    pub fn set_font_program(&mut self, font: FontId, data: Vec<u8>) {
+        self.fonts
+            .get_mut(font.0)
+            .expect("font must be registered")
+            .set_program(data);
+    }
+
+    /// Sets or replaces a glyph procedure in a registered Type 3 font.
+    pub fn set_type3_glyph(&mut self, font: FontId, id: u16, glyph: Type3Glyph) {
+        self.fonts
+            .get_mut(font.0)
+            .expect("font must be registered")
+            .set_glyph(id, glyph);
     }
 
     /// Writes the page's content and images immediately: the images are
@@ -268,18 +334,70 @@ impl PdfWriter {
         }
 
         let mut used_fonts = BTreeSet::new();
+        let mut alphas = HashMap::new();
+        let mut states = String::new();
         for run in page.text {
             let font = self
                 .fonts
                 .get_mut(run.font.0)
                 .expect("run font must be registered");
-            used_fonts.insert(run.font.0);
-            write_run(&mut content, &run, font, page.height);
+            if run.glyphs.is_empty() {
+                continue;
+            }
+            assert!(
+                run.color.iter().all(|value| (0.0..=1.0).contains(value)),
+                "text colour components must be in 0..1"
+            );
+            let alpha = run.color[3];
+            let saved = alpha < 1.0 || run.clip.is_some();
+            if saved {
+                content.push_str("q ");
+            }
+            if alpha < 1.0 {
+                // Canonicalise negative zero so equal alphas share one state.
+                let key = if alpha == 0.0 { 0 } else { alpha.to_bits() };
+                let next = alphas.len();
+                let state = alphas.entry(key).or_insert_with(|| {
+                    let object = self.objects.reserve();
+                    self.objects.write(
+                        object,
+                        &format!("<< /Type /ExtGState /ca {} >>", number(f64::from(alpha))),
+                    );
+                    states.push_str(&format!("/GS{next} {object} 0 R "));
+                    next
+                });
+                content.push_str(&format!("/GS{state} gs "));
+            }
+            if let Some(clip) = run.clip {
+                content.push_str(&format!(
+                    "{} {} {} {} re W n ",
+                    number(f64::from(clip.x)),
+                    number(f64::from(page.height) - f64::from(clip.y) - f64::from(clip.h)),
+                    number(f64::from(clip.w)),
+                    number(f64::from(clip.h)),
+                ));
+            }
+            for subfont in write_run(&mut content, &run, font, &mut self.objects, page.height) {
+                used_fonts.insert((run.font.0, subfont));
+            }
+            if saved {
+                content.push_str("Q\n");
+            }
         }
         let mut fonts = String::new();
-        for index in used_fonts {
-            fonts.push_str(&format!("/F{index} {} 0 R ", self.fonts[index].object));
+        for (index, subfont) in used_fonts {
+            let font = &self.fonts[index];
+            fonts.push_str(&format!(
+                "/{} {} 0 R ",
+                font.resource_name(index, subfont),
+                font.objects[subfont]
+            ));
         }
+        let states = if states.is_empty() {
+            String::new()
+        } else {
+            format!("/ExtGState << {states} >>")
+        };
 
         let mut annotations = String::new();
         for link in page.links {
@@ -307,7 +425,7 @@ impl PdfWriter {
             page_object,
             &format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
-                 /Resources << /XObject << {images} >> /Font << {fonts} >> >> \
+                 /Resources << /XObject << {images} >> /Font << {fonts} >> {states} >> \
                  /Contents {contents} 0 R /Annots [{annotations}] >>",
                 number(f64::from(page.width)),
                 number(f64::from(page.height)),
@@ -334,6 +452,7 @@ impl PdfWriter {
 
     /// Writes fonts, destinations, page tree and xref, returning the completed PDF.
     /// All in-document destinations must refer to pages added before this call.
+    /// Panics with the font name if a used font program or Type 3 glyph is missing.
     pub fn finish(mut self) -> Vec<u8> {
         for (index, font) in self.fonts.into_iter().enumerate() {
             font.write(&mut self.objects, index);
@@ -398,14 +517,19 @@ fn destination(pages: &[PageRecord], index: usize, y: f32) -> String {
     )
 }
 
-fn write_run(content: &mut String, run: &TextRun, font: &mut Font, height: f32) {
-    let em = f64::from(font.program.units_per_em);
+fn write_run(
+    content: &mut String,
+    run: &TextRun,
+    font: &mut Font,
+    objects: &mut Objects,
+    height: f32,
+) -> BTreeSet<usize> {
+    let em = f64::from(font.metrics.units_per_em);
     let size = f64::from(run.size);
+    let mut subfonts = BTreeSet::new();
     // Text render mode survives ET: set it explicitly so Fill follows Invisible correctly.
     content.push_str(&format!(
-        "BT /F{} {} Tf {} {} {} rg {} Tr 1 0 0 1 {} {} Tm [",
-        run.font.0,
-        number(size),
+        "BT {} {} {} rg {} Tr ",
         number(f64::from(run.color[0])),
         number(f64::from(run.color[1])),
         number(f64::from(run.color[2])),
@@ -414,28 +538,76 @@ fn write_run(content: &mut String, run: &TextRun, font: &mut Font, height: f32) 
         } else {
             0
         },
-        number(
-            f64::from(run.origin[0]) + run.glyphs.first().map_or(0.0, |glyph| f64::from(glyph.x))
-        ),
-        number(f64::from(height) - f64::from(run.origin[1])),
     ));
+    let mut selected = None;
     let mut previous: Option<&Glyph> = None;
-    for glyph in &run.glyphs {
-        font.record(glyph);
-        if let Some(prev) = previous {
-            // A zero-size run paints no glyphs; avoid division by zero in its TJ array.
-            if size != 0.0 {
-                let adjustment = -(f64::from(glyph.x)
-                    - (f64::from(prev.x) + f64::from(prev.advance) * size / em))
-                    * 1000.0
-                    / size;
-                if adjustment.abs() >= 0.01 {
-                    content.push_str(&format!("{} ", number(adjustment)));
-                }
+    let mut start = 0;
+    while start < run.glyphs.len() {
+        let first = &run.glyphs[start];
+        let mut end = start + 1;
+        if !first.text.is_empty() {
+            while end < run.glyphs.len() && run.glyphs[end].text.is_empty() {
+                end += 1;
             }
         }
-        content.push_str(&format!("<{:04X}> ", glyph.id));
-        previous = Some(glyph);
+        let actual = !first.text.is_empty() && (end - start > 1 || font.conflicts(first));
+        if actual {
+            close_text_array(content, &mut previous);
+            content.push_str(&format!(
+                "/Span << /ActualText <FEFF{}> >> BDC ",
+                utf16_hex(&first.text)
+            ));
+        }
+        for glyph in &run.glyphs[start..end] {
+            let (subfont, code) = font.record(glyph, objects);
+            subfonts.insert(subfont);
+            if selected != Some(subfont) {
+                close_text_array(content, &mut previous);
+                content.push_str(&format!(
+                    "/{} {} Tf ",
+                    font.resource_name(run.font.0, subfont),
+                    number(size)
+                ));
+                selected = Some(subfont);
+            }
+            if previous.is_some_and(|prev| prev.y != glyph.y) {
+                close_text_array(content, &mut previous);
+            }
+            if let Some(prev) = previous {
+                // A zero-size run paints no glyphs; avoid division by zero in its TJ array.
+                if size != 0.0 {
+                    let adjustment = -(f64::from(glyph.x)
+                        - (f64::from(prev.x) + f64::from(prev.advance) * size / em))
+                        * 1000.0
+                        / size;
+                    if adjustment.abs() >= 0.01 {
+                        content.push_str(&format!("{} ", number(adjustment)));
+                    }
+                }
+            } else {
+                content.push_str(&format!(
+                    "1 0 0 1 {} {} Tm [",
+                    number(f64::from(run.origin[0]) + f64::from(glyph.x)),
+                    number(f64::from(height) - f64::from(run.origin[1]) - f64::from(glyph.y)),
+                ));
+            }
+            content.push_str(&code);
+            content.push(' ');
+            previous = Some(glyph);
+        }
+        if actual {
+            close_text_array(content, &mut previous);
+            content.push_str("EMC ");
+        }
+        start = end;
     }
-    content.push_str("] TJ ET\n");
+    close_text_array(content, &mut previous);
+    content.push_str("ET\n");
+    subfonts
+}
+
+fn close_text_array(content: &mut String, previous: &mut Option<&Glyph>) {
+    if previous.take().is_some() {
+        content.push_str("] TJ ");
+    }
 }

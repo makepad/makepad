@@ -15,6 +15,7 @@
 //! Nothing here holds a copy of the document: every call takes the
 //! document's lines as they are now.
 
+mod copy;
 mod cut;
 mod format;
 mod index;
@@ -22,6 +23,7 @@ pub mod plan;
 mod project;
 mod table;
 
+pub use copy::Flavours;
 pub use index::{
     front_matter_end, parse_options, Block, BlockKind, Index, LineEdit, Row, RowPart, Slice,
     Splice, CODE_ROW_LINES,

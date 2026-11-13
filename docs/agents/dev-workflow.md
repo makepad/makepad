@@ -110,6 +110,9 @@ buckets ask for one, and the queue decides where and when.
   - A request waiting for a whole box, a tests shard or a landing gate holds its box. Only
     work that ends before it, or fits beside it, starts there. Interactive work may pass a
     background whole-box hold.
+  - A request that has waited 10 min drains the box it waits for the same way. A live
+    launch then starts there only beside its room: the cores the box frees go to that
+    request first.
   - A post-land tests shard asks the RAM of its largest unit's last peak
     (`--ram-floor-gb`). A shard that waits is resized to fit, never below that floor.
   - A request names `--node` only when it must; a pinned request waits for that one box.
@@ -143,6 +146,8 @@ buckets ask for one, and the queue decides where and when.
 - **Apps**:
   - `devhub live start <app> [--visible] [--env K=V]` returns `W<n>` at once; every file
     saved in the worktree ships to the box and hot-patches in;
+  - `--home <archive>` gives the app a home of its own on its box (`MAKEPAD_TEST_HOME`),
+    seeded with the archive's files (a capture to look at); it goes with the session;
   - `devhub live look <id>`: patched, a frame drawn, and a grab in
     `local/screencap/<lane>/` (a look, not a playtest);
   - `live wait <id> patched|verdict|settled|frame` waits for one of those;
@@ -165,7 +170,9 @@ buckets ask for one, and the queue decides where and when.
   - the JIT's own crates;
   - an open JIT miss (`devhub jit misses`);
   - a platform no JIT runs on;
-  - a test that devhub's measured routing sends to cargo (it says both walls);
+  - a test that devhub's measured routing sends to cargo (it says both walls; a test it never
+    ran under the JIT runs there first, which measures it, and one the tests bucket found red
+    runs under the JIT, as the bucket ran it);
   - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
   The refusal names the JIT command.
 - **One JIT and one cache per box**, shared by every lane:
@@ -183,6 +190,10 @@ buckets ask for one, and the queue decides where and when.
     background shell.
   - A conflict or a failure is final: fix it, then hand in again (`land retry` resends the
     same pins).
+  - The hand-in checks each merge it brings against `git merge-tree --write-tree` of the
+    merge's parents. A merge whose files outside its conflicts differ from that result is
+    refused: a merge against a stale tip reverts other landings, and so does an amend onto
+    a merge. A merge resolves its conflicts only. Commit any other change on its own.
 - **Land = merge only.** Nothing builds or tests before the merge; checks run after it in
   buckets, and none of them blocks the train.
   - fast: right after each landing, pipelined: the checks and presents of the packages the
@@ -224,6 +235,8 @@ buckets ask for one, and the queue decides where and when.
 - **Reads that are safe on someone's running app**:
   - `devhub inspect <box>/<app> --read-only <cmd>` with status, why-hung, panics, events,
     or session;
+  - `devhub lease <id> jits` lists a lease's JITs as `<box>/<pid>`, a JIT-run test's among
+    them (it leads a process group of its own), for `devhub inspect <box>/<pid> why-hung`;
   - never `makepad inspect <app> ui` on an app your lease did not start: it walks the whole
     tree on the UI thread and can freeze the app.
 

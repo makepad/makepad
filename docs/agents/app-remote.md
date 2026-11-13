@@ -179,7 +179,7 @@ A scripted demo or a pixel test that must come out the same every time pins
 the four inputs that otherwise vary between runs, at launch:
 
 ```sh
-MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 ./target/release/APP --remote \
+MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 ./target/release/APP --remote \
   --virtual-clock --window 360x640@3 --seed 1
 ```
 
@@ -242,7 +242,7 @@ MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 ./target/release/APP --remote \
   audio tap) on the frames' sample clock, padded with silence; the device
   runs in real time, so under the virtual clock only the last 0.1 s the
   device played is kept per frame and the sound is not deterministic (run
-  with `SANDBOX_MUTE=1`). Quitting, or the app closing, with a capture open
+  with `MAKEPAD_MUTE=1`). Quitting, or the app closing, with a capture open
   finishes the file. `cap pause` and `cap resume` stop and restart
   writing without stopping the clock: while paused, `step` frames advance
   the app but are not written (nor is sound), and the file stays gapless, as
@@ -282,7 +282,7 @@ take; `cap stop`; `quit`.
   between ticks; in the code map every `g` drops keyboard focus, click the
   map before the next key batch; `MAKEPAD_HIDE_WINDOWS` is implemented on
   macOS and Windows. Test instances of apps with audio or a shared home run with
-  `SANDBOX_MUTE=1` and their own `SANDBOX_HOME` / `--state-dir`.
+  `MAKEPAD_MUTE=1` and their own `SANDBOX_HOME` / `--state-dir`.
 
 ## Coordinate and lifecycle details
 

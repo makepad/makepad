@@ -197,12 +197,20 @@ it used (this one and any build or bench node):
   only. Review a pull request from its own diff; one that adds an external
   dependency waits for the user's approval.
 - Every pull request gets a full review of its whole diff before anything
-  lands: take what fits, fix or rewrite the rest in our own commit; "merged as
-  is" is a written verdict after that review, never the default. Nothing a
-  pull request brings (tests, fixtures, build scripts, CI or helper scripts,
-  benches) runs before it is reviewed and ported into our own commit, and
-  proofs run that commit, never the pull request's head. A dependency it adds
-  is never built or run without the user's approval.
+  lands, a security review included: what it runs, reads, writes, spawns,
+  links or opens to the network, and the API surface it adds (commands,
+  flags, environment variables, files, public items). Take what fits, fix or
+  rewrite the rest in our own commit; "merged as is" is a written verdict after
+  that review, never the default.
+- A pull request never runs as-is on our computers (user, 2026-11-13): its
+  branch is never checked out, built, tested or run, and its patch is never
+  applied wholesale. It is processed into the code base by hand while it is
+  reviewed, change by change, into our own commit. Nothing it brings (tests,
+  fixtures, build scripts, CI or helper scripts, benches) runs before that
+  port, and proofs run our commit, never the pull request's head. A merge that
+  names the pull request's head as a parent, for credit, carries our ported
+  tree. A dependency it adds is never built or run without the user's
+  approval.
 - NEVER install, upgrade, bootstrap, or download and run external software
   without the user's prior explicit approval for that software and installation.
   This includes tools, applications, runtimes, SDKs, plugins, package-manager

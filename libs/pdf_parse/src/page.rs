@@ -579,21 +579,15 @@ fn parse_hex_token(s: &str) -> Option<u32> {
 
 fn parse_hex_unicode(s: &str) -> Option<String> {
     let s = s.trim_start_matches('<').trim_end_matches('>');
-    // Could be multiple 4-hex-digit groups (for supplementary chars)
-    let mut result = String::new();
-    let mut i = 0;
-    let bytes = s.as_bytes();
-    while i + 4 <= bytes.len() {
-        let hex_str = std::str::from_utf8(&bytes[i..i + 4]).ok()?;
-        let code = u32::from_str_radix(hex_str, 16).ok()?;
-        result.push(char::from_u32(code)?);
-        i += 4;
-    }
-    if result.is_empty() {
-        None
-    } else {
-        Some(result)
-    }
+    // UTF-16BE in 4-hex-digit units: several for a ligature, a surrogate
+    // pair for a character outside the BMP (an emoji).
+    let units = s
+        .as_bytes()
+        .chunks_exact(4)
+        .map(|unit| std::str::from_utf8(unit).ok().and_then(|hex| u16::from_str_radix(hex, 16).ok()))
+        .collect::<Option<Vec<u16>>>()?;
+    let result = char::decode_utf16(units).collect::<Result<String, _>>().ok()?;
+    (!result.is_empty()).then_some(result)
 }
 
 fn extract_xobjects(

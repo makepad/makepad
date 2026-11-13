@@ -9,7 +9,7 @@ description = "Long-running, sandboxed Splash compute programs: a driver isolate
 makepad-script = { path = "../../platform/script", version = "1.0.0" }
 makepad-script-compute = { path = "../../platform/script/compute", version = "1.0.0", features = ["vm"] }
 makepad-script-compute-sched = { path = "../../platform/script/compute_sched", version = "1.0.0" }
-makepad-cpu-budget = { path = "../../platform/cpu_budget", version = "1.0.0" }
+makepad-cpu-budget = { path = "../cpu_budget", version = "1.0.0" }
 makepad-lz4 = { path = "../lz4", version = "0.1.0" }
 makepad-fast-inflate = { path = "../fast_inflate", version = "0.1.0" }
 bytemuck = { path = "../bytemuck", version = "1.25.0" }

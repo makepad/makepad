@@ -3049,7 +3049,7 @@ pub struct HostOpts {
     /// APK): the host conf's `desk_link=`, switched later by devhub or `files/deskhost.conf`
     pub desk_link: bool,
     /// a compile cache to ship in the APK (`--cache-seed=<dir>`): a copy of a device's relax home
-    /// of this very build (`adb pull` of `files/makepad-run`: `target/<run dir>/cache/<stores>`),
+    /// of this very build (`adb pull` of `files/relax`: `target/<run dir>/cache/<stores>`),
     /// laid down by the host at the first start, so the first launch is a warm one (the loader
     /// keys stores by codegen identity, arch and atomics class: a seed of another build or CPU
     /// class is ignored)
@@ -3078,11 +3078,11 @@ fn host_store_revs(cwd: &Path) -> Vec<String> {
 }
 
 /// The name of the packed source archive in the APK's assets (jni.rs ARCHIVE_ASSET).
-const HOST_ARCHIVE_ASSET: &str = "assets/makepad-run-src.pack";
+const HOST_ARCHIVE_ASSET: &str = "assets/relax-src.pack";
 /// The host's configuration asset (jni.rs CONF_ASSET).
-const HOST_CONF_ASSET: &str = "assets/makepad-run-host.conf";
+const HOST_CONF_ASSET: &str = "assets/relax-host.conf";
 /// The cache seed's assets: `index.txt` (one relax-home-relative path per line) and the files.
-const HOST_SEED_ASSET_DIR: &str = "assets/makepad-run-seed";
+const HOST_SEED_ASSET_DIR: &str = "assets/relax-seed";
 
 fn host_font_manifest(font_set: &str, extra: &[String]) -> Result<FontAssetManifest, String> {
     let mut text = crate::font_assets::font_set_manifest_text(font_set)?;
@@ -3211,7 +3211,7 @@ pub fn build_host(
     let release_dir = target_dir.join(format!("{toolchain}/release"));
 
     // 2. the app's source as a packed store for the phone's target
-    let archive = target_dir.join("makepad-android-apk").join("makepad-run-src.pack");
+    let archive = target_dir.join("makepad-android-apk").join("relax-src.pack");
     fs::create_dir_all(archive.parent().unwrap()).map_err(|e| format!("{}: {e}", archive.display()))?;
     let _ = fs::remove_file(&archive);
     let mut pack_args = vec!["run", "--release", "--offline", "-p", "makepad-run", "--", "pack-src", "--target", "aarch64-linux-android", archive.to_str().unwrap()];

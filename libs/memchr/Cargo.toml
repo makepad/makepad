@@ -35,7 +35,6 @@ description = """
 Provides extremely fast (uses SIMD on x86_64, aarch64 and wasm32) routines for
 1, 2 or 3 byte search and single substring search.
 """
-homepage = "https://github.com/BurntSushi/memchr"
 documentation = "https://docs.rs/memchr/"
 readme = "README.md"
 keywords = [

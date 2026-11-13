@@ -550,6 +550,63 @@ pub fn set_link(
     finish(text, edits, range.end)
 }
 
+/// The alt text and destination of the picture whose source starts at `at`.
+pub fn picture_at(events: &[(Event<'_>, Range<usize>)], at: usize) -> Option<(String, String)> {
+    let index = events.iter().position(|(event, range)| matches!(event, Event::Start(Tag::Image { .. })) && range.start == at)?;
+    let Event::Start(Tag::Image { dest_url, .. }) = &events[index].0 else { return None };
+    let mut alt = String::new();
+    let mut depth = 0usize;
+    for (event, _) in &events[index + 1..] {
+        match event {
+            Event::Start(_) => depth += 1,
+            Event::End(TagEnd::Image) if depth == 0 => break,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Text(text) | Event::Code(text) => alt.push_str(text),
+            Event::SoftBreak | Event::HardBreak => alt.push(' '),
+            _ => {}
+        }
+    }
+    Some((alt, dest_url.to_string()))
+}
+
+/// `![alt](url)`: the alt's brackets and backslashes escaped, the url as a
+/// link destination.
+pub fn picture(alt: &str, url: &str) -> String {
+    picture_titled(alt, url, "")
+}
+
+fn picture_titled(alt: &str, url: &str, title: &str) -> String {
+    let mut out = String::from("![");
+    for ch in alt.chars() {
+        if matches!(ch, '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push_str("](");
+    out.push_str(&destination(url));
+    if !title.is_empty() {
+        out.push_str(&format!(" \"{}\"", title.replace('&', "&amp;").replace('\\', "\\\\").replace('"', "\\\"")));
+    }
+    out.push(')');
+    out
+}
+
+/// Gives the picture whose source starts at `range.start` the alt text
+/// `alt` and the destination `url`, its title kept; a reference picture
+/// becomes an inline one. The caret ends after it.
+pub fn set_picture(
+    text: &str, events: &[(Event<'_>, Range<usize>)], range: Range<usize>, alt: &str, url: &str,
+) -> Option<Plan> {
+    let (Event::Start(Tag::Image { title, .. }), source) = events
+        .iter()
+        .find(|(event, source)| matches!(event, Event::Start(Tag::Image { .. })) && source.start == range.start)?
+    else {
+        return None;
+    };
+    finish(text, vec![(source.clone(), picture_titled(alt, url, title))], source.end)
+}
+
 struct Item {
     range: Range<usize>,
     event: usize,
@@ -1219,5 +1276,22 @@ mod tests {
                 Command::Outdent => indent_items(text, events, range, true),
             });
         });
+    }
+
+    #[test]
+    fn pictures_read_and_rewritten() {
+        let cases = [
+            ("alt and source change, the title stays", "a ‹![old](x.png \"T\")› z\n", "a ![new \\[1\\]](<my pic.png> \"T\")‸ z\n", "new [1]", "my pic.png"),
+            ("a reference picture becomes inline", "‹![ref]›\n\n[ref]: a.png\n", "![ref](b.png)‸\n\n[ref]: a.png\n", "ref", "b.png"),
+            ("the same alt and source change nothing", "‹![a](b.png)›\n", "![a](b.png)‸\n", "a", "b.png"),
+        ];
+        all(cases, |(rule, before, after, alt, url)| {
+            case(rule, before, after, |text, events, range| set_picture(text, events, range, alt, url));
+        });
+        let text = "![a *b* `c`](<my pic.png>)\n";
+        let events: Vec<_> = Parser::new_ext(text, parse_options()).into_offset_iter().collect();
+        assert_eq!(picture_at(&events, 0), Some(("a b c".to_string(), "my pic.png".to_string())), "the alt is its plain text");
+        assert_eq!(picture_at(&events, 1), None, "only a picture's start names it");
+        assert_eq!(picture("my notes", "my notes-image-1.png"), "![my notes](<my notes-image-1.png>)", "a space needs the angle form");
     }
 }

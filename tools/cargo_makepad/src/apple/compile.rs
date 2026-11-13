@@ -1399,9 +1399,9 @@ pub fn run_on_device(
 // ============================================================================
 
 /// The packed source store in the bundle (tools/run/src/ios.rs PACK).
-const HOST_PACK: &str = "makepad-run-src.pack";
+const HOST_PACK: &str = "relax-src.pack";
 /// What the bundle runs (tools/run/src/ios.rs CONF).
-const HOST_CONF: &str = "makepad-run-host.conf";
+const HOST_CONF: &str = "relax-host.conf";
 
 pub struct HostBuild {
     pub app_dir: PathBuf,
