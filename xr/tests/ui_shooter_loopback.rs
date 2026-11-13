@@ -5,6 +5,7 @@ use makepad_xr::makepad_widgets::*;
 use makepad_xr::{net::*, scene::*};
 use std::{
     cell::RefCell,
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     rc::Rc,
     sync::mpsc,
@@ -19,6 +20,9 @@ const TEST_DRAW_CYCLE_SLACK: usize = 120;
 const TEST_DRAW_CYCLE_NETWORK_SLACK: usize = 1500;
 const TEST_IO_TIMEOUT: Duration = Duration::from_secs(4);
 const SYNTHETIC_DT: f64 = 1.0 / 60.0;
+/// Past its injected frames a test waits for the physics worker to give every spawn an outcome;
+/// the wait fails when no spawn got one for this many turns (frames, not wall clock).
+const TEST_PHYSICS_STALL_TURNS: usize = 5000;
 static UI_SHOOTER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn shooter_activity_id() -> XrActivityId {
@@ -98,8 +102,13 @@ struct ShooterUiAppReport {
     runtime_body_count_peak: usize,
     runtime_body_widget_samples: Vec<WidgetUid>,
     physics_scene_body_count_peak: usize,
-    physics_body_spawn_apply_count_peak: usize,
-    physics_body_spawn_miss_count_peak: usize,
+    /// the spawns this app handed to physics, and where the worker says they ended up
+    physics_spawns_sent: usize,
+    physics_spawns: XrBodySpawnCounts,
+    /// spawns of a body this app had spawned before (a pooled body launched again)
+    relaunched_spawn_count: usize,
+    physics_rebuilds_after_first_spawn: usize,
+    physics_resets_after_first_spawn: usize,
     physics_revision_peak: u64,
     scene_changed_count: usize,
     scene_changed_after_spawn_count: usize,
@@ -244,9 +253,17 @@ struct ShooterLoopbackApp {
     #[rust]
     physics_scene_body_count_peak: usize,
     #[rust]
-    physics_body_spawn_apply_count_peak: usize,
+    physics_spawns_sent: usize,
     #[rust]
-    physics_body_spawn_miss_count_peak: usize,
+    physics_spawns: XrBodySpawnCounts,
+    #[rust]
+    spawned_widget_uids: HashSet<WidgetUid>,
+    #[rust]
+    relaunched_spawn_count: usize,
+    #[rust]
+    physics_rebuilds_and_resets: (usize, usize),
+    #[rust]
+    physics_rebuilds_and_resets_at_first_spawn: Option<(usize, usize)>,
     #[rust]
     physics_revision_peak: u64,
     #[rust]
@@ -273,6 +290,12 @@ struct ShooterLoopbackApp {
     last_injected_state: Option<Rc<XrState>>,
     #[rust]
     report_sent: bool,
+    /// Past the frame budget: the frame events the app got, and how many of them found it not
+    /// ready to report (`ready_for_synthetic_frames`), for a wait that stalls to name its path.
+    #[rust]
+    frame_events_after_budget: usize,
+    #[rust]
+    not_ready_after_budget: usize,
 }
 
 impl ShooterLoopbackApp {
@@ -414,7 +437,14 @@ impl ShooterLoopbackApp {
 
     fn apply_remote_body_spawn(&mut self, cx: &mut Cx, spawn: XrBodySpawn) {
         if let Some(mut root) = self.ui.borrow_mut::<XrRoot>() {
+            if self.physics_rebuilds_and_resets_at_first_spawn.is_none() {
+                self.physics_rebuilds_and_resets_at_first_spawn = Some(root.physics_rebuilds_and_resets());
+            }
             root.spawn_body(cx, spawn);
+            self.physics_spawns_sent += 1;
+            if !self.spawned_widget_uids.insert(spawn.widget_uid) {
+                self.relaunched_spawn_count += 1;
+            }
         }
     }
 
@@ -451,12 +481,8 @@ impl ShooterLoopbackApp {
             self.physics_scene_body_count_peak = self
                 .physics_scene_body_count_peak
                 .max(root.physics_scene_body_count());
-            self.physics_body_spawn_apply_count_peak = self
-                .physics_body_spawn_apply_count_peak
-                .max(root.physics_body_spawn_apply_count());
-            self.physics_body_spawn_miss_count_peak = self
-                .physics_body_spawn_miss_count_peak
-                .max(root.physics_body_spawn_miss_count());
+            self.physics_spawns = root.physics_body_spawns();
+            self.physics_rebuilds_and_resets = root.physics_rebuilds_and_resets();
             self.physics_revision_peak = self.physics_revision_peak.max(root.physics_revision());
             if self.runtime_body_widget_samples.len() < 8 {
                 for widget_uid in runtime_bodies.keys().copied() {
@@ -573,7 +599,7 @@ impl ShooterLoopbackApp {
             // frame that made them; the frames keep coming (the root steps physics on each), so
             // the report waits for every local spawn to be through the worker.
             self.collect_runtime_observation(cx);
-            if self.local_spawns_through_physics() {
+            if self.spawns_through_physics() {
                 self.finish_report(cx);
             }
             return;
@@ -615,21 +641,30 @@ impl ShooterLoopbackApp {
             self.collect_runtime_observation(cx);
         }
 
-        if self.synthetic_frame_index >= config.synthetic_frame_budget && self.local_spawns_through_physics() {
+        if self.synthetic_frame_index >= config.synthetic_frame_budget && self.spawns_through_physics() {
             self.finish_report(cx);
         }
     }
 
-    /// Every spawn this app made has been applied (or missed) by the physics worker.
-    fn local_spawns_through_physics(&self) -> bool {
-        self.physics_body_spawn_apply_count_peak + self.physics_body_spawn_miss_count_peak >= self.local_spawn_count
+    /// Every spawn this app handed to physics has an outcome from the worker.
+    fn spawns_through_physics(&self) -> bool {
+        self.physics_spawns.total() >= self.physics_spawns_sent
     }
 
-    /// Its frames are all in and the report waits for the physics worker to take the last spawns.
+    /// Its frames are all in and the report waits for the physics worker to give the last
+    /// spawns their outcomes.
     fn waiting_for_physics(&self) -> bool {
         !self.report_sent
             && self.config.as_ref().is_some_and(|config| self.synthetic_frame_index >= config.synthetic_frame_budget)
-            && !self.local_spawns_through_physics()
+            && !self.spawns_through_physics()
+    }
+
+    /// The physics scenes built and the physics resets since this app's first spawn.
+    fn physics_rebuilds_and_resets_since_first_spawn(&self) -> (usize, usize) {
+        let (rebuilds, resets) = self.physics_rebuilds_and_resets;
+        self.physics_rebuilds_and_resets_at_first_spawn.map_or((0, 0), |(rebuilds_then, resets_then)| {
+            (rebuilds.saturating_sub(rebuilds_then), resets.saturating_sub(resets_then))
+        })
     }
 
     fn finish_report(&mut self, cx: &mut Cx) {
@@ -678,8 +713,11 @@ impl ShooterLoopbackApp {
             runtime_body_count_peak: self.runtime_body_count_peak,
             runtime_body_widget_samples: self.runtime_body_widget_samples.clone(),
             physics_scene_body_count_peak: self.physics_scene_body_count_peak,
-            physics_body_spawn_apply_count_peak: self.physics_body_spawn_apply_count_peak,
-            physics_body_spawn_miss_count_peak: self.physics_body_spawn_miss_count_peak,
+            physics_spawns_sent: self.physics_spawns_sent,
+            physics_spawns: self.physics_spawns,
+            relaunched_spawn_count: self.relaunched_spawn_count,
+            physics_rebuilds_after_first_spawn: self.physics_rebuilds_and_resets_since_first_spawn().0,
+            physics_resets_after_first_spawn: self.physics_rebuilds_and_resets_since_first_spawn().1,
             physics_revision_peak: self.physics_revision_peak,
             scene_changed_count: self.scene_changed_count,
             scene_changed_after_spawn_count: self.scene_changed_after_spawn_count,
@@ -717,7 +755,7 @@ impl ShooterLoopbackApp {
             })
             .unwrap_or_else(|| "peer_sync=missing".to_string());
         format!(
-            "network_started={} current_activity={current_activity:?} frames_started={} frame_index={} clock_synced_peak={} clock_ping_tx_peak={} clock_ping_rx_peak={} clock_pong_tx_peak={} clock_pong_rx_peak={} non_xr_draw_clock_peak={} tx_shared_state_peak={} rx_shared_state_peak={} shadow_apply_peak={} local_spawns={} spawns_through_physics={}+{} remote_spawns={} local_spawn_tx={} local_spawn_tx_fail={} active_peak={} z_samples={:?} {peer_state}",
+            "network_started={} current_activity={current_activity:?} frames_started={} frame_index={} clock_synced_peak={} clock_ping_tx_peak={} clock_ping_rx_peak={} clock_pong_tx_peak={} clock_pong_rx_peak={} non_xr_draw_clock_peak={} tx_shared_state_peak={} rx_shared_state_peak={} shadow_apply_peak={} local_spawns={} physics_spawns_sent={} physics_spawns={:?} relaunched={} rebuilds_resets_since_first_spawn={:?} remote_spawns={} frame_events_after_budget={} not_ready_after_budget={} local_spawn_tx={} local_spawn_tx_fail={} active_peak={} z_samples={:?} {peer_state}",
             self.network_started,
             self.synthetic_frames_started,
             self.synthetic_frame_index,
@@ -731,9 +769,13 @@ impl ShooterLoopbackApp {
             self.peer_sync_rx_shared_object_state_count_peak,
             self.remote_shadow_apply_count_peak,
             self.local_spawn_count,
-            self.physics_body_spawn_apply_count_peak,
-            self.physics_body_spawn_miss_count_peak,
+            self.physics_spawns_sent,
+            self.physics_spawns,
+            self.relaunched_spawn_count,
+            self.physics_rebuilds_and_resets_since_first_spawn(),
             self.remote_spawn_count,
+            self.frame_events_after_budget,
+            self.not_ready_after_budget,
             self.local_spawn_tx_count,
             self.local_spawn_tx_fail_count,
             self.active_projectile_peak,
@@ -752,6 +794,12 @@ impl ShooterLoopbackApp {
         self.apply_local_scene_overrides(cx);
         self.refresh_spawnable_registry(cx, false);
         if matches!(event, Event::NextFrame(_)) {
+            if self.config.as_ref().is_some_and(|config| self.synthetic_frame_index >= config.synthetic_frame_budget) {
+                self.frame_events_after_budget += 1;
+                if !self.ready_for_synthetic_frames(cx) {
+                    self.not_ready_after_budget += 1;
+                }
+            }
             self.inject_synthetic_xr_update(cx);
         }
         if matches!(event, Event::XrUpdate(_)) {
@@ -1132,6 +1180,35 @@ fn configure_repeated_sparse_close_open_hand(
     }
 }
 
+/// Every spawn the app handed to physics ended in exactly one outcome, and only in outcomes its
+/// run allows: superseded where a pooled body was launched again, stale where a physics scene
+/// was built after its first spawn, reset where physics was reset after it.
+fn assert_spawns_accounted(report: &ShooterUiAppReport) {
+    let spawns = report.physics_spawns;
+    assert_eq!(
+        report.physics_spawns_sent,
+        report.local_spawn_count + report.remote_spawn_count,
+        "every local and remote spawn goes to physics: {report:?}"
+    );
+    assert_eq!(
+        spawns.applied + spawns.missed + spawns.superseded + spawns.stale + spawns.reset,
+        report.physics_spawns_sent,
+        "every spawn sent to physics ends in one outcome: {report:?}"
+    );
+    assert!(
+        spawns.superseded <= report.relaunched_spawn_count,
+        "a spawn is superseded only by a relaunch of its body: {report:?}"
+    );
+    assert!(
+        spawns.stale == 0 || report.physics_rebuilds_after_first_spawn > 0,
+        "a spawn is stale only after a scene rebuild: {report:?}"
+    );
+    assert!(
+        spawns.reset == 0 || report.physics_resets_after_first_spawn > 0,
+        "a spawn is reset only after a physics reset: {report:?}"
+    );
+}
+
 /// The tracked projectile flew more than 0.12 m from where it was launched (its first sample: a
 /// pooled body is in the physics' bodies only once spawned). How far it gets by the end is the
 /// physics' clock's (the draw's, not the synthetic frames'), and a pooled body can be launched
@@ -1197,17 +1274,47 @@ fn run_test_app_with_limits(
     let hal = Hal::global();
     let info = hal.open(&OpenReq { backend: backend_id::HEADLESS, ..Default::default() });
     cx.borrow_mut().hal_attach_session(info);
-    // A turn brings a frame, so the frames a test injects are bounded in turns. The physics
-    // worker that applies their spawns runs at its own pace (a loaded box: 4 of 52 spawns still
-    // to apply 120 turns past the budget), so a wait for it is not: it ends when the app quits.
+    // A turn brings a frame, so the frames a test injects are bounded in turns. Past them the
+    // app waits for the physics worker to give every spawn an outcome. The worker runs at its
+    // own pace (on a loaded box 120 turns behind), so the wait goes on while outcomes come in
+    // and fails, with the counts by outcome and the app's frame events since the budget, when
+    // none came for TEST_PHYSICS_STALL_TURNS of this loop's own turns (each one still a turn of
+    // the app's), whether or not the app gets frame events.
     let mut turns = 0;
-    while turns < draw_cycles || app_ref.borrow().as_ref().is_some_and(ShooterLoopbackApp::waiting_for_physics) {
+    let mut outcomes = 0;
+    let mut turns_without_outcome = 0;
+    let mut stalled = None;
+    loop {
+        let (waiting, outcomes_now) = app_ref
+            .borrow()
+            .as_ref()
+            .map_or((false, 0), |app| (app.waiting_for_physics(), app.physics_spawns.total()));
+        if turns >= draw_cycles {
+            if !waiting {
+                break;
+            }
+            turns_without_outcome = if outcomes_now == outcomes { turns_without_outcome + 1 } else { 0 };
+            if turns_without_outcome >= TEST_PHYSICS_STALL_TURNS {
+                let mut cx_ref = cx.borrow_mut();
+                stalled = app_ref.borrow_mut().as_mut().map(|app| {
+                    // the root's counts now beside the app's last read of them: a worker that
+                    // lost spawns, or an app that stopped reading
+                    let root_spawns = app.ui.borrow::<XrRoot>().map(|root| root.physics_body_spawns());
+                    format!("{} root_physics_spawns_now={root_spawns:?}", app.debug_state(&mut cx_ref))
+                });
+                break;
+            }
+        }
+        outcomes = outcomes_now;
         cx.borrow_mut().redraw_all();
         if !cx.borrow_mut().hal_session_turn(0, true) { break; }
         std::thread::sleep(Duration::from_millis(1));
         turns += 1;
     }
     hal.close(info.session);
+    if let Some(state) = stalled {
+        panic!("the app saw no spawn get an outcome from physics for {TEST_PHYSICS_STALL_TURNS} turns: {state}");
+    }
 
     match report_rx.recv_timeout(io_timeout) {
         Ok(report) => report,
@@ -1248,11 +1355,9 @@ fn single_headless_shooter_app_emits_projectiles_from_synthetic_xr_updates() {
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
     assert!(report.spawnable_binding_count_peak >= 24, "{report:?}");
     assert!(report.physics_scene_body_count_peak >= 26, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= 1,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert!(report.physics_spawns.applied >= 1, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert_eq!(report.scene_changed_after_spawn_count, 0, "{report:?}");
     assert!(report.active_projectile_peak >= 1, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 2, "{report:?}");
@@ -1281,11 +1386,9 @@ fn single_headless_shooter_app_emits_projectiles_from_openxr_aim_point_without_t
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
     assert!(report.spawnable_binding_count_peak >= 24, "{report:?}");
     assert!(report.physics_scene_body_count_peak >= 26, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= 1,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert!(report.physics_spawns.applied >= 1, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert_eq!(report.scene_changed_after_spawn_count, 0, "{report:?}");
     assert!(report.active_projectile_peak >= 1, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 2, "{report:?}");
@@ -1312,11 +1415,9 @@ fn single_headless_shooter_app_reemits_after_close_open_with_sticky_grab_bit() {
     assert_eq!(report.remote_spawn_count, 0);
     assert!(report.local_spawn_tx_count >= 2, "{report:?}");
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= 2,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert!(report.physics_spawns.applied >= 2, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert_eq!(report.scene_changed_after_spawn_count, 0, "{report:?}");
     assert!(report.active_projectile_peak >= 1, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 2, "{report:?}");
@@ -1346,11 +1447,8 @@ fn single_headless_shooter_app_keeps_emitting_and_advancing_physics_during_long_
         "{report:?}"
     );
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= report.local_spawn_count,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert_eq!(report.scene_changed_after_spawn_count, 0, "{report:?}");
     assert!(report.active_projectile_peak >= 6, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 8, "{report:?}");
@@ -1381,11 +1479,8 @@ fn single_headless_shooter_app_keeps_emitting_when_alternating_left_and_right_ha
         "{report:?}"
     );
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= report.local_spawn_count,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert!(report.active_projectile_peak >= 4, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 6, "{report:?}");
     assert!(report.projectile_z_samples.len() >= 6, "{report:?}");
@@ -1415,11 +1510,8 @@ fn single_headless_shooter_app_survives_repeated_sparse_close_open_cycles() {
         "{report:?}"
     );
     assert_eq!(report.local_spawn_tx_fail_count, 0, "{report:?}");
-    assert!(
-        report.physics_body_spawn_apply_count_peak >= report.local_spawn_count,
-        "{report:?}"
-    );
-    assert_eq!(report.physics_body_spawn_miss_count_peak, 0, "{report:?}");
+    assert_eq!(report.physics_spawns.missed, 0, "{report:?}");
+    assert_spawns_accounted(&report);
     assert!(report.active_projectile_peak >= 4, "{report:?}");
     assert!(report.tracked_projectile_presence_count >= 8, "{report:?}");
     assert!(report.projectile_z_samples.len() >= 8, "{report:?}");

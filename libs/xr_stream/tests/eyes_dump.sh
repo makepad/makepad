@@ -21,7 +21,7 @@ bin=$T/release/${3:-$pkg}
 dump=$out/dump-$$
 data=$out/data-$$
 mkdir -p "$dump" "$data"
-MAKEPAD_LAN=1 MAKEPAD_XR_STREAM=on MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_DUMP="$dump" XDG_DATA_HOME="$data" MAKEPAD_HIDE_WINDOWS=1 SANDBOX_MUTE=1 "$bin" > "$out/app.log" 2>&1 &
+MAKEPAD_LAN=1 MAKEPAD_XR_STREAM=on MAKEPAD_XR_REMOTE_SELFTEST=1 MAKEPAD_XR_REMOTE_DUMP="$dump" XDG_DATA_HOME="$data" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 "$bin" > "$out/app.log" 2>&1 &
 app_pid=$!
 line=""
 for i in $(seq 1 240); do

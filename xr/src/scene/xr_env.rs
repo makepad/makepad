@@ -43,7 +43,7 @@ mod xr_passthrough;
 mod xr_physics;
 pub use xr_hands::xr_hand_colliders;
 pub use xr_physics::{xr_grip_pose, xr_hold_frame, xr_two_hand_hold_pose, HandCollider as XrHandCollider};
-pub use xr_physics_worker::{XrPhysicsCounters, XrPhysicsState, XR_WORKER_FIXED_DT};
+pub use xr_physics_worker::{XrBodySpawnCounts, XrPhysicsCounters, XrPhysicsState, XR_WORKER_FIXED_DT};
 #[path = "xr_physics_worker.rs"]
 mod xr_physics_worker;
 
@@ -279,8 +279,8 @@ pub struct XrPhysicsMetrics {
     pub engine_step_ms: f64,
     pub depth_query_surface_count: usize,
     pub scene_body_count: usize,
-    pub body_spawn_apply_count: usize,
-    pub body_spawn_miss_count: usize,
+    /// where the spawns sent to the worker ended up (totals)
+    pub body_spawns: XrBodySpawnCounts,
 }
 
 /// The UI side of the XR physics: owns the physics worker thread ("makepad-xr-physics"),
@@ -297,6 +297,11 @@ pub struct XrPhysics {
     pub(crate) root_pose: Option<Pose>,
     scene_dirty: bool,
     revision: u64,
+    /// scenes built and physics resets so far (each makes a new revision)
+    rebuilds: usize,
+    resets: usize,
+    /// spawns a reset cleared before there was a worker (handed to it when it starts)
+    reset_spawns_before_worker: usize,
     metrics: XrPhysicsMetrics,
     /// the depth-query hits of the newest applied result, for the env's debug view
     retained_hits_update: Option<HashMap<u64, RetainedDepthQueryHit>>,
@@ -319,6 +324,9 @@ impl Default for XrPhysics {
             root_pose: None,
             scene_dirty: true,
             revision: 0,
+            rebuilds: 0,
+            resets: 0,
+            reset_spawns_before_worker: 0,
             metrics: XrPhysicsMetrics::default(),
             retained_hits_update: None,
             pending_body_spawns: Vec::new(),
@@ -333,7 +341,8 @@ impl Default for XrPhysics {
 
 impl XrPhysics {
     fn worker(&mut self, cx: &mut Cx) -> &mut XrPhysicsWorker {
-        self.worker.get_or_insert_with(|| XrPhysicsWorker::new(cx.xr_tsdf()))
+        let reset_spawns = &mut self.reset_spawns_before_worker;
+        self.worker.get_or_insert_with(|| XrPhysicsWorker::new(cx.xr_tsdf(), std::mem::take(reset_spawns)))
     }
 
     fn apply_worker_result(&mut self, result: XrPhysicsWorkerResult) -> bool {
@@ -353,8 +362,7 @@ impl XrPhysics {
             engine_step_ms: result.physics_engine_step_ms,
             depth_query_surface_count: result.physics_depth_query_surface_count,
             scene_body_count: result.physics_scene_body_count,
-            body_spawn_apply_count: result.physics_body_spawn_apply_count,
-            body_spawn_miss_count: result.physics_body_spawn_miss_count,
+            body_spawns: result.body_spawns,
         };
         true
     }
@@ -382,6 +390,7 @@ impl XrPhysics {
     /// one is dropped).
     pub fn rebuild(&mut self, cx: &mut Cx, gravity: f32, bodies: Vec<XrPhysicsBody>, floor_y: Option<f32>) {
         self.revision = self.revision.saturating_add(1);
+        self.rebuilds += 1;
         let revision = self.revision;
         self.worker(cx).request_rebuild(revision, gravity, bodies, floor_y);
         self.scene_dirty = false;
@@ -466,10 +475,16 @@ impl XrPhysics {
 
     pub fn reset(&mut self) {
         self.revision = self.revision.saturating_add(1);
+        self.resets += 1;
+        // the spawns still queued here never reach the worker: the reset is their outcome
+        let unsent_spawns = self.pending_body_spawns.len();
         if let Some(worker) = self.worker.as_mut() {
-            worker.request_reset(self.revision);
+            worker.request_reset(self.revision, unsent_spawns);
+        } else {
+            self.reset_spawns_before_worker += unsent_spawns;
         }
-        self.metrics = XrPhysicsMetrics::default();
+        // the spawn counts are the worker's totals: they carry over
+        self.metrics = XrPhysicsMetrics { body_spawns: self.metrics.body_spawns, ..Default::default() };
         self.retained_hits_update = None;
         Rc::make_mut(&mut self.runtime_bodies).clear();
         Rc::make_mut(&mut self.runtime_contacts).clear();
@@ -531,6 +546,11 @@ impl XrPhysics {
 
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Scenes built and physics resets so far.
+    pub fn rebuilds_and_resets(&self) -> (usize, usize) {
+        (self.rebuilds, self.resets)
     }
 
     pub fn metrics(&self) -> &XrPhysicsMetrics {
@@ -786,12 +806,12 @@ impl XrEnv {
         self.world.physics.metrics().scene_body_count
     }
 
-    pub(crate) fn physics_body_spawn_apply_count(&self) -> usize {
-        self.world.physics.metrics().body_spawn_apply_count
+    pub(crate) fn physics_body_spawns(&self) -> XrBodySpawnCounts {
+        self.world.physics.metrics().body_spawns
     }
 
-    pub(crate) fn physics_body_spawn_miss_count(&self) -> usize {
-        self.world.physics.metrics().body_spawn_miss_count
+    pub(crate) fn physics_rebuilds_and_resets(&self) -> (usize, usize) {
+        self.world.physics.rebuilds_and_resets()
     }
 
     pub(crate) fn depth_mesh_chunk_count(&self) -> usize {

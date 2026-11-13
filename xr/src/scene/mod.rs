@@ -28,7 +28,7 @@ pub use crate::sync::xr_peer_sync::{XrPeerSync, XrPeerSyncAction};
 pub use crate::sync::xr_scene_sync_controller::XrSceneSyncController;
 pub use xr_body_spawn::{XrBodyDrive, XrBodyImpulse, XrBodySpawn, XrBodyWrench, XrCarControl};
 pub use xr_env::{
-    xr_grip_pose, xr_hand_colliders, xr_hold_frame, xr_two_hand_hold_pose, XrHandCollider, DrawDepthMeshBasic, XrEnv, XrPhysics, XrPhysicsBody, XrPhysicsCounters, XrPhysicsMetrics,
+    xr_grip_pose, xr_hand_colliders, xr_hold_frame, xr_two_hand_hold_pose, XrHandCollider, DrawDepthMeshBasic, XrEnv, XrBodySpawnCounts, XrPhysics, XrPhysicsBody, XrPhysicsCounters, XrPhysicsMetrics,
     XrPhysicsState, XrPlayerHands, XR_WORKER_FIXED_DT,
 };
 pub use xr_node::{

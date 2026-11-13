@@ -7,4 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-xr-stream = { path = "../../libs/xr_stream" }
+
+# the bridge and its IPC (src/bridge.rs, src/ipc.rs) run on Linux only
+[target.'cfg(target_os = "linux")'.dependencies]
 makepad-xr-runtime = { path = "../../libs/xr_runtime" }

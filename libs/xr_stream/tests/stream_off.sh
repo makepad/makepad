@@ -44,7 +44,7 @@ launch() {
   tag=$1; shift
   data=$out/data-$tag-$$  # a fresh folder per run (the switch is kept there)
   mkdir -p "$data"
-  env "$@" XDG_DATA_HOME="$data" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_LAN=1 SANDBOX_MUTE=1 "$bin" --remote > "$out/app-$tag.log" 2>&1 &
+  env "$@" XDG_DATA_HOME="$data" MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_LAN=1 MAKEPAD_MUTE=1 "$bin" --remote > "$out/app-$tag.log" 2>&1 &
   app_pid=$!
   for i in $(seq 1 120); do
     "$R" app "$app_pid" status > /dev/null 2>&1 && break

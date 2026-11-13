@@ -286,6 +286,16 @@ impl Session {
         self.shared.new_space("the headset linked");
         let server_instance = self.pairing.lock().unwrap().instance;
         *self.shared.live_headset.lock().unwrap() = Some(LiveHeadset { instance, name: name.to_string(), session });
+        // a person uses the app through the headset while it is linked, however the session ends:
+        // a node's devhub keeps other work off the machine meanwhile (its frames share the GPU)
+        struct InUse;
+        impl Drop for InUse {
+            fn drop(&mut self) {
+                makepad_widgets::makepad_platform::restart::set_in_use("xr headset", None);
+            }
+        }
+        makepad_widgets::makepad_platform::restart::set_in_use("xr headset", Some(&format!("an XR headset ({name})")));
+        let _in_use = InUse;
         let welcome = XrServerMsg::Welcome { version: XR_VERSION, server: self.server.clone(), instance: server_instance, session, size: core.size, codec: core.codec, tiles: core.tiles as u8, encoder: core.description.clone(), eye: core.eye, fovea: core.fovea };
         write_all(stream, &welcome.encode()).map_err(|e| format!("write: {e}"))?;
         // the poses come as datagrams: a socket of the session's own, a key for it

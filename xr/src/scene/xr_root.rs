@@ -1,4 +1,4 @@
-use super::xr_env::XrEnv;
+use super::xr_env::{XrBodySpawnCounts, XrEnv};
 use super::xr_gesture::{floor_set_gesture_sample, XrFloorSetGestureSample};
 use super::xr_select::XrSelectAction;
 use super::{arm_pair_metrics, flat_head_forward, hand_closed_fist_contact_point};
@@ -1182,12 +1182,14 @@ impl XrRoot {
         self.env.physics_scene_body_count()
     }
 
-    pub fn physics_body_spawn_apply_count(&self) -> usize {
-        self.env.physics_body_spawn_apply_count()
+    /// Where the body spawns sent to physics ended up (totals).
+    pub fn physics_body_spawns(&self) -> XrBodySpawnCounts {
+        self.env.physics_body_spawns()
     }
 
-    pub fn physics_body_spawn_miss_count(&self) -> usize {
-        self.env.physics_body_spawn_miss_count()
+    /// Physics scenes built and physics resets so far.
+    pub fn physics_rebuilds_and_resets(&self) -> (usize, usize) {
+        self.env.physics_rebuilds_and_resets()
     }
 
     pub fn physics_revision(&self) -> u64 {

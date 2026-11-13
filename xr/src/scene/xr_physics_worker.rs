@@ -108,6 +108,9 @@ struct PhysicsWorkerMailbox {
     /// a hand pose the steps between it and its neighbours interpolate)
     pending_steps: Vec<PhysicsWorkerStep>,
     pending_body_spawns: Vec<PhysicsWorkerBodySpawn>,
+    /// spawns that ended here before the worker read them (it adds them to its counts)
+    superseded_body_spawns: usize,
+    reset_body_spawns: usize,
     pending_body_despawns:
         SmallVec<[PhysicsWorkerBodyDespawn; XR_PHYSICS_WORKER_MAX_PENDING_BODY_DESPAWNS]>,
     pending_body_impulses:
@@ -140,6 +143,30 @@ pub struct XrPhysicsCounters {
     pub skipped_seconds: f64,
 }
 
+/// Where the body spawns the UI sent ended up (totals since the worker started). Every spawn
+/// ends in exactly one of these, so the counts add up to the spawns sent once the worker has
+/// read them all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct XrBodySpawnCounts {
+    /// respawned in the scene
+    pub applied: usize,
+    /// the scene has no such body
+    pub missed: usize,
+    /// the same body was spawned again (a pooled body relaunched) before the worker read it
+    pub superseded: usize,
+    /// its scene was rebuilt (a new revision) before the worker read it
+    pub stale: usize,
+    /// a physics reset cleared it before the worker read it (or before it was sent)
+    pub reset: usize,
+}
+
+impl XrBodySpawnCounts {
+    /// The spawns that have an outcome.
+    pub fn total(&self) -> usize {
+        self.applied + self.missed + self.superseded + self.stale + self.reset
+    }
+}
+
 pub(super) struct XrPhysicsWorkerResult {
     pub(super) revision: u64,
     /// the newest states, oldest first (the newest is `runtime_bodies`' time)
@@ -153,8 +180,7 @@ pub(super) struct XrPhysicsWorkerResult {
     pub(super) physics_engine_step_ms: f64,
     pub(super) physics_depth_query_surface_count: usize,
     pub(super) physics_scene_body_count: usize,
-    pub(super) physics_body_spawn_apply_count: usize,
-    pub(super) physics_body_spawn_miss_count: usize,
+    pub(super) body_spawns: XrBodySpawnCounts,
 }
 
 pub(super) struct XrPhysicsWorker {
@@ -164,8 +190,12 @@ pub(super) struct XrPhysicsWorker {
 }
 
 impl XrPhysicsWorker {
-    pub(super) fn new(depth_mesh: XrTsdfStore) -> Self {
-        let mailbox = Arc::new((Mutex::new(PhysicsWorkerMailbox::default()), Condvar::new()));
+    /// `reset_spawns`: spawns a physics reset cleared before there was a worker to send them to.
+    pub(super) fn new(depth_mesh: XrTsdfStore, reset_spawns: usize) -> Self {
+        let mailbox = Arc::new((
+            Mutex::new(PhysicsWorkerMailbox { reset_body_spawns: reset_spawns, ..Default::default() }),
+            Condvar::new(),
+        ));
         let latest_result = Arc::new(Mutex::new(None));
         let mailbox_thread = mailbox.clone();
         let result_thread = latest_result.clone();
@@ -228,11 +258,15 @@ impl XrPhysicsWorker {
     pub(super) fn request_body_spawn(&mut self, revision: u64, spawn: XrBodySpawn) {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
+            let mailbox = &mut *mailbox;
+            // the same body spawned again before the worker read the first: the newer launch
+            // replaces it (the body is in one place), and the older counts as superseded
             if let Some(pending) = mailbox
                 .pending_body_spawns
                 .iter_mut()
                 .find(|pending| pending.spawn.widget_uid == spawn.widget_uid)
             {
+                mailbox.superseded_body_spawns += 1;
                 pending.revision = revision;
                 pending.spawn = spawn;
             } else {
@@ -313,9 +347,11 @@ impl XrPhysicsWorker {
         }
     }
 
-    pub(super) fn request_reset(&mut self, revision: u64) {
+    /// `unsent_spawns`: spawns the reset cleared on the UI side before they were sent.
+    pub(super) fn request_reset(&mut self, revision: u64, unsent_spawns: usize) {
         let (lock, wake) = &*self.mailbox;
         if let Ok(mut mailbox) = lock.lock() {
+            mailbox.reset_body_spawns += mailbox.pending_body_spawns.len() + unsent_spawns;
             mailbox.pending_reset_revision = Some(revision);
             mailbox.pending_rebuild = None;
             mailbox.pending_steps.clear();
@@ -365,8 +401,9 @@ fn physics_worker_loop(
     let mut runtime_contacts_scratch = Vec::new();
     let mut retained_hits_snapshot_scratch = HashMap::new();
     let mut clock = WorkerClock::default();
-    let mut total_body_spawn_apply_count = 0usize;
-    let mut total_body_spawn_miss_count = 0usize;
+    let mut body_spawns = XrBodySpawnCounts::default();
+    // spawns of the current revision that came before its scene: they wait for it
+    let mut spawns_before_scene: Vec<PhysicsWorkerBodySpawn> = Vec::new();
 
     loop {
         let (
@@ -396,6 +433,8 @@ fn physics_worker_loop(
                 return;
             }
             seen_version = guard.version;
+            body_spawns.superseded += mem::take(&mut guard.superseded_body_spawns);
+            body_spawns.reset += mem::take(&mut guard.reset_body_spawns);
             (
                 guard.pending_reset_revision.take(),
                 guard.pending_rebuild.take(),
@@ -409,12 +448,13 @@ fn physics_worker_loop(
             )
         };
 
+        let body_spawns_before = body_spawns;
         let mut should_publish = false;
-        let mut physics_body_spawn_apply_count = 0usize;
-        let mut physics_body_spawn_miss_count = 0usize;
 
         if let Some(reset_revision) = pending_reset_revision {
             revision = reset_revision;
+            body_spawns.reset += spawns_before_scene.len();
+            spawns_before_scene.clear();
             clear_depth_query_state_for_scene(scene.as_ref(), &mut retained_hits);
             scene = None;
             clock.restart();
@@ -438,37 +478,43 @@ fn physics_worker_loop(
             should_publish = true;
         }
 
-        if !pending_body_spawns.is_empty() {
-            if let Some(scene) = scene.as_mut() {
-                let mut applied_spawn = false;
-                for body_spawn in pending_body_spawns {
-                    if body_spawn.revision != revision {
-                        continue;
-                    }
-                    let query_keys = scene.respawn_body(
-                        body_spawn.spawn.widget_uid,
-                        body_spawn.spawn.shadow,
-                        body_spawn.spawn.mode,
-                        body_spawn.spawn.pose,
-                        body_spawn.spawn.linvel,
-                        body_spawn.spawn.angvel,
-                    );
-                    if query_keys.iter().any(Option::is_some) {
-                        clear_depth_query_keys(&mut retained_hits, query_keys);
-                        physics_body_spawn_apply_count =
-                            physics_body_spawn_apply_count.saturating_add(1);
-                        total_body_spawn_apply_count =
-                            total_body_spawn_apply_count.saturating_add(1);
-                    } else {
-                        physics_body_spawn_miss_count =
-                            physics_body_spawn_miss_count.saturating_add(1);
-                        total_body_spawn_miss_count = total_body_spawn_miss_count.saturating_add(1);
-                    }
-                    applied_spawn = true;
+        if !pending_body_spawns.is_empty() || (scene.is_some() && !spawns_before_scene.is_empty()) {
+            let waited = mem::take(&mut spawns_before_scene);
+            for body_spawn in waited.into_iter().chain(pending_body_spawns) {
+                if body_spawn.revision != revision {
+                    body_spawns.stale += 1;
+                    continue;
                 }
-                should_publish |= applied_spawn;
+                let Some(scene) = scene.as_mut() else {
+                    if let Some(older) = spawns_before_scene
+                        .iter_mut()
+                        .find(|older| older.spawn.widget_uid == body_spawn.spawn.widget_uid)
+                    {
+                        body_spawns.superseded += 1;
+                        *older = body_spawn;
+                    } else {
+                        spawns_before_scene.push(body_spawn);
+                    }
+                    continue;
+                };
+                let query_keys = scene.respawn_body(
+                    body_spawn.spawn.widget_uid,
+                    body_spawn.spawn.shadow,
+                    body_spawn.spawn.mode,
+                    body_spawn.spawn.pose,
+                    body_spawn.spawn.linvel,
+                    body_spawn.spawn.angvel,
+                );
+                if query_keys.iter().any(Option::is_some) {
+                    clear_depth_query_keys(&mut retained_hits, query_keys);
+                    body_spawns.applied += 1;
+                } else {
+                    body_spawns.missed += 1;
+                }
             }
         }
+        // a spawn's outcome is news even when nothing else changed
+        should_publish |= body_spawns != body_spawns_before;
 
         if !pending_body_despawns.is_empty() {
             if let Some(scene) = scene.as_mut() {
@@ -627,8 +673,7 @@ fn physics_worker_loop(
                         physics_engine_step_ms,
                         physics_depth_query_surface_count: stats.surface_count,
                         physics_scene_body_count: scene.cubes.len(),
-                        physics_body_spawn_apply_count: total_body_spawn_apply_count,
-                        physics_body_spawn_miss_count: total_body_spawn_miss_count,
+                        body_spawns,
                     },
                 );
                 recycle_worker_buffers(
@@ -672,8 +717,7 @@ fn physics_worker_loop(
                         .as_ref()
                         .map(|scene| scene.cubes.len())
                         .unwrap_or(0),
-                    physics_body_spawn_apply_count: total_body_spawn_apply_count,
-                    physics_body_spawn_miss_count: total_body_spawn_miss_count,
+                    body_spawns,
                 },
             );
             recycle_worker_buffers(
