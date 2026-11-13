@@ -28,6 +28,12 @@
 //! * drag a label flag to move the label;
 //! * Left / Right nudge the selected item by one minor tick (Shift: one
 //!   major tick);
+//! * with a [`SequencerGrid`] on the model (a musical grid: beats from an
+//!   origin, a bar every so many), the ruler counts bars (`bar.beat` once
+//!   beats are wide enough), drags land on bars (Shift: on beats; Alt:
+//!   freely) when they do not snap to a target, and Left / Right nudge by a
+//!   beat (Shift: a bar); the model's `start` lets the axis begin before 0
+//!   (a count-in);
 //! * primary modifier (Ctrl, Cmd on macOS) + wheel zooms about the pointer,
 //!   Shift + wheel, a horizontal wheel or a drag on empty space pans; the
 //!   "-", "+" and "Fit" buttons in the corner zoom too. A plain vertical
@@ -80,8 +86,8 @@ use std::fmt::Write;
 /// engine (`makepad_tween::sequencer_model`, plain data and pure functions);
 /// they are re-exported here for hosts of the widget.
 pub use crate::tween::{
-    apply_sequencer_edit, snap_nearest, snap_time, SequencerAction, SequencerDrag, SequencerItem,
-    SequencerKind, SequencerLabel, SequencerModel, SequencerTrack,
+    apply_sequencer_edit, snap_nearest, snap_time, SequencerAction, SequencerDrag, SequencerEdge,
+    SequencerGrid, SequencerItem, SequencerKind, SequencerLabel, SequencerModel, SequencerTrack,
 };
 
 script_mod! {
@@ -403,6 +409,27 @@ const HEAD_H: f64 = 8.0;
 const BUTTON_H: f64 = 18.0;
 const BUTTONS: [(&str, f64); 3] = [("-", 20.0), ("+", 20.0), ("Fit", 28.0)];
 const ZOOM_STEP: f64 = 1.5;
+
+/// The grid's ticks at `zoom`: (major, minor) in steps, the major the
+/// fewest steps from one step, one bar, then doubling bars, at least
+/// [`TICK_MIN_PX`] apart; the minor a step where steps are
+/// [`MINOR_MIN_PX`] apart, else a bar, else none.
+fn grid_ticks(g: &SequencerGrid, zoom: f64) -> (f64, f64) {
+    let bar = g.per_major.max(1) as f64;
+    let px = |steps: f64| g.span(steps) * zoom;
+    let major = std::iter::once(1.0)
+        .chain((0..16).map(|k| bar * (1u64 << k) as f64))
+        .find(|&m| px(m) >= TICK_MIN_PX)
+        .unwrap_or(bar * 65536.0);
+    let minor = if px(1.0) >= MINOR_MIN_PX {
+        1.0
+    } else if bar < major && px(bar) >= MINOR_MIN_PX {
+        bar
+    } else {
+        major
+    };
+    (major, minor)
+}
 
 fn ticks_for(zoom: f64) -> (f64, f64, usize) {
     TICKS
@@ -776,7 +803,29 @@ impl Sequencer {
     }
 
     fn duration(&self) -> f64 {
-        finite_or(self.model.duration, 0.0).max(0.0)
+        finite_or(self.model.duration, 0.0).max(self.axis_start())
+    }
+
+    /// Where the axis starts: the model's `start` (before 0 for a count-in).
+    fn axis_start(&self) -> f64 {
+        finite_or(self.model.start, 0.0).min(0.0)
+    }
+
+    /// The major and minor tick spacing in seconds, the first major tick at or
+    /// after `from`, and the decimals a seconds label takes (none with a grid).
+    fn ticks(&self, from: f64) -> (f64, f64, f64, usize) {
+        let zoom = self.view.zoom;
+        match self.model.grid.filter(|g| g.step > 0.0 && g.step.is_finite()) {
+            Some(g) => {
+                let (major, minor) = grid_ticks(&g, zoom);
+                let first = g.time_of((g.steps_at(from) / major).ceil() * major);
+                (g.span(major), g.span(minor), first, 0)
+            }
+            None => {
+                let (major, minor, dec) = ticks_for(zoom);
+                (major, minor, (from / major).ceil() * major, dec)
+            }
+        }
     }
 
     // ---- view --------------------------------------------------------------
@@ -797,9 +846,9 @@ impl Sequencer {
     }
 
     fn fit_view(&mut self) {
-        let z = self.clamp_zoom((self.view.w - 24.0) / self.duration().max(0.1));
+        let z = self.clamp_zoom((self.view.w - 24.0) / (self.duration() - self.axis_start()).max(0.1));
         self.view.zoom = z;
-        self.view.offset = -12.0 / z;
+        self.view.offset = self.axis_start() - 12.0 / z;
     }
 
     fn clamp_offset(&mut self) {
@@ -807,7 +856,7 @@ impl Sequencer {
             return;
         }
         let half = 0.5 * self.view.w / self.view.zoom;
-        let lo = -half;
+        let lo = self.axis_start() - half;
         let hi = (self.duration() - half).max(lo);
         self.view.offset = finite_or(self.view.offset, lo).clamp(lo, hi);
     }
@@ -1128,7 +1177,7 @@ impl Sequencer {
     }
 
     fn scrub_to(&mut self, cx: &mut Cx, t: f64) {
-        let t = t.clamp(0.0, self.duration());
+        let t = t.clamp(self.axis_start(), self.duration());
         if t != self.playhead {
             self.playhead = t;
             self.model.playhead = t;
@@ -1246,7 +1295,15 @@ impl Sequencer {
         cx.set_cursor(Self::cursor_for(h));
     }
 
-    fn drag_to(&mut self, cx: &mut Cx, p: DVec2, alt: bool) {
+    /// Grid steps a drag lands on: a bar, or a step with Shift.
+    fn grid_steps(&self, shift: bool) -> f64 {
+        match self.model.grid {
+            Some(g) if !shift => g.per_major.max(1) as f64,
+            _ => 1.0,
+        }
+    }
+
+    fn drag_to(&mut self, cx: &mut Cx, p: DVec2, alt: bool, shift: bool) {
         let Some(mut d) = self.drag else {
             return;
         };
@@ -1273,8 +1330,10 @@ impl Sequencer {
                 let targets: &[f64] = if alt { &[] } else { &self.snap_targets };
                 let raw = t - d.grab_dt;
                 let snap = snap_nearest(targets, &[raw], radius);
-                self.snap_guide = snap.map(|s| s.1);
-                let time = (raw + snap.map_or(0.0, |s| s.0)).clamp(0.0, self.duration());
+                // Else onto the grid, unless placed freely.
+                let grid = self.model.grid.filter(|_| snap.is_none() && !alt).map(|g| g.snap(raw, self.grid_steps(shift)));
+                self.snap_guide = snap.map(|s| s.1).or(grid);
+                let time = grid.unwrap_or(raw + snap.map_or(0.0, |s| s.0)).clamp(self.axis_start(), self.duration());
                 if let Some(l) = self.model.labels.iter_mut().find(|l| l.id == d.id) {
                     if l.time != time {
                         l.time = time;
@@ -1314,6 +1373,17 @@ impl Sequencer {
                 let Some(r) = r else {
                     self.drag = None;
                     return;
+                };
+                // What snapped to no target lands on the grid (Alt: freely).
+                let r = if alt {
+                    r
+                } else {
+                    let edge = match d.kind {
+                        DragKind::Move => SequencerEdge::Move,
+                        DragKind::ResizeRight => SequencerEdge::End,
+                        _ => SequencerEdge::Start,
+                    };
+                    m.snap_drag_to_grid(d.id, r, edge, self.grid_steps(shift))
                 };
                 self.snap_guide = r.guide;
                 let moved = r.start != start;
@@ -1444,8 +1514,13 @@ impl Sequencer {
             return;
         }
         self.ensure_view();
-        let (maj, min, _) = ticks_for(self.view.zoom);
-        let step = if major { maj } else { min };
+        let step = match self.model.grid {
+            Some(g) => g.span(if major { g.per_major.max(1) as f64 } else { 1.0 }),
+            None => {
+                let (maj, min, _) = ticks_for(self.view.zoom);
+                if major { maj } else { min }
+            }
+        };
         let floor = self.model.min_start(id).unwrap_or(0.0);
         let it = &mut self.model.tracks[ti].items[ii];
         let s = (it.start + dir * step).max(floor);
@@ -1674,7 +1749,8 @@ impl Sequencer {
         let v = self.view;
         // Tick labels right of each major tick.
         self.draw_text.color = self.color_dim;
-        let first = (v.offset / major).ceil() * major;
+        let (_, _, first, _) = self.ticks(v.offset);
+        let grid = self.model.grid.filter(|g| g.step > 0.0);
         let text_y = (self.ruler_height * 0.4 - self.line_h()).max(0.0) + 1.0;
         for i in 0..512 {
             let t = first + i as f64 * major;
@@ -1683,7 +1759,20 @@ impl Sequencer {
                 break;
             }
             self.num.clear();
-            let _ = write!(self.num, "{:.*}s", dec, clean(t));
+            match grid {
+                // Bars, or bar.beat while ticks fall on beats.
+                Some(g) => {
+                    let (bar, beat) = g.place(g.steps_at(t).round() as i64);
+                    if major < g.span(g.per_major.max(1) as f64) - 1e-9 {
+                        let _ = write!(self.num, "{bar}.{beat}");
+                    } else {
+                        let _ = write!(self.num, "{bar}");
+                    }
+                }
+                None => {
+                    let _ = write!(self.num, "{:.*}s", dec, clean(t));
+                }
+            }
             self.draw_text
                 .draw_abs(cx, o + dvec2(x + 3.0, text_y), &self.num);
         }
@@ -1971,7 +2060,7 @@ impl Widget for Sequencer {
                         _ => MouseCursor::Hand,
                     });
                 }
-                self.drag_to(cx, fe.abs - r.pos, fe.modifiers.alt);
+                self.drag_to(cx, fe.abs - r.pos, fe.modifiers.alt, fe.modifiers.shift);
             }
             Hit::FingerUp(fe) => {
                 self.release(cx);
@@ -2056,13 +2145,12 @@ impl Widget for Sequencer {
         }
         self.clamp_offset();
         let v = self.view;
-        let (major, minor, dec) = ticks_for(v.zoom);
+        let (major, minor, first, dec) = self.ticks(v.offset);
         let minor_div = if minor * v.zoom >= MINOR_MIN_PX {
-            (major / minor).round()
+            (major / minor).round().max(1.0)
         } else {
             1.0
         };
-        let first = (v.offset / major).ceil() * major;
 
         // The rows the selection and the pointer are on.
         let row_of = |id: u64| {

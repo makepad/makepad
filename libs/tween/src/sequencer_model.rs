@@ -122,6 +122,60 @@ pub struct SequencerLabel {
     pub time: f64,
 }
 
+/// A musical grid over the time axis: steps (beats) `step` long from
+/// `origin`, every `per_major`th a major one (a bar). Step 0 is the first
+/// step of major 1; steps before `origin` count back from it (major 0, then
+/// -1, ...), so a host can put a count-in before it. With a grid the
+/// ruler counts majors and steps, drags snap to majors (steps with Shift)
+/// and Left / Right nudge by a step (a major with Shift).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SequencerGrid {
+    pub origin: f64,
+    pub step: f64,
+    pub per_major: u32,
+}
+
+impl SequencerGrid {
+    /// How many steps from `origin` time `t` is.
+    pub fn steps_at(&self, t: f64) -> f64 {
+        (t - self.origin) / self.step
+    }
+
+    /// The time `k` steps from `origin`.
+    pub fn time_of(&self, k: f64) -> f64 {
+        self.origin + k * self.step
+    }
+
+    /// The length of `steps` steps.
+    pub fn span(&self, steps: f64) -> f64 {
+        steps * self.step
+    }
+
+    /// `t` moved to the nearest multiple of `steps` steps from `origin`.
+    pub fn snap(&self, t: f64, steps: f64) -> f64 {
+        if !(self.step > 0.0) || !(steps > 0.0) || !t.is_finite() {
+            return t;
+        }
+        self.time_of((self.steps_at(t) / steps).round() * steps)
+    }
+
+    /// Step `k` as (major, step within it), both counted from 1: step 0 is
+    /// (1, 1), step -1 is (0, per_major).
+    pub fn place(&self, k: i64) -> (i64, i64) {
+        let n = self.per_major.max(1) as i64;
+        (k.div_euclid(n) + 1, k.rem_euclid(n) + 1)
+    }
+}
+
+/// Which edge of an item a drag sets ([`SequencerModel::snap_drag_to_grid`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SequencerEdge {
+    /// The whole item: its start (or, failing that, its end) lands on the grid.
+    Move,
+    Start,
+    End,
+}
+
 /// What a timeline editor shows: plain data any timeline source can fill.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct SequencerModel {
@@ -130,6 +184,11 @@ pub struct SequencerModel {
     pub playhead: f64,
     pub tracks: Vec<SequencerTrack>,
     pub labels: Vec<SequencerLabel>,
+    /// Where the time axis starts: 0, or before it for a count-in. Items at
+    /// depth 0, the playhead and labels may go back to here.
+    pub start: f64,
+    /// A musical grid over the axis, if the host has one.
+    pub grid: Option<SequencerGrid>,
 }
 
 /// What a timeline editor reports (the widgets' `Sequencer` emits these as
@@ -246,7 +305,7 @@ impl SequencerModel {
         let (ti, ii) = self.find(item)?;
         let d = self.tracks[ti].depth;
         let parent = if d == 0 {
-            0.0
+            self.start
         } else {
             self.tracks[..ti]
                 .iter()
@@ -286,7 +345,7 @@ impl SequencerModel {
                 out.push(x);
             }
         };
-        push(0.0);
+        push(self.start);
         if !defined(self.duration) {
             push(self.duration);
         }
@@ -326,7 +385,7 @@ impl SequencerModel {
                 out.push(x);
             }
         };
-        push(0.0);
+        push(self.start);
         push(self.duration);
         push(playhead);
         for l in &self.labels {
@@ -414,6 +473,46 @@ impl SequencerModel {
         })
     }
 
+    /// `drag` (from [`SequencerModel::drag_move`] or a resize of item `id`)
+    /// with the edge it sets put on the grid, every `steps` steps, when it did
+    /// not snap to a target already (`drag.guide`) and there is a grid: a
+    /// move puts its start on the grid (keeping its length), a resize the
+    /// edge it drags, leaving at least one unit; the start stays at or after
+    /// [`SequencerModel::min_start`]. The guide is the grid time it took.
+    pub fn snap_drag_to_grid(
+        &self,
+        item: u64,
+        drag: SequencerDrag,
+        edge: SequencerEdge,
+        steps: f64,
+    ) -> SequencerDrag {
+        let (Some(g), None) = (self.grid, drag.guide) else {
+            return drag;
+        };
+        let Some(min) = self.min_start(item) else {
+            return drag;
+        };
+        let unit = g.span(steps);
+        let end = drag.start + drag.duration;
+        match edge {
+            SequencerEdge::Move => {
+                let s = g.snap(drag.start, steps);
+                let s = if s < min { s + unit } else { s };
+                SequencerDrag { start: s.max(min), duration: drag.duration, guide: Some(s) }
+            }
+            SequencerEdge::Start => {
+                let s = g.snap(drag.start, steps);
+                let s = if s < min { s + unit } else { s };
+                let s = s.max(min).min(end - unit.min(drag.duration).max(1e-9));
+                SequencerDrag { start: s, duration: end - s, guide: Some(s) }
+            }
+            SequencerEdge::End => {
+                let e = g.snap(end, steps).max(drag.start + unit);
+                SequencerDrag { start: drag.start, duration: e - drag.start, guide: Some(e) }
+            }
+        }
+    }
+
     /// The tree under timeline `root` of a tween engine: row 0 is `root`
     /// (locked, at 0), then every child in start order, depth first; stagger
     /// and keyframes groups and nested timelines are foldable rows whose
@@ -447,6 +546,7 @@ impl SequencerModel {
             playhead: if finite { r.total_time() } else { r.time() },
             tracks: Vec::new(),
             labels,
+            ..Default::default()
         };
         let at = RowAt {
             depth: 0,
@@ -778,4 +878,60 @@ fn resize(e: &mut TweenEngine, root: TweenId, n: TweenId, f: Frame, duration: f6
         }
     }
     true
+}
+
+#[cfg(test)]
+mod grid_tests {
+    use super::*;
+
+    fn model() -> SequencerModel {
+        let item = SequencerItem { id: 1, start: 2.0, duration: 4.0, repeat: 0, ..Default::default() };
+        SequencerModel {
+            duration: 60.0,
+            start: -2.0,
+            grid: Some(SequencerGrid { origin: 1.0, step: 0.5, per_major: 4 }),
+            tracks: vec![SequencerTrack { id: 10, items: vec![item], ..Default::default() }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_grid_counts_majors_and_steps_from_its_origin_and_before_it() {
+        let g = model().grid.unwrap();
+        assert_eq!(g.place(0), (1, 1));
+        assert_eq!(g.place(5), (2, 2));
+        assert_eq!(g.place(-1), (0, 4));
+        assert_eq!(g.place(-4), (0, 1));
+        assert_eq!(g.place(-5), (-1, 4));
+        assert_eq!(g.snap(1.9, 4.0), 1.0);
+        assert_eq!(g.snap(1.9, 1.0), 2.0);
+        assert_eq!(g.snap(-0.4, 4.0), -1.0);
+    }
+
+    #[test]
+    fn a_drag_lands_on_the_grid_unless_it_snapped_to_a_target() {
+        let m = model();
+        let d = m.drag_move(1, 2.3, &[], 0.1).unwrap();
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::Move, 4.0);
+        assert_eq!((g.start, g.duration), (3.0, 4.0));
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::Move, 1.0);
+        assert_eq!(g.start, 2.5);
+        // Back into the count-in, to the axis start at most.
+        let d = m.drag_move(1, -1.2, &[], 0.1).unwrap();
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::Move, 4.0);
+        assert_eq!(g.start, -1.0);
+        // A target won: left as it is.
+        let d = m.drag_move(1, 2.3, &[2.31], 0.1).unwrap();
+        assert_eq!(m.snap_drag_to_grid(1, d, SequencerEdge::Move, 4.0), d);
+        // Resizes: the dragged edge on the grid, at least a unit long.
+        let d = m.drag_resize_end(1, 6.6, &[], 0.1, 0.01).unwrap();
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::End, 4.0);
+        assert_eq!((g.start, g.duration), (2.0, 5.0));
+        let d = m.drag_resize_end(1, 2.2, &[], 0.1, 0.01).unwrap();
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::End, 4.0);
+        assert_eq!(g.duration, 2.0);
+        let d = m.drag_resize_start(1, 2.8, 6.0, &[], 0.1, 0.01).unwrap();
+        let g = m.snap_drag_to_grid(1, d, SequencerEdge::Start, 1.0);
+        assert_eq!((g.start, g.duration), (3.0, 3.0));
+    }
 }
