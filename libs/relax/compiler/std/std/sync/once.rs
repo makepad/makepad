@@ -466,6 +466,23 @@ impl<T, F: FnOnce() -> T> Deref for LazyLock<T, F> {
     }
 }
 
+// std/src/sync/lazy_lock.rs: `DerefMut for LazyLock` (stable 1.89) over `force_mut`.
+impl<T, F: FnOnce() -> T> LazyLock<T, F> {
+    pub fn force_mut(this: &mut LazyLock<T, F>) -> &mut T {
+        LazyLock::force(this);
+        match this.value.get_mut().as_mut() {
+            Some(v) => v,
+            None => panic!("LazyLock instance has previously been poisoned"),
+        }
+    }
+}
+
+impl<T, F: FnOnce() -> T> core::ops::DerefMut for LazyLock<T, F> {
+    fn deref_mut(&mut self) -> &mut T {
+        LazyLock::force_mut(self)
+    }
+}
+
 impl<T: Default> Default for LazyLock<T> {
     fn default() -> LazyLock<T> {
         LazyLock::new(T::default)

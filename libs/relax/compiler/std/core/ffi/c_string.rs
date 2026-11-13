@@ -183,6 +183,13 @@ impl From<&CStr> for CString {
     }
 }
 
+// alloc/src/ffi/c_str.rs: back from a `Cow<CStr>`, the fourth of the conversions with it.
+impl<'a> From<crate::borrow::Cow<'a, CStr>> for CString {
+    fn from(s: crate::borrow::Cow<'a, CStr>) -> CString {
+        s.into_owned()
+    }
+}
+
 impl crate::borrow::ToOwned for CStr {
     type Owned = CString;
     fn to_owned(&self) -> CString {
