@@ -93,8 +93,11 @@ pub fn own_nice() -> i32 {
 /// share of the box under contention, the whole box when idle. Never a CPU quota: a quota of the
 /// lease's cores throttled a live Fab (measured at one core) to one CPU, and its pools and JIT
 /// sized themselves to that one CPU.
-/// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`), the only hard memory cap; a
-/// measured ask only schedules, never kills a run that needs more than it measured.
+/// `ram_max_gb`: the RAM the lease asked for itself (`--ram-gb`): past half again as much its
+/// scope is throttled (`MemoryHigh`: the kernel reclaims its pages and slows its allocations),
+/// never killed. A hard cap (`MemoryMax`) killed a hot bucket's JIT at 7.5 GB of its 5 GB ask, and
+/// systemd stopped the scope with it: the bucket had no verdict (11-13). A measured ask only
+/// schedules.
 pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, weight: Option<u32>, ram_max_gb: Option<f64>) -> Vec<String> {
     let mut full: Vec<String> = Vec::new();
     if let Some(u) = unit {
@@ -104,7 +107,7 @@ pub fn lease_argv(argv: Vec<String>, unit: Option<&str>, nice: i32, cpus: &str, 
         full.push(format!("--unit={u}"));
         if let Some(weight) = weight.filter(|_| cfg!(target_os = "linux")) {
             full.extend(["-p".into(), format!("CPUWeight={weight}")]);
-            if let Some(gb) = ram_max_gb { full.extend(["-p".into(), format!("MemoryMax={}G", gb * 1.5)]); }
+            if let Some(gb) = ram_max_gb { full.extend(["-p".into(), format!("MemoryHigh={}G", gb * 1.5)]); }
         }
         full.push("--".into());
     }
@@ -555,15 +558,35 @@ fn wait4_usage(child: &mut Child, options: i32) -> std::io::Result<Option<(ExitS
 }
 
 /// Starts a lease run in its own session and process group (the group is what end signals; `exit`
-/// names the run's job on Windows).
+/// names the run's job on Windows). A run writes no core file: its soft core limit is 0, the hard
+/// one stays (a run that wants a core raises its own: `ulimit -c unlimited` in its command). Its
+/// crash says itself in the run's log, and systemd-coredump keeps one journal line of it ("Resource
+/// limits disable core dumping"), no core: a lane's native makepad that aborted every 30 s on a
+/// pool box kept systemd-coredump at about 0.8 of a core beside the leases there, and a game's
+/// 60-600 MB dumps once filled a node's disk in 90 s (11-13, 10-13).
 pub fn lease_spawn(cmd: &mut Command, _exit: Option<&Path>) -> std::io::Result<(Child, Hold)> {
     use std::os::unix::process::CommandExt;
+    #[repr(C)]
+    struct RLimit {
+        cur: u64,
+        max: u64,
+    }
     extern "C" {
         fn setsid() -> i32;
+        fn getrlimit(resource: i32, rlim: *mut RLimit) -> i32;
+        fn setrlimit(resource: i32, rlim: *const RLimit) -> i32;
     }
+    // (4 on Linux and macOS alike)
+    const RLIMIT_CORE: i32 = 4;
     unsafe {
         cmd.pre_exec(|| {
             setsid();
+            // (async-signal-safe: two plain syscalls on this process)
+            let mut core = RLimit { cur: 0, max: 0 };
+            if getrlimit(RLIMIT_CORE, &mut core) == 0 {
+                core.cur = 0;
+                setrlimit(RLIMIT_CORE, &core);
+            }
             Ok(())
         });
     }
@@ -1023,6 +1046,25 @@ fn groups_held_counts_a_groups_members_and_their_descendants() {
     let [run_held, other_held, reused, none] = looks;
     assert!(run_held.unwrap() > other_held.unwrap() && other_held.unwrap() > 0, "{looks:?}");
     assert_eq!((reused, none), (None, None), "{looks:?}");
+}
+
+/// A run dumps no core: its soft core limit is 0, and its hard one is the hub's, so a run that
+/// wants a core can raise its own.
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn a_run_writes_no_core_file_unless_it_raises_its_own_limit() {
+    let mut sh = Command::new("sh");
+    sh.args(["-c", "ulimit -c; ulimit -H -c"]).stdout(std::process::Stdio::piped());
+    let (child, _hold) = lease_spawn(&mut sh, None).unwrap();
+    let out = child.wait_with_output().unwrap();
+    let out = String::from_utf8_lossy(&out.stdout);
+    let hub = std::fs::read_to_string("/proc/self/limits").unwrap();
+    let hard = hub.lines().find_map(|l| l.strip_prefix("Max core file size")).unwrap().split_whitespace().nth(1).unwrap().to_string();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.first().copied(), Some("0"), "the run's soft core limit: {out}");
+    // (the shell says the kernel's limit in 1 KB blocks: `unlimited` or bytes / 1024)
+    let hard_kb = if hard == "unlimited" { hard } else { (hard.parse::<u64>().unwrap() / 1024).to_string() };
+    assert_eq!(lines.get(1).copied(), Some(hard_kb.as_str()), "the run's hard core limit is the hub's: {out}");
 }
 
 /// A descriptor the hub got from its parent without close-on-exec (the WM's GPU buffers) reaches

@@ -176,7 +176,7 @@ pub fn start(conf: &SyncConf, s: &Spec, lease: &str, publish: &crate::local::Pub
             // as the WM's spawn_jit: the window becomes the WM's tile through its socket
             cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
         } else {
-            cmd.env("MAKEPAD_HIDE_WINDOWS", "1").env("SANDBOX_MUTE", "1");
+            cmd.env("MAKEPAD_HIDE_WINDOWS", "1").env("MAKEPAD_MUTE", "1");
         }
         cmd.env("MAKEPAD_TEST_LANE", &lane);
         cmd.env("MAKEPAD_LAN", if lan { "1" } else { "0" });

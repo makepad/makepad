@@ -17,6 +17,50 @@ pub(super) fn script_word(argv: &[String]) -> Option<(usize, bool)> {
     Some((i, shell))
 }
 
+/// The rustup command in `argv` that changes its box's toolchain (`rustup update stable`), if
+/// one does: in its words, in a shell's script word, or in a script it carries as base64 (`echo
+/// <b64> | base64 -d | bash`, PowerShell's `-EncodedCommand`). Such a run takes its box whole:
+/// every other lease's cargo or rustc during the swap failed with rustup's "binary not applicable
+/// to the stable toolchain", which read as each lane's own bug (the Rust 1.100 move, 11-13).
+pub fn changes_toolchain(argv: &[String]) -> Option<String> {
+    // (its words as one text: `rustup`, `update` and `stable` are three argv words)
+    toolchain_change_in(&argv.join(" "), 2)
+}
+
+fn toolchain_change_in(text: &str, depth: u32) -> Option<String> {
+    let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '"' | '\'' | '`')).filter(|w| !w.is_empty()).collect();
+    for (i, w) in words.iter().enumerate() {
+        let name = w.rsplit(['/', '\\']).next().unwrap_or(w).trim_end_matches(".exe");
+        if name == "rustup-init" || w.contains("sh.rustup.rs") {
+            return Some(w.to_string());
+        }
+        if name != "rustup" { continue; }
+        // its subcommand and the word after it, past its options (`-q`, `+nightly`)
+        let mut rest = words[i + 1..].iter().filter(|w| !w.starts_with('-') && !w.starts_with('+'));
+        let (sub, next) = (rest.next().copied().unwrap_or(""), rest.next().copied().unwrap_or(""));
+        let changes = match sub {
+            "update" | "upgrade" | "install" | "uninstall" | "default" | "self" | "set" | "override" => true,
+            "toolchain" | "component" | "target" => next != "list",
+            _ => false,
+        };
+        if changes {
+            return Some(format!("rustup {sub}{}", if next.is_empty() { String::new() } else { format!(" {next}") }));
+        }
+    }
+    if depth == 0 { return None; }
+    // a script carried as base64: its text (UTF-8, or PowerShell's UTF-16LE)
+    words.iter().filter(|w| w.len() >= 16 && w.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))).find_map(|w| {
+        let bytes = super::exec::b64_decode(w)?;
+        // (UTF-16LE of ASCII is valid UTF-8 too, with a NUL after each letter: a NUL says which)
+        let text = if bytes.len() % 2 == 0 && bytes.contains(&0) {
+            String::from_utf16(&bytes.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>()).ok()?
+        } else {
+            String::from_utf8(bytes).ok()?
+        };
+        toolchain_change_in(&text, depth - 1)
+    })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExecProfile {
     pub largest: usize,
@@ -149,6 +193,27 @@ mod tests {
     fn utf16_b64(script: &str) -> String {
         let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
         makepad_network::digest::base64_encode(&bytes)
+    }
+
+    /// A run that changes its box's toolchain is seen in its words, a shell's script, and a script
+    /// it carries as base64 (the Rust 1.100 move's jobs carried theirs so, 11-13); one that only
+    /// reads the toolchain is not.
+    #[test]
+    fn a_run_that_changes_the_toolchain_is_seen_through_its_script() {
+        let b64 = |s: &str| makepad_network::digest::base64_encode(s.as_bytes());
+        let script = "set -e\necho before: $(rustc -V)\nrustup update stable\nrustup component add rust-src\n";
+        for (argv, said) in [
+            (words(&["rustup", "update", "stable"]), Some("rustup update stable")),
+            (words(&["bash", "-c", "rustup -q toolchain install 1.100.0 && cargo -V"]), Some("rustup toolchain install")),
+            (words(&["bash", "-c", &format!("mkdir -p target && echo {} | base64 -d > target/x.sh && bash target/x.sh", b64(script))]), Some("rustup update stable")),
+            (words(&["powershell", "-NoProfile", "-EncodedCommand", &utf16_b64("C:\\rustup\\rustup.exe default stable")]), Some("rustup default stable")),
+            (words(&["dl/rustup-init", "-y"]), Some("dl/rustup-init")),
+        ] {
+            assert_eq!(changes_toolchain(&argv).as_deref(), said, "{argv:?}");
+        }
+        for argv in [words(&["rustup", "show"]), words(&["rustup", "toolchain", "list"]), words(&["bash", "-c", "rustup check; rustc -vV"]), words(&["cargo", "build", "--release"]), words(&["bash", "-c", &format!("echo {} | base64 -d", b64("cargo test -p x"))])] {
+            assert_eq!(changes_toolchain(&argv), None, "{argv:?}");
+        }
     }
 
     /// A Windows run never starts cmd, nor PowerShell with its script on the command line: a lane's

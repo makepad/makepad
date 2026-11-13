@@ -488,7 +488,7 @@ impl Store {
             hits: per_id.iter().map(|s| s.hits).sum(),
             misses: per_id.iter().map(|s| s.misses).sum(),
             builds_today: per_id.iter().filter(|s| s.day == today).map(|s| s.builds_today).sum(),
-            compiler: super::loaders::compiler().to_string(),
+            compiler: super::loaders::compiler(),
             per_id,
         }
     }

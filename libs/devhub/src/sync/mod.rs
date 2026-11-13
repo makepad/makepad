@@ -86,6 +86,12 @@ pub fn ensure_rev(control: &makepad_remote::Client, node: &str, repo: &str, dir:
     cli::ensure_rev(control, node, repo, dir, branch, sha)
 }
 
+/// Leases: sends `node`'s store of `repo` the objects `ids` it lacks ([`crate::lease::NO_OBJECTS`]).
+#[cfg(feature = "checkout")]
+pub fn fill_objects(control: &makepad_remote::Client, node: &str, repo: &str, dir: &std::path::Path, ids: &[String]) -> Result<(), String> {
+    cli::fill_objects(control, node, repo, dir, ids)
+}
+
 /// Whether the master's auto-sync follows `node` (its `nodes` list, all when it has none).
 #[cfg(feature = "checkout")]
 pub fn autosync_covers(home: &std::path::Path, node: &str) -> bool {

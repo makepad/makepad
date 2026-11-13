@@ -9,12 +9,12 @@
 //! the app (ui, key, click, grab, test hooks); `live wait patched|verdict|settled|frame` blocks on the
 //! JIT. A parked panic pauses the live job (act and resume through it). It ends on release, when
 //! its app exits, after 10 min with no edit or call (a `devhub inspect` of its app is a call; a
-//! visible one: nor a person's input at its box), when its lane starts a fourth headless one (the least recently used idle headless one
-//! goes; with all of them busy the new one waits for a slot: a visible session is the person's app
-//! and never counts), when its lane landed, or to give a waiting whole/timed lease its box once the
-//! current call answers. A call (a test session's tests) past three times its class's measured run
-//! is said, never ended: an inbox warning, a why-hung sample in `devhub job result <lease>`, and
-//! the test's still-running line. Tests keep one job per lane, target and args;
+//! visible one: nor a person's input at its box), when its lane landed, or to give a waiting
+//! whole/timed lease its box once the current call answers. A lane's sessions are not counted:
+//! each asks for its box and waits in the queue for room. A call (a test session's tests) past
+//! three times its class's measured run is said, never ended: an inbox warning, a why-hung sample
+//! in `devhub job result <lease>`, and the test's still-running line. Tests keep one job per lane,
+//! target and args;
 //! their saves only queue, and a test call ships and waits for that patch's test group.
 //! Between calls a session is charged only its resident share of its box (one core and its
 //! memory); a call takes its full charge back, admitted like a lease (it waits up to 30 s for
@@ -35,9 +35,6 @@ use std::time::{Duration, Instant};
 
 /// A live job with no edit or call this long ends (tests too: an idle session's box waits for it).
 pub const IDLE_MS: u64 = 10 * 60 * 1000;
-/// Headless live sessions a lane keeps at once: a new one ends the lane's least recently used idle
-/// one, or waits for a slot ([`slot`]; visible ones never count).
-pub const LANE_SESSIONS: usize = 3;
 /// How long a session has gone unused at `now`: since its last edit or call, and a visible one also
 /// since a person's last input at its box (`input_ms`, [`crate::lease::sched::Sched::user_input_ms`]):
 /// a visible session is the person's app, in use while they work at its box (the idle end closed
@@ -45,38 +42,6 @@ pub const LANE_SESSIONS: usize = 3;
 fn unused_ms(x: &Live, input_ms: Option<u64>, now: u64) -> u64 {
     let last = if x.visible { x.touched_ms.max(input_ms.unwrap_or(0)) } else { x.touched_ms };
     now.saturating_sub(last)
-}
-
-/// Whether a lane's session may ask for its box ([`slot`]).
-#[derive(Debug, PartialEq)]
-enum Slot<'a> {
-    /// the lane has room
-    Free,
-    /// it takes the place of this one, the lane's least recently used idle headless session
-    Takes(&'a Live),
-    /// the lane's headless sessions are all busy, or an earlier one waits: it waits for a slot
-    Waits,
-}
-
-/// Whether a session of a lane (`mine`: the lane's other active sessions; `own`: the session when it
-/// waits already, None for a new one) may ask for its box. At most [`LANE_SESSIONS`] headless sessions
-/// per lane hold a slot: past them the least recently used idle one goes, and with all of them busy
-/// the session waits for one, like a lease, first come first served (a lane's fourth session was
-/// refused, 11-09: a bound waits, it never refuses). A waiting session holds no slot. A visible
-/// session is the person's app: it never counts, never waits and is never the one ended (the cap
-/// ended a person's visible Fab for its lane's next session, 11-09).
-fn slot<'a>(mine: &'a [Live], own: Option<&Live>, visible: bool, idle: impl Fn(&Live) -> bool) -> Slot<'a> {
-    if visible { return Slot::Free; }
-    let key = |x: &Live| (x.slot_wait_ms, x.id.len(), x.id.clone());
-    if mine.iter().any(|x| x.slot_wait_ms != 0 && own.is_none_or(|o| key(x) < key(o))) { return Slot::Waits; }
-    let counted: Vec<&Live> = mine.iter().filter(|x| !x.visible && x.slot_wait_ms == 0).collect();
-    if counted.len() < LANE_SESSIONS { return Slot::Free; }
-    counted.into_iter().filter(|x| idle(x)).min_by_key(|x| x.touched_ms).map_or(Slot::Waits, Slot::Takes)
-}
-
-/// No call runs in the session and no edit is on its way to it (one still placed has neither).
-fn idle_now(x: &Live) -> bool {
-    running(&x.id).is_none_or(|r| r.calls.lock().unwrap().count == 0 && !r.inflight.load(std::sync::atomic::Ordering::SeqCst))
 }
 
 /// A command routed to an app on `node` (`spec`: its pid or name, as `devhub inspect <node>/<spec>`
@@ -103,45 +68,6 @@ fn a_lanes_call(service: &str, caller: &str) -> bool {
 /// name it was started by.
 fn names_app(x: &Live, node: &str, spec: &str) -> bool {
     x.node == node && ((x.pid > 0 && x.pid.to_string() == spec) || x.app == spec || makepad_app_registry::find(spec).is_some_and(|e| e.package == x.app))
-}
-
-/// What a session that waits for a slot of `lane` says while it waits.
-fn slot_note(lane: &str) -> String {
-    format!("waits for a slot: lane {lane}'s {LANE_SESSIONS} headless live sessions are busy (or an earlier one waits); it asks for its box when one is idle or ends")
-}
-
-/// A session that waits for its lane's slot ([`slot`]) has one once one of its lane's headless
-/// sessions is idle (it takes that one's place) or ends, and earlier waiters have theirs. False: it
-/// ended meanwhile.
-fn wait_slot(ctx: &Ctx, id: &str) -> bool {
-    loop {
-        let (signal, seen) = {
-            let _starting = STARTING.lock().unwrap();
-            let Some(x) = get(ctx, id).filter(|x| x.active()) else { return false };
-            if x.slot_wait_ms == 0 { return true; }
-            let mine: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|o| o.active() && o.lane == x.lane && o.id != id).cloned().collect());
-            let free = match slot(&mine, Some(&x), x.visible, idle_now) {
-                Slot::Waits => false,
-                Slot::Free => true,
-                Slot::Takes(lru) => {
-                    event(ctx, Sev::Info, format!("live {} ({}) of lane {}: released for its lane's waiting session {id} (at most {LANE_SESSIONS} headless per lane)", lru.id, lru.app, x.lane), Some(lru));
-                    release(ctx, &lru.id, &format!("released: lane {}'s waiting session {id} took its place (at most {LANE_SESSIONS} headless per lane)", x.lane)).is_ok()
-                }
-            };
-            if free {
-                let waited = wall_ms().saturating_sub(x.slot_wait_ms) / 1000;
-                let x = set(ctx, id, |s| { s.slot_wait_ms = 0; s.note.clear(); });
-                event(ctx, Sev::Info, format!("live {id}: has its lane's slot after {waited} s: asks for a box"), x.as_ref());
-                return true;
-            }
-            // a lane session's change (one ending, this one released) wakes it; one going idle, the next look
-            let ids: Vec<&str> = mine.iter().map(|o| o.id.as_str()).chain(std::iter::once(id)).collect();
-            let signal = ctx.store.subscribe("live", &ids);
-            let seen = signal.generation();
-            (signal, seen)
-        };
-        signal.wait(seen, HOUSEKEEPING);
-    }
 }
 
 /// How often live jobs are checked for a lane that is gone (a lease beat).
@@ -318,6 +244,25 @@ fn wait_for_room(try_admit: &mut dyn FnMut() -> Result<(), String>, ended: &dyn 
         if let Some(why) = ended() { return Err(first.map_or(why.clone(), |f| format!("{why}; it waited for {f}"))); }
         std::thread::sleep(ADMIT_LOOK);
     }
+}
+
+/// A live test's selection before its libtest `--` arguments: its target (none, `--lib`, `--bin B`
+/// or `--test T`), then its package's feature flags (`--no-default-features`, `--features F`),
+/// which the session builds with and is keyed by.
+pub(crate) fn test_select_ok(select: &[String]) -> bool {
+    let mut i = match select {
+        [f, ..] if f == "--lib" => 1,
+        [f, t, ..] if (f == "--bin" || f == "--test") && !t.is_empty() && !t.starts_with('-') => 2,
+        _ => 0,
+    };
+    while i < select.len() {
+        match select[i].as_str() {
+            "--no-default-features" => i += 1,
+            "--features" if select.get(i + 1).is_some_and(|v| !v.is_empty() && !v.starts_with('-')) => i += 2,
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// No call runs and no edit is on its way: the session's box charges it its resident share.
@@ -906,7 +851,7 @@ fn event_cursor(v: &Value) -> String {
 
 /// Bytes of this run, not an asynchronously followed local log: its text from `off` on, and the
 /// offset after its last whole line, where the next window starts (the JIT's unbuffered stderr
-/// writes a line in pieces; a window cut between them lost "makepad live:   struct ", 11-02).
+/// writes a line in pieces; a window cut between them lost "relax live:   struct ", 11-02).
 fn run_log(r: &Running, run: u64, mut off: u64) -> Result<(u64, String), String> {
     let mut bytes = Vec::new();
     loop {
@@ -1151,7 +1096,7 @@ fn failure_output(log: &str, failures: &[String]) -> String {
     let mut out = String::new();
     let mut report = false;
     for line in log.lines() {
-        if line.starts_with("makepad: POISONED:") || line.starts_with("makepad: fault") { report = true; }
+        if crate::run_names::says(line, "", "POISONED:") || crate::run_names::says(line, "", "fault") { report = true; }
         else if !line.starts_with("  ") { report = false; }
         if report { out.push_str(line); out.push('\n'); }
     }
@@ -1892,7 +1837,6 @@ fn finished(ctx: &Ctx, id: &str, r: &Running, res: Result<i32, String>) {
 
 /// Places the live job, starts its app, runs until it ends.
 fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
-    if !wait_slot(ctx, id) { return; }
     let Some(x) = get(ctx, id) else { return };
     // (a job released meanwhile stays released: its lease wait gives up because of that)
     let fail = |e: String| {
@@ -1925,7 +1869,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         if changed.is_empty() && deleted.is_empty() { Ok((rev, String::new(), 0)) }
         else { super::job::copy_snapshot(ctx, &tree, rev, changed, deleted) }
     })();
-    let (rev, snap, _) = match snapshot {
+    let (rev, snap, _) = match snapshot.and_then(|s| super::job::whole_pair(ctx, &s.0).map(|()| s)) {
         Ok(s) => s,
         Err(e) => return fail(e),
     };
@@ -1946,9 +1890,22 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
     // for its self-update, most often): the lease goes back and it is placed again, as a job is.
     // So is an ask for its box whose answer was lost ([`super::leg::exit_lost`]): a live test's
     // session queued 9 min for its box failed on "beat: no answer", its test never run (W4322, 11-08).
+    // It waits for its box as any lease does, in the queue by what the boxes have free; how many
+    // sessions its lane has is no matter. Its wait is its note, and said once in the log. At most
+    // three headless sessions per lane, a lane's next one ended its least recently used one
+    // between two calls, and a lane's WM screenshot tests ran again (11-13).
+    let waited: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+    let mut on_wait = |line: &str| {
+        if line.contains(" granted") { return; }
+        let first = waited.get().is_none();
+        if first { waited.set(Some(wall_ms())); }
+        let note = format!("waits for its box: {line}");
+        let x = set(ctx, id, |s| s.note = note.clone());
+        if first { event(ctx, Sev::Info, format!("live {id}: {note}"), x.as_ref()); }
+    };
     let mut placed = 0;
-    let (held, ship_started) = loop {
-        let held = match Held::acquire_with(&spec, &configure, &mut |_| {}, &|| get(ctx, id).is_none_or(|x| !x.active())) {
+    let (held, ship_started, home_dir) = loop {
+        let held = match Held::acquire_with(&spec, &configure, &mut on_wait, &|| get(ctx, id).is_none_or(|x| !x.active())) {
             Ok(h) => h,
             Err(e) if placed + 1 < super::job::ATTEMPTS && super::leg::exit_lost(&e) => {
                 placed += 1;
@@ -1961,14 +1918,27 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         };
         placed += 1;
         let ship_started = wall_ms();
-        let shipped = if !snap.is_empty() || src == Src::Overlay { super::job::ship_snap(ctx, &held, &snap).map(drop) } else { Ok(()) };
-        let Err(e) = shipped else { break (held, ship_started) };
+        let shipped = if !snap.is_empty() || src == Src::Overlay { super::job::ship_snap(ctx, &held, &snap).map(drop).map_err(|e| (format!("shipping {snap}"), e)) } else { Ok(()) };
+        // its home's files go to the box once (by their hash) and the app gets its own copy
+        let shipped = shipped.and_then(|()| if x.home.is_empty() { Ok(String::new()) } else {
+            crate::lease::ship::send_home(held.client(), &held.node, &held.id, Path::new(&x.home)).map_err(|e| (format!("shipping its home {}", x.home), e))
+        });
+        let (what, e) = match shipped {
+            Ok(home_dir) => {
+                if let Some(since) = waited.take() {
+                    let x = set(ctx, id, |s| s.note.clear());
+                    event(ctx, Sev::Info, format!("live {id}: has its box {} after {} s in the queue", held.node, wall_ms().saturating_sub(since) / 1000), x.as_ref());
+                }
+                break (held, ship_started, home_dir);
+            }
+            Err(e) => e,
+        };
         let node = held.node.clone();
         held.release(None);
         if placed >= super::job::ATTEMPTS || !super::leg::exit_lost(&e) {
-            return fail(format!("shipping {snap}: {e}"));
+            return fail(format!("{what}: {e}"));
         }
-        event(ctx, Sev::Warn, format!("live {id}: shipping to {node} failed ({}); placed again", crate::proto::clean(&e, 160)), Some(&x));
+        event(ctx, Sev::Warn, format!("live {id}: {what} to {node} failed ({}); placed again", crate::proto::clean(&e, 160)), Some(&x));
     };
     let sources = if snap.is_empty() { BTreeMap::new() } else {
         let dir = super::job::snap_dir(ctx, &snap);
@@ -1999,6 +1969,7 @@ fn run(ctx: &Arc<Ctx>, id: &str, first_call: bool) {
         s.touched_ms = wall_ms();
         s.log = log.to_string_lossy().into_owned();
         s.sources = sources;
+        s.home_dir = home_dir;
         if s.test {
             s.patch = Some(LivePatch { files: s.sources.keys().cloned().collect(), edit_ms: ship_started, shipped_ms: s.started_ms, outcome: "initial".into(), ..Default::default() });
         }
@@ -2019,11 +1990,12 @@ fn run_processes(ctx: &Arc<Ctx>, id: &str, r: &Arc<Running>, mut follow: Option<
         // An overlay run's sources are a store with an edits folder, and devhub ships every save
         // into that folder: such a run is live only when asked (run.rs store_live). Without it
         // the app never watches its sources and no edit patches in.
-        let live: &[&str] = if x.test { &[] } else { &["MAKEPAD_RUN_STORE_LIVE=1"] };
+        let live: &[&str] = if x.test { &[] } else { &["RELAX_STORE_LIVE=1"] };
         let mut argv = vec!["env".to_string()];
         argv.extend(x.env.iter().map(|(k, v)| format!("{k}={v}")));
+        if !x.home_dir.is_empty() { argv.push(format!("MAKEPAD_TEST_HOME={}", x.home_dir)); }
         argv.extend(hide.iter().chain(live).chain(&["cargo", "run", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "--"]).map(|s| s.to_string()));
-        argv.extend(if x.test { vec!["test".into(), "--live".into(), x.app.clone()] } else { vec!["run".into(), x.app.clone()] });
+        argv.extend(if x.test { vec!["test".into(), "--live".into(), x.app.clone(), "--release".into()] } else { vec!["run".into(), x.app.clone()] });
         argv.extend(x.test_args.iter().cloned());
         let file = std::fs::OpenOptions::new().append(true).create(true).open(&x.log).map_err(|e| e.to_string())?;
         let log_start = file.metadata().map_err(|e| e.to_string())?.len();
@@ -2380,7 +2352,7 @@ mod owner_tests {
     fn a_relaunch_in_place_ends_when_the_new_run_has_the_sources() {
         let live = |pending: u32| vec![format!(r#"{{"now_ms":1.0,"frames":40,"patches":3,"frame_patch":3,"restart_pending":{pending}}}"#)];
         let postponed = "[I] platform/src/restart.rs:433:17 - restart postponed (struct `Plate` changed): unsaved: plate 1\n";
-        assert_eq!(super::relaunch_end(&live(2), "makepad live: restarting (struct `Plate` changed)\n"), None, "on its way");
+        assert_eq!(super::relaunch_end(&live(2), "relax live: restarting (struct `Plate` changed)\n"), None, "on its way");
         assert_eq!(super::relaunch_end(&live(2), postponed), Some(Err("(struct `Plate` changed): unsaved: plate 1".to_string())));
         assert_eq!(super::relaunch_end(&live(0), postponed), Some(Ok(())), "the app allowed it after all");
         assert_eq!(super::relaunch_end(&[], ""), None, "a look that failed: looked at again");
@@ -2462,7 +2434,7 @@ mod owner_tests {
     #[test]
     fn a_log_window_ends_after_its_last_whole_line() {
         // read from 100 to 140: the next window starts where the half-written line does
-        let bytes = b"test a ... ok\nverdict\nmakepad live:   struct ";
+        let bytes = b"test a ... ok\nverdict\nrelax live:   struct ";
         assert_eq!(super::whole_lines_end(100 + bytes.len() as u64, bytes), 100 + 22);
         assert_eq!(super::whole_lines_end(120, b"no newline yet"), 106);
         assert_eq!(super::whole_lines_end(120, b"done\n"), 120);
@@ -2658,7 +2630,7 @@ pub(super) fn validate_env(k: &str, v: &str) -> Result<(), String> {
     if v.contains(['\n', '\r']) { return Err("live start: --env value must not contain a newline".into()); }
     // Lease argv is NUL-separated; a value must remain one argument.
     if v.contains('\0') { return Err("live start: --env value must not contain NUL".into()); }
-    if matches!(k, "MAKEPAD_RUN_VFS" | "MAKEPAD_RUN_WORKSPACE" | "MAKEPAD_RUN_EDITS" | "MAKEPAD_RUN_HOME" | "CARGO_TARGET_DIR" | "MAKEPAD_HIDE_WINDOWS" | "MAKEPAD_RUN_STORE_LIVE") {
+    if matches!(k, "CARGO_TARGET_DIR" | "MAKEPAD_HIDE_WINDOWS") || ["VFS", "WORKSPACE", "EDITS", "HOME", "STORE_LIVE"].iter().any(|v| crate::run_names::is(k, v)) {
         return Err(format!("live start: --env {k} is managed by devhub"));
     }
     Ok(())
@@ -2710,14 +2682,22 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             {
                 let select = &test_args[..test_args.iter().position(|a| a == "--").unwrap_or(test_args.len())];
                 if test {
-                    if !select.is_empty() && !matches!(select, [f] if f == "--lib") && !matches!(select, [f, t] if (f == "--bin" || f == "--test") && !t.is_empty() && !t.starts_with('-')) {
-                        return Err("live: select --lib, --bin B or --test T before the libtest -- arguments".into());
+                    if !test_select_ok(select) {
+                        return Err("live: select --lib, --bin B or --test T, then any --no-default-features or --features F, before the libtest -- arguments".into());
                     }
                 } else if !select.is_empty() && !matches!(select, [f, t] if f == "--bin" && !t.is_empty() && !t.starts_with('-')) {
                     return Err("live: a program takes --bin B before its -- arguments; a test selection needs test=true".into());
                 }
             }
             if test_args.last().is_some_and(|a| a == "--") { test_args.pop(); }
+            // `--home`: files the app finds in a home of its own on its box (a capture to look at
+            // was put into the box user's home by a job pinned to the session's box, 11-13)
+            let home = s("home");
+            if !home.is_empty() {
+                if test { return Err("live: --home seeds an app's home; a test's app has its harness's own".into()); }
+                if !Path::new(&home).is_absolute() || !Path::new(&home).is_file() { return Err(format!("live: --home {home} is not an archive on this machine")); }
+                if env.iter().any(|(k, _)| k == "MAKEPAD_TEST_HOME") { return Err("live: --home is the app's MAKEPAD_TEST_HOME; drop the --env one".into()); }
+            }
             // a registry name (`calculator`) runs as its package (`makepad-app-calculator`)
             let app = if test { app } else { makepad_app_registry::find(&app).map_or(app, |e| e.package.to_string()) };
             if app.is_empty() || app.starts_with('-') || !app.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
@@ -2739,20 +2719,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 }
                 return Err(format!("{} already runs {app} for lane {lane} on {} (live release {} first)", old.id, old.node, old.id));
             }
-            // a lane keeps LANE_SESSIONS headless: the new one ends its least recently used idle one,
-            // or waits for a slot (lanes held 7 and 8 sessions past the lane cap, 11-02); a visible
-            // one is the person's
+            // (a lane's sessions are not counted: each asks for its box and waits in the queue for
+            // room, [`run`])
             let visible = v.get("visible").and_then(|b| b.as_bool()).unwrap_or(false);
-            let mine: Vec<Live> = ctx.store.read(|d| d.lives.iter().filter(|x| x.active() && x.lane == lane).cloned().collect());
-            let waits = match slot(&mine, None, visible, idle_now) {
-                Slot::Free => false,
-                Slot::Takes(lru) => {
-                    event(ctx, Sev::Info, format!("live {} ({}) of lane {lane}: released for its lane's new session (at most {LANE_SESSIONS} headless per lane)", lru.id, lru.app), Some(lru));
-                    release(ctx, &lru.id, &format!("released: lane {lane}'s new session took its place (at most {LANE_SESSIONS} headless per lane)"))?;
-                    false
-                }
-                Slot::Waits => true,
-            };
             let priority = match s("priority").as_str() { "" => Priority::Interactive, p => Priority::parse(p).ok_or("priority is interactive or background")? };
             let cost = s("cost");
             if !cost.is_empty() && CostClass::parse(&cost).is_none() { return Err("cost is small, medium or large".into()); }
@@ -2762,12 +2731,12 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let ram_gb = v.get("ram_gb").filter(|v| !v.is_null()).map(|v| crate::lease::num(v).filter(|n| n.is_finite() && *n > 0.0).ok_or("ram_gb is a positive number")).transpose()?;
             let x = ctx.store.update(|d| {
                 d.lives_next += 1;
-                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, test_args, env, also, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible, state: "starting".into(), touched_ms: wall_ms(), slot_wait_ms: if waits { wall_ms() } else { 0 }, note: if waits { slot_note(&lane) } else { String::new() }, ..Default::default() };
+                let x = Live { id: format!("W{}", d.lives_next), priority: priority.as_str().into(), loader: s("loader"), src: src.as_str().into(), cost: cost.as_str().into(), est_min, cores, ram_gb, class: s("class"), app: app.clone(), test, test_args, env, also, home, lane: lane.clone(), agent: s("agent"), tree: tree.clone(), needs: s("needs"), pin: s("node"), visible, state: "starting".into(), touched_ms: wall_ms(), ..Default::default() };
                 d.lives.push(x.clone());
                 x
             })?;
             drop(starting);
-            event(ctx, Sev::Info, if waits { format!("live {}: {app} for lane {lane} {}", x.id, x.note) } else { format!("live {}: {app} for lane {lane} asks for a box", x.id) }, Some(&x));
+            event(ctx, Sev::Info, format!("live {}: {app} for lane {lane} asks for a box", x.id), Some(&x));
             let (c, id, first_call) = (ctx.clone(), x.id.clone(), verb == "test");
             if let Err(e) = std::thread::Builder::new().name("devhub-live".into()).spawn(move || run(&c, &id, first_call)) {
                 try_set(ctx, &x.id, |s| { s.state = "failed".into(); s.note = e.to_string(); })?;
@@ -2814,9 +2783,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             let strs = |v: &[String]| format!("[{}]", v.iter().map(|s| json_str(s)).collect::<Vec<_>>().join(","));
             let env = x.env.iter().map(|(k, v)| format!("[{},{}]", json_str(k), json_str(v))).collect::<Vec<_>>().join(",");
             let req = format!(
-                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{}}}",
+                "{{\"app\":{},\"repo_dir\":{},\"tree\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{},\"test\":{},\"test_args\":{},\"env\":[{env}],\"also\":{},\"home\":{},\"priority\":{},\"cost\":{},\"est_min\":{},\"cores\":{},\"ram_gb\":{},\"class\":{},\"loader\":{}}}",
                 json_str(&x.app), json_str(&x.tree), x.src == Src::Tree.as_str(), json_str(&x.lane), json_str(&x.agent), json_str(&x.needs), json_str(&x.pin), x.visible, x.test,
-                strs(&x.test_args), strs(&x.also), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader),
+                strs(&x.test_args), strs(&x.also), json_str(&x.home), json_str(&x.priority), json_str(&x.cost), x.est_min.map_or("null".to_string(), |m| m.to_string()), x.cores.map_or("null".to_string(), |n| n.to_string()), x.ram_gb.map_or("null".to_string(), |n| n.to_string()), json_str(&x.class), json_str(&x.loader),
             );
             serve(ctx, &format!("live {} {req}", if x.test { "test" } else { "start" }))
         }
@@ -3036,6 +3005,7 @@ pub fn render(x: &Live) -> String {
     };
     let mut out = format!("{} {} {}{owner} on {} pid {}{}\n", x.id, x.state, x.app, if x.node.is_empty() { "-" } else { &x.node }, x.pid, if x.note.is_empty() { String::new() } else { format!(" ({})", x.note) });
     if !x.env.is_empty() { out.push_str(&format!("  env: {}\n", x.env.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(","))); }
+    if !x.home.is_empty() { out.push_str(&format!("  home: {}{}\n", x.home, if x.home_dir.is_empty() { String::new() } else { format!(" (the app's copy on its box: {})", x.home_dir) })); }
     if let Some(p) = &x.patch {
         let after = |t: u64| if t == 0 { "-".to_string() } else { format!("{} ms", t.saturating_sub(p.edit_ms)) };
         if x.test {
@@ -3055,33 +3025,14 @@ pub fn render(x: &Live) -> String {
 mod person_tests {
     use crate::state::Live;
 
-    /// A lane holds [`super::LANE_SESSIONS`] headless sessions: past them the least recently used
-    /// idle one goes, and with all of them busy the new one waits for a slot, first come first served,
-    /// never refused. A visible session is the person's app: the cap never ends it, counts it or
-    /// makes it wait (it closed a person's visible Fab for its lane's next session, and refused a
-    /// lane's fourth session, 11-09).
+    /// A visible session is the person's app: in use while they work at its box, and a headless one
+    /// by its edits and calls alone (the idle end closed a person's visible Fab, 11-09).
     #[test]
-    fn a_lanes_sessions_past_its_cap_wait_and_its_visible_one_is_the_persons() {
-        use super::Slot;
+    fn a_visible_session_is_in_use_while_its_person_works_at_its_box() {
         let t0 = 1_793_713_740_000u64;
         let min = 60_000;
         let live = |id: &str, visible: bool, touched_ms: u64| Live { id: id.into(), lane: "a-lane".into(), node: "box-a".into(), visible, touched_ms, state: "running".into(), ..Default::default() };
-        let waiting = |id: &str, since: u64| Live { slot_wait_ms: since, state: "starting".into(), ..live(id, false, since) };
-        let pick = |s: Slot| match s { Slot::Free => "free".to_string(), Slot::Takes(x) => x.id.clone(), Slot::Waits => "waits".to_string() };
-        // the visible session is the least recently used one, and idle
-        let mine = [live("W1", true, t0), live("W2", false, t0 + min), live("W3", false, t0 + 2 * min), live("W4", false, t0 + 3 * min)];
-        assert_eq!(pick(super::slot(&mine, None, false, |_| true)), "W2", "cap: the least recently used idle headless session goes, never the visible one");
-        assert_eq!(pick(super::slot(&mine, None, true, |_| true)), "free", "cap: a new visible session ends none");
-        assert_eq!(pick(super::slot(&mine[..3], None, false, |_| true)), "free", "cap: a visible session does not count toward it");
-        assert_eq!(pick(super::slot(&mine, None, false, |x| x.visible)), "waits", "cap: with its headless sessions busy the new one waits, the visible one stays");
-        // W5 and W6 wait, in that order; W2 ended
-        let (w5, w6) = (waiting("W5", t0 + 4 * min), waiting("W6", t0 + 5 * min));
-        let lane = [mine[0].clone(), mine[2].clone(), mine[3].clone(), w5.clone(), w6.clone()];
-        let others = |id: &str| lane.iter().filter(|x| x.id != id).cloned().collect::<Vec<_>>();
-        assert_eq!(pick(super::slot(&others("W5"), Some(&w5), false, |_| false)), "free", "wait: a slot freed goes to the first waiter; waiting sessions hold none");
-        assert_eq!(pick(super::slot(&others("W6"), Some(&w6), false, |_| true)), "waits", "wait: a later waiter waits behind an earlier one");
-        assert_eq!(pick(super::slot(&lane, None, false, |_| true)), "waits", "wait: a new session queues behind the waiters");
-        assert_eq!(pick(super::slot(&lane, None, true, |_| false)), "free", "wait: a visible session never waits");
+        let mine = [live("W1", true, t0), live("W2", false, t0 + min)];
         let now = t0 + 30 * min;
         assert_eq!(super::unused_ms(&mine[0], Some(now - 2 * min), now), 2 * min, "idle: a person's input at its box uses a visible session");
         assert_eq!(super::unused_ms(&mine[1], Some(now - 2 * min), now), 29 * min, "idle: a headless session on that box goes by its edits and calls");
@@ -3115,7 +3066,7 @@ mod fault_tests {
     #[test]
     fn the_jits_own_crates_tests_print_the_jits_lines_as_their_own() {
         let panic = "thread '<unnamed>' (2729363) panicked at libs/relax/compiler/src/jit.rs:2200:49:";
-        let restart = "makepad-run: JIT thread `lifeline-test-restart` panicked: lifeline test panic (at libs/relax/compiler/src/lifeline.rs:271) -- restarted (1 of 16)";
+        let restart = "relax: JIT thread `lifeline-test-restart` panicked: lifeline test panic (at libs/relax/compiler/src/lifeline.rs:271) -- restarted (1 of 16)";
         for line in [panic, restart] {
             assert!(super::fault_line("makepad-fab", line, &mut false), "an app's run: the JIT's fault: {line}");
             assert!(!super::fault_line("relax-compiler", line, &mut false), "relax-compiler's tests: its own line: {line}");

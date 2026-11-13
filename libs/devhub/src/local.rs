@@ -88,6 +88,8 @@ struct State {
     /// JITs seen gone with their discovery file still there (a lister removes stale files, so
     /// the scan records it before it lists)
     crashed: std::collections::HashSet<u32>,
+    /// pid -> a second name of its session log, made at its first panic ([`kept_name`])
+    kept: BTreeMap<u32, std::path::PathBuf>,
 }
 
 pub struct Local {
@@ -135,7 +137,7 @@ impl Local {
             hitch_ms,
             started_ms: proto::wall_ms(),
             publish,
-            state: Mutex::new(State { jits: BTreeMap::new(), jit_state: BTreeMap::new(), recent: BTreeMap::new(), cpu: CpuMeter::default(), crashed: Default::default() }),
+            state: Mutex::new(State { jits: BTreeMap::new(), jit_state: BTreeMap::new(), recent: BTreeMap::new(), cpu: CpuMeter::default(), crashed: Default::default(), kept: BTreeMap::new() }),
             ai_hub: Mutex::new(ai_hub_endpoint().map(|_| AiHub { why: "health probe pending".into(), ..AiHub::default() }.to_json())),
             stop: AtomicBool::new(false),
             hot_ready: AtomicBool::new(false),
@@ -198,6 +200,29 @@ impl Local {
 
     pub fn jits(&self) -> Vec<Jit> {
         self.state.lock().unwrap().jits.values().cloned().collect()
+    }
+
+    /// The session log `pid` panicked with, kept past its end ([`kept_name`]), while it is there.
+    pub fn kept_log(&self, pid: u32) -> Option<std::path::PathBuf> {
+        self.state.lock().unwrap().kept.get(&pid).filter(|p| p.exists()).cloned()
+    }
+
+    /// At `jit`'s first panic: a second name for its session log, which its clean exit does not
+    /// remove. The panic's record names the pid, and its log is what says what led to it: a job
+    /// whose test went on past a panic ended with the log gone (J13633, 11-13). It sits beside the
+    /// log, in the JIT's temp dir: a lease's goes with the lease.
+    fn keep_log(&self, jit: &Jit) {
+        let Some(log) = jit.session_log.as_deref().filter(|p| !p.is_empty()).map(std::path::Path::new) else { return };
+        if self.state.lock().unwrap().kept.contains_key(&jit.pid) {
+            return;
+        }
+        let kept = kept_name(log);
+        match std::fs::hard_link(log, &kept) {
+            Ok(()) => {
+                self.state.lock().unwrap().kept.insert(jit.pid, kept);
+            }
+            Err(e) => eprintln!("devhub: {}#{}: its session log {} is not kept: {e}", jit.app, jit.pid, log.display()),
+        }
     }
 
     /// The AI hub's health, on its own thread: three fleet TLS requests never stall the JIT scan.
@@ -329,6 +354,9 @@ impl Local {
                     Ok(Some((_, line))) => {
                         let line = String::from_utf8_lossy(&line);
                         if let Some(r) = proto::from_jit_event(&self.machine, &jit.app, jit.pid, &line, self.hitch_ms) {
+                            if r.kind == "panic" {
+                                self.keep_log(&jit);
+                            }
                             self.emit(r);
                         }
                     }
@@ -804,6 +832,12 @@ impl AiHubWatch {
 /// into).
 fn exe_replaced(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|p| p.to_string_lossy().ends_with(" (deleted)"))
+}
+
+/// The second name a panicked JIT's session log keeps ([`Local::keep_log`]): `x.log` -> `x.kept.log`.
+fn kept_name(log: &std::path::Path) -> std::path::PathBuf {
+    let stem = log.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    log.with_file_name(format!("{stem}.kept.log"))
 }
 
 fn log_tail(path: &str) -> String {

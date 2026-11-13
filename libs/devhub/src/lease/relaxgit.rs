@@ -192,7 +192,7 @@ pub fn prepare(work: &Path, lane: &str, lease: &str, pin: &Pin) -> Result<Vec<(S
     let state = work.join("dev/lane").join(lane);
     std::fs::create_dir_all(state.join("run")).map_err(|e| layer("makepad", &pin.makepad, "run directory", e))?;
     std::fs::write(state.join("overlay-pin"), pin.key()).map_err(|e| layer("makepad", &pin.makepad, "pin record", e))?;
-    Ok(vec![("MAKEPAD_RUN_HOME".into(), work.join("dev/run-home").to_string_lossy().into_owned()), ("MAKEPAD_RUN_CACHE_MAX".into(), DEV_STORE_MB.to_string()), ("MAKEPAD_RUN_VFS".into(), mounts), ("MAKEPAD_RUN_WORKSPACE".into(), root.to_string_lossy().into_owned()), ("MAKEPAD_RUN_EDITS".into(), edits.to_string_lossy().into_owned())])
+    Ok(vec![("RELAX_HOME".into(), work.join("dev/run-home").to_string_lossy().into_owned()), ("RELAX_CACHE_MAX".into(), DEV_STORE_MB.to_string()), ("RELAX_VFS".into(), mounts), ("RELAX_WORKSPACE".into(), root.to_string_lossy().into_owned()), ("RELAX_EDITS".into(), edits.to_string_lossy().into_owned())])
 }
 
 /// What the dev store may hold (MB). Every overlay lease of a box shares it, across the JIT builds

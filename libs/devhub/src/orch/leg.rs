@@ -660,20 +660,29 @@ impl Held {
     /// Lets the lease go. Some: what its box's cleanup found it did that fails its work (it wrote
     /// under the overlay's virtual root on the box's disk).
     pub fn release(mut self, exit: Option<i32>) -> Option<String> {
+        self.end(exit).0
+    }
+
+    /// [`Self::release`], and whether the toolchain changed under the lease (`rustc A -> B`): its
+    /// run then has no verdict ([`crate::lease::exec`]'s `toolchain`).
+    pub fn release_seeing_toolchain(mut self, exit: Option<i32>) -> (Option<String>, Option<String>) {
         self.end(exit)
     }
 
-    fn end(&mut self, exit: Option<i32>) -> Option<String> {
+    fn end(&mut self, exit: Option<i32>) -> (Option<String>, Option<String>) {
         if self.released {
-            return None;
+            return (None, None);
         }
         self.released = true;
         let line = match exit {
             Some(c) => format!("{} released exit={c}", self.id),
             None => self.id.clone(),
         };
-        let answer = ask(&self.ctl, None, "release", &line).ok()?;
-        answer.iter().find_map(|l| cleanup_fault(&self.id, &json(l)?))
+        let Ok(answer) = ask(&self.ctl, None, "release", &line) else { return (None, None) };
+        let answers: Vec<Value> = answer.iter().filter_map(|l| json(l)).collect();
+        let fault = answers.iter().find_map(|v| cleanup_fault(&self.id, v));
+        let toolchain = answers.iter().find_map(|v| v.get("cleanup")?.get("toolchain")?.as_str().map(str::to_string));
+        (fault, toolchain)
     }
 }
 

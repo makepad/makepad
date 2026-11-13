@@ -770,6 +770,11 @@ pub struct Live {
     pub env: Vec<(String, String)>,
     /// paths the run names in `DEVHUB_ALSO`: they ship with every patch, `local/` included
     pub also: Vec<String>,
+    /// `--home`: a tar archive on the master's machine whose files seed the app's own home on its
+    /// box (empty: the app reads the box user's home)
+    pub home: String,
+    /// that home on its box, once placed: the app's `MAKEPAD_TEST_HOME`
+    pub home_dir: String,
     pub lane: String,
     pub src: String,
     pub cost: String,
@@ -815,9 +820,6 @@ pub struct Live {
     pub restart_since_ms: u64,
     pub restart_saves: u64,
     pub restart_why: String,
-    /// since when it waits for one of its lane's headless slots, asking for no box yet (0: it has
-    /// one, or is visible): a lane's session past them waits like a lease ([`crate::orch::live`])
-    pub slot_wait_ms: u64,
     pub panic: Option<JobPanic>,
     pub log: String,
     pub note: String,
@@ -1686,6 +1688,8 @@ fn live_state_value(x: &Live) -> Value {
         ("test_args", strs(&x.test_args)),
         ("env", Value::Arr(x.env.iter().map(|(k, v)| Value::Arr(vec![s(k), s(v)])).collect())),
         ("also", strs(&x.also)),
+        ("home", s(&x.home)),
+        ("home_dir", s(&x.home_dir)),
         ("lane", s(&x.lane)),
         ("src", s(&x.src)),
         ("cost", s(&x.cost)),
@@ -1712,7 +1716,6 @@ fn live_state_value(x: &Live) -> Value {
         ("restart_since_ms", int(x.restart_since_ms)),
         ("restart_saves", int(x.restart_saves)),
         ("restart_why", s(&x.restart_why)),
-        ("slot_wait_ms", int(x.slot_wait_ms)),
         ("panic", panic_value(&x.panic)),
         ("log", s(&x.log)),
         ("note", s(&x.note)),
@@ -1745,6 +1748,8 @@ fn live_state_from(v: &Value) -> Live {
             Some((k.as_str()?.to_string(), v.as_str()?.to_string()))
         }).collect(),
         also: strs_from(o, "also"),
+        home: text(o, "home"),
+        home_dir: text(o, "home_dir"),
         lane: text(o, "lane"),
         src: text(o, "src"),
         cost: text(o, "cost"),
@@ -1771,7 +1776,6 @@ fn live_state_from(v: &Value) -> Live {
         restart_since_ms: uint(o, "restart_since_ms"),
         restart_saves: uint(o, "restart_saves"),
         restart_why: text(o, "restart_why"),
-        slot_wait_ms: uint(o, "slot_wait_ms"),
         panic: panic_from(v.get("panic")),
         log: text(o, "log"),
         note: text(o, "note"),
@@ -2576,12 +2580,14 @@ mod tests {
         assert_eq!(Doc::parse(&doc.to_value().to_json()), Some(doc));
     }
 
-    /// A session keeps what it asked through a master's restart, and `live again` reads it there.
+    /// A session keeps what it asked through a master's restart, and `live again` reads it there:
+    /// its cores and RAM, and its home (the archive, and where its box holds the app's copy).
     #[test]
-    fn a_live_session_keeps_its_cores_and_ram_asks() {
-        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), ..Default::default() };
+    fn a_live_session_keeps_its_asks_and_its_home() {
+        let x = Live { id: "W1".into(), cores: Some(4.0), ram_gb: Some(12.5), home: "/a/scan.tar".into(), home_dir: "/w/tmp/L1/app-home".into(), ..Default::default() };
         let back = live_from(&live_value(&x));
         assert_eq!((back.cores, back.ram_gb), (Some(4.0), Some(12.5)));
+        assert_eq!((back.home.as_str(), back.home_dir.as_str()), ("/a/scan.tar", "/w/tmp/L1/app-home"));
         assert_eq!(live_from(&live_value(&Live::default())).ram_gb, None);
     }
 

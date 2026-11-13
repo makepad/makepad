@@ -21,6 +21,7 @@ use super::sign::{self, Order, Seen};
 use super::toast::{self, News, Outcome};
 use super::NodeCtx;
 use crate::proto::{self, hub_record, Sev};
+use makepad_app_registry::machine::Launcher;
 use makepad_network::digest::Sha256;
 use makepad_remote::conn::{Event, CLOSE_REFUSED};
 use makepad_remote::endpoint::Factory;
@@ -901,18 +902,72 @@ fn restart_blockers() -> Vec<String> {
     // a WM restart ends every app in its session: it never takes a user's app with it (it
     // killed Fab on a pool box, 3 min after the last input, 2026-10-30)
     // (a headless lease's JIT runs on through it: its lease is not on the WM)
-    out.extend(apps_on_the_wm().into_iter().map(|(app, pid, leased)| if leased { format!("{app} (pid {pid}) of a lease") } else { format!("{app} runs (pid {pid}): close it to let the WM update") }));
+    out.extend(apps_on_the_wm().into_iter().map(|(app, pid, leased)| if leased { format!("{app} (pid {pid}) of a lease") } else { format!("{app} runs (pid {pid}, {}): close it to let the WM update", opened_said(launched_by(pid).as_ref(), wm_child(pid))) }));
     out
 }
 
+/// Who opened app process `pid` on the WM: an agent's launch carries the mark in its environment
+/// (and its children with it), and the WM's client log of it names any launcher, the latest last
+/// (a warm instance opened later). None: the WM's launches do not name it (a shell started it, or
+/// a WM from before the mark).
+fn launched_by(pid: u32) -> Option<Launcher> {
+    #[cfg(target_os = "linux")]
+    if let Some(mark) = makepad_app_registry::machine::launched_by_env(pid) {
+        return Some(mark);
+    }
+    let log = crate::node::wm_client_log(&std::env::temp_dir(), pid)?;
+    Launcher::last_in(&std::fs::read_to_string(log).ok()?)
+}
+
+/// For a WM restart's "waits for" line: who opened the app; one no launch mark names, through the
+/// WM (`wm_child`: the WM started it) or not. A pool box's Fab, opened from the WM's dock over a
+/// Desk Link by a WM from before the marks, read "not opened through the WM", and was taken for a
+/// lease's left behind (11-13).
+fn opened_said(by: Option<&Launcher>, wm_child: bool) -> String {
+    match by {
+        Some(by) => format!("opened by {}", by.said()),
+        None if wm_child => "opened through the WM before it named who opens apps: its opener is unknown, a person's as far as the WM tells".to_string(),
+        None => "not opened through the WM: a shell started it".to_string(),
+    }
+}
+
+/// Whether the WM's own process started process `pid` (its parent is the WM's).
+fn wm_child(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let parent = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|stat| stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse::<u32>().ok());
+        parent.is_some_and(|ppid| super::jits::list().into_iter().any(|j| j.pid == ppid && (j.app == "wm" || j.app == "makepad-app-wm")))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
+/// Whether a WM restart waits for an app no lease here runs (`lease`: [`crate::lease::exec::app_lease`])
+/// that `by` opened: a person's, or one whose opener nothing names; not one an ended lease left
+/// behind, nor an agent's (a terminal an agent's request had opened held a node's WM restart for
+/// days, 11-13).
+fn waits_for(lease: crate::lease::exec::AppLease, by: Option<&Launcher>) -> bool {
+    use crate::lease::exec::AppLease;
+    match lease {
+        AppLease::Live { .. } => true,
+        AppLease::Left => false,
+        AppLease::Nobody => !matches!(by, Some(Launcher::Agent(_))),
+    }
+}
+
 /// The apps a WM restart waits for, with whether a lease runs each: (app, pid, leased). Not the
-/// WM's own, not a headless lease's (it runs on through the restart), and not one an ended
-/// lease left behind (nothing waits for it, and the restart ends it).
+/// WM's own, not a headless lease's (it runs on through the restart), not one an ended lease left
+/// behind (nothing waits for it, and the restart ends it), nor one an agent opened that no lease
+/// runs ([`waits_for`]).
 fn apps_on_the_wm() -> Vec<(String, u32, bool)> {
     use crate::lease::exec::{app_lease, in_headless_lease, AppLease};
-    super::jits::list().into_iter().filter(|j| !wm_own(&j.app) && !in_headless_lease(j.pid)).filter_map(|j| match app_lease(j.pid) {
-        AppLease::Left => None,
-        lease => Some((j.app, j.pid, lease != AppLease::Nobody)),
+    super::jits::list().into_iter().filter(|j| !wm_own(&j.app) && !in_headless_lease(j.pid)).filter_map(|j| {
+        let lease = app_lease(j.pid);
+        let by = (lease == AppLease::Nobody).then(|| launched_by(j.pid)).flatten();
+        waits_for(lease, by.as_ref()).then(|| (j.app, j.pid, lease != AppLease::Nobody))
     }).collect()
 }
 
@@ -1068,6 +1123,16 @@ mod tests {
     /// every app keep the box at work while it waits.
     #[test]
     fn a_wm_restart_drains_only_for_leases() {
+        // whose app it waits for: a lease's and a person's, or one nothing names; not an
+        // agent's no lease runs, nor a leftover (11-13)
+        use crate::lease::exec::AppLease;
+        let (person, agent) = (Launcher::Person("at the WM".into()), Launcher::Agent("devhub show, through the WM socket".into()));
+        assert!(super::waits_for(AppLease::Live { on_wm: true }, None));
+        assert!(super::waits_for(AppLease::Nobody, Some(&person)) && super::waits_for(AppLease::Nobody, Some(&Launcher::Pool)) && super::waits_for(AppLease::Nobody, None));
+        assert!(!super::waits_for(AppLease::Nobody, Some(&agent)) && !super::waits_for(AppLease::Left, Some(&person)));
+        assert_eq!(super::opened_said(Some(&agent), true), "opened by an agent (devhub show, through the WM socket)");
+        assert!(super::opened_said(None, true).starts_with("opened through the WM before it named who opens apps"), "a WM from before launch marks opened it");
+        assert_eq!(super::opened_said(None, false), "not opened through the WM: a shell started it");
         let leases = vec!["screen lease L7 of lane-s (its windows)".to_string()];
         let leased = vec![("makepad-sqlite".to_string(), 41, true)];
         assert_eq!(super::drain_said(&[], &leases, &leased, true), "screen lease L7 of lane-s (its windows); makepad-sqlite (pid 41) of a lease");

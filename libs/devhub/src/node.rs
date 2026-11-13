@@ -132,7 +132,7 @@ impl LanListener {
 /// The endpoint the master (and this machine's own user, on the control socket) is served by.
 pub fn master_endpoint(name: &str, launch: Vec<String>, local: &Arc<Local>, peers: &Arc<Mutex<Peers>>) -> (Endpoint, makepad_remote::watch::WatchSink) {
     // sessions the master launches run hidden and muted, like every agent launch
-    let env = vec![("MAKEPAD_HIDE_WINDOWS".to_string(), "1".to_string()), ("SANDBOX_MUTE".to_string(), "1".to_string())];
+    let env = vec![("MAKEPAD_HIDE_WINDOWS".to_string(), "1".to_string()), ("MAKEPAD_MUTE".to_string(), "1".to_string())];
     let ep = relay::endpoint(relay::Config { name: format!("devhub {name}"), launch, env, ledger: relay::default_ledger() });
     let sink = ep.register_watch();
     crate::hot::register(&ep);
@@ -188,7 +188,9 @@ fn jit_log(local: &Local, line: &str, out: &mut Vec<String>) {
     let pid = jit.map(|j| j.pid).or_else(|| who.parse().ok());
     let path = pid.and_then(crate::sync::launch_log)
         .or_else(|| pid.and_then(|p| wm_client_log(&std::env::temp_dir(), p)))
-        .or_else(|| jit.and_then(|j| j.session_log.clone()).filter(|p| !p.is_empty()).map(PathBuf::from));
+        .or_else(|| jit.and_then(|j| j.session_log.clone()).filter(|p| !p.is_empty()).map(PathBuf::from))
+        // a JIT that panicked and ended: its log under its kept name
+        .or_else(|| pid.and_then(|p| local.kept_log(p)));
     let Some(path) = path else {
         return out.push(format!("{{\"err\":{}}}", json_str(&format!("no JIT or launch `{who}` with a log here"))));
     };
@@ -203,7 +205,7 @@ fn jit_log(local: &Local, line: &str, out: &mut Vec<String>) {
 /// The WM's log of the client process `pid` (`<dir>/wm-client-<id>.log`, the WM's temp dir): the
 /// one whose program announced that pid (`makepad-remote: pid <pid> ...`, near its start). None
 /// once the WM reused the client's id for another run.
-fn wm_client_log(dir: &std::path::Path, pid: u32) -> Option<PathBuf> {
+pub(crate) fn wm_client_log(dir: &std::path::Path, pid: u32) -> Option<PathBuf> {
     use std::io::Read;
     let announce = format!("makepad-remote: pid {pid} ");
     std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| {

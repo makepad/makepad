@@ -216,6 +216,75 @@ fn rev(dir: &Path, what: &str) -> Option<String> {
     crate::gitread::rev(dir, what)
 }
 
+/// Of `landed` (landings, any order), the newest two-repo landing a lane's pair holds one half of
+/// (`work` the makepad half's commit, `main` the commercial half's): it, and whether the makepad
+/// half is the one that holds it. A landing both halves hold ends the look: what landed before
+/// it is in both. A lane merged work into its makepad half by hand, a live run started before
+/// main came into its commercial half, and its store build asked for a crate the makepad half had
+/// renamed: `no matching package named makepad-relax` (#4046, 11-12).
+pub fn half_landed<'a>(landed: &'a [Entry], repo: &Path, work: &str, main: &str) -> Option<(&'a Entry, bool)> {
+    if work.is_empty() || main.is_empty() { return None; }
+    let commercial = repo.join("apps/commercial");
+    let mut both: Vec<(&Entry, (String, String))> = landed.iter().filter(|e| e.state == St::Landed).filter_map(|e| {
+        let (pre, done) = (pair_sides(&e.pre)?, pair_sides(&e.landed)?);
+        (pre.0 != done.0 && pre.1 != done.1).then_some((e, done))
+    }).collect();
+    both.sort_by_key(|(e, _)| std::cmp::Reverse(e.id));
+    for (e, (w, m)) in both {
+        match (is_ancestor(repo, &w, work), is_ancestor(&commercial, &m, main)) {
+            (true, true) => return None,
+            (false, false) => {}
+            (makepad, _) => return Some((e, makepad)),
+        }
+    }
+    None
+}
+
+/// A landing's recorded pair (`work <sha> main <sha>`): its work and main commits.
+fn pair_sides(text: &str) -> Option<(String, String)> {
+    match text.split_whitespace().collect::<Vec<_>>()[..] {
+        ["work", w, "main", m] => Some((w.to_string(), m.to_string())),
+        _ => None,
+    }
+}
+
+/// The commercial main a makepad commit on work landed beside: the main of the landing that made
+/// it, else of the newest landing it holds. None: it holds no landing of `landed`.
+pub fn landed_main(landed: &[Entry], repo: &Path, work: &str) -> Option<String> {
+    let mut sides: Vec<(u64, (String, String))> = landed.iter().filter(|e| e.state == St::Landed).filter_map(|e| Some((e.id, pair_sides(&e.landed)?))).collect();
+    sides.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+    sides.iter().find(|(_, (w, _))| w == work).or_else(|| sides.iter().find(|(_, (w, _))| is_ancestor(repo, w, work))).map(|(_, (_, m))| m.clone())
+}
+
+/// Whether a run pins makepad commit `work` beside the checkout's commercial HEAD `head` (a `--rev`
+/// naming no commercial side): Ok(None) when they never split a two-repo landing; Ok(Some(why)) when
+/// the head holds one `work` lacks and has no commits of its own (all in main): the run takes the
+/// main `work` landed beside instead ([`landed_main`]: a rig branch on an older base beside the
+/// lane's newer main died at cargo's "no matching package named `makepad-relax`", 11-12); Err when
+/// `work` holds one the head lacks, or the head would lose its own commits.
+pub fn beside_head(live: &[Entry], repo: &Path, work: &str, head: &str) -> Result<Option<String>, String> {
+    let commercial = repo.join("apps/commercial");
+    match half_landed(live, repo, work, head) {
+        None => Ok(None),
+        Some((e, true)) => Err(half_landed_said(e, true)),
+        Some((e, false)) => {
+            let main = crate::gitread::rev(&commercial, "refs/heads/main^{commit}").unwrap_or_default();
+            if is_ancestor(&commercial, head, &main) {
+                Ok(Some(format!("the commercial HEAD holds #{} {} and makepad {work:.10} does not: commercial runs at the main makepad {work:.10} landed beside", e.id, e.label())))
+            } else {
+                Err(format!("{}; or name the commercial side in the rev (`<rev>,commercial=<branch>@<sha>`)", half_landed_said(e, false)))
+            }
+        }
+    }
+}
+
+/// Why a run does not pin a pair [`half_landed`] found: which half lacks the landing, and how
+/// that half takes it.
+pub fn half_landed_said(e: &Entry, makepad: bool) -> String {
+    let (has, lacks, how) = if makepad { ("makepad", "commercial", "`git -C apps/commercial merge main`") } else { ("commercial", "makepad", "`git merge work`") };
+    format!("the lane's {has} half holds #{} {} ({}) and its {lacks} half does not: a run would build a pair that never landed together; merge it into the {lacks} half ({how}) and run again", e.id, e.label(), e.agent)
+}
+
 fn is_ancestor(dir: &Path, a: &str, b: &str) -> bool {
     crate::gitread::is_ancestor(dir, a, b)
 }
@@ -323,6 +392,104 @@ fn merge_pair(root: &Path, w: &str, ms: &str, m: &str, cs: &str, branch: &str, c
 pub fn merge_onto(dir: &Path, base: &str, sha: &str, msg: &str) -> Result<String, Vec<String>> {
     let merge = prepare_merge(dir, base, sha)?;
     finish_merge(dir, &merge, msg)
+}
+
+/// A merge's files that differ from the clean merge of its two parents (`merge-tree --write-tree`)
+/// outside the files that conflict there: what its resolution changed that no conflict asked for.
+/// A merge made by hand from a tree merged against an older tip, committed with the newer tip as
+/// its parent and in the merge bot's form, reverted another lane's landing in three files this way
+/// (11-13). Err: git failed, or `merge` has not two parents.
+pub fn merge_strays(dir: &Path, merge: &str) -> Result<Vec<String>, String> {
+    let (ok, line) = git(dir, &["rev-list", "--parents", "-n", "1", merge]);
+    match line.split_whitespace().collect::<Vec<_>>().as_slice() {
+        [m, p1, p2] if ok => strays(dir, m, p1, p2),
+        _ => Err(format!("{merge:.10}: no merge of two parents")),
+    }
+}
+
+fn strays(dir: &Path, merge: &str, p1: &str, p2: &str) -> Result<Vec<String>, String> {
+    let (_, out) = git(dir, &["merge-tree", "--write-tree", "--name-only", "--no-messages", p1, p2]);
+    let mut lines = out.lines();
+    let clean = lines.next().unwrap_or("");
+    // (a tree id: sync's valid_sha is a checkout build's alone)
+    if clean.len() != 40 || !clean.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Err(format!("`git merge-tree --write-tree {p1:.10} {p2:.10}` failed"));
+    }
+    let conflicted: std::collections::HashSet<&str> = lines.filter(|l| !l.is_empty()).collect();
+    let (ok, diff) = git(dir, &["diff-tree", "-r", "--name-only", "--no-renames", clean, &format!("{merge}^{{tree}}")]);
+    if !ok {
+        return Err(format!("the tree of {merge:.10} did not compare with its parents' merge"));
+    }
+    Ok(diff.lines().filter(|f| !f.is_empty() && !conflicted.contains(f)).map(str::to_string).collect())
+}
+
+/// Whether a hand-in (`pins`: its makepad commit, its commercial one and that checkout) holds at
+/// `path` the bytes a live session shipped (`shipped`, its `sources` entry: link, exec bit, sha256).
+fn carries(repo: &Path, (ms, cs, cwt): (&str, &str, &str), path: &str, shipped: &str) -> bool {
+    let Some(sha) = shipped.rsplit(':').next().filter(|s| s.len() == 64) else { return false };
+    let (dir, at, rel) = match path.strip_prefix("apps/commercial/") {
+        Some(rel) if !cs.is_empty() => (Path::new(cwt), cs, rel),
+        _ if !ms.is_empty() => (repo, ms, path),
+        _ => return false,
+    };
+    let Some(oid) = crate::gitread::entries_at(dir, at, &[rel]).and_then(|v| v.into_iter().next()).filter(|o| !o.is_empty()) else { return false };
+    crate::gitread::blob(dir, &oid).is_ok_and(|bytes| makepad_network::digest::sha256_hash(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() == sha)
+}
+
+/// The merges a hand-in brings (`target..sha`) against their parents' clean merge
+/// ([`merge_strays`]), one merge-tree each. Err: a merge with files outside its conflicts that
+/// differ from that clean merge, which the branch has not changed again since by a commit of its
+/// own: a merge resolves its conflicts and nothing else, and a resolution past them is a commit
+/// of its own. Such a file the tip changed since the merge base is a landing the merge reverts;
+/// one it did not holds the branch's own work inside the merge (an amend onto the bot's merge).
+/// Ok: what to say of the files the branch changed again since (its own to have checked).
+pub fn merges_checked(dir: &Path, target: &str, sha: &str, branch: &str) -> Result<Vec<String>, String> {
+    // (a retired chain's merges, `work-old-<date>`, landed long ago)
+    let (ok, log) = git(dir, &["log", "--merges", "--format=%H %P%x09%s", &format!("refs/heads/{target}..{sha}"), "--not", &format!("--glob=refs/heads/{target}-old-*")]);
+    if !ok {
+        return Ok(vec![format!("the merges {branch} brings did not read: not checked against their parents")]);
+    }
+    let named = |files: &[String]| if files.len() > 6 { format!("{} and {} more", files[..6].join(" "), files.len() - 6) } else { files.join(" ") };
+    // of `files`, those the git command lists (a diff's or a log's names)
+    let changed = |args: &[&str], files: &[String]| -> std::collections::HashSet<String> {
+        let mut args = args.to_vec();
+        args.push("--");
+        args.extend(files.iter().map(String::as_str));
+        git(dir, &args).1.lines().filter(|l| !l.is_empty()).map(str::to_string).collect()
+    };
+    let (mut refused, mut said) = (Vec::new(), Vec::new());
+    for l in log.lines() {
+        let Some((ids, subject)) = l.split_once('\t') else { continue };
+        let (m, p1, p2) = match ids.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [m, p1, p2] => (*m, *p1, *p2),
+            _ => continue,
+        };
+        let files = match strays(dir, m, p1, p2) {
+            Ok(f) if f.is_empty() => continue,
+            Ok(f) => f,
+            Err(e) => {
+                said.push(format!("merge {m:.10} \"{subject}\": {e}: not checked"));
+                continue;
+            }
+        };
+        let against = format!("`git merge-tree --write-tree {p1:.10} {p2:.10}`");
+        let since = changed(&["log", "--no-merges", "--name-only", "--format=", &format!("{m}..{sha}")], &files);
+        let (fixed, kept): (Vec<String>, Vec<String>) = files.into_iter().partition(|f| since.contains(f));
+        if !fixed.is_empty() {
+            said.push(format!("merge {m:.10} \"{subject}\" differs from its parents' clean merge outside its conflicts in {}, which the branch changed again since: check them against {against}", named(&fixed)));
+        }
+        if kept.is_empty() { continue; }
+        let mut tips = std::collections::HashSet::new();
+        for base in git(dir, &["merge-base", "--all", p1, p2]).1.lines().filter(|b| !b.is_empty()) {
+            tips.extend(changed(&["diff-tree", "-r", "--name-only", "--no-renames", base, p2], &kept));
+        }
+        let (tip, own): (Vec<String>, Vec<String>) = kept.into_iter().partition(|f| tips.contains(f));
+        let mut why = Vec::new();
+        if !tip.is_empty() { why.push(format!("it lacks what {p2:.10} changed in {} since the merge base: a tree merged against another tip reverts that tip's landings", named(&tip))); }
+        if !own.is_empty() { why.push(format!("it holds the branch's own changes to {}, which neither side brought (an amend onto a merge?)", named(&own))); }
+        refused.push(format!("merge {m:.10} \"{subject}\" is not the clean merge of its parents outside its conflicts ({against}): {}. Nothing the branch did since changed those files. Remake it (reset to {p1:.10}, `git merge {p2:.10}`, resolve only the conflicts and commit any other change on its own), or commit those files as they should be and hand in again", why.join("; ")));
+    }
+    if refused.is_empty() { Ok(said) } else { Err(refused.join("; ")) }
 }
 
 /// The hosted wire's files ([`WIRE_SOURCES`]) that differ between makepad commits `from` and `to`;
@@ -590,6 +757,34 @@ impl Train {
         Ok(out)
     }
 
+    /// What the lane's own live sessions hold open for the files its hand-in brings: their last save
+    /// did not compile, or the JIT reverted it, and the hand-in carries those very bytes (`pins`:
+    /// its makepad commit, its commercial one and that checkout). Said, never refused: landing
+    /// merges, the checks run after it. The JIT knew it at no build; a lane landed an app that did
+    /// not compile (E0597), its live session had said so, and the fast bucket named it 17 min
+    /// later (#4251, 11-13).
+    fn live_open(&self, lane: &crate::state::LaneRec, pins: (&str, &str, &str)) -> Vec<String> {
+        let lives: Vec<crate::state::Live> = self.store().read(|d| d.lives.iter().filter(|x| x.active() && (x.lane == lane.name || x.tree == lane.path)).cloned().collect());
+        let mut out = Vec::new();
+        for x in lives {
+            let Some(p) = x.patch.as_ref() else { continue };
+            let reason = if p.reason.is_empty() { p.reason_ref.read().unwrap_or_default() } else { p.reason.clone() };
+            let errors = crate::jit_misses::compile_errors(&reason);
+            let what = match p.outcome.as_str() {
+                "compile_error" => "did not compile",
+                "refused" if !errors.is_empty() => "did not compile",
+                "reverted" | "jit_fault" => "was reverted by the JIT",
+                _ => continue,
+            };
+            let carried: Vec<&str> = p.files.iter().map(String::as_str).filter(|f| x.sources.get(*f).is_some_and(|shipped| carries(&self.repo, pins, f, shipped))).collect();
+            if carried.is_empty() { continue; }
+            let why = errors.first().cloned().or_else(|| reason.lines().find(|l| !l.trim().is_empty()).map(|l| l.trim().to_string())).unwrap_or_default();
+            let why = if why.chars().count() > 200 { format!("{}…", why.chars().take(200).collect::<String>()) } else { why };
+            out.push(format!("live session {} of lane {}: its last save of {} {what} ({why}), and this hand-in carries those bytes: it lands, and the fast bucket will say so", x.id, lane.name, carried.join(", ")));
+        }
+        out
+    }
+
     fn add(&self, w: &[&str]) -> Result<String, String> {
         let proof = w.contains(&"proof");
         let wire = w.contains(&"wire-change");
@@ -650,6 +845,11 @@ impl Train {
         if branch == "-" && cb.is_empty() && nested.is_empty() {
             return Err("nothing to land".into());
         }
+        // each merge it brings is its parents' merge outside its conflicts ([`merges_checked`])
+        let mut warn = Vec::new();
+        if !ms.is_empty() { warn.extend(merges_checked(&self.repo, "work", &ms, branch)?); }
+        if !cs.is_empty() { warn.extend(merges_checked(Path::new(cwt), "main", &cs, cb)?); }
+        if let Some(lane) = lane { warn.extend(self.live_open(lane, (&ms, &cs, cwt))); }
         let now = (self.clock)();
         let mut list = self.st.lock().unwrap();
         // (a hand-in of nested halves alone is the same entry for the same branches)
@@ -683,7 +883,8 @@ impl Train {
         self.event(Sev::Info, format!("land queued {label} (#{id}, {pos} open)"), &[]);
         self.kicked.store(true, Ordering::Release);
         let included = if included.is_empty() { String::new() } else { format!(",\"included\":{}", makepad_remote::json_str(included)) };
-        Ok(format!("{{\"ok\":1,\"id\":{id},\"pos\":{pos},\"label\":{}{included}}}", makepad_remote::json_str(&label)))
+        let warn = if warn.is_empty() { String::new() } else { format!(",\"warn\":[{}]", warn.iter().map(|w| makepad_remote::json_str(w)).collect::<Vec<_>>().join(",")) };
+        Ok(format!("{{\"ok\":1,\"id\":{id},\"pos\":{pos},\"label\":{}{included}{warn}}}", makepad_remote::json_str(&label)))
     }
 
     /// One-time import of the old train's files: landq lines, failed shas (they stay failed until their branch moves),
@@ -1101,6 +1302,67 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A merge is its parents' clean merge outside its conflicts. One whose tree was merged
+    /// against an older tip and committed on the newer one, or that holds the branch's own work
+    /// (an amend onto the bot's merge), is refused at hand-in, whatever its message, until the
+    /// branch changes those files again; the clean merge has nothing to say (a hand-made merge
+    /// reverted another lane's landing, 11-13).
+    #[test]
+    fn a_merge_that_is_not_its_parents_clean_merge_is_caught() {
+        let d = std::env::temp_dir().join(format!("devhub-land-strays-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let g = |args: &[&str]| {
+            let (ok, out) = git(&d, args);
+            assert!(ok, "git {args:?}: {out}");
+            out
+        };
+        let commit = |file: &str, text: &str, msg: &str| {
+            std::fs::write(d.join(file), text).unwrap();
+            g(&["add", file]);
+            g(&["commit", "-qm", msg]);
+            g(&["rev-parse", "HEAD"])
+        };
+        g(&["init", "-q", "-b", "work"]);
+        g(&["config", "user.email", "t@example.com"]);
+        g(&["config", "user.name", "t"]);
+        commit("a", "1\n", "a");
+        commit("b", "1\n", "b");
+        g(&["checkout", "-qb", "rc-x"]);
+        let x = commit("c", "x\n", "x");
+        g(&["checkout", "-q", "work"]);
+        let w1 = commit("a", "w1\n", "w1");
+        let stale = g(&["merge-tree", "--write-tree", &x, &w1]);
+        let w2 = commit("b", "w2\n", "w2: another lane's landing");
+        let fresh = g(&["merge-tree", "--write-tree", &x, &w2]);
+        let merge = |tree: &str, msg: &str| g(&["commit-tree", tree, "-p", &x, "-p", &w2, "-m", msg]);
+        let bot_form = format!("Merge work ({w2:.10}) into rc-x");
+        let bad = merge(&stale, &bot_form);
+        assert_eq!(merge_strays(&d, &bad).unwrap(), vec!["b".to_string()], "the old tip's b reverts the newer tip's");
+        let refused = merges_checked(&d, "work", &bad, "rc-x").unwrap_err();
+        assert!(refused.contains(&format!("merge {bad:.10} \"{bot_form}\" is not the clean merge")) && refused.contains("changed in b since the merge base"), "{refused}");
+        let by_hand = merge(&stale, "merge work by hand");
+        assert!(merges_checked(&d, "work", &by_hand, "rc-x").unwrap_err().contains("changed in b since the merge base"), "a lane's own message refuses the same");
+        // the clean merge: nothing to say
+        let good = merge(&fresh, &bot_form);
+        assert_eq!(merge_strays(&d, &good).unwrap(), Vec::<String>::new());
+        assert_eq!(merges_checked(&d, "work", &good, "rc-x").unwrap(), Vec::<String>::new());
+        // the branch put b right since: said, not refused
+        g(&["checkout", "-q", &bad]);
+        let fixed = commit("b", "w2\n", "b as work has it");
+        let said = merges_checked(&d, "work", &fixed, "rc-x").unwrap();
+        assert!(said.len() == 1 && said[0].contains("in b, which the branch changed again since"), "{said:?}");
+        // the branch's own work amended onto the bot's merge (a file neither side changed)
+        g(&["checkout", "-q", &x]);
+        std::fs::write(d.join("c"), "x amended\n").unwrap();
+        g(&["add", "c"]);
+        let amended = merge(&g(&["write-tree"]), &bot_form);
+        g(&["reset", "-q", "--hard", &x]);
+        assert!(merges_checked(&d, "work", &amended, "rc-x").unwrap_err().contains("the branch's own changes to c"));
+        assert!(merge_strays(&d, &x).is_err(), "no merge");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[cfg(unix)]
     fn train(home: &Path, repo: &Path, exe: &Path, events: Arc<Mutex<Vec<String>>>) -> Arc<Train> {
         Arc::new(Train {
@@ -1270,6 +1532,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A hand-in that carries the very bytes its lane's live session saw fail to compile is told so
+    /// in its reply, and is queued all the same; one whose commit carries other bytes there (the
+    /// fix) hears nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_hand_in_hears_of_its_lanes_open_live_compile_error() {
+        let d = std::env::temp_dir().join(format!("devhub-land-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (r, home) = (d.join("repo"), d.join("home"));
+        std::fs::create_dir_all(r.join("app/src")).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        let g = |args: &[&str]| assert!(git(&r, args).0, "git {args:?}");
+        g(&["init", "-q", "-b", "work"]);
+        g(&["config", "user.email", "t@t"]);
+        g(&["config", "user.name", "t"]);
+        std::fs::write(r.join("app/src/a.rs"), "fn a() {}\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-qm", "base"]);
+        let broken = "fn a() { let r; { let x = 1; r = &x; } }\n";
+        g(&["checkout", "-qb", "rc-x"]);
+        std::fs::write(r.join("app/src/a.rs"), broken).unwrap();
+        g(&["commit", "-qam", "x"]);
+        g(&["checkout", "-q", "work"]);
+        let t = train(&home, &r, Path::new("/usr/bin/true"), Arc::new(Mutex::new(Vec::new())));
+        let sha: String = makepad_network::digest::sha256_hash(broken.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        t.store().update(|d| {
+            d.lanes.push(crate::state::LaneRec { name: "x".into(), path: "/nowhere/x".into(), branch: "rc-x".into(), state: "live".into(), ..Default::default() });
+            d.lives.push(crate::state::Live {
+                id: "W1".into(), lane: "x".into(), state: "running".into(),
+                sources: [("app/src/a.rs".to_string(), format!("false:false:{sha}"))].into(),
+                patch: Some(crate::state::LivePatch { files: vec!["app/src/a.rs".into()], outcome: "compile_error".into(), reason: "error[E0597]: `x` does not live long enough\n --> app/src/a.rs:1:30".into(), ..Default::default() }),
+                ..Default::default()
+            });
+        }).unwrap();
+        let ask = |line: &str| {
+            let mut out = Vec::new();
+            t.serve(line, &mut out);
+            out.join("\n")
+        };
+        let told = ask("add rc-x");
+        assert!(told.contains("\"id\":1"), "queued all the same: {told}");
+        assert!(told.contains("live session W1 of lane x: its last save of app/src/a.rs did not compile (app/src/a.rs:1:30: error[E0597]: `x` does not live long enough), and this hand-in carries those bytes"), "{told}");
+        // the fix committed: other bytes than the ones that failed
+        g(&["checkout", "-q", "rc-x"]);
+        std::fs::write(r.join("app/src/a.rs"), "fn a() { let x = 1; let _r = &x; }\n").unwrap();
+        g(&["commit", "-qam", "fix"]);
+        g(&["checkout", "-q", "work"]);
+        let told = ask("add rc-x");
+        assert!(!told.contains("live session"), "{told}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A two-repo lane's hand-in lands exactly the commits pinned when it was handed in. A conflict
     /// lands nothing and stays so whatever the branches do next, a retry too; a new hand-in pins
     /// the branches anew, and commits after it wait for the next one. #2759 conflicted, its
@@ -1350,6 +1664,29 @@ mod tests {
         assert!(!is_ancestor(&c, &later, &main), "a commit after the hand-in did not");
         assert_eq!(std::fs::read_to_string(c.join("model")).unwrap(), "tubes(curves, blend)\n");
         assert_eq!(std::fs::read_to_string(r.join("lib")).unwrap(), "fn tubes(curves, blend) {}\n");
+        // a lane pair that holds one half of this two-repo landing is named, with the half to merge;
+        // both halves, or neither, is a pair that landed together
+        let landed = [e.clone()];
+        let (said, makepad) = half_landed(&landed, &r, &work, &m0).expect("its makepad half alone");
+        assert!(makepad && half_landed_said(said, makepad).contains("its commercial half does not") && half_landed_said(said, makepad).contains("git -C apps/commercial merge main"), "{}", half_landed_said(said, makepad));
+        assert_eq!(half_landed(&landed, &r, &w0, &main).map(|(e, m)| (e.id, m)), Some((1, false)), "its commercial half alone");
+        assert!(half_landed(&landed, &r, &work, &main).is_none() && half_landed(&landed, &r, &w0, &m0).is_none());
+        // a makepad commit on work pairs with the main its landing left: the landing that made it,
+        // else the newest one it holds; one older than every landing has none
+        assert_eq!(landed_main(&landed, &r, &work).as_deref(), Some(main.as_str()), "the landing's own work commit");
+        let after = commit(&r, "after", "after\n", "a makepad-only commit on work");
+        assert_eq!(landed_main(&landed, &r, &after).as_deref(), Some(main.as_str()), "a later work commit");
+        assert_eq!(landed_main(&landed, &r, &w0), None, "older than the landing");
+        // a rev naming an older makepad commit beside a commercial HEAD that holds the landing: a head
+        // with nothing of its own runs at the main that commit landed beside; one with commits of its
+        // own, or a makepad commit holding a landing the head lacks, is refused
+        assert_eq!(beside_head(&landed, &r, &work, &main), Ok(None));
+        assert!(beside_head(&landed, &r, &w0, &main).unwrap().is_some_and(|why| why.starts_with("the commercial HEAD holds #1 ")), "a head that is main's");
+        g(&c, &["checkout", "-qb", "rc-own", "main"]);
+        let own = commit(&c, "model", "tubes(curves, blend, own)\n", "a commit of its own on main");
+        g(&c, &["checkout", "-q", "main"]);
+        assert!(beside_head(&landed, &r, &w0, &own).is_err_and(|e| e.contains("or name the commercial side")), "a head with commits of its own");
+        assert!(beside_head(&landed, &r, &work, &m0).is_err_and(|e| e.contains("git -C apps/commercial merge main")));
         let _ = std::fs::remove_dir_all(&d);
     }
 

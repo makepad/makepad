@@ -40,6 +40,7 @@ pub mod ship;
 #[cfg(feature = "checkout")]
 pub mod tree;
 pub mod user;
+pub mod hand;
 pub mod wt;
 
 use makepad_remote::json_str;
@@ -108,7 +109,7 @@ impl Kind {
     }
 
     /// The nice level of this kind's runs: 10 leaves a program's thread classes their offsets (up to
-    /// +8, platform/cpu_budget), and timed work runs at the level a person's app gets, so its numbers
+    /// +8, libs/cpu_budget), and timed work runs at the level a person's app gets, so its numbers
     /// are theirs. Linux only: a run's scope keeps the box's desktop ahead of it there. A Mac has no
     /// scopes, and its classes are QoS, not nice.
     pub fn nice(self) -> i32 {
@@ -280,6 +281,20 @@ fn jit_class_words(args: &[String]) -> Vec<String> {
         }
     }
     std::iter::once(sub.clone()).chain(package).chain(target).collect()
+}
+
+/// The program a JIT `run` starts, named as cargo names its binary and the run its own executable
+/// (relax-compiler selfexe.rs program_name): `--bin`'s value, else its package's last part. None
+/// for any other JIT command (`makepad test` starts its targets from links of its own).
+pub fn run_program(args: &[String]) -> Option<String> {
+    let words = jit_class_words(args);
+    if words.first().map(String::as_str) != Some("run") {
+        return None;
+    }
+    let flags: Vec<&String> = args.iter().take_while(|a| *a != "--").collect();
+    let bin = flags.iter().position(|f| *f == "--bin").and_then(|i| flags.get(i + 1)).map(|v| v.to_string())
+        .or_else(|| flags.iter().find_map(|f| f.strip_prefix("--bin=").map(str::to_string)));
+    bin.or_else(|| words.get(1).filter(|p| !p.starts_with('-')).and_then(|p| std::path::Path::new(p).file_stem()).map(|s| s.to_string_lossy().into_owned()))
 }
 
 /// Reserved cores, RAM and disk in GB, and GPUs. Concurrent leases sum these costs.
@@ -473,6 +488,36 @@ pub struct Caps {
     /// a person at the node, as its WM saw their input ([`UserSense`]); None: no WM of ours
     /// runs there (the Macs, Windows): the dev switch alone decides
     pub user: Option<UserSense>,
+    /// an app of ours that runs outside every lease and that a person uses now, or did within
+    /// [`hand::GRACE_MS`] ([`HandHeld`]): the box takes no work that does not name it
+    pub hand_held: Option<HandHeld>,
+}
+
+/// An app of ours running outside devhub that a person uses ([`hand`]): through input at the
+/// box, a Desk Link viewer watching it, or its own say (an XR headset streaming its view).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct HandHeld {
+    /// the registry's label (`Fab`)
+    pub app: String,
+    pub pid: u32,
+    /// how a person uses it: `an XR headset (Quest 3)`, `a Desk Link viewer`, `input at the box
+    /// (key from its device)`, and since when it ended while its grace lasts
+    pub how: String,
+}
+
+impl HandHeld {
+    pub fn to_json(&self) -> String {
+        format!("{{\"app\":{},\"pid\":{},\"how\":{}}}", json_str(&self.app), self.pid, json_str(&self.how))
+    }
+
+    pub fn parse(v: &makepad_strict_json::Value) -> Option<HandHeld> {
+        Some(HandHeld { app: v.get("app")?.as_str()?.to_string(), pid: v.get("pid").and_then(num).unwrap_or(0.0) as u32, how: v.get("how").and_then(|x| x.as_str()).unwrap_or("").to_string() })
+    }
+
+    /// `held: Fab in use by a person via an XR headset (Quest 3)`.
+    pub fn line(&self) -> String {
+        format!("held: {} in use by a person via {}", self.app, self.how)
+    }
 }
 
 /// One hub build that finished on a node: when (wall ms), how long, the CPU seconds of its
@@ -567,6 +612,7 @@ pub const FEATURES: &[&str] = &[
     "for-cpu", // a lease builds `--for` another box's CPU
     "deploy-jobs", // an apply's prebuild takes the jobs its room was granted, `apply ... jobs=N`
     "gpu-quiet", // a GPU timing (`gpu` in its lease-start) waits for its GPU, not the box's CPU
+    "jit-jobs", // a lease's JIT build admitted on fewer cores than it measures builds on those, `cost.jit_jobs`
 ];
 
 /// Whether `t` can be a `-C target-cpu` a lease builds for (it goes into the build's flags):
@@ -610,7 +656,7 @@ impl Caps {
         let exec_limits = self.exec_limits.map_or("null".into(), |l| l.to_json());
         let slots: Vec<String> = self.slots.iter().map(|(k, n)| format!("\"{}\":{n}", k.as_str())).collect();
         format!(
-            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{}}}",
+            "{{\"exec_limits\":{exec_limits},\"rustc\":{},\"node\":{},\"arch\":{},\"os\":{},\"cpu\":{},\"cpu_target\":{},\"cores\":{},\"cpus_shared\":{},\"cpus_timed\":{},\"cpu_pct\":{},\"load1\":{:.2},\"ram_gb\":{:.1},\"ram_avail_gb\":{:.1},\"ram_resident_gb\":{:.1},\"disk_free_gb\":{:.1},\"disk_total_gb\":{:.1},\"gpus\":[{}],\"display\":{},\"battery\":{},\"role\":\"{}\",\"spec\":{},\"slots\":{{{}}},\"disk_floor_gb\":{:.0},\"disk_warn_gb\":{:.0},\"timed\":{},\"timed_spare\":{},\"apply\":{},\"desk_link\":{},\"dev_req\":{},\"tree\":{},\"deploy\":{},\"applying\":{},\"stalls\":[{}],\"sick\":{},\"clocksource\":{},\"mem_pressure\":{},\"mem_stall\":{:.1},\"trouble\":{},\"wm_wire\":{},\"wm_dark\":{},\"wm_drain\":{},\"hub_rev\":{},\"hub_rss_mb\":{},\"hub_heap_mb\":{},\"features\":[{}]{}{},\"services\":{{{}}},\"user\":{},\"hand_held\":{}}}",
             json_str(&self.rustc),
             json_str(&self.node),
             json_str(&self.arch),
@@ -662,6 +708,7 @@ impl Caps {
             self.mac_gpu.as_ref().map_or(String::new(), |(pct, on)| format!(",\"mac_gpu\":{{\"pct\":{pct:.0},\"on\":[{}]}}", on.iter().map(|(what, pid, pct)| format!("{{\"what\":{},\"pid\":{pid},\"pct\":{pct:.2}}}", json_str(what))).collect::<Vec<_>>().join(","))),
             self.services.iter().map(|(n, t)| format!("{}:{t}", json_str(n))).collect::<Vec<_>>().join(","),
             self.user.as_ref().map_or("null".to_string(), |u| u.to_json()),
+            self.hand_held.as_ref().map_or("null".to_string(), |h| h.to_json()),
         )
     }
 
@@ -723,6 +770,7 @@ impl Caps {
                 _ => Vec::new(),
             },
             user: v.get("user").and_then(UserSense::parse),
+            hand_held: v.get("hand_held").and_then(HandHeld::parse),
             ..Default::default()
         };
         if let Some(a) = v.get("gpus").and_then(|x| x.as_arr()) {
@@ -854,6 +902,20 @@ fn hex40(s: &str) -> bool {
 /// A node's word for a pinned commit its store does not hold (a push the master thought done).
 pub const NO_COMMIT: &str = "this box's store has no commit";
 
+/// A node's word for objects of a pinned commit's tree its store lacks, though it holds the
+/// commit: `<NO_OBJECTS> <repo> <id>..: <why>`. Every bundle leaves out what the store's refs
+/// reach, so only a fill of exactly these brings them ([`lacking_objects`]).
+pub const NO_OBJECTS: &str = "this box's store lacks objects of";
+
+/// The repository and the object ids of a [`NO_OBJECTS`] answer.
+pub fn lacking_objects(e: &str) -> Option<(String, Vec<String>)> {
+    let rest = &e[e.find(NO_OBJECTS)? + NO_OBJECTS.len()..];
+    let mut words = rest.split(':').next()?.split_whitespace();
+    let repo = words.next()?.to_string();
+    let ids: Vec<String> = words.filter(|w| hex40(w)).map(str::to_string).collect();
+    (!ids.is_empty()).then_some((repo, ids))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RevPin {
     pub branch: String,
@@ -884,9 +946,11 @@ pub fn pin_revs(repo_dir: &std::path::Path, spec: &str) -> Result<String, String
             None => format!("refs/heads/{branch}^{{commit}}"),
         };
         let side = |full: String| name.map_or_else(|| format!("{branch}@{full}"), |n| format!("{n}={branch}@{full}"));
-        // a branch or a full id: read in-process; only an abbreviated id asks git to expand it
-        if sha.is_none_or(|s| s.len() == 40) {
-            let full = crate::gitread::rev(&dir, &what).ok_or_else(|| format!("--rev: {} has no {}", dir.display(), sha.map_or(format!("branch {branch}"), |s| format!("commit {s}"))))?;
+        // a branch or a full id: read in-process; an abbreviated id, or one that read missed, asks
+        // git (one of four `devhub test`s a lane started together was told `--rev: .. has no
+        // commit` of the commit all four ran, 11-13: git's read lists the packs again as a repack
+        // moves them)
+        if let Some(full) = sha.is_none_or(|s| s.len() == 40).then(|| crate::gitread::rev(&dir, &what)).flatten() {
             out.push(side(full));
             continue;
         }
@@ -986,6 +1050,13 @@ mod tests {
         assert_eq!(run_class("lane", Kind::Build, &argv(&["env", "FOO_MUTE=1", "makepad", "check", "makepad-bar"])), "build makepad check makepad-bar", "lanes share what names its package");
         assert_eq!(run_class("lane", Kind::Build, &argv(&["makepad", "--version"])), "build makepad --version");
         assert_ne!(cargo(&["test", "makepad-baz"]), cargo(&["run", "makepad-app-foo"]), "a CI shard and a session are measured apart");
+        // the program a JIT run starts, which its process is named after (exec.rs launch_link)
+        let program = |args: &[&str]| run_program(&argv(args));
+        assert_eq!(program(&["run", "--report-to", "/s/r", "makepad-app-calculator", "--features", "standalone", "--", "--remote", "--bin", "x"]).as_deref(), Some("makepad-app-calculator"), "the package; app arguments are no part");
+        assert_eq!(program(&["run", "apps/demo", "--bin", "demo-bin"]).as_deref(), Some("demo-bin"));
+        assert_eq!(program(&["run", "apps/demo", "--bin=demo-bin"]).as_deref(), Some("demo-bin"));
+        assert_eq!(program(&["run", "https://example.com/org/robrix"]).as_deref(), Some("robrix"), "a source's last part");
+        assert_eq!(program(&["test", "makepad-baz"]), None, "a test's targets start from its own links");
         // a run cargo builds its JIT for is that job, whether its lease asked a class or not
         let built = format!("ci makepad --version{JIT_BUILD_RUN}");
         assert_eq!(lease_class("", &built), built);
@@ -994,7 +1065,7 @@ mod tests {
         assert_eq!(lease_class(&built, &built), built, "said once");
         assert_eq!(lease_class("test cargo test", "test git rev-parse HEAD"), "test cargo test", "otherwise the asked class stays");
         // and the JIT past an env prefix runs on the overlay, never a native checkout's build
-        let jit = argv(&["env", "MAKEPAD_RUN_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
+        let jit = argv(&["env", "RELAX_O3=1", "cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "live", "a"]);
         assert_eq!(Src::for_run(Kind::Test, &jit, false), Src::Overlay);
         assert_eq!(Src::for_run(Kind::Test, &jit, true), Src::Tree);
     }
@@ -1062,6 +1133,7 @@ mod tests {
             jit_store: None,
             services: vec![("ai-hub".into(), 1_700_000_000_000)],
             user: Some(UserSense { present: true, idle_ms: Some(42_000), what: "key from its device".into(), idle_min: 3 }),
+            hand_held: Some(HandHeld { app: "Fab".into(), pid: 41, how: "an XR headset".into() }),
         };
         assert_eq!(Caps::parse(&c.to_json()), Some(c.clone()));
         let wire = c.to_json();
@@ -1069,7 +1141,7 @@ mod tests {
         let user = &value.get("mac_gpu").unwrap().get("on").unwrap().as_arr().unwrap()[0];
         assert_eq!(user.get("pct").and_then(num), Some(14.0), "GPU users carry percent of the GPU on the wire");
         assert!(user.get("cores").is_none(), "GPU use is not CPU cores");
-        let none = Caps { desk_link: None, user: None, mac_gpu: None, ..c };
+        let none = Caps { desk_link: None, user: None, mac_gpu: None, hand_held: None, ..c };
         assert_eq!(Caps::parse(&none.to_json()), Some(none.clone()));
         assert_eq!((none.cores_for(Kind::Build), none.cores_for(Kind::Test), none.cores_for(Kind::Timed)), (8, 8, 6), "each kind runs on the CPUs it is pinned to");
         let unpinned = Caps { cpus_shared: 0, cpus_timed: 0, ..none };

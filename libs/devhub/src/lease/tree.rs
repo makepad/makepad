@@ -167,6 +167,50 @@ pub fn current(root: &Path) -> Option<Pin> {
     }))
 }
 
+/// Moves the tree at `dir` (at `from`, None: no tree yet) to `to`: the count of files it changed.
+fn move_to(store: &Store, dir: &Path, from: Option<&str>, to: &str, native: bool) -> Result<usize, String> {
+    match from {
+        Some(from) => {
+            let files = run(Some(dir), None, &[], &["diff", "--name-only", "--no-renames", from, to])?.lines().count();
+            if native {
+                let _ = run(Some(dir), None, &[], &["update-index", "-q", "--refresh"]);
+                run(Some(dir), None, &[], &["read-tree", "-m", "-u", from, to])?;
+                run(Some(dir), None, &[], &["update-ref", "--no-deref", "HEAD", to])?;
+            } else {
+                run(Some(dir), None, &[], &["checkout", "-q", "--detach", to])?;
+            }
+            Ok(files)
+        }
+        None => {
+            std::fs::create_dir_all(dir.parent().ok_or("work tree has no parent")?).map_err(|e| e.to_string())?;
+            run(None, Some(&store.git_dir), &[], &["worktree", "add", "-q", "--detach", &dir.to_string_lossy(), to])?;
+            Ok(run(Some(dir), None, &[], &["ls-files"])?.lines().count())
+        }
+    }
+}
+
+/// A move that failed part way back to `from`: what it wrote goes (the tree was scrubbed before
+/// it, so nothing there is anyone's), and a tree it was adding is removed.
+fn undo_move(store: &Store, dir: &Path, from: Option<&str>) {
+    match from {
+        Some(from) => {
+            let _ = run(Some(dir), None, &[], &["reset", "-q", "--hard", from]);
+            let _ = store.clean_tree(dir);
+        }
+        None => {
+            let _ = run(None, Some(&store.git_dir), &[], &["worktree", "remove", "--force", &dir.to_string_lossy()]);
+            let _ = run(None, Some(&store.git_dir), &[], &["worktree", "prune"]);
+        }
+    }
+}
+
+/// The objects of commit `to`'s tree (every tree and blob in it) the store lacks.
+fn lacking(store: &Store, to: &str) -> Vec<String> {
+    run(None, Some(&store.git_dir), &[], &["rev-list", "--objects", "--no-walk", "--missing=print", to])
+        .map(|out| out.lines().filter_map(|l| l.strip_prefix('?')).map(|s| s.trim().to_string()).filter(|s| crate::sync::git::valid_sha(s)).collect())
+        .unwrap_or_default()
+}
+
 fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result<Taken, String> {
     let mut taken = Taken { root: root.to_path_buf(), pin: pin.clone(), moved: Vec::new(), cleared: Released::default() };
     // A pin must not inherit a previous pin's checkout of a nested repository it does not name: a
@@ -194,6 +238,10 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
         if dir.join(".git").exists() && store.admin_of(&dir).is_none() {
             return Err(format!("{} is not this node's worktree", dir.display()));
         }
+        // a lock a killed writer left in its git is cleared first, and one a live writer holds
+        // waited for: a hub the WM replaced mid-start left `config.worktree.lock`, and every later
+        // start in that tree was refused on it (11-13)
+        taken.cleared.locks.extend(if dir.join(".git").exists() { crate::gitlock::sweep_worktree(&dir) } else { crate::gitlock::sweep(&store.git_dir) });
         let from = head(&dir);
         if from.as_deref() == Some(to) {
             crate::ci_merge::install_merge_driver(&dir, root)?;
@@ -204,22 +252,28 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
             return Err(format!("{repo} {} is not in this node's store", to));
         }
         scrub(repo, root, from.as_deref(), id, out, &format!("{id}-start"), &mut taken.cleared)?;
-        let files = match from {
-            Some(from) => {
-                let files = run(Some(&dir), None, &[], &["diff", "--name-only", "--no-renames", &from, to])?.lines().count();
-                if native {
-                    let _ = run(Some(&dir), None, &[], &["update-index", "-q", "--refresh"]);
-                    run(Some(&dir), None, &[], &["read-tree", "-m", "-u", &from, to])?;
-                    run(Some(&dir), None, &[], &["update-ref", "--no-deref", "HEAD", to])?;
-                } else {
-                    run(Some(&dir), None, &[], &["checkout", "-q", "--detach", to])?;
+        // A store holding the commit can lack objects of its tree: a reset fails reading them
+        // (L966518, 11-13), and a checkout moves anyway, without the files it could not read (it
+        // exits 0). The node says which before it moves, and the master sends them
+        // ([`NO_OBJECTS`]): one listing of the tree, some 40 ms for this repository's.
+        let missing = lacking(&store, to);
+        if !missing.is_empty() {
+            return Err(format!("{} {repo} {}: this node's store holds the commit, not its tree", super::NO_OBJECTS, missing.join(" ")));
+        }
+        // a move that fails with every object there met the store's own maintenance (a repack):
+        // once more, after a look for objects that went missing
+        let files = match move_to(&store, &dir, from.as_deref(), to, native) {
+            Ok(files) => files,
+            Err(e) => {
+                undo_move(&store, &dir, from.as_deref());
+                let missing = lacking(&store, to);
+                if !missing.is_empty() {
+                    return Err(format!("{} {repo} {}: {e}", super::NO_OBJECTS, missing.join(" ")));
                 }
-                files
-            }
-            None => {
-                std::fs::create_dir_all(dir.parent().ok_or("work tree has no parent")?).map_err(|e| e.to_string())?;
-                run(None, Some(&store.git_dir), &[], &["worktree", "add", "-q", "--detach", &dir.to_string_lossy(), to])?;
-                run(Some(&dir), None, &[], &["ls-files"])?.lines().count()
+                move_to(&store, &dir, from.as_deref(), to, native).map_err(|again| {
+                    undo_move(&store, &dir, from.as_deref());
+                    format!("{again} (and before it: {e})")
+                })?
             }
         };
         crate::ci_merge::install_merge_driver(&dir, root)?;
@@ -484,6 +538,9 @@ pub struct Released {
     pub unclean: Vec<String>,
     /// what stayed in the tree because it holds someone's files, and why
     pub kept: Vec<String>,
+    /// git lock files a writer that is gone left, cleared, or one a live writer held, waited for
+    /// ([`crate::gitlock::settle`])
+    pub locks: Vec<String>,
 }
 
 /// The last holder bundles tracked edits and removes untracked files; the pin and target stay.
@@ -693,6 +750,31 @@ mod tests {
         assert_eq!(current(&root), Some(at(&two)), "an idle work tree catches up after apply");
         assert!(target.join("release/makepad").exists());
         assert!(!work.join("tree").exists());
+
+        // a store that holds a commit but not a blob of its tree: the move says which object it
+        // lacks and leaves the tree at its pin, with nothing of the move in it; with the object
+        // there (the master's fill), the lease starts (L966518, 11-13)
+        // (contents that differ: one blob for both would be copied with a.rs)
+        std::fs::write(src.join("c.rs"), "c3").unwrap();
+        std::fs::write(src.join("a.rs"), "3").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-q", "-m", "three"]);
+        let three = g(&["rev-parse", "HEAD"]).trim().to_string();
+        let loose = |id: &str| format!("objects/{}/{}", &id[..2], &id[2..]);
+        let (tree, blob, a3) = (g(&["rev-parse", "HEAD^{tree}"]).trim().to_string(), g(&["rev-parse", "HEAD:c.rs"]).trim().to_string(), g(&["rev-parse", "HEAD:a.rs"]).trim().to_string());
+        for id in [&three, &tree, &a3] {
+            std::fs::create_dir_all(store.git_dir.join(loose(id)).parent().unwrap()).unwrap();
+            std::fs::copy(src.join(".git").join(loose(id)), store.git_dir.join(loose(id))).unwrap();
+        }
+        let why = take("L8", &at(&three), &root, &out).unwrap_err();
+        assert_eq!(crate::lease::lacking_objects(&why), Some(("makepad".to_string(), vec![blob.clone()])), "{why}");
+        assert_eq!(current(&root), Some(at(&two)), "the failed move keeps the tree's pin");
+        assert!(!root.join("c.rs").exists() && std::fs::read_to_string(root.join("a.rs")).unwrap() == "2", "nothing of the failed move stays");
+        std::fs::create_dir_all(store.git_dir.join(loose(&blob)).parent().unwrap()).unwrap();
+        std::fs::copy(src.join(".git").join(loose(&blob)), store.git_dir.join(loose(&blob))).unwrap();
+        take("L8", &at(&three), &root, &out).unwrap();
+        assert_eq!((current(&root), std::fs::read_to_string(root.join("c.rs")).unwrap()), (Some(at(&three)), "c3".to_string()));
+        release("L8", &root, &out, "x-L8");
         let _ = std::fs::remove_dir_all(&base);
     }
 

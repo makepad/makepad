@@ -561,7 +561,7 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
         for next in asked { let _ = next.recv(); }
     }
     let node = held.node.clone();
-    let fault = held.release(r.as_ref().ok().copied());
+    let (fault, toolchain) = held.release_seeing_toolchain(r.as_ref().ok().copied());
     if get(ctx, id).is_some_and(|j| !j.shadow_of.is_empty()) {
         let lane = format!("shadow-{id}");
         let cleaned = ask(&ctl(), Some(&node), "disk", &format!("disk clean {lane}"));
@@ -573,6 +573,14 @@ fn ended(ctx: &Arc<Ctx>, id: &str, held: Held, r: Result<i32, String>, log: &std
     // virtual root, and the box refused every overlay lease after it: a Linux node, 11-06)
     if let Some(why) = fault.filter(|_| !finished) {
         return finish(ctx, id, Err(why), log);
+    }
+    // the toolchain changed under a run that failed (a rustup update beside it): no verdict, the
+    // job runs again (four lanes' runs failed with rustup's "binary not applicable" as a toolchain
+    // move ran beside them, each read as the lane's own bug, 11-13)
+    if let Some(t) = toolchain.filter(|_| !finished && !matches!(r, Ok(0))) {
+        if again(ctx, id, &format!("the toolchain changed under it on {node} ({t}): its run has no verdict")) {
+            return;
+        }
     }
     // (a run the node refused is the job's result: another box refuses it too)
     if let Some(e) = r.as_ref().err().filter(|e| !e.starts_with(super::leg::REFUSED)) {
@@ -793,6 +801,17 @@ pub fn on_record(ctx: &Arc<Ctx>, r: &Record) {
         let d = makepad_strict_json::parse(r.detail.as_bytes()).ok();
         let f = |k: &str| d.as_ref().and_then(|d| d.get(k)).and_then(|x| x.as_str()).map(|s| crate::proto::clean(s, 300)).unwrap_or_default();
         let p = JobPanic { id: f("id"), pid: r.pid, message: f("message"), thread: f("thread"), location: f("location"), at_ms: wall_ms() };
+        // its process said its crash is expected (RELAX_EXPECTED_CRASH): the test's own, which the
+        // test decides; the job runs on, and its result names it (a fixture's deliberate stale
+        // access paused J13633 while its script went on, 11-13)
+        let expected = f("expected");
+        if !expected.is_empty() {
+            let note = format!("{} of pid {}: an expected crash ({expected}): the job runs on", if p.id.is_empty() { "a panic" } else { p.id.as_str() }, p.pid);
+            if let Some(j) = set(&ctx, &j.id, |j| if j.state == "running" { j.note = note.clone(); }) {
+                event(&ctx, Sev::Info, format!("job {}: {note}", j.id), Some(&j));
+            }
+            return;
+        }
         let Some(j) = set(&ctx, &j.id, |j| {
             if j.state == "running" {
                 j.state = "paused".into();
@@ -874,6 +893,13 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
     let ids = || -> Vec<String> { rest.split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect() };
     match verb {
         "submit" => submit(ctx, rest),
+        // `job landed-main <makepad sha> [<commercial HEAD>]`: the commercial commit a client's `--rev`
+        // naming no commercial side pins ([`paired_main`])
+        "landed-main" => {
+            let mut w = rest.split_whitespace();
+            let (work, head) = (w.next().ok_or("job landed-main <makepad sha> [<commercial HEAD>]")?, w.next());
+            paired_main(ctx, work, head).map(|(main, note)| format!("{{\"main\":{},\"note\":{}}}", json_str(&main), json_str(&note)))
+        }
         // what a lease's end kept (`job result L<id>`): it outlives the lease, not the prune below
         "lease-log" => {
             if rest.len() < 2 || !rest.starts_with('L') || !rest[1..].bytes().all(|b| b.is_ascii_digit()) {
@@ -942,12 +968,19 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             let (any, rest) = rest.strip_prefix("--any").map_or((false, rest), |r| (true, r.trim()));
             let want: Vec<String> = rest.split([' ', ',']).filter(|s| !s.is_empty()).map(str::to_string).collect();
             if verb == "wait" {
+                // an open wait is its jobs' agents talking to devhub (asked again at most every 30 s,
+                // and after a master restart): [`LeaseMaster::agent_heard`]
+                for agent in ctx.store.read(|d| d.jobs.iter().filter(|j| want.contains(&j.id)).map(|j| j.agent.clone()).collect::<Vec<_>>()) {
+                    ctx.leases.agent_heard(&agent);
+                }
                 let ids: Vec<&str> = want.iter().map(String::as_str).collect();
                 let signal = ctx.store.subscribe("job", &ids);
                 let seen = signal.generation();
                 let ready = ctx.store.read(|d| {
                     if want.iter().any(|id| !d.jobs.iter().any(|j| &j.id == id)) { return true; }
-                    let settled = |id: &String| d.jobs.iter().find(|j| &j.id == id).is_none_or(|j| j.done() || j.state == "paused");
+                    // (a pause is no end: its job keeps its box, and the park may go on by itself; the
+                    // wait's answer names it, J13633's wait ended on a park its script went on from)
+                    let settled = |id: &String| d.jobs.iter().find(|j| &j.id == id).is_none_or(|j| j.done());
                     if any { want.iter().any(settled) } else { want.iter().all(settled) }
                 });
                 if !ready { signal.wait(seen, Duration::from_secs(30)); }
@@ -957,6 +990,16 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
             Ok(format!("[{}]", list.join(",")))
         }
         "cancel" | "release" => {
+            // release lets go of a paused job alone: it ends `panicked` and frees its box, the parked
+            // process dying with the lease. A job that is not paused is refused, never cancelled: J13263
+            // had run on (its parked process gone) when its agent released it, and the release
+            // cancelled it (11-13).
+            if verb == "release" {
+                let running: Vec<String> = ids().iter().filter_map(|id| get(ctx, id).filter(|j| !j.done() && j.state != "paused")).map(|j| format!("{} is {}{}", j.id, j.state, if j.note.is_empty() { String::new() } else { format!(" ({})", j.note) })).collect();
+                if !running.is_empty() {
+                    return Err(format!("nothing to release: {}; `job cancel` ends a job", running.join("; ")));
+                }
+            }
             let mut out = Vec::new();
             for id in ids() {
                 let j = get(ctx, &id).ok_or_else(|| format!("no job {id}"))?;
@@ -965,9 +1008,8 @@ pub fn serve(ctx: &Ctx, line: &str) -> Result<String, String> {
                     continue;
                 }
                 // release: the paused result stands (`panicked`); cancel: the job is cancelled
-                let paused = j.state == "paused";
                 let j = try_set(ctx, &id, |j| {
-                    if verb == "cancel" || !paused {
+                    if verb == "cancel" || j.state != "paused" {
                         if j.state == "queued" {
                             j.ended_ms = wall_ms();
                         }
@@ -1057,6 +1099,46 @@ fn label(b: &str, lane: &str) -> String {
     } else {
         format!("job-{lane}")
     }
+}
+
+/// A run's pinned pair holds one half of a two-repo landing and not the other
+/// ([`crate::land::half_landed`]): Err, saying which half takes it. Read off the land queue's
+/// current entries, the recent landings a lane merges.
+pub(crate) fn whole_pair(ctx: &Ctx, rev: &str) -> Result<(), String> {
+    let Some(pair) = crate::lease::Pin::of_rev(rev).map(|p| p.pair()) else { return Ok(()) };
+    if pair.main.is_empty() { return Ok(()); }
+    match crate::land::half_landed(&live_landings(ctx), &ctx.repo, &pair.work, &pair.main) {
+        Some((e, makepad)) => Err(crate::land::half_landed_said(e, makepad)),
+        None => Ok(()),
+    }
+}
+
+/// The land queue's current entries: the recent landings a lane merges.
+fn live_landings(ctx: &Ctx) -> Vec<crate::land::Entry> {
+    ctx.store.read(|d| d.land.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect())
+}
+
+/// The commercial commit a `--rev` naming no commercial side pins beside makepad commit `work`, and
+/// a line that says why when it is not the checkout's: on work, the main it landed beside
+/// ([`landed_main`]); else the checkout's commercial HEAD `head`, or that main when the HEAD holds a
+/// two-repo landing `work` lacks and nothing of its own ([`crate::land::beside_head`]; refused when
+/// it has).
+pub(crate) fn paired_main(ctx: &Ctx, work: &str, head: Option<&str>) -> Result<(String, String), String> {
+    let Some(head) = head else { return landed_main(ctx, work).map(|main| (main, String::new())) };
+    match crate::land::beside_head(&live_landings(ctx), &ctx.repo, work, head)? {
+        None => Ok((head.to_string(), String::new())),
+        Some(why) => landed_main(ctx, work).map(|main| (main.clone(), format!("{why} ({main:.10})"))),
+    }
+}
+
+/// The commercial main a work commit landed beside ([`crate::land::landed_main`], off the whole
+/// land history): what a `--rev` naming only work pins commercial at. Work's tip pairs with main's.
+pub(crate) fn landed_main(ctx: &Ctx, work: &str) -> Result<String, String> {
+    if crate::gitread::rev(&ctx.repo, "refs/heads/work^{commit}").as_deref() == Some(work) {
+        return crate::gitread::rev(&ctx.commercial(), "refs/heads/main^{commit}").ok_or_else(|| "commercial has no main".to_string());
+    }
+    let landed: Vec<crate::land::Entry> = ctx.store.history("land")?.iter().filter_map(|v| crate::land::Entry::parse(&v.to_json())).collect();
+    crate::land::landed_main(&landed, &ctx.repo, work).ok_or_else(|| format!("work@{work:.10} holds no landing devhub knows: name the commercial side too (`--rev work@{work:.10},commercial=main@<sha>`)"))
 }
 
 /// The worktree as a job snapshot: its HEAD (and the nested commercial HEAD) as the pinned base,
@@ -1179,7 +1261,7 @@ fn configure_request(r: &mut crate::lease::sched::Req, j: &Job) {
     r.loader = (!j.loader.is_empty()).then(|| j.loader.clone());
     r.cores = j.cores;
     r.ram_gb = j.ram_gb;
-    r.whole = j.whole;
+    r.whole |= j.whole;
     r.holder = j.holder;
     r.series = (!j.series.is_empty()).then(|| j.series.clone());
 }
@@ -1218,9 +1300,17 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             Some(Kind::Inspect) | None => return Err(format!("job {}: kind `{kind}` (build test screen long timed gpu gate)", i + 1)),
             _ => {}
         }
-        let cmd = list(r, "cmd");
+        let mut cmd = list(r, "cmd");
         if cmd.is_empty() || cmd[0].is_empty() {
             return Err(format!("job {}: no command", i + 1));
+        }
+        // `--native` runs cargo in the lane's tree, as `devhub test --native` does: a JIT test
+        // command becomes the cargo test it stands for. It went to the JIT's overlay with the
+        // reason logged and nothing else (relax-compiler's tests, 11-13).
+        if !s(r, "native").trim().is_empty() && crate::lease::loaders::cargo_run_args(&cmd).is_some() {
+            let native = crate::jit_misses::native_test_argv(&cmd).map_err(|e| format!("job {}: --native runs a cargo command in the lane's tree: {e}", i + 1))?;
+            notes.push(format!("job {}: --native: `{}` in the lane's tree", i + 1, native.join(" ")));
+            cmd = native;
         }
         if let Some(direct) = nested_devhub(&cmd) {
             return Err(format!("job {}: its command is itself a devhub command, which asks the master for its own box and has no makepad checkout to run from on the job's box: run it directly instead: `{direct}`", i + 1));
@@ -1302,8 +1392,9 @@ fn submit(ctx: &Ctx, json: &str) -> Result<String, String> {
             (rev, String::new(), 0)
         }
         r if r.is_empty() => snapshot(ctx, &tree, &lane)?,
-        r => (crate::lease::client::pin_lane_rev(&tree, &r, &lane)?, String::new(), 0),
+        r => (crate::lease::client::pin_lane_rev(&tree, &r, &lane, Some(&|w: &str, head: Option<&str>| paired_main(ctx, w, head).map(|(main, _)| main)))?, String::new(), 0),
     };
+    whole_pair(ctx, &rev)?;
     let (changed, deleted) = if snap.is_empty() { Default::default() } else { snap_paths(ctx, &snap)? };
     let list = |v: &[String]| v.iter().map(|p| json_str(p)).collect::<Vec<_>>().join(",");
     let made = ctx.store.try_update(|d| -> Result<(String, Vec<Job>), String> {
@@ -1543,6 +1634,18 @@ mod tests {
         std::fs::remove_dir_all(&c.home).unwrap();
     }
 
+    /// An open `job wait` is its jobs' agent talking to devhub, whatever the waiting process's
+    /// environment: `lane quiet` read a lane's background wait as "nothing talked for 62 min" (11-13).
+    #[test]
+    fn an_open_job_wait_is_its_agent_talking() {
+        let c = ctx("heard");
+        c.store.update(|d| d.jobs.push(Job { id: "J1".into(), state: "ok".into(), agent: "AGENT-W".into(), ..Default::default() })).unwrap();
+        assert_eq!(c.leases.agent_seen_ms("AGENT-W"), 0);
+        serve(&c, "job wait J1").unwrap();
+        assert!(c.leases.agent_seen_ms("AGENT-W") > 0, "the wait is its agent's call");
+        std::fs::remove_dir_all(&c.home).unwrap();
+    }
+
     #[test]
     fn an_idle_lease_wakes_its_jobs_wait_once() {
         let c = ctx("idle");
@@ -1770,8 +1873,24 @@ mod tests {
         // commercial HEAD too (a commercial package was missing from the overlay without it)
         let r = submit_line(&c, "rc-t", false, &[req("x", &[])]).unwrap();
         assert!(r.contains(&format!("\"rev\":\"rc-t@{head},commercial=rc-t@{chead}\",\"snap\":\"\"")), "{r}");
-        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,commercial=rc-t@{}", &chead[..10]), "lane1").unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
-        let old = crate::lease::client::pin_lane_rev(&tree, "rc-t,rc-t", "lane1").unwrap_err();
+        let none = |_: &str, _: Option<&str>| -> Result<String, String> { unreachable!("a rev naming both sides asks for no landing") };
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("rc-t,commercial=rc-t@{}", &chead[..10]), "lane1", Some(&none)).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
+        // a rev naming only work pins commercial at the main that work commit landed beside, never
+        // at the worktree's HEAD (a lane's newer main beside an older work built a pair that never
+        // landed together); without a landing it is refused, saying how to name both
+        g(&tree, &["branch", "work"]);
+        let beside = |w: &str, at: Option<&str>| -> Result<String, String> { if w == head && at.is_none() { Ok(chead.clone()) } else { Err(format!("work@{w:.10} holds no landing")) } };
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", Some(&beside)).unwrap(), format!("work@{head},commercial=main@{chead}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, &format!("work@{}", &head[..10]), "lane1", Some(&|_: &str, _: Option<&str>| Err("holds no landing".to_string()))).unwrap_err(), "holds no landing");
+        // a rev off work keeps the commercial HEAD the master pairs it with, else the main it says
+        // (a rig branch on an older base beside a newer main, 11-12)
+        let keep = |_: &str, at: Option<&str>| -> Result<String, String> { Ok(at.expect("the HEAD to pair").to_string()) };
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&keep)).unwrap(), format!("rc-t@{head},commercial=rc-t@{chead}"));
+        let old_main = g(&tree.join("apps/commercial"), &["commit-tree", "HEAD^{tree}", "-m", "an older main"]);
+        let older = |_: &str, _: Option<&str>| -> Result<String, String> { Ok(old_main.clone()) };
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "rc-t", "lane1", Some(&older)).unwrap(), format!("rc-t@{head},commercial=main@{old_main}"));
+        assert_eq!(crate::lease::client::pin_lane_rev(&tree, "work", "lane1", None).unwrap(), format!("work@{head},commercial=rc-t@{chead}"), "a worktree's own HEAD keeps its commercial HEAD");
+        let old = crate::lease::client::pin_lane_rev(&tree, "rc-t,rc-t", "lane1", Some(&none)).unwrap_err();
         assert!(old.contains("write `<name>=<branch>`, as in `work,commercial=main`"), "an old-form rev is refused in one line: {old}");
         // bad requests change nothing
         assert!(submit_line(&c, "", false, &[req("x", &["@1"])]).unwrap_err().contains("no earlier job"));
@@ -1815,13 +1934,19 @@ mod tests {
         g(&tree, &["add", "."]);
         g(&tree, &["commit", "-q", "-m", "packages"]);
         let job = |cmd: &[&str]| format!("{{\"kind\":\"test\",\"needs\":\"arch=x64\",\"lane\":\"lane1\",\"agent\":\"a\",\"cmd\":[{}],\"after\":[]}}", cmd.iter().map(|w| json_str(w)).collect::<Vec<_>>().join(","));
+        let native = |cmd: &[&str]| job(cmd).replace("\"after\"", "\"native\":\"a baseline\",\"after\"");
         let r = submit_line(&c, "", false, &[
             job(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "-p", "pkg-a", "--release", "--", "one"]),
             job(&["makepad", "test", "pkg-b", "--lib"]),
+            native(&["env", "CARGO_INCREMENTAL=0", "makepad", "test", "pkg-b", "--release", "--test", "t", "--", "one"]),
         ]).unwrap();
         assert!(r.contains("job 1: pkg-a runs in the lane's tree: its tests run cargo on the checkout (its Cargo.toml's test-tree)"), "{r}");
         assert!(!r.contains("job 2:"), "{r}");
-        assert_eq!(c.store.read(|d| d.jobs.iter().map(|j| j.src.clone()).collect::<Vec<_>>()), ["tree", "overlay"]);
+        // --native: the JIT test as the cargo test it stands for, in the tree
+        assert!(r.contains("job 3: --native: `env CARGO_INCREMENTAL=0 cargo test --release -p pkg-b --test t -- one` in the lane's tree"), "{r}");
+        assert_eq!(c.store.read(|d| d.jobs.iter().map(|j| j.src.clone()).collect::<Vec<_>>()), ["tree", "overlay", "tree"]);
+        let refused = submit_line(&c, "", false, &[native(&["makepad", "run", "app"])]).unwrap_err();
+        assert!(refused.contains("job 1: --native runs a cargo command in the lane's tree: `makepad run` has no cargo form"), "{refused}");
         let home = c.repo.parent().unwrap().to_path_buf();
         drop(c);
         let _ = std::fs::remove_dir_all(&home);
@@ -1879,7 +2004,7 @@ mod tests {
         assert_eq!(e, vec!["error[E0425]: cannot find `x`".to_string(), "thread 'main' panicked at a.rs:3".to_string()]);
         assert_eq!(t.last().map(String::as_str), Some("ok"));
         // the JIT's panic is its report line; a later `report:` that is no report stays out
-        let text = "  report: {\"kind\":\"panic\",\"message\":\"not in 5 s\",\"build\":\"b\",\"location\":\"a.rs:89:13\",\"backtrace\":[]}\ntest x ... FAILED\nmakepad: report: /a/capture.txt\n";
+        let text = "  report: {\"kind\":\"panic\",\"message\":\"not in 5 s\",\"build\":\"b\",\"location\":\"a.rs:89:13\",\"backtrace\":[]}\ntest x ... FAILED\nrelax: report: /a/capture.txt\n";
         assert_eq!(digest(text).0, vec!["panic: not in 5 s at a.rs:89:13".to_string(), "test x ... FAILED".to_string()]);
         let j = Job { id: "J1".into(), state: "paused".into(), cmd: vec!["cargo".into()], panic: Some(JobPanic { id: "P1".into(), pid: 7, message: "boom".into(), thread: "main".into(), location: "a.rs:3".into(), at_ms: 0 }), ..Default::default() };
         assert!(render(&j, false).contains("job resume J1 P1 retry|restart|unwind"));
@@ -1930,6 +2055,10 @@ mod tests {
         assert_eq!(state("J4"), "panicked");
         // a job not paused is not asked about
         super::runs_on(&c, &|_, _| panic!("asked about a job with nothing parked"));
+        assert_eq!(state("J5"), "running");
+        // releasing a job no longer paused is refused, never a cancel (J13263, 11-13)
+        let refused = serve(&c, "job release J5").unwrap_err();
+        assert!(refused.contains("J5 is running") && refused.contains("job cancel"), "{refused}");
         assert_eq!(state("J5"), "running");
     }
 }

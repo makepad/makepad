@@ -384,7 +384,7 @@ impl Follow {
     fn answer(&self, report: &mut Report, node: &str, to: &Pin, after: &str, build: bool, result: Result<Pin, String>) -> Answer {
         match result {
             Ok(revs) => {
-                report.say(node, format!("applied {}{after}{}", revs.key(), if build { "" } else { " (the tree: its prebuild waits until no timed ask waits there)" }));
+                report.say(node, format!("applied {}{after}{}", revs.key(), if build { "" } else { " (the tree alone: its prebuild waits for its room's turn, or for the timed ask there)" }));
                 self.waits().done(node);
                 let mut applied = self.applied.lock().unwrap_or_else(|e| e.into_inner());
                 applied.revs.insert(node.to_string(), revs);
@@ -477,10 +477,12 @@ fn pin_pass<'s>(scope: &'s std::thread::Scope<'s, '_>, follow: &'s Follow, moves
 /// built under it when it is granted at once; else the tree moves alone and the room waits in line
 /// on a thread of its own ([`Follow::rooms`]), which builds the box's deployment once granted
 /// ([`build_in_room`]). A box with such a thread moves its tree alone too. Timed work there: it
-/// waits for the gap after.
+/// waits for the gap after. A bench box never moves its tree alone: its apply waits while its room
+/// waits in line, and the room's thread moves the tree with the build ([`crate::orch::roll::is_bench`]).
 fn room_now(follow: &Arc<Follow>, socket: &Path, repo: &Path, node: &str, waits: &mut dyn FnMut(&str)) -> Result<RoomNow, String> {
+    let bench = crate::orch::roll::is_bench(node);
     if follow.rooms().contains(node) {
-        return Ok(RoomNow::Tree);
+        return Ok(if bench { RoomNow::InLine } else { RoomNow::Tree });
     }
     enum First {
         Queued,
@@ -513,6 +515,10 @@ fn room_now(follow: &Arc<Follow>, socket: &Path, repo: &Path, node: &str, waits:
         }
     }).map_err(|e| format!("its room's thread: {e}"))?;
     match rx.recv() {
+        Ok(First::Queued) if bench => {
+            waits("its deployment-build room waits in line: a bench box's tree moves with its build, once it is granted");
+            Ok(RoomNow::InLine)
+        }
         Ok(First::Queued) => {
             waits("its deployment-build room waits in line: the tree moves now, the build once it is granted");
             Ok(RoomNow::Tree)

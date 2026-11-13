@@ -372,6 +372,41 @@ pub fn input_put(work: &Path, tmp: &Path, rest: &str) -> Result<Option<PathBuf>,
     placed.map(Some)
 }
 
+/// Where a lease's app keeps its per-user state when it was given a home of its own
+/// ([`input_home`]): in its `tmp`, so it goes with the lease.
+pub fn app_home(tmp: &Path) -> PathBuf {
+    tmp.join("app-home")
+}
+
+/// `input-home <id> <hash>`: the lease's own app home ([`app_home`]), made afresh as a copy of
+/// input `hash` the box holds. The app writes there (its settings, autosave, what it imports),
+/// never into the inputs every lease of the box shares.
+pub fn input_home(work: &Path, tmp: &Path, hash: &str) -> Result<PathBuf, String> {
+    let from = input_have(work, hash)?.ok_or_else(|| format!("input-home: the box holds no input {hash}"))?;
+    let home = app_home(tmp);
+    let _ = std::fs::remove_dir_all(&home);
+    copy_tree(&from, &home)?;
+    Ok(home)
+}
+
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
+    for e in std::fs::read_dir(from).map_err(|e| format!("{}: {e}", from.display()))? {
+        let e = e.map_err(|e| format!("{}: {e}", from.display()))?;
+        let (src, dst) = (e.path(), to.join(e.file_name()));
+        let kind = e.file_type().map_err(|e| format!("{}: {e}", src.display()))?;
+        if kind.is_dir() {
+            copy_tree(&src, &dst)?;
+        } else if kind.is_symlink() {
+            #[cfg(unix)]
+            std::fs::read_link(&src).and_then(|t| std::os::unix::fs::symlink(t, &dst)).map_err(|e| format!("{}: {e}", src.display()))?;
+        } else {
+            std::fs::copy(&src, &dst).map_err(|e| format!("{}: {e}", dst.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn place_input(work: &Path, tmp: &Path, hash: &str, part: &Path, size: u64) -> Result<PathBuf, String> {
     let len = std::fs::metadata(part).map_err(|e| format!("{}: {e}", part.display()))?.len();
     let got = input_hash(part)?;
@@ -630,6 +665,23 @@ pub fn send_inputs(c: &Client, node: &str, id: &str, inputs: &[Input]) -> Result
         out.push(Placed { name: i.name.clone(), hash, dir, sent: off });
     }
     Ok(out)
+}
+
+/// Gives lease `id` on `node` an app home of its own seeded with `archive` (a tar archive, any
+/// compression `tar -xf` reads): shipped as an input ([`send_inputs`]: once per box by its hash),
+/// then copied afresh into the lease's [`app_home`]. Its path on the box.
+pub fn send_home(c: &Client, node: &str, id: &str, archive: &Path) -> Result<String, String> {
+    let placed = send_inputs(c, node, id, &[Input { name: "MAKEPAD_TEST_HOME".into(), path: archive.to_path_buf() }])?;
+    let hash = &placed.first().ok_or("send_home: no input placed")?.hash;
+    let mut home = None;
+    let mut got = |_: &str, lines: &[String]| {
+        home = lines.first().and_then(|l| makepad_strict_json::parse(l.as_bytes()).ok()).and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_string));
+        Ok(())
+    };
+    let mut p = Pipe::open(c, node, "input-home").map_err(|e| if e.contains("unsupported service") { format!("{e} (its hub is from before app homes: it takes them once it updates)") } else { e })?;
+    p.send(format!("input-home {id} {hash}"), &mut got)?;
+    p.drain(&mut got)?;
+    home.ok_or_else(|| format!("{node}: no app home from input {}", &hash[..12]))
 }
 
 /// `cmd` with the placed inputs in its environment, as a `lease-run` takes one (`env K=V cmd`).

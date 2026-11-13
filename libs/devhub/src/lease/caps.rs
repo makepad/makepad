@@ -183,17 +183,35 @@ pub fn rust_command(prog: &str) -> std::process::Command {
     c
 }
 
-/// The node's `rustc -V` version (`1.97.1`), looked at every 5 min (an update needs no hub restart).
-fn rustc_version() -> String {
-    static LAST: std::sync::Mutex<Option<(std::time::Instant, String)>> = std::sync::Mutex::new(None);
-    let mut g = LAST.lock().unwrap();
-    if let Some((t, v)) = g.as_ref().filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(300)) {
-        let _ = t;
-        return v.clone();
-    }
-    let v = rust_command("rustc").arg("-V").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1).unwrap_or("").to_string()).unwrap_or_default();
-    *g = Some((std::time::Instant::now(), v.clone()));
-    v
+/// The toolchain a lease's run finds ([`rust_command`]): `rustc -vV`'s release (`1.100.0`) and
+/// commit hash. The box's report and the JIT store's keys (loaders::compiler) read it again on
+/// their own, so a rustup update reaches both without a hub restart.
+#[derive(Clone, Default)]
+pub struct Rustc {
+    pub release: String,
+    pub commit: String,
+}
+
+static RUSTC: std::sync::Mutex<Option<(std::time::Instant, Rustc)>> = std::sync::Mutex::new(None);
+
+/// `rustc -vV`'s `release:` and `commit-hash:` lines (empty when it does not say).
+fn parse_rustc(vv: &str) -> Rustc {
+    let line = |k: &str| vv.lines().find_map(|l| l.strip_prefix(k)).unwrap_or("").trim().to_string();
+    Rustc { release: line("release: "), commit: line("commit-hash: ") }
+}
+
+/// Reads the toolchain again now: a lease's start ([`super::loaders::refresh_compiler`]).
+pub fn read_rustc() -> Rustc {
+    let r = rust_command("rustc").arg("-vV").output().ok().map(|o| parse_rustc(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    *RUSTC.lock().unwrap() = Some((std::time::Instant::now(), r.clone()));
+    r
+}
+
+/// This box's rustc release (`1.97.1`): its report, and on the master the toolchain gate runs and
+/// their proofs name. Read again when 5 min old, and at each lease's start.
+pub fn rustc_version() -> String {
+    let fresh = RUSTC.lock().unwrap().as_ref().filter(|(t, _)| t.elapsed() < std::time::Duration::from_secs(300)).map(|(_, r)| r.release.clone());
+    fresh.unwrap_or_else(|| read_rustc().release)
 }
 
 /// The same live WM display reported in caps, without reprobing the hardware/toolchain.
@@ -205,12 +223,19 @@ pub(super) fn display() -> Option<String> {
 /// Why a WM's `status` answer (its windows) shows nothing: its one window is 0x0, which it is
 /// when no output is attached or live, and every window opened under it then times out on its
 /// first frame (fourteen gui and screen leases on one node in 3 h, 11-07). Empty when a window
-/// has a size, or the answer says nothing of them.
-pub fn dark_of(status: &str) -> String {
+/// has a size, or the answer says nothing of them. `connectors` are the box's DRM connector
+/// states (`/sys/class/drm/*/status`): when each reads `disconnected`, no output is plugged in
+/// or the display is off, a cable or a screen to see to, not the WM (a node's line said only
+/// "window is 0x0", 11-13).
+pub fn dark_of(status: &str, connectors: &[String]) -> String {
     let Ok(v) = makepad_strict_json::parse(status.as_bytes()) else { return String::new() };
     let Some(windows) = v.get("w").and_then(|w| w.as_arr()).filter(|w| !w.is_empty()) else { return String::new() };
     let empty = |w: &makepad_strict_json::Value| w.get("sz").and_then(|s| s.as_arr()).is_some_and(|s| s.iter().all(|n| super::num(n).is_some_and(|n| n <= 0.0)));
-    if windows.iter().all(empty) { "its WM's window is 0x0: no output shows it".into() } else { String::new() }
+    if !windows.iter().all(empty) { return String::new(); }
+    if !connectors.is_empty() && connectors.iter().all(|c| c.trim() == "disconnected") {
+        return format!("no output connected (its {} DRM connectors read disconnected; its WM's window is 0x0)", connectors.len());
+    }
+    "its WM's window is 0x0: no output shows it".into()
 }
 
 /// The node's own WM among this box's endpoints, the newest when a restart left the old one's file.
@@ -343,6 +368,11 @@ static SICK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 /// Why git cannot work this box's stores: its last store command that failed for the box, not
 /// for the request ([`git_failed`]), until a probe of the stores passes ([`probe_git`]).
 static GIT_SICK: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Whether this box's last toolchain probe failed: out of rotation until one passes.
+pub fn toolchain_sick() -> bool {
+    !SICK.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+}
 
 /// Why this box takes no lease (empty: it takes them).
 pub fn sick() -> String {
@@ -673,9 +703,15 @@ mod os {
         let Ok(wm) = makepad_remote::link::Client::connect(&wm.socket) else { return String::new() };
         wm.set_timeout(Some(std::time::Duration::from_secs(3)));
         match wm.cmd("status").ok().and_then(|mut lines| lines.next()) {
-            Some(Ok(line)) => super::dark_of(&line),
+            Some(Ok(line)) => super::dark_of(&line, &drm_connectors()),
             _ => String::new(),
         }
+    }
+
+    /// The states of the box's DRM connectors (`connected`, `disconnected`, `unknown`).
+    fn drm_connectors() -> Vec<String> {
+        let Ok(dir) = std::fs::read_dir("/sys/class/drm") else { return Vec::new() };
+        dir.flatten().filter_map(|e| std::fs::read_to_string(e.path().join("status")).ok()).map(|s| s.trim().to_string()).collect()
     }
 
     /// Whether the WM at `path` takes today's apps, asked the way an app asks it
@@ -971,6 +1007,16 @@ mod os {
 
 #[cfg(test)]
 mod tests {
+    /// The JIT store's keys take the commit and the box's report the release from `rustc -vV`;
+    /// one that says neither leaves both empty (no key: the store builds nothing under a guess).
+    #[test]
+    fn rustc_vv_gives_release_and_commit() {
+        let r = super::parse_rustc("rustc 1.100.0 (0ef1bc386 2026-11-26)\nbinary: rustc\ncommit-hash: 0ef1bc386059596dada8fb65b50425aab2ea637a\ncommit-date: 2026-11-26\nhost: x86_64-unknown-linux-gnu\nrelease: 1.100.0\nLLVM version: 21.1.0\n");
+        assert_eq!((r.release.as_str(), r.commit.as_str()), ("1.100.0", "0ef1bc386059596dada8fb65b50425aab2ea637a"));
+        let none = super::parse_rustc("error: no such command\n");
+        assert!(none.release.is_empty() && none.commit.is_empty());
+    }
+
     /// A service runs where its state file's pid is alive: a file left by one that ended, or one
     /// with no pid, is no service of the node, and the update roll asks it to restart none.
     #[test]
@@ -1037,10 +1083,13 @@ mod tests {
     fn a_wm_window_of_0x0_is_a_dark_display() {
         let dark = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[0,0],"px":[0,0],"dpi":2.43,"pos":[0,0]}]}"#;
         let lit = r#"{"app":"makepad-app-wm","pid":7,"w":[{"i":0,"t":"makepad-wm","sz":[1920,1080],"px":[3840,2160],"dpi":2,"pos":[0,0]}]}"#;
-        assert_eq!(dark_of(dark), "its WM's window is 0x0: no output shows it");
-        assert_eq!(dark_of(lit), "");
-        assert_eq!(dark_of(r#"{"app":"makepad-app-wm","pid":7,"w":[]}"#), "");
-        assert_eq!(dark_of("not json"), "");
+        let s = |v: &[&str]| v.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+        assert_eq!(dark_of(dark, &[]), "its WM's window is 0x0: no output shows it");
+        assert_eq!(dark_of(dark, &s(&["connected", "disconnected"])), "its WM's window is 0x0: no output shows it", "a connected output: the WM's to look at");
+        assert_eq!(dark_of(dark, &s(&["disconnected", "disconnected"])), "no output connected (its 2 DRM connectors read disconnected; its WM's window is 0x0)");
+        assert_eq!(dark_of(lit, &s(&["disconnected"])), "", "a window with a size shows, whatever the connectors say");
+        assert_eq!(dark_of(r#"{"app":"makepad-app-wm","pid":7,"w":[]}"#, &[]), "");
+        assert_eq!(dark_of("not json", &[]), "");
     }
 
     #[test]

@@ -105,7 +105,8 @@ impl Package {
     }
 
     fn argv(&self) -> Vec<String> {
-        let mut argv: Vec<_> = ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", &self.pkg].into_iter().map(String::from).collect();
+        // the release profile, as `devhub test` runs the package (lease/client.rs)
+        let mut argv: Vec<_> = ["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", &self.pkg, "--release"].into_iter().map(String::from).collect();
         argv.extend(self.select());
         argv.extend(["--".into(), "--list".into()]);
         argv
@@ -120,20 +121,24 @@ impl Package {
     }
 }
 
-fn resolve(repo: &Path, rev: &str, packages: &[Package]) -> (Vec<Package>, String) {
+fn resolve(repo: &Path, rev: &str, packages: &[Package], overlay: bool) -> (Vec<Package>, String) {
     if packages.is_empty() { return (Vec::new(), String::new()); }
     let tree = crate::lease::Pin::of_rev(rev).ok_or_else(|| "missing commit pair".to_string()).and_then(|pin| {
         super::ci::Tree::at(repo, &pin.pair())
     });
     match tree {
-        Ok(tree) => resolve_in(&tree, packages),
+        Ok(tree) => resolve_in(&tree, packages, overlay),
         Err(e) => (Vec::new(), format!("targets unknown at {rev}: {e}")),
     }
 }
 
 /// The packages' targets as `tree` has them, each with the features its target requires; the
 /// note names those it dropped (no such package or target).
-fn resolve_in(tree: &super::ci::Tree, packages: &[Package]) -> (Vec<Package>, String) {
+/// The packages a warm run builds at `tree`, with their targets' required features. `overlay`: a
+/// JIT overlay run, which leaves out a package whose tests run in the lane's tree (its test-tree:
+/// no run of them ever reads an overlay, and one fails there; relax-compiler's build script runs
+/// cargo metadata on the checkout, 11-13).
+fn resolve_in(tree: &super::ci::Tree, packages: &[Package], overlay: bool) -> (Vec<Package>, String) {
     let dirs = super::ci::package_dirs(tree);
     let (mut kept, mut dropped) = (Vec::new(), Vec::new());
     let mut seen = BTreeSet::new();
@@ -145,6 +150,10 @@ fn resolve_in(tree: &super::ci::Tree, packages: &[Package]) -> (Vec<Package>, St
             dropped.push(format!("{} (no such package)", package.label()));
             continue;
         };
+        if let Some(why) = k.test_tree.as_deref().filter(|_| overlay) {
+            dropped.push(format!("{} (runs in the lane's tree: {why})", package.label()));
+            continue;
+        }
         let harness = match &package.harness {
             Harness::All | Harness::Tests => Ok(package.harness.clone()),
             Harness::Lib if k.lib => Ok(Harness::Lib),
@@ -707,7 +716,7 @@ fn run_leg(ctx: &Ctx, run: &Run) {
         };
         if run.borrow().native {
             let r = run.borrow().clone();
-            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages);
+            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages, false);
             dropped = note;
             if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
             return native_leg(&r, &spec_of(&r), &packages, &mut log);
@@ -797,7 +806,7 @@ fn run_leg(ctx: &Ctx, run: &Run) {
             }
             let r = run.borrow().clone();
             if !set(&r, |p| { p.state = "held".into(); p.note.clear(); p.lease = Some(held.id.clone()); p.listed.clear(); }) { return Ok(String::new()); }
-            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages);
+            let (packages, note) = resolve(&ctx.repo, &r.key.rev, &r.key.packages, true);
             dropped = note;
             if !dropped.is_empty() { let _ = writeln!(log, "{dropped}"); }
             let mut failures = Vec::new();
@@ -1045,22 +1054,30 @@ mod tests {
     /// A warm replay builds a target with the features it requires (`required-features`): a
     /// test target selected without them is an error (makepad-motion's `effect_modules` needs
     /// `scene3d`: every warm run of it failed, 11-06). A target that needs none, and the
-    /// all-targets selections cargo skips such a target in, get no `--features`.
+    /// all-targets selections cargo skips such a target in, get no `--features`. A package whose
+    /// tests run in the lane's tree (test-tree) is built by a native warm run alone: in an overlay
+    /// relax-compiler's build script ran cargo metadata on a root only the JIT reads (11-13).
     #[test]
     fn a_warm_target_builds_with_the_features_it_requires() {
         let manifest = "[package]\nname = \"motion\"\n\n[features]\nscene3d = []\n\n[[test]]\nname = \"effect_modules\"\nrequired-features = [\"scene3d\"]\n\n[[bin]]\nname = \"viewer\"\nrequired-features = [\"scene3d\", \"gpu\"]\n";
         let tree = super::super::ci::Tree::mem(vec![
-            ("Cargo.toml", "[workspace]\nmembers = [\"motion\"]\n"),
+            ("Cargo.toml", "[workspace]\nmembers = [\"motion\", \"stamped\"]\n"),
             ("motion/Cargo.toml", manifest),
             ("motion/src/lib.rs", ""),
             ("motion/tests/effect_modules.rs", ""),
             ("motion/tests/plain.rs", ""),
+            ("stamped/Cargo.toml", "[package]\nname = \"stamped\"\n[package.metadata.makepad]\ntest-tree = \"its build script runs cargo on the checkout\"\n"),
+            ("stamped/src/lib.rs", ""),
         ]);
-        let asked: Vec<Package> = ["test:motion:effect_modules", "test:motion:plain", "test:motion:bin:viewer", "test:motion:lib"].iter().map(|c| Package::from_class(c).unwrap()).collect();
-        let (packages, note) = super::resolve_in(&tree, &asked);
-        assert_eq!(note, "");
+        let mut asked: Vec<Package> = ["test:motion:effect_modules", "test:motion:plain", "test:motion:bin:viewer", "test:motion:lib"].iter().map(|c| Package::from_class(c).unwrap()).collect();
+        let stamped = Package::from_class("test:stamped:lib").unwrap();
+        asked.push(stamped.clone());
+        let (natively, note) = super::resolve_in(&tree, &asked, false);
+        assert!(natively.contains(&stamped) && note.is_empty(), "a native warm run builds it: {note}");
+        let (packages, note) = super::resolve_in(&tree, &asked, true);
+        assert_eq!(note, "dropped stamped:lib (runs in the lane's tree: its build script runs cargo on the checkout)", "an overlay one leaves it out");
         let argv: Vec<String> = packages.iter().map(|p| p.argv()[11..].join(" ")).collect();
-        assert_eq!(argv, ["motion --test effect_modules --features scene3d -- --list", "motion --test plain -- --list", "motion --bin viewer --features scene3d,gpu -- --list", "motion --lib -- --list"]);
+        assert_eq!(argv, ["motion --release --test effect_modules --features scene3d -- --list", "motion --release --test plain -- --list", "motion --release --bin viewer --features scene3d,gpu -- --list", "motion --release --lib -- --list"]);
         let native = packages.iter().find(|p| p.label() == "motion:effect_modules").unwrap().native_argv("linux");
         assert!(native.ends_with(&["--test".to_string(), "effect_modules".into(), "--features".into(), "scene3d".into()]), "{native:?}");
     }

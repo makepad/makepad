@@ -84,6 +84,21 @@ fn runs_jit(w: &[String]) -> bool {
     })
 }
 
+/// The command builds a tree it made: cargo after a `cd` into a `mktemp` dir of its own, an export
+/// under its own workspace manifest (another repository's tree, built as a fresh clone of it
+/// builds), which no JIT run of the lane's workspace stands in for. Such builds before each push
+/// of the relax repository marked its lane OVER (11-13).
+fn builds_made_tree(w: &[String]) -> bool {
+    let mut made: Vec<&str> = Vec::new();
+    let mut in_made = false;
+    for (i, x) in w.iter().enumerate() {
+        if let Some(var) = x.strip_suffix("=$").filter(|_| w.get(i + 1).is_some_and(|s| s == ";") && w.get(i + 2).is_some_and(|m| m == "mktemp")) { made.push(var); }
+        if x == "cd" { in_made = w.get(i + 1).and_then(|d| d.strip_prefix('$')).is_some_and(|d| made.contains(&d.split('/').next().unwrap_or(d))); }
+        if in_made && (x == "cargo" || x.ends_with("/cargo")) { return true; }
+    }
+    false
+}
+
 fn built_in(w: &[String]) -> Vec<Built> {
     let mut out: Vec<Built> = Vec::new();
     let mut i = 0;
@@ -238,7 +253,7 @@ pub fn check(home: &Path, a: &Ask, now: u64) -> Result<String, String> {
         for b in built.iter_mut().filter(|b| b.pkg == "*") { b.pkg = here.clone(); }
     }
     let on_jit = |b: &Built| if b.target.is_empty() { jit_runs(a.os, a.arch) } else { let (os, arch) = target_platform(&b.target); jit_runs(&os, &arch) };
-    let mut not_over = if a.kind == Kind::Timed || runs_jit(&words) { "baseline" } else { "" };
+    let mut not_over = if a.kind == Kind::Timed || runs_jit(&words) || builds_made_tree(&words) { "baseline" } else { "" };
     if built.iter().any(on_jit) {
         let pair = pair_of(a.repo_dir, a.rev)?;
         let mut own = BTreeSet::new();
@@ -356,6 +371,13 @@ mod tests {
         assert!(jit("cargo run --profile host -p makepad-run --bin makepad -- test a"));
         assert!(!jit("cargo test --release -p a; cd makepad; ls test"));
         assert!(!jit("cargo test --release -p makepad-foo"));
+        // a build of a tree the command exported to a dir of its own is a baseline too
+        let made = |t: &str| builds_made_tree(&words(t));
+        assert!(made("set -u\nO=$(mktemp -d /tmp/t.XXXXXX); [ -n \"$O\" ] || exit 1\ngit archive HEAD -- libs | tar -x -C \"$O\"\ncd \"$O\" && cargo build --release --workspace > \"$O/b.log\"\ncd / && rm -rf \"$O\""));
+        assert!(made("D=$(mktemp -d); cd $D/sub; cargo test"));
+        assert!(!made("O=$(mktemp -d); cargo build -p a; cd $O"), "the workspace's build, before the cd");
+        assert!(!made("O=$(mktemp -d); cd $O; cd /x; cargo build"), "a cd out of it");
+        assert!(!made("cd $REPO && cargo build -p a"), "a dir it did not make");
     }
 
     #[test]

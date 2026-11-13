@@ -1,11 +1,11 @@
 //! Clearing this machine's JIT cache: the run dirs `makepad run` keeps its compiled code in
-//! (relax `dirs.rs`: `<target dir>/makepad-run` per workspace, `<run home>/target/<8 hex>` per git
+//! (relax `dirs.rs`: `<target dir>/relax` per workspace, `<run home>/target/<8 hex>` per git
 //! run). The next start of an app on a cleared cache is cold.
 //!
 //! Which run dirs: the checkout devhub was built from, the git-run dirs under the run home, the
 //! run dir every running JIT announces (`run_dir` in its discovery file) and the ones announced
 //! before (remembered in `~/.makepad/devhub/jit-caches`). A dir is cleared only when it is what a
-//! run dir is: a real folder (not a link) named `makepad-run` holding a `cache/` or `startup/`, or
+//! run dir is: a real folder (not a link) named `relax` holding a `cache/` or `startup/`, or
 //! an 8-hex folder directly under the run home's `target/`.
 //!
 //! What goes, by explicit name inside a run dir, and nothing else: `cache/` (the compiled stores:
@@ -13,7 +13,7 @@
 //! stay) and `startup/` (startup manifests). What stays: `registry/` (downloaded packages),
 //! `git.lock` (dependency pins), `windows/` (the apps' window geometry), `build/` and
 //! `build-scripts/` (build script outputs) and anything else; never `~/.cargo`, cargo's own
-//! `target/` output, the run home's git source stores (`~/.makepad-run/cache`) or any source. One app (`app=<package>`): its
+//! `target/` output, the run home's git source stores (`~/.relax/cache`) or any source. One app (`app=<package>`): its
 //! startup manifest and its own crate's stores (`<crate>-<16 hex>.rcs` and their generations);
 //! the stores shared with other apps stay, so only its own crate compiles again.
 //!
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// What a run dir is, for the line that names it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
-    /// `<target>/makepad-run`
+    /// `<target>/relax`
     Workspace,
     /// `<run home>/target/<8 hex>` (a git repository run's virtual workspace)
     GitRun,
@@ -80,9 +80,9 @@ impl CachePlan {
 pub const CLEARED: &[&str] = &["cache", "startup"];
 
 fn run_home() -> PathBuf {
-    std::env::var_os("MAKEPAD_RUN_HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
+    std::env::var_os("RELAX_HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
         let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from).unwrap_or_default();
-        home.join(".makepad-run")
+        home.join(".relax")
     })
 }
 
@@ -138,11 +138,11 @@ fn announced() -> Vec<(u32, String, Option<PathBuf>)> {
     out
 }
 
-/// `<folder>/target/makepad-run` of the nearest folder at or above the process's working
+/// `<folder>/target/relax` of the nearest folder at or above the process's working
 /// directory that has one (Linux: `/proc/<pid>/cwd`).
 fn below_cwd(pid: u32) -> Option<PathBuf> {
     let cwd = std::fs::read_link(format!("/proc/{pid}/cwd")).ok()?;
-    cwd.ancestors().map(|a| a.join("target").join("makepad-run")).find(|d| d.is_dir())
+    cwd.ancestors().map(|a| a.join("target").join("relax")).find(|d| d.is_dir())
 }
 
 /// `dir` as a run dir (its real path), or why it is not one.
@@ -153,7 +153,7 @@ pub fn checked(dir: &Path) -> Result<(PathBuf, Kind), String> {
     }
     let real = std::fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let name = real.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    if name == "makepad-run" {
+    if name == "relax" {
         if !(real.join("cache").is_dir() || real.join("startup").is_dir()) {
             return Err(format!("{} holds no cache/ or startup/: not a run dir", real.display()));
         }
@@ -163,7 +163,7 @@ pub fn checked(dir: &Path) -> Result<(PathBuf, Kind), String> {
     if name.len() == 8 && name.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) && (in_runs(run_home().join("target")) || in_runs(dev_runs())) {
         return Ok((real, Kind::GitRun));
     }
-    Err(format!("{} is neither a `makepad-run` folder nor a git run's dir under {} or {}", real.display(), run_home().join("target").display(), dev_runs().display()))
+    Err(format!("{} is neither a `relax` folder nor a git run's dir under {} or {}", real.display(), run_home().join("target").display(), dev_runs().display()))
 }
 
 /// Every run dir of this machine (checked, each once).
@@ -171,9 +171,9 @@ pub fn caches() -> Vec<(PathBuf, Kind)> {
     let mut cand: Vec<PathBuf> = Vec::new();
     // the checkout devhub was built from (libs/devhub is two folders below its root), and the
     // one it runs in
-    cand.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/makepad-run"));
+    cand.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/relax"));
     if let Ok(cwd) = std::env::current_dir() {
-        cand.push(cwd.join("target").join("makepad-run"));
+        cand.push(cwd.join("target").join("relax"));
     }
     for runs in [run_home().join("target"), dev_runs()] {
         if let Ok(rd) = std::fs::read_dir(runs) {

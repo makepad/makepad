@@ -197,6 +197,8 @@ fn key_digest(tree: &Tree, dir: &str, unit: &str, digest: &str) -> Option<String
 fn key_text(tree: &Tree, dir: &str, unit: &str, digest: &str, gate: bool) -> Option<String> {
     if digest.is_empty() { return None; }
     let mut text = format!("gate-proof-v1\n{unit}\n{digest}\nCargo.toml {}\n", tree.blob("Cargo.toml")?);
+    // a pass under one rustc is no proof under another (gates run on the master's: bucket.rs gate_needs)
+    text.push_str(&format!("rustc {}\n", crate::lease::caps::rustc_version()));
     let lock = format!("{dir}/Cargo.lock");
     let paths = std::iter::once(".cargo/config.toml").chain(GATE_SCRIPTS.into_iter().filter(|_| gate)).chain(std::iter::once(lock.as_str()));
     for path in paths {

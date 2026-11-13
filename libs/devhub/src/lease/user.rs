@@ -177,6 +177,12 @@ impl UserTrack {
         self.sense.as_ref().is_some_and(|s| s.present)
     }
 
+    /// A Desk Link viewer shows the node now (its tab selected in a visible window), input or
+    /// not: a person watching an app of ours there uses it ([`super::hand`]).
+    pub fn viewing(&self) -> bool {
+        self.viewers
+    }
+
     /// Wall ms of the last person input this hub saw (None: none since it started).
     pub fn last_input_ms(&self) -> Option<u64> {
         self.last_input_ms

@@ -33,6 +33,11 @@ pub fn install_merge_driver(repo: &Path, makepad_root: &Path) -> Result<(), Stri
     let _install = INSTALL.lock().unwrap_or_else(|e| e.into_inner());
     let root = makepad_root.canonicalize().map_err(|e| format!("ci merge root: {e}"))?;
     let (git_dir, common) = git_dirs(repo)?;
+    // a lock a killed writer left goes first, said, and a live writer's is waited for: one a hub
+    // the WM replaced mid-write left refused every later lease start in that tree (11-13)
+    for lock in [git_dir.join("config.worktree.lock"), common.join("config.lock"), common.join("config.worktree.lock")] {
+        if let Some(said) = crate::gitlock::settle(&lock) { eprintln!("ci merge config: {said}"); }
+    }
     let e = |e: makepad_git::GitError| format!("ci merge config: {e}");
     let shared = common.join("config");
     let mut text = config::read_file(&shared).map_err(e)?;

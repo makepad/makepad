@@ -1,5 +1,5 @@
 //! This machine's JITs as sync sees them: which run from the synced checkout, what their live
-//! patcher did with a sync's edits (the JIT's `makepad-run-live-<pid>.jsonl`, its `edit`
+//! patcher did with a sync's edits (the JIT's `relax-live-<pid>.jsonl`, its `edit`
 //! records), whether they still run a `makepad` binary a build replaced, and the session tick a
 //! JIT reports (for coordinated patches).
 //!
@@ -73,11 +73,11 @@ pub fn exe_replaced(pid: u32) -> bool {
 
 /// Where the JIT writes its live-edit records.
 pub fn live_log(pid: u32) -> PathBuf {
-    if let Some(p) = environ(pid, "MAKEPAD_RUN_LIVE_LOG").filter(|p| !p.is_empty()) {
+    if let Some(p) = environ(pid, &crate::run_names::var("LIVE_LOG")).filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
     let tmp = environ(pid, "TMPDIR").filter(|t| !t.is_empty()).unwrap_or_else(|| "/tmp".into());
-    Path::new(&tmp).join(format!("makepad-run-live-{pid}.jsonl"))
+    crate::run_names::live_log(Path::new(&tmp), pid)
 }
 
 pub fn log_len(path: &Path) -> u64 {

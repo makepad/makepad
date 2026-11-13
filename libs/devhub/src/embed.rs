@@ -61,8 +61,13 @@ pub fn desk_link_state() -> Option<DeskLinkState> {
 
 /// The node's `desk` service: `desk on`, `desk off`, `desk` / `desk state`; one JSON line.
 pub fn desk_service(line: &str) -> String {
+    serve_desk(desk_link_control().as_deref(), line)
+}
+
+/// [`desk_service`] on `control`, the host's endpoint (None: no endpoint).
+fn serve_desk(control: Option<&DeskLinkControl>, line: &str) -> String {
     let word = line.split_whitespace().find(|w| *w != "desk").unwrap_or("state");
-    let Some(c) = desk_link_control() else {
+    let Some(c) = control else {
         return "{\"err\":\"this node has no Desk Link endpoint (only JIT hosts that embed one)\"}".to_string();
     };
     let said = match word {
@@ -81,12 +86,15 @@ pub fn desk_service(line: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The service on an endpoint of the test's own: the process's one ([`set_desk_link_control`])
+    /// outlives the test, and a rerun in the same warm test process found the last run's
+    /// installed where it asserts there is none (11-13).
     #[test]
     fn the_endpoint_switches_through_the_service() {
-        assert!(desk_service("desk on").contains("no Desk Link endpoint"));
+        assert!(serve_desk(None, "desk on").contains("no Desk Link endpoint"));
         let on = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (a, b) = (on.clone(), on.clone());
-        set_desk_link_control(DeskLinkControl {
+        let c = DeskLinkControl {
             set: Box::new(move |v| {
                 a.store(v, std::sync::atomic::Ordering::Release);
                 Ok(format!("switched {}", if v { "on" } else { "off" }))
@@ -95,7 +103,8 @@ mod tests {
                 let on = b.load(std::sync::atomic::Ordering::Acquire);
                 DeskLinkState { on, port: if on { 8790 } else { 0 }, note: if on { "listens on 192.0.2.85:8790".into() } else { "off".into() } }
             }),
-        });
+        };
+        let desk_service = |line: &str| serve_desk(Some(&c), line);
         let line = desk_service("desk on");
         assert!(line.contains("\"on\":true") && line.contains("\"port\":8790") && line.contains("switched on"), "{line}");
         let v = makepad_strict_json::parse(line.as_bytes()).unwrap();

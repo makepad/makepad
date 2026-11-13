@@ -234,6 +234,9 @@ pub struct Krate {
     /// the features a `[[bin]]` or `[[test]]` target requires (`required-features`), by
     /// `bin:<name>` / `test:<name>`: selecting it without them is an error, not a skip
     pub required: BTreeMap<String, Vec<String>>,
+    /// why its tests run in the lane's tree, never a JIT overlay: its
+    /// `[package.metadata.makepad] test-tree` (an overlay's root is one only the JIT reads)
+    pub test_tree: Option<String>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -291,7 +294,8 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
             }
         }
     }
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required })
+    let test_tree = doc.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string);
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -1286,9 +1290,9 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     let (_apps, scripts) = discover(tree);
     let m = matrix(tree, &scripts);
     let own = jit_own_dirs(tree);
+    // `test <package> <args>`: the release profile, under the JIT as under cargo
     let test_step = |dir: &str, args: &[&str]| {
-        if !own.contains(dir) { return jit(args); }
-        let mut step = argv(&["cargo", "test", "--release", "-p", args[1]]);
+        let mut step = if own.contains(dir) { argv(&["cargo", "test", "--release", "-p", args[1]]) } else { jit(&["test", args[1], "--release"]) };
         step.extend(args[2..].iter().map(|a| a.to_string()));
         step
     };
@@ -1522,6 +1526,21 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
     // fn's `use X as Y`, through a test's macro call) as unused
     if tree.has("libs/relax/compiler/tests/test_warnings/run.py") {
         push("live:test-warnings".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/test_warnings/run.py"])], Judge::Exit, 120.0, None);
+    }
+    // a live test session answers each test's outcome and whether it ran for the edit, and
+    // refuses another edit's group
+    if tree.has("libs/relax/compiler/tests/live_test_results/run.py") {
+        push("live:test-results".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/live_test_results/run.py"])], Judge::Exit, 120.0, None);
+    }
+    // the check server's edits of one file declared as two modules: the import stays in scope in
+    // both, and a file that includes itself ends the module walk
+    if tree.has("libs/relax/compiler/tests/two_module_file/run.py") {
+        push("live:two-module-file".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/two_module_file/run.py"])], Judge::Exit, 120.0, None);
+    }
+    // the check server: protocol, CLI and one-shot parity, and a server of another compiler (what
+    // an upgrade leaves running) stopped by its recorded pid, the check run in-process
+    if tree.has("libs/relax/compiler/tests/serve/run.py") {
+        push("live:check-server".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/serve/run.py"])], Judge::Exit, 120.0, None);
     }
     // a test's and a program's process have cargo's run-time environment (their package's
     // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
@@ -3698,7 +3717,7 @@ fn run_steps(held: &Held, shard: &Shard, log: &Path, at: &CiShard, note: &mut dy
             // the step says this box cannot do it (ci_xcheck.sh: no std for the target)
             Ok(UNFIT) => {
                 let _ = writeln!(f, "== exit {UNFIT}: this box cannot run it");
-                let why = text.lines().rev().find(|l| !l.starts_with("makepad-run:")).unwrap_or("");
+                let why = text.lines().rev().find(|l| crate::run_names::after(l, "").is_none()).unwrap_or("");
                 return ("incomplete", format!("unfit: {}: {why}", step_name(step)));
             }
             Ok(code) => {
@@ -4664,8 +4683,8 @@ mod tests {
             for os in [Os::Linux, Os::Windows] {
                 let steps: Vec<_> = p.iter().filter(|s| s.kind == Kind::Test && s.os == os).flat_map(|s| &s.steps).collect();
                 assert!(steps.contains(&&argv(&["cargo", "test", "--release", "-p", "makepad-run"])), "loader on {os:?}");
-                assert!(steps.contains(&&jit(&["test", "relax-base"])), "shared dependency on {os:?}");
-                assert!(steps.contains(&&jit(&["test", "makepad-devhub", "--lib"])), "other member on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "relax-base", "--release"])), "shared dependency on {os:?}");
+                assert!(steps.contains(&&jit(&["test", "makepad-devhub", "--release", "--lib"])), "other member on {os:?}");
                 assert_eq!(steps.contains(&&compiler), !failing || os == Os::Linux, "compiler on {os:?}, failing={failing}");
             }
             if failing {
@@ -4685,14 +4704,14 @@ mod tests {
         let p = sweep_plan(&t, &|_| None, 0);
         let check = p.iter().find(|s| s.id == "checks:story:every_profile").unwrap_or_else(|| panic!("the named check has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
         assert_eq!((check.os, check.kind, check.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named check's OS, kind and default estimate");
-        assert_eq!(check.steps, vec![jit(&["test", "story", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])], "the named check's exact JIT test command");
+        assert_eq!(check.steps, vec![jit(&["test", "story", "--release", "--lib", "--", "--ignored", "--exact", "export::tests::every_profile"])], "the named check's exact JIT test command");
         let run = p.iter().find(|s| s.id == "runs:story:--export-web talks/a.deck.splash").unwrap_or_else(|| panic!("the named run has its own shard: {:?}", p.iter().map(|s| &s.id).collect::<Vec<_>>()));
         assert_eq!((run.os, run.kind, run.est), (Os::Linux, Kind::Test, GUESS_CHECK_SECS), "the named run's OS, kind and default estimate");
         assert!(matches!(run.judge, Judge::Exit), "the named run is judged by its exit status");
         assert_eq!(run.steps, vec![jit(&["run", "story", "--", "--export-web", "talks/a.deck.splash"])], "the named run's JIT command and arguments");
         // its own proof: the crate's tests are another unit, so a pass runs both
         assert_eq!(units_of(check)[0].section, "job.checks_story_every_profile", "the named check has its own proof");
-        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story"]))), "the crate's tests still have a separate shard");
+        assert!(p.iter().any(|s| s.id.starts_with("test:") && s.steps.contains(&jit(&["test", "story", "--release"]))), "the crate's tests still have a separate shard");
         let conf = read_conf("[ci]\nchecks = \"a::b, c\"\nruns = \"--x 1; --y\"\n").unwrap();
         assert_eq!(conf.checks, ["a::b", "c"], "the named checks are split and trimmed");
         assert_eq!(conf.runs, ["--x 1", "--y"], "the named runs are split and trimmed");
@@ -5023,9 +5042,9 @@ mod tests {
         assert_eq!(judge(Judge::Report, "x", 1, "").0, false);
         assert!(judge(Judge::Cargo, "x", 0, "warning: unused manifest key\n    Finished").0);
         assert!(!judge(Judge::Cargo, "x", 0, "src/a.rs:3:9: warning: unused variable: `x`\n").0);
-        assert!(!judge(Judge::Check, "x", 0, "makepad check: 1193 body owners of the checked crates, 9 compiled in all, 2 errors\n").0);
-        assert!(judge(Judge::Check, "x", 0, "makepad check: 1193 body owners, 9 compiled in all, 0 errors\n").0);
-        let warned = "/t/platform/src/remote_core.rs:92:8: warning: function `end_fields` is never used [dead_code]\nmakepad check: 6435 body owners of the checked crates, 204 compiled in all, 0 errors\n";
+        assert!(!judge(Judge::Check, "x", 0, "relax check: 1193 body owners of the checked crates, 9 compiled in all, 2 errors\n").0);
+        assert!(judge(Judge::Check, "x", 0, "relax check: 1193 body owners, 9 compiled in all, 0 errors\n").0);
+        let warned = "/t/platform/src/remote_core.rs:92:8: warning: function `end_fields` is never used [dead_code]\nrelax check: 6435 body owners of the checked crates, 204 compiled in all, 0 errors\n";
         assert_eq!(judge(Judge::Check, "check makepad-platform", 0, warned), (false, "check makepad-platform: 1 warning".to_string()));
     }
 

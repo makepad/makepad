@@ -35,10 +35,12 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
   job cancel <id..> | job rerun <id>     cancel; run again exactly (same snapshot and command)
   job bump <job|lease id..>             the manager's unstick: a waiting job or queued lease goes to the front of its queue class
   job inspect <id> <cmd..> | job resume <id> <P1> retry|restart|unwind | job release <id>
-                                          a job paused on a parked panic keeps its box: look, resume or let go
-                                          (while the panic stays parked; 10 min with no action release it)
+                                          a job paused on a parked panic keeps its box: look, or resume the process
+                                          (it runs on); release ends the job `panicked`, its box freed and the parked
+                                          process ended with it (10 min with no action release it; a job no longer
+                                          paused is refused: `job cancel` ends it)
   live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [-- args...]
-        [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key]
+        [--cost small|medium|large] [--est-min N] [--class name] [--priority interactive|background] [--jit key] [--home <archive>]
                                           the app under the JIT on a box (headless, or visible on a screen box), held
                                           for this lane: every file saved in this worktree ships to it as it comes and
                                           hot-patches in; overlay by default (--tree opts out), small cost on a hot box. Returns its id at once.
@@ -46,6 +48,8 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           live look <id>: the edit patched, a frame drawn, a grab in
                                           local/screencap/<lane>/<id>-<n>.png (a look, not a playtest)
                                           a save during an app's start applies once it is up
+                                          --home: a tar archive of files the app finds in a home of its own on
+                                          its box (MAKEPAD_TEST_HOME, where an app keeps its per-user state), gone with the session
   live look <id> [timeout_s]              that one look (before any edit: the app up and drawing); default 300 s
   live start <pkg> --test [--env K=V ..] [--lib|--bin B|--test T] [-- args...]
                                           warm JIT tests: rerun after each saved edit, including restarts
@@ -57,7 +61,7 @@ pub const HELP: &str = "  job submit [--kind test] [--needs k=v,..] [--node N [-
                                           ship changes since the last ship, including deletions; end it (10 min idle; tests 30 min)
   live again <id>                         an ended session (parked: an ask needed the RAM it held idle; a visible one
                                           parks only for timed or whole-box work) starts again
-                                          as it was asked: same app or tests, box, env and source mode
+                                          as it was asked: same app or tests, box, env, home and source mode
   show <app> [--on mac|<node>|quest] [--after landed <branch>] [--replace] [--pin] [-- <app args>]
   show pin <app> [--on <device> | <device>] on|off   an operation runs on the app: no edit or landing reaches it and it
                                           does not restart, while landings go on for everyone else; off: it catches up;
@@ -548,7 +552,8 @@ fn job(c: &Client, words: &[&str], json: bool) -> i32 {
                     eprintln!("makepad devhub job wait: no job {}", u.id);
                     return 2;
                 }
-                let settled = |j: &crate::state::Job| j.done() || j.state == "paused";
+                // (a pause is no end: the master's wait goes on through it, `job` says it)
+                let settled = |j: &crate::state::Job| j.done();
                 let ready = if any { list.iter().any(settled) } else { list.iter().all(settled) };
                 if ready {
                     let shown: Vec<&crate::state::Job> = if any { list.iter().filter(|j| settled(j)).collect() } else { list.iter().collect() };
@@ -721,9 +726,16 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             let mut loader = None;
             let (mut test, mut test_args, mut selected) = (false, Vec::new(), false);
             let mut env = Vec::new();
+            let mut home = String::new();
             let mut i = 0;
             while i < rest.len() {
                 match (rest[i], rest.get(i + 1)) {
+                    // files the app finds in a home of its own on its box (`MAKEPAD_TEST_HOME`)
+                    ("--home", Some(a)) => {
+                        let Some(a) = std::fs::canonicalize(a).ok().filter(|a| a.is_file()) else { eprintln!("makepad devhub live start: --home {a} is not a file (a tar archive of the files the app's home starts with)"); return 2 };
+                        home = a.to_string_lossy().into_owned();
+                        i += 1;
+                    }
                     ("--needs", Some(n)) => {
                         needs = n.to_string();
                         i += 1;
@@ -778,7 +790,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
                     }
                     ("--", _) => { test_args.extend_from_slice(&rest[i..]); break; }
                     (w, _) => {
-                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
+                        eprintln!("makepad devhub live start <app> [--node N|--needs k=v,..] [--visible] [--lane L] [--tree] [--cores N] [--ram-gb N] [--env K=V ..] [--home <archive>] [--bin B] [--test [--lib|--bin B|--test T]] [-- args...]: invalid `{w}`");
                         return 2;
                     }
                 }
@@ -794,7 +806,7 @@ fn live_as(c: &Client, words: &[&str], json: bool, me: Option<String>) -> i32 {
             };
             let lane = lane.or_else(|| std::env::var("DEVHUB_LANE").ok().filter(|l| !l.is_empty())).unwrap_or_else(|| tree.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default());
             let loader = loader.unwrap_or_default();
-            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}]}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","));
+            let req = format!("{{\"loader\":{},\"priority\":{},\"cost\":{},\"class\":{},\"est_min\":{est_min},\"cores\":{cores},\"ram_gb\":{ram_gb},\"tree\":{use_tree},\"app\":{},\"repo_dir\":{},\"lane\":{},\"agent\":{},\"needs\":{},\"node\":{},\"visible\":{visible},\"test\":{test},\"test_args\":[{}],\"env\":[{}],\"also\":[{}],\"home\":{}}}", json_str(&loader), json_str(priority), json_str(&cost), json_str(&class), json_str(app), json_str(&tree.to_string_lossy()), json_str(&lane), json_str(&std::env::var("DEVHUB_AGENT").unwrap_or_default()), json_str(&needs), json_str(&node), test_args.iter().map(|a| json_str(a)).collect::<Vec<_>>().join(","), env.join(","), std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace().map(json_str).collect::<Vec<_>>().join(","), json_str(&home));
             done(retry_master(|| one(c, "live", &format!("live start {req}"))), json, &flat)
         }
         // goes on through a master or hub restart when asking again does nothing twice ([`cut_act`])

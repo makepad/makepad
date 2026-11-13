@@ -233,6 +233,21 @@ impl View {
         }
         Ok(())
     }
+
+    /// [`View::landed`], or its tip in the target and a hand-in of the branch landed since
+    /// `since_ms` (`land`: [`land_entries`]), its pinned commit in the target. The merge bot
+    /// fast-forwards a landed lane to the target: its tip is one of the target's own first-parent
+    /// commits then, as a fresh lane's is, and only the train's record tells the two apart.
+    fn landed_since(&mut self, branch: &str, tree: &Path, since_ms: u64, land: &[String]) -> Result<(), String> {
+        self.landed(branch, tree, true).or_else(|e| {
+            let Ok(Some(tip)) = self.tip_of(branch) else { return Err(e) };
+            let handed = self.reached(&tip) && land.iter().filter_map(|x| crate::land::Entry::parse(x)).any(|h| {
+                let (b, pinned) = if self.target == "main" { (&h.cbranch, &h.cs) } else { (&h.branch, &h.ms) };
+                h.state == crate::land::St::Landed && b == branch && h.asked_ms >= since_ms && ObjectId::from_hex(pinned).is_ok_and(|o| self.reached(&o))
+            });
+            if handed { Ok(()) } else { Err(e) }
+        })
+    }
 }
 
 impl View {
@@ -296,7 +311,7 @@ impl Views {
 /// the automatic cleanup takes only landed lanes, never one an agent just made.
 fn removable(ctx: &Ctx, l: &LaneRec, views: &mut Views, cwds: &[(u32, PathBuf)], land: &[String], asked: bool) -> Result<(), String> {
     let path = Path::new(&l.path);
-    views.makepad.landed(&l.branch, path, true).or_else(|e| views.makepad.nothing_unlanded(&l.branch, path, asked, e))?;
+    views.makepad.landed_since(&l.branch, path, l.created_ms, land).or_else(|e| views.makepad.nothing_unlanded(&l.branch, path, asked, e))?;
     let nested = path.join("apps/commercial");
     if nested.join(".git").exists() {
         if l.cbranch.is_empty() {
@@ -580,7 +595,7 @@ pub fn cleanup(ctx: &Ctx) {
         match removable(ctx, &l, &mut views, &cwds, &land, false) {
             Err(why) => {
                 // a lane that landed and is still referenced says why once
-                let landed = views.makepad.landed(&l.branch, Path::new(&l.path), true).is_ok();
+                let landed = views.makepad.landed_since(&l.branch, Path::new(&l.path), l.created_ms, &land).is_ok();
                 if l.landed_ms != 0 || (landed && l.note != why) {
                     set(ctx, &l.name, |x| {
                         if !landed {
@@ -836,8 +851,12 @@ struct HalfAudit {
 }
 
 impl View {
-    fn audit_commits(&mut self, path: &Path, branch: &str, head: ObjectId, check_own: bool, nested: bool) -> HalfAudit {
-        let landed = self.landed(branch, path, check_own);
+    /// `since`: a registered lane's making and the land queue's entries ([`View::landed_since`]).
+    fn audit_commits(&mut self, path: &Path, branch: &str, head: ObjectId, check_own: bool, nested: bool, since: Option<(u64, &[String])>) -> HalfAudit {
+        let landed = match since {
+            Some((ms, land)) if check_own => self.landed_since(branch, path, ms, land),
+            _ => self.landed(branch, path, check_own),
+        };
         let unlanded = self.unlanded(branch, head);
         HalfAudit { path: path.to_path_buf(), nested, branch: branch.to_string(), landed, unlanded, tracked: Vec::new(), untracked: Vec::new() }
     }
@@ -869,12 +888,16 @@ pub fn audit(repo: &Path, json: bool, out: &mut dyn Write) -> Result<(), String>
     // registered lanes, from the master's state (read only)
     let state = crate::state::committed(&crate::proto::home())?;
     let mut registered: HashMap<PathBuf, (String, String, bool)> = HashMap::new();
+    let mut made: HashMap<PathBuf, u64> = HashMap::new();
     for l in state.as_ref().and_then(|v| v.get("lanes")).and_then(|v| v.as_arr()).unwrap_or(&[]) {
         let s = |k: &str| l.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         if s("state") == "live" {
             registered.insert(PathBuf::from(s("path")), (s("name"), s("note"), l.get("keep").and_then(|x| x.as_bool()).unwrap_or(false)));
+            made.insert(PathBuf::from(s("path")), l.get("created_ms").and_then(|x| x.as_u64()).unwrap_or(0));
         }
     }
+    let land: Vec<String> = state.as_ref().and_then(|v| v.get("land")).and_then(|v| v.as_arr()).unwrap_or(&[]).iter().map(|v| v.to_json()).collect();
+    let since = |path: &Path| made.get(path).map(|ms| (*ms, land.as_slice()));
     let list = |v: &View| -> Result<Vec<(PathBuf, String, ObjectId)>, String> {
         Ok(v.repo.lock().unwrap_or_else(|e| e.into_inner()).worktree_list().map_err(|e| e.to_string())?.into_iter().filter(|w| !w.main && w.path.starts_with(&root) && w.path.is_dir()).filter_map(|w| Some((w.path, w.branch.unwrap_or_default(), w.head?))).collect())
     };
@@ -889,11 +912,11 @@ pub fn audit(repo: &Path, json: bool, out: &mut dyn Write) -> Result<(), String>
     for (path, branch, head) in mk_list {
         let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         let nested = path.join("apps/commercial");
-        let mut halves = vec![("makepad", mk.audit_commits(&path, &branch, head, true, nested.join(".git").exists()))];
+        let mut halves = vec![("makepad", mk.audit_commits(&path, &branch, head, true, nested.join(".git").exists(), since(&path)))];
         if let Some(i) = com_list.iter().position(|c| c.0 == nested) {
             let (cp, cb, ch) = com_list.swap_remove(i);
             if let Some(c) = com.as_mut() {
-                halves.push(("commercial", c.audit_commits(&cp, &cb, ch, false, false)));
+                halves.push(("commercial", c.audit_commits(&cp, &cb, ch, false, false, None)));
             }
         }
         let reg = registered.get(&path).cloned();
@@ -902,7 +925,7 @@ pub fn audit(repo: &Path, json: bool, out: &mut dyn Write) -> Result<(), String>
     for (path, branch, head) in com_list {
         let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
         if let Some(c) = com.as_mut() {
-            let h = c.audit_commits(&path, &branch, head, true, false);
+            let h = c.audit_commits(&path, &branch, head, true, false, since(&path));
             lanes.push((name, path.clone(), registered.get(&path).cloned(), vec![("commercial", h)]));
         }
     }
@@ -1533,6 +1556,18 @@ const RETIRE_OFFER_MS: u64 = 6 * 3_600_000;
 /// live sessions whose restart waited past 5 min ([`super::live::restarts_pending`]) and the tests
 /// run's units far over their measure ([`crate::bucket::slow_units`]). Some just work on code. Then the lanes offered for retirement ([`retire_offers`]) and the parked
 /// ones, in one row.
+/// The bucket shards' units far past their measure, each with its box as the lease scheduler sees
+/// it now ([`crate::bucket::slow_units`]): the check-in's rows, and `devhub bucket`'s beside the run.
+pub(crate) fn slow_now(ctx: &Ctx, now: u64) -> Vec<String> {
+    let (leases, nodes) = (ctx.leases.view(), ctx.leases.nodes());
+    let shard_box = |id: &str| {
+        let node = leases.iter().find(|l| l.id == id && !matches!(l.state, crate::lease::sched::State::Ended(_)))?.node.clone()?;
+        let caps = nodes.iter().find(|n| n.name == node).map(|n| (n.up, n.caps.as_ref()));
+        Some(crate::bucket::ShardBox { up: caps.is_some_and(|(up, _)| up), load: caps.and_then(|(_, c)| c).map_or(0.0, |c| c.load1), cores: caps.and_then(|(_, c)| c).map_or(0, |c| c.cores), node })
+    };
+    crate::bucket::slow_units(&ctx.home, now, &shard_box)
+}
+
 fn quiet(ctx: &Ctx) -> Result<String, String> {
     let lanes: Vec<LaneRec> = ctx.store.read(|d| d.lanes.iter().filter(|l| l.ended_ms == 0).cloned().collect());
     let ended = ended_runs(ctx, &lanes);
@@ -1551,13 +1586,7 @@ fn quiet(ctx: &Ctx) -> Result<String, String> {
         rows.extend(overdue);
     }
     rows.extend(super::live::restarts_pending(ctx, now));
-    let (leases, nodes) = (ctx.leases.view(), ctx.leases.nodes());
-    let shard_box = |id: &str| {
-        let node = leases.iter().find(|l| l.id == id && !matches!(l.state, crate::lease::sched::State::Ended(_)))?.node.clone()?;
-        let caps = nodes.iter().find(|n| n.name == node).map(|n| (n.up, n.caps.as_ref()));
-        Some(crate::bucket::ShardBox { up: caps.is_some_and(|(up, _)| up), load: caps.and_then(|(_, c)| c).map_or(0.0, |c| c.load1), cores: caps.and_then(|(_, c)| c).map_or(0, |c| c.cores), node })
-    };
-    rows.extend(crate::bucket::slow_units(&ctx.home, now, &shard_box));
+    rows.extend(slow_now(ctx, now));
     let offers = offered(ctx, &lanes, &ended, &busy, now);
     let waiting: Vec<LaneRec> = lanes.iter().filter(|l| l.parked.is_empty() && !offers.iter().any(|o| o.name == l.name)).cloned().collect();
     rows.extend(quiet_lanes(&waiting, &ended, &busy, &landed, now));
@@ -2148,7 +2177,22 @@ mod tests {
         g(&ran, &["add", "."]);
         g(&ran, &["commit", "-q", "-m", "lane work"]);
         g(&mk, &["merge", "-q", "--no-ff", "-m", "land r", "rc-r"]);
+        // the merge bot fast-forwards it to work: its tip is one of work's own commits then, as a
+        // fresh lane's is. The train's record of its hand-in says it landed; one of an earlier
+        // lane of the name does not.
+        let own = g(&ran, &["rev-parse", "HEAD"]);
+        g(&ran, &["merge", "-q", "--ff-only", "work"]);
+        let landed_ms = || ctx.store.read(|d| d.lanes.iter().rev().find(|l| l.name == "r").map(|l| l.landed_ms).unwrap());
         cleanup(&ctx);
+        assert_eq!(landed_ms(), 0, "{:?}", ctx.store.read(|d| d.lanes.last().map(|l| l.note.clone())));
+        let made = ctx.store.read(|d| d.lanes.iter().rev().find(|l| l.name == "r").unwrap().created_ms);
+        let hand_in = |asked_ms: u64| makepad_strict_json::parse(format!(r#"{{"id":10,"branch":"rc-r","state":"landed","ms":"{own}","asked_ms":{asked_ms}}}"#).as_bytes()).unwrap();
+        ctx.store.update(|d| d.land = vec![hand_in(made - 1)]).unwrap();
+        cleanup(&ctx);
+        assert_eq!(landed_ms(), 0);
+        ctx.store.update(|d| d.land = vec![hand_in(made)]).unwrap();
+        cleanup(&ctx);
+        assert!(landed_ms() > 0, "{:?}", ctx.store.read(|d| d.lanes.last().map(|l| l.note.clone())));
         set(&ctx, "r", |x| x.landed_ms = 1);
         let ledger = |ended_ms: u64| std::fs::write(home.join("leases.jsonl"), format!("{{\"id\":\"L7\",\"lane\":\"rc-r\",\"kind\":\"screen\",\"node\":\"n1\",\"how\":\"released\",\"ended_ms\":{ended_ms}}}\n")).unwrap();
         ledger(wall_ms());

@@ -50,12 +50,14 @@ pub mod lease;
 pub mod land;
 pub mod private_check;
 pub mod ci_merge;
+pub mod gitlock;
 pub mod git_exec;
 pub mod gitread;
 pub mod nested;
 pub mod jitcache;
 pub mod logstamp;
 mod jit_misses;
+pub mod run_names;
 pub mod state;
 pub mod testlog;
 #[cfg(test)]

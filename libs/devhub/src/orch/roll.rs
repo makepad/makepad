@@ -944,18 +944,42 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     // there, granted in its turn beside the work granted there, held until the hub answers that it
     // restarts on what it built (two Macs' hubs built beside their work at 12 and 14 of their 10
     // cores, 11-05)
-    let mut room = None;
-    if svc == "devhub" {
+    // The room is its build's alone: it is taken once the box's tree is free ([`tree_busy`]), and
+    // given back while the hub waits on other work there (a sync's apply, a timed run), to be
+    // taken again in line once that ends. The hub builds in its deployment's tree, which a sync's
+    // apply builds in too (one cargo lock), and refuses its restart while one runs: a hub room
+    // granted beside its box's deployment build held 4 cores past the box's for nothing, 36 of
+    // 129 rooms in 6 h, and live test runs waited 11 min at 24 of 16 cores behind both (11-13).
+    let take_room = || -> Result<super::leg::Held, RollEnd> {
+        let mut said = None;
+        while let Some(why) = tree_busy(ctx, node) {
+            if has_it() {
+                done(&caps().unwrap_or_default());
+                return Err(RollEnd::NoRestart);
+            }
+            if said != Some(why) {
+                updating(Some(&format!("its hub builds after {why} there (one tree)")));
+                said = Some(why);
+            }
+            std::thread::sleep(Duration::from_secs(5));
+        }
         match hub_build_room(ctx, node, &has_it, &|line| updating(Some(&format!("its hub build waits for room ({line})")))) {
-            Ok(held) => room = Some(held),
+            Ok(held) => Ok(held),
             Err(_) if has_it() => {
                 done(&caps().unwrap_or_default());
-                return RollEnd::NoRestart;
+                Err(RollEnd::NoRestart)
             }
             Err(e) => {
                 event(ctx, Sev::Warn, format!("update: {node}'s hub build got no room: {e}"));
-                return RollEnd::NoRestart;
+                Err(RollEnd::NoRestart)
             }
+        }
+    };
+    let mut room = None;
+    if svc == "devhub" {
+        match take_room() {
+            Ok(held) => room = Some(held),
+            Err(end) => return end,
         }
         updating(None);
         // A hub without `handover` restarts only between runs: it drains, once.
@@ -993,6 +1017,12 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
             done(&caps().unwrap_or_default());
             return RollEnd::NoRestart;
         }
+        if svc == "devhub" && room.is_none() {
+            match take_room() {
+                Ok(held) => { room = Some(held); updating(None); stall.clear(); }
+                Err(end) => return end,
+            }
+        }
         // a hub build granted fewer cores than it measured (it started now on its box's free
         // ones) builds on that many jobs; an older hub compares the whole word with its
         // deployment, so it gets the sha alone
@@ -1010,6 +1040,9 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
                 std::thread::sleep(Duration::from_secs(5));
             }
             Ok(l) if l.first().is_some_and(|x| x.starts_with("{\"err\":\"waits: ")) => {
+                if svc == "devhub" && gives_room_back(&l[0]) {
+                    room = None;
+                }
                 if svc == "devhub" && !waits.on && l[0].contains("waits: a timed lease runs") {
                     waits.set(Some(format!("its hub restarts at {}", super::short(&deploy))));
                 }
@@ -1092,6 +1125,36 @@ fn roll_node(ctx: &Ctx, node: &str, svc: &str, dirs: &BTreeSet<String>, work: &s
     RollEnd::Late
 }
 
+/// What `node`'s deployment tree does now that its hub's build waits for: a sync's apply there
+/// ([`crate::lease::Caps::applying`]; the hub refuses its restart under one), its deployment build
+/// ([`deploy_build_room`], in the same tree and target), or a timed run (the hub builds after it).
+/// None: the tree is free for the hub's build.
+fn tree_busy(ctx: &Ctx, node: &str) -> Option<&'static str> {
+    use crate::lease::sched::State;
+    let applying = ctx.leases.nodes().into_iter().find(|n| n.name == node).and_then(|n| n.caps).is_some_and(|c| c.applying);
+    let leases = ctx.leases.view();
+    let running = leases.iter().filter(|l| matches!(l.state, State::Starting | State::Granted) && l.node.as_deref() == Some(node));
+    tree_busy_of(applying, running.map(|l| (l.req.deploy_build(), l.req.kind == crate::lease::Kind::Timed)))
+}
+
+/// [`tree_busy`] of whether the box applies, and of each lease running there whether it is its
+/// deployment's build and whether it is timed.
+fn tree_busy_of(applying: bool, running: impl Iterator<Item = (bool, bool)>) -> Option<&'static str> {
+    if applying { return Some("a sync's apply"); }
+    let (mut deploy, mut timed) = (false, false);
+    for (d, t) in running { deploy |= d; timed |= t; }
+    if deploy { return Some("its deployment's build"); }
+    timed.then_some("a timed run")
+}
+
+/// Whether a hub's `waits:` answer to `hub-restart` is a wait on other work on its box, not on its
+/// own build: a sync's apply there, a timed run (`lease/exec.rs`). Its build room goes back until
+/// that ends ([`tree_busy`]); its own build, a deployment that moved under the ask (asked again at
+/// once at the new one) and the short ones keep it.
+fn gives_room_back(answer: &str) -> bool {
+    answer.contains("waits: a sync runs on ") || answer.contains("waits: a timed lease runs on ")
+}
+
 /// The room `node`'s hub builds itself in ([`crate::lease::sched::Req::hub_build`]): the master's
 /// own lease of its class there, granted in its turn (its wait on the box's line). `gone`: the
 /// hub has the code another way, and the ask is given up.
@@ -1119,6 +1182,14 @@ pub(crate) fn deploy_build_room(repo: &std::path::Path, node: &str, waits: &mut 
         Err(_) if timed() => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+/// Whether `node` is a bench box: timed work is its job, so its deployment's tree moves only with
+/// its build, in its room (sync/autosync.rs): a tree that moved alone handed its JIT apps a landing
+/// of the JIT's own code, which they took by rebuilding `makepad run` at ~13 cores outside any
+/// lease, while timed work waited there (11-13).
+pub(crate) fn is_bench(node: &str) -> bool {
+    super::leases().is_some_and(|lm| lm.nodes().iter().any(|n| n.name == node && n.role() == crate::lease::Role::Bench))
 }
 
 /// A box's deployment-build room ([`deploy_build_room`]), held until dropped.
@@ -1648,6 +1719,29 @@ mod tests {
         // an allapps run holds it for a while only
         let waits: Vec<bool> = (0..5).map(|m| super::restart_blocker_of(false, false, true, m * min).is_some()).collect();
         assert_eq!(waits, [true, true, true, false, false]);
+    }
+
+    /// A hub's build room is held only while the hub builds: an answer that waits on a sync's
+    /// apply or a timed run gives it back, and it is taken again once the box's tree is free of
+    /// both and of its deployment's build (both build in one tree). Its own build, and a
+    /// deployment that moved under the ask, keep it (a hub room beside its box's deployment build
+    /// held 4 cores for nothing, 11-13).
+    #[test]
+    fn a_hub_build_room_is_held_only_while_the_hub_builds() {
+        let answer = |w: &str| format!("{{\"err\":\"waits: {w}\"}}");
+        for (w, back) in [
+            ("a sync runs on node-a (the hub restarts after it)", true),
+            ("a timed lease runs on node-a: its new hub at 0123456789 builds after it", true),
+            ("node-a's new hub builds at 0123456789 first", false),
+            ("the deployment of node-a moved to 0123456789 (the master looked at 9876543210)", false),
+            ("the overlay selftest of L1 runs in node-a's hub", false),
+        ] {
+            assert_eq!(super::gives_room_back(&answer(w)), back, "{w}");
+        }
+        assert_eq!(super::tree_busy_of(true, std::iter::empty()), Some("a sync's apply"));
+        assert_eq!(super::tree_busy_of(false, [(false, false), (true, false)].into_iter()), Some("its deployment's build"));
+        assert_eq!(super::tree_busy_of(false, [(false, true)].into_iter()), Some("a timed run"));
+        assert_eq!(super::tree_busy_of(false, [(false, false)].into_iter()), None, "other work beside it: the hub builds");
     }
 
     /// The hubs follow the newest devhub build, not the master's restart (Mac hubs lagged the

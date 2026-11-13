@@ -374,13 +374,13 @@ fn mac_watch(ctx: &Ctx, x: &Show) {
 /// its exit, then the host's close: Stage, Synth, Amp and the fractal zoomer said "session 0 (the
 /// host) closed it", not by the person's hand, 11-06.)
 fn close_cause(log: &str) -> (bool, String) {
-    const SOURCES: [&str; 9] = ["makepad-hal: window ", "makepad-hal: asked to quit", "the app closes it at", "the app asks to close it at", "[makepad-remote] remote closed window", "hal: the app quit", "makepad-run: the run ends: SIG", "its caption's close button: ", RUN_WINDOW];
+    const SOURCES: [&str; 9] = ["makepad-hal: window ", "makepad-hal: asked to quit", "the app closes it at", "the app asks to close it at", "[makepad-remote] remote closed window", "hal: the app quit", ": the run ends: SIG", "its caption's close button: ", RUN_WINDOW];
     // (the run's own close of its window is a cause only of the host's close after it: after the
     // person's close it says nothing of who closed the app's window)
-    const RUN_WINDOW: &str = "makepad-run: the run's window closes: ";
+    const RUN_WINDOW: &str = ": the run's window closes: ";
     // the links of a chain, never a cause: the run's end at the app's exit, the app's last window
     // closing (its exit follows)
-    const LINKS: [&str; 2] = ["makepad-run: the run ends: the app exited", "hal: the last window closed"];
+    const LINKS: [&str; 2] = [": the run ends: the app exited", "hal: the last window closed"];
     let follows = |l: &str| l.contains(" closes: session ") && !l.contains("(the host)");
     let link = |l: &str| LINKS.iter().any(|s| l.contains(s));
     let request = |l: &str| l.contains(" asked to close (") || l.contains("makepad-hal: asked to quit");
@@ -1744,10 +1744,10 @@ mod tests {
         assert_eq!(close_cause(end), (false, "its log names no close or quit".to_string()), "an old build's log");
         // the run's end lines (11-06): the app's session closing its window and the app's exit
         // follow the cause; a quit signal, and the host closing the window it lent, are causes
-        let ran = "makepad-hal: window 0 closes: session 1 closed it\nmakepad-run: the run ends: the app exited (0)\n";
+        let ran = "makepad-hal: window 0 closes: session 1 closed it\nrelax: the run ends: the app exited (0)\n";
         assert!(close_cause(&format!("makepad-hal: window 0 asked to close (windowShouldClose:): key down \"w\" (code 13) +cmd\n{ran}")).0, "Cmd+W, then the app's close");
-        let signal = "makepad-hal: window 0 closes: session 0 (the host) closed it\nmakepad-run: the run ends: SIGTERM from pid 812 (cmd x, its parent 640: cmd y)\n";
-        assert_eq!(close_cause(signal), (false, "makepad-run: the run ends: SIGTERM from pid 812 (cmd x, its parent 640: cmd y)".to_string()));
+        let signal = "makepad-hal: window 0 closes: session 0 (the host) closed it\nrelax: the run ends: SIGTERM from pid 812 (cmd x, its parent 640: cmd y)\n";
+        assert_eq!(close_cause(signal), (false, "relax: the run ends: SIGTERM from pid 812 (cmd x, its parent 640: cmd y)".to_string()));
         assert_eq!(close_cause("makepad-hal: window 0 closes: session 0 (the host) closed it\n").1, "makepad-hal: window 0 closes: session 0 (the host) closed it");
         assert_eq!(close_cause(ran).1, "its log names no close or quit");
         // a caption's close button (a node's WM, app-drawn captions): the window system's input
@@ -1760,19 +1760,19 @@ mod tests {
         assert!(!close_cause(&agent).0 && close_cause(&agent).1.contains("injected by agent A1"));
         assert_eq!(close_cause(asks).0, false, "the app's own request, no click before it");
         // the run closing the window it lent names why
-        let run = "makepad-run: the run's window closes: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n";
-        assert_eq!(close_cause(run), (false, "makepad-run: the run's window closes: the app exited (0)".to_string()));
-        let after = format!("makepad-hal: window 0 asked to close (windowShouldClose:): key down \"w\" (code 13) +cmd\n{ran}makepad-run: the run's window closes: the app exited (0)\n");
+        let run = "relax: the run's window closes: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n";
+        assert_eq!(close_cause(run), (false, "relax: the run's window closes: the app exited (0)".to_string()));
+        let after = format!("makepad-hal: window 0 asked to close (windowShouldClose:): key down \"w\" (code 13) +cmd\n{ran}relax: the run's window closes: the app exited (0)\n");
         assert!(close_cause(&after).0, "the run closing its window after the person's close says nothing of who closed it");
         // a Mac window's close button, then the app's quit (or its last window closing), the
         // run's end and the host's close (Stage and Synth, 11-06): the click's
         let click = "makepad-hal: window 0 asked to close (windowShouldClose:): mouse event 2 in window 807 at (16, 779), on its close button";
-        let stage = format!("{click}\n[I] platform/src/cx_api.rs:1480:9 - the app quits: Cx::quit at apps/x/src/product/mod.rs:1088:16\n[I] platform/src/os/hal/event_loop.rs:396:17 - hal: the app quit\nmakepad-run: the UI waits on the JIT (504 ms): the load screen fades in\nmakepad-run: after 793 ms the load screen gives way to the run's view\nmakepad-run: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\nmakepad-run domain: 1: retaining mapping until thread exit: domain-1-x\n");
+        let stage = format!("{click}\n[I] platform/src/cx_api.rs:1480:9 - the app quits: Cx::quit at apps/x/src/product/mod.rs:1088:16\n[I] platform/src/os/hal/event_loop.rs:396:17 - hal: the app quit\nrelax: the UI waits on the JIT (504 ms): the load screen fades in\nrelax: after 793 ms the load screen gives way to the run's view\nrelax: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\nrelax domain: 1: retaining mapping until thread exit: domain-1-x\n");
         assert_eq!(close_cause(&stage), (true, click.to_string()), "Stage: the click, not the host's close");
-        let synth = format!("{click}\n[I] platform/src/event/hal_intake.rs:621:21 - hal: the last window closed (\"Synth\")\nmakepad-run: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n");
+        let synth = format!("{click}\n[I] platform/src/event/hal_intake.rs:621:21 - hal: the last window closed (\"Synth\")\nrelax: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n");
         assert_eq!(close_cause(&synth), (true, click.to_string()), "Synth: the click, not the host's close");
         // the app's own quit, no request before it: the app's; the host's close before the run ends: the host's
-        let quit = "[I] platform/src/os/hal/event_loop.rs:396:17 - hal: the app quit\nmakepad-run: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n";
+        let quit = "[I] platform/src/os/hal/event_loop.rs:396:17 - hal: the app quit\nrelax: the run ends: the app exited (0)\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n";
         assert_eq!(close_cause(quit), (false, "[I] platform/src/os/hal/event_loop.rs:396:17 - hal: the app quit".to_string()));
         let host = format!("{click}\nmakepad-hal: window 0 closes: session 0 (the host) closed it\n");
         assert_eq!(close_cause(&host).1, "makepad-hal: window 0 closes: session 0 (the host) closed it", "no run's end between: the host's own close");

@@ -289,7 +289,7 @@ static IMAGE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 /// runs natively, so the tests of those roles run under `cargo test`, which `devhub test` uses here.
 #[cfg(test)]
 pub fn no_image_roles() -> bool {
-    let jit = std::env::var_os("MAKEPAD_RUN_SELF_EXEC").is_some();
+    let jit = std::env::var_os("RELAX_SELF_EXEC").is_some();
     if jit { eprintln!("not under the JIT: this tests the image's roles before main"); }
     jit
 }

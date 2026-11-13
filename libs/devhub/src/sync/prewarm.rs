@@ -183,7 +183,7 @@ mod node {
             args.push(pkg);
             args.extend(extra.iter().copied());
             args.extend(["--", "--remote"]);
-            env.extend([("MAKEPAD_HIDE_WINDOWS", "1"), ("SANDBOX_MUTE", "1")].iter().map(|(k, v)| (k.to_string(), v.to_string())));
+            env.extend([("MAKEPAD_HIDE_WINDOWS", "1"), ("MAKEPAD_MUTE", "1")].iter().map(|(k, v)| (k.to_string(), v.to_string())));
             steps.push(Step { app: id.to_string(), what: "present", program: cargo.clone(), dir, argv: jit(root, &args), env, report: Some(report) });
         }
         steps
@@ -468,7 +468,7 @@ mod node {
             assert_eq!(steps[0].dir, root.join("apps/commercial"));
             let calc = steps.last().unwrap();
             assert_eq!(calc.argv[head.len()..], ["run", "--report-to", &report, "makepad-app-calculator", "--no-default-features", "--features", "standalone", "--", "--remote"]);
-            assert!(calc.env.contains(&("MAKEPAD_HIDE_WINDOWS".into(), "1".into())) && calc.env.contains(&("SANDBOX_MUTE".into(), "1".into())));
+            assert!(calc.env.contains(&("MAKEPAD_HIDE_WINDOWS".into(), "1".into())) && calc.env.contains(&("MAKEPAD_MUTE".into(), "1".into())));
         }
 
         /// A present step's JIT, stopped once it presented, ended by that stop: the node's crash

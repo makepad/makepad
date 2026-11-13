@@ -186,16 +186,16 @@ impl<'a> Rig<'a> {
             .env("DEVHUB_FIXTURE_VALUE", if case == "build-env" { "env2" } else { "env1" });
         if case == "concurrent" {
             let jobs = (self.cores / 2).max(1);
-            cmd.env("MAKEPAD_RUN_JOBS", jobs.to_string());
+            cmd.env("RELAX_JOBS", jobs.to_string());
         }
         // The fixture repositories hold no makepad run std: both sides name the box's own explicitly, so
         // the overlay's automatic std check (which would print a disk-std notice) is not part of the diff.
-        cmd.env("MAKEPAD_RUN_STD", self.box_work.join("dev/tree/libs/relax/compiler/std"));
-        for key in ["MAKEPAD_RUN_VFS", "MAKEPAD_RUN_WORKSPACE", "MAKEPAD_RUN_EDITS", "MAKEPAD_RUN_HOME", "MAKEPAD_RUN_CACHE_DIR", "MAKEPAD_RUN_CACHE_MAX"] { cmd.env_remove(key); }
+        cmd.env("RELAX_STD", self.box_work.join("dev/tree/libs/relax/compiler/std"));
+        for key in ["VFS", "WORKSPACE", "EDITS", "HOME", "CACHE_DIR", "CACHE_MAX"].iter().map(|v| crate::run_names::var(v)) { cmd.env_remove(key); }
         if overlay {
             cmd.envs(env.iter().cloned()).current_dir(self.work.join("dev/lane").join(tree.file_name().unwrap()).join("run"));
         } else {
-            cmd.current_dir(tree).env("CARGO_TARGET_DIR", self.root.join("tree-target")).env("MAKEPAD_RUN_HOME", self.root.join("tree-home"));
+            cmd.current_dir(tree).env("CARGO_TARGET_DIR", self.root.join("tree-target")).env("RELAX_HOME", self.root.join("tree-home"));
         }
         (self.spawn)(&cmd)
     }

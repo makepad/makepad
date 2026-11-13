@@ -58,7 +58,7 @@ fn timed_boxes(leases: &[Value]) -> Vec<String> {
     }).collect()
 }
 
-pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
+pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--needs k=v,..] [--lane L] [--prio P] [--rev <branch>[@sha][,<name>=<branch>[@sha]]...]
         [--repo-dir D] [--watch-pid P] [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--ram-floor-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
         [--input NAME=<archive> ..] [--for <node>] [--exit-to <file>] [-- cmd...]
@@ -83,12 +83,12 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
                                           box, or runs over 10 min while one of 10 min or less waits there (it says
                                           who); a timed series or bench checks it between steps and, once
                                           it exists, stops after the current step with its partial results and releases
-  run <lane> <kind> [--node N [--series S]|--needs ..] [--with-uncommitted] [--tree] [--patch <diff> ..]
+  run <lane> <kind> [--node N [--series S|--pin-why R]|--needs ..] [--rev R] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
         [--for <node>] -- cmd...
                                           --cores N: the run sees N cores, as each unit of a land gate's tests bucket does:
-                                          MAKEPAD_CPU_CORES (its pools and JIT workers), MAKEPAD_RUN_JOBS, CARGO_BUILD_JOBS and
+                                          MAKEPAD_CPU_CORES (its pools and JIT workers), RELAX_JOBS, CARGO_BUILD_JOBS and
                                           RUST_TEST_THREADS are N, unpinned (`devhub test ... --cores 4` runs as a unit of 4).
                                           Its box is charged what its class's runs used, its N until one is measured.
                                           A run's outputs (sheets, grabs, logs): the cmd writes them to $DEVHUB_KEEP and
@@ -96,7 +96,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
                                           run can find the lane's tree already handed to another lane.
                                           JIT commands of kinds test, screen, gpu, long and build use overlays by default;
                                           --tree uses the work tree. CI, gates, timed and non-JIT commands always use trees.
-                                          Main checkout edits need --with-uncommitted.
+                                          Main checkout edits need --with-uncommitted. --rev R: those commits
+                                          alone (`work@<sha>[,commercial=main@<sha>]`), none of the worktree's files.
                                           --patch <diff>: the files a diff (`git diff`) changes ship patched, for
                                           this lease only (a rig's instrumentation): never in the worktree or a
                                           node's tree, which gets every shipped file back at release. Its paths are
@@ -115,7 +116,15 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
   overlay selftest [--node N] [--case NAME]
                                           compare real checkouts with overlay runs on a test lease
   overlay shadow on|off|status           background tree/overlay comparisons of JIT tests; last 24 h of evidence
-  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N [--series S]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--rev R] [--tree] [-- args...]
+  test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--no-default-features] [--needs k=v,..] [--node N [--series S|--pin-why R]] [--avoid N[,N..]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--rev R] [--tree] [-- args...]
+                                          --features F, --no-default-features: the package built with those features,
+                                          as cargo builds it (the land gate's `--lib --no-default-features` run of
+                                          makepad-devhub, which Scope's agents and the phone host build so); with
+                                          --live, the feature set is part of the session's key: each set its own session.
+                                          --pin-why R (with --node): the reason it names its box when no series
+                                          does; devhub then never asks it to unpin.
+                                          --avoid N[,N..]: boxes it never takes (a tests run's rerun of a lost
+                                          shard's units goes elsewhere).
                                           --rev R: one run at the commits R alone (`<branch>[@sha]` for makepad, then
                                           `,<name>=<branch>[@sha]` per nested apps/<name> repo, as in `work,commercial=main`;
                                           each nested checkout's HEAD where R names none), none of the worktree's uncommitted files.
@@ -151,9 +160,13 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
                                           a land queue's gate or tests shard keeps none: the next landing's is
                                           other work);
                                           how far its last run got stays: `job result L<id> --tail`
+  lease <id> show | lease show <id>       that lease's line of `queue --all`: its state, box, cost, and why it
+                                          waits or how it was granted (per box: `why-queued <id>`)
   lease <id> why                          what a running lease does now, on that lease (a second lease on its tree
                                           waits for it): processes, threads and kernel waits, gdb's stacks where the
                                           box lets it attach, tests running over a minute, the last lines
+  lease <id> jits                         its JITs, wherever they run (a JIT-run test leads a process group of its
+                                          own), as <node>/<pid> <app>: `devhub inspect <node>/<pid> why-hung`
   override <node> [--to <lane>]           take the node now: its leases end; to the user (dev off) or a lane
   evict <lane|agent>                      end every lease of it, clean up, block new ones; unblock <lane|agent>
   blocked                                 the lanes and agents the user blocked
@@ -181,6 +194,8 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S]|--needs k=v,..] [-
   node <n> dev on|off                     the node's dev switch (the user's decision)
   node <n> back                           the person hands the node back (on their say-so): the input it saw so
                                           far holds it no more; new input does again
+  node <n> probe                          its toolchain probe now (a compile and a link): a box a toolchain move left
+                                          out of rotation comes back at once (it probes again as a lease there ends too)
   node <n> [role pool|hot|suite|bench|user-wm|device] [set slots.screen=0 disk_floor_gb=40 ...]
                                           the node's role and budgets (its lease.conf, kept on the node)
   disk <node> [--dry-run]                 the node's disk categories and reclaim
@@ -341,6 +356,23 @@ fn fail(e: impl std::fmt::Display) -> i32 {
 
 fn json(l: &str) -> Option<Value> {
     makepad_strict_json::parse(l.as_bytes()).ok()
+}
+
+/// One line of a `live test` call's stream: its end (`Some`: the call's answer), an error, or a
+/// line taken in (`None`). What the session says while its call waits for room on its box (a
+/// `{"say":..}` line, [`crate::cli::said_line`]) is said here and is no answer: taken for one, a
+/// test call that waited for room ended on "the master answered with no session" and exit 1,
+/// its tests run on the box with nobody to read them (W6628, 11-13).
+fn live_line(l: &str, answer: &mut Option<Value>) -> Result<Option<Value>, String> {
+    if let Some((said, _)) = crate::cli::said_line(l) {
+        if !said.is_empty() { eprintln!("devhub: {said}"); }
+        return Ok(None);
+    }
+    let v = json(l).ok_or("live: bad answer")?;
+    if v.get("end").is_some() { return answer.take().map(Some).ok_or_else(|| "live: no answer".to_string()); }
+    if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(e.to_string()); }
+    if answer.is_none() { *answer = Some(v); }
+    Ok(None)
 }
 
 fn s(v: &Value, k: &str) -> String {
@@ -509,6 +541,8 @@ const FLAG_FIELDS: &[(&[&str], &str)] = &[
     (&["--ram-gb", "2"], "ram_gb"),
     (&["--repo-dir", "/x"], "repo_dir"),
     (&["--series", "s1", "--node", "box-a"], "series"),
+    (&["--pin-why", "its files are in that home", "--node", "box-a"], "pin_why"),
+    (&["--avoid", "box-a,box-b"], "avoid"),
     (&["--whole"], "whole"),
 ];
 
@@ -542,6 +576,8 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--class" => req.class = val(i)?.to_string(),
             "--node" => req.node = Some(val(i)?.to_string()),
             "--series" => req.series = Some(val(i)?.to_string()),
+            "--pin-why" => req.pin_why = Some(val(i)?.to_string()),
+            "--avoid" => req.avoid = super::sched::avoid_list(val(i)?),
             "--needs" => req.needs = parse_needs(val(i)?),
             "--lane" => req.lane = val(i)?.to_string(),
             "--priority" => req.priority = Priority::parse(val(i)?).ok_or("--priority is interactive or background")?,
@@ -574,14 +610,23 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
         req.repo_dir = root.map(|root| root.to_string_lossy().into_owned());
     }
     // branch names become commits here, once: what ships is what was ordered, however long the
-    // lease queues and whatever other landings do to the branches meanwhile
+    // lease queues and whatever other landings do to the branches meanwhile. A rev named runs those
+    // commits alone, as `devhub test --rev` and a job's `--rev` do: none of the worktree's files
+    // on top. Shipped the worktree's differences from the pin, three runs a lane pinned at the tip,
+    // before and after a rename ran its own tree, and all three the same JIT (11-13).
+    let commits_only = req.rev.is_some();
     if let Some(spec) = &req.rev {
         let dir = req.repo_dir.as_deref().ok_or("--rev needs a git repo (--repo-dir)")?;
-        req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane)?);
+        req.rev = Some(pin_lane_rev(Path::new(dir), spec, &req.lane, Some(&master_paired))?);
     }
     if req.class.is_empty() && !cmd.is_empty() { req.class = super::run_class(&req.lane, kind, &cmd); }
     req.exec_profile = super::argv::ExecProfile::of(&cmd);
-    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new(), commits_only: false, inputs, for_node, exit_to })
+    // a run that changes the box's toolchain has the box to itself ([`super::argv::changes_toolchain`])
+    if let Some(what) = super::argv::changes_toolchain(&cmd).filter(|_| !req.whole) {
+        eprintln!("makepad devhub: `{what}` changes its box's toolchain: the lease takes the box whole");
+        req.whole = true;
+    }
+    Ok(Opts { req, watch, keep, cmd, tree, native, patched: Vec::new(), commits_only, inputs, for_node, exit_to })
 }
 
 /// `--for <node>`: the lease builds for that box's CPU, as its hub reports it
@@ -711,6 +756,13 @@ impl Drop for Beat {
 
 /// Asks for the lease and waits for it (one stderr line per change); Err(exit code).
 fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
+    acquire_said(c, req).map_err(|(code, _)| code)
+}
+
+/// [`acquire`], and when the lease ends before its run, what it said of that on stderr: a check
+/// whose lease never started is "not run", naming why, never read as the check's red
+/// ("check of relax-compiler .. FAILED: no error line": its lease was refused, 11-13).
+fn acquire_said(c: &Client, req: &Req) -> Result<Held, (i32, String)> {
     // this process holds it: the master ends the lease as soon as this pid is gone
     let mut req = req.clone();
     req.holder = Some(std::process::id());
@@ -722,7 +774,7 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
     let wire = req.to_json();
     let mut v = retry_master(|| one(c, "lease", &wire)).map_err(|e| {
         eprintln!("makepad devhub lease: {e}");
-        2
+        (2, format!("the lease was not taken: {e}"))
     })?;
     let mut id = s(&v, "id");
     let mut client = c.clone();
@@ -765,11 +817,13 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 if how == "cancelled" {
                     let node = s(&v, "node");
                     let at = if node.is_empty() { CancelledAt::Queued(req.node.as_deref()) } else { CancelledAt::Ran(&node) };
-                    eprintln!("{}", cancelled_notice(&id, at));
-                    return Err(CANCELLED_EXIT);
+                    let said = cancelled_notice(&id, at);
+                    eprintln!("{said}");
+                    return Err((CANCELLED_EXIT, said));
                 }
-                eprintln!("{id} {}: {how}{}", req.kind.as_str(), if why.is_empty() { String::new() } else { format!(": {why}") });
-                return Err(if how == "denied" { 2 } else { 1 });
+                let why = if why.is_empty() { String::new() } else { format!(": {why}") };
+                eprintln!("{id} {}: {how}{why}", req.kind.as_str());
+                return Err((if how == "denied" { 2 } else { 1 }, format!("lease {id} {how}{why}")));
             }
         };
         if line != last || !note.is_empty() {
@@ -790,12 +844,12 @@ fn acquire(c: &Client, req: &Req) -> Result<Held, i32> {
                 }
                 Err(e) => {
                     eprintln!("makepad devhub: lease: {e}");
-                    return Err(1);
+                    return Err((1, format!("lease {id}: asked again after the master's restart: {e}")));
                 }
             },
             Err(e) => {
                 eprintln!("makepad devhub: beat {id}: {e} (after {} s)", t0.elapsed().as_secs());
-                return Err(1);
+                return Err((1, format!("lease {id}: beat: {e}")));
             }
         }
     }
@@ -1082,6 +1136,11 @@ fn finish(c: &Client, held: &Held, r: Result<i32, String>) -> i32 {
     };
     if let Ok(v) = through_restarts(&held.id, &mut c, |c| one(c, "release", &line), &master) {
         eprintln!("{}", released_line(&v));
+        // the toolchain changed under the run (a rustup update beside it): a failure is no verdict
+        if let Some(t) = v.get("cleanup").and_then(|c| c.get("toolchain")).and_then(Value::as_str).filter(|_| code != 0) {
+            eprintln!("TOOLCHAIN CHANGED under {} on {} ({t}): toolchain changed under you: rerun. The command has no verdict, the code is not to blame. Exit code {LOST_EXIT}.", held.id, held.node);
+            return LOST_EXIT;
+        }
     }
     code
 }
@@ -1137,43 +1196,99 @@ fn head_side(dir: &Path, lane: &str) -> Result<String, String> {
 /// The worktree's revision for `run`: its HEAD (+ each nested repository's), as a pinned `--rev`
 /// (`<branch>@<sha>[,<name>=<branch>@<sha>]...`).
 fn head_rev(root: &Path, lane: &str) -> Result<String, String> {
-    pin_lane_rev(root, &head_side(root, lane)?, lane)
+    pin_lane_rev(root, &head_side(root, lane)?, lane, None)
 }
 
 /// A `--rev` given for a lane worktree, pinned whole: each nested repository checked out in it
 /// ([`crate::nested`]) that the rev does not name is pinned at its HEAD, so its packages are in
 /// the lease's tree (a makepad-only pin left them out of the overlay: `package .. is not a member
-/// of the workspace`).
-pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str) -> Result<String, String> {
+/// of the workspace`). With `paired` (a rev someone named: the master's `job landed-main`), the
+/// commercial side it does not name pins where the makepad commit landed beside, never at the
+/// worktree's HEAD alone: on work, the main that commit landed beside; else the HEAD, unless the
+/// master says another main (the HEAD holds a two-repo landing the commit lacks). An older makepad
+/// commit beside a lane's newer main is a pair that never landed together: a rig branch on an older
+/// base died at cargo's "no matching package named `makepad-relax`" (11-12).
+pub fn pin_lane_rev(root: &Path, spec: &str, lane: &str, paired: Option<&dyn Fn(&str, Option<&str>) -> Result<String, String>>) -> Result<String, String> {
     let named: Vec<&str> = spec.split(',').skip(1).filter_map(|side| side.split_once('=').map(|(name, _)| name)).collect();
+    let first = spec.split(',').next().unwrap_or("");
     let mut whole = spec.to_string();
     for name in crate::nested::names(root).into_iter().filter(|n| !named.contains(&n.as_str())) {
-        whole.push_str(&format!(",{name}={}", head_side(&root.join(crate::nested::dir(&name)), lane)?));
+        let head = || head_side(&root.join(crate::nested::dir(&name)), lane);
+        let side = match paired {
+            Some(paired) if name == crate::state::PAIRED => {
+                // the rev as given pins first: a malformed one is refused before the master is asked
+                let pinned = super::pin_revs(root, spec)?;
+                let makepad = pinned.split(',').next().and_then(|side| side.rsplit('@').next()).unwrap_or("");
+                if first.split('@').next() == Some("work") {
+                    format!("main@{}", paired(makepad, None)?)
+                } else {
+                    let head = head()?;
+                    let main = paired(makepad, head.rsplit('@').next())?;
+                    if head.ends_with(&format!("@{main}")) { head } else { format!("main@{main}") }
+                }
+            }
+            _ => head()?,
+        };
+        whole.push_str(&format!(",{name}={side}"));
     }
     super::pin_revs(root, &whole)
 }
 
-/// Ships the complete uncommitted set and base blobs into the lease's source layer; its line names
-/// each repository's branch and commit of the pinned `rev`.
-fn ship(c: &Client, root: &Path, held: &Held, rev: &str, uncommitted: bool, commits_only: bool, patched: &[(String, Vec<u8>)]) -> Result<(), String> {
-    let pin = &super::Pin::of_rev(rev).ok_or_else(|| format!("{}: rev `{rev}` is not pinned", held.id))?;
-    if held.work.is_empty() {
-        return Err(format!("{}: no work dir to ship to", held.id));
+/// The master's [`pin_lane_rev`] pairing (`job landed-main`), its line said when it moved the
+/// commercial side off the HEAD.
+fn master_paired(makepad: &str, head: Option<&str>) -> Result<String, String> {
+    let line = format!("job landed-main {makepad} {}", head.unwrap_or(""));
+    let v = crate::cli::retry_master(|| master().and_then(|c| one(&c, "job", line.trim_end())))?;
+    let note = s(&v, "note");
+    if !note.is_empty() {
+        eprintln!("devhub: {note}");
     }
+    Ok(s(&v, "main"))
+}
+
+/// What a run ships on top of its pinned commits, read when it is asked and staged: a queued ask
+/// runs what was ordered, never the worktree as its grant finds it. The merge bot merged work into
+/// a lane while two `--patch` runs waited, and each shipped the patched files of the HEAD it was
+/// asked at beside the merged ones: a call with 3 arguments to a function that took 4 there, a
+/// compile error on both arms (L924557/8, 11-13). Hand commits while it waits are the same.
+/// The stage goes with it.
+struct Snap {
+    stage: PathBuf,
+    entries: Vec<super::ship::Entry>,
+    deleted: Vec<String>,
+    patched: usize,
+}
+
+impl Drop for Snap {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.stage);
+    }
+}
+
+/// `devhub-snap-<pid>-<n>` in the temp dir: one per run a client asks (a client's checks ask
+/// several at once).
+const SNAP_PREFIX: &str = "devhub-snap-";
+
+/// The complete uncommitted set (`--with-uncommitted` in the main checkout, none with `--rev`),
+/// DEVHUB_ALSO's paths and the patched files, staged now with their modes and mtimes. A stage a
+/// client that is gone left behind is removed first.
+fn snap(root: &Path, rev: &str, uncommitted: bool, commits_only: bool, patched: &[(String, Vec<u8>)]) -> Result<Snap, String> {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let pin = &super::Pin::of_rev(rev).ok_or_else(|| format!("rev `{rev}` is not pinned"))?;
     let (files, deleted) = if commits_only { (Vec::new(), Vec::new()) } else { super::ship::uncommitted(root, pin)? };
     let (files, deleted) = if commits_only || uncommitted || !super::ship::is_main_checkout(root) {
         (files, deleted)
     } else {
         if files.len() + deleted.len() > 0 {
-            eprintln!("{} {}: main checkout: its {} uncommitted file(s) stay out (--with-uncommitted ships them)", held.id, held.node, files.len() + deleted.len());
+            eprintln!("devhub: main checkout: its {} uncommitted file(s) stay out (--with-uncommitted ships them)", files.len() + deleted.len());
         }
         (Vec::new(), Vec::new())
     };
-    let mut entries = Vec::new();
+    let mut found = Vec::new();
     for f in &files {
-        super::ship::entries(root, f, &mut entries)?;
+        super::ship::entries(root, f, &mut found)?;
     }
-    entries.retain(|e| !super::ship::never_ships(&e.path));
+    found.retain(|e| !super::ship::never_ships(&e.path));
     // named paths ship as they are (untracked dirs and `local/` included); a file the
     // uncommitted set has already ships once
     for p in std::env::var("DEVHUB_ALSO").unwrap_or_default().split_whitespace() {
@@ -1185,33 +1300,59 @@ fn ship(c: &Client, root: &Path, held: &Held, rev: &str, uncommitted: bool, comm
         }
         let mut named = Vec::new();
         super::ship::entries(root, p, &mut named)?;
-        entries.extend(named.into_iter().filter(|e| !super::ship::never_ships_named(&e.path)));
+        found.extend(named.into_iter().filter(|e| !super::ship::never_ships_named(&e.path)));
     }
-    entries.sort_by(|a, b| a.path.cmp(&b.path));
-    entries.dedup_by(|a, b| a.path == b.path);
-    // a patched file ships patched, from a staging copy, whatever else would ship it
-    entries.retain(|e| !patched.iter().any(|(p, _)| *p == e.path));
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    found.dedup_by(|a, b| a.path == b.path);
+    // a patched file ships patched, whatever else would ship it
+    found.retain(|e| !patched.iter().any(|(p, _)| *p == e.path));
     let deleted: Vec<String> = deleted.into_iter().filter(|d| !patched.iter().any(|(p, _)| p == d)).collect();
-    let t = Instant::now();
-    let sent = if entries.is_empty() { Ok(super::ship::Shipped::default()) } else { super::ship::send(c, &held.node, &held.id, root, &entries, false) };
-    let mut sent = sent?;
-    let mut paths: Vec<String> = entries.iter().map(|e| e.path.clone()).collect();
-    if !patched.is_empty() {
-        let stage = std::env::temp_dir().join(format!("devhub-patch-{}-{}", held.id, std::process::id()));
-        let staged = stage_patched(root, &stage, patched).and_then(|staged| super::ship::send(c, &held.node, &held.id, &stage, &staged, false));
-        let _ = std::fs::remove_dir_all(&stage);
-        let staged = staged?;
-        (sent.files, sent.sent, sent.bytes) = (sent.files + staged.files, sent.sent + staged.sent, sent.bytes + staged.bytes);
-        paths.extend(patched.iter().map(|(p, _)| p.clone()));
+    let tmp = std::env::temp_dir();
+    for e in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let pid = name.strip_prefix(SNAP_PREFIX).and_then(|r| r.split('-').next()).and_then(|p| p.parse::<u32>().ok());
+        if pid.is_some_and(|p| p != std::process::id() && !crate::procinfo::alive(p)) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
+    let stage = tmp.join(format!("{SNAP_PREFIX}{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&stage);
+    let mut snap = Snap { stage, entries: Vec::new(), deleted, patched: patched.len() };
+    for e in found {
+        if e.link.is_none() {
+            let to = snap.stage.join(&e.path);
+            let err = |err: std::io::Error| format!("staging {}: {err}", e.path);
+            let (bytes, mtime_us, _) = super::ship::read_stable(&root.join(&e.path)).map_err(err)?;
+            std::fs::create_dir_all(to.parent().unwrap_or(&snap.stage)).map_err(err)?;
+            std::fs::write(&to, &bytes).map_err(err)?;
+            std::fs::set_permissions(&to, std::fs::metadata(root.join(&e.path)).map_err(err)?.permissions()).map_err(err)?;
+            std::fs::File::options().write(true).open(&to).and_then(|f| f.set_modified(std::time::UNIX_EPOCH + Duration::from_micros(mtime_us))).map_err(err)?;
+        }
+        snap.entries.push(e);
+    }
+    snap.entries.extend(stage_patched(root, &snap.stage, patched)?);
+    snap.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(snap)
+}
+
+/// Ships a run's [`snap`] and its paths' base blobs into the lease's source layer; its line names
+/// each repository's branch and commit of the pinned `rev`.
+fn ship(c: &Client, root: &Path, held: &Held, rev: &str, commits_only: bool, snap: &Snap) -> Result<(), String> {
+    let pin = &super::Pin::of_rev(rev).ok_or_else(|| format!("{}: rev `{rev}` is not pinned", held.id))?;
+    if held.work.is_empty() {
+        return Err(format!("{}: no work dir to ship to", held.id));
+    }
+    let t = Instant::now();
+    let sent = if snap.entries.is_empty() { super::ship::Shipped::default() } else { super::ship::send(c, &held.node, &held.id, &snap.stage, &snap.entries, false)? };
+    let paths: Vec<String> = snap.entries.iter().map(|e| e.path.clone()).collect();
     let list = |v: &[String]| v.iter().map(|p| makepad_remote::json_str(p)).collect::<Vec<_>>().join(",");
-    let bases = super::ship::bases_json(root, pin, &paths.iter().chain(&deleted).cloned().collect::<Vec<_>>())?;
-    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&paths), list(&deleted));
+    let bases = super::ship::bases_json(root, pin, &paths.iter().chain(&snap.deleted).cloned().collect::<Vec<_>>())?;
+    let body = format!("{{\"shipped\":[{}],\"deleted\":[{}],\"bases\":{bases}}}", list(&paths), list(&snap.deleted));
     let done = node_one(c, &held.node, "ship-done", &format!("ship-done {} {}", held.id, makepad_network::digest::base64_encode(body.as_bytes())))?;
     let source = done.get("source").and_then(|s| s.as_str()).unwrap_or("").to_string();
-    let patched_note = if patched.is_empty() { String::new() } else { format!(", {} of them patched by --patch", patched.len()) };
-    let at = if commits_only { format!("{} alone (--rev)", super::rev_said(rev)) } else { format!("the worktree's HEAD {}", super::rev_said(rev)) };
-    eprintln!("{} {}: sources at {at}, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, deleted.len(), t.elapsed().as_secs_f64());
+    let patched_note = if snap.patched == 0 { String::new() } else { format!(", {} of them patched by --patch", snap.patched) };
+    let at = if commits_only { format!("{} alone (--rev)", super::rev_said(rev)) } else { format!("the worktree's HEAD {} as it was asked", super::rev_said(rev)) };
+    eprintln!("{} {}: sources at {at}, source {source}; shipped {} changed file(s){patched_note} ({} KB, {} sent) and {} deletion(s) on top in {:.1} s", held.id, held.node, paths.len(), sent.bytes >> 10, sent.sent, snap.deleted.len(), t.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -1340,14 +1481,27 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         }
     }
     o.req.src = Src::for_run(o.req.kind, &o.cmd, o.tree);
+    // what it ships, read now: the worktree as its grant finds it is not what was asked ([`Snap`])
+    let snapped = match snap(&root, o.req.rev.as_deref().unwrap_or(""), uncommitted, o.commits_only, &o.patched) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("makepad devhub {word}: {e}");
+            return (2, false);
+        }
+    };
     let c = match retry_master(master) {
         Ok(c) => c,
         Err(e) => return (fail(e), false),
     };
+    shipped_hint(&c, &root, &mut o.req, &snapped);
     let queued = Instant::now();
-    let mut held = match acquire(&c, &o.req) {
+    let mut held = match acquire_said(&c, &o.req) {
         Ok(h) => h,
-        Err(code) => return (code, false),
+        Err((code, said)) => {
+            // (a test's verdict line: one whose lease never started has none)
+            if let Some(pkg) = test { let _ = writeln!(out, "{}", not_run_line(pkg, &said)); }
+            return (code, false);
+        }
     };
     held.adopt = adopt_body(o, rel.trim_end_matches('/'));
     let queue = queued.elapsed();
@@ -1355,7 +1509,7 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     let rev = o.req.rev.clone().unwrap_or_default();
     // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
     // ledger): the ship is made again once it answers
-    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, uncommitted, o.commits_only, &o.patched), &master);
+    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, o.commits_only, &snapped), &master);
     let ship = shipping.elapsed();
     let running = Instant::now();
     let mut tally = crate::testlog::Tally::default();
@@ -1384,6 +1538,30 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
     }
     (code, completed)
 }
+
+/// The JIT ids an overlay run is placed by, read off what it ships ([`super::loaders::shipped_ids`]):
+/// its pin's, and the lane's own when its edits change the JIT's inputs, in the order of the
+/// master's compilers (`jit compilers`). Without them (a master that predates the query, a tree it
+/// cannot read) the master sets the pin's at intake, as it did.
+#[cfg(feature = "checkout")]
+fn shipped_hint(c: &Client, root: &Path, req: &mut Req, snap: &Snap) {
+    if req.src != Src::Overlay || !req.on_node() || !req.hint.is_empty() || req.loader.as_deref().is_some_and(|id| !id.is_empty()) { return; }
+    let Some(pin) = req.rev.as_deref().and_then(super::Pin::of_rev) else { return };
+    let Ok(v) = one(c, "jit", "compilers") else { return };
+    let compilers: Vec<String> = v.get("compilers").and_then(Value::as_arr).unwrap_or(&[]).iter().filter_map(Value::as_str).map(str::to_string).collect();
+    if compilers.is_empty() { return; }
+    let edits: Vec<(String, Option<PathBuf>)> = snap.entries.iter()
+        .map(|e| (e.path.clone(), Some(if e.link.is_some() { root.join(&e.path) } else { snap.stage.join(&e.path) })))
+        .chain(snap.deleted.iter().map(|p| (p.clone(), None)))
+        .collect();
+    match super::loaders::shipped_ids(root, &pin.makepad, &compilers, &edits) {
+        Ok((hint, own)) => (req.hint, req.own_jit) = (hint, own),
+        Err(e) => eprintln!("devhub: JIT placement hint: {e} (the master's is the pin's)"),
+    }
+}
+
+#[cfg(not(feature = "checkout"))]
+fn shipped_hint(_: &Client, _: &Path, _: &mut Req, _: &Snap) {}
 
 /// The run's output on its way out, tallied for its tests.
 struct Tee<'a> {
@@ -1450,6 +1628,17 @@ fn cargo_output(log: &str) -> (Option<bool>, String) {
     (built, out)
 }
 
+/// Where a JIT miss's cargo check runs: a named box stays the box (its cargo run is the one asked
+/// for); else a pool box. A macOS ask keeps every Mac, the hot one too (the sched takes macOS work
+/// on any Mac): pinned to the pool, it had one Mac, held by a person's screen session, while the
+/// other stood free (L929083 queued 13 min, 11-13).
+fn on_cargo_boxes(req: &mut Req) {
+    if req.node.is_none() && !req.requires_macos() {
+        req.needs.retain(|(k, _)| k != "role");
+        req.needs.push(("role".into(), "pool".into()));
+    }
+}
+
 /// `jit_log`: what the JIT run that failed printed, kept first whatever cargo says: a run whose
 /// cargo check passed kept only cargo's output, and the JIT's own failing message was gone (11-07).
 fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known: Option<Value>, inputs: Option<MissInputs>, jit_log: Option<&str>) -> i32 {
@@ -1463,11 +1652,7 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
     let _ = std::io::stdout().flush();
     o.cmd = ["cargo", "test", "--release", "--message-format=json-render-diagnostics", "-p", pkg].iter().map(|s| s.to_string()).chain(args.iter().cloned()).collect();
     o.tree = true;
-    // a named box stays the box (its cargo run is the one asked for); else a pool box
-    if o.req.node.is_none() {
-        o.req.needs.retain(|(k, _)| k != "role");
-        o.req.needs.push(("role".into(), "pool".into()));
-    }
+    on_cargo_boxes(&mut o.req);
     o.req.loader = None;
     o.req.class = format!("native:{}", o.req.class);
     o.req.cost = CostClass::Medium;
@@ -1513,15 +1698,19 @@ fn cargo_test(mut o: Opts, pkg: &str, args: &[String], errors: &[String], known:
 /// One-shot tests change their default route only with at least this measured run-phase gain.
 const ROUTE_MIN_GAIN: f64 = 0.25;
 
-/// One-shot tests default to the JIT, or cargo for JIT-own crates; true selects the JIT.
+/// One-shot tests default to the JIT, or cargo for JIT-own crates once the JIT is measured; true
+/// selects the JIT. A class with no JIT measure runs under the JIT, which measures it.
 /// Compares run-phase medians (the command's own time, its build included; not the dev JIT build).
 /// Switch only when both medians exist and the other side is at least ROUTE_MIN_GAIN faster.
 pub fn test_route(own: bool, jit: Option<u64>, cargo: Option<u64>) -> (bool, String) {
     let default = if own { "cargo" } else { "the JIT" };
     let why = if own { "compiled only into the JIT binary; " } else { "" };
     match (jit, cargo) {
-        (None, _) => (!own, format!("{default} ({why}no JIT measurement yet)")),
-        (_, None) => (!own, format!("{default} ({why}no cargo measurement yet)")),
+        // a class the JIT never ran has no JIT measure: it runs there once and is measured (the JIT's
+        // own crates stayed on cargo for good, and differed from the tests bucket, which runs
+        // every package under the JIT: a lane could not reproduce its red, 11-13)
+        (None, _) => (true, format!("the JIT ({why}no JIT measurement yet: this run measures it)")),
+        (_, None) => (!own, format!("{default} ({why}no cargo measurement yet{})", if own { ": this run measures it" } else { "" })),
         (Some(jit), Some(cargo)) => {
             let use_jit = if own { jit as f64 <= cargo as f64 * (1.0 - ROUTE_MIN_GAIN) }
                 else { cargo as f64 > jit as f64 * (1.0 - ROUTE_MIN_GAIN) };
@@ -1540,6 +1729,19 @@ pub fn test_route(own: bool, jit: Option<u64>, cargo: Option<u64>) -> (bool, Str
 
 pub(crate) const ALL_TESTS: &str = "tests:*";
 
+/// What the tests bucket did with `devhub test <pkg> <select>`'s unit (`test <pkg> --test T`, else
+/// `test <pkg>`), from this machine's bucket ledger (the master's): its runner and last look, and
+/// whether that look was red. None: no bucket run here looked at it.
+#[cfg(feature = "checkout")]
+fn bucket_said(pkg: &str, select: &[&str]) -> Option<(String, bool)> {
+    let home = crate::proto::home();
+    let target = select.iter().position(|w| *w == "--test").and_then(|i| select.get(i + 1)).map(|t| format!("test {pkg} --test {t}"));
+    let (unit, (failed, started, secs)) = target.into_iter().chain([format!("test {pkg}")]).find_map(|u| crate::bucket::tests_last(&home, &u).map(|l| (u, l)))?;
+    let ago = super::sched::dur(crate::proto::wall_ms().saturating_sub(started));
+    let took = secs.map_or(String::new(), |s| format!(" in {}", super::sched::dur(s * 1000)));
+    Some((format!("the tests bucket runs `{unit}` under the JIT (`makepad test {}`): {} {ago} ago{took}", &unit[5..], if failed { "red" } else { "passed" }), failed))
+}
+
 fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let parsed = (|| -> Result<_, String> {
         if pkg.is_empty() || pkg.starts_with('-') || !pkg.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
@@ -1547,6 +1749,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         }
         let (mut flags, mut select, mut args) = (Vec::new(), Vec::new(), Vec::new());
         let (mut native, mut live, mut target, mut rev_spec) = (false, false, None::<String>, None::<&str>);
+        let mut asked_native = false;
         let mut i = 0;
         while i < rest.len() {
             let val = || rest.get(i + 1).copied().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or_else(|| format!("{} needs a value", rest[i]));
@@ -1554,14 +1757,15 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
                 "--" => { args.extend_from_slice(&rest[i..]); break; }
                 // `--native "<reason>"`: the reason goes to the JIT-first gate (lease/native.rs)
                 "--native" => {
-                    native = true;
+                    (native, asked_native) = (true, true);
                     if let Ok(reason) = val() { flags.extend(["--native", reason]); i += 1; }
                 }
                 "--live" => live = true,
                 "--rev" => { rev_spec = Some(val()?); i += 1; }
                 "--tree" => flags.push("--tree"),
-                "--needs" | "--node" | "--series" | "--priority" | "--jit" | "--cost" | "--est-min" | "--cores" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
+                "--needs" | "--node" | "--avoid" | "--series" | "--pin-why" | "--priority" | "--jit" | "--cost" | "--est-min" | "--cores" | "--class" => { flags.extend([rest[i], val()?]); i += 1; }
                 "--features" => { select.extend([rest[i], val()?]); i += 1; }
+                "--no-default-features" => select.push(rest[i]),
                 "--lib" | "--bin" | "--tests" | "--test" => {
                     if target.is_some() { return Err("select only one of --lib, --bin B, --test T or --tests".into()); }
                     select.push(rest[i]);
@@ -1580,7 +1784,7 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         let root = o.req.repo_dir.as_deref().map(PathBuf::from).unwrap_or_else(cwd);
         // `--rev`: the commits alone (a landed sha, say), under the same JIT, none of the lane's
         // uncommitted files with them (a lane reverted a file by hand to leave it out, 11-06)
-        let rev = match rev_spec { Some(spec) => pin_lane_rev(&root, spec, &o.req.lane)?, None => head_rev(&root, &o.req.lane)? };
+        let rev = match rev_spec { Some(spec) => pin_lane_rev(&root, spec, &o.req.lane, Some(&master_paired))?, None => head_rev(&root, &o.req.lane)? };
         let pin = super::Pin::of_rev(&rev).ok_or("test: missing commit pair")?;
         o.req.rev = Some(rev);
         o.commits_only = rev_spec.is_some();
@@ -1588,8 +1792,8 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             return Err("--live follows the lane's saves; --rev runs its commits once (drop one of them)".into());
         }
         // Leave the live default to makepad test: the lib, else the package's only harness target.
-        if live && (native || target.as_deref() == Some(ALL_TESTS) || select.contains(&"--features")) {
-            return Err("--live selects one target (--lib, --bin B or --test T; default: the lib, else the package's only harness target); --native, --tests and --features cannot be combined with it".into());
+        if live && (native || target.as_deref() == Some(ALL_TESTS)) {
+            return Err("--live selects one target (--lib, --bin B or --test T; default: the lib, else the package's only harness target); --native and --tests cannot be combined with it".into());
         }
         if live && (o.req.node.is_some() || o.req.cost != CostClass::Small || o.req.est_min.is_some()) {
             return Err("--live uses small cost and hot-box routing; omit --node, --cost and --est-min".into());
@@ -1615,6 +1819,16 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
             let v = retry_master(|| master().and_then(|c| one(&c, "stats", &format!("stats class {} {}\t{cargo_class}", o.req.kind.as_str(), o.req.class))))?;
             let runs = v.get("runs");
             let (use_jit, reason) = test_route(own, runs.and_then(|r| r.get(&o.req.class)).and_then(Value::as_u64), runs.and_then(|r| r.get(&cargo_class)).and_then(Value::as_u64));
+            // the tests bucket's runner for it, and its last look: a red there is reproduced as
+            // it ran (a lane's cargo run of a bucket red under the JIT passed, 11-13)
+            #[cfg(feature = "checkout")]
+            let (use_jit, reason) = match bucket_said(pkg, &select) {
+                Some((said, red)) => {
+                    eprintln!("devhub test: {said}");
+                    if red && !use_jit { (true, format!("the JIT, as the tests bucket that found it red ran it (else {reason})")) } else { (use_jit, reason) }
+                }
+                None => (use_jit, reason),
+            };
             eprintln!("devhub test: {}: {reason}", o.req.class);
             if !use_jit { native = true; }
         }
@@ -1624,21 +1838,29 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         if live && !flags.contains(&"--priority") { o.req.priority = Priority::Interactive; }
         let mut test_args = select.clone();
         test_args.extend(args.iter().copied());
-        let mut cmd = if native { vec!["cargo", "test", "--release", "-p", pkg] } else { vec!["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", pkg] };
+        // the release profile both ways: makepad's own tests build release (`makepad test` alone
+        // builds cargo test's `test` profile, debug assertions and overflow checks on)
+        let mut cmd = if native { vec!["cargo", "test", "--release", "-p", pkg] } else { vec!["cargo", "run", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad", "--", "test", pkg, "--release"] };
         cmd.extend(select);
         cmd.extend(args);
         o.cmd = cmd.into_iter().map(str::to_string).collect();
         if native { o.req.class = format!("native:{}", o.req.class); }
         o.tree |= native;
-        Ok((o, native, live, test_args.into_iter().map(str::to_string).collect::<Vec<_>>()))
+        let test_args: Vec<String> = test_args.into_iter().map(str::to_string).collect();
+        Ok((o, native, asked_native, live, if live { live_select(test_args) } else { test_args }))
     })();
-    let (mut o, native, live, test_args) = match parsed {
+    let (mut o, native, asked_native, live, test_args) = match parsed {
         Ok(v) => v,
         Err(e) => { eprintln!("test: {e}"); return 2; }
     };
+    // a run that passed is the lane's pre-land check when devhub chose its route (a `--native` one
+    // is a baseline): the packages its diff touches are checked without their tests too
+    let (lane, commits_only) = (o.req.lane.clone(), o.commits_only);
     if native {
         if let Err(code) = retry_master(master).map_err(fail).and_then(|c| native_gate(&c, &o)) { return code; }
-        return run_worktree(o, false, Some(pkg));
+        let rev = o.req.rev.clone().unwrap_or_default();
+        let code = run_worktree(o, false, Some(pkg));
+        return if code == 0 && !asked_native { pre_land_checks(&lane, &rev, commits_only) } else { code };
     }
     match test_miss(&o, pkg, &test_args, "lookup", &[], None) {
         Ok(miss) if !miss.is_null() => {
@@ -1665,7 +1887,108 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
     let errors = crate::jit_misses::compile_errors(&log);
     if completed && code != CANCELLED_EXIT && !errors.is_empty() { return cargo_test(o, pkg, &test_args, &errors, None, Some(inputs), Some(&*log)); }
     print!("{log}");
-    code
+    if code != 0 { return code; }
+    pre_land_checks(&lane, o.req.rev.as_deref().unwrap_or(""), commits_only)
+}
+
+/// The pre-land check's other half: a `devhub test` without --live that passed also checks each
+/// package the lane's diff touches without its tests ([`crate::jit_misses::touched_packages`]), in
+/// one run per checker ([`crate::jit_misses::check_runs`]) at the run's sources: one
+/// `makepad check -p .. -p ..` on the JIT, and one cargo check of the crates the JIT is built from
+/// (whose tests run under cargo too). A warning fails it as an error does, each one listed
+/// ([`crate::jit_misses::check_failures`]): a fn only tests called compiled under cfg(test) in the
+/// lane's tests, and twice the fast bucket after the landing was the first to say it was dead
+/// (#4005, #4024, 11-12).
+fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
+    let Some((root, _)) = lane_root() else { return 0 };
+    let Some(pin) = super::Pin::of_rev(rev) else {
+        eprintln!("devhub test: rev `{rev}` is not pinned: the packages it touches are not checked");
+        return 2;
+    };
+    let touched = match crate::jit_misses::touched_packages(&root, &pin, commits_only) {
+        Ok(t) => t,
+        Err(e) => return fail(format!("devhub test: the packages the lane's diff touches: {e}")),
+    };
+    if touched.is_empty() { return 0; }
+    let mut sides = Vec::new();
+    for pkg in touched {
+        match crate::jit_misses::test_package(&root, &pin.pair(), &pkg) {
+            Ok((own, _)) => sides.push((pkg, own)),
+            Err(e) => return fail(format!("devhub test: check {pkg}: {e}")),
+        }
+    }
+    let runs = crate::jit_misses::check_runs(&sides);
+    let shadow = match retry_master(master).and_then(|c| one(&c, "overlay-shadow", "overlay-shadow enabled")) {
+        Ok(v) => v.get("on").and_then(Value::as_bool) == Some(true),
+        Err(e) => return fail(e),
+    };
+    eprintln!("devhub test: the lane's diff touches {}: checked without their tests in {} run{}, and a warning fails it",
+        sides.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join(", "), runs.len(), if runs.len() == 1 { "" } else { "s" });
+    let ran: Vec<(i32, String)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = runs.iter().map(|run| scope.spawn(move || check_run(lane, rev, commits_only, run, shadow))).collect();
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| (1, "its check's thread panicked".into()))).collect()
+    });
+    let mut worst = 0;
+    for (run, (code, log)) in runs.iter().zip(ran) {
+        let failures = crate::jit_misses::check_failures(&log);
+        let named = run.packages.join(", ");
+        if code == 0 && failures.is_empty() {
+            println!("devhub test: check of {named} without their tests: ok, 0 warnings");
+            continue;
+        }
+        // its lease never started: no verdict on the crates, said as that
+        if let Some(said) = not_run(&log).filter(|_| code != 0) {
+            println!("devhub test: check of {named} without their tests {NOT_RUN}{said} (exit {code}): no verdict on them; run it again");
+            worst = 1;
+            continue;
+        }
+        if failures.is_empty() {
+            for l in log.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() { println!("{l}"); }
+        }
+        for l in &failures { println!("{l}"); }
+        println!("devhub test: check of {named} without their tests FAILED: {} (exit {code}); `{}` shows it alone", if failures.is_empty() { "no error line".to_string() } else { format!("{} error and warning line(s)", failures.len()) }, run.alone);
+        worst = 1;
+    }
+    worst
+}
+
+/// What a test run whose lease never started says in place of its verdict, before why.
+const NOT_RUN: &str = "not run: ";
+
+/// A test run's line in place of its verdict when its lease never started.
+fn not_run_line(pkg: &str, said: &str) -> String {
+    format!("devhub test: {pkg} {NOT_RUN}{said}")
+}
+
+/// Why a test run's lease never started, from its output ([`not_run_line`]): None when it did.
+fn not_run(log: &str) -> Option<&str> {
+    log.lines().find_map(|l| l.strip_prefix("devhub test: ")?.split_once(&format!(" {NOT_RUN}")).map(|(_, why)| why))
+}
+
+/// One run of the pre-land check at `rev` ([`pre_land_checks`]): its exit and output.
+fn check_run(lane: &str, rev: &str, commits_only: bool, run: &crate::jit_misses::CheckRun, shadow: bool) -> (i32, String) {
+    let named = run.packages.join(" ");
+    let mut o = match parse("test", Some(lane), &[]) {
+        Ok(o) => o,
+        Err(e) => return (2, format!("check {named}: {e}\n")),
+    };
+    (o.req.rev, o.commits_only, o.req.class, o.cmd) = (Some(rev.to_string()), commits_only, run.class.clone(), run.cmd.clone());
+    let c = match retry_master(master) {
+        Ok(c) => c,
+        Err(e) => return (2, format!("check {named}: {e}\n")),
+    };
+    let mut out = Vec::new();
+    let name = format!("check of {named}");
+    let code = if run.own {
+        o.tree = true;
+        if let Err(code) = native_gate(&c, &o) { return (code, format!("check {named}: the master refused its cargo check\n")); }
+        run_worktree_into(&mut o, false, Some(&name), &mut out).0
+    } else if shadow {
+        shadow_test(&c, &mut o, &name, &mut out).0
+    } else {
+        run_worktree_into(&mut o, false, Some(&name), &mut out).0
+    };
+    (code, String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Submit the requested source mode; the master snapshots once and owns the opposite-mode shadow.
@@ -1737,6 +2060,33 @@ fn overlay_selftest(args: &[&str]) -> i32 {
     finish(&c, &held, r)
 }
 
+/// A live test's arguments with its feature flags said one way (`--no-default-features`, then
+/// `--features` sorted and comma-joined, after its target): they are its session's key
+/// ([`live_test`]), so a feature set keeps one session and two sets never share one. A test that
+/// needs its package's features could not be iterated live, and ran on the pre-land path or
+/// `--native` instead (a selection test needing `packs scene3d`, 11-13).
+fn live_select(args: Vec<String>) -> Vec<String> {
+    let end = args.iter().position(|a| a == "--").unwrap_or(args.len());
+    let (select, rest) = args.split_at(end);
+    let (mut out, mut features, mut no_default) = (Vec::new(), std::collections::BTreeSet::new(), false);
+    let mut i = 0;
+    while i < select.len() {
+        match select[i].as_str() {
+            "--features" => {
+                if let Some(v) = select.get(i + 1) { features.extend(v.split([',', ' ']).filter(|f| !f.is_empty()).map(str::to_string)); }
+                i += 1;
+            }
+            "--no-default-features" => no_default = true,
+            a => out.push(a.to_string()),
+        }
+        i += 1;
+    }
+    if no_default { out.push("--no-default-features".into()); }
+    if !features.is_empty() { out.extend(["--features".to_string(), features.into_iter().collect::<Vec<_>>().join(",")]); }
+    out.extend(rest.iter().cloned());
+    out
+}
+
 fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32 {
     let started = Instant::now();
     let result = (|| -> Result<crate::state::Live, String> {
@@ -1764,10 +2114,7 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
                 match ch.recv_timeout(Duration::from_secs(1)) {
                     Ok(makepad_remote::Event::Data(d)) => {
                         for l in String::from_utf8_lossy(&d).lines().filter(|l| !l.is_empty()) {
-                            let v = json(l).ok_or("live: bad answer")?;
-                            if v.get("end").is_some() { return answer.ok_or_else(|| "live: no answer".to_string()); }
-                            if let Some(e) = v.get("err").and_then(Value::as_str) { return Err(e.to_string()); }
-                            if answer.is_none() { answer = Some(v); }
+                            if let Some(v) = live_line(l, &mut answer)? { return Ok(v); }
                         }
                     }
                     Ok(makepad_remote::Event::Opened(_)) | Err(true) => {}
@@ -1800,7 +2147,11 @@ fn live_test(mut o: Opts, pkg: &str, args: &[String], inputs: MissInputs) -> i32
                 }
             }
         })?;
-        Ok(crate::state::live_from(&v))
+        let x = crate::state::live_from(&v);
+        // an answer that names no session printed `devhub test:  : ` and exit 1, unexplained
+        // (11-13): what came instead is said
+        if x.id.is_empty() { return Err(format!("test --live: the master answered with no session: {}", crate::proto::clean(&v.to_json(), 400))); }
+        Ok(x)
     })();
     match result {
         Ok(x) => {
@@ -2011,15 +2362,23 @@ fn cpu_note(c: &Client, node: &str, lease: Option<&str>, rel: &str) -> Option<St
     ))
 }
 
-fn queue(c: &Client, all: bool) -> i32 {
-    let lines = match ask(c, None, "leases", if all { "leases all" } else { "leases" }) {
+/// The master's lease list (`queue`, `leases [--all]`), or one lease's line of it (`only`: `lease
+/// <id> show`, a check-in's one-lease view; its queue reason in full, `why-queued` per box).
+fn queue(c: &Client, all: bool, only: Option<&str>) -> i32 {
+    let lines = match ask(c, None, "leases", if all || only.is_some() { "leases all" } else { "leases" }) {
         Ok(l) => l,
         Err(e) => return fail(e),
     };
     if lines.is_empty() {
         println!("no leases");
     }
-    let leases: Vec<Value> = lines.iter().filter_map(|l| json(l)).collect();
+    let mut leases: Vec<Value> = lines.iter().filter_map(|l| json(l)).collect();
+    if let Some(id) = only {
+        leases.retain(|v| s(v, "id") == id);
+        if leases.is_empty() {
+            return fail(format!("no lease {id} in the master's list (one that ended a while ago: `devhub job result {id} --tail`)"));
+        }
+    }
     for v in &leases {
         let v = v.clone();
         let node = s(&v, "node");
@@ -2036,8 +2395,10 @@ fn queue(c: &Client, all: bool) -> i32 {
                 let disk = info.and_then(|i| i.get("disk_mb")).and_then(super::num).map_or(String::new(), |m| format!(" disk {:.1} GB", m / 1024.0));
                 let agent = s(&v, "agent");
                 let past = n(&v, "past_budget");
+                let why = s(&v, "grant_why");
+                let why = if why.is_empty() { why } else { format!(" ({why})") };
                 format!(
-                    "{st} {}s ago, beat {}s ago{}{run}{ram}{cores}{disk}{}{}",
+                    "{st} {}s ago{why}, beat {}s ago{}{run}{ram}{cores}{disk}{}{}",
                     n(&v, "granted_s"),
                     n(&v, "beat_s"),
                     if agent.is_empty() { String::new() } else { format!(" agent {agent}") },
@@ -2051,7 +2412,7 @@ fn queue(c: &Client, all: bool) -> i32 {
         let target = if loader.is_empty() { jit } else { loader };
         println!("{:<6} {:<8} {:<10} {} {} ({}) {} {}{}: {tail}", s(&v, "id"), s(&v, "lane"), format!("{}{at}", s(&v, "kind")), s(&v, "priority"), s(&v, "cost"), s(&v, "cost_source"), s(&v, "src"), if target.is_empty() { "" } else { "jit " }, target);
     }
-    let timed = timed_boxes(&leases);
+    let timed = if only.is_some() { Vec::new() } else { timed_boxes(&leases) };
     if !timed.is_empty() {
         println!("timed queue per box:");
         for line in timed { println!("{line}"); }
@@ -2319,6 +2680,27 @@ fn why(id: &str) -> i32 {
     }
 }
 
+/// `lease <id> jits`: the JITs among a running lease's processes, wherever they run (a JIT-run
+/// test leads a process group of its own), as `<node>/<pid> <app>`: what `devhub inspect` and a
+/// sampler take.
+fn lease_jits(id: &str) -> i32 {
+    let c = match master() {
+        Ok(c) => c,
+        Err(e) => return fail(e),
+    };
+    match lane_node(&c, "", Some(id)).and_then(|node| node_one(&c, &node, "lease-jits", &format!("lease-jits {id}")).map(|v| (node, v))) {
+        Ok((node, v)) => {
+            let jits = v.get("jits").and_then(Value::as_arr).unwrap_or(&[]);
+            if jits.is_empty() { println!("no JIT runs under {id} on {node}"); }
+            for j in jits {
+                println!("{node}/{} {}", j.get("pid").and_then(super::num).unwrap_or(0.0) as u64, j.get("app").and_then(Value::as_str).unwrap_or(""));
+            }
+            0
+        }
+        Err(e) => fail(e),
+    }
+}
+
 /// The lease words; None: not one of them.
 pub fn cli(args: &[&str]) -> Option<i32> {
     let word = *args.first()?;
@@ -2341,12 +2723,14 @@ pub fn cli(args: &[&str]) -> Option<i32> {
         ["prof", rest @ ..] => if let Err(e) = super::prof::Query::parse(rest) { eprintln!("makepad devhub {e}"); return Some(2); },
         ["lease", id, "cancel"] | ["cancel", id] => return Some(cancel(id)),
         ["lease", id, "why"] => return Some(why(id)),
+        ["lease", id, "jits"] => return Some(lease_jits(id)),
+        ["lease", _, "show"] | ["lease", "show", _] => {}
         ["lease", rest @ ..] => return Some(lease(rest)),
         ["overlay", "selftest", rest @ ..] => return Some(overlay_selftest(rest)),
         ["overlay", word @ ("status" | "why"), lane, rest @ ..] => return Some(overlay_inspect(word, lane, rest)),
         ["run", lane, kind, rest @ ..] => return Some(run(lane, kind, rest)),
         ["test", lane, pkg, rest @ ..] => return Some(test(lane, pkg, rest)),
-        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--needs k=v,..] [--node N [--series S]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]"); return Some(2); }
+        ["test", ..] => { eprintln!("makepad devhub test <lane> <pkg> [--lib|--bin B|--test T|--tests] [--features F] [--no-default-features] [--needs k=v,..] [--node N [--series S|--pin-why R]] [--avoid N[,N..]] [--cost small|medium|large] [--est-min N] [--cores N] [--class name] [--priority interactive|background] [--jit key] [--native [<reason>]|--live] [--tree] [-- args...]"); return Some(2); }
         ["get", lane, rel, dst, rest @ ..] => return Some(get(lane, rel, dst, rest)),
         _ => {}
     }
@@ -2401,7 +2785,8 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             }
             Err(e) => fail(e),
         },
-        ["queue" | "leases", rest @ ..] => queue(&c, rest.contains(&"--all")),
+        ["queue" | "leases", rest @ ..] => queue(&c, rest.contains(&"--all"), None),
+        ["lease", id, "show"] | ["lease", "show", id] => queue(&c, true, Some(id)),
         ["why-queued", id] => match ask(&c, None, "why-queued", id) {
             Ok(lines) => {
                 for line in lines {
@@ -2485,6 +2870,15 @@ pub fn cli(args: &[&str]) -> Option<i32> {
             Err(e) if e.contains("unknown") || e.contains("unsupported") => fail(format!("{e} ({node}'s hub is older than `node back`: it takes it from its next self-update)")),
             Err(e) => fail(e),
         },
+        // the toolchain probe now (a box out of rotation after a toolchain move comes back at once)
+        ["node", node, "probe"] => match node_one(&c, node, "toolchain-probe", "toolchain-probe") {
+            Ok(v) => match v.get("why").and_then(|w| w.as_str()) {
+                None => { println!("{node}: its toolchain links: in rotation"); 0 }
+                Some(why) => { println!("{node}: its toolchain cannot link, out of rotation: {why}"); 1 }
+            },
+            Err(e) if e.contains("unknown") || e.contains("unsupported") => fail(format!("{e} ({node}'s hub is older than `node probe`: it takes it from its next self-update)")),
+            Err(e) => fail(e),
+        },
         ["node", node] => node_conf(&c, node, ""),
         ["node", node, "role", role] => node_conf(&c, node, &format!("set role={role}{}", conf_by())),
         ["node", node, "set", kvs @ ..] if !kvs.is_empty() => node_conf(&c, node, &format!("set {}{}", kvs.join(" "), conf_by())),
@@ -2510,9 +2904,11 @@ pub fn cli(args: &[&str]) -> Option<i32> {
 #[test]
 fn test_route_takes_the_measured_faster_side() {
     for own in [false, true] {
-        for (jit, cargo) in [(None, None), (None, Some(100_000)), (Some(70_000), None)] {
-            assert_eq!(test_route(own, jit, cargo).0, !own, "missing measurement uses the default: own={own}, JIT={jit:?}, cargo={cargo:?}");
+        for cargo in [None, Some(100_000)] {
+            let (chosen, reason) = test_route(own, None, cargo);
+            assert!(chosen && reason.contains("this run measures it"), "no JIT measure: the JIT measures it: own={own}, cargo={cargo:?}, {reason}");
         }
+        assert_eq!(test_route(own, Some(70_000), None).0, !own, "no cargo measure: the default: own={own}");
     }
     for (own, jit, cargo, use_jit, jit_dur, cargo_dur) in [
         (true, 70_000, 100_000, true, "1m10s", "1m40s"),
@@ -2573,6 +2969,109 @@ mod restart_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test run whose lease never started says so in place of its verdict, and the pre-land
+    /// check reads that back as no verdict, never as the crates' red ("FAILED: no error line" for
+    /// a check whose lease a stale lock refused, 11-13).
+    #[test]
+    fn a_test_whose_lease_never_started_reads_as_not_run() {
+        let said = "lease L1 denied: refused on box-a: lease-start L1: ci merge config: config.worktree is locked";
+        let log = format!("{}\n", super::not_run_line("check of relax-compiler relax-types", said));
+        assert_eq!(super::not_run(&log), Some(said));
+        assert_eq!(super::not_run("devhub test: makepad-devhub failed in 1.000s (queue 0.100s, ship 0.100s, run 0.800s) on box-a\n"), None, "a run that started has its verdict");
+    }
+
+    /// A live test's feature set is said one way and is part of its session's key: the same set
+    /// in any order shares a session, another set gets its own (`--live` refused `--features`, 11-13).
+    #[test]
+    fn a_live_tests_feature_set_is_part_of_its_session_key() {
+        let s = |a: &[&str]| a.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let one = super::live_select(s(&["--features", "scene3d packs", "--lib", "--", "selection_bounds"]));
+        assert_eq!(one, s(&["--lib", "--features", "packs,scene3d", "--", "selection_bounds"]), "one order, after its target");
+        assert_eq!(super::live_select(s(&["--lib", "--features", "packs,scene3d", "--", "selection_bounds"])), one, "the same set: the same session");
+        assert_ne!(super::live_select(s(&["--lib", "--features", "packs", "--", "selection_bounds"])), one, "another set: another session");
+        assert_eq!(super::live_select(s(&["--no-default-features", "--lib"])), s(&["--lib", "--no-default-features"]));
+        assert_eq!(super::live_select(s(&["--lib", "--", "--features", "x"])), s(&["--lib", "--", "--features", "x"]), "libtest's own arguments stay");
+        #[cfg(feature = "checkout")]
+        for args in [one.clone(), super::live_select(s(&["--no-default-features", "--features", "a", "--test", "t"])), super::live_select(s(&["--features", "a"]))] {
+            let select = &args[..args.iter().position(|a| a == "--").unwrap_or(args.len())];
+            assert!(crate::orch::live::test_select_ok(select), "the master takes the key the client says: {args:?}");
+        }
+    }
+
+    /// A `live test` call that waits for room on its box answers with its session after the wait's
+    /// lines: they are said, never the answer (W6628, 11-13).
+    #[test]
+    fn a_live_test_call_that_waits_for_room_answers_with_its_session() {
+        let mut answer = None;
+        let lines = [
+            r#"{"say":"live call W1 waits for room on box-a: box-a: budget ram 38.0 GB, in use 36.1 GB, asked 4.1 GB","waiting":true}"#,
+            r#"{"say":"","waiting":false}"#,
+            r#"{"id":"W1","state":"running","room":"live call W1 waited 41000 ms for room on box-a"}"#,
+            r#"{"end":true}"#,
+        ];
+        let mut got = None;
+        for l in lines { if let Some(v) = live_line(l, &mut answer).unwrap() { got = Some(v); } }
+        let got = got.expect("the call's answer at its end");
+        assert_eq!(crate::state::live_from(&got).id, "W1", "{}", got.to_json());
+        assert_eq!(live_line(r#"{"err":"W1: the session ended"}"#, &mut None), Err("W1: the session ended".to_string()));
+        assert_eq!(live_line(r#"{"end":true}"#, &mut None), Err("live: no answer".to_string()), "a wait alone is no answer");
+    }
+
+    /// A JIT miss's cargo check goes to a pool box, a macOS one to any Mac, a named box to itself.
+    #[test]
+    fn a_cargo_check_goes_to_the_pool_and_a_macos_one_to_any_mac() {
+        let on = |node: Option<&str>, needs: &[(&str, &str)]| {
+            let mut req = Req::new("lane", Kind::Test);
+            (req.node, req.needs) = (node.map(str::to_string), needs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+            on_cargo_boxes(&mut req);
+            req.needs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
+        };
+        assert_eq!(on(None, &[("os", "linux"), ("role", "hot")]), "os=linux,role=pool");
+        assert_eq!(on(None, &[("os", "macos")]), "os=macos", "the hot Mac too");
+        assert_eq!(on(Some("boxa"), &[("os", "linux")]), "os=linux");
+    }
+
+    /// A run ships what it was asked with: the worktree's files and its patch as they were when
+    /// it queued, never an edit or a commit (the lane's, the merge bot's) made while it waited;
+    /// with `--rev`, nothing of the worktree. Its stage goes with it (11-13).
+    #[cfg(feature = "checkout")]
+    #[test]
+    fn a_queued_run_ships_its_tree_as_it_was_asked() {
+        let repo = std::env::temp_dir().join(format!("devhub-snap-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| crate::orch::git(&repo, &[&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"][..], args].concat()).unwrap().trim().to_string();
+        let write = |p: &str, text: &str| std::fs::write(repo.join(p), text).unwrap();
+        write("a.rs", "fn a() {}\n");
+        write("b.rs", "fn b(x: u8) {}\n");
+        git(&["init", "-q", "-b", "work"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let rev = format!("work@{}", git(&["rev-parse", "HEAD"]));
+        write("a.rs", "fn a() { 1 }\n");
+        let us = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros();
+        let mtime = us(&repo.join("a.rs"));
+        let asked = snap(&repo, &rev, true, false, &[("b.rs".to_string(), b"fn b(x: u8) { patched }\n".to_vec())]).unwrap();
+        // while it waits: an edit, and a merge that changes b.rs and adds c.rs
+        write("a.rs", "fn a() { 2 }\n");
+        write("b.rs", "fn b(x: u8, y: u8) {}\n");
+        write("c.rs", "fn c() {}\n");
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "merged while it waited"]);
+        assert_eq!(asked.entries.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(), ["a.rs", "b.rs"]);
+        let staged = |p: &str| std::fs::read_to_string(asked.stage.join(p)).unwrap();
+        assert_eq!((staged("a.rs"), staged("b.rs")), ("fn a() { 1 }\n".to_string(), "fn b(x: u8) { patched }\n".to_string()));
+        assert_eq!(us(&asked.stage.join("a.rs")), mtime, "the file's own mtime: the node's cargo sees no new edit");
+        assert_eq!(asked.patched, 1);
+        let stage = asked.stage.clone();
+        drop(asked);
+        assert!(!stage.exists(), "the stage goes with the run");
+        let alone = snap(&repo, &rev, true, true, &[]).unwrap();
+        assert!(alone.entries.is_empty() && alone.deleted.is_empty(), "--rev: the commits alone");
+        drop(alone);
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn every_lease_run_flag_reaches_the_request_or_is_local() {

@@ -937,6 +937,11 @@ impl AppMain for App {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
+            // SIGTERM to a node (the WM that replaces it, a service stop): its hub finishes the
+            // lease start in flight and exits itself, refusing new ones
+            Event::QuitRequested(e) if e.reason == QuitReason::Signal && matches!(self.core, Some(Core::Node(_))) => {
+                if makepad_devhub::lease::exec::drain_and_exit() { e.handle(); }
+            }
             Event::Timer(t) if self.timer.is_timer(t).is_some() => self.refresh(cx),
             Event::Timer(t) if self.live_on && self.live_timer.is_timer(t).is_some() => self.redraw_live(cx),
             Event::TrayMenu(e) if e.tray == TRAY => match e.item {

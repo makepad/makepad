@@ -301,6 +301,83 @@ impl Bundles {
     }
 }
 
+/// Sends `node`'s store of `repo` the objects `ids` (trees and blobs this repo at `dir` has) its
+/// store lacks: a store holding a commit can lack objects of its tree, and every bundle of a pin
+/// leaves out what the store's refs reach. One commit of a tree that names each of them, bundled
+/// with no bases: the objects and all they hold. It lands on the node's `devhub-fill` ref.
+pub fn fill_objects(control: &Client, node: &str, repo: &str, dir: &Path, ids: &[String]) -> Result<(), String> {
+    if !super::git::valid_repo(repo) {
+        return Err(format!("no repo `{repo}`"));
+    }
+    if ids.is_empty() || !ids.iter().all(|id| valid_sha(id)) {
+        return Err("no object ids".into());
+    }
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("devhub-fill-{}-{n}-{repo}.bundle", std::process::id()));
+    let scratch = path.with_extension("git");
+    let made = (|| -> Result<String, String> {
+        let common = crate::gitread::paths(dir).ok_or_else(|| format!("{}: no repository", dir.display()))?.common_dir.to_string_lossy().into_owned();
+        git(dir, &["init", "-q", "--bare", &scratch.to_string_lossy()])?;
+        std::fs::write(scratch.join("objects/info/alternates"), format!("{common}/objects\n")).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        // (a tree entry per object, named by its id: what git's tree format takes for each kind)
+        let mut entries = String::new();
+        for id in ids {
+            match git(&scratch, &["cat-file", "-t", id])?.as_str() {
+                "blob" => entries.push_str(&format!("100644 blob {id}\t{id}\n")),
+                "tree" => entries.push_str(&format!("040000 tree {id}\t{id}\n")),
+                other => return Err(format!("{id} is a {other}, not a tree or blob")),
+            }
+        }
+        let tree = git_in(&scratch, &["mktree"], entries.as_bytes())?;
+        let commit = git_in(&scratch, &["-c", "user.name=devhub", "-c", "user.email=devhub@localhost", "commit-tree", &tree, "-m", "devhub fill"], &[])?;
+        git(&scratch, &["update-ref", "refs/heads/devhub-fill", &commit])?;
+        git(&scratch, &["bundle", "create", "-q", &path.to_string_lossy(), "refs/heads/devhub-fill"])?;
+        Ok(commit)
+    })();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let sent = made.and_then(|commit| {
+        let (hash, size) = digest(&path)?;
+        let p = Push { repo: repo.to_string(), dir: dir.to_path_buf(), branch: "devhub-fill".into(), sha: commit };
+        send_bundle(control, node, &p, &path, &hash, size).map(|_| ())
+    });
+    let _ = std::fs::remove_file(&path);
+    sent
+}
+
+/// [`git`] with `input` on its stdin.
+fn git_in(repo: &Path, args: &[&str], input: &[u8]) -> Result<String, String> {
+    use std::io::Write;
+    let mut child = crate::git_exec::command().arg("-C").arg(repo).args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("git: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("git: no stdin")?;
+    let written = stdin.write_all(input);
+    drop(stdin);
+    let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
+    written.map_err(|e| format!("git {}: {e}", args.first().unwrap_or(&"")))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!("git {}: {}", args.first().unwrap_or(&""), proto::clean(String::from_utf8_lossy(&out.stderr).trim(), 300)))
+    }
+}
+
+/// A bundle file's sha256 (as its signed order names it) and size.
+fn digest(path: &Path) -> Result<(String, u64), String> {
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut h = makepad_network::digest::Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut size = 0u64;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+        size += n as u64;
+    }
+    Ok((sign::hex(&h.finalise()), size))
+}
+
 fn make_bundle(p: &Push, bases: &[String]) -> Result<(PathBuf, String, u64), String> {
     // unique per call: parallel node pushes with different bases make bundles of one commit at once
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -322,19 +399,8 @@ fn make_bundle(p: &Push, bases: &[String]) -> Result<(PathBuf, String, u64), Str
     })();
     let _ = std::fs::remove_dir_all(&scratch);
     made?;
-    let mut f = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-    let mut h = makepad_network::digest::Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut size = 0u64;
-    loop {
-        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-        size += n as u64;
-    }
-    Ok((path, sign::hex(&h.finalise()), size))
+    let (hash, size) = digest(&path)?;
+    Ok((path, hash, size))
 }
 
 /// Sends one bundle down `node`'s `sync-push`.
@@ -588,6 +654,8 @@ pub(super) enum RoomNow {
     Held(Option<u32>),
     /// its tree moves alone: its room waits in line, and the box builds once it is granted
     Tree,
+    /// a bench box whose room waits in line: its tree moves with its build, once it is granted
+    InLine,
     /// timed work on the box goes first: it waits for the gap after
     Waits,
 }
@@ -675,6 +743,7 @@ pub(super) fn push_and_apply(c: &Client, repo: &Path, follow: &[(String, String)
                 };
                 let (words, _room) = match room {
                     RoomNow::Waits => return Ok(vec![format!("{{\"err\":\"waits: timed work runs or waits at {n}: its deployment builds in the gap after it\"}}")]),
+                    RoomNow::InLine => return Ok(vec![format!("{{\"err\":\"waits: {n} is a bench box: its tree moves with its build, once its deployment-build room waiting in line is granted\"}}")]),
                     RoomNow::Tree => (words("off"), None),
                     RoomNow::Held(jobs) => (with_jobs(words("on"), jobs), None),
                     RoomNow::Built(room) => (with_jobs(words("on"), room.jobs()), Some(room)),

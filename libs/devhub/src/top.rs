@@ -528,6 +528,9 @@ pub struct CpuSplit {
     pub leases: Vec<(String, f64)>,
     /// (what, pid, cores), the busiest first
     pub outside: Vec<(String, u32, f64)>,
+    /// (pid, app): the apps of ours that run outside every lease and the hub, busy or not, by the
+    /// registry's label ([`apps_outside`])
+    pub apps: Vec<(u32, String)>,
 }
 
 /// [`cpu_split`] of a look's rows.
@@ -558,7 +561,31 @@ fn split_rows(rows: &[ProcRow], lease_of: &dyn Fn(u32) -> Option<String>) -> Cpu
     out.leases.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     out.outside.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.1.cmp(&b.1)));
     out.outside.truncate(OUTSIDE_TOP);
+    out.apps = apps_outside(rows, &by_pid, me, lease_of);
     out
+}
+
+/// The windowed apps of ours (the registry's WM-launchable rows) among a look's `rows` that run
+/// outside every lease and the hub: a person's, or one an agent opened without a lease (an XR
+/// session or a viewer on one holds its box, `lease::hand`). Only a process named like one of
+/// ours (`makepad`, or an app's binary: the kernel cuts names at 15 bytes) has its argv read; a
+/// devhub client naming an app is none.
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "checkout"))]
+fn apps_outside(rows: &[ProcRow], by_pid: &std::collections::HashMap<u32, &ProcRow>, me: u32, lease_of: &dyn Fn(u32) -> Option<String>) -> Vec<(u32, String)> {
+    let ours = |name: &str| name.starts_with("makepad") || makepad_app_registry::apps().iter().any(|a| a.bin == name || name.len() >= 15 && a.bin.starts_with(name));
+    let mut apps: Vec<(u32, String)> = rows.iter().filter(|r| r.pid != me && ours(&r.name) && matches!(owner_of(by_pid, r, me, lease_of), Owner::Nobody)).filter_map(|r| {
+        let argv = argv_bytes(r.pid)?;
+        let words: Vec<String> = argv.split(|b| *b == 0).filter(|w| !w.is_empty()).map(|w| String::from_utf8_lossy(w).into_owned()).collect();
+        if words.iter().any(|w| w == "devhub") { return None; }
+        let app = makepad_app_registry::machine::app_in_command(words.iter().map(String::as_str)).filter(|a| a.wm_launchable)?;
+        Some((r.pid, app.label.to_string()))
+    }).collect();
+    apps.sort();
+    apps
+}
+#[cfg(all(not(windows), not(all(any(target_os = "linux", target_os = "macos"), feature = "checkout"))))]
+fn apps_outside(_rows: &[ProcRow], _by_pid: &std::collections::HashMap<u32, &ProcRow>, _me: u32, _lease_of: &dyn Fn(u32) -> Option<String>) -> Vec<(u32, String)> {
+    Vec::new()
 }
 
 /// The processes [`cpu_split`] names outside the leases, said: `dumper pid 812 (1.0 cores), ...`.

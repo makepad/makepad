@@ -31,7 +31,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 /// What a build leaves in the tree's target to have its binary published.
 pub const MARK: &str = "host/makepad.publish";
@@ -53,13 +52,26 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// The compiler's commit: a rustup update on this box means new binaries.
-pub(crate) fn compiler() -> &'static str {
-    static COMPILER: OnceLock<String> = OnceLock::new();
-    COMPILER.get_or_init(|| {
-        let v = super::caps::rust_command("rustc").arg("-vV").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
-        v.lines().find_map(|l| l.strip_prefix("commit-hash: ")).unwrap_or("").to_string()
-    })
+/// The compiler's commit as this box's last lease start read it ([`refresh_compiler`]; read now
+/// when none did yet): a rustup update on this box means new binaries. A hub that kept the commit
+/// it started with labelled another rustc's builds with it (stale code under the old key).
+static COMPILER: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub(crate) fn compiler() -> String {
+    let mut c = COMPILER.lock().unwrap();
+    c.get_or_insert_with(|| super::caps::read_rustc().commit).clone()
+}
+
+/// A lease's start: reads the toolchain again, so that lease's keys name the rustc its builds use.
+/// What it read: the lease keeps it, and its end compares ([`super::exec`]'s toolchain verdict).
+pub(crate) fn refresh_compiler() -> super::caps::Rustc {
+    let rustc = super::caps::read_rustc();
+    let now = rustc.commit.clone();
+    let was = COMPILER.lock().unwrap().replace(now.clone());
+    if let Some(was) = was.filter(|w| !w.is_empty() && *w != now) {
+        eprintln!("devhub: rustc changed ({was} -> {now}): JIT binaries are keyed by the new compiler");
+    }
+    rustc
 }
 
 /// The key of `inputs` with `blob` (path to its git blob); None when one is not tracked.
@@ -180,7 +192,7 @@ pub fn find(root: &Path, target: &Path) -> Option<(String, PathBuf)> {
     held.into_iter().find_map(|k| {
         let inputs = read_inputs(target, &k)?;
         let p = path(target, &k);
-        (!inputs.iter().any(|i| dirty.contains(i)) && p.is_file() && key(compiler(), &inputs, &blob).as_deref() == Some(k.as_str())).then_some((k, p))
+        (!inputs.iter().any(|i| dirty.contains(i)) && p.is_file() && key(&compiler(), &inputs, &blob).as_deref() == Some(k.as_str())).then_some((k, p))
     })
     .map(|(k, p)| {
         used(target, &k);
@@ -244,7 +256,7 @@ fn crate_input(path: &str, dirs: &std::collections::BTreeSet<String>, contains: 
 // Edited tree files have an empty oid and must not read or populate this process-wide cache.
 #[cfg(feature = "checkout")]
 fn blob_includes(path: &str, oid: &str, bytes: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Result<Vec<(String, bool)>, String> {
-    static INCLUDES: OnceLock<std::sync::Mutex<HashMap<String, Vec<(String, bool)>>>> = OnceLock::new();
+    static INCLUDES: std::sync::OnceLock<std::sync::Mutex<HashMap<String, Vec<(String, bool)>>>> = std::sync::OnceLock::new();
     let cache = INCLUDES.get_or_init(Default::default);
     if !oid.is_empty() {
         if let Some(list) = cache.lock().unwrap().get(oid) { return Ok(list.clone()); }
@@ -431,7 +443,7 @@ pub fn tree_id(root: &Path) -> Option<TreeKey> {
     let inputs = inputs(&index, &|p| std::fs::read(root.join(p)).map_err(|e| e.to_string())).ok()?;
     if compiler().is_empty() { return None; }
     let converted = std::cell::RefCell::new(None::<(usize, String)>);
-    let key = inputs.key(compiler(), &|p| {
+    let key = inputs.key(&compiler(), &|p| {
         if changed.contains(p) { return Some(makepad_git::oid::hash_object("blob", &disk_bytes(&root.join(p))?).to_hex()); }
         let (blob, other) = on_disk(root, p, entries.get(p)?)?;
         if other {
@@ -449,7 +461,7 @@ pub fn overlay_id(work: &Path, pin: &super::Pin) -> Result<(String, Vec<String>)
     let index = super::relaxgit::bases(work, pin, &|_| true)?;
     let inputs = pinned_inputs(work, pin, &index)?;
     if compiler().is_empty() { return Err("dev JIT: rustc did not report its compiler commit".into()); }
-    let id = inputs.key(compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
+    let id = inputs.key(&compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
     Ok((id, inputs.files))
 }
 
@@ -489,21 +501,17 @@ pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &su
     let index = super::relaxgit::bases(work, pin, &|_| true)?;
     let inputs = pinned_inputs(work, pin, &index)?;
     if compiler().is_empty() { return Err("dev JIT: rustc did not report its compiler commit".into()); }
-    let pinned = inputs.key(compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
+    let pinned = inputs.key(&compiler(), &|p| index.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
     let edits = lane_edits(edits, &index)?;
-    // Only an edit the pin's inputs could see (one of them, a new file in one of its crates or
-    // named directories) can change the JIT; the lane's tree's own inputs say whether it does.
-    let input = |p: &String| inputs.files.binary_search(p).is_ok() || crate_input(p, &inputs.crate_dirs, &|m| edits.tree.contains_key(m))
-        || inputs.extra_dirs.iter().any(|dir| p.starts_with(&format!("{dir}/")));
     let mut own = None;
-    if edits.edited.iter().chain(&edits.deleted).any(input) {
+    if reaches_inputs(&inputs, &edits.tree, &edits.edited, &edits.deleted) {
         let blobs = super::relaxgit::Blobs::open(work, pin)?;
         let tree = self::inputs(&edits.tree, &|p| match edits.tree.get(p) {
             Some(_) if edits.edited.contains(p) => edit_bytes(&edits.dir, p),
             Some(oid) => blobs.read(p, oid),
             None => Err(format!("overlay: JIT input {p} is not in the lane's tree")),
         })?;
-        let id = tree.key(compiler(), &|p| edits.tree.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
+        let id = tree.key(&compiler(), &|p| edits.tree.get(p).cloned()).ok_or("overlay: missing JIT input blob")?;
         if id != pinned {
             let changed: Vec<String> = edits.edited.iter().filter(|p| tree.files.binary_search(p).is_ok()).chain(edits.deleted.iter().filter(|p| inputs.files.binary_search(p).is_ok())).cloned().collect();
             // all of the lane's edits, so the workspace cargo resolves is the lane's too
@@ -530,6 +538,61 @@ pub fn find_overlay(work: &Path, lane: &str, edits: &Path, lease: &str, pin: &su
     };
     (build.active)()?;
     Ok(Overlay { id: selected.into(), binary, changed })
+}
+
+/// Whether one of a lane's `edited` or `deleted` paths is one the pin's JIT `inputs` could see:
+/// one of them, a new file in one of its crates or named directories (`tree`: the lane's). Only
+/// such an edit can change the JIT; the lane's tree's own inputs say whether it does.
+#[cfg(feature = "checkout")]
+fn reaches_inputs(inputs: &Inputs, tree: &std::collections::BTreeMap<String, String>, edited: &HashSet<String>, deleted: &HashSet<String>) -> bool {
+    let input = |p: &String| inputs.files.binary_search(p).is_ok() || crate_input(p, &inputs.crate_dirs, &|m| tree.contains_key(m))
+        || inputs.extra_dirs.iter().any(|dir| p.starts_with(&format!("{dir}/")));
+    edited.iter().chain(deleted).any(input)
+}
+
+/// The dev JIT ids, in compiler order, of the pin's makepad commit `sha` ([`commit_ids`]), and of
+/// the tree a run ships on it when its edits change the JIT's inputs: the lane's own JIT, which
+/// [`find_overlay`] builds for it on its box (else empty). `edits`: each path it ships and the
+/// file that holds its bytes as they ship (a symlink: its target), None: deleted. Placement goes by
+/// the second ([`super::sched::Req::jit_ids`]).
+#[cfg(feature = "checkout")]
+pub(crate) fn shipped_ids(repo: &Path, sha: &str, compilers: &[String], edits: &[(String, Option<PathBuf>)]) -> Result<(Vec<String>, Vec<String>), String> {
+    use std::collections::BTreeMap;
+    if compilers.iter().all(|c| c.is_empty()) { return Ok((Vec::new(), Vec::new())); }
+    let index = crate::gitread::files_at(repo, sha)?;
+    let pinned = |path: &str| -> Result<Vec<u8>, String> {
+        crate::gitread::blob(repo, index.get(path).ok_or_else(|| format!("JIT input missing from pin: {path}"))?)
+    };
+    let keys = |inputs: &Inputs, tree: &BTreeMap<String, String>| -> Result<Vec<String>, String> {
+        compilers.iter().filter(|c| !c.is_empty()).map(|c| inputs.key(c, &|p| tree.get(p).cloned()).ok_or_else(|| "JIT input missing from pin".to_string())).collect()
+    };
+    let inputs = inputs(&index, &pinned)?;
+    let pin_ids = keys(&inputs, &index)?;
+    // (the tree as the box's [`lane_edits`] puts it together; by name first, its bytes read only
+    // when one of those names can change the JIT)
+    let files: BTreeMap<&str, &PathBuf> = edits.iter().filter_map(|(p, f)| Some((p.as_str(), f.as_ref()?))).collect();
+    let deleted: HashSet<String> = edits.iter().filter(|(p, f)| f.is_none() && index.contains_key(p)).map(|(p, _)| p.clone()).collect();
+    let mut tree = index.clone();
+    for p in &deleted { tree.remove(p); }
+    let shipped: HashSet<String> = files.keys().map(|p| p.to_string()).collect();
+    for p in &shipped { tree.entry(p.clone()).or_default(); }
+    if !reaches_inputs(&inputs, &tree, &shipped, &deleted) { return Ok((pin_ids, Vec::new())); }
+    let mut edited = HashSet::new();
+    for (p, file) in &files {
+        let bytes = read_edit(file).map_err(|e| format!("{p}: {e}"))?;
+        let mut object = format!("blob {}\0", bytes.len()).into_bytes();
+        object.extend_from_slice(&bytes);
+        let blob = relax_base::gitstore::hex(&relax_base::gitstore::sha1(&object));
+        if index.get(*p) != Some(&blob) { edited.insert(p.to_string()); }
+        tree.insert(p.to_string(), blob);
+    }
+    if !reaches_inputs(&inputs, &tree, &edited, &deleted) { return Ok((pin_ids, Vec::new())); }
+    let own = self::inputs(&tree, &|p| match files.get(p) {
+        Some(file) if edited.contains(p) => read_edit(file).map_err(|e| format!("{p}: {e}")),
+        _ => pinned(p),
+    })?;
+    let own_ids = keys(&own, &tree)?;
+    Ok(if own_ids == pin_ids { (pin_ids, Vec::new()) } else { (pin_ids, own_ids) })
 }
 
 /// The lane's shipped tree as the JIT's inputs see it: the pin's index with its edits' blob ids.
@@ -763,8 +826,8 @@ fn build_tree(root: &Path, target: &Path, pin: &super::Pin, inputs: &[String], i
         cmd
     } else { super::caps::rust_command("cargo") };
     cmd.args(["build", "--profile", "host", "-p", "makepad-run", "--bin", "makepad", "-j", &build.jobs.max(1).to_string()])
-        .current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_INCREMENTAL", "0").env("CARGO_NET_OFFLINE", "true")
-        .env_remove("MAKEPAD_RUN_VFS").env_remove("MAKEPAD_RUN_EDITS").env_remove("MAKEPAD_RUN_WORKSPACE");
+        .current_dir(root).env("CARGO_TARGET_DIR", target).env("CARGO_INCREMENTAL", "0").env("CARGO_NET_OFFLINE", "true");
+    for k in ["VFS", "EDITS", "WORKSPACE"].iter().map(|v| crate::run_names::var(v)) { cmd.env_remove(k); }
     (build.say)(&format!("devhub: building the dev JIT {id} at {}", pin.short()));
     let (status, log) = (build.run)(id, &cmd, active)?;
     if !status.success() {
@@ -921,7 +984,7 @@ pub fn publish(root: &Path, target: &Path, own: Option<&TreeBuild>) -> Result<Op
     if let Some(p) = inputs.iter().find(|p| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).map_or(true, |t| t > built)) {
         return Err(format!("{p} changed after the build"));
     }
-    let k = key(compiler(), &inputs, &|f| on_disk(root, f, index.get(f)?).map(|(b, _)| b)).ok_or("an input is not tracked")?;
+    let k = key(&compiler(), &inputs, &|f| on_disk(root, f, index.get(f)?).map(|(b, _)| b)).ok_or("an input is not tracked")?;
     let dst = path(target, &k);
     // one key is one build: a published binary is never unlinked or replaced, since a loader that
     // runs from it would lose its own path (current_exe)
@@ -1012,6 +1075,62 @@ mod tests {
         assert_eq!(cargo_build_argv(&quiet).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
         assert_eq!(cargo_build_argv(&words("env K=V makepad test z")).unwrap(), words("cargo build --profile host -q -p makepad-run --bin makepad"));
         assert!(cargo_build_argv(&words("cargo test z")).is_none());
+    }
+
+    /// What a run ships on its pin selects the JIT that pin with those edits committed would: the
+    /// lane's own when an edit reaches the JIT's inputs (a file of its crates, a new one there, a
+    /// deleted one), the pin's when none does (another package, an input shipped as the pin has it).
+    #[test]
+    fn shipped_edits_select_the_jit_their_commit_would() {
+        let d = std::env::temp_dir().join(format!("devhub-shipped-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let root = d.join("r");
+        let write = |dir: &Path, path: &str, text: &str| {
+            std::fs::create_dir_all(dir.join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(path), text).unwrap();
+        };
+        for (path, text) in [
+            ("Cargo.toml", "[workspace]\nmembers = [\"tools/run\", \"libs/a\", \"app\"]\n"),
+            ("tools/run/Cargo.toml", "[package]\nname = \"makepad-run\"\n[dependencies]\na = { path = \"../../libs/a\" }\n"),
+            ("tools/run/src/main.rs", "fn main() {}\n"),
+            ("libs/a/Cargo.toml", "[package]\nname = \"a\"\n"),
+            ("libs/a/src/lib.rs", "pub fn a() {}\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\n"),
+            ("app/src/main.rs", "fn main() {}\n"),
+        ] { write(&root, path, text); }
+        let g = |a: &[&str]| assert!(std::process::Command::new("git").args(a).current_dir(&root).output().unwrap().status.success(), "{a:?}");
+        g(&["init", "-q"]);
+        g(&["add", "-A"]);
+        g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "pin"]);
+        let head = || git(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let pin = head();
+        let compilers = vec!["c1".to_string(), "c2".to_string()];
+        let ids = |edits: &[(String, Option<PathBuf>)]| shipped_ids(&root, &pin, &compilers, edits).unwrap();
+        let ship = |path: &str, text: &str| -> (String, Option<PathBuf>) {
+            write(&d.join("e"), path, text);
+            (path.to_string(), Some(d.join("e").join(path)))
+        };
+        let (pin_ids, none) = ids(&[]);
+        assert_eq!((pin_ids.clone(), none), (commit_ids(&root, &pin, &compilers).unwrap(), Vec::new()), "nothing shipped: the pin's");
+        assert!(pin_ids.len() == 2 && pin_ids[0] != pin_ids[1], "one per compiler: {pin_ids:?}");
+        assert_eq!(ids(&[ship("app/src/main.rs", "fn main() { other() }\n")]), (pin_ids.clone(), Vec::new()), "another package's edit");
+        assert_eq!(ids(&[ship("libs/a/src/lib.rs", "pub fn a() {}\n")]), (pin_ids.clone(), Vec::new()), "an input shipped as the pin has it");
+        for (what, path, text) in [("an edited input", "libs/a/src/lib.rs", Some("pub fn a() { b() }\n")), ("a new file in its crate", "libs/a/src/b.rs", Some("pub fn b() {}\n")), ("a deleted input", "libs/a/src/lib.rs", None)] {
+            let shipped = match text { Some(text) => ship(path, text), None => (path.to_string(), None) };
+            let (pin_again, own) = ids(&[shipped]);
+            // the same edit committed on the pin
+            g(&["checkout", "-q", "-B", "edit", &pin]);
+            match text {
+                Some(text) => write(&root, path, text),
+                None => g(&["rm", "-q", path]),
+            }
+            g(&["add", "-A"]);
+            g(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", what]);
+            assert_eq!(pin_again, pin_ids, "{what}");
+            assert_eq!(own, commit_ids(&root, &head(), &compilers).unwrap(), "{what}: the lane's own JIT is its commit's");
+            assert_ne!(own, pin_ids, "{what}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

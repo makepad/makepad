@@ -136,7 +136,7 @@ pub(crate) const RAN_NOTHING: &str = "it had done nothing yet";
 
 /// A `{"say":..}` line a service sends while it waits (`lines::say_waiting`): what it says, and
 /// whether the request still waits. An answer's lines are not one.
-fn said_line(l: &str) -> Option<(String, bool)> {
+pub(crate) fn said_line(l: &str) -> Option<(String, bool)> {
     if !l.starts_with("{\"say\":") {
         return None;
     }
@@ -1299,6 +1299,9 @@ fn land(c: &Client, a: &[&str]) -> i32 {
                     let wait_key = s("label").unwrap_or(key);
                     let included = s("included").map(|b| format!(" (+ {b} from the lane)")).unwrap_or_default();
                     println!("queued #{} {label}{included} ({} open; `makepad devhub land wait {wait_key}`)", n("id"), n("pos"));
+                    for w in v.as_ref().and_then(|v| v.get("warn")).and_then(|w| w.as_arr()).into_iter().flatten().filter_map(|w| w.as_str()) {
+                        eprintln!("makepad devhub land: warning: {w}");
+                    }
                     let Some(app) = chain_app else { return 0 };
                     let by = std::env::var("DEVHUB_AGENT").ok().filter(|x| !x.is_empty()).unwrap_or_else(|| key.to_string());
                     let j = makepad_remote::json_str;
