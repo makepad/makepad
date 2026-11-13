@@ -1,8 +1,9 @@
 //! io::Cursor over anything that is AsRef<[u8]>.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use super::{BufRead, Error, ErrorKind, Read, Result, Seek, SeekFrom, Write};
+use super::{BufRead, Error, ErrorKind, IoSlice, Read, Result, Seek, SeekFrom, Write};
 
 #[derive(Debug, Default, Eq, PartialEq, Clone)]
 pub struct Cursor<T> {
@@ -104,6 +105,19 @@ fn slice_write(pos: &mut u64, slice: &mut [u8], buf: &[u8]) -> Result<usize> {
     Ok(n)
 }
 
+/// Every buffer in turn, up to the first that does not fit whole.
+fn slice_write_vectored(pos: &mut u64, slice: &mut [u8], bufs: &[IoSlice<'_>]) -> Result<usize> {
+    let mut written = 0;
+    for buf in bufs.iter() {
+        let n = slice_write(pos, slice, &**buf)?;
+        written += n;
+        if n < buf.len() {
+            break;
+        }
+    }
+    Ok(written)
+}
+
 fn vec_write(pos: &mut u64, vec: &mut Vec<u8>, buf: &[u8]) -> Result<usize> {
     let p = *pos as usize;
     if p > vec.len() {
@@ -116,27 +130,20 @@ fn vec_write(pos: &mut u64, vec: &mut Vec<u8>, buf: &[u8]) -> Result<usize> {
     Ok(buf.len())
 }
 
+fn vec_write_vectored(pos: &mut u64, vec: &mut Vec<u8>, bufs: &[IoSlice<'_>]) -> Result<usize> {
+    let mut written = 0;
+    for buf in bufs.iter() {
+        written += vec_write(pos, vec, &**buf)?;
+    }
+    Ok(written)
+}
+
 impl Write for Cursor<&mut [u8]> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         slice_write(&mut self.pos, self.inner, buf)
     }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Write for Cursor<&mut Vec<u8>> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        vec_write(&mut self.pos, self.inner, buf)
-    }
-    fn flush(&mut self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl Write for Cursor<Box<[u8]>> {
-    fn write(&mut self, buf: &[u8]) -> Result<usize> {
-        slice_write(&mut self.pos, &mut self.inner, buf)
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        slice_write_vectored(&mut self.pos, self.inner, bufs)
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -147,6 +154,33 @@ impl<const N: usize> Write for Cursor<[u8; N]> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         slice_write(&mut self.pos, &mut self.inner, buf)
     }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        slice_write_vectored(&mut self.pos, &mut self.inner, bufs)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for Cursor<Box<[u8]>> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        slice_write(&mut self.pos, &mut self.inner, buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        slice_write_vectored(&mut self.pos, &mut self.inner, bufs)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl Write for Cursor<&mut Vec<u8>> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        vec_write(&mut self.pos, self.inner, buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        vec_write_vectored(&mut self.pos, self.inner, bufs)
+    }
     fn flush(&mut self) -> Result<()> {
         Ok(())
     }
@@ -155,6 +189,9 @@ impl<const N: usize> Write for Cursor<[u8; N]> {
 impl Write for Cursor<Vec<u8>> {
     fn write(&mut self, buf: &[u8]) -> Result<usize> {
         vec_write(&mut self.pos, &mut self.inner, buf)
+    }
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> Result<usize> {
+        vec_write_vectored(&mut self.pos, &mut self.inner, bufs)
     }
     fn flush(&mut self) -> Result<()> {
         Ok(())

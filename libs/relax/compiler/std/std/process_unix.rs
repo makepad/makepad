@@ -301,6 +301,9 @@ pub struct Command {
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
     pgroup: Option<sys::pid_t>,
+    /// CommandExt::uid / gid: the ids the child switches to before it execs
+    uid: Option<sys::uid_t>,
+    gid: Option<sys::gid_t>,
     /// CommandExt::pre_exec closures, run in the child between fork and exec
     closures: Vec<PreExec>,
 }
@@ -308,7 +311,7 @@ pub struct Command {
 impl Command {
     pub fn new<S: AsRef<OsStr>>(program: S) -> Command {
         let program = program.as_ref().to_os_string();
-        Command { args: alloc::vec![program.clone()], program, env_clear: false, env: Vec::new(), cwd: None, stdin: None, stdout: None, stderr: None, pgroup: None, closures: Vec::new() }
+        Command { args: alloc::vec![program.clone()], program, env_clear: false, env: Vec::new(), cwd: None, stdin: None, stdout: None, stderr: None, pgroup: None, uid: None, gid: None, closures: Vec::new() }
     }
     pub fn arg<S: AsRef<OsStr>>(&mut self, arg: S) -> &mut Command {
         self.args.push(arg.as_ref().to_os_string());
@@ -387,6 +390,12 @@ impl Command {
     }
     pub(crate) fn set_pgroup(&mut self, pgroup: sys::pid_t) {
         self.pgroup = Some(pgroup);
+    }
+    pub(crate) fn set_uid(&mut self, id: sys::uid_t) {
+        self.uid = Some(id);
+    }
+    pub(crate) fn set_gid(&mut self, id: sys::gid_t) {
+        self.gid = Some(id);
     }
     pub(crate) fn add_pre_exec(&mut self, f: alloc::boxed::Box<dyn FnMut() -> io::Result<()> + Send + Sync>, run: unsafe fn(*mut u8) -> io::Result<()>) {
         self.closures.push(PreExec { f, run });
@@ -513,8 +522,8 @@ impl Command {
         // NDK r28 spawn.h: addchdir_np requires API 34; spawning itself requires API 28.
         // The launcher will provide --cwd; never change the Activity process's cwd or fork it.
         #[cfg(target_os = "android")]
-        if self.cwd.is_some() || !self.closures.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::Unsupported, "Android posix_spawn does not support cwd or pre_exec"));
+        if self.cwd.is_some() || !self.closures.is_empty() || (!exec && (self.uid.is_some() || self.gid.is_some())) {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "Android posix_spawn does not support cwd, pre_exec, uid or gid"));
         }
         let Some(dir) = self.cwd.clone() else {
             // the child runs in this program's folder: the one it changed to, if it did
@@ -591,16 +600,16 @@ impl Command {
         let (stderr_child, stderr_parent) = setup_stdio(self.stderr.take(), default_piped, false)?;
 
         #[cfg(not(target_os = "android"))]
-        if !self.closures.is_empty() || self.searches_own_path() {
+        if !self.closures.is_empty() || self.searches_own_path() || self.uid.is_some() || self.gid.is_some() {
             if exec {
                 // CommandExt::exec: real std runs the closures in this process before the exec
                 for p in self.closures.iter_mut() {
                     unsafe { p.call()? };
                 }
             } else {
-                // real std: no posix_spawn when there are pre_exec closures or the Command's own
-                // PATH finds the program -- fork, set the child up, run the closures, exec; a
-                // CLOEXEC pipe carries a failure's errno back
+                // real std: no posix_spawn when there are pre_exec closures, a uid or gid to
+                // switch to, or the Command's own PATH finds the program -- fork, set the child
+                // up, run the closures, exec; a CLOEXEC pipe carries a failure's errno back
                 let pid = unsafe { self.fork_exec(&prog, &argv, envp_ptr, &cwd, &stdin_child, &stdout_child, &stderr_child)? };
                 drop(stdin_child);
                 drop(stdout_child);
@@ -625,7 +634,7 @@ impl Command {
         }
         if exec {
             // CommandExt::exec is real std's do_exec on every Unix: this process gets the child's
-            // stdio, folder and process group and SIGPIPE back to its default, then execvp with the
+            // stdio, ids, folder and process group and SIGPIPE back to its default, then execvp with the
             // new program's environment in place, whose PATH it searches (exec_path_env); it
             // returns only on failure. (An exec by Darwin's posix_spawn with POSIX_SPAWN_SETEXEC
             // failed EBADF with a `Stdio::null()` or a file for stdio: os_exec.rs a02.)
@@ -637,6 +646,7 @@ impl Command {
                         }
                     }
                 }
+                self.switch_ids()?;
                 if let Some(c) = &cwd {
                     if chdir(c.as_ptr()) != 0 {
                         return Err(io::Error::last_os_error());
@@ -720,9 +730,32 @@ impl Command {
 }
 
 impl Command {
-    /// fork + exec for commands with pre_exec closures (real std's do_exec order: stdio, cwd,
-    /// process group, SIGPIPE default, closures, exec). Returns the child's pid, or the error the
-    /// child reported through the CLOEXEC pipe (the child is reaped then).
+    /// CommandExt::uid / gid in the process about to exec (real std's do_exec): the group first,
+    /// while the user may still change it, then the user. A user also drops the supplementary
+    /// groups, which only CAP_SETGID can: EPERM there is no failure.
+    unsafe fn switch_ids(&self) -> io::Result<()> {
+        if let Some(gid) = self.gid {
+            if setgid(gid) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        if let Some(uid) = self.uid {
+            if setgroups(0, core::ptr::null()) != 0 {
+                let e = io::Error::last_os_error();
+                if e.raw_os_error() != Some(sys::os::EPERM) {
+                    return Err(e);
+                }
+            }
+            if setuid(uid) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+
+    /// fork + exec for commands with pre_exec closures or ids (real std's do_exec order: stdio,
+    /// ids, cwd, process group, SIGPIPE default, closures, exec). Returns the child's pid, or the
+    /// error the child reported through the CLOEXEC pipe (the child is reaped then).
     #[cfg(not(target_os = "android"))]
     unsafe fn fork_exec(&mut self, prog: &CString, argv: &Vec<*const c_char>, envp: *const *const c_char, cwd: &Option<CString>, stdin_child: &Option<OwnedFd>, stdout_child: &Option<OwnedFd>, stderr_child: &Option<OwnedFd>) -> io::Result<sys::pid_t> {
         // Under the JIT the child must find its code built: it has only this thread, and a
@@ -766,7 +799,7 @@ impl Command {
         }
     }
 
-    /// The child's half of fork_exec: stdio, cwd, process group, SIGPIPE default, the
+    /// The child's half of fork_exec: stdio, ids, cwd, process group, SIGPIPE default, the
     /// closures, exec; a failure's errno goes back through the CLOEXEC pipe `w`.
     #[cfg(not(target_os = "android"))]
     unsafe fn fork_child_half(&mut self, w: c_int, prog: &CString, argv: &Vec<*const c_char>, envp: *const *const c_char, cwd: &Option<CString>, stdin_child: &Option<OwnedFd>, stdout_child: &Option<OwnedFd>, stderr_child: &Option<OwnedFd>) -> ! {
@@ -776,6 +809,9 @@ impl Command {
                     child_fail(w, io::Error::last_os_error());
                 }
             }
+        }
+        if let Err(e) = self.switch_ids() {
+            child_fail(w, e);
         }
         if let Some(c) = cwd {
             if sys::chdir(c.as_ptr()) != 0 {
@@ -1107,6 +1143,12 @@ extern "C" {
     fn dup2(fd: c_int, to: c_int) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn setpgid(pid: sys::pid_t, pgid: sys::pid_t) -> c_int;
+    fn setuid(uid: sys::uid_t) -> c_int;
+    fn setgid(gid: sys::gid_t) -> c_int;
+    #[cfg(target_vendor = "apple")]
+    fn setgroups(n: c_int, list: *const sys::gid_t) -> c_int;
+    #[cfg(not(target_vendor = "apple"))]
+    fn setgroups(n: usize, list: *const sys::gid_t) -> c_int;
     fn signal(sig: c_int, handler: usize) -> usize;
     fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
     fn sigaddset(set: *mut SigSet, sig: c_int) -> c_int;

@@ -44,6 +44,8 @@ pub struct TcpListener {
     sock: Socket,
 }
 
+// library/std/src/net/tcp.rs: `#[derive(Debug)]`, it prints the listener it borrows
+#[derive(Debug)]
 pub struct Incoming<'a> {
     listener: &'a TcpListener,
 }
@@ -207,6 +209,8 @@ impl<'a> Iterator for Incoming<'a> {
         })
     }
 }
+
+impl crate::iter::FusedIterator for Incoming<'_> {}
 
 impl fmt::Debug for TcpListener {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
