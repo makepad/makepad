@@ -5,7 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
 description = "Packing a Makepad wasm app for static hosting: the platform's web runtime stripped to the sections the app uses, the output folder (brotli, content-named files, the loader's fallbacks), font coverage classification and a small static server"
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]

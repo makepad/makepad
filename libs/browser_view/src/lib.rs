@@ -239,7 +239,7 @@ impl BrowserViews {
         // Pages arrive through their frame rings; the windows carry input.
         spec.frames_external = true;
         // Pages play sound: the host app's own mute applies to its pages.
-        spec.audio = std::env::var_os("SANDBOX_MUTE").is_none();
+        spec.audio = std::env::var_os("MAKEPAD_MUTE").is_none();
         if let Some(profile) = &self.profile {
             spec.env.push((protocol::PROFILE_ENV.to_string(), profile.display().to_string()));
         }

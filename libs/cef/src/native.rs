@@ -608,7 +608,6 @@ struct LifeSpanHandler {
     state: Arc<SharedBrowserState>,
 }
 
-#[repr(C)]
 /// Told once when something CEF was asked to do is done. Holds a flag the
 /// asker polls while turning the loop; the object lives as long as CEF
 /// holds a reference to it.
