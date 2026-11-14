@@ -127,7 +127,15 @@ pub struct MemoMap<K, V> {
 
 struct MemoTable<K, V> {
     buckets: Box<[std::sync::atomic::AtomicPtr<MemoNode<K, V>>]>,
+    /// bit r: a bucket of run r (MEMO_RUN buckets) was used. Walks of the table read those
+    /// runs alone (`used`): the pages of a large table no bucket was used in stay untouched
+    /// when it is freed too. Freeing a cleared 2^20-bucket table read all 8 MB of it for the
+    /// two entries it held; a run-time module's load frees fourteen (10 ms of a 21 ms load).
+    runs: Box<[std::sync::atomic::AtomicU64]>,
 }
+
+/// log2 of the buckets one bit of `MemoTable::runs` stands for (16 KB of buckets: a page).
+const MEMO_RUN: u32 = 11;
 
 struct MemoNode<K, V> {
     hash: u64,
@@ -146,12 +154,36 @@ impl<K, V> MemoTable<K, V> {
         // All-zero bytes are null pointers: a large fresh zeroed allocation's pages stay
         // untouched until a bucket is used (a Program/Tcx holds dozens of 2^16-bucket tables).
         let buckets = unsafe { Box::<[std::sync::atomic::AtomicPtr<MemoNode<K, V>>]>::new_zeroed_slice(1usize << bits).assume_init() };
-        Box::into_raw(Box::new(MemoTable { buckets }))
+        let runs = (0..(((1usize << bits) >> MEMO_RUN).max(1)).div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect();
+        Box::into_raw(Box::new(MemoTable { buckets, runs }))
+    }
+
+    /// Bucket `b` gets its first node (before the bucket points at it).
+    #[inline]
+    fn mark(&self, b: usize) {
+        let r = b >> MEMO_RUN;
+        let (w, bit) = (&self.runs[r / 64], 1u64 << (r % 64));
+        if w.load(std::sync::atomic::Ordering::Acquire) & bit == 0 {
+            w.fetch_or(bit, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
+
+    /// The buckets of the runs any bucket was used in: every bucket that holds a chain is one.
+    fn used(&self) -> impl Iterator<Item = &std::sync::atomic::AtomicPtr<MemoNode<K, V>>> {
+        let n = self.buckets.len();
+        (0..self.runs.len() * 64)
+            .filter(|r| self.runs[r / 64].load(std::sync::atomic::Ordering::Acquire) >> (r % 64) & 1 == 1)
+            .flat_map(move |r| self.buckets[(r << MEMO_RUN).min(n)..((r + 1) << MEMO_RUN).min(n)].iter())
+    }
+
+    /// No bucket was ever used.
+    fn unused(&self) -> bool {
+        self.runs.iter().all(|w| w.load(std::sync::atomic::Ordering::Acquire) == 0)
     }
 
     unsafe fn free(t: *mut MemoTable<K, V>) {
         let t = Box::from_raw(t);
-        for b in t.buckets.iter() {
+        for b in t.used() {
             let mut p = b.load(std::sync::atomic::Ordering::Relaxed);
             while !p.is_null() {
                 let n = Box::from_raw(p);
@@ -265,7 +297,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     pub fn snapshot(&self) -> HashMap<K, V> where K: Clone {
         let mut out = HashMap::default();
         let table = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
-        for bucket in &table.buckets {
+        for bucket in table.used() {
             let mut ptr = bucket.load(std::sync::atomic::Ordering::Acquire);
             while !ptr.is_null() {
                 let node = unsafe { &*ptr };
@@ -282,6 +314,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         let _l = self.locks[b % MEMO_LOCKS].lock().unwrap_or_else(|e| e.into_inner());
         let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
+        t.mark(b);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v, next: head }));
         t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
@@ -298,6 +331,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         }
         let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
+        t.mark(b);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v.clone(), next: head }));
         t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
@@ -316,6 +350,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
         }
         let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         let head = t.buckets[b].load(std::sync::atomic::Ordering::Acquire);
+        t.mark(b);
         let _k = self.phase();
         let n = Box::into_raw(Box::new(MemoNode { hash: h, key: k, val: v, next: head }));
         t.buckets[b].store(n, std::sync::atomic::Ordering::Release);
@@ -326,7 +361,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     pub fn mem_stats(&self, deep: impl Fn(&K, &V) -> usize) -> (usize, usize) {
         let t = unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) };
         let (mut n, mut b) = (0usize, t.buckets.len() * 8);
-        for bucket in t.buckets.iter() {
+        for bucket in t.used() {
             let mut p = bucket.load(std::sync::atomic::Ordering::Acquire);
             while !p.is_null() {
                 let node = unsafe { &*p };
@@ -339,6 +374,10 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     }
 
     pub fn clear(&self) {
+        // (nothing to drop: no fresh table to make, none to retire)
+        if unsafe { &*self.table.load(std::sync::atomic::Ordering::Acquire) }.unused() {
+            return;
+        }
         let _k = self.phase();
         let fresh = MemoTable::new(self.bits);
         let old = self.table.swap(fresh, std::sync::atomic::Ordering::AcqRel);
@@ -349,7 +388,7 @@ impl<K: Hash + Eq, V: Clone> MemoMap<K, V> {
     /// Safety: exclude ALL readers and writers (including suspended queries holding references).
     pub unsafe fn retain_exclusive(&self, mut keep: impl FnMut(&K, &V) -> bool) {
         let table = &*self.table.load(std::sync::atomic::Ordering::Relaxed);
-        for bucket in table.buckets.iter() {
+        for bucket in table.used() {
             let mut prev: *mut MemoNode<K, V> = std::ptr::null_mut();
             let mut node = bucket.load(std::sync::atomic::Ordering::Relaxed);
             while !node.is_null() {
@@ -594,5 +633,39 @@ mod settle_tests {
         drop(gone);
         assert_eq!(Arc::strong_count(&values[0]), 1);
         assert_eq!(Arc::strong_count(&values[5]), 2);
+    }
+
+    #[test]
+    fn walks_read_the_bucket_runs_in_use() {
+        use std::sync::atomic::Ordering::Relaxed;
+        // 2^14 buckets: 8 runs
+        let map = MemoMap::with_bits(14);
+        let first = map.table.load(Relaxed);
+        map.clear();
+        assert_eq!(map.table.load(Relaxed), first, "an unused table is its own fresh table");
+        assert!(map.graveyard.lock().unwrap().is_empty());
+        let values: Vec<_> = (0..600).map(|_| Arc::new(vec![0u8; 16])).collect();
+        let runs = |map: &MemoMap<usize, Arc<Vec<u8>>>| unsafe { &*map.table.load(Relaxed) }.runs.iter().map(|w| w.load(Relaxed).count_ones()).sum::<u32>();
+        // a few entries use a few runs, and every walk finds them there
+        map.insert(1, values[0].clone());
+        assert_eq!(map.insert_first(2, values[1].clone()).as_ptr(), values[1].as_ptr());
+        map.put_unless(3, values[2].clone(), |_| false);
+        assert!((1..=3).contains(&runs(&map)));
+        assert_eq!(map.snapshot().len(), 3);
+        assert_eq!(map.mem_stats(|_, _| 0).0, 3);
+        for (i, v) in values.iter().enumerate().skip(3) { map.insert(i + 1, v.clone()); }
+        let t = unsafe { &*map.table.load(Relaxed) };
+        assert!(t.buckets.iter().enumerate().all(|(b, p)| p.load(Relaxed).is_null() || t.runs[(b >> super::MEMO_RUN) / 64].load(Relaxed) >> ((b >> super::MEMO_RUN) % 64) & 1 == 1), "a bucket with a chain is in a marked run");
+        assert_eq!(map.snapshot().len(), 600);
+        assert_eq!(map.mem_stats(|_, _| 0).0, 600);
+        unsafe { map.retain_exclusive(|k, _| k % 3 == 0); }
+        assert_eq!(map.snapshot().len(), 200);
+        assert!(values.iter().enumerate().all(|(i, v)| Arc::strong_count(v) == if (i + 1) % 3 == 0 { 2 } else { 1 }));
+        // a used table is retired by a clear, and freed with its entries
+        map.clear();
+        assert_ne!(map.table.load(Relaxed), first);
+        assert!(!map.contains(&3) && runs(&map) == 0);
+        unsafe { map.reclaim(); }
+        assert!(values.iter().all(|v| Arc::strong_count(v) == 1));
     }
 }
