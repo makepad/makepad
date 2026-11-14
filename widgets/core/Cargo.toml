@@ -28,3 +28,14 @@ makepad-app-icons = { path = "../../libs/app_icons" }
 ## The checks every catalogue sheet is held to (`sheet_checks`), for the
 ## tests of an app that registers sheets of its own.
 sheet-checks = []
+
+## A Window without its depth buffer (the window's draw pass gets no depth
+## attachment). For a 2D app whose draws never set `draw_depth` to come in
+## front of later draws: paint order decides, as it does without the buffer.
+## Measured on a Lenovo Yoga Smart Tab (YT-X705F, Adreno 505 GPU, 1920x1200;
+## a full-screen animation, 1,200 frames, twice each way): 8.8 MB less GPU
+## memory, 1.6 ms less GPU time a frame (32.8 -> 31.2 ms), 28.6 -> 30.0
+## frames a second, every screen and popup drawn pixel-identical. Off by default: overlays lift
+## themselves in depth (`draw_list_2d.rs`), which only matters where content
+## uses `draw_depth`.
+no-window-depth = []

@@ -1799,18 +1799,21 @@ impl Window {
 
         self.window.handle.set_pass(cx, &self.pass.handle);
         //self.pass.set_window_clear_color(cx, vec4(0.0,0.0,0.0,0.0));
-        self.depth_texture = Texture::new_with_format(
-            cx,
-            TextureFormat::DepthD32 {
-                size: TextureSize::Auto,
-                initial: true,
-            },
-        );
-        self.pass.handle.set_depth_texture(
-            cx,
-            &self.depth_texture,
-            DrawPassClearDepth::ClearWith(1.0),
-        );
+        // `no-window-depth`: no depth attachment, paint order alone (Cargo.toml).
+        if !cfg!(feature = "no-window-depth") {
+            self.depth_texture = Texture::new_with_format(
+                cx,
+                TextureFormat::DepthD32 {
+                    size: TextureSize::Auto,
+                    initial: true,
+                },
+            );
+            self.pass.handle.set_depth_texture(
+                cx,
+                &self.depth_texture,
+                DrawPassClearDepth::ClearWith(1.0),
+            );
+        }
 
         if self.demo {
             self.demo_next_frame = cx.new_next_frame();
