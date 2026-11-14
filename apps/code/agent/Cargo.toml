@@ -23,6 +23,8 @@ makepad-ai-services = { path = "../../../libs/ai/services", default-features = f
 makepad-regex = { path = "../../../libs/regex" }
 makepad-strict-json = { path = "../../../libs/strict_json" }
 makepad-git = { path = "../../../libs/git" }
+# The file index watches the folder (index.rs).
+makepad-filesystem-watcher = { path = "../../../libs/filesystem_watcher" }
 # Running makepad apps here and on paired hosts (remote.rs).
 makepad-remote = { path = "../../../libs/remote" }
 # The app table builds and runs come from (runs.rs).
