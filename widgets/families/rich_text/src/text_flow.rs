@@ -416,6 +416,34 @@ struct CellAnchor {
     drawn: DVec2,
 }
 
+/// The run's layout with its rows where they were drawn. A row after the first starts on the
+/// turtle's next line, below anything taller than the text on the first row's line (a picture,
+/// a display formula), where the layout put it at the text's own pitch. The selection, the
+/// caret and the page-break bands read the run's rows, so they take these. `row_tops` holds
+/// each row's drawn top; a run drawn as one walk moves no row.
+fn rows_as_drawn(text: Rc<LaidoutText>, row_tops: &[f64], font_scale: f32) -> Rc<LaidoutText> {
+    if text.rows.len() < 2 || row_tops.len() != text.rows.len() || font_scale <= 0.0 {
+        return text;
+    }
+    let top = |row: &LaidoutRow| f64::from((row.origin_in_lpxs.y - row.ascender_in_lpxs) * font_scale);
+    let first = row_tops[0] - top(&text.rows[0]);
+    let moved: Vec<f32> = text
+        .rows
+        .iter()
+        .zip(row_tops)
+        .map(|(row, drawn)| ((drawn - first - top(row)) / f64::from(font_scale)) as f32)
+        .collect();
+    if moved.iter().all(|dy| dy.abs() < 0.01) {
+        return text;
+    }
+    let mut text = (*text).clone();
+    for (row, dy) in text.rows.iter_mut().zip(&moved) {
+        row.origin_in_lpxs.y += dy;
+    }
+    text.size_in_lpxs.height += moved.last().copied().unwrap_or(0.0);
+    Rc::new(text)
+}
+
 /// Notes a run's first row as an aligned area, which the cell's alignment
 /// moves with the run's text.
 fn anchor_run(cx: &mut Cx2d, anchor: &mut Option<(Area, DVec2)>, rect: Rect) {
@@ -3406,6 +3434,8 @@ impl TextFlow {
             // While we hold inline content, where the run starts and the edge it's laid out against.
             let mut held_run_bounds = self.is_holding_inline_content.then(|| (cx.turtle().pos(), Self::get_row_end(cx)));
             let mut anchor = None;
+            // Where each of the run's rows was drawn (its top).
+            let mut row_tops: Vec<f64> = Vec::new();
             let laidout_text = if self.inline_code.value() > 0 {
                 let db = &mut self.draw_block;
                 db.block_type = FlowBlockType::InlineCode;
@@ -3588,6 +3618,7 @@ impl TextFlow {
                 let laidout_text = self.pending_following_room.and_then(|pending| self.lay_out_run(cx, text, pending));
                 let (dt, db, areas_tracker) = (&mut self.draw_text, &mut self.draw_block, &mut self.areas_tracker);
                 let result = dt.draw_laidout_resumable_with_background(cx, text, laidout_text, |cx, mut rect, _| {
+                    row_tops.push(rect.pos.y);
                     if anchored {
                         anchor_run(cx, &mut anchor, rect);
                     }
@@ -3636,6 +3667,7 @@ impl TextFlow {
                     db.line_color = font_color;
                     db.block_type = FlowBlockType::Strikethrough;
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        row_tops.push(rect.pos.y);
                         if anchored {
                             anchor_run(cx, &mut anchor, rect);
                         }
@@ -3646,6 +3678,7 @@ impl TextFlow {
                     db.line_color = font_color;
                     db.block_type = FlowBlockType::Underline;
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        row_tops.push(rect.pos.y);
                         if anchored {
                             anchor_run(cx, &mut anchor, rect);
                         }
@@ -3654,6 +3687,7 @@ impl TextFlow {
                     })
                 } else {
                     dt.draw_laidout_resumable_with(cx, text, laidout_text, |cx, rect, _| {
+                        row_tops.push(rect.pos.y);
                         if anchored {
                             anchor_run(cx, &mut anchor, rect);
                         }
@@ -3661,6 +3695,7 @@ impl TextFlow {
                     })
                 }
             };
+            let laidout_text = rows_as_drawn(laidout_text, &row_tops, self.draw_text.font_scale);
             if let Some((run_start, row_end)) = held_run_bounds.filter(|_| self.overrun_start_x.is_none()) {
                 let last_row = laidout_text.rows.last().unwrap();
                 let end_in_lpxs = last_row.origin_in_lpxs.x + last_row.width_without_hanging_in_lpxs();

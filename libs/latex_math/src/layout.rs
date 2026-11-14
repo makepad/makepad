@@ -48,11 +48,28 @@ pub struct LayoutGlyph {
     pub y: f32,
     pub size: f32, // font size in the local coordinate space
     /// The source character this glyph shows (the character the formula wrote,
-    /// not the italic or size variant drawn); `'\0'` for a piece of an
-    /// assembled delimiter.
+    /// not the italic or size variant drawn); every piece of an assembled
+    /// delimiter carries the delimiter's character.
     pub ch: char,
     /// Index into [`LayoutOutput::parts`].
     pub part: u32,
+    /// For a piece of an assembled glyph (a grown delimiter or arrow) after
+    /// the first, the piece before it being the item just before: where the
+    /// two meet. A renderer that fills the pieces as one shape, each cut at its
+    /// joints, covers their overlaps once.
+    pub joint: Option<Joint>,
+}
+
+/// Where a piece of an assembled glyph meets the piece before it: the middle
+/// of their overlap, as a distance from the piece's own origin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Joint {
+    /// A horizontal assembly: the piece before is to the left, and they meet
+    /// this far right of the origin.
+    Right(f32),
+    /// A vertical assembly: the piece before is below, and they meet this far
+    /// above the origin (the piece's baseline).
+    Up(f32),
 }
 
 /// A horizontal or vertical rule (line)
@@ -116,8 +133,8 @@ impl LayoutItem {
 
 /// One step of a part's path through the formula tree: a position in a
 /// sequence (`role` empty, `index` set) or the named slot of a node
-/// (`num`, `den`, `sup`, `sub`, `radicand`, `index`, `base`, `body`, and
-/// `row`/`col` with their number for matrix cells).
+/// (`num`, `den`, `sup`, `sub`, `over`, `under`, `radicand`, `index`, `base`,
+/// `body`, and `row`/`col` with their number for matrix cells).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartSeg {
     pub role: &'static str,
@@ -282,6 +299,38 @@ impl<'a> FontMetrics<'a> {
         };
         self.math_const(style, f)
             .unwrap_or(self.scaled_size(style) * 0.05)
+    }
+
+    /// Where the top part of a stack (a fraction without a rule) sits above
+    /// the baseline.
+    fn stack_top_shift_up(&self, style: MathStyle) -> f32 {
+        let f = if matches!(style, MathStyle::Display) {
+            |c: &ttf_parser::math::Constants| c.stack_top_display_style_shift_up().value
+        } else {
+            |c: &ttf_parser::math::Constants| c.stack_top_shift_up().value
+        };
+        self.math_const(style, f).unwrap_or(self.fraction_num_shift_up(style))
+    }
+
+    /// Where the bottom part of a stack sits below the baseline.
+    fn stack_bottom_shift_down(&self, style: MathStyle) -> f32 {
+        let f = if matches!(style, MathStyle::Display) {
+            |c: &ttf_parser::math::Constants| c.stack_bottom_display_style_shift_down().value
+        } else {
+            |c: &ttf_parser::math::Constants| c.stack_bottom_shift_down().value
+        };
+        self.math_const(style, f).unwrap_or(self.fraction_den_shift_down(style))
+    }
+
+    /// The least gap between a stack's top part and its bottom part.
+    fn stack_gap_min(&self, style: MathStyle) -> f32 {
+        let f = if matches!(style, MathStyle::Display) {
+            |c: &ttf_parser::math::Constants| c.stack_display_style_gap_min().value
+        } else {
+            |c: &ttf_parser::math::Constants| c.stack_gap_min().value
+        };
+        let rules = if matches!(style, MathStyle::Display) { 7.0 } else { 3.0 };
+        self.math_const(style, f).unwrap_or(self.fraction_rule_thickness(style) * rules)
     }
 
     fn superscript_shift_up(&self, style: MathStyle) -> f32 {
@@ -472,37 +521,31 @@ impl<'a> FontMetrics<'a> {
         None
     }
 
-    /// A glyph grown to at least `min_height`: the first prepared variant that
-    /// is tall enough, else an assembly of the font's parts (ends plus as many
-    /// repeated extenders as it takes), else the largest variant. The box has the
-    /// glyph's origin at its baseline; callers place it.
-    fn stretch_vertical(
-        &self,
-        glyph: GlyphId,
-        ch: char,
-        min_height: f32,
-        style: MathStyle,
-    ) -> LayoutBox {
+    /// A glyph grown along `axis` to at least `min`: the first prepared variant
+    /// that is long enough, else an assembly of the font's parts (ends plus as
+    /// many repeated extenders as it takes), else the largest variant. The box
+    /// has the glyph's origin at its baseline; callers place it.
+    fn stretch(&self, glyph: GlyphId, ch: char, min: f32, axis: Axis, style: MathStyle) -> LayoutBox {
         if let Some(math) = self.face.tables().math {
             if let Some(variants) = &math.variants {
-                if let Some(construction) = variants.vertical_constructions.get(glyph) {
+                let constructions = match axis {
+                    Axis::Vertical => variants.vertical_constructions,
+                    Axis::Horizontal => variants.horizontal_constructions,
+                };
+                if let Some(construction) = constructions.get(glyph) {
                     let mut last = None;
                     for i in 0..construction.variants.len() {
                         if let Some(v) = construction.variants.get(i) {
-                            if self.to_output_u16(v.advance_measurement, style) >= min_height {
+                            if self.to_output_u16(v.advance_measurement, style) >= min {
                                 return self.glyph_box(v.variant_glyph, ch, style);
                             }
                             last = Some(v.variant_glyph);
                         }
                     }
                     if let Some(assembly) = &construction.assembly {
-                        if let Some(b) = self.assemble_vertical(
-                            assembly,
-                            variants.min_connector_overlap,
-                            ch,
-                            min_height,
-                            style,
-                        ) {
+                        if let Some(b) =
+                            self.assemble(assembly, variants.min_connector_overlap, ch, min, axis, style)
+                        {
                             return b;
                         }
                     }
@@ -515,9 +558,9 @@ impl<'a> FontMetrics<'a> {
         self.glyph_box(glyph, ch, style)
     }
 
-    /// The glyph `stretch_vertical` would draw when it is a single glyph.
+    /// The glyph `stretch` would draw upward when it is a single glyph.
     fn metrics_variant(&self, glyph: GlyphId, ch: char, min_height: f32, style: MathStyle) -> GlyphId {
-        match self.stretch_vertical(glyph, ch, min_height, style).items.first() {
+        match self.stretch(glyph, ch, min_height, Axis::Vertical, style).items.first() {
             Some(LayoutItem::Glyph(g)) => GlyphId(g.glyph_id),
             _ => glyph,
         }
@@ -539,6 +582,7 @@ impl<'a> FontMetrics<'a> {
                 size: self.scaled_size(style),
                 ch,
                 part: NO_PART,
+                joint: None,
             })],
             width: self.glyph_advance(glyph, style),
             ascent,
@@ -548,16 +592,18 @@ impl<'a> FontMetrics<'a> {
         }
     }
 
-    /// Stacks the parts of a glyph assembly (listed bottom to top) so the stack is
-    /// `min_height` tall: the fewest extender repeats whose loosest fit reaches it,
-    /// then the connector overlap tightened as far as the font allows to hit the
-    /// height exactly. Centered on the baseline.
-    fn assemble_vertical(
+    /// Joins the parts of a glyph assembly (listed bottom to top, or left to
+    /// right) so the result is `min` long: the fewest extender repeats whose
+    /// loosest fit reaches it, then the connector overlap tightened as far as the
+    /// font allows to hit the length exactly. A vertical stack is centered on the
+    /// baseline; a horizontal row sits on it.
+    fn assemble(
         &self,
         assembly: &ttf_parser::math::GlyphAssembly,
         min_overlap: u16,
         ch: char,
-        min_height: f32,
+        min: f32,
+        axis: Axis,
         style: MathStyle,
     ) -> Option<LayoutBox> {
         let parts: Vec<_> = assembly.parts.into_iter().collect();
@@ -565,7 +611,7 @@ impl<'a> FontMetrics<'a> {
             return None;
         }
         let k = self.scaled_size(style) / self.upem;
-        let target = min_height / k;
+        let target = min / k;
         let min_overlap = min_overlap as f32;
         let has_extender = parts.iter().any(|p| p.part_flags.extender());
         let mut seq: Vec<usize> = Vec::new();
@@ -605,35 +651,48 @@ impl<'a> FontMetrics<'a> {
             ((sum - target) / joints as f32).clamp(min_overlap, max_overlap)
         };
         let total = sum - joints as f32 * overlap;
-        let width = seq
-            .iter()
-            .map(|&i| self.glyph_advance(parts[i].glyph_id, style))
-            .fold(0.0f32, f32::max);
-        let mut items = Vec::new();
-        let mut bottom = 0.0f32;
-        for &i in &seq {
-            let p = &parts[i];
-            let w = self.glyph_advance(p.glyph_id, style);
-            // y grows downward; the stack is centered on the baseline
-            let y_up = (bottom - total * 0.5) * k;
-            items.push(LayoutItem::Glyph(LayoutGlyph {
-                glyph_id: p.glyph_id.0,
-                x: (width - w) * 0.5,
-                y: -y_up,
-                size: self.scaled_size(style),
-                ch,
-                part: NO_PART,
-            }));
-            bottom += p.full_advance as f32 - overlap;
-        }
-        Some(LayoutBox {
-            items,
-            width,
-            ascent: total * 0.5 * k,
-            descent: total * 0.5 * k,
-            italic: assembly.italics_correction.value as f32 * k,
-            kern_glyph: None,
-        })
+        let size = self.scaled_size(style);
+        let piece = |glyph: GlyphId, x: f32, y: f32, joint: Option<Joint>| {
+            LayoutItem::Glyph(LayoutGlyph { glyph_id: glyph.0, x, y, size, ch, part: NO_PART, joint })
+        };
+        let mut items: Vec<LayoutItem> = Vec::new();
+        // Each piece after the first meets the one before it halfway into
+        // their overlap.
+        let half = overlap * 0.5 * k;
+        // Where the next part starts along the axis, in design units.
+        let mut start = 0.0f32;
+        let (width, ascent, descent, italic) = match axis {
+            Axis::Vertical => {
+                let width = seq
+                    .iter()
+                    .map(|&i| self.glyph_advance(parts[i].glyph_id, style))
+                    .fold(0.0f32, f32::max);
+                for &i in &seq {
+                    let p = &parts[i];
+                    let w = self.glyph_advance(p.glyph_id, style);
+                    // y grows downward; the stack is centered on the baseline
+                    let joint = (!items.is_empty()).then_some(Joint::Up(half));
+                    items.push(piece(p.glyph_id, (width - w) * 0.5, (total * 0.5 - start) * k, joint));
+                    start += p.full_advance as f32 - overlap;
+                }
+                let half = total * 0.5 * k;
+                (width, half, half, assembly.italics_correction.value as f32 * k)
+            }
+            Axis::Horizontal => {
+                let (mut ascent, mut descent) = (0.0f32, 0.0f32);
+                for &i in &seq {
+                    let p = &parts[i];
+                    let (a, d) = self.glyph_bbox_height(p.glyph_id, style);
+                    ascent = ascent.max(a);
+                    descent = descent.max(d);
+                    let joint = (!items.is_empty()).then_some(Joint::Right(half));
+                    items.push(piece(p.glyph_id, start * k, 0.0, joint));
+                    start += p.full_advance as f32 - overlap;
+                }
+                (total * k, ascent, descent, 0.0)
+            }
+        };
+        Some(LayoutBox { items, width, ascent, descent, italic, kern_glyph: None })
     }
 
     fn math_const<F: Fn(&ttf_parser::math::Constants) -> i16>(
@@ -645,6 +704,13 @@ impl<'a> FontMetrics<'a> {
         let constants = math.constants.as_ref()?;
         Some(self.to_output(f(constants), style))
     }
+}
+
+/// The direction a glyph grows in (`FontMetrics::stretch`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Axis {
+    Vertical,
+    Horizontal,
 }
 
 #[derive(Clone, Copy)]
@@ -850,6 +916,7 @@ impl<'a> LayoutEngine<'a> {
             MathNode::Char(c) => self.layout_char_impl(*c, style, true, char_math_class(*c)),
             MathNode::Symbol(sym) => self.layout_symbol(*sym, style, symbol_math_class(*sym)),
             MathNode::Frac(num, den) => self.layout_frac(num, den, style),
+            MathNode::Stack(top, bottom) => self.layout_stack(top, bottom, style),
             MathNode::Sqrt(index, content) => self.layout_sqrt(index.as_deref(), content, style),
             MathNode::Superscript(sup) => self.layout_superscript(sup, style),
             MathNode::Subscript(sub) => self.layout_subscript(sub, style),
@@ -867,6 +934,20 @@ impl<'a> LayoutEngine<'a> {
             MathNode::Underline(content) => self.layout_underline(content, style),
             MathNode::Overbrace(content) => self.layout_overline(content, style), // simplified
             MathNode::Underbrace(content) => self.layout_underline(content, style), // simplified
+            MathNode::Overset(over, base) => {
+                let over = self.sub("over", over, style.script());
+                let base = self.sub("base", base, style);
+                self.layout_over_under(base, Some(over), None, style)
+            }
+            MathNode::Underset(under, base) => {
+                let under = self.sub("under", under, style.script());
+                let base = self.sub("base", base, style);
+                self.layout_over_under(base, None, Some(under), style)
+            }
+            MathNode::ExtensibleArrow(arrow, over, under) => {
+                self.layout_extensible_arrow(*arrow, over, under, style)
+            }
+            MathNode::Boxed(content) => self.layout_boxed(content),
             MathNode::MathVariant(_variant, content) => {
                 // For now, just layout content normally
                 // A full implementation would switch font variant
@@ -1060,66 +1141,14 @@ impl<'a> LayoutEngine<'a> {
         result
     }
 
-    fn layout_limit_superscript(
-        &self,
-        base: LayoutBox,
-        sup: &[MathNode],
-        style: MathStyle,
-    ) -> LayoutBox {
-        let script_style = style.script();
-        let sup_box = self.sub("sup", sup, script_style);
-        let gap = self.metrics.upper_limit_gap_min(style);
-        let rise_min = self.metrics.upper_limit_baseline_rise_min(style);
-        let shift = rise_min.max(base.ascent + gap + sup_box.descent);
-
-        let total_width = base.width.max(sup_box.width);
-        let base_x = (total_width - base.width) * 0.5;
-        let sup_x = (total_width - sup_box.width) * 0.5;
-
-        let mut result = LayoutBox::empty();
-        let mut base_items = base.clone();
-        base_items.translate(base_x, 0.0);
-        result.items.extend(base_items.items);
-
-        let mut sup_items = sup_box.clone();
-        sup_items.translate(sup_x, -shift);
-        result.items.extend(sup_items.items);
-
-        result.width = total_width;
-        result.ascent = base.ascent.max(shift + sup_box.ascent);
-        result.descent = base.descent.max((sup_box.descent - shift).max(0.0));
-        result
+    fn layout_limit_superscript(&self, base: LayoutBox, sup: &[MathNode], style: MathStyle) -> LayoutBox {
+        let sup_box = self.sub("sup", sup, style.script());
+        self.layout_over_under(base, Some(sup_box), None, style)
     }
 
-    fn layout_limit_subscript(
-        &self,
-        base: LayoutBox,
-        sub: &[MathNode],
-        style: MathStyle,
-    ) -> LayoutBox {
-        let script_style = style.script();
-        let sub_box = self.sub("sub", sub, script_style);
-        let gap = self.metrics.lower_limit_gap_min(style);
-        let drop_min = self.metrics.lower_limit_baseline_drop_min(style);
-        let shift = drop_min.max(base.descent + gap + sub_box.ascent);
-
-        let total_width = base.width.max(sub_box.width);
-        let base_x = (total_width - base.width) * 0.5;
-        let sub_x = (total_width - sub_box.width) * 0.5;
-
-        let mut result = LayoutBox::empty();
-        let mut base_items = base.clone();
-        base_items.translate(base_x, 0.0);
-        result.items.extend(base_items.items);
-
-        let mut sub_items = sub_box.clone();
-        sub_items.translate(sub_x, shift);
-        result.items.extend(sub_items.items);
-
-        result.width = total_width;
-        result.ascent = base.ascent.max((sub_box.ascent - shift).max(0.0));
-        result.descent = base.descent.max(shift + sub_box.descent);
-        result
+    fn layout_limit_subscript(&self, base: LayoutBox, sub: &[MathNode], style: MathStyle) -> LayoutBox {
+        let sub_box = self.sub("sub", sub, style.script());
+        self.layout_over_under(base, None, Some(sub_box), style)
     }
 
     fn layout_limit_sub_superscript(
@@ -1129,40 +1158,87 @@ impl<'a> LayoutEngine<'a> {
         sup: &[MathNode],
         style: MathStyle,
     ) -> LayoutBox {
-        let script_style = style.script();
-        let sub_box = self.sub("sub", sub, script_style);
-        let sup_box = self.sub("sup", sup, script_style);
+        let sub_box = self.sub("sub", sub, style.script());
+        let sup_box = self.sub("sup", sup, style.script());
+        self.layout_over_under(base, Some(sup_box), Some(sub_box), style)
+    }
 
-        let upper_gap = self.metrics.upper_limit_gap_min(style);
-        let lower_gap = self.metrics.lower_limit_gap_min(style);
-        let upper_rise_min = self.metrics.upper_limit_baseline_rise_min(style);
-        let lower_drop_min = self.metrics.lower_limit_baseline_drop_min(style);
+    /// `base` with `over` centered above it and `under` centered below it, at
+    /// the font's limit gaps: an operator's limits, `\overset`, an arrow's labels.
+    fn layout_over_under(
+        &self,
+        mut base: LayoutBox,
+        over: Option<LayoutBox>,
+        under: Option<LayoutBox>,
+        style: MathStyle,
+    ) -> LayoutBox {
+        let width = [Some(&base), over.as_ref(), under.as_ref()]
+            .into_iter()
+            .flatten()
+            .fold(0.0f32, |w, b| w.max(b.width));
+        let mut result = LayoutBox { width, ascent: base.ascent, descent: base.descent, ..LayoutBox::empty() };
+        let (base_ascent, base_descent) = (base.ascent, base.descent);
+        base.translate((width - base.width) * 0.5, 0.0);
+        result.items.extend(base.items);
 
-        let sup_shift = upper_rise_min.max(base.ascent + upper_gap + sup_box.descent);
-        let sub_shift = lower_drop_min.max(base.descent + lower_gap + sub_box.ascent);
+        if let Some(mut over) = over {
+            let gap = self.metrics.upper_limit_gap_min(style);
+            let rise_min = self.metrics.upper_limit_baseline_rise_min(style);
+            let shift = rise_min.max(base_ascent + gap + over.descent);
+            result.ascent = result.ascent.max(shift + over.ascent);
+            result.descent = result.descent.max((over.descent - shift).max(0.0));
+            over.translate((width - over.width) * 0.5, -shift);
+            result.items.extend(over.items);
+        }
+        if let Some(mut under) = under {
+            let gap = self.metrics.lower_limit_gap_min(style);
+            let drop_min = self.metrics.lower_limit_baseline_drop_min(style);
+            let shift = drop_min.max(base_descent + gap + under.ascent);
+            result.ascent = result.ascent.max((under.ascent - shift).max(0.0));
+            result.descent = result.descent.max(shift + under.descent);
+            under.translate((width - under.width) * 0.5, shift);
+            result.items.extend(under.items);
+        }
+        result
+    }
 
-        let total_width = base.width.max(sub_box.width.max(sup_box.width));
-        let base_x = (total_width - base.width) * 0.5;
-        let sup_x = (total_width - sup_box.width) * 0.5;
-        let sub_x = (total_width - sub_box.width) * 0.5;
-
-        let mut result = LayoutBox::empty();
-
-        let mut base_items = base.clone();
-        base_items.translate(base_x, 0.0);
-        result.items.extend(base_items.items);
-
-        let mut sup_items = sup_box.clone();
-        sup_items.translate(sup_x, -sup_shift);
-        result.items.extend(sup_items.items);
-
-        let mut sub_items = sub_box.clone();
-        sub_items.translate(sub_x, sub_shift);
-        result.items.extend(sub_items.items);
-
-        result.width = total_width;
-        result.ascent = base.ascent.max(sup_shift + sup_box.ascent);
-        result.descent = base.descent.max(sub_shift + sub_box.descent);
+    /// `\xrightarrow[under]{over}`: the arrow grown to its labels' width with
+    /// the padding amsmath gives them, the labels above and below it as limits,
+    /// spaced as a relation.
+    fn layout_extensible_arrow(
+        &self,
+        arrow: Symbol,
+        over: &[MathNode],
+        under: &[MathNode],
+        style: MathStyle,
+    ) -> LayoutBox {
+        let script = style.script();
+        let over = (!over.is_empty()).then(|| self.sub("over", over, script));
+        let under = (!under.is_empty()).then(|| self.sub("under", under, script));
+        // amsmath's kerns in mu of the labels' size, (left, right): the arrow
+        // is 5 + 9 mu wider than its widest label, the room on its head's side;
+        // the label above keeps 3 mu clear of the head, the one below 9.
+        let mu = self.metrics.scaled_size(script) / 18.0;
+        let head_left = arrow == Symbol::LeftArrow;
+        let mirror = |(l, r): (f32, f32)| if head_left { (r, l) } else { (l, r) };
+        let pad = |b: Option<LayoutBox>, (l, r): (f32, f32)| {
+            b.map(|mut b| {
+                b.translate(l * mu, 0.0);
+                b.width += (l + r) * mu;
+                b
+            })
+        };
+        let label = [over.as_ref(), under.as_ref()].into_iter().flatten().fold(0.0f32, |w, b| w.max(b.width));
+        let c = parser::symbol_to_char(arrow);
+        let Some(glyph) = self.metrics.glyph_id(c) else {
+            return LayoutBox::empty();
+        };
+        let shaft = self.metrics.stretch(glyph, c, label + 14.0 * mu, Axis::Horizontal, style);
+        let mut result =
+            self.layout_over_under(shaft, pad(over, mirror((0.0, 3.0))), pad(under, mirror((5.0, 9.0))), style);
+        let (left, right) = spacing_for_class(MathClass::Relation, self.metrics.scaled_size(style), style);
+        result.translate(left, 0.0);
+        result.width += left + right;
         result
     }
 
@@ -1192,6 +1268,7 @@ impl<'a> LayoutEngine<'a> {
                 size: self.metrics.scaled_size(style),
                 ch: c,
                 part: NO_PART,
+                joint: None,
             });
             LayoutBox {
                 items: vec![item],
@@ -1249,6 +1326,7 @@ impl<'a> LayoutEngine<'a> {
                     size: self.metrics.scaled_size(style),
                     ch: c,
                     part: NO_PART,
+                    joint: None,
                 })],
                 width,
                 ascent: ascent.max(0.0),
@@ -1321,6 +1399,59 @@ impl<'a> LayoutEngine<'a> {
         result.ascent = (-num_y) + num_box.ascent;
         result.descent = den_y + den_box.descent;
 
+        result
+    }
+
+    /// One part centered over the other with no rule between, in a fraction's
+    /// styles, at the font's stack shifts and gap (the inside of `\binom`).
+    fn layout_stack(&self, top: &[MathNode], bottom: &[MathNode], style: MathStyle) -> LayoutBox {
+        let inner = match style {
+            MathStyle::Display => MathStyle::Text,
+            _ => style.script(),
+        };
+        let mut top = self.sub("num", top, inner);
+        let mut bottom = self.sub("den", bottom, inner);
+        let mut up = self.metrics.stack_top_shift_up(style);
+        let mut down = self.metrics.stack_bottom_shift_down(style);
+        let gap = (up - top.descent) - (bottom.ascent - down);
+        let gap_min = self.metrics.stack_gap_min(style);
+        if gap < gap_min {
+            up += (gap_min - gap) * 0.5;
+            down += (gap_min - gap) * 0.5;
+        }
+        let width = top.width.max(bottom.width);
+        let mut result = LayoutBox {
+            width,
+            ascent: up + top.ascent,
+            descent: down + bottom.descent,
+            ..LayoutBox::empty()
+        };
+        top.translate((width - top.width) * 0.5, -up);
+        bottom.translate((width - bottom.width) * 0.5, down);
+        result.items.extend(top.items);
+        result.items.extend(bottom.items);
+        result
+    }
+
+    /// `\boxed`: the content in display style and full size, framed by rules
+    /// 3 pt out at 10 pt, as amsmath's `\fbox` sets it.
+    fn layout_boxed(&self, content: &[MathNode]) -> LayoutBox {
+        let mut body = self.sub("body", content, MathStyle::Display);
+        let rule = self.metrics.overbar_rule_thickness(MathStyle::Text);
+        let inset = self.metrics.scaled_size(MathStyle::Text) * 0.3 + rule;
+        let width = body.width + inset * 2.0;
+        let (ascent, descent) = (body.ascent + inset, body.descent + inset);
+        body.translate(inset, 0.0);
+        let mut result = LayoutBox { width, ascent, descent, ..LayoutBox::empty() };
+        result.items.extend(body.items);
+        for (x, y, w, h) in [
+            (0.0, -ascent, width, rule),
+            (0.0, descent - rule, width, rule),
+            (0.0, -ascent, rule, ascent + descent),
+            (width - rule, -ascent, rule, ascent + descent),
+        ] {
+            result.items.push(LayoutItem::Rule(LayoutRule { x, y, width: w, height: h, part: NO_PART }));
+        }
         result
     }
 
@@ -1433,7 +1564,7 @@ impl<'a> LayoutEngine<'a> {
 
         // Get radical glyph (√), grown (variant or assembly) to cover the radicand
         let radical_glyph = self.metrics.glyph_id('\u{221A}').unwrap_or(GlyphId(0));
-        let radical = self.metrics.stretch_vertical(radical_glyph, '\u{221A}', inner_height, style);
+        let radical = self.metrics.stretch(radical_glyph, '\u{221A}', inner_height, Axis::Vertical, style);
         let radical_advance = radical.width;
         let radical_ascent = radical.ascent;
         let radical_descent = radical.descent;
@@ -1566,6 +1697,7 @@ impl<'a> LayoutEngine<'a> {
                 size: self.metrics.scaled_size(style),
                 ch: accent_char,
                 part: NO_PART,
+                joint: None,
             }));
 
             result.ascent = content_box.ascent.max(accent_top + lift);
@@ -1613,7 +1745,7 @@ impl<'a> LayoutEngine<'a> {
 
         let c = delimiter_char(delim, is_left);
         if let Some(base_glyph) = self.metrics.glyph_id(c) {
-            let mut grown = self.metrics.stretch_vertical(base_glyph, c, target_height, style);
+            let mut grown = self.metrics.stretch(base_glyph, c, target_height, Axis::Vertical, style);
 
             // Center the delimiter vertically around the math axis
             let axis = self.metrics.axis_height(style);
@@ -1634,8 +1766,11 @@ impl<'a> LayoutEngine<'a> {
         rows: &[Vec<Vec<MathNode>>],
         style: MathStyle,
     ) -> LayoutBox {
+        let substack = kind == MatrixKind::Substack;
         let inner_style = match (style, kind) {
             (MathStyle::Display, MatrixKind::Aligned) => MathStyle::Display,
+            // amsmath sets a substack's rows in script style.
+            (MathStyle::Display | MathStyle::Text, MatrixKind::Substack) => MathStyle::Script,
             (MathStyle::Display, _) => MathStyle::Text,
             (s, _) => s,
         };
@@ -1650,7 +1785,7 @@ impl<'a> LayoutEngine<'a> {
         }
 
         let aligned = kind == MatrixKind::Aligned;
-        let outer_pad_x = if aligned { 0.0 } else { self.metrics.scaled_size(style) * 0.18 };
+        let outer_pad_x = if aligned || substack { 0.0 } else { self.metrics.scaled_size(style) * 0.18 };
         // The space after each column: an aligned block packs its columns in
         // (right, left) pairs and spaces the pairs apart.
         let col_gaps: Vec<f32> = (0..num_cols)
@@ -1674,7 +1809,7 @@ impl<'a> LayoutEngine<'a> {
                 _ => 0.5,
             }
         };
-        let outer_pad_y = self.metrics.scaled_size(style) * 0.18;
+        let outer_pad_y = if substack { 0.0 } else { self.metrics.scaled_size(style) * 0.18 };
         let row_gap_y = self.metrics.scaled_size(style) * 0.32;
 
         // Layout all cells
@@ -1708,6 +1843,22 @@ impl<'a> LayoutEngine<'a> {
             cell_boxes.push(row_boxes);
         }
 
+        // The gap below each row but the last. A substack's rows are a script
+        // font's baseline skip apart (num3 + denom2), and at least three rule
+        // thicknesses clear of each other.
+        let row_gaps: Vec<f32> = (1..rows.len())
+            .map(|r| {
+                if substack {
+                    let skip = self.metrics.stack_top_shift_up(inner_style)
+                        + self.metrics.stack_bottom_shift_down(inner_style);
+                    let clear = self.metrics.fraction_rule_thickness(inner_style) * 3.0;
+                    (skip - row_descents[r - 1] - row_ascents[r]).max(clear)
+                } else {
+                    row_gap_y
+                }
+            })
+            .collect();
+
         // Compute total dimensions
         let total_width: f32 = col_widths.iter().sum::<f32>()
             + outer_pad_x * 2.0
@@ -1718,7 +1869,7 @@ impl<'a> LayoutEngine<'a> {
             .map(|(a, d)| a + d)
             .sum::<f32>()
             + outer_pad_y * 2.0
-            + row_gap_y * (rows.len().saturating_sub(1) as f32);
+            + row_gaps.iter().sum::<f32>();
 
         // Center vertically on math axis
         let axis = self.metrics.axis_height(style);
@@ -1745,7 +1896,7 @@ impl<'a> LayoutEngine<'a> {
                 x_offset += col_widths[col_idx] + col_gaps[col_idx];
             }
 
-            y_offset += row_descent + row_gap_y;
+            y_offset += row_descent + row_gaps.get(row_idx).copied().unwrap_or(0.0);
         }
 
         result.width = total_width;
@@ -1760,7 +1911,7 @@ impl<'a> LayoutEngine<'a> {
             MatrixKind::Vert => (Delimiter::Vert, Delimiter::Vert),
             MatrixKind::DoubleVert => (Delimiter::DoubleVert, Delimiter::DoubleVert),
             MatrixKind::Cases => (Delimiter::Brace, Delimiter::None),
-            MatrixKind::Plain | MatrixKind::Aligned => return result,
+            MatrixKind::Plain | MatrixKind::Aligned | MatrixKind::Substack => return result,
         };
 
         let target = result.ascent + result.descent;
@@ -2099,6 +2250,8 @@ fn node_class(node: &MathNode) -> MathClass {
         MathNode::Char(c) => char_math_class(*c),
         MathNode::Symbol(sym) => symbol_math_class(*sym),
         MathNode::Id(_, content) | MathNode::Limits(_, content) if content.len() == 1 => node_class(&content[0]),
+        MathNode::Overset(_, base) | MathNode::Underset(_, base) if base.len() == 1 => node_class(&base[0]),
+        MathNode::ExtensibleArrow(..) => MathClass::Relation,
         _ => MathClass::Ordinary,
     }
 }
@@ -2248,6 +2401,155 @@ mod tests {
         let out = layout_expr("");
         assert_eq!(out.width, 0.0);
         assert_eq!(count_glyphs(&out), 0);
+    }
+
+    /// The glyphs drawn for source character `ch`.
+    fn glyphs_of(output: &LayoutOutput, ch: char) -> Vec<&LayoutGlyph> {
+        output
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                LayoutItem::Glyph(g) if g.ch == ch => Some(g),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn only(output: &LayoutOutput, ch: char) -> &LayoutGlyph {
+        let found = glyphs_of(output, ch);
+        assert_eq!(found.len(), 1, "one glyph for {ch:?}");
+        found[0]
+    }
+
+    fn rules(output: &LayoutOutput) -> Vec<&LayoutRule> {
+        output
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                LayoutItem::Rule(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn known(latex: &str) -> LayoutOutput {
+        let (_, unknown) = crate::parser::parse_checked(latex);
+        assert!(unknown.is_empty(), "{latex}: unknown {unknown:?}");
+        layout_expr(latex)
+    }
+
+    #[test]
+    fn binom_is_a_stack_in_parentheses() {
+        let out = known(r"\binom{n}{k}");
+        assert!(rules(&out).is_empty(), "no fraction bar");
+        let (open, close) = (only(&out, '('), only(&out, ')'));
+        let (n, k) = (only(&out, 'n'), only(&out, 'k'));
+        assert!(open.x < n.x.min(k.x) && close.x > n.x.max(k.x), "parentheses around the stack");
+        assert!(n.y < 0.0 && k.y > 0.0, "n above the baseline, k below: {} {}", n.y, k.y);
+        assert!((n.x - k.x).abs() < 2.0, "the parts are centered over each other");
+        // \dbinom and \tbinom set the same stack.
+        assert_eq!(known(r"\dbinom{n}{k}").width, out.width);
+    }
+
+    #[test]
+    fn overset_and_underset_put_a_script_over_or_under_the_base() {
+        let over = known(r"a \overset{!}{=} b");
+        let (bang, eq) = (only(&over, '!'), only(&over, '='));
+        assert!(bang.y < 0.0 && eq.y == 0.0, "the script above, the base on the baseline");
+        assert!(bang.size < eq.size, "the script in script size");
+        // The pair spaces as a relation, as the bare = does.
+        let bare = known("a = b");
+        let gap = |o: &LayoutOutput| only(o, '=').x - only(o, 'a').x;
+        assert!((gap(&over) - gap(&bare)).abs() < 0.01, "relation spacing kept");
+        let under = known(r"\underset{x \to 0}{\lim}");
+        assert!(only(&under, 'x').y > 0.0, "the script below the base");
+    }
+
+    #[test]
+    fn xrightarrow_grows_under_its_labels() {
+        let plain = known(r"\rightarrow");
+        let out = known(r"\xrightarrow[below]{\text{a long label above}}");
+        let arrow = glyphs_of(&out, '\u{2192}');
+        assert!(arrow.len() > 1, "assembled from pieces");
+        let label: Vec<_> = ['a', 'l', 'n', 'g', 'v'].iter().flat_map(|&c| glyphs_of(&out, c)).collect();
+        let above: Vec<_> = label.iter().filter(|g| g.y < 0.0).collect();
+        let below = glyphs_of(&out, 'w');
+        assert!(!above.is_empty() && below.len() == 1 && below[0].y > 0.0, "labels above and below");
+        let arrow_left = arrow.iter().map(|g| g.x).fold(f32::MAX, f32::min);
+        let arrow_right = arrow.iter().map(|g| g.x).fold(f32::MIN, f32::max);
+        let label_right = above.iter().map(|g| g.x).fold(f32::MIN, f32::max);
+        assert!(out.width > plain.width * 3.0, "the arrow grew: {} vs {}", out.width, plain.width);
+        assert!(arrow_left < above.iter().map(|g| g.x).fold(f32::MAX, f32::min), "starts before the label");
+        assert!(arrow_right > label_right, "its head is past the label's end");
+        assert!((known(r"\xleftarrow{f}").width - known(r"\xrightarrow{f}").width).abs() < 0.01);
+    }
+
+    /// An assembled glyph's pieces follow each other in the items, each after
+    /// the first naming where it meets the one before: inside both, so a
+    /// renderer cutting them there leaves no gap and no double cover.
+    #[test]
+    fn assembled_pieces_mark_their_joints() {
+        for (latex, ch, horizontal) in [
+            (r"\xrightarrow{\text{a long label above the arrow}}", '\u{2192}', true),
+            (r"\left( \begin{matrix} a\\b\\c\\d\\e\\f\\g\\h \end{matrix} \right.", '(', false),
+        ] {
+            let out = known(latex);
+            let at: Vec<usize> = (0..out.items.len())
+                .filter(|&n| matches!(&out.items[n], LayoutItem::Glyph(g) if g.ch == ch))
+                .collect();
+            assert!(at.len() > 2, "{latex}: assembled from pieces");
+            assert!(at.windows(2).all(|w| w[1] == w[0] + 1), "{latex}: the pieces are adjacent");
+            let pieces: Vec<&LayoutGlyph> = at
+                .iter()
+                .map(|&n| match &out.items[n] {
+                    LayoutItem::Glyph(g) => g,
+                    _ => unreachable!(),
+                })
+                .collect();
+            assert!(pieces[0].joint.is_none(), "{latex}: the first piece starts the glyph");
+            for pair in pieces.windows(2) {
+                let (before, piece) = (pair[0], pair[1]);
+                // Into the piece from its start, by less than the step from the
+                // piece before.
+                match (piece.joint, horizontal) {
+                    (Some(Joint::Right(d)), true) => assert!(d > 0.0 && d < piece.x - before.x, "{latex}: {d}"),
+                    (Some(Joint::Up(d)), false) => assert!(d > 0.0 && d < before.y - piece.y, "{latex}: {d}"),
+                    other => panic!("{latex}: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boxed_frames_its_content() {
+        let plain = layout_expr("x");
+        let out = known(r"\boxed{x}");
+        let frame = rules(&out);
+        assert_eq!(frame.len(), 4, "four rules");
+        let x = only(&out, 'x');
+        assert!(frame.iter().any(|r| r.x < x.x && r.height > r.width), "a side rule left of the content");
+        assert!(out.ascent > plain.ascent + 5.0 && out.descent > plain.descent + 5.0, "padding above and below");
+        assert!(out.width > plain.width + 10.0, "padding left and right");
+        // In a subscript the frame keeps its full size.
+        assert!(only(&known(r"a_{\boxed{x}}"), 'x').size == x.size);
+    }
+
+    #[test]
+    fn substack_sets_tight_centered_script_rows() {
+        let nodes = parse(r"\substack{a \\ bb \\}");
+        let MathNode::Matrix(MatrixKind::Substack, rows) = &nodes[0] else { panic!("{nodes:?}") };
+        assert_eq!(rows.len(), 2, "a trailing \\\\ starts no row");
+        let out = known(r"\sum_{\substack{0<i<m\\0<j<n}}");
+        let (i, j) = (only(&out, 'i'), only(&out, 'j'));
+        assert!(i.y < j.y, "rows top to bottom");
+        let pitch = j.y - i.y;
+        let matrix = layout_expr(r"\sum_{\begin{matrix}0<i<m\\0<j<n\end{matrix}}");
+        assert!(pitch < only(&matrix, 'j').y - only(&matrix, 'i').y, "tighter than a matrix: {pitch}");
+        let ab = known(r"\substack{a\\bb}");
+        let a = only(&ab, 'a');
+        let bs = glyphs_of(&ab, 'b');
+        assert!(a.size < 20.0, "script size");
+        assert!(a.x > bs[0].x && a.x < bs[1].x, "rows centered");
     }
 
     #[test]
