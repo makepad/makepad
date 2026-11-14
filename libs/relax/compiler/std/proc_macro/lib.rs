@@ -446,6 +446,26 @@ impl Literal {
         let escape = EscapeOptions { escape_single_quote: false, escape_double_quote: true, escape_nonascii: false };
         delimited("c\"", escape_bytes(string.to_bytes(), escape), '"')
     }
+    /// library/proc_macro/src/lib.rs (1.79), with escape.rs's `escape_bytes`: a run of valid UTF-8
+    /// goes through `char::escape_debug` (a `'` stays as it is), any other byte through
+    /// `ascii::escape_default`.
+    pub fn c_string(string: &std::ffi::CStr) -> Literal {
+        let mut s = String::from("c\"");
+        for chunk in string.to_bytes().utf8_chunks() {
+            for ch in chunk.valid().chars() {
+                if ch == '\'' {
+                    s.push(ch);
+                } else {
+                    s.extend(ch.escape_debug());
+                }
+            }
+            for &b in chunk.invalid() {
+                s.extend(std::ascii::escape_default(b).map(char::from));
+            }
+        }
+        s.push('"');
+        Literal::from_text(s)
+    }
     pub fn span(&self) -> Span {
         self.span
     }
