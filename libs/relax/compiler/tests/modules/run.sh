@@ -26,6 +26,60 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
+# A twin's O3 build takes in the twins it calls and keeps the fuel count in a register between
+# calls: what a path costs, where a run on a budget ends and what the module did up to there are
+# the same with tiering off and after a tier-up that inlined.
+BASE_TIERS=""
+for TIER in 0 1; do
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/fuel_tiers.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" != 0 ] || ! echo "$GOT" | grep -q '^out the same after the tier-up: true$'; then
+    echo "modules fuel tiers (tier1=$TIER): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+fi
+if [ "$TIER" = 0 ]; then BASE_TIERS="$GOT"; else
+    if [ "$GOT" != "$BASE_TIERS" ] || ! echo "$OUT" | grep -Eq '^tier1: sandbox:tiers::run installed \([0-9]+ bytes, [1-9][0-9]* callees inlined'; then
+        echo "modules fuel tiers invariance: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+    fi
+fi
+echo "modules fuel tiers (tier1=$TIER): PASS ($(echo "$GOT" | head -1 | sed 's/^out //'))"
+done
+# A twin's O3 build checks a run of meters once: with every budget up to a call's cost, the fuel
+# consumed, how the call ends and the module's state after it are those of one check per block.
+BASE_CHAINS=""
+for TIER in 0 1; do
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/fuel_chains.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" != 0 ] || [ "$(echo "$GOT" | wc -l | tr -d ' ')" != 4 ]; then
+    echo "modules fuel chains (tier1=$TIER): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+fi
+if [ "$TIER" = 0 ]; then BASE_CHAINS="$GOT"; else
+    if [ "$GOT" != "$BASE_CHAINS" ] || ! echo "$OUT" | grep -Eq '^tier1: sandbox:chains::run installed \([0-9]+ bytes, [1-9][0-9]* callees inlined' || ! echo "$OUT" | grep -Eq '^tier1: sandbox:chains::walk installed '; then
+        echo "modules fuel chains invariance: FAIL"; echo "$BASE_CHAINS"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+    fi
+fi
+echo "modules fuel chains (tier1=$TIER): PASS ($(echo "$GOT" | sed -n 2p | sed 's/^out //'))"
+done
+# A twin's O3 build makes the arena copies of a known small size inline: sorts of elements of
+# 1 to 72 bytes give the host's results before and after the tier-up.
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/copies.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out the module' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" = 0 ] && [ "$GOT" = $'out the module, before the tier-up: true\nout the module, after it: true' ] && echo "$OUT" | grep -Eq '^tier1: sandbox:core::slice::sort::.* installed '; then
+    echo "modules copies: PASS"
+else
+    echo "modules copies: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1))
+fi
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)

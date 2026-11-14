@@ -2256,12 +2256,801 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     // RELAX_SANDBOX_OPT=0/1 forces the O1 clean-up.
     let opt = options.sandbox_opt.unwrap_or(!jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
     if opt {
+        if !relax_backend::stats::opt_off(options, "-sbwords") {
+            words_in_registers(f, tls_sym);
+        }
         relax_backend::passes::simplify(options, f, None, true, true);
         relax_backend::passes::licm(options, f);
         relax_backend::passes::simplify(options, f, None, true, true);
         f.verify().map_err(|e| format!("{}: sandbox clean-up made invalid RIR: {}", f.name, e))?;
     }
     Ok(())
+}
+
+/// Unit `u`'s twin `f`, optimised: its sandbox words in registers (`words_in_registers`; O3's
+/// last step for a twin, after the twins it took in are part of it). True: `f` changed.
+pub(crate) fn settle_words(u: &Unit, f: &mut Func) -> bool {
+    let tls = with_sb(u, |s| s.tls_sym);
+    // RELAX_OPT=-sbmeters: every meter keeps its own check (A/B)
+    let merged = !relax_backend::stats::opt_off(&u.prog.session.options, "-sbmeters") && merge_meters(f, tls);
+    words_in_registers(f, tls) | merged
+}
+
+/// One check for a run of meters. The transform charges every block of the canonical body, and
+/// that body is the lowering's own: `u64::rotate_left` is four blocks there, so once the inliner
+/// and the optimizer are done a twin's straight-line code still stops every few instructions to
+/// subtract, store, compare and branch (SHA-256's compression: 217 meters in one function, the
+/// larger part of its instructions). A chain here is a meter and the blocks after it that each
+/// have the one before as their only way in and hold no call, up to its last meter; a block may
+/// leave the chain only for code that never comes back (a trap, a panic). The first meter
+/// checks the fuel for the whole chain at once:
+/// - enough for all of it: every check of the chain would pass, so none is made. The word in
+///   memory still takes each meter's value before code that could fault, leave or be seen from
+///   outside runs (a load, a store, a division, a branch out), so a fault or a panic reports
+///   the fuel the unmerged code would; a stretch of register arithmetic defers its charge to
+///   the next store. A deadline's signal can land inside such a stretch and read the word
+///   before that charge, as it could land an instruction earlier.
+/// - not enough: the chain's own code runs instead, as it was, meter by meter (a copy, right
+///   after the chain): it stops at the same meter with the same word in memory. The copy never
+///   returns to the chain -- no call in it gives fuel back, so its last meter traps -- and its
+///   registers are its own (the function's single definitions stay single, and what the
+///   backend folds into one instruction still has one reader); where it leaves for a trap or
+///   a panic, the registers that code reads take the copy's values first.
+/// Charged fuel, the meter a call stops at and what the module did before it are unchanged.
+/// A meter is the transform's shape as the optimizer leaves it, or it is left alone: the fuel
+/// word (loaded, or known from the meter before) less a constant, stored, compared with zero,
+/// with a branch to code that never returns. True: `f` changed.
+fn merge_meters(f: &mut Func, tls: Sym) -> bool {
+    use relax_backend::rir::{Block, Mem};
+    let Some((addr, _)) = words_of(f, tls) else { return false };
+    let is_fuel = |base: VReg, off: i32| addr[base.0 as usize].is_some_and(|k| k + off as i64 == W_FUEL);
+    let nb = f.blocks.len();
+    let nv = f.vregs.len();
+    let (mut ndef, mut nuse) = (vec![0u32; nv], vec![0u32; nv]);
+    // registers that hold the fuel word's value: what a load of it gave, what a store put there
+    let mut fuel_value = vec![false; nv];
+    let mut npred = vec![0u32; nb];
+    let mut tu = Vec::new();
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+            relax_backend::regalloc::for_uses(i, |u| nuse[u.0 as usize] += 1);
+            match i {
+                Inst::Load(Mem::Int(8, _), d, base, off) if is_fuel(*base, *off) => fuel_value[d.0 as usize] = true,
+                Inst::Store(Mem::Int(8, _), base, off, src) if is_fuel(*base, *off) => fuel_value[src.0 as usize] = true,
+                _ => {}
+            }
+        }
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        for u in &tu {
+            nuse[u.0 as usize] += 1;
+        }
+        for t in b.term.succs() {
+            npred[t as usize] += 1;
+        }
+    }
+    // Code that never comes back to the function's flow (a trap, a panic and its cleanup): the
+    // blocks no return is reached from. Per such block, the registers everything reachable
+    // from it reads: a bit set each, to a fixpoint over those blocks (what they lead to is one
+    // of them too).
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); nb];
+    for (b, blk) in f.blocks.iter().enumerate() {
+        for t in blk.term.succs() {
+            preds[t as usize].push(b as u32);
+        }
+    }
+    let mut returns = vec![false; nb];
+    let mut stack: Vec<u32> = (0..nb as u32).filter(|&b| matches!(f.blocks[b as usize].term, Term::Ret(_))).collect();
+    for &b in &stack {
+        returns[b as usize] = true;
+    }
+    while let Some(b) = stack.pop() {
+        for &p in &preds[b as usize] {
+            if !std::mem::replace(&mut returns[p as usize], true) {
+                stack.push(p);
+            }
+        }
+    }
+    let cold: Vec<usize> = (0..nb).filter(|&b| !returns[b]).collect();
+    let width = nv.div_ceil(64);
+    // (a function too large for the sets keeps its meters as they are)
+    if cold.len().saturating_mul(width) > 1 << 21 {
+        return false;
+    }
+    let mut row = vec![usize::MAX; nb];
+    for (k, &b) in cold.iter().enumerate() {
+        row[b] = k;
+    }
+    let mut reads = vec![0u64; cold.len() * width];
+    for (k, &b) in cold.iter().enumerate() {
+        let blk = &f.blocks[b];
+        for i in &blk.insts {
+            relax_backend::regalloc::for_uses(i, |u| reads[k * width + u.0 as usize / 64] |= 1 << (u.0 % 64));
+        }
+        relax_backend::regalloc::term_uses(&blk.term, &mut tu);
+        for u in &tu {
+            reads[k * width + u.0 as usize / 64] |= 1 << (u.0 % 64);
+        }
+    }
+    loop {
+        let mut more = false;
+        for (k, &b) in cold.iter().enumerate().rev() {
+            for t in f.blocks[b].term.succs() {
+                let j = row[t as usize];
+                if j == usize::MAX || j == k {
+                    continue;
+                }
+                for w in 0..width {
+                    let x = reads[k * width + w] | reads[j * width + w];
+                    if x != reads[k * width + w] {
+                        reads[k * width + w] = x;
+                        more = true;
+                    }
+                }
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    let exit = |t: u32| !returns[t as usize];
+    // code reached by leaving at `t` reads register `v`
+    let read_at = |t: u32, v: u32| row[t as usize] != usize::MAX && (v as usize) < nv && reads[row[t as usize] * width + v as usize / 64] >> (v % 64) & 1 != 0;
+    // a block's meter: `left = was - cost`, stored and compared at the block's end (constants
+    // the optimizer moved down may follow). `was` is the word loaded just before (`load`), or
+    // the value the optimizer knows it holds (the meter before it in the same straight line).
+    // `at`: where the subtraction is; the store and the compare follow it
+    struct Meter {
+        cost: i64,
+        trap: u32,
+        next: u32,
+        at: usize,
+        load: bool,
+        was: VReg,
+        left: VReg,
+        store: (Mem, VReg, i32),
+    }
+    // an instruction that neither faults nor shows the fuel word to anything
+    let quiet = |i: &Inst| match i {
+        Inst::Iconst(..) | Inst::Fconst(..) | Inst::Mov(..) | Inst::INeg(..) | Inst::INot(..) | Inst::IBit(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::Conv(..) | Inst::Sel(..) | Inst::SelCmp(..) | Inst::FMulAdd(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::TlsAddr(..) => true,
+        Inst::IBin(op, ..) | Inst::IBinI(op, ..) => !matches!(op, IOp::Div | IOp::Rem),
+        // (a sandbox word: this thread's own memory)
+        Inst::Load(_, _, base, _) | Inst::Store(_, base, _, _) => addr[base.0 as usize].is_some(),
+        _ => false,
+    };
+    let meter_of = |b: &Block| -> Option<Meter> {
+        let n = b.insts.len();
+        let Term::Branch(c, trap, next) = &b.term else { return None };
+        if n < 3 || trap == next || !exit(*trap) {
+            return None;
+        }
+        let q = (0..n).rev().find(|&k| matches!(&b.insts[k], Inst::ICmpI(Cond::Lt, true, c1, _, 0) if c1 == c))?;
+        if q < 2 || !b.insts[q + 1..].iter().all(|i| matches!(i, Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..))) {
+            return None;
+        }
+        let (was, left, cost, store) = match (&b.insts[q - 2], &b.insts[q - 1], &b.insts[q]) {
+            (Inst::IBinI(IOp::Sub, it, v2, v, cost), Inst::Store(sm @ Mem::Int(8, _), a, off, src), Inst::ICmpI(_, _, _, x, _))
+                if it.bits == 64 && src == v2 && x == v2 && *cost > 0 && is_fuel(*a, *off) => (*v, *v2, *cost, (*sm, *a, *off)),
+            _ => return None,
+        };
+        let single = |v: VReg| ndef[v.0 as usize] == 1;
+        if !(single(was) && single(left) && single(*c) && nuse[c.0 as usize] == 1 && fuel_value[was.0 as usize]) {
+            return None;
+        }
+        let load = q >= 3 && matches!(&b.insts[q - 3], Inst::Load(Mem::Int(8, _), d, a, off) if *d == was && is_fuel(*a, *off) && nuse[d.0 as usize] == 1);
+        Some(Meter { cost, trap: *trap, next: *next, at: q - 2, load, was, left, store })
+    };
+    let meters: Vec<Option<Meter>> = f.blocks.iter().map(|b| meter_of(b)).collect();
+    // a block's code without its meter
+    let body = |b: usize| {
+        let m = meters[b].as_ref();
+        f.blocks[b].insts.iter().enumerate().filter(move |(k, _)| m.map_or(true, |m| !(m.at..m.at + 3).contains(k) && !(m.load && k + 1 == m.at))).map(|x| x.1)
+    };
+    // code a chain may run through: no call (a callee reads and writes the word), no other
+    // access of the word
+    let plain = |b: usize| !body(b).any(|i| match i {
+        Inst::Call(..) => true,
+        Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => is_fuel(*base, *off),
+        _ => false,
+    });
+    // a block between two meters (the entry of a twin taken in, a bounds check): where it goes
+    // on to, and where it may leave to
+    let onward = |b: usize| -> Option<(u32, Option<u32>)> {
+        match &f.blocks[b].term {
+            Term::Jump(x) => Some((*x, None)),
+            Term::Branch(_, x, y) if x != y && exit(*x) && !exit(*y) => Some((*y, Some(*x))),
+            Term::Branch(_, x, y) if x != y && exit(*y) && !exit(*x) => Some((*x, Some(*y))),
+            _ => None,
+        }
+    };
+    // meter block -> the blocks from it to the next meter of its chain (that meter's block last)
+    let mut link: Vec<Vec<usize>> = vec![Vec::new(); nb];
+    let mut linked = vec![false; nb];
+    for b in 0..nb {
+        let Some(m) = &meters[b] else { continue };
+        let mut path: Vec<usize> = Vec::new();
+        let mut cur = m.next as usize;
+        let ok = loop {
+            if cur == b || cur == 0 || npred[cur] != 1 || linked[cur] || path.contains(&cur) || path.len() > 6 || !plain(cur) {
+                break false;
+            }
+            path.push(cur);
+            match &meters[cur] {
+                // what this meter left is read by its own store and compare, and by the next
+                // meter when that one has no load of its own: nothing else may wait for it
+                Some(mn) => break (mn.load || mn.was == m.left) && nuse[m.left.0 as usize] == 2 + !mn.load as u32,
+                None => match onward(cur) {
+                    Some((x, _)) => cur = x as usize,
+                    None => break false,
+                },
+            }
+        };
+        if ok {
+            for &p in &path {
+                linked[p] = true;
+            }
+            link[b] = path;
+        }
+    }
+    // blocks whose code (their meter aside) is register arithmetic only
+    let calm: Vec<bool> = (0..nb).map(|b| body(b).all(|i| quiet(i))).collect();
+    // where a block of a chain may leave it for good (its meter's trap, its branch out)
+    let way_out: Vec<Option<u32>> = (0..nb).map(|b| match &meters[b] {
+        Some(m) => Some(m.trap),
+        None => onward(b).and_then(|o| o.1),
+    }).collect();
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+    for head in (0..nb).filter(|&b| !link[b].is_empty() && !linked[b]) {
+        let mut chain = vec![head];
+        // registers the copy will name anew, and a way out that reads a words address among
+        // them (the address keeps its one definition: no copy's value can be handed to it):
+        // the chain ends before it
+        let mut renamed: Vec<u32> = Vec::new();
+        'grow: while !link[*chain.last().unwrap()].is_empty() {
+            let path = &link[*chain.last().unwrap()];
+            let mut named = renamed.clone();
+            for &b in path {
+                for i in &f.blocks[b].insts {
+                    relax_backend::regalloc::for_defs(i, |d| if addr[d.0 as usize].is_some() { named.push(d.0) });
+                }
+                if let Some(t) = way_out[b] {
+                    if named.iter().any(|&v| read_at(t, v)) {
+                        break 'grow;
+                    }
+                }
+            }
+            renamed = named;
+            chain.extend(path.iter().copied());
+        }
+        if chain.len() > 1 {
+            chains.push(chain);
+        }
+    }
+    if chains.is_empty() {
+        return false;
+    }
+    let before = f.clone();
+    // (a chain's last block, the first and the number of its copy's blocks)
+    let mut copies: Vec<(usize, u32, u32)> = Vec::new();
+    for chain in &chains {
+        let k = chain.len();
+        let total: i64 = chain.iter().filter_map(|&b| meters[b].as_ref()).map(|m| m.cost).sum();
+        let cold = |c: f32| if c < 0.0 { c } else { 0.0 };
+        // the copy: each block's code as it was (the first block's is only its meter, moved)
+        let slow0 = f.blocks.len() as u32;
+        let mut to: HashMap<u32, VReg> = HashMap::new();
+        let mut slow: Vec<Block> = Vec::with_capacity(k);
+        // blocks on the copy's ways out: the registers the code there reads take its values
+        let mut handing: Vec<Block> = Vec::new();
+        for (n, &b) in chain.iter().enumerate() {
+            let m = meters[b].as_ref();
+            let (from, upto) = if n == 0 { (m.unwrap().at, m.unwrap().at + 3) } else { (0, f.blocks[b].insts.len()) };
+            let code: Vec<Inst> = f.blocks[b].insts[from..upto].to_vec();
+            let code_pos: Vec<u64> = f.blocks[b].pos[from..upto].to_vec();
+            let (term_pos, count) = (f.blocks[b].term_pos, cold(f.blocks[b].count));
+            let mut insts = Vec::with_capacity(code.len());
+            let mut at_pos: Vec<u64> = Vec::with_capacity(code.len());
+            let last = n + 1 == k;
+            for (ci, i) in code.iter().enumerate() {
+                if n == 0 {
+                    insts.push(i.clone());
+                    at_pos.push(code_pos[ci]);
+                    continue;
+                }
+                // (the chain's last meter: nothing gets past it here, so it is not compared)
+                if last && ci == m.unwrap().at + 2 {
+                    continue;
+                }
+                // fresh registers for what it defines, its operands by the copy's names so far.
+                // (A register it both reads and writes: the fresh one starts as a copy of it.)
+                let mut fresh: Vec<(u32, VReg)> = Vec::new();
+                relax_backend::regalloc::for_defs(i, |d| fresh.push((d.0, d)));
+                for e in fresh.iter_mut() {
+                    e.1 = f.vreg(f.vregs[e.0 as usize]);
+                }
+                let now = |v: VReg| to.get(&v.0).copied().unwrap_or(v);
+                let mut both: Vec<(VReg, VReg)> = Vec::new();
+                relax_backend::regalloc::for_uses(i, |u| {
+                    if let Some(e) = fresh.iter().find(|e| e.0 == u.0) {
+                        if !both.iter().any(|x| x.0 == e.1) {
+                            both.push((e.1, now(u)));
+                        }
+                    }
+                });
+                for (d, s) in both {
+                    insts.push(Inst::Mov(d, s));
+                    at_pos.push(code_pos[ci]);
+                }
+                insts.push(relax_backend::passes::map_inst(i, &|v| fresh.iter().find(|e| e.0 == v.0).map_or_else(|| now(v), |e| e.1), 0));
+                at_pos.push(code_pos[ci]);
+                for e in fresh {
+                    to.insert(e.0, e.1);
+                }
+            }
+            // this block's way out, by way of a block that hands the copy's values over
+            let mut out = |t: u32, insts: Option<(&mut Vec<Inst>, &mut Vec<u64>)>| -> u32 {
+                let mut hand: Vec<(u32, VReg)> = to.iter().filter(|x| read_at(t, *x.0)).map(|x| (*x.0, *x.1)).collect();
+                hand.sort_unstable_by_key(|x| x.0);
+                let hand: Vec<Inst> = hand.into_iter().map(|(v, n)| Inst::Mov(VReg(v), n)).collect();
+                if hand.is_empty() {
+                    return t;
+                }
+                match insts {
+                    // (the block ends there: the copies go at its end)
+                    Some((insts, at_pos)) => {
+                        at_pos.extend(std::iter::repeat(term_pos).take(hand.len()));
+                        insts.extend(hand);
+                        t
+                    }
+                    None => {
+                        handing.push(Block { pos: vec![term_pos; hand.len()], insts: hand, term: Term::Jump(t), term_pos, count });
+                        slow0 + (k + handing.len() - 1) as u32
+                    }
+                }
+            };
+            let onto = slow0 + n as u32 + 1;
+            let now = |v: VReg| to.get(&v.0).copied().unwrap_or(v);
+            let term = match (f.blocks[b].term.clone(), m) {
+                (Term::Branch(..), Some(m)) if last => Term::Jump(out(m.trap, Some((&mut insts, &mut at_pos)))),
+                (Term::Branch(c, t, _), Some(_)) => Term::Branch(now(c), out(t, None), onto),
+                (Term::Jump(_), None) => Term::Jump(onto),
+                (Term::Branch(c, x, y), None) if x as usize == chain[n + 1] => Term::Branch(now(c), onto, out(y, None)),
+                (Term::Branch(c, x, _), None) => Term::Branch(now(c), out(x, None), onto),
+                _ => unreachable!(),
+            };
+            slow.push(Block { insts, pos: at_pos, term, term_pos, count });
+        }
+        // the chain itself: the one check, then each block without its meter. `at` holds the
+        // word's value as last stored, `owed` what the meters since then charge, `word` where
+        // the last meter passed stores it
+        let first = meters[chain[0]].as_ref().unwrap();
+        let mut at = first.was;
+        let mut owed = 0i64;
+        let mut word = first.store;
+        for (n, &b) in chain.iter().enumerate() {
+            let m = meters[b].as_ref();
+            let p = f.blocks[b].pos.first().copied().unwrap_or(0);
+            // the charge so far goes to memory before this block's code, unless that is only
+            // register arithmetic that stays in the chain
+            let charge = n > 0 && owed > 0 && (!calm[b] || (m.is_none() && !matches!(f.blocks[b].term, Term::Jump(_))));
+            let last = n + 1 == k;
+            let t = if charge { f.vreg(Cls::I) } else { at };
+            let (x, cf) = if n == 0 { (f.vreg(Cls::I), f.vreg(Cls::I)) } else { (at, at) };
+            let blk = &mut f.blocks[b];
+            if let Some(m) = m {
+                // (the head keeps its load: the copy's first meter reads what it loaded)
+                let cut = if m.load && n > 0 { m.at - 1..m.at + 3 } else { m.at..m.at + 3 };
+                blk.insts.drain(cut.clone());
+                blk.pos.drain(cut);
+            }
+            if charge {
+                blk.insts.insert(0, Inst::Store(word.0, word.1, word.2, t));
+                blk.insts.insert(0, Inst::IBinI(IOp::Sub, U64, t, at, owed));
+                blk.pos.insert(0, p);
+                blk.pos.insert(0, p);
+                at = t;
+                owed = 0;
+            }
+            let Some(m) = m else { continue };
+            owed += m.cost;
+            word = m.store;
+            if n == 0 {
+                blk.insts.push(Inst::IBinI(IOp::Sub, U64, x, at, total));
+                blk.insts.push(Inst::ICmpI(Cond::Lt, true, cf, x, 0));
+                blk.pos.extend([p, p]);
+                blk.term = Term::Branch(cf, slow0, chain[1] as u32);
+            } else if last {
+                // (the last meter's own register: code after the chain may read the word from it)
+                blk.insts.push(Inst::IBinI(IOp::Sub, U64, m.left, at, owed));
+                blk.insts.push(Inst::Store(m.store.0, m.store.1, m.store.2, m.left));
+                blk.pos.extend([p, p]);
+                blk.term = Term::Jump(m.next);
+            } else {
+                blk.term = Term::Jump(m.next);
+            }
+        }
+        copies.push((*chain.last().unwrap(), slow0, (k + handing.len()) as u32));
+        f.blocks.extend(slow);
+        f.blocks.extend(handing);
+    }
+    // A copy goes right after its chain: the register allocator gives a value one interval over
+    // all the positions it is live at, and a copy at the function's end kept everything its
+    // chain reads live across the code between (the sort's partition closure took eight
+    // callee-saved registers for it).
+    let mut order: Vec<u32> = Vec::with_capacity(f.blocks.len());
+    for b in 0..nb {
+        order.push(b as u32);
+        if let Some(c) = copies.iter().find(|c| c.0 == b) {
+            order.extend(c.1..c.1 + c.2);
+        }
+    }
+    let mut map = vec![0u32; order.len()];
+    for (i, b) in order.iter().enumerate() {
+        map[*b as usize] = i as u32;
+    }
+    let mut old: Vec<Option<Block>> = std::mem::take(&mut f.blocks).into_iter().map(Some).collect();
+    for b in &order {
+        let mut blk = old[*b as usize].take().unwrap();
+        blk.term.map_succs(|t| map[t as usize]);
+        f.blocks.push(blk);
+    }
+    if let Err(e) = f.verify() {
+        eprintln!("relax: sandbox meters of {} left as they were: {}", f.name, e);
+        *f = before;
+        return false;
+    }
+    true
+}
+
+/// (word offset, a call leaves it as it was)
+const WORDS: [(i64, bool); 4] = [(W_ARENA, true), (W_SSP, false), (W_FUEL, false), (W_SSLO, true)];
+
+/// The registers of `f` that hold an address of this thread's sandbox words (per register,
+/// `words + k`), and which words the function loads or stores (a bit per WORDS entry). None:
+/// such a register is used in a way a transform's code never does (see words_in_registers), or
+/// the function names no word.
+fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
+    use relax_backend::rir::Mem;
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+    }
+    // registers holding `words + k`: the TLS address, copies of it, it plus a constant
+    let mut addr: Vec<Option<i64>> = vec![None; nv];
+    loop {
+        let mut more = false;
+        for i in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (d, k) = match i {
+                Inst::TlsAddr(d, s) if s.id == tls.id => (*d, s.off - tls.off),
+                Inst::Mov(d, a) => match addr[a.0 as usize] { Some(k) => (*d, k), None => continue },
+                Inst::IBinI(IOp::Add, it, d, a, c) if it.bits == 64 => match addr[a.0 as usize] { Some(k) => (*d, k + *c), None => continue },
+                _ => continue,
+            };
+            if ndef[d.0 as usize] != 1 {
+                return None;
+            }
+            if addr[d.0 as usize] != Some(k) {
+                addr[d.0 as usize] = Some(k);
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    if addr.iter().all(|a| a.is_none()) {
+        return None;
+    }
+    let word = |base: VReg, off: i32| -> Option<Result<usize, ()>> {
+        let k = addr[base.0 as usize]? + off as i64;
+        Some(WORDS.iter().position(|w| w.0 == k).ok_or(()))
+    };
+    // every use of such a register is one of the forms above or the base of a load or store of
+    // a whole word; the promoted words are only loaded, or (not the activation's) stored
+    let mut used: u8 = 0;
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                Inst::TlsAddr(..) => {}
+                Inst::Mov(_, a) if addr[a.0 as usize].is_some() => {}
+                Inst::IBinI(IOp::Add, it, _, a, _) if it.bits == 64 && addr[a.0 as usize].is_some() => {}
+                Inst::Load(m, _, base, off) => match word(*base, *off) {
+                    None => {}
+                    Some(w) => {
+                        if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                            return None;
+                        }
+                        if let Ok(k) = w {
+                            used |= 1 << k;
+                        }
+                    }
+                },
+                Inst::Store(m, base, off, src) => {
+                    if addr[src.0 as usize].is_some() {
+                        return None;
+                    }
+                    match word(*base, *off) {
+                        None => {}
+                        Some(w) => {
+                            if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                                return None;
+                            }
+                            match w {
+                                Ok(k) if WORDS[k].1 => return None,
+                                Ok(k) => used |= 1 << k,
+                                Err(()) => {}
+                            }
+                        }
+                    }
+                }
+                other => {
+                    let mut named = false;
+                    relax_backend::regalloc::for_uses(other, |u| named |= addr[u.0 as usize].is_some());
+                    if named {
+                        return None;
+                    }
+                }
+            }
+        }
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        if tu.iter().any(|u| addr[u.0 as usize].is_some()) {
+            return None;
+        }
+    }
+    Some((addr, used))
+}
+
+/// Keeps this thread's sandbox words in registers between calls. Every block of a twin reads and
+/// writes the fuel word, and every frame the shadow stack pointer; as memory operations each
+/// meter's load waits for the store of the one before it, so a loop's blocks form one chain
+/// through memory however independent their work is (measured: most of a hot twin's time, also
+/// once the twins it calls are inlined, since their meters come with them). Only the transform
+/// makes code that names these words -- a module's own accesses are masked into its window, and
+/// its thread-locals are redirected -- so every access is found by its address, `words + k`:
+/// - a store still happens (the word in memory is exact at every instruction: a fault, a
+///   deadline or the runtime may read it at any time) and the register takes the value too;
+/// - a load is a copy of the register wherever the register is known to hold the word: on every
+///   path since the function's entry or its last call, the word was loaded or stored. A call
+///   ends that: the callee (a twin's own meter, the runtime at an entry or a leave) writes the
+///   word. The arena base and the shadow stack's floor are the activation's and outlive calls,
+///   as the transform's own use of the base it loads at entry already assumes.
+/// The fuel charged, the instruction it runs out at and the words in memory are unchanged.
+///
+/// All or nothing: a register that may hold a words address and is used in any way but these
+/// (not a single definition, arithmetic, an indexed access, passed on) leaves the function as it
+/// is. True: `f` changed.
+fn words_in_registers(f: &mut Func, tls: Sym) -> bool {
+    let invariant: u8 = WORDS.iter().enumerate().filter(|(_, w)| w.1).fold(0, |m, (k, _)| m | 1 << k);
+    let Some((addr, used)) = words_of(f, tls) else { return false };
+    let word = |base: VReg, off: i32| -> Option<Result<usize, ()>> {
+        let k = addr[base.0 as usize]? + off as i64;
+        Some(WORDS.iter().position(|w| w.0 == k).ok_or(()))
+    };
+    if used == 0 {
+        return false;
+    }
+    // where each word's register holds it: at a block's entry, on every path into it
+    let step = |state: u8, i: &Inst| -> u8 {
+        match i {
+            Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                Some(Ok(k)) => state | 1 << k,
+                _ => state,
+            },
+            Inst::Call(..) => state & invariant,
+            _ => state,
+        }
+    };
+    let nb = f.blocks.len();
+    let mut at_entry = vec![u8::MAX; nb];
+    at_entry[0] = 0;
+    let mut work: Vec<usize> = (0..nb).collect();
+    while let Some(b) = work.pop() {
+        let out = f.blocks[b].insts.iter().fold(at_entry[b], |st, i| step(st, i));
+        for t in f.blocks[b].term.succs() {
+            let t = t as usize;
+            if at_entry[t] & out != at_entry[t] {
+                at_entry[t] &= out;
+                work.push(t);
+            }
+        }
+    }
+    let regs: Vec<VReg> = WORDS.iter().map(|_| f.vreg(Cls::I)).collect();
+    for (b, blk) in f.blocks.iter_mut().enumerate() {
+        let insts = std::mem::take(&mut blk.insts);
+        let pos = std::mem::take(&mut blk.pos);
+        let mut state = at_entry[b];
+        for (n, i) in insts.into_iter().enumerate() {
+            let p = pos.get(n).copied().unwrap_or(0);
+            let w = match &i {
+                Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                    Some(Ok(k)) => Some(k),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let next = step(state, &i);
+            match (i, w) {
+                (Inst::Load(_, d, _, _), Some(k)) if state & 1 << k != 0 => {
+                    blk.insts.push(Inst::Mov(d, regs[k]));
+                    blk.pos.push(p);
+                }
+                (Inst::Load(m, d, base, off), Some(k)) => {
+                    blk.insts.push(Inst::Load(m, d, base, off));
+                    blk.insts.push(Inst::Mov(regs[k], d));
+                    blk.pos.extend([p, p]);
+                }
+                (Inst::Store(m, base, off, src), Some(k)) => {
+                    blk.insts.push(Inst::Store(m, base, off, src));
+                    blk.insts.push(Inst::Mov(regs[k], src));
+                    blk.pos.extend([p, p]);
+                }
+                (i, _) => {
+                    blk.insts.push(i);
+                    blk.pos.push(p);
+                }
+            }
+            state = next;
+        }
+    }
+    // one address of the words for the whole activation, made at its entry: in machine code a
+    // `TlsAddr` is a read of the thread's block and of the symbol's offset (eight instructions
+    // on arm64 macOS), and each twin the inliner took in brought its own, so every meter of a
+    // run of small twins paid one. The transform already holds the address it makes at entry
+    // through the whole function (its meters, `words`); here the same holds after the inliner.
+    let base = f.vreg(Cls::I);
+    let mut same: HashMap<u32, VReg> = HashMap::new();
+    for blk in f.blocks.iter_mut() {
+        let mut k = 0;
+        while k < blk.insts.len() {
+            match blk.insts[k] {
+                Inst::TlsAddr(d, s) if s.id == tls.id && s.off == tls.off => {
+                    same.insert(d.0, base);
+                    blk.insts.remove(k);
+                    blk.pos.remove(k);
+                    continue;
+                }
+                Inst::TlsAddr(d, s) if s.id == tls.id => blk.insts[k] = Inst::IBinI(IOp::Add, U64, d, base, s.off - tls.off),
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    if !same.is_empty() {
+        let to = |v: VReg| same.get(&v.0).copied().unwrap_or(v);
+        for i in f.blocks.iter_mut().flat_map(|b| b.insts.iter_mut()) {
+            *i = relax_backend::passes::rename(i, &to);
+        }
+    }
+    let p0 = f.blocks[0].pos.first().copied().unwrap_or(0);
+    f.blocks[0].insts.insert(0, Inst::TlsAddr(base, tls));
+    f.blocks[0].pos.insert(0, p0);
+    true
+}
+
+/// A twin's calls of the arena memcpy / memmove with a known small size, as inline copies in
+/// the window (O3's step for a twin once the twins it took in are part of it: the size of
+/// `ptr::copy_nonoverlapping(p, q, 1)` of a `T` is a constant only then). Host code has this
+/// from the optimizer's own fold (passes::simplify, `mem_fns`), which does not know a twin's
+/// entries, so a twin kept a call per element moved: a sort of u64 spent most of its time in
+/// them and in the thread-local reads of the entry. Both addresses are masked into the window
+/// like every access the transform rewrites, and at most INLINE_COPY_MAX bytes follow them:
+/// the guard pages take what the entry's range check did, as for the transform's own `Copy`.
+/// The call was charged with its block (the cost of a host call), and still is.
+/// True: `f` changed.
+pub(crate) fn inline_copies(u: &Unit, f: &mut Func) -> bool {
+    use relax_backend::rir::Mem;
+    let is_copy = |i: &Inst| matches!(i, Inst::Call(Callee::Host(s), a, r) if s.off == 0 && a.len() == 3 && r.len() <= 1);
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| is_copy(i))) {
+        return false;
+    }
+    let tls = with_sb(u, |s| s.tls_sym);
+    // a size is known when its register has one definition, a constant
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    let mut konst: Vec<Option<i64>> = vec![None; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+        if let Inst::Iconst(d, k) = i {
+            konst[d.0 as usize] = Some(*k);
+        }
+    }
+    // 1: memcpy, 2: memmove (one entry behind both, sb_rt_memcpy; a memcpy's ranges are apart)
+    let mut entries: HashMap<u32, u8> = HashMap::new();
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        if !f.blocks[bi].insts.iter().any(|i| is_copy(i)) {
+            continue;
+        }
+        let insts = std::mem::take(&mut f.blocks[bi].insts);
+        let pos = std::mem::take(&mut f.blocks[bi].pos);
+        let mut out: Vec<Inst> = Vec::with_capacity(insts.len() + 8);
+        let mut opos: Vec<u64> = Vec::with_capacity(insts.len() + 8);
+        for (n, i) in insts.into_iter().enumerate() {
+            let p = pos.get(n).copied().unwrap_or(0);
+            let hit = match &i {
+                Inst::Call(Callee::Host(s), a, r) if is_copy(&i) => {
+                    let e = *entries.entry(s.id).or_insert_with(|| match u.syms.kind(s.id) {
+                        Some(SymKind::SbHost(name)) if name == "rt:memcpy" => 1,
+                        Some(SymKind::SbHost(name)) if name == "rt:memmove" => 2,
+                        _ => 0,
+                    });
+                    let size = if ndef[a[2].0 as usize] == 1 { konst[a[2].0 as usize] } else { None };
+                    match size {
+                        Some(k) if e != 0 && (0..=relax_backend::passes::INLINE_COPY_MAX).contains(&k) => Some((e, a[0], a[1], k as u32, r.first().copied())),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some((e, d, s, size, ret)) = hit else {
+                out.push(i);
+                opos.push(p);
+                continue;
+            };
+            changed = true;
+            let at = out.len();
+            if size > 0 || ret.is_some() {
+                // the arena base as the transform reads it at entry (words_in_registers, which
+                // runs next, gives the register that holds it)
+                let (w, ar) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                out.push(Inst::TlsAddr(w, tls.plus(W_ARENA)));
+                out.push(Inst::Load(Mem::Int(8, false), ar, w, 0));
+                let mut masked = |v: VReg, out: &mut Vec<Inst>| {
+                    let (t, mv) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                    out.push(Inst::Conv(Conv::IntToInt(U32), t, v));
+                    out.push(Inst::IBin(IOp::Add, U64, mv, t, ar));
+                    mv
+                };
+                let d2 = masked(d, &mut out);
+                if size > 0 {
+                    let s2 = masked(s, &mut out);
+                    if e == 1 {
+                        out.push(Inst::Copy(d2, s2, size));
+                    } else {
+                        // every load before any store (the ranges may overlap): 8-byte words
+                        // with the tail as one overlapping word; under 8 bytes, 4/2/1 pieces
+                        let mut parts: Vec<(u8, i32)> = Vec::new();
+                        if size >= 8 {
+                            parts.extend((0..size / 8).map(|j| (8u8, j as i32 * 8)));
+                            if size % 8 != 0 {
+                                parts.push((8, size as i32 - 8));
+                            }
+                        } else {
+                            let mut o = 0;
+                            for wd in [4u32, 2, 1] {
+                                if size - o >= wd {
+                                    parts.push((wd as u8, o as i32));
+                                    o += wd;
+                                }
+                            }
+                        }
+                        let ts: Vec<VReg> = parts.iter().map(|_| f.vreg(Cls::I)).collect();
+                        out.extend(parts.iter().zip(&ts).map(|(&(wd, o), &t)| Inst::Load(Mem::Int(wd, false), t, s2, o)));
+                        out.extend(parts.iter().zip(&ts).map(|(&(wd, o), &t)| Inst::Store(Mem::Int(wd, false), d2, o, t)));
+                    }
+                }
+                // (the entry returns the destination's address in the window)
+                if let Some(r) = ret {
+                    out.push(Inst::Mov(r, d2));
+                }
+            }
+            opos.extend(std::iter::repeat(p).take(out.len() - at));
+        }
+        f.blocks[bi].insts = out;
+        f.blocks[bi].pos = opos;
+    }
+    changed
 }
 
 /// Where `sym` (a `#[thread_local]` static, or the thread block itself) is in a segment's
@@ -2461,6 +3250,13 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
     jit::build_rir(up, base)?;
     let mut f = jit::sandbox_source_rir(up, base)?;
     transform(up, &mut f, id)?;
+    // What the inliner prices this body by (Func::priced): its base's, as the host's inliner
+    // prices the base -- by its O1 body (the canonical one is not optimised) -- though not under
+    // a quarter of its own size: a twin's O3 build stays within four times a host build's size.
+    // (Pricing by the canonical body's size left the sort's partition loop a call per element.)
+    let own = relax_codegen::opt::inst_count(&f) as u32;
+    let host = (&*up).fns[base as usize].rir.as_ref().map_or(own, |r| relax_codegen::opt::inst_count(r) as u32);
+    f.confined = Some((host.max(own / 4).min(own), own));
     // RELAX_SANDBOX_DUMP=<substring>: the transformed RIR of matching twins
     if let Some(pat) = sandbox_dump() {
         if f.name.contains(pat) {
