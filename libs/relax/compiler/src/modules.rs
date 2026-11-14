@@ -106,46 +106,78 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
     let files: std::collections::BTreeSet<u32> = prog.mods.iter().filter(|m| m.krate == krate).map(|m| m.file).collect();
     for &f in &files {
         let pf = &prog.files[f as usize];
-        let ast = &pf.ast;
-        let tok = |i: u32| -> &[u8] { pf.toks.get(i as usize).map_or(&[][..], |t| &pf.src[t.lo as usize..t.hi as usize]) };
-        for it in &ast.items {
-            for a in ast.list(it.attrs) {
-                if a.toks.hi > a.toks.lo {
-                    let n = tok(a.toks.lo);
-                    if matches!(n, b"no_mangle" | b"export_name" | b"link" | b"link_section" | b"used" | b"naked" | b"link_name") {
-                        out.push(format!("{}: `#[{}]` is not allowed in a sandboxed module -- remove it", at(f, it.lo), String::from_utf8_lossy(n)));
+        // The file's whole tree: its first parse, then the fn bodies that parse skipped. A program
+        // run loads bodies on demand (ParsedFile::part, a tree of their own after the file's), and
+        // the type checks before this parsed them; read from the file's tree alone, the check saw
+        // items and signatures and no body: `unsafe` inside a fn, a closure or a method loaded.
+        let cfg = &prog.crates[krate as usize].cfg;
+        let _ = pf.part(cfg);
+        let root = &pf.ast;
+        let trees = || std::iter::successors(Some(root), |a| a.part.get().map(|p| &**p));
+        let tok = |i: u32| -> &[u8] {
+            let t = pf.tok(i);
+            pf.bytes(t.lo, t.hi)
+        };
+        // what a builtin derive wrote is the front's own text, not the module's: the expressions
+        // parsed for its impl and that impl's items, their skipped bodies too (an enum's PartialEq,
+        // PartialOrd, Ord and Hash read the discriminant in an `unsafe` block)
+        let mut derived: Vec<(u32, u32)> = Vec::new();
+        for it in trees().flat_map(|a| &a.items) {
+            if let ItemKind::Impl(r) = &it.kind {
+                if root.row(*r).builtin_derive {
+                    derived.push((it.ranges[0], it.ranges[1]));
+                    for m in root.list(root.row(*r).items) {
+                        let mi = root.item(*m);
+                        derived.push((mi.ranges[0], mi.ranges[1]));
+                        if let Some(Ok((_, body))) = pf.lazy_body(*m, cfg) {
+                            derived.push((body[0], body[1]));
+                        }
                     }
                 }
             }
-            let bad = match &it.kind {
-                ItemKind::Fn(sig, _, _) if ast.fn_sig(*sig).unsafe_ => Some("`unsafe fn`"),
-                ItemKind::Fn(sig, _, _) if ast.fn_sig(*sig).abi.is_some() => Some("an `extern` fn"),
-                ItemKind::Impl(r) if ast.row(*r).unsafe_ && !ast.row(*r).builtin_derive => Some("`unsafe impl`"),
-                ItemKind::Trait(r) if ast.row(*r).unsafe_ => Some("`unsafe trait`"),
-                ItemKind::ForeignMod(..) => Some("an `extern` block"),
-                ItemKind::Static(true, _, _) => Some("`static mut`"),
-                ItemKind::Union(..) => Some("a `union`"),
-                ItemKind::MacroRules(_) => None,
-                _ => None,
-            };
-            if let Some(b) = bad {
-                out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
-            }
         }
-        for e in &ast.exprs {
-            match &e.kind {
-                ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
-                ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_args.get(ast.row(*m).args as usize).map_or(false, |a| a.asm.is_some()) => {
-                    out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
+        let mut raw_pointer = false;
+        for ast in trees() {
+            for it in &ast.items {
+                for a in root.list(it.attrs) {
+                    if a.toks.hi > a.toks.lo {
+                        let n = tok(a.toks.lo);
+                        if matches!(n, b"no_mangle" | b"export_name" | b"link" | b"link_section" | b"used" | b"naked" | b"link_name") {
+                            out.push(format!("{}: `#[{}]` is not allowed in a sandboxed module -- remove it", at(f, it.lo), String::from_utf8_lossy(n)));
+                        }
+                    }
                 }
-                _ => {}
+                let bad = match &it.kind {
+                    ItemKind::Fn(sig, _, _) if root.fn_sig(*sig).unsafe_ => Some("`unsafe fn`"),
+                    ItemKind::Fn(sig, _, _) if root.fn_sig(*sig).abi.is_some() => Some("an `extern` fn"),
+                    ItemKind::Impl(r) if root.row(*r).unsafe_ && !root.row(*r).builtin_derive => Some("`unsafe impl`"),
+                    ItemKind::Trait(r) if root.row(*r).unsafe_ => Some("`unsafe trait`"),
+                    ItemKind::ForeignMod(..) => Some("an `extern` block"),
+                    ItemKind::Static(true, _, _) => Some("`static mut`"),
+                    ItemKind::Union(..) => Some("a `union`"),
+                    ItemKind::MacroRules(_) => None,
+                    _ => None,
+                };
+                if let Some(b) = bad {
+                    out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
+                }
             }
+            for (k, e) in ast.exprs.iter().enumerate() {
+                // (a part's ids continue the trees before it)
+                let id = ast.base[0] + k as u32;
+                match &e.kind {
+                    ExprKind::Unsafe(_) if derived.iter().any(|r| r.0 <= id && id < r.1) => {}
+                    ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
+                    ExprKind::Mac(m) if root.row(*m).args != crate::ast::NO_MAC_ARGS && root.mac_arg(root.row(*m).args).asm.is_some() => {
+                        out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
+                    }
+                    _ => {}
+                }
+            }
+            raw_pointer |= ast.tys.iter().any(|t| matches!(t, Ty::Ptr(..)));
         }
-        for t in &ast.tys {
-            if let Ty::Ptr(..) = t {
-                out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
-                break;
-            }
+        if raw_pointer {
+            out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
         }
         // built-in macros that read the host's files or environment (expanded before the tree)
         for (i, t) in pf.toks.iter().enumerate() {

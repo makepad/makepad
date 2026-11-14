@@ -378,6 +378,14 @@ impl<'a> Parser<'a> {
         self.token_origins.extend(self.toks.range(start, self.toks.len()).iter().filter(|t| t.kind != T::Eof)
             .map(|t| crate::source::TokenOrigin { lo: t.lo, hi: t.hi, source }));
         let items = self.in_expansion(start, |p| p.items_until(T::Eof))?;
+        // every impl made here is the front's own text: the sandbox's source check passes its
+        // `unsafe impl` (derive(Clone)'s TrivialClone) and the `unsafe` blocks of its bodies (an
+        // enum's discriminant reads in PartialEq, PartialOrd, Ord and Hash)
+        for &iid in &items {
+            if let ItemKind::Impl(r) = self.ast.item(iid).kind {
+                self.ast.row_mut(r).builtin_derive = true;
+            }
+        }
         self.extra_items.extend(items);
         Ok(())
     }
@@ -1038,7 +1046,6 @@ impl Parser<'_> {
         // (`items_until` hands earlier extras back with the new item: the newest id is the one just installed)
         let iid = *self.extra_items.iter().max_by_key(|i| i.0).expect("derived impl");
         let impl_row = match self.ast.item(iid).kind { ItemKind::Impl(r) => r, _ => unreachable!() };
-        self.ast.row_mut(impl_row).builtin_derive = unsafe_;
         let mut generics = self.ast.row(impl_row).generics;
         if !field_params.is_empty() {
             // The generated type parameter has exactly the additional derive bounds
