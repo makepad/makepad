@@ -105,6 +105,13 @@ if [ "$GOT" = $'out calls returned: 100\nout most inside at once: 64' ]; then ec
 OUT=$(RELAX_MODULE_FUEL=1000000 "$1" test "$D/fuel.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-fuel.out")" ]; then echo "modules fuel: PASS"; else echo "modules fuel: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -6; FAILS=$((FAILS + 1)); fi
+# A module's own cleanup fails while its frames unwind (fuel spent, a panicking destructor): the
+# call ends with the first error, the host's frames clean up, the process goes on. Both tiers.
+for TIER in 0 1; do
+OUT=$(RELAX_O3=$TIER RELAX_O3_CALLS=100 "$1" test "$D/cleanup_panic.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-cleanup-panic.out")" ]; then echo "modules cleanup panic (tier1=$TIER): PASS"; else echo "modules cleanup panic (tier1=$TIER): FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+done
 bash "$D/milk.sh" "$1" || FAILS=$((FAILS + 1))
 OUT=$(RELAX_SANDBOX_FUEL=0 "$1" test "$D/deadline.rs" 2>&1)
 STATUS=$?
