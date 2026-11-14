@@ -1927,7 +1927,7 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         // std's runtime panic hook and payload end (sys/rt.rs install_core_hook): host code never
         // calls into twins; their panics record their payload through core's hook in the arena,
         // and a runtime check's failure in a twin is a contained fault
-        "relax_set_panic_hook" | "relax_set_payload_end" => Some(("sb_unrecorded", sb_unrecorded as *const () as u64)),
+        "relax_set_panic_hook" | "relax_set_payload_end" | "relax_set_payload_record" => Some(("sb_unrecorded", sb_unrecorded as *const () as u64)),
         "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "atan2" | "sinh" | "cosh" | "tanh" | "asinh" | "acosh" | "atanh" | "exp" | "exp2" | "expm1" | "log" | "log2" | "log10" | "log1p" | "pow" | "sqrt" | "cbrt" | "hypot" | "fmod" | "floor" | "ceil" | "round" | "trunc" | "fma" | "fmax" | "fmin" | "fdim" | "erf" | "erfc" | "tgamma" | "lgamma" | "ldexp" | "nextafter" | "copysign" | "rint" | "nearbyint" | "sinf" | "cosf" | "tanf" | "asinf" | "acosf" | "atanf" | "atan2f" | "sinhf" | "coshf" | "tanhf" | "asinhf" | "acoshf" | "atanhf" | "expf" | "exp2f" | "expm1f" | "logf" | "log2f" | "log10f" | "log1pf" | "powf" | "sqrtf" | "cbrtf" | "hypotf" | "fmodf" | "floorf" | "ceilf" | "roundf" | "truncf" | "fmaf" | "fmaxf" | "fminf" | "fdimf" | "erff" | "erfcf" | "tgammaf" | "lgammaf" | "ldexpf" | "nextafterf" | "copysignf" | "rintf" | "nearbyintf" => None,
         // std's thread-locals with lazy init or drop glue (thread/local.rs LazyKey): the arena's
         // own keys, a value per segment

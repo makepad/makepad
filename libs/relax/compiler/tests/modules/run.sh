@@ -113,5 +113,11 @@ if [ "$STATUS" = 0 ] && echo "$OUT" | grep -q '^out deadlines: true$'; then echo
 OUT=$("$1" test "$D/unsafe_impl.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-unsafe-impl.out")" ]; then echo "modules unsafe impl: PASS"; else echo "modules unsafe impl: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# A module's panic reaches the host with its message (panic!, unwrap, expect, assert!), both tiers.
+for TIER in 0 1; do
+OUT=$(RELAX_O3=$TIER "$1" test "$D/panic_message.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-panic-message.out")" ]; then echo "modules panic message (tier1=$TIER): PASS"; else echo "modules panic message (tier1=$TIER): FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+done
 if [ "$FAILS" != 0 ]; then echo "modules: $FAILS case(s) FAILED"; exit 1; fi
 echo "modules: every case PASS"
