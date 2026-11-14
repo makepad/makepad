@@ -1,7 +1,8 @@
-// A twin's O3 build takes in the twins it calls. That may not show: the fuel a path costs, the
-// instruction it runs out at and what the module did up to there are the same as before the
-// tier-up. `run` calls small functions in a loop and the host every eighth turn; the host counts
-// those calls, so a run that ends on its budget tells where it ended.
+// A twin's O3 build takes in the twins it calls and keeps the fuel count in a register between
+// calls. Neither may show: the fuel a path costs, the instruction it runs out at and what the
+// module did up to there are the same as before the tier-up. `run` calls small functions in a
+// loop and the host every eighth turn; the host counts those calls, so a run that ends on its
+// budget tells where it ended.
 use std::relax::{Budget, BudgetError, Host, Module};
 
 pub struct Tally { pub ticks: u64 }
