@@ -118,5 +118,8 @@ if [ "$GOT" = "$(cat "$D/expect-unsafe-impl.out")" ]; then echo "modules unsafe 
 OUT=$("$1" test "$D/derive_enum.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-derive-enum.out")" ]; then echo "modules derive on enums: PASS"; else echo "modules derive on enums: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# The source check reads the fn bodies a program's load parses on demand (`relax run`), not only
+# a file's items: `unsafe` inside a body is refused there too, a derive's own text is not.
+python3 "$D/source_check.py" "$1" || FAILS=$((FAILS + 1))
 if [ "$FAILS" != 0 ]; then echo "modules: $FAILS case(s) FAILED"; exit 1; fi
 echo "modules: every case PASS"
