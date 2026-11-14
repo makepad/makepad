@@ -138,8 +138,28 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
                 out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
             }
         }
-        for e in trees.iter().flat_map(|t| &t.exprs) {
+        // what a builtin derive wrote is the front's own text, not the module's: the expressions
+        // parsed for its impl and that impl's items, their skipped bodies too (an enum's PartialEq,
+        // PartialOrd, Ord and Hash read the discriminant in an `unsafe` block)
+        let mut derived: Vec<(u32, u32)> = Vec::new();
+        for it in trees.iter().flat_map(|t| &t.items) {
+            if let ItemKind::Impl(r) = &it.kind {
+                if ast.row(*r).builtin_derive {
+                    derived.push((it.ranges[0], it.ranges[1]));
+                    for m in ast.list(ast.row(*r).items) {
+                        let mi = ast.item(*m);
+                        derived.push((mi.ranges[0], mi.ranges[1]));
+                        if let Some(Ok((_, body))) = pf.lazy_body(*m, &prog.crates[krate as usize].cfg) {
+                            derived.push((body[0], body[1]));
+                        }
+                    }
+                }
+            }
+        }
+        // (a part's ids continue the trees before it)
+        for (id, e) in trees.iter().flat_map(|t| t.exprs.iter().enumerate().map(move |(k, e)| (t.base[0] + k as u32, e))) {
             match &e.kind {
+                ExprKind::Unsafe(_) if derived.iter().any(|r| r.0 <= id && id < r.1) => {}
                 ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
                 ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_arg(ast.row(*m).args).asm.is_some() => {
                     out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
