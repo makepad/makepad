@@ -229,7 +229,7 @@ macro_rules! float_impl {
             const NAN: Self = Self::NAN;
             // NAN isn't guaranteed to be positive but it usually is. We only use this for
             // tests.
-            const NEG_NAN: Self = $from_bits($to_bits(Self::NAN) | Self::SIGN_MASK);
+            const NEG_NAN: Self = $from_bits($to_bits(Self::NAN) | <Self as Float>::SIGN_MASK);
             const MAX: Self = -Self::MIN;
             // Sign bit set, saturated mantissa, saturated exponent with last bit zeroed
             const MIN: Self = $from_bits(Self::Int::MAX & !(1 << Self::SIG_BITS));
@@ -247,7 +247,7 @@ macro_rules! float_impl {
 
             const SIGN_MASK: Self::Int = 1 << (<Self as Float>::BITS - 1);
             const SIG_MASK: Self::Int = (1 << Self::SIG_BITS) - 1;
-            const EXP_MASK: Self::Int = !(Self::SIGN_MASK | Self::SIG_MASK);
+            const EXP_MASK: Self::Int = !(<Self as Float>::SIGN_MASK | Self::SIG_MASK);
             const IMPLICIT_BIT: Self::Int = 1 << Self::SIG_BITS;
 
             fn to_bits(self) -> Self::Int {
