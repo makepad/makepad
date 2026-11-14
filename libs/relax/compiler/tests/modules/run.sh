@@ -26,9 +26,9 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
-# A twin's O3 build takes in the twins it calls: what a path costs, where a run on a budget ends
-# and what the module did up to there are the same with tiering off and after a tier-up that
-# inlined.
+# A twin's O3 build takes in the twins it calls and keeps the fuel count in a register between
+# calls: what a path costs, where a run on a budget ends and what the module did up to there are
+# the same with tiering off and after a tier-up that inlined.
 BASE_TIERS=""
 for TIER in 0 1; do
 SO=$(mktemp); SE=$(mktemp)

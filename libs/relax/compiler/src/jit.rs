@@ -21793,6 +21793,12 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         let remarks = relax_backend::remark::begin();
         let (optimized, inline_rules) = optimize()?;
         func = optimized;
+        // a twin's sandbox words stay in registers between calls (sandbox.rs words_in_registers;
+        // after the inliner: the twins it took in bring their own meters and frames).
+        // RELAX_OPT=-sbwords: off (A/B)
+        if sandboxed && !relax_backend::stats::opt_off(options, "-sbwords") && crate::sandbox::settle_words(&*up, &mut func) {
+            relax_backend::passes::live_dce(&mut func);
+        }
         let mut inlined = Vec::with_capacity(inline_rules.len());
         for (c, _) in inline_rules { inlined.push(c); }
         inlined.extend_from_slice(&func.inl_slots);
