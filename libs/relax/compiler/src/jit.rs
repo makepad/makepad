@@ -6726,6 +6726,12 @@ impl Unit {
         }
     }
 
+    /// No-codegen mode: the slots of the unit's window of the precompiled pools (sandbox.rs checks
+    /// its twins' fn values against them).
+    pub(crate) fn nc_slots(&self) -> u32 {
+        self.nc_window().1
+    }
+
     /// No-codegen mode: the unit's window of the precompiled slot pools, (first global slot,
     /// slots), installed as its segment 0 at the first call (an auxiliary unit -- the proc-macro
     /// world -- takes NC_AUX_SLOTS, a program's unit the largest free range less that), so units live at the

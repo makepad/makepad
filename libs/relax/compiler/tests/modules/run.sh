@@ -98,6 +98,19 @@ if [ "$GOT" = $'out each thread its own: true\nout thread ids differ: true\nout 
 OUT=$("$1" test "$D/fn_values.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out distinct fn values: 9000\nout calls land: true' ]; then echo "modules fn values: PASS"; else echo "modules fn values: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+# No-codegen mode (arm64 Apple only): no thunk table is written, a module's fn values are its
+# twins' own precompiled thunks and each indirect call is checked against the ones given out.
+if [ "$(uname -sm)" = "Darwin arm64" ]; then
+OUT=$(RELAX_NO_CODEGEN=1 RELAX_SANDBOX_NOCHECK=1 "$1" test "$D/nocodegen_fns.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-nocodegen-fns.out")" ]; then echo "modules no-codegen fns: PASS"; else echo "modules no-codegen fns: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+OUT=$(RELAX_NO_CODEGEN=1 "$1" test "$D/fn_values.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = $'out distinct fn values: 9000\nout calls land: true' ]; then echo "modules no-codegen fn values: PASS"; else echo "modules no-codegen fn values: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
+OUT=$(RELAX_NO_CODEGEN=1 "$1" test "$D/host.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect.out")" ]; then echo "modules no-codegen host: PASS"; else echo "modules no-codegen host: FAIL"; diff <(echo "$GOT") "$D/expect.out"; echo "$OUT" | tail -5; FAILS=$((FAILS + 1)); fi
+fi
 # More threads than segments: the rest wait for one, every call returns.
 OUT=$(RELAX_SANDBOX_NOCHECK=1 RELAX_SANDBOX_FUEL=0 "$1" test "$D/segment_wait.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')

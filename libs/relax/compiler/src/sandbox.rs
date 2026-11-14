@@ -105,6 +105,8 @@ pub struct Arena {
     /// into it: no unit there)
     sbt_base: u64,
     sbt_span: u64,
+    /// no-codegen mode: its unit's fn values (no table to mask into: `Fns`)
+    fns: Option<Arc<Fns>>,
     /// the bytes of a segment's thread-local area in use (its unit's layout): zeroed at a claim
     tls_used: Arc<std::sync::atomic::AtomicU32>,
     /// std's runtime keys of its code (`relax_key_*`) and each segment's values; the segments
@@ -122,6 +124,41 @@ struct Keys {
     made: Vec<(u64, bool)>,
     /// segment -> (key -> value, the keys in the order first set): a claim's values
     vals: Vec<(Vec<u64>, Vec<u32>)>,
+}
+
+/// No-codegen mode's fn values of a unit's twins. The process makes no machine code there, so
+/// there is no thunk table to write: a twin taken as a value is named by its own slot's thunk
+/// (precompiled, one per slot of the unit's window of the pool: jit.rs Unit::nc_window), which sits
+/// among the thunks of host slots. An indirect call cannot be masked into a range of its own, so
+/// it is checked instead: a set bit per slot whose thunk was given out, and the trap thunk for
+/// any other address.
+struct Fns {
+    /// the unit's first thunk, bytes per thunk, slots
+    base: u64,
+    stride: u64,
+    slots: u64,
+    given: Box<[std::sync::atomic::AtomicU64]>,
+    /// the thunk of the slot whose code panics with the reason (an invalid fn pointer)
+    trap: u64,
+}
+
+impl Fns {
+    /// Twin `t`'s thunk at `at` is a fn value from now on.
+    fn give(&self, t: u32, at: u64) -> u64 {
+        self.given[t as usize / 64].fetch_or(1 << (t % 64), std::sync::atomic::Ordering::AcqRel);
+        at
+    }
+
+    /// What a call of `f` runs: `f` when it was given out, else the trap.
+    fn target(&self, f: u64) -> u64 {
+        let d = f.wrapping_sub(self.base);
+        let k = d / self.stride;
+        if d % self.stride == 0 && k < self.slots && self.given[k as usize / 64].load(std::sync::atomic::Ordering::Acquire) & 1 << (k % 64) != 0 {
+            f
+        } else {
+            self.trap
+        }
+    }
 }
 
 struct Heap {
@@ -156,7 +193,9 @@ impl State {
     /// A retired unit's code goes (Unit's drop): its thunk table with it.
     pub(crate) fn release(&mut self) {
         if let Some(s) = self.sb.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
-            crate::os::mem::release(s.sbt_base, s.sbt_span as usize, 0);
+            if s.sbt_span != 0 {
+                crate::os::mem::release(s.sbt_base, s.sbt_span as usize, 0);
+            }
         }
     }
 }
@@ -204,6 +243,8 @@ struct Sb {
     sbt_of: HashMap<u32, u32>,
     /// the thunk every unused index holds: a jump through the trap slot
     trap: Vec<u8>,
+    /// no-codegen mode: fn values are the twins' own thunks, checked at each call (no table)
+    fns: Option<Arc<Fns>>,
     /// thread-locals of the twins: symbol -> offset in a segment's thread-local area; the bytes
     /// in use (shared with the arenas, which zero them when a segment is claimed)
     tls: HashMap<u32, u32>,
@@ -304,18 +345,25 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
     };
     let tls_sym = u.syms.intern(SymKind::Rt("sb_tls"), tls as u64);
     let ts = jit::thunk_size() as u64;
-    let sbt_span = (u.exec_size / ts).next_power_of_two() * ts;
-    let sbt_base = crate::os::mem::reserve(sbt_span as usize, 0);
+    // no-codegen mode writes no thunk table (`Fns`)
+    let no_table = u.prog.session.options.no_codegen;
+    let sbt_span = if no_table { 0 } else { (u.exec_size / ts).next_power_of_two() * ts };
+    let sbt_base = if no_table { 0 } else { crate::os::mem::reserve(sbt_span as usize, 0) };
     // held until a chunk is written: zero bytes would run as code (x86: `add [rax], al`). (No
     // twin exists yet, so no code can call into the table before this.)
     #[cfg(unix)]
-    if !crate::os::mem::code_held(sbt_base, sbt_span as usize, true) {
+    if !no_table && !crate::os::mem::code_held(sbt_base, sbt_span as usize, true) {
         crate::os::mem::release(sbt_base, sbt_span as usize, 0);
         return Err("cannot reserve the sandbox thunk table".to_string());
     }
     // the slot every unused sandbox thunk jumps through: its code panics with the reason
     let trap_slot = u.fn_id(FnKey::Sandbox(u32::MAX));
     let trap = tgt::thunk(u.slots.table(trap_slot));
+    let fns = no_table.then(|| {
+        let slots = u.nc_slots() as u64;
+        let base = u.slots.thunk(0);
+        Arc::new(Fns { base, stride: u.slots.thunk(1) - base, slots, given: (0..slots.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(), trap: u.slots.thunk(trap_slot) })
+    });
     *u.sandbox.sb.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(Sb {
         tls_sym,
         domain: domain.name,
@@ -327,6 +375,7 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
         sbt_filled: 0,
         sbt_of: HashMap::new(),
         trap,
+        fns,
         tls: HashMap::new(),
         // (words 0 and 1: the thread block's two words)
         tls_used: Arc::new(std::sync::atomic::AtomicU32::new(TLS_ERRNO + 8)),
@@ -483,6 +532,9 @@ unsafe fn sbthunk(up: *mut Unit, t: u32) -> Result<u64, String> {
     let ts = jit::thunk_size() as u64;
     let table = u.slots.table(t);
     with_sb(u, |s| {
+        if let Some(fns) = &s.fns {
+            return Ok(fns.give(t, u.slots.thunk(t)));
+        }
         if let Some(&k) = s.sbt_of.get(&t) {
             return Ok(s.sbt_base + k as u64 * ts);
         }
@@ -796,6 +848,7 @@ pub fn new_arena(up: *mut Unit, module: u32, name: &str, mem: u64, fuel: i64) ->
             segs_mapped: std::sync::atomic::AtomicU64::new(0),
             sbt_base: s.sbt_base,
             sbt_span: s.sbt_span,
+            fns: s.fns.clone(),
             tls_used: s.tls_used.clone(),
             keys: Mutex::new(Keys::default()),
             keyed: std::sync::atomic::AtomicU64::new(0),
@@ -1865,9 +1918,20 @@ fn sb_catch_panic(f: u64, data: u64) -> u64 {
 }
 }
 
+rt_fn! {
+/// An indirect call's target in no-codegen mode (`Fns`: the transform's `mask_fn` calls this where
+/// it masks otherwise).
+leaf fn sb_fn_value(f: u64) -> u64 {
+    mask_thunk(f)
+}
+}
+
 /// A fn pointer of the current arena's code masked into its unit's thunk table (0: no arena).
 fn mask_thunk(f: u64) -> u64 {
     let Some(a) = cur_arena() else { return 0 };
+    if let Some(fns) = &a.fns {
+        return fns.target(f);
+    }
     let (base, span, ts) = (a.sbt_base, a.sbt_span, jit::thunk_size() as u64);
     base + ((f.wrapping_sub(base)) & (span - 1) & !(ts - 1))
 }
@@ -1883,6 +1947,8 @@ fn rt_policy(name: &str) -> Option<Option<(&'static str, u64)>> {
         "memcpy" | "memmove" => Some(("sb_rt_memcpy", sb_rt_memcpy as *const () as u64)),
         "memset" => Some(("sb_rt_memset", sb_rt_memset as *const () as u64)),
         "catch_panic" => Some(("sb_catch_panic", sb_catch_panic as *const () as u64)),
+        // (no runtime entry of the program's: the transform's own call, mask_fn)
+        "sb_fn_value" => Some(("sb_fn_value", sb_fn_value as *const () as u64)),
         _ => return None,
     })
 }
@@ -2295,6 +2361,15 @@ unsafe fn tls_offset(up: *mut Unit, sym: Sym) -> Result<u32, String> {
 /// An indirect call's target masked into unit `u`'s sandbox thunk table. (The span is the code
 /// area's slots' (Unit::exec_size, a compile-time constant): an immediate like any other.)
 fn mask_fn(u: &Unit, f: &mut Func, insts: &mut Vec<Inst>, pos: &mut Vec<u64>, p: u64, v: VReg) -> VReg {
+    // no-codegen mode: no table to mask into, the runtime checks the target (`Fns`)
+    if with_sb(u, |s| s.fns.is_some()) {
+        if let Some(check) = host_sym(u, "rt:sb_fn_value") {
+            let t = f.vreg(Cls::I);
+            insts.push(Inst::Call(Callee::Host(check), vec![v], vec![t]));
+            pos.push(p);
+            return t;
+        }
+    }
     let span = with_sb(u, |s| s.sbt_span);
     let ts = jit::thunk_size() as u64;
     let b = f.vreg(Cls::I);
