@@ -26,6 +26,14 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
+# RELAX_SANDBOX_FUEL=0 leaves the meter out of a twin's code: a budget is neither spent nor ends a call.
+for FUEL in 1 0; do
+OUT=$(RELAX_SANDBOX_FUEL=$FUEL "$1" test "$D/fuel_off.rs" 2>&1)
+STATUS=$?
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$FUEL" = 1 ]; then WANT='out a budget of 100 units: result out of fuel fuel spent 100'; else WANT='out a budget of 100 units: result true fuel spent 0'; fi
+if [ "$STATUS" = 0 ] && [ "$GOT" = "$WANT" ]; then echo "modules fuel off (fuel=$FUEL): PASS"; else echo "modules fuel off (fuel=$FUEL): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); fi
+done
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)

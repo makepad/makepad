@@ -2243,7 +2243,9 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     f.slots.clear();
     // (a domain without fuel pays nothing per block: the meter's load and store of the thread's
     // fuel word chained every block of its code through memory)
-    if with_sb(&*up, |s| s.fuel) {
+    // RELAX_SANDBOX_FUEL=0: no meter in the code at all (a host that bounds its modules by
+    // deadline alone). No per-call budget ends a call then, and a Budget's fuel is never spent.
+    if with_sb(&*up, |s| s.fuel) && options.sandbox_fuel {
         add_fuel(f, t_arena, site_fuel, panic_site, pos0, &costs);
     }
     with_sb(&*up, |s| s.refs.insert(twin_id, refs));
