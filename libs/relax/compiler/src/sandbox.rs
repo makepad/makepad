@@ -614,7 +614,7 @@ unsafe fn place(up: *mut Unit, sym: u32, depth: u32) -> Result<u32, String> {
             let (start, len, align, mutable) = u.syms.obj_info(i).ok_or("unknown data object")?;
             if mutable {
                 let b = initial_bytes(u, sym)?;
-                let words = provenance_words(u, &b);
+                let words = pointer_words(u, sym, &b);
                 (b, align, true, words)
             } else {
                 let words = crate::syms::obj_pointer_words(u, i).ok_or_else(|| format!("data object `{}` holds pointers the sandbox cannot relocate", crate::syms::describe(u, Sym::new(sym))))?;
@@ -625,7 +625,7 @@ unsafe fn place(up: *mut Unit, sym: u32, depth: u32) -> Result<u32, String> {
             let t = u.tcx.const_ty(&u.prog, d).ok_or("static without a type")?;
             let align = u.layout_of(t).align.max(1) as u64;
             let b = initial_bytes(u, sym)?;
-            let words = provenance_words(u, &b);
+            let words = pointer_words(u, sym, &b);
             (b, align, true, words)
         }
         SymKind::Rw(i) => {
@@ -633,7 +633,7 @@ unsafe fn place(up: *mut Unit, sym: u32, depth: u32) -> Result<u32, String> {
             // Lowered promotions are filled by code when it runs. Only promotions filled
             // by a const initializer have nonzero initial bytes; never copy host writes.
             let b = initial_bytes(u, sym).unwrap_or_else(|_| vec![0; size.max(1) as usize]);
-            let words = provenance_words(u, &b);
+            let words = pointer_words(u, sym, &b);
             (b, align.max(1), true, words)
         }
         k => return Err(format!("{:?} is not data a sandboxed module can reach", k)),
@@ -720,15 +720,65 @@ pub(crate) fn provenance_words(u: &Unit, b: &[u8]) -> Vec<(u32, Sym)> {
     let pw = u.ptr_bytes() as usize;
     let mut i = 0;
     while i + pw <= b.len() {
-        let w = crate::syms::word_in(u, b, i);
-        if (if pw == 4 { w & 0xffff_ffff } else { w }) > 0x10000 {
-            if let Some(s) = u.syms.symbol_at(w, u) {
-                out.push((i as u32, s));
-            }
+        if let Some(s) = word_symbol(u, b, i) {
+            out.push((i as u32, s));
         }
         i += pw;
     }
     out
+}
+
+/// The symbol the word at `i` of initializer bytes `b` is an address of, if any.
+fn word_symbol(u: &Unit, b: &[u8], i: usize) -> Option<Sym> {
+    let w = crate::syms::word_in(u, b, i);
+    if (if u.ptr_bytes() == 4 { w & 0xffff_ffff } else { w }) > 0x10000 {
+        u.syms.symbol_at(w, u)
+    } else {
+        None
+    }
+}
+
+/// `provenance_words` of the initial bytes `b` of what `sym` names, of the words its type makes
+/// pointers alone (syms::pointer_offsets, as domain.rs rehome): an integer that equals an
+/// address is no reference, and one that equals none sent `provenance` through every foreign
+/// declaration of the program, a dlsym each (core's WHITE_SPACE table: 21 ms of the first load
+/// of a module that splits text). What cannot tell (a union) is scanned word by word.
+fn pointer_words(u: &Unit, sym: u32, b: &[u8]) -> Vec<(u32, Sym)> {
+    let Some(offs) = crate::syms::pointer_offsets(u, u.syms.addr(Sym::new(sym)), b) else { return provenance_words(u, b) };
+    let pw = u.ptr_bytes() as usize;
+    offs.into_iter().filter(|&o| o as usize + pw <= b.len()).filter_map(|o| word_symbol(u, b, o as usize).map(|s| (o, s))).collect()
+}
+
+#[cfg(test)]
+mod pointer_words_tests {
+    use super::*;
+
+    /// The words of a placed value that are pointers are the ones its type makes pointers: the
+    /// same bytes as integers name nothing (core's unicode tables hold words that are addresses
+    /// in some runs, and words no symbol has).
+    #[test]
+    fn a_placed_value_takes_its_pointer_words_from_its_type() {
+        isolated_test!(a_placed_value_takes_its_pointer_words_from_its_type);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-sandbox-words-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("fixture.rs");
+        std::fs::write(&source, "static S: u64 = 7;\nstatic INTS: [u64; 2] = [1, 2];\nstatic REFS: [&u64; 2] = [&S, &S];\nfn main() {}\n").unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let def = |u: &Unit, name: &str| crate::program::DefId(u.prog.defs.iter().position(|d| u.prog.syms.str(d.name) == name).unwrap() as u32);
+        let (s, ints, refs) = (u.static_sym(def(&u, "S")), u.static_sym(def(&u, "INTS")), u.static_sym(def(&u, "REFS")));
+        let at = u.syms.addr(s);
+        let b = [1u64.to_le_bytes(), at.to_le_bytes()].concat();
+        assert_eq!(provenance_words(&u, &b).iter().map(|(o, t)| (*o, t.id)).collect::<Vec<_>>(), vec![(8, s.id)], "by its value, the word is S's address");
+        assert!(pointer_words(&u, ints.id, &b).is_empty(), "an integer is no reference");
+        let b = [at.to_le_bytes(), at.to_le_bytes()].concat();
+        assert_eq!(pointer_words(&u, refs.id, &b).iter().map(|(o, t)| (*o, t.id)).collect::<Vec<_>>(), vec![(0, s.id), (8, s.id)]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 /// Copies what unit `u`'s image gained since into each of its arenas.
