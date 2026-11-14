@@ -457,17 +457,16 @@ pub fn read_leaf(u: &Unit, s: Sym, m: Mem) -> relax_backend::passes::RoRead {
     read_obj(u, s, n)
 }
 
-/// The functions a constant data object at `addr` points at, directly or through the data
+/// The functions a constant data object containing `addr` points at, directly or through the data
 /// objects it points at (vtables and their supertrait vtables, fn tables, constants holding fn
 /// pointers): what code reading it can call (real-time reach, jit.rs realtime).
 pub(crate) fn data_thunks(u: &Unit, addr: u64, out: &mut Vec<u32>) {
-    let mut seen = Vec::new();
-    let mut todo: Vec<u32> = u.syms.data_at(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut todo: Vec<u32> = u.syms.containing(addr).into_iter().filter_map(|s| match u.syms.kind(s.id) { Some(SymKind::Data(i)) => Some(i), _ => None }).collect();
     while let Some(idx) = todo.pop() {
-        if seen.contains(&idx) || seen.len() > 4096 {
+        if !seen.insert(idx) {
             continue;
         }
-        seen.push(idx);
         let Some((_, _, ptrs, _)) = obj_ptrs(u, idx) else { continue };
         for (_, s) in ptrs.iter() {
             match s.and_then(|s| u.syms.kind(s.id)) {
@@ -658,6 +657,32 @@ fn provenance(u: &Unit, v: u64) -> Option<Sym> {
 #[cfg(test)]
 mod provenance_tests {
     use super::*;
+
+    #[test]
+    fn data_thunks_follows_deep_chains_and_stops_at_cycles_and_mutable_data() {
+        isolated_test!(data_thunks_follows_deep_chains_and_stops_at_cycles_and_mutable_data);
+        let session = std::sync::Arc::new(crate::Session::default());
+        let u = Unit::new(crate::program::Program::new(&session), crate::tcx::Tcx::new(), 0);
+        let mut storage = vec![[0u64; 2]; 4100];
+        let objects: Vec<_> = storage.iter_mut().map(|v| (v.as_mut_ptr() as u64, 16, 8, None)).collect();
+        let callback = u.syms.intern(SymKind::Thunk(7), 0);
+        let chain = u.syms.add_data_batch(&objects, |i, syms| {
+            if i + 1 < syms.len() { vec![(0, syms[i + 1])] }
+            else { vec![(0, syms[0]), (8, callback)] }
+        });
+        let mut found = Vec::new();
+        data_thunks(&u, u.syms.addr(chain[0]), &mut found);
+        assert_eq!(found, [7], "deep and cyclic immutable data still reaches its callback");
+        found.clear();
+        data_thunks(&u, u.syms.addr(chain[0]) + 8, &mut found);
+        assert_eq!(found, [7], "an interior pointer reaches the containing object's callbacks");
+        let mut mutable = 0u64;
+        let sym = u.syms.add_data(&mut mutable as *mut u64 as u64, 8, 8, DataKind::Relocs(vec![(0, callback)]), true);
+        found.clear();
+        data_thunks(&u, u.syms.addr(sym), &mut found);
+        assert!(found.is_empty(), "mutable function pointers cannot be predicted");
+    }
+
 
     #[test]
     fn address_maps_are_lazy_and_extend_for_new_defs() {

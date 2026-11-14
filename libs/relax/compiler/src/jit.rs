@@ -1665,30 +1665,36 @@ pub(crate) fn precompile_from(roots: &[u32], exhaustive: bool) -> u64 {
             unsafe { compile_slot(up, id) };
             built += 1;
         }
-        // the lowered body's callees (before inlining: an inlined callee's own calls are among
-        // its callees') and its call / fn-address sites
-        let mut next: Vec<u32> = owner::publish(|| unsafe {
+        let next = owner::call(owner::Class::Program, || unsafe {
+            use relax_backend::rir::Reloc;
             let f = &(&*up).fns[id as usize];
-            f.calls.iter().chain(f.rir_refs.iter()).copied().collect()
+            let mut next: Vec<u32> = f.calls.iter().chain(f.rir_refs.iter()).copied().collect();
+            let mut rir = f.rir.clone();
+            let cached = if rir.is_none() { cache_lookup(up, id) } else { None };
+            if rir.is_none() && cached.is_none() && matches!((&*up).fns[id as usize].key, FnKey::Inst(..) | FnKey::Closure(..)) {
+                // Completed bodies can be evicted before this walk, while fresh code is not
+                // on disk yet. Recover its references without executing or replacing its code.
+                if build_rir(up, id).is_ok() { rir = (&*up).fns[id as usize].rir.clone(); }
+            }
+            let u = &*up;
+            if let Some(rir) = rir {
+                realtime_rir_refs(u, &rir, &mut next);
+            } else if let Some(cached) = cached {
+                for reloc in cached.2 {
+                    let addr = match reloc.target {
+                        Reloc::Slot(c) | Reloc::Thunk(c) | Reloc::Call(c) => { next.push(c); continue; }
+                        Reloc::Sym(sym) => u.syms.addr(sym),
+                        Reloc::Value(addr) => addr,
+                        _ => continue,
+                    };
+                    if let Some(c) = u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&c| (c as usize) < u.fns.len()) {
+                        next.push(c);
+                    }
+                    crate::syms::data_thunks(u, addr, &mut next);
+                }
+            }
+            next
         });
-        if next.is_empty() {
-            // code linked from the disk cache or the startup image has no lowered body here: its
-            // cache entry's relocations name what it calls
-            next = owner::call(owner::Class::Program, || unsafe {
-                let u = &*up;
-                let slot_at = |addr: u64| u.find_fn(addr).or_else(|| (0..2).find_map(|k| u.slots.find(k, addr).map(|x| x.0))).filter(|&id| (id as usize) < u.fns.len());
-                cache_lookup(up, id).map_or(Vec::new(), |c| {
-                    c.2.iter()
-                        .filter_map(|r| match r.target {
-                            relax_backend::rir::Reloc::Slot(c) | relax_backend::rir::Reloc::Thunk(c) | relax_backend::rir::Reloc::Call(c) => Some(c),
-                            // the linker has resolved it: a callee's thunk or stub by address
-                            relax_backend::rir::Reloc::Value(addr) => slot_at(addr),
-                            _ => None,
-                        })
-                        .collect()
-                })
-            });
-        }
         todo.extend(next.into_iter().filter(|c| !seen.contains(c)));
     }
     built

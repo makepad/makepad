@@ -168,17 +168,36 @@ mod tests {
 
     const SOURCE: &str = r#"
 static mut FLAGS: [u8; 2] = [0; 2];
+trait Work { fn indirect_target(&self) -> u32; }
+struct Job;
+impl Work for Job {
+    #[inline(never)]
+    fn indirect_target(&self) -> u32 { 7 }
+}
+#[inline(never)]
+fn invoke(job: &dyn Work) -> u32 { job.indirect_target() }
+#[inline(never)]
+fn table_first() -> u32 { 11 }
+#[inline(never)]
+fn table_second() -> u32 { 13 }
+const CALLBACKS: (u32, [fn() -> u32; 2]) = (1, [table_first, table_second]);
 #[test]
 fn chosen_a() {
     extern "C" { fn __relax_precompile(roots: *const usize, len: usize, exhaustive: bool) -> u64; }
     // Supplied by the host, so these addresses are not statically reachable from this body.
     let roots: Vec<usize> = std::env::args().next().unwrap().split(',').map(|s| s.parse().unwrap()).collect();
     assert_eq!(unsafe { __relax_precompile(roots.as_ptr(), roots.len(), true) }, 0,
-        "selected tests and their Termination adapter must be prepared before any test starts");
+        "selected tests, their Termination adapter and indirect callees must be prepared before any test starts");
     unsafe { FLAGS[0] += 1; }
 }
 #[test]
-fn chosen_result() -> Result<(), ()> { unsafe { FLAGS[1] += 1; } Ok(()) }
+fn chosen_result() -> Result<(), ()> {
+    assert_eq!(invoke(&Job), 7);
+    // Host input keeps both table elements reachable instead of folding a constant index.
+    assert_eq!(CALLBACKS.1[std::env::args().count() % 2](), 11);
+    unsafe { FLAGS[1] += 1; }
+    Ok(())
+}
 #[test]
 #[ignore]
 fn chosen_ignored() { panic!("ignored test ran"); }
@@ -187,7 +206,7 @@ fn excluded() { panic!("filtered test ran"); }
 pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
 "#;
 
-    fn fixture(args: &[&str]) -> (Box<Unit>, u32, std::path::PathBuf) {
+    fn fixture(args: &[&str]) -> (Box<Unit>, u32, std::path::PathBuf, u32) {
         std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
         let root = std::env::temp_dir().join(format!("relax-harness-prepare-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -203,21 +222,31 @@ pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
         assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
         let mut u = Unit::new(prog, tcx, core);
         unsafe { jit::UNIT = &mut *u; }
-        let first_arg = crate::owner::call(crate::owner::Class::Program, || {
+        let (first_arg, callback) = crate::owner::call(crate::owner::Class::Program, || {
             let result = find_fn(&u, "harness_fixture::chosen_result").unwrap();
             let ret = u.tcx.fn_sig(&u.prog, result).unwrap().ret;
             let start = find_fn(&u, "std::relax::test::__relax_test_start").unwrap();
             let adapter = u.fn_id(FnKey::Inst(start, vec![ret]));
             let selected = u.fn_id(FnKey::Inst(result, Vec::new()));
-            format!("{},{}", u.entry(adapter), u.entry(selected)).into_bytes()
+            let def = u.prog.defs.iter().enumerate().find_map(|(i, d)| {
+                (u.prog.syms.str(d.name) == "indirect_target" && u.prog.def(d.parent).kind == DefKind::Impl)
+                    .then_some(DefId(i as u32))
+            }).unwrap();
+            let callback = u.fn_id(FnKey::Inst(def, Vec::new()));
+            let table: Vec<_> = ["harness_fixture::table_first", "harness_fixture::table_second"].iter().map(|name| {
+                let def = find_fn(&u, name).unwrap();
+                let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
+                u.entry(slot).to_string()
+            }).collect();
+            (format!("{},{},{},{}", u.entry(adapter), u.entry(selected), u.entry(callback), table.join(",")).into_bytes(), callback)
         });
         let mut argv = vec![first_arg];
         argv.extend(args.iter().map(|s| s.as_bytes().to_vec()));
         jit::set_program_args(argv);
-        (u, krate, root)
+        (u, krate, root, callback)
     }
 
-    fn finish(mut u: Box<Unit>, root: std::path::PathBuf, executed: [u8; 2]) {
+    fn finish(mut u: Box<Unit>, root: std::path::PathBuf, executed: [u8; 2], callback: u32) {
         crate::owner::call(crate::owner::Class::Program, || {
             for name in ["harness_fixture::chosen_ignored", "harness_fixture::excluded"] {
                 let def = find_fn(&u, name).unwrap();
@@ -225,6 +254,7 @@ pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
                 assert!(!u.fns[slot as usize].compiled, "unselected body was prepared: {name}");
             }
         });
+        assert_eq!(u.fns[callback as usize].compiled, executed[0] != 0, "indirect callback preparation");
         let entry = crate::owner::call(crate::owner::Class::Program, || {
             let def = find_fn(&u, "harness_fixture::flags").unwrap();
             let slot = u.fn_id(FnKey::Inst(def, Vec::new()));
@@ -242,19 +272,38 @@ pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
     #[test]
     fn precompile_respects_filter_ignore_and_return_values() {
         isolated_test!(precompile_respects_filter_ignore_and_return_values);
-        let (mut u, krate, root) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
+        let (mut u, krate, root, callback) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
         let found = collect(&u.prog, &[krate]);
         assert_eq!(found.len(), 4);
         assert_eq!(found.iter().filter(|t| t.ignore).count(), 1);
         let up = &mut *u as *mut Unit;
         assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
-        finish(u, root, [1, 1]); // each selected body ran exactly once; none ran as a warm-up
+        finish(u, root, [1, 1], callback); // each selected body ran exactly once; none ran as a warm-up
+    }
+
+    #[test]
+    fn precompile_follows_previously_compiled_code_after_ir_eviction() {
+        isolated_test!(precompile_follows_previously_compiled_code_after_ir_eviction);
+        let (mut u, krate, root, callback) = fixture(&["chosen", "--precompile", "--test-threads=1"]);
+        let slot = crate::owner::call(crate::owner::Class::Program, || {
+            let def = find_fn(&u, "harness_fixture::chosen_result").unwrap();
+            u.fn_id(FnKey::Inst(def, Vec::new()))
+        });
+        let up = &mut *u as *mut Unit;
+        unsafe { jit::compile_slot(up, slot); }
+        crate::owner::call(crate::owner::Class::Program, || {
+            // Model completed-body eviction before this run's code has reached the disk cache.
+            u.fns[slot as usize].rir = None;
+            u.cache = None;
+        });
+        assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
+        finish(u, root, [1, 1], callback);
     }
 
     #[test]
     fn precompile_list_does_not_prepare_or_run_test_bodies() {
         isolated_test!(precompile_list_does_not_prepare_or_run_test_bodies);
-        let (mut u, krate, root) = fixture(&["chosen", "--list", "--precompile"]);
+        let (mut u, krate, root, callback) = fixture(&["chosen", "--list", "--precompile"]);
         let up = &mut *u as *mut Unit;
         assert_eq!(run(&mut u, up, &[("fixture".into(), krate)]), 0);
         crate::owner::call(crate::owner::Class::Program, || {
@@ -263,6 +312,6 @@ pub fn flags(out: *mut [u8; 2]) { unsafe { *out = FLAGS; } }
                 assert!(!u.fns[slot as usize].compiled, "--list prepared {}", t.name);
             }
         });
-        finish(u, root, [0, 0]);
+        finish(u, root, [0, 0], callback);
     }
 }
