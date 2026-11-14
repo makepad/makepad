@@ -59,6 +59,15 @@ type RuntimePanicHook = extern "C" fn(*const u8, usize, *const u8, usize, u32, u
 extern "C" {
     fn relax_set_panic_hook(hook: RuntimePanicHook);
     fn relax_set_payload_end(end: extern "C" fn());
+    fn relax_set_payload_record(record: extern "C" fn(*const u8, usize));
+}
+
+/// A sandboxed module's panic, caught by this program (std::relax::guard): the payload the catch
+/// hands out is its message. No hook runs: the module's panic is not the program's.
+#[cfg(not(relax_web))]
+extern "C" fn payload_record(msg: *const u8, len: usize) {
+    let msg = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(msg, len)) };
+    crate::panic::record_payload(format_args!("{}", msg));
 }
 
 /// A catch of native code (a catch_unwind of a provided crate's rustc code around a callback)
@@ -99,6 +108,7 @@ pub fn set_panic_trampoline(f: fn(&str, &core::panic::Location<'_>)) {
     unsafe {
         relax_set_panic_hook(runtime_panic_hook);
         relax_set_payload_end(payload_end);
+        relax_set_payload_record(payload_record);
     }
     core::panicking::set_depth_fn(crate::panic::panic_depth_step);
     core::panicking::set_hook_fn(Some(core_hook));
@@ -111,6 +121,7 @@ pub fn install_core_hook() {
     unsafe {
         relax_set_panic_hook(runtime_panic_hook);
         relax_set_payload_end(payload_end);
+        relax_set_payload_record(payload_record);
     }
     core::panicking::set_depth_fn(crate::panic::panic_depth_step);
     if core::panicking::hook_fn().is_none() {

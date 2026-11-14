@@ -442,6 +442,8 @@ pub struct Unit {
     panic_hook: std::sync::atomic::AtomicUsize,
     /// std's end of a panic of its program that a catch_unwind of rustc's ended (caller_panic_ended)
     payload_end: std::sync::atomic::AtomicUsize,
+    /// std's record of a panic's payload with no hook run (a sandboxed module's: rt_panic_impl)
+    payload_record: std::sync::atomic::AtomicUsize,
     pub rt: Rt,
     /// the runtime entries as symbols (what compiled code calls; see syms.rs)
     pub rs: RtSyms,
@@ -3481,6 +3483,22 @@ pub(crate) fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len:
     let m = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(msg, len as usize)).into_owned() };
     let f = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(file, file_len as usize)).into_owned() };
     PANIC_LOC.with(|l| *l.borrow_mut() = format!("{}:{}:{}", f, line as u32, col as u32));
+    // A sandboxed module's panic. The program's panics reach std through core's hook: it records
+    // the payload a catch hands out, runs the panic hook, then calls this entry. A twin's core is
+    // the arena's own copy with no hook set, so std never saw the panic and the host's guard got
+    // "explicit panic" for every `panic!`, `unwrap` and `expect` of a module. Its payload is
+    // recorded here, for code whose caller is a twin -- the payload alone: the program's panic
+    // hook is the program's and does not run for a module (tests/modules/host_hook_panic.rs).
+    // (The interpreter's frames are not known here: there the payload stays unset.)
+    let ret = unsafe { *regs.add(1) };
+    let u = unsafe { &*cur_unit() };
+    if u.find_fn(ret.wrapping_sub(1)).is_some_and(|c| matches!(u.fns[c as usize].key, FnKey::Sandbox(_))) {
+        let record = u.payload_record.load(Ordering::Acquire);
+        if record != 0 && !in_const_eval() {
+            let record: extern "C" fn(*const u8, usize) = unsafe { std::mem::transmute(record) };
+            record(m.as_ptr(), m.len());
+        }
+    }
     raise_unwinding("panic", m, u64::MAX, regs)
 }
 }
@@ -3798,6 +3816,11 @@ extern "C" fn caller_panic_ended() {
 /// std's end of a panic that a catch of the native side ended (caller_panic_ended).
 extern "C" fn relax_set_payload_end(end: extern "C" fn()) {
     unsafe { (*cur_unit()).payload_end.store(end as usize, Ordering::Release) };
+}
+
+/// std's payload record (rt_panic_impl: a sandboxed module's panic).
+extern "C" fn relax_set_payload_record(record: extern "C" fn(*const u8, usize)) {
+    unsafe { (*cur_unit()).payload_record.store(record as usize, Ordering::Release) };
 }
 
 /// makepad inspect's restart / return: a frame's unwind landing ended the panic -- this thread
@@ -5022,6 +5045,7 @@ impl Unit {
             site_ix: Default::default(),
             panic_hook: std::sync::atomic::AtomicUsize::new(0),
             payload_end: std::sync::atomic::AtomicUsize::new(0),
+            payload_record: std::sync::atomic::AtomicUsize::new(0),
             rs: RtSyms { tls_base: relax_backend::rir::Sym::new(0), coverage_disabled: relax_backend::rir::Sym::new(0), fmt_str: relax_backend::rir::Sym::new(0), fmt_int: relax_backend::rir::Sym::new(0), fmt_float: relax_backend::rir::Sym::new(0), fmt_print: relax_backend::rir::Sym::new(0), panic_site: relax_backend::rir::Sym::new(0), panic_bounds: relax_backend::rir::Sym::new(0), str_eq: relax_backend::rir::Sym::new(0), fmod: relax_backend::rir::Sym::new(0), fmodf: relax_backend::rir::Sym::new(0), panic_impl: relax_backend::rir::Sym::new(0), thread_run: relax_backend::rir::Sym::new(0), catch_panic: relax_backend::rir::Sym::new(0), args: relax_backend::rir::Sym::new(0), memcpy: relax_backend::rir::Sym::new(0), memmove: relax_backend::rir::Sym::new(0), memset: relax_backend::rir::Sym::new(0), fmt_push: relax_backend::rir::Sym::new(0), fmt_pop: relax_backend::rir::Sym::new(0), resume: relax_backend::rir::Sym::new(0), land: relax_backend::rir::Sym::new(0), panicking: relax_backend::rir::Sym::new(0), rethrow: relax_backend::rir::Sym::new(0) },
             syms: crate::syms::Syms::new(syms_base, rw_base),
             cache: None,
@@ -24604,6 +24628,7 @@ pub(crate) fn loader_symbol(name: &[u8]) -> Option<usize> {
         b"relax_runtime_cpu_ns" => Some(crate::inspect::instrument::relax_runtime_cpu_ns as *const () as usize),
         b"relax_runtime_waited_ns" => Some(crate::inspect::instrument::relax_runtime_waited_ns as *const () as usize),
         b"relax_set_payload_end" => Some(relax_set_payload_end as *const () as usize),
+        b"relax_set_payload_record" => Some(relax_set_payload_record as *const () as usize),
         b"relax_before_first_frame" => Some(relax_before_first_frame as *const () as usize),
         b"relax_app_main" => Some(relax_app_main as *const () as usize),
         b"relax_first_present" => Some(relax_first_present as *const () as usize),

@@ -1,0 +1,7 @@
+out panic!: Err("boom 7")
+out unwrap: Err("called `Option::unwrap()` on a `None` value")
+out expect: Err("wanted: \"bad\"")
+out assert!: Err("n was 3")
+out index: Err("index out of bounds: the len is 3 but the index is 9")
+out under a budget: "boom 2"
+out no panic: Ok(2)
