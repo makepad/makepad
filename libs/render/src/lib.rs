@@ -41,6 +41,7 @@ pub mod model;
 pub mod material_surface;
 pub mod texture_compression;
 pub mod texture_pack;
+pub mod texture_restore;
 pub use makepad_texcomp;
 pub mod renderer;
 pub mod scene;

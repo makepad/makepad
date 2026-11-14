@@ -31,6 +31,15 @@
 //! (shaders/splat.rs `grass_carpet`, under the blades from 40 % of the
 //! reach, all of the cover from 80 %).
 //!
+//! Flowers are grown the same way (`level.grass({flowers: [...]})`): a
+//! third raster channel, BLOOM, says where they grow (the level builds it
+//! from lush, flat ground in drifts), and a patch that blooms draws one
+//! more instance, from flower geometries that are prefixes of one sorted
+//! list like the blades': a thin stem ending in a six-petal head that the
+//! vertex shader places, bends and lights as it does a blade. Their own
+//! screen density ([`GrassLod::flowers`]) follows the heads' size; past
+//! the last heads the terrain's carpet carries the bloom's colour on.
+//!
 //! The shader (DrawSceneGrass) is DrawScenePbr's sibling: the same lane
 //! binding (sun, fog, cascades, clustered lights), no discard (the blades
 //! are opaque geometry, so a tile GPU keeps its hidden-surface removal), and
@@ -61,6 +70,18 @@ pub(crate) const WIDTH_CAP: f32 = 4.0;
 /// How far the shader may move a root toward its clump's centre, metres:
 /// the slack around a patch's roots.
 const ROOT_SLACK: f32 = 0.4;
+/// The kinds of flower a field may grow (the shader's uniform layout).
+pub const MAX_FLOWER_KINDS: usize = 4;
+/// Stem segments of a flower in each level.
+const FLOWER_SEGMENTS: [usize; LEVELS] = [2, 2, 1, 1, 1];
+/// Petals of a flower's head.
+pub(crate) const PETALS: usize = 6;
+/// The widest a thinned flower's head grows, in its own sizes (the
+/// shader's `grass_flower_lod.z`).
+pub(crate) const HEAD_CAP: f32 = 2.0;
+/// The flowers reach at most this many of the blades' radii: past the
+/// blades they stand over the carpet, and the carpet takes their colour on.
+const FLOWER_RADIUS: f32 = 1.5;
 
 /// Blade look and reach, authored by `level.grass`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,6 +102,22 @@ pub struct GrassBlades {
     pub dry: [f32; 3],
 }
 
+/// A flower a field grows (`level.grass({flowers: [...]})`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlowerKind {
+    /// sRGB of its petals and of its eye (the head's centre).
+    pub color: [f32; 3],
+    pub eye: [f32; 3],
+    /// Flowers per square metre where the bloom is full.
+    pub density: f32,
+    /// Stem metres, before the per-flower 0.8..1.2 variation.
+    pub height: f32,
+    /// Head diameter, metres.
+    pub size: f32,
+    /// 0: flat petals, 1: a deep bowl.
+    pub cup: f32,
+}
+
 impl Default for GrassBlades {
     fn default() -> Self {
         Self { height: 0.32, width: 0.05, density: 1.0, radius: 42.0, wind: 0.5, lush: [0.30, 0.45, 0.16], dry: [0.55, 0.53, 0.30] }
@@ -96,15 +133,20 @@ pub struct GrassField {
     pub nz: usize,
     /// Ground height per texel (row-major, z rows).
     pub height: Vec<f32>,
-    /// Per texel: density (0..255) and dryness (0..255).
-    pub cover: Vec<[u8; 2]>,
+    /// Per texel: density, dryness and bloom (0..255; the flowers' share
+    /// of the ground), and a spare byte.
+    pub cover: Vec<[u8; 4]>,
     pub blades: GrassBlades,
+    /// At most MAX_FLOWER_KINDS; none: no flowers.
+    pub flowers: Vec<FlowerKind>,
 }
 
-const MAGIC: &[u8; 8] = b"MPGRASS1";
+const MAGIC: &[u8; 8] = b"MPGRASS2";
+/// Floats per flower kind in the product bytes.
+const KIND_FLOATS: usize = 10;
 
 impl GrassField {
-    pub fn cover_at(&self, x: f32, z: f32) -> Option<[u8; 2]> {
+    pub fn cover_at(&self, x: f32, z: f32) -> Option<[u8; 4]> {
         let (ix, iz) = (((x - self.origin[0]) / self.cell).floor(), ((z - self.origin[1]) / self.cell).floor());
         if ix < 0.0 || iz < 0.0 || ix as usize >= self.nx || iz as usize >= self.nz { return None; }
         self.cover.get(iz as usize * self.nx + ix as usize).copied()
@@ -112,33 +154,45 @@ impl GrassField {
 
     /// The level product's bytes: a fixed little-endian layout.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(96 + self.height.len() * 6);
+        let mut out = Vec::with_capacity(100 + self.flowers.len() * KIND_FLOATS * 4 + self.height.len() * 8);
         out.extend_from_slice(MAGIC);
         for v in [self.nx as u32, self.nz as u32] { out.extend_from_slice(&v.to_le_bytes()); }
         let b = &self.blades;
         let floats = [self.origin[0], self.origin[1], self.cell, b.height, b.width, b.density, b.radius, b.wind,
             b.lush[0], b.lush[1], b.lush[2], b.dry[0], b.dry[1], b.dry[2]];
         for f in floats { out.extend_from_slice(&f.to_le_bytes()); }
+        out.extend_from_slice(&(self.flowers.len() as u32).to_le_bytes());
+        for k in &self.flowers {
+            let floats = [k.color[0], k.color[1], k.color[2], k.eye[0], k.eye[1], k.eye[2], k.density, k.height, k.size, k.cup];
+            for f in floats { out.extend_from_slice(&f.to_le_bytes()); }
+        }
         for h in &self.height { out.extend_from_slice(&h.to_le_bytes()); }
         for c in &self.cover { out.extend_from_slice(c); }
         out
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        if bytes.len() < 16 + 14 * 4 || &bytes[..8] != MAGIC { return Err("grass field: not a grass product".into()); }
+        if bytes.len() < 16 + 14 * 4 + 4 || &bytes[..8] != MAGIC { return Err("grass field: not a grass product".into()); }
         let u = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
         let f = |at: usize| f32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
         let (nx, nz) = (u(8), u(12));
         let n = nx.checked_mul(nz).filter(|n| *n > 0 && *n <= 16 << 20).ok_or("grass field: size")?;
-        let head = 16 + 14 * 4;
-        if bytes.len() != head + n * 6 { return Err("grass field: length".into()); }
+        let kinds = u(16 + 14 * 4);
+        if kinds > MAX_FLOWER_KINDS { return Err("grass field: flower kinds".into()); }
+        let head = 16 + 14 * 4 + 4 + kinds * KIND_FLOATS * 4;
+        if bytes.len() != head + n * 8 { return Err("grass field: length".into()); }
         let v: Vec<f32> = (0..14).map(|i| f(16 + i * 4)).collect();
-        if v.iter().any(|x| !x.is_finite()) || v[2] <= 0.0 { return Err("grass field: values".into()); }
+        let k: Vec<f32> = (0..kinds * KIND_FLOATS).map(|i| f(16 + 14 * 4 + 4 + i * 4)).collect();
+        if v.iter().chain(&k).any(|x| !x.is_finite()) || v[2] <= 0.0 { return Err("grass field: values".into()); }
+        let flowers = k.chunks_exact(KIND_FLOATS).map(|k| FlowerKind {
+            color: [k[0], k[1], k[2]], eye: [k[3], k[4], k[5]], density: k[6], height: k[7], size: k[8], cup: k[9],
+        }).collect();
         let height = (0..n).map(|i| f(head + i * 4)).collect();
-        let cover = bytes[head + n * 4..].chunks_exact(2).map(|c| [c[0], c[1]]).collect();
+        let cover = bytes[head + n * 4..].chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
         Ok(Self {
             origin: [v[0], v[1]], cell: v[2], nx, nz, height, cover,
             blades: GrassBlades { height: v[3], width: v[4], density: v[5], radius: v[6], wind: v[7], lush: [v[8], v[9], v[10]], dry: [v[11], v[12], v[13]] },
+            flowers,
         })
     }
 }
@@ -163,6 +217,16 @@ impl GrassLod {
         Self { full, reach: (full * REACH).min(blades.radius).max(PATCH) }
     }
 
+    /// The flowers' screen density: every flower out to where the
+    /// smallest head is `pixels` wide, then thinning as the blades do, out
+    /// to at most FLOWER_RADIUS of the blades' radius. None: no flowers.
+    pub fn flowers(field: &GrassField, focal_px: f32, pixels: f32) -> Option<Self> {
+        let size = field.flowers.iter().map(|k| k.size).fold(f32::MAX, f32::min);
+        if field.flowers.is_empty() { return None; }
+        let full = (size * focal_px / pixels.max(0.25)).max(0.5);
+        Some(Self { full, reach: (full * REACH).min(field.blades.radius * FLOWER_RADIUS).max(PATCH) })
+    }
+
     /// The fraction of the blades kept at `d` metres from the eye (the
     /// shader's `kept`).
     pub fn kept(&self, d: f32) -> f32 {
@@ -171,34 +235,74 @@ impl GrassLod {
     }
 }
 
+/// Everything [`GrassGpu`] is made of that needs no GPU: the rasters as
+/// texture data, the cull summaries and the LEVELS geometries' vertices.
+/// Built by [`GrassPrep::new`] on any thread (10 ms for a 1000 x 1000
+/// field), so the frame that installs the grass only makes its textures and
+/// geometries ([`crate::Renderer::set_grass_prepared`]).
+pub struct GrassPrep {
+    field: std::sync::Arc<GrassField>,
+    height: Vec<f32>,
+    /// BGRA8 texels: a texel's u32 is a << 24 | r << 16 | g << 8 | b.
+    cover: Vec<u32>,
+    cull: GrassCull,
+    levels: [(Vec<f32>, Vec<u32>); LEVELS],
+    flower_levels: Option<[(Vec<f32>, Vec<u32>); LEVELS]>,
+}
+
+impl GrassPrep {
+    pub fn new(field: std::sync::Arc<GrassField>) -> Self {
+        let height = field.height.clone();
+        let cover = field.cover.iter().map(|c| (c[3] as u32) << 24 | (c[0] as u32) << 16 | (c[1] as u32) << 8 | c[2] as u32).collect();
+        let cull = GrassCull::new(&field);
+        let full = cull.level_blades[0];
+        let levels = std::array::from_fn(|l| patch_vertices(full, cull.level_blades[l], SEGMENTS[l]));
+        let flowers = cull.level_flowers[0];
+        let flower_levels = (flowers > 0).then(|| std::array::from_fn(|l| flower_vertices(flowers, cull.level_flowers[l], FLOWER_SEGMENTS[l])));
+        Self { field, height, cover, cull, levels, flower_levels }
+    }
+
+    /// The field it was prepared from.
+    pub fn field(&self) -> &std::sync::Arc<GrassField> {
+        &self.field
+    }
+}
+
 /// The resident half: the rasters as textures, the per-patch and per-block
 /// cover summaries the CPU culls with, and the LEVELS geometries.
 pub(crate) struct GrassGpu {
     pub field: std::sync::Arc<GrassField>,
-    /// The ground's height (metres, R32F) and the cover (RG8: density in R,
-    /// dryness in G), a texel per field cell.
+    /// The ground's height (metres, R32F) and the cover (RGBA8: density in
+    /// R, dryness in G, bloom in B), a texel per field cell.
     pub height_tex: Texture,
     pub cover_tex: Texture,
     pub cull: GrassCull,
     /// Every blade, then the first half, quarter, eighth and sixteenth.
     pub levels: [Geometry; LEVELS],
+    /// The same for the flowers, when the field grows any.
+    pub flower_levels: Option<[Geometry; LEVELS]>,
 }
 
 /// What the CPU walks a field with: cover and ground summaries per patch
 /// and per block, and the levels' blade counts.
 pub(crate) struct GrassCull {
-    /// Per patch: (max density 0..255, min ground, max ground).
-    pub patches: Vec<(u8, f32, f32)>,
+    /// Per patch: (max density 0..255, max bloom 0..255, min ground, max
+    /// ground).
+    pub patches: Vec<(u8, u8, f32, f32)>,
     pub px: usize,
     pub pz: usize,
     /// The same per BLOCK x BLOCK patches.
-    blocks: Vec<(u8, f32, f32)>,
+    blocks: Vec<(u8, u8, f32, f32)>,
     bx: usize,
     /// A patch's blades in each level.
     pub level_blades: [usize; LEVELS],
     /// The smallest keep threshold of a patch: a patch whose kept fraction
     /// is no more keeps no blade.
     first_keep: f32,
+    /// A patch's flowers in each level (0: the field grows none), and their
+    /// smallest keep threshold.
+    pub level_flowers: [usize; LEVELS],
+    first_flower_keep: f32,
 }
 
 /// Floats per vertex in the `geom.GameMeshVertexAo` layout the PBR lane's
@@ -206,6 +310,14 @@ pub(crate) struct GrassCull {
 /// into them: root x, t along the blade, root z, side, keep threshold,
 /// shape random, yaw random.
 const VERTEX_FLOATS: usize = 7;
+
+/// How many of `n` roots (keep thresholds `hash(i, salt)`) each level
+/// holds: every one the shader can keep in a patch of that level (keep
+/// under 0.5^level). A count by halves would miss a few of a patch's roots
+/// and they would pop in whole at the next level.
+fn level_counts(n: usize, salt: u32) -> [usize; LEVELS] {
+    std::array::from_fn(|l| if n == 0 { 0 } else { (0..n as u32).filter(|&i| hash(i, salt) < 0.5f32.powi(l as i32)).count().max(1) })
+}
 
 fn hash(i: u32, salt: u32) -> f32 {
     let mut n = i.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
@@ -255,24 +367,73 @@ pub(crate) fn patch_vertices(blades: usize, take: usize, segments: usize) -> (Ve
     (verts, idx)
 }
 
+/// The first `take` of a patch's `flowers`, sorted by keep threshold like
+/// the blades of [`patch_vertices`] (their own roots and thresholds). A
+/// flower is a stem of `segments` quads (side -1 and 1, t 0..1) that ends in
+/// its head: the centre (t lane 2), then PETALS petals of three vertices
+/// (t lane 3, 4, 5: left base, tip, right base; the side lane holds the
+/// petal's index). Every vertex carries its yaw plus 2, the vertex shader's
+/// mark of a flower (a blade's yaw lane is 0..1).
+pub(crate) fn flower_vertices(flowers: usize, take: usize, segments: usize) -> (Vec<f32>, Vec<u32>) {
+    let mut roots: Vec<(f32, f32, f32, f32, f32)> = (0..flowers as u32).map(|i| {
+        let side = (flowers as f32).sqrt().ceil() as u32;
+        let (gx, gz) = ((i % side) as f32, (i / side) as f32);
+        let x = ((gx + hash(i, 11)) / side as f32).fract();
+        let z = ((gz + hash(i, 12)) / side as f32).fract();
+        (hash(i, 13), x, z, hash(i, 14), hash(i, 15))
+    }).collect();
+    roots.sort_by(|a, b| a.0.total_cmp(&b.0));
+    roots.truncate(take);
+    let per = segments * 2 + 1 + PETALS * 3;
+    let mut verts = Vec::with_capacity(roots.len() * per * VERTEX_FLOATS);
+    let mut idx = Vec::with_capacity(roots.len() * (segments * 2 - 1 + PETALS * 2) * 3);
+    for (keep, x, z, shape, yaw) in roots {
+        let base = (verts.len() / VERTEX_FLOATS) as u32;
+        let yaw = yaw + 2.0;
+        for s in 0..segments {
+            let t = s as f32 / segments as f32;
+            for side in [-1.0f32, 1.0] { verts.extend_from_slice(&[x, t, z, side, keep, shape, yaw]); }
+        }
+        let centre = base + segments as u32 * 2;
+        verts.extend_from_slice(&[x, 2.0, z, 0.0, keep, shape, yaw]);
+        for petal in 0..PETALS {
+            for role in [3.0f32, 4.0, 5.0] { verts.extend_from_slice(&[x, role, z, petal as f32, keep, shape, yaw]); }
+        }
+        for s in 0..segments as u32 {
+            let (a, b) = (base + s * 2, base + s * 2 + 1);
+            if s + 1 < segments as u32 {
+                idx.extend_from_slice(&[a, b, a + 2, b, b + 2, a + 2]);
+            } else {
+                idx.extend_from_slice(&[a, b, centre]);
+            }
+        }
+        for petal in 0..PETALS as u32 {
+            let (l, t, r) = (centre + 1 + petal * 3, centre + 2 + petal * 3, centre + 3 + petal * 3);
+            idx.extend_from_slice(&[centre, l, t, centre, t, r]);
+        }
+    }
+    (verts, idx)
+}
+
 impl GrassGpu {
-    pub fn new(cx: &mut Cx, field: std::sync::Arc<GrassField>) -> Self {
+    /// The textures and geometries of a prepared field: the part that needs the GPU.
+    pub fn new(cx: &mut Cx, prep: GrassPrep) -> Self {
+        let GrassPrep { field, height, cover, cull, levels, flower_levels } = prep;
         let (nx, nz) = (field.nx, field.nz);
         let height_tex = Texture::new_with_format(cx, TextureFormat::VecRf32 {
-            width: nx, height: nz, data: Some(field.height.clone()), updated: TextureUpdated::Full,
+            width: nx, height: nz, data: Some(height), updated: TextureUpdated::Full,
         });
-        let cover_tex = Texture::new_with_format(cx, TextureFormat::VecRGu8 {
-            width: nx, height: nz, data: Some(field.cover.iter().flatten().copied().collect()), unpack_row_length: None, updated: TextureUpdated::Full,
+        let cover_tex = Texture::new_with_format(cx, TextureFormat::VecBGRAu8_32 {
+            width: nx, height: nz, data: Some(cover), updated: TextureUpdated::Full,
         });
-        let cull = GrassCull::new(&field);
-        let full = cull.level_blades[0];
-        let levels = std::array::from_fn(|l| {
-            let (v, i) = patch_vertices(full, cull.level_blades[l], SEGMENTS[l]);
+        let geometry = |cx: &mut Cx, (v, i): (Vec<f32>, Vec<u32>)| {
             let g = Geometry::new(cx);
             g.update(cx, i, v);
             g
-        });
-        Self { field, height_tex, cover_tex, cull, levels }
+        };
+        let levels = levels.map(|l| geometry(cx, l));
+        let flower_levels = flower_levels.map(|levels| levels.map(|l| geometry(cx, l)));
+        Self { field, height_tex, cover_tex, cull, levels, flower_levels }
     }
 }
 
@@ -280,49 +441,70 @@ impl GrassCull {
     pub fn new(field: &GrassField) -> Self {
         let (nx, nz) = (field.nx, field.nz);
         // Per-patch summary: the densest texel (an empty patch is never
-        // drawn) and the ground range (the patch's culling box).
+        // drawn), the fullest bloom and the ground range (the patch's
+        // culling box).
         let texels = (PATCH / field.cell).ceil().max(1.0) as usize;
         let (px, pz) = (nx.div_ceil(texels), nz.div_ceil(texels));
-        let mut patches = vec![(0u8, f32::MAX, f32::MIN); px * pz];
+        let mut patches = vec![(0u8, 0u8, f32::MAX, f32::MIN); px * pz];
         for z in 0..nz {
             for x in 0..nx {
                 let p = &mut patches[(z / texels) * px + x / texels];
                 let i = z * nx + x;
                 p.0 = p.0.max(field.cover[i][0]);
-                p.1 = p.1.min(field.height[i]);
-                p.2 = p.2.max(field.height[i]);
+                p.1 = p.1.max(field.cover[i][2]);
+                p.2 = p.2.min(field.height[i]);
+                p.3 = p.3.max(field.height[i]);
             }
         }
         // Blocks of BLOCK x BLOCK patches, the same summary.
         let (bx, bz) = (px.div_ceil(BLOCK), pz.div_ceil(BLOCK));
-        let mut blocks = vec![(0u8, f32::MAX, f32::MIN); bx * bz];
+        let mut blocks = vec![(0u8, 0u8, f32::MAX, f32::MIN); bx * bz];
         for z in 0..pz {
             for x in 0..px {
-                let (d, lo, hi) = patches[z * px + x];
+                let (d, bloom, lo, hi) = patches[z * px + x];
                 let b = &mut blocks[(z / BLOCK) * bx + x / BLOCK];
                 b.0 = b.0.max(d);
-                b.1 = b.1.min(lo);
-                b.2 = b.2.max(hi);
+                b.1 = b.1.max(bloom);
+                b.2 = b.2.min(lo);
+                b.3 = b.3.max(hi);
             }
         }
         let b = &field.blades;
         let per_m2 = COVER_PER_M2 * b.density.clamp(0.1, 4.0) / b.width.max(0.005);
         let full = ((per_m2 * PATCH * PATCH).round() as usize).max(16);
-        let level_blades: [usize; LEVELS] = std::array::from_fn(|l| (full >> l).max(1));
+        let level_blades = level_counts(full, 3);
         let first_keep = (0..full as u32).map(|i| hash(i, 3)).fold(1.0f32, f32::min);
-        Self { patches, px, pz, blocks, bx, level_blades, first_keep }
+        // Flowers: every kind's density at full bloom, together.
+        let flowers = if field.flowers.is_empty() {
+            0
+        } else {
+            ((field.flowers.iter().map(|k| k.density.max(0.0)).sum::<f32>() * PATCH * PATCH).round() as usize).max(1)
+        };
+        let level_flowers = level_counts(flowers, 13);
+        let first_flower_keep = (0..flowers as u32).map(|i| hash(i, 13)).fold(1.0f32, f32::min);
+        Self { patches, px, pz, blocks, bx, level_blades, first_keep, level_flowers, first_flower_keep }
     }
 
     /// The patches to draw from `eye` this frame, by level: (x, z) of each
     /// patch's corner. A patch draws the sparsest level that still holds
     /// every blade the shader can keep in it (its densest cover at its
-    /// nearest point); one that can keep none is not drawn.
-    pub fn visible(&self, f: &GrassField, eye: Vec3f, frustum: Option<&crate::renderer::Frustum>, lod: &GrassLod, out: &mut [Vec<(f32, f32)>; LEVELS]) {
+    /// nearest point); one that can keep none is not drawn. With `flowers`
+    /// (their screen density and their levels) a patch that blooms is
+    /// sorted into the flower levels the same way, by its fullest bloom.
+    pub fn visible(
+        &self, f: &GrassField, eye: Vec3f, frustum: Option<&crate::renderer::Frustum>, lod: &GrassLod,
+        out: &mut [Vec<(f32, f32)>; LEVELS], mut flowers: Option<(&GrassLod, &mut [Vec<(f32, f32)>; LEVELS])>,
+    ) {
         for level in out.iter_mut() { level.clear(); }
-        let reach = lod.reach;
-        // The tallest blade, and how far past its patch a blade can lean
-        // or be pulled into a clump.
-        let rise = f.blades.height * 1.4;
+        if let Some((_, out)) = flowers.as_mut() {
+            for level in out.iter_mut() { level.clear(); }
+        }
+        let flower_reach = flowers.as_ref().map_or(0.0, |(l, _)| l.reach);
+        let reach = lod.reach.max(flower_reach);
+        // The tallest blade or flower, and how far past its patch a blade
+        // can lean or be pulled into a clump.
+        let tallest = f.flowers.iter().map(|k| k.height).fold(f.blades.height, f32::max);
+        let rise = tallest * 1.4;
         let spread = rise + ROOT_SLACK;
         // Metres from the eye to the nearest point of a box.
         let near = |lo: Vec3f, hi: Vec3f| {
@@ -330,6 +512,7 @@ impl GrassCull {
             d.length()
         };
         let seen = |lo: Vec3f, hi: Vec3f| frustum.is_none_or(|fr| fr.intersects_aabb(lo, hi));
+        let level_of = |kept: f32| (0..LEVELS - 1).find(|l| kept > 0.5f32.powi(*l as i32 + 1)).unwrap_or(LEVELS - 1);
         let span = PATCH * BLOCK as f32;
         let to = |v: f32, o: f32, s: f32| ((v - o) / s).floor().max(0.0) as usize;
         let (bx0, bz0) = (to(eye.x - reach - spread, f.origin[0], span), to(eye.z - reach - spread, f.origin[1], span));
@@ -337,25 +520,32 @@ impl GrassCull {
         let bz_n = self.blocks.len() / self.bx.max(1);
         for bz in bz0..bz1.min(bz_n) {
             for bx in bx0..bx1.min(self.bx) {
-                let (dens, lo, hi) = self.blocks[bz * self.bx + bx];
-                if dens < 8 { continue; }
+                let (dens, bloom, lo, hi) = self.blocks[bz * self.bx + bx];
+                let blooms = flowers.is_some() && bloom >= 8;
+                if dens < 8 && !blooms { continue; }
                 let (x, z) = (f.origin[0] + bx as f32 * span, f.origin[1] + bz as f32 * span);
-                if near(vec3f(x - ROOT_SLACK, lo - ROOT_SLACK, z - ROOT_SLACK), vec3f(x + span + ROOT_SLACK, hi + ROOT_SLACK, z + span + ROOT_SLACK)) > reach { continue; }
+                let d = near(vec3f(x - ROOT_SLACK, lo - ROOT_SLACK, z - ROOT_SLACK), vec3f(x + span + ROOT_SLACK, hi + ROOT_SLACK, z + span + ROOT_SLACK));
+                let limit = if blooms { reach } else { lod.reach };
+                if d > limit { continue; }
                 if !seen(vec3f(x - spread, lo - 0.2, z - spread), vec3f(x + span + spread, hi + rise, z + span + spread)) { continue; }
                 for pz in bz * BLOCK..((bz + 1) * BLOCK).min(self.pz) {
                     for px in bx * BLOCK..((bx + 1) * BLOCK).min(self.px) {
-                        let (dens, lo, hi) = self.patches[pz * self.px + px];
+                        let (dens, bloom, lo, hi) = self.patches[pz * self.px + px];
                         if dens < 8 { continue; }
                         let (x, z) = (f.origin[0] + px as f32 * PATCH, f.origin[1] + pz as f32 * PATCH);
                         // The roots' box: the ground under them may sit a
                         // texel's interpolation past the patch's range.
                         let d = near(vec3f(x - ROOT_SLACK, lo - ROOT_SLACK, z - ROOT_SLACK), vec3f(x + PATCH + ROOT_SLACK, hi + ROOT_SLACK, z + PATCH + ROOT_SLACK));
-                        if d > reach { continue; }
-                        let kept = lod.kept(d) * dens as f32 / 255.0;
-                        if kept <= self.first_keep { continue; }
+                        let kept = if d > lod.reach { 0.0 } else { lod.kept(d) * dens as f32 / 255.0 };
+                        let blossom = match flowers.as_ref() {
+                            Some((fl, _)) if bloom >= 8 && d <= fl.reach => fl.kept(d) * bloom as f32 / 255.0,
+                            _ => 0.0,
+                        };
+                        let (grows, blooms) = (kept > self.first_keep, blossom > self.first_flower_keep);
+                        if !grows && !blooms { continue; }
                         if !seen(vec3f(x - spread, lo - 0.2, z - spread), vec3f(x + PATCH + spread, hi + rise, z + PATCH + spread)) { continue; }
-                        let level = (0..LEVELS - 1).find(|l| kept > 0.5f32.powi(*l as i32 + 1)).unwrap_or(LEVELS - 1);
-                        out[level].push((x, z));
+                        if grows { out[level_of(kept)].push((x, z)); }
+                        if let (true, Some((_, out))) = (blooms, flowers.as_mut()) { out[level_of(blossom)].push((x, z)); }
                     }
                 }
             }
@@ -369,14 +559,17 @@ mod tests {
 
     #[test]
     fn a_field_round_trips_through_its_product_bytes() {
+        let poppy = FlowerKind { color: [0.9, 0.1, 0.1], eye: [0.1, 0.1, 0.1], density: 3.0, height: 0.4, size: 0.06, cup: 0.6 };
         let field = GrassField {
             origin: [-10.0, -20.0], cell: 1.0, nx: 3, nz: 2,
-            height: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.5], cover: vec![[0, 0], [255, 10], [128, 200], [1, 2], [3, 4], [5, 6]],
+            height: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.5],
+            cover: vec![[0, 0, 0, 0], [255, 10, 7, 0], [128, 200, 30, 0], [1, 2, 3, 0], [3, 4, 5, 0], [5, 6, 7, 0]],
             blades: GrassBlades { height: 0.4, radius: 30.0, ..Default::default() },
+            flowers: vec![poppy, FlowerKind { density: 1.5, cup: 0.0, ..poppy }],
         };
         let back = GrassField::decode(&field.encode()).unwrap();
         assert_eq!(back, field);
-        assert_eq!(back.cover_at(-7.5, -19.5), Some([128, 200]));
+        assert_eq!(back.cover_at(-7.5, -19.5), Some([128, 200, 30, 0]));
         assert_eq!(back.cover_at(-11.0, -19.5), None);
         assert!(GrassField::decode(&field.encode()[..40]).is_err());
     }
@@ -389,15 +582,15 @@ mod tests {
     fn the_blade_budget_follows_the_resolution() {
         let n = 400;
         let field = GrassField {
-            origin: [-200.0, -200.0], cell: 1.0, nx: n, nz: n, height: vec![0.0; n * n], cover: vec![[255, 0]; n * n],
-            blades: GrassBlades { radius: 1000.0, ..Default::default() },
+            origin: [-200.0, -200.0], cell: 1.0, nx: n, nz: n, height: vec![0.0; n * n], cover: vec![[255, 0, 0, 0]; n * n],
+            blades: GrassBlades { radius: 1000.0, ..Default::default() }, flowers: vec![],
         };
         let cull = GrassCull::new(&field);
         let eye = vec3f(0.3, 1.5, 0.7);
         let blades = |focal: f32| {
             let lod = GrassLod::new(&field.blades, focal, 2.5);
             let mut out: [Vec<(f32, f32)>; LEVELS] = Default::default();
-            cull.visible(&field, eye, None, &lod, &mut out);
+            cull.visible(&field, eye, None, &lod, &mut out, None);
             out.iter().enumerate().map(|(l, p)| p.len() * cull.level_blades[l]).sum::<usize>() as f32
         };
         let (small, large) = (blades(900.0), blades(1800.0));
@@ -415,5 +608,47 @@ mod tests {
         let keeps: Vec<f32> = (0..64).map(|k| root(&near, 7, k).2).collect();
         assert!(keeps.windows(2).all(|w| w[0] <= w[1]), "sorted by keep");
         for k in 0..32 { assert_eq!(root(&near, 7, k), root(&mid, 5, k)); }
+        // Flowers: the same, with their head after the stem, and every
+        // vertex marked (yaw lane past 2).
+        let per = |segments: usize| segments * 2 + 1 + PETALS * 3;
+        let (near, ni) = flower_vertices(12, 12, 2);
+        let (far, fi) = flower_vertices(12, 3, 1);
+        assert_eq!((near.len(), ni.len()), (12 * per(2) * VERTEX_FLOATS, 12 * (3 + PETALS * 2) * 3));
+        assert_eq!((far.len(), fi.len()), (3 * per(1) * VERTEX_FLOATS, 3 * (1 + PETALS * 2) * 3));
+        assert!(near.chunks_exact(VERTEX_FLOATS).all(|v| v[6] >= 2.0 && v[6] < 3.0), "every flower vertex is marked");
+        for k in 0..3 { assert_eq!(root(&near, per(2), k), root(&far, per(1), k)); }
+        let keeps: Vec<f32> = (0..12).map(|k| root(&near, per(2), k).2).collect();
+        assert!(keeps.windows(2).all(|w| w[0] <= w[1]), "flowers sorted by keep");
+    }
+
+    /// Flowers grow where the field blooms and only there, out to their own
+    /// reach (past the blades'), thinning by the screen as the blades do;
+    /// a field without kinds walks no flower at all.
+    #[test]
+    fn flowers_grow_where_the_field_blooms() {
+        let n = 200;
+        // Bloom on the half x >= 0 only; cover everywhere.
+        let cover = (0..n * n).map(|i| [255, 0, if i % n >= n / 2 { 255 } else { 0 }, 0]).collect();
+        let kind = FlowerKind { color: [1.0, 0.0, 1.0], eye: [1.0, 0.0, 1.0], density: 4.0, height: 0.4, size: 0.05, cup: 0.3 };
+        let field = GrassField {
+            origin: [-100.0, -100.0], cell: 1.0, nx: n, nz: n, height: vec![0.0; n * n], cover,
+            blades: GrassBlades { radius: 40.0, ..Default::default() }, flowers: vec![kind],
+        };
+        let cull = GrassCull::new(&field);
+        assert_eq!(cull.level_flowers[0], 16, "4 per m2 on a 2 m patch");
+        let eye = vec3f(0.3, 1.5, 0.7);
+        let lod = GrassLod::new(&field.blades, 1800.0, 1.5);
+        let flod = GrassLod::flowers(&field, 1800.0, 1.5).unwrap();
+        assert!(flod.reach > lod.reach, "flowers reach past the blades: {} vs {}", flod.reach, lod.reach);
+        let (mut blades, mut flowers): ([Vec<(f32, f32)>; LEVELS], [Vec<(f32, f32)>; LEVELS]) = Default::default();
+        cull.visible(&field, eye, None, &lod, &mut blades, Some((&flod, &mut flowers)));
+        let all: Vec<(f32, f32)> = flowers.iter().flatten().copied().collect();
+        assert!(!all.is_empty() && all.iter().all(|p| p.0 >= 0.0), "flowers only on the blooming half");
+        let far = all.iter().map(|p| ((p.0 + 1.0 - eye.x).powi(2) + (p.1 + 1.0 - eye.z).powi(2)).sqrt()).fold(0.0f32, f32::max);
+        assert!(far > lod.reach, "flower patches past the blades' reach: {far}");
+        // No kinds: no flower walk.
+        let bare = GrassField { flowers: vec![], ..field };
+        assert!(GrassLod::flowers(&bare, 1800.0, 1.5).is_none());
+        assert_eq!(GrassCull::new(&bare).level_flowers, [0; LEVELS]);
     }
 }

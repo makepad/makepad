@@ -55,6 +55,24 @@ pub(super) enum ModelLane {
     Splat = 9,
 }
 
+/// The lanes a load prepares (`Renderer::prepare_lane_variant`), in the order
+/// a world's first frame meets them: level slabs and terrain, placed models,
+/// foliage and its stand-ins, generated tiles, the streamed city, GPU-skinned
+/// characters, blended slabs. `true`: the lane also draws through its variant
+/// without `clip` (`lane_shaders`); the level draws take only theirs.
+const STAGED_LANES: [(ModelLane, bool); 10] = [
+    (ModelLane::Cube, false),
+    (ModelLane::Terrain, false),
+    (ModelLane::Diffuse, true),
+    (ModelLane::Pbr, true),
+    (ModelLane::Foliage, true),
+    (ModelLane::Impostor, true),
+    (ModelLane::Splat, true),
+    (ModelLane::City, true),
+    (ModelLane::SkinnedGpu, true),
+    (ModelLane::Alpha, false),
+];
+
 /// The optional features a lane's shader keeps.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub(crate) struct Features {
@@ -163,6 +181,48 @@ impl Renderer {
         let (gi, gi_debug) = self.gi.shader_features();
         let csm = self.gpu_baker.csm_binding().is_some_and(|(frame, _, _)| frame.on);
         Features { clip: true, gi, gi_debug, csm, csm_debug: csm && self.shadow_debug, cluster: self.clustered.active(self.clustered_enabled), local_shadows: self.clustered.shadows_active(self.clustered_enabled), reflections: self.ssr.active() }
+    }
+
+    /// The feature sets a world's frames draw a lane with, most likely
+    /// first. They are this frame's, with the targets a world's first frame
+    /// allocates counted as there: the cascades in Realtime and the cluster
+    /// grid, which a load staged before any world drew sees off. The lamps'
+    /// shadows stay as this frame has them. In Realtime the cascades come
+    /// both on and off: they follow the sun's side of the horizon, which is
+    /// the world's and its hour's, and a day cycle crosses it in play.
+    pub(super) fn world_frame_features(&self) -> Vec<Features> {
+        let now = self.lane_features();
+        let cluster = self.clustered_enabled;
+        let world = Features { cluster, local_shadows: cluster && self.clustered.shadows.active(), ..now };
+        let off = Features { csm: false, csm_debug: false, ..world };
+        if self.gpu_baker.mode() == crate::gpu_lightmap::GpuLightmapMode::Realtime {
+            vec![Features { csm: true, csm_debug: self.shadow_debug, ..world }, off]
+        } else {
+            vec![off]
+        }
+    }
+
+    /// Build the next stock lane variant a world's frames draw through (one
+    /// per lane and `world_frame_features` set, with the one without `clip`
+    /// where the lane has it). A world's first frame built them otherwise,
+    /// 4-11 ms each, 40-70 ms of a cold launch's first frame; a host's load
+    /// prepares them while it stages. `Some(true)`: one was built;
+    /// `Some(false)`: the VM is busy; `None` once every one is built (they
+    /// are kept, so a later load finds them so).
+    pub fn prepare_lane_variant(&mut self, cx: &mut Cx) -> Option<bool> {
+        if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
+            return None;
+        }
+        let opaque = !std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_some_and(|v| v == "0");
+        let unbuilt = |lv: &LaneVariants, key| matches!(lv.shaders.get(&key), None | Some(VariantShader::Unbuilt));
+        let (lane, features) = self.world_frame_features().into_iter()
+            .flat_map(|features| STAGED_LANES.into_iter().flat_map(move |(lane, without_clip)| {
+                let bare = (without_clip && opaque).then_some((lane, Features { clip: false, ..features }));
+                std::iter::once((lane, features)).chain(bare)
+            }))
+            .find(|key| unbuilt(&self.lane_variants, *key))?;
+        self.variant(cx, lane, features);
+        Some(!unbuilt(&self.lane_variants, (lane, features)))
     }
 
     /// The lane's shaders for this frame's features: the one it draws
@@ -456,15 +516,16 @@ mod tests {
         cx
     }
 
-    /// The painted-terrain and foliage lanes are built for a model that draws through them: with
-    /// none resident, nothing of theirs reaches the VM or the compiler.
+    /// The painted-terrain, foliage and stand-in lanes are built for a model that draws through
+    /// them: with none resident, nothing of theirs reaches the VM or the compiler.
     #[test]
     fn a_lane_without_a_model_builds_nothing() {
         let mut cx = shader_cx();
         let mut renderer = Renderer::default();
         renderer.prepare_splat_lane(&mut cx);
         renderer.prepare_foliage_lane(&mut cx);
-        assert!(!renderer.splat_ready && !renderer.foliage_ready);
+        renderer.prepare_impostor_lane(&mut cx);
+        assert!(!renderer.splat_ready && !renderer.foliage_ready && renderer.impostor_shader.is_none());
         assert!(renderer.splat_draw.is_none() && renderer.foliage_draw.is_none());
         assert!(renderer.lane_variants.shaders.is_empty());
     }
