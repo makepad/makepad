@@ -2256,12 +2256,206 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     // RELAX_SANDBOX_OPT=0/1 forces the O1 clean-up.
     let opt = options.sandbox_opt.unwrap_or(!jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
     if opt {
+        if !relax_backend::stats::opt_off(options, "-sbwords") {
+            words_in_registers(f, tls_sym);
+        }
         relax_backend::passes::simplify(options, f, None, true, true);
         relax_backend::passes::licm(options, f);
         relax_backend::passes::simplify(options, f, None, true, true);
         f.verify().map_err(|e| format!("{}: sandbox clean-up made invalid RIR: {}", f.name, e))?;
     }
     Ok(())
+}
+
+/// Unit `u`'s twin `f`, optimised: its sandbox words in registers (`words_in_registers`; O3's
+/// last step for a twin, after the twins it took in are part of it). True: `f` changed.
+pub(crate) fn settle_words(u: &Unit, f: &mut Func) -> bool {
+    let tls = with_sb(u, |s| s.tls_sym);
+    words_in_registers(f, tls)
+}
+
+/// Keeps this thread's sandbox words in registers between calls. Every block of a twin reads and
+/// writes the fuel word, and every frame the shadow stack pointer; as memory operations each
+/// meter's load waits for the store of the one before it, so a loop's blocks form one chain
+/// through memory however independent their work is (measured: most of a hot twin's time, also
+/// once the twins it calls are inlined, since their meters come with them). Only the transform
+/// makes code that names these words -- a module's own accesses are masked into its window, and
+/// its thread-locals are redirected -- so every access is found by its address, `words + k`:
+/// - a store still happens (the word in memory is exact at every instruction: a fault, a
+///   deadline or the runtime may read it at any time) and the register takes the value too;
+/// - a load is a copy of the register wherever the register is known to hold the word: on every
+///   path since the function's entry or its last call, the word was loaded or stored. A call
+///   ends that: the callee (a twin's own meter, the runtime at an entry or a leave) writes the
+///   word. The arena base and the shadow stack's floor are the activation's and outlive calls,
+///   as the transform's own use of the base it loads at entry already assumes.
+/// The fuel charged, the instruction it runs out at and the words in memory are unchanged.
+///
+/// All or nothing: a register that may hold a words address and is used in any way but these
+/// (not a single definition, arithmetic, an indexed access, passed on) leaves the function as it
+/// is. True: `f` changed.
+fn words_in_registers(f: &mut Func, tls: Sym) -> bool {
+    use relax_backend::rir::Mem;
+    // (word offset, a call leaves it as it was)
+    const WORDS: [(i64, bool); 4] = [(W_ARENA, true), (W_SSP, false), (W_FUEL, false), (W_SSLO, true)];
+    let invariant: u8 = WORDS.iter().enumerate().filter(|(_, w)| w.1).fold(0, |m, (k, _)| m | 1 << k);
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+    }
+    // registers holding `words + k`: the TLS address, copies of it, it plus a constant
+    let mut addr: Vec<Option<i64>> = vec![None; nv];
+    loop {
+        let mut more = false;
+        for i in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (d, k) = match i {
+                Inst::TlsAddr(d, s) if s.id == tls.id => (*d, s.off - tls.off),
+                Inst::Mov(d, a) => match addr[a.0 as usize] { Some(k) => (*d, k), None => continue },
+                Inst::IBinI(IOp::Add, it, d, a, c) if it.bits == 64 => match addr[a.0 as usize] { Some(k) => (*d, k + *c), None => continue },
+                _ => continue,
+            };
+            if ndef[d.0 as usize] != 1 {
+                return false;
+            }
+            if addr[d.0 as usize] != Some(k) {
+                addr[d.0 as usize] = Some(k);
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    if addr.iter().all(|a| a.is_none()) {
+        return false;
+    }
+    let word = |base: VReg, off: i32| -> Option<Result<usize, ()>> {
+        let k = addr[base.0 as usize]? + off as i64;
+        Some(WORDS.iter().position(|w| w.0 == k).ok_or(()))
+    };
+    // every use of such a register is one of the forms above or the base of a load or store of
+    // a whole word; the promoted words are only loaded, or (not the activation's) stored
+    let mut used: u8 = 0;
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                Inst::TlsAddr(..) => {}
+                Inst::Mov(_, a) if addr[a.0 as usize].is_some() => {}
+                Inst::IBinI(IOp::Add, it, _, a, _) if it.bits == 64 && addr[a.0 as usize].is_some() => {}
+                Inst::Load(m, _, base, off) => match word(*base, *off) {
+                    None => {}
+                    Some(w) => {
+                        if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                            return false;
+                        }
+                        if let Ok(k) = w {
+                            used |= 1 << k;
+                        }
+                    }
+                },
+                Inst::Store(m, base, off, src) => {
+                    if addr[src.0 as usize].is_some() {
+                        return false;
+                    }
+                    match word(*base, *off) {
+                        None => {}
+                        Some(w) => {
+                            if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                                return false;
+                            }
+                            match w {
+                                Ok(k) if WORDS[k].1 => return false,
+                                Ok(k) => used |= 1 << k,
+                                Err(()) => {}
+                            }
+                        }
+                    }
+                }
+                other => {
+                    let mut named = false;
+                    relax_backend::regalloc::for_uses(other, |u| named |= addr[u.0 as usize].is_some());
+                    if named {
+                        return false;
+                    }
+                }
+            }
+        }
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        if tu.iter().any(|u| addr[u.0 as usize].is_some()) {
+            return false;
+        }
+    }
+    if used == 0 {
+        return false;
+    }
+    // where each word's register holds it: at a block's entry, on every path into it
+    let step = |state: u8, i: &Inst| -> u8 {
+        match i {
+            Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                Some(Ok(k)) => state | 1 << k,
+                _ => state,
+            },
+            Inst::Call(..) => state & invariant,
+            _ => state,
+        }
+    };
+    let nb = f.blocks.len();
+    let mut at_entry = vec![u8::MAX; nb];
+    at_entry[0] = 0;
+    let mut work: Vec<usize> = (0..nb).collect();
+    while let Some(b) = work.pop() {
+        let out = f.blocks[b].insts.iter().fold(at_entry[b], |st, i| step(st, i));
+        for t in f.blocks[b].term.succs() {
+            let t = t as usize;
+            if at_entry[t] & out != at_entry[t] {
+                at_entry[t] &= out;
+                work.push(t);
+            }
+        }
+    }
+    let regs: Vec<VReg> = WORDS.iter().map(|_| f.vreg(Cls::I)).collect();
+    for (b, blk) in f.blocks.iter_mut().enumerate() {
+        let insts = std::mem::take(&mut blk.insts);
+        let pos = std::mem::take(&mut blk.pos);
+        let mut state = at_entry[b];
+        for (n, i) in insts.into_iter().enumerate() {
+            let p = pos.get(n).copied().unwrap_or(0);
+            let w = match &i {
+                Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                    Some(Ok(k)) => Some(k),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let next = step(state, &i);
+            match (i, w) {
+                (Inst::Load(_, d, _, _), Some(k)) if state & 1 << k != 0 => {
+                    blk.insts.push(Inst::Mov(d, regs[k]));
+                    blk.pos.push(p);
+                }
+                (Inst::Load(m, d, base, off), Some(k)) => {
+                    blk.insts.push(Inst::Load(m, d, base, off));
+                    blk.insts.push(Inst::Mov(regs[k], d));
+                    blk.pos.extend([p, p]);
+                }
+                (Inst::Store(m, base, off, src), Some(k)) => {
+                    blk.insts.push(Inst::Store(m, base, off, src));
+                    blk.insts.push(Inst::Mov(regs[k], src));
+                    blk.pos.extend([p, p]);
+                }
+                (i, _) => {
+                    blk.insts.push(i);
+                    blk.pos.push(p);
+                }
+            }
+            state = next;
+        }
+    }
+    true
 }
 
 /// Where `sym` (a `#[thread_local]` static, or the thread block itself) is in a segment's
