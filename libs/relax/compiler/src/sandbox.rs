@@ -2332,45 +2332,73 @@ fn merge_meters(f: &mut Func, tls: Sym) -> bool {
             npred[t as usize] += 1;
         }
     }
-    // Code that never comes back to the function's flow (a trap, a panic and its cleanup): per
-    // block, the registers everything reachable from it reads. None: it may return, or is large.
-    let leaves = |t: u32| -> Option<Vec<VReg>> {
-        let (mut seen, mut stack, mut reads) = (vec![t], vec![t], Vec::new());
-        let mut us = Vec::new();
-        while let Some(b) = stack.pop() {
-            let blk = &f.blocks[b as usize];
-            if matches!(blk.term, Term::Ret(_)) || seen.len() > 24 {
-                return None;
-            }
-            for i in &blk.insts {
-                relax_backend::regalloc::for_uses(i, |u| if !reads.contains(&u) { reads.push(u) });
-            }
-            relax_backend::regalloc::term_uses(&blk.term, &mut us);
-            for u in &us {
-                if !reads.contains(u) {
-                    reads.push(*u);
-                }
-            }
-            for x in blk.term.succs() {
-                if !seen.contains(&x) {
-                    seen.push(x);
-                    stack.push(x);
-                }
-            }
+    // Code that never comes back to the function's flow (a trap, a panic and its cleanup): the
+    // blocks no return is reached from. Per such block, the registers everything reachable
+    // from it reads: a bit set each, to a fixpoint over those blocks (what they lead to is one
+    // of them too).
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); nb];
+    for (b, blk) in f.blocks.iter().enumerate() {
+        for t in blk.term.succs() {
+            preds[t as usize].push(b as u32);
         }
-        Some(reads)
-    };
-    let mut exits: HashMap<u32, Option<Vec<VReg>>> = HashMap::new();
-    for b in &f.blocks {
-        if let Term::Branch(_, x, y) = &b.term {
-            for t in [*x, *y] {
-                if !exits.contains_key(&t) {
-                    exits.insert(t, leaves(t));
-                }
+    }
+    let mut returns = vec![false; nb];
+    let mut stack: Vec<u32> = (0..nb as u32).filter(|&b| matches!(f.blocks[b as usize].term, Term::Ret(_))).collect();
+    for &b in &stack {
+        returns[b as usize] = true;
+    }
+    while let Some(b) = stack.pop() {
+        for &p in &preds[b as usize] {
+            if !std::mem::replace(&mut returns[p as usize], true) {
+                stack.push(p);
             }
         }
     }
-    let exit = |t: u32| exits.get(&t).is_some_and(|e| e.is_some());
+    let cold: Vec<usize> = (0..nb).filter(|&b| !returns[b]).collect();
+    let width = nv.div_ceil(64);
+    // (a function too large for the sets keeps its meters as they are)
+    if cold.len().saturating_mul(width) > 1 << 21 {
+        return false;
+    }
+    let mut row = vec![usize::MAX; nb];
+    for (k, &b) in cold.iter().enumerate() {
+        row[b] = k;
+    }
+    let mut reads = vec![0u64; cold.len() * width];
+    for (k, &b) in cold.iter().enumerate() {
+        let blk = &f.blocks[b];
+        for i in &blk.insts {
+            relax_backend::regalloc::for_uses(i, |u| reads[k * width + u.0 as usize / 64] |= 1 << (u.0 % 64));
+        }
+        relax_backend::regalloc::term_uses(&blk.term, &mut tu);
+        for u in &tu {
+            reads[k * width + u.0 as usize / 64] |= 1 << (u.0 % 64);
+        }
+    }
+    loop {
+        let mut more = false;
+        for (k, &b) in cold.iter().enumerate().rev() {
+            for t in f.blocks[b].term.succs() {
+                let j = row[t as usize];
+                if j == usize::MAX || j == k {
+                    continue;
+                }
+                for w in 0..width {
+                    let x = reads[k * width + w] | reads[j * width + w];
+                    if x != reads[k * width + w] {
+                        reads[k * width + w] = x;
+                        more = true;
+                    }
+                }
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    let exit = |t: u32| !returns[t as usize];
+    // code reached by leaving at `t` reads register `v`
+    let read_at = |t: u32, v: u32| row[t as usize] != usize::MAX && (v as usize) < nv && reads[row[t as usize] * width + v as usize / 64] >> (v % 64) & 1 != 0;
     // a block's meter: `left = was - cost`, stored and compared at the block's end (constants
     // the optimizer moved down may follow). `was` is the word loaded just before (`load`), or
     // the value the optimizer knows it holds (the meter before it in the same straight line).
@@ -2480,16 +2508,16 @@ fn merge_meters(f: &mut Func, tls: Sym) -> bool {
         // registers the copy will name anew, and a way out that reads a words address among
         // them (the address keeps its one definition: no copy's value can be handed to it):
         // the chain ends before it
-        let mut renamed: HashSet<u32> = HashSet::new();
+        let mut renamed: Vec<u32> = Vec::new();
         'grow: while !link[*chain.last().unwrap()].is_empty() {
             let path = &link[*chain.last().unwrap()];
             let mut named = renamed.clone();
             for &b in path {
                 for i in &f.blocks[b].insts {
-                    relax_backend::regalloc::for_defs(i, |d| { named.insert(d.0); });
+                    relax_backend::regalloc::for_defs(i, |d| if addr[d.0 as usize].is_some() { named.push(d.0) });
                 }
-                if let Some(Some(reads)) = way_out[b].map(|t| exits.get(&t).cloned().flatten()) {
-                    if reads.iter().any(|v| named.contains(&v.0) && addr[v.0 as usize].is_some()) {
+                if let Some(t) = way_out[b] {
+                    if named.iter().any(|&v| read_at(t, v)) {
                         break 'grow;
                     }
                 }
@@ -2564,7 +2592,9 @@ fn merge_meters(f: &mut Func, tls: Sym) -> bool {
             }
             // this block's way out, by way of a block that hands the copy's values over
             let mut out = |t: u32, insts: Option<(&mut Vec<Inst>, &mut Vec<u64>)>| -> u32 {
-                let hand: Vec<Inst> = exits.get(&t).cloned().flatten().unwrap_or_default().iter().filter_map(|v| to.get(&v.0).map(|n| Inst::Mov(*v, *n))).collect();
+                let mut hand: Vec<(u32, VReg)> = to.iter().filter(|x| read_at(t, *x.0)).map(|x| (*x.0, *x.1)).collect();
+                hand.sort_unstable_by_key(|x| x.0);
+                let hand: Vec<Inst> = hand.into_iter().map(|(v, n)| Inst::Mov(VReg(v), n)).collect();
                 if hand.is_empty() {
                     return t;
                 }
