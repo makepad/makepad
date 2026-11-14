@@ -2805,6 +2805,13 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
     jit::build_rir(up, base)?;
     let mut f = jit::sandbox_source_rir(up, base)?;
     transform(up, &mut f, id)?;
+    // What the inliner prices this body by (Func::priced): its base's, as the host's inliner
+    // prices the base -- by its O1 body (the canonical one is not optimised) -- though not under
+    // a quarter of its own size: a twin's O3 build stays within four times a host build's size.
+    // (Pricing by the canonical body's size left the sort's partition loop a call per element.)
+    let own = relax_codegen::opt::inst_count(&f) as u32;
+    let host = (&*up).fns[base as usize].rir.as_ref().map_or(own, |r| relax_codegen::opt::inst_count(r) as u32);
+    f.confined = Some((host.max(own / 4).min(own), own));
     // RELAX_SANDBOX_DUMP=<substring>: the transformed RIR of matching twins
     if let Some(pat) = sandbox_dump() {
         if f.name.contains(pat) {

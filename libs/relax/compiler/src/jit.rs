@@ -16192,7 +16192,11 @@ impl<'a> InlineBodies<'a> {
         // a body above the largest size any rule admits (site_rule) is not prepared (one that
         // optimises down into its own rules' range still is: piano_render, brotli_decode)
         let max_insts = relax_codegen::opt::InlineLimits::tier1().always_insts;
-        if attrs & relax_codegen::opt::ATTR_COLD != 0 || !calls || relax_codegen::opt::inst_count(o1) > max_insts {
+        // (a sandbox twin's snapshot body is its canonical one, confined and not optimised: it
+        // is prepared also when it calls nothing, so its optimised body prices its sites as a
+        // host callee's O1 body does)
+        let twin = o1.confined.is_some();
+        if attrs & relax_codegen::opt::ATTR_COLD != 0 || !(calls || twin) || o1.priced(relax_codegen::opt::inst_count(o1)) > max_insts {
             return None;
         }
         let sub = |x: u32| if self.node.get(&x).is_some_and(|n| n.0 == comp) { None } else { self.get_prepared(x) };
@@ -16248,7 +16252,7 @@ impl<'a> InlineBodies<'a> {
         if let Some(st) = stats { st.report(&format!("prep:{} (root {})", o1.name, self.root)); }
         let (raw, mut taken) = raw;
         // shared preparations outlive this build: they are copied out of its job arena
-        let prepared = (!taken.is_empty()).then(|| {
+        let prepared = (!taken.is_empty() || twin).then(|| {
             self.expand(&mut taken);
             let deps: Vec<u32> = taken.into_iter().map(|x| x.0).collect();
             crate::zone_alloc::copy_out(|| std::sync::Arc::new(Prepared { raw: raw.clone(), priced: f.clone(), deps: deps.clone() }))
@@ -16391,7 +16395,7 @@ fn tier1_simplify(options: &crate::options::Options, func: &mut relax_backend::r
     limits.cold_tiny = export_o3_mode() && crate::wasm_export::o3_cold_tiny();
     limits.lto = export_o3_mode() && crate::wasm_export::o3_lto();
     if let (Some(cap), Some(g)) = (growth_cap, limits.growth_limit.as_mut()) {
-        *g = (*g).min(cap.max(relax_codegen::opt::inst_count(func)));
+        *g = (*g).min(cap.max(func.priced(relax_codegen::opt::inst_count(func))));
     }
     let mut inlined: Vec<(u32, usize)> = Vec::new();
     if cfg.inline {
@@ -23603,7 +23607,7 @@ unsafe fn o3_next_level(up: *mut Unit, (prog, tcx): (&Program, &Tcx), options: &
             let cost_admits = !relax_backend::stats::opt_off(options, "-costmodel")
                 && callee_attrs(&*std::ptr::addr_of!((*up).sandbox), prog, tcx, fns, core, c, inline_all, true, unverified_root(fns, id), sandbox_twin(fns, id))
                     .map_or(false, |attrs| relax_codegen::opt::rustc_inline_cost(r, c) <= relax_codegen::opt::rustc_inline_threshold(r, attrs));
-            if never_run && relax_codegen::opt::inst_count(r) > relax_codegen::opt::INLINE_FREE_INSTS && !cost_admits {
+            if never_run && r.priced(relax_codegen::opt::inst_count(r)) > relax_codegen::opt::INLINE_FREE_INSTS && !cost_admits {
                 continue;
             }
             for b in &r.blocks {
