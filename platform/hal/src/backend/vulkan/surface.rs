@@ -219,8 +219,18 @@ impl Swapchain {
         let index = match result {
             Ok((index, suboptimal)) => {
                 if suboptimal {
-                    if log_enabled() { eprintln!("[hal-vulkan] vkAcquireNextImageKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
-                    self.dirty.store(true, Ordering::Release);
+                    // Android 10+ answers SUBOPTIMAL to every acquire and present of a chain whose
+                    // pre-transform (IDENTITY: the compositor rotates) is not the surface's current
+                    // transform, as on a device whose natural orientation is portrait shown in
+                    // landscape; the chain stays valid. A real size change is rebuilt by the size
+                    // check (`Windows::swapchain`), so on Android SUBOPTIMAL is no reason. Rebuilding
+                    // after every present, each rebuild waiting for the queue to go idle (up to 2 s),
+                    // put 6 of 365 encoded frames on screen during an animation.
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        if log_enabled() { eprintln!("[hal-vulkan] vkAcquireNextImageKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
+                        self.dirty.store(true, Ordering::Release);
+                    }
                 }
                 index
             }
@@ -290,8 +300,13 @@ impl Swapchain {
         match result {
             Ok(false) => Ok(Shown::Presented),
             Ok(true) => {
-                if log_enabled() { eprintln!("[hal-vulkan] vkQueuePresentKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
-                self.dirty.store(true, Ordering::Release); Ok(Shown::Presented)
+                // Android: a pre-transform SUBOPTIMAL is no reason to rebuild (see the acquire above)
+                #[cfg(not(target_os = "android"))]
+                {
+                    if log_enabled() { eprintln!("[hal-vulkan] vkQueuePresentKHR key={:?}: SUBOPTIMAL_KHR; rebuilding swapchain", self.key); }
+                    self.dirty.store(true, Ordering::Release);
+                }
+                Ok(Shown::Presented)
             }
             Err(vk::Result::ERROR_SURFACE_LOST_KHR) => {
                 eprintln!("[hal-vulkan] vkQueuePresentKHR key={:?}: ERROR_SURFACE_LOST_KHR; recreating surface", self.key);
