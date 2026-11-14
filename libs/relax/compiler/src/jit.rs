@@ -21387,6 +21387,17 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             }
         };
         let sandboxed = matches!((&*up).fns[id as usize].key, FnKey::Sandbox(_));
+        // A twin's build starts from its body in the early form (sandbox::early_rir: metered,
+        // its memory not confined yet) and confines what the optimizer leaves (sandbox::confine,
+        // below), so that inlining and scalar replacement work as on host code. When that body
+        // cannot be made now, and with RELAX_OPT=-sblate, from the confined body as before.
+        let rir = match sandboxed && !relax_backend::stats::opt_off(options, "-sblate") && !crate::sandbox::late_refused(&*up, id) {
+            true => match early_rir_or_skip(up, id) {
+                Some(Ok(early)) => early,
+                _ => rir,
+            },
+            false => rir,
+        };
         let mut callees: Vec<u32> = Vec::new();
         for b in &rir.blocks {
             for i in &b.insts {
@@ -21512,7 +21523,25 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
             let c = frontier[idx];
             let te = cpu_ns();
             ensure_rir(c);
-            views.borrow_mut().insert(c, o3_view(&*up, c));
+            let mut view = o3_view(&*up, c);
+            // (a root in the early form takes its candidates in that form too: a candidate
+            // whose early body cannot be made stays a call; one that waits for a front is
+            // asked again once, as a twin's own build above)
+            if rir.unconfined && view.rir.is_some() {
+                view.rir = match early_rir_or_skip(up, c) {
+                    Some(r) => r.ok(),
+                    None => {
+                        let mut l = left_out.borrow_mut();
+                        let n = l.entry(c).or_insert(0);
+                        *n += 1;
+                        if *n < SPLIT_TRIES {
+                            twin_wait.set(true);
+                        }
+                        None
+                    }
+                };
+            }
+            views.borrow_mut().insert(c, view);
             TIER1_TAKE_PARTS[1].fetch_add(cpu_ns() - te, Ordering::Relaxed);
             idx += 1;
         }
@@ -21803,6 +21832,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         // Before it, the arena copies whose size the inliner made a constant become inline
         // copies (sandbox.rs inline_copies; RELAX_OPT=-sbcopy: off).
         if sandboxed {
+            // (a build from the early form: every access the optimizer left is masked now)
+            if func.unconfined {
+                crate::sandbox::confine(&*up, &mut func).map_err(|e| format!("{}{}", crate::sandbox::LATE_REFUSED, e))?;
+            }
             let copies = !relax_backend::stats::opt_off(options, "-sbcopy") && crate::sandbox::inline_copies(&*up, &mut func);
             let words = !relax_backend::stats::opt_off(options, "-sbwords") && crate::sandbox::settle_words(&*up, &mut func);
             if copies || words {
@@ -22394,6 +22427,12 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 // SPEC-V: a callee it took in unverified was rejected meanwhile: built again
                 // without it (the snapshot leaves a rejected callee out)
                 if why == "inlined a rejected callee" {
+                    u.retier(id);
+                }
+                // a twin's build from the early form that sandbox::confine refused: built again
+                // from the confined body
+                if matches!(&built, Ok(Err(e)) if e.starts_with(crate::sandbox::LATE_REFUSED)) {
+                    crate::sandbox::refuse_late(u, id);
                     u.retier(id);
                 }
                 if tier1_trace() {
@@ -26188,6 +26227,23 @@ thread_local! {
     /// prepare_rir_from's own lowering (build_rir_inner) runs: a front it needs inside a take is
     /// noted and returned as NEEDS_FRONT instead of unwinding
     static PREP_LOWER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A twin's body in the early form (sandbox::early_rir) inside an O3 build's take: None when its
+/// base's lowering needs a front only the owner could run (noted for the take's next round, as
+/// build_rir_or_skip).
+unsafe fn early_rir_or_skip(up: *mut Unit, id: u32) -> Option<Result<std::sync::Arc<relax_backend::rir::Func>, String>> {
+    let _w = BuildWhy::enter(1);
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::sandbox::early_rir(up, id))) {
+        Ok(r) => Some(r),
+        Err(p) => match p.downcast::<crate::preempt::PublishBail>() {
+            Ok(b) => {
+                owner::note_needs(b.slots);
+                None
+            }
+            Err(p) => std::panic::resume_unwind(p),
+        },
+    }
 }
 
 /// `build_rir_mode` inside a background build's take: a candidate whose front only the owner could

@@ -230,6 +230,10 @@ struct Sb {
     refs: HashMap<u32, Vec<u32>>,
     /// host API fns checked at the boundary ((def, collect epoch) -> the refusal, None: allowed)
     api_checked: HashMap<(u32, u64), Option<String>>,
+    /// twin -> its body in the early form (`early_rir`): made when an O3 build first asks
+    early: HashMap<u32, Arc<Func>>,
+    /// twins whose build from the early form `confine` refused
+    late_refused: HashSet<u32>,
 }
 
 
@@ -342,6 +346,8 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
         arenas: Vec::new(),
         refs: HashMap::new(),
         api_checked: HashMap::new(),
+        early: HashMap::new(),
+        late_refused: HashSet::new(),
     }));
     u.sandbox.ready.store(true, std::sync::atomic::Ordering::Release);
     Ok(())
@@ -1950,7 +1956,7 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
 
 /// Rewrites a twin's RIR for sandboxed execution (on the owner thread). Errors name what a module
 /// cannot do (a C function, data it cannot reach), never a crash.
-pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(), String> {
+pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32, early: bool) -> Result<(), String> {
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
     let u = &mut *up;
@@ -1990,7 +1996,8 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
         frame += s.size as u64;
     }
     let frame = (frame + 15) & !15;
-    let has_frame = !f.slots.is_empty();
+    // (the early form keeps its slots: `confine` makes the frame of what the optimizer leaves)
+    let has_frame = !f.slots.is_empty() && !early;
     let t_arena = f.vreg(Cls::I);
     let ar = f.vreg(Cls::I);
     let t_ssp = f.vreg(Cls::I);
@@ -2057,6 +2064,10 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
             };
             // masks a base (with its offset) into the window
             let mask = |f: &mut Func, insts: &mut Vec<Inst>, pos: &mut Vec<u64>, cache: &mut HashMap<u32, VReg>, base: VReg, off: i32| -> (VReg, i32) {
+                // (the early form: accesses stay the base's, `confine` masks them)
+                if early {
+                    return (base, off);
+                }
                 let (base, off) = if (off as i64).unsigned_abs() >= GUARD {
                     let b2 = f.vreg(Cls::I);
                     insts.push(Inst::IBinI(IOp::Add, U64, b2, base, off as i64));
@@ -2080,6 +2091,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
             let mut defs: Vec<VReg> = Vec::new();
             relax_backend::regalloc::for_defs(&inst, |d| defs.push(d));
             match inst {
+                Inst::SlotAddr(d, s) if early => emit(Inst::SlotAddr(d, s), &mut insts, &mut pos),
                 Inst::SlotAddr(d, s) => emit(Inst::IBinI(IOp::Add, U64, d, nsp, offs[s as usize] as i64), &mut insts, &mut pos),
                 Inst::Addr(d, sym) => {
                     let kind = u.syms.kind(sym.id);
@@ -2158,6 +2170,7 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                     let (b2, _) = mask(f, &mut insts, &mut pos, &mut cache, a, 0);
                     emit(Inst::AtomicCas(mm, o1, o2, d, b2, e, nw), &mut insts, &mut pos);
                 }
+                Inst::Copy(dst, src, len) if early => emit(Inst::Copy(dst, src, len), &mut insts, &mut pos),
                 Inst::Copy(dst, src, len) => {
                     if len as u64 >= GUARD {
                         let n = f.vreg(Cls::I);
@@ -2176,6 +2189,9 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                         Callee::Asm(_) => return Err(format!("{}: inline assembly, which sandboxed code cannot run", f.name)),
                         Callee::Fn(id) => Callee::Fn(call_target(up, id, &sandboxed, allow)?),
                         Callee::CFn(id, sig) => Callee::CFn(call_target(up, id, &sandboxed, allow)?, sig),
+                        // (the early form: `confine` masks the target)
+                        Callee::Indirect(v) if early => Callee::Indirect(v),
+                        Callee::CIndirect(v, sig) if early => Callee::CIndirect(v, sig),
                         Callee::Indirect(v) => Callee::Indirect(mask_fn(&*up, f, &mut insts, &mut pos, p, v)),
                         Callee::CIndirect(v, sig) => Callee::CIndirect(mask_fn(&*up, f, &mut insts, &mut pos, p, v), sig),
                         Callee::Host(s) => match u.syms.kind(s.id) {
@@ -2187,6 +2203,10 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
                                 emit(Inst::Call(Callee::Host(panic_site), vec![v], Vec::new()), &mut insts, &mut pos);
                                 continue;
                             }
+                            // (the early form keeps the runtime's own copies and fills: the
+                            // optimizer folds those of a constant size, `confine` sends the
+                            // rest to the arena's)
+                            Some(SymKind::Rt("memcpy" | "memmove" | "memset")) if early => Callee::Host(s),
                             Some(SymKind::Rt(name)) => match rt_policy(name) {
                                 Some(None) => Callee::Host(s),
                                 Some(Some(_)) => Callee::Host(host_sym(u, &format!("rt:{}", name)).ok_or_else(|| format!("{}: no sandboxed `{}`", f.name, name))?),
@@ -2240,7 +2260,9 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     f.blocks.push(b0);
     f.blocks.extend(out_blocks);
     f.blocks.extend(new_blocks);
-    f.slots.clear();
+    if !early {
+        f.slots.clear();
+    }
     // (a domain without fuel pays nothing per block: the meter's load and store of the thread's
     // fuel word chained every block of its code through memory)
     if with_sb(&*up, |s| s.fuel) {
@@ -2248,6 +2270,10 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     }
     with_sb(&*up, |s| s.refs.insert(twin_id, refs));
     f.verify().map_err(|e| format!("{}: sandbox transform made invalid RIR: {}", f.name, e))?;
+    f.unconfined = early;
+    if early {
+        return Ok(());
+    }
     // the masks the transform added: common ones merged, loop-invariant ones hoisted. Only
     // under O1 alone (RELAX_O3=0, O2 pipeline): with O3 on, O1 keeps
     // registers unoptimised and the hoisted masks cost more than they save (mini, particle
@@ -2705,6 +2731,340 @@ fn merge_meters(f: &mut Func, tls: Sym) -> bool {
     true
 }
 
+/// What starts the error of an O3 build whose body `confine` refused.
+pub(crate) const LATE_REFUSED: &str = "sandbox confinement after O3: ";
+
+/// Twin `id`'s O3 build from the early form was refused by `confine`: its next build starts from
+/// the confined body.
+pub(crate) fn refuse_late(u: &Unit, id: u32) {
+    crate::zone_alloc::copy_out(|| with_sb(u, |s| s.late_refused.insert(id)));
+}
+
+pub(crate) fn late_refused(u: &Unit, id: u32) -> bool {
+    with_sb(u, |s| s.late_refused.contains(&id))
+}
+
+/// A direct call in a twin's optimised body: to a twin, to a host API function the boundary
+/// admits, or to allow-listed C (what `call_target` made of the base's calls: the optimizer adds
+/// none, and `confine` checks that).
+fn call_ok(u: &Unit, id: u32, sandboxed: &HashSet<u32>, allow: Allow) -> Result<(), String> {
+    match &u.fns[id as usize].key {
+        FnKey::Sandbox(_) => Ok(()),
+        FnKey::Inst(d, args) => {
+            let def = u.prog.def(*d);
+            if def.kind == DefKind::ForeignFn {
+                let name = u.prog.syms.str(def.name).to_string();
+                return match c_policy(allow, &name) {
+                    Some(None) => Ok(()),
+                    _ => Err(format!("reaches the C function `{}`", name)),
+                };
+            }
+            if !sandboxed.contains(&def.krate) && args.is_empty() && host_api_escape(u, *d).is_none() {
+                return Ok(());
+            }
+            Err(format!("calls `{}`, which is not a twin", u.prog.def_path(*d)))
+        }
+        _ => Err(format!("calls slot {}, which is not a twin", id)),
+    }
+}
+
+/// Confines the memory of a twin's body that came through O3 in the early form (`early_rir`):
+/// the second half of the transform, on what the optimizer left. Every instruction is decided
+/// here by its kind, and one that is not listed fails the build (the twin keeps the code it
+/// has); nothing the optimizer assumed about the module's code is relied on.
+/// - An access is masked into the window (`[arena + (address as u32) + offset]`, the offset
+///   under the guard's size) unless it is one of two things: a load or store of this thread's
+///   sandbox words (their address is the transform's own, and `words_scan` fails the build if
+///   such an address is used any other way), or an access of a slot of this function at a
+///   constant place inside it (the frame is made here, in the window).
+/// - The slots the optimizer left -- those whose address still goes somewhere -- become one
+///   shadow frame, made at the entry with the stack check and given back at every return. The
+///   twins taken in share it, so the frame's size and a local's address differ from the O1
+///   code's: a recursion that is too deep for the shadow stack ends at another depth.
+/// - A call goes to a twin, to an entry the domain allows, or through the masked thunk table;
+///   the runtime's copies and fills the early form kept go to the arena's; addresses are the
+///   window's; anything else fails the build.
+pub(crate) fn confine(u: &Unit, f: &mut Func) -> Result<(), String> {
+    use relax_backend::rir::{Block, DbgLoc, Mem};
+    let (tls, sandboxed, allow) = with_sb(u, |s| (s.tls_sym, s.sandboxed.clone(), s.allow));
+    let name = f.name.clone();
+    // RELAX_TEST_SANDBOX_REFUSE=1: every body is refused (the build falls back to the confined body)
+    static REFUSE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *REFUSE.get_or_init(|| std::env::var_os("RELAX_TEST_SANDBOX_REFUSE").is_some()) {
+        return Err(format!("{}: refused for a test", name));
+    }
+    let Ok((addr, _)) = words_scan(f, tls) else {
+        return Err(format!("{}: an address of the sandbox words is used as a value", name));
+    };
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+    }
+    // registers that are a slot's address plus a constant (one definition each)
+    let mut slot_at: Vec<Option<(u32, i64)>> = vec![None; nv];
+    loop {
+        let mut more = false;
+        for i in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (d, at) = match i {
+                Inst::SlotAddr(d, s) => (*d, (*s, 0)),
+                Inst::Mov(d, a) => match slot_at[a.0 as usize] { Some(x) => (*d, x), None => continue },
+                Inst::IBinI(IOp::Add, it, d, a, k) if it.bits == 64 => match slot_at[a.0 as usize] { Some((s, o)) => (*d, (s, o.wrapping_add(*k))), None => continue },
+                _ => continue,
+            };
+            if ndef[d.0 as usize] == 1 && slot_at[d.0 as usize] != Some(at) {
+                slot_at[d.0 as usize] = Some(at);
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    let sizes: Vec<i64> = f.slots.iter().map(|s| s.size as i64).collect();
+    // `len` bytes at `v + off` are inside one slot of this function
+    let inside = |v: VReg, off: i64, len: i64| (v.0 as usize) < nv && slot_at[v.0 as usize].is_some_and(|(s, o)| o.checked_add(off).is_some_and(|at| at >= 0 && at.checked_add(len).is_some_and(|end| end <= sizes[s as usize])));
+    let trusted = |v: VReg| (v.0 as usize) < nv && addr[v.0 as usize].is_some();
+    // the shadow frame of the slots that are left
+    let mut offs = Vec::with_capacity(f.slots.len());
+    let mut frame: u64 = 0;
+    for s in &f.slots {
+        let a = s.align.max(1) as u64;
+        frame = (frame + a - 1) / a * a;
+        offs.push(frame);
+        frame += s.size as u64;
+    }
+    let frame = (frame + 15) & !15;
+    let has_frame = !f.slots.is_empty();
+    let pos0 = f.blocks[0].pos.first().copied().unwrap_or(f.blocks[0].term_pos);
+    let count0 = f.blocks[0].count;
+    let (words, ar, t_ssp, ssp0, nsp) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+    let int8 = Mem::Int(8, false);
+    let mut b0 = Block { insts: vec![Inst::TlsAddr(words, tls.plus(W_ARENA)), Inst::Load(int8, ar, words, 0)], pos: Vec::new(), term: Term::Jump(1), term_pos: pos0, count: count0 };
+    let mut made: Vec<Block> = Vec::new();
+    // (every block moves up by one for the new entry; the made ones follow them)
+    let first_made = f.blocks.len() as u32 + 1;
+    if has_frame {
+        let (lo, rel, c, v) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+        b0.insts.extend([
+            Inst::IBinI(IOp::Add, U64, t_ssp, words, W_SSP - W_ARENA),
+            Inst::Load(int8, ssp0, t_ssp, 0),
+            Inst::IBinI(IOp::Sub, U64, nsp, ssp0, frame as i64),
+            // this thread's segment: nsp - lo must be in [0, stack size] (as the transform's)
+            Inst::Load(int8, lo, words, (W_SSLO - W_ARENA) as i32),
+            Inst::IBin(IOp::Sub, U64, rel, nsp, lo),
+            Inst::ICmpI(Cond::Gt, false, c, rel, (SEG - STACK_LO) as i64),
+        ]);
+        let site = u.site_sym(f.file, (pos0 & 0xffff_ffff) as u32, "sandboxed module: shadow stack overflow (recursion too deep)");
+        made.push(Block { insts: vec![Inst::Addr(v, site), Inst::Call(Callee::Host(u.rs.panic_site), vec![v], Vec::new())], pos: vec![pos0, pos0], term: Term::Unreachable, term_pos: pos0, count: if count0 < 0.0 { count0 } else { 0.0 } });
+        made.push(Block { insts: vec![Inst::Store(int8, t_ssp, 0, nsp)], pos: vec![pos0], term: Term::Jump(1), term_pos: pos0, count: count0 });
+        b0.term = Term::Branch(c, first_made, first_made + 1);
+    }
+    b0.pos = vec![pos0; b0.insts.len()];
+    // the low 32 bits of `base` (of `base + off` when the offset is past the guard): what an
+    // access adds to the arena base, and the offset it keeps
+    fn low(f: &mut Func, out: &mut Vec<Inst>, base: VReg, off: i32) -> (VReg, i32) {
+        let (b, o) = if (off as i64).unsigned_abs() >= GUARD {
+            let b2 = f.vreg(Cls::I);
+            out.push(Inst::IBinI(IOp::Add, U64, b2, base, off as i64));
+            (b2, 0)
+        } else {
+            (base, off)
+        };
+        let z = f.vreg(Cls::I);
+        out.push(Inst::Conv(Conv::IntToInt(U32), z, b));
+        (z, o)
+    }
+    // base + (idx << sh)
+    fn sum(f: &mut Func, out: &mut Vec<Inst>, base: VReg, idx: VReg, sh: u8) -> VReg {
+        let t = if sh > 0 {
+            let t = f.vreg(Cls::I);
+            out.push(Inst::IBinI(IOp::Shl, U64, t, idx, sh as i64));
+            t
+        } else {
+            idx
+        };
+        let a = f.vreg(Cls::I);
+        out.push(Inst::IBin(IOp::Add, U64, a, base, t));
+        a
+    }
+    // `p` in the window, as an address
+    fn windowed(f: &mut Func, out: &mut Vec<Inst>, ar: VReg, p: VReg) -> VReg {
+        let (z, _) = low(f, out, p, 0);
+        let mv = f.vreg(Cls::I);
+        out.push(Inst::IBin(IOp::Add, U64, mv, z, ar));
+        mv
+    }
+    let blocks = std::mem::take(&mut f.blocks);
+    let mut done: Vec<Block> = Vec::with_capacity(blocks.len() + 3);
+    for mut b in blocks {
+        b.term.map_succs(|t| t + 1);
+        let mut out: Vec<Inst> = Vec::with_capacity(b.insts.len() + 8);
+        let mut pos: Vec<u64> = Vec::with_capacity(b.insts.len() + 8);
+        for (k, inst) in std::mem::take(&mut b.insts).into_iter().enumerate() {
+            let p = b.pos.get(k).copied().unwrap_or(pos0);
+            match inst {
+                // ---- memory
+                Inst::Load(m, d, base, off) => {
+                    if trusted(base) || inside(base, off as i64, relax_backend::passes::mem_size(m) as i64) {
+                        out.push(Inst::Load(m, d, base, off));
+                    } else {
+                        let (z, o) = low(f, &mut out, base, off);
+                        out.push(Inst::LoadX(m, d, z, ar, 0, o));
+                    }
+                }
+                Inst::Store(m, base, off, src) => {
+                    if trusted(base) || inside(base, off as i64, relax_backend::passes::mem_size(m) as i64) {
+                        out.push(Inst::Store(m, base, off, src));
+                    } else {
+                        let (z, o) = low(f, &mut out, base, off);
+                        out.push(Inst::StoreX(m, z, ar, 0, o, src));
+                    }
+                }
+                Inst::LoadX(m, d, base, idx, sh, off) => {
+                    let a = sum(f, &mut out, base, idx, sh);
+                    let (z, o) = low(f, &mut out, a, off);
+                    out.push(Inst::LoadX(m, d, z, ar, 0, o));
+                }
+                Inst::StoreX(m, base, idx, sh, off, src) => {
+                    let a = sum(f, &mut out, base, idx, sh);
+                    let (z, o) = low(f, &mut out, a, off);
+                    out.push(Inst::StoreX(m, z, ar, 0, o, src));
+                }
+                Inst::VLoad(d, base, off) => {
+                    if inside(base, off as i64, 16) {
+                        out.push(Inst::VLoad(d, base, off));
+                    } else {
+                        let (z, o) = low(f, &mut out, base, off);
+                        out.push(Inst::VLoadX(d, z, ar, 0, o));
+                    }
+                }
+                Inst::VStore(base, off, src) => {
+                    if inside(base, off as i64, 16) {
+                        out.push(Inst::VStore(base, off, src));
+                    } else {
+                        let (z, o) = low(f, &mut out, base, off);
+                        out.push(Inst::VStoreX(z, ar, 0, o, src));
+                    }
+                }
+                Inst::VLoadX(d, base, idx, sh, off) => {
+                    let a = sum(f, &mut out, base, idx, sh);
+                    let (z, o) = low(f, &mut out, a, off);
+                    out.push(Inst::VLoadX(d, z, ar, 0, o));
+                }
+                Inst::VStoreX(base, idx, sh, off, src) => {
+                    let a = sum(f, &mut out, base, idx, sh);
+                    let (z, o) = low(f, &mut out, a, off);
+                    out.push(Inst::VStoreX(z, ar, 0, o, src));
+                }
+                Inst::Copy(dst, src, len) => {
+                    if len as u64 >= GUARD {
+                        let (n, r) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                        out.push(Inst::Iconst(n, len as i64));
+                        let s = host_sym(u, "rt:memcpy").ok_or_else(|| format!("{}: no sandboxed memcpy", name))?;
+                        out.push(Inst::Call(Callee::Host(s), vec![dst, src, n], vec![r]));
+                    } else {
+                        let d2 = if inside(dst, 0, len as i64) { dst } else { windowed(f, &mut out, ar, dst) };
+                        let s2 = if inside(src, 0, len as i64) { src } else { windowed(f, &mut out, ar, src) };
+                        out.push(Inst::Copy(d2, s2, len));
+                    }
+                }
+                Inst::AtomicLoad(mm, o, d, a) => {
+                    let a2 = if inside(a, 0, relax_backend::passes::mem_size(mm) as i64) { a } else { windowed(f, &mut out, ar, a) };
+                    out.push(Inst::AtomicLoad(mm, o, d, a2));
+                }
+                Inst::AtomicStore(mm, o, a, src) => {
+                    let a2 = if inside(a, 0, relax_backend::passes::mem_size(mm) as i64) { a } else { windowed(f, &mut out, ar, a) };
+                    out.push(Inst::AtomicStore(mm, o, a2, src));
+                }
+                Inst::AtomicRmw(op, mm, o, d, a, src) => {
+                    let a2 = if inside(a, 0, relax_backend::passes::mem_size(mm) as i64) { a } else { windowed(f, &mut out, ar, a) };
+                    out.push(Inst::AtomicRmw(op, mm, o, d, a2, src));
+                }
+                Inst::AtomicCas(mm, o1, o2, d, a, e, nw) => {
+                    let a2 = if inside(a, 0, relax_backend::passes::mem_size(mm) as i64) { a } else { windowed(f, &mut out, ar, a) };
+                    out.push(Inst::AtomicCas(mm, o1, o2, d, a2, e, nw));
+                }
+                Inst::VGather(..) | Inst::VTbl(..) => return Err(format!("{}: a vector gather or table lookup after the optimizer", name)),
+                // ---- addresses
+                Inst::SlotAddr(d, s) => out.push(Inst::IBinI(IOp::Add, U64, d, nsp, offs[s as usize] as i64)),
+                Inst::Addr(d, sym) => match u.syms.kind(sym.id) {
+                    Some(SymKind::SbPlace(_)) | Some(SymKind::SbThunk(_)) | Some(SymKind::SbTls(_)) | Some(SymKind::SbTable) | Some(SymKind::Site(_)) | Some(SymKind::Rt("null")) => out.push(Inst::Addr(d, sym)),
+                    other => return Err(format!("{}: the address of {:?} after the optimizer", name, other)),
+                },
+                Inst::TlsAddr(d, sym) if sym.id == tls.id => out.push(Inst::TlsAddr(d, sym)),
+                Inst::FnAddr(..) | Inst::TlsAddr(..) | Inst::TlsStatic(..) => return Err(format!("{}: a fn or thread-local address the early form did not place", name)),
+                // ---- calls
+                Inst::Call(callee, args, rets) => {
+                    let callee = match callee {
+                        Callee::Fn(id) => {
+                            call_ok(u, id, &sandboxed, allow).map_err(|e| format!("{}: {}", name, e))?;
+                            Callee::Fn(id)
+                        }
+                        Callee::CFn(id, sig) => {
+                            call_ok(u, id, &sandboxed, allow).map_err(|e| format!("{}: {}", name, e))?;
+                            Callee::CFn(id, sig)
+                        }
+                        Callee::Indirect(v) => Callee::Indirect(mask_fn(u, f, &mut out, &mut Vec::new(), p, v)),
+                        Callee::CIndirect(v, sig) => Callee::CIndirect(mask_fn(u, f, &mut out, &mut Vec::new(), p, v), sig),
+                        Callee::Host(s) => match u.syms.kind(s.id) {
+                            Some(SymKind::SbHost(_)) => Callee::Host(s),
+                            Some(SymKind::Rt(n)) => match rt_policy(n) {
+                                Some(None) => Callee::Host(s),
+                                Some(Some(_)) => Callee::Host(host_sym(u, &format!("rt:{}", n)).ok_or_else(|| format!("{}: no sandboxed `{}`", name, n))?),
+                                None => return Err(format!("{}: calls the runtime's `{}` after the optimizer", name, n)),
+                            },
+                            other => return Err(format!("{}: calls {:?} after the optimizer", name, other)),
+                        },
+                        Callee::CHost(s, sig) => {
+                            let n = match u.syms.kind(s.id) {
+                                Some(SymKind::SbHost(_)) => None,
+                                Some(SymKind::Foreign(n)) => Some(n),
+                                Some(SymKind::Rt(n)) => Some(n.to_string()),
+                                other => return Err(format!("{}: calls {:?} after the optimizer", name, other)),
+                            };
+                            match n.as_deref().map(|n| (n, c_policy(allow, n))) {
+                                None | Some((_, Some(None))) => Callee::CHost(s, sig),
+                                Some((_, Some(Some(("abort", _))))) => return Err(format!("{}: an abort the early form did not turn into a trap", name)),
+                                Some((n, Some(Some(_)))) => Callee::CHost(host_sym(u, &format!("c:{}", n)).ok_or_else(|| format!("{}: no sandboxed `{}`", name, n))?, sig),
+                                Some((n, None)) => return Err(format!("{}: reaches the C function `{}` after the optimizer", name, n)),
+                            }
+                        }
+                        Callee::Asm(_) => return Err(format!("{}: inline assembly", name)),
+                    };
+                    out.push(Inst::Call(callee, args, rets));
+                }
+                Inst::FpEnv(true, _) => return Err(format!("{}: writes the floating-point control register", name)),
+                // ---- registers only
+                i @ (Inst::Iconst(..) | Inst::Fconst(..) | Inst::Mov(..) | Inst::IBin(..) | Inst::IBinI(..) | Inst::INeg(..) | Inst::INot(..) | Inst::IBit(..) | Inst::ICmp(..) | Inst::ICmpI(..)
+                | Inst::FBin(..) | Inst::FUnary(..) | Inst::FCmp(..) | Inst::Conv(..) | Inst::Sel(..) | Inst::SelCmp(..) | Inst::FMulAdd(..) | Inst::Fence(..) | Inst::FpEnv(false, _)
+                | Inst::Cpuid(..) | Inst::Xgetbv(..) | Inst::VSel(..) | Inst::VFma(..) | Inst::VSplat(..) | Inst::VConst(..) | Inst::VExtract(..) | Inst::VInsert(..) | Inst::VAny(..)
+                | Inst::VShuffle(..) | Inst::VX(..) | Inst::VX3(..) | Inst::Coverage { .. }) => out.push(i),
+            }
+            pos.extend(std::iter::repeat(p).take(out.len() - pos.len()));
+        }
+        // a return gives the shadow frame back
+        if has_frame {
+            if let Term::Ret(_) = b.term {
+                out.push(Inst::Store(int8, t_ssp, 0, ssp0));
+                pos.push(b.term_pos);
+            }
+        }
+        done.push(Block { insts: out, pos, term: b.term, term_pos: b.term_pos, count: b.count });
+    }
+    f.blocks = Vec::with_capacity(done.len() + made.len() + 1);
+    f.blocks.push(b0);
+    f.blocks.extend(done);
+    f.blocks.extend(made);
+    f.slots.clear();
+    f.dbg.retain(|d| !matches!(d.loc, DbgLoc::Slot(..)));
+    f.unconfined = false;
+    f.verify().map_err(|e| format!("{}: the sandbox confinement made invalid RIR: {}", name, e))
+}
+
 /// (word offset, a call leaves it as it was)
 const WORDS: [(i64, bool); 4] = [(W_ARENA, true), (W_SSP, false), (W_FUEL, false), (W_SSLO, true)];
 
@@ -2713,6 +3073,13 @@ const WORDS: [(i64, bool); 4] = [(W_ARENA, true), (W_SSP, false), (W_FUEL, false
 /// such a register is used in a way a transform's code never does (see words_in_registers), or
 /// the function names no word.
 fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
+    words_scan(f, tls).ok().filter(|w| w.0.iter().any(|a| a.is_some()))
+}
+
+/// `words_of`'s scan. Err: a register that holds a words address is used in a way a transform's
+/// code never does (it has several definitions, is passed on, stored, indexed, or reaches a
+/// word through anything but a whole-word load or store).
+fn words_scan(f: &Func, tls: Sym) -> Result<(Vec<Option<i64>>, u8), ()> {
     use relax_backend::rir::Mem;
     let nv = f.vregs.len();
     let mut ndef = vec![0u32; nv];
@@ -2734,7 +3101,7 @@ fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
                 _ => continue,
             };
             if ndef[d.0 as usize] != 1 {
-                return None;
+                return Err(());
             }
             if addr[d.0 as usize] != Some(k) {
                 addr[d.0 as usize] = Some(k);
@@ -2744,9 +3111,6 @@ fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
         if !more {
             break;
         }
-    }
-    if addr.iter().all(|a| a.is_none()) {
-        return None;
     }
     let word = |base: VReg, off: i32| -> Option<Result<usize, ()>> {
         let k = addr[base.0 as usize]? + off as i64;
@@ -2766,7 +3130,7 @@ fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
                     None => {}
                     Some(w) => {
                         if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
-                            return None;
+                            return Err(());
                         }
                         if let Ok(k) = w {
                             used |= 1 << k;
@@ -2775,16 +3139,16 @@ fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
                 },
                 Inst::Store(m, base, off, src) => {
                     if addr[src.0 as usize].is_some() {
-                        return None;
+                        return Err(());
                     }
                     match word(*base, *off) {
                         None => {}
                         Some(w) => {
                             if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
-                                return None;
+                                return Err(());
                             }
                             match w {
-                                Ok(k) if WORDS[k].1 => return None,
+                                Ok(k) if WORDS[k].1 => return Err(()),
                                 Ok(k) => used |= 1 << k,
                                 Err(()) => {}
                             }
@@ -2795,17 +3159,17 @@ fn words_of(f: &Func, tls: Sym) -> Option<(Vec<Option<i64>>, u8)> {
                     let mut named = false;
                     relax_backend::regalloc::for_uses(other, |u| named |= addr[u.0 as usize].is_some());
                     if named {
-                        return None;
+                        return Err(());
                     }
                 }
             }
         }
         relax_backend::regalloc::term_uses(&b.term, &mut tu);
         if tu.iter().any(|u| addr[u.0 as usize].is_some()) {
-            return None;
+            return Err(());
         }
     }
-    Some((addr, used))
+    Ok((addr, used))
 }
 
 /// Keeps this thread's sandbox words in registers between calls. Every block of a twin reads and
@@ -3249,7 +3613,9 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
     // Metering itself never uses that tier-dependent optimized body.
     jit::build_rir(up, base)?;
     let mut f = jit::sandbox_source_rir(up, base)?;
-    transform(up, &mut f, id)?;
+    transform(up, &mut f, id, false)?;
+    // (the early form of the body before: its base may have changed)
+    with_sb(&*up, |s| s.early.remove(&id));
     // What the inliner prices this body by (Func::priced): its base's, as the host's inliner
     // prices the base -- by its O1 body (the canonical one is not optimised) -- though not under
     // a quarter of its own size: a twin's O3 build stays within four times a host build's size.
@@ -3264,6 +3630,42 @@ pub unsafe fn twin_rir(up: *mut Unit, id: u32, base: u32) -> Result<Func, String
         }
     }
     Ok(f)
+}
+
+/// Twin `id`'s body in the early form, the input of a twin's O3 build (on the owner thread, made
+/// when a build first asks and kept until the twin is built again). The transform confines the
+/// canonical body before any optimizer runs, and what is confined stays so: a local whose
+/// address is passed to a callee is shadow-frame memory behind a masked address, and after the
+/// callee is inlined nothing can prove it private any more. So the iterator, the hasher and the
+/// table of a word count kept their state in memory at every tier, ten times the host's time.
+/// The early form does everything of the transform that decides what a module may reach or
+/// what it is charged -- the meters, on the canonical blocks, so fuel is what it was; calls to
+/// twins and to the entries the domain allows; data, fn values and thread-locals at their
+/// places in the window -- and leaves loads, stores and copies as the base has them and the
+/// frame as slots. The inliner and scalar replacement then work as on host code, and `confine`
+/// masks every access that is left and makes the shadow frame of the slots that are left.
+/// Such a body never runs: `Func::unconfined` says so, the backends refuse it, and it is kept
+/// here, not in the slot.
+pub unsafe fn early_rir(up: *mut Unit, id: u32) -> Result<Arc<Func>, String> {
+    if let Some(f) = with_sb(&*up, |s| s.early.get(&id).cloned()) {
+        return Ok(f);
+    }
+    let base = match (&*up).fns[id as usize].key {
+        FnKey::Sandbox(b) if b != u32::MAX => b,
+        _ => return Err(format!("slot {} is not a twin", id)),
+    };
+    let mut f = jit::sandbox_source_rir(up, base)?;
+    transform(up, &mut f, id, true)?;
+    // (priced as twin_rir prices the confined body)
+    let own = relax_codegen::opt::inst_count(&f) as u32;
+    let host = (&*up).fns[base as usize].rir.as_ref().map_or(own, |r| relax_codegen::opt::inst_count(r) as u32);
+    f.confined = Some((host.max(own / 4).min(own), own));
+    // (kept past the build that asked: out of its job's arena)
+    Ok(crate::zone_alloc::copy_out(|| {
+        let f = Arc::new(f.clone());
+        with_sb(&*up, |s| s.early.insert(id, f.clone()));
+        f
+    }))
 }
 
 /// Rewrites a wrapper (host code)'s calls into sandboxed crates to their twins.

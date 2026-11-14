@@ -80,6 +80,38 @@ if [ "$STATUS" = 0 ] && [ "$GOT" = $'out the module, before the tier-up: true\no
 else
     echo "modules copies: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1))
 fi
+# A twin's O3 build optimises its body before the memory is confined: whatever address hot code
+# names (indexed, at a constant offset, struct and vector copies, a local moved out of its slot,
+# a forged fn pointer), the host's memory is neither written nor read. With the confined body as
+# the build's input (RELAX_OPT=-sblate) the same holds.
+for LATE in 1 0; do
+SO=$(mktemp); SE=$(mktemp)
+if [ "$LATE" = 1 ]; then SW=""; else SW="-sblate"; fi
+RELAX_OPT=$SW RELAX_SANDBOX_NOCHECK=1 RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/contain_hot.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+HOT=$(echo "$OUT" | grep -E '^tier1: sandbox:hot::[a-z_]+ installed ' | sed -E 's/^tier1: sandbox:hot::([a-z_]+) .*/\1/' | sort -u | wc -l | tr -d ' ')
+if [ "$STATUS" = 0 ] && [ "$GOT" = "$(cat "$D/expect-contain-hot.out")" ] && [ "$HOT" -ge 15 ]; then
+    echo "modules contain hot (late=$LATE): PASS ($HOT twins at O3)"
+else
+    echo "modules contain hot (late=$LATE): FAIL ($HOT twins at O3)"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1))
+fi
+done
+# A body the confinement refuses (RELAX_TEST_SANDBOX_REFUSE=1: every one) is built again from
+# the confined body: the sorts still give the host's results once hot.
+SO=$(mktemp); SE=$(mktemp)
+RELAX_TEST_SANDBOX_REFUSE=1 RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/copies.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out the module' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" = 0 ] && [ "$GOT" = $'out the module, before the tier-up: true\nout the module, after it: true' ] && echo "$OUT" | grep -q 'dropped(err: sandbox confinement after O3: ' && echo "$OUT" | grep -Eq '^tier1: sandbox:core::slice::sort::.* installed '; then
+    echo "modules confinement refused: PASS"
+else
+    echo "modules confinement refused: FAIL"; echo "$OUT" | grep -v '^  report' | tail -20; FAILS=$((FAILS + 1))
+fi
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)

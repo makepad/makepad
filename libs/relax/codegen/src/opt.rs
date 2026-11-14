@@ -1371,6 +1371,8 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
         f.guard_calls.push((ctx_of(p), s));
     }
     f.guard_size.add(callee.guard_size);
+    // (a sandbox twin's body not confined yet makes the body that takes it in one too)
+    f.unconfined |= callee.unconfined;
     let m = |v: VReg| vmap[v.0 as usize];
     // calls that may unwind in the callee's blocks, when the callee is inlined at an
     // Invoke: each ends a block of its own whose Invoke continues at the caller's pad

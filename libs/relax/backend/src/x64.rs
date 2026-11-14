@@ -6678,6 +6678,10 @@ fn imm_fits(i: &Inst) -> bool {
 }
 
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
+    // (sandbox.rs: the input of a twin's O3 build is confined before it comes here)
+    if f.unconfined {
+        return Err(format!("{}: a sandboxed body whose memory is not confined reached the backend", f.name));
+    }
     let covered = crate::passes::lower_coverage(f);
     let f = covered.as_ref().unwrap_or(f);
     let _warm = crate::probe::backend(&f.name);

@@ -5569,6 +5569,10 @@ pub fn vx_native(op: VX) -> bool {
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
+    // (sandbox.rs: the input of a twin's O3 build is confined before it comes here)
+    if f.unconfined {
+        return Err(format!("{}: a sandboxed body whose memory is not confined reached the backend", f.name));
+    }
     let _warm = crate::probe::backend(&f.name);
     let _cost_codegen = crate::probe::phase(5);
     crate::probe::size(f);
