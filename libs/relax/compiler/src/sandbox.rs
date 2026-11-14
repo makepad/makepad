@@ -2490,6 +2490,124 @@ fn words_in_registers(f: &mut Func, tls: Sym) -> bool {
     true
 }
 
+/// A twin's calls of the arena memcpy / memmove with a known small size, as inline copies in
+/// the window (O3's step for a twin once the twins it took in are part of it: the size of
+/// `ptr::copy_nonoverlapping(p, q, 1)` of a `T` is a constant only then). Host code has this
+/// from the optimizer's own fold (passes::simplify, `mem_fns`), which does not know a twin's
+/// entries, so a twin kept a call per element moved: a sort of u64 spent most of its time in
+/// them and in the thread-local reads of the entry. Both addresses are masked into the window
+/// like every access the transform rewrites, and at most INLINE_COPY_MAX bytes follow them:
+/// the guard pages take what the entry's range check did, as for the transform's own `Copy`.
+/// The call was charged with its block (the cost of a host call), and still is.
+/// True: `f` changed.
+pub(crate) fn inline_copies(u: &Unit, f: &mut Func) -> bool {
+    use relax_backend::rir::Mem;
+    let is_copy = |i: &Inst| matches!(i, Inst::Call(Callee::Host(s), a, r) if s.off == 0 && a.len() == 3 && r.len() <= 1);
+    if !f.blocks.iter().any(|b| b.insts.iter().any(|i| is_copy(i))) {
+        return false;
+    }
+    let tls = with_sb(u, |s| s.tls_sym);
+    // a size is known when its register has one definition, a constant
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    let mut konst: Vec<Option<i64>> = vec![None; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+        if let Inst::Iconst(d, k) = i {
+            konst[d.0 as usize] = Some(*k);
+        }
+    }
+    // 1: memcpy, 2: memmove (one entry behind both, sb_rt_memcpy; a memcpy's ranges are apart)
+    let mut entries: HashMap<u32, u8> = HashMap::new();
+    let mut changed = false;
+    for bi in 0..f.blocks.len() {
+        if !f.blocks[bi].insts.iter().any(|i| is_copy(i)) {
+            continue;
+        }
+        let insts = std::mem::take(&mut f.blocks[bi].insts);
+        let pos = std::mem::take(&mut f.blocks[bi].pos);
+        let mut out: Vec<Inst> = Vec::with_capacity(insts.len() + 8);
+        let mut opos: Vec<u64> = Vec::with_capacity(insts.len() + 8);
+        for (n, i) in insts.into_iter().enumerate() {
+            let p = pos.get(n).copied().unwrap_or(0);
+            let hit = match &i {
+                Inst::Call(Callee::Host(s), a, r) if is_copy(&i) => {
+                    let e = *entries.entry(s.id).or_insert_with(|| match u.syms.kind(s.id) {
+                        Some(SymKind::SbHost(name)) if name == "rt:memcpy" => 1,
+                        Some(SymKind::SbHost(name)) if name == "rt:memmove" => 2,
+                        _ => 0,
+                    });
+                    let size = if ndef[a[2].0 as usize] == 1 { konst[a[2].0 as usize] } else { None };
+                    match size {
+                        Some(k) if e != 0 && (0..=relax_backend::passes::INLINE_COPY_MAX).contains(&k) => Some((e, a[0], a[1], k as u32, r.first().copied())),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            let Some((e, d, s, size, ret)) = hit else {
+                out.push(i);
+                opos.push(p);
+                continue;
+            };
+            changed = true;
+            let at = out.len();
+            if size > 0 || ret.is_some() {
+                // the arena base as the transform reads it at entry (words_in_registers, which
+                // runs next, gives the register that holds it)
+                let (w, ar) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                out.push(Inst::TlsAddr(w, tls.plus(W_ARENA)));
+                out.push(Inst::Load(Mem::Int(8, false), ar, w, 0));
+                let mut masked = |v: VReg, out: &mut Vec<Inst>| {
+                    let (t, mv) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                    out.push(Inst::Conv(Conv::IntToInt(U32), t, v));
+                    out.push(Inst::IBin(IOp::Add, U64, mv, t, ar));
+                    mv
+                };
+                let d2 = masked(d, &mut out);
+                if size > 0 {
+                    let s2 = masked(s, &mut out);
+                    if e == 1 {
+                        out.push(Inst::Copy(d2, s2, size));
+                    } else {
+                        // every load before any store (the ranges may overlap): 8-byte words
+                        // with the tail as one overlapping word; under 8 bytes, 4/2/1 pieces
+                        let mut parts: Vec<(u8, i32)> = Vec::new();
+                        if size >= 8 {
+                            parts.extend((0..size / 8).map(|j| (8u8, j as i32 * 8)));
+                            if size % 8 != 0 {
+                                parts.push((8, size as i32 - 8));
+                            }
+                        } else {
+                            let mut o = 0;
+                            for wd in [4u32, 2, 1] {
+                                if size - o >= wd {
+                                    parts.push((wd as u8, o as i32));
+                                    o += wd;
+                                }
+                            }
+                        }
+                        let ts: Vec<VReg> = parts.iter().map(|_| f.vreg(Cls::I)).collect();
+                        out.extend(parts.iter().zip(&ts).map(|(&(wd, o), &t)| Inst::Load(Mem::Int(wd, false), t, s2, o)));
+                        out.extend(parts.iter().zip(&ts).map(|(&(wd, o), &t)| Inst::Store(Mem::Int(wd, false), d2, o, t)));
+                    }
+                }
+                // (the entry returns the destination's address in the window)
+                if let Some(r) = ret {
+                    out.push(Inst::Mov(r, d2));
+                }
+            }
+            opos.extend(std::iter::repeat(p).take(out.len() - at));
+        }
+        f.blocks[bi].insts = out;
+        f.blocks[bi].pos = opos;
+    }
+    changed
+}
+
 /// Where `sym` (a `#[thread_local]` static, or the thread block itself) is in a segment's
 /// thread-locals: the block's two words first (zero: std's LocalKey takes the runtime call), each
 /// static laid out once per unit with its first-access flag byte.

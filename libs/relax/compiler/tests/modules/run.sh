@@ -47,6 +47,19 @@ if [ "$TIER" = 0 ]; then BASE_TIERS="$GOT"; else
 fi
 echo "modules fuel tiers (tier1=$TIER): PASS ($(echo "$GOT" | head -1 | sed 's/^out //'))"
 done
+# A twin's O3 build makes the arena copies of a known small size inline: sorts of elements of
+# 1 to 72 bytes give the host's results before and after the tier-up.
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/copies.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out the module' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" = 0 ] && [ "$GOT" = $'out the module, before the tier-up: true\nout the module, after it: true' ] && echo "$OUT" | grep -Eq '^tier1: sandbox:core::slice::sort::.* installed '; then
+    echo "modules copies: PASS"
+else
+    echo "modules copies: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1))
+fi
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)
