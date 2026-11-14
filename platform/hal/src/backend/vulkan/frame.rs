@@ -495,7 +495,8 @@ impl Vulkan {
                                 image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
                                 batch.images.push(image.clone());
                                 chain.latest.store(packet.frame, std::sync::atomic::Ordering::Release);
-                                batch.present = Some(super::surface::Present { chain, image, frame: packet.frame });
+                                batch.present = Some(super::surface::Present { chain, image, frame: packet.frame,
+                                    #[cfg(target_os = "android")] presenter: self.present.clone() });
                             }
                         }
                         Err(e) => { eprintln!("[hal-vulkan] surface: {e}"); s.bad(); }
