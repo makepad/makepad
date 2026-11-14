@@ -1,0 +1,5 @@
+out as intended, hot: true
+out nothing of the host written: true
+out nothing of the host read: true
+out a forged fn pointer does not reach the host: true
+out the module still runs: true
