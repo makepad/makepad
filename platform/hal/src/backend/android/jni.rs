@@ -72,7 +72,10 @@ pub(super) fn hide_surface_cover() {
     SURFACE_COVERED.store(false, Ordering::Release);
     let _ = with_activity(|env, activity| unsafe {
         void(env, activity, c"setSurfaceCoverVisible", c"(Z)V", &[jvalue { z: 0 }]);
-        void(env, activity, c"requestSurfaceSnapshotRefresh", c"()V", &[]);
+        // `no-surface-snapshot`: the Activity takes none (`create`), so none is asked for
+        if !cfg!(feature = "no-surface-snapshot") {
+            void(env, activity, c"requestSurfaceSnapshotRefresh", c"()V", &[]);
+        }
     });
 }
 pub(super) fn set_native_appearance(value: u32) -> bool {
@@ -113,6 +116,10 @@ unsafe extern "system" fn create(env: *mut JNIEnv, _: jclass, activity: jobject)
     if new.is_null() { return; }
     let old = std::mem::replace(&mut *lock(&ACTIVITY), new as usize);
     if old != 0 { ((**env).DeleteGlobalRef.unwrap())(env, old as _); }
+    // `no-surface-snapshot`: the Activity keeps no copy of the surface, not even on its own pauses
+    if cfg!(feature = "no-surface-snapshot") {
+        void(env, activity, c"setSurfaceSnapshotsEnabled", c"(Z)V", &[jvalue { z: 0 }]);
+    }
     emit_lifecycle(lifecycle::FOREGROUND);
 }
 fn emit_lifecycle(kind: u32) { Shared::global().emit(clock_ns(), |q, _| q.lifecycle(kind)); }

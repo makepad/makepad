@@ -1188,6 +1188,9 @@ public class MakepadActivity
     private Bitmap mLatestSurfaceSnapshot;
     private int mLatestSurfaceSnapshotOrientation = android.content.res.Configuration.ORIENTATION_UNDEFINED;
     private boolean mSurfaceSnapshotCopyInFlight = false;
+    // Off with the Rust feature `no-surface-snapshot` (`setSurfaceSnapshotsEnabled`): no copy of the
+    // surface is taken, and a resume shows the cover in the app's background colour instead.
+    private boolean mSurfaceSnapshotsEnabled = true;
     private boolean mSurfaceRecoveryOverlayVisible = false;
     private boolean mIsCoverWaitingForFirstFrame = false;
 
@@ -2143,7 +2146,7 @@ public class MakepadActivity
     }
 
     private void refreshSurfaceSnapshotCache() {
-        if (!canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
+        if (!mSurfaceSnapshotsEnabled || !canCaptureSurfaceSnapshot() || mSurfaceSnapshotCopyInFlight) {
             return;
         }
         mSurfaceSnapshotCopyInFlight = true;
@@ -2396,6 +2399,23 @@ public class MakepadActivity
                     clearWarmResumeSurfaceSnapshot();
                 }
             });
+    }
+
+    // Rust's `no-surface-snapshot` turns the surface snapshots off (any snapshot already taken goes too).
+    public void setSurfaceSnapshotsEnabled(final boolean enabled) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    setSurfaceSnapshotsEnabled(enabled);
+                }
+            });
+            return;
+        }
+        mSurfaceSnapshotsEnabled = enabled;
+        if (!enabled) {
+            trimSurfaceSnapshotCaches();
+        }
     }
 
     public void setSurfaceCoverVisible(final boolean visible) {

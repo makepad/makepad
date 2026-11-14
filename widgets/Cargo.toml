@@ -126,3 +126,7 @@ browser = ["dep:makepad-widgets-browser"]
 # turns it on, so exactly the apps that link the chat get the slot.
 ai = ["dep:makepad-widgets-ai"]
 
+# Android: the Activity keeps no full-screen snapshot of the surface for pauses and resumes
+# (28 MB at 1920x1200); a resume shows the app's background colour until the first frame
+# (see makepad-hal).
+no-surface-snapshot = ["makepad-widgets-core/no-surface-snapshot"]
