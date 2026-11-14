@@ -204,7 +204,9 @@ fn requests_to_an_unreachable_fleet_host_leave_no_route_threads() {
     let c = client(&hub);
     for _ in 0..10 {
         let ch = c.open("route", "gone peers").unwrap();
-        ch.send(b"peers".to_vec()).unwrap();
+        // while the host's redial pauses the hub may answer before the request goes: the
+        // channel is closed then, and its close says why
+        let _ = ch.send(b"peers".to_vec());
         match ch.recv_timeout(WAIT) {
             Ok(Event::Closed(_, why)) => assert!(why.contains("down"), "{why}"),
             other => panic!("{other:?}"),

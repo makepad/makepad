@@ -542,8 +542,9 @@ pub(super) fn end_process(destroyed: usize) -> ! {
             if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
         });
     }
-    // the process's exit work (its endpoint's files), the flushes, then `_exit`, as every process ends
-    makepad_core_util::process_end::end(0)
+    // the process's exit work (its endpoint's files), the flushes, then `_exit` (as before: no C library
+    // exit handlers on Android while the Java threads run)
+    makepad_core_util::process_end::end_without_c_handlers(0)
 }
 
 pub(super) fn ime_command(cmd: OsCmd) -> bool {

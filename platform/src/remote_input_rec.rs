@@ -105,7 +105,7 @@ fn command_of(event: &Event) -> Option<String> {
 /// Input at the dispatch boundary for the flight recorder (makepad run): native and injected
 /// alike (a replay reproduces what the app saw), at its drawn frame.
 pub(crate) fn flight(event: &Event, injected: bool) {
-    // the window's size and scale: a replay opens its window so (MAKEPAD_WINDOW)
+    // the window's size and scale: a replay opens its window so (RELAX_REPLAY_WINDOW)
     if let Event::WindowGeomChange(e) = event {
         let g = &e.new_geom;
         crate::makepad_error_log::flight::mark_ab("window.geom", &format!("{}x{}@{}", n(g.inner_size.x), n(g.inner_size.y), n(g.dpi_factor)), e.window_id.0 as u64, 0);
@@ -176,11 +176,11 @@ pub(crate) fn status() -> Answer {
     ))
 }
 
-/// MAKEPAD_INPUT_REPLAY=<file> (a flight recorder replay, `makepad inspect file=<x.mkpf> rec
+/// RELAX_REPLAY_INPUT=<file> (a flight recorder replay, `makepad inspect file=<x.mkpf> rec
 /// replay`): the app plays the input back from its start, each event at the drawn frame it
 /// was recorded at (frames counted from the app's start).
 pub(crate) fn replay_at_start() {
-    let Some(path) = std::env::var("MAKEPAD_INPUT_REPLAY").ok().filter(|p| !p.is_empty()) else { return };
+    let Some(path) = std::env::var("RELAX_REPLAY_INPUT").ok().filter(|p| !p.is_empty()) else { return };
     let p = Params(vec![("path".into(), path), ("sync".into(), "frame".into()), ("abs".into(), "1".into())]);
     if let Answer::Json(s) = replay(&p) {
         eprintln!("[makepad-remote] input replay: {s}");
