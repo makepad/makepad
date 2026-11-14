@@ -113,5 +113,10 @@ if [ "$STATUS" = 0 ] && echo "$OUT" | grep -q '^out deadlines: true$'; then echo
 OUT=$("$1" test "$D/unsafe_impl.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-unsafe-impl.out")" ]; then echo "modules unsafe impl: PASS"; else echo "modules unsafe impl: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
+# A module derives the comparison and hash traits on its enums (the derives read the discriminant
+# in an `unsafe` block of the front's own writing); its own `unsafe` beside a derive stays refused.
+OUT=$("$1" test "$D/derive_enum.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-derive-enum.out")" ]; then echo "modules derive on enums: PASS"; else echo "modules derive on enums: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
 if [ "$FAILS" != 0 ]; then echo "modules: $FAILS case(s) FAILED"; exit 1; fi
 echo "modules: every case PASS"

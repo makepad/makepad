@@ -132,8 +132,21 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
                 out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
             }
         }
-        for e in &ast.exprs {
+        // what a builtin derive wrote is the front's own text, not the module's: the expressions
+        // parsed for its impl and that impl's items (an enum's PartialEq, PartialOrd, Ord and Hash
+        // read the discriminant in an `unsafe` block)
+        let mut derived: Vec<(u32, u32)> = Vec::new();
+        for it in &ast.items {
+            if let ItemKind::Impl(r) = &it.kind {
+                if ast.row(*r).builtin_derive {
+                    derived.push((it.ranges[0], it.ranges[1]));
+                    derived.extend(ast.list(ast.row(*r).items).iter().map(|m| { let m = ast.item(*m); (m.ranges[0], m.ranges[1]) }));
+                }
+            }
+        }
+        for (id, e) in ast.exprs.iter().enumerate() {
             match &e.kind {
+                ExprKind::Unsafe(_) if derived.iter().any(|r| r.0 <= id as u32 && (id as u32) < r.1) => {}
                 ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
                 ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_args.get(ast.row(*m).args as usize).map_or(false, |a| a.asm.is_some()) => {
                     out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
