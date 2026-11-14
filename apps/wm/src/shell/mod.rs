@@ -45,7 +45,7 @@ pub mod wifi_linux;
 #[cfg(target_os = "linux")]
 pub mod hotspot_linux;
 #[cfg(target_os = "linux")]
-pub mod qr;
+pub use makepad_qr as qr;
 #[cfg(target_os = "linux")]
 pub mod system_linux;
 /// The saved display arrangement (order, main screen, modes, render-on
