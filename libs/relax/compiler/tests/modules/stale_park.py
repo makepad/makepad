@@ -19,7 +19,7 @@ try:
         if not line:
             break
         err.append(line)
-        m = re.search(r"stale access parked as (P\d+) -- makepad inspect (\d+) panics", line)
+        m = re.search(r"stale access parked as (P\d+) -- (?:makepad|relax) inspect (\d+) panics", line)
         if m:
             ident, pid = m.group(1), m.group(2)
             break
@@ -58,7 +58,7 @@ try:
         if not line:
             break
         err.append(line)
-        m = re.search(r"stale access parked as (P\d+) -- makepad inspect (\d+) panics", line)
+        m = re.search(r"stale access parked as (P\d+) -- (?:makepad|relax) inspect (\d+) panics", line)
         if m:
             ident, pid = m.group(1), m.group(2)
             break
