@@ -26,6 +26,27 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
+# A twin's O3 build takes in the twins it calls: what a path costs, where a run on a budget ends
+# and what the module did up to there are the same with tiering off and after a tier-up that
+# inlined.
+BASE_TIERS=""
+for TIER in 0 1; do
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/fuel_tiers.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" != 0 ] || ! echo "$GOT" | grep -q '^out the same after the tier-up: true$'; then
+    echo "modules fuel tiers (tier1=$TIER): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+fi
+if [ "$TIER" = 0 ]; then BASE_TIERS="$GOT"; else
+    if [ "$GOT" != "$BASE_TIERS" ] || ! echo "$OUT" | grep -Eq '^tier1: sandbox:tiers::run installed \([0-9]+ bytes, [1-9][0-9]* callees inlined'; then
+        echo "modules fuel tiers invariance: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+    fi
+fi
+echo "modules fuel tiers (tier1=$TIER): PASS ($(echo "$GOT" | head -1 | sed 's/^out //'))"
+done
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)
