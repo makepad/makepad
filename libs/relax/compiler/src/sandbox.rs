@@ -2455,6 +2455,38 @@ fn words_in_registers(f: &mut Func, tls: Sym) -> bool {
             state = next;
         }
     }
+    // one address of the words for the whole activation, made at its entry: in machine code a
+    // `TlsAddr` is a read of the thread's block and of the symbol's offset (eight instructions
+    // on arm64 macOS), and each twin the inliner took in brought its own, so every meter of a
+    // run of small twins paid one. The transform already holds the address it makes at entry
+    // through the whole function (its meters, `words`); here the same holds after the inliner.
+    let base = f.vreg(Cls::I);
+    let mut same: HashMap<u32, VReg> = HashMap::new();
+    for blk in f.blocks.iter_mut() {
+        let mut k = 0;
+        while k < blk.insts.len() {
+            match blk.insts[k] {
+                Inst::TlsAddr(d, s) if s.id == tls.id && s.off == tls.off => {
+                    same.insert(d.0, base);
+                    blk.insts.remove(k);
+                    blk.pos.remove(k);
+                    continue;
+                }
+                Inst::TlsAddr(d, s) if s.id == tls.id => blk.insts[k] = Inst::IBinI(IOp::Add, U64, d, base, s.off - tls.off),
+                _ => {}
+            }
+            k += 1;
+        }
+    }
+    if !same.is_empty() {
+        let to = |v: VReg| same.get(&v.0).copied().unwrap_or(v);
+        for i in f.blocks.iter_mut().flat_map(|b| b.insts.iter_mut()) {
+            *i = relax_backend::passes::rename(i, &to);
+        }
+    }
+    let p0 = f.blocks[0].pos.first().copied().unwrap_or(0);
+    f.blocks[0].insts.insert(0, Inst::TlsAddr(base, tls));
+    f.blocks[0].pos.insert(0, p0);
     true
 }
 
