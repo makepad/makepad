@@ -259,7 +259,10 @@ fn sample() -> (f64, Vec<ProcRow>) {
 #[cfg(not(any(target_os = "linux", windows)))]
 fn sample() -> (f64, Vec<ProcRow>) {
     // macOS (and the rest): `ps` gives a decaying CPU average per process; the machine's use is
-    // their sum over the cores
+    // their sum over the cores. Spawned, not read in place: /bin/ps is setuid root, and libproc
+    // refuses another user's CPU and RSS to this process (WindowServer's, which a busy look names).
+    // It runs for a CPU look alone (a timed start, a timed lease's noise look every 10 s); the GPU
+    // split names its processes from [`named`]
     let out = makepad_remote::group::command("/bin/ps").args(["-Ao", "pid=,ppid=,pgid=,pcpu=,rss=,comm="]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output();
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     let rows: Vec<ProcRow> = text
@@ -411,6 +414,70 @@ const COMPILERS: [&str; 13] = ["rustc", "cargo", "cc", "c++", "gcc", "g++", "cla
 /// The box's processes, each with its CPU over a half-second look.
 pub fn processes() -> Vec<ProcRow> {
     sample().1
+}
+
+/// Every process's pid, parent, group and name, without CPU or RSS, read in place: macOS's
+/// `sysctl` process table, which holds other users' processes too (WindowServer), and the
+/// executable's file name where libproc gives it. Elsewhere [`processes`].
+#[cfg(target_os = "macos")]
+pub fn named() -> Vec<ProcRow> {
+    extern "C" {
+        fn sysctl(name: *const i32, namelen: u32, oldp: *mut u8, oldlenp: *mut usize, newp: *const u8, newlen: usize) -> i32;
+        fn proc_pidpath(pid: i32, buffer: *mut u8, size: u32) -> i32;
+    }
+    // struct kinfo_proc (sys/sysctl.h), 648 bytes on 64-bit macOS: p_stat at 36 (5: a zombie),
+    // p_pid at 40, p_comm[17] at 243, kp_eproc's e_ppid at 560 and e_pgid at 564
+    const SIZE: usize = 648;
+    let mib = [1, 14, 0]; // CTL_KERN, KERN_PROC, KERN_PROC_ALL
+    let buf = loop {
+        let mut len = 0usize;
+        if unsafe { sysctl(mib.as_ptr(), 3, std::ptr::null_mut(), &mut len, std::ptr::null(), 0) } != 0 {
+            return Vec::new();
+        }
+        len += len / 8 + SIZE * 16;
+        let mut buf = vec![0u8; len];
+        // (the table grew between the two calls: ask again)
+        if unsafe { sysctl(mib.as_ptr(), 3, buf.as_mut_ptr(), &mut len, std::ptr::null(), 0) } == 0 {
+            buf.truncate(len);
+            break buf;
+        }
+    };
+    buf.chunks_exact(SIZE).filter(|k| k[36] != 5).filter_map(|k| {
+        let int = |at: usize| i32::from_ne_bytes(k[at..at + 4].try_into().unwrap());
+        let pid = int(40);
+        (pid > 0).then_some(())?;
+        let mut path = [0u8; 4096];
+        let n = unsafe { proc_pidpath(pid, path.as_mut_ptr(), path.len() as u32) };
+        let name = if n > 0 {
+            let full = String::from_utf8_lossy(&path[..n as usize]).into_owned();
+            full.rsplit('/').next().unwrap_or(&full).to_string()
+        } else {
+            let comm = &k[243..260];
+            String::from_utf8_lossy(&comm[..comm.iter().position(|b| *b == 0).unwrap_or(comm.len())]).into_owned()
+        };
+        Some(ProcRow { pid: pid as u32, ppid: int(560) as u32, pgid: int(564) as u32, name, ..Default::default() })
+    }).collect()
+}
+
+/// [`processes`]: off macOS the process table comes with CPU and RSS in place.
+#[cfg(not(target_os = "macos"))]
+pub fn named() -> Vec<ProcRow> {
+    processes()
+}
+
+/// This process and launchd (another user's) are in the table with their parent and group.
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+fn the_named_table_holds_other_users_processes_without_a_spawn() {
+    extern "C" {
+        fn getppid() -> i32;
+        fn getpgrp() -> i32;
+    }
+    let rows = named();
+    let me = rows.iter().find(|r| r.pid == std::process::id()).expect("this process");
+    assert_eq!((me.ppid, me.pgid), (unsafe { getppid() } as u32, unsafe { getpgrp() } as u32));
+    assert!(!me.name.is_empty());
+    assert!(rows.iter().any(|r| r.pid == 1 && r.name == "launchd"), "another user's process: {:?}", rows.iter().find(|r| r.pid == 1));
 }
 
 /// The compilers among a look's `rows` ([`processes`]; `me`: the hub's pid) that run outside

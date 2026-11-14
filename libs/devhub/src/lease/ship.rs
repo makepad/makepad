@@ -416,7 +416,7 @@ fn place_input(work: &Path, tmp: &Path, hash: &str, part: &Path, size: u64) -> R
     let unpack = tmp.join(format!("input-{hash}"));
     let _ = std::fs::remove_dir_all(&unpack);
     std::fs::create_dir_all(&unpack).map_err(|e| format!("{}: {e}", unpack.display()))?;
-    let out = std::process::Command::new("tar").arg("-xf").arg(part).arg("-C").arg(&unpack).output().map_err(|e| format!("input {hash}: tar: {e}"))?;
+    let out = std::process::Command::new(crate::os::tool("tar")).arg("-xf").arg(part).arg("-C").arg(&unpack).output().map_err(|e| format!("input {hash}: tar: {e}"))?;
     if !out.status.success() {
         let _ = std::fs::remove_dir_all(&unpack);
         return Err(format!("input {hash}: `tar -xf` of it failed ({}): {}", out.status, String::from_utf8_lossy(&out.stderr).trim()));

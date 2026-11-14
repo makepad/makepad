@@ -2292,9 +2292,16 @@ impl LeaseMaster {
                 if let Some(at_beat) = beaten {
                     match self.durable_state_line(line.trim()) {
                         // its holder hears the idle verdict or its yield too, not the inbox alone (`Beat`);
-                        // `hung`: the idle verdict, on which a run's client hands its run to a job
+                        // `hung`: the idle verdict, on which a run's client hands its run to a job;
+                        // `yield`: told to yield, on which a run in rounds hands its box over after
+                        // its round (`devhub run --rounds`)
                         Ok(Some(state)) => out.push(match self.owner_word(line.trim()) {
-                            Some(word) => format!("{},\"idle\":{}{}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word), if self.sched.lock().unwrap().hung_word(line.trim()).is_some() { ",\"hung\":true" } else { "" }),
+                            Some(word) => {
+                                let s = self.sched.lock().unwrap();
+                                let hung = if s.hung_word(line.trim()).is_some() { ",\"hung\":true" } else { "" };
+                                let told = if s.told_to_yield(line.trim()) { ",\"yield\":true" } else { "" };
+                                format!("{},\"idle\":{}{hung}{told}}}", state.strip_suffix('}').unwrap_or(&state), json_str(&word))
+                            }
                             None => state,
                         }),
                         // an empty answer, said with the lease as its beat found it (a live test's

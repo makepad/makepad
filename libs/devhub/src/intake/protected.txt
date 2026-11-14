@@ -1,0 +1,83 @@
+# Protected paths: the land rule (docs/agents/intake.md). This file is itself t1-hard.
+# A line is `<tier> <pattern>`. A pattern ending in `/` is a directory prefix, `*/<name>` matches
+# that file or directory name anywhere, anything else is one exact path. The most severe tier
+# that matches wins: t1-hard, then t1-origin, then t2.
+#
+# t1-hard: every landing needs `devhub intake approve` at the user's terminal (what needs the
+#   user's eye even from our own lanes).
+# t1-origin: a lane made from an intake item needs that approval; any other lane lands and the
+#   landing is recorded for the daily push review.
+# t2: a lane made from an intake item needs an adversarial-review record; any other lane lands
+#   and the landing is recorded.
+# The root Cargo.toml is ruled per hunk in protect.rs: [patch] and any non-path dependency are
+# t1-hard (a new external dependency needs the user), the rest is t1-origin.
+# t2 never matches a test or fixture path (a `tests`, `fixture`, `fixtures` or `testdata`
+# directory): the record lists only real build scripts and macro crates.
+
+# t1-hard: CI, what every build reads, and the intake code with this list
+t1-hard .github/
+t1-hard .cargo/config.toml
+t1-hard libs/devhub/src/intake/
+
+# t1-origin: the land gate and the private check
+t1-origin libs/devhub/src/land.rs
+t1-origin libs/devhub/src/private_check.rs
+t1-origin tools/private_check/
+
+# t1-origin: agent instructions
+t1-origin AGENTS.md
+t1-origin */AGENTS.md
+t1-origin */CLAUDE.md
+t1-origin docs/agents/
+t1-origin .claude/
+t1-origin */.claude/
+
+# t1-origin: the relax policy and sandbox core
+t1-origin libs/relax/base/src/compile_time.rs
+t1-origin libs/relax/base/src/progenv.rs
+t1-origin libs/relax/compiler/src/sandbox.rs
+t1-origin libs/relax/compiler/src/sandbox/
+t1-origin libs/relax/compiler/src/pmhost.rs
+t1-origin libs/relax/compiler/src/registry_net.rs
+t1-origin libs/relax/front/src/unitgraph.rs
+t1-origin libs/relax/front/src/macro_reg.rs
+
+# t1-origin: the parsers that define the --allow-* flags
+t1-origin libs/relax/compiler/src/lib.rs
+t1-origin libs/relax/compiler/src/tool.rs
+t1-origin libs/relax/compiler/src/run.rs
+t1-origin libs/relax/front/src/native.rs
+t1-origin libs/relax/front/src/native_stub.rs
+
+# t2: trusted by position (the sandbox owner sets the final map)
+t2 libs/relax/backend/
+t2 libs/relax/codegen/
+t2 libs/relax/compiler/src/jit.rs
+t2 libs/relax/compiler/src/jit_queue.rs
+t2 libs/relax/compiler/src/lower.rs
+t2 libs/relax/compiler/src/lower/
+t2 libs/relax/compiler/src/global_asm.rs
+t2 libs/relax/compiler/src/cabi.rs
+t2 libs/relax/compiler/src/rt_abi.rs
+t2 libs/relax/compiler/src/static_glue.rs
+t2 libs/relax/compiler/src/syms.rs
+t2 libs/relax/compiler/src/cache.rs
+t2 libs/relax/compiler/src/cache/
+t2 libs/relax/compiler/src/codegen_id.rs
+t2 libs/relax/compiler/src/kernel_store.rs
+t2 libs/relax/compiler/src/provided.rs
+t2 libs/relax/compiler/src/std_source.rs
+t2 libs/relax/compiler/std/
+t2 libs/relax/native_macros/
+t2 libs/relax/attr/
+t2 libs/relax/build_sources.rs
+t2 libs/relax/build_stamp.rs
+t2 libs/relax/self_stamp.rs
+t2 libs/relax_api/macro/
+t2 platform/script/derive/
+t2 widgets/derive_widget/
+t2 libs/makepad_test/macros/
+t2 libs/wasm_bridge/derive/
+t2 libs/live_id/id_macros/
+t2 libs/micro_serde/derive/
+t2 */build.rs
