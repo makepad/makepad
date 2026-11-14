@@ -21,6 +21,8 @@ const BATCH_FRAMES_IN_FLIGHT: usize = 2;
 
 /// The longest a batch renderer's beat waits for the GPU to complete a frame.
 const BATCH_STALL: std::time::Duration = BEAT;
+/// How long an Android window's beat waits for a frame completion that never comes.
+const ANDROID_STALL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// `MAKEPAD_PAINT_INTERVAL` (seconds): a process whose windows are hidden
 /// (`MAKEPAD_HIDE_WINDOWS`) and draw offscreen work only (a batch renderer:
@@ -364,8 +366,19 @@ impl Cx {
                 }
                 self.hal_submit_batch();
             }
-            let gpu_ready = batch.is_none() || in_flight.len() < BATCH_FRAMES_IN_FLIGHT || self.frame_completed_serial() >= in_flight[0]
-                || last_beat.elapsed() >= BATCH_STALL;
+            // On Android the display clock's FrameReady comes every vsync whatever the GPU has
+            // left to do; a slow GPU (Adreno 505: ~31 frames/s at 1920x1200) then fell 60+ frames
+            // behind, each frame waiting seconds to be shown, and memory grew with them. A window's
+            // beat there waits, as a batch renderer's does, for the oldest of its frames in flight.
+            let pace = batch.is_some() || cfg!(target_os = "android");
+            let stall = if batch.is_some() { BATCH_STALL } else { ANDROID_STALL };
+            let gpu_ready = !pace || in_flight.len() < BATCH_FRAMES_IN_FLIGHT || self.frame_completed_serial() >= in_flight[0]
+                || last_beat.elapsed() >= stall;
+            if announced && !gpu_ready {
+                // asked again at the next vsync (`frame_request` below)
+                requested = None;
+            }
+            let announced = announced && gpu_ready;
             let due = std::time::Instant::now() >= next_beat && gpu_ready;
             if !hosted && !self.hal.device_lost && (announced || (!display_clock && due && self.hal_has_work())) {
                 requested = None;
@@ -383,7 +396,7 @@ impl Cx {
                 let now = std::time::Instant::now();
                 next_beat = if next_beat + period > now { next_beat + period } else { now + period };
                 last_beat = now;
-                if batch.is_some() {
+                if pace {
                     while in_flight.len() >= BATCH_FRAMES_IN_FLIGHT {
                         in_flight.pop_front();
                     }
