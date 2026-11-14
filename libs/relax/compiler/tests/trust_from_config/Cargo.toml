@@ -1,0 +1,11 @@
+# A repository that names Relax's grants in its cargo `[env]` and its build script's `rustc-env`,
+# run with and without grants in the environment and on the command line
+# (tools/run/fixture/modules_harness.rs). Runs only under the runner (std::relax::Module).
+[package]
+name = "tfc-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[workspace]

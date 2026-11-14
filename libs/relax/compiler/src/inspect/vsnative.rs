@@ -178,7 +178,7 @@ mod imp {
                 all.iter().position(|a| a == "--").map(|k| all[k + 1..].to_vec()).unwrap_or_default()
             }
         };
-        let log = std::env::temp_dir().join(format!("makepad-vsnative-{}.log", std::process::id()));
+        let log = std::env::temp_dir().join(format!("relax-vsnative-{}.log", std::process::id()));
         let f = match std::fs::File::create(&log) {
             Ok(f) => f,
             Err(e) => return out.err(&format!("cannot write {}: {}", log.display(), e)),
@@ -545,7 +545,7 @@ mod stacks {
                 for (ks, w) in v.iter() {
                     *folded.entry(ks.iter().map(|k| k.replace(';', ":")).collect::<Vec<_>>().join(";")).or_default() += w;
                 }
-                let path = std::env::temp_dir().join(format!("makepad-vsnative-{}-{}-{}.folded", std::process::id(), side, crate::inspect::now_ms()));
+                let path = std::env::temp_dir().join(format!("relax-vsnative-{}-{}-{}.folded", std::process::id(), side, crate::inspect::now_ms()));
                 let text: String = folded.iter().map(|(k, w)| format!("{} {:.0}\n", k, w)).collect();
                 if std::fs::write(&path, text).is_ok() {
                     out.line(&format!("saved {} stacks ({} ms of CPU over {:.1} s): {}", side, v.iter().map(|x| x.1).sum::<f64>() as u64, t, path.display()));

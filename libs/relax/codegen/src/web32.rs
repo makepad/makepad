@@ -1,4 +1,4 @@
-//! The wasm32 web target's execution on this machine (local/agent_state/wasm/web32.DESIGN.md):
+//! The wasm32 web target's execution on this machine (the compile half; compiler's web32.rs runs it):
 //! a program built for `wasm32-unknown-unknown` has 4-byte pointers, and every pointer value is a
 //! 32-bit offset into the linear memory's 4 GB window at `base` (zone_alloc/web.rs), where
 //! everything the program can address lives: its code and data (the unit's reservation), its

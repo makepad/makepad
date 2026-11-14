@@ -4,6 +4,9 @@
 // a cleared environment. `--shell-nested`: a shell it starts with a cleared environment execs it;
 // `--shell-changed`: a shell it starts with another PREPARED_TOKEN (the build script's input)
 // execs it, which is still the run's build (relax issue 172, PR 175's shell case).
+// `--env-off-disk`: no file in the run's own folder (its executable's) holds PREPARED_MARKER's
+// value, which the run's build environment has: the run hands that to a launch of its executable
+// by a descriptor, never in a file a killed run would leave.
 use std::process::Command;
 
 fn main() {
@@ -35,6 +38,27 @@ fn main() {
     }
     #[cfg(unix)]
     {
+        if has("--env-off-disk") {
+            use std::os::unix::fs::MetadataExt;
+            let marker = std::env::var("PREPARED_MARKER").expect("the fixture sets PREPARED_MARKER");
+            let me = std::fs::metadata(&exe).unwrap();
+            let mut dirs = vec![exe.parent().unwrap().to_path_buf()];
+            let mut files = 0;
+            while let Some(d) = dirs.pop() {
+                for e in std::fs::read_dir(&d).unwrap().flatten() {
+                    let m = e.metadata().unwrap();
+                    if m.is_dir() {
+                        dirs.push(e.path());
+                    } else if !(m.dev() == me.dev() && m.ino() == me.ino()) {
+                        // (the links of the loader are the program's executable itself)
+                        files += 1;
+                        let bytes = std::fs::read(e.path()).unwrap();
+                        assert!(!bytes.windows(marker.len()).any(|w| w == marker.as_bytes()), "{} holds the run's environment", e.path().display());
+                    }
+                }
+            }
+            assert!(files > 0, "the run's folder has its command line beside its executable");
+        }
         if has("--shell-nested") {
             let child = Command::new("/bin/sh").args(["-c", "exec \"$0\" --empty --via-shell"]).arg(&exe).env_clear().output().unwrap();
             assert!(child.status.success(), "its own executable, exec'd by a shell with a cleared environment: {}", String::from_utf8_lossy(&child.stderr));

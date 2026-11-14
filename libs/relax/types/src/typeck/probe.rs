@@ -269,7 +269,9 @@ impl Fcx<'_> {
 
     /// :1772-1843,2371-2406: collapse only candidates from the same trait;
     /// different traits or inherent impls are E0034, including ambiguous probes.
-    fn consider_candidates(&mut self, receiver: TyId, candidates: &[Candidate], steps: &[CandidateStep], original: &[GenericArg], obligations: &[Goal], lo: u32) -> Result<Option<Candidate>, ()> {
+    /// `stable_only` (:1834-1843 `unstable_candidates`): an applicable candidate the calling crate
+    /// may not use (`#[unstable]` in another crate, its feature not enabled) is set aside.
+    fn consider_candidates(&mut self, receiver: TyId, candidates: &[Candidate], steps: &[CandidateStep], original: &[GenericArg], obligations: &[Goal], lo: u32, stable_only: bool) -> Result<Option<Candidate>, ()> {
         let mut applicable = Vec::new();
         for candidate in candidates {
             let ok = self.infcx.probe(|snapshot| {
@@ -278,12 +280,21 @@ impl Fcx<'_> {
             });
             if ok { applicable.push(candidate.clone()); }
         }
+        if stable_only { applicable.retain(|candidate| !self.unstable_here(candidate.item)); }
         if applicable.len() > 1 {
             if let Some(candidate) = self.collapse_candidates_to_trait_pick(&applicable) { return Ok(Some(candidate)); }
             self.err(lo, "E0034: multiple applicable items in scope".into());
             return Err(());
         }
         Ok(applicable.pop())
+    }
+
+    /// stability.rs eval_stability's `Deny`: `item` is `#[unstable]` in another crate and the
+    /// calling crate does not enable its feature.
+    fn unstable_here(&self, item: DefId) -> bool {
+        let krate = self.prog.mods[self.module as usize].krate;
+        if self.prog.def(item).krate == krate { return false; }
+        crate::feature_gate::unstable_of(self.prog, item).is_some_and(|(feature, _)| !self.prog.crates[krate as usize].features(self.prog).has(&feature))
     }
 
     fn collapse_candidates_to_trait_pick(&self, candidates: &[Candidate]) -> Option<Candidate> {
@@ -336,9 +347,11 @@ impl Fcx<'_> {
         let snapshot = self.start_snapshot();
         // probe.rs:566: all generalized candidate variables and query replay
         // assignments live only for this probe. Confirmation recomputes autoderef.
-        let result = (|| {
-            for step in &mut steps { step.self_ty = method_response::generalize_response(&self.infcx, &step.response); }
-            let (inherent, extension) = self.assemble_probe_candidates(&steps, name);
+        for step in &mut steps { step.self_ty = method_response::generalize_response(&self.infcx, &step.response); }
+        let (inherent, extension) = self.assemble_probe_candidates(&steps, name);
+        // probe.rs pick_core: stable methods first, the unstable ones only when no stable one
+        // applies (shellexpand's own `as_str` trait method, not the unstable inherent `str::as_str`)
+        let mut search = |stable_only: bool| -> Result<Option<_>, ()> {
             for step in &steps {
                 if step.from_unsafe_deref || self.tcx.tys.has_error(step.self_ty) { continue; }
                 let (self_ty, obligations) = method_response::probe_instantiate_query_response(&self.infcx, self.prog, &self.param_env, &original, &step.response).expect("applicable autoderef response");
@@ -350,7 +363,7 @@ impl Fcx<'_> {
                         _ => match self.tcx.tys.kind(self_ty) { TyKind::Ptr(true, t) => self.tcx.tys.intern(TyKind::Ptr(false, *t)), _ => continue },
                     };
                     for candidates in [&inherent, &extension] {
-                        if let Some(candidate) = self.consider_candidates(receiver, candidates, &steps, &original, &obligations, lo)? {
+                        if let Some(candidate) = self.consider_candidates(receiver, candidates, &steps, &original, &obligations, lo, stable_only)? {
                             let (autoderefs, autoref) = if adjustment == 0 {
                                 match self.tcx.tys.kind(self_ty) {
                                     TyKind::Ref(m, _, _) => (step.autoderefs + 1, if *m { 2 } else { 1 }),
@@ -363,7 +376,8 @@ impl Fcx<'_> {
                 }
             }
             Ok(None)
-        })();
+        };
+        let result = match search(true) { Ok(None) => search(false), found => found };
         self.rollback_to(snapshot);
         let Some((mut candidate, autoderefs, autoref, unsize, const_ptr)) = result? else { return Ok(None); };
         let mut adjusted = self.shallow(receiver);

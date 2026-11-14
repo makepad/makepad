@@ -33,7 +33,7 @@ CRATES = {
     "makepad_font_core": "libs/font_core/src/lib.rs",
     "makepad_cpu_budget": "libs/cpu_budget/src/lib.rs",
     "makepad_shared_bytes": "libs/shared_bytes/src/lib.rs",
-    "makepad_alloc_phase": "libs/relax_api/phase/src/lib.rs",
+    "relax_api_phase": "libs/relax_api/phase/src/lib.rs",
     "makepad_live_id": "libs/live_id/src/lib.rs",
     "makepad_shader": "platform/shader/src/lib.rs",
     "makepad_script_std": "platform/script/std/src/lib.rs",
@@ -134,7 +134,7 @@ def scan_file(path, modpath, found, resets):
     st = {"raw": None, "block": 0, "str": False}
     src = open(path, errors="replace").read().split("\n")
     stack = [{"kind": "mod", "depth": 0, "path": modpath}]
-    depth, pending, path_attr, test_attr = 0, None, None, False
+    depth, pending, path_attr, test_attr, test_only = 0, None, None, False, False
     for i, line in enumerate(src):
         code = code_of(line, st)
         t = code.strip()
@@ -143,6 +143,8 @@ def scan_file(path, modpath, found, resets):
             path_attr = m.group(1)
         if t.startswith("#[") and "test" in t and t.startswith("#[cfg("):
             test_attr = True
+        if re.match(r"#\[cfg\((?:all\()?test\b", t):
+            test_only = True
         in_fn = any(s["kind"] == "fn" for s in stack)
         hidden = any(s["kind"] in ("tls", "test") for s in stack)
         m = INCLUDE.match(code_of(line.replace('"', "\x00"), dict(st)).replace("\x00", '"'))
@@ -183,7 +185,7 @@ def scan_file(path, modpath, found, resets):
         if TLS.search(code) or EXTERN.match(code):
             stack.append({"kind": "tls", "depth": depth, "path": stack[-1]["path"]})
         m = STATIC.match(code)
-        if m and not any(s["kind"] in ("tls", "test") for s in stack):
+        if m and not test_only and not any(s["kind"] in ("tls", "test") for s in stack):
             fns = [s["name"] for s in stack if s["kind"] == "fn"]
             found.setdefault("::".join(stack[-1]["path"] + fns + [m.group(1)]), []).append("%s:%d" % (os.path.relpath(path, ROOT), i + 1))
         for s in stack:
@@ -191,7 +193,7 @@ def scan_file(path, modpath, found, resets):
                 resets.setdefault("::".join(s["path"]), set()).update(re.findall(r"[A-Z_][A-Z0-9_]*", code))
                 break
         if t and not t.startswith("#["):
-            test_attr = False
+            test_attr, test_only = False, False
         depth += code.count("{") - code.count("}")
         while len(stack) > 1 and depth <= stack[-1]["depth"] and "}" in code:
             stack.pop()

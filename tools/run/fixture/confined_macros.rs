@@ -13,6 +13,16 @@
 //!   interner in `unsafe`, thread-locals, HashMap, OnceLock, catch_unwind, TokenStream parsing,
 //!   the crate's cargo environment), a workspace macro crate using a registry crate (confined
 //!   too) and a workspace-only macro crate reading a file (host code): the same output under both.
+//! - script: a registry package whose build script uses a registry macro crate (a
+//!   build-dependency) that writes a marker. The macro expands in the script's own run, which
+//!   sees the script's packages as the run does: under Open the marker appears, under Sandboxed
+//!   the script's build fails naming the C function and no marker appears.
+//! - script environment: a registry package's build script reports what it reads of the
+//!   environment. Under Open it reads the person's variables (a canary, PATH) and runs
+//!   RUSTC_WRAPPER (a marker-writing program), as cargo's scripts do; under Sandboxed it reads
+//!   cargo's variables and the workspace's `[env]` alone, its `rerun-if-env-changed` of the canary
+//!   grants nothing and is said once, and its Open output does not stand for a Sandboxed run of
+//!   the same workspace.
 //! - warm: the positive app under Sandboxed with the disk cache, started again after an edit of
 //!   the app (its macros expand again): the macro world's code, its twins included, all comes from
 //!   the world's cache (hits, no miss, nothing compiled), and the output is the same.
@@ -24,9 +34,9 @@ const AS_RUNNER: &str = "RELAX_CONFINED_MACROS_RUNNER";
 fn main() {
     // the runner, with the host of the policy asked for
     if let Ok(policy) = std::env::var(AS_RUNNER) {
-        std::env::remove_var(AS_RUNNER);
+        // (kept: a build script's run is this binary again, under the same policy)
         let host: &'static relax_runner::Host = match policy.as_str() {
-            "open" => Box::leak(Box::new(relax_runner::Host { proc_macros: relax_compiler::pmhost::Policy::Open, ..makepad_run::HOST })),
+            "open" => Box::leak(Box::new(relax_runner::Host { compile_time_code: relax_compiler::sandbox::Policy::Open, ..makepad_run::HOST })),
             _ => &makepad_run::HOST,
         };
         relax_runner::main(host);
@@ -38,8 +48,11 @@ fn main() {
     let _ = std::fs::remove_dir_all(&t);
     let (open, sandboxed, cached) = (t.join("open"), t.join("sandboxed"), t.join("cached"));
     let (ws_open, ws_sb, ws_cached) = (workspace(&open), workspace(&sandboxed), workspace(&cached));
-    let ([bypass_open, positive_open, bypass_sb, positive_sb], (cold, warm)) = std::thread::scope(|s| {
-        let runs = [(&ws_open, "open", "bypass"), (&ws_open, "open", "positive"), (&ws_sb, "sandboxed", "bypass"), (&ws_sb, "sandboxed", "positive")].map(|(ws, policy, package)| s.spawn(move || run(ws, policy, package, false)));
+    let ([bypass_open, positive_open, script_open, bypass_sb, positive_sb, script_sb, env_sb], (env_open, env_switched), (cold, warm)) = std::thread::scope(|s| {
+        let runs = [(&ws_open, "open", "bypass"), (&ws_open, "open", "positive"), (&ws_open, "open", "script"), (&ws_sb, "sandboxed", "bypass"), (&ws_sb, "sandboxed", "positive"), (&ws_sb, "sandboxed", "script"), (&ws_sb, "sandboxed", "script_env")]
+            .map(|(ws, policy, package)| s.spawn(move || run(ws, policy, package, false)));
+        // the Open workspace's script under Open, then under Sandboxed in the same target folder
+        let env = s.spawn(|| (run(&ws_open, "open", "script_env", false), run(&ws_open, "sandboxed", "script_env", false)));
         let starts = s.spawn(|| {
             let cold = run(&ws_cached, "sandboxed", "positive", true);
             let main = ws_cached.join("positive/src/main.rs");
@@ -47,7 +60,7 @@ fn main() {
             std::fs::write(&main, format!("{text}// edited: its macros expand again\n")).unwrap();
             (cold, run(&ws_cached, "sandboxed", "positive", true))
         });
-        (runs.map(|r| r.join().unwrap()), starts.join().unwrap())
+        (runs.map(|r| r.join().unwrap()), env.join().unwrap(), starts.join().unwrap())
     });
     let markers_after_sandboxed: Vec<String> = BYPASS.iter().filter(|b| sandboxed.join("markers").join(b.name).exists()).map(|b| b.name.to_string()).collect();
     let mut bad = Vec::new();
@@ -79,6 +92,34 @@ fn main() {
     if bypass_sb.1.contains("secret-entry") || bypass_sb.2.contains("secret-entry") {
         bad.push("read_dir: the folder's entry reached the output under Sandboxed".to_string());
     }
+    // script: the macro of a registry script's build-dependency acts under Open; under Sandboxed
+    // it is refused in the script's run, naming the C function, and does not act
+    if !script_open.0 || !script_open.1.contains("script acted") || !open.join("markers").join("script").exists() {
+        bad.push(format!("script under Open: the build-dependency's macro did not act:\n{}\n{}", script_open.1, script_open.2));
+    }
+    if script_sb.0 || !script_sb.2.contains("`script_go`") || !script_sb.2.contains("reaches the C function `") {
+        bad.push(format!("script under Sandboxed: no named refusal in the script's run:\n{}\n{}", script_sb.1, script_sb.2));
+    }
+    if sandboxed.join("markers").join("script").exists() {
+        bad.push("script: its build-dependency's macro wrote its marker under Sandboxed".to_string());
+    }
+    // script environment: Open reads the person's environment and runs the wrapper; Sandboxed
+    // reads what cargo defines and `[env]`, says the withheld canary once, and runs no wrapper
+    let open_env = "canary Some(\"canary-value\") listed true granted Some(\"from-config\") path true wrapper true out_dir true";
+    let confined_env = "canary None listed false granted Some(\"from-config\") path false wrapper false out_dir true";
+    let said = |err: &str| err.lines().filter(|l| l.contains("reads CONFINED_CANARY")).count();
+    if !env_open.0 || env_open.1.trim() != open_env || !open.join("markers").join("wrapper").exists() || said(&env_open.2) != 0 {
+        bad.push(format!("script environment under Open: wanted {open_env:?} and the wrapper's marker:\n{}\n{}", env_open.1, env_open.2));
+    }
+    if !env_sb.0 || env_sb.1.trim() != confined_env || said(&env_sb.2) != 1 {
+        bad.push(format!("script environment under Sandboxed: wanted {confined_env:?} and the withheld canary said once:\n{}\n{}", env_sb.1, env_sb.2));
+    }
+    if sandboxed.join("markers").join("wrapper").exists() {
+        bad.push("script environment: RUSTC_WRAPPER ran under Sandboxed".to_string());
+    }
+    if !env_switched.0 || env_switched.1.trim() != confined_env {
+        bad.push(format!("script environment: the Open output stood for a Sandboxed run of the same workspace:\n{}\n{}", env_switched.1, env_switched.2));
+    }
     // positive: the same output under both
     if !positive_open.0 || !positive_sb.0 {
         bad.push(format!("positive failed:\nOpen: {}\n{}\nSandboxed: {}\n{}", positive_open.1, positive_open.2, positive_sb.1, positive_sb.2));
@@ -107,7 +148,7 @@ fn main() {
         eprintln!("confined_macros: FAILED\n{}", bad.join("\n"));
         std::process::exit(1);
     }
-    println!("confined_macros: ok ({} bypass fixtures refused under Sandboxed and live under Open; positive output equal; warm start: {})", BYPASS.len(), warm.2.lines().find_map(|l| l.split_once("world cache: ")).map_or("", |(_, w)| w));
+    println!("confined_macros: ok ({} bypass fixtures and a build script's macro refused under Sandboxed and live under Open; positive output equal; warm start: {})", BYPASS.len(), warm.2.lines().find_map(|l| l.split_once("world cache: ")).map_or("", |(_, w)| w));
 }
 
 /// `run --quiet <package>` in the workspace under the policy: (success, stdout, stderr). `cached`:
@@ -125,6 +166,9 @@ fn run(ws: &Path, policy: &str, package: &str, cached: bool) -> (bool, String, S
         .current_dir(ws)
         .env(AS_RUNNER, policy)
         .env("CARGO_NET_OFFLINE", "true")
+        // what a build script may read of the person's environment (`script_env`)
+        .env("CONFINED_CANARY", "canary-value")
+        .env("RUSTC_WRAPPER", ws.parent().unwrap().join("wrapper.sh"))
         .env("RELAX_STD", root.join("libs/relax/compiler/std"))
         .env_remove("CARGO")
         .output()
@@ -177,8 +221,8 @@ fn workspace(t: &Path) -> PathBuf {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
     };
-    put("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"bypass\", \"positive\", \"path_confined\", \"path_reads\"]\n");
-    put(".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n");
+    put("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"bypass\", \"positive\", \"script\", \"script_env\", \"path_confined\", \"path_reads\"]\n");
+    put(".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n[env]\nCONFINED_GRANTED = \"from-config\"\n");
     let package = |name: &str, deps: &str, proc_macro: bool| format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{}[dependencies]\n{deps}", if proc_macro { "[lib]\nproc-macro = true\n" } else { "" });
     let vendored = |name: &str, deps: &str, files: &[(&str, String)]| {
         put(&format!("vendor/{name}/Cargo.toml"), &package(name, deps, true));
@@ -209,6 +253,25 @@ fn workspace(t: &Path) -> PathBuf {
     vendored("bypass_stage1", "", &[("src/lib.rs", format!("{HEAD}#[proc_macro]\npub fn write_marker(_: TokenStream) -> TokenStream {{\n    \"std::fs::write(\\\"{}\\\", \\\"x\\\").unwrap();\".parse().unwrap()\n}}\n", markers.join("generated").to_string_lossy()))]);
     put("bypass/Cargo.toml", &package("bypass", &deps, false));
     put("bypass/src/main.rs", &format!("{uses}\nfn main() {{\n{prints}}}\n"));
+    // script: a registry lib whose build script expands a registry macro crate's macro
+    vendored("bypass_script", "", &[("src/lib.rs", format!("{HEAD}#[proc_macro]\npub fn script_go(_: TokenStream) -> TokenStream {{\n    std::fs::write({:?}, \"x\").unwrap();\n    \"const SCRIPT_GO: &str = \\\"script acted\\\";\".parse().unwrap()\n}}\n", markers.join("script").to_string_lossy()))]);
+    put("vendor/script_host/Cargo.toml", "[package]\nname = \"script_host\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n[build-dependencies]\nbypass_script = \"0.1.0\"\n");
+    put("vendor/script_host/.cargo-checksum.json", "{\"files\":{},\"package\":null}");
+    put("vendor/script_host/build.rs", "bypass_script::script_go!();\nfn main() {\n    println!(\"cargo:rustc-env=SCRIPT_GO={}\", SCRIPT_GO);\n}\n");
+    put("vendor/script_host/src/lib.rs", "pub const SCRIPT_GO: &str = env!(\"SCRIPT_GO\");\n");
+    put("script/Cargo.toml", &package("script", "script_host = \"0.1.0\"\n", false));
+    put("script/src/main.rs", "fn main() {\n    println!(\"{}\", script_host::SCRIPT_GO);\n}\n");
+    // script environment: a registry lib whose build script reports what it reads, and the
+    // RUSTC_WRAPPER it would run (it writes a marker)
+    let wrapper = t.join("wrapper.sh");
+    std::fs::write(&wrapper, format!("#!/bin/sh\necho x > '{}'\n", markers.join("wrapper").to_string_lossy())).unwrap();
+    std::fs::set_permissions(&wrapper, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
+    put("vendor/env_probe/Cargo.toml", "[package]\nname = \"env_probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n");
+    put("vendor/env_probe/.cargo-checksum.json", "{\"files\":{},\"package\":null}");
+    put("vendor/env_probe/build.rs", ENV_PROBE);
+    put("vendor/env_probe/src/lib.rs", "pub const PROBE: &str = env!(\"ENV_PROBE\");\n");
+    put("script_env/Cargo.toml", &package("script_env", "env_probe = \"0.1.0\"\n", false));
+    put("script_env/src/main.rs", "fn main() {\n    println!(\"{}\", env_probe::PROBE);\n}\n");
     // positive
     vendored("shapes", "", &[("src/lib.rs", format!("{HEAD}{SHAPES}"))]);
     put("vendor/reg_util/Cargo.toml", &package("reg_util", "", false));
@@ -223,6 +286,24 @@ fn workspace(t: &Path) -> PathBuf {
     put("positive/src/main.rs", "shapes::shapes!(alpha beta alpha gamma beta alpha);\npath_confined::via_registry!(one two three);\npath_reads::read_data!();\nfn main() {\n    println!(\"{}\", SHAPES);\n    println!(\"via registry {}\", VIA_REGISTRY);\n    println!(\"{}\", READ);\n}\n");
     ws
 }
+
+/// A build script that reports what it reads of its environment, in thiserror's shape for the
+/// wrapper (`RUSTC_WRAPPER` runs before `$RUSTC`); it declares the canary twice.
+const ENV_PROBE: &str = r#"fn main() {
+    println!("cargo:rerun-if-env-changed=CONFINED_CANARY");
+    println!("cargo:rerun-if-env-changed=CONFINED_GRANTED");
+    println!("cargo:rerun-if-env-changed=CONFINED_CANARY");
+    let canary = std::env::var("CONFINED_CANARY").ok();
+    let listed = std::env::vars().any(|(k, _)| k == "CONFINED_CANARY");
+    let granted = std::env::var("CONFINED_GRANTED").ok();
+    let path = std::env::var_os("PATH").is_some();
+    let wrapper = std::env::var_os("RUSTC_WRAPPER").map_or(false, |w| {
+        std::process::Command::new(w).arg(std::env::var_os("RUSTC").unwrap()).arg("--version").status().map_or(false, |s| s.success())
+    });
+    let out_dir = std::env::var_os("OUT_DIR").is_some();
+    println!("cargo:rustc-env=ENV_PROBE=canary {canary:?} listed {listed} granted {granted:?} path {path} wrapper {wrapper} out_dir {out_dir}");
+}
+"#;
 
 /// A macro in the shapes of the ecosystem's base crates (proc-macro2, syn, quote, serde_derive).
 const SHAPES: &str = r#"use std::cell::RefCell;

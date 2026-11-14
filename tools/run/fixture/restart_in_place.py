@@ -96,7 +96,6 @@ env["RELAX_PANIC_PARK"] = "600"
 env["RELAX_STALE_PARK"] = "1"
 # where a quit that does not end stops (the term stage prints it)
 env["RELAX_QUIT_TRACE"] = "1"
-env["RELAX_MODULES_TRUSTED"] = "1"
 env["RELAX_LEFTOVERS"] = leftovers_file
 env["RELAX_TEST_HOT_BUILD_ERROR"] = "hot_fail_target"
 env["MAKEPAD_HOME"] = os.path.join(tmp, "makepad")
@@ -108,7 +107,7 @@ def owned():
         ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)
 # makepad itself first: a fresh tree's build is not on the clock of the run below
 subprocess.check_call(["cargo", "build", "--profile", "host", "-q", "--manifest-path", os.path.join(ROOT, "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad"], cwd=ROOT)
-p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "relax-live-kinds", "--features", "window"], cwd=pkg, env=env,
+p = subprocess.Popen(JIT + ["run", "--ahead=minimal", "--allow-host-modules", "relax-live-kinds", "--features", "window"], cwd=pkg, env=env,
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True, preexec_fn=owned)
 
 def stop():
@@ -169,9 +168,14 @@ def descendants(root):
     return out, procs
 
 def app_pid():
-    """The makepad process: `cargo run` itself once it execs the binary (unix), else its child."""
+    """The app's process: the pid its run says last on stderr ("<tool>-remote: pid N app ..."), while
+    it is `cargo run` itself (unix: exec) or a process under it. (Its command name does not say: on
+    Linux a run takes its program's name, selfexe.rs name_process.)"""
+    said = [int(m.group(1)) for _, l in err for m in [re.match(r"\S+-remote: pid (\d+) app ", l)] if m]
+    if not said:
+        return None
     kids, procs = descendants(p.pid)
-    return next((k for k in [p.pid] + kids if k in procs and "makepad" in os.path.basename(procs[k][1])), None)
+    return said[-1] if said[-1] in [p.pid] + kids and said[-1] in procs else None
 
 def threads(pid):
     if os.path.isdir("/proc/%d/task" % pid):

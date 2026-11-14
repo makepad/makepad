@@ -18,7 +18,7 @@ impl<T: ?Sized + Unsize<U>, U: ?Sized> crate::ops::CoerceUnsized<Arc<U>> for Arc
 impl<T: ?Sized + Unsize<U>, U: ?Sized> crate::ops::CoerceUnsized<Weak<U>> for Weak<T> {}
 unsafe impl<T: ?Sized> PinSafePointer for Arc<T> {}
 use crate::ptr;
-use crate::rc::{alloc_block, free_block, header_of, is_dangling, value_offset, Header, DANGLING};
+use crate::rc::{alloc_block, free_block_of, header_of, is_dangling, Header, DANGLING};
 
 const RELAXED: u8 = 0;
 const RELEASE: u8 = 1;
@@ -160,7 +160,7 @@ impl<T: ?Sized + crate::clone_uninit::CloneToUninit> Arc<T> {
                 let size = crate::intrinsics_mem::size_of_val(&*p);
                 let align = crate::intrinsics_mem::align_of_val(&*p);
                 let (nh, np) = alloc_block(size, align, 1, 1);
-                let guard = crate::rc::FreeBlockGuard(nh);
+                let guard = crate::rc::FreeBlockGuard(nh, size, align);
                 (*p).clone_to_uninit(np);
                 crate::mem::forget(guard);
                 *this = Arc::from_parts(crate::clone_uninit::with_addr(p, np));
@@ -620,7 +620,7 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Weak<T> {
         if old == 1 {
             unsafe {
                 ia::atomic_fence(ACQUIRE);
-                free_block(header_of(self.ptr.as_ptr()));
+                free_block_of(self.ptr.as_ptr());
             }
         }
     }

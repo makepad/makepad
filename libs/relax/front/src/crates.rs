@@ -620,6 +620,17 @@ pub fn config_env_value(key: &str) -> Option<String> {
     CONFIG_ENV.lock().unwrap().iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
+/// The value late input `name` of crate `krate` (sip LATE_*, kind `kind`) has now: an included
+/// file's contents, an `env!` value (crate_env_named), or cargo's `[env]` value a proc macro read
+/// (config_env_value alone).
+pub fn late_value_now(krate: &str, kind: u8, name: &str) -> Option<Vec<u8>> {
+    match crate::sip::late_base(kind) {
+        crate::sip::LATE_FILE => crate::vfs::read(name).ok(),
+        crate::sip::LATE_CONFIG_ENV => config_env_value(name).map(String::into_bytes),
+        _ => crate_env_named(krate, name).map(String::into_bytes),
+    }
+}
+
 /// Value of `env!(key)` / `option_env!(key)` in crate `krate`. The process environment is the one
 /// the run was started with: a variable the run set for its program (set_program_env) reads as it
 /// was before, as rustc never sees the run-time variables of the target cargo runs.
@@ -642,13 +653,20 @@ static PROGRAM_PROCESS: Mutex<ProgramProcess> = Mutex::new(ProgramProcess { env:
 /// Sets the variables of `env` in this process for the program the run calls next (the first
 /// value of a name stands), and makes `dir` the working folder when given. Each one's previous
 /// state is kept: crate_env_named reads it, and the run's end puts it back (reset_statics), so a
-/// restart starts as this run did. Call it with no program thread running.
+/// restart starts as this run did. A reserved name (`RELAX_*`, a path package's build-script
+/// `rustc-env`) is the program's alone (progenv `set_program_value`): never in this process's
+/// environment, which this host and a self-exec child's host read their options from. Call it
+/// with no program thread running.
 pub fn set_program_env(env: &[(String, String)], dir: Option<&str>) {
     // the record lives for the run: grown in the kept phase
     let _k = crate::zone_alloc::kept();
     let mut p = PROGRAM_PROCESS.lock().unwrap();
     for (i, (k, v)) in env.iter().enumerate() {
         if env[..i].iter().any(|(n, _)| n == k) { continue; }
+        if crate::progenv::reserved(k.as_bytes()) {
+            crate::progenv::set_program_value(k, v);
+            continue;
+        }
         if !p.env.iter().any(|(n, _)| n == k) { p.env.push((k.clone(), std::env::var_os(k))); }
         unsafe { std::env::set_var(k, v) };
     }

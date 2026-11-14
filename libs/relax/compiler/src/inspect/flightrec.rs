@@ -44,7 +44,7 @@ const HITCH_LAST_NS: u64 = 60_000_000_000;
 const AUTO_KEEP: usize = 12;
 
 static DUMP_MS: AtomicU64 = AtomicU64::new(1000);
-/// how the run was started (a replay starts the same): (args, cwd, MAKEPAD_* environment)
+/// how the run was started (a replay starts the same): (args, cwd, the variables HostEnv.recorded names)
 static RUN: Mutex<Option<(String, String, String)>> = Mutex::new(None);
 static THREAD: Mutex<Option<std::thread::Thread>> = Mutex::new(None);
 
@@ -66,7 +66,7 @@ pub fn init() {
     let cwd = std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default();
     let env: Vec<String> = std::env::vars_os()
         .map(|(k, v)| (k.to_string_lossy().into_owned(), v))
-        .filter(|(k, _)| k.starts_with("MAKEPAD") || k.starts_with("SANDBOX_"))
+        .filter(|(k, _)| crate::progenv::host_env().recorded.iter().any(|p| k.starts_with(p)))
         .map(|(k, v)| format!("{k}={}", v.to_string_lossy()))
         .collect();
     *RUN.lock().unwrap_or_else(|e| e.into_inner()) = Some((args.join("\u{1f}"), cwd, env.join("\u{1f}")));

@@ -45,3 +45,20 @@ pub fn inferred(input: TokenStream) -> TokenStream {
 pub fn same(input: TokenStream) -> TokenStream {
     input
 }
+
+fn describe(ts: TokenStream) -> String {
+    ts.into_iter().map(|t| match t {
+        TokenTree::Group(g) => {
+            let d = match g.delimiter() { Delimiter::None => "None", Delimiter::Parenthesis => "Paren", Delimiter::Brace => "Brace", Delimiter::Bracket => "Bracket" };
+            format!("{d}[{}]", describe(g.stream()))
+        }
+        other => other.to_string(),
+    }).collect::<Vec<_>>().join(" ")
+}
+
+/// `shape!(..)`: how its input reached the macro, as a string literal: a group's delimiter and
+/// contents (`None[..]`, `Paren[..]`), else the token.
+#[proc_macro]
+pub fn shape(input: TokenStream) -> TokenStream {
+    format!("{:?}", describe(input)).parse().unwrap()
+}

@@ -997,6 +997,18 @@ pub struct IntoIter<T> {
     inner: VecDeque<T>,
 }
 
+// alloc/src/collections/vec_deque/into_iter.rs (`cycle()` clones the IntoIter)
+impl<T: Clone> Clone for IntoIter<T> {
+    fn clone(&self) -> Self {
+        IntoIter { inner: self.inner.clone() }
+    }
+}
+impl<T: fmt::Debug> fmt::Debug for IntoIter<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("IntoIter").field(&self.inner).finish()
+    }
+}
+
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<T> {

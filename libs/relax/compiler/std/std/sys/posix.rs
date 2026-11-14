@@ -84,6 +84,9 @@ extern "C" {
     pub fn realpath(path: *const c_char, resolved: *mut c_char) -> *mut c_char;
     pub fn chmod(path: *const c_char, mode: mode_t) -> c_int;
     pub fn fchmod(fd: c_int, mode: mode_t) -> c_int;
+    pub fn chown(path: *const c_char, owner: uid_t, group: gid_t) -> c_int;
+    pub fn lchown(path: *const c_char, owner: uid_t, group: gid_t) -> c_int;
+    pub fn fchown(fd: c_int, owner: uid_t, group: gid_t) -> c_int;
     pub fn access(path: *const c_char, mode: c_int) -> c_int;
     pub fn opendir(path: *const c_char) -> *mut c_void;
     pub fn closedir(dir: *mut c_void) -> c_int;

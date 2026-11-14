@@ -32,8 +32,13 @@ fn main() {
         (root / "go").unlink(missing_ok=True)
         output = root / (mode + ".log")
         with output.open("w") as log:
-            p = subprocess.Popen([binary, "run", "session-log", "--", mode], cwd=root,
-                                 env=dict(os.environ, RELAX_CACHE="off"), stdout=log, stderr=subprocess.STDOUT)
+            # --verbose: the run names its transcript at the start (otherwise only when it keeps it);
+            # --unattended: a panic unwinds at once (a run someone could decide parks it)
+            # SIGINT as a terminal's Ctrl+C leaves it: a runner that started this test with SIGINT
+            # ignored would pass that on through exec, and the run would never see "int"
+            p = subprocess.Popen([binary, "run", "--verbose", "--unattended", "session-log", "--", mode], cwd=root,
+                                 env=dict(os.environ, RELAX_CACHE="off"), stdout=log, stderr=subprocess.STDOUT,
+                                 preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
             try:
                 deadline = time.monotonic() + 120
                 while "session-log fixture ready" not in output.read_text(errors="replace"):
