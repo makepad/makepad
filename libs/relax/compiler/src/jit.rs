@@ -9882,6 +9882,26 @@ unsafe fn ready_code_locked(up: *mut Unit, id: u32) -> Option<u64> {
     None
 }
 
+/// A module load's twin `id` (reload.rs compile_reachable_in, on the owner thread): the code its
+/// first call would find ready (ready_code_locked: the disk cache's), installed now. The slots
+/// that code calls or names, for the load to follow; None: the load compiles it.
+/// Its calls are counted unless an earlier run parked it: an entry without a tier verdict is
+/// code that "counted and never turned hot" when its first call links it (stored_tier_verdict),
+/// but a load reaches every twin, run or not, and the run that stored it may never have called
+/// it. Final, the twins of a module first loaded by a run that did no work stayed at O1 in
+/// every run after it (a sort: 1056 ms for 130).
+pub(crate) unsafe fn ready_twin(up: *mut Unit, id: u32) -> Option<Vec<u32>> {
+    let at = ready_code_locked(up, id)?;
+    let u = &*up;
+    if let Some(threshold) = u.tier1.as_ref().map(|t| t.threshold) {
+        if (*tier_rec(&u.slots, id).add(5)).load(Ordering::Relaxed) & STORED_PARKED == 0 {
+            settle_unfinal(u, id, threshold);
+        }
+    }
+    let refs = u.code.read().unwrap_or_else(|e| e.into_inner()).refs_at(at).map_or_else(Vec::new, |r| r.slots().to_vec());
+    Some(refs)
+}
+
 /// A lazy compile's result: the code, or (outer and pipelined) the back end still to run off
 /// the unit, on the requesting thread.
 pub(crate) enum Compiled {

@@ -11244,6 +11244,7 @@ impl Linker {
             14 => {
                 let FnKey::Sandbox(base) = self.dec_fnkey(u, d, 0)? else { return None };
                 let t = unsafe { crate::sandbox::twin(u, base) };
+                crate::sandbox::note_linked_ref(u, t);
                 unsafe { crate::sandbox::thunk_sym(u, t) }.ok()?
             }
             15 => {

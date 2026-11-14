@@ -26,6 +26,8 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
+# A module's load links std's twins from the disk cache; its own code is built and tiers as in a cold run.
+python3 "$D/warm_cache.py" "$1" || FAILS=$((FAILS + 1))
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)

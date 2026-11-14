@@ -4488,16 +4488,7 @@ unsafe fn compile_reachable_in(up: *mut Unit, roots: Vec<u32>, seeds: Vec<u32>, 
         let mut built: Vec<(u32, Result<Code, String>)> = Vec::new();
         let mut to_compile: Vec<u32> = Vec::new();
         for id in host {
-            let cacheable = {
-                let u = &*up;
-                match &u.fns[id as usize].key {
-                    FnKey::Inst(d, args) => {
-                        let ed = edited_crates();
-                        !ed.contains(&u.prog.def(*d).krate) && !args.iter().any(|a| ty_in_crates(u, *a, &ed, 0))
-                    }
-                    _ => false,
-                }
-            };
+            let cacheable = unedited_inst(&*up, &(&*up).fns[id as usize].key);
             match if cacheable { jit::cache_lookup(up, id) } else { None } {
                 Some(c) => {
                     jit::count_cache_ahead();
@@ -4508,6 +4499,22 @@ unsafe fn compile_reachable_in(up: *mut Unit, roots: Vec<u32>, seeds: Vec<u32>, 
         }
         built.extend(jit::compile_batch_off_lock(up, &to_compile, threads));
         for id in twins {
+            // a module load's twin of such code (of any code while no edit was made): the disk
+            // cache's too when it has it -- an earlier run's build of it under this domain's
+            // policy (cache.rs enc_fnkey) -- installed here as its first call would install it
+            // (std's twins are the unit's, whatever becomes of this load) and followed as a
+            // built one is. Every run built the 606 twins of std a small module reaches again:
+            // 163 of its load's 186 ms. (A reload's twins install with its patch: built.)
+            let cached = module.is_some() && match (&*up).fns[id as usize].key {
+                FnKey::Sandbox(b) if (b as usize) < (&*up).fns.len() => edited_crates().is_empty() || unedited_inst(&*up, &(&*up).fns[b as usize].key),
+                _ => false,
+            };
+            if let Some(refs) = if cached { jit::ready_twin(up, id) } else { None } {
+                jit::count_cache_ahead();
+                frontier.extend(refs);
+                frontier.extend(crate::sandbox::extra_refs(&*up, u32::MAX));
+                continue;
+            }
             let r = compile_guarded(up, id);
             built.push((id, r));
         }
@@ -4534,6 +4541,18 @@ unsafe fn compile_reachable_in(up: *mut Unit, roots: Vec<u32>, seeds: Vec<u32>, 
         Ok(out)
     } else {
         Err(errs)
+    }
+}
+
+/// Whether `key` is an instance of crates no edit touched: the disk cache's code for it is this
+/// session's (its keys hold the crates' fingerprints from the run's start).
+fn unedited_inst(u: &Unit, key: &FnKey) -> bool {
+    match key {
+        FnKey::Inst(d, args) => {
+            let ed = edited_crates();
+            !ed.contains(&u.prog.def(*d).krate) && !args.iter().any(|a| ty_in_crates(u, *a, &ed, 0))
+        }
+        _ => false,
     }
 }
 

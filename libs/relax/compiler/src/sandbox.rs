@@ -540,6 +540,17 @@ pub fn extra_refs(u: &Unit, t: u32) -> Vec<u32> {
     g.as_ref().and_then(|s| s.refs.get(&t).cloned()).unwrap_or_default()
 }
 
+/// Code linked from the disk cache names twin `t` of unit `u` as a fn value: a load follows it
+/// with the data image's (`extra_refs` of u32::MAX), as it follows a built twin's own.
+pub(crate) fn note_linked_ref(u: &Unit, t: u32) {
+    with_sb(u, |s| {
+        let v = s.refs.entry(u32::MAX).or_default();
+        if !v.contains(&t) {
+            v.push(t);
+        }
+    });
+}
+
 // ------------------------------------------------------------------ twin code's symbols
 
 // What twin code holds of this run (thunk addresses, data and thread-local offsets, the thunk
