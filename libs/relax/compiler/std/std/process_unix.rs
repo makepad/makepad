@@ -717,9 +717,11 @@ impl Command {
         // none of its effects left: the loader built that code, and the fork goes again.
         let loader = ForkLoader::get();
         if let Some(pre) = loader.precompile {
-            pre(Self::fork_child_half as usize);
+            let run = Self::fork_child_half as usize;
+            pre(&run, 1, false);
             for p in &self.closures {
-                pre(p.run as usize);
+                let run = p.run as usize;
+                pre(&run, 1, false);
             }
         }
         let mut again = 0;
@@ -842,7 +844,7 @@ pub(crate) unsafe fn run_pre_exec<F: FnMut() -> io::Result<()>>(f: *mut u8) -> i
 /// when std runs without Relax, e.g. under rustc in std/check_os).
 #[cfg(not(target_os = "android"))]
 struct ForkLoader {
-    precompile: Option<extern "C" fn(usize) -> u64>,
+    precompile: Option<unsafe extern "C" fn(*const usize, usize, bool) -> u64>,
     fork_exec: Option<extern "C" fn() -> sys::pid_t>,
     fork_exec_done: Option<extern "C" fn(sys::pid_t) -> u32>,
 }
@@ -860,7 +862,7 @@ impl ForkLoader {
         unsafe {
             let (p, f, d) = (sym(c"__relax_precompile"), sym(c"__relax_fork_exec"), sym(c"__relax_fork_exec_done"));
             ForkLoader {
-                precompile: (p != 0).then(|| core::mem::transmute::<usize, extern "C" fn(usize) -> u64>(p)),
+                precompile: (p != 0).then(|| core::mem::transmute::<usize, unsafe extern "C" fn(*const usize, usize, bool) -> u64>(p)),
                 fork_exec: (f != 0).then(|| core::mem::transmute::<usize, extern "C" fn() -> sys::pid_t>(f)),
                 fork_exec_done: (d != 0).then(|| core::mem::transmute::<usize, extern "C" fn(sys::pid_t) -> u32>(d)),
             }

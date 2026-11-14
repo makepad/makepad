@@ -111,7 +111,7 @@ pub(crate) extern "C" fn relax_fork_exec_done(pid: i32) -> u32 {
     match unbuilt {
         Some(slot) => {
             crate::jit::with_slot_name(slot, &mut |n| eprintln!("makepad run: a forked child ended at `{}`, not built before its fork: built now, forking again", String::from_utf8_lossy(n)));
-            crate::jit::precompile_from(slot);
+            crate::jit::precompile_from(&[slot], false);
             1
         }
         None => 0,
