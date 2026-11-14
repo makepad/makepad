@@ -161,6 +161,10 @@ pub(super) struct Swapchain {
     retired: AtomicBool,
     /// The newest frame queued for presentation here (set when the frame is encoded).
     pub latest: AtomicU64,
+    /// Android: the newest frame handed to the present worker (`Batch::hand_to_presenter`). A
+    /// frame there is skipped only for a newer one already handed on, never for one still being
+    /// encoded: with frames in flight `latest` was always newer, so every frame of an animation was skipped.
+    pub queued: AtomicU64,
     /// A frame that found no free image, waiting on the queue worker for its next try
     /// (`Batch::show`). Only the queue worker takes or fills it.
     pub pending: Mutex<Option<super::device::LaterJob>>,
@@ -486,7 +490,7 @@ impl Windows {
             .map_err(|e| format!("vkCreateSwapchainKHR size={extent:?} format={:?} color_space={:?} alpha={alpha:?} present_mode=FIFO: {e:?}", fmt.format, fmt.color_space))?;
         let mut out = Swapchain { dev, surface, raw, images: Vec::new(), ready: Vec::new(), size: [extent.width, extent.height],
             host: Mutex::new(()), key, logged_acquire: AtomicBool::new(false), logged_present: AtomicBool::new(false), generation, requested, transparent, dirty: AtomicBool::new(false), lost: AtomicBool::new(false),
-            retired: AtomicBool::new(false), latest: AtomicU64::new(0), pending: Mutex::new(None), blits: Mutex::new(Vec::new()) };
+            retired: AtomicBool::new(false), latest: AtomicU64::new(0), queued: AtomicU64::new(0), pending: Mutex::new(None), blits: Mutex::new(Vec::new()) };
         out.images = unsafe { out.dev.raw.get_swapchain_images(raw) }.map_err(|e| format!("vkGetSwapchainImagesKHR: {e:?}"))?;
         if out.images.is_empty() { return Err("vkGetSwapchainImagesKHR returned no images".into()); }
         for _ in &out.images {

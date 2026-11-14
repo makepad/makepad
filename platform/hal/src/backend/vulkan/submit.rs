@@ -681,10 +681,13 @@ impl Batch {
     /// or when a newer frame of its window follows (that one is shown instead).
     #[cfg(target_os = "android")]
     fn hand_to_presenter(self, present: Present, complete: Arc<Worker>, mailbox: Mailbox) {
+        present.chain.queued.store(present.frame, Ordering::Release);
         present.presenter.clone().push(move || {
             let mut tries = SHOW_TRIES;
             loop {
-                if present.chain.latest.load(Ordering::Acquire) != present.frame {
+                // superseded only by a frame already handed on (`Swapchain::queued`), never by one
+                // still being encoded
+                if present.chain.queued.load(Ordering::Acquire) != present.frame {
                     return self.deliver(Outcome::Ran, false, complete, mailbox);
                 }
                 let shown = present.chain.show(&present.image);
