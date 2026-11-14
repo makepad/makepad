@@ -28,3 +28,7 @@ makepad-app-icons = { path = "../../libs/app_icons" }
 ## The checks every catalogue sheet is held to (`sheet_checks`), for the
 ## tests of an app that registers sheets of its own.
 sheet-checks = []
+
+## Android: the Activity keeps no full-screen snapshot of the surface
+## (see makepad-hal).
+no-surface-snapshot = ["makepad-draw/no-surface-snapshot"]

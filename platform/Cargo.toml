@@ -101,3 +101,5 @@ version = "0.1.0"
 # The web backend's message types built for this machine (src/web_protocol.rs): the web trace
 # host (apps/commercial/tools/wasm-export/trace) plays the page's side of them.
 web-protocol = ["dep:makepad-wasm-bridge"]
+# Android: the Activity keeps no full-screen snapshot of the surface (see makepad-hal).
+no-surface-snapshot = ["makepad-hal/no-surface-snapshot"]

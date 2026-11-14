@@ -41,6 +41,15 @@ makepad-objc-sys = { path = "../../libs/objc-sys", version = "1.0.0" }
 [features]
 # the #[relax_api] wrappers and table entries; only the `makepad` loader enables it
 host-shims = []
+# Android: the Activity keeps no snapshot of the surface. Without it, after the first frame and
+# on every pause the Activity copies the whole surface (`PixelCopy`) into a bitmap, shows it
+# behind the surface and over it while the app pauses and resumes. With it, none is taken (any
+# taken already is dropped), and a resume shows the cover in the app's background colour until
+# the first frame. For an app that redraws quickly on resume. Measured on a Lenovo Yoga Smart
+# Tab (YT-X705F, 1920x1200): 28 MB less memory (the bitmap, its texture and the copy's scratch
+# render targets), and the recents thumbnail shows the current screen instead of the first
+# frame the snapshot kept. Off by default.
+no-surface-snapshot = []
 
 [dev-dependencies]
 # tests/entries.rs reads the generated #[relax_api] table
