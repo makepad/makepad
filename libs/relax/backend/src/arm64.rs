@@ -94,15 +94,18 @@ const A64_FUSE: u8 = 1;
 const A64_FCONST: u8 = 2;
 /// struct copies of >= 32 bytes through 16-byte vector pairs (off: 8-byte pieces; measurement switch)
 const A64_QCOPY: u8 = 4;
+/// a zero-extended word as the uxtw operand of the access or add after it (off: measurement switch)
+const A64_UXTW: u8 = 8;
 
 fn isel_flags(options: &relax_session::Options) -> u8 {
-    let mut f = A64_FUSE | A64_FCONST | A64_QCOPY;
+    let mut f = A64_FUSE | A64_FCONST | A64_QCOPY | A64_UXTW;
     for part in &options.a64 {
         match part.as_str() {
             "none" => f = 0,
             "-fuse" => f &= !A64_FUSE,
             "-fconst" => f &= !A64_FCONST,
             "-qcopy" => f &= !A64_QCOPY,
+            "-uxtw" => f &= !A64_UXTW,
             _ => {}
         }
     }
@@ -144,7 +147,8 @@ fn keeps_flags(i: &Inst) -> bool {
 /// RegConfig::defers: the pairs the block loop emits at the second instruction's position --
 /// a constant shift into the next add / sub / and / orr / eor (shifted_operand), a 64-bit multiply
 /// into the next add / sub or indexed access (mul_add), a byte / bit reverse into the next
-/// right shift by 32 / 48 (narrow_bswap), and `t = x & K; c = t ==/!= 0` before a branch on c (the
+/// right shift by 32 / 48 (narrow_bswap), a zero-extended word into the next indexed access or
+/// add (zext_index), and `t = x & K; c = t ==/!= 0` before a branch on c (the
 /// tst). The first result is read only by the second. The emitter's own conditions (flags, bounds,
 /// operand locations) only narrow these shapes; the loop asks this before each deferral.
 fn arm64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
@@ -168,6 +172,13 @@ fn arm64_defers(b: &Block, k: usize, uses: &[u32]) -> bool {
         },
         Inst::IBin(IOp::Mul, it, t, a, m) if it.bits == 64 && a != t && m != t && once(t) => mul_add_next(t, next),
         Inst::IBinI(IOp::Mul, it, t, a, _) if it.bits == 64 && a != t && once(t) => mul_add_next(t, next),
+        // a zero-extended word into the next indexed access or add: its uxtw operand (zext_index)
+        Inst::Conv(Conv::IntToInt(it), t, p) if it == U32 && p != t && once(t) => match *next {
+            Inst::LoadX(_, _, base, x, 0, _) => (base == t) != (x == t),
+            Inst::StoreX(_, base, x, 0, _, src) => (base == t) != (x == t) && src != t,
+            Inst::IBin(IOp::Add, it, _, x, y) => it.bits == 64 && (x == t) != (y == t),
+            _ => false,
+        },
         Inst::IBit(BitOp::Bswap | BitOp::Rev, t, _) if once(t) => matches!(*next, Inst::IBinI(IOp::Shr, it, _, x, 32 | 48) if x == t && it.bits == 64 && !it.signed),
         _ => false,
     }
@@ -1514,7 +1525,7 @@ impl<'a> Gen<'a> {
                 // readable at the next instruction (deferred reads)
                 if let Some(k) = deferred.take() {
                     let first = &b.insts[k];
-                    let done = self.shifted_operand(options, first, inst, true).is_some() || self.narrow_bswap(options, first, inst, true).is_some() || self.mul_add(options, first, inst, true).is_some();
+                    let done = self.shifted_operand(options, first, inst, true).is_some() || self.narrow_bswap(options, first, inst, true).is_some() || self.mul_add(options, first, inst, true).is_some() || self.zext_index(options, first, inst, true).is_some();
                     debug_assert!(done, "a deferred pair no longer matches");
                     continue;
                 }
@@ -1532,7 +1543,7 @@ impl<'a> Gen<'a> {
                     // register operand form (`eor d, a, b, lsl #13`); a 64-bit byte swap whose only
                     // use shifts the low half back down: the 32-bit forms (u32 / u16
                     // from_be_bytes: rev w; rev16 w). Emitted with the next instruction (above).
-                    if arm64_defers(b, ii, &self.al.uses) && (self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() || self.mul_add(options, inst, &b.insts[ii + 1], false).is_some()) {
+                    if arm64_defers(b, ii, &self.al.uses) && (self.shifted_operand(options, inst, &b.insts[ii + 1], false).is_some() || self.narrow_bswap(options, inst, &b.insts[ii + 1], false).is_some() || self.mul_add(options, inst, &b.insts[ii + 1], false).is_some() || self.zext_index(options, inst, &b.insts[ii + 1], false).is_some()) {
                         deferred = Some(ii);
                         continue;
                     }
@@ -3593,6 +3604,102 @@ impl<'a> Gen<'a> {
         self.a.e(if sub { 0x9B00_8000 } else { 0x9B00_0000 } | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | rd as u32);
         self.fin_i(d, rd);
         Some(())
+    }
+
+    /// `t = p as u32` zero-extended to 64 bits, then `[t + b]` loaded or stored, or `d = b + t`
+    /// (t used once): the access, or the add, takes p as an extended register (`[xb, wp, uxtw]`,
+    /// `add xd, xb, wp, uxtw`). A sandbox twin reaches memory only this way (sandbox.rs: the arena
+    /// base plus the low 32 bits of the pointer), so each access it makes is one instruction
+    /// shorter and its address one step sooner. None: no match. `emit` false: only whether the
+    /// pair matches.
+    fn zext_index(&mut self, options: &relax_session::Options, z: &Inst, next: &Inst, emit: bool) -> Option<()> {
+        let (t, p) = match *z {
+            Inst::Conv(Conv::IntToInt(it), t, p) if it == U32 && p != t => (t, p),
+            _ => return None,
+        };
+        if self.al.uses[t.0 as usize] != 1 || isel_flags(options) & (A64_FUSE | A64_UXTW) != A64_FUSE | A64_UXTW {
+            return None;
+        }
+        let reg_base = |g: &Self, v: VReg| v != t && g.slot_base(v).is_none() && g.resolve_off(v, 0).0 == v;
+        // add xd, xn, wm, uxtw
+        let add_uxtw = |rd: u8, rn: u8, rm: u8| 0x8B20_4000u32 | (rm as u32) << 16 | (rn as u32) << 5 | rd as u32;
+        // LDR/STR (register), option UXTW (010), unscaled
+        let ldst_uxtw = |op: u32, rt: u8, rn: u8, rm: u8| (op & !0x0100_0000) | 0x0020_4800 | (rm as u32) << 16 | (rn as u32) << 5 | rt as u32;
+        match *next {
+            Inst::LoadX(mm, d, base, x, 0, off) if (base == t) != (x == t) && (off as i64).unsigned_abs() < 1 << 24 => {
+                let b = if base == t { x } else { base };
+                if !reg_base(self, b) {
+                    return None;
+                }
+                if !emit {
+                    return Some(());
+                }
+                let rn = self.use_i(b, S1);
+                let rm = self.use_i(p, S0);
+                let (op, size) = mem_op(mm, true);
+                let far = off != 0;
+                let o = if far {
+                    self.a.e(add_uxtw(IP1, rn, rm));
+                    self.ip1_off(off as i64, size)
+                } else {
+                    0
+                };
+                match mm {
+                    Mem::Int(..) => {
+                        let rd = self.def_i(d, S0);
+                        if far { self.a.ldst(op, size, rd, IP1, o) } else { self.a.e(ldst_uxtw(op, rd, rn, rm)) }
+                        self.fin_i(d, rd);
+                    }
+                    _ => {
+                        let xd = self.def_f(d, FS0);
+                        if far { self.a.ldst(op, size, xd, IP1, o) } else { self.a.e(ldst_uxtw(op, xd, rn, rm)) }
+                        self.fin_f(d, xd);
+                    }
+                }
+                Some(())
+            }
+            Inst::StoreX(mm, base, x, 0, off, src) if (base == t) != (x == t) && src != t && (off as i64).unsigned_abs() < 1 << 24 => {
+                let b = if base == t { x } else { base };
+                if !reg_base(self, b) {
+                    return None;
+                }
+                if !emit {
+                    return Some(());
+                }
+                // (the stored value first, as StoreX: a far reload of it uses ip1)
+                let (op, size) = mem_op(mm, false);
+                let rs = match mm {
+                    Mem::Int(..) => self.use_stored(src, S0),
+                    _ => self.use_f(src, FS0),
+                };
+                let rn = self.use_i(b, S1);
+                let rm = self.use_i(p, IP1);
+                if off != 0 {
+                    self.a.e(add_uxtw(IP1, rn, rm));
+                    let o = self.ip1_off(off as i64, size);
+                    self.a.ldst(op, size, rs, IP1, o);
+                } else {
+                    self.a.e(ldst_uxtw(op, rs, rn, rm));
+                }
+                Some(())
+            }
+            Inst::IBin(IOp::Add, it, d, x, y) if it.bits == 64 && (x == t) != (y == t) => {
+                let b = if x == t { y } else { x };
+                if !reg_base(self, b) {
+                    return None;
+                }
+                if !emit {
+                    return Some(());
+                }
+                let rn = self.use_i(b, S1);
+                let rm = self.use_i(p, S0);
+                let rd = self.def_i(d, S0);
+                self.a.e(add_uxtw(rd, rn, rm));
+                self.fin_i(d, rd);
+                Some(())
+            }
+            _ => None,
+        }
     }
 
     /// mul_add's second factor: its register (ip0 when spilled), or the constant built in ip0
@@ -6366,6 +6473,53 @@ mod tests {
                 // tst x, #8 (ANDS xzr) before it, no and
                 assert_eq!(w[k - 1] & 0xFF80_001F, 0xF200_001F, "{:08x}", w[k - 1]);
             }
+        }
+    }
+
+    /// A zero-extended word read only by the access or the add after it is that instruction's
+    /// uxtw operand (a sandbox twin's masked addresses): no separate extension, and the bytes
+    /// loaded and stored are those of `[base + (p as u32)]` (the unfused forms).
+    #[test]
+    fn a_zero_extended_index_is_the_uxtw_operand() {
+        // (the instruction after the extension, the uxtw form it takes)
+        let cases: [(&str, fn(VReg, VReg, VReg, VReg) -> Vec<Inst>, u32); 5] = [
+            ("load", |t, b, d, _| vec![Inst::LoadX(Mem::Int(8, false), d, t, b, 0, 0)], 0xF860_4800),
+            ("load at an offset", |t, b, d, _| vec![Inst::LoadX(Mem::Int(4, false), d, b, t, 0, 24)], 0x8B20_4000),
+            ("store", |t, b, d, q| vec![Inst::StoreX(Mem::Int(1, false), b, t, 0, 0, q), Inst::Mov(d, q)], 0x3820_4800),
+            ("store at an offset", |t, b, d, q| vec![Inst::StoreX(Mem::Int(8, false), t, b, 0, 16, q), Inst::Mov(d, q)], 0x8B20_4000),
+            ("add", |t, b, d, _| vec![Inst::IBin(IOp::Add, IntTy { bits: 64, signed: false }, d, t, b)], 0x8B20_4000),
+        ];
+        for (what, next, form) in cases {
+            let build = || {
+                let mut f = Func::new("uxtw".to_string(), 0);
+                let (p, b, q) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
+                f.params.extend([p, b, q]);
+                f.rets.push(Cls::I);
+                let b0 = f.block();
+                let (t, d) = (f.vreg(Cls::I), f.vreg(Cls::I));
+                let mut insts = vec![Inst::Conv(Conv::IntToInt(U32), t, p)];
+                insts.extend(next(t, b, d, q));
+                for i in insts {
+                    f.blocks[b0 as usize].insts.push(i);
+                    f.blocks[b0 as usize].pos.push(0);
+                }
+                f.blocks[b0 as usize].term = Term::Ret(vec![d]);
+                f
+            };
+            let env = Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
+            let words = |options: &relax_session::Options| -> Vec<u32> {
+                let r = compile(options, &build(), &env).expect("compiles");
+                r.code[..r.text_len as usize].chunks(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+            };
+            // ubfx xd, xn, #0, #32 (UBFM, immr 0, imms 31) or mov wd, wn (ORR wd, wzr, wn)
+            let extends = |w: &[u32]| w.iter().filter(|&&x| x & 0xFFFF_FC00 == 0xD340_7C00 || x & 0xFFE0_FFE0 == 0x2A00_03E0).count();
+            let on = words(&relax_session::Options::default());
+            assert_eq!(extends(&on), 0, "{}: an extension is left: {:08x?}", what, on);
+            assert!(on.iter().any(|&x| x & 0xFFE0_FC00 == form), "{}: no uxtw form {:08x} in {:08x?}", what, form, on);
+            let mut off = relax_session::Options::default();
+            off.a64 = vec!["-uxtw".to_string()];
+            let unfused = words(&off);
+            assert!(extends(&unfused) > 0 && !unfused.iter().any(|&x| x & 0xFFE0_FC00 == form), "{}: RELAX_A64=-uxtw: {:08x?}", what, unfused);
         }
     }
 }
