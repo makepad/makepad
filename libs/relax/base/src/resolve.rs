@@ -71,6 +71,10 @@ struct Dep {
     platform: Option<String>,
     /// a path package directory, or None for a registry or git package
     path: Option<String>,
+    /// `path` is the manifest's own `path` key (not the root workspace's [patch] or
+    /// [workspace.dependencies]): what a third-party manifest names is no path package of the
+    /// person's (`Graph::follow`)
+    own_path: bool,
     /// a git package's source
     git: Option<GitSrc>,
     /// the version requirement (`version = ..`; "*" when none)
@@ -914,6 +918,7 @@ impl Resolver {
                 let package = s(&st, "package").unwrap_or_else(|| key.clone());
                 let mut git = git_src(&st, &format!("{}/Cargo.toml", dir), key)?;
                 let mut path = s(&st, "path").map(|p| join(&base_dir, &p));
+                let own_path = path.is_some() && !from_ws;
                 // the root workspace's [patch] of the dependency's source (crates-io or its repository)
                 if path.is_none() && (git.is_some() || !st.contains_key("registry")) {
                     let src = git.as_ref().map_or_else(|| "crates-io".to_string(), |g| canonical_url(&g.url));
@@ -935,6 +940,7 @@ impl Resolver {
                     default_features: b(&st, "default-features").or_else(|| b(&st, "default_features")).unwrap_or(true),
                     features: strs(&st, "features"),
                     platform: platform.clone(),
+                    own_path,
                     path,
                     git,
                     req: s(&st, "version").unwrap_or_else(|| "*".to_string()),
@@ -1210,14 +1216,19 @@ pub fn test_targets(sess: &std::sync::Arc<crate::Session>, dir: &str, package: &
     let bins = enabled(&m.bins, bin_names)?;
     let tests = enabled(&m.tests, test_names)?;
     let examples = enabled(&m.examples, example_names)?;
-    let mut all_examples = Vec::new();
-    for t in &m.examples {
-        if t.enabled(&features, false)? {
-            all_examples.push((t.name.clone(), t.path.clone(), t.harness));
+    let every = |targets: &[Target]| -> Result<Vec<(String, String, bool)>, String> {
+        let mut out = Vec::new();
+        for t in targets {
+            if t.enabled(&features, false)? {
+                out.push((t.name.clone(), t.path.clone(), t.harness));
+            }
         }
-    }
-    all_examples.sort();
-    Ok(TestTargets { lib: m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests, examples, all_examples })
+        out.sort();
+        Ok(out)
+    };
+    let all_bins = every(&m.bins)?;
+    let all_examples = every(&m.examples)?;
+    Ok(TestTargets { lib: m.lib.as_ref().map(|l| LibTarget { path: l.path.clone(), test: l.test, doctest: l.doctest }), bins, tests, examples, all_bins, all_examples })
 }
 
 /// A package's targets as `cargo test` selects them (`test_targets`): the lib, and (name, source
@@ -1227,6 +1238,9 @@ pub struct TestTargets {
     pub bins: Vec<(String, String, bool)>,
     pub tests: Vec<(String, String, bool)>,
     pub examples: Vec<(String, String, bool)>,
+    /// every bin whose required features are on, `test = false` ones too: what cargo builds
+    /// beside an integration test (its CARGO_BIN_EXE_<name>)
+    pub all_bins: Vec<(String, String, bool)>,
     /// every example whose required features are on (`--examples`, cargo's "all example targets")
     pub all_examples: Vec<(String, String, bool)>,
 }
@@ -1291,6 +1305,27 @@ pub fn run_env_refused(name: &str) -> bool {
     let tool = |t: &str| n == t || n.starts_with(&format!("{t}_")) || n.ends_with(&format!("_{t}"));
     ["RELAX_", "LD_", "DYLD_", "RUSTC", "RUSTFLAGS", "RUSTDOC", "CARGO"].iter().any(|p| n.starts_with(p))
         || ["CC", "CXX", "AR", "LINKER", "CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS"].iter().any(|t| tool(t))
+}
+
+/// What a confined build script's `rustc-env` says of a refused name (`script_env_refused`).
+pub const SCRIPT_ENV_PRINCIPLE: &str = "a third-party build script sets variables for the program, never for Relax, makepad, the loader or the tools they start";
+
+/// The names a confined build script's `rustc-env` may not set. The value lands in the host
+/// process, which the program shares with Relax, makepad, the dynamic loader and every tool they
+/// start (a rebuild's scripts, a self-exec run, git, ssh, a linker): a third-party script sets
+/// variables for the program, never for them (SCRIPT_ENV_PRINCIPLE). So every name that steers
+/// one of them is refused: `run_env_refused`'s, the program search (`PATH`, the Windows loader's
+/// too), the loader's (`LD_*`, `DYLD_*`), Relax's and makepad's (`RELAX_*`, `MAKEPAD_*`), cargo's,
+/// rustc's and rustup's (`CARGO*`, `RUSTC*`, `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTUP_*`), git's and
+/// ssh's (`GIT_*`, `SSH_*`), the home and temp folders (`HOME`, `TMPDIR`, `TMP`, `TEMP`,
+/// `XDG_*`), the shell (`SHELL`) and the network's route (`HTTP_PROXY`, `HTTPS_PROXY`,
+/// `ALL_PROXY`, `NO_PROXY`). Without case: a Windows name has none, and the proxies are read in
+/// either.
+pub fn script_env_refused(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    run_env_refused(name)
+        || ["LD_", "DYLD_", "RELAX_", "MAKEPAD_", "CARGO", "RUSTC", "RUSTUP_", "GIT_", "SSH_", "XDG_"].iter().any(|p| n.starts_with(p))
+        || ["PATH", "RUSTFLAGS", "RUSTDOCFLAGS", "HOME", "TMPDIR", "TMP", "TEMP", "SHELL", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"].contains(&n.as_str())
 }
 
 /// The folders of a repository's tree (a commit's path table) whose Cargo.toml cargo's package
@@ -1444,8 +1479,11 @@ pub fn cargo_config_files(dir: &str) -> Vec<(String, String)> {
 /// field, and a string in one file against a table in another is an error. A `relative` value is
 /// joined to the folder of the file its `value` comes from (Path::join: unnormalized, an absolute
 /// value stands). An entry applies when it is `force`d or the process environment lacks the
-/// variable. CARGO_HOME, RUSTUP_HOME and RUSTUP_TOOLCHAIN may not be set there.
-pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
+/// variable. CARGO_HOME, RUSTUP_HOME and RUSTUP_TOOLCHAIN may not be set there. Nor are Relax's
+/// own names (`RELAX_*`, progenv `reserved`): a repository's configuration does not set what a
+/// Relax host or a build script's host reads, such as its trust settings; each is left out and
+/// named in the second list (`<file>: [env] `<name>``), for the run to say so.
+pub fn cargo_env(dir: &str) -> Result<(Vec<(String, String)>, Vec<String>), String> {
     // a plain string, or the table's (value and its file's folder, force, relative)
     enum Entry { Plain(String), Options(Option<(String, String)>, Option<bool>, Option<bool>) }
     let mut env: BTreeMap<String, (Entry, String)> = BTreeMap::new();
@@ -1484,10 +1522,14 @@ pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
             }
         }
     }
-    let mut out = Vec::new();
+    let (mut out, mut ignored) = (Vec::new(), Vec::new());
     for (k, (e, path)) in env {
         if ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"].contains(&k.as_str()) {
             return Err(format!("{}: setting the `{}` environment variable is not supported in the `[env]` configuration table", path, k));
+        }
+        if crate::progenv::reserved(k.as_bytes()) {
+            ignored.push(format!("{}: [env] `{}`", path, k));
+            continue;
         }
         let (value, force) = match e {
             Entry::Plain(value) => (value, false),
@@ -1499,7 +1541,7 @@ pub fn cargo_env(dir: &str) -> Result<Vec<(String, String)>, String> {
         };
         if force || std::env::var_os(&k).is_none() { out.push((k, value)); }
     }
-    Ok(out)
+    Ok((out, ignored))
 }
 
 /// What a cargo profile sets that changes what a program's code does: `debug-assertions`
@@ -2206,7 +2248,22 @@ impl<'a> Feat<'a> {
                 return Err(format!("registry package `{}` {} compiles C or C++ (build-dependency `{}`): it {}", m.name, m.version, c, relax_session::options::C_GATE));
             }
         }
-        let (dir, source) = self.r.dep_dir(d)?;
+        let (dir, mut source) = self.r.dep_dir(d)?;
+        // a path dependency a third-party manifest names is third-party too: a registry package's
+        // in its vendored folder is a registry package (its build script and macros confined as
+        // its owner's are); one anywhere else, or a git package's outside its repository (a mount
+        // keeps the ones inside git: dep_dir), would make a folder of this machine the person's
+        // own package, unconfined, so it is an error
+        let owner = &self.r.manifests[k.0];
+        if d.own_path && source == Source::Path && owner.source != Source::Path {
+            let vendored = matches!(&self.r.vendor, Some((Vendor::Dir(v), _)) if dir.starts_with(&format!("{}/", v)));
+            if owner.source != Source::Registry || !vendored {
+                return Err(format!("{} package `{}` {} names the path dependency `{}` ({}), outside its {}: a third-party package's path dependency is never a package of the person's",
+                    if owner.source == Source::Registry { "registry" } else { "git" }, owner.name, owner.version, d.key, dir,
+                    if owner.source == Source::Registry { "vendored folder" } else { "repository" }));
+            }
+            source = Source::Registry;
+        }
         let t = self.r.load(&dir, source)?;
         if self.r.manifests[t].name != d.package {
             return Err(format!("{}/Cargo.toml: dependency `{}` names package `{}`, but {} holds `{}`", self.r.manifests[k.0].dir, d.key, d.package, dir, self.r.manifests[t].name));
@@ -2346,6 +2403,21 @@ pub struct Units {
     pub roots: Vec<usize>,
     /// binary target names of the root package when building integration tests (`CARGO_BIN_EXE_<name>`)
     pub bins: Vec<String>,
+    /// a build script's units: its parent confined its run, with these folders (`relax_script`)
+    pub script: Option<ScriptFolders>,
+}
+
+/// The folders of a confined build script's run, as its parent names them (relax-front
+/// unitgraph.rs `script_units`): a store's or a folder mount's path stays virtual. OUT_DIR, the
+/// one it writes, is its environment's.
+#[derive(Clone, Debug, Default)]
+pub struct ScriptFolders {
+    /// its package's source root, which it reads
+    pub read: Vec<String>,
+    /// folders it never reaches (the run's target folder, Relax's dir)
+    pub excluded: Vec<String>,
+    /// its current folder at the start (its package's)
+    pub cwd: String,
 }
 
 impl Units {
@@ -2393,7 +2465,8 @@ impl Units {
             pending.extend(units[i].deps.iter().map(|d| d.0));
         }
         let roots = j.get("roots").map(|r| r.arr().iter().map(|x| x.num() as usize).collect()).unwrap_or_default();
-        Ok(Units { units, roots, bins: Vec::new() })
+        let script = j.get("relax_script").map(|r| ScriptFolders { read: list(r.get("read")), excluded: list(r.get("excluded")), cwd: s(r.get("cwd")) });
+        Ok(Units { units, roots, bins: Vec::new(), script })
     }
 }
 
@@ -3010,7 +3083,7 @@ fn emit(r: &Resolver, nodes: &HashMap<(usize, bool), Node>, order: &[(usize, boo
                 if u.host { "host" } else { "target" }, u.name, u.mode, u.features.join(","), deps.join(","));
         }
     }
-    Ok(Units { units: out, roots, bins })
+    Ok(Units { units: out, roots, bins, script: None })
 }
 
 #[cfg(test)]
@@ -3303,6 +3376,45 @@ required-features = ["b", "manual"]
         let _ = std::fs::write(format!("{root}/vendor/shares/Cargo.toml"), "[package]\nname = \"shares\"\nversion = \"6.0.1\"\nedition = \"2021\"\n[features]\ndefault = [\"nope/alloc\"]\n");
         let e = unit_graph(sess, &root, "app", &[]).err().unwrap();
         assert!(e.contains("names no dependency"), "{e}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A path dependency a third-party manifest names is third-party too. A vendored registry
+    /// package's, inside the vendored folder, is a registry package (its pkg_id is what makes a
+    /// unit third-party: its build script and macros run confined under `makepad run`); one
+    /// outside it is an error. It was a path package, the person's own: a vendored tree (the
+    /// repository's content) ran a build script of its choosing unconfined.
+    #[test]
+    fn a_third_party_manifests_path_dependency_is_no_path_package() {
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let vend = |dep: &str| format!("[package]\nname = \"vend\"\nversion = \"1.0.0\"\nedition = \"2021\"\n[dependencies]\n{dep}\n");
+        let pkg = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nedition = \"2021\"\n");
+        let checksum = "{\"files\":{},\"package\":null}";
+        let (vend_inner, inner, outer) = (vend("inner = { path = \"../inner\" }"), pkg("inner"), pkg("outer"));
+        let root = tree("third-party-path", &[
+            ("Cargo.toml", "[workspace]\nresolver = \"2\"\nmembers = [\"app\"]\n"),
+            (".cargo/config.toml", "[source.crates-io]\nreplace-with = \"v\"\n[source.v]\ndirectory = \"vendor\"\n"),
+            ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nvend = \"1\"\n"),
+            ("app/src/lib.rs", ""),
+            ("vendor/vend/Cargo.toml", vend_inner.as_str()),
+            ("vendor/vend/.cargo-checksum.json", checksum),
+            ("vendor/vend/src/lib.rs", ""),
+            ("vendor/inner/Cargo.toml", inner.as_str()),
+            ("vendor/inner/build.rs", "fn main() {}\n"),
+            ("vendor/inner/.cargo-checksum.json", checksum),
+            ("vendor/inner/src/lib.rs", ""),
+            ("outer/Cargo.toml", outer.as_str()),
+            ("outer/build.rs", "fn main() {}\n"),
+            ("outer/src/lib.rs", ""),
+        ]);
+        let g = unit_graph(sess, &root, "app", &[]).unwrap_or_else(|e| panic!("{e}"));
+        let ids: Vec<&str> = g.units.iter().map(|u| u.pkg_id.as_str()).collect();
+        let inner: Vec<&&str> = ids.iter().filter(|id| id.contains("inner")).collect();
+        assert!(inner.len() >= 2 && inner.iter().all(|id| id.starts_with("registry+")), "the vendored path dependency, its lib and its build script, is a registry package: {ids:?}");
+        assert!(ids.iter().any(|id| id.starts_with("path+") && id.contains("/app#")), "the member stays the person's: {ids:?}");
+        let _ = std::fs::write(format!("{root}/vendor/vend/Cargo.toml"), vend("outer = { path = \"../../outer\" }"));
+        let e = unit_graph(sess, &root, "app", &[]).err().unwrap_or_else(|| panic!("a vendored package's path dependency outside the vendored folder resolved"));
+        assert!(e.contains("registry package `vend` 1.0.0 names the path dependency `outer`") && e.contains("outside its vendored folder"), "{e}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

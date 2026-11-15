@@ -160,6 +160,11 @@ impl std::fmt::Debug for Secret {
 }
 
 impl Secret {
+    /// The access token, for a request header the hub itself sends (intake_scope's upstream call).
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+
     fn redact(&self, text: &str) -> String {
         if self.0.is_empty() { text.to_string() } else { text.replace(&self.0, "[redacted]") }
     }

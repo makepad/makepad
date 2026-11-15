@@ -1,0 +1,16 @@
+# The asm! removal (2026-10-05): the replacement code gives the same results as the inline
+# assembly it replaced. A rustc program (the old asm is only here): `cargo run --release`.
+[package]
+name = "asm-identity"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libm = { path = "../../../../libs/rapier/vendor/libm" }
+
+# the half conversions and f16 arithmetic: aarch64 only
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+makepad-half = { path = "../../../../libs/vulkan/makepad-half" }
+
+[workspace]

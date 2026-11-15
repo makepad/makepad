@@ -40,7 +40,12 @@ pub use makepad_strict_json as json;
 /// 7: LOD bounds are certified (every point, both directions), not sampled.
 /// 8: a document holds canonical zeros (-0.0 is +0.0), so a product built in
 /// memory is the one its reopened source builds.
-pub const MODEL_GENERATOR_VERSION: u32 = 8;
+/// 9: a far stand-in carries its depth atlas (render impostor.rs) in its
+/// material's occlusion layer.
+/// 10: a far stand-in's albedo carries no occlusion and its leaf mips
+/// average in linear light; its occlusion rides in the depth atlas's blue,
+/// and a crown tree's stand-in is a crown layer.
+pub const MODEL_GENERATOR_VERSION: u32 = 10;
 pub use makepad_mesh_edit as mesh;
 
 mod schema;

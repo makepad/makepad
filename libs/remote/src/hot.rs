@@ -171,7 +171,7 @@ pub const LOAD_ERROR_EXIT: i32 = 88;
 
 /// `makepad test` tells each target's harness it sums the verdict over the targets: one of
 /// several may match no test.
-pub const TEST_PACKAGE_ENV: &str = "MAKEPAD_TEST_PACKAGE";
+pub const TEST_PACKAGE_ENV: &str = "RELAX_TEST_PACKAGE";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {

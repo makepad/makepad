@@ -219,7 +219,7 @@ fn report_fulfillment_errors(prog: &Program, tcx: &Tcx, infcx: &crate::infer::In
         if crate::wfcheck::obligations::predicate_mentions_error(infcx, &o.goal.predicate) { continue; }
         let mut message = match &o.goal.predicate.kind {
             crate::next_solver::PredicateKind::Clause(crate::next_solver::ClauseKind::Trait(p)) => {
-                let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_string(false, prog, tcx, t));
+                let message = typeck::trait_error_message(prog, tcx, code, p, &mut |t| typeck::ty_to_diag_string(prog, tcx, t));
                 // rustc_on_unimplemented on `Send`/`Sync` for a future: "future cannot be sent between threads safely"
                 if message.ends_with("cannot be sent between threads safely") && matches!(p.trait_ref.args.first(), Some(crate::consts::GenericArg::Type(t)) if tcx.is_coroutine(*t)) {
                     "future cannot be sent between threads safely".to_string()

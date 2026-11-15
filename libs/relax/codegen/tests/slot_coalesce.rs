@@ -13,20 +13,30 @@ fn push(f: &mut Func, b: u32, i: Inst) {
 
 #[cfg(target_arch = "x86_64")]
 fn run(f: &Func, n: u64) -> u64 {
+    try_run(f, n).unwrap()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn try_run(f: &Func, n: u64) -> Result<u64, String> {
     let env = relax_backend::x64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
-    let c = relax_backend::x64::compile(&relax_session::Options::default(), f, &env).unwrap();
+    let c = relax_backend::x64::compile(&relax_session::Options::default(), f, &env)?;
     let code = Code::new(&c.code[..c.text_len as usize]).unwrap();
     let g: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
-    g(n)
+    Ok(g(n))
 }
 
 #[cfg(target_arch = "aarch64")]
 fn run(f: &Func, n: u64) -> u64 {
+    try_run(f, n).unwrap()
+}
+
+#[cfg(target_arch = "aarch64")]
+fn try_run(f: &Func, n: u64) -> Result<u64, String> {
     let env = relax_backend::arm64::Env { slots: SlotsPtr::NONE, tls_key: 0, tls_slow: 0, resume: 0, opt_regs: true, syms: 0, sym_class: 0, near: false };
-    let c = relax_backend::arm64::compile(&relax_session::Options::default(), f, &env).unwrap();
+    let c = relax_backend::arm64::compile(&relax_session::Options::default(), f, &env)?;
     let code = Code::new(&c.code[..c.text_len as usize]).unwrap();
     let g: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(code.ptr()) };
-    g(n)
+    Ok(g(n))
 }
 
 fn copies(f: &Func) -> usize {
@@ -698,51 +708,159 @@ fn a_move_to_another_offset_keeps_the_slots_apart() {
     }
 }
 
-/// The backends' guard (frame::copy_overlap): a copy between overlapping bytes of the frame --
-/// here the joined form of the DFREE miscompile, one 64-byte slot, the 40 bytes at 0 copied to 8
-/// and to -8 of a second one -- is emitted in memmove order outside verify mode (a correct copy,
-/// never a shifted one), and the RIR verifier names it.
+/// `Copy` is a memcpy: the RIR verifier refuses one between overlapping bytes of one slot (the
+/// joined form of the DFREE miscompile: one 64-byte slot, the 40 bytes at 0 copied to 8).
 #[test]
-fn an_overlapping_frame_copy_is_a_memmove() {
-    for up in [true, false] {
-        let mut f = Func::new("overlap_copy".into(), 0);
-        let n = f.vreg(Cls::I);
-        f.params.push(n);
-        f.rets.push(Cls::I);
-        let s = f.slot(64, 8);
-        f.block();
-        let v = |f: &mut Func| f.vreg(Cls::I);
-        let (p, q, src) = (v(&mut f), v(&mut f), v(&mut f));
-        push(&mut f, 0, Inst::SlotAddr(p, s));
-        // up: [8..48) <- [0..40); down: [0..40) <- [8..48)
-        let (from, to) = if up { (0, 8) } else { (8, 0) };
-        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, src, p, from));
-        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, q, p, to));
-        for k in 0..6 {
-            let w = v(&mut f);
-            push(&mut f, 0, Inst::IBinI(IOp::Add, U64, w, n, 100 * (k + 1)));
-            push(&mut f, 0, Inst::Store(Mem::Int(8, false), p, 8 * k as i32, w));
-        }
-        push(&mut f, 0, Inst::Copy(q, src, 40));
-        let acc = v(&mut f);
-        push(&mut f, 0, Inst::Iconst(acc, 0));
-        for k in 0..6 {
-            let (x, m) = (v(&mut f), v(&mut f));
-            push(&mut f, 0, Inst::Load(Mem::Int(8, false), x, p, 8 * k));
-            push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, m, acc, 1_000_003));
-            push(&mut f, 0, Inst::IBin(IOp::Add, U64, acc, m, x));
-        }
-        f.blocks[0].term = Term::Ret(vec![acc]);
-        assert!(f.overlapping_copy().is_some(), "the verifier names the overlapping copy");
-        let reference = |n: u64| {
-            let mut w: Vec<u64> = (0..6).map(|k| n.wrapping_add(100 * (k + 1))).collect();
-            if up { w.copy_within(0..5, 1) } else { w.copy_within(1..6, 0) }
-            w.iter().fold(0u64, |a, &x| a.wrapping_mul(1_000_003).wrapping_add(x))
-        };
-        for n in [0u64, 5, 77] {
-            assert_eq!(run(&f, n), reference(n), "up {up}, n = {n}");
+fn the_verifier_names_an_overlapping_copy() {
+    let mut f = Func::new("overlap_copy".into(), 0);
+    let s = f.slot(64, 8);
+    f.block();
+    let (p, q) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    push(&mut f, 0, Inst::SlotAddr(p, s));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, q, p, 8));
+    push(&mut f, 0, Inst::Copy(q, p, 40));
+    f.blocks[0].term = Term::Ret(Vec::new());
+    assert!(f.overlapping_copy().is_some(), "the verifier names the overlapping copy");
+    let e = f.verify().expect_err("an overlapping Copy is no valid RIR");
+    assert!(e.contains("copy between overlapping bytes of one slot"), "{e}");
+}
+
+const MOVE_WORDS: usize = 13;
+
+/// f(x): the slot's 13 words x + 0x0102030405060708 * (k + 1) (every byte its own), then
+/// `ptr::copy(at + from, at + to, len)` as Rust lowers it (a memmove call, `memmove`), then a hash
+/// of the words.
+fn build_copy_within(memmove: Sym, len: u32, from: i64, to: i64) -> Func {
+    let mut f = Func::new("copy_within".into(), 0);
+    let x = f.vreg(Cls::I);
+    f.params.push(x);
+    f.rets.push(Cls::I);
+    let s = f.slot(8 * MOVE_WORDS as u32, 8);
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (p, src, dst, n) = (v(&mut f), v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(p, s));
+    for k in 0..MOVE_WORDS {
+        let w = v(&mut f);
+        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, w, x, 0x0102030405060708i64.wrapping_mul(k as i64 + 1)));
+        push(&mut f, 0, Inst::Store(Mem::Int(8, false), p, 8 * k as i32, w));
+    }
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, src, p, from));
+    push(&mut f, 0, Inst::IBinI(IOp::Add, U64, dst, p, to));
+    push(&mut f, 0, Inst::Iconst(n, len as i64));
+    push(&mut f, 0, Inst::Call(Callee::Host(memmove), vec![dst, src, n], Vec::new()));
+    let acc = v(&mut f);
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    for k in 0..MOVE_WORDS {
+        let (w, m) = (v(&mut f), v(&mut f));
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), w, p, 8 * k as i32));
+        push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, m, acc, 1_000_003));
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, acc, m, w));
+    }
+    f.blocks[0].term = Term::Ret(vec![acc]);
+    f
+}
+
+fn copy_within_reference(x: u64, len: u32, from: i64, to: i64) -> u64 {
+    let mut b: Vec<u8> = (0..MOVE_WORDS as u64).flat_map(|k| x.wrapping_add(0x0102030405060708u64.wrapping_mul(k + 1)).to_le_bytes()).collect();
+    b.copy_within(from as usize..from as usize + len as usize, to as usize);
+    b.chunks_exact(8).fold(0u64, |a, w| a.wrapping_mul(1_000_003).wrapping_add(u64::from_le_bytes(w.try_into().unwrap())))
+}
+
+/// What Rust emits for a copy inside one slot (`ptr::copy`, `slice::copy_within`): a memmove,
+/// which simplify folds into loads, then stores (never a `Copy`). Every size the fold takes
+/// (passes::INLINE_COPY_MAX) at byte, word, 16- and 24-byte distances, each way, from an aligned
+/// and an odd start, through simplify, coalesce_slot_copies and the backend's rewrites (legalize,
+/// pair256, switch, hoist, sink) with the verifier on: the bytes move as memmove moves them.
+#[test]
+fn a_copy_within_one_slot_is_a_memmove_at_every_size_and_offset() {
+    relax_backend::rir::force_verify_passes();
+    opt::set_mem_fns(Sym::new(u32::MAX - 2), Sym::new(u32::MAX - 1));
+    let (_, memmove) = relax_backend::passes::mem_fns().expect("the memcpy / memmove pair");
+    let o = relax_session::Options::default();
+    let calls = |f: &Func| f.blocks.iter().flat_map(|b| b.insts.iter()).filter(|i| matches!(i, Inst::Call(..))).count();
+    for len in 1..=relax_backend::passes::INLINE_COPY_MAX as u32 {
+        for delta in [1i64, 8, 16, 24] {
+            for base in [0i64, 3] {
+                for up in [true, false] {
+                    let (from, to) = if up { (base, base + delta) } else { (base + delta, base) };
+                    let what = format!("len {len}, from {from} to {to}");
+                    let mut f = build_copy_within(memmove, len, from, to);
+                    f.verify().unwrap_or_else(|e| panic!("{what}: the memmove form is valid RIR: {e}"));
+                    relax_backend::passes::simplify(&o, &mut f, None, true, true);
+                    assert_eq!(calls(&f), 0, "{what}: simplify folds the memmove inline:\n{}", f.dump());
+                    assert_eq!(copies(&f), 0, "{what}: a memmove never becomes a Copy (a memcpy):\n{}", f.dump());
+                    opt::coalesce_slot_copies(&mut f, true);
+                    f.verify().unwrap_or_else(|e| panic!("{what}: {e}\n{}", f.dump()));
+                    let x = 0x55 + len as u64;
+                    let got = try_run(&f, x).unwrap_or_else(|e| panic!("{what}: {e}"));
+                    assert_eq!(got, copy_within_reference(x, len, from, to), "{what}\n{}", f.dump());
+                }
+            }
         }
     }
+}
+
+/// coalesce_slot_copies joins two 24-byte slots along the whole copy C = B; a second copy between
+/// them, C[8..24) = B[0..16), would be a copy between overlapping bytes of the joined slot. The
+/// pass keeps such slots apart (or the joined copy would need the backends' memmove emit): after it
+/// no copy meets bytes of its own slot, the verifier is on, and the words are the reference's.
+#[test]
+fn a_second_copy_at_another_offset_keeps_joined_slots_apart() {
+    relax_backend::rir::force_verify_passes();
+    // without the second copy the pass joins them: the whole copy goes
+    let mut alone = join_offset(false);
+    assert!(opt::coalesce_slot_copies(&mut alone, true), "the slots join along their whole copy:\n{}", alone.dump());
+    assert_eq!(copies(&alone), 0, "the joining copy goes:\n{}", alone.dump());
+    let mut f = join_offset(true);
+    let reference = |x: u64| {
+        let b: Vec<u64> = (0..3u64).map(|k| x.wrapping_add(0x0102030405060708u64.wrapping_mul(k + 1))).collect();
+        [b[0], b[0], b[1]].iter().fold(0u64, |a, &w| a.wrapping_mul(1_000_003).wrapping_add(w))
+    };
+    for x in [0u64, 9, 1 << 40] {
+        assert_eq!(run(&f, x), reference(x), "before the pass, x = {x}");
+    }
+    opt::coalesce_slot_copies(&mut f, true);
+    assert!(f.overlapping_copy().is_none(), "the pass joined the slots under a copy between their overlapping bytes:\n{}", f.dump());
+    f.verify().unwrap_or_else(|e| panic!("{e}\n{}", f.dump()));
+    for x in [0u64, 9, 1 << 40] {
+        assert_eq!(try_run(&f, x).unwrap_or_else(|e| panic!("{e}\n{}", f.dump())), reference(x), "after the pass, x = {x}\n{}", f.dump());
+    }
+}
+
+/// f(x): B = three words of x; C = B (whole); with `second`, C[8..24) = B[0..16); a hash of C.
+fn join_offset(second: bool) -> Func {
+    let mut f = Func::new("join_offset".into(), 0);
+    let x = f.vreg(Cls::I);
+    f.params.push(x);
+    f.rets.push(Cls::I);
+    let (sb, sc) = (f.slot(24, 8), f.slot(24, 8));
+    f.block();
+    let v = |f: &mut Func| f.vreg(Cls::I);
+    let (pb, pc, pc8) = (v(&mut f), v(&mut f), v(&mut f));
+    push(&mut f, 0, Inst::SlotAddr(pb, sb));
+    push(&mut f, 0, Inst::SlotAddr(pc, sc));
+    for k in 0..3 {
+        let w = v(&mut f);
+        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, w, x, 0x0102030405060708i64.wrapping_mul(k + 1)));
+        push(&mut f, 0, Inst::Store(Mem::Int(8, false), pb, 8 * k as i32, w));
+    }
+    push(&mut f, 0, Inst::Copy(pc, pb, 24));
+    if second {
+        push(&mut f, 0, Inst::IBinI(IOp::Add, U64, pc8, pc, 8));
+        push(&mut f, 0, Inst::Copy(pc8, pb, 16));
+    }
+    let acc = v(&mut f);
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    for k in 0..3 {
+        let (w, m) = (v(&mut f), v(&mut f));
+        push(&mut f, 0, Inst::Load(Mem::Int(8, false), w, pc, 8 * k));
+        push(&mut f, 0, Inst::IBinI(IOp::Mul, U64, m, acc, 1_000_003));
+        push(&mut f, 0, Inst::IBin(IOp::Add, U64, acc, m, w));
+    }
+    f.blocks[0].term = Term::Ret(vec![acc]);
+    f.verify().unwrap();
+    f
 }
 
 /// A value moved into a by-value argument copy (`Slot::arg`) for one call: `E = (n, 1); A = E;

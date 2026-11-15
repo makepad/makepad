@@ -820,7 +820,7 @@ impl Cx {
                             width: *width,
                             height: *height,
                             data: WasmPtrU32::new(match data {
-                                Some(data) => data,
+                                Some(data) => data.as_slice(),
                                 None => return,
                             }),
                         });
@@ -877,7 +877,7 @@ impl Cx {
                             height: *height,
                             layers: *layers,
                             data: WasmPtrU32::new(match data {
-                                Some(data) => data,
+                                Some(data) => data.as_slice(),
                                 None => return,
                             }),
                         });

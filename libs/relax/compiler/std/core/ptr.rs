@@ -142,6 +142,10 @@ pub struct NonNull<T: crate::marker::PointeeSized> {
 
 impl<T: crate::marker::PointeeSized + crate::marker::Unsize<U>, U: crate::marker::PointeeSized> crate::ops::CoerceUnsized<NonNull<U>> for NonNull<T> {}
 impl<T> NonNull<T> {
+    // library/core/src/ptr/non_null.rs
+    pub fn align_offset(self, align: usize) -> usize {
+        self.as_ptr().align_offset(align)
+    }
     pub const fn dangling() -> NonNull<T> {
         NonNull { pointer: dangling::<T>() }
     }

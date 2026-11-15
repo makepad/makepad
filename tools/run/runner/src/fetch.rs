@@ -196,6 +196,9 @@ fn export_path(out: &Path, rel: &str) -> Result<Option<PathBuf>, String> {
 /// Files whose bytes are already there are left alone (their times too: cargo rebuilds only what
 /// changed); files an earlier export wrote that this one does not are removed
 /// (`<out>/.makepad-export` lists what it wrote). Returns (files in the tree, files written).
+/// The manifest keeps its `.makepad-` name, as the edits folder's `.makepad-run-*` files do
+/// (relax-base vfs.rs): it lives in a person's export folder across exports, and a new name
+/// would leave the files the last export wrote behind.
 pub fn export(snap: &Snapshot, edits: Option<&Path>, out: &Path) -> Result<(usize, usize), String> {
     use std::collections::BTreeSet;
     let mut files: BTreeSet<String> = BTreeSet::new();

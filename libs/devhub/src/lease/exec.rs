@@ -1018,7 +1018,7 @@ pub(crate) fn log_tail(log: &Path, n: usize) -> String {
 /// The kernel's lines that say why a process died (OOM kills, GPU faults) between two times.
 #[cfg(target_os = "linux")]
 fn kernel_log(from_ms: u64, to_ms: u64) -> Option<String> {
-    let o = std::process::Command::new("journalctl")
+    let o = std::process::Command::new(os::tool("journalctl"))
         .args(["-k", "-q", "--no-pager", "-o", "cat", &format!("--since=@{}", from_ms / 1000), &format!("--until=@{}", to_ms / 1000 + 2), "-g", "oom-kill:|Killed process|memory: usage|NVRM: Xid|fallen off the bus|GPU reset"])
         .stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
     // journalctl -g exits 1 when nothing matched
@@ -1114,6 +1114,44 @@ fn exit_file(state: &Path, id: &str, n: u32) -> PathBuf {
     state.join(format!("{id}-{n}.exit"))
 }
 
+/// `<tmp>/launch/<jit file>/+launch/<name>`, a hard link of `jit`, for a JIT run of the program
+/// `name` to start from (start_run): one per JIT file and program for the lease, which each run
+/// of it takes while it is still that file. On macOS a new link of a file and an unlink of one
+/// each make syspolicyd scan the file again at its next exec (about 0.3 s for a 76 MB loader, and
+/// a process killed in that wait now and then; an M-series Mac, 11-14): a link made and removed
+/// for each run paid that at every start. A JIT rebuilt at its path is another file, with a
+/// folder of its own. The folder's name `+launch` tells the runner that its process is a start,
+/// not a relaunch of a run (relax-compiler selfexe.rs relaunched). None where it cannot be made
+/// (another volume, Windows, whose processes an exec does not name, a name that is no file name):
+/// the run starts the JIT itself.
+fn launch_link(tmp: &Path, jit: &Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.starts_with('.') || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let file = std::fs::metadata(jit).ok()?;
+        let is_jit = |link: &Path| std::fs::metadata(link).is_ok_and(|m| (m.dev(), m.ino()) == (file.dev(), file.ino()));
+        let at = tmp.join("launch").join(format!("{:x}-{:x}", file.dev(), file.ino())).join("+launch");
+        let link = at.join(name);
+        if is_jit(&link) {
+            return Some(link);
+        }
+        std::fs::create_dir_all(&at).ok()?;
+        match std::fs::hard_link(jit, &link) {
+            Ok(()) => Some(link),
+            // (a run of the lease that started beside this one made it)
+            Err(_) => is_jit(&link).then_some(link),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (tmp, jit);
+        None
+    }
+}
+
 /// A timed run on macOS first runs the JIT binary it starts (the box's, built for its tree) once
 /// with `--version`, untimed: macOS scans a newly written program on its first run, and the scan
 /// went into the run's numbers (0.65 s for the 62 MB JIT binary; about 0.2 s and 6.5 ms per MB,
@@ -1121,21 +1159,6 @@ fn exit_file(state: &Path, id: &str, n: u32) -> PathBuf {
 /// their own first run: a timed series takes a lead-in round. (The whole command ran twice
 /// before, 4960 s untimed beside 8344 s timed over 17 leases, 11-04.) `mark` is written when it
 /// is done: the profile's `warmup` span ([`Lease::profile`]).
-/// `<dir>/+launch/<name>`, a hard link of `jit`, for a JIT run of the program `name` to start from
-/// (start_run). None where it cannot be made (another volume, Windows, whose processes an exec
-/// does not name, a name that is no file name): the run starts the JIT itself.
-fn launch_link(dir: &Path, jit: &Path, name: &str) -> Option<PathBuf> {
-    if !cfg!(unix) || name.is_empty() || name.starts_with('.') || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) {
-        return None;
-    }
-    let at = dir.join("+launch");
-    std::fs::create_dir_all(&at).ok()?;
-    let link = at.join(name);
-    let _ = std::fs::remove_file(&link);
-    std::fs::hard_link(jit, &link).ok()?;
-    Some(link)
-}
-
 fn warmed_up(argv: Vec<String>, jit: &Path, mark: &Path) -> Vec<String> {
     let script = r#"mark=$1
 jit=$2
@@ -2170,7 +2193,7 @@ impl Exec {
                 (c.busy_leases, c.busy_outside) = (split.leases, split.outside);
                 static GPU_LAST: Mutex<Option<(Instant, Vec<(u32, u64)>)>> = Mutex::new(None);
                 c.mac_gpu = crate::top::gpu_since(&GPU_LAST).map(|rates| {
-                    let rows = crate::top::processes();
+                    let rows = crate::top::named();
                     let groups: BTreeSet<u32> = self.leases.lock().unwrap().values()
                         .flat_map(|l| l.runs.iter().map(|r| r.pid).filter(|p| *p != 0)).collect();
                     let (pct, mut on) = crate::top::gpu_split(&rates, &rows, std::process::id(), &|pgid| groups.contains(&pgid).then(String::new));
@@ -2366,9 +2389,9 @@ impl Exec {
         } else {
             Vec::new()
         };
-        // the toolchain this lease's builds use names its JIT binaries (a rustup update since the
-        // last lease is seen here, not at the hub's restart)
-        let rustc = super::loaders::refresh_compiler();
+        // the toolchain this lease's builds use names its JIT binaries (read_rustc keys them); the
+        // lease keeps what it read, and its end compares (the toolchain verdict)
+        let rustc = super::caps::read_rustc();
         let rustc = if rustc.release.is_empty() && rustc.commit.is_empty() { String::new() } else { format!("{} {}", rustc.release, rustc.commit) };
         let conf = self.conf();
         let w = &conf.work;
@@ -2791,7 +2814,7 @@ impl Exec {
         let (mut own, mut note) = (None, None);
         #[cfg(feature = "checkout")]
         let loader = if loader.is_none() && l.work == super::tree::native_root(&conf.work, l.tree_lane()) && super::loaders::cargo_run_args(argv).is_some() {
-            let asked = std::time::SystemTime::now();
+            let asked = super::loaders::file_clock_now(&conf.work.join("dev/jit")).map_err(|e| format!("lease-run {id}: {e}"))?;
             if let Some(tree_key) = super::loaders::tree_id(&l.work) {
                 note = converted_note(&tree_key);
                 let key = tree_key.key;
@@ -2877,7 +2900,7 @@ impl Exec {
         // process after the program (macOS has no other way), with no exec more. RELAX_LOADER
         // names the JIT, which the run goes by (the runner's loader_exe)
         let launch = jit.filter(|j| argv.first().is_some_and(|a| Path::new(a) == *j))
-            .and_then(|j| launch_link(&l.tmp.join(format!("run-{n}-launch")), j, &super::run_program(&argv[1..])?));
+            .and_then(|j| launch_link(&l.tmp, j, &super::run_program(&argv[1..])?));
         if let Some(link) = &launch {
             argv[0] = link.to_string_lossy().into_owned();
         }
@@ -3073,6 +3096,8 @@ impl Exec {
         if l.src == Src::Overlay || l.tmp.join("overlay-selftest.json").is_file() { cmd.env("MAKEPAD_DEVHUB_GIT", crate::sync::git::stores_dir()); }
         // what it starts carries this, in whatever session: the lease's end finds it by this
         cmd.env(LEASE_ENV, lease_mark(&self.state, &l.id));
+        // relax names the lease as the owner of what its runs hold (a build script's claim)
+        cmd.env("RELAX_RUN_OWNER", &l.id);
         if let Some(outer) = std::env::var_os(LEASE_OUTER_ENV).or_else(|| std::env::var_os(LEASE_ENV)) {
             cmd.env(LEASE_OUTER_ENV, outer);
         }
@@ -3236,6 +3261,7 @@ impl Exec {
         if own_path.is_some() { run_cmd.env("PATH", &hub_path); }
         // what it starts carries the lease's mark, as a run's processes do ([`Exec::run_env`])
         run_cmd.env(LEASE_ENV, lease_mark(&self.state, id));
+        run_cmd.env("RELAX_RUN_OWNER", id);
         if let Some(outer) = std::env::var_os(LEASE_OUTER_ENV).or_else(|| std::env::var_os(LEASE_ENV)) {
             run_cmd.env(LEASE_OUTER_ENV, outer);
         }
@@ -3499,7 +3525,7 @@ impl Exec {
             return err(format!("waits: {}", blockers.join("; ")));
         }
         // kill by the pid its supervisor recorded
-        let ok = std::process::Command::new("kill").args(["-TERM", &pid.to_string()]).status().is_ok_and(|s| s.success());
+        let ok = std::process::Command::new(os::tool("kill")).args(["-TERM", &pid.to_string()]).status().is_ok_and(|s| s.success());
         if !ok {
             return err(format!("{name} (pid {pid}): kill -TERM failed"));
         }
@@ -3517,14 +3543,15 @@ impl Exec {
         }
     }
 
-    /// `lease-owns <id> <pid>`: whether the process is one of the lease's runs (a JIT a job
-    /// started: the master pauses that job on its parked panic).
+    /// `lease-owns <id> <pid>`: whether the process is one of the lease's ([`lease_pids`]: a JIT a
+    /// job started, a JIT-run test's own group included: the master pauses that job on its parked
+    /// panic).
     fn owns(&self, rest: &str) -> String {
         let w: Vec<&str> = rest.split_whitespace().collect();
         let (Some(id), Some(Ok(pid))) = (w.first(), w.get(1).map(|p| p.parse::<u32>())) else { return err("usage: lease-owns <id> <pid>") };
-        let leases = self.leases.lock().unwrap();
-        let Some(l) = leases.get(*id) else { return err(format!("no lease {id} on {}", self.machine)) };
-        let owns = l.runs.iter().any(|r| r.pid != 0 && (r.pid == pid || os::in_group(pid, r.pid, &r.hold)));
+        // no process walks under the lease table lock
+        let Some(runs) = self.leases.lock().unwrap().get(*id).map(|l| l.runs.clone()) else { return err(format!("no lease {id} on {}", self.machine)) };
+        let owns = lease_pids(self, id, &runs).contains(&pid);
         format!("{{\"owns\":{owns}}}")
     }
 
@@ -4569,7 +4596,7 @@ impl Exec {
         let me = std::process::id();
         let mut seen = self.orphans.lock().unwrap();
         // (orphans only: a process whose parent still runs is someone's, whatever its environment)
-        let orphan = |pid: u32| makepad_remote::group::command("ps").args(["-o", "ppid=", "-p", &pid.to_string()]).stdin(std::process::Stdio::null()).output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1");
+        let orphan = |pid: u32| makepad_remote::procs::process(pid).is_some_and(|p| p.ppid == 1);
         let mine = format!("{LEASE_ENV}={}/", self.state.display());
         let now: Vec<(u32, String)> = os::env_values(&mine).into_iter().filter(|(p, id)| *p != me && valid_name(id) && !live.contains(id) && orphan(*p)).collect();
         for (pid, id) in &now {
@@ -4645,6 +4672,9 @@ fn probe_soon() {
 
 /// One toolchain probe, said when its verdict changed: why the box cannot link, if it cannot.
 fn probe_toolchain_now(x: &Exec) -> Option<String> {
+    // the probe reads the toolchain too, which keys the JIT store by it: a rustup update between
+    // leases re-keys the hub here, with no lease and no restart
+    super::caps::read_rustc();
     let dir = x.conf().work.join("tmp").join("toolchain-probe");
     let (why, changed) = super::caps::probe_toolchain(&dir);
     if changed {
@@ -4891,7 +4921,7 @@ fn stop_runs(runs: &[Arc<Run>], registry: &Path, at_once: bool) -> (Vec<u32>, Ve
     }
     for (r, u) in runs.iter().filter_map(|r| r.unit.as_ref().map(|u| (r, u))) {
         r.sample();
-        let _ = makepad_remote::group::command("systemctl").args(["--user", "stop", &format!("{u}.scope")]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+        let _ = makepad_remote::group::command(os::tool("systemctl")).args(["--user", "stop", &format!("{u}.scope")]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
     }
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(2) && alive.iter().any(|r| os::group_alive(r.pid, r.start, &r.hold)) {
@@ -5191,14 +5221,18 @@ fn lease_tell(x: &Exec, rest: &str) -> String {
     }
 }
 
-/// `lease-kill <id> <pid>`: KILL one process of the lease's runs (a live session's JIT restart).
-/// An overlay lease runs only the JIT's cargo invocation, so a `kill` run there was refused and
-/// the session stayed "recovering" (11-02).
+/// `lease-kill <id> <pid>`: KILL one process of the lease's ([`lease_pids`]: its runs' groups and
+/// what carries its mark), by that pid: a live session's JIT restart and stop. An overlay lease
+/// runs only the JIT's cargo invocation, so a `kill` run there was refused and the session stayed
+/// "recovering" (11-02). A JIT-run test leads a group of its own (relax test_pkg.rs): matched by
+/// the runs' groups alone, a live test session's JIT was no process of its lease, which then could
+/// neither restart nor stop it (11-14).
 fn lease_kill(x: &Exec, rest: &str) -> String {
     let mut w = rest.split_whitespace();
     let (Some(id), Some(pid)) = (w.next(), w.next().and_then(|p| p.parse::<u32>().ok())) else { return err("lease-kill <id> <pid>") };
+    // no process walks under the lease table lock
     let Some(runs) = x.leases.lock().unwrap().get(id).map(|l| l.runs.clone()) else { return err(format!("no lease {id} on {}", x.machine)) };
-    if !runs.iter().any(|r| r.pid != 0 && (r.pid == pid || os::in_group(pid, r.pid, &r.hold))) {
+    if !lease_pids(x, id, &runs).contains(&pid) {
         return err(format!("pid {pid} is no process of lease {id} on {}", x.machine));
     }
     os::signal_one(pid, true);
@@ -5889,6 +5923,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A lease's JIT runs of a program start from one link of the JIT (launch_link): the second
+    /// run makes no link and removes none (the JIT's inode change time and link count stay), as
+    /// each did on macOS a syspolicyd scan of the JIT at its next exec. Another program has a
+    /// link of its own, a JIT rebuilt at its path its own folder, and no file name is no link.
+    #[cfg(unix)]
+    #[test]
+    fn a_leases_runs_of_a_program_start_from_one_link_of_its_jit() {
+        use std::os::unix::fs::MetadataExt;
+        // (not `devhub-exec-launch-<pid>`: that is test_exec("launch")'s, which a test beside this one uses)
+        let base = std::env::temp_dir().join(format!("devhub-exec-jit-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let (tmp, jit) = (base.join("tmp"), base.join("makepad.jit"));
+        std::fs::write(&jit, "jit 1").unwrap();
+        let changed = || std::fs::metadata(&jit).map(|m| (m.ctime(), m.ctime_nsec(), m.nlink())).unwrap();
+        let first = launch_link(&tmp, &jit, "app").expect("a link");
+        assert!(first.parent().is_some_and(|p| p.ends_with("+launch")) && first.file_name().is_some_and(|n| n == "app"), "{}", first.display());
+        let made = changed();
+        assert_eq!(made.2, 2, "one link of the JIT");
+        // (Linux keeps the change time to a clock tick)
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(launch_link(&tmp, &jit, "app").as_deref(), Some(first.as_path()));
+        assert_eq!(changed(), made, "the second run made no link of the JIT and removed none");
+        let tool = launch_link(&tmp, &jit, "tool").expect("a link");
+        assert!(tool != first && changed().2 == 3, "another program, another link");
+        std::fs::remove_file(&jit).unwrap();
+        std::fs::write(&jit, "jit 2").unwrap();
+        let rebuilt = launch_link(&tmp, &jit, "app").expect("a link");
+        assert!(rebuilt != first && std::fs::read_to_string(&rebuilt).unwrap() == "jit 2" && std::fs::read_to_string(&first).unwrap() == "jit 1", "a rebuilt JIT is linked anew");
+        assert!(launch_link(&tmp, &jit, ".app").is_none() && launch_link(&tmp, &jit, "a/b").is_none() && launch_link(&tmp, &jit, "").is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     fn test_exec(name: &str, mut opts: Opts) -> (TestHub, PathBuf, Arc<Mutex<Vec<String>>>) {
         let base = std::env::temp_dir().join(format!("devhub-exec-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -6081,7 +6148,8 @@ mod tests {
         };
         let run = |id: &str, request: &str, args: &[&str]| run_env(id, request, &[], args);
         // what cargo's build ran under: its jobs and its nice level, as its build script sees them
-        const SAYS_ITS_BUILD: &str = "fn main() {\n    let nice = std::process::Command::new(\"nice\").output().unwrap().stdout;\n    std::fs::write(std::path::Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap()).join(\"build.said\"), format!(\"{} {}\", std::env::var(\"NUM_JOBS\").unwrap(), String::from_utf8_lossy(&nice).trim())).unwrap();\n}\n";
+        // (getpriority: macOS's `nice` prints no level, only its usage)
+        const SAYS_ITS_BUILD: &str = "extern \"C\" {\n    fn getpriority(which: i32, who: u32) -> i32;\n}\n\nfn main() {\n    // PRIO_PROCESS of this process\n    let nice = unsafe { getpriority(0, 0) };\n    std::fs::write(std::path::Path::new(&std::env::var(\"CARGO_MANIFEST_DIR\").unwrap()).join(\"build.said\"), format!(\"{} {nice}\", std::env::var(\"NUM_JOBS\").unwrap())).unwrap();\n}\n";
         let build_said = |id: &str| std::fs::read_to_string(x.leases.lock().unwrap()[id].work.join("build.said")).unwrap();
         x.handle("lease-start", r#"{"id":"J1","lane":"jitx","kind":"test","rev":null}"#);
         stand_in("J1", "fn main() { println!(\"stand-in JIT {:?}\", std::env::args().skip(1).collect::<Vec<_>>()); }\n");
@@ -6519,6 +6587,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             x.leases.lock().unwrap()["S2"].runs.first().cloned()
         }).expect("its run");
+        // a scoped run is measurable once systemd-run has moved it into its scope and its wrapper
+        // wrote the cgroup's path: on a loaded Linux box that came after the beats below (a fast
+        // bucket's red, 11-14), and a beat that cannot measure the build measures nothing
+        assert!((0..200).any(|_| super::activity_now(std::slice::from_ref(&build)).is_some() || { std::thread::sleep(Duration::from_millis(50)); false }), "the store build is never measurable");
         let measured = |x: &Exec| {
             let a = x.handle("lease-beat", "S1");
             let v = makepad_strict_json::parse(a[0].as_bytes()).unwrap();
@@ -7640,13 +7712,22 @@ mod tests {
             }
             c.spawn().unwrap().id()
         };
-        let (gone, stays) = (spawn(true), spawn(false));
+        let (gone, stays, jit) = (spawn(true), spawn(false), spawn(true));
         let t = Instant::now();
-        while !os::with_env(&mark).contains(&gone) {
+        while !os::with_env(&mark).contains(&gone) || !os::with_env(&mark).contains(&jit) {
             assert!(t.elapsed() < Duration::from_secs(30), "the stray did not start");
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert!(os::pid_alive(gone) && os::pid_alive(stays));
+        assert!(os::pid_alive(gone) && os::pid_alive(stays) && os::pid_alive(jit));
+        // a live session's stop of its JIT, which leads a group of its own (a JIT-run test): killed
+        // by its pid, as the lease's; one without the mark is not the lease's to kill
+        assert_eq!(x.handle("lease-kill", &format!("S1 {jit}")), vec![format!("{{\"killed\":{jit}}}")], "a marked process outside the run's group");
+        assert!(x.handle("lease-kill", &format!("S1 {stays}"))[0].contains("is no process of lease S1"), "an unmarked one");
+        let t = Instant::now();
+        while os::with_env(&mark).contains(&jit) {
+            assert!(t.elapsed() < Duration::from_secs(10), "the killed JIT {jit} lives on");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         let e = x.handle("lease-end", "S1 released");
         assert!(e[0].contains(&gone.to_string()) && !e[0].contains(&stays.to_string()), "gone {gone} stays {stays}: {e:?}");
         assert_eq!(os::with_env(&format!("{LEASE_ENV}={}", lease_mark(&base.join("leases"), "S1"))), Vec::<u32>::new());

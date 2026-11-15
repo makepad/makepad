@@ -341,7 +341,7 @@ impl<'a> Iterator for EscapeDefault<'a> {
                 self.cur = None;
             }
             let c = self.chars.next()?;
-            self.cur = Some(crate::char::escape_default(c));
+            self.cur = Some(crate::char::methods::escape_default(c));
         }
     }
 }
@@ -379,7 +379,7 @@ impl<'a> Iterator for EscapeUnicode<'a> {
                 self.cur = None;
             }
             let c = self.chars.next()?;
-            self.cur = Some(crate::char::escape_unicode(c));
+            self.cur = Some(crate::char::methods::escape_unicode(c));
         }
     }
 }

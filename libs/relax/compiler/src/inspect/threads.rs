@@ -635,7 +635,8 @@ mod imp {
     // ---- holds: a thread stands still in the capture signal's handler
     //
     // A slot per held thread. State: 0 free; 1 asked (signal sent); 5 the handler claimed it;
-    // 2 registers ready, the thread waits; 3 released by the inspector; 4 the handler left.
+    // 2 registers ready, the thread waits; 3 released by the inspector; 4 the handler left;
+    // 6 a pause's hold declined (the thread is inside the compiler's front end).
     // A capture uses a slot for the time of one walk; `pause` keeps slots until `resume`.
     const SLOTS: usize = 256;
     pub struct Slot {
@@ -673,6 +674,14 @@ mod imp {
             let tid = syscall(SYS_GETTID) as i32;
             // the slot asked for this thread (a late signal of a capture that gave up finds none)
             let Some(slot) = HOLDS.iter().find(|h| h.tid.load(Acquire) == tid && h.state.compare_exchange(1, 5, AcqRel, Relaxed).is_ok()) else { return };
+            // A pause for a report or an inspection holds no thread inside the compiler's front
+            // end (instrument::pause_lets_front_readers_go): it runs on, and the pause's sweep
+            // holds it once it has left. (Atomics and a thread-local count: async-signal-safe.)
+            if slot.mode.load(Relaxed) == HOLD_PAUSE && crate::inspect::instrument::pause_lets_front_readers_go() && crate::jit::front_reads_held() > 0 {
+                slot.state.store(6, Release);
+                futex_wake(&slot.state);
+                return;
+            }
             #[cfg(target_arch = "x86_64")]
             {
                 let gregs = uc.add(40) as *const u64;
@@ -737,6 +746,12 @@ mod imp {
         loop {
             match slot.state.load(Acquire) {
                 2 => return Ok(slot),
+                6 => {
+                    slot.tid.store(0, Relaxed);
+                    slot.mode.store(HOLD_CAPTURE, Relaxed);
+                    slot.state.store(0, Release);
+                    return Err("inside the compiler's front end (held once it has left)");
+                }
                 1 if t0.elapsed().as_millis() >= 250 => {
                     if slot.state.compare_exchange(1, 0, AcqRel, Relaxed).is_ok() {
                         slot.tid.store(0, Relaxed);

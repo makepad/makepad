@@ -1,5 +1,5 @@
-//! Sandboxed run-time modules: memory confinement (local/plans/hotreload.md §12.3, option B
-//! "one shared sandbox": MAIN 2026-10-05).
+//! Sandboxed run-time modules: memory confinement, every module in one shared sandbox (one set of
+//! twins and one data image for all of them, each module's memory in its own arena window).
 //!
 //! Every function a sandboxed module runs is a *twin* (`FnKey::Sandbox(base)`): the base slot's
 //! RIR (built as usual, shared by all modules) rewritten by `transform` before code generation:
@@ -19,7 +19,10 @@
 //!   target into the sandbox thunk table; host runtime and C calls are allow-listed and the
 //!   memory ones replaced by arena-checked versions (malloc & co. allocate in the arena);
 //! - in a domain that meters fuel (`Domain::fuel`), pre-optimization RIR blocks spend
-//!   deterministic instruction fuel at entry.
+//!   deterministic instruction fuel at entry;
+//! - a module's cleanups never end its host: a call that has spent its fuel runs none of them
+//!   (each would stop again), and a panic raised in one (rustc aborts the process there) cuts
+//!   the unwind at the module's edge, its remaining cleanups skipped (jit.rs unwind_walk).
 //!
 //! Host code reaches a module only through generated wrapper functions (modules.rs) that enter
 //! the module's arena, copy reference arguments into it, call the twin and leave. Plain-data
@@ -27,6 +30,10 @@
 //! sret stores must never receive a host destination.
 
 include!("rt_abi.rs");
+
+pub mod script;
+#[cfg(unix)]
+mod broker;
 
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
@@ -105,6 +112,8 @@ pub struct Arena {
     /// into it: no unit there)
     sbt_base: u64,
     sbt_span: u64,
+    /// no-codegen mode: its unit's fn values (no table to mask into: `Fns`)
+    fns: Option<Arc<Fns>>,
     /// the bytes of a segment's thread-local area in use (its unit's layout): zeroed at a claim
     tls_used: Arc<std::sync::atomic::AtomicU32>,
     /// std's runtime keys of its code (`relax_key_*`) and each segment's values; the segments
@@ -122,6 +131,41 @@ struct Keys {
     made: Vec<(u64, bool)>,
     /// segment -> (key -> value, the keys in the order first set): a claim's values
     vals: Vec<(Vec<u64>, Vec<u32>)>,
+}
+
+/// No-codegen mode's fn values of a unit's twins. The process makes no machine code there, so
+/// there is no thunk table to write: a twin taken as a value is named by its own slot's thunk
+/// (precompiled, one per slot of the unit's window of the pool: jit.rs Unit::nc_window), which sits
+/// among the thunks of host slots. An indirect call cannot be masked into a range of its own, so
+/// it is checked instead: a set bit per slot whose thunk was given out, and the trap thunk for
+/// any other address.
+struct Fns {
+    /// the unit's first thunk, bytes per thunk, slots
+    base: u64,
+    stride: u64,
+    slots: u64,
+    given: Box<[std::sync::atomic::AtomicU64]>,
+    /// the thunk of the slot whose code panics with the reason (an invalid fn pointer)
+    trap: u64,
+}
+
+impl Fns {
+    /// Twin `t`'s thunk at `at` is a fn value from now on.
+    fn give(&self, t: u32, at: u64) -> u64 {
+        self.given[t as usize / 64].fetch_or(1 << (t % 64), std::sync::atomic::Ordering::AcqRel);
+        at
+    }
+
+    /// What a call of `f` runs: `f` when it was given out, else the trap.
+    fn target(&self, f: u64) -> u64 {
+        let d = f.wrapping_sub(self.base);
+        let k = d / self.stride;
+        if d % self.stride == 0 && k < self.slots && self.given[k as usize / 64].load(std::sync::atomic::Ordering::Acquire) & 1 << (k % 64) != 0 {
+            f
+        } else {
+            self.trap
+        }
+    }
 }
 
 struct Heap {
@@ -156,7 +200,9 @@ impl State {
     /// A retired unit's code goes (Unit's drop): its thunk table with it.
     pub(crate) fn release(&mut self) {
         if let Some(s) = self.sb.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
-            crate::os::mem::release(s.sbt_base, s.sbt_span as usize, 0);
+            if s.sbt_span != 0 {
+                crate::os::mem::release(s.sbt_base, s.sbt_span as usize, 0);
+            }
         }
     }
 }
@@ -166,10 +212,11 @@ impl State {
 /// name, address)))); None: not this domain's. Run-time modules add nothing (`MODULES`).
 pub type Allow = fn(&str) -> Option<Option<(&'static str, u64)>>;
 
-/// A confinement domain: its name, what its code may call beyond what every domain may, and
-/// whether its code meters fuel. The name is part of its twins' cache keys: code one domain's
-/// policy made is never linked into another domain's unit (cache.rs enc_fnkey); `allow` and
-/// `fuel` are fixed per domain, so the name covers them.
+/// A confinement domain: its name, what its code may call beyond what every domain may, whether
+/// its code meters fuel and whether its twins always get the clean-up. The name is part of its
+/// twins' cache keys: code one domain's policy made is never linked into another domain's unit
+/// (cache.rs enc_fnkey); `allow`, `fuel` and `clean_up` are fixed per domain, so the name covers
+/// them.
 #[derive(Clone, Copy)]
 pub struct Domain {
     pub name: &'static str,
@@ -177,11 +224,19 @@ pub struct Domain {
     /// its twins charge each block's instructions to the thread's fuel word (`add_fuel`): an
     /// arena's per-call budget (`Arena::fuel`) can only end a call in a domain that meters
     pub fuel: bool,
+    /// its twins always get the O1 clean-up of the masks (`transform`): a domain whose code never
+    /// tiers up to O3 (the proc-macro world) has no later pass that does it
+    pub clean_up: bool,
 }
+
+/// What third-party packages' compile-time code may do (proc macros, pmhost.rs; build scripts,
+/// unitgraph.rs): the entry point's choice, one per process (runner Host `compile_time_code`).
+/// Kept in relax-base, where the build-script runs read it too.
+pub use relax_base::compile_time::{policy, set_policy, Policy};
 
 /// The run-time modules' domain: what every domain may call, nothing more; metered (a module's
 /// arena may set a per-call budget).
-pub const MODULES: Domain = Domain { name: "modules", allow: modules_allow, fuel: true };
+pub const MODULES: Domain = Domain { name: "modules", allow: modules_allow, fuel: true, clean_up: false };
 
 fn modules_allow(_: &str) -> Option<Option<(&'static str, u64)>> {
     None
@@ -190,10 +245,11 @@ fn modules_allow(_: &str) -> Option<Option<(&'static str, u64)>> {
 struct Sb {
     /// the symbol TlsAddr reads the sandbox words' offset from (this unit's; the offset is TLS_OFF)
     tls_sym: Sym,
-    /// the domain's name, own C entries and whether its twins meter fuel
+    /// the domain's name, own C entries, whether its twins meter fuel and get the clean-up
     domain: &'static str,
     allow: Allow,
     fuel: bool,
+    clean_up: bool,
     sbt_base: u64,
     /// the table's bytes (a power of two: the indirect-call mask)
     sbt_span: u64,
@@ -204,6 +260,8 @@ struct Sb {
     sbt_of: HashMap<u32, u32>,
     /// the thunk every unused index holds: a jump through the trap slot
     trap: Vec<u8>,
+    /// no-codegen mode: fn values are the twins' own thunks, checked at each call (no table)
+    fns: Option<Arc<Fns>>,
     /// thread-locals of the twins: symbol -> offset in a segment's thread-local area; the bytes
     /// in use (shared with the arenas, which zero them when a segment is claimed)
     tls: HashMap<u32, u32>,
@@ -304,29 +362,38 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
     };
     let tls_sym = u.syms.intern(SymKind::Rt("sb_tls"), tls as u64);
     let ts = jit::thunk_size() as u64;
-    let sbt_span = (u.exec_size / ts).next_power_of_two() * ts;
-    let sbt_base = crate::os::mem::reserve(sbt_span as usize, 0);
+    // no-codegen mode writes no thunk table (`Fns`)
+    let no_table = u.prog.session.options.no_codegen;
+    let sbt_span = if no_table { 0 } else { (u.exec_size / ts).next_power_of_two() * ts };
+    let sbt_base = if no_table { 0 } else { crate::os::mem::reserve(sbt_span as usize, 0) };
     // held until a chunk is written: zero bytes would run as code (x86: `add [rax], al`). (No
     // twin exists yet, so no code can call into the table before this.)
     #[cfg(unix)]
-    if !crate::os::mem::code_held(sbt_base, sbt_span as usize, true) {
+    if !no_table && !crate::os::mem::code_held(sbt_base, sbt_span as usize, true) {
         crate::os::mem::release(sbt_base, sbt_span as usize, 0);
         return Err("cannot reserve the sandbox thunk table".to_string());
     }
     // the slot every unused sandbox thunk jumps through: its code panics with the reason
     let trap_slot = u.fn_id(FnKey::Sandbox(u32::MAX));
     let trap = tgt::thunk(u.slots.table(trap_slot));
+    let fns = no_table.then(|| {
+        let slots = u.nc_slots() as u64;
+        let base = u.slots.thunk(0);
+        Arc::new(Fns { base, stride: u.slots.thunk(1) - base, slots, given: (0..slots.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(), trap: u.slots.thunk(trap_slot) })
+    });
     *u.sandbox.sb.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(Sb {
         tls_sym,
         domain: domain.name,
         allow: domain.allow,
         fuel: domain.fuel,
+        clean_up: domain.clean_up,
         sbt_base,
         sbt_span,
         sbt_n: 1,
         sbt_filled: 0,
         sbt_of: HashMap::new(),
         trap,
+        fns,
         tls: HashMap::new(),
         // (words 0 and 1: the thread block's two words)
         tls_used: Arc::new(std::sync::atomic::AtomicU32::new(TLS_ERRNO + 8)),
@@ -483,6 +550,9 @@ unsafe fn sbthunk(up: *mut Unit, t: u32) -> Result<u64, String> {
     let ts = jit::thunk_size() as u64;
     let table = u.slots.table(t);
     with_sb(u, |s| {
+        if let Some(fns) = &s.fns {
+            return Ok(fns.give(t, u.slots.thunk(t)));
+        }
         if let Some(&k) = s.sbt_of.get(&t) {
             return Ok(s.sbt_base + k as u64 * ts);
         }
@@ -796,6 +866,7 @@ pub fn new_arena(up: *mut Unit, module: u32, name: &str, mem: u64, fuel: i64) ->
             segs_mapped: std::sync::atomic::AtomicU64::new(0),
             sbt_base: s.sbt_base,
             sbt_span: s.sbt_span,
+            fns: s.fns.clone(),
             tls_used: s.tls_used.clone(),
             keys: Mutex::new(Keys::default()),
             keyed: std::sync::atomic::AtomicU64::new(0),
@@ -975,6 +1046,12 @@ fn sb_ready() -> bool {
     TLS_OFF.load(std::sync::atomic::Ordering::Acquire) != 0
 }
 
+/// This thread's call into a module has spent its fuel: no block of the module's code can run,
+/// its cleanups' neither (each one's meter would stop it again).
+pub(crate) fn fuel_spent() -> bool {
+    sb_ready() && unsafe { *words() != 0 && *words().add((W_FUEL / 8) as usize) < 0 }
+}
+
 fn cur_arena() -> Option<&'static Arena> {
     let p = unsafe { *words().add(3) } as *const Arena;
     if p.is_null() {
@@ -992,9 +1069,9 @@ fn m(p: u64) -> u64 {
     }
 }
 
-/// `len` bytes from masked `p` stay inside the window.
+/// `len` bytes from masked `p` stay inside the window (a length past the address space too).
 fn fits(p: u64, len: u64) -> bool {
-    (p & 0xffff_ffff) + len <= WINDOW
+    (p & 0xffff_ffff).checked_add(len).is_some_and(|end| end <= WINDOW)
 }
 
 /// The state a guarded call or a wrapper restores (the sandbox words, W_*).
@@ -1389,14 +1466,7 @@ fn run_key_destructors() {
     if !a.alive.load(std::sync::atomic::Ordering::SeqCst) || jit::unwinding() {
         return;
     }
-    // under a recovery point, as the module's own catch_unwind (a panicking destructor, or one
-    // out of fuel, is reported and the next one runs; std aborts the process there)
-    let call = |dtor: u64, value: u64| {
-        let s = save();
-        let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
-        g(mask_thunk(dtor), m(value));
-        restore(s);
-    };
+    let call = call_in_arena;
     loop {
         let next = {
             let mut g = a.keys.lock().unwrap_or_else(|e| e.into_inner());
@@ -1431,6 +1501,39 @@ fn run_key_destructors() {
     for (dtor, value) in late {
         call(dtor, value);
     }
+}
+
+/// Host code calls code of the current arena through a pointer that code supplied: `f` masked into
+/// the arena's thunk table (a forged pointer lands on a thunk: a twin or the trap), `arg` into its
+/// window, under a recovery point as the module's own catch_unwind (a panicking callee, or one out
+/// of fuel, is reported and the caller goes on; std aborts the process there), the sandbox words as
+/// they were after. The one way host code calls such a pointer (key destructors, exit handlers):
+/// never stored as a host fn type, never called outside an entry of its arena.
+pub(crate) fn call_in_arena(f: u64, arg: u64) {
+    if !sb_ready() || cur_arena().is_none() {
+        return;
+    }
+    let s = save();
+    let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
+    g(mask_thunk(f), m(arg));
+    restore(s);
+}
+
+/// A pointer a confinement entry hands back to the current arena's code (returned, or written
+/// through an out pointer): itself when it lies in the arena's window, else 0 (a broker bug,
+/// said): the code gets NULL, a clean error, never the arena's bytes at a masked host address.
+pub(crate) fn ret_arena(p: u64) -> u64 {
+    let base = if sb_ready() { cur_arena().map_or(0, |a| a.base) } else { 0 };
+    let r = ret_in(base, p);
+    if r != p {
+        eprintln!("relax: a confinement entry handed back {p:#x}, outside its arena (a Relax bug): the code gets NULL");
+    }
+    r
+}
+
+/// `ret_arena` of the window at `base` (0: no arena).
+fn ret_in(base: u64, p: u64) -> u64 {
+    if base != 0 && p & !(WINDOW - 1) == base { p } else { 0 }
 }
 
 /// A wrapper's call returns (or unwinds): the state before it comes back.
@@ -1814,6 +1917,10 @@ extern "C" fn sb_gettid() -> i32 {
 extern "C" fn sb_getpid() -> i32 {
     0
 }
+/// (a pthread_t is a host address on Linux and macOS: the segment's number instead, as `gettid`)
+extern "C" fn sb_pthread_self() -> u64 {
+    cur_seg().map_or(0, |(_, k)| k as u64 + 1)
+}
 
 rt_fn! {
 fn sb_fmt_str(p: u64, len: u64, spec: u64) {
@@ -1865,9 +1972,20 @@ fn sb_catch_panic(f: u64, data: u64) -> u64 {
 }
 }
 
+rt_fn! {
+/// An indirect call's target in no-codegen mode (`Fns`: the transform's `mask_fn` calls this where
+/// it masks otherwise).
+leaf fn sb_fn_value(f: u64) -> u64 {
+    mask_thunk(f)
+}
+}
+
 /// A fn pointer of the current arena's code masked into its unit's thunk table (0: no arena).
 fn mask_thunk(f: u64) -> u64 {
     let Some(a) = cur_arena() else { return 0 };
+    if let Some(fns) = &a.fns {
+        return fns.target(f);
+    }
     let (base, span, ts) = (a.sbt_base, a.sbt_span, jit::thunk_size() as u64);
     base + ((f.wrapping_sub(base)) & (span - 1) & !(ts - 1))
 }
@@ -1883,6 +2001,8 @@ fn rt_policy(name: &str) -> Option<Option<(&'static str, u64)>> {
         "memcpy" | "memmove" => Some(("sb_rt_memcpy", sb_rt_memcpy as *const () as u64)),
         "memset" => Some(("sb_rt_memset", sb_rt_memset as *const () as u64)),
         "catch_panic" => Some(("sb_catch_panic", sb_catch_panic as *const () as u64)),
+        // (no runtime entry of the program's: the transform's own call, mask_fn)
+        "sb_fn_value" => Some(("sb_fn_value", sb_fn_value as *const () as u64)),
         _ => return None,
     })
 }
@@ -1938,6 +2058,7 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         // thread identity (std::thread::current): no host thread or process ids
         "pthread_main_np" => Some(("sb_main_np", sb_main_np as *const () as u64)),
         "gettid" => Some(("sb_gettid", sb_gettid as *const () as u64)),
+        "pthread_self" => Some(("sb_pthread_self", sb_pthread_self as *const () as u64)),
         "getpid" => Some(("sb_getpid", sb_getpid as *const () as u64)),
         "abort" => Some(("abort", 0)),
         // std's catch_unwind names its recovery point (jit.rs relax_catch_caught: a thread-local flag)
@@ -2248,13 +2369,15 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     }
     with_sb(&*up, |s| s.refs.insert(twin_id, refs));
     f.verify().map_err(|e| format!("{}: sandbox transform made invalid RIR: {}", f.name, e))?;
-    // the masks the transform added: common ones merged, loop-invariant ones hoisted. Only
-    // under O1 alone (RELAX_O3=0, O2 pipeline): with O3 on, O1 keeps
+    // the masks the transform added: common ones merged, loop-invariant ones hoisted. Under O1
+    // alone (RELAX_O3=0, O2 pipeline), and always in a domain whose code never tiers up
+    // (`Domain::clean_up`: the proc-macro world, whose macro calls of a warm start went 134 ->
+    // 114 ms with it, and its twins' compile 136 -> 126 ms CPU). With O3 on, O1 keeps
     // registers unoptimised and the hoisted masks cost more than they save (mini, particle
-    // kernel: +25% with the clean-up, +0.5% without). Hot twins retain this confined RIR
-    // for O3, whose full pipeline and register allocation perform the clean-up there.
-    // RELAX_SANDBOX_OPT=0/1 forces the O1 clean-up.
-    let opt = options.sandbox_opt.unwrap_or(!jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
+    // kernel: +25% with the clean-up, +0.5% without); hot twins retain this confined RIR for
+    // O3, whose full pipeline and register allocation perform the clean-up there.
+    // RELAX_SANDBOX_OPT=0/1 forces it either way.
+    let opt = options.sandbox_opt.unwrap_or_else(|| with_sb(&*up, |s| s.clean_up) || !jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
     if opt {
         relax_backend::passes::simplify(options, f, None, true, true);
         relax_backend::passes::licm(options, f);
@@ -2295,6 +2418,15 @@ unsafe fn tls_offset(up: *mut Unit, sym: Sym) -> Result<u32, String> {
 /// An indirect call's target masked into unit `u`'s sandbox thunk table. (The span is the code
 /// area's slots' (Unit::exec_size, a compile-time constant): an immediate like any other.)
 fn mask_fn(u: &Unit, f: &mut Func, insts: &mut Vec<Inst>, pos: &mut Vec<u64>, p: u64, v: VReg) -> VReg {
+    // no-codegen mode: no table to mask into, the runtime checks the target (`Fns`)
+    if with_sb(u, |s| s.fns.is_some()) {
+        if let Some(check) = host_sym(u, "rt:sb_fn_value") {
+            let t = f.vreg(Cls::I);
+            insts.push(Inst::Call(Callee::Host(check), vec![v], vec![t]));
+            pos.push(p);
+            return t;
+        }
+    }
     let span = with_sb(u, |s| s.sbt_span);
     let ts = jit::thunk_size() as u64;
     let b = f.vreg(Cls::I);
@@ -2496,4 +2628,21 @@ pub(crate) unsafe fn reset_statics() {
     reset(&TLS_OFF, std::sync::atomic::AtomicU32::new(0));
     reset(&DEAD, Mutex::new(Vec::new()));
     reset(&ARENAS, [const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; MAX_MODULES]);
+    script::reset_statics();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_confinement_entry_hands_back_only_addresses_in_its_window() {
+        let base = 7 * WINDOW;
+        let host = &base as *const u64 as u64;
+        assert_eq!(ret_in(base, base + 0x1000), base + 0x1000, "an address in the window is handed back as it is");
+        assert_eq!(ret_in(base, base + WINDOW - 1), base + WINDOW - 1, "the window's last byte is in it");
+        assert_eq!(ret_in(base, host), 0, "a host address becomes NULL, never the window's bytes at its masked offset");
+        assert_eq!(ret_in(base, base + WINDOW), 0, "the next window is not this one");
+        assert_eq!(ret_in(0, host), 0, "with no arena nothing is handed back");
+    }
 }

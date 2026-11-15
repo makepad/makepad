@@ -116,7 +116,7 @@ impl VfxState {
                     TextureFormat::VecMipBGRAu8_32 {
                         width: atlas::ATLAS_SIZE,
                         height: atlas::ATLAS_SIZE,
-                        data: Some(texels),
+                        data: Some(texels.into()),
                         max_level: Some(atlas::ATLAS_MIPS),
                         wrap: TextureWrap::ClampToEdge,
                         updated: TextureUpdated::Full,

@@ -11,5 +11,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 
 [lints.rust]
-# `cfg(relax)`: set when makepad run (Relax) compiles the crate
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)"] }
+# `cfg(relax)`: set when makepad run (Relax) compiles the crate; `cfg(makepad_profile_runtime)`: an
+# instrumented build (tools/run/host/build.sh gen) whose _exit writes the profile runtime's counts
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(relax)", "cfg(makepad_profile_runtime)"] }

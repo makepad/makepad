@@ -3,7 +3,7 @@
 //! `cfg!(target_feature = ..) || detect::check(Feature::..)` as in std_detect; the run-time
 //! check is answered once per process: CPUID/XGETBV on x86_64, sysctl on macOS
 //! aarch64, getauxval on Linux aarch64, and processor-feature queries on Windows aarch64.
-//! Only the features the supported crate graph asks for are listed; any other literal is a compile error,
+//! aarch64 lists std_detect's single-word features; x86 only the ones the supported crate graph asks for. Any other literal is a compile error,
 //! as an unknown feature is in std.
 
 pub use core::arch::aarch64;
@@ -78,24 +78,69 @@ pub mod detect {
         Avx512bitalg = 59,
         Avx512vpopcntdq = 60,
         Avxvnni = 61,
+        // aarch64, the rest of std_detect's list (bits 64 on)
+        Bti = 64,
+        Cssc = 65,
+        Dit = 66,
+        Dpb = 67,
+        Dpb2 = 68,
+        Ecv = 69,
+        F32mm = 70,
+        F64mm = 71,
+        Faminmax = 72,
+        Fcma = 73,
+        Flagm = 74,
+        Flagm2 = 75,
+        Fp8 = 76,
+        Fp8dot2 = 77,
+        Fp8dot4 = 78,
+        Fp8fma = 79,
+        Fpmr = 80,
+        Frintts = 81,
+        Hbc = 82,
+        Jsconv = 83,
+        Lse128 = 84,
+        Lse2 = 85,
+        Lut = 86,
+        Mops = 87,
+        Mte = 88,
+        Paca = 89,
+        Pacg = 90,
+        Rand = 91,
+        Rcpc = 92,
+        Rcpc2 = 93,
+        Rcpc3 = 94,
+        Sb = 95,
+        Sm4 = 96,
+        Sme = 97,
+        Sme2 = 98,
+        Sme2p1 = 99,
+        Ssbs = 100,
+        Sve = 101,
+        Sve2 = 102,
+        Sve2p1 = 103,
+        Tme = 104,
+        Wfxt = 105,
     }
 
-    /// bit 63 = initialised
-    static CACHE: AtomicU64 = AtomicU64::new(0);
-    const INIT: u64 = 1 << 63;
+    /// The feature bits, low and high words; bit 127 = initialised (written last, so a reader
+    /// that sees it sees the low word too).
+    static CACHE: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+    const INIT: u128 = 1 << 127;
 
     pub fn check(f: Feature) -> bool {
-        let mut v = CACHE.load(Ordering::Relaxed);
+        let mut v = ((CACHE[1].load(Ordering::Acquire) as u128) << 64) | CACHE[0].load(Ordering::Relaxed) as u128;
         if v & INIT == 0 {
             v = detect_features() | INIT;
-            CACHE.store(v, Ordering::Relaxed);
+            CACHE[0].store(v as u64, Ordering::Relaxed);
+            CACHE[1].store((v >> 64) as u64, Ordering::Release);
         }
-        v & (1u64 << (f as u8)) != 0
+        v & (1u128 << (f as u8)) != 0
     }
 
-    fn bit(f: Feature, on: bool) -> u64 {
+    fn bit(f: Feature, on: bool) -> u128 {
         if on {
-            1u64 << (f as u8)
+            1u128 << (f as u8)
         } else {
             0
         }
@@ -114,7 +159,7 @@ pub mod detect {
     }
 
     #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
-    fn detect_features() -> u64 {
+    fn detect_features() -> u128 {
         // std_detect os/darwin/aarch64.rs (same names and compositions)
         let fp = sysctl(b"hw.optional.floatingpoint\0");
         // std_detect reads hw.optional.AdvSIMD; current macOS names it hw.optional.arm.AdvSIMD / hw.optional.neon
@@ -146,10 +191,34 @@ pub mod detect {
             | bit(Feature::Sha3, sha512 && sha3 && asimd)
             | bit(Feature::I8mm, sysctl(b"hw.optional.arm.FEAT_I8MM\0"))
             | bit(Feature::Bf16, sysctl(b"hw.optional.arm.FEAT_BF16\0"))
+            | bit(Feature::Bti, sysctl(b"hw.optional.arm.FEAT_BTI\0"))
+            | bit(Feature::Cssc, sysctl(b"hw.optional.arm.FEAT_CSSC\0"))
+            | bit(Feature::Dit, sysctl(b"hw.optional.arm.FEAT_DIT\0"))
+            | bit(Feature::Dpb, sysctl(b"hw.optional.arm.FEAT_DPB\0"))
+            | bit(Feature::Dpb2, sysctl(b"hw.optional.arm.FEAT_DPB2\0"))
+            | bit(Feature::Ecv, sysctl(b"hw.optional.arm.FEAT_ECV\0"))
+            | bit(Feature::Fcma, sysctl(b"hw.optional.arm.FEAT_FCMA\0"))
+            | bit(Feature::Flagm, sysctl(b"hw.optional.arm.FEAT_FlagM\0"))
+            | bit(Feature::Flagm2, sysctl(b"hw.optional.arm.FEAT_FlagM2\0"))
+            | bit(Feature::Frintts, sysctl(b"hw.optional.arm.FEAT_FRINTTS\0"))
+            | bit(Feature::Hbc, sysctl(b"hw.optional.arm.FEAT_HBC\0"))
+            | bit(Feature::Jsconv, sysctl(b"hw.optional.arm.FEAT_JSCVT\0"))
+            | bit(Feature::Lse2, sysctl(b"hw.optional.arm.FEAT_LSE2\0"))
+            | bit(Feature::Mte, sysctl(b"hw.optional.arm.FEAT_MTE\0") && sysctl(b"hw.optional.arm.FEAT_MTE2\0"))
+            | bit(Feature::Paca, sysctl(b"hw.optional.arm.FEAT_PAuth\0"))
+            | bit(Feature::Pacg, sysctl(b"hw.optional.arm.FEAT_PAuth\0"))
+            | bit(Feature::Rcpc, sysctl(b"hw.optional.arm.FEAT_LRCPC\0"))
+            | bit(Feature::Rcpc2, sysctl(b"hw.optional.arm.FEAT_LRCPC2\0"))
+            | bit(Feature::Sb, sysctl(b"hw.optional.arm.FEAT_SB\0"))
+            | bit(Feature::Sme, sysctl(b"hw.optional.arm.FEAT_SME\0"))
+            | bit(Feature::Sme2, sysctl(b"hw.optional.arm.FEAT_SME2\0"))
+            | bit(Feature::Sme2p1, sysctl(b"hw.optional.arm.FEAT_SME2p1\0"))
+            | bit(Feature::Ssbs, sysctl(b"hw.optional.arm.FEAT_SSBS\0"))
+            | bit(Feature::Wfxt, sysctl(b"hw.optional.arm.FEAT_WFxT\0"))
     }
 
     #[cfg(target_arch = "x86_64")]
-    fn detect_features() -> u64 {
+    fn detect_features() -> u128 {
         use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv, CpuidResult};
         let root = __cpuid(0);
         if root.eax < 1 { return 0; }
@@ -222,7 +291,7 @@ pub mod detect {
     }
 
     #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
-    fn detect_features() -> u64 {
+    fn detect_features() -> u128 {
         extern "C" { fn getauxval(kind: usize) -> usize; }
         let hw = unsafe { getauxval(16) }; // AT_HWCAP
         let hw2 = unsafe { getauxval(26) }; // AT_HWCAP2
@@ -244,10 +313,69 @@ pub mod detect {
             | bit(Feature::Rdm, hw & (1 << 12) != 0)
             | bit(Feature::I8mm, hw2 & (1 << 13) != 0)
             | bit(Feature::Bf16, hw2 & (1 << 14) != 0)
+            | detect_more(hw, hw2, fp, asimd)
+    }
+
+    /// std_detect os/linux/aarch64.rs: the rest of its single-word features, from the same
+    /// AT_HWCAP and AT_HWCAP2 bits and with the same compositions.
+    #[cfg(all(any(target_os = "linux", target_os = "android"), target_arch = "aarch64"))]
+    fn detect_more(hw: usize, hw2: usize, fp: bool, asimd: bool) -> u128 {
+        let h = |n: u32| hw >> n & 1 != 0;
+        let h2 = |n: u32| hw2 >> n & 1 != 0;
+        let bf16 = h2(14);
+        let sve = h(22);
+        let rcpc2 = h(26) && h(15);
+        let sve2 = h2(1) && sve && asimd;
+        let fp8 = h2(51) && h2(50) && h2(49) && bf16;
+        let fp8fma = h2(52) && fp8;
+        let fp8dot4 = h2(53) && fp8fma;
+        let sme = h2(23) && bf16;
+        let sme2 = h2(37) && sme;
+        bit(Feature::Lse2, h(25))
+            | bit(Feature::Lse128, h2(47) && h(8))
+            | bit(Feature::Rcpc, h(15))
+            | bit(Feature::Rcpc2, rcpc2)
+            | bit(Feature::Rcpc3, h2(46) && rcpc2)
+            | bit(Feature::Dit, h(24))
+            | bit(Feature::Flagm, h(27))
+            | bit(Feature::Flagm2, h2(7))
+            | bit(Feature::Ssbs, h(28))
+            | bit(Feature::Sb, h(29))
+            | bit(Feature::Paca, h(30))
+            | bit(Feature::Pacg, h(31))
+            | bit(Feature::Dpb, h(16))
+            | bit(Feature::Dpb2, h2(0))
+            | bit(Feature::Rand, h2(16))
+            | bit(Feature::Bti, h2(17))
+            | bit(Feature::Mte, h2(18))
+            | bit(Feature::Jsconv, h(13) && fp)
+            | bit(Feature::Frintts, h2(8))
+            | bit(Feature::Fcma, h(14) && asimd)
+            | bit(Feature::Sve, sve && asimd)
+            | bit(Feature::F32mm, h2(10) && sve && asimd)
+            | bit(Feature::F64mm, h2(11) && sve && asimd)
+            | bit(Feature::Sm4, h(18) && h(19) && asimd)
+            | bit(Feature::Sve2, sve2)
+            | bit(Feature::Sve2p1, h2(36) && sve2)
+            | bit(Feature::Hbc, h2(44))
+            | bit(Feature::Mops, h2(43))
+            | bit(Feature::Ecv, h2(19))
+            | bit(Feature::Lut, h2(49))
+            | bit(Feature::Cssc, h2(34))
+            | bit(Feature::Fpmr, h2(48))
+            | bit(Feature::Faminmax, h2(50))
+            | bit(Feature::Fp8, fp8)
+            | bit(Feature::Fp8fma, fp8fma)
+            | bit(Feature::Fp8dot4, fp8dot4)
+            | bit(Feature::Fp8dot2, h2(54) && fp8dot4)
+            | bit(Feature::Wfxt, h2(31))
+            | bit(Feature::Sme, sme)
+            | bit(Feature::Sme2, sme2)
+            | bit(Feature::Sme2p1, h2(38) && sme2)
     }
 
     #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    fn detect_features() -> u64 {
+    fn detect_features() -> u128 {
         #[link(name = "kernel32")]
         extern "system" { fn IsProcessorFeaturePresent(feature: u32) -> i32; }
         unsafe {
@@ -272,7 +400,7 @@ pub mod detect {
     }
 
     #[cfg(not(any(target_arch = "x86_64", all(target_arch = "aarch64", any(target_vendor = "apple", target_os = "linux", target_os = "android", target_os = "windows")))))]
-    fn detect_features() -> u64 { 0 }
+    fn detect_features() -> u128 { 0 }
 
 }
 
@@ -293,6 +421,48 @@ macro_rules! is_aarch64_feature_detected {
     ("rdm") => { cfg!(target_feature = "rdm") || $crate::arch::detect::check($crate::arch::detect::Feature::Rdm) };
     ("i8mm") => { cfg!(target_feature = "i8mm") || $crate::arch::detect::check($crate::arch::detect::Feature::I8mm) };
     ("bf16") => { cfg!(target_feature = "bf16") || $crate::arch::detect::check($crate::arch::detect::Feature::Bf16) };
+    ("bti") => { cfg!(target_feature = "bti") || $crate::arch::detect::check($crate::arch::detect::Feature::Bti) };
+    ("cssc") => { cfg!(target_feature = "cssc") || $crate::arch::detect::check($crate::arch::detect::Feature::Cssc) };
+    ("dit") => { cfg!(target_feature = "dit") || $crate::arch::detect::check($crate::arch::detect::Feature::Dit) };
+    ("dpb") => { cfg!(target_feature = "dpb") || $crate::arch::detect::check($crate::arch::detect::Feature::Dpb) };
+    ("dpb2") => { cfg!(target_feature = "dpb2") || $crate::arch::detect::check($crate::arch::detect::Feature::Dpb2) };
+    ("ecv") => { cfg!(target_feature = "ecv") || $crate::arch::detect::check($crate::arch::detect::Feature::Ecv) };
+    ("f32mm") => { cfg!(target_feature = "f32mm") || $crate::arch::detect::check($crate::arch::detect::Feature::F32mm) };
+    ("f64mm") => { cfg!(target_feature = "f64mm") || $crate::arch::detect::check($crate::arch::detect::Feature::F64mm) };
+    ("faminmax") => { cfg!(target_feature = "faminmax") || $crate::arch::detect::check($crate::arch::detect::Feature::Faminmax) };
+    ("fcma") => { cfg!(target_feature = "fcma") || $crate::arch::detect::check($crate::arch::detect::Feature::Fcma) };
+    ("flagm") => { cfg!(target_feature = "flagm") || $crate::arch::detect::check($crate::arch::detect::Feature::Flagm) };
+    ("flagm2") => { cfg!(target_feature = "flagm2") || $crate::arch::detect::check($crate::arch::detect::Feature::Flagm2) };
+    ("fp8") => { cfg!(target_feature = "fp8") || $crate::arch::detect::check($crate::arch::detect::Feature::Fp8) };
+    ("fp8dot2") => { cfg!(target_feature = "fp8dot2") || $crate::arch::detect::check($crate::arch::detect::Feature::Fp8dot2) };
+    ("fp8dot4") => { cfg!(target_feature = "fp8dot4") || $crate::arch::detect::check($crate::arch::detect::Feature::Fp8dot4) };
+    ("fp8fma") => { cfg!(target_feature = "fp8fma") || $crate::arch::detect::check($crate::arch::detect::Feature::Fp8fma) };
+    ("fpmr") => { cfg!(target_feature = "fpmr") || $crate::arch::detect::check($crate::arch::detect::Feature::Fpmr) };
+    ("frintts") => { cfg!(target_feature = "frintts") || $crate::arch::detect::check($crate::arch::detect::Feature::Frintts) };
+    ("hbc") => { cfg!(target_feature = "hbc") || $crate::arch::detect::check($crate::arch::detect::Feature::Hbc) };
+    ("jsconv") => { cfg!(target_feature = "jsconv") || $crate::arch::detect::check($crate::arch::detect::Feature::Jsconv) };
+    ("lse128") => { cfg!(target_feature = "lse128") || $crate::arch::detect::check($crate::arch::detect::Feature::Lse128) };
+    ("lse2") => { cfg!(target_feature = "lse2") || $crate::arch::detect::check($crate::arch::detect::Feature::Lse2) };
+    ("lut") => { cfg!(target_feature = "lut") || $crate::arch::detect::check($crate::arch::detect::Feature::Lut) };
+    ("mops") => { cfg!(target_feature = "mops") || $crate::arch::detect::check($crate::arch::detect::Feature::Mops) };
+    ("mte") => { cfg!(target_feature = "mte") || $crate::arch::detect::check($crate::arch::detect::Feature::Mte) };
+    ("paca") => { cfg!(target_feature = "paca") || $crate::arch::detect::check($crate::arch::detect::Feature::Paca) };
+    ("pacg") => { cfg!(target_feature = "pacg") || $crate::arch::detect::check($crate::arch::detect::Feature::Pacg) };
+    ("rand") => { cfg!(target_feature = "rand") || $crate::arch::detect::check($crate::arch::detect::Feature::Rand) };
+    ("rcpc") => { cfg!(target_feature = "rcpc") || $crate::arch::detect::check($crate::arch::detect::Feature::Rcpc) };
+    ("rcpc2") => { cfg!(target_feature = "rcpc2") || $crate::arch::detect::check($crate::arch::detect::Feature::Rcpc2) };
+    ("rcpc3") => { cfg!(target_feature = "rcpc3") || $crate::arch::detect::check($crate::arch::detect::Feature::Rcpc3) };
+    ("sb") => { cfg!(target_feature = "sb") || $crate::arch::detect::check($crate::arch::detect::Feature::Sb) };
+    ("sm4") => { cfg!(target_feature = "sm4") || $crate::arch::detect::check($crate::arch::detect::Feature::Sm4) };
+    ("sme") => { cfg!(target_feature = "sme") || $crate::arch::detect::check($crate::arch::detect::Feature::Sme) };
+    ("sme2") => { cfg!(target_feature = "sme2") || $crate::arch::detect::check($crate::arch::detect::Feature::Sme2) };
+    ("sme2p1") => { cfg!(target_feature = "sme2p1") || $crate::arch::detect::check($crate::arch::detect::Feature::Sme2p1) };
+    ("ssbs") => { cfg!(target_feature = "ssbs") || $crate::arch::detect::check($crate::arch::detect::Feature::Ssbs) };
+    ("sve") => { cfg!(target_feature = "sve") || $crate::arch::detect::check($crate::arch::detect::Feature::Sve) };
+    ("sve2") => { cfg!(target_feature = "sve2") || $crate::arch::detect::check($crate::arch::detect::Feature::Sve2) };
+    ("sve2p1") => { cfg!(target_feature = "sve2p1") || $crate::arch::detect::check($crate::arch::detect::Feature::Sve2p1) };
+    ("tme") => { cfg!(target_feature = "tme") || $crate::arch::detect::check($crate::arch::detect::Feature::Tme) };
+    ("wfxt") => { cfg!(target_feature = "wfxt") || $crate::arch::detect::check($crate::arch::detect::Feature::Wfxt) };
     ($t:tt,) => { $crate::is_aarch64_feature_detected!($t) };
     ($t:tt) => { compile_error!(concat!("unknown aarch64 target feature: ", $t)) };
 }

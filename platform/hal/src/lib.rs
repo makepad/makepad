@@ -1257,6 +1257,21 @@ pub fn end_run() {
     backend::end_run();
 }
 
+/// Before this process execs itself in place (a self-update that keeps its pid, from any thread):
+/// what the OS holds for the process by its pid and would keep past the exec goes. macOS: the
+/// activity an unseen app (menu-bar, no-focus) holds against App Nap, whose power assertion an
+/// exec would leave behind while the next image begins another. [`exec_failed`] takes it back.
+pub fn before_exec() {
+    #[cfg(target_os = "macos")]
+    backend::apple::appkit::end_unseen_activity();
+}
+
+/// The exec [`before_exec`] prepared for did not happen: the process goes on as it was.
+pub fn exec_failed() {
+    #[cfg(target_os = "macos")]
+    backend::apple::appkit::resume_unseen_activity();
+}
+
 /// Ends [`run_main_loop`] (any thread), as the app does when it is done.
 pub fn stop_main_loop() {
     main_loop::stop()

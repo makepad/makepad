@@ -71,10 +71,9 @@ fn init() {
 /// shared folder takes no entry once it holds its 1 GB, and every other program's per-path keys
 /// fill it (a pool box at 1025 MB: each cold start of a large app compiled its pipelines again, the first
 /// frame held 20.5 s for 177 pipelines; in a folder of its own 0.3 s). The driver trims neither: past
-/// 3/4 of its cap this one is emptied, and the next runs fill it again. It is renamed away before
-/// it is removed, so a start beside this one finds the full folder or a new empty one, never one
-/// half removed, and a running program's open files go with the old one (its writes are lost, not
-/// mixed into the new folder).
+/// 3/4 of its cap this one is emptied (`trim_nvidia_shader_cache`), and the next runs fill it again.
+/// The start only names the folder; the walk that sizes it (up to 768 MB of files) and an emptying
+/// run on a thread of their own, beside the program's start.
 #[cfg(target_os = "linux")]
 fn nvidia_shader_cache() {
     if std::env::var_os("__GL_SHADER_DISK_CACHE_APP_NAME").is_none() {
@@ -88,6 +87,20 @@ fn nvidia_shader_cache() {
         return;
     };
     let dir = base.join("makepad").join("nvidia");
+    if std::fs::create_dir_all(&dir).is_ok() {
+        std::env::set_var("__GL_SHADER_DISK_CACHE_PATH", &dir);
+        // (its record in the kept heap, as the run's other host threads)
+        let _ = relax_compiler::zone_alloc::kept_with(|| std::thread::Builder::new().name("nvidia-cache-trim".into()).spawn(move || trim_nvidia_shader_cache(&dir)));
+    }
+}
+
+/// Empties the NVIDIA cache folder `dir` once it holds more than 768 MB, and says so. It is renamed
+/// away before it is removed, and made again at once: a start beside this one, or this process's
+/// program, finds the full folder or a new empty one, never one half removed, and a running
+/// program's open files go with the old one (its writes are lost, not mixed into the new folder).
+#[cfg(target_os = "linux")]
+fn trim_nvidia_shader_cache(dir: &std::path::Path) {
+    const CAP: u64 = 768 << 20;
     fn bytes(dir: &std::path::Path) -> u64 {
         let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
         entries.flatten().map(|e| match e.file_type() {
@@ -95,16 +108,19 @@ fn nvidia_shader_cache() {
             _ => e.metadata().map_or(0, |m| m.len()),
         }).sum()
     }
-    if bytes(&dir) > 768 << 20 {
-        // (one name: what a killed removal left goes with the next one)
-        let old = dir.with_extension("old");
-        let _ = std::fs::remove_dir_all(&old);
-        if std::fs::rename(&dir, &old).is_ok() {
-            let _ = std::fs::remove_dir_all(&old);
-        }
+    let held = bytes(dir);
+    if held <= CAP {
+        return;
     }
-    if std::fs::create_dir_all(&dir).is_ok() {
-        std::env::set_var("__GL_SHADER_DISK_CACHE_PATH", &dir);
+    // (one name: what a killed removal left goes with the next one)
+    let old = dir.with_extension("old");
+    let _ = std::fs::remove_dir_all(&old);
+    if std::fs::rename(dir, &old).is_ok() {
+        let _ = std::fs::create_dir_all(dir);
+        let _ = std::fs::remove_dir_all(&old);
+        eprintln!("makepad: the NVIDIA shader cache {} held {} MB, past its {} MB: emptied it (the next runs fill it again)", dir.display(), held >> 20, CAP >> 20);
+    } else {
+        eprintln!("makepad: the NVIDIA shader cache {} holds {} MB, past its {} MB, and could not be moved away to empty it", dir.display(), held >> 20, CAP >> 20);
     }
 }
 
@@ -117,7 +133,7 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     ahead: relax_compiler::options::AheadLevel::Balanced,
     // apps for users: third-party proc macros run confined (what that covers, and what it does
     // not -- build scripts -- is in pmhost.rs's module doc)
-    proc_macros: relax_compiler::pmhost::Policy::Sandboxed,
+    compile_time_code: relax_compiler::sandbox::Policy::Sandboxed,
     default_launch: Some(checkout_runner),
     package: env!("CARGO_PKG_NAME"),
     manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
@@ -131,6 +147,18 @@ pub static HOST: relax_runner::Host = relax_runner::Host {
     // makepad's shader derives: makepad_shader_derive, its derive_impl and micro_proc_macro read no
     // filesystem, environment, clock or process state (audited 2026-10-09)
     pure_macro_crates: &["makepad_shader_derive"],
+    env: relax_compiler::progenv::HostEnv {
+        // a Makepad app nobody sees or hears: no window shown (the first: a run with it is not
+        // seen), no sound
+        unseen: &[("MAKEPAD_HIDE_WINDOWS", "1"), ("MAKEPAD_MUTE", "1")],
+        // a package check offline: the CEF crates' build fetches nothing
+        offline: &[("MAKEPAD_CEF_OFFLINE", "1")],
+        // the check server outlives the devhub lease that started it: not one of its processes
+        detached_remove: &[makepad_remote::discovery::LEASE_ENV],
+        // a flight recording keeps the app's settings, Makepad's and the Sandbox's
+        recorded: &["MAKEPAD", "SANDBOX_"],
+    },
+    tool: "makepad",
 };
 
 /// `makepad` with no arguments and no `runner` launch record (an installation's entry script
@@ -245,10 +273,12 @@ fn provided() {
         let mut types = HashMap::new();
         let mut layouts = HashMap::new();
         let mut per_side = std::collections::HashSet::new();
+        let mut table = Vec::new();
         for e in relax_api::entries() {
             if e.module.split("::").next() != Some(krate) {
                 continue;
             }
+            table.push(e);
             if e.kind == 0 || e.kind > 4 {
                 continue;
             }
@@ -270,7 +300,7 @@ fn provided() {
                 _ => {}
             }
         }
-        relax_compiler::provided::register(krate, shims, types, layouts, per_side, relax_api::last_panic, src(krate), source_manifest(krate));
+        relax_compiler::provided::register(krate, shims, types, layouts, per_side, relax_api::last_panic, src(krate), source_manifest(krate), table);
     }
 
     // Splash VM registry -> makepad inspect (vm list, script error events)

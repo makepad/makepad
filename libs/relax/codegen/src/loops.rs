@@ -372,21 +372,59 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         if idefs.len() != 1 {
             continue;
         }
+        let iv_at = idefs[0];
+        // the counter carried in two registers (a rotated iterator loop whose copy survived:
+        // `t = w + 1; i = t; ..; w = i`): `w` is refreshed from the counter once, after the step,
+        // and every way into the loop leaves w == i, so each round starts with w == i and w's reads
+        // before its refresh are the counter's value before the step. Its refresh's index.
+        let loop_copy = |w: VReg| -> Option<usize> {
+            if w == iv || f.vregs[w.0 as usize] != Cls::I {
+                return None;
+            }
+            let wdefs: Vec<usize> = (0..n).filter(|k| {
+                let mut d = false;
+                for_defs(&b.insts[*k], |x| d |= x == w);
+                d
+            }).collect();
+            let at = match wdefs[..] {
+                [at] if at > iv_at && matches!(b.insts[at], Inst::Mov(d2, s2) if d2 == w && s2 == iv) => at,
+                _ => return None,
+            };
+            // on entry: each other predecessor's last write of w or i is `w = i`
+            let entry_ok = f.blocks.iter().enumerate().filter(|(pb, p)| *pb != bi && reach[*pb] && p.term.succs().any(|s2| s2 as usize == bi)).all(|(_, p)| {
+                p.insts.iter().rev().find(|i| {
+                    let mut d = false;
+                    for_defs(i, |x| d |= x == w || x == iv);
+                    d
+                }).is_some_and(|i| matches!(*i, Inst::Mov(d2, s2) if d2 == w && s2 == iv))
+            });
+            entry_ok.then_some(at)
+        };
         let mut used: Vec<bool> = vec![false; n];
         used[n - 1] = true;
-        used[idefs[0]] = true;
-        let mut inc_at = idefs[0];
-        let it = match b.insts[idefs[0]] {
+        used[iv_at] = true;
+        let mut inc_at = iv_at;
+        let mut copy: Option<(VReg, usize)> = None;
+        let it = match b.insts[iv_at] {
             Inst::IBinI(IOp::Add, it, d, a, 1) if d == iv && a == iv => it,
-            Inst::Mov(d, t) if d == iv => match b.insts[..idefs[0]].iter().enumerate().rev().find(|(_, i)| {
+            Inst::Mov(d, t) if d == iv => match b.insts[..iv_at].iter().enumerate().rev().find(|(_, i)| {
                 let mut d2 = false;
                 for_defs(i, |x| d2 |= x == t);
                 d2
             }) {
-                Some((ti, Inst::IBinI(IOp::Add, it, _, a, 1))) if *a == iv && ndef[t.0 as usize] == 1 && nuse[t.0 as usize] == 1 => {
+                Some((ti, &Inst::IBinI(IOp::Add, it, _, a, 1))) if ndef[t.0 as usize] == 1 && nuse[t.0 as usize] == 1 => {
+                    if a != iv {
+                        match loop_copy(a) {
+                            Some(at) => {
+                                used[at] = true;
+                                copy = Some((a, at));
+                            }
+                            None => continue,
+                        }
+                    }
                     used[ti] = true;
                     inc_at = ti;
-                    *it
+                    it
                 }
                 _ => continue,
             },
@@ -401,12 +439,18 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             for_defs(&b.insts[*k], |x| d |= x == v);
             d
         });
-        // the counter's value before the step: the counter itself (`Some(None)`) or a copy of it
+        // the counter's value before the step, read at `at`: the counter itself before its
+        // definition, or the loop-carried copy before its refresh (`Some(None)`), or a copy of it
         // taken before the step (`j = i; i = i + 1; load [j]`, an iterator's next inlined: the
         // Mov to mark used)
-        let counter_copy = |ix: VReg| -> Option<Option<usize>> {
+        let counter_copy = |ix: VReg, at: usize| -> Option<Option<usize>> {
             if ix == iv {
-                return Some(None);
+                return (at < iv_at).then_some(None);
+            }
+            if let Some((w, refresh)) = copy {
+                if ix == w {
+                    return (at < refresh).then_some(None);
+                }
             }
             if ndef[ix.0 as usize] != 1 || nuse[ix.0 as usize] != 1 {
                 return None;
@@ -420,12 +464,12 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
         for (k, i) in b.insts.iter().enumerate() {
             match *i {
                 Inst::LoadX(Mem::Int(sz @ (4 | 8), sg), x, base, ix, sh, 0) if (1u32 << sh) == sz as u32 && !(sz == 4 && sg) && !defined_in(base) => {
-                    let Some(copy) = counter_copy(ix) else { continue };
+                    let Some(read) = counter_copy(ix, k) else { continue };
                     if load.is_some() {
                         load = None;
                         break;
                     }
-                    if let Some(mk) = copy {
+                    if let Some(mk) = read {
                         used[mk] = true;
                     }
                     load = Some((k, x, base, sz));
@@ -459,8 +503,8 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
                         _ => continue,
                     };
                     let idx = match b.insts[sk] {
-                        Inst::IBinI(IOp::Shl, it2, _, a2, k2) if k2 == sh && it2.bits == 64 => counter_copy(a2),
-                        Inst::IBinI(IOp::Mul, it2, _, a2, k2) if k2 == sz as i64 && it2.bits == 64 => counter_copy(a2),
+                        Inst::IBinI(IOp::Shl, it2, _, a2, k2) if k2 == sh && it2.bits == 64 => counter_copy(a2, sk),
+                        Inst::IBinI(IOp::Mul, it2, _, a2, k2) if k2 == sz as i64 && it2.bits == 64 => counter_copy(a2, sk),
                         _ => None,
                     };
                     let Some(idx) = idx else { continue };
@@ -586,6 +630,10 @@ pub fn vectorize_reductions(options: &relax_session::Options, f: &mut Func) -> b
             s
         };
         ve.push(Inst::IBin(IOp::Add, U64_TY, acc, acc, s_fin));
+        // the loop-carried copy follows the counter (the scalar rest reads it, and so may the exit)
+        if let Some((w, _)) = copy {
+            ve.push(Inst::Mov(w, iv));
+        }
         ve.push(Inst::ICmp(if lt { Cond::Lt } else { Cond::Ne }, signed, g4, iv, bvreg));
         let veb = Block { insts: ve.clone(), pos: vec![pos; ve.len()], term: Term::Branch(g4, bi as u32, exit), term_pos: pos, count: -1.0 };
         for pb in 0..nb0 {
