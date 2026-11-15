@@ -8536,6 +8536,10 @@ mod cold_tests {
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
         let store = dir.join("cache");
+        // made as a run makes its cache folder, owner-only: a missing one comes from the first
+        // lookup's live lock (store::hold_build) with the umask's mode, and under umask 002
+        // record_collected stores nothing in it
+        pack::ensure_private_dir(&store).unwrap();
         let load = |images: Option<&dyn crate::crate_image::CrateImages>| {
             let mut prog = crate::program::Program::new(sess);
             prog.record_front = true;
@@ -8624,6 +8628,7 @@ mod cold_tests {
                 image_deps: deps.clone(), image_dep_names: deps.iter().map(|&d| (names[d].to_string(), names[d].to_string())).collect() });
         }
         let store = dir.join("cache");
+        pack::ensure_private_dir(&store).unwrap();
         let load = |pre: &[crate::preload::PreCrate], images: &FrontImages| {
             let mut prog = crate::program::Program::new(sess);
             prog.record_front = true;
@@ -8700,7 +8705,8 @@ mod cold_tests {
         isolated_test!(cold_self_dependency_finishes_without_blocking_later_crates);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-cycle-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        // the sink's folder, owner-only as a run's cache folder (create_dir_all's is refused under umask 002)
+        pack::ensure_private_dir(&dir).unwrap();
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
         prog.front_sink = Some(FrontSink::for_dir(&dir));
@@ -8738,7 +8744,7 @@ mod cold_tests {
         isolated_test!(cold_self_alias_graph_matches_full_fingerprints_before_finish);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-self-alias-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
         prog.front_sink = Some(FrontSink::for_dir(&dir));
@@ -8804,7 +8810,7 @@ mod cold_tests {
 
     fn forward_dependencies(sess: &std::sync::Arc<crate::Session>, missing_callback: bool) {
         let dir = std::env::temp_dir().join(format!("relax-cold-forward-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
@@ -8868,7 +8874,7 @@ mod cold_tests {
         isolated_test!(cold_load_maps_at_publication_and_restores_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-front-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let a = dir.join("a.rs").to_string_lossy().into_owned();
         let b = dir.join("b.rs").to_string_lossy().into_owned();
         std::fs::write(&a, "pub fn a() -> u32 { 7 }").unwrap();
@@ -8958,7 +8964,7 @@ mod cold_tests {
         isolated_test!(lazy_part_is_mapped_before_publication_and_restored_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-part-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&dir).unwrap();
+        pack::ensure_private_dir(&dir).unwrap();
         let path = dir.join("lib.rs").to_string_lossy().into_owned();
         let text = b"pub fn f(x: u32) -> u32 { let y = x + 3; y * 2 }".to_vec();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
@@ -10476,7 +10482,8 @@ mod data_tests {
 
     fn front_fixture(sess: &std::sync::Arc<crate::Session>, tag: &str) -> (PathBuf, crate::program::Program, Vec<crate::preload::PreCrate>) {
         let root = std::env::temp_dir().join(format!("relax-front-{tag}-{}-{}", std::process::id(), crate::clock::wall_ns()));
-        std::fs::create_dir_all(&root).unwrap();
+        // owner-only, as open_test_cache's root has to be (create_dir_all's is not under umask 002)
+        pack::ensure_private_dir(&root).unwrap();
         let cfg = crate::cfg::CfgSet::host(sess, &[]);
         let mut prog = crate::program::Program::new(sess);
         prog.record_front = true;
@@ -12242,7 +12249,7 @@ mod prune_tests {
         let me = crate::store::this_build();
         let (prog, other) = (0x5eed_u64, 0x0ade_u64);
         let sets = dir.join("sets");
-        std::fs::create_dir_all(&sets).unwrap();
+        pack::ensure_private_dir(&sets).unwrap();
         std::fs::write(sets.join(format!("{me:016x}-{prog:016x}")), "code w widgets-0000000000000001.rcs\nfront w widgets-0000000000000021.rcs\ncode r removed-0000000000000004.rcs\ncode s shared-0000000000000005.rcs\nfront p parted-0000000000000007.rcs\ngraph front_graph-0000000000000008.rcs\n").unwrap();
         // another program of this build still uses the old `shared`
         std::fs::write(sets.join(format!("{me:016x}-{other:016x}")), "code s shared-0000000000000005.rcs\n").unwrap();

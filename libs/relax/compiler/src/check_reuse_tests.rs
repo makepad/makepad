@@ -109,11 +109,13 @@ fn reuse_child() {
     std::mem::forget(u);
 }
 
-/// A package folder with `files` (lib.rs, bin.rs, ..), empty store.
+/// A package folder with `files` (lib.rs, bin.rs, ..), empty store. The store's folder is made as
+/// a run makes its cache folder, owner-only: a missing one comes from the first lookup's live
+/// lock (store::hold_build) with the umask's mode, and under umask 002 no verdict is stored in it.
 fn package(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("relax-check-reuse-{}-{}", name, std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    crate::pack::ensure_private_dir(&dir.join("store")).unwrap();
     for (f, src) in files { std::fs::write(dir.join(f), src).unwrap(); }
     dir
 }
