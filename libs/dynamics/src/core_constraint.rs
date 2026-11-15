@@ -11,7 +11,7 @@ use crate::{
     inline, memory,
     model::{disabled, enabled, Model},
     sleep,
-    sparse_pattern::PatternRef,
+    sparse_pattern::{PatternBuf, PatternRef},
     types::*,
     util_blas,
     util_misc::{max, min},
@@ -2677,23 +2677,31 @@ fn compute_y_fill(
     m_rowadr: &[i32],
     m_colind: &[i32],
 ) {
-    // C J and j collide after case conversion; J becomes j_mat.
+    // C J and j collide after case conversion; J becomes j_mat. Y's columns and values are cut to the row's end and
+    // J's columns to the row, and M's counts and addresses to one length, so a lookup by a column checks once.
+    let nm = m_rownnz.len().min(m_rowadr.len());
+    let (m_rownnz, m_rowadr) = (&m_rownnz[..nm], &m_rowadr[..nm]);
     for r in 0..nefc {
-        let end = (y_rowadr[r] + y_rownnz[r]) as usize;
+        let adr_y = y_rowadr[r] as usize;
+        let end = adr_y + y_rownnz[r] as usize;
+        let row_colind = &mut y_colind[..end];
+        let mut row_y = y.as_deref_mut().map(|y| &mut y[..end]);
         let adr_j = j_rowadr[r] as usize;
-        let mut remain_j = j_rownnz[r] as usize;
+        let src_colind = &j_colind[adr_j..adr_j + j_rownnz[r] as usize];
+        let mut remain_j = src_colind.len();
         let mut nnz_y = 0;
         loop {
             let prev_src = if remain_j > 0 {
-                j_colind[adr_j + remain_j - 1]
+                src_colind[remain_j - 1]
             } else {
                 -1
             };
             let mut prev_dst = -1;
             if nnz_y > 0 {
-                let j = y_colind[end - nnz_y] as usize;
-                if m_rownnz[j] > 1 {
-                    prev_dst = m_colind[(m_rowadr[j] + m_rownnz[j] - 2) as usize];
+                let j = row_colind[end - nnz_y] as usize;
+                let nnz_m = m_rownnz[j];
+                if nnz_m > 1 {
+                    prev_dst = m_colind[(m_rowadr[j] + nnz_m - 2) as usize];
                 }
             }
             if prev_src < 0 && prev_dst < 0 {
@@ -2701,14 +2709,14 @@ fn compute_y_fill(
             } else if prev_src >= prev_dst {
                 nnz_y += 1;
                 remain_j -= 1;
-                y_colind[end - nnz_y] = prev_src;
-                if let Some(y) = y.as_deref_mut() {
+                row_colind[end - nnz_y] = prev_src;
+                if let Some(y) = row_y.as_deref_mut() {
                     y[end - nnz_y] = j_mat[adr_j + remain_j];
                 }
             } else {
                 nnz_y += 1;
-                y_colind[end - nnz_y] = prev_dst;
-                if let Some(y) = y.as_deref_mut() {
+                row_colind[end - nnz_y] = prev_dst;
+                if let Some(y) = row_y.as_deref_mut() {
                     y[end - nnz_y] = 0.0;
                 }
             }
@@ -3064,23 +3072,13 @@ fn make_arnumeric(m: &Model, d: &mut Data) {
         return;
     }
     if core_util::is_sparse(m) != 0 {
-        let mut yt_rownnz = d.scratch.int(nv);
-        let mut yt_rowadr = d.scratch.int(nv);
-        let mut yt_colind = d.scratch.int(d.n_y as usize);
+        let yt_buf = PatternBuf {
+            rownnz: d.scratch.int(nv),
+            rowadr: d.scratch.int(nv),
+            colind: d.scratch.int(d.n_y as usize),
+            rowsuper: Vec::new(),
+        };
         let mut yt = d.scratch.num(d.n_y as usize);
-        util_sparse::transpose_sparse(
-            Some(&mut yt),
-            &d.efc_y,
-            nefc,
-            nv,
-            &mut yt_rownnz,
-            &mut yt_rowadr,
-            &mut yt_colind,
-            None,
-            &d.efc_y_rownnz,
-            &d.efc_y_rowadr,
-            &d.efc_y_colind,
-        );
         let mut diagind = d.scratch.int(nefc);
         for i in 0..nefc {
             let mut adr = d.efc_ar_rowadr[i];
@@ -3099,14 +3097,15 @@ fn make_arnumeric(m: &Model, d: &mut Data) {
         let y_rowadr = std::mem::take(&mut d.efc_y_rowadr);
         let y_colind = std::mem::take(&mut d.efc_y_colind);
         let y_rowsuper = std::mem::take(&mut d.efc_j_rowsuper);
-        // the product's three patterns, checked where they are taken
+        // the product's patterns, checked where they are taken; Y' is transposed from the checked Y (C:
+        // mju_transposeSparse) and checked as it is made
         let ar_p = PatternRef::check(&ar_rownnz, &ar_rowadr, &ar_colind, None, nefc, nefc)
             .expect("make_arnumeric: the AR pattern is malformed");
-        let yt_p = PatternRef::check(&yt_rownnz, &yt_rowadr, &yt_colind, None, nv, nefc)
-            .expect("make_arnumeric: the Y' pattern is malformed");
         let y_p = PatternRef::check(&y_rownnz, &y_rowadr, &y_colind, Some(&y_rowsuper), nefc, nv)
             .expect("make_arnumeric: the Y pattern is malformed");
-        util_sparse::sqr_mat_tdsparse_numeric(&mut ar, ar_p, Some(&diagind), &yt, yt_p, &y, y_p, None, &mut d.scratch);
+        let yt_pat = util_sparse::transpose_pat(Some(&mut yt), &y, y_p, yt_buf, false);
+        util_sparse::sqr_mat_tdsparse_numeric(&mut ar, ar_p, Some(&diagind), &yt, yt_pat.view(), &y, y_p, None, &mut d.scratch);
+        let [yt_rownnz, yt_rowadr, yt_colind, _] = yt_pat.into_buf().into_parts();
         d.efc_ar = ar;
         d.efc_ar_rownnz = ar_rownnz;
         d.efc_ar_rowadr = ar_rowadr;

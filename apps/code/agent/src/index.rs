@@ -6,18 +6,43 @@
 //! - `start(root, wake)` returns at once; the walk runs on a thread and calls
 //!   `wake` when done (the window passes its UI signal);
 //! - `files()` is the current list: relative paths, `/` separators, sorted;
-//! - `version()` bumps each time the list is replaced;
+//! - `version()` bumps each time the list changes;
 //! - `search(query, limit)` ranks by the fuzzy score, best first, with the
 //!   byte offsets of the matched characters;
 //! - `refresh()` walks again (after a create / rename / delete); calls made
 //!   while a walk runs fold into one more walk.
+//!
+//! After its first walk the worker also watches the folder
+//! (`makepad-filesystem-watcher`) and walks once more, so changes made
+//! outside Code show up on their own:
+//! - a file or folder that appears, disappears or is renamed outside what
+//!   git ignores wakes the worker, as does a `.gitignore` change or a lost-
+//!   events signal (a queue overflow, dropped records, a changed root); a
+//!   file's content changing does not, since it leaves the list as it is;
+//! - wakes are coalesced: the worker waits for 30 ms of quiet (at most
+//!   `max(0.5 s, 10 walks)` under steady churn) and walks once, and wakes the
+//!   window only when the list changed;
+//! - the watcher leaves out `.git` and `target` folders at any depth, the
+//!   folders git ignores (as the last walk found them, or as they appear)
+//!   and the home folders a walk skips, so their churn never reaches the
+//!   worker;
+//! - without a watcher (one that cannot start) the worker walks again every
+//!   `max(2 s, 20 walks)` and says so once in the log. The Linux watcher
+//!   itself polls the folders it has no inotify watch left for.
+//! Changes only inside `.git` (the tracked set, `.git/info/exclude`) wait
+//! for the next walk.
 
-use makepad_git::ignore::GitIgnore;
+use makepad_filesystem_watcher::{
+    ExcludePolicy, FileSystemEvent, FileSystemEventKind, FileSystemWatcher, JournalConfig, WatchRoot, WatcherConfig,
+};
+use makepad_git::ignore::{GitIgnore, IgnoreRules};
 use crate::port::Wake;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// One ranked file: the path and the byte offsets of the matched characters
 /// (for drawing them lit).
@@ -207,37 +232,58 @@ struct Shared {
     snap: Mutex<Arc<Snapshot>>,
     version: AtomicU64,
     ready: AtomicBool,
+    /// Walks done, whether or not they changed the list.
+    walks: AtomicU64,
+    /// The last walk's ignore rules: the watcher drops events on what they
+    /// ignore. `None` until the first walk.
+    rules: Mutex<Option<Arc<IgnoreRules>>>,
 }
+
+/// What the worker is told.
+enum Msg {
+    /// Walk again: asked for, or the watcher saw a change that may alter the list.
+    Walk,
+    /// A folder git ignores appeared: leave it out of the watch (no walk needed).
+    Skip(String),
+    /// The index is gone.
+    Stop,
+}
+
+/// How long the worker waits for quiet after a wake before it walks.
+const QUIET: Duration = Duration::from_millis(30);
 
 #[derive(Default)]
 pub struct FileIndex {
     shared: Option<Arc<Shared>>,
-    wake: Option<Sender<()>>,
+    wake: Option<Sender<Msg>>,
 }
 
 impl FileIndex {
     pub fn start(root: &Path, wake: Wake) -> Self {
-        let shared = Arc::new(Shared { snap: Mutex::new(Arc::new(Snapshot::default())), version: AtomicU64::new(0), ready: AtomicBool::new(false) });
-        let (tx, rx) = channel::<()>();
+        let shared = Arc::new(Shared {
+            snap: Mutex::new(Arc::new(Snapshot::default())),
+            version: AtomicU64::new(0),
+            ready: AtomicBool::new(false),
+            walks: AtomicU64::new(0),
+            rules: Mutex::new(None),
+        });
+        let (tx, rx) = channel::<Msg>();
         let root = root.to_path_buf();
         let worker = shared.clone();
-        let spawned = std::thread::Builder::new().name("code-file-index".into()).spawn(move || {
-            while rx.recv().is_ok() {
-                // Several refreshes asked for while a walk ran: one walk.
-                while rx.try_recv().is_ok() {}
-                let files = walk(&root);
-                let snap = Arc::new(Snapshot::new(files));
-                *worker.snap.lock().unwrap() = snap;
-                worker.version.fetch_add(1, Ordering::SeqCst);
-                worker.ready.store(true, Ordering::SeqCst);
-                wake();
-            }
-        });
+        let events = tx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("code-file-index".into())
+            .spawn(move || run_worker(&root, &worker, rx, events, wake));
         if spawned.is_err() {
             return FileIndex::default();
         }
-        let _ = tx.send(());
+        let _ = tx.send(Msg::Walk);
         FileIndex { shared: Some(shared), wake: Some(tx) }
+    }
+
+    /// Walks done so far, whether or not they changed the list.
+    pub fn walks(&self) -> u64 {
+        self.shared.as_ref().map_or(0, |s| s.walks.load(Ordering::SeqCst))
     }
 
     fn snapshot(&self) -> Arc<Snapshot> {
@@ -269,9 +315,191 @@ impl FileIndex {
 
     pub fn refresh(&self) {
         if let Some(tx) = &self.wake {
-            let _ = tx.send(());
+            let _ = tx.send(Msg::Walk);
         }
     }
+}
+
+impl Drop for FileIndex {
+    fn drop(&mut self) {
+        // The watcher holds a sender too: say stop, or the worker waits forever.
+        if let Some(tx) = &self.wake {
+            let _ = tx.send(Msg::Stop);
+        }
+    }
+}
+
+/// The worker: walks `root` when told to or when its watcher saw a change
+/// that may alter the list.
+fn run_worker(root: &Path, shared: &Arc<Shared>, rx: Receiver<Msg>, tx: Sender<Msg>, wake: Wake) {
+    let home = home_dir();
+    // The watcher reports the folder's real path.
+    let real_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let mut watcher: Option<FileSystemWatcher> = None;
+    let mut started_watching = false;
+    let mut skipped = BTreeSet::new();
+    let mut walk_time = Duration::ZERO;
+    'work: loop {
+        // Without a watcher the folder is walked again now and then.
+        let first = if watcher.is_some() || !started_watching {
+            rx.recv().map_err(|_| ())
+        } else {
+            match rx.recv_timeout(Duration::from_secs(2).max(walk_time * 20)) {
+                Ok(msg) => Ok(msg),
+                Err(RecvTimeoutError::Timeout) => Ok(Msg::Walk),
+                Err(RecvTimeoutError::Disconnected) => Err(()),
+            }
+        };
+        let mut walk = false;
+        let mut skips = BTreeSet::new();
+        match first {
+            Ok(Msg::Walk) => walk = true,
+            Ok(Msg::Skip(rel)) => {
+                skips.insert(rel);
+            }
+            Ok(Msg::Stop) | Err(()) => break,
+        }
+        // Wakes in a burst (a checkout, a tool writing many files) fold into one walk.
+        let woke = Instant::now();
+        let longest = Duration::from_millis(500).max(walk_time * 10);
+        loop {
+            let left = longest.saturating_sub(woke.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(QUIET.min(left)) {
+                Ok(Msg::Walk) => walk = true,
+                Ok(Msg::Skip(rel)) => {
+                    skips.insert(rel);
+                }
+                Ok(Msg::Stop) | Err(RecvTimeoutError::Disconnected) => break 'work,
+                Err(RecvTimeoutError::Timeout) => break,
+            }
+        }
+        if !walk {
+            // Only new ignored folders: the list is as it was; their churn leaves the watch.
+            if watcher.is_some() && !skips.is_subset(&skipped) {
+                skipped.extend(skips);
+                if let Some(next) = start_watcher(&real_root, &skipped, shared, &tx) {
+                    watcher = Some(next);
+                }
+            }
+            continue;
+        }
+        let started = Instant::now();
+        let walked = walk_in(home.as_deref(), root);
+        walk_time = started.elapsed();
+        shared.walks.fetch_add(1, Ordering::SeqCst);
+        *shared.rules.lock().unwrap() = walked.rules.map(Arc::new);
+        let old = shared.snap.lock().unwrap().clone();
+        if *old.files != walked.files || !shared.ready.load(Ordering::SeqCst) {
+            *shared.snap.lock().unwrap() = Arc::new(Snapshot::new(walked.files));
+            shared.version.fetch_add(1, Ordering::SeqCst);
+            shared.ready.store(true, Ordering::SeqCst);
+            wake();
+        }
+        if !started_watching {
+            // The first walk tells which folders to leave out of the watch. Once the
+            // watch is on, walk again: a change during the first walk is not lost.
+            started_watching = true;
+            skipped = walked.skipped;
+            watcher = start_watcher(&real_root, &skipped, shared, &tx);
+            if watcher.is_some() {
+                let _ = tx.send(Msg::Walk);
+            }
+        } else if watcher.is_some() && walked.skipped != skipped {
+            // Folders git newly ignores leave the watch; one it no longer ignores joins
+            // it. An ignored folder that is merely gone stays left out: that costs nothing.
+            let joined = skipped.difference(&walked.skipped).any(|rel| root.join(rel).exists());
+            if joined || !walked.skipped.is_subset(&skipped) {
+                skipped = walked.skipped;
+                // The new watcher starts before the old one stops. A folder that joins the
+                // watch was not watched since this walk read it: walk once more.
+                if let Some(next) = start_watcher(&real_root, &skipped, shared, &tx) {
+                    watcher = Some(next);
+                    if joined {
+                        let _ = tx.send(Msg::Walk);
+                    }
+                }
+            }
+        }
+    }
+    drop(watcher);
+}
+
+/// A watcher on `root` that leaves out `.git`, `target` and the `skipped`
+/// folders, and tells the worker about events that may change the list.
+fn start_watcher(root: &Path, skipped: &BTreeSet<String>, shared: &Arc<Shared>, tx: &Sender<Msg>) -> Option<FileSystemWatcher> {
+    let mut exclude = ExcludePolicy::none().dir_name(".git").dir_name("target");
+    for rel in skipped {
+        exclude = exclude.path(rel);
+    }
+    let config = WatcherConfig {
+        exclude,
+        // Every event is taken at once: the journal keeps a little history only.
+        journal: JournalConfig { ring_bytes: 64 * 1024, spool: None },
+        startup_rescan: false,
+    };
+    let (shared, tx, real_root) = (shared.clone(), tx.clone(), root.to_path_buf());
+    let roots = vec![WatchRoot { mount: "root".into(), path: root.to_path_buf() }];
+    match FileSystemWatcher::start_with_journal(roots, config, move |event| {
+        if let Some(msg) = message_for(&real_root, &shared, event) {
+            let _ = tx.send(msg);
+        }
+        true
+    }) {
+        Ok((watcher, _journal)) => Some(watcher),
+        Err(error) => {
+            eprintln!("code index: {} is not watched ({error}): it is walked again every 2 s or more instead", root.display());
+            None
+        }
+    }
+}
+
+/// What an event asks of the worker: a walk when it can change the list (a
+/// path git does not ignore appeared, went or was renamed; a `.gitignore`; a
+/// sign events were lost), leaving out a folder git ignores that appeared, or
+/// nothing.
+fn message_for(root: &Path, shared: &Shared, event: &FileSystemEvent) -> Option<Msg> {
+    // The path relative to the root when git ignores it.
+    let ignored = |path: &Path| -> Option<String> {
+        if path.file_name().is_some_and(|name| name == ".gitignore") {
+            return None;
+        }
+        let rel = relative(root, path).filter(|rel| !rel.is_empty())?;
+        let ignored = shared.rules.lock().unwrap().as_ref().is_some_and(|rules| rules.ignored(&rel));
+        ignored.then_some(rel)
+    };
+    match &event.kind {
+        FileSystemEventKind::RescanRequired { .. } => Some(Msg::Walk),
+        // A file's content changing leaves the list as it is. A watcher that
+        // can only poll says `Changed` for its root.
+        FileSystemEventKind::Changed => {
+            (event.path == root || event.path.file_name().is_some_and(|name| name == ".gitignore")).then_some(Msg::Walk)
+        }
+        FileSystemEventKind::Created => match ignored(&event.path) {
+            None => Some(Msg::Walk),
+            Some(rel) if event.is_dir == Some(true) => Some(Msg::Skip(rel)),
+            Some(_) => None,
+        },
+        FileSystemEventKind::Removed => ignored(&event.path).is_none().then_some(Msg::Walk),
+        FileSystemEventKind::Renamed { from } => {
+            (ignored(&event.path).is_none() || ignored(from).is_none()).then_some(Msg::Walk)
+        }
+    }
+}
+
+/// `path` relative to `root` with `/` separators, if it is inside.
+fn relative(root: &Path, path: &Path) -> Option<String> {
+    let rel = path.strip_prefix(root).ok()?;
+    let mut out = String::new();
+    for part in rel.components() {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(part.as_os_str().to_str()?);
+    }
+    Some(out)
 }
 
 /// Folders directly in the home folder that macOS guards with privacy prompts.
@@ -308,11 +536,21 @@ fn home_dir() -> Option<PathBuf> {
 /// relative with `/` separators. `.git` is always skipped; symlinked
 /// folders are not followed.
 pub fn walk(root: &Path) -> Vec<String> {
-    walk_in(home_dir().as_deref(), root)
+    walk_in(home_dir().as_deref(), root).files
 }
 
-fn walk_in(home: Option<&Path>, root: &Path) -> Vec<String> {
+/// What one walk found.
+struct Walked {
+    files: Vec<String>,
+    /// Folders left out: ignored by git, or guarded home folders.
+    skipped: BTreeSet<String>,
+    /// The ignore rules the walk used.
+    rules: Option<IgnoreRules>,
+}
+
+fn walk_in(home: Option<&Path>, root: &Path) -> Walked {
     let mut ignore = GitIgnore::with_user_excludes(root).ok();
+    let mut skipped = BTreeSet::new();
     let mut out = Vec::new();
     let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     while let Some((dir, rel)) = stack.pop() {
@@ -335,11 +573,15 @@ fn walk_in(home: Option<&Path>, root: &Path) -> Vec<String> {
             let path = if rel.is_empty() { name.to_string() } else { format!("{rel}/{name}") };
             if let Some(ig) = ignore.as_mut() {
                 if ig.ignored(&path, is_dir).unwrap_or(false) {
+                    if is_dir {
+                        skipped.insert(path);
+                    }
                     continue;
                 }
             }
             if is_dir {
                 if home.is_some_and(|home| skips_home_dir(home, root, &entry.path())) {
+                    skipped.insert(path);
                     continue;
                 }
                 stack.push((entry.path(), path));
@@ -349,7 +591,7 @@ fn walk_in(home: Option<&Path>, root: &Path) -> Vec<String> {
         }
     }
     out.sort_unstable();
-    out
+    Walked { files: out, skipped, rules: ignore.map(|ignore| ignore.snapshot()) }
 }
 
 #[cfg(test)]
@@ -407,7 +649,7 @@ mod tests {
         assert!(!skips_home_dir(&home, &home, &home.join("src/.cache")), "only folders directly in home count");
         put(&home, ".cargo/registry/a.rs");
         put(&home, "src/main.rs");
-        assert_eq!(walk_in(Some(&home), &home), ["src/main.rs"]);
+        assert_eq!(walk_in(Some(&home), &home).files, ["src/main.rs"]);
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -462,25 +704,78 @@ mod tests {
         assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
     }
 
+    /// Waits up to 5 s for `done`, failing with `what`.
+    fn wait_until(what: &str, done: impl Fn() -> bool) {
+        let t0 = Instant::now();
+        while !done() {
+            assert!(t0.elapsed() < Duration::from_secs(5), "timed out: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
-    fn the_index_walks_on_its_worker() {
-        let dir = scratch("worker");
-        put(&dir, "a.rs");
-        put(&dir, "b/c.rs");
+    fn the_index_follows_the_folder_and_rests_when_nothing_changes() {
+        let dir = scratch("watch");
+        for git in [".git/objects", ".git/refs"] {
+            std::fs::create_dir_all(dir.join(git)).unwrap();
+        }
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(dir.join(".gitignore"), "target/\nignored/\n*.log\n").unwrap();
+        // A workspace of 100 folders of 20 files, a build folder and an ignored one.
+        for folder in 0..100 {
+            for file in 0..20 {
+                put(&dir, &format!("src/m{folder:03}/f{file:02}.rs"));
+            }
+        }
+        put(&dir, "target/debug/app");
+        put(&dir, "ignored/cache.bin");
         let index = FileIndex::start(&dir, Arc::new(|| {}));
-        let t0 = std::time::Instant::now();
-        while !index.ready() && t0.elapsed().as_secs() < 5 {
-            std::thread::yield_now();
+        let has = |path: &str| index.files().iter().any(|file| file == path);
+        // The first walk, then the one once the watch is on.
+        wait_until("the walks at the start", || index.walks() >= 2);
+        assert_eq!(index.files().len(), 2001, "the first walk lists the workspace's files and its .gitignore");
+
+        let (walks, version) = (index.walks(), index.version());
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(index.walks(), walks, "a workspace where nothing changes is not walked again");
+
+        for i in 0..50 {
+            put(&dir, &format!("target/debug/deps/lib{i}.rlib"));
+            put(&dir, &format!(".git/objects/{i:02}/object"));
+            put(&dir, &format!("ignored/cache{i}.bin"));
+            put(&dir, &format!("src/run{i}.log"));
         }
-        assert_eq!(*index.files(), ["a.rs", "b/c.rs"]);
-        let v = index.version();
-        put(&dir, "d.rs");
+        std::fs::write(dir.join("src/m000/f00.rs"), "edited").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(index.walks(), walks, "build output, git internals, ignored files and content edits wake no walk");
+        assert_eq!(index.version(), version, "the list is unchanged");
+
+        put(&dir, "src/new.rs");
+        wait_until("a created file is listed", || has("src/new.rs"));
+        std::fs::rename(dir.join("src/new.rs"), dir.join("src/renamed.rs")).unwrap();
+        wait_until("a renamed file is listed by its new name only", || has("src/renamed.rs") && !has("src/new.rs"));
+        std::fs::remove_file(dir.join("src/m001/f01.rs")).unwrap();
+        wait_until("a removed file leaves the list", || !has("src/m001/f01.rs"));
+        put(&dir, "docs/guide/intro.md");
+        wait_until("a file in new folders is listed", || has("docs/guide/intro.md"));
+        put(&dir, "docs/guide/next.md");
+        wait_until("a new folder is watched", || has("docs/guide/next.md"));
+
+        std::fs::write(dir.join(".gitignore"), "target/\nignored/\n*.log\nsrc/m002/\n").unwrap();
+        wait_until("a folder git now ignores leaves the list", || !index.files().iter().any(|file| file.starts_with("src/m002/")));
+        let walks = index.walks();
+        put(&dir, "src/m002/later.rs");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(index.walks(), walks, "a folder git now ignores wakes no walk");
+        std::fs::write(dir.join(".gitignore"), "target/\nignored/\n*.log\n").unwrap();
+        wait_until("a folder git ignores no more is listed again", || has("src/m002/later.rs"));
+        put(&dir, "src/m002/again.rs");
+        wait_until("a folder git ignores no more is watched again", || has("src/m002/again.rs"));
+
+        let walks = index.walks();
         index.refresh();
-        let t0 = std::time::Instant::now();
-        while index.version() == v && t0.elapsed().as_secs() < 5 {
-            std::thread::yield_now();
-        }
-        assert_eq!(index.files().len(), 3);
+        wait_until("refresh walks", || index.walks() > walks);
+        drop(index);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -91,7 +91,7 @@ pub mod vec;
 
 /// core::alloc / alloc::alloc
 pub mod alloc {
-    pub use crate::heap::{alloc, alloc_zeroed, dealloc, handle_alloc_error, realloc, GlobalAlloc, Layout, LayoutErr, LayoutError, System};
+    pub use crate::heap::{alloc, alloc_zeroed, dealloc, handle_alloc_error, realloc, AllocError, Allocator, AllocatorNightly, GlobalAlloc, Layout, LayoutErr, LayoutError, StaticAllocator, System};
 }
 
 pub mod sync {

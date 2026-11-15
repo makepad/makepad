@@ -53,6 +53,8 @@ impl str {
     pub const fn as_mut_ptr(&mut self) -> *mut u8 {
         self.as_ptr() as *mut u8
     }
+    // core's own attribute: a crate's extension trait `as_str` (shellexpand's) is the one picked
+    #[unstable(feature = "str_as_str", issue = "130366")]
     pub const fn as_str(&self) -> &str {
         self
     }

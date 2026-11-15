@@ -41,6 +41,10 @@ fn blob_route(method: &str, path: &str) -> bool {
 /// narrows everyone to the job API.
 pub fn route_allowed(peer: &Peer, edge: bool, method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
+    // the hostile-intake jail's credential: its own narrow scope, whatever its role
+    if crate::intake_scope::is_intake(&peer.name) {
+        return crate::intake_scope::route_allowed(method, path);
+    }
     if edge {
         return job_route(method, path);
     }

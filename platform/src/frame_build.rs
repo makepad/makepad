@@ -797,19 +797,19 @@ fn vec_image(format: &TextureFormat) -> Option<VecImage<'_>> {
         TextureFormat::VecBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecCubeBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Cube, as_bytes(d)),
         TextureFormat::VecMipBGRAu8_32 { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d.as_slice()))
         }
         TextureFormat::VecMipRGBAf32 { width, height, data: Some(d), max_level, .. } => {
             img(*width, *height, 16, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
         }
         TextureFormat::VecMipCompressed { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: 1 }, d)
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: 1 }, d.as_slice())
         }
         TextureFormat::VecArrayMipBGRAu8_32 { width, height, layers, data: Some(d), max_level, .. } => {
-            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, as_bytes(d))
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, as_bytes(d.as_slice()))
         }
         TextureFormat::VecArrayMipCompressed { width, height, layers, data: Some(d), max_level, .. } => {
-            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, d)
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, d.as_slice())
         }
         TextureFormat::VecRGBAf32 { width, height, data: Some(d), .. } => img(*width, *height, 16, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecRu8 { width, height, data: Some(d), .. } => img(*width, *height, 1, VecLayout::Plain, d),

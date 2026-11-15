@@ -104,22 +104,16 @@ pub struct File {
     virtual_stat: Option<vfs::Stat>,
 }
 
+extern "C" {
+    /// An anonymous file of this process, close-on-exec, made by the host (compiler jit.rs
+    /// `relax_anon_fd`; a confined build script's broker makes it there): -1 and errno on failure.
+    fn __relax_anon_fd() -> c_int;
+}
+
+/// A virtual file's private copy: an anonymous file, which names nothing on any disk.
 fn virtual_fd() -> io::Result<OwnedFd> {
-    #[cfg(any(target_os = "linux", target_os = "android"))]
-    {
-        let fd = cvt_r(|| unsafe { sys::os::memfd_create(b"relax-vfs\0".as_ptr() as *const c_char, sys::os::MFD_CLOEXEC) })?;
-        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-    }
-    #[cfg(target_vendor = "apple")]
-    {
-        let path = crate::env::temp_dir().join("relax-vfs-XXXXXX");
-        let mut name = CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| NUL_ERR)?.into_bytes_with_nul();
-        let fd = cvt(unsafe { sys::os::mkstemp(name.as_mut_ptr() as *mut c_char) })?;
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        cvt_r(|| unsafe { sys::unlink(name.as_ptr() as *const c_char) })?;
-        cvt_r(|| unsafe { sys::fcntl(fd.as_raw_fd(), sys::F_SETFD, sys::FD_CLOEXEC) })?;
-        Ok(fd)
-    }
+    let fd = cvt_r(|| unsafe { __relax_anon_fd() })?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// A folder fd that names no folder: a fresh empty folder in the temp folder, removed once it is
@@ -1268,6 +1262,26 @@ pub fn set_permissions<P: AsRef<Path>>(path: P, perm: Permissions) -> io::Result
         cvt_r(|| unsafe { sys::chmod(c.as_ptr(), perm.mode as sys::mode_t) })?;
         Ok(())
     })
+}
+
+// chown(2), lchown(2) and fchown(2), as real std's sys fs: `u32::MAX` (-1) leaves that id as it is.
+pub(crate) fn chown_raw(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    run_path_with_cstr(path, &|c| {
+        cvt(unsafe { sys::chown(c.as_ptr(), uid as sys::uid_t, gid as sys::gid_t) })?;
+        Ok(())
+    })
+}
+
+pub(crate) fn lchown_raw(path: &Path, uid: u32, gid: u32) -> io::Result<()> {
+    run_path_with_cstr(path, &|c| {
+        cvt(unsafe { sys::lchown(c.as_ptr(), uid as sys::uid_t, gid as sys::gid_t) })?;
+        Ok(())
+    })
+}
+
+pub(crate) fn fchown_raw(fd: RawFd, uid: u32, gid: u32) -> io::Result<()> {
+    cvt(unsafe { sys::fchown(fd, uid as sys::uid_t, gid as sys::gid_t) })?;
+    Ok(())
 }
 
 /// Deprecated alias of `os::unix::fs::symlink` (rustc library/std/src/fs.rs `soft_link`).

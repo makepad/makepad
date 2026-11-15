@@ -1,4 +1,4 @@
-//! The owner thread (local/agent_state/fast-rust/JIT_THREADS.md): the one thread that runs every
+//! The owner thread: the one thread that runs every
 //! step reading or changing a unit's mutable state -- lazy compiles' fronts and installs, constant
 //! and static evaluation (and the JIT code they run), the disk cache, patches, tier installs, the
 //! exit summary. There is no unit lock. Other threads hand it closures and wait for them

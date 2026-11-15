@@ -1,4 +1,4 @@
-//! A git repository as ONE file (local/plans/run-from-git.md): what `makepad run <git url>` reads its
+//! A git repository as ONE file: what `makepad run <git url>` reads its
 //! sources from, without a working tree, a .git folder, packs or loose objects on disk.
 //!
 //! ```text

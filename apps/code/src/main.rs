@@ -25,6 +25,8 @@ script_mod! {
                 body +: {
                     padding: 0 margin: 0 spacing: 0
                     ide := IdeShell{}
+                    // Hover tips (a formula the math subset cannot typeset).
+                    layers := OverlayLayers{}
                 }
             }
         }

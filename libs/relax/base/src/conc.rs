@@ -505,7 +505,8 @@ impl<T> AppendVec<T> {
 
     #[inline]
     fn ptr(&self, i: usize) -> *mut T {
-        assert!(i < self.len(), "AppendVec index {} out of bounds", i);
+        let len = self.len();
+        assert!(i < len, "AppendVec index {} out of bounds (len {})", i, len);
         let c = self.chunks[i >> AV_BITS].load(std::sync::atomic::Ordering::Acquire);
         unsafe { c.add(i & (AV_CHUNK - 1)) }
     }

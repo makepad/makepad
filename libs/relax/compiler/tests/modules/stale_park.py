@@ -48,8 +48,8 @@ try:
     assert rc != 0 and "out parked call" not in out, f"stop: rc {rc}, out {out[:300]}"
     print("modules stale access parks until stop: PASS")
     # a trusted module's fn called through a kept fn pointer after its unload: parked, named
-    env2 = dict(env, SAFE2_UNLOAD_CRASH="trusted_call", RELAX_MODULES_TRUSTED="1")
-    q = subprocess.Popen([mk, "test", os.path.join(root, "unload_inside.rs")], env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    env2 = dict(env, SAFE2_UNLOAD_CRASH="trusted_call")
+    q = subprocess.Popen([mk, "test", "--allow-host-modules", os.path.join(root, "unload_inside.rs")], env=env2, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     p = q
     err = []
     ident = None

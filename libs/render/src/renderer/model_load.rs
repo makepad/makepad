@@ -8,6 +8,76 @@ impl Renderer {
         self.texture_cache.keys().copied()
     }
 
+    /// Whether this renderer's content cache holds a texture under `key`.
+    pub fn holds_texture(&self, key: u64) -> bool {
+        self.texture_cache.contains_key(&key)
+    }
+
+    /// Write `prepared`, levels `level..` of the chain stored under `stored`, into the cached
+    /// texture under content key `key`, in place: every model sharing it draws the new chain
+    /// (another first mip, size or format) from the next frame. False when this renderer holds
+    /// no texture under `key`.
+    pub fn retune_texture(&mut self, cx: &mut Cx, key: u64, stored: &[u64], level: usize, prepared: crate::material_surface::PreparedTexture) -> bool {
+        let Some(texture) = self.texture_cache.get(&key) else { return false };
+        let compressed = prepared.compressed.is_some();
+        prepared.retune(cx, texture);
+        crate::texture_restore::note(cx, texture, compressed, stored, level, key);
+        true
+    }
+
+    /// Every texture this renderer's models draw with (a texture shared by several appears
+    /// once per binding).
+    fn for_each_model_texture(&self, f: &mut dyn FnMut(&Texture)) {
+        fn walk(m: &LoadedModel, f: &mut dyn FnMut(&Texture)) {
+            let mut layer = |t: &Texture, d: &Texture, mat: &LayerMaterial| {
+                f(t);
+                f(d);
+                f(&mat.orm);
+                if let Some(s) = &mat.surface {
+                    for t in [&s.normal, &s.occlusion, &s.emissive] { f(t); }
+                    if let Some(p) = &s.splat {
+                        for t in [&p.albedo, &p.normal, &p.weights] { f(t); }
+                    }
+                }
+            };
+            layer(&m.texture, &m.detail, &m.material);
+            for (_, t, d, _, mat) in m.extra_draws.iter()
+                .chain(m.anim_parts.iter().flat_map(|p| p.draws.iter()))
+                .chain(m.driven_parts.iter().flat_map(|p| p.draws.iter()))
+            {
+                layer(t, d, mat);
+            }
+            for (_, lod) in &m.lods {
+                walk(lod, f);
+            }
+        }
+        for (_, m) in &self.static_models {
+            walk(m, f);
+        }
+    }
+
+    /// Once per scene draw: on the first draw on a replaced GPU device, and after models were
+    /// installed, the textures this renderer's models hold that dropped their CPU chain on an
+    /// earlier device are remade from their stored forms ([`crate::texture_restore`]); finished
+    /// remakes land, and frames keep coming while they run.
+    pub(super) fn restore_textures(&mut self, cx: &mut Cx) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let generation = cx.gpu_device_generation();
+            let replaced = self.device_generation.replace(generation) != Some(generation);
+            if (std::mem::take(&mut self.restore_walk) || replaced) && crate::texture_restore::any_held() {
+                let mut textures = Vec::new();
+                self.for_each_model_texture(&mut |t| textures.push(t.clone()));
+                crate::texture_restore::restore_stale(cx, textures.iter());
+            }
+            if crate::texture_restore::poll(cx) {
+                cx.redraw_all();
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = cx;
+    }
+
     /// Load a stock prop onto the GPU under `id`, idempotent. `png` is the
     /// pack atlas, shared by every model in that pack.
     pub fn load_model(
@@ -113,6 +183,7 @@ impl Renderer {
         let ao=uploaded.ao.clone();
         let model = Self::uploaded_static_model(uploaded);
         self.model_lod_chains_dirty = true;
+        self.restore_walk = true;
         let previous = if let Some(at) = at { Some(std::mem::replace(&mut self.static_models[at].1, model)) }
             else { self.static_models.push((id.to_string(), model)); if transient { self.preview_new.insert(id.to_string()); } None };
         let old_ao_key = self.model_pack.iter().find(|(key, _)| key == id).map(|(_, key)| key.clone());
@@ -129,13 +200,42 @@ impl Renderer {
         Some(triangles)
     }
 
+    /// The host chooses the first mip to upload per texture content key (0 keeps the whole
+    /// chain). Clamped to `PreparedTexture::deepest_first_level`; asked only on upload,
+    /// never on a texture-cache hit, so changing the hook does not retune resident textures.
+    pub fn set_texture_first_level(&mut self, hook: Option<std::rc::Rc<dyn Fn(u64) -> usize>>) {
+        self.texture_first_level = hook;
+    }
+
     pub fn upload_static_preview(&mut self, cx:&mut Cx, prepared:PreparedStaticPreview)->UploadedStaticPreview {
+        use std::sync::atomic::Ordering::Relaxed;
+        use crate::material_surface::UPLOAD_UI;
+        let started=crate::material_surface::work_clock();
+        let uploaded=self.upload_static_preview_levels(cx,prepared);
+        let micros=crate::material_surface::work_micros(started);
+        UPLOAD_UI[0].fetch_add(1,Relaxed);UPLOAD_UI[1].fetch_add(micros,Relaxed);UPLOAD_UI[2].fetch_max(micros,Relaxed);
+        uploaded
+    }
+
+    /// [`Self::upload_static_preview`] for one model and, recursively, its distance levels.
+    fn upload_static_preview_levels(&mut self, cx:&mut Cx, prepared:PreparedStaticPreview)->UploadedStaticPreview {
         // Identical images (within this model, and across every model and
         // chunk already resident) share one GPU texture.
         let cache=&mut self.texture_cache;
-        fn shared(cx:&mut Cx,cache:&mut std::collections::HashMap<u64,Texture>,prepared:std::sync::Arc<crate::material_surface::PreparedTexture>)->Texture{
+        let first_level: &dyn Fn(u64)->usize=self.texture_first_level.as_deref().unwrap_or(&|_|0);
+        fn shared(cx:&mut Cx,cache:&mut std::collections::HashMap<u64,Texture>,prepared:std::sync::Arc<crate::material_surface::PreparedTexture>,first_level:&dyn Fn(u64)->usize)->Texture{
             if let Some(texture)=cache.get(&prepared.hash){return texture.clone();}
-            std::sync::Arc::try_unwrap(prepared).unwrap_or_else(|arc|(*arc).clone()).upload_cached(cx,cache)
+            let k=first_level(prepared.hash).min(prepared.deepest_first_level());
+            let (hash,stored,compressed)=(prepared.hash,prepared.stored,prepared.compressed.is_some());
+            let texture=if k>0 {
+                let reduced=prepared.from_level(k);
+                crate::material_surface::UPLOAD_UI[3].fetch_add(reduced.bytes(),std::sync::atomic::Ordering::Relaxed);
+                reduced.upload_cached(cx,cache)
+            } else {
+                std::sync::Arc::try_unwrap(prepared).unwrap_or_else(|arc|(*arc).clone()).upload_cached(cx,cache)
+            };
+            crate::texture_restore::note(cx,&texture,compressed,stored.as_slice(),k,hash);
+            texture
         }
         let mut upload=|layer:PreparedStaticLayer| {
             let geometry=Geometry::new(cx);geometry.update(cx,layer.indices,layer.vertices);
@@ -143,11 +243,11 @@ impl Renderer {
             // Surface maps (normal, occlusion, emissive) share by content too:
             // terrain tiles carry the same material maps.
             let surface=layer.surface.map(|s|crate::material_surface::UploadedSurface{definition:std::sync::Arc::new(s.definition),
-                normal:shared(cx,cache,std::sync::Arc::new(s.normal)),occlusion:shared(cx,cache,std::sync::Arc::new(s.occlusion)),emissive:shared(cx,cache,std::sync::Arc::new(s.emissive)),
-                splat:s.splat.map(|p|p.upload(cx,cache))});
+                normal:shared(cx,cache,std::sync::Arc::new(s.normal),first_level),occlusion:shared(cx,cache,std::sync::Arc::new(s.occlusion),first_level),emissive:shared(cx,cache,std::sync::Arc::new(s.emissive),first_level),
+                splat:s.splat.map(|p|p.upload(cx,cache,first_level))});
             let material=LayerMaterial{surface,metallic:if shiny{layer.pbr.metallic}else{0.0},roughness:layer.pbr.roughness,
-                orm:shared(cx,cache,layer.orm),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
-            (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture),shared(cx,cache,layer.detail),layer.detail_scale,material)
+                orm:shared(cx,cache,layer.orm,first_level),orm_on:layer.orm_on,mag_nearest:layer.pbr.mag_nearest,cutout:layer.cutout};
+            (std::rc::Rc::new(geometry),shared(cx,cache,layer.texture,first_level),shared(cx,cache,layer.detail,first_level),layer.detail_scale,material)
         };
         let wants_pbr=!prepared.prelit&&(prepared.main.orm_on||prepared.main.pbr.is_shiny()||prepared.extra.iter().any(|l|l.orm_on||l.pbr.is_shiny())||prepared.anim_parts.iter().flat_map(|p|&p.draws).chain(prepared.driven_parts.iter().flat_map(|p|&p.draws)).any(|l|l.orm_on||l.pbr.is_shiny()));
         let stand_in=std::iter::once(&prepared.main).chain(&prepared.extra)
@@ -167,7 +267,7 @@ impl Renderer {
         let sdf=prepared.sdf.map(|atlas|Self::upload_sdf_atlas(cx,atlas));
         let bake_geometry=prepared.bake_stream.map(|(indices,vertices)|{let g=Geometry::new(cx);g.update(cx,indices,vertices);std::rc::Rc::new(g)});
         let morph=prepared.morph.map(|m|m.upload(cx));
-        let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview(cx,model))).collect();
+        let lods=prepared.lods.into_iter().map(|(distance,model)|(distance,self.upload_static_preview_levels(cx,model))).collect();
         UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
             prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,stand_in,
             authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
@@ -189,6 +289,7 @@ impl Renderer {
         let ao=uploaded.ao.clone();
         let model = Self::uploaded_static_model(uploaded);
         self.model_lod_chains_dirty = true;
+        self.restore_walk = true;
         if let Some((_, old)) = self.static_models.iter_mut().find(|(key, _)| key == id) { *old = model; }
         else { self.static_models.push((id.to_string(), model)); }
         self.model_pack.retain(|(key, _)| key != id);
@@ -207,34 +308,14 @@ impl Renderer {
         if self.texture_cache.is_empty() {
             return;
         }
-        fn collect(m: &LoadedModel, out: &mut Vec<TextureId>) {
-            let mut layer = |t: &Texture, d: &Texture, mat: &LayerMaterial| {
-                out.push(t.texture_id());
-                out.push(d.texture_id());
-                out.push(mat.orm.texture_id());
-                if let Some(s) = &mat.surface {
-                    out.extend([s.normal.texture_id(), s.occlusion.texture_id(), s.emissive.texture_id()]);
-                    if let Some(p) = &s.splat {
-                        out.extend([p.albedo.texture_id(), p.normal.texture_id(), p.weights.texture_id()]);
-                    }
-                }
-            };
-            layer(&m.texture, &m.detail, &m.material);
-            for (_, t, d, _, mat) in m.extra_draws.iter()
-                .chain(m.anim_parts.iter().flat_map(|p| p.draws.iter()))
-                .chain(m.driven_parts.iter().flat_map(|p| p.draws.iter()))
-            {
-                layer(t, d, mat);
-            }
-            for (_, lod) in &m.lods {
-                collect(lod, out);
-            }
-        }
         let mut live = Vec::new();
-        for (_, m) in &self.static_models {
-            collect(m, &mut live);
-        }
-        self.texture_cache.retain(|_, t| live.contains(&t.texture_id()));
+        self.for_each_model_texture(&mut |t| live.push(t.texture_id()));
+        self.texture_cache.retain(|_, t| {
+            let keep = live.contains(&t.texture_id());
+            // The cache held the last handle: the texture goes now.
+            if !keep && t.readers() == 1 { crate::texture_restore::forget(t.texture_id()); }
+            keep
+        });
     }
 
     pub fn restore_all_static_previews(&mut self) {
@@ -250,6 +331,7 @@ impl Renderer {
         if let Some((original, ao_key)) = self.preview_originals.remove(id) {
             if let Some((_, model)) = self.static_models.iter_mut().find(|(key, _)| key == id) {
                 *model = original;
+                self.restore_walk = true;
                 if let Some(key) = ao_key { self.model_pack.push((id.to_string(), key)); }
                 self.rebuild_csm_static_casters();
             }

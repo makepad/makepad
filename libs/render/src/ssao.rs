@@ -673,6 +673,12 @@ impl SsaoPass {
         if self.tex_c.is_none() {
             self.tex_c = Some(rgba16f(cx));
         }
+        self.prepare_draws(cx)
+    }
+
+    /// Make the draw structs (their shaders) before the first run, which made them otherwise;
+    /// the passes and targets wait for that run. False while the script VM is held elsewhere.
+    pub fn prepare_draws(&mut self, cx: &mut Cx) -> bool {
         while self.draw_depth.len() < LEVELS {
             match cx.try_with_vm(|vm| Box::new(DrawSsaoDepth::script_new_with_default(vm))) {
                 Some(d) => self.draw_depth.push(d),
@@ -690,6 +696,10 @@ impl SsaoPass {
             self.draw_blur_v =
                 cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
         }
+        self.draws_ready()
+    }
+
+    pub fn draws_ready(&self) -> bool {
         self.draw_depth.len() == LEVELS && self.draw_raw.is_some() && self.draw_blur.is_some() && self.draw_blur_v.is_some()
     }
 

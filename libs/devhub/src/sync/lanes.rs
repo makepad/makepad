@@ -805,7 +805,11 @@ impl Lanes {
             // (taken before git reads the tree: a change while it runs is heard)
             let mark = if ff_only { self.tree_mark(h) } else { None };
             // A lane carried over from a retired work chain isn't a fast-forward: its tree moves
-            // the same careful way (refusing over a change), then its branch.
+            // the same careful way (refusing over a change), then its branch. Git itself moves the
+            // checkout (`merge --ff-only`, `move_checked`'s `read-tree -m -u`): a two-way move of
+            // worktree and index that refuses over the user's uncommitted files is git's, and
+            // makepad-git has none (its checkout writes every file). One exec per lane the bot
+            // moves onto a merge it made, never per pass.
             let (ok, _, err) = if !carried {
                 git(&h.wt, &self.env, &["merge", "--ff-only", "-q", c])
             } else {
@@ -1008,12 +1012,14 @@ impl Lanes {
             return Err(Outcome::Failed(format!("commit-tree: {}", first_err(&err))));
         }
         // the commit is the clean merge of the parents it names, read back from the commit itself
-        // before the branch moves to it: a tree merged against one tip never goes in on another
+        // before the branch moves to it: the tree merge-tree wrote for this head and this tip, on
+        // exactly those parents (a tree merged against one tip never goes in on another)
         if retired.is_none() {
-            match crate::land::merge_strays(&h.dir, &commit) {
-                Ok(f) if f.is_empty() => {}
-                Ok(f) => return Err(Outcome::Failed(format!("refused {commit:.10}: not the clean merge of its parents in {}", f.join(" ")))),
-                Err(e) => return Err(Outcome::Failed(format!("the merge did not check against its parents: {e}"))),
+            let named = (tree.clone(), vec![h.head.clone(), h.base.clone()]);
+            match crate::gitread::commit_parts(&h.dir, &commit) {
+                Some(read) if read == named => {}
+                Some((t, p)) => return Err(Outcome::Failed(format!("refused {commit:.10}: tree {t:.10} on {} is not the merge of {:.10} and {:.10} ({tree:.10})", p.iter().map(|p| format!("{p:.10}")).collect::<Vec<_>>().join(" "), h.head, h.base))),
+                None => return Err(Outcome::Failed(format!("the merge {commit:.10} did not read back"))),
             }
         }
         Ok((commit, retired.is_some()))

@@ -14,7 +14,70 @@ pub fn no_codegen_env(get: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> bool 
     cfg!(any(target_os = "ios", target_os = "tvos")) || get("RELAX_NO_CODEGEN").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
-pub const C_GATE: &str = "is built only with `--allow-c` (or RELAX_ALLOW_C=1): cargo and the system C compiler build it, and its library is linked into the run";
+pub const C_GATE: &str = "is built only with `--allow-c`: cargo and the system C compiler build it, and its library is linked into the run";
+
+/// A module call's fuel when no `--allow-module-fuel=<n>` sets it (`RuntimeOptions::module_fuel`).
+pub const MODULE_FUEL: i64 = 4_000_000_000;
+
+/// What the person grants an invocation: what opens the confinement of `makepad run` (C builds, a
+/// module's checks and its fuel), each a word before `--` and an environment name. Under
+/// `makepad run` (Policy::Sandboxed) the words are the only source: a host drops the names from
+/// its environment at its start, each said in one line (relax-compiler `session_from_env`), and a
+/// child of the run gets the words its parent Relax writes (the self-exec line and a restart all
+/// of them; a build script's host and a test's package binary `--allow-c`). Bare `relax`
+/// (Policy::Open) reads the names too. A word ending in `=` takes a value; any other `--allow-`
+/// word is an error (`apply_grant`).
+pub const GRANTS: [(&str, &str); 5] = [
+    ("--allow-c", "RELAX_ALLOW_C"),
+    ("--allow-host-modules", "RELAX_MODULES_TRUSTED"),
+    ("--allow-unchecked-modules", "RELAX_SANDBOX_NOCHECK"),
+    ("--allow-unmetered-modules", "RELAX_SANDBOX_FUEL"),
+    ("--allow-module-fuel=", "RELAX_MODULE_FUEL"),
+];
+
+/// A word of the command line before `--` that names a grant (`GRANTS`, `apply_grant`).
+pub fn is_grant_word(word: &str) -> bool {
+    word.starts_with("--allow-")
+}
+
+/// `word` (one before `--`) as a grant into `options` and `runtime`: Ok(true) when it is one,
+/// Ok(false) when it is no `--allow-` word, an error naming it when it is one but no grant, or
+/// its value does not parse.
+pub fn apply_grant(word: &str, options: &mut Options, runtime: &mut RuntimeOptions) -> Result<bool, String> {
+    if !is_grant_word(word) {
+        return Ok(false);
+    }
+    if let Some(n) = word.strip_prefix(GRANTS[4].0) {
+        runtime.module_fuel = n.parse().map_err(|_| format!("`{word}`: the fuel is a whole number of loop iterations"))?;
+        return Ok(true);
+    }
+    match word {
+        "--allow-c" => options.allow_c = true,
+        "--allow-host-modules" => options.modules_trusted = true,
+        "--allow-unchecked-modules" => options.sandbox_nocheck = true,
+        "--allow-unmetered-modules" => options.sandbox_fuel = false,
+        _ => {
+            let known: Vec<String> = GRANTS.iter().map(|(w, _)| if w.ends_with('=') { format!("{w}<n>") } else { w.to_string() }).collect();
+            return Err(format!("`{word}` is no grant (the grants are {})", known.join(", ")));
+        }
+    }
+    Ok(true)
+}
+
+/// The words of the grants `options` and `runtime` hold, in `GRANTS` order: what a child that
+/// is this run again gets on its command line.
+pub fn grant_words(options: &Options, runtime: &RuntimeOptions) -> Vec<String> {
+    let mut out = Vec::new();
+    for (on, word) in [(options.allow_c, GRANTS[0].0), (options.modules_trusted, GRANTS[1].0), (options.sandbox_nocheck, GRANTS[2].0), (!options.sandbox_fuel, GRANTS[3].0)] {
+        if on {
+            out.push(word.to_string());
+        }
+    }
+    if runtime.module_fuel != MODULE_FUEL {
+        out.push(format!("{}{}", GRANTS[4].0, runtime.module_fuel));
+    }
+    out
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Borrowck { Off, Moves, Full }
@@ -142,7 +205,7 @@ pub struct Options {
     /// `naked_asm!` are an error naming the crate and the flag. Default `false`: inline assembly
     /// is assembled (backend asm).
     pub no_asm: bool,
-    /// `--allow-c` / `RELAX_ALLOW_C=1`: dependencies whose build script compiles C are built
+    /// `--allow-c` (a grant: `GRANTS`): dependencies whose build script compiles C are built
     /// by cargo and the system C compiler and linked in (front native.rs); without it they are an
     /// error naming the flag. Default `false`.
     pub allow_c: bool,
@@ -218,7 +281,8 @@ pub struct Options {
     pub native_bitflags: bool,
     /// `RELAX_PRE_DERIVES`; default `true`.
     pub pre_derives: bool,
-    /// `RELAX_SANDBOX_FUEL`; default `true`.
+    /// Whether a module call runs on fuel; `--allow-unmetered-modules` (a grant: `GRANTS`) turns
+    /// it off. Default `true`.
     pub sandbox_fuel: bool,
     /// `RELAX_SPEC`; default `true`.
     pub spec: bool,
@@ -238,9 +302,11 @@ pub struct Options {
     /// A live session (hot reload, watcher): `makepad run` of a working tree, `makepad live`; never
     /// from the environment. Default `false`.
     pub live: bool,
-    /// `RELAX_MODULES_TRUSTED`; default `false`.
+    /// `--allow-host-modules` (a grant: `GRANTS`): a module runs as host code, unconfined
+    /// (diagnosis only). Default `false`.
     pub modules_trusted: bool,
-    /// `RELAX_SANDBOX_NOCHECK`; default `false`.
+    /// `--allow-unchecked-modules` (a grant: `GRANTS`): a module's source is not refused at its
+    /// load, its memory still confined (tests of the confinement alone). Default `false`.
     pub sandbox_nocheck: bool,
     /// `RELAX_BORROWCK_ONLY`; default `None`.
     pub borrowck_only: Option<String>,
@@ -788,7 +854,8 @@ pub struct RuntimeOptions {
     pub settle_drop: bool,
     /// `RELAX_BURST_ARENA`; default `true`.
     pub burst_arena: bool,
-    /// `RELAX_MODULE_FUEL`; default `4_000_000_000`.
+    /// A module call's fuel (loop iterations); `--allow-module-fuel=<n>` (a grant: `GRANTS`)
+    /// sets it. Default `MODULE_FUEL`.
     pub module_fuel: i64,
     /// `RELAX_MODULE_MEM_MB`; default `256`.
     pub module_mem_mb: u64,
@@ -818,7 +885,7 @@ impl Default for RuntimeOptions {
             mem_trim: true,
             settle_drop: true,
             burst_arena: true,
-            module_fuel: 4_000_000_000,
+            module_fuel: MODULE_FUEL,
             module_mem_mb: 256,
             repeat: 1,
             test_domains: 1,
@@ -845,7 +912,7 @@ impl RuntimeOptions {
             mem_trim: { let os = get("RELAX_MEM_TRIM"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             settle_drop: { let os = get("RELAX_SETTLE_DROP"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
             burst_arena: { let os = get("RELAX_BURST_ARENA"); let v = os.and_then(|v| v.into_string().ok()); v.as_deref() != Some("0") },
-            module_fuel: { let os = get("RELAX_MODULE_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(4_000_000_000) },
+            module_fuel: { let os = get("RELAX_MODULE_FUEL"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(MODULE_FUEL) },
             module_mem_mb: { let os = get("RELAX_MODULE_MEM_MB"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(256) },
             repeat: { let os = get("RELAX_REPEAT"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).unwrap_or(1) },
             test_domains: { let os = get("RELAX_TEST_DOMAINS"); let v = os.and_then(|v| v.into_string().ok()); v.and_then(|v| v.parse().ok()).filter(|n: &usize| *n >= 1).unwrap_or(1) },
@@ -875,6 +942,24 @@ fn parse_leaf(v: Option<&str>) -> (usize, usize) {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    /// Each grant word sets its option, `grant_words` gives the words back, and an `--allow-` word
+    /// that is no grant, or a fuel that is no number, is an error naming it.
+    #[test]
+    fn grant_words_set_their_options_and_come_back_as_words() {
+        let (mut options, mut runtime) = (Options::read(&|_| None), RuntimeOptions::read(&|_| None));
+        assert!(grant_words(&options, &runtime).is_empty(), "no grant without a word");
+        let words = ["--allow-c", "--allow-host-modules", "--allow-unchecked-modules", "--allow-unmetered-modules", "--allow-module-fuel=1000"];
+        for w in words {
+            assert_eq!(apply_grant(w, &mut options, &mut runtime), Ok(true), "{w}");
+        }
+        assert!(options.allow_c && options.modules_trusted && options.sandbox_nocheck && !options.sandbox_fuel && runtime.module_fuel == 1000);
+        assert_eq!(grant_words(&options, &runtime), words);
+        assert_eq!(apply_grant("--quiet", &mut options, &mut runtime), Ok(false));
+        let e = apply_grant("--allow-nonsense", &mut options, &mut runtime).unwrap_err();
+        assert!(e.contains("`--allow-nonsense` is no grant") && e.contains("--allow-module-fuel=<n>"), "{e}");
+        assert!(apply_grant("--allow-module-fuel=lots", &mut options, &mut runtime).unwrap_err().contains("`--allow-module-fuel=lots`"));
+    }
 
     #[test]
     fn q2_options_preserve_parsing_and_presence() {

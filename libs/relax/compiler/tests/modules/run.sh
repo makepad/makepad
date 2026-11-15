@@ -26,20 +26,75 @@ fi
 echo "modules budget (tier1=$TIER): PASS ($(echo "$OUT" | grep 'budget cost:'))"
 echo "$GOT" | grep 'shared tick fuel'
 done
+# A twin's O3 build takes in the twins it calls and keeps the fuel count in a register between
+# calls: what a path costs, where a run on a budget ends and what the module did up to there are
+# the same with tiering off and after a tier-up that inlined.
+BASE_TIERS=""
+for TIER in 0 1; do
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/fuel_tiers.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" != 0 ] || ! echo "$GOT" | grep -q '^out the same after the tier-up: true$'; then
+    echo "modules fuel tiers (tier1=$TIER): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+fi
+if [ "$TIER" = 0 ]; then BASE_TIERS="$GOT"; else
+    if [ "$GOT" != "$BASE_TIERS" ] || ! echo "$OUT" | grep -Eq '^tier1: sandbox:tiers::run installed \([0-9]+ bytes, [1-9][0-9]* callees inlined'; then
+        echo "modules fuel tiers invariance: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+    fi
+fi
+echo "modules fuel tiers (tier1=$TIER): PASS ($(echo "$GOT" | head -1 | sed 's/^out //'))"
+done
+# A twin's O3 build checks a run of meters once: with every budget up to a call's cost, the fuel
+# consumed, how the call ends and the module's state after it are those of one check per block.
+BASE_CHAINS=""
+for TIER in 0 1; do
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=$TIER RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/fuel_chains.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out ' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" != 0 ] || [ "$(echo "$GOT" | wc -l | tr -d ' ')" != 4 ]; then
+    echo "modules fuel chains (tier1=$TIER): FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+fi
+if [ "$TIER" = 0 ]; then BASE_CHAINS="$GOT"; else
+    if [ "$GOT" != "$BASE_CHAINS" ] || ! echo "$OUT" | grep -Eq '^tier1: sandbox:chains::run installed \([0-9]+ bytes, [1-9][0-9]* callees inlined' || ! echo "$OUT" | grep -Eq '^tier1: sandbox:chains::walk installed '; then
+        echo "modules fuel chains invariance: FAIL"; echo "$BASE_CHAINS"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); continue
+    fi
+fi
+echo "modules fuel chains (tier1=$TIER): PASS ($(echo "$GOT" | sed -n 2p | sed 's/^out //'))"
+done
+# A twin's O3 build makes the arena copies of a known small size inline: sorts of elements of
+# 1 to 72 bytes give the host's results before and after the tier-up.
+SO=$(mktemp); SE=$(mktemp)
+RELAX_O3=1 RELAX_O3_CALLS=100 RELAX_O3_TRACE=1 "$1" test "$D/copies.rs" >"$SO" 2>"$SE"
+STATUS=$?
+GOT=$(grep '^out the module' "$SO")
+OUT="$(cat "$SO" "$SE")"
+rm -f "$SO" "$SE"
+if [ "$STATUS" = 0 ] && [ "$GOT" = $'out the module, before the tier-up: true\nout the module, after it: true' ] && echo "$OUT" | grep -Eq '^tier1: sandbox:core::slice::sort::.* installed '; then
+    echo "modules copies: PASS"
+else
+    echo "modules copies: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1))
+fi
 # Host panic setup must not change sandbox reachability (run before other modules).
 for CASE in host_hook_repro host_hook_panic; do
 OUT=$("$1" test "$D/$CASE.rs" 2>&1)
 STATUS=$?
 if [ "$STATUS" = 0 ]; then echo "modules $CASE: PASS"; else echo "modules $CASE: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); fi
 done
-OUT=$(RELAX_SANDBOX_FUEL=0 "$1" test "$D/guard_threads.rs" 2>&1)
+OUT=$("$1" test --allow-unmetered-modules "$D/guard_threads.rs" 2>&1)
 STATUS=$?
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$STATUS" = 0 ] && [ "$GOT" = $'out concurrent guards: true\nout nested guards: true' ]; then echo "modules guard threads: PASS"; else echo "modules guard threads: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); fi
 # Exercise the sandbox wrappers/twins and the trusted host-code inlining path.
 for TRUSTED in 0 1; do
 for TIER in 1 0; do
-    OUT=$(RELAX_MODULES_TRUSTED=$TRUSTED RELAX_O3=$TIER RELAX_O3_CALLS=2000 RELAX_O3_TRACE=1 "$1" test "$D/palette.rs" 2>&1)
+    GRANT=""; [ "$TRUSTED" = 1 ] && GRANT=--allow-host-modules
+    OUT=$(RELAX_O3=$TIER RELAX_O3_CALLS=2000 RELAX_O3_TRACE=1 "$1" test $GRANT "$D/palette.rs" 2>&1)
     STATUS=$?
     GOT=$(echo "$OUT" | grep '^out ')
     HOT=$(echo "$OUT" | grep -Ec '^tier1: sandbox:palette_patch::color installed')
@@ -64,7 +119,7 @@ if [ "$GOT" = "$(cat "$D/expect.out")" ]; then echo "modules: PASS ($(echo "$OUT
 OUT=$("$1" test "$D/scale.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-scale.out")" ]; then echo "modules scale: PASS ($(echo "$OUT" | grep -o 'scale: .*'))"; else echo "modules scale: FAIL"; echo "$OUT" | tail -8; FAILS=$((FAILS + 1)); fi
-OUT=$(RELAX_SANDBOX_NOCHECK=1 "$1" test "$D/contain.rs" 2>&1)
+OUT=$("$1" test --allow-unchecked-modules "$D/contain.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-contain.out")" ]; then echo "modules contain: PASS"; else echo "modules contain: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
 # Append-only module code (MEMRECLAIM): 400 load/edit/unload cycles keep a live module stable;
@@ -87,11 +142,11 @@ OUT=$("$1" test "$D/escape_fn.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out escaping fn values refused: true\nout plain data to host API: true' ]; then echo "modules escape fn: PASS"; else echo "modules escape fn: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
 # Shadow stacks, result slots and fuel per thread and entry (SAFE2 F4).
-OUT=$(RELAX_MODULE_FUEL=2000000 "$1" test "$D/shadow_threads.rs" 2>&1)
+OUT=$("$1" test --allow-module-fuel=2000000 "$D/shadow_threads.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-shadow-threads.out")" ]; then echo "modules shadow threads: PASS"; else echo "modules shadow threads: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
 # Thread-locals in twins: per thread, from their initialisers at each claim, destructors at its end.
-OUT=$(RELAX_SANDBOX_NOCHECK=1 "$1" test "$D/thread_locals.rs" 2>&1)
+OUT=$("$1" test --allow-unchecked-modules "$D/thread_locals.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out each thread its own: true\nout thread ids differ: true\nout initialised per claim: true\nout destructors at release: 4' ]; then echo "modules thread-locals: PASS"; else echo "modules thread-locals: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
 # Fn values across three thunk-table chunks: each its own thunk, every call lands.
@@ -99,14 +154,19 @@ OUT=$("$1" test "$D/fn_values.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out distinct fn values: 9000\nout calls land: true' ]; then echo "modules fn values: PASS"; else echo "modules fn values: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
 # More threads than segments: the rest wait for one, every call returns.
-OUT=$(RELAX_SANDBOX_NOCHECK=1 RELAX_SANDBOX_FUEL=0 "$1" test "$D/segment_wait.rs" 2>&1)
+OUT=$("$1" test --allow-unchecked-modules --allow-unmetered-modules "$D/segment_wait.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = $'out calls returned: 100\nout most inside at once: 64' ]; then echo "modules segment wait: PASS"; else echo "modules segment wait: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -12; FAILS=$((FAILS + 1)); fi
-OUT=$(RELAX_MODULE_FUEL=1000000 "$1" test "$D/fuel.rs" 2>&1)
+OUT=$("$1" test --allow-module-fuel=1000000 "$D/fuel.rs" 2>&1)
 GOT=$(echo "$OUT" | grep '^out ')
 if [ "$GOT" = "$(cat "$D/expect-fuel.out")" ]; then echo "modules fuel: PASS"; else echo "modules fuel: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -6; FAILS=$((FAILS + 1)); fi
+# A module's cleanups never end the host: a fuel stop with values to drop, a destructor that runs
+# out of fuel or panics while the module unwinds (rustc aborts there) end the call at the guard.
+OUT=$("$1" test --allow-module-fuel=1000000 "$D/fuel_cleanup.rs" 2>&1)
+GOT=$(echo "$OUT" | grep '^out ')
+if [ "$GOT" = "$(cat "$D/expect-fuel-cleanup.out")" ]; then echo "modules fuel cleanup: PASS"; else echo "modules fuel cleanup: FAIL"; echo "$GOT"; echo "$OUT" | grep -v '^  report' | tail -8; FAILS=$((FAILS + 1)); fi
 bash "$D/milk.sh" "$1" || FAILS=$((FAILS + 1))
-OUT=$(RELAX_SANDBOX_FUEL=0 "$1" test "$D/deadline.rs" 2>&1)
+OUT=$("$1" test --allow-unmetered-modules "$D/deadline.rs" 2>&1)
 STATUS=$?
 if [ "$STATUS" = 0 ] && echo "$OUT" | grep -q '^out deadlines: true$'; then echo "modules deadlines: PASS"; else echo "modules deadlines: FAIL"; echo "$OUT" | tail -30; FAILS=$((FAILS + 1)); fi
 # A sandboxed module's own `unsafe impl` is refused; the builtin derive(Clone)'s TrivialClone impl is not its own.

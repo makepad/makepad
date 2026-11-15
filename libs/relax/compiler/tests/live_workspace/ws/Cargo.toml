@@ -1,0 +1,8 @@
+# A workspace of several crates for a live test session (run.py): the test is an integration
+# test of crates/app, which uses crates/core (a member) and libs/state (a path crate the tree's
+# libs/ holds: no app crate, as a registry crate is not), whose impls have array lengths from
+# libs/nums. crates/other is a member the test does not use. `cargo test -p lw-app --test t`
+# passes both tests.
+[workspace]
+members = ["crates/app", "crates/core", "crates/other"]
+resolver = "2"

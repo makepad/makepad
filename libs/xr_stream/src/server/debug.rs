@@ -34,14 +34,17 @@ use std::time::{Duration, Instant};
 /// removes it: `head=<x>,<y>,<z>,<yaw>` puts the head there in the tracking space from then on
 /// (turned `yaw` radians about y; it starts at 1.6 m over the origin), `session` links it again
 /// (a session of its own) and `recenter` is its wearer recentering, each a new tracking space.
-pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>) {
+pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<AtomicBool>, busy: Arc<AtomicBool>) {
     let log = shared.log.clone();
     use makepad_hal::{buffers::Wire, XrEye, XrFrame, XrPose};
     let codec = if VideoStreamEncoder::caps().hevc { StreamVideoCodec::Hevc } else { StreamVideoCodec::H264 };
     let hz: u32 = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_HZ").ok().and_then(|v| v.parse().ok()).unwrap_or(72).clamp(30, 120);
     let core = match Core::start(shared.clone(), eye, hz, codec) {
         Ok(c) => c,
-        Err(e) => return log(&format!("xr selftest: {e}")),
+        Err(e) => {
+            busy.store(false, Ordering::Release);
+            return log(&format!("xr selftest: {e}"));
+        }
     };
     log(&format!("xr selftest: {}x{} {codec:?} in {} tile(s) on {}", core.size[0], core.size[1], core.tiles, core.description));
     hal::hal_xr_remote_enable();
@@ -66,6 +69,10 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
     let _ = std::thread::Builder::new().name("xr-selftest".into()).spawn(move || {
         let start = Instant::now();
         let mut seq = 0u64;
+        // A display period, and when the next pose is due: each a period after the one before,
+        // so the poses keep the display's rate whatever the loop's work and sleeps take.
+        let period = Duration::from_micros(1_000_000 / hz as u64);
+        let mut next = start;
         // MAKEPAD_XR_REMOTE_SELFTEST_DECODE=1 (macOS): the encoded stream decoded here, the 300th
         // picture's numbers beside the dump's (what the encode and decode did to them)
         #[cfg(target_os = "macos")]
@@ -153,8 +160,11 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
             if !core.pose(seq, makepad_hal::clock_ns(), makepad_hal::clock_ns() + 30_000_000, &wire) {
                 stats.refused_poses += 1;
             }
-            // drained as they come, the next pose a display period on
-            let next = Instant::now() + Duration::from_micros(1_000_000 / hz as u64);
+            // drained as they come, the next pose a display period after this one was due (a
+            // period from now when it is that late: after a pause or a stall it starts again,
+            // without a burst of poses)
+            let now = Instant::now();
+            next = if next + period > now { next + period } else { now + period };
             loop {
                 while let Ok(m) = core.out.try_recv() {
                     let Out::Video(mut head, data, encoded_at) = m;
@@ -199,6 +209,7 @@ pub(crate) fn selftest(shared: Arc<ServerShared>, eye: [u32; 2], stop: Arc<Atomi
         *shared.live_headset.lock().unwrap() = None;
         shared.reports.lock().unwrap().clear();
         core.stop();
+        busy.store(false, Ordering::Release);
         shared.wake();
         log("xr selftest: ended");
     });

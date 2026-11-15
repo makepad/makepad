@@ -18,4 +18,8 @@ fn the_binary_is_the_tests_build_in_any_environment() {
     assert_eq!(run(Command::new(exe).arg("--nested")), built, "started with the test's environment, starting itself with a cleared one");
     #[cfg(unix)]
     assert_eq!(run(Command::new(exe).args(["--shell-nested", "--shell-changed"]).env_clear()), built, "started with a cleared environment, exec'd again by a shell");
+    // a launcher that clears the environment on its way (relax issue 205): no spawn of Relax std
+    // starts the binary, and it is still the test's build (its wrapper is a shell, which may set PATH)
+    #[cfg(unix)]
+    assert_eq!(run(Command::new("/usr/bin/env").args(["-i", exe, "--empty", "--via-shell"])), built, "started by `env -i`");
 }

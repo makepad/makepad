@@ -130,7 +130,7 @@ pub fn relay(args: &[String]) -> i32 {
 }
 
 fn remote_usage() -> i32 {
-    eprintln!("usage: {tool} remote add <name> --ssh <user@host> [--makepad <path on that host>] [--env NAME=value ...]", tool = relax_compiler::tool_name());
+    eprintln!("usage: {tool} remote add <name> --ssh <user@host> [--tool <path on that host>] [--env NAME=value ...]", tool = relax_compiler::tool_name());
     eprintln!("       {tool} remote pair <name> [--hub <host:port>] [--print | --adb | --ssh <user@host>]", tool = relax_compiler::tool_name());
     eprintln!("       {tool} remote list", tool = relax_compiler::tool_name());
     2
@@ -154,7 +154,7 @@ pub fn remote(args: &[String]) -> i32 {
                         env.push((k.to_string(), v.to_string()));
                     }
                 }
-                reg.set(Host { name: name.clone(), via: Via::Ssh { ssh: ssh.to_string(), relax: flag(args, "--makepad").unwrap_or("makepad").to_string(), env } });
+                reg.set(Host { name: name.clone(), via: Via::Ssh { ssh: ssh.to_string(), relax: flag(args, "--tool").unwrap_or(relax_compiler::tool_name()).to_string(), env } });
                 reg.save(&hosts::registry_path()).map_err(|e| e.to_string())
             }
             Some("pair") => {

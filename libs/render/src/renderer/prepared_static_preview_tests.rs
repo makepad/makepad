@@ -59,6 +59,15 @@ fn texture_book_separates_shared_lod_atlas_from_geometry() {
     let _uploaded = renderer.upload_static_preview(&mut cx, prepared);
     assert_eq!(renderer.cached_texture_keys().collect::<std::collections::HashSet<_>>(),
         charges.iter().map(|t| t.key).collect(), "charge keys match upload cache keys");
+    // A host that plans the atlas from level 1 gets only that level on the GPU, copied in the frame.
+    let copied = crate::material_surface::upload_ui_stats()[3];
+    let mut planned = Renderer::default();
+    let key = atlas.hash;
+    planned.set_texture_first_level(Some(std::rc::Rc::new(move |k| usize::from(k == key))));
+    let _uploaded = planned.upload_static_preview(&mut cx, prepare());
+    assert!(matches!(planned.texture_cache[&key].get_format(&mut cx), TextureFormat::VecMipBGRAu8_32 { width: 1, height: 1, max_level: Some(0), .. }),
+        "the atlas uploads from level 1: one texel, one level");
+    assert!(crate::material_surface::upload_ui_stats()[3] >= copied + 4, "the kept level is copied in the upload's frame");
 }
 
 #[test]
@@ -80,12 +89,14 @@ fn splat_charges_follow_array_order_and_upload_format() {
     let splat = surface.splat.as_mut().unwrap();
     for layer in &mut splat.albedo {
         let layer = std::sync::Arc::make_mut(layer);
-        layer.data.clear();
-        layer.compressed = Some((crate::material_surface::GpuCompressedFormat::Bc7, vec![0; 16]));
+        layer.data.make_mut().clear();
+        layer.compressed = Some((crate::material_surface::GpuCompressedFormat::Bc7, vec![0; 16].into()));
     }
+    splat.gather_arrays();
     let first_key = splat_array_key(&splat.albedo);
     let mut reversed = surface.clone();
     reversed.splat.as_mut().unwrap().albedo.reverse();
+    reversed.splat.as_mut().unwrap().gather_arrays();
     let second_key = splat_array_key(&reversed.splat.as_ref().unwrap().albedo);
     assert_ne!(first_key, second_key, "layer order identifies a distinct array");
     let mut prepared = PreparedStaticPreview::prepare(triangle()).unwrap();

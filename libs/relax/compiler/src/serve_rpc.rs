@@ -332,15 +332,44 @@ fn run(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> Result<(), Str
 }
 
 pub fn request(dir: &Path, method: &str, params: &str) -> Result<Json, String> {
+    request_within(dir, method, params, Duration::from_secs(1800))
+}
+/// `request`, waiting at most `answer` for the server's answer.
+fn request_within(dir: &Path, method: &str, params: &str, answer: Duration) -> Result<Json, String> {
     let (port, token, _) = endpoint(dir)?;
     let mut socket = TcpStream::connect_timeout(&([127,0,0,1],port).into(), Duration::from_secs(2)).map_err(|e|e.to_string())?;
-    socket.set_read_timeout(Some(Duration::from_secs(1800))).map_err(|e|e.to_string())?;
+    socket.set_read_timeout(Some(answer)).map_err(|e|e.to_string())?;
     socket.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
     writeln!(socket,"{{\"id\":1,\"token\":{},\"method\":{},\"params\":{params}}}", quote(&token),quote(method)).map_err(|e|e.to_string())?;
     let text = line(&mut BufReader::new(socket)).map_err(|e|e.to_string())?.ok_or("server closed connection")?;
     let response = crate::json::parse(text.as_bytes())?;
     if let Some(e) = response.get("error") { return Err(e.get("message").map_or("server error",Json::str).into()); }
     match response { Json::Obj(v) => v.into_iter().find(|(k,_)|k=="result").map(|(_,v)|v).ok_or("missing result".into()), _ => Err("invalid response".into()) }
+}
+/// Stops the check server `pid` (listening on `port`) within seconds, each step said in one line:
+/// asked (`shutdown`), then SIGTERM, then SIGKILL. A busy server takes neither the ask nor SIGTERM
+/// before its current request ends, which can be minutes. It is gone once its pid is or its port no
+/// longer takes connections: a server whose parent is still running stays a zombie, alive by its
+/// pid. Whether it is gone.
+fn stop_server(dir: &Path, port: u16, pid: u32) -> bool {
+    let gone = |within: Duration| {
+        let since = Instant::now();
+        loop {
+            if !serve_os::alive(pid) || TcpStream::connect_timeout(&([127,0,0,1],port).into(), Duration::from_millis(200)).is_err() { return true; }
+            if since.elapsed() >= within { return false; }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    };
+    let answered = request_within(dir, "shutdown", "{}", Duration::from_secs(1)).is_ok();
+    if gone(Duration::from_secs(2)) { return true; }
+    eprintln!("relax: the check server (pid {pid}) still runs 2 s after it was asked to stop{}: sending SIGTERM", if answered { "" } else { " (no answer)" });
+    serve_os::stop(pid);
+    if gone(Duration::from_secs(3)) { return true; }
+    eprintln!("relax: the check server (pid {pid}) still runs 3 s after SIGTERM: sending SIGKILL");
+    serve_os::stop_now(pid);
+    if gone(Duration::from_secs(2)) { return true; }
+    eprintln!("relax: the check server (pid {pid}) still runs 2 s after SIGKILL: going on without it");
+    false
 }
 fn connect(start: bool) -> Result<PathBuf, String> {
     let root = workspace(&std::env::current_dir().map_err(|e|e.to_string())?)?;
@@ -350,15 +379,14 @@ fn connect(start: bool) -> Result<PathBuf, String> {
         // any upgrade: it is stopped by the pid it recorded, and this compiler checks.
         let theirs = status.get("compiler").map_or("", Json::str);
         if theirs == crate::jit::PROVENANCE { return Ok(dir); }
-        if let Ok((_, _, pid)) = endpoint(&dir) {
-            serve_os::stop(pid);
-            eprintln!("relax: the check server (pid {pid}) runs another compiler ({}): stopped it{}", if theirs.is_empty() { "unnamed" } else { theirs }, if start { "" } else { "; checking in-process" });
-            if !start { return Err("the check server ran another compiler".into()); }
-            let stopping = Instant::now();
-            while serve_os::alive(pid) {
-                if stopping.elapsed() > Duration::from_secs(1800) { return Err("timed out stopping the check server".into()); }
-                std::thread::sleep(Duration::from_millis(25));
+        if let Ok((port, _, pid)) = endpoint(&dir) {
+            let name = if theirs.is_empty() { "unnamed" } else { theirs };
+            eprintln!("relax: the check server (pid {pid}) runs another compiler ({name}): asking it to stop");
+            if !stop_server(&dir, port, pid) {
+                return Err(format!("the check server (pid {pid}) of another compiler did not stop"));
             }
+            eprintln!("relax: the check server (pid {pid}) runs another compiler ({name}): stopped it{}", if start { "" } else { "; checking in-process" });
+            if !start { return Err("the check server ran another compiler".into()); }
         }
     }
     if !start { return Err("no check server".into()); }
@@ -368,8 +396,11 @@ fn connect(start: bool) -> Result<PathBuf, String> {
     let mut cmd = std::process::Command::new(crate::dirs::loader_exe().map_err(|e|e.to_string())?);
     cmd.arg("serve").arg("--workspace").arg(&root).stdin(std::process::Stdio::null()).stdout(log.try_clone().map_err(|e|e.to_string())?).stderr(log);
     serve_os::detach(&mut cmd);
-    // the check server outlives what started it: not one of a devhub lease's processes
-    cmd.env_remove("MAKEPAD_DEVHUB_LEASE");
+    // the check server outlives what started it: not one of its starter's processes, its claims
+    // name no owner, and it holds no grant (options.rs GRANTS: bare `relax` reads their names)
+    cmd.env_remove("RELAX_RUN_OWNER");
+    for (_, name) in crate::options::GRANTS { cmd.env_remove(name); }
+    for k in crate::progenv::host_env().detached_remove { cmd.env_remove(k); }
     let mut child = cmd.spawn().map_err(|e|e.to_string())?; let started = Instant::now();
     loop {
         if request(&dir,"status","{}").is_ok() { return Ok(dir); }
@@ -382,7 +413,7 @@ fn connect(start: bool) -> Result<PathBuf, String> {
 /// their one-shot meaning. An explicit --serve with such flags is rejected, never ignored.
 /// `-p <package>`: a package like one named plainly. Several: each checked by a process of its own,
 /// all of them whatever one says; the exit is the worst.
-fn check_packages(args: &[String]) -> Result<Vec<String>, i32> {
+fn check_packages(args: &[String], grants: &[String]) -> Result<Vec<String>, i32> {
     let mut out = Vec::new();
     let mut packages = Vec::new();
     let mut i = 0;
@@ -412,7 +443,7 @@ fn check_packages(args: &[String]) -> Result<Vec<String>, i32> {
     })?;
     let mut worst = 0;
     for p in packages {
-        let status = std::process::Command::new(&exe).arg("check").args(&out).arg(&p).status();
+        let status = std::process::Command::new(&exe).arg("check").args(grants).args(&out).arg(&p).status();
         let code = status.ok().and_then(|s| s.code()).unwrap_or(2);
         if code != 0 {
             eprintln!("relax check: {p}: exit {code}");
@@ -423,7 +454,8 @@ fn check_packages(args: &[String]) -> Result<Vec<String>, i32> {
 }
 
 pub fn check(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
-    let args = match check_packages(args) {
+    let grants = crate::options::grant_words(&sess.options, &sess.runtime);
+    let args = match check_packages(args, &grants) {
         Ok(a) => a,
         Err(code) => return code,
     };
@@ -433,6 +465,14 @@ pub fn check(sess: &std::sync::Arc<crate::Session>, args: &[String]) -> i32 {
     let json = args.iter().any(|a|a=="--json");
     let rest: Vec<_> = args.iter().filter(|a| !matches!(a.as_str(),"--serve"|"--no-serve"|"--json")).collect();
     if start && never { eprintln!("relax: --serve and --no-serve conflict"); return 2; }
+    // the check server reads the program for the target it was started with: a check for
+    // another one (RELAX_CHECK_TARGET) runs here
+    let cross = sess.options.check_target != crate::options::CheckTarget::Host;
+    if start && cross { eprintln!("relax: --serve checks this machine's target; a RELAX_CHECK_TARGET check runs in-process (--no-serve)"); return 2; }
+    // nor does it hold a grant (it is started with none, whoever starts it): a check with one
+    // runs here, as one without never takes a server's
+    if start && !grants.is_empty() { eprintln!("relax: --serve checks without grants; a check with {} runs in-process (--no-serve)", grants.join(" ")); return 2; }
+    let never = never || cross || !grants.is_empty();
     if !never && rest.len() == 1 && !rest[0].starts_with('-') {
         let response = connect(start).and_then(|dir|request(&dir,"check",&format!("{{\"pkg\":{}}}",quote(rest[0]))));
         match response {

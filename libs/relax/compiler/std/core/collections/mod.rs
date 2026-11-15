@@ -22,8 +22,8 @@ pub use vec_deque::VecDeque;
 use crate::fmt;
 use crate::ops::{Bound, RangeBounds};
 
-/// Returned by the `try_reserve` methods (Relax aborts on allocation failure, so this is
-/// only produced for capacity overflow).
+/// Returned by the `try_reserve` methods: the capacity overflowed, or the allocator returned an
+/// error (library/alloc/src/collections/mod.rs @1.100.0).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TryReserveError {
     kind: TryReserveErrorKind,
@@ -32,11 +32,15 @@ pub struct TryReserveError {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TryReserveErrorKind {
     CapacityOverflow,
+    AllocError { layout: crate::heap::Layout, non_exhaustive: () },
 }
 
 impl TryReserveError {
     pub(crate) fn capacity_overflow() -> TryReserveError {
         TryReserveError { kind: TryReserveErrorKind::CapacityOverflow }
+    }
+    pub(crate) fn alloc_error(layout: crate::heap::Layout) -> TryReserveError {
+        TryReserveError { kind: TryReserveErrorKind::AllocError { layout, non_exhaustive: () } }
     }
     pub const fn kind(&self) -> TryReserveErrorKind {
         self.kind.clone()
@@ -45,7 +49,11 @@ impl TryReserveError {
 
 impl fmt::Display for TryReserveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("memory allocation failed because the computed capacity exceeded the collection's maximum")
+        f.write_str("memory allocation failed")?;
+        f.write_str(match self.kind {
+            TryReserveErrorKind::CapacityOverflow => " because the computed capacity exceeded the collection's maximum",
+            TryReserveErrorKind::AllocError { .. } => " because the memory allocator returned an error",
+        })
     }
 }
 

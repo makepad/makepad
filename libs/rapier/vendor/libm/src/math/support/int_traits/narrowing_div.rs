@@ -34,7 +34,7 @@ macro_rules! impl_narrowing_div_primitive {
                 if self.hi() >= n {
                     unsafe { core::hint::unreachable_unchecked() }
                 }
-                ((self / n.widen()).cast(), (self % n.widen()).cast())
+                ((self / HInt::widen(n)).cast(), (self % HInt::widen(n)).cast())
             }
         }
     };

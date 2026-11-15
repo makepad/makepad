@@ -16,7 +16,7 @@ thread_local! {
     static HERE: Cell<u64> = const { Cell::new(0) };
 }
 
-/// `git`, counted. It stays in this process's group: a TERM that stops the hub ends it too, and git
+/// `git` by its path ([`crate::os::tool`]: one file started, not a PATH search), counted. It stays in this process's group: a TERM that stops the hub ends it too, and git
 /// removes what it was making (the master asks the next hub again, `lease::master::unreachable`).
 #[track_caller]
 pub fn command() -> std::process::Command {
@@ -30,7 +30,7 @@ pub fn command() -> std::process::Command {
         *m = (now, 0, if m.0 + 1 == now { m.1 } else { 0 });
     }
     m.1 += 1;
-    makepad_remote::group::command("git")
+    makepad_remote::group::command(crate::os::tool("git"))
 }
 
 /// git processes this process started.

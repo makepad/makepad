@@ -507,14 +507,10 @@ impl ContentBackend for Flux2Backend {
 
 /// The pipeline's planar `[-1, 1]` image as interleaved RGB8, straight
 /// from the decode: no PNG between the model and the wire.
+/// `flux2_image_to_rgb_u8` interleaves already; interleaving its answer a
+/// second time scrambled every live frame into colour stripes.
 fn rgb8_of(image: &makepad_ai_flux::flux2_vae::Flux2VaeImage) -> (Vec<u8>, u32, u32) {
-    let planar = flux2_image_to_rgb_u8(image);
-    let plane = image.width * image.height;
-    let mut rgb = Vec::with_capacity(plane * 3);
-    for i in 0..plane {
-        rgb.extend_from_slice(&[planar[i], planar[plane + i], planar[2 * plane + i]]);
-    }
-    (rgb, image.width as u32, image.height as u32)
+    (flux2_image_to_rgb_u8(image), image.width as u32, image.height as u32)
 }
 
 /// FLUX.2 [dev] edit-mode reference-image area cap (diffusers
@@ -732,6 +728,21 @@ fn decode_png_rgb(bytes: &[u8]) -> Result<(Vec<u8>, usize, usize), AssetAiError>
 #[cfg(test)]
 mod flux2_edit_reference_tests {
     use super::*;
+
+    /// A live frame's pixels leave the model planar and reach the wire
+    /// interleaved, each pixel's own red, green and blue together.
+    #[test]
+    fn live_frame_pixels_are_interleaved_once() {
+        let image = makepad_ai_flux::flux2_vae::Flux2VaeImage {
+            width: 2,
+            height: 1,
+            // planar: red plane, green plane, blue plane; -1 = 0, 1 = 255
+            data: vec![1.0, -1.0, -1.0, 1.0, -1.0, 1.0],
+        };
+        let (rgb, w, h) = rgb8_of(&image);
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgb, [255, 0, 0, 0, 255, 255], "pixel 0 red, pixel 1 cyan");
+    }
 
     fn solid(width: usize, height: usize, rgb: [u8; 3]) -> Vec<u8> {
         let mut out = vec![0u8; width * height * 3];
