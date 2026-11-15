@@ -16,6 +16,9 @@ use crate::state::{Pair, Pushed};
 use makepad_remote::json_str;
 
 pub const TRAILER: &str = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>";
+/// Codex's credit on a pushed commit that carries code Codex wrote: GitHub's `codex` account, which
+/// links (`noreply@openai.com` links to no account).
+pub const CODEX_TRAILER: &str = "Co-Authored-By: Codex <267193182+codex@users.noreply.github.com>";
 /// The most new commits the pre-push hook takes in one push.
 const HOOK_COMMITS: usize = 20;
 /// Where the commercial checkout's crates stand in the tree (`Ctx::commercial`).

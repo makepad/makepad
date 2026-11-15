@@ -197,7 +197,7 @@ impl HInt for u128 {
     }
 
     fn zero_widen(self) -> Self::D {
-        self.widen()
+        HInt::widen(self)
     }
 
     fn zero_widen_mul(self, rhs: Self) -> Self::D {

@@ -17,12 +17,102 @@
 //! the run's stderr tee), where a zero slot would jump to address 0. A slot stays unbound in a
 //! program that links only some of the library's packages (a build script's run of its parent's
 //! library) when its symbol is no fn of that program: the C that calls it is a package's the
-//! program does not link, which a linker would have left out (relax issue 174).
+//! program does not link, which a linker would have left out (relax issue 174). So does a slot
+//! whose symbol only archive members call that a linker would not take for the program: the
+//! names table goes on with the archive members' table (MEMBERS), and the loader follows it from
+//! the program's imports as a linker extracts members (relax issue 197).
 
 /// The table of slots, one pointer per stub.
 pub const SLOTS: &str = "__relax_native_callbacks";
 /// The stubs' names, NUL-terminated, in slot order; an empty name ends the list.
 pub const NAMES: &str = "__relax_native_callback_names";
+/// What follows the names' empty one (`member_table`): this string, then per archive member the
+/// global symbols it defines as `+name` and the ones it references that a member defines or a
+/// stub stands for as `-name`, the member ended by `|`; an empty string ends the table. Names are
+/// C names (Mach-O's leading `_` off). A library without it has every callback needed.
+pub const MEMBERS: &str = "relax archive members";
+
+/// One member of the static archives a native library links: the global symbols it defines and
+/// the ones it references (C names).
+#[derive(Clone, Debug, Default)]
+pub struct ArchiveMember {
+    pub defs: Vec<String>,
+    pub refs: Vec<String>,
+}
+
+/// The archive members' table (MEMBERS) of a library whose stubs are `callbacks`. A member keeps
+/// only the references that lead somewhere (to a member's symbol or a stub); one with none is
+/// left out, as taking it needs no callback.
+pub fn member_table(members: &[ArchiveMember], callbacks: &[String]) -> Vec<u8> {
+    let defined: std::collections::HashSet<&str> = members.iter().flat_map(|m| m.defs.iter().map(String::as_str)).collect();
+    let stubs: std::collections::HashSet<&str> = callbacks.iter().map(String::as_str).collect();
+    let mut out = Vec::new();
+    let mut put = |s: &str| {
+        out.extend_from_slice(s.as_bytes());
+        out.push(0);
+    };
+    put(MEMBERS);
+    for m in members {
+        let refs: Vec<&String> = m.refs.iter().filter(|r| defined.contains(r.as_str()) || stubs.contains(r.as_str())).collect();
+        if refs.is_empty() {
+            continue;
+        }
+        for d in &m.defs {
+            put(&format!("+{d}"));
+        }
+        for r in refs {
+            put(&format!("-{r}"));
+        }
+        put("|");
+    }
+    put("");
+    out
+}
+
+/// Which of the stubs' `callbacks` the program needs, from a members' table's strings after
+/// MEMBERS up to its empty end (`table`): the ones the members a linker takes for the program's
+/// `imports` (the C names its extern blocks declare) reference, following each taken member's
+/// references to other members, and any no member of the table references (its caller is not
+/// known, so it stays needed).
+pub fn needed_callbacks(table: &[String], callbacks: &[String], imports: &dyn Fn(&str) -> bool) -> std::collections::HashSet<String> {
+    let mut members: Vec<(Vec<&str>, Vec<&str>)> = vec![(Vec::new(), Vec::new())];
+    for t in table {
+        let last = members.last_mut().unwrap();
+        if let Some(d) = t.strip_prefix('+') {
+            last.0.push(d);
+        } else if let Some(r) = t.strip_prefix('-') {
+            last.1.push(r);
+        } else if t == "|" {
+            members.push((Vec::new(), Vec::new()));
+        }
+    }
+    let mut by_def: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for (i, m) in members.iter().enumerate() {
+        for &d in &m.0 {
+            by_def.entry(d).or_default().push(i);
+        }
+    }
+    let mut taken = vec![false; members.len()];
+    let mut queue: Vec<usize> = (0..members.len()).filter(|&i| members[i].0.iter().any(|d| imports(d))).collect();
+    for &i in &queue {
+        taken[i] = true;
+    }
+    let mut needed = std::collections::HashSet::new();
+    while let Some(i) = queue.pop() {
+        for &r in &members[i].1 {
+            needed.insert(r.to_string());
+            for &j in by_def.get(r).map_or(&[][..], Vec::as_slice) {
+                if !taken[j] {
+                    taken[j] = true;
+                    queue.push(j);
+                }
+            }
+        }
+    }
+    let referenced: std::collections::HashSet<&str> = members.iter().flat_map(|m| m.1.iter().copied()).collect();
+    needed.extend(callbacks.iter().filter(|c| !referenced.contains(c.as_str())).cloned());
+    needed
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Arch {
@@ -31,8 +121,8 @@ enum Arch {
 }
 
 /// The relocatable object for `triple` (ELF, or Mach-O for an Apple triple) defining a stub
-/// for each of `names` (C symbol names).
-pub fn object(triple: &str, names: &[String]) -> Result<Vec<u8>, String> {
+/// for each of `names` (C symbol names), the names table ending in `members` (`member_table`).
+pub fn object(triple: &str, names: &[String], members: &[u8]) -> Result<Vec<u8>, String> {
     let arch = if triple.starts_with("x86_64") {
         Arch::X64
     } else if triple.starts_with("aarch64") || triple.starts_with("arm64") {
@@ -47,6 +137,7 @@ pub fn object(triple: &str, names: &[String]) -> Result<Vec<u8>, String> {
         rodata.push(0);
     }
     rodata.push(0);
+    rodata.extend_from_slice(members);
     let names_len = rodata.len();
     let mut messages = Vec::new();
     for n in names {
@@ -63,7 +154,7 @@ pub fn object(triple: &str, names: &[String]) -> Result<Vec<u8>, String> {
 
 /// What a slot's trap writes when C code calls it before the loader bound it.
 fn unbound_message(name: &str) -> String {
-    format!("relax: the --allow-c native library's C code calls `{name}`, which no fn of the program is bound to: a C constructor calls it while the library loads, or C of a package the program does not link runs\n")
+    format!("relax: the --allow-c native library's C code calls `{name}`, which no fn of the program is bound to: a C constructor calls it while the library loads, or C the program does not link runs (a package's it does not link, an archive member none of its imports needs)\n")
 }
 
 /// The object's code: the stubs, one unbound trap per stub, and the traps' shared exit.
@@ -444,17 +535,37 @@ mod tests {
     #[test]
     fn stub_objects_have_one_stub_and_one_slot_per_name() {
         let names = vec!["first_callback".to_string(), "second".to_string()];
-        let elf = super::object("x86_64-unknown-linux-gnu", &names).unwrap();
+        let elf = super::object("x86_64-unknown-linux-gnu", &names, &[]).unwrap();
         assert_eq!(&elf[..4], b"\x7fELF");
         // .text holds two 8-byte stubs, each `jmp *0(%rip)`
         let text = elf.windows(6).filter(|w| *w == [0xff, 0x25, 0, 0, 0, 0]).count();
         assert_eq!(text, 2);
-        let arm = super::object("aarch64-apple-darwin", &names).unwrap();
+        let arm = super::object("aarch64-apple-darwin", &names, &[]).unwrap();
         assert_eq!(u32::from_le_bytes(arm[..4].try_into().unwrap()), 0xfeed_facf);
         // every external name is in the string table, with Mach-O's leading underscore
         for s in ["_first_callback\0", "_second\0", "___relax_native_callbacks\0", "___relax_native_callback_names\0", "_write\0", "_exit\0"] {
             assert!(arm.windows(s.len()).any(|w| w == s.as_bytes()), "{s}");
         }
-        assert!(super::object("riscv64gc-unknown-linux-gnu", &names).is_err());
+        assert!(super::object("riscv64gc-unknown-linux-gnu", &names, &[]).is_err());
+    }
+
+    /// The members' table keeps what leads to a callback, and the loader's reading of it needs a
+    /// callback only through members the program's imports take (relax issue 197).
+    #[test]
+    fn a_callback_is_needed_only_through_members_the_imports_take() {
+        let m = |defs: &[&str], refs: &[&str]| super::ArchiveMember { defs: defs.iter().map(|s| s.to_string()).collect(), refs: refs.iter().map(|s| s.to_string()).collect() };
+        let members = [m(&["api"], &["helper", "printf"]), m(&["helper"], &["deep_cb"]), m(&["unused"], &["unused_cb"]), m(&["leaf"], &[])];
+        let callbacks: Vec<String> = ["deep_cb", "unused_cb", "orphan_cb"].map(String::from).to_vec();
+        let table = super::member_table(&members, &callbacks);
+        let strings: Vec<String> = table.split(|&b| b == 0).map(|s| String::from_utf8(s.to_vec()).unwrap()).collect();
+        assert_eq!(strings[0], super::MEMBERS);
+        let end = strings.iter().skip(1).position(|s| s.is_empty()).unwrap() + 1;
+        let tokens = &strings[1..end];
+        assert!(!tokens.iter().any(|t| t == "+leaf" || t == "-printf"), "a member or a reference that leads to no callback was kept: {tokens:?}");
+        let needed = super::needed_callbacks(tokens, &callbacks, &|s| s == "api");
+        assert!(needed.contains("deep_cb"), "a callback two members down was not followed");
+        assert!(!needed.contains("unused_cb"), "a member no import takes made its callback needed");
+        assert!(needed.contains("orphan_cb"), "a callback no member references is not needed");
+        assert!(!super::needed_callbacks(tokens, &callbacks, &|_| false).contains("deep_cb"), "a member was taken with no import");
     }
 }

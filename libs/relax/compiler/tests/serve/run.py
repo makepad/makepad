@@ -171,7 +171,9 @@ try:
     fd = os.open(endpoint, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.write(fd, f'{port} {"0"*64} {stale.pid}\n'.encode()); os.close(fd)
     upgraded, upgraded_rows = cli('check', '--json', 'serve_fixture')
+    # it answers the ask to stop without stopping: SIGTERM ends it, a few seconds later, never minutes
     assert 'runs another compiler (stale build): stopped it; checking in-process' in upgraded.stderr, upgraded.stderr
+    assert 'sending SIGTERM' in upgraded.stderr and 'SIGKILL' not in upgraded.stderr, upgraded.stderr
     assert upgraded.returncode == one.returncode and stable(upgraded_rows) == stable(rows), (upgraded, upgraded_rows)
     assert stale.wait(timeout=15) == (-signal.SIGTERM if os.name != 'nt' else 1)
     stale.stdout.close(); endpoint.unlink()

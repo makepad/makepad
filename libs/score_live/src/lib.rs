@@ -61,7 +61,7 @@ pub use makepad_audio_engine::feed::{live_params, LiveParams};
 /// Seconds at a beat under a tempo map (as renders and the transport time it).
 pub use makepad_audio_engine::feed::tempo_seconds;
 pub use build::{NoSamples, Samples};
-pub use live::{ClockSource, LiveConfig, LiveScore, Status};
+pub use live::{ClockSource, LiveConfig, LiveScore, LiveThread, Status};
 pub use model::{load, AssetRef, Diag, ScoreDoc};
 pub use render::{render, RenderOpts, Rendered};
 

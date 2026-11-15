@@ -1,4 +1,4 @@
-//! Relax-only: run-time modules (local/plans/hotreload.md §11). A program running under Relax
+//! Relax-only: run-time modules. A program running under Relax
 //! (`cfg(relax)`) loads a Rust source file as a module, takes typed fn pointers to its
 //! exports, edits it live and unloads it. A failed load or edit changes nothing and returns
 //! the compiler's one-line errors.
@@ -187,55 +187,6 @@ pub fn store_file(url: &str, commit: &str, path: &str) -> Option<crate::vec::Vec
     let v = unsafe { core::slice::from_raw_parts(p, n) }.to_vec();
     unsafe { relax_vfs_release(id) };
     Some(v)
-}
-
-/// One file of a git repository in Relax's stores (`url` as a run spec names it, the 40-hex
-/// `commit`, `path` inside the repository): None when the store does not keep that commit
-/// (e.g. a release downloaded but not run yet) or has no such file.
-pub fn store_file(url: &str, commit: &str, path: &str) -> Option<crate::vec::Vec<u8>> {
-    let (mut p, mut n) = (core::ptr::null(), 0usize);
-    let id = unsafe { relax_store_file(url.as_ptr(), url.len(), commit.as_ptr(), commit.len(), path.as_ptr(), path.len(), &mut p, &mut n) };
-    if id == 0 {
-        return None;
-    }
-    let v = unsafe { core::slice::from_raw_parts(p, n) }.to_vec();
-    unsafe { relax_vfs_release(id) };
-    Some(v)
-}
-
-/// Reports progress of a long wait (a download): `done` of `total` (None: unknown) for `label`,
-/// e.g. "CEF 132 MB". The launcher (the runner) shows it as its progress bar; in a terminal it
-/// is a short line. A build script's reports reach the launcher through the Relax running it.
-/// Throttled inside: call it as often as convenient.
-pub fn progress(label: &str, done: u64, total: Option<u64>) {
-    unsafe { __relax_progress(label.as_ptr(), label.len(), done, total.unwrap_or(u64::MAX)) }
-}
-
-/// HTTPS GET of `url` into the file `to` through Relax's own HTTP client (the system's TLS
-/// stack; no process is started): written to `<to>.part` and renamed when complete, redirects
-/// followed, progress reported as `label`. Returns the byte count.
-pub fn download(url: &str, to: &crate::path::Path, label: &str) -> Result<u64, String> {
-    let to = to.to_string_lossy();
-    let mut err = crate::vec::Vec::with_capacity(1024);
-    let mut n = 0usize;
-    let r = unsafe { __relax_download(url.as_ptr(), url.len(), to.as_ptr(), to.len(), label.as_ptr(), label.len(), err.as_mut_ptr(), err.capacity(), &mut n) };
-    if r >= 0 {
-        return Ok(r as u64);
-    }
-    unsafe { err.set_len(n) };
-    Err(String::from_utf8_lossy(&err).into_owned())
-}
-
-/// The folder for downloads any later run may reuse (a CEF distribution): `downloads/` in
-/// Relax's cache folder. None without a home folder.
-pub fn download_dir() -> Option<crate::path::PathBuf> {
-    let mut buf = crate::vec::Vec::with_capacity(4096);
-    let n = unsafe { __relax_download_dir(buf.as_mut_ptr(), buf.capacity()) };
-    if n == 0 || n > buf.capacity() {
-        return None;
-    }
-    unsafe { buf.set_len(n) };
-    Some(crate::path::PathBuf::from(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 /// Streams source into a loaded file. Returns 0 for applied/partial, 1 for incomplete

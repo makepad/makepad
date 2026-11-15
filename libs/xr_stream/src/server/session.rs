@@ -109,6 +109,12 @@ impl Host {
         }
         let stop = Arc::new(AtomicBool::new(false));
         let shared_for_test = shared.clone();
+        // the headset on a loop (debug) is this server's one headset: no probe is answered and a
+        // real headset is refused while it runs (a paired headset on the LAN never joins a test)
+        let selftest = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1");
+        if selftest {
+            self.busy.store(true, Ordering::Release);
+        }
         let (shared, stop2, port) = (shared.clone(), stop.clone(), self.port.clone());
         let (app, name, tls, verifier, pairing, world, busy) = (self.app.clone(), self.name.clone(), self.tls.clone(), self.verifier.clone(), self.pairing.clone(), self.world.clone(), self.busy.clone());
         std::thread::Builder::new()
@@ -134,8 +140,8 @@ impl Host {
                 port.store(bound, Ordering::Release);
                 log(&format!("xr host: {app} listens on port {bound} as {name} (the admin or a paired headset), instance {:016x}", pairing.lock().unwrap().instance));
                 // headsets find this server by their probe (answered while paired, or for the
-                // PIN typed here)
-                let responder = match xr_pair::identity("pairing headsets") {
+                // PIN typed here; never beside the headset on a loop)
+                let responder = if selftest { None } else { match xr_pair::identity("pairing headsets") {
                     Ok((me, fleet)) => match xr_pair::Responder::start(me, fleet, pairing.clone(), app.clone(), bound, log.clone()) {
                         Ok(r) => Some(r),
                         Err(e) => {
@@ -147,7 +153,7 @@ impl Host {
                         log(&format!("xr host: no pairing: {e}"));
                         None
                     }
-                };
+                } };
                 while !stop2.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((tcp, peer)) => {
@@ -171,13 +177,13 @@ impl Host {
             })
             .map_err(|e| e.to_string())?;
         // the headset on a loop (debug): a session of this listener's, ended by the off switch
-        if std::env::var("MAKEPAD_XR_REMOTE_SELFTEST").as_deref() == Ok("1") {
+        if selftest {
             // its eye size: `MAKEPAD_XR_REMOTE_SELFTEST_EYE=<w>x<h>` (a headset's: Quest 3 2016x2112)
             let eye = std::env::var("MAKEPAD_XR_REMOTE_SELFTEST_EYE").ok().and_then(|v| {
                 let (w, h) = v.split_once('x')?;
                 Some([w.trim().parse().ok()?, h.trim().parse().ok()?])
             });
-            super::debug::selftest(shared_for_test, eye.unwrap_or([1680, 1760]), stop.clone());
+            super::debug::selftest(shared_for_test, eye.unwrap_or([1680, 1760]), stop.clone(), self.busy.clone());
         }
         *listener = Some(Listener { stop });
         Ok(())

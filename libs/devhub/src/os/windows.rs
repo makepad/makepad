@@ -518,6 +518,12 @@ pub fn pid_alive(pid: u32) -> bool {
     proc_start(pid).is_some()
 }
 
+/// `name` as a spawn names it: the bare name, which CreateProcess searches with its own rules (the
+/// application directory and PATHEXT besides PATH); the unix side resolves it to one file once.
+pub fn tool(name: &'static str) -> PathBuf {
+    PathBuf::from(name)
+}
+
 pub fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("C:\\"))
 }

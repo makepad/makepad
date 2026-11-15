@@ -1633,9 +1633,9 @@ impl Predecoded {
     }
 }
 
-// Only deferred executable outlines change the namespace after discovery. The
-// writer records that delta, so an edit restores it without a second full
-// namespace decode/import fixed point. All identities on disk are spellings.
+// A namespace's tables (or the additions to them, as a closure delta). Nothing after the plan's
+// crate loop writes a namespace, so the delta a recording stores is empty; a local selection
+// applies it over the restored namespaces. All identities on disk are spellings.
 #[derive(Clone, Default)]
 pub(crate) struct NamespaceDelta {
     symbols: Vec<String>, types: Vec<String>, traits: Vec<String>, values: Vec<String>,
@@ -1650,6 +1650,16 @@ strings::fields!(NamespaceDelta, symbols, types, traits, values, public, modules
 impl NamespaceDelta {
     pub(super) fn legacy_size(&self, delta: bool) -> usize {
         self.plain_size() - self.bindings.plain_size() + self.bindings.legacy_size(delta)
+    }
+    /// The record check's report: each nonempty table's length, or "empty".
+    pub(super) fn summary(&self) -> String {
+        let lengths = [("symbols", self.symbols.len()), ("types", self.types.len()), ("traits", self.traits.len()),
+            ("values", self.values.len()), ("public", self.public.len()), ("modules", self.modules.len()),
+            ("module_macros", self.module_macros.len()), ("macros", self.macros.len()), ("uses", self.uses.len()),
+            ("macro_uses", self.macro_uses.len()), ("externs", self.externs.len()), ("empty_rules", self.empty_rules.len()),
+            ("bindings", self.bindings.entries.len()), ("binding_strings", self.bindings.strings.len())];
+        let set = lengths.iter().filter(|(_, n)| *n > 0).map(|(table, n)| format!("{table}={n}")).collect::<Vec<_>>();
+        if set.is_empty() { "empty".into() } else { set.join(" ") }
     }
 }
 /// A part's closure delta, always as the bytes it is stored as: the recorder encodes it once, a
@@ -1681,6 +1691,26 @@ impl ClosureDelta {
         value.bindings.valid().then_some(value)
     }
     pub(super) fn legacy_size(&self) -> usize { self.legacy }
+}
+/// The record check's report on two namespace images that differ: each table that differs, as
+/// its lengths and, for the name lists, one name only `a` has and one only `b` has.
+pub(super) fn namespace_differences(a: &[u8], b: &[u8]) -> String {
+    let (Some(a), Some(b)) = (strings::decode::<NamespaceDelta>(a), strings::decode::<NamespaceDelta>(b)) else { return "undecodable".into() };
+    let mut out = Vec::new();
+    let only = |x: &[String], y: &[String]| { let y = y.iter().collect::<HashSet<_>>(); x.iter().find(|s| !y.contains(s)).cloned().unwrap_or_default() };
+    for (table, x, y) in [("symbols", &a.symbols, &b.symbols), ("types", &a.types, &b.types), ("traits", &a.traits, &b.traits),
+        ("values", &a.values, &b.values), ("public", &a.public, &b.public), ("modules", &a.modules, &b.modules),
+        ("module_macros", &a.module_macros, &b.module_macros), ("macros", &a.macros, &b.macros), ("binding_strings", &a.bindings.strings, &b.bindings.strings)] {
+        if x != y { out.push(format!("{table} {}/{} {:?}/{:?}", x.len(), y.len(), only(x, y), only(y, x))); }
+    }
+    if a.uses != b.uses { out.push(format!("uses {}/{}", a.uses.len(), b.uses.len())); }
+    if a.macro_uses != b.macro_uses { out.push(format!("macro_uses {}/{}", a.macro_uses.len(), b.macro_uses.len())); }
+    if a.externs != b.externs { out.push(format!("externs {}/{}", a.externs.len(), b.externs.len())); }
+    if a.empty_rules != b.empty_rules { out.push(format!("empty_rules {}/{}", a.empty_rules.len(), b.empty_rules.len())); }
+    if a.bindings.sets != b.bindings.sets || a.bindings.entries != b.bindings.entries {
+        out.push(format!("bindings {}/{} sets {}/{}", a.bindings.entries.len(), b.bindings.entries.len(), a.bindings.sets.len(), b.bindings.sets.len()));
+    }
+    if out.is_empty() { "same tables, other bytes".into() } else { out.join(", ") }
 }
 pub(super) fn namespace_legacy_size(bytes: &[u8]) -> Option<usize> {
     let image: NamespaceDelta = strings::decode(bytes)?;

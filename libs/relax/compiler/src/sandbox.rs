@@ -1,5 +1,5 @@
-//! Sandboxed run-time modules: memory confinement (local/plans/hotreload.md §12.3, option B
-//! "one shared sandbox": MAIN 2026-10-05).
+//! Sandboxed run-time modules: memory confinement, every module in one shared sandbox (one set of
+//! twins and one data image for all of them, each module's memory in its own arena window).
 //!
 //! Every function a sandboxed module runs is a *twin* (`FnKey::Sandbox(base)`): the base slot's
 //! RIR (built as usual, shared by all modules) rewritten by `transform` before code generation:
@@ -19,7 +19,10 @@
 //!   target into the sandbox thunk table; host runtime and C calls are allow-listed and the
 //!   memory ones replaced by arena-checked versions (malloc & co. allocate in the arena);
 //! - in a domain that meters fuel (`Domain::fuel`), pre-optimization RIR blocks spend
-//!   deterministic instruction fuel at entry.
+//!   deterministic instruction fuel at entry;
+//! - a module's cleanups never end its host: a call that has spent its fuel runs none of them
+//!   (each would stop again), and a panic raised in one (rustc aborts the process there) cuts
+//!   the unwind at the module's edge, its remaining cleanups skipped (jit.rs unwind_walk).
 //!
 //! Host code reaches a module only through generated wrapper functions (modules.rs) that enter
 //! the module's arena, copy reference arguments into it, call the twin and leave. Plain-data
@@ -27,6 +30,10 @@
 //! sret stores must never receive a host destination.
 
 include!("rt_abi.rs");
+
+pub mod script;
+#[cfg(unix)]
+mod broker;
 
 use crate::jit::{self, FnKey, Unit};
 use crate::program::DefKind;
@@ -166,10 +173,11 @@ impl State {
 /// name, address)))); None: not this domain's. Run-time modules add nothing (`MODULES`).
 pub type Allow = fn(&str) -> Option<Option<(&'static str, u64)>>;
 
-/// A confinement domain: its name, what its code may call beyond what every domain may, and
-/// whether its code meters fuel. The name is part of its twins' cache keys: code one domain's
-/// policy made is never linked into another domain's unit (cache.rs enc_fnkey); `allow` and
-/// `fuel` are fixed per domain, so the name covers them.
+/// A confinement domain: its name, what its code may call beyond what every domain may, whether
+/// its code meters fuel and whether its twins always get the clean-up. The name is part of its
+/// twins' cache keys: code one domain's policy made is never linked into another domain's unit
+/// (cache.rs enc_fnkey); `allow`, `fuel` and `clean_up` are fixed per domain, so the name covers
+/// them.
 #[derive(Clone, Copy)]
 pub struct Domain {
     pub name: &'static str,
@@ -177,11 +185,19 @@ pub struct Domain {
     /// its twins charge each block's instructions to the thread's fuel word (`add_fuel`): an
     /// arena's per-call budget (`Arena::fuel`) can only end a call in a domain that meters
     pub fuel: bool,
+    /// its twins always get the O1 clean-up of the masks (`transform`): a domain whose code never
+    /// tiers up to O3 (the proc-macro world) has no later pass that does it
+    pub clean_up: bool,
 }
+
+/// What third-party packages' compile-time code may do (proc macros, pmhost.rs; build scripts,
+/// unitgraph.rs): the entry point's choice, one per process (runner Host `compile_time_code`).
+/// Kept in relax-base, where the build-script runs read it too.
+pub use relax_base::compile_time::{policy, set_policy, Policy};
 
 /// The run-time modules' domain: what every domain may call, nothing more; metered (a module's
 /// arena may set a per-call budget).
-pub const MODULES: Domain = Domain { name: "modules", allow: modules_allow, fuel: true };
+pub const MODULES: Domain = Domain { name: "modules", allow: modules_allow, fuel: true, clean_up: false };
 
 fn modules_allow(_: &str) -> Option<Option<(&'static str, u64)>> {
     None
@@ -190,10 +206,11 @@ fn modules_allow(_: &str) -> Option<Option<(&'static str, u64)>> {
 struct Sb {
     /// the symbol TlsAddr reads the sandbox words' offset from (this unit's; the offset is TLS_OFF)
     tls_sym: Sym,
-    /// the domain's name, own C entries and whether its twins meter fuel
+    /// the domain's name, own C entries, whether its twins meter fuel and get the clean-up
     domain: &'static str,
     allow: Allow,
     fuel: bool,
+    clean_up: bool,
     sbt_base: u64,
     /// the table's bytes (a power of two: the indirect-call mask)
     sbt_span: u64,
@@ -321,6 +338,7 @@ unsafe fn sb_init(up: *mut Unit, domain: Domain) -> Result<(), String> {
         domain: domain.name,
         allow: domain.allow,
         fuel: domain.fuel,
+        clean_up: domain.clean_up,
         sbt_base,
         sbt_span,
         sbt_n: 1,
@@ -975,6 +993,12 @@ fn sb_ready() -> bool {
     TLS_OFF.load(std::sync::atomic::Ordering::Acquire) != 0
 }
 
+/// This thread's call into a module has spent its fuel: no block of the module's code can run,
+/// its cleanups' neither (each one's meter would stop it again).
+pub(crate) fn fuel_spent() -> bool {
+    sb_ready() && unsafe { *words() != 0 && *words().add((W_FUEL / 8) as usize) < 0 }
+}
+
 fn cur_arena() -> Option<&'static Arena> {
     let p = unsafe { *words().add(3) } as *const Arena;
     if p.is_null() {
@@ -992,9 +1016,9 @@ fn m(p: u64) -> u64 {
     }
 }
 
-/// `len` bytes from masked `p` stay inside the window.
+/// `len` bytes from masked `p` stay inside the window (a length past the address space too).
 fn fits(p: u64, len: u64) -> bool {
-    (p & 0xffff_ffff) + len <= WINDOW
+    (p & 0xffff_ffff).checked_add(len).is_some_and(|end| end <= WINDOW)
 }
 
 /// The state a guarded call or a wrapper restores (the sandbox words, W_*).
@@ -1389,14 +1413,7 @@ fn run_key_destructors() {
     if !a.alive.load(std::sync::atomic::Ordering::SeqCst) || jit::unwinding() {
         return;
     }
-    // under a recovery point, as the module's own catch_unwind (a panicking destructor, or one
-    // out of fuel, is reported and the next one runs; std aborts the process there)
-    let call = |dtor: u64, value: u64| {
-        let s = save();
-        let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
-        g(mask_thunk(dtor), m(value));
-        restore(s);
-    };
+    let call = call_in_arena;
     loop {
         let next = {
             let mut g = a.keys.lock().unwrap_or_else(|e| e.into_inner());
@@ -1431,6 +1448,39 @@ fn run_key_destructors() {
     for (dtor, value) in late {
         call(dtor, value);
     }
+}
+
+/// Host code calls code of the current arena through a pointer that code supplied: `f` masked into
+/// the arena's thunk table (a forged pointer lands on a thunk: a twin or the trap), `arg` into its
+/// window, under a recovery point as the module's own catch_unwind (a panicking callee, or one out
+/// of fuel, is reported and the caller goes on; std aborts the process there), the sandbox words as
+/// they were after. The one way host code calls such a pointer (key destructors, exit handlers):
+/// never stored as a host fn type, never called outside an entry of its arena.
+pub(crate) fn call_in_arena(f: u64, arg: u64) {
+    if !sb_ready() || cur_arena().is_none() {
+        return;
+    }
+    let s = save();
+    let g: rt_fn_ty!(fn(u64, u64) -> u64) = unsafe { std::mem::transmute(jit::rt_entry("catch_panic") as usize) };
+    g(mask_thunk(f), m(arg));
+    restore(s);
+}
+
+/// A pointer a confinement entry hands back to the current arena's code (returned, or written
+/// through an out pointer): itself when it lies in the arena's window, else 0 (a broker bug,
+/// said): the code gets NULL, a clean error, never the arena's bytes at a masked host address.
+pub(crate) fn ret_arena(p: u64) -> u64 {
+    let base = if sb_ready() { cur_arena().map_or(0, |a| a.base) } else { 0 };
+    let r = ret_in(base, p);
+    if r != p {
+        eprintln!("relax: a confinement entry handed back {p:#x}, outside its arena (a Relax bug): the code gets NULL");
+    }
+    r
+}
+
+/// `ret_arena` of the window at `base` (0: no arena).
+fn ret_in(base: u64, p: u64) -> u64 {
+    if base != 0 && p & !(WINDOW - 1) == base { p } else { 0 }
 }
 
 /// A wrapper's call returns (or unwinds): the state before it comes back.
@@ -1814,6 +1864,10 @@ extern "C" fn sb_gettid() -> i32 {
 extern "C" fn sb_getpid() -> i32 {
     0
 }
+/// (a pthread_t is a host address on Linux and macOS: the segment's number instead, as `gettid`)
+extern "C" fn sb_pthread_self() -> u64 {
+    cur_seg().map_or(0, |(_, k)| k as u64 + 1)
+}
 
 rt_fn! {
 fn sb_fmt_str(p: u64, len: u64, spec: u64) {
@@ -1938,6 +1992,7 @@ fn c_policy(allow: Allow, name: &str) -> Option<Option<(&'static str, u64)>> {
         // thread identity (std::thread::current): no host thread or process ids
         "pthread_main_np" => Some(("sb_main_np", sb_main_np as *const () as u64)),
         "gettid" => Some(("sb_gettid", sb_gettid as *const () as u64)),
+        "pthread_self" => Some(("sb_pthread_self", sb_pthread_self as *const () as u64)),
         "getpid" => Some(("sb_getpid", sb_getpid as *const () as u64)),
         "abort" => Some(("abort", 0)),
         // std's catch_unwind names its recovery point (jit.rs relax_catch_caught: a thread-local flag)
@@ -2248,20 +2303,216 @@ pub unsafe fn transform(up: *mut Unit, f: &mut Func, twin_id: u32) -> Result<(),
     }
     with_sb(&*up, |s| s.refs.insert(twin_id, refs));
     f.verify().map_err(|e| format!("{}: sandbox transform made invalid RIR: {}", f.name, e))?;
-    // the masks the transform added: common ones merged, loop-invariant ones hoisted. Only
-    // under O1 alone (RELAX_O3=0, O2 pipeline): with O3 on, O1 keeps
+    // the masks the transform added: common ones merged, loop-invariant ones hoisted. Under O1
+    // alone (RELAX_O3=0, O2 pipeline), and always in a domain whose code never tiers up
+    // (`Domain::clean_up`: the proc-macro world, whose macro calls of a warm start went 134 ->
+    // 114 ms with it, and its twins' compile 136 -> 126 ms CPU). With O3 on, O1 keeps
     // registers unoptimised and the hoisted masks cost more than they save (mini, particle
-    // kernel: +25% with the clean-up, +0.5% without). Hot twins retain this confined RIR
-    // for O3, whose full pipeline and register allocation perform the clean-up there.
-    // RELAX_SANDBOX_OPT=0/1 forces the O1 clean-up.
-    let opt = options.sandbox_opt.unwrap_or(!jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
+    // kernel: +25% with the clean-up, +0.5% without); hot twins retain this confined RIR for
+    // O3, whose full pipeline and register allocation perform the clean-up there.
+    // RELAX_SANDBOX_OPT=0/1 forces it either way.
+    let opt = options.sandbox_opt.unwrap_or_else(|| with_sb(&*up, |s| s.clean_up) || !jit::TIER1_ENABLED.load(std::sync::atomic::Ordering::Relaxed));
     if opt {
+        if !relax_backend::stats::opt_off(options, "-sbwords") {
+            words_in_registers(f, tls_sym);
+        }
         relax_backend::passes::simplify(options, f, None, true, true);
         relax_backend::passes::licm(options, f);
         relax_backend::passes::simplify(options, f, None, true, true);
         f.verify().map_err(|e| format!("{}: sandbox clean-up made invalid RIR: {}", f.name, e))?;
     }
     Ok(())
+}
+
+/// Unit `u`'s twin `f`, optimised: its sandbox words in registers (`words_in_registers`; O3's
+/// last step for a twin, after the twins it took in are part of it). True: `f` changed.
+pub(crate) fn settle_words(u: &Unit, f: &mut Func) -> bool {
+    let tls = with_sb(u, |s| s.tls_sym);
+    words_in_registers(f, tls)
+}
+
+/// Keeps this thread's sandbox words in registers between calls. Every block of a twin reads and
+/// writes the fuel word, and every frame the shadow stack pointer; as memory operations each
+/// meter's load waits for the store of the one before it, so a loop's blocks form one chain
+/// through memory however independent their work is (measured: most of a hot twin's time, also
+/// once the twins it calls are inlined, since their meters come with them). Only the transform
+/// makes code that names these words -- a module's own accesses are masked into its window, and
+/// its thread-locals are redirected -- so every access is found by its address, `words + k`:
+/// - a store still happens (the word in memory is exact at every instruction: a fault, a
+///   deadline or the runtime may read it at any time) and the register takes the value too;
+/// - a load is a copy of the register wherever the register is known to hold the word: on every
+///   path since the function's entry or its last call, the word was loaded or stored. A call
+///   ends that: the callee (a twin's own meter, the runtime at an entry or a leave) writes the
+///   word. The arena base and the shadow stack's floor are the activation's and outlive calls,
+///   as the transform's own use of the base it loads at entry already assumes.
+/// The fuel charged, the instruction it runs out at and the words in memory are unchanged.
+///
+/// All or nothing: a register that may hold a words address and is used in any way but these
+/// (not a single definition, arithmetic, an indexed access, passed on) leaves the function as it
+/// is. True: `f` changed.
+fn words_in_registers(f: &mut Func, tls: Sym) -> bool {
+    use relax_backend::rir::Mem;
+    // (word offset, a call leaves it as it was)
+    const WORDS: [(i64, bool); 4] = [(W_ARENA, true), (W_SSP, false), (W_FUEL, false), (W_SSLO, true)];
+    let invariant: u8 = WORDS.iter().enumerate().filter(|(_, w)| w.1).fold(0, |m, (k, _)| m | 1 << k);
+    let nv = f.vregs.len();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for i in f.blocks.iter().flat_map(|b| &b.insts) {
+        relax_backend::regalloc::for_defs(i, |d| ndef[d.0 as usize] += 1);
+    }
+    // registers holding `words + k`: the TLS address, copies of it, it plus a constant
+    let mut addr: Vec<Option<i64>> = vec![None; nv];
+    loop {
+        let mut more = false;
+        for i in f.blocks.iter().flat_map(|b| &b.insts) {
+            let (d, k) = match i {
+                Inst::TlsAddr(d, s) if s.id == tls.id => (*d, s.off - tls.off),
+                Inst::Mov(d, a) => match addr[a.0 as usize] { Some(k) => (*d, k), None => continue },
+                Inst::IBinI(IOp::Add, it, d, a, c) if it.bits == 64 => match addr[a.0 as usize] { Some(k) => (*d, k + *c), None => continue },
+                _ => continue,
+            };
+            if ndef[d.0 as usize] != 1 {
+                return false;
+            }
+            if addr[d.0 as usize] != Some(k) {
+                addr[d.0 as usize] = Some(k);
+                more = true;
+            }
+        }
+        if !more {
+            break;
+        }
+    }
+    if addr.iter().all(|a| a.is_none()) {
+        return false;
+    }
+    let word = |base: VReg, off: i32| -> Option<Result<usize, ()>> {
+        let k = addr[base.0 as usize]? + off as i64;
+        Some(WORDS.iter().position(|w| w.0 == k).ok_or(()))
+    };
+    // every use of such a register is one of the forms above or the base of a load or store of
+    // a whole word; the promoted words are only loaded, or (not the activation's) stored
+    let mut used: u8 = 0;
+    let mut tu = Vec::new();
+    for b in &f.blocks {
+        for i in &b.insts {
+            match i {
+                Inst::TlsAddr(..) => {}
+                Inst::Mov(_, a) if addr[a.0 as usize].is_some() => {}
+                Inst::IBinI(IOp::Add, it, _, a, _) if it.bits == 64 && addr[a.0 as usize].is_some() => {}
+                Inst::Load(m, _, base, off) => match word(*base, *off) {
+                    None => {}
+                    Some(w) => {
+                        if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                            return false;
+                        }
+                        if let Ok(k) = w {
+                            used |= 1 << k;
+                        }
+                    }
+                },
+                Inst::Store(m, base, off, src) => {
+                    if addr[src.0 as usize].is_some() {
+                        return false;
+                    }
+                    match word(*base, *off) {
+                        None => {}
+                        Some(w) => {
+                            if !matches!(m, Mem::Int(8, _)) || addr[base.0 as usize].is_some_and(|k| (k + *off as i64) % 8 != 0) {
+                                return false;
+                            }
+                            match w {
+                                Ok(k) if WORDS[k].1 => return false,
+                                Ok(k) => used |= 1 << k,
+                                Err(()) => {}
+                            }
+                        }
+                    }
+                }
+                other => {
+                    let mut named = false;
+                    relax_backend::regalloc::for_uses(other, |u| named |= addr[u.0 as usize].is_some());
+                    if named {
+                        return false;
+                    }
+                }
+            }
+        }
+        relax_backend::regalloc::term_uses(&b.term, &mut tu);
+        if tu.iter().any(|u| addr[u.0 as usize].is_some()) {
+            return false;
+        }
+    }
+    if used == 0 {
+        return false;
+    }
+    // where each word's register holds it: at a block's entry, on every path into it
+    let step = |state: u8, i: &Inst| -> u8 {
+        match i {
+            Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                Some(Ok(k)) => state | 1 << k,
+                _ => state,
+            },
+            Inst::Call(..) => state & invariant,
+            _ => state,
+        }
+    };
+    let nb = f.blocks.len();
+    let mut at_entry = vec![u8::MAX; nb];
+    at_entry[0] = 0;
+    let mut work: Vec<usize> = (0..nb).collect();
+    while let Some(b) = work.pop() {
+        let out = f.blocks[b].insts.iter().fold(at_entry[b], |st, i| step(st, i));
+        for t in f.blocks[b].term.succs() {
+            let t = t as usize;
+            if at_entry[t] & out != at_entry[t] {
+                at_entry[t] &= out;
+                work.push(t);
+            }
+        }
+    }
+    let regs: Vec<VReg> = WORDS.iter().map(|_| f.vreg(Cls::I)).collect();
+    for (b, blk) in f.blocks.iter_mut().enumerate() {
+        let insts = std::mem::take(&mut blk.insts);
+        let pos = std::mem::take(&mut blk.pos);
+        let mut state = at_entry[b];
+        for (n, i) in insts.into_iter().enumerate() {
+            let p = pos.get(n).copied().unwrap_or(0);
+            let w = match &i {
+                Inst::Load(_, _, base, off) | Inst::Store(_, base, off, _) => match word(*base, *off) {
+                    Some(Ok(k)) => Some(k),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let next = step(state, &i);
+            match (i, w) {
+                (Inst::Load(_, d, _, _), Some(k)) if state & 1 << k != 0 => {
+                    blk.insts.push(Inst::Mov(d, regs[k]));
+                    blk.pos.push(p);
+                }
+                (Inst::Load(m, d, base, off), Some(k)) => {
+                    blk.insts.push(Inst::Load(m, d, base, off));
+                    blk.insts.push(Inst::Mov(regs[k], d));
+                    blk.pos.extend([p, p]);
+                }
+                (Inst::Store(m, base, off, src), Some(k)) => {
+                    blk.insts.push(Inst::Store(m, base, off, src));
+                    blk.insts.push(Inst::Mov(regs[k], src));
+                    blk.pos.extend([p, p]);
+                }
+                (i, _) => {
+                    blk.insts.push(i);
+                    blk.pos.push(p);
+                }
+            }
+            state = next;
+        }
+    }
+    true
 }
 
 /// Where `sym` (a `#[thread_local]` static, or the thread block itself) is in a segment's
@@ -2496,4 +2747,21 @@ pub(crate) unsafe fn reset_statics() {
     reset(&TLS_OFF, std::sync::atomic::AtomicU32::new(0));
     reset(&DEAD, Mutex::new(Vec::new()));
     reset(&ARENAS, [const { std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()) }; MAX_MODULES]);
+    script::reset_statics();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_confinement_entry_hands_back_only_addresses_in_its_window() {
+        let base = 7 * WINDOW;
+        let host = &base as *const u64 as u64;
+        assert_eq!(ret_in(base, base + 0x1000), base + 0x1000, "an address in the window is handed back as it is");
+        assert_eq!(ret_in(base, base + WINDOW - 1), base + WINDOW - 1, "the window's last byte is in it");
+        assert_eq!(ret_in(base, host), 0, "a host address becomes NULL, never the window's bytes at its masked offset");
+        assert_eq!(ret_in(base, base + WINDOW), 0, "the next window is not this one");
+        assert_eq!(ret_in(0, host), 0, "with no arena nothing is handed back");
+    }
 }

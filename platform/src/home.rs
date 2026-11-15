@@ -33,21 +33,31 @@ pub fn storage_dir() -> PathBuf {
 /// elsewhere. `None` when the platform names no such base as an absolute
 /// path. The directory may not exist yet.
 ///
+/// A test instance (an absolute `MAKEPAD_TEST_HOME`, the test harness's
+/// stand-in for the person's home folder) keeps the same layout below that
+/// folder instead (`<test home>/.local/share/makepad/<app>`,
+/// `<test home>/AppData/Roaming/Makepad/<app>`, ...): a test never reads or
+/// writes the machine's own state (preferences, linked devices).
+///
 /// Overrides for isolated runs (`MUSIC_DATA_DIR` and the like) are the
 /// caller's: an app checks its own variable and falls back to this.
 pub fn app_data_dir(app: &str) -> Option<PathBuf> {
     let absolute = |var: &str| std::env::var_os(var).map(PathBuf::from).filter(|path| path.is_absolute());
+    let test_home = absolute("MAKEPAD_TEST_HOME");
     #[cfg(target_os = "macos")]
     {
-        Some(absolute("HOME")?.join("Library").join("Application Support").join("Makepad").join(app))
+        Some(test_home.or_else(|| absolute("HOME"))?.join("Library").join("Application Support").join("Makepad").join(app))
     }
     #[cfg(target_os = "windows")]
     {
-        Some(absolute("APPDATA")?.join("Makepad").join(app))
+        Some(test_home.map(|home| home.join("AppData").join("Roaming")).or_else(|| absolute("APPDATA"))?.join("Makepad").join(app))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let base = absolute("XDG_DATA_HOME").or_else(|| absolute("HOME").map(|home| home.join(".local").join("share")))?;
+        let base = match test_home {
+            Some(home) => home.join(".local").join("share"),
+            None => absolute("XDG_DATA_HOME").or_else(|| absolute("HOME").map(|home| home.join(".local").join("share")))?,
+        };
         Some(base.join("makepad").join(app))
     }
 }

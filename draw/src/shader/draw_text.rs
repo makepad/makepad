@@ -12,6 +12,7 @@ use {
         cx_2d::Cx2d,
         cx_draw::CxDraw,
         draw_list_2d::ManyInstances,
+        glyph_capture::CapturedGlyph,
         makepad_platform::*,
         makepad_platform::recording_buffer::RecordingBuffer,
         text::{
@@ -27,7 +28,7 @@ use {
             line_break::{FollowingContext, PrecedingContext},
             loader::{FontDefinition, FontFamilyDefinition},
             rasterizer::{AtlasKind, OutlineSdf, RasterizedGlyph},
-            shaper::ShapedText,
+            shaper::{Direction, ShapedText},
             slug_atlas::SlugGlyphCacheResult,
             system_faces::{self, SystemFaceKey, SystemFaceState},
         },
@@ -41,6 +42,34 @@ use {
         rc::Rc,
     },
 };
+
+#[derive(Default)]
+struct StockTextShader {
+    generation: Option<u64>,
+    shader: Option<DrawShaderId>,
+}
+
+/// The shader compiled by the registered `DrawText` type default. Objects that
+/// only set values share it; objects with their own shader functions have another
+/// shader and stay in the pixels during capture, since a writer cannot paint them
+/// as flat text. Cached until a reload; made again after one. Where the script VM is
+/// held (a caller inside a script call) it answers what it had, or `None`: then no
+/// glyph is left out of the pixels, and the text is still captured.
+pub fn stock_text_shader(cx: &mut Cx) -> Option<DrawShaderId> {
+    let generation = cx.reload_generation;
+    let cached = cx.global::<StockTextShader>();
+    if cached.generation == Some(generation) {
+        return cached.shader;
+    }
+    let previous = cached.shader;
+    let Some(made) = cx.try_with_vm(|vm| DrawText::script_new_with_default(vm)) else {
+        log!("stock_text_shader: the script VM is held, answering the shader made before ({previous:?})");
+        return previous;
+    };
+    let shader = made.draw_vars.draw_shader_id;
+    *cx.global::<StockTextShader>() = StockTextShader { generation: Some(generation), shader };
+    shader
+}
 
 script_mod! {
     use mod.pod.*
@@ -1796,6 +1825,10 @@ impl DrawText {
         row: &LaidoutRow,
         out_instances: &mut RecordingBuffer,
     ) {
+        if cx.glyph_capture.is_some() {
+            self.draw_captured_row(cx, origin_in_lpxs, row, out_instances);
+            return;
+        }
         let aa_pad_in_lpxs = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
         for glyph in &row.glyphs {
             self.draw_glyph(
@@ -1807,6 +1840,66 @@ impl DrawText {
             );
         }
         self.draw_debug_row_guides(cx, origin_in_lpxs, row);
+    }
+
+    // Out of line, so `draw_row` stays the same small loop when no capture is on.
+    #[cold]
+    #[inline(never)]
+    fn draw_captured_row(
+        &mut self,
+        cx: &mut Cx2d,
+        origin_in_lpxs: Point<f32>,
+        row: &LaidoutRow,
+        out_instances: &mut RecordingBuffer,
+    ) {
+        let Some(mut capture) = cx.glyph_capture.take() else {
+            return;
+        };
+        let plain = capture.is_plain(self.draw_vars.draw_shader_id);
+        let recorded = capture.begin_row(
+            cx,
+            rect(
+                origin_in_lpxs.x as f64,
+                (origin_in_lpxs.y - row.ascender_in_lpxs * self.font_scale) as f64,
+                (row.width_in_lpxs * self.font_scale) as f64,
+                // The descender is negative: below the baseline.
+                ((row.ascender_in_lpxs - row.descender_in_lpxs) * self.font_scale) as f64,
+            ),
+            &row.text,
+            plain,
+        );
+        let aa_pad_in_lpxs = (self.get_aa_pad_px(cx.cx) / cx.current_dpi_factor() as f32).max(0.0);
+        for (group, text, _) in row.glyph_clusters() {
+            for glyph in group {
+                let origin = origin_in_lpxs + Size::from(glyph.origin_in_lpxs) * self.font_scale;
+                let (face, embeddable) = capture.face(&glyph.font);
+                let skipped = plain && embeddable;
+                let color = glyph.color.map_or(self.color, |color| {
+                    vec4(color.r as f32, color.g as f32, color.b as f32, color.a as f32) / 255.0
+                });
+                if let Some(row) = recorded {
+                    capture.push_glyph(row, CapturedGlyph {
+                        face,
+                        id: glyph.id,
+                        x: origin.x + glyph.offset_in_lpxs() * self.font_scale,
+                        baseline: origin.y + self.temp_y_shift * glyph.font_size_in_lpxs,
+                        size: glyph.font_size_in_lpxs * self.font_scale,
+                        color: [color.x, color.y, color.z, color.w],
+                        text: text.clone(),
+                        rtl: glyph.direction == Direction::Rtl,
+                        in_pixels: !skipped,
+                    });
+                }
+                if skipped {
+                    // A glyph's colour remains the draw's colour for subsequent glyphs.
+                    self.color = color;
+                } else {
+                    self.draw_glyph(cx, origin, glyph, aa_pad_in_lpxs, out_instances);
+                }
+            }
+        }
+        self.draw_debug_row_guides(cx, origin_in_lpxs, row);
+        cx.glyph_capture = Some(capture);
     }
 
     fn resolve_glyph(&mut self, cx: &mut Cx2d, glyph: &LaidoutGlyph) -> Option<PreparedGlyph> {

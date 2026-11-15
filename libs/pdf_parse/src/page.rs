@@ -20,6 +20,10 @@ pub struct PdfPage {
     pub xobjects: std::collections::HashMap<String, XObjectResource>,
     /// ExtGState resources.
     pub ext_gstate: std::collections::HashMap<String, ExtGStateResource>,
+    /// Resolved marked-content property lists from the resources' /Properties.
+    pub properties: std::collections::HashMap<String, PdfDict>,
+    /// This page's key in the structure parent tree (/StructParents).
+    pub struct_parents: Option<i64>,
 }
 
 /// Minimal font resource info extracted from the page's resources.
@@ -115,6 +119,33 @@ impl PdfPage {
         // Extract ExtGState resources
         let ext_gstate = extract_ext_gstate(doc, &resources_dict)?;
 
+        let mut properties = std::collections::HashMap::new();
+        if let Some(obj) = resources_dict.get("Properties") {
+            // A null entry is an absent one (7.3.7); a malformed one does not stop the page from
+            // drawing: its marked content then reads without properties.
+            let lists = match doc.resolve(obj)? {
+                PdfObj::Dict(lists) => lists,
+                _ => PdfDict::new(),
+            };
+            for (name, value) in &lists.map {
+                let mut property = match doc.resolve(value)? {
+                    PdfObj::Dict(property) => property,
+                    _ => continue,
+                };
+                for value in property.map.values_mut() {
+                    *value = doc.resolve(value)?;
+                }
+                properties.insert(name.clone(), property);
+            }
+        }
+        let struct_parents = match dict.get("StructParents") {
+            Some(value) => match doc.resolve(value)? {
+                PdfObj::Int(key) => Some(key),
+                _ => None,
+            },
+            None => None,
+        };
+
         Ok(PdfPage {
             media_box,
             crop_box,
@@ -123,6 +154,8 @@ impl PdfPage {
             fonts,
             xobjects,
             ext_gstate,
+            properties,
+            struct_parents,
         })
     }
 

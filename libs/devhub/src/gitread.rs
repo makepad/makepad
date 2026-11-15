@@ -145,6 +145,119 @@ pub fn rev(dir: &Path, name: &str) -> Option<String> {
     with(dir, |p, repo| resolve(p, repo, name)).flatten().map(|o| o.to_hex())
 }
 
+/// [`rev`] in the bare store `store` (`git --git-dir <store> rev-parse -q --verify <name>^{commit}`).
+pub fn store_rev(store: &Path, name: &str) -> Option<String> {
+    let common = store.canonicalize().ok()?;
+    let p = RepositoryPaths { workdir: common.clone(), git_dir: common.clone(), common_dir: common.clone() };
+    with_common(&common, |repo| resolve(&p, repo, name)).flatten().map(|o| o.to_hex())
+}
+
+/// The tree and the parents of commit `name` ([`resolve`]), as hex (`git rev-list --parents -n 1`
+/// with its `^{tree}`). None: no such commit.
+pub fn commit_parts(dir: &Path, name: &str) -> Option<(String, Vec<String>)> {
+    with(dir, |p, repo| {
+        let oid = resolve(p, repo, name)?;
+        let c = repo.read_commit(&oid).ok()?;
+        Some((c.tree.to_hex(), c.parents.iter().map(ObjectId::to_hex).collect()))
+    })
+    .flatten()
+}
+
+/// The files where commit `merge`'s tree differs from the clean merge of commits `p1` and `p2`
+/// (`git merge-tree --write-tree p1 p2`, then `git diff-tree -r --name-only` against `merge`), for
+/// the repository of `dir`, where that clean merge is plain: one merge base, and every path as the
+/// side that changed it has it. None where only git's merge decides the clean merge: several
+/// merge bases (a criss-cross: a merged base) or none, a path both sides changed differently (a
+/// content merge or a conflict), a path of the base's both sides deleted or a directory one side
+/// removed while the other changed in it (rename and directory-rename detection may move a change
+/// there), or a commit that does not read. A tree one side left as the base has it is taken whole
+/// from the other side and compared by id, not walked.
+pub fn one_sided_strays(dir: &Path, merge: &str, p1: &str, p2: &str) -> Option<Vec<String>> {
+    with(dir, |p, repo| {
+        let (m, o, t) = (resolve(p, repo, merge)?, resolve(p, repo, p1)?, resolve(p, repo, p2)?);
+        let bases = makepad_git::merge_bases(repo, o, t).ok()?;
+        let &[base] = bases.as_slice() else { return None };
+        let mut tree = |c: ObjectId| repo.read_commit(&c).ok().map(|c| Some((TREE, c.tree)));
+        let (b, o, t, m) = (tree(base)?, tree(o)?, tree(t)?, tree(m)?);
+        let mut out = Vec::new();
+        merged(repo, "", [b, o, t], m, &mut out)?;
+        out.sort();
+        out.dedup();
+        Some(out)
+    })
+    .flatten()
+}
+
+const TREE: u32 = 0o040000;
+/// A tree entry's (mode, id); None: nothing at the path.
+type Entry = Option<(u32, ObjectId)>;
+
+fn is_tree(e: Entry) -> bool {
+    e.is_some_and(|(mode, _)| mode == TREE)
+}
+
+/// The entries of a tree entry by name: none for a file or nothing.
+fn children(repo: &mut Repository, e: Entry) -> Option<HashMap<String, (u32, ObjectId)>> {
+    match e {
+        Some((TREE, oid)) => Some(repo.read_tree(&oid).ok()?.entries.into_iter().map(|e| (e.name, (e.mode, e.oid))).collect()),
+        _ => Some(HashMap::new()),
+    }
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() { name.to_string() } else { format!("{prefix}/{name}") }
+}
+
+/// [`one_sided_strays`] at `path`: the clean merge of (base, side 1, side 2) against `m`. None:
+/// git's merge decides it.
+fn merged(repo: &mut Repository, path: &str, [b, o, t]: [Entry; 3], m: Entry, out: &mut Vec<String>) -> Option<()> {
+    let clean = if o == b {
+        t
+    } else if t == b {
+        o
+    } else if o == t && (b.is_none() || o.is_some() && !is_tree(o) && !is_tree(b)) {
+        // added alike on both sides, or a file changed alike: nothing of the base's is gone on both
+        o
+    } else if is_tree(o) && is_tree(t) && (b.is_none() || is_tree(b)) {
+        // both sides changed in this directory (alike too: a file of the base's both deleted is a
+        // rename source to git): each entry of it on its own
+        if m.is_some() && !is_tree(m) {
+            out.push(path.to_string());
+        }
+        let kids = [children(repo, b)?, children(repo, o)?, children(repo, t)?, children(repo, m)?];
+        let names: std::collections::BTreeSet<&str> = kids.iter().flat_map(|k| k.keys()).map(String::as_str).collect();
+        let at = |i: usize, n: &str| kids[i].get(n).copied();
+        for n in names {
+            merged(repo, &join(path, n), [at(0, n), at(1, n), at(2, n)], at(3, n), out)?;
+        }
+        return Some(());
+    } else {
+        return None;
+    };
+    differ(repo, path, clean, m, out)
+}
+
+/// The files at or below `path` that differ between entries `x` and `y` (`git diff-tree -r
+/// --name-only`).
+fn differ(repo: &mut Repository, path: &str, x: Entry, y: Entry, out: &mut Vec<String>) -> Option<()> {
+    if x == y {
+        return Some(());
+    }
+    if !is_tree(x) && !is_tree(y) || x.is_some() && !is_tree(x) || y.is_some() && !is_tree(y) {
+        out.push(path.to_string());
+    }
+    if !is_tree(x) && !is_tree(y) {
+        return Some(());
+    }
+    let kids = [children(repo, x)?, children(repo, y)?];
+    let names: std::collections::BTreeSet<&str> = kids.iter().flat_map(|k| k.keys()).map(String::as_str).collect();
+    let at = |i: usize, n: &str| kids[i].get(n).copied();
+    for n in names {
+        differ(repo, &join(path, n), at(0, n), at(1, n), out)?;
+    }
+    Some(())
+}
+
 /// Whether the repository of `dir` definitely has no commit `sha` (a read that failed for another
 /// reason, or a repository that cannot be opened, says nothing: false).
 pub fn lacks_commit(dir: &Path, sha: &str) -> bool {

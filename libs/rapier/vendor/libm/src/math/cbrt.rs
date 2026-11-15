@@ -45,7 +45,7 @@ pub fn cbrt_round(x: f64, round: Round) -> FpResult<f64> {
     if ((e + 1) & f64::EXP_SAT) < 2 {
         cold_path();
 
-        let ix: u64 = hx & !f64::SIGN_MASK;
+        let ix: u64 = hx & !<f64 as Float>::SIGN_MASK;
 
         /* 0, inf, nan: we return x + x instead of simply x,
         to that for x a signaling NaN, it correctly triggers

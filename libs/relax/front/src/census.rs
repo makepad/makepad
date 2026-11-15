@@ -1,5 +1,4 @@
-//! Census of constructs outside the Relax subset (rules in local/plans/fast-rust.md),
-//! counted per crate from the syntax tree.
+//! Census of constructs outside the Relax subset, counted per crate from the syntax tree.
 
 use crate::ast::*;
 use crate::lexer::T;

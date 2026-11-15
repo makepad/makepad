@@ -568,8 +568,8 @@ fn read_union() -> Result<HashMap<String, std::collections::HashSet<(usize, usiz
     for path in file.split(',').filter(|p| !p.is_empty()) {
         let bytes = std::fs::read(path).map_err(|e| format!("union {path}: {e}"))?;
         let j = crate::json::parse(&bytes).map_err(|e| format!("union {path}: {e}"))?;
-        if j.get("format").map(|v| v.str()) != Some("makepad-web-trace/1") {
-            return Err(format!("union {path}: expected makepad-web-trace/1"));
+        if j.get("format").map(|v| v.str()) != Some("relax-web-trace/1") {
+            return Err(format!("union {path}: expected relax-web-trace/1"));
         }
         let functions = j.get("functions").ok_or_else(|| format!("union {path}: no functions"))?;
         for f in functions.arr() {
@@ -1118,7 +1118,7 @@ fn emit(u: &Unit, funcs: &BTreeMap<u32, Func>, kept: &std::collections::BTreeSet
             for id in &reached { included.extend(funcs[id].inl_slots.iter().copied()); }
         }
         let keys = included.iter().map(|id| crate::jit::slot_key(u, *id)).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-        if let Err(error) = std::fs::write(&manifest, format!("makepad-shipped-functions/1\n{}\n", keys.join("\n"))) {
+        if let Err(error) = std::fs::write(&manifest, format!("relax-shipped-functions/1\n{}\n", keys.join("\n"))) {
             eprintln!("wasm export: function manifest {manifest}: {error}");
             FAILED.store(true, std::sync::atomic::Ordering::Release);
             let _ = std::fs::remove_file(path);

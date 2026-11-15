@@ -8,7 +8,8 @@
 # GATE_FULL=1 runs every package's whatever the diff (the full bucket, daily). A failing test fails
 # its unit alone and says the command that runs it (GATEREPRO); GATE_PROVEN skips a proven unit; GATE_RETRY runs a
 # red one whatever the diff reaches. The units run slowest first by their last measures (GATE_TIMES), one not
-# measured yet at the median; a package measured past GATE_SPLIT_S runs a unit per test target. With GATE_QUEUE=1 a
+# measured yet at the median; a package measured past GATE_SPLIT_S runs a unit per test target, and so does one whose
+# Cargo.toml runs a target under cargo (native-tests), that target's unit under `cargo test`. With GATE_QUEUE=1 a
 # shard takes them from its run's one queue a unit per free slot (a stub of the master's dealer here), and runs none
 # of a queue not its own. A unit whose processes do nothing (HUNG_QUIET, short here) is stopped and
 # fails HUNG, naming the test it still ran (after a child's own run of a test inside its target's), while the
@@ -228,6 +229,14 @@ order=$(echo "$gate_out" | grep -oE '^GATESTART test [a-z-]+' | cut -d' ' -f3 | 
 # runs and its tests/more.rs was proven; tests/heavy.rs needs a feature its defaults lack, so `makepad test` of the
 # package skips it, and named alone it is an error: no unit
 GATE_RETRY="test test-run-other" GATE_TIMES="test test-run-other=700" GATE_PROVEN="test test-run-other --test more" gate split shape ok "makepad-draw test-run-other --lib test-run-shape" "GATEUNIT ok test test-run-other --lib|GATEUNIT proven test test-run-other --test more|GATETIME test test-run-other --lib |GATESTART test test-run-other --lib |NODEGATE-OK testrun 3 packages"
+# the other's Cargo.toml runs its tests/more.rs under cargo (native-tests): the package runs a unit per target, its lib
+# under the JIT and more under `cargo test`, never the JIT, whose red says the cargo command that shows it; a
+# declared target the package lacks is said
+g checkout -q -b native "$base"
+printf '\n[package.metadata.makepad.native-tests]\n"test:more" = "it runs its own binary"\n"test:gone" = "no such target"\n' >> "$dir/repo/libs/other/Cargo.toml"
+put libs/other/tests/more.rs '#[test] fn more() { panic!("red under cargo") }'
+g commit -q -am native
+gate native native fail "test-run-other --lib" "test test-run-other --test more: under cargo, as its Cargo.toml's native-tests says: it runs its own binary|GATEUNIT ok test test-run-other --lib|GATEUNIT fail test test-run-other --test more|red under cargo|GATEREPRO test test-run-other --test more :: cargo test --release -p test-run-other --test more|testrun: test-run-other's native-tests names test:gone, which is none of its test targets|NODEGATE-FAIL: test:test-run-other---test-more"
 # the plan hangs in its second test while the shape works past the quiet: the plan alone is stopped, HUNG. Four
 # units two at a time (in this order by their measures): the other ends first, and the draw waits on the plan and
 # the shape, the other's pid no longer among those it waits on (a `wait -n` given an ended job's pid again returns at once: the gate's shell

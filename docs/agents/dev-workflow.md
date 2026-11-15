@@ -173,6 +173,11 @@ buckets ask for one, and the queue decides where and when.
   - a test that devhub's measured routing sends to cargo (it says both walls; a test it never
     ran under the JIT runs there first, which measures it, and one the tests bucket found red
     runs under the JIT, as the bucket ran it);
+  - a test target its package's Cargo.toml runs under cargo:
+    `[package.metadata.makepad.native-tests]`, `"test:<name>" = "<why>"` (or `lib`,
+    `bin:<name>`). A run that selects one goes to cargo whole, and the tests bucket gives each
+    one a unit of its own under `cargo test`. It is for a test the JIT cannot host, such as one
+    that re-runs its own binary as a JIT runner;
   - `--native "<reason>"`: native-vs-JIT baselines and timed perf series.
   The refusal names the JIT command.
 - **One JIT and one cache per box**, shared by every lane:

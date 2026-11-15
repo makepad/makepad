@@ -35,6 +35,7 @@ pub mod embed;
 pub mod inbox;
 pub mod notes;
 pub mod reports;
+pub mod intake;
 pub mod hot;
 pub mod local;
 pub mod node;

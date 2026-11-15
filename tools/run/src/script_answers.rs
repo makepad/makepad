@@ -5,7 +5,13 @@ mod platform_gen;
 
 use relax_compiler::unitgraph::{ScriptAnswer, ScriptEnv};
 
-pub static PLATFORM: ScriptAnswer = ScriptAnswer { package: "makepad-platform", answer: platform };
+/// For this checkout's makepad-platform: a package whose build.rs and build_gen.rs read as these (an
+/// app on a registry release, another checkout's edit) runs its own script.
+pub static PLATFORM: ScriptAnswer = ScriptAnswer {
+    package: "makepad-platform",
+    sources: &[("build.rs", include_str!("../../../platform/build.rs")), ("build_gen.rs", include_str!("../../../platform/build_gen.rs"))],
+    answer: platform,
+};
 
 /// What makepad-platform's build.rs (platform/build.rs) gives the build, from the code build.rs
 /// includes (platform/build_gen.rs), without running the script: its cfgs (`apple_sim` from the
@@ -15,9 +21,8 @@ pub static PLATFORM: ScriptAnswer = ScriptAnswer { package: "makepad-platform", 
 /// the host binary's: in this mode nothing is linked at run time. Its side files
 /// (makepad-platform.path, a target-folder Info.plist) are for cargo runs only.
 fn platform(e: &ScriptEnv) -> Result<Vec<String>, String> {
-    let target_os = e.env.iter().find(|(k, _)| k == "CARGO_CFG_TARGET_OS").map_or("", |(_, v)| v.as_str());
-    let makepad = std::env::var("MAKEPAD_BUILD").ok();
-    let lines = platform_gen::cfgs(makepad.as_deref(), target_os, e.target).into_iter().map(|c| format!("cargo:rustc-cfg={}", c)).collect();
+    let var = |name: &str| e.env.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+    let lines = platform_gen::cfgs(var("MAKEPAD_BUILD"), var("CARGO_CFG_TARGET_OS").unwrap_or(""), e.target).into_iter().map(|c| format!("cargo:rustc-cfg={}", c)).collect();
     for (f, text) in [("app_meta_gen.rs", platform_gen::app_meta_gen(e.out_dir)), ("app_icon_gen.rs", platform_gen::app_icon_gen(e.out_dir).source)] {
         let path = e.out_dir.join(f);
         // unchanged files stay as they are (their stamps decide what is reparsed)

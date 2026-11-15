@@ -3,7 +3,7 @@
 //! `config.worktree.lock` in a lane tree's git dir, and every later lease start in that tree was
 //! refused on it ("ci merge config: ... is locked", 11-13). A lease start clears such a lock and
 //! says so in one line; a lock a live process holds open is waited out, never taken from it.
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Between two looks at a held lock.
@@ -30,7 +30,7 @@ pub fn holders(path: &Path) -> Option<Vec<u32>> {
     }
     #[cfg(target_os = "macos")]
     {
-        let o = makepad_remote::group::command("lsof").arg("-t").arg("--").arg(path).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
+        let o = makepad_remote::group::command(crate::os::tool("lsof")).arg("-t").arg("--").arg(path).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output().ok()?;
         // (exit 1 and nothing said: no process has it open)
         Some(String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
     }
@@ -88,13 +88,17 @@ pub fn settle(lock: &Path) -> Option<String> {
     }
 }
 
-/// Every git lock file directly in `git_dir` (`index.lock`, `HEAD.lock`, `config.worktree.lock`,
-/// ..) settled as [`settle`] does; a line for each one there was.
+/// The locks [`sweep`] settles: a config write's, which its writer (`git config`, a hub's own
+/// config writes) renames into place with nothing run between. Never `index.lock`, `HEAD.lock` or a
+/// ref's: `git commit` closes `index.lock` before it runs its hooks (the pre-commit scanner, seconds)
+/// and renames it after, so one no process holds open can be a live commit's, in this tree or in
+/// another worktree of its store.
+const SWEPT: &[&str] = &["config.lock", "config.worktree.lock"];
+
+/// The config locks ([`SWEPT`]) in `git_dir` settled as [`settle`] does; a line for each one there
+/// was.
 pub fn sweep(git_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(git_dir) else { return Vec::new() };
-    let mut locks: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|x| x == "lock")).collect();
-    locks.sort();
-    locks.iter().filter_map(|l| settle(l)).collect()
+    SWEPT.iter().map(|name| git_dir.join(name)).filter(|p| p.is_file()).filter_map(|l| settle(&l)).collect()
 }
 
 /// [`sweep`] of a worktree's own git dir and of the repository's shared one.
@@ -110,7 +114,8 @@ mod tests {
     use super::*;
 
     /// A lock no process holds is cleared and said; one a live process holds open is waited for
-    /// (and cleared once that process is gone without renaming it); no lock, no line.
+    /// (and cleared once that process is gone without renaming it); no lock, no line. A sweep
+    /// takes only a config write's locks: a commit's `index.lock` sits closed while its hooks run.
     #[test]
     fn a_stale_lock_is_cleared_and_a_held_one_waited_for() {
         let dir = std::env::temp_dir().join(format!("devhub-gitlock-{}", std::process::id()));
@@ -137,10 +142,15 @@ mod tests {
             let _ = child.wait();
             assert!(!lock.exists() && said.contains(&format!("pid {pid}")) && said.contains("cleared a stale lock"), "its holder waited for and named, then the lock cleared once it was gone: {said}");
         }
+        // a commit running its hooks holds `index.lock` closed: a sweep leaves it, and `HEAD.lock`;
+        // a config write's left lock goes
         left(&dir.join("index.lock"), "");
+        left(&dir.join("HEAD.lock"), "");
+        left(&lock, "x");
         std::fs::write(dir.join("index"), "").unwrap();
         let swept = sweep(&dir);
-        assert!(swept.len() == 1 && swept[0].contains("index.lock") && dir.join("index").exists() && !dir.join("index.lock").exists(), "{swept:?}");
+        assert!(swept.len() == 1 && swept[0].contains("config.worktree.lock") && !lock.exists(), "{swept:?}");
+        assert!(dir.join("index.lock").exists() && dir.join("HEAD.lock").exists() && dir.join("index").exists(), "a commit's locks are never swept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

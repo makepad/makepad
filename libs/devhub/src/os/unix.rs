@@ -133,7 +133,7 @@ pub fn hub_program(program: &str, path: &std::ffi::OsStr) -> Result<std::path::P
 /// A run's scope (`unit`, Linux) takes CPU weight `weight` now: kept by systemd, a reload
 /// leaves it so.
 pub fn set_cpu_weight(unit: &str, weight: u32) -> Result<(), String> {
-    let out = Command::new("systemctl").args(["--user", "set-property", "--runtime", &format!("{unit}.scope"), &format!("CPUWeight={weight}")])
+    let out = Command::new(tool("systemctl")).args(["--user", "set-property", "--runtime", &format!("{unit}.scope"), &format!("CPUWeight={weight}")])
         .stdin(std::process::Stdio::null()).output().map_err(|e| format!("systemctl: {e}"))?;
     if out.status.success() { Ok(()) } else { Err(format!("systemctl set-property {unit}.scope CPUWeight={weight}: {}", String::from_utf8_lossy(&out.stderr).trim())) }
 }
@@ -143,7 +143,7 @@ pub fn quiet_errors() {}
 
 /// Clear failed transient units left by earlier hubs; an unloaded unit is harmless.
 pub fn reset_failed_units(pattern: &str) {
-    let _ = Command::new("systemctl").args(["--user", "reset-failed", pattern])
+    let _ = Command::new(tool("systemctl")).args(["--user", "reset-failed", pattern])
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
 }
 
@@ -411,7 +411,7 @@ pub fn stuck_in(_pids: &[u32]) -> Option<(String, u32, u64)> {
 /// process that is not dumpable).
 #[cfg(target_os = "linux")]
 fn stacks(pid: u32) -> Result<String, String> {
-    let o = std::process::Command::new("gdb").args(["-q", "-n", "-batch", "-p", &pid.to_string(), "-ex", "thread apply all bt 20"]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("no gdb here: {e}"))?;
+    let o = std::process::Command::new(tool("gdb")).args(["-q", "-n", "-batch", "-p", &pid.to_string(), "-ex", "thread apply all bt 20"]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("no gdb here: {e}"))?;
     let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
     let frames: Vec<&str> = text.lines().filter(|l| l.starts_with("Thread ") || l.starts_with('#')).collect();
     if !frames.is_empty() { return Ok(frames.join("\n")); }
@@ -495,15 +495,13 @@ pub fn groups_held(groups: &[(u32, u64)]) -> Option<u64> {
     groups_rss(groups)
 }
 
-/// RSS in bytes across recorded process groups (ps reports KiB), in one process-table
-/// snapshot per lease. A departed leader can still have children; a reused pid is excluded.
+/// RSS in bytes across recorded process groups, in one read of the process table in place (no
+/// `ps` per sample). A departed leader can still have children; a reused pid is excluded.
 pub fn groups_rss(groups: &[(u32, u64)]) -> Option<u64> {
-    let groups: Vec<_> = groups.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| pid.to_string()).collect();
-    if groups.is_empty() { return None; }
-    let out = Command::new("ps").args(["-o", "rss=", "-g", &groups.join(",")]).output().ok()?;
-    if !out.status.success() { return None; }
-    let rss: Vec<u64> = String::from_utf8_lossy(&out.stdout).split_whitespace().map(str::parse).collect::<Result<_, _>>().ok()?;
-    (!rss.is_empty()).then(|| rss.iter().sum::<u64>() * 1024)
+    let leaders: Vec<u32> = groups.iter().filter(|(pid, start)| *pid != 0 && proc_start(*pid).is_none_or(|s| s == *start)).map(|(pid, _)| *pid).collect();
+    if leaders.is_empty() { return None; }
+    let rss: Vec<u64> = process_table(&leaders).into_iter().filter(|(_, (_, member))| *member).filter_map(|(pid, _)| crate::procinfo::proc(pid).map(|p| p.rss_bytes)).collect();
+    (!rss.is_empty()).then(|| rss.iter().sum())
 }
 
 /// Reap just this child, retaining user + system CPU including its waited-for descendants, and
@@ -611,6 +609,41 @@ pub fn home_dir() -> PathBuf {
     std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/"))
 }
 
+/// `name` as the one file a spawn starts: the first PATH directory that holds an executable `name`,
+/// looked up once per process and again when that file is gone; the bare name when none does (its
+/// spawn then searches and fails as before). A spawn by bare name tries each PATH directory in turn, and on macOS each miss is a
+/// process made and torn down: once the running binary's file has been replaced (a hub building its
+/// successor where it runs from), AppleSystemPolicy logs every miss as a refused process, three per
+/// git on a Mac with three PATH directories before /usr/bin.
+pub fn tool(name: &'static str) -> PathBuf {
+    static FOUND: std::sync::Mutex<Vec<(&'static str, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    tool_in(&mut FOUND.lock().unwrap_or_else(|e| e.into_inner()), &path, name)
+}
+
+/// [`tool`] over `found` (name, file): a found file still there is kept; one gone (an update moved
+/// it) is looked up again on `path`, not started to fail.
+fn tool_in(found: &mut Vec<(&'static str, PathBuf)>, path: &std::ffi::OsStr, name: &'static str) -> PathBuf {
+    if name.contains('/') {
+        return PathBuf::from(name);
+    }
+    if let Some((_, p)) = found.iter().find(|(n, _)| *n == name) {
+        if !p.is_absolute() || p.is_file() {
+            return p.clone();
+        }
+    }
+    let p = first_on(path, name).unwrap_or_else(|| PathBuf::from(name));
+    found.retain(|(n, _)| *n != name);
+    found.push((name, p.clone()));
+    p
+}
+
+/// The first absolute directory of `path` (a PATH value) that holds an executable file `name`.
+fn first_on(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::split_paths(path).filter(|d| d.is_absolute()).map(|d| d.join(name)).find(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+}
+
 /// `program` as a background build. On macOS at background QoS: efficiency cores and throttled
 /// I/O, a clamp cargo's rustc inherit and cannot lift, so a build never competes with the apps the
 /// person works in (nice only orders it behind them: after a landing a nice-10 build beside another
@@ -618,7 +651,7 @@ pub fn home_dir() -> PathBuf {
 /// longer. Elsewhere at nice 15.
 pub fn background(program: &std::ffi::OsStr) -> Command {
     let (low, words): (&str, &[&str]) = if cfg!(target_os = "macos") { ("/usr/sbin/taskpolicy", &["-c", "background"]) } else { ("nice", &["-n", "15"]) };
-    let mut cmd = Command::new(low);
+    let mut cmd = Command::new(tool(low));
     cmd.args(words).arg(program);
     cmd
 }
@@ -1092,4 +1125,35 @@ fn a_run_gets_none_of_the_hubs_descriptors() {
     assert_eq!(in_run(), "free");
     drop(file);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A spawn starts one file: the first PATH directory with an executable of that name, git by its
+/// path (by its bare name, a Mac makes a refused process per PATH miss once the hub's binary is
+/// replaced), and the bare name when none holds it.
+#[cfg(test)]
+#[test]
+fn a_tool_is_one_file_from_the_first_path_directory_that_holds_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(format!("devhub-tool-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dirs: Vec<PathBuf> = ["a", "b", "c", "d"].iter().map(|d| base.join(d)).collect();
+    std::fs::create_dir_all(dirs[0].join("x")).unwrap();
+    for (d, mode) in [(&dirs[1], 0o644), (&dirs[2], 0o755), (&dirs[3], 0o755)] {
+        let f = d.join("x");
+        std::fs::create_dir_all(d).unwrap();
+        std::fs::write(&f, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    let path = std::env::join_paths(&dirs).unwrap();
+    assert_eq!(first_on(&path, "x"), Some(dirs[2].join("x")), "a directory named x and a file without x bits are passed over");
+    assert_eq!(first_on(&path, "y"), None, "no directory holds y");
+    let git = crate::git_exec::command();
+    assert!(Path::new(git.get_program()).is_absolute(), "git starts by its path: {:?}", git.get_program());
+    assert_eq!(tool("devhub-no-such-tool"), PathBuf::from("devhub-no-such-tool"), "not found: the bare name");
+    let mut found = Vec::new();
+    assert_eq!(tool_in(&mut found, &path, "x"), dirs[2].join("x"));
+    std::fs::remove_file(dirs[2].join("x")).unwrap();
+    assert_eq!(tool_in(&mut found, &path, "x"), dirs[3].join("x"), "its file gone: looked up again, the next directory's");
+    assert_eq!(found.len(), 1, "one entry per name");
+    let _ = std::fs::remove_dir_all(&base);
 }

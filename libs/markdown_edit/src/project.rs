@@ -83,6 +83,18 @@ struct Frame {
 impl Projection {
     /// Projects the events of a parse of `source`.
     pub fn new(source: &str, events: &[(Event<'_>, Range<usize>)]) -> Self {
+        Self::with_open_math(source, events, |_| false)
+    }
+
+    /// Projects the events of a parse of `source`, with the formulas `open`
+    /// picks (by their source range, delimiters included) as their source
+    /// text, edited like text: the formula a caret stands in. Every other
+    /// formula is one atomic object.
+    pub fn with_open_math(
+        source: &str,
+        events: &[(Event<'_>, Range<usize>)],
+        open: impl Fn(&Range<usize>) -> bool,
+    ) -> Self {
         let mut out = Projection::default();
         let mut stack: Vec<Frame> = Vec::new();
         let mut image_depth = 0usize;
@@ -160,7 +172,13 @@ impl Projection {
                         top.first.get_or_insert(range.start);
                         top.last = Some(range.end);
                     }
-                    out.leaf(source, event, range, &mut pending_break);
+                    let math = matches!(event, Event::InlineMath(_) | Event::DisplayMath(_));
+                    match source.get(range.clone()) {
+                        Some(text) if math && open(&range) => {
+                            out.push(&mut pending_break, range, text, PieceKind::Text)
+                        }
+                        _ => out.leaf(source, event, range, &mut pending_break),
+                    }
                 }
             }
         }

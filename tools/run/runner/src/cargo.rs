@@ -1,5 +1,7 @@
 //! Build scripts use this loader as both CARGO and RUSTC. The initial script launch consumes
 //! its role; later calls are rustc's option-led probes or cargo's subcommands, never loader runs.
+//! (The script's own option-led RUSTC questions are answered in its process, relax_compiler
+//! tool.rs, and start no loader; a probe through a wrapper the script runs still comes here.)
 
 pub fn dispatch(raw_args: &[Vec<u8>]) -> bool {
     match std::env::var("RELAX_AS_RUSTC").as_deref() {

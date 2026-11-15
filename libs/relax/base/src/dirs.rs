@@ -66,10 +66,87 @@ pub fn anchored(path: &str) -> std::borrow::Cow<'_, str> {
 
 /// The absolute anchor locations as one key input (the worktree).
 pub fn anchors_key() -> u128 {
+    key_of(anchors())
+}
+
+fn key_of(anchors: &[(&'static str, String)]) -> u128 {
     let mut h = crate::sip::Sip128::new();
     h.str("relax-anchors");
-    for (tag, dir) in anchors() { h.str(tag); h.str(dir); }
+    for (tag, dir) in anchors { h.str(tag); h.str(dir); }
     h.finish128()
+}
+
+/// The anchors a code cache is opened against, held as a value (two checkouts in one test are two
+/// values): the process's (`run`, `cargo`, `ws`), and where the sources no checkout owns lie --
+/// the cargo home, and std's sources when no checkout anchor holds them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Anchors {
+    /// (tag, absolute normalized dir), as anchors() has them
+    dirs: Vec<(&'static str, String)>,
+    /// std's sources (absolute, normalized)
+    std: String,
+}
+
+impl Anchors {
+    /// This process's: anchors() and `std`, std's source folder.
+    pub fn current(std: &str) -> Anchors {
+        Anchors { dirs: anchors().to_vec(), std: absolute_dir(std) }
+    }
+
+    /// The anchors `dirs` (each made absolute) with std at `std`.
+    pub fn of(dirs: &[(&'static str, &str)], std: &str) -> Anchors {
+        Anchors { dirs: dirs.iter().map(|(tag, dir)| (*tag, absolute_dir(dir))).collect(), std: absolute_dir(std) }
+    }
+
+    /// anchors_key() of these anchors.
+    pub fn key(&self) -> u128 {
+        key_of(&self.dirs)
+    }
+
+    /// The key of the places no checkout owns (the cargo home, std's folder): what a sealed
+    /// crate's code is keyed by in place of key(), the same in every checkout over them.
+    pub fn machine_key(&self) -> u128 {
+        let mut h = crate::sip::Sip128::new();
+        h.str("relax-sealed-anchors");
+        for (tag, dir) in self.dirs.iter().filter(|(tag, _)| *tag == "cargo") { h.str(tag); h.str(dir); }
+        h.str("std");
+        h.str(&self.std);
+        h.finish128()
+    }
+
+    /// The places no checkout owns (the cargo home, std's folder), absolute: where a late input of
+    /// a shared code store's ledger may lie.
+    pub fn machine_dirs(&self) -> impl Iterator<Item = &str> {
+        self.dirs.iter().filter(|(tag, _)| *tag == "cargo").map(|(_, dir)| dir.as_str()).chain(std::iter::once(self.std.as_str()))
+    }
+
+    /// The folders of sources no checkout owns, absolute: std's sources and the cargo home's
+    /// registry and git folders, each unless it lies in a folder of the checkout (its paths are
+    /// then the checkout's). A path inside one is that folder's, whatever its name shares with
+    /// the checkout's (a checkout `.../s` beside std at `.../std`).
+    pub fn shared_roots(&self) -> Vec<String> {
+        let mut roots: Vec<String> = self.dirs.iter().filter(|(tag, _)| *tag == "cargo")
+            .flat_map(|(_, dir)| ["registry", "git"].map(|sub| format!("{}/{sub}", dir.trim_end_matches('/'))))
+            .chain(std::iter::once(self.std.clone()))
+            .collect();
+        roots.retain(|r| !self.checkout_dirs().any(|dir| crate::vfs::is_under_normalized(r, dir)));
+        roots
+    }
+
+    /// The checkout's folders (the workspace, the run dir), absolute: text a sealed entry never
+    /// holds.
+    pub fn checkout_dirs(&self) -> impl Iterator<Item = &str> {
+        self.dirs.iter().filter(|(tag, _)| matches!(*tag, "ws" | "run")).map(|(_, dir)| dir.as_str())
+    }
+
+    /// Whether `path` is a source no checkout owns: under the cargo home or std's folder, and in
+    /// no folder of the checkout, the workspace or the run dir (a cargo home inside the workspace
+    /// is the checkout's, and so are packages downloaded into the run dir).
+    pub fn sealed_source(&self, path: &str) -> bool {
+        let p = crate::vfs::normalize_path(path);
+        let under = |tags: &[&str]| self.dirs.iter().any(|(tag, dir)| tags.contains(tag) && crate::vfs::is_under_normalized(&p, dir));
+        (under(&["cargo"]) || crate::vfs::is_under_normalized(&p, &self.std)) && !under(&["ws", "run"])
+    }
 }
 
 /// The run dir handed over by a parent run (`makepad run --run-dir`). Set before anything
@@ -128,23 +205,24 @@ pub fn loader_exe() -> std::io::Result<PathBuf> {
 }
 
 /// The files beside a run's own executable (relax-compiler selfexe.rs): names no link has (a link
-/// keeps a name's letters, digits, `-`, `_` and `.`). The run's command line (RELAX_SELF_EXEC's
-/// words) and build environment (progenv `build_wire`, which a launch of the link by a shell
-/// builds with), the loader the link was made of, the folder of the links a process starts runs
-/// from, and on Windows the command lines of a test's package binaries.
-pub const RUN_LINE: &str = "+self-exec";
-pub const RUN_BUILD: &str = "+build";
+/// keeps a name's letters, digits, `-`, `_` and `.`). The folder of the runs of the links there
+/// (`+run/<pid>`: each run's command line, RELAX_SELF_EXEC's words, and where a launch of the link
+/// by a shell finds its build environment, progenv `build_wire`; on Unix the descriptor of a file
+/// without a name, never the environment itself), the loader the links were made of, the folder
+/// of the links a process starts runs from, and on Windows the command lines of a test's package
+/// binaries.
+pub const RUN_ENTRIES: &str = "+run";
 pub const RUN_LOADER: &str = "+loader";
 pub const LAUNCH_DIR: &str = "+launch";
 pub const BIN_LINES: &str = "+bin";
 
-/// Whether `exe` is a run's own executable (its command line beside it), a link a run was
-/// started from (in a `+launch` folder), or a package binary above a test's `deps/` (its line in
-/// `+bin`): none is the loader's own path. A launch of a run's link runs that run's program, as
-/// one of a package binary runs that binary; a launch link goes with its folder.
+/// Whether `exe` is a run's own executable (its runs' folder beside it), a link a run was started
+/// from (in a `+launch` folder), or a package binary above a test's `deps/` (its line in `+bin`):
+/// none is the loader's own path. A launch of a run's link runs that run's program, as one of a
+/// package binary runs that binary.
 pub fn is_run_link(exe: &std::path::Path) -> bool {
     exe.parent().is_some_and(|d| {
-        d.join(RUN_LINE).is_file() || d.file_name().is_some_and(|n| n == LAUNCH_DIR) || exe.file_name().is_some_and(|f| d.join(BIN_LINES).join(f).is_file())
+        d.join(RUN_ENTRIES).is_dir() || d.file_name().is_some_and(|n| n == LAUNCH_DIR) || exe.file_name().is_some_and(|f| d.join(BIN_LINES).join(f).is_file())
     })
 }
 
@@ -249,27 +327,27 @@ mod tests {
         assert_eq!(super::anchor_in("C:/a/ws/f.rs", &[("ws", "C:/a/ws".to_string())]).as_deref(), Some("\0ws\0f.rs"));
     }
 
-    /// A run's link (its line beside it) and a launch link are no loader; each names the loader it
-    /// was made of, and a record that names a run's link is none.
+    /// A run's link (its runs' folder beside it) and a launch link are no loader; each names the
+    /// loader it was made of, and a record that names a run's link is none.
     #[test]
     fn a_runs_link_names_the_loader_it_was_made_of() {
-        use super::{is_run_link, recorded_loader, LAUNCH_DIR, RUN_LINE, RUN_LOADER};
+        use super::{is_run_link, recorded_loader, LAUNCH_DIR, RUN_ENTRIES, RUN_LOADER};
         let root = std::env::temp_dir().join(format!("relax-run-link-{}", std::process::id()));
         let file = |p: &std::path::Path, text: &[u8]| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, text).unwrap();
         };
         let loader = root.join("bin/relax");
-        let (run, again, launch) = (root.join("exe/1/app"), root.join("exe/2/app"), root.join(LAUNCH_DIR).join("app"));
+        let (run, again, launch) = (root.join("exe/k1/run/app"), root.join("exe/k2/run/app"), root.join("exe/k1").join(LAUNCH_DIR).join("app"));
         file(&loader, b"");
         for link in [&run, &again, &launch] {
             file(link, b"");
         }
-        file(&root.join("exe/1").join(RUN_LINE), b"");
-        file(&root.join("exe/2").join(RUN_LINE), b"");
-        file(&root.join("exe/1").join(RUN_LOADER), loader.as_os_str().as_encoded_bytes());
-        file(&root.join(LAUNCH_DIR).join(RUN_LOADER), loader.as_os_str().as_encoded_bytes());
-        file(&root.join("exe/2").join(RUN_LOADER), run.as_os_str().as_encoded_bytes());
+        std::fs::create_dir_all(root.join("exe/k1/run").join(RUN_ENTRIES)).unwrap();
+        std::fs::create_dir_all(root.join("exe/k2/run").join(RUN_ENTRIES)).unwrap();
+        file(&root.join("exe/k1/run").join(RUN_LOADER), loader.as_os_str().as_encoded_bytes());
+        file(&root.join("exe/k1").join(LAUNCH_DIR).join(RUN_LOADER), loader.as_os_str().as_encoded_bytes());
+        file(&root.join("exe/k2/run").join(RUN_LOADER), run.as_os_str().as_encoded_bytes());
         let got = [is_run_link(&loader), is_run_link(&run), is_run_link(&launch)];
         let recorded = [recorded_loader(&run), recorded_loader(&launch), recorded_loader(&again), recorded_loader(&loader)];
         let _ = std::fs::remove_dir_all(&root);

@@ -2821,7 +2821,7 @@ fn a_new_item_in_another_crate_patches_unless_the_host_provides_that_crate() {
     assert_eq!(o.rung, Rung::Patch, "a new fn and its first use in another crate, saved together: {:?}", o.lines);
     assert_eq!(run(), 29, "the dependent crate's new code calls the new fn");
     unsafe extern "C" fn no_panic(_: *mut *const u8, _: *mut usize) {}
-    crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[]);
+    crate::provided::register("parts", Default::default(), Default::default(), Default::default(), Default::default(), no_panic, 0, &[], Vec::new());
     let use_later = || vec![Edit { file: app_file, path: app_path.clone(), src: app_src("later").into_bytes() }];
     let o = unsafe { apply(up, use_later()) };
     assert_eq!(o.rung, Rung::Refuse, "a fn the provided crate lacks, with relax's inputs unchanged: {:?}", o.lines);

@@ -17,6 +17,18 @@ macro_rules! arg {
 macro_rules! doubled {
     ($e:expr) => { fwd_mac::same!($e * 2) };
 }
+// every fragment but an `ident`, a `lifetime` and a `tt` is an invisible group, of one token
+// too: const_format's `formatcp!($fmt, $arg)` reads each argument as one (wax's `sepexpr!`
+// forwards through `$fmt:expr` and a block passed on as an expression)
+macro_rules! expr { ($x:expr) => { fwd_mac::shape!($x) }; }
+macro_rules! literal { ($x:literal) => { fwd_mac::shape!($x) }; }
+macro_rules! ty { ($x:ty) => { fwd_mac::shape!($x) }; }
+macro_rules! block { ($x:block) => { fwd_mac::shape!($x) }; }
+macro_rules! ident { ($x:ident) => { fwd_mac::shape!($x) }; }
+macro_rules! tt { ($x:tt) => { fwd_mac::shape!($x) }; }
+macro_rules! args { ($f:expr $(, $x:expr)*) => { fwd_mac::shape!(($f) $(, $x)*,) }; }
+macro_rules! passed_on { ($e:expr) => { $e }; }
+macro_rules! twice { ($x:expr) => { passed_on! {{ fwd_mac::shape!(, $x,) }} }; }
 
 fn main() {
     assert_eq!(source!("one"), "one");
@@ -27,4 +39,5 @@ fn main() {
     assert!(!arg!(1u8));
     println!("forwarded expr group ok {} {}", with_tail!("tail"), arg!(2u8 as _));
     println!("handed back: {}", doubled!(1 + 1));
+    println!("shapes: {} | {} | {} | {} | {} | {} | {} | {} | {}", expr!("b"), expr!(-1), literal!("b"), ty!(u8), block!({ 1 }), ident!(x), tt!("b"), args!("a{0}", "b"), twice!("b"));
 }

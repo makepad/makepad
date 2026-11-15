@@ -385,7 +385,9 @@ fn make_bundle(p: &Push, bases: &[String]) -> Result<(PathBuf, String, u64), Str
     let path = std::env::temp_dir().join(format!("devhub-push-{}-{n}-{}-{}.bundle", std::process::id(), p.repo, &p.sha[..12]));
     // the bundle names `refs/heads/<branch>` at exactly `p.sha`, even when the branch has moved
     // since (another landing): it is made in a scratch bare repo that borrows the user repo's
-    // objects (alternates), so nothing is written to the user's repo and no ref is read twice
+    // objects (alternates), so nothing is written to the user's repo and no ref is read twice.
+    // Git writes it (`init --bare`, `update-ref`, `bundle create`): makepad-git reads packs but
+    // writes none. Three execs per node push of a landing.
     let scratch = path.with_extension("git");
     let made = (|| {
         let common = crate::gitread::paths(&p.dir).ok_or_else(|| format!("{}: no repository", p.dir.display()))?.common_dir.to_string_lossy().into_owned();

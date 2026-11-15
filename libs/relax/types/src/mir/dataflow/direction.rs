@@ -89,6 +89,15 @@ pub(super) struct Edge<'a> {
     kind: EdgeKind<'a>,
 }
 
+/// Whether an edge changes the state it carries; a plain edge passes the exit state as is.
+pub(super) fn has_edge_effect(analysis: &dyn Analysis, edge: Edge<'_>) -> bool {
+    match edge.kind {
+        EdgeKind::Plain => false,
+        EdgeKind::Return(_) => true,
+        EdgeKind::Switch(targets, discr, _) => analysis.has_switch_int_edge_effect(edge.source, targets, discr),
+    }
+}
+
 pub(super) fn apply_edge_effect(analysis: &dyn Analysis, state: &mut BitSet, edge: Edge<'_>) {
     match edge.kind {
         EdgeKind::Plain => {}
@@ -131,8 +140,8 @@ pub(super) fn apply_effect(body: &Body, analysis: &dyn Analysis, state: &mut Bit
     }
 }
 
-/// Flat edge/predecessor storage; the DFS postorder is rustc's (its reverse is the initial work
-/// queue).
+/// Flat edge/predecessor storage; the DFS postorder is rustc's (its reverse gives the forward
+/// ranks).
 pub(super) struct Cfg<'a> {
     pub edges: Vec<Edge<'a>>,
     pub pred_offsets: Vec<usize>,

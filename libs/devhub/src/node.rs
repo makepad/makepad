@@ -320,9 +320,23 @@ fn keep_over_exec(cmd: &mut std::process::Command, fd: i32) {
 #[cfg(unix)]
 pub fn exec(cmd: &mut std::process::Command) -> std::io::Error {
     crate::logstamp::keep_over_exec(cmd);
+    let hooks = EXEC_HOOKS.get();
+    if let Some((before, _)) = hooks { before(); }
     let e = exec_keeping(cmd, CONTROL.load(std::sync::atomic::Ordering::Relaxed));
+    if let Some((_, failed)) = hooks { failed(); }
     crate::logstamp::exec_failed();
     e
+}
+
+/// What the app hosting this process lets go before an exec in place, and takes back when it
+/// failed ([`set_exec_hooks`]).
+static EXEC_HOOKS: std::sync::OnceLock<(fn(), fn())> = std::sync::OnceLock::new();
+
+/// The host app's `before` and `failed` around [`exec`]: what its platform holds by the pid,
+/// which the exec keeps (the macOS App Nap activity: each self-update of the master left its
+/// power assertion behind, 11-13). Set once, at start.
+pub fn set_exec_hooks(before: fn(), failed: fn()) {
+    let _ = EXEC_HOOKS.set((before, failed));
 }
 
 #[cfg(unix)]

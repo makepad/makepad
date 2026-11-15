@@ -22,6 +22,12 @@ script_mod! {
     // The trampled field (crate::trample) rides `emissive_map` (the blades
     // never read an emissive map): B how flat, R and G the way pushed (128
     // at rest), over `grass_trample` (corner x, z, 1 / side; 0: off).
+    //
+    // Flowers (grass.rs flower_vertices) ride the same lanes, marked by a
+    // yaw lane past 2: py is t up the stem (0..1), or the head's vertex (2
+    // the centre, 3, 4, 5 a petal's left base, tip and right base) with the
+    // petal's index in nrm. A draw holds only blades or only flowers, so the
+    // split never diverges inside a draw.
     mod.draw.DrawSceneGrass = mod.std.set_type_default() do #(DrawSceneGrass::script_shader(vm)){
         ..mod.draw.DrawScenePbr
         // A blade is no model's own layer: every caster shadows it.
@@ -40,6 +46,22 @@ script_mod! {
         wind_scroll: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         grass_lod: uniform(vec4(1.0, 1.0, 1.0, 0.0))
         grass_trample: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The flowers (grass.rs FlowerKind, GrassLod::flowers): their
+        // screen density (every head out to x metres, the reach, the widest
+        // a thinned head grows, the kinds); the kinds' cumulative share of
+        // the flowers, their stem heights, and per kind the petals' sRGB and
+        // head size, and the eye's sRGB and cup.
+        grass_flower_lod: uniform(vec4(1.0, 1.0, 1.0, 0.0))
+        grass_flower_cum: uniform(vec4(1.0, 1.0, 1.0, 1.0))
+        grass_flower_h: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_petal0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_petal1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_petal2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_petal3: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_eye0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_eye1: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_eye2: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        flower_eye3: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
         // The ground under a root: bilinear over the four texels around it
         // (point reads: a device may not filter a float texture).
@@ -67,6 +89,23 @@ script_mod! {
                 return vec4(centre.x, centre.y, d, h)
             }
             return best
+        }
+
+        // Pressed by a tyre or a foot (crate::trample) at a root: the way it
+        // was pushed (xy, -1..1) and how flat (z), faded out over the
+        // field's last 8 %.
+        grass_press: fn(root: vec2) -> vec3 {
+            let tr = self.grass_trample
+            if tr.z > 0.0 {
+                let tuv = (root - tr.xy) * tr.z
+                let edge = min(min(tuv.x, 1.0 - tuv.x), min(tuv.y, 1.0 - tuv.y))
+                if edge > 0.0 {
+                    let pressed = self.emissive_map.sample_nearest(tuv, 0.0)
+                    let tread = (pressed.xy * 255.0 - vec2(128.0, 128.0)) / 127.0
+                    return vec3(tread.x, tread.y, pressed.z * smoothstep(0.0, 0.08, edge))
+                }
+            }
+            return vec3(0.0, 0.0, 0.0)
         }
 
         vertex: fn() {
@@ -105,6 +144,107 @@ script_mod! {
             // keep the cover; the last ones sink at the reach.
             let lod = self.grass_lod
             let dist = length(vec3(root.x, ground, root.y) - self.morph_weights5.xyz)
+            if self.geom.ao_uv > 1.5 {
+                // A flower: kept by the bloom and its own screen density
+                // (the heads' size), grown out of the ground over the last
+                // 15% of its keep margin like a blade.
+                let fl = self.grass_flower_lod
+                let near_f = fl.x / max(dist, 0.001)
+                let kept_f = min(near_f * near_f, 1.0)
+                let bloom = cover.z * kept_f * (1.0 - smoothstep(fl.y * 0.8, fl.y, dist))
+                let margin_f = 1.0 - keep / max(bloom, 0.0001)
+                if margin_f <= 0.0 || cover.x < 0.03 {
+                    self.vertex_pos = vec4(0.0, 0.0, 2.0, 1.0)
+                    return
+                }
+                let grow_f = smoothstep(0.0, 0.15, margin_f)
+                // Its kind, by its own random against the kinds' shares.
+                let pick = fract(shape * 7.31 + 0.17)
+                let cum = self.grass_flower_cum
+                var petal_k = self.flower_petal3
+                var eye_k = self.flower_eye3
+                var tall = self.grass_flower_h.w
+                if pick < cum.z {
+                    petal_k = self.flower_petal2
+                    eye_k = self.flower_eye2
+                    tall = self.grass_flower_h.z
+                }
+                if pick < cum.y {
+                    petal_k = self.flower_petal1
+                    eye_k = self.flower_eye1
+                    tall = self.grass_flower_h.y
+                }
+                if pick < cum.x {
+                    petal_k = self.flower_petal0
+                    eye_k = self.flower_eye0
+                    tall = self.grass_flower_h.x
+                }
+                // The stem stands taller than a blade and nearly upright,
+                // bends in the world wind and lies down where it was
+                // pressed, as the blades around it do.
+                let h_f = tall * (0.8 + 0.4 * shape) * (0.6 + 0.4 * cover.x) * grow_f
+                let press_f = self.grass_press(root)
+                let lay_f = press_f.z
+                let gust_f = self.scene_wind(root, self.wind_state, self.wind_scroll)
+                let wind_f = self.wind_push(gust_f.xy) * ((1.0 + self.wind_wave(self.wind_state.w, 216.0, shape * 6.37) * 0.12) * self.morph_weights2.w * (1.0 - 0.85 * lay_f))
+                let splay_f = (root - centre) * 0.6 + vec2(cos(yaw * 1.7 + 1.3), sin(yaw * 1.7 + 1.3)) * 0.15
+                let lean_f = splay_f * 0.3 + vec2(press_f.x, press_f.y) * (3.0 * lay_f) + wind_f * 0.45
+                let upright_f = 1.0 / sqrt(1.0 + dot(lean_f, lean_f))
+                let role = self.geom.py
+                let st = min(role, 1.0)
+                let bend_f = lean_f * (upright_f * st * st * h_f)
+                let stem_f = vec3(root.x + bend_f.x, ground + st * h_f * (1.0 - st * (1.0 - upright_f)), root.y + bend_f.y)
+                // The head faces up, tipped with the stem and a little
+                // toward the sun (a field's heads turn one way), and on its
+                // own a little; six petals around an eye, rising by the
+                // kind's cup. A thinned head widens by the root of its
+                // thinning (it stays as wide on screen as at grass_flower_lod.x
+                // metres), so the heads keep their share of the view.
+                let sun_f = normalize(self.light_dir)
+                let tilt_f = vec2(cos(yaw * 2.3), sin(yaw * 2.3)) * 0.25
+                let up_f = normalize(vec3(lean_f.x * 1.2 + sun_f.x * 0.35 + tilt_f.x, 1.0, lean_f.y * 1.2 + sun_f.z * 0.35 + tilt_f.y))
+                let e0_f = vec3(cos(yaw), 0.0, sin(yaw))
+                let tx_f = normalize(e0_f - up_f * dot(e0_f, up_f))
+                let tz_f = cross(up_f, tx_f)
+                let is_head = step(1.5, role)
+                let is_petal = step(2.5, role)
+                let is_tip = step(3.5, role) - step(4.5, role)
+                let side_off = (step(4.5, role) - (step(2.5, role) - step(3.5, role))) * 0.42
+                let ang = self.geom.nrm * 1.0471976 + yaw * 3.0 + side_off
+                let dir_f = tx_f * cos(ang) + tz_f * sin(ang)
+                let radius_f = petal_k.w * 0.5 * clamp(dist / fl.x, 1.0, fl.z) * grow_f
+                let cup_f = eye_k.w
+                let r_f = is_petal * mix(0.32, 1.0, is_tip)
+                let rise_f = mix(0.18, cup_f * mix(0.15, 1.0, is_tip), is_petal)
+                let head_f = stem_f + (dir_f * r_f + up_f * rise_f) * radius_f
+                let across_f = vec3(cos(yaw), 0.0, sin(yaw))
+                let stem_w = petal_k.w * 0.1 * grow_f
+                let pos_f = mix(stem_f + across_f * (side * stem_w * 0.5), head_f, is_head)
+                // The bowl's inside faces up and in; the stem faces across.
+                let n_head = normalize(up_f - dir_f * (cup_f * 0.8 * is_petal))
+                let n_stem = normalize(vec3(0.0 - across_f.z, 0.3, across_f.x))
+                let to_eye_f = self.morph_weights5.xyz - pos_f
+                let n_f0 = mix(n_stem, n_head, is_head)
+                let n_f = n_f0 * sign(dot(n_f0, to_eye_f) + 0.0001)
+                self.world = self.draw_list.view_transform * vec4(pos_f.x, pos_f.y, pos_f.z, 1.0)
+                let view_f = self.draw_pass.camera_view * self.world
+                self.v_csm = vec4(pos_f.x, pos_f.y, pos_f.z, max(dot(n_f, sun_f), 0.0))
+                self.v_csm_n = n_f
+                // The eye in the middle, the petals' colour out to their
+                // tips (lighter there); a green stem. The head takes the
+                // full light of a blade's tip: the sun glows through a
+                // petal as through a leaf.
+                let petal_col = mix(mix(eye_k.xyz, petal_k.xyz, 0.55), petal_k.xyz * 1.05, is_tip)
+                let head_col = mix(eye_k.xyz, petal_col, is_petal)
+                let stem_col = self.morph_weights3.xyz * mix(0.5, 0.9, st)
+                let lift_f = 1.0 + (gust_f.z - 0.5) * 0.12 * self.morph_weights2.w
+                self.v_tint = vec4(mix(stem_col, head_col, is_head) * (0.9 + 0.2 * shape) * lift_f, mix(st * 0.8, 1.0, is_head))
+                self.v_fog = 1.0 - exp(0.0 - length(view_f.xyz) * self.fog_density)
+                let clip_f = self.draw_pass.camera_projection * view_f
+                self.v_spos = clip_f
+                self.vertex_pos = clip_f
+                return
+            }
             let near = lod.x / max(dist, 0.001)
             let kept = min(near * near, 1.0)
             let fade = 1.0 - smoothstep(lod.y * 0.8, lod.y, dist)
@@ -138,19 +278,9 @@ script_mod! {
             // catching more light (its face turned up), standing up again as
             // the field recovers. The read fades out over the field's last
             // 8 %.
-            var lay = 0.0
-            var tread = vec2(0.0, 0.0)
-            let tr = self.grass_trample
-            if tr.z > 0.0 {
-                let tuv = (root - tr.xy) * tr.z
-                let edge = min(min(tuv.x, 1.0 - tuv.x), min(tuv.y, 1.0 - tuv.y))
-                if edge > 0.0 {
-                    let pressed = self.emissive_map.sample_nearest(tuv, 0.0)
-                    let flatness = pressed.z * smoothstep(0.0, 0.08, edge)
-                    lay = flatness
-                    tread = (pressed.xy * 255.0 - vec2(128.0, 128.0)) / 127.0
-                }
-            }
+            let press = self.grass_press(root)
+            let lay = press.z
+            let tread = vec2(press.x, press.y)
             let wind = push * ((1.0 + flick) * self.morph_weights2.w * (1.0 - 0.85 * lay))
             // The blade keeps its length: its tip turns from upright by
             // atan(|lean|) and the blade arcs there, so a gale lays it over
