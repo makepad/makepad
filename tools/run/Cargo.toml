@@ -17,6 +17,14 @@ include = ["../../libs/relax/build_stamp.rs", "../../docs/agents/change-report.m
 # JIT process reads
 [package.metadata.makepad]
 test-tree = "its build-flag tests run cargo in the checkout, which reads the workspace's .cargo/config.toml"
+# the loader runs natively, on a desktop or a phone: a web page runs no loader (and no provided
+# crate's #[relax_api] table, which the host-shims features below turn on)
+platforms = ["desktop", "mobile"]
+
+# test targets that run under cargo, never the JIT (the tests bucket and `devhub test` route them)
+[package.metadata.makepad.native-tests]
+"test:confined_macros" = "it re-runs its own binary as each case's runner: under makepad test each runner is a JIT of its own, and six at once took 41 GB"
+"test:confined_scripts" = "it re-runs its own binary as each case's runner, as confined_macros does"
 
 [lib]
 name = "makepad_run"
@@ -34,6 +42,12 @@ path = "fixture/modules_harness.rs"
 [[test]]
 name = "confined_macros"
 path = "fixture/confined_macros.rs"
+harness = false
+
+# third-party build scripts under Open and Sandboxed: it re-executes itself as the runner
+[[test]]
+name = "confined_scripts"
+path = "fixture/confined_scripts.rs"
 harness = false
 
 [[bin]]

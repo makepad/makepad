@@ -11,4 +11,4 @@ publish = false
 include = ["../self_stamp.rs", "../base/src/sha256.rs"]
 
 [dependencies]
-makepad-alloc-phase = { path = "../../relax_api/phase", version = "1.0.0" }
+relax-api-phase = { path = "../../relax_api/phase", version = "1.0.0" }

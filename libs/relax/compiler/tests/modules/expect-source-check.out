@@ -1,0 +1,11 @@
+out fn body: refused (`unsafe`, raw pointers)
+out closure: refused (`unsafe`, raw pointers)
+out method: refused (`unsafe`, raw pointers)
+out nested fn: refused (`unsafe`, raw pointers)
+out macro in a body: refused (`unsafe`, raw pointers)
+out raw pointer only: refused (raw pointers)
+out asm: refused (`unsafe`, `asm!`)
+out safe: loaded, run Some(5)
+out derives on an enum: loaded, run Some(5)
+out the module's own unsafe beside a derive: refused (`unsafe`, raw pointers)
+out refused: 8 of 10

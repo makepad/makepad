@@ -871,7 +871,8 @@ macro_rules! impl_extend_tuple {
             fn extend_reserve(&mut self, additional: usize) { $(Extend::<$ty>::extend_reserve(&mut self.$i, additional);)+ }
         }
         impl<$($ty,)+ $($ex: Default + Extend<$ty>,)+> FromIterator<($($ty,)+)> for ($($ex,)+) {
-            fn from_iter<I: IntoIterator<Item = ($($ty,)+)>>(iter: I) -> Self {
+            // (`Iter`, not `I`: the tuples of nine and more name their ninth element type `I`)
+            fn from_iter<Iter: IntoIterator<Item = ($($ty,)+)>>(iter: Iter) -> Self {
                 let mut res = ($($ex::default(),)+);
                 res.extend(iter);
                 res

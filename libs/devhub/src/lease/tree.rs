@@ -150,11 +150,12 @@ fn repos_in(root: &Path) -> Vec<String> {
     crate::nested::names(root).into_iter().chain(["makepad".to_string()]).collect()
 }
 
+/// The commit `dir`'s HEAD is at (makepad-git: a node's caps read each of the tree's every 10 s).
 fn head(dir: &Path) -> Option<String> {
     if !dir.join(".git").exists() {
         return None;
     }
-    run(Some(dir), None, &[], &["rev-parse", "--verify", "HEAD^{commit}"]).ok().map(|s| s.trim().to_string()).filter(|s| crate::sync::git::valid_sha(s))
+    crate::gitread::rev(dir, "HEAD")
 }
 
 /// The work tree's detached HEADs (`caps.tree`).
@@ -238,9 +239,10 @@ fn prepare(id: &str, pin: &Pin, root: &Path, out: &Path, native: bool) -> Result
         if dir.join(".git").exists() && store.admin_of(&dir).is_none() {
             return Err(format!("{} is not this node's worktree", dir.display()));
         }
-        // a lock a killed writer left in its git is cleared first, and one a live writer holds
-        // waited for: a hub the WM replaced mid-start left `config.worktree.lock`, and every later
-        // start in that tree was refused on it (11-13)
+        // a config lock a killed writer left in its git is cleared first, and one a live writer
+        // holds waited for: a hub the WM replaced mid-start left `config.worktree.lock`, and every
+        // later start in that tree was refused on it (11-13). Only config locks: a commit's
+        // `index.lock` sits closed while its hooks run ([`crate::gitlock::sweep`])
         taken.cleared.locks.extend(if dir.join(".git").exists() { crate::gitlock::sweep_worktree(&dir) } else { crate::gitlock::sweep(&store.git_dir) });
         let from = head(&dir);
         if from.as_deref() == Some(to) {

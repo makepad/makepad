@@ -272,6 +272,47 @@ impl PartialOrd<Ipv4Addr> for IpAddr {
         }
     }
 }
+// (core net/ip_addr.rs: each comparison of an address with an `IpAddr` both ways)
+impl PartialEq<IpAddr> for Ipv4Addr {
+    fn eq(&self, other: &IpAddr) -> bool {
+        match other {
+            IpAddr::V4(v4) => self == v4,
+            IpAddr::V6(_) => false,
+        }
+    }
+}
+impl PartialEq<IpAddr> for Ipv6Addr {
+    fn eq(&self, other: &IpAddr) -> bool {
+        match other {
+            IpAddr::V4(_) => false,
+            IpAddr::V6(v6) => self == v6,
+        }
+    }
+}
+impl PartialOrd<IpAddr> for Ipv4Addr {
+    fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
+        match other {
+            IpAddr::V4(v4) => self.partial_cmp(v4),
+            IpAddr::V6(_) => Some(Ordering::Less),
+        }
+    }
+}
+impl PartialOrd<Ipv6Addr> for IpAddr {
+    fn partial_cmp(&self, other: &Ipv6Addr) -> Option<Ordering> {
+        match self {
+            IpAddr::V4(_) => Some(Ordering::Less),
+            IpAddr::V6(v6) => v6.partial_cmp(other),
+        }
+    }
+}
+impl PartialOrd<IpAddr> for Ipv6Addr {
+    fn partial_cmp(&self, other: &IpAddr) -> Option<Ordering> {
+        match other {
+            IpAddr::V4(_) => Some(Ordering::Greater),
+            IpAddr::V6(v6) => self.partial_cmp(v6),
+        }
+    }
+}
 
 fn pad_or_write(f: &mut fmt::Formatter, s: &str) -> fmt::Result {
     if f.precision().is_none() && f.width().is_none() {

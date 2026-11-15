@@ -86,12 +86,18 @@ impl Fcx<'_> {
         roots.sort_unstable_by_key(|expr| expr.0);
         roots.dedup();
         for root in roots { self.convert_place_to_mutable(root, false); }
-        for (call, recv, derefs) in receivers {
-            self.last_lo = self.ast().expr(call).lo;
-            let inside_union = self.convert_place_to_mutable(recv, false);
-            // the receiver's own autoderef steps live on the call node
-            for step in 0..derefs { self.convert_deref_step(call.0, false, step, inside_union); }
-        }
+        for (call, recv, derefs) in receivers { self.convert_call_receiver_to_mutable(call, recv, derefs); }
+    }
+
+    /// The receiver `recv` of a method or call `call` that borrows it mutably, with its `derefs`
+    /// autoderef steps: also for a closure call whose kind is known only after this pass ran
+    /// (call.rs DeferredCallResolution).
+    pub(super) fn convert_call_receiver_to_mutable(&mut self, call: ExprId, recv: ExprId, derefs: usize) {
+        if !self.keep_user_types || !self.b.errors.is_empty() { return; }
+        self.last_lo = self.ast().expr(call).lo;
+        let inside_union = self.convert_place_to_mutable(recv, false);
+        // the receiver's own autoderef steps live on the call node
+        for step in 0..derefs { self.convert_deref_step(call.0, false, step, inside_union); }
     }
 
     /// has a binding `ref mut x` (explicit: the implicit ones sit behind a reference).

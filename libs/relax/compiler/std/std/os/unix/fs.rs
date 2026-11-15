@@ -2,6 +2,7 @@
 
 use crate::fs::{self, DirBuilder, DirEntry, FileType, Metadata, OpenOptions, Permissions};
 use crate::io;
+use crate::os::fd::{AsFd, AsRawFd};
 use crate::path::Path;
 
 pub trait PermissionsExt {
@@ -158,6 +159,22 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(original: P, link: Q) -> io::Resu
     fs::symlink_raw(original.as_ref(), link.as_ref())
 }
 
+/// Changes the owner and group of a file or directory, following symlinks; `None` leaves that
+/// id unchanged (real std's `os::unix::fs::chown`).
+pub fn chown<P: AsRef<Path>>(dir: P, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+    fs::chown_raw(dir.as_ref(), uid.unwrap_or(u32::MAX), gid.unwrap_or(u32::MAX))
+}
+
+/// `chown` of an open file's descriptor.
+pub fn fchown<F: AsFd>(fd: F, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+    fs::fchown_raw(fd.as_fd().as_raw_fd(), uid.unwrap_or(u32::MAX), gid.unwrap_or(u32::MAX))
+}
+
+/// `chown` of a symlink itself, not of what it points to.
+pub fn lchown<P: AsRef<Path>>(dir: P, uid: Option<u32>, gid: Option<u32>) -> io::Result<()> {
+    fs::lchown_raw(dir.as_ref(), uid.unwrap_or(u32::MAX), gid.unwrap_or(u32::MAX))
+}
+
 /// Positioned reads and writes (pread/pwrite), as real std's unix FileExt.
 pub trait FileExt {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
@@ -206,13 +223,11 @@ pub(crate) const READ_LIMIT: usize = isize::MAX as usize;
 
 impl FileExt for fs::File {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        use crate::os::fd::AsRawFd;
         let len = if buf.len() > READ_LIMIT { READ_LIMIT } else { buf.len() };
         let n = unsafe { crate::sys::pread(self.as_raw_fd(), buf.as_mut_ptr() as *mut _, len, offset as i64) };
         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }
     }
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
-        use crate::os::fd::AsRawFd;
         let len = if buf.len() > READ_LIMIT { READ_LIMIT } else { buf.len() };
         let n = unsafe { crate::sys::pwrite(self.as_raw_fd(), buf.as_ptr() as *const _, len, offset as i64) };
         if n < 0 { Err(io::Error::last_os_error()) } else { Ok(n as usize) }

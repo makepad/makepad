@@ -1,6 +1,6 @@
 // ported from N:rustc_const_eval/src/interpret/{memory.rs,step.rs,operator.rs,cast.rs,discriminant.rs,intern.rs,validity.rs}
 // ported from N:rustc_middle/src/mir/interpret/allocation.rs (+ provenance_map.rs, init_mask.rs) @8d1a764
-//! The check-mode const-eval interpreter (design: local/agent_state/relax-campaign/suite/consteval.DESIGN.md).
+//! The check-mode const-eval interpreter.
 //!
 //! `makepad check` only, diagnostics only: a constant's value still comes from ctfe.rs / the JIT. The
 //! interpreter runs the constant's MIR with rustc's CTFE memory model -- allocations with an init mask,

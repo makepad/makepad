@@ -479,7 +479,7 @@ mod tests {
     fn capture_planes_round_trip_lossless() {
         // a picture-like plane (gradients and texture) and 16-bit depth, odd sizes
         let (w, h) = (37u32, 23u32);
-        let y: Vec<u8> = (0..w * h).map(|i| ((i % w) * 3 + (i / w) * 5 + (i * 2654435761u32 >> 28)) as u8).collect();
+        let y: Vec<u8> = (0..w * h).map(|i| ((i % w) * 3 + (i / w) * 5 + (i.wrapping_mul(2654435761u32) >> 28)) as u8).collect();
         let p = encode_plane(w, h, 1, &y);
         assert_eq!(p.codec, plane_codec::DELTA_DEFLATE);
         assert_eq!(decode_plane(&p).unwrap(), y);

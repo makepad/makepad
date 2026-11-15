@@ -6,6 +6,8 @@
 #
 #   build.sh plain           host profile + native cpu
 #   build.sh gen  <dir>      instrumented build (-Cprofile-generate=<dir>), for train.sh
+#                            (with --cfg makepad_profile_runtime: the JIT's exit, which skips the C library's
+#                            exit handlers, writes the profile runtime's counts itself)
 #   build.sh use  <profdata> PGO build from a merged profile
 #   build.sh pgo             gen -> train.sh -> llvm-profdata merge -> use, in one go
 #
@@ -73,7 +75,7 @@ plain)
 gen)
     dir=${2:?usage: build.sh gen <raw profile dir>}
     mkdir -p "$dir"
-    build gen "-Cprofile-generate=$dir" "${HOST_OUT:-$root/target/host/makepad-gen}"
+    build gen "-Cprofile-generate=$dir --cfg makepad_profile_runtime" "${HOST_OUT:-$root/target/host/makepad-gen}"
     ;;
 use)
     prof=${2:?usage: build.sh use <merged .profdata>}
@@ -85,7 +87,7 @@ pgo)
     raw=$pgo_dir/raw
     rm -rf "$raw"
     mkdir -p "$raw"
-    build gen "-Cprofile-generate=$raw" "$pgo_dir/makepad-gen"
+    build gen "-Cprofile-generate=$raw --cfg makepad_profile_runtime" "$pgo_dir/makepad-gen"
     "$here/train.sh" "$pgo_dir/makepad-gen" "$raw" "$pgo_dir/train"
     "$tool" merge -o "$pgo_dir/makepad.profdata.new" "$raw"
     mv "$pgo_dir/makepad.profdata.new" "$pgo_dir/makepad.profdata"

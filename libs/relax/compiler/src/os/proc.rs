@@ -355,6 +355,29 @@ mod unix {
         pub fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
     }
 
+    /// Where a confined build script's library `file` lies in the loader's search lists `vars`
+    /// (split at `seps`, as the loader reads them), the working folder aside: (the first absolute
+    /// entry's file, whether an entry that leads to the working folder, empty, `.` or relative,
+    /// holds it). The loader's own search of the bare name would take the latter.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub fn search_outside_cwd(file: &str, vars: &[&str], seps: &[char]) -> (Option<String>, bool) {
+        let mut in_cwd = false;
+        for var in vars {
+            let Some(list) = std::env::var_os(var) else { continue };
+            for entry in list.to_string_lossy().split(seps) {
+                if entry.starts_with('/') {
+                    let candidate = Path::new(entry).join(file);
+                    if candidate.is_file() {
+                        return (Some(candidate.to_string_lossy().into_owned()), in_cwd);
+                    }
+                } else if Path::new(if entry.is_empty() { "." } else { entry }).join(file).exists() {
+                    in_cwd = true;
+                }
+            }
+        }
+        (None, in_cwd)
+    }
+
     /// The library's handle, or the loader's diagnostic.
     pub fn load_path(path: &str, flags: i32) -> Result<usize, String> {
         let path = std::ffi::CString::new(path).map_err(|e| e.to_string())?;
@@ -407,14 +430,17 @@ mod unix {
         dlsym(handle, name)
     }
 
-    /// exit(): the program's atexit handlers, then the end every process takes
-    /// (`makepad_core_util::process_end::end`, a native app's too): the host's own exit work, the
-    /// flushes, `_exit`. The C library's exit handlers do not run, so neither do those a native
-    /// library registered: a GPU driver's teardown at exit joined one of its threads that never
-    /// ended (NVIDIA's Vulkan driver at a test process's exit, about 1 in 150 runs and more under
-    /// GPU load, the process hung for good). The main thread's pthread key destructors do not run
-    /// either (the program's thread locals are left as they are, as in a rustc build).
+    /// exit(): the program's atexit handlers, then the end without the C library's exit handlers
+    /// (`makepad_core_util::process_end::end_without_c_handlers`): the host's own exit work, the
+    /// flushes, the profile runtime's write in an instrumented build, `_exit`. The C library's
+    /// exit handlers do not run, so neither do those a native library registered: a GPU driver's
+    /// teardown at exit joined one of its threads that never ended (NVIDIA's Vulkan driver at a
+    /// test process's exit, about 1 in 150 runs and more under GPU load, the process hung for
+    /// good). The main thread's pthread key destructors do not run either (the program's thread
+    /// locals are left as they are, as in a rustc build).
     pub fn exit(code: i32) -> ! {
+        // (a validated warm start that missed recorded code fails under RELAX_WARM_STRICT)
+        let code = relax_codegen::warm::strict_code(code);
         super::run_program_atexit();
         crate::selfexe::remove();
         // An embedded run (the Android host: its library handle is named) failed: exit() would run the
@@ -428,7 +454,7 @@ mod unix {
             super::EMBEDDED_FAILURE.store(code, std::sync::atomic::Ordering::Release);
             loop { std::thread::park(); }
         }
-        makepad_core_util::process_end::end(code)
+        makepad_core_util::process_end::end_without_c_handlers(code)
     }
 
     pub fn last_error() -> i32 {
@@ -537,6 +563,27 @@ mod imp {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.so\0", name) };
         // RTLD_NOW | RTLD_GLOBAL
         unsafe { !dlopen(path.as_ptr(), 2 | 0x100).is_null() }
+    }
+
+    /// A library a confined build script named (`lib<name>.so`, a plain name: relax-front
+    /// unitgraph.rs `confined_output_refusals`) as the loader finds it with the person's
+    /// environment, but never in the working folder: an LD_LIBRARY_PATH entry that is empty, `.`
+    /// or relative is passed over. An absolute entry holding it loads by its path; else the bare
+    /// name goes to the loader when no passed-over entry holds the file (its own search finds none
+    /// there), and otherwise the system's folders are searched by path.
+    pub fn load_library_outside_cwd(name: &str, framework: bool) -> bool {
+        if framework {
+            // (an absolute path)
+            return load_library(name, framework);
+        }
+        let file = format!("lib{}.so", name);
+        let open = |path: &str| unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() };
+        match super::unix::search_outside_cwd(&file, &["LD_LIBRARY_PATH"], &[':', ';']) {
+            (Some(path), _) => open(&path),
+            (None, false) => load_library(name, false),
+            (None, true) => ["/lib", "/usr/lib", "/lib64", "/usr/lib64", "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
+                .iter().map(|d| format!("{}/{}", d, file)).find(|p| std::path::Path::new(p).is_file()).is_some_and(|p| open(&p)),
+        }
     }
 
     /// glibc's lib<name>.so is often a linker script (libm.so): the versioned file instead.
@@ -721,6 +768,22 @@ mod imp {
         }
     }
 
+    /// A confined build script's library (the Linux one's rule): an absolute LD_LIBRARY_PATH entry
+    /// holding it loads by its path; a bare name goes to the loader only when no entry that leads
+    /// to the working folder holds the file (bionic keeps `.` as that folder); else it is not
+    /// loaded.
+    pub fn load_library_outside_cwd(name: &str, framework: bool) -> bool {
+        if framework {
+            return load_library(name, framework);
+        }
+        let file = format!("lib{}.so", name);
+        match super::unix::search_outside_cwd(&file, &["LD_LIBRARY_PATH"], &[':']) {
+            (Some(path), _) => unsafe { !dlopen(format!("{}\0", path).as_ptr(), 2 | 0x100).is_null() },
+            (None, false) => load_library(name, false),
+            (None, true) => false,
+        }
+    }
+
     /// Bionic public libraries use plain sonames; never scan desktop library paths.
     pub fn load_library_versioned(_name: &str) -> bool { false }
 
@@ -770,6 +833,41 @@ mod imp {
         let path = if framework { format!("/System/Library/Frameworks/{}.framework/{}\0", name, name) } else { format!("lib{}.dylib\0", name) };
         // RTLD_NOW | RTLD_GLOBAL
         unsafe { !dlopen(path.as_ptr(), 2 | 8).is_null() }
+    }
+
+    /// A library a confined build script named (`lib<name>.dylib`, a plain name: relax-front
+    /// unitgraph.rs `confined_output_refusals`), resolved to an absolute path before the dlopen, so
+    /// the working folder never applies (dlopen of a bare name tries it, between the person's
+    /// DYLD_LIBRARY_PATH and the fallback folders): the absolute entries of LD_LIBRARY_PATH and
+    /// DYLD_LIBRARY_PATH, then of DYLD_FALLBACK_LIBRARY_PATH (unset: dyld's /usr/local/lib and
+    /// /usr/lib); the first that holds it, as a file or in the shared cache, loads. A framework's
+    /// path is absolute already.
+    pub fn load_library_outside_cwd(name: &str, framework: bool) -> bool {
+        if framework {
+            return load_library(name, framework);
+        }
+        extern "C" {
+            fn _dyld_shared_cache_contains_path(path: *const std::ffi::c_char) -> bool;
+        }
+        let absolute = |var: &str| -> Vec<String> {
+            std::env::var(var).map(|v| v.split(':').filter(|e| e.starts_with('/')).map(str::to_string).collect()).unwrap_or_default()
+        };
+        let mut dirs = absolute("LD_LIBRARY_PATH");
+        dirs.extend(absolute("DYLD_LIBRARY_PATH"));
+        if std::env::var_os("DYLD_FALLBACK_LIBRARY_PATH").is_some() {
+            dirs.extend(absolute("DYLD_FALLBACK_LIBRARY_PATH"));
+        } else {
+            dirs.extend(["/usr/local/lib".to_string(), "/usr/lib".to_string()]);
+        }
+        for d in dirs {
+            let path = format!("{}/lib{}.dylib\0", d, name);
+            let held = std::path::Path::new(&path[..path.len() - 1]).is_file() || unsafe { _dyld_shared_cache_contains_path(path.as_ptr().cast()) };
+            // RTLD_NOW | RTLD_GLOBAL
+            if held && unsafe { !dlopen(path.as_ptr(), 2 | 8).is_null() } {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn load_library_versioned(_name: &str) -> bool {
@@ -845,20 +943,51 @@ mod imp {
         std::ptr::null_mut()
     }
 
-    /// --allow-c's native library is not supported on Windows.
-    pub fn load_path(_path: &str) -> Result<usize, String> {
-        Err("--allow-c native libraries are not supported on Windows".into())
+    /// The executable's image base, its DOS header: what a PE linker's `__ImageBase` is in a
+    /// program linked into the executable (jit.rs loader_symbol).
+    pub fn exe_image_base() -> Option<usize> {
+        let mut module: HANDLE = 0;
+        // UNCHANGED_REFCOUNT, and no name: the process's executable
+        (unsafe { GetModuleHandleExW(0x2, std::ptr::null(), &mut module) } != 0 && module != 0).then_some(module as usize)
     }
 
-    pub fn symbol_in(_handle: usize, _name: &str) -> usize {
-        0
+    /// A library by its path (--allow-c's native library, a DLL), as dlopen loads one: the
+    /// DLLs it imports are searched in its own folder first (LOAD_WITH_ALTERED_SEARCH_PATH), as
+    /// an executable's are beside it. The error is the system's message. (Before, --allow-c
+    /// stopped here: "not supported on Windows", relax issue 165.)
+    pub fn load_path(path: &str) -> Result<usize, String> {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(Some(0)).collect();
+        let module = unsafe { LoadLibraryExW(wide.as_ptr(), 0, 0x8) };
+        if module != 0 {
+            return Ok(module as usize);
+        }
+        Err(std::io::Error::from_raw_os_error(unsafe { GetLastError() } as i32).to_string())
     }
 
-    /// load_path takes no handle here.
-    pub fn unload(_handle: usize) {}
+    /// The export `name` of the library `handle` (load_path), 0 without one.
+    pub fn symbol_in(handle: usize, name: &str) -> usize {
+        let Ok(name) = std::ffi::CString::new(name) else { return 0 };
+        unsafe { GetProcAddress(handle as HANDLE, name.as_ptr().cast()) as usize }
+    }
 
-    pub fn image_of(_addr: usize) -> Option<(usize, std::path::PathBuf)> {
-        None
+    pub fn unload(handle: usize) {
+        unsafe {
+            FreeLibrary(handle as HANDLE);
+        }
+    }
+
+    /// The image `addr` is in: its base and its file.
+    pub fn image_of(addr: usize) -> Option<(usize, std::path::PathBuf)> {
+        use std::os::windows::ffi::OsStringExt;
+        let mut module: HANDLE = 0;
+        // FROM_ADDRESS | UNCHANGED_REFCOUNT
+        if unsafe { GetModuleHandleExW(0x4 | 0x2, addr as *const u16, &mut module) } == 0 || module == 0 {
+            return None;
+        }
+        let mut name = vec![0u16; 32768];
+        let n = unsafe { GetModuleFileNameW(module, name.as_mut_ptr(), name.len() as u32) } as usize;
+        (n > 0 && n < name.len()).then(|| (module as usize, std::path::PathBuf::from(std::ffi::OsString::from_wide(&name[..n]))))
     }
 
     /// `#[link(name = "user32")]` / raw-dylib `name = "DINPUT8"`: the DLL of that name.
@@ -871,6 +1000,12 @@ mod imp {
         false
     }
 
+    /// A confined build script's library: Windows confines no build script (its run is refused,
+    /// relax KNOWN_GAPS), so none is named; loaded as any other.
+    pub fn load_library_outside_cwd(name: &str, framework: bool) -> bool {
+        load_library(name, framework)
+    }
+
     pub unsafe fn lookup(handle: *mut u8, name: *const u8) -> *mut u8 {
         GetProcAddress(handle as HANDLE, name)
     }
@@ -879,14 +1014,16 @@ mod imp {
     /// run's exit work, the control endpoint's cleanup). A run that returned from main or quit
     /// through its app domain did neither: no final cache, and a discovery file left behind, which
     /// the hub reads as a crash (11-04). Then the process ends without ExitProcess
-    /// (`makepad_core_util::process_end::end`), which would run the fiber-local destructors of the
-    /// exiting thread: the program's thread locals (FlsAlloc callbacks in JIT code) would run after
-    /// Relax dropped the unit, and unix's exit() does not run the main thread's key destructors
-    /// either.
+    /// (`makepad_core_util::process_end::end_without_c_handlers`), which would run the fiber-local
+    /// destructors of the exiting thread: the program's thread locals (FlsAlloc callbacks in JIT
+    /// code) would run after Relax dropped the unit, and unix's exit() does not run the main
+    /// thread's key destructors either.
     pub fn exit(code: i32) -> ! {
+        // (a validated warm start that missed recorded code fails under RELAX_WARM_STRICT)
+        let code = relax_codegen::warm::strict_code(code);
         super::run_program_atexit();
         crate::selfexe::remove();
-        makepad_core_util::process_end::end(code)
+        makepad_core_util::process_end::end_without_c_handlers(code)
     }
 
     pub fn last_error() -> i32 {
@@ -1153,4 +1290,24 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&EMBEDDED_FAILURE, std::sync::atomic::AtomicI32::new(0));
     reset(&PROGRAM_ATEXIT, std::sync::Mutex::new(Vec::new()));
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// A library loaded by its path answers its exports and the image they are in, and one that
+    /// is not there says why (--allow-c's native library, relax issue 165).
+    #[test]
+    fn a_library_loaded_by_its_path_answers_its_exports_and_its_image() {
+        let system = format!("{}\\System32", std::env::var("SystemRoot").unwrap());
+        let handle = super::load_path(&format!("{system}\\version.dll")).unwrap();
+        let export = super::symbol_in(handle, "GetFileVersionInfoSizeW");
+        assert_ne!(export, 0, "the library's export");
+        assert_eq!(super::symbol_in(handle, "relax_no_such_export"), 0, "a name it does not export");
+        let (base, file) = super::image_of(export).unwrap();
+        assert_eq!(base, handle, "the export's image is the library");
+        assert!(file.to_string_lossy().to_ascii_lowercase().ends_with("\\version.dll"), "the image's file: {}", file.display());
+        super::unload(handle);
+        let missing = super::load_path(&format!("{system}\\relax-no-such-library.dll")).unwrap_err();
+        assert!(missing.contains("os error 126"), "the system's reason: {missing}");
+    }
 }

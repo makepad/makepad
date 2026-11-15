@@ -106,9 +106,15 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
     let files: std::collections::BTreeSet<u32> = prog.mods.iter().filter(|m| m.krate == krate).map(|m| m.file).collect();
     for &f in &files {
         let pf = &prog.files[f as usize];
+        // every fn body, those the load skipped too: a `makepad run` parses a body a later parse
+        // can do alone on its first need, into the part that continues the file's tree. All of
+        // them are parsed here, before any of the module's code can run, and read with the tree.
+        let _ = pf.part(&prog.crates[krate as usize].cfg);
         let ast = &pf.ast;
-        let tok = |i: u32| -> &[u8] { pf.toks.get(i as usize).map_or(&[][..], |t| &pf.src[t.lo as usize..t.hi as usize]) };
-        for it in &ast.items {
+        let trees: Vec<&crate::ast::Ast> = std::iter::successors(Some(ast), |t| t.part.get().map(|p| &**p)).collect();
+        // (the accessors of `ast` read the part's ids too)
+        let tok = |i: u32| -> &[u8] { let t = pf.tok(i); pf.bytes(t.lo, t.hi) };
+        for it in trees.iter().flat_map(|t| &t.items) {
             for a in ast.list(it.attrs) {
                 if a.toks.hi > a.toks.lo {
                     let n = tok(a.toks.lo);
@@ -132,25 +138,44 @@ pub(crate) fn sandbox_check(prog: &crate::program::Program, tcx: &crate::tcx::Tc
                 out.push(format!("{}: {} is not allowed in a sandboxed module -- use safe code and the host's API", at(f, it.lo), b));
             }
         }
-        for e in &ast.exprs {
+        // what a builtin derive wrote is the front's own text, not the module's: the expressions
+        // parsed for its impl and that impl's items, their skipped bodies too (an enum's PartialEq,
+        // PartialOrd, Ord and Hash read the discriminant in an `unsafe` block)
+        let mut derived: Vec<(u32, u32)> = Vec::new();
+        for it in trees.iter().flat_map(|t| &t.items) {
+            if let ItemKind::Impl(r) = &it.kind {
+                if ast.row(*r).builtin_derive {
+                    derived.push((it.ranges[0], it.ranges[1]));
+                    for m in ast.list(ast.row(*r).items) {
+                        let mi = ast.item(*m);
+                        derived.push((mi.ranges[0], mi.ranges[1]));
+                        if let Some(Ok((_, body))) = pf.lazy_body(*m, &prog.crates[krate as usize].cfg) {
+                            derived.push((body[0], body[1]));
+                        }
+                    }
+                }
+            }
+        }
+        // (a part's ids continue the trees before it)
+        for (id, e) in trees.iter().flat_map(|t| t.exprs.iter().enumerate().map(move |(k, e)| (t.base[0] + k as u32, e))) {
             match &e.kind {
+                ExprKind::Unsafe(_) if derived.iter().any(|r| r.0 <= id && id < r.1) => {}
                 ExprKind::Unsafe(_) => out.push(format!("{}: `unsafe` is not allowed in a sandboxed module -- use safe code and the host's API", at(f, e.lo))),
-                ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_args.get(ast.row(*m).args as usize).map_or(false, |a| a.asm.is_some()) => {
+                ExprKind::Mac(m) if ast.row(*m).args != crate::ast::NO_MAC_ARGS && ast.mac_arg(ast.row(*m).args).asm.is_some() => {
                     out.push(format!("{}: `asm!` is not allowed in a sandboxed module", at(f, e.lo)))
                 }
                 _ => {}
             }
         }
-        for t in &ast.tys {
-            if let Ty::Ptr(..) = t {
-                out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
-                break;
-            }
+        if trees.iter().flat_map(|t| &t.tys).any(|t| matches!(t, Ty::Ptr(..))) {
+            out.push(format!("{}: raw pointers are not allowed in a sandboxed module -- use references", at(f, 0)));
         }
-        // built-in macros that read the host's files or environment (expanded before the tree)
-        for (i, t) in pf.toks.iter().enumerate() {
-            let w = &pf.src[t.lo as usize..t.hi as usize];
-            if matches!(w, b"include_bytes" | b"include_str" | b"include" | b"env" | b"option_env" | b"asm" | b"global_asm") && tok(i as u32 + 1) == b"!" {
+        // built-in macros that read the host's files or environment (expanded before the tree):
+        // the file's tokens with its expansions, then those of its lazily parsed bodies
+        let part_toks = pf.parts().flat_map(|p| p.toks.iter().enumerate().map(move |(j, t)| (p.tok_base + j as u32, t)));
+        for (i, t) in pf.toks.iter().enumerate().map(|(i, t)| (i as u32, t)).chain(part_toks) {
+            let w = pf.bytes(t.lo, t.hi);
+            if matches!(w, b"include_bytes" | b"include_str" | b"include" | b"env" | b"option_env" | b"asm" | b"global_asm") && tok(i + 1) == b"!" {
                 out.push(format!("{}: `{}!` is not allowed in a sandboxed module", at(f, t.lo), String::from_utf8_lossy(w)));
             }
         }
@@ -247,7 +272,7 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
         crate::run::preserve_collected_boot(u);
         u.tcx.collect_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // parsed on this thread (no parse workers for one small crate)
-        crate::preload::SINGLE.with(|s| s.set(true));
+        let single_before = crate::preload::SINGLE.with(|s| s.replace(true));
         let mut failed = None;
         for (done, nc) in new.iter().enumerate() {
             if domain.is_some() { crate::run_state::progress(domain, crate::run_state::Phase::Parse,
@@ -275,7 +300,8 @@ pub(crate) unsafe fn add_crates(up: *mut Unit, new: &[NewCrate], tolerant: bool,
                 }
             }
         }
-        crate::preload::SINGLE.with(|s| s.set(false));
+        // as it was: a world build's single-thread load may hold it (pmhost SingleLoad)
+        crate::preload::SINGLE.with(|s| s.set(single_before));
         marks.push(("parse", std::time::Instant::now()));
         if let Some(e) = failed {
             u.prog.reclaim_caches();
@@ -439,7 +465,7 @@ fn root_fns(u: &Unit, defs: &[DefId]) -> Vec<DefId> {
     defs.iter().copied().filter(|d| matches!(u.prog.def(*d).kind, DefKind::Fn | DefKind::AssocFn) && u.tcx.fn_sig(&u.prog, *d).map_or(false, |s| s.n_generics == 0)).collect()
 }
 
-/// Loads a trusted module (RELAX_MODULES_TRUSTED=1; on the owner thread): it runs as host code.
+/// Loads a trusted module (`--allow-host-modules`; on the owner thread): it runs as host code.
 unsafe fn load(up: *mut Unit, name: &str, path: &str, deps: &[String], sandbox: bool) -> Result<(u32, u32, Vec<DefId>), Vec<String>> {
     let (krate, root_file, defs) = front(up, name, path, deps, sandbox)?;
     note_module_crate(krate);
@@ -811,7 +837,8 @@ fn wrapper_source(u: &Unit, krate: u32, modname: &str, idx: u32, defs: &[DefId])
         } else {
             let n = ty_src(u, rt);
             let boxed = match u.tcx.tys.kind(rt) {
-                TyKind::Adt(d, a, _) if u.tcx.adts.get(d).is_some_and(|adt| adt.is_box()) && !a.is_empty() => match u.tcx.tys.kind(u.tcx.tys.list(*a)[0]) {
+                // (a Box in the global allocator: the host frees it as one)
+                TyKind::Adt(d, a, _) if u.tcx.adts.get(d).is_some_and(|adt| adt.is_box()) && !a.is_empty() && u.tcx.tys.list(*a)[1..].iter().all(|x| crate::provided::is_global_alloc(&u.tcx, *x)) => match u.tcx.tys.kind(u.tcx.tys.list(*a)[0]) {
                     TyKind::Adt(d, _, _) => u.prog.def(*d).krate == krate,
                     _ => false,
                 },
@@ -853,7 +880,7 @@ unsafe fn load_sandboxed(up: *mut Unit, idx: u32, name: &str, path: &str, deps: 
     let sess = &session;
     let runtime = &sess.runtime;
     let options = &sess.options;
-    // RELAX_SANDBOX_NOCHECK=1 (tests of the memory confinement alone): no compile-time refusal
+    // --allow-unchecked-modules (tests of the memory confinement alone): no compile-time refusal
     let check = !options.sandbox_nocheck;
     let t0 = std::time::Instant::now();
     let (krate, root_file, mut defs) = front(up, name, path, deps, check)?;
@@ -1071,7 +1098,7 @@ fn load_src_inner(name: *const u8, nlen: usize, path: *const u8, plen: usize, sr
     }
     let session = unsafe { crate::jit::unit_session(up) };
     let options = &session.options;
-    // RELAX_MODULES_TRUSTED=1: a trusted module (host code, no sandbox; diagnosis only)
+    // --allow-host-modules: a trusted module (host code, no sandbox; diagnosis only)
     let trusted = options.modules_trusted;
     let fix = |t: String| -> String {
         match &temp {

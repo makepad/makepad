@@ -568,7 +568,7 @@ impl<'a> Lcx<'a> {
             field_moved: HashMap::default(),
             want_mut: false,
             const_init: false,
-            // the crate's profile (cfg(overflow_checks): `makepad test`'s, run.rs TEST_PROFILE);
+            // the crate's profile (cfg(overflow_checks): `makepad test`'s, unitgraph.rs TEST_PROFILE);
             // a run's crates, and Relax's std, build without checks
             overflow_checks: u.prog.file_crate.get(b.file as usize).and_then(|&k| u.prog.crates.get(k as usize)).is_some_and(|c| c.cfg.holds("overflow_checks")),
             foreign: vec![false; n],
@@ -3858,7 +3858,8 @@ impl<'a> Lcx<'a> {
     /// owned here (a local, a by-value capture this body owns, a temporary) and may be moved.
     fn illegal_move(&mut self, e: ExprId) -> Option<String> {
         let ast = self.ast();
-        let ts = |l: &Self, t: TyId| crate::typeck::ty_to_string(false, &l.u.prog, &l.u.tcx, t);
+        // as rustc's diagnostics print a type (`Vec<String>` for `Vec<String, Global>`)
+        let ts = |l: &Self, t: TyId| crate::typeck::ty_to_diag_string(&l.u.prog, &l.u.tcx, t);
         match &ast.expr(e).kind {
             ExprKind::Paren(x) => self.illegal_move(*x),
             ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
@@ -3911,6 +3912,133 @@ impl<'a> Lcx<'a> {
             }
             _ => None,
         }
+    }
+
+    /// A Box's type arguments: T, then its allocator.
+    fn box_args(&self, t: TyId) -> Vec<TyId> {
+        match self.kind(t) {
+            TyKind::Adt(_, a, _) => self.u.tcx.tys.list(a).to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The leaves of the pointer a value `v` of type `t` (a reference, a raw pointer or a Box) is to
+    /// its `pointee`: the address, and the metadata when the pointee is unsized. A Box's allocator
+    /// follows its pointer (in its leaves, or in memory when it is too big for registers).
+    fn pointer_leaves(&mut self, v: Val, t: TyId, pointee: TyId) -> Vec<VReg> {
+        let n = if self.unsized_ty(pointee) { 2 } else { 1 };
+        let mut p = match v {
+            // (its pointer is its first field)
+            Val::M(base, off) if self.box_inner(t).is_some() && self.layout(t).leaves.is_none() => {
+                let at = off + self.layout(t).fields.first().copied().unwrap_or(0) as i32;
+                let ft = self.struct_field_tys(t).first().copied().unwrap_or(t);
+                let v = self.load_val(base, at, ft);
+                self.to_leaves(v, ft)
+            }
+            v => self.to_leaves(v, t),
+        };
+        p.truncate(n);
+        p
+    }
+
+    /// The field types of a struct `t` (its only variant), in declaration order.
+    fn struct_field_tys(&self, t: TyId) -> Vec<TyId> {
+        let TyKind::Adt(d, a, _) = self.kind(t) else { return Vec::new() };
+        let n = self.u.tcx.adts.get(&d).and_then(|x| x.variants.first()).map_or(0, |v| v.fields.len());
+        let env = crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog);
+        (0..n).map(|f| self.u.tcx.field_ty(&self.u.prog, env, d, 0, f as u32, self.u.tcx.tys.list(a))).collect()
+    }
+
+    /// The arguments of `box_free_after_move::<T, A>(ptr, alloc)` for the Box `b` of type `t`
+    /// (its fields: the pointer, the marker, the allocator), passed as a call passes them: a
+    /// Box in registers is its leaves; one in memory (an allocator too big for registers) its
+    /// pointer's leaves, then its allocator's or the address of a private copy of it. The first
+    /// is the pointer to the contents.
+    fn box_free_args(&mut self, b: Val, t: TyId) -> Vec<VReg> {
+        if self.layout(t).leaves.is_some() {
+            return self.to_leaves(b, t);
+        }
+        let Val::M(base, off) = b else { return Vec::new() };
+        let fields = &self.layout(t).fields;
+        let mut args = Vec::new();
+        for (i, ft) in self.struct_field_tys(t).into_iter().enumerate() {
+            let at = off + fields[i] as i32;
+            let fl = self.layout(ft);
+            if fl.leaves.is_some() {
+                let v = self.load_val(base, at, ft);
+                args.extend(self.to_leaves(v, ft));
+            } else {
+                let tmp = self.new_arg_slot_for(ft);
+                let src = self.addr_add(base, at);
+                if fl.size > 0 {
+                    self.emit(Inst::Copy(tmp, src, fl.size));
+                }
+                if let Some(c) = self.coro.as_mut() {
+                    c.call_private.insert(tmp);
+                }
+                args.push(tmp);
+            }
+        }
+        args
+    }
+
+    /// Where the pointer an unsizing coercion from `src` to `dst` changes lies in a struct
+    /// (rustc coerce_unsized: the one field whose type changes is coerced, the others are kept,
+    /// as a Box's allocator): the field, the leaves of the fields before it, and the pointer's
+    /// index among the field's own leaves. None when `src` is the pointer itself (a reference,
+    /// a raw pointer).
+    fn coerced_field(&mut self, src: TyId, dst: TyId) -> Option<(usize, usize, usize)> {
+        let (TyKind::Adt(d, ..), TyKind::Adt(e, ..)) = (self.kind(src), self.kind(dst)) else { return None };
+        if d != e {
+            return None;
+        }
+        let (fs, gs) = (self.struct_field_tys(src), self.struct_field_tys(dst));
+        let mut before = 0;
+        for (i, (a, b)) in fs.into_iter().zip(gs).enumerate() {
+            let l = self.layout(a);
+            if a != b && l.size > 0 {
+                let inner = self.coerced_field(a, b).map_or(0, |(_, x, y)| x + y);
+                return Some((i, before, inner));
+            }
+            before += l.leaves.as_ref().map_or(0, |v| v.len());
+        }
+        None
+    }
+
+    /// `v` of `src` as the pointer type `dst` it unsizes to: `edit` turns the leaves of the
+    /// coerced pointer (at the index it is given) into the target's ([T; N] -> [T] adds the
+    /// length, T -> dyn the vtable, an upcast replaces the vtable); a struct's other fields are
+    /// kept (a Box's allocator). None when `edit` finds no such pointer.
+    fn coerce_ptr_leaves(&mut self, v: Val, src: TyId, dst: TyId, edit: &mut dyn FnMut(&mut Self, &mut Vec<VReg>, usize) -> bool) -> Option<Val> {
+        let at = self.coerced_field(src, dst);
+        let in_regs = self.layout(src).leaves.is_some();
+        let Some((f, _, inner)) = at.filter(|_| !in_regs) else {
+            let mut p = self.to_leaves(v, src);
+            let i = at.map_or(0, |(_, before, inner)| before + inner);
+            return edit(self, &mut p, i).then_some(Val::L(p));
+        };
+        // a struct in memory (an allocator too big for registers): field by field
+        let Val::M(base, off) = v else { return None };
+        let (sf, df) = (&self.layout(src).fields, &self.layout(dst).fields);
+        let out = self.new_slot_for(dst);
+        for (i, (a, b)) in self.struct_field_tys(src).into_iter().zip(self.struct_field_tys(dst)).enumerate() {
+            if i == f {
+                let fv = self.load_val(base, off + sf[i] as i32, a);
+                let mut p = self.to_leaves(fv, a);
+                if !edit(self, &mut p, inner) {
+                    return None;
+                }
+                self.store_val(out, df[i] as i32, b, Val::L(p));
+            } else {
+                let size = self.layout(a).size;
+                if size > 0 {
+                    let s = self.addr_add(base, off + sf[i] as i32);
+                    let d = self.addr_add(out, df[i] as i32);
+                    self.emit(Inst::Copy(d, s, size));
+                }
+            }
+        }
+        Some(Val::M(out, 0))
     }
 
     /// T of `Box<T>`; rustc_middle/src/ty/adt.rs:374 identifies the owning ADT by flag.
@@ -4042,14 +4170,17 @@ impl<'a> Lcx<'a> {
                 // the allocation without dropping them again
                 let mut sub = prefix.to_vec();
                 sub.push((BOX_STEP, 0));
-                // Read the Box's complete pointer layout, including metadata when present.
+                // Read the Box's complete pointer layout, including metadata when present, and
+                // its allocator.
                 let pointer = self.load_val(addr, 0, t);
-                let pointer = self.to_leaves(pointer, t);
-                let ptr = pointer[0];
-                self.drop_tree(entries, ptr, inner, &sub);
-                if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
-                    let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
-                    self.tree_leaf_call_may(Callee::Fn(id), pointer, false);
+                let pointer = self.box_free_args(pointer, t);
+                if let Some(&ptr) = pointer.first() {
+                    self.drop_tree(entries, ptr, inner, &sub);
+                    if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
+                        // all the Box's arguments (its allocator's too)
+                        let id = self.u.fn_id(FnKey::Inst(free, self.box_args(t)));
+                        self.tree_leaf_call_may(Callee::Fn(id), pointer, false);
+                    }
                 }
                 if let Some(j) = skip {
                     self.goto(j);
@@ -5964,6 +6095,8 @@ impl<'a> Lcx<'a> {
             ExprKind::Array(v) | ExprKind::Tuple(v) => ast.list(v).iter().all(|x| self.value_unqualified(*x)),
             // (qualifs.rs in_rvalue: a repeat is qualified by its operand)
             ExprKind::Repeat(x, _) => self.value_unqualified(x),
+            // (qualifs.rs in_place: a field's type may hold a qualif, then its base's value decides)
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => self.value_unqualified(x),
             ExprKind::Path(_) => match self.b.res.get(&e.0).copied() {
                 Some(Res::Def(d)) => match self.u.prog.def(d).kind {
                     DefKind::Const | DefKind::AssocConst => self.const_promotable(e),
@@ -6057,6 +6190,15 @@ impl<'a> Lcx<'a> {
             ExprKind::Closure(_) => matches!(self.kind_ref(t), TyKind::Closure(_, _, crate::types::ClosureArgs { tupled_upvars_ty: captures, .. })
                 if matches!(self.kind_ref(*captures), TyKind::Tuple(ts) if ts.is_empty())),
             ExprKind::AddrOf(false, false, x) => self.promotable(x),
+            // rustc_mir_transform/src/promote_consts.rs: Validator::validate_place: a field of a
+            // promotable temporary (`&[C.id, 6]` reads `C`'s temporary), not of a union; a Deref
+            // projection (an autoderef) is not promoted
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                let bt = self.body_ty(x);
+                self.b.field_idx.get(&e.0).is_some_and(|&(d, _)| d == 0)
+                    && !matches!(self.kind(bt), TyKind::Adt(d, ..) if self.u.tcx.adts.get(&d).is_some_and(|a| a.is_union()))
+                    && self.promotable(x)
+            }
             ExprKind::Call(f, args) => {
                 let ctor = matches!(self.b.res.get(&strip_paren(ast, f).0), Some(Res::Def(d)) if matches!(self.u.prog.def(*d).kind, DefKind::Variant | DefKind::Struct));
                 // rustc_mir_transform/src/promote_consts.rs: Validator::validate_call.
@@ -6757,24 +6899,29 @@ impl<'a> Lcx<'a> {
                 // a block tail passes its own type as the target: the length is the array's in
                 // the source (the only array an unsizing can come from)
                 let len = if len == 0 && target == src { self.array_len_in(src, 0) } else { len };
-                let p = self.to_leaves(v, src);
-                if p.len() != 1 {
-                    self.err(self.pos, "unsizing `[T; N]` to `[T]` needs a single-pointer value".to_string());
-                    return self.unit();
+                // the thin pointer gets its length; a smart pointer's other fields stay
+                let mut add_len = |me: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i >= p.len() {
+                        return false;
+                    }
+                    let l = me.iconst(len as i64);
+                    p.insert(i + 1, l);
+                    true
+                };
+                match self.coerce_ptr_leaves(v, src, target, &mut add_len) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "unsizing `[T; N]` to `[T]` needs a pointer value".to_string());
+                        self.unit()
+                    }
                 }
-                let l = self.iconst(len as i64);
-                Val::L(vec![p[0], l])
             }
             Some(Coerce::ToDyn(src, dy)) => {
                 let src = self.monomorphize(src);
                 let dy = self.monomorphize(dy);
-                // thin pointer (alone in its wrapper) -> (data, vtable)
+                // thin pointer -> (data, vtable); a smart pointer's other fields stay (a Box's
+                // allocator)
                 let st = self.body_ty(e);
-                let p = self.to_leaves(v, st);
-                if p.len() != 1 {
-                    self.err(self.pos, "unsizing to `dyn` needs a single-pointer value".to_string());
-                    return self.unit();
-                }
                 let vt = self.f.vreg(Cls::I);
                 match self.u.vtable_shared(src, dy) {
                     Ok(Some(addr)) => {
@@ -6788,8 +6935,20 @@ impl<'a> Lcx<'a> {
                         return self.unit();
                     }
                 }
-                let _ = target;
-                Val::L(vec![p[0], vt])
+                let mut add_vt = |_: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i >= p.len() {
+                        return false;
+                    }
+                    p.insert(i + 1, vt);
+                    true
+                };
+                match self.coerce_ptr_leaves(v, st, target, &mut add_vt) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "unsizing to `dyn` needs a pointer value".to_string());
+                        self.unit()
+                    }
+                }
             }
             Some(Coerce::Upcast(sd, dd)) => {
                 let sd = self.monomorphize(sd);
@@ -6798,18 +6957,26 @@ impl<'a> Lcx<'a> {
                 // dropped) keeps its vtable (rustc codegen unsized_info): the value is unchanged,
                 // whatever holds the pointer (`Ref<'_, dyn Any>` passed on as `Ref<'_, T>`).
                 let Some(slot) = self.u.tcx.supertrait_vtable_slot(&self.u.prog, sd, dd) else { return v };
-                // (data, vtable of Sub) -> (data, Sub's stored vtable for Super)
+                // (data, vtable of Sub) -> (data, Sub's stored vtable for Super); a smart
+                // pointer's other fields stay (a Box's allocator)
                 let st = self.body_ty(e);
-                let p = self.to_leaves(v, st);
-                if p.len() != 2 {
-                    self.err(self.pos, "internal: trait object upcast of a value without a vtable -- Relax bug, report it".to_string());
-                    return self.unit();
+                let mut swap_vt = |me: &mut Self, p: &mut Vec<VReg>, i: usize| {
+                    if i + 1 >= p.len() {
+                        return false;
+                    }
+                    let vt = me.f.vreg(Cls::I);
+                    let pm = me.pmem();
+                    me.emit(Inst::Load(pm, vt, p[i + 1], (slot * me.pb() as usize) as i32));
+                    p[i + 1] = vt;
+                    true
+                };
+                match self.coerce_ptr_leaves(v, st, target, &mut swap_vt) {
+                    Some(v) => v,
+                    None => {
+                        self.err(self.pos, "internal: trait object upcast of a value without a vtable -- Relax bug, report it".to_string());
+                        self.unit()
+                    }
                 }
-                let vt = self.f.vreg(Cls::I);
-                let pm = self.pmem();
-                self.emit(Inst::Load(pm, vt, p[1], (slot * self.pb() as usize) as i32));
-                let _ = target;
-                Val::L(vec![p[0], vt])
             }
             Some(Coerce::DerefRef(n)) => {
                 let st = self.body_ty(e);
@@ -6980,10 +7147,11 @@ impl<'a> Lcx<'a> {
                     {
                         let inner = self.box_inner(xt).unwrap();
                         let b = self.lower_expr(*x);
-                        let b = self.to_leaves(b, xt);
-                        let v = self.read_place(&Place::Mem(b[0], 0), inner);
+                        let b = self.box_free_args(b, xt);
+                        let Some(&ptr) = b.first() else { return self.unit() };
+                        let v = self.read_place(&Place::Mem(ptr, 0), inner);
                         if let Some(free) = self.u.core_path(&["boxed", "box_free_after_move"]) {
-                            let id = self.u.fn_id(FnKey::Inst(free, vec![inner]));
+                            let id = self.u.fn_id(FnKey::Inst(free, self.box_args(xt)));
                             self.nounwind += 1;
                             self.emit(Inst::Call(Callee::Fn(id), b, Vec::new()));
                             self.nounwind -= 1;
@@ -8142,7 +8310,7 @@ impl<'a> Lcx<'a> {
                 let saved = std::mem::replace(&mut self.want_mut, false);
                 let p = self.lower_expr(*x);
                 self.want_mut = saved;
-                let p = self.to_leaves(p, xt);
+                let p = self.pointer_leaves(p, xt, t);
                 if self.unsized_ty(t) {
                     return (Place::Regs(p), t);
                 }
@@ -10845,8 +11013,12 @@ impl<'a> Lcx<'a> {
                 let once = matches!(self.u.tcx.lang_items.by_def.get(&selected.trait_def), Some(LangItem::FnOnce | LangItem::AsyncFnOnce));
                 let mutable = matches!(self.u.tcx.lang_items.by_def.get(&selected.trait_def), Some(LangItem::FnMut | LangItem::AsyncFnMut));
                 let (recv, recv_ty) = if once && selected.derefs == 0 { (self.lower_expr(f), ft) } else {
+                    // an FnMut callee is borrowed mutably: its overloaded derefs and indices are
+                    // `deref_mut` / `index_mut` (typeck place_op.rs made them so), a Fn one's stay shared
+                    let saved = std::mem::replace(&mut self.want_mut, mutable);
                     let (mut place, mut pt) = self.lower_place(f);
                     for k in 0..selected.derefs { (place, pt) = self.deref_place(e.0, k, place, pt); }
+                    self.want_mut = saved;
                     if once { (self.read_place(&place, pt), pt) } else {
                         let receiver = if self.unsized_ty(pt) {
                             match place { Place::Regs(regs) => Val::L(regs), _ => panic!("unsized callable metadata") }

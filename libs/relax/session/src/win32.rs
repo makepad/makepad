@@ -60,6 +60,8 @@ extern "system" {
     pub fn UnhandledExceptionFilter(ep: *mut ExceptionPointers) -> i32;
     // modules
     pub fn LoadLibraryA(name: *const u8) -> HANDLE;
+    pub fn LoadLibraryExW(name: *const u16, file: HANDLE, flags: u32) -> HANDLE;
+    pub fn FreeLibrary(module: HANDLE) -> i32;
     pub fn GetModuleHandleExW(flags: u32, name: *const u16, module: *mut HANDLE) -> i32;
     pub fn GetModuleFileNameW(module: HANDLE, name: *mut u16, size: u32) -> u32;
     // stdio (fault diagnostics)

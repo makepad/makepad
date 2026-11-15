@@ -368,15 +368,19 @@ impl Builder {
             }
             IS::Store { region, base, extent, off, val } => {
                 let region = *region;
-                // The words the store may write: its own, or its whole range with an offset.
-                let (lo, hi) = (*base, *base + if off.is_some() { *extent } else { 1 });
+                // The words the store may write: its own, or its whole range
+                // with an offset. In u64: a range ending past u32::MAX (an
+                // emit's word k of u32::MAX) must not wrap to a low end and
+                // read as a miss.
+                let lo = *base as u64;
+                let hi = lo + if off.is_some() { *extent as u64 } else { 1 };
                 for (map, _) in &mut self.cse {
                     map.retain(|k, _| match *k {
                         Key::Load(r, ..) if r != region => true,
                         // Two words past a host buffer's end clamp to the same word: any may alias.
                         Key::Load(Region::Buf(_), ..) => false,
                         // A load keeps its value while the store misses every word it may read.
-                        Key::Load(_, b, e, ..) => b + e <= lo || hi <= b,
+                        Key::Load(_, b, e, ..) => b as u64 + e as u64 <= lo || hi <= b as u64,
                         _ => true,
                     });
                 }
@@ -562,8 +566,9 @@ impl Builder {
         // A constant offset folds into the base.
         if let Some(o) = off {
             if let Some(c) = self.cst(o) {
+                // (Saturating: past u32::MAX is the last word, never a low one.)
                 let c = ir::clamp_off(c, extent);
-                return self.raw(ty, Op::Load { region, base: base + c, extent: 1, off: None }, None);
+                return self.raw(ty, Op::Load { region, base: base.saturating_add(c), extent: 1, off: None }, None);
             }
         }
         self.raw(ty, Op::Load { region, base, extent, off }, None)
@@ -572,7 +577,7 @@ impl Builder {
         if let Some(o) = off {
             if let Some(c) = self.cst(o) {
                 let c = ir::clamp_off(c, extent);
-                self.push(IS::Store { region, base: base + c, extent: 1, off: None, val });
+                self.push(IS::Store { region, base: base.saturating_add(c), extent: 1, off: None, val });
                 return;
             }
         }
@@ -4786,4 +4791,36 @@ pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError
         state_vars: l.state_vars,
         shared_init: l.shared_init,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store drops every value-numbered load of a word it may write, also
+    /// for ranges that end past u32::MAX: summed in u32 such a range wrapped
+    /// to a low end, read as a miss, and a later load reused the value from
+    /// before the store.
+    #[test]
+    fn a_store_drops_the_loads_it_may_write_at_the_top_of_the_range() {
+        let top = u32::MAX;
+        let mut b = Builder::new();
+        let x = b.ci(7);
+        let i = b.ci(0);
+        // A load whose range runs past the top, a store inside it.
+        let wide = Key::Load(Region::Frame, top - 4, 8, Some(i), Ty::I32);
+        // A store whose range runs past the top, a load inside it.
+        let word = Key::Load(Region::Frame, top - 1, 1, None, Ty::I32);
+        // A load of words the store misses keeps its value.
+        let below = Key::Load(Region::Frame, 0, 4, Some(i), Ty::I32);
+        for key in [wide, word, below] {
+            b.cse[0].0.insert(key, x);
+        }
+        b.push(IS::Store { region: Region::Frame, base: top - 2, extent: 1, off: None, val: x });
+        assert!(b.lookup(&wide).is_none(), "a store to word top-2 drops a load of top-4..top+4");
+        assert!(b.lookup(&word).is_some(), "a store to word top-2 keeps a load of word top-1");
+        b.push(IS::Store { region: Region::Frame, base: top - 2, extent: 8, off: Some(i), val: x });
+        assert!(b.lookup(&word).is_none(), "a store to top-2..top+6 drops a load of word top-1");
+        assert_eq!(b.lookup(&below), Some(x), "a store to top-2..top+6 keeps a load of words 0..4");
+    }
 }

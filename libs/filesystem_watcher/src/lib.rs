@@ -59,7 +59,14 @@
 //!   becomes `RescanRequired { reason: Overflow, missing }` for every root,
 //!   where `missing` is the wall-clock interval between the last successful
 //!   read and the overflow. Symlinked directories are never watched.
-//!   Delivery order is the kernel's order.
+//!   Delivery order is the kernel's order. When the kernel has no watches
+//!   left (`ENOSPC`, `fs.inotify.max_user_watches`) the folders without one
+//!   are polled instead: each poll first retries their watches, then diffs
+//!   each folder's entries (kind, size, modification time) into `Created`,
+//!   `Changed` and `Removed`, and a new subfolder is watched or polled in
+//!   turn. The interval is max(1 s, 20 × the last poll's duration); one log
+//!   line says when polling starts and one when every folder is watched
+//!   again.
 //! * **Windows** (`windows.rs`, `ReadDirectoryChangesW`): one synchronous
 //!   reader thread per root, recursive; a root that is a reparse point is
 //!   refused and `start` fails. `FILE_NOTIFY_INFORMATION` records map to

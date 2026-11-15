@@ -5,6 +5,8 @@
 //! them: none is left a call for want of a front made already. And O3 code a warm launch links
 //! from the disk cache that kept a callee as a call (incomplete: built before the callee could be
 //! inlined) is built again once it can be, as the build that stored it would have been.
+//! And a slot waiting for its O2 build leaves its O1 code in the disk cache: a run that ends
+//! before that build gives the next launch an entry to link.
 
 use super::*;
 
@@ -141,11 +143,12 @@ fn hot_fns_reach_o3() {
     });
     assert_eq!(ids.iter().map(|&id| run(id)).collect::<Vec<u32>>(), expected, "O3 code must compute what baseline code did");
     // an instance's promoted constants are one object, evaluated once by the owner for the slot's
-    // body: the callees' (table, pieces, f32::clamp, char::to_digit) whose bodies the O3 builds took
+    // body: the callees' (table, pieces, f32::clamp, char::methods::to_digit) whose bodies the O3
+    // builds took
     crate::owner::call(crate::owner::Class::Program, || {
         let epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
         let named: Vec<String> = u.front.body_consts.snapshot().keys().filter(|k| k.0 == epoch && !k.3).map(|k| u.fns[k.1 as usize].name.to_string()).collect();
-        for want in ["tier_stuck::table", "tier_stuck::pieces", "f32::clamp", "char::to_digit"] {
+        for want in ["tier_stuck::table", "tier_stuck::pieces", "f32::clamp", "char::methods::to_digit"] {
             assert!(named.iter().any(|n| n.ends_with(want)), "no promoted value evaluated for {}: {:?}", want, named);
         }
     });
@@ -242,7 +245,7 @@ fn an_opaque_types_own_methods_are_made_off_the_owner() {
     // the fixture's crate provided as the loader provides makepad-script: Handle an opaque handle
     // laid out as rustc does, no op listed
     unsafe extern "C" fn no_panic_text(_: *mut *const u8, _: *mut usize) {}
-    let fixture = crate::provided::ProvidedCrate { name: "opaque_front".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[] };
+    let fixture = crate::provided::ProvidedCrate { name: "opaque_front".into(), shims: Default::default(), types: Default::default(), layouts: Default::default(), per_side: Default::default(), last_panic: no_panic_text, source: 0, binding: 0, manifest: &[], table: Vec::new() };
     u.provided.push((krate, fixture));
     u.provided_types.insert(handle_d, 0);
     assert!(u.provided_rustc_layout(handle_d));
@@ -395,6 +398,100 @@ fn linked_incomplete_o3_is_built_again() {
     std::mem::forget(u);
 }
 
+const HINTED_SOURCE: &str = r#"
+pub fn fit(x: u32) -> u32 {
+    let len = |y: u32| y.wrapping_mul(3) ^ 5;
+    len(x)
+}
+fn main() {}
+"#;
+
+/// A closure follows its fn's level, and a fn whose baseline code keeps running is hinted O2
+/// (o2_base): the closure's first code is O1 and its O2 build is queued. That O1 code was left
+/// out of the disk cache (the O2 build was to be the entry), and the O2 worker, the lowest
+/// priority, rarely got to it before the run ended: the closure had no entry, and every warm
+/// launch missed and built it again, recording nothing (a text layouter's closure, each warm run
+/// of a widget bench). Each phase is one launch over the same cache; no worker runs, so the O2
+/// build never comes.
+#[test]
+fn a_closure_of_a_hinted_fn_is_linked_by_the_next_launch() {
+    const PHASE: &str = "RELAX_HINTED_CLOSURE_TEST";
+    const DIR: &str = "RELAX_HINTED_CLOSURE_TEST_DIR";
+    let Ok(phase) = std::env::var(PHASE) else {
+        let dir = std::env::temp_dir().join(format!("relax-hinted-closure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("input.rs"), HINTED_SOURCE).unwrap();
+        let mut said = String::new();
+        for phase in ["cold", "warm"] {
+            let output = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "jit::tier_stuck_tests::a_closure_of_a_hinted_fn_is_linked_by_the_next_launch", "--nocapture", "--test-threads=1"])
+                .env(PHASE, phase).env(DIR, &dir).env("RELAX_SPEC", "0"));
+            said += &format!("{phase}: {}\n{}\n", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "{said}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+        return;
+    };
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::path::PathBuf::from(std::env::var_os(DIR).unwrap());
+    std::env::set_var("RELAX_CACHE_DIR", dir.join("cache"));
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), dir.join("input.rs").to_str().unwrap(), "hinted_closure", false).unwrap();
+    let fit_d = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "fit").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    // (the queued O2 build stays queued: the run ends before it, as a short one does)
+    queue::stop_workers(std::time::Duration::from_secs(10));
+    // fit's lowering makes the closure's slot
+    let (fit, closure) = crate::owner::call(crate::owner::Class::Program, || {
+        let mut cache = crate::cache::Cache::open(&u, crate::cache::Mode::ReadOnly).unwrap();
+        cache.mode = crate::cache::Mode::On;
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        let fit = u.fn_id(FnKey::Inst(fit_d, Vec::new()));
+        unsafe { compile_fn(up, fit) }.unwrap();
+        (fit, (0..u.fns.len() as u32).find(|&id| matches!(u.fns[id as usize].key, FnKey::Closure(_, _, p) if p == fit)))
+    });
+    let closure = closure.expect("fit's closure has a slot");
+    if phase == "cold" {
+        let (marked, recorded) = crate::owner::call(crate::owner::Class::Program, || {
+            // fit's baseline code keeps running: its O2 build is queued, and it is hinted O2
+            assert!(unsafe { o2_base(up, fit) });
+            let marked = marked_hot(&u, closure);
+            let before = u.cache.as_ref().unwrap().stats.recorded;
+            // the closure's first call
+            let _ = unsafe { compile_slot_locked(up, closure, false) };
+            u.flush_cache_records();
+            let recorded = u.cache.as_ref().unwrap().stats.recorded - before;
+            let mut cache = u.cache.take().unwrap();
+            if let Some(spill) = cache.spill_take() {
+                assert!(spill.write().unwrap() > 0);
+            }
+            u.cache = Some(cache);
+            (marked, recorded)
+        });
+        assert!(marked, "the fixture: the closure follows fit's O2 hint");
+        assert_eq!(recorded, 1, "the closure's O1 code is its entry while its O2 build waits");
+    } else {
+        let (linked, misses, built) = crate::owner::call(crate::owner::Class::Program, || {
+            let (misses, built) = (u.cache.as_ref().unwrap().stats.misses, u.stats.compiled);
+            let linked = unsafe { ready_code_locked(up, closure) }.is_some();
+            (linked, u.cache.as_ref().unwrap().stats.misses - misses, u.stats.compiled - built)
+        });
+        assert_eq!((linked, misses, built), (true, 0, 0), "the next launch links the closure: (linked, misses, builds) on it");
+    }
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+}
+
 const TLS_SOURCE: &str = r#"
 use std::collections::HashMap;
 fn main() {
@@ -507,6 +604,99 @@ fn a_bailed_take_gives_back_a_full_bodys_normal_lowering() {
         assert!(matches!(u.front.lowered.lock().unwrap_or_else(|e| e.into_inner()).get(&id), Some(LoweredState::Ready(_))),
             "the bailed take kept the lowering for the full body's normal one: its next round needs the front made again");
     });
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A body checked ahead before the program's declarations were collected again (Tcx::collect_epoch
+/// moves: a crate a cold demand load added after the first frame, a module, an edit) is lowered from
+/// no more, and the check ahead skipped any key the map held: every later front of the slot failed
+/// "stale" for the rest of the run, and the O3 builds of its callers left it out (an app's input
+/// dispatch: hundreds of left-out lines). The stale body leaves the map and is checked again.
+#[test]
+fn a_front_checked_before_a_new_collection_is_made_again() {
+    isolated_test!(a_front_checked_before_a_new_collection_is_made_again);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-stale-front-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TAKE_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "stale_front", false).unwrap();
+    let twice = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "twice").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    enable_pipelining(&u.prog.session.options);
+    let id = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).fn_id(FnKey::Inst(twice, Vec::new())) });
+    let front = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).front.clone() });
+    assert!(prefront_slot(&front, id), "the first front of twice was not made off the owner");
+    let key = (twice, Vec::new());
+    assert!(front.ahead.contains_key(&key), "the first front left its checked body in the map");
+    // a build took the lowering; then the declarations are collected again
+    crate::owner::call(crate::owner::Class::Program, || {
+        front.lowered.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+        let _fw = front_write();
+        unsafe { (*up).tcx.collect_epoch.fetch_add(1, Ordering::SeqCst) };
+    });
+    assert!(prefront_slot(&front, id), "the front of twice was not made again after the new collection");
+    let epoch = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).tcx.collect_epoch.load(Ordering::SeqCst) });
+    assert_eq!(front.ahead.get(&key).map(|(e, _)| e), Some(epoch), "the map holds the body checked under the new collection");
+    // (process exit owns the runtime's teardown)
+    std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A patch moves the definitions of the file it edits to the file's new version, and a slot keeps
+/// the file it was named in. The take compared a lowering made ahead (its body's file) with the
+/// slot's own, so after a patch every front of a slot of that file was refused for the rest of the
+/// run: an O3 take that needed one bailed after its rounds (a hot fn of a replaced or streamed
+/// module never reached O3), and builds off the owner lowered it again on the owner. The take asks
+/// for the file the slot's body is in now.
+#[test]
+fn a_front_made_after_a_patch_of_its_file_is_taken() {
+    isolated_test!(a_front_made_after_a_patch_of_its_file_is_taken);
+    crate::borrowck::lazy::disable_gandalf();
+    if std::env::var_os("RELAX_STD").is_none() {
+        std::env::set_var("RELAX_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
+    }
+    let dir = std::env::temp_dir().join(format!("relax-patched-front-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("input.rs");
+    std::fs::write(&path, TAKE_SOURCE).unwrap();
+    let (prog, core, krate) = crate::load_with_std(&std::sync::Arc::new(crate::Session::default()), path.to_str().unwrap(), "patched_front", false).unwrap();
+    let twice = prog.defs.iter().enumerate().find_map(|(i, d)| {
+        let id = DefId(i as u32);
+        (d.krate == krate && d.kind == DefKind::Fn && prog.name(id) == "twice").then_some(id)
+    }).unwrap();
+    let mut tcx = Tcx::new();
+    tcx.collect(&prog);
+    assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+    let mut u = Unit::new(prog, tcx, core);
+    let up = &mut *u as *mut Unit;
+    unsafe { UNIT = up };
+    enable_pipelining(&u.prog.session.options);
+    let id = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).fn_id(FnKey::Inst(twice, Vec::new())) });
+    // the patch edits main: twice's text stays, its definition moves to the file's new version
+    let file = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).prog.def(twice).file });
+    let patched = TAKE_SOURCE.replace("twice(3)", "twice(4)");
+    let outcome = unsafe { crate::reload::apply(up, vec![crate::reload::Edit { file, path: path.to_string_lossy().into_owned(), src: patched.into_bytes() }]) };
+    assert_eq!(outcome.rung, crate::reload::Rung::Patch, "{:?}", outcome.lines);
+    let (now, named) = crate::owner::call(crate::owner::Class::Program, || unsafe { let u = &*up; (u.prog.def(twice).file, u.fns[id as usize].file) });
+    assert_ne!(now, named, "the patch moved twice to the file's new version, its slot kept the file it was named in");
+    let front = crate::owner::call(crate::owner::Class::Program, || unsafe { (*up).front.clone() });
+    assert!(prefront_slot(&front, id), "the front of twice was not made off the owner after the patch");
+    let taken = crate::owner::call(crate::owner::Class::Program, || unsafe { take_lowered_ahead(&mut *up, id).is_some() });
+    assert!(taken, "the lowering made ahead for twice after the patch was refused at its take");
     // (process exit owns the runtime's teardown)
     std::mem::forget(u);
     std::fs::remove_dir_all(dir).unwrap();

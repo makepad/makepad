@@ -2,27 +2,28 @@
 
 use super::Vec;
 use crate::fmt;
+use crate::heap::{Allocator, Global};
 use crate::intrinsics_mem as im;
 
 /// Yields the elements of `vec[start..end]`; on drop the remaining ones are dropped and the
 /// tail is moved down. While it lives the vec's len is `start` (leak-safe, as core).
-pub struct Drain<'a, T> {
-    vec: &'a mut Vec<T>,
+pub struct Drain<'a, T, #[unstable(feature = "allocator_ext", issue = "163177", implied_by = "allocator_api")] A: Allocator = Global> {
+    pub(super) vec: &'a mut Vec<T, A>,
     /// next front index
     idx: usize,
     /// one past the next back index
     end: usize,
-    tail_start: usize,
-    tail_len: usize,
+    pub(super) tail_start: usize,
+    pub(super) tail_len: usize,
 }
 
-pub(super) fn new<T>(vec: &mut Vec<T>, start: usize, end: usize) -> Drain<'_, T> {
+pub(super) fn new<T, A: Allocator>(vec: &mut Vec<T, A>, start: usize, end: usize) -> Drain<'_, T, A> {
     let len = vec.len;
     vec.len = start;
     Drain { vec, idx: start, end, tail_start: end, tail_len: len - end }
 }
 
-impl<'a, T> Drain<'a, T> {
+impl<'a, T, A: Allocator> Drain<'a, T, A> {
     pub fn as_slice(&self) -> &[T] {
         unsafe { im::slice_from_raw(im::ptr_add(self.vec.ptr.as_ptr() as *const T, self.idx), self.end - self.idx) }
     }
@@ -43,7 +44,7 @@ impl<'a, T> Drain<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for Drain<'a, T> {
+impl<'a, T, A: Allocator> Iterator for Drain<'a, T, A> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
         if self.idx == self.end {
@@ -60,7 +61,7 @@ impl<'a, T> Iterator for Drain<'a, T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
+impl<'a, T, A: Allocator> DoubleEndedIterator for Drain<'a, T, A> {
     fn next_back(&mut self) -> Option<T> {
         if self.idx == self.end {
             None
@@ -71,16 +72,16 @@ impl<'a, T> DoubleEndedIterator for Drain<'a, T> {
     }
 }
 
-impl<'a, T> ExactSizeIterator for Drain<'a, T> {}
-impl<'a, T> crate::iter::FusedIterator for Drain<'a, T> {}
+impl<'a, T, A: Allocator> ExactSizeIterator for Drain<'a, T, A> {}
+impl<'a, T, A: Allocator> crate::iter::FusedIterator for Drain<'a, T, A> {}
 
-impl<'a, T: fmt::Debug> fmt::Debug for Drain<'a, T> {
+impl<'a, T: fmt::Debug, A: Allocator> fmt::Debug for Drain<'a, T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("Drain").field(&self.as_slice()).finish()
     }
 }
 
-impl<'a, T> Drop for Drain<'a, T> {
+impl<'a, T, A: Allocator> Drop for Drain<'a, T, A> {
     fn drop(&mut self) {
         while self.idx < self.end {
             unsafe { im::drop_in_place(im::ptr_add_mut(self.vec.ptr.as_ptr(), self.idx)) };

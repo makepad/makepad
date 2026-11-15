@@ -634,14 +634,15 @@ fn divisibility_tests_fold() {
                 relax_backend::passes::simplify(&relax_session::Options::default(), &mut f, None, true, true);
                 assert!(!f.blocks[0].insts.iter().any(|i| matches!(i, Inst::IBin(IOp::Rem | IOp::MulHi, ..))), "c {c} bits {bits}: {:?}", f.blocks[0].insts);
                 let m = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
-                let mut xs: Vec<u64> = vec![0, 1, 2, c - 1, c, c + 1, 2 * c, 3 * c - 1, m, m - 1, m / c * c, m / c * c + 1];
+                // inputs around c and m, taken mod 2^64 (then masked to the width): c near u64::MAX wraps
+                let mut xs: Vec<u64> = vec![0, 1, 2, c.wrapping_sub(1), c, c.wrapping_add(1), c.wrapping_mul(2), c.wrapping_mul(3).wrapping_sub(1), m, m - 1, m / c * c, (m / c * c).wrapping_add(1)];
                 let mut s = 0x9E37_79B9_7F4A_7C15u64;
                 for _ in 0..2000 {
                     s ^= s << 13;
                     s ^= s >> 7;
                     s ^= s << 17;
                     xs.push(s & m);
-                    xs.push((s % 1000) * c & m);
+                    xs.push((s % 1000).wrapping_mul(c) & m);
                 }
                 for xv in xs.iter().map(|v| v & m) {
                     assert_eq!(eval(&orig, &[xv], &[]), eval(&f, &[xv], &[]), "x {xv} c {c} bits {bits} eq {eq}");
@@ -762,4 +763,70 @@ fn previous_iv_copy_reads_the_stepped_pointer() {
     let mut h = orig.clone();
     h.blocks[0].insts[1] = Inst::IBinI(IOp::Add, U64, r, base, 8);
     assert!(!version::prev_iv_copies(&relax_session::Options::default(), &mut h));
+}
+
+/// `for x in v { s = s.wrapping_add(x as u64) }` over a Vec's IntoIter, rotated with the counter
+/// carried in two registers (std's `Vec<T, A>` loop at O3): the way in sets `w = i` (unless
+/// `entry` is false), the loop steps `t = w + 1; i = t`, refreshes `w = i` and leaves on `i == n`.
+/// `read` is where the element is loaded: before the step at `w` (the counter before it), after
+/// the refresh at `w`, or after the step at `i` itself (both the counter after the step).
+#[derive(Clone, Copy, PartialEq)]
+enum Read { CopyBefore, CopyAfter, CounterAfter }
+fn copied_counter_sum(read: Read, entry: bool) -> (Func, VReg, VReg) {
+    let mut f = Func::new("into_iter_sum".into(), 0);
+    let (base, n) = (f.vreg(Cls::I), f.vreg(Cls::I));
+    f.params.extend([base, n]);
+    f.rets.push(Cls::I);
+    for _ in 0..4 {
+        f.block();
+    }
+    let [acc, i, w, c0, x, t, s, c1] = std::array::from_fn(|_| f.vreg(Cls::I));
+    let load = |ix| Inst::LoadX(Mem::Int(4, false), x, base, ix, 2, 0);
+    push(&mut f, 0, Inst::Iconst(acc, 0));
+    push(&mut f, 0, Inst::Iconst(i, 0));
+    push(&mut f, 0, Inst::Iconst(w, 0));
+    term(&mut f, 0, Term::Jump(1));
+    if entry {
+        push(&mut f, 1, Inst::Mov(w, i));
+    }
+    push(&mut f, 1, Inst::ICmp(Cond::Eq, false, c0, i, n));
+    term(&mut f, 1, Term::Branch(c0, 3, 2));
+    if read == Read::CopyBefore {
+        push(&mut f, 2, load(w));
+    }
+    push(&mut f, 2, Inst::IBinI(IOp::Add, U64, t, w, 1));
+    push(&mut f, 2, Inst::Mov(i, t));
+    if read == Read::CounterAfter {
+        push(&mut f, 2, load(i));
+    }
+    push(&mut f, 2, Inst::Mov(w, i));
+    if read == Read::CopyAfter {
+        push(&mut f, 2, load(w));
+    }
+    push(&mut f, 2, Inst::IBin(IOp::Add, U64, s, acc, x));
+    push(&mut f, 2, Inst::Mov(acc, s));
+    push(&mut f, 2, Inst::ICmp(Cond::Eq, false, c1, i, n));
+    term(&mut f, 2, Term::Branch(c1, 3, 2));
+    term(&mut f, 3, Term::Ret(vec![acc]));
+    (f, i, w)
+}
+
+/// The reduction matcher takes the two-register counter (the loop the vector part leaves keeps
+/// `w == i`), and refuses an element read after the step: the vector part would sum one element
+/// early. Nor without `w = i` on the way in.
+#[test]
+fn sum_over_copied_counter_vectorises() {
+    let (mut f, i, w) = copied_counter_sum(Read::CopyBefore, true);
+    let n0 = f.blocks.len();
+    assert!(relax_codegen::loops::vectorize_reductions(&relax_session::Options::default(), &mut f), "vectorised");
+    assert_eq!(f.blocks.len(), n0 + 4, "H, H2, V and VE in front of the loop");
+    let ve = f.blocks.iter().find(|b| b.insts.iter().any(|x| matches!(x, Inst::VX(VX::AddAcross(_), ..)))).expect("VE");
+    let refresh = ve.insts.iter().position(|x| *x == Inst::Mov(w, i));
+    assert!(refresh.is_some_and(|k| k + 1 < ve.insts.len()), "VE sets the copy from the counter before the scalar rest: {:?}", ve.insts);
+    for (read, entry) in [(Read::CopyAfter, true), (Read::CounterAfter, true), (Read::CopyBefore, false)] {
+        let (mut g, _, _) = copied_counter_sum(read, entry);
+        let before = g.dump();
+        assert!(!relax_codegen::loops::vectorize_reductions(&relax_session::Options::default(), &mut g), "refused: read after the step {}, w = i on entry {entry}", read != Read::CopyBefore);
+        assert_eq!(g.dump(), before);
+    }
 }

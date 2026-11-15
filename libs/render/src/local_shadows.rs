@@ -749,6 +749,30 @@ impl LocalShadows {
         full
     }
 
+    /// Make the lamp shadow draws (their depth shaders) before the first render with a
+    /// shadowed lamp, which made them otherwise. False while the script VM is held elsewhere.
+    pub(crate) fn prepare_draws(&mut self, cx: &mut Cx) -> bool {
+        if self.rigid.is_none() {
+            let Some((rigid, inside, skinned)) = cx.try_with_vm(|vm| {
+                (
+                    DrawLmLampDepth::script_new_with_default(vm),
+                    DrawLmLampDepthInside::script_new_with_default(vm),
+                    DrawLocalShadowSkinned::script_new_with_default(vm),
+                )
+            }) else {
+                return false;
+            };
+            self.rigid = Some(rigid);
+            self.inside = Some(inside);
+            self.skinned = Some(skinned);
+        }
+        true
+    }
+
+    pub(crate) fn draws_ready(&self) -> bool {
+        self.rigid.is_some()
+    }
+
     pub fn render(
         &mut self,
         cx: &mut CxDraw,
@@ -772,29 +796,20 @@ impl LocalShadows {
             self.upload_metadata(cx.cx);
             return;
         }
-        if self.rigid.is_none() {
-            let Some((rigid, inside, skinned)) = cx.cx.try_with_vm(|vm| {
-                (
-                    DrawLmLampDepth::script_new_with_default(vm),
-                    DrawLmLampDepthInside::script_new_with_default(vm),
-                    DrawLocalShadowSkinned::script_new_with_default(vm),
-                )
-            }) else {
-                self.stats.omitted_lights += self.stats.lights;
-                self.stats.lights = 0;
-                self.stats.faces = 0;
-                for record in &mut self.records {
-                    if record.count > 0 {
-                        record.count = -1;
-                    }
+        // The draws (their depth shaders) wait for the first shadowed lamp: a world without one
+        // only needs the one-texel depth binding below.
+        if !self.faces.is_empty() && !self.prepare_draws(cx.cx) {
+            self.stats.omitted_lights += self.stats.lights;
+            self.stats.lights = 0;
+            self.stats.faces = 0;
+            for record in &mut self.records {
+                if record.count > 0 {
+                    record.count = -1;
                 }
-                self.faces.clear();
-                self.upload_metadata(cx.cx);
-                return;
-            };
-            self.rigid = Some(rigid);
-            self.inside = Some(inside);
-            self.skinned = Some(skinned);
+            }
+            self.faces.clear();
+            self.upload_metadata(cx.cx);
+            return;
         }
         // An initialized one-texel depth binding is still required when the
         // shader has no active shadow lights. Do not allocate a full atlas;

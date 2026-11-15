@@ -163,19 +163,38 @@ impl Fcx<'_> {
     /// become / are trait objects, slices.
     fn unsize_tails(&mut self, source: TyId, target: TyId) -> Option<(TyId, TyId)> {
         let (ks, kt) = (self.tcx.tys.kind(source).clone(), self.tcx.tys.kind(target).clone());
-        let (mut s, mut d) = match (ks, kt) {
-            (TyKind::Ref(_, a, _) | TyKind::Ptr(_, a), TyKind::Ref(_, d, _) | TyKind::Ptr(_, d)) => (a, d),
+        match (ks, kt) {
+            (TyKind::Ref(_, a, _) | TyKind::Ptr(_, a), TyKind::Ref(_, d, _) | TyKind::Ptr(_, d)) => Some(self.unsize_tail_from(a, d)),
             (TyKind::Adt(d1, xs, _), TyKind::Adt(d2, ys, _)) if d1 == d2 => {
                 let (xs, ys) = (self.tcx.tys.list(xs).to_vec(), self.tcx.tys.list(ys).to_vec());
-                let mut found = None;
-                for i in 0..xs.len().min(ys.len()) { let (x, y) = (self.shallow(xs[i]), self.shallow(ys[i])); if x != y { found = Some((xs[i], ys[i])); } }
-                found?
+                self.unsizing_arg(&xs, &ys)
             }
-            _ => return None,
-        };
+            _ => None,
+        }
+    }
+
+    /// Of a struct's type arguments, the pair the coercion unsizes: the first whose tails are a
+    /// trait object or a slice (the others may differ in their regions only, as a Box's
+    /// allocator `&'a A` against `&'b A`), else the last pair that differs.
+    fn unsizing_arg(&mut self, xs: &[TyId], ys: &[TyId]) -> Option<(TyId, TyId)> {
+        let mut last = None;
+        for i in 0..xs.len().min(ys.len()) {
+            if self.shallow(xs[i]) == self.shallow(ys[i]) {
+                continue;
+            }
+            let tails = self.unsize_tail_from(xs[i], ys[i]);
+            if matches!(self.tcx.tys.kind(tails.1), TyKind::Dyn(..) | TyKind::Slice(_)) {
+                return Some(tails);
+            }
+            last = Some(tails);
+        }
+        last
+    }
+
+    fn unsize_tail_from(&mut self, mut s: TyId, mut d: TyId) -> (TyId, TyId) {
         loop {
             let (ss, dd) = (self.shallow(s), self.shallow(d));
-            if matches!(self.tcx.tys.kind(dd), TyKind::Dyn(..) | TyKind::Slice(_)) { return Some((ss, dd)); }
+            if matches!(self.tcx.tys.kind(dd), TyKind::Dyn(..) | TyKind::Slice(_)) { return (ss, dd); }
             match (self.tcx.tys.kind(ss).clone(), self.tcx.tys.kind(dd).clone()) {
                 (TyKind::Ref(_, source, _) | TyKind::Ptr(_, source), TyKind::Ref(_, target, _) | TyKind::Ptr(_, target)) => {
                     s = source;
@@ -183,11 +202,9 @@ impl Fcx<'_> {
                 }
                 (TyKind::Adt(a1, xa, _), TyKind::Adt(a2, ya, _)) if a1 == a2 && self.prog.def(a1).kind == DefKind::Struct && self.tcx.tys.list(xa).len() == self.tcx.tys.list(ya).len() => {
                     let (xa, ya) = (self.tcx.tys.list(xa).to_vec(), self.tcx.tys.list(ya).to_vec());
-                    let mut next = None;
-                    for j in 0..xa.len() { let (x, y) = (self.shallow(xa[j]), self.shallow(ya[j])); if x != y { next = Some((xa[j], ya[j])); } }
-                    match next { Some((x, y)) => { s = x; d = y; } None => return Some((ss, dd)) }
+                    return self.unsizing_arg(&xa, &ya).unwrap_or((ss, dd));
                 }
-                _ => return Some((ss, dd)),
+                _ => return (ss, dd),
             }
         }
     }

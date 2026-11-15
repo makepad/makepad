@@ -642,9 +642,12 @@ impl<'a> Parser<'a> {
             let k = self.toks.kind_at(i);
             // parse_part has no invisible type/path/statement boundaries (rustc_parse
             // interpolated nonterminals): consume these while their expansion's metadata is live.
+            // Nor a one-token expression or literal fragment (meta_frags), which is one invisible
+            // group as well (builtins.rs group_fragments).
             if (!self.ty_frags.is_empty() && self.ty_frags.contains(&{ self.toks.at(i).lo }))
                 || (!self.path_frags.is_empty() && self.path_frags.contains(&{ self.toks.at(i).lo }))
-                || (!self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ self.toks.at(i).lo })) {
+                || (!self.stmt_frags.is_empty() && self.stmt_frags.contains(&{ self.toks.at(i).lo }))
+                || (!self.meta_frags.is_empty() && self.meta_frags.contains_key(&{ self.toks.at(i).lo })) {
                 return BodyOutline::Eager(5);
             }
             // Nor the invisible parentheses of an expression fragment (synth_parens): there a false
@@ -4403,7 +4406,8 @@ impl<'a> Parser<'a> {
     pub fn ty(&mut self) -> PResult<TyId> {
         self.ty_inner(false)
     }
-    fn ty_plus(&mut self) -> PResult<TyId> {
+    /// rustc parse_ty: a type where `+` bounds may follow (a `$t:ty` fragment, a generic argument)
+    pub(crate) fn ty_plus(&mut self) -> PResult<TyId> {
         self.ty_inner(true)
     }
 

@@ -412,3 +412,17 @@ fn round42_cancelled_gandalf_check_has_no_persisted_verdict() {
     assert!(take_verdict_keys().contains(&(42, StoredVerdict::Clean)));
     stop();
 }
+
+/// Two programs of one process (the application's and the proc-macro world's) each number their
+/// crates from 0: a crate's user-types decision is its own, not that of the other program's crate
+/// with the same number (an app crate after serde's derive: E0596 on `&mut self.values[i]`).
+#[test]
+fn a_crates_user_types_decision_is_not_another_programs_same_numbered_crate() {
+    if child("a_crates_user_types_decision_is_not_another_programs_same_numbered_crate") { return; }
+    use super::super::event::user_types_wanted;
+    let (framework, _) = fixture("framework", SOURCE);
+    let (app, _) = fixture("app", SOURCE);
+    assert!(!user_types_wanted(&framework, 0), "the framework crate is no app crate");
+    assert!(user_types_wanted(&app, 0), "the app's crate 0 keeps its user types");
+    assert!(!user_types_wanted(&framework, 0), "and the framework's crate 0 still does not");
+}

@@ -1578,6 +1578,12 @@ impl ScriptCode {
     }
 
     pub(crate) fn ip_to_loc_native(&self, ip: ScriptIp, file: &mut crate::vm_api::ScriptTextOut, at: &mut crate::vm_api::ScriptLineCol) -> bool {
+        // no place at all (an object made where no instruction stands): no location. The
+        // fallback below names a body's unmapped instruction, and took the unknown ip's
+        // u16::MAX / u32::MAX for a line and a column, which a caller's `col + 1` overflowed
+        if ip.is_unknown() {
+            return false;
+        }
         let found = (|| -> Option<ScriptLoc> {
             if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
                 let source_map = &body.parser.source_map;

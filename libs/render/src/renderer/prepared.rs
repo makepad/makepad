@@ -64,7 +64,7 @@ pub fn decode_generated_png_within(bytes: &[u8], dimension: usize, byte_limit: u
 /// This never builds CPU mips, including when image-cache mipmaps are enabled.
 pub fn upload_generated_texture(cx: &mut Cx, image: ImageBuffer) -> Texture {
     Texture::new_with_format(cx, TextureFormat::VecMipBGRAu8_32 {
-        width: image.width, height: image.height, data: Some(image.data),
+        width: image.width, height: image.height, data: Some(image.data.into()),
         max_level: Some(0), wrap: TextureWrap::Repeat, updated: TextureUpdated::Full,
     })
 }
@@ -210,6 +210,7 @@ impl PreparedStaticPreview {
     /// work. The corresponding upload only consumes validated vectors.
     pub fn prepare(model: StaticModel) -> Result<Self, String> { Self::prepare_with_sidecars(model,None,None) }
     pub fn prepare_with_sidecars(mut model:StaticModel,ao_png:Option<&[u8]>,sdf_bytes:Option<&[u8]>)->Result<Self,String>{
+        let _preparing=crate::material_surface::Preparing::begin();
         let ao=ao_png.map(|bytes|decode_generated_png(bytes,4096,usize::MAX)).transpose()?;
         let sdf=sdf_bytes.and_then(|bytes|crate::shadow_sdf::ShadowSdfAtlas::from_shadowsdf(bytes).map(|v|v.0));
         if model.texture_uri.is_some() && model.texture_png.is_none() { return Err("model references an external texture without supplied pixels".into()); }
@@ -243,7 +244,8 @@ impl PreparedStaticPreview {
         // ONE atlas): decode, mip and charge each distinct image once, and
         // share the prepared pixels (upload dedupes them too).
         let shared = std::cell::RefCell::new(std::collections::HashMap::<(u64,usize,u32,u8),std::sync::Arc<crate::material_surface::PreparedTexture>>::new());
-        let image = |bytes:Option<&[u8]>,fallback:u32,semantic:crate::material_surface::PixelSemantic| -> Result<std::sync::Arc<crate::material_surface::PreparedTexture>,String> {
+        // `store`: the image may be kept in the store's block form (not an MSDF, whose distances need exact texels).
+        let image = |bytes:Option<&[u8]>,fallback:u32,semantic:crate::material_surface::PixelSemantic,store:bool| -> Result<std::sync::Arc<crate::material_surface::PreparedTexture>,String> {
             // The same image as colour and as a masked cutout mips differently.
             let kind=semantic as u8;
             // The load-ready form: pre-mipped UASTC (KTX2) in the GLB, keyed by
@@ -272,7 +274,24 @@ impl PreparedStaticPreview {
                 } else { let mut image=ImageBuffer::default();image.width=1;image.height=1;image.data=vec![fallback];image };
                 Ok(crate::material_surface::texture_work(crate::material_surface::TextureWork::DecodeMip,||crate::material_surface::PreparedTexture::prepare(decoded,semantic)))
             };
-            let texture=match bytes { Some(_)=>crate::material_surface::prepared_once((key.0,key.1,key.3),prepare)?, None=>std::sync::Arc::new(prepare()?) };
+            let texture=match bytes {
+                Some(bytes) if store=>{
+                    let texture=crate::material_surface::prepared_once((key.0,key.1,key.3),||{
+                        let texture=crate::material_surface::stored_device_texture(bytes,semantic,false,prepare)?;
+                        if texture.compressed.is_some() { remaining.set(remaining.get().saturating_sub(texture.bytes())); }
+                        Ok(texture)
+                    })?;
+                    // The memo may hold an out-of-scope decode of the same image.
+                    let stored=crate::material_surface::owe_unstored(bytes,semantic,false,&texture);
+                    if texture.stored.is_none() && stored.is_some() {
+                        let mut texture=std::sync::Arc::unwrap_or_clone(texture);
+                        texture.stored=stored;
+                        std::sync::Arc::new(texture)
+                    } else { texture }
+                }
+                Some(_)=>crate::material_surface::prepared_once((key.0,key.1,key.3),prepare)?,
+                None=>std::sync::Arc::new(prepare()?),
+            };
             shared.borrow_mut().insert(key,texture.clone());
             Ok(texture)
         };
@@ -281,9 +300,9 @@ impl PreparedStaticPreview {
             // An alpha-tested layer keeps its cutout coverage down the mips.
             let msdf=pbr.surface.as_ref().is_some_and(|s|s.msdf.is_some());
             let semantic=pbr.surface.as_ref().map_or(crate::material_surface::PixelSemantic::Color, |s|s.base_semantic());
-            let texture=image(png.as_deref(),0xffff_ffff,semantic)?;
-            let detail_on=detail.is_some();let detail=image(detail.as_deref(),0xff80_8080,crate::material_surface::PixelSemantic::Color)?;
-            let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff,crate::material_surface::PixelSemantic::Data)?;
+            let texture=image(png.as_deref(),0xffff_ffff,semantic,!msdf)?;
+            let detail_on=detail.is_some();let detail=image(detail.as_deref(),0xff80_8080,crate::material_surface::PixelSemantic::Color,true)?;
+            let orm_on=pbr.orm_png.is_some();let orm=image(pbr.orm_png.as_deref(),0xffff_ffff,crate::material_surface::PixelSemantic::Data,true)?;
             let surface=pbr.surface.as_ref().map(|surface|{let mut budget=remaining.get();let prepared=crate::material_surface::PreparedSurface::prepare(surface.as_ref().clone(),&mut budget)?;remaining.set(budget);Ok::<_,String>(prepared)}).transpose()?;
             pbr.orm_png=None;
             let cutout=msdf || texture.cutout();
@@ -352,17 +371,22 @@ impl PreparedStaticPreview {
     fn visit_texture_charges(&self, visit: &mut impl FnMut(TextureCharge)) {
         use crate::material_surface::splat_array_charge;
         for layer in self.layers() {
-            visit(layer.texture.charge(TextureSlot::Base));
-            visit(layer.detail.charge(TextureSlot::Detail));
-            visit(layer.orm.charge(TextureSlot::Orm));
+            let texel_addressed = layer.pbr.mag_nearest || layer.surface.as_ref()
+                .is_some_and(|surface| surface.definition.msdf.is_some() || surface.definition.impostor > 0.0);
+            visit(layer.texture.charge(TextureSlot::Base, texel_addressed));
+            visit(layer.detail.charge(TextureSlot::Detail, texel_addressed));
+            visit(layer.orm.charge(TextureSlot::Orm, texel_addressed));
             if let Some(surface) = &layer.surface {
-                visit(surface.normal.charge(TextureSlot::Normal));
-                visit(surface.occlusion.charge(TextureSlot::Occlusion));
-                visit(surface.emissive.charge(TextureSlot::Emissive));
+                visit(surface.normal.charge(TextureSlot::Normal, texel_addressed));
+                visit(surface.occlusion.charge(TextureSlot::Occlusion, texel_addressed));
+                visit(surface.emissive.charge(TextureSlot::Emissive, texel_addressed));
                 if let Some(splat) = &surface.splat {
-                    visit(splat_array_charge(&splat.albedo, TextureSlot::SplatAlbedo));
-                    visit(splat_array_charge(&splat.normal, TextureSlot::SplatNormal));
-                    visit(splat.weights.charge(TextureSlot::SplatWeights));
+                    for (layers, slot) in [(&splat.albedo, TextureSlot::SplatAlbedo), (&splat.normal, TextureSlot::SplatNormal)] {
+                        let mut charge = splat_array_charge(layers, slot);
+                        charge.texel_addressed = texel_addressed;
+                        visit(charge);
+                    }
+                    visit(splat.weights.charge(TextureSlot::SplatWeights, true));
                 }
             }
         }

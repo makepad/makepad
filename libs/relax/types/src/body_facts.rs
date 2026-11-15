@@ -259,12 +259,16 @@ const ITEM_CELL_NAMES: [&str; ITEM_CELLS] = ["signatures", "declarations", "cons
 /// to the body whose lookup first needed it. Interface text records its import uses outside any
 /// body's capture, in the program's sets, as the owners phase does; an item written inside a body
 /// (a local struct, fn, impl) is that body's text, so its uses go to that body's facts, whichever
-/// body asks. A body's own declarations stay in its capture.
+/// body asks. A body's own declarations stay in its capture, and so do its closures', anonymous
+/// constants' and opaque types' (its own text: not counted).
 pub fn item_text<R>(prog: &Program, d: DefId, cell: ItemCell, f: impl FnOnce() -> R) -> R {
     if !record_import_uses() { return f(); }
     let key = fact_owner(prog, d);
     let current = OWNER.with(|o| o.get());
-    if current == Some(key) { count_in_body(prog, d, cell); return f(); }
+    if current == Some(key) {
+        if d == key { count_in_body(prog, d, cell); }
+        return f();
+    }
     if let Some(root) = hole_owner(prog, key) {
         if current == Some(root) { return f(); }
         let (r, mut uses) = capture_import_uses(f);
@@ -277,8 +281,12 @@ pub fn item_text<R>(prog: &Program, d: DefId, cell: ItemCell, f: impl FnOnce() -
     outside_capture(f)
 }
 
-/// Counts a fresh crate's item cell computed inside a body.
+/// Counts a fresh crate's item cell computed inside a body. (An alias type is a lowering per
+/// typing environment of text the owners phase has read: check_def_signature lowers every type
+/// alias of a fresh crate, wfcheck.rs check_type_alias. A body's lowering reads it again, its uses
+/// outside the body's capture as the first one's.)
 fn count_in_body(prog: &Program, d: DefId, cell: ItemCell) {
+    if matches!(cell, ItemCell::AliasTy) { return; }
     if FRESH.lock().unwrap_or_else(|e| e.into_inner()).get(prog.def(d).krate as usize).copied().unwrap_or(false) {
         IN_BODY[cell as usize].fetch_add(1, Ordering::Relaxed);
     }

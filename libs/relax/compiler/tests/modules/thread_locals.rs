@@ -2,7 +2,7 @@
 // first frame in the module) starts them from their initialisers, and their destructors run
 // when the claim ends. All three kinds: a `#[thread_local]` static (const, no drop glue), a
 // lazy runtime key without drop glue and one with a destructor; and std::thread::current().
-// Run with RELAX_SANDBOX_NOCHECK=1 (the module names std::thread and std::sync, which the
+// Run with --allow-unchecked-modules (the module names std::thread and std::sync, which the
 // module scan refuses).
 use std::relax::Module;
 

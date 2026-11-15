@@ -4,7 +4,8 @@
 //! panic messages); the algorithms are ported from it (Copyright (c) 2018 The Servo Project
 //! Developers, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md). `smallvec!` is a
 //! Relax built-in that expands per SV2; `smallvec_inline!` is exported without a feature gate.
-//! The rustc path keeps using the real crate; std/check_ext tests this file against it.
+//! The rustc path keeps using the real crate; Makepad's tools/run/tests/check_ext tests this file
+//! against it.
 
 extern crate alloc;
 
