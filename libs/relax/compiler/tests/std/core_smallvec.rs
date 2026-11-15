@@ -1,6 +1,6 @@
 // std-core differential test (core_diff.sh): Relax's built-in smallvec (std/smallvec),
 // mounted with #[path] on both sides until the loader substitutes the crate (coord.md SV1); its
-// equivalence with the real smallvec 1.15.1 under rustc is std/check_ext.
+// equivalence with the real smallvec 1.15.1 under rustc is Makepad's tools/run/tests/check_ext.
 #[path = "../../std/smallvec/lib.rs"]
 mod smallvec;
 

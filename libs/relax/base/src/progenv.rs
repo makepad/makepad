@@ -20,6 +20,9 @@
 //!   it, and a self-exec child's host does not either. A provided crate's rustc code reads the
 //!   program's environment through relax-api's `env` (`program_var_os`), for a setting that only
 //!   tunes or reports the program's own run; its `std::env` stays the host's (KNOWN_GAPS 7).
+//! - A reserved name of cargo's run-time environment of the target (a build script's `rustc-env`,
+//!   `set_program_value`) is a program value too. Cargo's `[env]` sets no reserved name
+//!   (resolve.rs `cargo_env`): a repository does not set what a Relax host reads.
 //!
 //! The policy is the pure function `child_env`: what each child gets. A self-exec child (this
 //! program again, `makepad run ... --`) gets every reserved name from this process's environment
@@ -63,9 +66,11 @@ pub const MOUNT: [&[u8]; 3] = [WORKSPACE, VFS, EDITS];
 /// run reads its own folder, so it is a run fact: a runner the program starts somewhere else never
 /// finds it and mounts its own folder under this run's name.
 pub const SHARE: &[u8] = b"RELAX_SHARE";
-/// `--allow-c` (the person's grant for this invocation): this run builds and links C, and the
-/// self-exec child, this run again, does too; a relax the program starts (`$RELAX_LOADER run` of
-/// another package) does not inherit it.
+/// A bare `relax`'s `--allow-c` from its environment (the person's grant for this invocation; a
+/// `makepad run` host takes it as a word alone and drops this name at its start, relax-compiler
+/// lib.rs `drop_ambient_grants`): this run builds and links C, and the self-exec child, this run
+/// again, does too; a relax the program starts (`$RELAX_LOADER run` of another package) does not
+/// inherit it.
 pub const ALLOW_C: &[u8] = b"RELAX_ALLOW_C";
 /// The native build the program was built with when the run took it from the run that prepared
 /// it (a test's package binary: its test's): a run of this program again takes it too.
@@ -73,19 +78,27 @@ pub const RUN_NATIVE: &[u8] = b"RELAX_RUN_NATIVE";
 /// Run facts: what the host says of this run, for this run again (a self-exec child) and nothing
 /// else; the mount also for a child in this process's folder or in the mount. The self-exec
 /// command line (Relax std's spawn of this program; its first word is the program's own
-/// executable, relax-compiler selfexe.rs), whether the run added its `--silent`, its `--allow-c`
-/// and the native build it took.
+/// executable, relax-compiler selfexe.rs), whether the run added its `--silent`, a bare relax's
+/// `RELAX_ALLOW_C` and the native build it took.
 pub const RUN_FACTS: [&[u8]; 8] = [b"RELAX_SELF_EXEC", b"RELAX_SELF_EXEC_SILENT_ADDED", WORKSPACE, VFS, EDITS, SHARE, ALLOW_C, RUN_NATIVE];
 /// The build environment a run hands the runs of the programs it prepared (`BUILD`, `encode`d):
 /// their hosts build as it does. Never the program's: the child host takes it out at its start.
 pub const BUILD_ENV: &[u8] = b"RELAX_BUILD_ENV";
+/// A confined build script's run (relax-front unitgraph.rs `run_one`, Policy::Sandboxed): the names
+/// its program is given, in the wire form (`encode`, names without values). The run's host takes
+/// it out at its start (`init`), and from then on the program reads those names and the reserved
+/// ones alone: every other name of this process's environment is removed from the program's view
+/// (its overlay), so `var_os`, `vars_os` and the environment of a child it starts go without them.
+/// The host keeps its environment. Not a boundary: code that walks the `environ` array, or a C
+/// library's own `getenv`, still reads this process's environment.
+pub const SCRIPT_ENV: &[u8] = b"RELAX_SCRIPT_ENV";
 /// What one process hands the next and no build reads: never part of a build environment.
 /// RELAX_LOADER is each loader's own (the runner's start sets it, from what it was started with
 /// or the loader recorded beside a run's link): a run started with it (`$RELAX_LOADER run` from a
 /// program) wrote it into its build environment, and a relaunch of its program by a shell that
 /// cleared it hid the loader its start found from the program (the build's reserved names it was
 /// not started with), which then had none.
-const HANDOVER: [&[u8]; 6] = [PROGRAM_ENV, BUILD_ENV, b"RELAX_ARG0", b"RELAX_BIN_NATIVE_RECEIPT", b"RELAX_NATIVE_RECEIPT", b"RELAX_LOADER"];
+const HANDOVER: [&[u8]; 7] = [PROGRAM_ENV, BUILD_ENV, SCRIPT_ENV, b"RELAX_ARG0", b"RELAX_BIN_NATIVE_RECEIPT", b"RELAX_NATIVE_RECEIPT", b"RELAX_LOADER"];
 
 pub fn run_fact(name: &[u8]) -> bool {
     RUN_FACTS.iter().any(|n| same_name(n, name))
@@ -103,6 +116,39 @@ pub fn scrub_run_facts(cmd: &mut std::process::Command) {
     for n in RUN_FACTS {
         cmd.env_remove(std::str::from_utf8(n).unwrap());
     }
+}
+
+/// The program's own variables that Relax only passes on, probes or drops, as its host names
+/// them (relax-runner Host.env). Relax reads only `RELAX_*` names; these are the program's. The
+/// bare runner names none.
+#[derive(Clone, Copy)]
+pub struct HostEnv {
+    /// what a child gets when no person should see or hear it (a replay that is not shown); the
+    /// first, set alone, says a run is not seen (its window hidden)
+    pub unseen: &'static [(&'static str, &'static str)],
+    /// what a child gets beside `RELAX_OFFLINE` (a package check run offline)
+    pub offline: &'static [(&'static str, &'static str)],
+    /// what a process that outlives its starter (the check server) must not carry
+    pub detached_remove: &'static [&'static str],
+    /// the prefixes of the variables a flight recording keeps of how its run started, for a
+    /// replay to start it the same way
+    pub recorded: &'static [&'static str],
+}
+
+static HOST_ENV: std::sync::OnceLock<HostEnv> = std::sync::OnceLock::new();
+
+/// The host's table, once, before anything reads it (relax-runner set_host).
+pub fn set_host_env(env: HostEnv) {
+    let _ = HOST_ENV.set(env);
+}
+
+pub fn host_env() -> HostEnv {
+    HOST_ENV.get().copied().unwrap_or(HostEnv { unseen: &[], offline: &[], detached_remove: &[], recorded: &[] })
+}
+
+/// Nobody sees this run: the host's first `unseen` variable is set.
+pub fn unseen_run() -> bool {
+    host_env().unseen.first().is_some_and(|(k, _)| std::env::var_os(k).is_some())
 }
 
 pub fn reserved(name: &[u8]) -> bool {
@@ -375,6 +421,17 @@ pub fn set_run_env(values: &[(String, String)]) -> Vec<(String, String)> {
         applied.push((k.clone(), v.clone()));
     }
     applied
+}
+
+/// A reserved name of cargo's run-time environment of the target (relax-front `set_program_env`:
+/// a path package's build-script `rustc-env`): the program's value, in its overlay, never this
+/// process's environment. The program and its children read it as under cargo; this host's
+/// options and a self-exec child's host never do, so a build script does not switch off the
+/// run's confinement (RELAX_SANDBOX_FUEL, RELAX_SANDBOX_NOCHECK). The overlay keeps it over a
+/// restart in place, as it keeps `set_run_env`'s; the next run writes its own.
+pub fn set_program_value(name: &str, value: &str) {
+    assert!(reserved(name.as_bytes()), "{name} is no reserved name");
+    write(name.as_bytes(), Some(value.as_bytes()));
 }
 
 /// What `set_run_env` gave the program, as the line the run prints when its session starts (the
@@ -677,8 +734,9 @@ pub fn init() {
 }
 
 /// `init` of a run's own executable that a shell or a C library launched (selfexe.rs
-/// `relaunched`): `beside` is the build environment that run left beside its command line, which a
-/// spawn by Relax std hands in `BUILD_ENV` (relax issue 172). A hand-off in the environment stands
+/// `relaunched`): `beside` is the build environment that run handed a launch of its link
+/// (selfexe.rs `relaunch_build`), which a spawn by Relax std hands in `BUILD_ENV` (relax issue
+/// 172). A hand-off in the environment stands
 /// over it, and either goes through `take_build`: neither grants anything. One that does not parse
 /// is not taken, said in one line.
 pub fn init_handed(beside: Option<Vec<u8>>) {
@@ -689,6 +747,18 @@ pub fn init_handed(beside: Option<Vec<u8>>) {
             write(k, v.as_deref());
         }
     }
+    // a confined build script's run: the program reads the names it was given and the reserved
+    // ones, nothing else of this environment (`SCRIPT_ENV`)
+    if let Some(v) = std::env::var_os(std::str::from_utf8(SCRIPT_ENV).unwrap()) {
+        std::env::remove_var(std::str::from_utf8(SCRIPT_ENV).unwrap());
+        let given = parse(v.as_encoded_bytes()).unwrap_or_else(|e| panic!("RELAX_SCRIPT_ENV from the run of the script's parent: {e}"));
+        for (k, _) in real() {
+            if !reserved(&k) && !given.iter().any(|(g, _)| same_name(g, &k)) {
+                write(&k, None);
+            }
+        }
+        let _ = GIVEN.set(given.into_iter().map(|(k, _)| k).filter(|k| !reserved(k)).collect());
+    }
     let set = |own: Own| -> Env { own.into_iter().filter_map(|(k, v)| Some((k, v?))).collect() };
     let build = match std::env::var_os(std::str::from_utf8(BUILD_ENV).unwrap()) {
         Some(handed) => Some(set(parse(handed.as_encoded_bytes()).unwrap_or_else(|e| panic!("RELAX_BUILD_ENV from the parent's Relax std: {e}")))),
@@ -697,7 +767,7 @@ pub fn init_handed(beside: Option<Vec<u8>>) {
         None => beside.filter(|b| !cfg!(windows) || std::str::from_utf8(b).is_ok()).and_then(|b| match parse(&b) {
             Ok(own) => Some(set(own)),
             Err(e) => {
-                eprintln!("relax: the build environment beside this run's executable is not taken ({e}); it builds with its own");
+                eprintln!("relax: the build environment the run of this executable handed is not taken ({e}); it builds with its own");
                 None
             }
         }),
@@ -730,8 +800,37 @@ pub fn init_handed(beside: Option<Vec<u8>>) {
 /// This run's build environment (`init`): the one it was handed, else its own as it started.
 static BUILD: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
 
+/// A confined build script's run (`SCRIPT_ENV`): the names its parent gave, without the reserved
+/// ones (Relax's own plumbing is never the script's).
+static GIVEN: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
+
+/// A confined build script's value of `name`: one of the names its parent gave (`SCRIPT_ENV`), as
+/// the program's view has it; None for any other name, and for every name outside such a run (a
+/// confined run that was given none reads none).
+pub fn given_value(name: &[u8]) -> Option<Vec<u8>> {
+    if !GIVEN.get()?.iter().any(|g| same_name(g, name)) {
+        return None;
+    }
+    match lookup(name) {
+        Some(v) => v.map(|v| v.to_bytes().to_vec()),
+        None => std::env::var_os(unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(name) }).map(std::ffi::OsString::into_encoded_bytes),
+    }
+}
+
+/// Whether this run was handed a build script's given names (`SCRIPT_ENV`): its parent confined it.
+pub fn script_env_handed() -> bool {
+    GIVEN.get().is_some()
+}
+
+/// A confined build script's whole environment (`given_value` of each given name that is set), in
+/// the wire form (`encode`, every entry set).
+pub fn given_wire() -> Vec<u8> {
+    let own: Own = GIVEN.get().map_or(&[][..], Vec::as_slice).iter().filter_map(|k| Some((k.clone(), Some(given_value(k)?)))).collect();
+    encode(&own)
+}
+
 /// This run's build environment in the wire form (`encode`): what a run of its program again
-/// builds with (`spawn_env`, and beside the run's command line for a launch by a shell).
+/// builds with (`spawn_env`, and selfexe.rs `hand_build` for a launch of its link by a shell).
 pub fn build_wire() -> Vec<u8> {
     let build: Own = BUILD.get().cloned().unwrap_or_else(|| build_part(&real())).into_iter().map(|(k, v)| (k, Some(v))).collect();
     encode(&build)
@@ -739,9 +838,13 @@ pub fn build_wire() -> Vec<u8> {
 /// The program's environment as this process was started, when its host builds with a handed one.
 static PROGRAM_START: std::sync::OnceLock<Env> = std::sync::OnceLock::new();
 
-/// `env` without what one process hands the next (`HANDOVER`) and without the run facts.
+/// `env` without what one process hands the next (`HANDOVER`), without the run facts and without
+/// the grants' names (options.rs GRANTS): a `makepad run` host takes a grant from its words alone,
+/// so the environment a run builds with, its own or one it was handed, carries none to a run it
+/// hands it to.
 fn build_part(env: &[(Vec<u8>, Vec<u8>)]) -> Env {
-    env.iter().filter(|(k, _)| !run_fact(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
+    let grant = |k: &[u8]| crate::options::GRANTS.iter().any(|(_, name)| same_name(name.as_bytes(), k));
+    env.iter().filter(|(k, _)| !run_fact(k) && !grant(k) && !HANDOVER.iter().any(|h| same_name(h, k))).cloned().collect()
 }
 
 /// A child run handed a build environment (`BUILD_ENV`): `start` is its environment as started,
@@ -853,7 +956,8 @@ mod tests {
         let start: Env = vec![(b("RELAX_ARG0"), b("/run/bin/app")), (b("RELAX_CACHE_DIR"), b("/given")), (b("RELAX_BUILD_ENV"), b("..."))];
         // (a hand-off that names a grant or a handover: none of them is taken)
         let build: Env = vec![(b("HOME"), b("/h")), (b("PATH"), b("/tools")), (b("RELAX_CACHE_DIR"), b("/test")), (b("RELAX_STD"), b("/std")),
-            (b("RELAX_ALLOW_C"), b("1")), (b("RELAX_RUN_NATIVE"), b("/forged.json")), (b("RELAX_ARG0"), b("/forged")), (b("RELAX_BUILD_ENV"), b("x"))];
+            (b("RELAX_ALLOW_C"), b("1")), (b("RELAX_MODULES_TRUSTED"), b("1")), (b("RELAX_MODULE_FUEL"), b("9")), (b("RELAX_RUN_NATIVE"), b("/forged.json")),
+            (b("RELAX_ARG0"), b("/forged")), (b("RELAX_BUILD_ENV"), b("x"))];
         let (host, hidden, program) = take_build(&start, &build);
         let mut host_names: Vec<String> = host.iter().map(|(k, v)| format!("{}={}", String::from_utf8_lossy(k), String::from_utf8_lossy(v))).collect();
         host_names.sort();
@@ -934,7 +1038,7 @@ mod tests {
         assert_eq!(ran_travel, vec![(b("APP_MODE"), Some(b("demo"))), (b("PATH"), Some(b("/app/bin")))], "the run-env travels to the self-exec child program in PROGRAM_ENV");
         let ran_foreign = child_env(&real, &run_env, &Spawn { edits: &[], clear: false, self_exec: false, dir: ChildDir::Same, host: &[] });
         assert_eq!((get(&ran_foreign, "APP_MODE"), get(&ran_foreign, "PATH")), (Some(&b"demo"[..]), Some(&b"/app/bin"[..])), "a foreign child gets the program's view, run-env included");
-        // `--allow-c` is this invocation's: a relax the program starts does not inherit it
+        // a bare relax's RELAX_ALLOW_C is this invocation's: a relax the program starts does not inherit it
         let mut granted = real.clone();
         granted.push((b("RELAX_ALLOW_C"), b("1")));
         let nested = child_env(&granted, &own, &Spawn { edits: &[], clear: false, self_exec: false, dir: ChildDir::Same, host: &[] });

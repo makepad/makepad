@@ -79,7 +79,8 @@ impl<'a> FuncGen<'a> {
     fn konst(&mut self, ty: ValType) {
         let instr = match ty {
             ValType::I32 => Instr::I32Const(self.rng.i32()),
-            ValType::I64 => Instr::I64Const(self.rng.i32() as i64 * (1 + self.rng.below(3) as i64 * 0x1_0000_0001)),
+            // any i64: the product wraps
+            ValType::I64 => Instr::I64Const((self.rng.i32() as i64).wrapping_mul(1 + self.rng.below(3) as i64 * 0x1_0000_0001)),
             ValType::F32 => Instr::F32Const((self.rng.below(2000) as f32 / 7.0 - 100.0).to_bits()),
             _ => Instr::F64Const((self.rng.below(2000) as f64 / 3.0 - 300.0).to_bits()),
         };

@@ -154,7 +154,7 @@ pub fn rustc_inline_cost(callee: &Func, _callee_id: u32) -> usize {
             Term::Jump(..) | Term::Ret(..) | Term::Invoke(..) => {}
         }
     }
-    penalty.saturating_sub(callee.guard_size.cost as usize).saturating_sub(bonus)
+    callee.priced(penalty.saturating_sub(callee.guard_size.cost as usize)).saturating_sub(bonus)
 }
 
 pub fn rustc_inline_threshold(callee: &Func, attrs: u8) -> usize {
@@ -360,13 +360,13 @@ pub const HOT_FREQ: f32 = 0.05;
 
 /// The size the inliner prices `f` at: its instructions, a live session's guards aside (code only a
 /// patch runs: `Func::guard_size`, `guard_blocks`), so live inlining decides as a run without
-/// patches does.
+/// patches does; a sandbox twin's by its base's share (`Func::priced`).
 fn inline_inst_count(f: &Func) -> usize {
     let n = match guard_blocks(f) {
         Some(g) => f.blocks.iter().zip(&g).filter(|x| !*x.1).map(|x| x.0.insts.len()).sum(),
         None => f.blocks.iter().map(|b| b.insts.len()).sum::<usize>(),
     };
-    n.saturating_sub(f.guard_size.insts as usize)
+    f.priced(n.saturating_sub(f.guard_size.insts as usize))
 }
 
 /// ... and its blocks, likewise.
@@ -1308,9 +1308,15 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
     // (`unguard_prefix`). A build that read its slot's copy version (`Func::copy_ver`) checks that
     // one word first: while it holds the value the build read, no flag its code reads was set
     // after the build began, so the flags are read (in a block of their own) only once it moved.
-    let mut flags: Vec<Sym> = callee.patch_flag.into_iter().chain(callee.unguarded_flags.iter().copied()).collect();
-    flags.sort_unstable();
-    flags.dedup();
+    // In the copies' order, the ones its body took in first and its own flag last -- never by
+    // symbol number: symbols are numbered as a run interns them, so a cached build and a fresh one
+    // of the same inputs read the same flags in another order (another relocation list)
+    let mut flags: Vec<Sym> = Vec::with_capacity(callee.unguarded_flags.len() + 1);
+    for flag in callee.unguarded_flags.iter().copied().chain(callee.patch_flag) {
+        if !flags.contains(&flag) {
+            flags.push(flag);
+        }
+    }
     // a split body's fast half takes the copy in unguarded where an exit covers the site
     // (`patched::split_patched_path`): its flags are noted as a copy before any wait point's are
     if unguarded {
@@ -1371,6 +1377,8 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
         f.guard_calls.push((ctx_of(p), s));
     }
     f.guard_size.add(callee.guard_size);
+    // (a sandbox twin's body not confined yet makes the body that takes it in one too)
+    f.unconfined |= callee.unconfined;
     let m = |v: VReg| vmap[v.0 as usize];
     // calls that may unwind in the callee's blocks, when the callee is inlined at an
     // Invoke: each ends a block of its own whose Invoke continues at the caller's pad
@@ -6874,52 +6882,55 @@ mod inline_priority_tests {
         // a live session: no call and no loop before the site, so no frame waits there for a
         // patch; the patch rebuilds the caller. The copy is the unpatched build's, its flag noted
         // for the guard of a copy of the caller elsewhere, which reads both flags.
+        // The flags come in the copies' order however the run numbered their symbols (a run
+        // numbers them as it interns them): a cached build and a fresh one name them alike.
         let options = &relax_session::Options::default();
-        let (flag, mid_flag) = (Sym { id: 9, off: 16 }, Sym { id: 9, off: 24 });
-        let mut leaf = callee(2);
-        leaf.patch_flag = Some(flag);
-        let mut mid = callee(0);
-        mid.patch_flag = Some(mid_flag);
-        mid.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
-        mid.blocks[0].pos = vec![5];
-        let get = |id: u32| (id == 1).then_some((&leaf as *const Func, ATTR_ALWAYS));
-        assert_eq!(inline_calls(options, &mut mid, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        mid.verify().unwrap();
-        assert!(!mid.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Addr(..) | Inst::AtomicLoad(..) | Inst::Call(..))), "{}", mid.dump());
-        assert!(mid.guard_calls.is_empty());
-        assert_eq!(mid.unguarded_flags, vec![flag]);
-        // the ordered inliner (O3) the same
-        let mut mid3 = callee(0);
-        mid3.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
-        mid3.blocks[0].pos = vec![5];
-        assert_eq!(inline_calls_ordered(options, &mut mid3, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 1);
-        mid3.verify().unwrap();
-        assert!(mid3.guard_calls.is_empty() && mid3.unguarded_flags == vec![flag], "{}", mid3.dump());
-        // in a loop: the copy of `mid` reads its flag and the one of its unguarded copy
-        let get = |id: u32| match id {
-            1 => Some((&leaf as *const Func, ATTR_ALWAYS)),
-            2 => Some((&mid as *const Func, ATTR_ALWAYS)),
-            _ => None,
-        };
-        let mut outer = caller_in_loop();
-        outer.blocks[1].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
-        outer.blocks[1].pos = vec![7];
-        assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        outer.verify().unwrap();
-        let read: Vec<Sym> = outer.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i { Inst::Addr(_, s) => Some(*s), _ => None }).collect();
-        assert_eq!(read, vec![flag, mid_flag], "{}", outer.dump());
-        assert!(outer.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::IBin(IOp::Or, ..))));
-        assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
-        assert!(outer.unguarded_flags.is_empty());
-        // before the loop: unguarded as well, both flags noted
-        let mut outer = caller();
-        outer.blocks[0].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
-        outer.blocks[1].insts.clear();
-        outer.blocks[1].pos.clear();
-        assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        outer.verify().unwrap();
-        assert!(outer.guard_calls.is_empty(), "{}", outer.dump());
-        assert_eq!(outer.unguarded_flags, vec![flag, mid_flag]);
+        for (flag, mid_flag) in [(Sym { id: 9, off: 16 }, Sym { id: 9, off: 24 }), (Sym { id: 10, off: 16 }, Sym { id: 9, off: 16 })] {
+            let mut leaf = callee(2);
+            leaf.patch_flag = Some(flag);
+            let mut mid = callee(0);
+            mid.patch_flag = Some(mid_flag);
+            mid.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
+            mid.blocks[0].pos = vec![5];
+            let get = |id: u32| (id == 1).then_some((&leaf as *const Func, ATTR_ALWAYS));
+            assert_eq!(inline_calls(options, &mut mid, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            mid.verify().unwrap();
+            assert!(!mid.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Addr(..) | Inst::AtomicLoad(..) | Inst::Call(..))), "{}", mid.dump());
+            assert!(mid.guard_calls.is_empty());
+            assert_eq!(mid.unguarded_flags, vec![flag]);
+            // the ordered inliner (O3) the same
+            let mut mid3 = callee(0);
+            mid3.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
+            mid3.blocks[0].pos = vec![5];
+            assert_eq!(inline_calls_ordered(options, &mut mid3, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 1);
+            mid3.verify().unwrap();
+            assert!(mid3.guard_calls.is_empty() && mid3.unguarded_flags == vec![flag], "{}", mid3.dump());
+            // in a loop: the copy of `mid` reads its flag and the one of its unguarded copy
+            let get = |id: u32| match id {
+                1 => Some((&leaf as *const Func, ATTR_ALWAYS)),
+                2 => Some((&mid as *const Func, ATTR_ALWAYS)),
+                _ => None,
+            };
+            let mut outer = caller_in_loop();
+            outer.blocks[1].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
+            outer.blocks[1].pos = vec![7];
+            assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            outer.verify().unwrap();
+            let read: Vec<Sym> = outer.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i { Inst::Addr(_, s) => Some(*s), _ => None }).collect();
+            assert_eq!(read, vec![flag, mid_flag], "a guard reads the flags in the copies' order (flags {:?}): {}", (flag, mid_flag), outer.dump());
+            assert!(outer.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::IBin(IOp::Or, ..))));
+            assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
+            assert!(outer.unguarded_flags.is_empty());
+            // before the loop: unguarded as well, both flags noted
+            let mut outer = caller();
+            outer.blocks[0].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
+            outer.blocks[1].insts.clear();
+            outer.blocks[1].pos.clear();
+            assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            outer.verify().unwrap();
+            assert!(outer.guard_calls.is_empty(), "{}", outer.dump());
+            assert_eq!(outer.unguarded_flags, vec![flag, mid_flag], "unguarded copies note their flags in the copies' order");
+        }
     }
 
     #[test]
@@ -7319,6 +7330,23 @@ mod inline_priority_tests {
         assert_eq!(stats.growth_after, inline_inst_count(&f));
         assert!(inline_calls_ordered(options, &mut f, 0, &get, &|_| None, &|_, _| false, &|_| false, &lim, None, Some(&mut stats)).is_empty());
         f.verify().unwrap();
+    }
+
+    /// A sandbox twin is priced by its base's share of its confined body (`Func::priced`): its
+    /// size, its rustc cost and with them the rule a site takes it by.
+    #[test]
+    fn a_twin_is_priced_by_its_base() {
+        let lim = InlineLimits::tier1();
+        let mut f = callee(4 * lim.leaf_insts);
+        let (size, cost) = (inline_inst_count(&f), rustc_inline_cost(&f, 0));
+        assert!(inline_rule(&f, 1, 0, 0, 0, &lim).is_none(), "a body four times the leaf rule's size");
+        f.confined = Some((lim.leaf_insts as u32, 4 * lim.leaf_insts as u32));
+        assert_eq!(inline_inst_count(&f), size.div_ceil(4));
+        assert_eq!(rustc_inline_cost(&f, 0), cost.div_ceil(4));
+        assert!(inline_rule(&f, 1, 0, 0, 0, &lim).is_some(), "the twin of a body the leaf rule takes");
+        // (never above its own size)
+        f.confined = Some((u32::MAX, 4));
+        assert_eq!(inline_inst_count(&f), size);
     }
 
     #[test]

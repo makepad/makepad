@@ -2,11 +2,11 @@
 
 use super::Vec;
 use crate::fmt;
-use crate::heap;
+use crate::heap::{Allocator, Global};
 use crate::intrinsics_mem as im;
 
 #[rustc_insignificant_dtor]
-pub struct IntoIter<T> {
+pub struct IntoIter<T, #[unstable(feature = "allocator_ext", issue = "163177", implied_by = "allocator_api")] A: Allocator = Global> {
     buf: crate::ptr::NonNull<T>,
     cap: usize,
     /// next front index
@@ -14,17 +14,25 @@ pub struct IntoIter<T> {
     /// one past the next back index
     end: usize,
     _marker: crate::marker::PhantomData<T>,
+    alloc: A,
 }
 
-unsafe impl<T: Send> Send for IntoIter<T> {}
-unsafe impl<T: Sync> Sync for IntoIter<T> {}
+unsafe impl<T: Send, A: Allocator + Send> Send for IntoIter<T, A> {}
+unsafe impl<T: Sync, A: Allocator + Sync> Sync for IntoIter<T, A> {}
 
-pub(super) fn new<T>(v: Vec<T>) -> IntoIter<T> {
+// inlined into `into_iter` as before the allocator parameter (moving the allocator out took the
+// source past O1's size rule): the iterator's fields are registers from the loop's first round
+#[inline]
+pub(super) fn new<T, A: Allocator>(v: Vec<T, A>) -> IntoIter<T, A> {
     let me = crate::mem::ManuallyDrop::new(v);
-    IntoIter { buf: me.ptr, cap: me.cap.get(), start: 0, end: me.len, _marker: crate::marker::PhantomData }
+    let alloc = unsafe { im::ptr_read(&me.alloc as *const A) };
+    IntoIter { buf: me.ptr, cap: me.cap.get(), start: 0, end: me.len, _marker: crate::marker::PhantomData, alloc }
 }
 
-impl<T> IntoIter<T> {
+impl<T, A: Allocator> IntoIter<T, A> {
+    pub fn allocator(&self) -> &A {
+        &self.alloc
+    }
     pub fn as_slice(&self) -> &[T] {
         unsafe { im::slice_from_raw(im::ptr_add(self.buf.as_ptr() as *const T, self.start), self.end - self.start) }
     }
@@ -33,7 +41,7 @@ impl<T> IntoIter<T> {
     }
 }
 
-impl<T> Iterator for IntoIter<T> {
+impl<T, A: Allocator> Iterator for IntoIter<T, A> {
     type Item = T;
     fn next(&mut self) -> Option<T> {
         if self.start == self.end {
@@ -75,7 +83,7 @@ impl<T> Iterator for IntoIter<T> {
     }
 }
 
-impl<T> DoubleEndedIterator for IntoIter<T> {
+impl<T, A: Allocator> DoubleEndedIterator for IntoIter<T, A> {
     fn next_back(&mut self) -> Option<T> {
         if self.start == self.end {
             None
@@ -86,42 +94,42 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     }
 }
 
-impl<T> ExactSizeIterator for IntoIter<T> {}
-unsafe impl<T> crate::iter::TrustedLen for IntoIter<T> {}
-impl<T> crate::iter::FusedIterator for IntoIter<T> {}
+impl<T, A: Allocator> ExactSizeIterator for IntoIter<T, A> {}
+unsafe impl<T, A: Allocator> crate::iter::TrustedLen for IntoIter<T, A> {}
+impl<T, A: Allocator> crate::iter::FusedIterator for IntoIter<T, A> {}
 // real alloc: `T: NonDrop`, its marker for Copy (the indexed reads leave the items in the buffer, and
 // its drop drops start..end)
-unsafe impl<T: Copy> crate::iter::TrustedRandomAccessNoCoerce for IntoIter<T> {
+unsafe impl<T: Copy, A: Allocator> crate::iter::TrustedRandomAccessNoCoerce for IntoIter<T, A> {
     const MAY_HAVE_SIDE_EFFECT: bool = false;
 }
 
-impl<T: Clone> Clone for IntoIter<T> {
-    fn clone(&self) -> IntoIter<T> {
-        new(crate::slice::to_vec(self.as_slice()))
+impl<T: Clone, A: Allocator + Clone> Clone for IntoIter<T, A> {
+    fn clone(&self) -> IntoIter<T, A> {
+        new(crate::slice::to_vec_in(self.as_slice(), self.alloc.clone()))
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for IntoIter<T> {
+impl<T: fmt::Debug, A: Allocator> fmt::Debug for IntoIter<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("IntoIter").field(&self.as_slice()).finish()
     }
 }
 
-impl<T> Default for IntoIter<T> {
-    fn default() -> IntoIter<T> {
-        new(Vec::new())
+impl<T, A: Allocator + Default> Default for IntoIter<T, A> {
+    fn default() -> IntoIter<T, A> {
+        new(Vec::new_in(A::default()))
     }
 }
 
 // alloc vec/into_iter.rs: the items left drop as one slice (a panicking drop leaves the others to
-// the slice's drop), and a guard frees the buffer, on an unwind too
-unsafe impl<#[may_dangle] T> Drop for IntoIter<T> {
+// the slice's drop), and a guard frees the buffer, on an unwind too; the allocator drops last
+unsafe impl<#[may_dangle] T, A: Allocator> Drop for IntoIter<T, A> {
     fn drop(&mut self) {
-        struct DropGuard<'a, T>(&'a mut IntoIter<T>);
-        impl<T> Drop for DropGuard<'_, T> {
+        struct DropGuard<'a, T, A: Allocator>(&'a mut IntoIter<T, A>);
+        impl<T, A: Allocator> Drop for DropGuard<'_, T, A> {
             fn drop(&mut self) {
                 if crate::mem::size_of::<T>() != 0 && self.0.cap != 0 {
-                    heap::free(self.0.buf.as_ptr() as *mut u8, Vec::<T>::current_layout(self.0.cap));
+                    unsafe { self.0.alloc.deallocate(self.0.buf.cast::<u8>(), Vec::<T>::current_layout(self.0.cap)) };
                 }
             }
         }

@@ -3,6 +3,7 @@
 //! domain zero on the process heap and selects an arena only for hosted program allocations.
 
 use crate::fmt;
+use crate::ptr::NonNull;
 #[cfg(relax_web)]
 use crate::web_allocator as sys;
 
@@ -195,34 +196,20 @@ pub(crate) fn alloc_or_abort(layout: Layout) -> *mut u8 {
     p
 }
 
-pub(crate) fn realloc_or_abort(ptr: *mut u8, old: Layout, new_size: usize) -> *mut u8 {
-    if old.size == 0 {
-        return alloc_or_abort(unsafe { Layout::from_size_align_unchecked(new_size, old.align()) });
-    }
-    if new_size == 0 {
-        unsafe { dealloc(ptr, old) };
-        return old.align() as *mut u8;
-    }
-    let p = unsafe { realloc(ptr, old, new_size) };
-    if p.is_null() {
-        handle_alloc_error(unsafe { Layout::from_size_align_unchecked(new_size, old.align()) });
-    }
-    p
+/// Gives a block back to its allocator when dropped, on the unwind path too (library/'s
+/// DeallocDropGuard of Box::try_clone_from_ref_in; Box's and Vec's drops free their block with
+/// it after dropping the contents). A zero-sized layout is no block.
+pub(crate) struct DeallocGuard<'a, A: Allocator> {
+    pub(crate) ptr: NonNull<u8>,
+    pub(crate) layout: Layout,
+    pub(crate) alloc: &'a A,
 }
 
-pub(crate) fn free(ptr: *mut u8, layout: Layout) {
-    if layout.size != 0 {
-        unsafe { dealloc(ptr, layout) }
-    }
-}
-
-// library/alloc/src/boxed.rs: Box::try_clone_from_ref_in uses DeallocDropGuard
-// to keep deallocation on the unwind path.
-pub(crate) struct DeallocGuard(pub(crate) *mut u8, pub(crate) Layout);
-
-impl Drop for DeallocGuard {
+impl<'a, A: Allocator> Drop for DeallocGuard<'a, A> {
     fn drop(&mut self) {
-        free(self.0, self.1);
+        if self.layout.size != 0 {
+            unsafe { self.alloc.deallocate(self.ptr, self.layout) }
+        }
     }
 }
 
@@ -281,6 +268,7 @@ pub unsafe trait GlobalAlloc {
     }
 }
 
+#[derive(Copy, Clone, Default, Debug)]
 pub struct System;
 
 /// The system allocator (Relax's program heap), whatever the program's global allocator is.
@@ -296,5 +284,307 @@ unsafe impl GlobalAlloc for System {
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         { __rdl_realloc(ptr, layout.size, layout.align(), new_size) }
+    }
+}
+
+/// library/core/src/alloc/mod.rs @1.100.0: an allocation failed (resource exhaustion, or a layout the
+/// allocator does not serve).
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct AllocError;
+
+impl crate::error::Error for AllocError {}
+
+impl fmt::Display for AllocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("memory allocation failed")
+    }
+}
+
+/// library/core/src/alloc/mod.rs @1.100.0 (stable allocator_api): allocates, grows, shrinks and frees
+/// blocks described by a Layout. The defaults of `allocate_zeroed`, `grow`, `grow_zeroed` and
+/// `shrink` are library/'s: allocate, copy, deallocate (its debug_asserts on the sizes are off in
+/// the release std a program links, so none here).
+pub unsafe trait Allocator {
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError>;
+
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let ptr = self.allocate(layout)?;
+        unsafe { crate::ptr::write_bytes(ptr.as_mut_ptr(), 0, ptr.len()) }
+        Ok(ptr)
+    }
+
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout);
+
+    unsafe fn grow(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let new_ptr = self.allocate(new_layout)?;
+        unsafe {
+            crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+        Ok(new_ptr)
+    }
+
+    unsafe fn grow_zeroed(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let new_ptr = self.allocate_zeroed(new_layout)?;
+        unsafe {
+            crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+        Ok(new_ptr)
+    }
+
+    unsafe fn shrink(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        let new_ptr = self.allocate(new_layout)?;
+        unsafe {
+            crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_layout.size());
+            self.deallocate(ptr, old_layout);
+        }
+        Ok(new_ptr)
+    }
+}
+
+unsafe impl<A: Allocator + ?Sized> Allocator for &A {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        (**self).allocate(layout)
+    }
+    #[inline]
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        (**self).allocate_zeroed(layout)
+    }
+    #[inline]
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { (**self).deallocate(ptr, layout) }
+    }
+    #[inline]
+    unsafe fn grow(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).grow(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn grow_zeroed(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).grow_zeroed(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn shrink(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).shrink(ptr, old_layout, new_layout) }
+    }
+}
+
+unsafe impl<A: Allocator + ?Sized> Allocator for &mut A {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        (**self).allocate(layout)
+    }
+    #[inline]
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        (**self).allocate_zeroed(layout)
+    }
+    #[inline]
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        unsafe { (**self).deallocate(ptr, layout) }
+    }
+    #[inline]
+    unsafe fn grow(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).grow(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn grow_zeroed(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).grow_zeroed(ptr, old_layout, new_layout) }
+    }
+    #[inline]
+    unsafe fn shrink(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { (**self).shrink(ptr, old_layout, new_layout) }
+    }
+}
+
+/// library/core/src/alloc/mod.rs @1.100.0 (unstable allocator_ext): an allocator whose blocks stay
+/// valid until they are deallocated, whatever happens to the allocator value. Box::into_pin and
+/// `Pin<Box<T, A>>: From<Box<T, A>>` require it of A; Global and System are, and a reference to one.
+pub unsafe trait StaticAllocator: Allocator {}
+
+unsafe impl<A: StaticAllocator + ?Sized> StaticAllocator for &A {}
+unsafe impl<A: StaticAllocator + ?Sized> StaticAllocator for &mut A {}
+
+/// library/alloc/src/alloc.rs @1.100.0: the global memory allocator as an `Allocator`. It goes to the
+/// program's global allocator (`alloc` and the rest: a `#[global_allocator]` static, else System),
+/// as Box's and Vec's allocations do. A zero-sized allocation is the layout's dangling pointer and
+/// touches no heap; `grow`, `grow_zeroed` and `shrink` of one alignment are a realloc, as library/'s.
+#[derive(Copy, Clone, Default, Debug)]
+#[lang = "global_alloc_ty"]
+pub struct Global;
+
+unsafe impl StaticAllocator for Global {}
+unsafe impl StaticAllocator for System {}
+
+/// library/alloc/src/alloc.rs @1.100.0: the bound of the stable methods whose result names an
+/// allocator parameter that is still unstable (Vec::drain, splice and extract_if: Drain, Splice and
+/// ExtractIf). library/ implements it for every allocator only under `allocator_ext`
+/// (`#[unstable_feature_bound]`), which Relax does not take: here, as on stable, Global alone.
+#[doc(hidden)]
+pub trait AllocatorNightly: Allocator {}
+
+impl AllocatorNightly for Global {}
+
+impl Global {
+    #[inline]
+    fn alloc_impl(&self, layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
+        match layout.size() {
+            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),
+            size => unsafe {
+                let raw = if zeroed { alloc_zeroed(layout) } else { alloc(layout) };
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                Ok(NonNull::slice_from_raw_parts(ptr, size))
+            },
+        }
+    }
+
+    #[inline]
+    unsafe fn grow_impl(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
+        match old_layout.size() {
+            0 => self.alloc_impl(new_layout, zeroed),
+            old_size if old_layout.align() == new_layout.align() => unsafe {
+                let new_size = new_layout.size();
+                let raw = realloc(ptr.as_ptr(), old_layout, new_size);
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                if zeroed {
+                    crate::ptr::write_bytes(raw.add(old_size), 0, new_size - old_size);
+                }
+                Ok(NonNull::slice_from_raw_parts(ptr, new_size))
+            },
+            old_size => unsafe {
+                let new_ptr = self.alloc_impl(new_layout, zeroed)?;
+                crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_size);
+                self.deallocate(ptr, old_layout);
+                Ok(new_ptr)
+            },
+        }
+    }
+}
+
+unsafe impl Allocator for Global {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl(layout, false)
+    }
+    #[inline]
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl(layout, true)
+    }
+    #[inline]
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        if layout.size() != 0 {
+            unsafe { dealloc(ptr.as_ptr(), layout) }
+        }
+    }
+    #[inline]
+    unsafe fn grow(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { self.grow_impl(ptr, old_layout, new_layout, false) }
+    }
+    #[inline]
+    unsafe fn grow_zeroed(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { self.grow_impl(ptr, old_layout, new_layout, true) }
+    }
+    #[inline]
+    unsafe fn shrink(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        match new_layout.size() {
+            0 => unsafe {
+                self.deallocate(ptr, old_layout);
+                Ok(NonNull::slice_from_raw_parts(new_layout.dangling(), 0))
+            },
+            new_size if old_layout.align() == new_layout.align() => unsafe {
+                let raw = realloc(ptr.as_ptr(), old_layout, new_size);
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                Ok(NonNull::slice_from_raw_parts(ptr, new_size))
+            },
+            new_size => unsafe {
+                let new_ptr = self.allocate(new_layout)?;
+                crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_size);
+                self.deallocate(ptr, old_layout);
+                Ok(new_ptr)
+            },
+        }
+    }
+}
+
+/// library/std/src/alloc.rs @1.100.0: System as an `Allocator`, on Relax's program heap whatever the
+/// program's global allocator is (`__rdl_*`), with library/'s zero-size and realloc rules.
+impl System {
+    #[inline]
+    fn alloc_impl(&self, layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
+        match layout.size() {
+            0 => Ok(NonNull::slice_from_raw_parts(layout.dangling(), 0)),
+            size => unsafe {
+                let raw = if zeroed { __rdl_alloc_zeroed(size, layout.align()) } else { __rdl_alloc(size, layout.align()) };
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                Ok(NonNull::slice_from_raw_parts(ptr, size))
+            },
+        }
+    }
+
+    #[inline]
+    unsafe fn grow_impl(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout, zeroed: bool) -> Result<NonNull<[u8]>, AllocError> {
+        match old_layout.size() {
+            0 => self.alloc_impl(new_layout, zeroed),
+            old_size if old_layout.align() == new_layout.align() => unsafe {
+                let new_size = new_layout.size();
+                let raw = __rdl_realloc(ptr.as_ptr(), old_size, old_layout.align(), new_size);
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                if zeroed {
+                    crate::ptr::write_bytes(raw.add(old_size), 0, new_size - old_size);
+                }
+                Ok(NonNull::slice_from_raw_parts(ptr, new_size))
+            },
+            old_size => unsafe {
+                let new_ptr = self.alloc_impl(new_layout, zeroed)?;
+                crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), old_size);
+                Allocator::deallocate(self, ptr, old_layout);
+                Ok(new_ptr)
+            },
+        }
+    }
+}
+
+unsafe impl Allocator for System {
+    #[inline]
+    fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl(layout, false)
+    }
+    #[inline]
+    fn allocate_zeroed(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        self.alloc_impl(layout, true)
+    }
+    #[inline]
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+        if layout.size() != 0 {
+            unsafe { __rdl_dealloc(ptr.as_ptr(), layout.size(), layout.align()) }
+        }
+    }
+    #[inline]
+    unsafe fn grow(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { self.grow_impl(ptr, old_layout, new_layout, false) }
+    }
+    #[inline]
+    unsafe fn grow_zeroed(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        unsafe { self.grow_impl(ptr, old_layout, new_layout, true) }
+    }
+    #[inline]
+    unsafe fn shrink(&self, ptr: NonNull<u8>, old_layout: Layout, new_layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
+        match new_layout.size() {
+            0 => unsafe {
+                Allocator::deallocate(self, ptr, old_layout);
+                Ok(NonNull::slice_from_raw_parts(new_layout.dangling(), 0))
+            },
+            new_size if old_layout.align() == new_layout.align() => unsafe {
+                let raw = __rdl_realloc(ptr.as_ptr(), old_layout.size(), old_layout.align(), new_size);
+                let ptr = NonNull::new(raw).ok_or(AllocError)?;
+                Ok(NonNull::slice_from_raw_parts(ptr, new_size))
+            },
+            new_size => unsafe {
+                let new_ptr = Allocator::allocate(self, new_layout)?;
+                crate::ptr::copy_nonoverlapping(ptr.as_ptr(), new_ptr.as_mut_ptr(), new_size);
+                Allocator::deallocate(self, ptr, old_layout);
+                Ok(new_ptr)
+            },
+        }
     }
 }

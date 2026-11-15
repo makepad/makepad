@@ -4419,7 +4419,13 @@ impl<'a> Gen<'a> {
             // a slot copied onto its own storage (frame::slot_addr_positions): nothing moves
             Inst::Copy(dst, src, _) if self.slot_pos[dst.0 as usize] != i64::MIN && self.slot_pos[dst.0 as usize] == self.slot_pos[src.0 as usize] => {}
             // overlapping bytes of the frame (frame::copy_overlap; a verify build fails on it,
-            // compile_freq): memmove order, each piece loaded whole before it is stored
+            // compile_freq): memmove order, each piece loaded whole before it is stored.
+            // Valid RIR never gets here (a Copy is a memcpy): coalesce_slot_copies joins slots in
+            // the RIR and keeps two apart where a copy between them would meet bytes of the
+            // joined slot (codegen tests/slot_coalesce.rs
+            // a_second_copy_at_another_offset_keeps_joined_slots_apart), and ptr::copy is a
+            // memmove call, never a Copy. Kept as the release build's guard against a pass or
+            // frame layout fault.
             Inst::Copy(dst, src, size) if crate::frame::copy_overlap(&self.slot_pos, *dst, *src, *size) != 0 => {
                 let delta = crate::frame::copy_overlap(&self.slot_pos, *dst, *src, *size);
                 let rd = self.use_i(*dst, S0);
@@ -5569,6 +5575,10 @@ pub fn vx_native(op: VX) -> bool {
 /// `compile` with measured block frequencies of `f` (0..=1 of its hottest block, per block), which
 /// the register allocator weighs uses by instead of loop depth.
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
+    // (sandbox.rs: the input of a twin's O3 build is confined before it comes here)
+    if f.unconfined {
+        return Err(format!("{}: a sandboxed body whose memory is not confined reached the backend", f.name));
+    }
     let _warm = crate::probe::backend(&f.name);
     let _cost_codegen = crate::probe::phase(5);
     crate::probe::size(f);

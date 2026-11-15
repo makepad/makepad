@@ -1,4 +1,4 @@
-//! Bitset dataflow, following rustc_mir_dataflow/src/framework/mod.rs:99,244.
+//! Bitset dataflow, following rustc_mir_dataflow/src/framework/mod.rs:99,288.
 //! The object-safe Analysis fixes the domain to BitSet and direction to an enum,
 //! avoiding per-analysis engine monomorphization. Effects must be monotone under join.
 
@@ -20,7 +20,6 @@ pub use visitor::{visit_reachable_results, visit_results, ResultsVisitor};
 
 use super::*;
 use direction::{apply_effect, Cfg};
-use std::collections::VecDeque;
 
 pub trait Analysis {
     fn direction(&self) -> Direction { Direction::Forward }
@@ -49,7 +48,7 @@ pub trait Analysis {
 /// Entry is in analysis order: before the first statement for Forward, after the
 /// terminator for Backward. Only reachable blocks may be queried; lifted domains
 /// additionally exclude blocks reachable solely through edges the analysis pruned.
-/// rustc_mir_dataflow/src/framework/results.rs:14 and framework/mod.rs:244.
+/// rustc_mir_dataflow/src/framework/results.rs:14 and framework/mod.rs:288.
 pub struct Results<'a> {
     body: &'a Body,
     analysis: &'a dyn Analysis,
@@ -68,8 +67,15 @@ impl<'a> Results<'a> {
     pub fn cursor(&self) -> ResultsCursor<'_, 'a> { ResultsCursor::new(self) }
 }
 
-/// rustc_mir_dataflow/src/framework/mod.rs:244. Seed every reachable block, even
-/// when bottom propagates unchanged: its transfer may generate facts from bottom.
+/// rustc_mir_dataflow/src/framework/mod.rs:288 (nightly 8d1a764). Seed every reachable block,
+/// even when bottom propagates unchanged: its transfer may generate facts from bottom.
+///
+/// The min-rank traversal of mod.rs:312: a block's rank is its position in the reverse
+/// postorder (flipped for a backward analysis), every reachable block starts dirty, and the
+/// next block is always the dirty one of least rank. A back edge that changes an earlier block
+/// returns there at once, so a loop settles before the blocks after it run, and loop-free code
+/// takes a single pass. Each target joins the exit state in place (mod.rs:370); only an edge
+/// effect needs a copy of it.
 pub fn iterate_to_fixpoint<'a>(body: &'a Body, analysis: &'a dyn Analysis) -> Results<'a> {
     assert!(!body.basic_blocks.is_empty());
     let cfg = Cfg::new(body);
@@ -88,54 +94,107 @@ pub fn iterate_to_fixpoint<'a>(body: &'a Body, analysis: &'a dyn Analysis) -> Re
     if backward {
         assert_eq!(results.entry_states[0], bottom, "backward start state is unsupported");
     }
-    let mut queue = VecDeque::new();
-    let mut queued = BitSet::new_empty(count);
-    for i in 0..cfg.postorder.len() {
-        let block = if backward { cfg.postorder[i] } else { cfg.postorder[cfg.postorder.len() - 1 - i] };
-        queue.push_back(block);
-        queued.insert(block.0 as usize);
+    // `cfg.postorder` holds the reachable blocks; a forward rank counts from its end.
+    let last = cfg.postorder.len() - 1;
+    let mut ranks = vec![usize::MAX; count];
+    for (i, block) in cfg.postorder.iter().enumerate() {
+        ranks[block.0 as usize] = if backward { i } else { last - i };
     }
+    let mut work = Worklist { ranks, dirty: BitSet::new_filled(cfg.postorder.len()), curr: 0, backward };
     let mut state = bottom.clone();
     let mut edge_state = bottom;
-    while let Some(block) = queue.pop_front() {
+    loop {
+        let block = cfg.postorder[if backward { work.curr } else { last - work.curr }];
+        work.dirty.remove(work.curr);
         let b = block.0 as usize;
-        queued.remove(b);
-        if lifted && !results.is_reachable(block) { continue; }
-        state.clone_from(&results.entry_states[b]);
-        let data = &body.basic_blocks[b];
-        if backward {
-            for step in 0..(data.statements.len() + 1) * 2 {
-                apply_effect(body, analysis, &mut state, block, step);
+        if !lifted || results.is_reachable(block) {
+            state.clone_from(&results.entry_states[b]);
+            let data = &body.basic_blocks[b];
+            if backward {
+                for step in 0..(data.statements.len() + 1) * 2 {
+                    apply_effect(body, analysis, &mut state, block, step);
+                }
+                // rustc direction.rs:80: only a call's return edge carries an effect backward.
+                for i in cfg.pred_offsets[b]..cfg.pred_offsets[b + 1] {
+                    let edge = cfg.edges[cfg.predecessors[i]];
+                    if direction::has_edge_effect(analysis, edge) {
+                        edge_state.clone_from(&state);
+                        direction::apply_edge_effect(analysis, &mut edge_state, edge);
+                        work.propagate(&mut results, edge.source, &edge_state);
+                    } else {
+                        work.propagate(&mut results, edge.source, &state);
+                    }
+                }
+            } else {
+                for step in 0..data.statements.len() * 2 + 1 {
+                    apply_effect(body, analysis, &mut state, block, step);
+                }
+                let at = Location { block, statement_index: data.statements.len() };
+                // rustc direction.rs:173. The cleanup edge leaves before the call's return
+                // effect; only a switch with edge effects copies the state, once per value.
+                match analysis.apply_primary_terminator_effect(&mut state, data.terminator.as_ref().unwrap(), at) {
+                    TerminatorEdges::None => {}
+                    TerminatorEdges::Single(target) => work.propagate(&mut results, target, &state),
+                    TerminatorEdges::Double(target, unwind) => {
+                        work.propagate(&mut results, target, &state);
+                        work.propagate(&mut results, unwind, &state);
+                    }
+                    TerminatorEdges::AssignOnReturn { return_, cleanup, place } => {
+                        if let Some(cleanup) = cleanup { work.propagate(&mut results, cleanup, &state); }
+                        if let Some(target) = return_ {
+                            analysis.apply_call_return_effect(&mut state, block, place);
+                            work.propagate(&mut results, target, &state);
+                        }
+                    }
+                    TerminatorEdges::SwitchInt { targets, discr } => {
+                        if analysis.has_switch_int_edge_effect(block, targets, discr) {
+                            for (i, &target) in targets.targets.iter().enumerate() {
+                                edge_state.clone_from(&state);
+                                analysis.apply_switch_int_edge_effect(&mut edge_state, block, targets, discr, SwitchTargetIndex::Normal(i));
+                                work.propagate(&mut results, target, &edge_state);
+                            }
+                            analysis.apply_switch_int_edge_effect(&mut state, block, targets, discr, SwitchTargetIndex::Otherwise);
+                        } else {
+                            for &target in &targets.targets { work.propagate(&mut results, target, &state); }
+                        }
+                        work.propagate(&mut results, targets.otherwise, &state);
+                    }
+                }
             }
-            for i in cfg.pred_offsets[b]..cfg.pred_offsets[b + 1] {
-                let edge = &cfg.edges[cfg.predecessors[i]];
-                edge_state.clone_from(&state);
-                direction::apply_edge_effect(analysis, &mut edge_state, *edge);
-                propagate(&mut results, edge.source, &edge_state, &mut queue, &mut queued);
-            }
-        } else {
-            for step in 0..data.statements.len() * 2 + 1 {
-                apply_effect(body, analysis, &mut state, block, step);
-            }
-            let at = Location { block, statement_index: data.statements.len() };
-            let edges = analysis.apply_primary_terminator_effect(&mut state, data.terminator.as_ref().unwrap(), at);
-            for i in 0..edges.len() {
-                let edge = edges.edge(block, i);
-                assert!(cfg.reachable.contains(edge.target.0 as usize), "analysis introduced an unreachable edge");
-                edge_state.clone_from(&state);
-                direction::apply_edge_effect(analysis, &mut edge_state, edge);
-                propagate(&mut results, edge.target, &edge_state, &mut queue, &mut queued);
-            }
+        }
+        match work.dirty.first_set_at_or_after(work.curr) {
+            Some(rank) => work.curr = rank,
+            None => break,
         }
     }
     results
 }
 
-fn propagate(results: &mut Results<'_>, target: BasicBlock, state: &BitSet, queue: &mut VecDeque<BasicBlock>, queued: &mut BitSet) {
-    let i = target.0 as usize;
-    let reached = results.analysis.bottom_is_unreachable() && results.reachable.insert(i);
-    let changed = results.analysis.join(&mut results.entry_states[i], state);
-    if (reached || changed) && queued.insert(i) { queue.push_back(target); }
+/// The dirty blocks by rank, and the least dirty rank: rustc framework/mod.rs:346.
+struct Worklist {
+    ranks: Vec<usize>,
+    dirty: BitSet,
+    curr: usize,
+    backward: bool,
+}
+
+impl Worklist {
+    fn propagate(&mut self, results: &mut Results<'_>, target: BasicBlock, state: &BitSet) {
+        let i = target.0 as usize;
+        let rank = self.ranks[i];
+        // A backward analysis meets the unreachable predecessors of reachable blocks and skips
+        // them (mod.rs:361); a forward one reaches only reachable blocks.
+        if rank == usize::MAX {
+            assert!(self.backward, "analysis introduced an unreachable edge");
+            return;
+        }
+        let reached = results.analysis.bottom_is_unreachable() && results.reachable.insert(i);
+        let changed = results.analysis.join(&mut results.entry_states[i], state);
+        if reached || changed {
+            self.dirty.insert(rank);
+            self.curr = self.curr.min(rank);
+        }
+    }
 }
 
 #[cfg(test)]

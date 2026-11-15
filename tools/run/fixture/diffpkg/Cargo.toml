@@ -13,3 +13,6 @@ ttf-parser = { path = "../../../../libs/ttf-parser" }
 makepad-fast-inflate = { path = "../../../../libs/fast_inflate" }
 smallvec = { path = "../../../../libs/smallvec", features = ["const_new"] }
 arrayvec = { path = "../../../../libs/vulkan/arrayvec" }
+# relax_api_table: the #[relax_api] table a Relax host reads (the CPU budget is a crate the loader provides)
+makepad-cpu-budget = { path = "../../../../libs/cpu_budget", features = ["host-shims"] }
+relax-api = { path = "../../../../libs/relax_api", features = ["host-shims"] }

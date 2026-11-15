@@ -70,5 +70,12 @@ impl DeferredCallResolution {
             fcx.err(lo, "E0308: closure call signature mismatch".into());
         }
         fcx.record_call_trait(self.call_expr, td, ct, self.derefs, tuple);
+        // the closure's kind is known only now, after finish_mutable_places: an FnMut call takes
+        // its receiver mutably, through `DerefMut` / `IndexMut` where it is reached by them
+        if matches!(fcx.tcx.lang_items.by_def.get(&td), Some(LangItem::FnMut | LangItem::AsyncFnMut)) {
+            if let ExprKind::Call(recv, _) = fcx.ast().expr(self.call_expr).kind {
+                fcx.convert_call_receiver_to_mutable(self.call_expr, recv, self.derefs);
+            }
+        }
     }
 }

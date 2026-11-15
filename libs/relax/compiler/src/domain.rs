@@ -1,4 +1,4 @@
-//! Domain-local statics (local/agent_state/fast-rust/android/DESIGN-domains.md §2).
+//! Domain-local statics.
 //!
 //! Several apps ("domains") may run in one process on the same compiled code, so each needs its
 //! own copy of every static. A domain symbol (`SymClass::Domain`: a static, a writable block
@@ -1683,8 +1683,11 @@ pub(crate) const EXIT_KIND: &str = "domain exit";
 
 /// The domain ends in `st` (exited or crashed); a domain that already ended keeps its first end.
 fn end(id: DomainId, st: DomainState) {
-    if crate::run::app_domain() == Some(id) && crate::hot_failure::replacement_running() {
-        if let DomainState::Crashed(why) = &st { crate::hot_failure::restart_failed(why); }
+    if crate::run::app_domain() == Some(id) {
+        crate::first_frame::app_ended();
+        if crate::hot_failure::replacement_running() {
+            if let DomainState::Crashed(why) = &st { crate::hot_failure::restart_failed(why); }
+        }
     }
     if matches!(state(id), Some(DomainState::Compiling(_) | DomainState::Running)) {
         set_state(id, st);

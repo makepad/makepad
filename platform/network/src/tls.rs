@@ -366,22 +366,72 @@ pub mod x509 {
 
     /// [`tbs_certificate`] with an optional fleet identity extension.
     pub fn tbs_certificate_with(serial: &[u8; 16], common_name: &str, point: &[u8], fleet_identity: Option<&[u8]>) -> Vec<u8> {
-        let mut serial = *serial;
-        serial[0] &= 0x7F; // positive
-        serial[0] |= 0x01; // and never zero-led
-        let version = tlv(0xA0, &tlv(0x02, &[2]));
         let validity = seq(&[
             &tlv(0x17, b"250101000000Z"),
             &tlv(0x18, b"20991231235959Z"),
         ]);
+        let fleet = fleet_identity.map(|text| seq(&[OID_FLEET_IDENTITY, &tlv(0x04, text)]));
+        tbs(serial, common_name, point, &validity, fleet.as_deref())
+    }
+
+    const OID_SUBJECT_ALT_NAME: &[u8] = &[0x06, 0x03, 0x55, 0x1D, 0x11];
+
+    /// An RFC 5280 time (§4.1.2.5) from unix seconds: UTCTime through 2049,
+    /// GeneralizedTime from 2050.
+    pub fn time(unix_secs: u64) -> Vec<u8> {
+        let (y, m, d) = makepad_civil_time::to_ymd((unix_secs / 86_400) as i32);
+        let s = unix_secs % 86_400;
+        let hms = format!("{:02}{:02}{:02}", s / 3600, s / 60 % 60, s % 60);
+        if y < 2050 {
+            tlv(0x17, format!("{:02}{m:02}{d:02}{hms}Z", y % 100).as_bytes())
+        } else {
+            tlv(0x18, format!("{y:04}{m:02}{d:02}{hms}Z").as_bytes())
+        }
+    }
+
+    /// The subjectAltName extension (non-critical): dNSName [2] and
+    /// iPAddress [7] entries.
+    fn subject_alt_names(names: &[super::SubjectName]) -> Vec<u8> {
+        let mut general_names = Vec::new();
+        for name in names {
+            general_names.extend(match name {
+                super::SubjectName::Dns(host) => tlv(0x82, host.as_bytes()),
+                super::SubjectName::Ip(std::net::IpAddr::V4(ip)) => tlv(0x87, &ip.octets()),
+                super::SubjectName::Ip(std::net::IpAddr::V6(ip)) => tlv(0x87, &ip.octets()),
+            });
+        }
+        seq(&[OID_SUBJECT_ALT_NAME, &tlv(0x04, &tlv(0x30, &general_names))])
+    }
+
+    /// The TBSCertificate of a server browsers open by name or address: an
+    /// end-entity TLS server key as in [`tbs_certificate`], whose names are in
+    /// a subjectAltName (browsers ignore the CN), valid from `not_before` to
+    /// `not_after` (unix seconds). Apple platforms refuse a server
+    /// certificate without the names or valid for over 825 days.
+    pub fn tbs_certificate_for_names(
+        serial: &[u8; 16],
+        common_name: &str,
+        point: &[u8],
+        not_before: u64,
+        not_after: u64,
+        names: &[super::SubjectName],
+    ) -> Vec<u8> {
+        let validity = seq(&[&time(not_before), &time(not_after)]);
+        tbs(serial, common_name, point, &validity, Some(&subject_alt_names(names)))
+    }
+
+    fn tbs(serial: &[u8; 16], common_name: &str, point: &[u8], validity: &[u8], extra_extension: Option<&[u8]>) -> Vec<u8> {
+        let mut serial = *serial;
+        serial[0] &= 0x7F; // positive
+        serial[0] |= 0x01; // and never zero-led
+        let version = tlv(0xA0, &tlv(0x02, &[2]));
         let critical = [0x01, 0x01, 0xFF];
         let basic = seq(&[OID_BASIC_CONSTRAINTS, &critical, &tlv(0x04, &seq(&[]))]);
         let key_usage = seq(&[OID_KEY_USAGE, &critical, &tlv(0x04, &[0x03, 0x02, 0x07, 0x80])]);
         let eku = seq(&[OID_EXT_KEY_USAGE, &tlv(0x04, &seq(&[OID_SERVER_AUTH]))]);
-        let fleet = fleet_identity.map(|text| seq(&[OID_FLEET_IDENTITY, &tlv(0x04, text)]));
         let mut exts: Vec<&[u8]> = vec![&basic, &key_usage, &eku];
-        if let Some(fleet) = &fleet {
-            exts.push(fleet);
+        if let Some(extra) = extra_extension {
+            exts.push(extra);
         }
         let extensions = tlv(0xA3, &seq(&exts));
         seq(&[
@@ -389,7 +439,7 @@ pub mod x509 {
             &uint(&serial),
             &seq(&[OID_ECDSA_SHA256]),
             &name(common_name),
-            &validity,
+            validity,
             &name(common_name),
             &p256_spki(point),
             &extensions,
@@ -487,25 +537,37 @@ pub struct TlsIdentity {
     pub dir: PathBuf,
 }
 
+/// A name a browser-facing certificate is good for
+/// ([`TlsIdentity::load_or_create_for_names`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubjectName {
+    Dns(String),
+    Ip(std::net::IpAddr),
+}
+
+impl SubjectName {
+    fn record(&self) -> String {
+        match self {
+            SubjectName::Dns(host) => format!("dns {host}"),
+            SubjectName::Ip(ip) => format!("ip {ip}"),
+        }
+    }
+}
+
+/// Days a browser-facing certificate is valid: under the 398 that browsers
+/// and Apple platforms accept for a server certificate.
+pub const BROWSER_CERT_DAYS: u64 = 397;
+/// A browser-facing certificate this close to its end is made anew.
+const BROWSER_CERT_RENEW_DAYS: u64 = 30;
+/// What a browser-facing certificate was made for: its end and its names.
+pub const NAMES_FILE: &str = "tls-names.txt";
+
 impl TlsIdentity {
     /// Loads the identity in `dir`, creating the key and certificate the
     /// first time. The fingerprint stays the same as long as the files do.
     pub fn load_or_create(dir: &Path, common_name: &str) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
-        restrict_dir(dir)?;
-        let key_path = dir.join(KEY_FILE);
+        let key = load_or_create_key(dir)?;
         let cert_path = dir.join(CERT_FILE);
-        let key = match fs::read(&key_path) {
-            Ok(bytes) => key_from_bytes(&bytes)?,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let key = platform::generate_p256()?;
-                write_private(&key_path, &key)?;
-                let _ = fs::remove_file(&cert_path);
-                key
-            }
-            Err(e) => return Err(e),
-        };
-        check_private_file(&key_path)?;
         let point = &key[..65];
         let cert_der = match fs::read(&cert_path) {
             Ok(der) if contains(&der, point) => der,
@@ -519,6 +581,54 @@ impl TlsIdentity {
                 der
             }
         };
+        Self::with_cert(dir, key, cert_der)
+    }
+
+    /// The identity in `dir` of a server that browsers open by address or
+    /// name (a page served from a box on a LAN): its certificate names each
+    /// of `names` in a subjectAltName and is valid for [`BROWSER_CERT_DAYS`],
+    /// from a day before it was made. The key stays as long as its file does;
+    /// the certificate is made anew when the names change or it is within 30
+    /// days of its end ([`NAMES_FILE`] records both), and the fingerprint
+    /// changes with it.
+    pub fn load_or_create_for_names(dir: &Path, common_name: &str, names: &[SubjectName]) -> io::Result<Self> {
+        let key = load_or_create_key(dir)?;
+        let cert_path = dir.join(CERT_FILE);
+        let names_path = dir.join(NAMES_FILE);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let wanted: Vec<String> = names.iter().map(SubjectName::record).collect();
+        let recorded = fs::read_to_string(&names_path).unwrap_or_default();
+        let mut lines = recorded.lines();
+        let not_after = lines.next().and_then(|l| l.strip_prefix("not_after ")).and_then(|t| t.parse::<u64>().ok());
+        let same_names = lines.eq(wanted.iter().map(String::as_str));
+        let fresh = not_after.is_some_and(|end| end > now + BROWSER_CERT_RENEW_DAYS * 86_400);
+        let cert_der = match fs::read(&cert_path) {
+            Ok(der) if same_names && fresh && contains(&der, &key[..65]) => der,
+            _ => {
+                let mut serial = [0u8; 16];
+                os_random(&mut serial)?;
+                let not_before = now.saturating_sub(86_400);
+                let not_after = not_before + BROWSER_CERT_DAYS * 86_400;
+                let tbs = x509::tbs_certificate_for_names(&serial, common_name, &key[..65], not_before, not_after, names);
+                let signature = platform::sign_p256_sha256(&key, &tbs)?;
+                let der = x509::certificate(&tbs, &signature);
+                write_atomic(&cert_path, &der)?;
+                let mut record = format!("not_after {not_after}\n");
+                for line in &wanted {
+                    record.push_str(line);
+                    record.push('\n');
+                }
+                write_atomic(&names_path, record.as_bytes())?;
+                der
+            }
+        };
+        Self::with_cert(dir, key, cert_der)
+    }
+
+    fn with_cert(dir: &Path, key: [u8; X963_KEY_LEN], cert_der: Vec<u8>) -> io::Result<Self> {
         let fingerprint = fingerprint(&cert_der);
         let fp_path = dir.join(FINGERPRINT_FILE);
         let fp_text = format!("{}\n", to_hex(&fingerprint));
@@ -546,6 +656,26 @@ impl TlsIdentity {
     pub fn fingerprint_hex(&self) -> String {
         to_hex(&self.fingerprint)
     }
+}
+
+/// The key in `dir` (made the first time, readable only by its owner); a new
+/// key drops the certificate made for the old one.
+fn load_or_create_key(dir: &Path) -> io::Result<[u8; X963_KEY_LEN]> {
+    fs::create_dir_all(dir)?;
+    restrict_dir(dir)?;
+    let key_path = dir.join(KEY_FILE);
+    let key = match fs::read(&key_path) {
+        Ok(bytes) => key_from_bytes(&bytes)?,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let key = platform::generate_p256()?;
+            write_private(&key_path, &key)?;
+            let _ = fs::remove_file(dir.join(CERT_FILE));
+            key
+        }
+        Err(e) => return Err(e),
+    };
+    check_private_file(&key_path)?;
+    Ok(key)
 }
 
 pub fn key_from_bytes(bytes: &[u8]) -> io::Result<[u8; X963_KEY_LEN]> {
@@ -867,6 +997,15 @@ mod tests {
     }
 
     #[test]
+    fn certificate_times() {
+        assert_eq!(x509::time(0), x509::tlv(0x17, b"700101000000Z"));
+        // a leap day, and a time of day
+        assert_eq!(x509::time(951_831_907), x509::tlv(0x17, b"000229134507Z"));
+        // RFC 5280: GeneralizedTime from 2050 on
+        assert_eq!(x509::time(2_524_608_000), x509::tlv(0x18, b"20500101000000Z"));
+    }
+
+    #[test]
     fn constant_time_eq_works() {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
@@ -903,6 +1042,46 @@ mod server_tests {
             let mode = fs::metadata(dir.join(KEY_FILE)).unwrap().permissions().mode();
             assert_eq!(mode & 0o077, 0);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A browser-facing identity names its addresses in a subjectAltName, is valid for under
+    /// 398 days, keeps its certificate while the names stay, and makes a new one (same key)
+    /// when they change.
+    #[test]
+    fn browser_identity_names_and_renewal() {
+        let dir = temp_dir("names");
+        let ip: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let names = [SubjectName::Ip(ip), SubjectName::Dns("party.example".into())];
+        let a = TlsIdentity::load_or_create_for_names(&dir, "party test", &names).unwrap();
+        let (point, _) = x509::leaf_point_and_fleet_identity(&a.cert_der).unwrap();
+        assert_eq!(&point[..], &a.key[..65]);
+        let (_, cert, _) = x509::read_tlv(&a.cert_der).unwrap();
+        let (_, tbs, _) = x509::read_tlv(cert).unwrap();
+        let mut fields = Vec::new();
+        let mut rest = tbs;
+        while let Some((tag, content, next)) = x509::read_tlv(rest) {
+            fields.push((tag, content));
+            rest = next;
+        }
+        // version, serial, algorithm, issuer, validity
+        let (_, validity) = fields[4];
+        let (start_tag, start, after) = x509::read_tlv(validity).unwrap();
+        let (end_tag, end, _) = x509::read_tlv(after).unwrap();
+        assert_eq!((start_tag, end_tag), (0x17, 0x17));
+        let day = |t: &[u8]| {
+            let n = |i: usize| std::str::from_utf8(&t[i..i + 2]).unwrap().parse::<u32>().unwrap();
+            makepad_civil_time::from_ymd(2000 + n(0) as i32, n(2), n(4))
+        };
+        assert_eq!((day(end) - day(start)) as u64, BROWSER_CERT_DAYS, "validity in days");
+        let (_, exts) = fields.iter().find(|(tag, _)| *tag == 0xA3).unwrap();
+        assert!(contains(exts, &[0x87, 4, 192, 0, 2, 7]), "the IP is a subjectAltName iPAddress");
+        assert!(contains(exts, b"\x82\x0dparty.example"), "the host is a subjectAltName dNSName");
+        let again = TlsIdentity::load_or_create_for_names(&dir, "party test", &names).unwrap();
+        assert_eq!(again.fingerprint, a.fingerprint, "same names: the same certificate");
+        let moved = TlsIdentity::load_or_create_for_names(&dir, "party test", &names[..1]).unwrap();
+        assert_ne!(moved.fingerprint, a.fingerprint, "other names: a new certificate");
+        assert_eq!(moved.key, a.key, "the key stays");
         let _ = fs::remove_dir_all(&dir);
     }
 

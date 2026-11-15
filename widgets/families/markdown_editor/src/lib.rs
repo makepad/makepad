@@ -8,6 +8,8 @@ use makepad_widgets_core::*;
 
 pub mod editor;
 mod highlight;
+mod pdf_structure;
+mod pdf_text;
 mod print;
 mod rowmap;
 

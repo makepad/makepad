@@ -1,7 +1,7 @@
 // More threads than a module has segments (64): a thread that finds every segment in use waits
 // for one, and every call returns. The first 64 calls stay inside until the 64th arrives, so
-// the rest must wait. Run with RELAX_SANDBOX_NOCHECK=1 (the module's atomics are std::sync)
-// and RELAX_SANDBOX_FUEL=0 (the calls spin).
+// the rest must wait. Run with --allow-unchecked-modules (the module's atomics are
+// std::sync) and --allow-unmetered-modules (the calls spin).
 use std::relax::Module;
 
 const M: &str = r#"

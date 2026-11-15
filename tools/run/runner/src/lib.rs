@@ -62,9 +62,11 @@ pub struct Host {
     /// how much the JIT compiles ahead of the program's calls when neither `--ahead=` nor
     /// RELAX_AHEAD says (jit::AheadPolicy): the entry point's default
     pub ahead: relax_compiler::options::AheadLevel,
-    /// whether third-party proc macros run confined (pmhost::Policy): `relax` runs crates.io
-    /// macros as cargo does, `makepad` runs them in the sandbox (pmhost.rs's module doc)
-    pub proc_macros: relax_compiler::pmhost::Policy,
+    /// what third-party packages' compile-time code may do (sandbox::Policy): `relax` runs a
+    /// registry or git package's proc macros and build scripts with the person's rights, as cargo
+    /// does; `makepad` confines them (proc macros today: pmhost.rs's module doc). Run-time code is
+    /// not covered: the program runs with the person's rights under either.
+    pub compile_time_code: relax_compiler::sandbox::Policy,
     /// what `makepad` with no arguments runs when no launch record says (launch.rs): None prints
     /// the usage
     pub default_launch: Option<fn() -> Option<launch::Launch>>,
@@ -89,6 +91,12 @@ pub struct Host {
     /// set_pure_crates): their hosted expansions are reused across edits; the bare runner
     /// vouches for none
     pub pure_macro_crates: &'static [&'static str],
+    /// the program's own variables relax sets for an unseen or offline child, or drops from a
+    /// detached one (relax-base progenv.rs HostEnv); the bare runner names none
+    pub env: relax_compiler::progenv::HostEnv,
+    /// the command this binary is run as, for titles, usage lines and the hints that say what
+    /// to type next (relax-base set_tool_name)
+    pub tool: &'static str,
 }
 
 /// A command a host adds to its binary: its word, its row on the main help page, its own help
@@ -115,7 +123,7 @@ pub enum HelpLine {
 
 /// The bare runner (bin `relax`): provides nothing; tests, checks and agents' boots compile only
 /// what runs.
-pub const BARE: Host = Host { provenance: None, init: || {}, provide: || {}, run_host: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, proc_macros: relax_compiler::pmhost::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), commands: &[], native_sets: &[], raw_body_macros: &[], script_answers: &[], pure_macro_crates: &[] };
+pub const BARE: Host = Host { provenance: None, init: || {}, provide: || {}, run_host: || {}, ahead: relax_compiler::options::AheadLevel::Minimal, compile_time_code: relax_compiler::sandbox::Policy::Open, default_launch: None, package: env!("CARGO_PKG_NAME"), manifest: concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"), commands: &[], native_sets: &[], raw_body_macros: &[], script_answers: &[], pure_macro_crates: &[], env: relax_compiler::progenv::HostEnv { unseen: &[], offline: &[], detached_remove: &[], recorded: &[] }, tool: "relax" };
 
 static HOST: std::sync::OnceLock<&'static Host> = std::sync::OnceLock::new();
 
@@ -132,8 +140,10 @@ pub fn set_host(host: &'static Host) {
         for &a in host.script_answers {
             relax_compiler::unitgraph::register_script_answer(a);
         }
-        relax_compiler::pmhost::set_policy(host.proc_macros);
+        relax_compiler::sandbox::set_policy(host.compile_time_code);
         relax_compiler::macro_reg::set_pure_crates(host.pure_macro_crates);
+        relax_compiler::progenv::set_host_env(host.env);
+        relax_compiler::set_tool_name(host.tool);
         relax_compiler::reload::set_loader_package(host.package, host.manifest);
         // the entry point's ahead level, unless the environment names one; RELAX_AHEAD
         // carries it to the session (options.rs) and to every process this one starts
@@ -213,18 +223,23 @@ pub fn main(host: &'static Host) {
     // would give it, before anything reads the environment
     let bin = relax_compiler::selfexe::bin_start(&relax_compiler::os::proc::args_bytes());
     // a run's own executable launched by a shell or a C library: that run's program again, built
-    // with the build environment that run left beside its link (selfexe.rs)
+    // with the build environment that run handed a launch of its link (selfexe.rs)
     let relaunch = if bin.is_none() { relax_compiler::selfexe::relaunched(&relax_compiler::os::proc::args_bytes()) } else { None };
     // a self-exec child: the program values its parent passed, before anything reads the
     // environment (relax-base progenv.rs); a provided crate's read of the program's environment
-    // (relax-api env) answers with them
-    relax_compiler::progenv::init_handed(relaunch.as_ref().and_then(|_| relax_compiler::selfexe::relaunch_build()));
+    // (relax-api env) answers with them. A test's package binary that a launcher clearing the
+    // environment started builds with its test's run's build environment (selfexe.rs prepared_build).
+    let handed = match &relaunch {
+        Some(_) => relax_compiler::selfexe::relaunch_build(),
+        None if bin.is_none() => relax_compiler::selfexe::prepared_build(&relax_compiler::os::proc::args_bytes()),
+        None => None,
+    };
+    relax_compiler::progenv::init_handed(handed);
     relax_api::env::set_program_read(relax_compiler::progenv::program_var_os);
     if let Some(args) = bin.or(relaunch) {
         relax_compiler::os::proc::set_args(args);
     }
     set_host(host);
-    relax_compiler::set_tool_name(help::command());
     warn_legacy_env();
     relax_compiler::wasm_export::startup();
     run(relax_compiler::os::proc::args_bytes())

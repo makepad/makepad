@@ -4,7 +4,9 @@ use crate::{
     link_label::LinkLabel,
     makepad_derive_widget::*,
     makepad_draw::*,
+    math_view::unknown_math_commands,
     text_flow::TextFlow,
+    tip::TipAction,
     widget::*,
     WidgetMatchEvent,
 };
@@ -260,8 +262,24 @@ pub struct Markdown {
     in_splash_block: bool,
     #[rust]
     splash_block_string: String,
+    /// Draw `$..$` and `$$..$$` as typeset math (the `inline_math` and
+    /// `display_math` templates) instead of code. A formula with commands
+    /// the math subset does not know draws as its source in code style, with
+    /// a hover tip naming them (when the flow tracks its text).
     #[live(false)]
     use_math_widget: bool,
+    /// Per formula text: its tip (None: it typesets) and the draw that last
+    /// used it; entries the last draw did not use are dropped.
+    #[rust]
+    math_checks: HashMap<String, (Option<Arc<str>>, u64)>,
+    #[rust]
+    math_pass: u64,
+    /// The formulas drawn as source this draw: their flat range and tip.
+    #[rust]
+    math_tips: Vec<(Range<usize>, Arc<str>)>,
+    /// The flat range of the formula whose tip the pointer raised.
+    #[rust]
+    math_tip_hovered: Option<Range<usize>>,
     #[rust]
     auto_id: u64,
     #[live]
@@ -323,11 +341,45 @@ impl Widget for Markdown {
                 self.redraw(cx);
             }
         }
+        if self.math_tips.is_empty() && self.math_tip_hovered.is_none() {
+            return;
+        }
+        match event {
+            Event::MouseMove(event) => {
+                let shift = self.text_flow.drawn_shift(cx);
+                let over = self.math_tips.iter().find_map(|(range, tip)| {
+                    self.text_flow
+                        .selection_rects(range.start, range.end)
+                        .into_iter()
+                        .find_map(|mut rect| {
+                            rect.pos += shift;
+                            rect.contains(event.abs).then_some((range, tip, rect))
+                        })
+                });
+                if self.math_tip_hovered.as_ref() == over.as_ref().map(|(range, _, _)| *range) {
+                    return;
+                }
+                self.math_tip_hovered = over.as_ref().map(|(range, _, _)| (*range).clone());
+                let action = match over {
+                    Some((_, tip, rect)) => TipAction::HoverIn(tip.to_string(), rect),
+                    None => TipAction::HoverOut,
+                };
+                cx.widget_action(self.widget_uid(), action);
+            }
+            Event::MouseLeave(_) => {
+                if self.math_tip_hovered.take().is_some() {
+                    cx.widget_action(self.widget_uid(), TipAction::HoverOut);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         self.auto_id = 0;
         self.images_drawn.clear();
+        self.math_pass = self.math_pass.wrapping_add(1);
+        self.math_tips.clear();
 
         self.begin(cx, walk);
         self.process_markdown_doc(cx);
@@ -335,6 +387,8 @@ impl Widget for Markdown {
 
         let drawn = &self.images_drawn;
         self.image_requests.retain(|uid, _| drawn.contains(uid));
+        let pass = self.math_pass;
+        self.math_checks.retain(|_, (_, used)| *used == pass);
 
         DrawStep::done()
     }
@@ -401,6 +455,10 @@ pub struct MarkdownHost<'a> {
     /// (see [`resolve_source`]): drawn as given, or (`None`: it did not
     /// load) as their alt text. A source not here loads as usual.
     pub pictures: Option<&'a HashMap<String, Option<Texture>>>,
+    /// The formula (its source range, delimiters included) the caret stands
+    /// in: drawn as its source in code style, mapped byte for byte, instead
+    /// of typeset.
+    pub open_math: Option<Range<usize>>,
 }
 
 impl MarkdownHost<'_> {
@@ -445,6 +503,131 @@ fn muted(color: Vec4f) -> Vec4f {
     vec4(color.x, color.y, color.z, color.w * 0.55)
 }
 
+/// What a walk keeps about formulas: whether they typeset, each one's check
+/// (kept for this draw), and the tips of those drawn as source.
+struct MathChecks<'a> {
+    use_widget: bool,
+    checks: &'a mut HashMap<String, (Option<Arc<str>>, u64)>,
+    pass: u64,
+    tips: &'a mut Vec<(Range<usize>, Arc<str>)>,
+}
+
+/// Draws a formula (`text`, whose source with its delimiters is `src`):
+/// typeset by the `inline_math` or `display_math` item; as its content in
+/// code style, with a tip, when the math subset cannot typeset it; and when
+/// it is the formula a host has open, as its source, delimiters included,
+/// mapped byte for byte so a caret edits it as text.
+#[allow(clippy::too_many_arguments)]
+fn draw_formula(
+    cx: &mut Cx2d,
+    tf: &mut TextFlow,
+    host: &mut Option<&mut MarkdownHost<'_>>,
+    source: &str,
+    text: &str,
+    src: Range<usize>,
+    display: bool,
+    math: MathChecks<'_>,
+) {
+    let flat_start = tf.text_len();
+    let open = host.as_deref().is_some_and(|host| host.open_math.as_ref() == Some(&src));
+    if let (true, Some(spelled)) = (open, source.get(src.clone())) {
+        if display {
+            tf.begin_code(cx);
+            tf.fixed.push();
+            draw_mapped(cx, tf, host, source, spelled, src.clone());
+            tf.fixed.pop();
+            tf.end_code(cx);
+        } else {
+            tf.push_size_rel_scale(tf.fixed_font_size_scale);
+            tf.fixed.push();
+            tf.inline_code.push();
+            // A line break in the source shows as a space between its lines.
+            let mut at = src.start;
+            for (i, line) in spelled.split('\n').enumerate() {
+                if i > 0 {
+                    tf.draw_text(cx, " ");
+                }
+                draw_mapped(cx, tf, host, source, line, at..at + line.len());
+                at += line.len() + 1;
+            }
+            tf.font_sizes.pop();
+            tf.fixed.pop();
+            tf.inline_code.pop();
+        }
+        return;
+    }
+    let tip = if math.use_widget { math_tip(math.checks, text, math.pass) } else { None };
+    if math.use_widget && tip.is_none() {
+        let entry_id = tf.new_counted_id();
+        let template = if display { live_id!(display_math) } else { live_id!(inline_math) };
+        let hosted = host.is_some();
+        // A heading's formula is as large as its text.
+        let base = tf.font_size;
+        let scale = if base > 0.0 { tf.font_sizes.last().map_or(1.0, |size| size / base) } else { 1.0 };
+        tf.item_with(cx, entry_id, template, |cx, item, tf| {
+            if let Some(mut view) = item.borrow_mut::<crate::math_view::MathView>() {
+                view.set_text_scale(cx, scale as f64);
+            }
+            item.set_text(cx, text);
+            item.draw_all_unscoped(cx);
+            // For a host the formula is one object: a caret stands before
+            // and after it, a press finds it and a selection covers it.
+            if hosted {
+                tf.track_object(cx, item.area().rect(cx));
+            }
+        });
+    } else if display {
+        tf.begin_code(cx);
+        tf.fixed.push();
+        tf.draw_text(cx, text);
+        tf.fixed.pop();
+        tf.end_code(cx);
+    } else {
+        tf.push_size_rel_scale(tf.fixed_font_size_scale);
+        tf.fixed.push();
+        tf.inline_code.push();
+        tf.draw_text(cx, text);
+        tf.font_sizes.pop();
+        tf.fixed.pop();
+        tf.inline_code.pop();
+    }
+    if let Some(tip) = tip {
+        math.tips.push((flat_start..tf.text_len(), tip));
+    }
+    if let Some(host) = host.as_deref_mut() {
+        host.piece(src, flat_start..tf.text_len(), false);
+    }
+}
+
+/// Reuse each formula's check and keep it alive for this draw pass.
+fn math_tip(
+    checks: &mut HashMap<String, (Option<Arc<str>>, u64)>,
+    text: &str,
+    pass: u64,
+) -> Option<Arc<str>> {
+    if let Some((tip, used)) = checks.get_mut(text) {
+        *used = pass;
+        return tip.clone();
+    }
+    let unknown = unknown_math_commands(text);
+    let tip = if unknown.is_empty() {
+        None
+    } else {
+        let noun = if unknown.len() == 1 {
+            "command"
+        } else {
+            "commands"
+        };
+        Some(Arc::<str>::from(format!(
+            "Not typeset: unknown {} \\{}",
+            noun,
+            unknown.join(", \\")
+        )))
+    };
+    checks.insert(text.to_string(), (tip.clone(), pass));
+    tip
+}
+
 impl Markdown {
     /// The folder relative image sources are read from: a document's own
     /// folder. A new folder loads the images again from there.
@@ -478,11 +661,15 @@ impl Markdown {
     ) {
         self.auto_id = 0;
         self.images_drawn.clear();
+        self.math_pass = self.math_pass.wrapping_add(1);
+        self.math_tips.clear();
         self.begin(cx, walk);
         self.walk_events(cx, source, events, Some(host));
         self.end(cx);
         let drawn = &self.images_drawn;
         self.image_requests.retain(|uid, _| drawn.contains(uid));
+        let pass = self.math_pass;
+        self.math_checks.retain(|_, (_, used)| *used == pass);
     }
 
     fn walk_events<'e>(
@@ -815,26 +1002,8 @@ impl Markdown {
                 }
                 // Inline math ($...$)
                 MdEvent::InlineMath(text) => {
-                    let flat_start = tf.text_len();
-                    if self.use_math_widget {
-                        let entry_id = tf.new_counted_id();
-                        tf.item_with(cx, entry_id, live_id!(inline_math), |cx, item, _tf| {
-                            item.set_text(cx, &text);
-                            item.draw_all_unscoped(cx);
-                        });
-                    } else {
-                        // Fallback: render as inline code style
-                        tf.push_size_rel_scale(tf.fixed_font_size_scale);
-                        tf.fixed.push();
-                        tf.inline_code.push();
-                        tf.draw_text(cx, &text);
-                        tf.font_sizes.pop();
-                        tf.fixed.pop();
-                        tf.inline_code.pop();
-                    }
-                    if let Some(host) = host.as_deref_mut() {
-                        host.piece(range, flat_start..tf.text_len(), false);
-                    }
+                    let math = MathChecks { use_widget: self.use_math_widget, checks: &mut self.math_checks, pass: self.math_pass, tips: &mut self.math_tips };
+                    draw_formula(cx, tf, &mut host, source, &text, range, false, math);
                 }
                 // Display math ($$...$$)
                 MdEvent::DisplayMath(text) => {
@@ -842,25 +1011,8 @@ impl Markdown {
                         tf.new_line_collapsed_with_spacing(cx, self.paragraph_spacing);
                     }
                     is_first_block = false;
-                    let flat_start = tf.text_len();
-
-                    if self.use_math_widget {
-                        let entry_id = tf.new_counted_id();
-                        tf.item_with(cx, entry_id, live_id!(display_math), |cx, item, _tf| {
-                            item.set_text(cx, &text);
-                            item.draw_all_unscoped(cx);
-                        });
-                    } else {
-                        // Fallback: render as code block style
-                        tf.begin_code(cx);
-                        tf.fixed.push();
-                        tf.draw_text(cx, &text);
-                        tf.fixed.pop();
-                        tf.end_code(cx);
-                    }
-                    if let Some(host) = host.as_deref_mut() {
-                        host.piece(range, flat_start..tf.text_len(), false);
-                    }
+                    let math = MathChecks { use_widget: self.use_math_widget, checks: &mut self.math_checks, pass: self.math_pass, tips: &mut self.math_tips };
+                    draw_formula(cx, tf, &mut host, source, &text, range, true, math);
                 }
                 MdEvent::Text(_) if image_drawn => {}
                 // The alt text of an image that is not drawn stands in for

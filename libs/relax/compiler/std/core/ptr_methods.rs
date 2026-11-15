@@ -23,6 +23,10 @@ impl<T: crate::marker::PointeeSized> *const T {
     pub const fn addr(self) -> usize {
         self as *const u8 as usize
     }
+    // library/core/src/ptr/const_ptr.rs / mut_ptr.rs: the address, its provenance exposed
+    pub fn expose_provenance(self) -> usize {
+        self as *const u8 as usize
+    }
     pub fn with_addr(self, addr: usize) -> Self {
         let delta = (addr as isize).wrapping_sub(self.addr() as isize);
         self.wrapping_byte_add(delta as usize)
@@ -182,6 +186,10 @@ impl<T: crate::marker::PointeeSized> *mut T {
         self as *const T
     }
     pub const fn addr(self) -> usize {
+        self as *const u8 as usize
+    }
+    // library/core/src/ptr/const_ptr.rs / mut_ptr.rs: the address, its provenance exposed
+    pub fn expose_provenance(self) -> usize {
         self as *const u8 as usize
     }
     pub fn with_addr(self, addr: usize) -> Self {

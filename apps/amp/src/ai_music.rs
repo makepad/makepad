@@ -57,6 +57,10 @@ pub const DEFAULT_REQUEST: &str = "EDM christmas music";
 pub const DEFAULT_MODEL: &str = "yue2-3b";
 /// The writer: Claude Code on the hardened claude-cli hub.
 pub const WRITER_MODEL: &str = "claude-cli";
+/// The Claude model the writer runs. The hub runs exactly the model a
+/// request names (one of `claude_cli::CLAUDE_MODELS`) and refuses a turn
+/// that names none.
+pub const WRITER_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 /// When the next song is not ready as the current one ends, the current
 /// one's last this-many milliseconds play again.
 pub const LOOP_TAIL_MS: u32 = 30_000;
@@ -653,6 +657,7 @@ fn write_songs_text(
     }
     let ask = GenerateRequestJson {
         model: WRITER_MODEL.to_string(),
+        claude_model: Some(WRITER_CLAUDE_MODEL.to_string()),
         domain: Some("chat".to_string()),
         target_domain: Some("chat".to_string()),
         chat_system: Some(system),

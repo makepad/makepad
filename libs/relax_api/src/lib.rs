@@ -23,7 +23,8 @@
 //!
 //! In a normal build the attribute leaves the item as it is. With the crate's `host-shims`
 //! feature (only the `makepad` loader build enables it) it also emits, next to the item, an extern "C"
-//! wrapper and one [`Entry`] in the `relax_api` link section; [`entries`] reads them all back.
+//! wrapper and one [`Entry`] in the `relax_api` link section; [`entries`] reads them all back. The
+//! loader is not built for the web (its `platforms`), so the feature is never on for wasm32.
 //! Nothing generated is checked in.
 
 pub use relax_api_macro::relax_api;
@@ -55,11 +56,11 @@ pub fn app_call<F: FnOnce()>(f: F) -> bool {
 }
 
 /// An op of a crate whose objects are the program's: what it allocates goes with the program's heap
-/// (`makepad_alloc_phase::run`). Only generated wrappers call this.
+/// (`relax_api_phase::run`). Only generated wrappers call this.
 #[cfg(feature = "host-shims")]
 #[inline(always)]
 pub fn run_op() -> impl Sized {
-    makepad_alloc_phase::run()
+    relax_api_phase::run()
 }
 #[cfg(not(feature = "host-shims"))]
 #[inline(always)]
@@ -70,7 +71,7 @@ pub fn run_op() {}
 #[cfg(feature = "host-shims")]
 #[inline(always)]
 pub fn host_op() -> impl Sized {
-    makepad_alloc_phase::kept()
+    relax_api_phase::kept()
 }
 #[cfg(not(feature = "host-shims"))]
 #[inline(always)]
@@ -115,7 +116,7 @@ pub mod env {
 /// be the run's and go with it, and the lock with it. These keep their state inline.
 pub mod sync {
     #[cfg(target_vendor = "apple")]
-    pub use makepad_alloc_phase::sync::{Condvar, Mutex, MutexGuard};
+    pub use relax_api_phase::sync::{Condvar, Mutex, MutexGuard};
     #[cfg(not(target_vendor = "apple"))]
     pub use std::sync::{Condvar, Mutex, MutexGuard};
 }
@@ -126,7 +127,7 @@ pub mod sync {
 #[inline(always)]
 pub fn process_heap<R>(f: impl FnOnce() -> R) -> R {
     #[cfg(feature = "host-shims")]
-    let _kept = makepad_alloc_phase::kept();
+    let _kept = relax_api_phase::kept();
     f()
 }
 
@@ -324,11 +325,7 @@ mod section {
 }
 
 #[cfg(all(feature = "host-shims", target_arch = "wasm32"))]
-mod section {
-    pub fn entries() -> &'static [super::Entry] {
-        &[]
-    }
-}
+compile_error!("relax-api's host-shims is the `makepad` loader's, which wasm32 does not run: no table is laid down or read there");
 
 #[allow(dead_code)]
 const fn anchor() -> Entry {
@@ -344,8 +341,6 @@ fn platform() -> &'static str {
         "apple"
     } else if cfg!(windows) {
         "windows"
-    } else if cfg!(target_arch = "wasm32") {
-        "wasm32"
     } else {
         "elf"
     }

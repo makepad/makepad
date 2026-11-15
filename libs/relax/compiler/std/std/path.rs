@@ -603,6 +603,28 @@ impl<'a> Iter<'a> {
     }
 }
 
+// library/std/src/path.rs: the rest of the path still to iterate, as a path.
+impl AsRef<Path> for Components<'_> {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+impl AsRef<OsStr> for Components<'_> {
+    fn as_ref(&self) -> &OsStr {
+        self.as_path().as_os_str()
+    }
+}
+impl AsRef<Path> for Iter<'_> {
+    fn as_ref(&self) -> &Path {
+        self.as_path()
+    }
+}
+impl AsRef<OsStr> for Iter<'_> {
+    fn as_ref(&self) -> &OsStr {
+        self.as_path().as_os_str()
+    }
+}
+
 impl<'a> Iterator for Iter<'a> {
     type Item = &'a OsStr;
     fn next(&mut self) -> Option<&'a OsStr> {

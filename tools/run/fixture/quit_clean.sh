@@ -3,7 +3,10 @@
 # muted, ends it, and requires exit status 0, no crash, fault or leak line in its output, and its
 # endpoint's discovery file and socket gone (its exit cleanup ran: the node's hub reads a file left
 # behind as a crash). Each case has a registry dir of its own (MAKEPAD_REMOTE_REGISTRY):
-#   boot-<s>    SIGTERM <s> seconds after the start (the boot window, the app compiling or opening)
+#   boot-<s>    SIGTERM <s> seconds after the run's endpoint is up (its discovery file: the run's
+#               start, its quit handler installed before it), in the boot window: the app compiling
+#               or opening. (From the launch, the signal could reach `cargo run` before its exec, or
+#               the run before its handler: status 143, no cleanup)
 #   present     SIGTERM 0.5 s after the first frame
 #   swap-<s>    SIGTERM <s> seconds after the compiler-zone swap (settle)
 #   pages       clicks CLICKS (page/tab switches, "x,y;x,y;..."), then SIGTERM
@@ -115,7 +118,14 @@ run_case() {
         RELAX_HOME="$dir/runhome" RELAX_CACHE_DIR="$dir/cache-$pkg" MAKEPAD_WINDOW=1280x800@1 \
         $J run "$pkg" > "$d/run.log" 2>&1 &
     pid=$!
-    if [ "$when" != start ]; then
+    if [ "$when" = start ]; then
+        n=0
+        until [ -e "$d/registry/makepad-remote-$pid.json" ]; do
+            n=$((n + 1)); [ $n -ge 3000 ] && break
+            kill -0 $pid 2>/dev/null || break
+            sleep 0.02
+        done
+    else
         n=0
         until $R app $pid grab out="$d/g.png" > "$d/remote.log" 2>&1 && [ -s "$d/g.png" ]; do
             n=$((n + 1)); [ $n -ge 1200 ] && break

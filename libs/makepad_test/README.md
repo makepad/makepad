@@ -88,6 +88,7 @@ Inspection helpers:
 - `widget_dump()`
 - `screenshot()`
 - `wait_for_log_contains(...)`
+- `lose_gpu_device()`: a GPU device loss, as a driver reset (`hal lose`), for the recovery path
 
 ## Failure Artifacts
 

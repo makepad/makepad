@@ -673,13 +673,15 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
     }
     makepad_hal::expect_main_loop();
     *COMPILE.lock().unwrap_or_else(|e| e.into_inner()) = Some(compile);
-    relax_compiler::inspect::register_host_inspect("quit", host_quit);
-    start_compile_thread();
     // the app is a domain of this host: its platform installs no termination handler, so the
     // host answers SIGINT/SIGTERM/SIGHUP (quit_signal.rs): the cache's quit write, then the run
     // ends as closing its window ends it. Its worker thread (handle, name, result packet, closure)
     // waits for the whole run: it lives in the kept heap, not in the compiler generation the
-    // settle swap destroys (it then faulted on its own packet as the signal woke it)
+    // settle swap destroys (it then faulted on its own packet as the signal woke it). Installed
+    // before the compile thread starts: the run's endpoint (its discovery file, its startup line)
+    // comes up on that thread, so a signal sent on seeing it is always this quit, never the
+    // kernel's default end of the process (a harness's SIGTERM in the boot window: status 143,
+    // no cleanup)
     relax_compiler::zone_alloc::kept_with(|| crate::quit_signal::install(|signal| {
         let _at_the_run = relax_compiler::run_threads::process_work();
         relax_compiler::run::quit_requested();
@@ -687,6 +689,8 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
         RETRY.notify_all();
         Hal::global().wake_session(HOST);
     }));
+    relax_compiler::inspect::register_host_inspect("quit", host_quit);
+    start_compile_thread();
     {
         let _kept = relax_compiler::zone_alloc::kept();
         makepad_hal::run_main_loop();
@@ -944,11 +948,12 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     first.recv().map_err(|e| e.to_string())?
 }
 
-/// The boot window's geometry for `MAKEPAD_WINDOW=WxH@scale`: the native size that gives the app's
+/// The boot window's geometry for `MAKEPAD_WINDOW=WxH@scale` (a replay's `RELAX_REPLAY_WINDOW`
+/// first, as the app reads them): the native size that gives the app's
 /// window a `W`x`H` layout at `scale` on a display running at `dpi` (the app's `--window` does the
 /// same for a native launch: `makepad_platform::remote::app_clock::LaunchWindow::native_size`).
 fn launch_window(dpi: f32) -> Option<[f32; 4]> {
-    let value = std::env::var("MAKEPAD_WINDOW").ok()?;
+    let value = std::env::var("RELAX_REPLAY_WINDOW").or_else(|_| std::env::var("MAKEPAD_WINDOW")).ok()?;
     let (size, scale) = value.split_once('@')?;
     let (w, h) = size.split_once('x')?;
     let [w, h, scale] = [w, h, scale].map(|v| v.trim().parse::<f32>().ok().filter(|v| v.is_finite() && *v > 0.0));

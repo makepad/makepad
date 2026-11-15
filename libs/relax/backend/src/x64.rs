@@ -3900,7 +3900,13 @@ impl<'a> Gen<'a> {
                 let rd = self.use_i(options, *dst, R10);
                 let rs = self.use_i(options, *src, R11);
                 // overlapping bytes of the frame (frame::copy_overlap; a verify build fails on it,
-                // compile_freq): memmove order, each piece loaded whole before it is stored
+                // compile_freq): memmove order, each piece loaded whole before it is stored.
+                // Valid RIR never gets here (a Copy is a memcpy): coalesce_slot_copies joins slots in
+                // the RIR and keeps two apart where a copy between them would meet bytes of the
+                // joined slot (codegen tests/slot_coalesce.rs
+                // a_second_copy_at_another_offset_keeps_joined_slots_apart), and ptr::copy is a
+                // memmove call, never a Copy. Kept as the release build's guard against a pass or
+                // frame layout fault.
                 let delta = crate::frame::copy_overlap(&self.slot_pos, *dst, *src, *size);
                 if delta != 0 {
                     for (o, w) in crate::frame::copy_pieces(*size, 16, delta > 0) {
@@ -6678,6 +6684,10 @@ fn imm_fits(i: &Inst) -> bool {
 }
 
 pub fn compile_freq(options: &relax_session::Options, f: &Func, env: &Env, freq: Option<&[f32]>) -> Result<Compiled, String> {
+    // (sandbox.rs: the input of a twin's O3 build is confined before it comes here)
+    if f.unconfined {
+        return Err(format!("{}: a sandboxed body whose memory is not confined reached the backend", f.name));
+    }
     let covered = crate::passes::lower_coverage(f);
     let f = covered.as_ref().unwrap_or(f);
     let _warm = crate::probe::backend(&f.name);

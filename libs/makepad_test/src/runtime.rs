@@ -285,6 +285,20 @@ impl TestApp {
         self.client().grab(Some(window.id), scale)
     }
 
+    /// The app's GPU device is lost, as a driver reset or a GPU hang recovery loses it (`hal
+    /// lose`): the app hears `GpuLost`, then `GpuReset` on the new device the HAL makes. Fails on
+    /// a backend that cannot replace a lost device.
+    pub fn lose_gpu_device(&self) {
+        if let Err(err) = self.try_lose_gpu_device() {
+            panic_for_error(err);
+        }
+    }
+
+    pub fn try_lose_gpu_device(&self) -> TestResult<()> {
+        self.ensure_running()?;
+        self.client().get_text("hal lose", &[]).map(|_| ())
+    }
+
     pub fn widget_dump(&self) -> String {
         match self.try_widget_dump() {
             Ok(dump) => dump,

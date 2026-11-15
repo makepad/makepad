@@ -676,6 +676,26 @@ pub struct WidgetRefInner {
     // Widgets implemented without a source field still retain their override object.
     a11y_source: Option<ScriptObjectRef>,
 }
+
+impl WidgetRefInner {
+    /// The redraw after an apply. An `Eval` made while the frame draws, on a
+    /// widget that has not drawn in this drawing (its list is recording anew
+    /// and has not reached it, as a draw that tints a row before drawing it),
+    /// asks for nothing: the drawing under way draws it if it is drawn at all,
+    /// and asking would record the list again in the next frame, so a draw that
+    /// does this on every frame would never let the app idle. A widget the
+    /// apply shows or hides, one already drawn in this drawing and one without
+    /// an area are redrawn as before.
+    fn redraw_after_apply(&mut self, cx: &mut Cx, apply: &Apply, was_visible: bool) {
+        if apply.is_eval() && cx.in_draw_event() && self.widget.visible() == was_visible {
+            let area = self.widget.area();
+            if !area.is_empty() && !area.is_valid(cx) {
+                return;
+            }
+        }
+        self.widget.redraw(cx);
+    }
+}
 #[derive(Clone, Default)]
 pub struct WidgetRef(Rc<RefCell<Option<WidgetRefInner>>>);
 
@@ -1743,22 +1763,22 @@ impl WidgetRef {
                     *inner = None;
                 } else {
                     // Type matches, apply to existing widget and redraw
+                    let was_visible = component.widget.visible();
                     component.widget.script_apply(vm, apply, scope, value);
                     if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
                         component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
                     }
-                    let cx = vm.cx_mut();
-                    component.widget.redraw(cx);
+                    component.redraw_after_apply(vm.cx_mut(), apply, was_visible);
                     return;
                 }
             } else {
                 // No type_id in value, apply to existing widget anyway
+                let was_visible = component.widget.visible();
                 component.widget.script_apply(vm, apply, scope, value);
-                    if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
-                        component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
-                    }
-                let cx = vm.cx_mut();
-                component.widget.redraw(cx);
+                if component.widget.script_source() == ScriptObject::ZERO && !apply.is_eval() && apply.is_from_script() {
+                    component.a11y_source = value.as_object().map(|object| vm.new_object_ref(object));
+                }
+                component.redraw_after_apply(vm.cx_mut(), apply, was_visible);
                 return;
             }
         }

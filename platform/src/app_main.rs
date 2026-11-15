@@ -119,9 +119,9 @@ pub fn run_app(app: fn()) {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] app thread joined; the process ends");
         }
-        // the HAL's driver threads stop and are joined, then the process ends the one way every
-        // Makepad process does, natively and under the JIT alike: its exit work, the flushes, and
-        // no C library exit handlers (a GPU driver's teardown in those can wait for good)
+        // the HAL's driver threads stop and are joined, then the process ends on its main thread
+        // through the C library's exit (process_end::end): every atexit handler (the process's
+        // own exit work once among them, a profile or sanitizer runtime's), the C streams' flushes
         makepad_hal::Hal::global().before_exit();
         makepad_core_util::process_end::end(if panicked { 101 } else { 0 });
     }

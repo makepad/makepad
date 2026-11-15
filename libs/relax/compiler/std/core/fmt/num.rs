@@ -24,17 +24,17 @@ const DECIMAL_PAIRS: &[u8; 200] = b"\
       8081828384858687888990919293949596979899";
 
 /// Port of real core's `_fmt_inner` (library/core/src/fmt/num.rs): four decimals per step from the pair
-/// table, then two, then the last one, right-aligned in `buf`; returns the first written index.
+/// table, then two, then the last one, right-aligned below `out + end`; returns the first written
+/// index (the caller's buffer holds every decimal of `$T` below `end`).
 /// `$Unsigned` arithmetic: u32 for values that fit (real core formats u8..u32 at their width), else u64.
 /// Unchecked accesses where real core states the bounds (`assert_unchecked(offset >= 4)`, the pair
 /// indices below 100 from `% 1_00_00 / 100` and `% 100`, which its optimiser proves).
 macro_rules! dec_inner {
     ($name:ident, $T:ty) => {
-        fn $name(n: $T, buf: &mut [u8; 20]) -> usize {
-            let mut offset = buf.len();
+        unsafe fn $name(n: $T, out: *mut u8, end: usize) -> usize {
+            let mut offset = end;
             let mut remain = n;
             let pairs = DECIMAL_PAIRS.as_ptr();
-            let out = buf.as_mut_ptr();
             while remain > 999 {
                 offset -= 4;
                 let quad = remain % 1_00_00;
@@ -76,13 +76,25 @@ dec_inner!(dec_u64, u64);
 /// Decimal digits of `n` with the sign decided by `is_nonnegative`.
 pub(crate) fn fmt_u64(n: u64, is_nonnegative: bool, f: &mut Formatter<'_>) -> Result {
     let mut buf = [0u8; 20];
-    let i = if n <= u32::MAX as u64 { dec_u32(n as u32, &mut buf) } else { dec_u64(n, &mut buf) };
+    let out = buf.as_mut_ptr();
+    let i = unsafe { if n <= u32::MAX as u64 { dec_u32(n as u32, out, 20) } else { dec_u64(n, out, 20) } };
     f.pad_integral(is_nonnegative, "", ascii(&buf[i..]))
+}
+
+/// The decimals of a u64, at u32 width when they fit, below `out + end` (20 bytes there).
+unsafe fn dec_any_u64(n: u64, out: *mut u8, end: usize) -> usize {
+    if n <= u32::MAX as u64 { dec_u32(n as u32, out, end) } else { dec_u64(n, out, end) }
 }
 
 pub(crate) fn fmt_u128(n: u128, is_nonnegative: bool, f: &mut Formatter<'_>) -> Result {
     let mut buf = [0u8; 40];
-    let mut i = buf.len();
+    let i = unsafe { dec_u128(n, buf.as_mut_ptr(), buf.len()) };
+    f.pad_integral(is_nonnegative, "", ascii(&buf[i..]))
+}
+
+/// The decimals of a u128 below `out + end` (39 bytes there); the first written index.
+unsafe fn dec_u128(n: u128, out: *mut u8, end: usize) -> usize {
+    let mut i = end;
     let mut n = n;
     // 19-digit chunks through u64 arithmetic
     while n >= 10_000_000_000_000_000_000u128 {
@@ -91,7 +103,7 @@ pub(crate) fn fmt_u128(n: u128, is_nonnegative: bool, f: &mut Formatter<'_>) -> 
         let mut k = 0;
         while k < 19 {
             i -= 1;
-            buf[i] = b'0' + (low % 10) as u8;
+            *out.add(i) = b'0' + (low % 10) as u8;
             low /= 10;
             k += 1;
         }
@@ -99,13 +111,13 @@ pub(crate) fn fmt_u128(n: u128, is_nonnegative: bool, f: &mut Formatter<'_>) -> 
     let mut n = n as u64;
     loop {
         i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
+        *out.add(i) = b'0' + (n % 10) as u8;
         n /= 10;
         if n == 0 {
             break;
         }
     }
-    f.pad_integral(is_nonnegative, "", ascii(&buf[i..]))
+    i
 }
 
 fn prefix(shift: u32) -> &'static str {
@@ -275,3 +287,44 @@ macro_rules! exp_inner {
 }
 exp_inner!(exp_u64, u64, 24);
 exp_inner!(exp_u128, u128, 43);
+
+/// `format_into` (library/core/src/fmt/num.rs @1.100.0, int_format_into, stable since 1.98): an
+/// integer's decimals written into a NumBuffer, without a Formatter. The digits are right-aligned
+/// at the buffer's end (`_fmt_inner`), a negative value's `-` before them; the str is that tail.
+macro_rules! format_into {
+    ($dec:ident; $($Signed:ident $Unsigned:ident $Wide:ty),*) => {
+        $(
+            impl $Signed {
+                pub fn format_into(self, buf: &mut super::NumBuffer<Self>) -> &str {
+                    let digits = buf.buf.as_mut();
+                    let (out, end) = (digits.as_mut_ptr() as *mut u8, digits.len());
+                    // SAFETY: the buffer holds every decimal of the type and a sign (num_buffer.rs)
+                    unsafe {
+                        let mut offset = $dec(self.unsigned_abs() as $Wide, out, end);
+                        // Only difference between signed and unsigned are these 4 lines.
+                        if self < 0 {
+                            offset -= 1;
+                            *out.add(offset) = b'-';
+                        }
+                        crate::intrinsics_mem::str_from_raw(out.add(offset) as *const u8, end - offset)
+                    }
+                }
+            }
+
+            impl $Unsigned {
+                pub fn format_into(self, buf: &mut super::NumBuffer<Self>) -> &str {
+                    let digits = buf.buf.as_mut();
+                    let (out, end) = (digits.as_mut_ptr() as *mut u8, digits.len());
+                    // SAFETY: the buffer holds every decimal of the type (num_buffer.rs)
+                    unsafe {
+                        let offset = $dec(self as $Wide, out, end);
+                        crate::intrinsics_mem::str_from_raw(out.add(offset) as *const u8, end - offset)
+                    }
+                }
+            }
+        )*
+    };
+}
+format_into!(dec_u32; i8 u8 u32, i16 u16 u32, i32 u32 u32);
+format_into!(dec_any_u64; i64 u64 u64, isize usize u64);
+format_into!(dec_u128; i128 u128 u128);

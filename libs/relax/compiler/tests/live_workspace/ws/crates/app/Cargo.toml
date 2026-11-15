@@ -1,0 +1,8 @@
+[package]
+name = "lw-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lw-core = { path = "../core" }
+lw-state = { path = "../../libs/state" }

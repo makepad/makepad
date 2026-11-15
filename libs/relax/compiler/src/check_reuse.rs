@@ -211,18 +211,22 @@ pub(crate) struct Reuse {
     bodies_keep: Vec<(u128, Vec<u8>)>,
 }
 
-/// What a check's crates' keys rest on beyond the crates: the Relax build and options, the
+/// What a check's crates' keys rest on beyond the crates: the Relax build and options, the policy
+/// for third-party compile-time code, the
 /// variables that steer the check (every `RELAX_*` one but run.rs RUN_STATE_VARS and
 /// RUN_LOCATING_VARS, the store's mode RELAX_CACHE: how the verdicts are used, not what they rest
 /// on, so a Verify or read-only check finds what an ordinary one stored, and the store's own
 /// `RELAX_CHECK_REUSE_*` ones: its traces and its tests' store, child and hooks, which must find
 /// what a check without them stored). Payload keys add the anchor locations separately.
-fn env_key(prog: &Program) -> u128 {
+pub(crate) fn env_key(prog: &Program) -> u128 {
     let mut h = Sip128::new();
     h.str("relax-check-env");
     h.u32(VERSION);
     h.u128(crate::codegen_id::id());
     h.u128(prog.session.options.fingerprint());
+    // the policy for third-party compile-time code: what a check of expanded code rests on
+    // (crate_image::parse_options)
+    h.u8((crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed) as u8);
     let mut vars: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.to_string_lossy().into_owned())))
         .filter(|(k, _)| k.starts_with("RELAX_") && k != "RELAX_CACHE" && !k.starts_with("RELAX_CHECK_REUSE_") && !crate::run::RUN_STATE_VARS.contains(&k.as_str()) && !crate::run::RUN_LOCATING_VARS.contains(&k.as_str()))
@@ -371,7 +375,7 @@ fn deep_text(prog: &Program, c: u32, texts: &[u128]) -> u128 {
 
 /// The current value of a late input (as the front validates its images: cache.rs).
 pub(crate) fn late_now(c: &str, kind: u8, name: &str) -> u128 {
-    let content = if crate::sip::late_base(kind) == crate::sip::LATE_FILE { crate::vfs::read(name).ok() } else { crate::crates::crate_env_named(c, name).map(String::into_bytes) };
+    let content = crate::crates::late_value_now(c, kind, name);
     crate::sip::late_hash(content.as_deref())
 }
 
@@ -1036,7 +1040,7 @@ pub(crate) fn graph_key(g: &crate::unitgraph::Graph) -> u128 {
     h.u32(g.bins.len() as u32);
     for b in &g.bins { h.u32(*b as u32); }
     h.u32(g.link_libs.len() as u32);
-    for (l, framework) in &g.link_libs { h.str(l); h.u8(*framework as u8); }
+    for (l, framework, outside_cwd) in &g.link_libs { h.str(l); h.u8(*framework as u8); h.u8(*outside_cwd as u8); }
     h.u8(g.native.is_some() as u8);
     h.finish128()
 }

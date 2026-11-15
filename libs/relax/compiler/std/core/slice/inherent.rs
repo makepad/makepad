@@ -163,6 +163,62 @@ impl<T> [T] {
         let end = unsafe { im::ptr_add(start, self.len()) };
         start..end
     }
+    pub const fn as_mut_ptr_range(&mut self) -> crate::ops::Range<*mut T> {
+        let len = self.len();
+        let start = self.as_mut_ptr();
+        let end = unsafe { im::ptr_add(start as *const T, len) as *mut T };
+        start..end
+    }
+    /// library/core/src/slice/mod.rs: takes the one-sided `range` off this slice (`..n` from the
+    /// front, `n..` from the back), None when it reaches past the end.
+    pub fn split_off<'a, R: crate::ops::OneSidedRange<usize>>(self: &mut &'a Self, range: R) -> Option<&'a Self> {
+        let (front_part, split_index) = split_point_of(range)?;
+        if split_index > self.len() {
+            return None;
+        }
+        let (front, back) = self.split_at(split_index);
+        if front_part {
+            *self = back;
+            Some(front)
+        } else {
+            *self = front;
+            Some(back)
+        }
+    }
+    pub fn split_off_mut<'a, R: crate::ops::OneSidedRange<usize>>(self: &mut &'a mut Self, range: R) -> Option<&'a mut Self> {
+        let (front_part, split_index) = split_point_of(range)?;
+        if split_index > self.len() {
+            return None;
+        }
+        let (front, back) = crate::mem::take(self).split_at_mut(split_index);
+        if front_part {
+            *self = back;
+            Some(front)
+        } else {
+            *self = front;
+            Some(back)
+        }
+    }
+    pub fn split_off_first<'a>(self: &mut &'a Self) -> Option<&'a T> {
+        let (first, rest) = self.split_first()?;
+        *self = rest;
+        Some(first)
+    }
+    pub fn split_off_first_mut<'a>(self: &mut &'a mut Self) -> Option<&'a mut T> {
+        let (first, rest) = crate::mem::take(self).split_first_mut()?;
+        *self = rest;
+        Some(first)
+    }
+    pub fn split_off_last<'a>(self: &mut &'a Self) -> Option<&'a T> {
+        let (last, rest) = self.split_last()?;
+        *self = rest;
+        Some(last)
+    }
+    pub fn split_off_last_mut<'a>(self: &mut &'a mut Self) -> Option<&'a mut T> {
+        let (last, rest) = crate::mem::take(self).split_last_mut()?;
+        *self = rest;
+        Some(last)
+    }
     /// Real core's `element_offset` (slice/mod.rs): the index of `element` if it is one of this
     /// slice's elements by address (not by value); panics for a zero-sized `T`.
     pub fn element_offset(&self, element: &T) -> Option<usize> {
@@ -535,10 +591,16 @@ impl<T> [T] {
     {
         super::to_vec(self)
     }
-    pub fn into_vec(self: crate::boxed::Box<[T]>) -> Vec<T> {
+    pub fn to_vec_in<A: crate::heap::Allocator>(&self, alloc: A) -> Vec<T, A>
+    where
+        T: Clone,
+    {
+        super::to_vec_in(self, alloc)
+    }
+    pub fn into_vec<A: crate::heap::Allocator>(self: crate::boxed::Box<[T], A>) -> Vec<T, A> {
         let len = self.len();
-        let p = crate::boxed::Box::into_raw(self) as *mut T;
-        unsafe { Vec::from_raw_parts(p, len, len) }
+        let (p, alloc) = crate::boxed::Box::into_non_null_with_allocator(self);
+        unsafe { Vec::from_raw_parts_in(p.cast::<T>().as_ptr(), len, len, alloc) }
     }
     pub fn repeat(&self, n: usize) -> Vec<T>
     where
@@ -739,4 +801,15 @@ impl<T, const N: usize> [[T; N]] {
         };
         unsafe { crate::slice::from_raw_parts_mut(self.as_mut_ptr() as *mut T, len) }
     }
+}
+
+/// library/core/src/slice/mod.rs `split_point_of`: where a one-sided range splits a slice, and
+/// whether it takes the front part (`..n`, `..=n`) or the back (`n..`).
+fn split_point_of(range: impl crate::ops::OneSidedRange<usize>) -> Option<(bool, usize)> {
+    use crate::ops::OneSidedRangeBound::{End, EndInclusive, StartInclusive};
+    Some(match range.bound() {
+        (StartInclusive, i) => (false, i),
+        (End, i) => (true, i),
+        (EndInclusive, i) => (true, i.checked_add(1)?),
+    })
 }

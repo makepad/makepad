@@ -108,9 +108,11 @@ fn configuration() -> &'static Configuration {
                 std::env::var("MAKEPAD_SEED").ok(),
             );
             // MAKEPAD_WINDOW=WxH@scale: `--window` for launchers that pass
-            // env but not arguments.
+            // env but not arguments; a flight-recorder replay's recorded window
+            // (RELAX_REPLAY_WINDOW) comes first.
             if config.window.is_none() {
-                config.window = std::env::var("MAKEPAD_WINDOW").ok().as_deref().and_then(parse_window);
+                config.window = ["RELAX_REPLAY_WINDOW", "MAKEPAD_WINDOW"].iter()
+                    .find_map(|k| std::env::var(k).ok().as_deref().and_then(parse_window));
             }
             // Only the remote bridge's `/step` moves the clock: without it
             // (a child that inherited MAKEPAD_VIRTUAL_CLOCK, a forgotten

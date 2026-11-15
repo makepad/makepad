@@ -76,8 +76,9 @@ def check(jit, work):
     env = dict(os.environ, RELAX_HOME=home, RELAX_CACHE_DIR=os.path.join(home, "cache"),
                RELAX_TARGET_DIR=os.path.join(home, "target"), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_MUTE="1")
     env.setdefault("RELAX_STD", os.path.join(ROOT, "libs/relax/compiler/std"))
-    # 1. a run
-    p = subprocess.run(jit + ["run", "--quiet", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
+    # 1. a run, unattended: its panics unwind at once (attended, as under devhub's observer, the first
+    # parked for a decision nobody here makes, and the job paused, 11-14)
+    p = subprocess.run(jit + ["run", "--quiet", "--unattended", "relax-caught-report"], cwd=pkg, env=env, capture_output=True, text=True, errors="replace")
     if "main done" not in p.stdout:
         return "the run did not finish (exit %s): %s" % (p.returncode, p.stderr.strip()[-400:])
     got = reports(p.stderr)

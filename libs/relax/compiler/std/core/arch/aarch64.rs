@@ -7483,3 +7483,122 @@ neon_test_bits! { "neon":
     vtst_p16 poly16x4_t uint16x4_t; vtstq_p16 poly16x8_t uint16x8_t; vtst_p64 poly64x1_t uint64x1_t;
     vtstq_p64 poly64x2_t uint64x2_t;
 }
+
+// ---- pairwise min/max, two-register tables, unzips and zips (the NEON paths of base64 and hex
+// codecs). Lane by lane, as Arm's UMAXP/UMINP, TBL, UZP1/UZP2, ZIP1/ZIP2.
+
+/// UMAXP: the larger of each adjacent pair, `a`'s pairs first.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vpmax_u32(a: uint32x2_t, b: uint32x2_t) -> uint32x2_t {
+    uint32x2_t([a.0[0].max(a.0[1]), b.0[0].max(b.0[1])])
+}
+
+/// UMINP: the smaller of each adjacent pair, `a`'s pairs first.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vpmin_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[2 * i].min(a.0[2 * i + 1]);
+        r[4 + i] = b.0[2 * i].min(b.0[2 * i + 1]);
+        i += 1;
+    }
+    uint8x8_t(r)
+}
+
+/// TBL with a 32-byte table: an index >= 32 gives 0.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vqtbl2q_u8(a: uint8x16x2_t, b: uint8x16_t) -> uint8x16_t {
+    let mut r = [0; 16];
+    let mut i = 0;
+    while i < 16 {
+        let k = b.0[i] as usize;
+        r[i] = if k < 16 { a.0 .0[k] } else if k < 32 { a.1 .0[k - 16] } else { 0 };
+        i += 1;
+    }
+    uint8x16_t(r)
+}
+
+/// TBL with a 16-byte table of two 8-byte halves: an index >= 16 gives 0.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vtbl2_u8(a: uint8x8x2_t, b: uint8x8_t) -> uint8x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 8 {
+        let k = b.0[i] as usize;
+        r[i] = if k < 8 { a.0 .0[k] } else if k < 16 { a.1 .0[k - 8] } else { 0 };
+        i += 1;
+    }
+    uint8x8_t(r)
+}
+
+/// UZP1: the even lanes of `a` then of `b`.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp1_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[2 * i];
+        r[4 + i] = b.0[2 * i];
+        i += 1;
+    }
+    uint8x8_t(r)
+}
+
+/// UZP2: the odd lanes of `a` then of `b`.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp2_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8_t {
+    let mut r = [0; 8];
+    let mut i = 0;
+    while i < 4 {
+        r[i] = a.0[2 * i + 1];
+        r[4 + i] = b.0[2 * i + 1];
+        i += 1;
+    }
+    uint8x8_t(r)
+}
+
+/// UZP1 and UZP2 together.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzp_u8(a: uint8x8_t, b: uint8x8_t) -> uint8x8x2_t {
+    uint8x8x2_t(vuzp1_u8(a, b), vuzp2_u8(a, b))
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vuzpq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16x2_t {
+    uint8x16x2_t(vuzp1q_u8(a, b), vuzp2q_u8(a, b))
+}
+
+/// ZIP1 and ZIP2 together: the low halves of `a` and `b` interleaved, then the high halves.
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vzipq_u8(a: uint8x16_t, b: uint8x16_t) -> uint8x16x2_t {
+    let (mut lo, mut hi) = ([0; 16], [0; 16]);
+    let mut i = 0;
+    while i < 8 {
+        lo[2 * i] = a.0[i];
+        lo[2 * i + 1] = b.0[i];
+        hi[2 * i] = a.0[8 + i];
+        hi[2 * i + 1] = b.0[8 + i];
+        i += 1;
+    }
+    uint8x16x2_t(uint8x16_t(lo), uint8x16_t(hi))
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vzipq_u16(a: uint16x8_t, b: uint16x8_t) -> uint16x8x2_t {
+    let (mut lo, mut hi) = ([0; 8], [0; 8]);
+    let mut i = 0;
+    while i < 4 {
+        lo[2 * i] = a.0[i];
+        lo[2 * i + 1] = b.0[i];
+        hi[2 * i] = a.0[4 + i];
+        hi[2 * i + 1] = b.0[4 + i];
+        i += 1;
+    }
+    uint16x8x2_t(uint16x8_t(lo), uint16x8_t(hi))
+}
+
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+pub fn vzipq_u32(a: uint32x4_t, b: uint32x4_t) -> uint32x4x2_t {
+    uint32x4x2_t(uint32x4_t([a.0[0], b.0[0], a.0[1], b.0[1]]), uint32x4_t([a.0[2], b.0[2], a.0[3], b.0[3]]))
+}

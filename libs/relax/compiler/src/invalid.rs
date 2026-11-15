@@ -115,6 +115,17 @@ pub(crate) fn group_of(u: &Unit, id: u32, gen: u32, inlined: &[u32]) -> Option<G
                 return Some(Group::Module { krate: k, gen: g });
             }
         }
+        // a twin of shared code (an instance of std's made for a module's types or closures)
+        // that took that module's twins in holds the module's code: it goes with the module
+        if matches!(f.key, FnKey::Sandbox(_)) {
+            let module = inlined.iter().find_map(|&c| match u.fns[c as usize].key {
+                FnKey::Sandbox(b) if (b as usize) < u.fns.len() => slot_crate(u, b).filter(|&k| crate::modules::is_module_crate(k)),
+                _ => None,
+            });
+            if let Some(k) = module {
+                return Some(Group::Module { krate: k, gen: g });
+            }
+        }
     }
     (g > 0).then_some(Group::Patch { slot: id, gen: g })
 }
