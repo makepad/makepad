@@ -18,7 +18,7 @@ fn the_module_fixtures_pass_under_the_runner() {
 #[test]
 fn the_fixture_scripts_pass_under_the_runner() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let names = ["macro_rename_from_expansion", "cache_warm_coroutine_arg", "cache_warm_anon_const_impls", "cache_warm_dep_macro_impls", "derive_declared_by_dep_macro", "pm_as_lib", "script_cargo_is_loader", "non_unicode_launch", "prepared_child", "script_native_dep", "self_native"];
+    let names = ["macro_rename_from_expansion", "cache_warm_coroutine_arg", "cache_warm_anon_const_impls", "cache_warm_dep_macro_impls", "derive_declared_by_dep_macro", "pm_as_lib", "script_cargo_is_loader", "non_unicode_launch", "prepared_child", "script_native_dep", "self_native", "allow_c_unused_member", "pm_failed_crate_isolated", "cargo_config_env", "test_bin_borrowck", "test_dep_borrowck"];
     let failed: Vec<String> = std::thread::scope(|s| {
         let runs: Vec<_> = names
             .iter()
@@ -150,10 +150,15 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (std::process::ExitStatus, St
 /// The runner's command in the workspace at `dir`, with a cache and target directory of its own
 /// (under the scratch folder it returns).
 fn runner_in(dir: &std::path::Path) -> (Command, std::path::PathBuf) {
+    loader_in(std::path::Path::new(&runner()), dir)
+}
+
+/// `runner_in` with `loader` as the runner.
+fn loader_in(loader: &std::path::Path, dir: &std::path::Path) -> (Command, std::path::PathBuf) {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let name = dir.file_name().unwrap().to_string_lossy();
     let scratch = std::env::temp_dir().join(format!("{name}-run-{}", std::process::id()));
-    let mut command = Command::new(runner());
+    let mut command = Command::new(loader);
     command
         .current_dir(dir)
         .env("RELAX_STD", root.join("libs/relax/compiler/std"))
@@ -214,6 +219,103 @@ fn a_module_loads_while_the_macro_world_lives() {
     assert_eq!(stdout.trim(), "app 42 plain 42 derived 42", "{stderr}");
 }
 
+/// A sandboxed module's escapes in its fn bodies are refused when the program that loads it is a
+/// `makepad run` (libs/relax/compiler/tests/sandbox_lazy_bodies): such a run parses the bodies a
+/// later parse can do alone on their first need, and the refusal read only the file's first tree,
+/// so `unsafe` and raw pointers in a body loaded (a reference forged from an address, handed to
+/// the host). `makepad test` loads parse every body at once, which is why the module fixtures
+/// never saw it.
+#[test]
+fn a_sandboxed_modules_escapes_in_lazily_parsed_bodies_are_refused() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = root.join("libs/relax/compiler/tests/sandbox_lazy_bodies");
+    let (mut command, scratch) = runner_in(&dir);
+    let output = command.args(["run", "--quiet", "--unattended", "slb-app"]).env("RELAX_LAZY_BODIES", "1").output().unwrap();
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (stdout, stderr) = (String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    let refused = ["unsafe_block", "raw_ptr", "forged_ref", "method_body", "inner_unsafe_fn", "inner_no_mangle"].map(|n| format!("{n} refused"));
+    assert_eq!(stdout.lines().collect::<Vec<_>>(), refused.iter().map(String::as_str).chain(["safe_body 42"]).collect::<Vec<_>>(), "{stderr}");
+}
+
+/// Relax's grants (`--allow-c`, `--allow-host-modules`, `--allow-unchecked-modules`,
+/// `--allow-unmetered-modules`, `--allow-module-fuel=<n>`) are words of the person's command line
+/// alone (libs/relax/compiler/tests/trust_from_config). The repository names their environment
+/// variables in its cargo `[env]` and its path build script's `rustc-env`, and the program names
+/// two for its self-exec child: none of them reaches a Relax host, the run says it ignores each
+/// `[env]` name, the build script (run by a host of its own) sees none, and the program reads the
+/// script's and its own values as under cargo. Three runs:
+/// - the five names in the environment and the fuel as a word: the run says it ignores each name;
+///   the script's host, the run and the child refuse an `unsafe` module, and fuel stops a long
+///   call in the run and in the child (its words);
+/// - `--allow-host-modules --allow-c`: the run and its child load the module and run it as host
+///   code (no fuel), the script's host (given `--allow-c` alone) refuses it;
+/// - (unix) a build environment set by the person's shell (RELAX_BUILD_ENV, as a parent's Relax
+///   hands one to a run of a binary it prepared) naming a grant, and RELAX_MODULE_FUEL=1 with no
+///   fuel word: the module is refused and the long call runs to its end in the run and in the
+///   child. The program then gets the environment it was started with (no `rustc-env`).
+/// A word that is no grant ends the run before it builds, naming the word. Before, a host read
+/// its grants from its environment: `[env]` reached the script's host and, with the script's
+/// `rustc-env`, the process environment, from which the self-exec child's host read them, so the
+/// child loaded the module and ran it without fuel; and a grant in the environment of the person's
+/// shell, a launcher or a handed build environment was the run's and its children's.
+#[test]
+fn relax_takes_its_grants_from_the_command_line_alone() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = root.join("libs/relax/compiler/tests/trust_from_config");
+    // a cache and a target directory each: every run runs the build script (a cache keeps a
+    // script's outcome by its inputs)
+    let run = |tag: &str, args: &[&str], env: &[(&str, &str)], handed: Option<&str>| {
+        let (mut command, scratch) = match handed {
+            // set by a shell: a program's spawn under Relax never hands a build environment (progenv)
+            Some(wire) => {
+                let (mut command, scratch) = loader_in(std::path::Path::new("/bin/sh"), &dir);
+                command.args(["-c", "RELAX_BUILD_ENV=$0; export RELAX_BUILD_ENV; exec \"$@\"", wire, &runner()]);
+                (command, scratch)
+            }
+            None => runner_in(&dir),
+        };
+        let output = command.env("RELAX_CACHE_DIR", scratch.join(format!("cache-{tag}"))).env("RELAX_TARGET_DIR", scratch.join(format!("target-{tag}"))).arg("run").args(args).arg("tfc-app").envs(env.iter().copied()).output().unwrap();
+        (output.status, String::from_utf8_lossy(&output.stdout).into_owned(), String::from_utf8_lossy(&output.stderr).into_owned())
+    };
+    let lines = |unsafe_module: &str, stopped: bool, handed: bool| {
+        let script = if handed { "nothing" } else { "0" };
+        let who = |who: &str, fuel: &str| [format!("{who}: unsafe module {unsafe_module}"), format!("{who}: long call stopped: {stopped}"), format!("{who}: program reads RELAX_SANDBOX_FUEL={script} RELAX_MODULE_FUEL={fuel}")];
+        std::iter::once("script: saw none, its unsafe module refused".to_string()).chain(who("run", "nothing")).chain(who("child", "1")).collect::<Vec<_>>()
+    };
+    let fuel = "--allow-module-fuel=1000000";
+    let mut failed = Vec::new();
+    let mut expect = |what: &str, (status, stdout, stderr): (std::process::ExitStatus, String, String), want: Vec<String>, said: &[String]| {
+        let missing: Vec<&String> = said.iter().filter(|s| !stderr.contains(s.as_str())).collect();
+        if !status.success() || stdout.lines().collect::<Vec<_>>() != want || !missing.is_empty() {
+            failed.push(format!("-- {what}: wanted {want:#?}, saying {missing:?}; {status}\n{stdout}\n{stderr}"));
+        }
+    };
+    let env_said = |name: &str| format!("[env] `{name}` is ignored: RELAX_* names are Relax's own settings");
+    let ignored = |name: &str, word: &str| format!("{name} in the environment is ignored; pass {word}");
+    let in_env = [("RELAX_MODULES_TRUSTED", "1"), ("RELAX_SANDBOX_NOCHECK", "1"), ("RELAX_ALLOW_C", "1"), ("RELAX_SANDBOX_FUEL", "0"), ("RELAX_MODULE_FUEL", "99999999999")];
+    let mut said: Vec<String> = ["RELAX_ALLOW_C", "RELAX_MODULES_TRUSTED", "RELAX_SANDBOX_FUEL", "RELAX_SANDBOX_NOCHECK"].map(env_said).to_vec();
+    said.extend([("RELAX_ALLOW_C", "--allow-c"), ("RELAX_MODULES_TRUSTED", "--allow-host-modules"), ("RELAX_SANDBOX_NOCHECK", "--allow-unchecked-modules"), ("RELAX_SANDBOX_FUEL", "--allow-unmetered-modules"), ("RELAX_MODULE_FUEL", "--allow-module-fuel=<n>")].map(|(n, w)| ignored(n, w)));
+    expect("grants in the environment", run("env", &["--quiet", "--unattended", fuel], &in_env, None), lines("refused", true, false), &said);
+    expect("grants as words", run("words", &["--quiet", "--unattended", "--allow-host-modules", "--allow-c", fuel], &[], None), lines("LOADED", false, false), &[]);
+    #[cfg(unix)]
+    {
+        // the whole environment of this test, and a grant
+        let mut build = Vec::new();
+        for (k, v) in std::env::vars().filter(|(k, _)| !k.starts_with("RELAX_") && k != "CARGO").chain([("RELAX_MODULES_TRUSTED".to_string(), "1".to_string())]) {
+            build.push(format!("{}:{k}={v}", k.len() + v.len() + 1));
+        }
+        let handed = run("handed", &["--quiet", "--unattended"], &[("RELAX_MODULE_FUEL", "1")], Some(&build.concat()));
+        expect("a build environment from a shell, and the fuel in the environment", handed, lines("refused", false, true), &[ignored("RELAX_MODULE_FUEL", "--allow-module-fuel=<n>")]);
+    }
+    let (status, stdout, stderr) = run("nonsense", &["--quiet", "--allow-nonsense"], &[], None);
+    if status.code() != Some(2) || !stderr.contains("`--allow-nonsense` is no grant") {
+        failed.push(format!("-- a word that is no grant: wanted exit 2 naming it; {status}\n{stdout}\n{stderr}"));
+    }
+    let _ = std::fs::remove_dir_all(runner_in(&dir).1);
+    assert!(failed.is_empty(), "{}", failed.join("\n"));
+}
+
 /// A proc macro that calls `Span::call_site().file()` and `.local_file()` (stable since 1.88)
 /// compiles and runs (libs/relax/compiler/tests/pm_span_file); `cargo run -p pmsf-app` prints the
 /// same line. Before, the macro failed with E0599 `local_file`.
@@ -259,6 +361,32 @@ fn a_background_check_that_needs_a_skipped_module_lets_the_program_run() {
     assert_eq!(stdout.trim(), "steps 8 state 7", "{stderr}");
     // the check's verdict: the impls do not overlap
     assert!(!stderr.contains("E0119"), "{stderr}");
+}
+
+/// Two modules the file selection skipped, each importing a dependency's re-export of an attribute
+/// macro named like the dependency (`use lmi_dep::lmi_dep;`, as `use relax_api::relax_api;`)
+/// beside `use lmi_dep::sync::Mutex;` (libs/relax/compiler/tests/lazy_macro_import, both modules
+/// deferred). The macro import never binds a type, so the path's first segment waits on it until a
+/// run finds its failure determined; the load of the first module did not try the dependency's own
+/// open import of the macro, the wait never ended, and `Mutex` was undeclared there (E0433). Only
+/// the last skipped module's load forced it, so which one broke went with the load order: a
+/// provided crate's check broke when an unrelated std change moved its modules' order.
+/// `cargo run -p lmi-app` prints `2 3`. The first module's macro may need the macro world while
+/// the boot's prewarm still builds it: the owner, serving that load, waited for the build, and the
+/// build asked the owner to set the runtime's unit before it let go (a hang the deadline ends).
+#[test]
+fn a_lazily_loaded_module_imports_through_a_crate_beside_its_namesake_macro() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let env = [
+        ("RELAX_LAZY_DEFER", "app/src/first.rs,app/src/second.rs"),
+        // no completion loader: the modules load as the program needs them, first one first
+        ("RELAX_LAZY_COMPLETE", "0"),
+    ];
+    let dir = root.join("libs/relax/compiler/tests/lazy_macro_import");
+    let (status, stdout, stderr) = run_until(&dir, &["run", "--quiet", "--unattended", "lmi-app"], &env, std::time::Duration::from_secs(60));
+    assert!(status.is_some_and(|s| s.success()), "{stdout}\n{stderr}");
+    assert_eq!(stdout.trim(), "2 3", "{stderr}");
+    assert!(!stderr.contains("E0433") && !stderr.contains("E0412"), "{stderr}");
 }
 
 /// proc_macro's Literal constructors on text that needs escaping, `Literal::c_string` among them
@@ -916,6 +1044,112 @@ fn a_relaunched_runs_loader_is_the_loader_not_its_own_executable() {
     assert_eq!(stdout, "cleared: the loader answers as the loader\nnamed: the loader answers as the loader\n", "a relaunched run's RELAX_LOADER is the loader: {stderr}");
 }
 
+/// Every run of a program shares its own executable, one hard link of the loader per program name
+/// (relax-compiler selfexe.rs), so a run makes no new link of the loader: on macOS each new link of
+/// a file, and each unlink, made syspolicyd scan the loader again at its next exec (about 330 ms for
+/// a 76 MB loader, and a process killed in that wait now and then). Two runs of one program, with
+/// other features and other build environments, are live at once on a copy of the runner; each
+/// launches its own executable through a shell with another environment, then starts itself ten
+/// times. Both runs have one executable; the shell's launch is its own run's program (its feature)
+/// built with its own run's build environment (its mark); and the loader file has one link more
+/// than before them through all 22 runs and after. A shell's launch of that executable from no run
+/// (this test) ends non-zero and says why: two runs are live and neither started it, then none is.
+#[cfg(unix)]
+#[test]
+fn runs_of_a_program_share_its_executable_and_a_shell_launch_finds_its_own_run() {
+    use std::os::unix::fs::MetadataExt;
+    let ws = std::env::temp_dir().join(format!("shared-link-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ws);
+    let main = r#"use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+fn wait_for(p: &Path) {
+    let t = std::time::Instant::now();
+    while !p.exists() && t.elapsed().as_secs() < 120 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let exe = std::env::current_exe().unwrap();
+    let me = if cfg!(feature = "b") { "b" } else { "a" };
+    match args.get(1).map(String::as_str) {
+        Some("which") => println!("{} {me} links {}", option_env!("SHARED_MARK").unwrap_or("none"), std::fs::metadata(&exe).unwrap().nlink()),
+        Some("hold") => {
+            let dir = Path::new(&args[2]);
+            // whole: the test reads it once it is there
+            std::fs::write(dir.join(format!(".exe-{me}")), exe.to_str().unwrap()).unwrap();
+            std::fs::rename(dir.join(format!(".exe-{me}")), dir.join(format!("exe-{me}"))).unwrap();
+            wait_for(&dir.join("go"));
+            let shell = std::process::Command::new("/bin/sh").args(["-c", "exec \"$0\" which"]).arg(&exe).env("SHARED_MARK", "shell").output().unwrap();
+            print!("shell: {}", String::from_utf8_lossy(&shell.stdout));
+            eprint!("{}", String::from_utf8_lossy(&shell.stderr));
+            for _ in 0..10 {
+                let again = std::process::Command::new(&exe).arg("which").output().unwrap();
+                print!("again: {}", String::from_utf8_lossy(&again.stdout));
+            }
+            std::fs::write(dir.join(format!("done-{me}")), "").unwrap();
+            wait_for(&dir.join("end"));
+        }
+        _ => {}
+    }
+}
+"#;
+    let files = [
+        ("Cargo.toml", "[package]\nname = \"shared-link\"\nversion = \"0.1.0\"\nedition = \"2021\"\npublish = false\n\n[features]\na = []\nb = []\n\n[workspace]\n"),
+        ("src/main.rs", main),
+    ];
+    for (path, text) in files {
+        let path = ws.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    // a loader file of this test's own: the runner's has the links of every test running at once
+    let loader = ws.join("loader/makepad");
+    std::fs::create_dir_all(loader.parent().unwrap()).unwrap();
+    std::fs::copy(runner(), &loader).unwrap();
+    let links = || std::fs::metadata(&loader).unwrap().nlink();
+    let before = links();
+    let start = |feature: &str, mark: &str| {
+        let (mut command, _) = loader_in(&loader, &ws);
+        command.args(["run", "--quiet", "--unattended", "shared-link", "--features", feature, "--", "hold"]).arg(&ws).env("SHARED_MARK", mark);
+        command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap()
+    };
+    let (mut a, mut b) = (start("a", "ma"), start("b", "mb"));
+    let wait_for = |p: &std::path::Path, runs: &mut [&mut std::process::Child]| {
+        let t = std::time::Instant::now();
+        while !p.exists() && t.elapsed().as_secs() < 120 && runs.iter_mut().all(|r| r.try_wait().unwrap().is_none()) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    wait_for(&ws.join("exe-a"), &mut [&mut a, &mut b]);
+    wait_for(&ws.join("exe-b"), &mut [&mut a, &mut b]);
+    let (exe_a, exe_b) = (std::fs::read_to_string(ws.join("exe-a")).unwrap_or_default(), std::fs::read_to_string(ws.join("exe-b")).unwrap_or_default());
+    let live = links();
+    let shell = |exe: &str| Command::new("/bin/sh").args(["-c", "exec \"$0\" which"]).arg(exe).output().unwrap();
+    let two_live = shell(&exe_a);
+    std::fs::write(ws.join("go"), "").unwrap();
+    wait_for(&ws.join("done-a"), &mut [&mut a, &mut b]);
+    wait_for(&ws.join("done-b"), &mut [&mut a, &mut b]);
+    let after_runs = links();
+    std::fs::write(ws.join("end"), "").unwrap();
+    let (a, b) = (a.wait_with_output().unwrap(), b.wait_with_output().unwrap());
+    let none_live = shell(&exe_a);
+    let after = links();
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("shared-link-{}-run-{}", std::process::id(), std::process::id())));
+    let _ = std::fs::remove_dir_all(&ws);
+    let text = |o: &std::process::Output| format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    assert!(a.status.success() && b.status.success(), "both runs end well:\n{}\n{}", text(&a), text(&b));
+    assert!(!exe_a.is_empty() && exe_a == exe_b, "both runs have one executable: {exe_a:?} {exe_b:?}\n{}\n{}", text(&a), text(&b));
+    let n = before + 1;
+    for (run, mark, feature) in [(&a, "ma", "a"), (&b, "mb", "b")] {
+        let want = format!("shell: {mark} {feature} links {n}\n{}", format!("again: {mark} {feature} links {n}\n").repeat(10));
+        assert_eq!(String::from_utf8_lossy(&run.stdout), want, "the shell's launch is this run's program and build; no run made a link of the loader: {}", String::from_utf8_lossy(&run.stderr));
+    }
+    assert_eq!((live, after_runs, after), (n, n, n), "the loader's links: one more than before ({before}) with two runs live, after their 20 runs of themselves, and after they ended");
+    assert!(!two_live.status.success() && String::from_utf8_lossy(&two_live.stderr).contains("2 runs of this program are live and none of them started this process"), "a shell's launch from no run while two are live: {}", text(&two_live));
+    assert!(!none_live.status.success() && String::from_utf8_lossy(&none_live.stderr).contains("no run of this program is live"), "a shell's launch from no run once none is live: {}", text(&none_live));
+}
+
 /// A `links` package's build script hands its metadata on: the scripts of the packages that depend
 /// on it directly run after it and read it as `DEP_<LINKS>_<KEY>` (`cargo:KEY=VALUE` with a key
 /// that is no instruction, and `cargo::metadata=KEY=VALUE`); a package further down gets none, nor
@@ -1114,7 +1348,26 @@ fn a_dependency_feature_turns_on_the_feature_named_after_the_dependency() {
 fn a_forwarded_expression_reaches_a_proc_macro_in_an_invisible_group() {
     let (status, stdout, stderr) = run_fixture("macro_forwarded_expr_group", "fwd-app");
     assert!(status.success(), "{stdout}\n{stderr}");
-    assert_eq!(stdout.trim(), "forwarded expr group ok head tail true\nhanded back: 4", "{stderr}");
+    // every fragment but an ident, a lifetime and a tt is one invisible group, of one token too
+    // (relax PR 193: const_format's `formatcp!` reached through a `$fmt:expr`)
+    let shapes = r#"shapes: None["b"] | None[- 1] | None["b"] | None[u8] | None[Brace[1]] | x | "b" | Paren[None["a{0}"]] , None["b"] , | , None["b"] ,"#;
+    assert_eq!(stdout.trim(), format!("forwarded expr group ok head tail true\nhanded back: 4\n{shapes}"), "{stderr}");
+}
+
+/// An item's outer doc comments reach its derive and attribute macros as `#[doc = ".."]`
+/// attributes, those above its first attribute too, as rustc hands them over (the `documented`
+/// derive reads a type's `///` lines from them): libs/relax/compiler/tests/derive_doc_input
+/// (relax PR 193).
+#[test]
+fn an_items_doc_comments_reach_its_derive_and_attribute_macros() {
+    let (status, stdout, stderr) = run_fixture("derive_doc_input", "derive-doc-app");
+    assert!(status.success(), "{stdout}\n{stderr}");
+    let want = r#"# Bracket[doc = " One line."] # Bracket[doc = ""] # Bracket[doc = " A ` `code` ` and \"quotes\"."] pub struct Outer Brace[# Bracket[doc = " a field"] pub x : u8 ,]
+# Bracket[doc = " A block comment. "] struct Block ;
+# Bracket[doc = "explicit"] struct Explicit ;
+# Bracket[doc = " Attr."] struct Attr ;
+# Bracket[doc = " Local."] struct Local ;"#;
+    assert_eq!(stdout.trim(), want, "{stderr}");
 }
 
 /// A proc macro called through a path is the one the path's imports name, a rename among them
@@ -1161,10 +1414,12 @@ fn a_crate_named_macro_import_keeps_the_crate_for_its_attributes() {
 
 /// A crate Relax provides (std/substitutes.txt) keeps the features the graph enables: smallvec's
 /// `write` and arrayvec's default `std` give them `io::Write` (relax issue 117: the provided
-/// crates were loaded without features): libs/relax/compiler/tests/substitute_features.
+/// crates were loaded without features): tools/run/tests/substitute_features (Makepad's: it
+/// builds libs/smallvec and libs/vulkan/arrayvec).
 #[test]
 fn a_provided_crate_keeps_the_features_the_graph_enables() {
-    let (status, stdout, stderr) = run_fixture("substitute_features", "subfeat-app");
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let (status, stdout, stderr) = run_in(&root.join("tools/run/tests/substitute_features"), &["run", "--quiet", "--unattended", "subfeat-app"]);
     assert!(status.success(), "{stdout}\n{stderr}");
     assert_eq!(stdout.trim(), "[104, 105] 4 [104, 101, 108, 108]", "{stderr}");
 }
@@ -1604,11 +1859,14 @@ fn runs_and_keeps_its_binary() {
 /// The build script is told the profile as cargo tells it (PROFILE, OPT_LEVEL, DEBUG; before, always
 /// `release,3,false`), and its CARGO, a proc macro's, `env!("CARGO")` and the program's are absolute
 /// paths (before, the whole run had CARGO=cargo, which the program and its children looked up on
-/// PATH; found by a review of the runner).
+/// PATH; found by a review of the runner). The package's binary that its integration test starts
+/// (CARGO_BIN_EXE_pc-app), and that binary's run of itself, have the profile's checks too (relax
+/// issue 207: the binary built as a run, without them).
 /// Under cargo, `cargo test -p pc-app -- --nocapture` prints
 /// `app=true,true dep=false,false build=true,false macro=true script=debug,0,true,true
-/// cargo=true,true,true` and runs `debug_only`; with `--release`, `app=false,false dep=false,false
-/// build=false,false macro=false script=release,3,false,true cargo=true,true,true` and
+/// cargo=true,true,true` and `bin=true,true again=true,true` and runs `debug_only`; with
+/// `--release`, `app=false,false dep=false,false build=false,false macro=false
+/// script=release,3,false,true cargo=true,true,true` and `bin=false,false again=false,false` and
 /// `release_only`.
 #[test]
 fn a_tests_profile_is_cargo_tests() {
@@ -1631,6 +1889,25 @@ fn debug_only() {}
 #[test]
 fn release_only() {}
 "#;
+    let bin = r#"fn main() {
+    let again = match std::env::args().nth(1) {
+        Some(_) => String::new(),
+        None => {
+            let out = std::process::Command::new(std::env::current_exe().unwrap()).arg("again").output().unwrap();
+            let failed = if out.status.success() { String::new() } else { format!(" ({}: {})", out.status, String::from_utf8_lossy(&out.stderr)) };
+            format!(" again={}{failed}", String::from_utf8_lossy(&out.stdout))
+        }
+    };
+    print!("{},{}{again}", cfg!(debug_assertions), overflows());
+}
+"#;
+    let child = r#"#[test]
+fn the_binary() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_pc-app")).output().unwrap();
+    let failed = if out.status.success() { String::new() } else { format!(" ({}: {})", out.status, String::from_utf8_lossy(&out.stderr)) };
+    println!("bin={}{failed}", String::from_utf8_lossy(&out.stdout));
+}
+"#;
     let files = [
         ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"dep\", \"macro\"]\nresolver = \"2\"\n\n[profile.dev.package.pc-dep]\ndebug-assertions = false\n\n[profile.test.package.pc-dep]\noverflow-checks = false\n\n[profile.test.build-override]\noverflow-checks = false\n".to_string()),
         ("macro/Cargo.toml", pkg("pc-macro", "\n[lib]\nproc-macro = true\n")),
@@ -1640,6 +1917,8 @@ fn release_only() {}
         ("dep/src/lib.rs", format!("{overflows}\npub fn checks() -> (bool, bool) {{\n    (cfg!(debug_assertions), overflows())\n}}\n")),
         ("app/Cargo.toml", pkg("pc-app", "\n[dependencies]\npc-dep = { path = \"../dep\" }\npc-macro = { path = \"../macro\" }\n")),
         ("app/src/lib.rs", format!("{overflows}\n{app}")),
+        ("app/src/main.rs", format!("{overflows}\n{bin}")),
+        ("app/tests/child.rs", child.to_string()),
     ];
     for (path, text) in &files {
         let path = ws.join(path);
@@ -1651,13 +1930,14 @@ fn release_only() {}
     let release = run_until(&ws, &["test", "pc-app", "--release", "--", "--nocapture"], &[], deadline);
     let _ = std::fs::remove_dir_all(&ws);
     let cases = [
-        (test, "test", "app=true,true dep=false,false build=true,false macro=true", "script=debug,0,true,true", "debug_only", "release_only"),
-        (release, "release", "app=false,false dep=false,false build=false,false macro=false", "script=release,3,false,true", "release_only", "debug_only"),
+        (test, "test", "app=true,true dep=false,false build=true,false macro=true", "script=debug,0,true,true", "bin=true,true again=true,true\n", "debug_only", "release_only"),
+        (release, "release", "app=false,false dep=false,false build=false,false macro=false", "script=release,3,false,true", "bin=false,false again=false,false\n", "release_only", "debug_only"),
     ];
-    for ((status, stdout, stderr), profile, line, script, only, not) in cases {
+    for ((status, stdout, stderr), profile, line, script, bin, only, not) in cases {
         assert!(status.is_some_and(|s| s.success()), "the {profile} profile's run passes: {stdout}\n{stderr}");
         assert!(stdout.contains(line), "the {profile} profile's checks, the dependency's as its overrides set them, the host's as its build-override does: {stdout}\n{stderr}");
         assert!(stdout.contains(&format!("{script} cargo=true,true,true")), "the build script's PROFILE, OPT_LEVEL and DEBUG are the {profile} profile's, and CARGO is an absolute path for the script, the proc macro, env! and the program: {stdout}");
         assert!(stdout.contains(&format!("test {only} ... ok")) && !stdout.contains(not), "the {profile} profile selects {only}, not {not}: {stdout}");
+        assert!(stdout.contains(bin), "the binary the integration test starts, and its run of itself, have the {profile} profile's checks: {stdout}\n{stderr}");
     }
 }

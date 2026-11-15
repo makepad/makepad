@@ -2,6 +2,7 @@ use {
     crate::{
         cx_draw::CxDraw,
         draw_list_2d::DrawList2d,
+        glyph_capture::GlyphCapture,
         makepad_math::{Rect, Vec2d},
         makepad_platform::{DrawListId, DrawPassId, LiveId},
         makepad_script::ScriptNew,
@@ -47,6 +48,9 @@ pub struct Cx2d<'a, 'b> {
     /// Every text run drawn while a check is collecting them; `None` (and
     /// free) otherwise. See [`TextRunSink`].
     pub text_runs: Option<TextRunSink>,
+    /// Text drawn as glyphs for a document writer; `None` when no capture is on.
+    /// See [`GlyphCapture`].
+    pub glyph_capture: Option<GlyphCapture>,
 }
 
 /// What a UI check reads back after a draw: where each text run was laid out
@@ -253,6 +257,7 @@ impl<'a, 'b> Cx2d<'a, 'b> {
             sploded_hairline_seen: scratch.sploded_hairline_seen,
             sploded_scene: None,
             text_runs: None,
+            glyph_capture: None,
         }
     }
 

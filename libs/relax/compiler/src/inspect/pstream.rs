@@ -1,6 +1,6 @@
 //! The `prof` service: the live profiler stream a viewer (an app, `makepad inspect <app> pf ...`)
-//! opens on the app's makepad-remote endpoint. Layout and record kinds: makepad-prof-stream
-//! (local/agent_state/relax-campaign/profproto.md).
+//! opens on the app's makepad-remote endpoint. Layout and record kinds: the makepad-prof-stream
+//! crate (libs/prof_stream).
 //!
 //! While a viewer is attached, the timeline's markers (UI phases, owner service, waits, wakes,
 //! compile jobs) also go to per-thread stream rings: fixed size, overwritten when full, written

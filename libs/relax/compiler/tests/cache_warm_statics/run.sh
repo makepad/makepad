@@ -5,7 +5,7 @@
 # compile nothing (higher-ranked fn-pointer types are keys). The one exception is println!'s STDOUT: a
 # OnceLock holds a union, whose pointer words the data walk cannot attribute (syms.rs obj_ptrs), so it
 # has no value entry and its initializer runs from its cached code. Prints "cache_warm_statics: ok" or
-# "cache_warm_statics: FAILED ...".
+# "cache_warm_statics: FAILED ..."; exit 0 / 1.
 H=$(cd "$(dirname "$0")" && pwd)
 R=$1
 C=$(mktemp -d)
@@ -42,4 +42,5 @@ print("cache_warm_statics: " + ("ok" if not bad else "FAILED " + "; ".join(bad))
 # the temp dir this script made (mktemp -d), nothing else
 if os.path.dirname(c) and os.path.isdir(c) and not os.path.islink(c) and os.path.basename(c).startswith("tmp."):
     shutil.rmtree(c)
+sys.exit(1 if bad else 0)
 PY

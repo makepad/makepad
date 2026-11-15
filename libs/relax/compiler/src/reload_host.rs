@@ -62,11 +62,13 @@ fn identity(p: &Path) -> Option<(u64, u64, std::time::SystemTime)> {
 }
 
 /// The cargo target directory the loader was built into (cargo keeps `.rustc_info.json` at its
-/// root, and `.fingerprint` in each profile directory), and the `--target` triple between it and
-/// the profile directory, if any.
+/// root, and its build lock `.cargo-lock` in each profile directory), and the `--target` triple
+/// between it and the profile directory, if any. Not `.fingerprint`: cargo 1.100's build
+/// directory keeps fingerprints under `build/<package>/<hash>/`, so a target directory it made
+/// has none, and its loader could never rebuild itself ("not in a cargo target directory").
 fn layout(exe: &Path) -> Option<(PathBuf, String, Option<String>)> {
     let profile_dir = exe.parent()?;
-    if !profile_dir.join(".fingerprint").is_dir() { return None; }
+    if !profile_dir.join(".cargo-lock").is_file() { return None; }
     let profile = profile_dir.file_name()?.to_string_lossy().into_owned();
     let root = |d: &Path| d.join(".rustc_info.json").is_file() || d.join("CACHEDIR.TAG").is_file();
     let up = profile_dir.parent()?;
@@ -598,7 +600,7 @@ fn cargo_line(line: &str) -> CargoLine<'_> {
 /// The builds of one profile directory, across the makepad processes that run from it: cargo's
 /// lock lets one build at a time, and a low-priority one can hold it for minutes. So the person's
 /// build goes first: it ends the low-priority ones, which build again after it (their cargo then
-/// finds makepad current). In `<profile dir>/.makepad-rebuilds`: `turn`, locked by the person's
+/// finds makepad current). In `<profile dir>/.relax-rebuilds`: `turn`, locked by the person's
 /// build while it runs and by a low-priority build until its cargo has started and is marked;
 /// `low.<pid>` per low-priority cargo, locked while the makepad that started it lives (unlocked
 /// is left behind by a crash, its pid no longer ours to signal), removed by whoever ends it.
@@ -738,7 +740,7 @@ fn build_loop() {
             Ok(c) => c,
             Err(e) => return fail(format!("{why}; cannot rebuild {tool}: {e}; the app runs the previous code -- restart it by hand", tool = crate::tool_name())),
         };
-        let Some(dir) = loader().as_deref().and_then(Path::parent).map(|d| d.join(".makepad-rebuilds")) else { return fail(format!("the {tool} binary's path is unknown", tool = crate::tool_name())) };
+        let Some(dir) = loader().as_deref().and_then(Path::parent).map(|d| d.join(".relax-rebuilds")) else { return fail(format!("the {tool} binary's path is unknown", tool = crate::tool_name())) };
         let waits = || STATE.lock().unwrap_or_else(|e| e.into_inner()).progress.waiting = "another restart's build".into();
         let mut gate = match Gate::enter(&dir, asked, waits) {
             Ok(g) => g,

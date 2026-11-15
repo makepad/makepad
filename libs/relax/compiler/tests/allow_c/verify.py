@@ -126,13 +126,13 @@ for expected in ["cannot load", "libnative.", "--allow-c native library of cnati
 print("PASS loader: unresolved import reports library, crate and loader error; exit 1; no program output")
 
 # C code calling into the program while the library loads (a C constructor) runs before the
-# loader binds the callbacks: the stub reports the symbol on stderr and exits 1 (cargo's static
-# link has no such window).
+# loader binds the callbacks: the stub's trap reports the symbol on stderr and exits 1, on every
+# platform (cargo's static link has no such window).
 c_source.write_text(c_text + '\n__attribute__((constructor)) static void cn_init(void) { (void)cn_rust_square(3); }\n')
 early = run("constructor", command, success=False)
 assert early.returncode == 1, f"constructor callback exit status: {early.returncode}"
 assert not early.stdout, "program started after a constructor called into it"
-for expected in ["cannot load the --allow-c native library", "`cn_rust_square`", "a C constructor"]:
+for expected in ["the --allow-c native library's C code calls `cn_rust_square`", "a C constructor calls it while the library loads"]:
     assert expected in early.stderr, f"missing constructor diagnostic {expected!r}: {early.stderr}"
 c_source.write_text(c_text)
 print("PASS constructor: a C constructor calling into Rust reports the symbol; exit 1; no program output")

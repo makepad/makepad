@@ -110,7 +110,6 @@ pub struct App {
     /// The Dock icon's menu (`menu_kind::DOCK` items; the system adds the windows), nil: none.
     dock_menu: Cell<ObjcId>,
     pasteboard: Cell<ObjcId>,
-    nap: Cell<ObjcId>,
     marked_attributes: Cell<ObjcId>,
     cursor: Cell<u32>,
     cursors: RefCell<HashMap<u32, ObjcId>>,
@@ -149,7 +148,6 @@ pub fn app() -> &'static App {
             menu_delegate: Cell::new(nil),
             dock_menu: Cell::new(nil),
             pasteboard: Cell::new(nil),
-            nap: Cell::new(nil),
             marked_attributes: Cell::new(nil),
             cursor: Cell::new(cursor::DEFAULT),
             cursors: RefCell::new(HashMap::new()),
@@ -387,20 +385,61 @@ unsafe fn init() {
 /// also keeps the Mac from idle sleep, and a menu-bar app (`accessory`: devhub's master, the AI
 /// Hub), whose work goes on with no window shown and which lets the Mac sleep as before.
 unsafe fn begin_unseen_activity(accessory: bool) {
-    if app().nap.get() != nil {
-        return;
-    }
-    let (options, reason) = if !focus_allowed() {
-        (ACTIVITY_USER_INITIATED, "makepad no-focus instance")
+    let kind = if !focus_allowed() {
+        UNSEEN_NO_FOCUS
     } else if accessory {
-        (ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP, "makepad menu-bar app at work")
+        UNSEEN_MENU_BAR
     } else {
         return;
     };
+    UNSEEN_KIND.store(kind, Ordering::Release);
+    start_unseen_activity();
+}
+
+/// The activity [`begin_unseen_activity`] holds (an `NSActivity` token, retained; 0: none), and
+/// which kind it is (0: none asked): held outside the main thread's state, so it ends from the
+/// thread that execs the process ([`end_unseen_activity`]).
+static UNSEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static UNSEEN_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const UNSEEN_NO_FOCUS: u8 = 1;
+const UNSEEN_MENU_BAR: u8 = 2;
+
+unsafe fn start_unseen_activity() {
+    let (options, reason) = match UNSEEN_KIND.load(Ordering::Acquire) {
+        UNSEEN_NO_FOCUS => (ACTIVITY_USER_INITIATED, "makepad no-focus instance"),
+        UNSEEN_MENU_BAR => (ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP, "makepad menu-bar app at work"),
+        _ => return,
+    };
+    if UNSEEN.load(Ordering::Acquire) != 0 {
+        return;
+    }
     let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
     let token: ObjcId = msg_send![info, beginActivityWithOptions: options reason: str_to_nsstring(reason)];
     let () = msg_send![token, retain];
-    app().nap.set(token);
+    if UNSEEN.compare_exchange(0, token as usize, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        let () = msg_send![info, endActivity: token];
+        let () = msg_send![token, release];
+    }
+}
+
+/// Ends the activity [`begin_unseen_activity`] holds, from any thread: before the process execs
+/// itself in place. The power assertion behind it is the pid's, which an exec keeps, so powerd
+/// never sees it end, and the next image begins its own: each self-update of devhub's master left
+/// one more (28 in a day, 11-13).
+pub fn end_unseen_activity() {
+    let token = UNSEEN.swap(0, Ordering::AcqRel) as ObjcId;
+    if token != nil {
+        unsafe {
+            let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
+            let () = msg_send![info, endActivity: token];
+            let () = msg_send![token, release];
+        }
+    }
+}
+
+/// Begins the activity again after [`end_unseen_activity`] when the exec did not happen.
+pub fn resume_unseen_activity() {
+    unsafe { start_unseen_activity() }
 }
 
 /// Foundation `NSActivityIdleSystemSleepDisabled` (`1ULL << 20`), and

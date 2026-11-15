@@ -42,40 +42,42 @@ fn one(a: SocketAddr) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
     Ok(v.into_iter())
 }
 
+// library/std/src/net/socket_addr.rs: one address is an `option::IntoIter`, a slice's are its
+// cloned elements, a name lookup's a `vec::IntoIter` (code can name these types)
 impl ToSocketAddrs for SocketAddr {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(*self)
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(*self).into_iter())
     }
 }
 impl ToSocketAddrs for SocketAddrV4 {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(SocketAddr::V4(*self))
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(SocketAddr::V4(*self)).into_iter())
     }
 }
 impl ToSocketAddrs for SocketAddrV6 {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(SocketAddr::V6(*self))
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(SocketAddr::V6(*self)).into_iter())
     }
 }
 impl ToSocketAddrs for (IpAddr, u16) {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(SocketAddr::new(self.0, self.1))
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(SocketAddr::new(self.0, self.1)).into_iter())
     }
 }
 impl ToSocketAddrs for (Ipv4Addr, u16) {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(SocketAddr::V4(SocketAddrV4::new(self.0, self.1)))
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(SocketAddr::V4(SocketAddrV4::new(self.0, self.1))).into_iter())
     }
 }
 impl ToSocketAddrs for (Ipv6Addr, u16) {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        one(SocketAddr::V6(SocketAddrV6::new(self.0, self.1, 0, 0)))
+    type Iter = core::option::IntoIter<SocketAddr>;
+    fn to_socket_addrs(&self) -> io::Result<core::option::IntoIter<SocketAddr>> {
+        Ok(Some(SocketAddr::V6(SocketAddrV6::new(self.0, self.1, 0, 0))).into_iter())
     }
 }
 impl ToSocketAddrs for (&str, u16) {
@@ -114,9 +116,9 @@ impl ToSocketAddrs for String {
     }
 }
 impl<'a> ToSocketAddrs for &'a [SocketAddr] {
-    type Iter = alloc::vec::IntoIter<SocketAddr>;
-    fn to_socket_addrs(&self) -> io::Result<alloc::vec::IntoIter<SocketAddr>> {
-        Ok(self.to_vec().into_iter())
+    type Iter = core::iter::Cloned<core::slice::Iter<'a, SocketAddr>>;
+    fn to_socket_addrs(&self) -> io::Result<core::iter::Cloned<core::slice::Iter<'a, SocketAddr>>> {
+        Ok(self.iter().cloned())
     }
 }
 impl<T: ToSocketAddrs + ?Sized> ToSocketAddrs for &T {

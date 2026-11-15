@@ -6,7 +6,8 @@
 //!   of the tip's history the walk stopped at (`<tip>` itself among them
 //!   exactly when `head` contains the tip).
 //!
-//! [`is_ancestor`] answers the same for two commits with nothing kept.
+//! [`is_ancestor`] answers the same for two commits with nothing kept, and
+//! [`merge_bases`] gives `git merge-base --all`.
 //!
 //! Moving the tip forward reads only the new commits; a tip that is no
 //! descendant of the old one is read again from scratch. Shallow boundaries
@@ -133,15 +134,6 @@ pub fn is_ancestor(repo: &mut Repository, a: ObjectId, b: ObjectId) -> Result<bo
     let shallow = repo.shallow_boundary()?;
     // commit -> (its time, the parents the walk follows)
     let mut read: HashMap<ObjectId, (i64, Vec<ObjectId>)> = HashMap::new();
-    fn time(repo: &mut Repository, read: &mut HashMap<ObjectId, (i64, Vec<ObjectId>)>, shallow: &HashSet<ObjectId>, oid: ObjectId) -> Result<i64, GitError> {
-        if let Some((t, _)) = read.get(&oid) {
-            return Ok(*t);
-        }
-        let c = repo.read_commit(&oid)?;
-        let parents = if shallow.contains(&oid) { Vec::new() } else { c.parents };
-        read.insert(oid, (c.committer.timestamp, parents));
-        Ok(c.committer.timestamp)
-    }
     let mut flags: HashMap<ObjectId, u8> = HashMap::from([(a, A), (b, B)]);
     let mut heap = BinaryHeap::new();
     for oid in [a, b] {
@@ -167,4 +159,76 @@ pub fn is_ancestor(repo: &mut Repository, a: ObjectId, b: ObjectId) -> Result<bo
         }
     }
     Ok(false)
+}
+
+/// A commit's time, its parents read once into `read` (none past a shallow boundary).
+fn time(repo: &mut Repository, read: &mut HashMap<ObjectId, (i64, Vec<ObjectId>)>, shallow: &HashSet<ObjectId>, oid: ObjectId) -> Result<i64, GitError> {
+    if let Some((t, _)) = read.get(&oid) {
+        return Ok(*t);
+    }
+    let c = repo.read_commit(&oid)?;
+    let parents = if shallow.contains(&oid) { Vec::new() } else { c.parents };
+    read.insert(oid, (c.committer.timestamp, parents));
+    Ok(c.committer.timestamp)
+}
+
+/// The best common ancestors of `a` and `b` (`git merge-base --all a b`), exactly: the commits
+/// both reach that no other commit both reach descends from. Empty: no shared history. Several:
+/// a criss-cross merge, where a merge needs a merged base of its own.
+///
+/// The walk paints each side's history newest first; a commit both sides reach is a candidate and
+/// what it reaches is stale, and the walk ends when only stale commits are left. Commit times only
+/// order it: a candidate below another one (a clock that ran backwards) is dropped at the end
+/// with [`is_ancestor`].
+pub fn merge_bases(repo: &mut Repository, a: ObjectId, b: ObjectId) -> Result<Vec<ObjectId>, GitError> {
+    if a == b {
+        return Ok(vec![a]);
+    }
+    const A: u8 = 1;
+    const B: u8 = 2;
+    const STALE: u8 = 4;
+    const FOUND: u8 = 8;
+    let shallow = repo.shallow_boundary()?;
+    let mut read: HashMap<ObjectId, (i64, Vec<ObjectId>)> = HashMap::new();
+    let mut flags: HashMap<ObjectId, u8> = HashMap::from([(a, A), (b, B)]);
+    let mut heap = BinaryHeap::new();
+    for oid in [a, b] {
+        heap.push((time(repo, &mut read, &shallow, oid)?, oid));
+    }
+    let mut found = Vec::new();
+    while heap.iter().any(|(_, o)| flags[o] & STALE == 0) {
+        let Some((_, oid)) = heap.pop() else { break };
+        let mut f = flags[&oid] & (A | B | STALE);
+        if f == A | B {
+            if flags[&oid] & FOUND == 0 {
+                flags.insert(oid, flags[&oid] | FOUND);
+                found.push(oid);
+            }
+            f |= STALE;
+        }
+        // (every queued commit was read for its time)
+        let parents = read[&oid].1.clone();
+        for p in parents {
+            let old = flags.get(&p).copied().unwrap_or(0);
+            if old & f == f {
+                continue;
+            }
+            flags.insert(p, old | f);
+            heap.push((time(repo, &mut read, &shallow, p)?, p));
+        }
+    }
+    let mut bases = Vec::with_capacity(found.len());
+    for &x in &found {
+        let mut below = false;
+        for &y in &found {
+            if y != x && is_ancestor(repo, x, y)? {
+                below = true;
+                break;
+            }
+        }
+        if !below {
+            bases.push(x);
+        }
+    }
+    Ok(bases)
 }

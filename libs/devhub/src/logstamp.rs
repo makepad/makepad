@@ -218,6 +218,10 @@ mod tests {
             cmd.args(["--nocapture", "--test-threads=1"]).env("DEVHUB_LOGSTAMP_ROLE", "stamper");
             cmd
         };
+        // libtest wrote "test <name> ... " without its newline, and whether it reached the log yet
+        // is up to its buffer: end that line here, so each role's own lines (a stamper's stamped
+        // ones, the master's) start lines of their own
+        println!();
         match role.as_str() {
             "stamper" => {
                 std::fs::write(base.join(format!("stamper {}", std::process::id())), "").unwrap();

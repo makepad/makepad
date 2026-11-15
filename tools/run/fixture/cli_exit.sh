@@ -2,9 +2,11 @@
 # Regression test: a command-line program under `makepad run` ends with its own code, as a rustc
 # build's does. relax-cli-exit links the HAL (so it runs hosted: the run window opens beside the
 # load) and opens no window. It runs exactly as `makepad test` runs a test's CARGO_BIN_EXE_<bin>
-# (`run --quiet --silent --no-live ... --bin <bin> -- <args>`): main returning ends the process with
-# 0, std::process::exit(<code>) with <code> and a panic with 101; none leaves the process up behind
-# its run window (a parent waited forever: 950 s, makepad-asset-store's tests on a node). Run from the workspace root (the JIT runs through
+# (`run --quiet --silent --no-live --unattended ... --bin <bin> -- <args>`, relax-front unitgraph.rs):
+# main returning ends the process with 0, std::process::exit(<code>) with <code> and a panic with
+# 101, however the run is watched (a devhub-observed run parked the panic 600 s); none leaves the
+# process up behind its run window (a parent waited forever: 950 s, makepad-asset-store's tests on
+# a node). Run from the workspace root (the JIT runs through
 # `cargo run --profile host`). A run still up after 600 s is a hang (perl's alarm ends it).
 # A hidden live run whose boot fails must also end with a failure code instead of waiting for a retry,
 # and three runs at once on one run dir that remembers a 320x200 window each end with their code.
@@ -14,7 +16,7 @@ J="cargo run --profile host -q --manifest-path $ROOT/Cargo.toml -p makepad-run -
 dir=$(mktemp -d "${TMPDIR:-/tmp}/cli_exit.XXXXXX") || exit 1
 mkdir -p "$dir/home" "$dir/tmp"
 # shellcheck disable=SC2086
-run() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1 perl -e 'alarm 600; exec @ARGV' $J run --quiet --silent --no-live --workspace-dir "$ROOT" relax-cli-exit --bin relax-cli-exit -- "$@"; }
+run() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1 perl -e 'alarm 600; exec @ARGV' $J run --quiet --silent --no-live --unattended --workspace-dir "$ROOT" relax-cli-exit --bin relax-cli-exit -- "$@"; }
 fail=""
 out=$(run 2>&1); rc=$?
 [ $rc = 0 ] && echo "$out" | grep -q "relax-cli-exit: main returns" || fail="$fail main-returns:$rc"
@@ -33,7 +35,7 @@ key=$(perl -e 'my ($hi, $lo) = (0xcbf29ce4, 0x84222325); for my $b (unpack "C*",
 mkdir -p "$run_dir/windows"
 printf '0 0 320 200\n' > "$run_dir/windows/$key.geom"
 # shellcheck disable=SC2086
-run_at_once() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1 perl -e 'alarm 600; exec @ARGV' $J run --quiet --silent --no-live --run-dir "$run_dir" --workspace-dir "$ROOT" relax-cli-exit --bin relax-cli-exit; }
+run_at_once() { TMPDIR="$dir/tmp" RELAX_HOME="$dir/home" MAKEPAD_HIDE_WINDOWS=1 perl -e 'alarm 600; exec @ARGV' $J run --quiet --silent --no-live --unattended --run-dir "$run_dir" --workspace-dir "$ROOT" relax-cli-exit --bin relax-cli-exit; }
 for i in 1 2 3; do
     run_at_once > "$dir/at-once-$i.out" 2>&1 &
     eval "at_once_$i=\$!"

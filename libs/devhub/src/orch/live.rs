@@ -949,7 +949,7 @@ fn recover(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch, stop: bool) {
         p.retried = true;
         return restart_session(ctx, id, x, &r, p, stop);
     }
-    if stop { stop_run(ctx, &r, x); }
+    if stop { let _ = stop_run(ctx, &r, x); }
 }
 
 /// A new process on the overlay as shipped; `p.reason` says why. Tests restart at once, apps
@@ -962,13 +962,21 @@ fn restart_session(ctx: &Ctx, id: &str, x: &Live, r: &Running, p: &mut LivePatch
     if set_test_patch(ctx, id, x, p).is_none() { return; }
     r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
     event(ctx, Sev::Info, format!("live {id}: restarting its JIT warm on {}: {}", x.node, p.reason), Some(x));
-    if stop && !stop_run(ctx, r, x) {
-        // no restart comes: the edit's answer is that, not a wait for one
+    if !stop { return; }
+    if let Err(e) = stop_run(ctx, r, x) {
+        // no restart comes: the edit's answer is that, and the session ends (its lease's end stops
+        // what carries the lease's mark). Kept running beside a JIT it could not stop, it tried
+        // again on each later edit and failed the same way (W7246, 11-14).
+        let why = format!("its JIT could not be restarted: pid {} did not stop ({e})", x.pid);
         p.outcome = "failed".into();
-        p.reason = format!("its JIT could not be restarted: pid {} did not stop ({})", x.pid, p.reason);
+        p.reason = format!("{why}: the session ends ({})", p.reason);
         p.verdict_ms = wall_ms();
         r.restart.store(false, std::sync::atomic::Ordering::SeqCst);
         set_test_patch(ctx, id, x, p);
+        event(ctx, Sev::Warn, format!("live {id}: {why}: the session ends"), Some(x));
+        if let Err(e) = release(ctx, id, &why) {
+            event(ctx, Sev::Warn, format!("live {id}: ending it: {e}"), Some(x));
+        }
     }
 }
 
@@ -1069,22 +1077,16 @@ fn log_since(path: &str, from: u64) -> String {
 }
 
 /// Stops the run's JIT for its restart; false when it could not.
-fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> bool {
-    if x.pid == 0 { return true; }
+fn stop_run(ctx: &Ctx, r: &Running, x: &Live) -> Result<(), String> {
+    if x.pid == 0 { return Ok(()); }
     let _ = inspect(&x.node, x.pid, "quit");
     let asked = Instant::now();
     while asked.elapsed() < Duration::from_secs(2) {
-        if get(ctx, &x.id).is_none_or(|s| s.pid != x.pid || s.run_n != x.run_n) { return true; }
+        if get(ctx, &x.id).is_none_or(|s| s.pid != x.pid || s.run_n != x.run_n) { return Ok(()); }
         std::thread::sleep(Duration::from_millis(20));
     }
     // The original run is still followed; only its recorded pid is stopped.
-    match r.held.kill(x.pid) {
-        Ok(()) => true,
-        Err(e) => {
-            event(ctx, Sev::Warn, format!("live {}: stopping pid {}: {e}", x.id, x.pid), Some(x));
-            false
-        }
-    }
+    r.held.kill(x.pid).inspect_err(|e| event(ctx, Sev::Warn, format!("live {}: stopping pid {}: {e}", x.id, x.pid), Some(x)))
 }
 
 /// The failed tests' captured output in this verdict's log interval.
@@ -1345,6 +1347,14 @@ fn test_verdict(ctx: &Ctx, id: &str, x: &Live, p: &mut LivePatch) {
             p.outcome = if jit_fault(&p.reason) { "hot-recovery" } else if v.get("outcome").and_then(Value::as_str) == Some("restart") { "restart" } else { "refused" }.into();
             if let Some(r) = running(id) { *r.fault.lock().unwrap() = None; }
             if p.outcome == "hot-recovery" { continue; }
+            return;
+        }
+        // a run on the code from before patches the JIT undid is no verdict on the saved source
+        if v.get("reverted").is_some() { continue; }
+        // nor is one whose patched code faulted, whatever its tests say (a thread no test waits for)
+        if let Some(groups) = v.get("faulted") {
+            p.reason = format!("the patched code faulted (patch groups {}): the JIT undid it; no verdict on the saved source", groups.to_json());
+            p.outcome = "jit_fault".into();
             return;
         }
         let Some(t) = crate::state::live_tests_from(&v) else { continue };
@@ -1800,7 +1810,7 @@ fn reattach(ctx: &Arc<Ctx>, x: &Live) {
     };
     if x.patch.as_ref().is_some_and(|p| p.outcome == "recovering") {
         r.restart.store(true, std::sync::atomic::Ordering::SeqCst);
-        if !stop_run(ctx, &r, x) { r.restart.store(false, std::sync::atomic::Ordering::SeqCst); }
+        if stop_run(ctx, &r, x).is_err() { r.restart.store(false, std::sync::atomic::Ordering::SeqCst); }
     }
     // no run of it on the node: the previous master's ask goes on under its name
     let asked = (follow.is_none() && !x.ask.is_empty()).then(|| x.ask.clone());
@@ -2393,6 +2403,16 @@ mod owner_tests {
     }
 
     #[test]
+    fn a_session_answers_only_a_request_placed_as_it_is() {
+        let args = vec!["--lib".to_string()];
+        let x = crate::state::Live { id: "W1".into(), state: "running".into(), lane: "lane-x".into(), app: "pkg-x".into(), test: true, test_args: args.clone(), needs: "os=linux,gpu=1".into(), ..Default::default() };
+        assert!(super::answers(&x, "lane-x", "pkg-x", true, &args, "gpu=1, os=linux", ""), "the same needs in another order");
+        assert!(!super::answers(&x, "lane-x", "pkg-x", true, &args, "os=macos", ""), "another OS starts its own session");
+        assert!(!super::answers(&x, "lane-x", "pkg-x", true, &args, "", ""), "no needs: not one placed by them");
+        assert!(!super::answers(&x, "lane-x", "pkg-x", true, &args, "os=linux,gpu=1", "box-b"), "another box");
+    }
+
+    #[test]
     fn another_lanes_session_is_refused_with_the_owners_name() {
         let e = super::refuse("W257", "fablook3", "smallfix").unwrap_err();
         assert!(e.contains("W257") && e.contains("fablook3") && e.contains("--lane fablook3"), "{e}");
@@ -2636,6 +2656,19 @@ pub(super) fn validate_env(k: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether running session `x` is what a `live start`/`live test` asks for, and the call goes to
+/// it: the same lane, program, test selection and placement (its `--needs`, in any order, and its
+/// box). One that differs leaves it be and starts its own. A `--needs os=macos` test went to the
+/// lane's session on a Linux box, and --live takes no --node (W7272, 11-14).
+fn answers(x: &Live, lane: &str, app: &str, test: bool, test_args: &[String], needs: &str, pin: &str) -> bool {
+    let placed = |s: &str| {
+        let mut n = crate::lease::sched::parse_needs(s);
+        n.sort();
+        n
+    };
+    x.active() && x.lane == lane && x.app == app && x.test == test && x.test_args == test_args && placed(&x.needs) == placed(needs) && x.pin == pin
+}
+
 /// `live start {"app","repo_dir","tree"?,"lane","agent","needs","node"?,"visible","test","test_args","env"?}`, `live act <id> <cmd>`,
 /// `live wait <id> patched|verdict|settled|frame [timeout_s]`, `live sync|release|get <id>`, `live list [all]`.
 pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
@@ -2709,7 +2742,8 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
             if !makepad_devhub_conf::valid_name(&lane) {
                 return Err(format!("live: lane `{lane}` is not a name"));
             }
-            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| x.active() && x.lane == lane && x.app == app && x.test == test && x.test_args == test_args && accepting(&x.id)).cloned()) {
+            let (needs, pin) = (s("needs"), s("node"));
+            if let Some(old) = ctx.store.read(|d| d.lives.iter().find(|x| answers(x, &lane, &app, test, &test_args, &needs, &pin) && accepting(&x.id)).cloned()) {
                 if verb == "test" {
                     if old.tree != tree { return Err(format!("{} belongs to worktree {}", old.id, old.tree)); }
                     if old.src != src.as_str() { return Err(format!("{} uses {}; live release {} before changing its source mode", old.id, old.src, old.id)); }

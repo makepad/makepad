@@ -103,6 +103,7 @@ pub fn inspect(words: &str) -> Option<&'static str> {
         "hal pump" => "",
         "hal pace" => "",
         "hal shell" => "",
+        "hal lose" => "",
         "gpu prof start" => params!("s": "integer", "split": "integer", "hz": "number", "ablate": "string", "every": "integer", "as": "string"),
         "gpu prof stop" => params!("save": "string", "sid": "integer", "as": "string"),
         "gpu prof shader" => params!("save": "string", "as": "string"),

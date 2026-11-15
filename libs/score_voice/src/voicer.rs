@@ -63,7 +63,7 @@ impl Voicer {
         let bands = std::array::from_fn(|b| {
             let fc = NOISE_CENTERS[b];
             let bw = noise_bandwidth(b);
-            let mut band = Band { b0: 0.0, a1: 0.0, a2: 0.0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0, norm: 0.0, rng: 0x9E37_79B9 ^ seed.wrapping_mul(0x85EB_CA6B).wrapping_add(b as u32 * 0x2545_F491) | 1 };
+            let mut band = Band { b0: 0.0, a1: 0.0, a2: 0.0, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0, norm: 0.0, rng: 0x9E37_79B9 ^ seed.wrapping_mul(0x85EB_CA6B).wrapping_add((b as u32).wrapping_mul(0x2545_F491)) | 1 };
             if fc < rate * 0.45 {
                 // A band-pass of 0 dB peak gain, -3 dB at fc ± bw/2.
                 let w0 = std::f32::consts::TAU * fc / rate;

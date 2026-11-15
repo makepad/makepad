@@ -264,16 +264,20 @@ mod tests {
 
     #[test]
     fn a_panicking_loop_restarts_and_is_reported() {
+        // a name of its own each time it runs: a warm rerun in this process finds the rows of the
+        // runs before (the registry keeps every row)
+        static RUNS: AtomicU64 = AtomicU64::new(0);
+        let name = format!("lifeline-test-restart-{}", RUNS.fetch_add(1, Ordering::SeqCst));
         let n = std::sync::Arc::new(AtomicU64::new(0));
         let n2 = n.clone();
-        assert!(spawn("lifeline-test-restart".to_string(), OnPanic::Restart, None, move || {
+        assert!(spawn(name.clone(), OnPanic::Restart, None, move || {
             if n2.fetch_add(1, Ordering::SeqCst) == 0 {
                 panic!("lifeline test panic");
             }
         }));
         let t0 = std::time::Instant::now();
         loop {
-            let row = snapshot().into_iter().find(|r| r.name == "lifeline-test-restart");
+            let row = snapshot().into_iter().find(|r| r.name == name);
             if let Some(r) = row.filter(|r| r.state == EXITED) {
                 assert_eq!(r.restarts, 1);
                 assert!(r.last_panic.contains("lifeline test panic"), "{}", r.last_panic);

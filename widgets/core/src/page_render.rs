@@ -1,6 +1,7 @@
 //! Pages for print and export: an app lays its content out in points, this
 //! renders each page off screen at print resolution and hands back its
 //! pixels, and [`paginate`] decides where pages break.
+//! Optional text capture hands back laid-out glyphs and leaves eligible text out of the pixels.
 //!
 //! A page renders in horizontal bands sized so a band's readback stays within
 //! half of the context's readback budget and at most 4 MB (A4 at 300 dpi: nine
@@ -10,9 +11,14 @@
 //! host widget calls [`PageRender::begin_page`] in its draw (drawing the page
 //! between it and [`PageRender::end_page`] when it answers a page) and
 //! [`PageRender::handle_event`] with its events.
+//!
+//! A band nothing is drawn in (with text capture on: nothing but the text a writer
+//! sets) is neither drawn again nor read back, and comes back as paper: the page's
+//! first draw says, from the rects of the draws in its list, which bands hold
+//! anything only the picture shows.
 
 use crate::makepad_draw::*;
-use std::ops::Range;
+use std::{collections::VecDeque, ops::Range};
 
 /// A page's paper, margins and resolution.
 #[derive(Clone, Copy, Debug)]
@@ -160,14 +166,22 @@ pub fn paginate(items: &[PageItem], page_height: f64) -> Vec<Range<f64>> {
     }
 }
 
-/// A rendered page: its pixels as the GPU gave them back.
+/// A rendered page: its pixels as the GPU gave them back, and any captured text.
 pub struct RenderedPage {
     pub index: usize,
     pub width: usize,
     pub height: usize,
-    /// RGBA bands top to bottom: (pixels, width, rows); the last can hold
-    /// rows past the page's height.
-    bands: Vec<(HostBuf, usize, usize)>,
+    /// Final glyph positions and clips when text capture was on, otherwise `None`.
+    pub text: Option<CapturedText>,
+    /// Bands top to bottom; the last can hold rows past the page's height.
+    bands: Vec<BandPixels>,
+}
+
+/// A band as read back (RGBA pixels, width, rows), or paper: nothing in it
+/// that only the picture shows, so it was not read back.
+enum BandPixels {
+    Read(HostBuf, usize, usize),
+    Paper(usize),
 }
 
 impl RenderedPage {
@@ -180,16 +194,21 @@ impl RenderedPage {
         }
         let mut rgb = Vec::new();
         let mut rows = 0;
-        for (pixels, width, band_rows) in &self.bands {
-            let take = (*band_rows).min(self.height - rows);
+        for band in &self.bands {
+            let band_rows = match band {
+                BandPixels::Read(_, _, rows) | BandPixels::Paper(rows) => *rows,
+            };
+            let take = band_rows.min(self.height - rows);
             // Paper first, where a band narrower than the page (it never
             // is) leaves pixels uncovered.
             rgb.clear();
             rgb.resize(take * self.width * 3, 255);
-            for (row, out) in rgb.chunks_exact_mut(self.width * 3).enumerate() {
-                let line = &pixels[row * width * 4..(row + 1) * width * 4];
-                for (out, pixel) in out.chunks_exact_mut(3).zip(line.chunks_exact(4)) {
-                    out.copy_from_slice(&pixel[..3]);
+            if let BandPixels::Read(pixels, width, _) = band {
+                for (row, out) in rgb.chunks_exact_mut(self.width * 3).enumerate() {
+                    let line = &pixels[row * width * 4..(row + 1) * width * 4];
+                    for (out, pixel) in out.chunks_exact_mut(3).zip(line.chunks_exact(4)) {
+                        out.copy_from_slice(&pixel[..3]);
+                    }
                 }
             }
             rows += take;
@@ -204,40 +223,75 @@ impl RenderedPage {
             f(&rgb);
         }
     }
+
+    /// Nothing on the page is only in the picture: every band is paper.
+    pub fn is_paper(&self) -> bool {
+        self.bands.iter().all(|band| matches!(band, BandPixels::Paper(_)))
+    }
+
+    /// How many bands were read back.
+    pub fn read_bands(&self) -> usize {
+        self.bands.iter().filter(|band| matches!(band, BandPixels::Read(..))).count()
+    }
 }
 
 /// The most pixel bytes a band reads back (A4 at 300 dpi: nine bands of
 /// 390 rows, 3.9 MB each).
 const BAND_BYTES: usize = 4 << 20;
 
+/// How far past its rect a draw may paint, in points, for the bands it counts
+/// on: anti-aliasing and a glyph's padding. A shader that paints farther
+/// outside its rect (a wide shadow) is cut at a paper band's edge.
+const BLEED: f64 = 4.0;
+
+/// Bands drawn and read back at once, each into its own target: three
+/// readbacks of at most [`BAND_BYTES`] come back in a frame.
+const BANDS_IN_FLIGHT: usize = 3;
+
+/// A band's target: its pass, list and textures, and the band it holds.
+struct Slot {
+    pass: DrawPass,
+    list: DrawList2d,
+    color: Texture,
+    _depth: Texture,
+    state: SlotState,
+}
+
 #[derive(Clone, Copy, Debug)]
-enum Band {
-    /// The band is drawn in the next draw.
-    Draw,
-    /// Drawn; its readback was refused and is asked for again.
-    Ask,
-    /// Its pixels are on their way.
-    Wait(ReadbackTicket),
+enum SlotState {
+    Free,
+    /// Band drawn; its readback is to be asked for (again, once refused).
+    Ask(usize),
+    /// The band's pixels are on their way.
+    Wait(usize, ReadbackTicket),
 }
 
 struct PageJob {
     index: usize,
-    band: usize,
-    state: Band,
-    bands: Vec<(HostBuf, usize, usize)>,
+    /// The bands still to draw, in order; a band whose readback must be
+    /// made again comes back to the front.
+    todo: VecDeque<usize>,
+    /// Each band once it is in.
+    bands: Vec<Option<BandPixels>>,
+    /// Per band, whether it holds a draw only the picture shows; found by the
+    /// page's first draw.
+    raster: Option<Vec<bool>>,
+    /// The band being drawn and its slot, between `begin_page` and `end_page`.
+    drawing: Option<(usize, usize)>,
     refused: usize,
+    capture_text: bool,
+    stock_shader: Option<DrawShaderId>,
+    text: Option<CapturedText>,
 }
 
 /// Renders pages off screen and reads them back (see the module docs).
 pub struct PageRender {
     format: PageFormat,
-    pass: DrawPass,
-    list: DrawList2d,
-    color: Texture,
-    _depth: Texture,
+    capture_text: bool,
+    slots: Vec<Slot>,
     band_rows: usize,
     band_count: usize,
-    /// A place in the host's draw list: redrawing it brings the next band.
+    /// A place in the host's draw list: redrawing it brings the next bands.
     host: Area,
     job: Option<PageJob>,
     failed: Option<ReadbackError>,
@@ -256,23 +310,26 @@ impl PageRender {
         let budget_rows = (TEXTURE_READBACK_MAX_BYTES / 2 / padded_row).min(BAND_BYTES / (width * 4).max(1)).max(1);
         let band_count = height.div_ceil(budget_rows);
         let band_rows = height.div_ceil(band_count);
-        let size = TextureSize::Fixed { width, height: band_rows };
-        let color = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: size.clone(), initial: true }).label(cx, "page_render");
-        // A depth target, as a window has: the page draws with the pipeline
-        // each shader is built with (its colour layout over a depth target),
-        // where a colour-only pass has the GPU backend compile another variant
-        // of each on the UI thread (140 ms at a first print on Vulkan).
-        let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 { size, initial: true }).label(cx, "page_render depth");
-        let pass = DrawPass::new_with_name(cx, "page_render");
-        pass.set_size(cx, dvec2(width as f64, band_rows as f64) / format.scale());
-        pass.set_color_texture(cx, &color, DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 1.0, 1.0)));
-        pass.set_depth_texture(cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+        let slots = (0..BANDS_IN_FLIGHT.min(band_count))
+            .map(|_| {
+                let size = TextureSize::Fixed { width, height: band_rows };
+                let color = Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 { size: size.clone(), initial: true }).label(cx, "page_render");
+                // A depth target, as a window has: the page draws with the pipeline
+                // each shader is built with (its colour layout over a depth target),
+                // where a colour-only pass has the GPU backend compile another variant
+                // of each on the UI thread (140 ms at a first print on Vulkan).
+                let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 { size, initial: true }).label(cx, "page_render depth");
+                let pass = DrawPass::new_with_name(cx, "page_render");
+                pass.set_size(cx, dvec2(width as f64, band_rows as f64) / format.scale());
+                pass.set_color_texture(cx, &color, DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 1.0, 1.0)));
+                pass.set_depth_texture(cx, &depth, DrawPassClearDepth::ClearWith(1.0));
+                Slot { pass, list: DrawList2d::new(cx), color, _depth: depth, state: SlotState::Free }
+            })
+            .collect();
         Self {
             format,
-            pass,
-            list: DrawList2d::new(cx),
-            color,
-            _depth: depth,
+            capture_text: false,
+            slots,
             band_rows,
             band_count,
             host: Area::Empty,
@@ -286,7 +343,17 @@ impl PageRender {
         &self.format
     }
 
-    /// How many bands (draws and readbacks) a page takes.
+    /// With capture on, stock `DrawText` in embeddable faces is left out of the
+    /// next page's pixels and returned in `RenderedPage::text` for a writer to set
+    /// above the picture. Other shaders and faces stay in the pixels and are also
+    /// returned, marked `in_pixels`. Anything drawn over text ends up under it in
+    /// such a document. Glyph-only draws stay in the pixels and are not returned.
+    /// Capture is off by default.
+    pub fn set_text_capture(&mut self, on: bool) {
+        self.capture_text = on;
+    }
+
+    /// How many bands (draws and readbacks) a page takes at most.
     pub fn bands_per_page(&self) -> usize {
         self.band_count
     }
@@ -296,15 +363,32 @@ impl PageRender {
         self.job.is_some()
     }
 
-    /// Asks the host for a draw (the next band, or the next measuring step).
+    /// Asks the host for a draw (the next bands, or the next measuring step).
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(self.host);
     }
 
     /// Starts making page `index`, dropping a page in progress. The host
-    /// draws it from its next draw on, a band at a time.
+    /// draws it from its next draw on, a few bands at a time.
     pub fn render_page(&mut self, cx: &mut Cx, index: usize) {
-        self.job = Some(PageJob { index, band: 0, state: Band::Draw, bands: Vec::new(), refused: 0 });
+        let stock_shader = if self.capture_text { stock_text_shader(cx) } else { None };
+        self.job = Some(PageJob {
+            index,
+            todo: (0..self.band_count).collect(),
+            bands: (0..self.band_count).map(|_| None).collect(),
+            raster: None,
+            drawing: None,
+            refused: 0,
+            capture_text: self.capture_text,
+            stock_shader,
+            text: None,
+        });
+        for slot in &mut self.slots {
+            if let SlotState::Wait(_, ticket) = slot.state {
+                cx.cancel_texture_readback(ticket);
+            }
+            slot.state = SlotState::Free;
+        }
         self.failed = None;
         self.redraw(cx);
     }
@@ -312,6 +396,9 @@ impl PageRender {
     /// Stops the page in progress.
     pub fn cancel(&mut self) {
         self.job = None;
+        for slot in &mut self.slots {
+            slot.state = SlotState::Free;
+        }
         self.failed = None;
     }
 
@@ -319,129 +406,248 @@ impl PageRender {
     /// it, for a host that measures what it will put on pages. Draw between
     /// this and [`Self::end_measure`] with walks that place themselves
     /// (`abs_pos`), the page's width across. False (draw nothing) while a
-    /// page is being made: its target holds that page.
+    /// page is being made: its targets hold that page.
     pub fn begin_measure(&mut self, cx: &mut Cx2d) -> bool {
         cx.add_aligned_rect_area(&mut self.host, Rect::default());
         if self.job.is_some() {
             return false;
         }
-        cx.begin_pass(&self.pass, Some(self.format.scale()));
-        self.list.begin_always(cx);
+        let slot = &mut self.slots[0];
+        cx.begin_pass(&slot.pass, Some(self.format.scale()));
+        slot.list.begin_always(cx);
         cx.begin_root_turtle(dvec2(self.format.size.x, 1.0e6), Layout::flow_overlay());
         true
     }
 
     pub fn end_measure(&mut self, cx: &mut Cx2d) {
         cx.end_pass_sized_turtle();
-        self.list.end(cx);
-        cx.end_pass(&self.pass);
+        let slot = &mut self.slots[0];
+        slot.list.end(cx);
+        cx.end_pass(&slot.pass);
     }
 
-    /// Call in the host's draw. Answers the page to draw now: draw it in
-    /// points, (0, 0) the paper's top left, then call [`Self::end_page`].
-    /// None: nothing to draw this time.
+    /// Call in the host's draw, again after each [`Self::end_page`] until it
+    /// answers `None`: a page to draw now, a band of it into a target of its
+    /// own (a few each draw). Draw it in points, (0, 0) the paper's top left,
+    /// then call [`Self::end_page`]. A page's first band is drawn alone: its
+    /// draw says which of the others hold anything the picture shows.
     pub fn begin_page(&mut self, cx: &mut Cx2d) -> Option<usize> {
         cx.add_aligned_rect_area(&mut self.host, Rect::default());
-        let job = self.job.as_ref()?;
-        match job.state {
-            Band::Draw => {}
-            // Keep the pass attached while its pixels are owed.
-            Band::Ask | Band::Wait(_) => {
-                cx.make_child_pass(&self.pass);
-                return None;
+        let job = self.job.as_mut()?;
+        // Keep each pass attached while its pixels are owed.
+        for slot in &self.slots {
+            if !matches!(slot.state, SlotState::Free) {
+                cx.make_child_pass(&slot.pass);
             }
         }
+        let free = self.slots.iter().position(|slot| matches!(slot.state, SlotState::Free))?;
+        let band = job.todo.pop_front()?;
+        job.drawing = Some((band, free));
         let scale = self.format.scale();
         let (width, _) = self.format.pixels();
-        let top = (job.band * self.band_rows) as f64 / scale;
-        self.pass.set_size(cx, dvec2(width as f64 / scale, self.band_rows as f64 / scale));
-        cx.set_pass_shift_scale(&self.pass, dvec2(0.0, top), dvec2(1.0, 1.0));
-        cx.make_child_pass(&self.pass);
-        cx.begin_pass(&self.pass, Some(scale));
-        self.list.begin_always(cx);
+        let top = (band * self.band_rows) as f64 / scale;
+        let slot = &mut self.slots[free];
+        slot.pass.set_size(cx, dvec2(width as f64 / scale, self.band_rows as f64 / scale));
+        cx.set_pass_shift_scale(&slot.pass, dvec2(0.0, top), dvec2(1.0, 1.0));
+        cx.make_child_pass(&slot.pass);
+        cx.begin_pass(&slot.pass, Some(scale));
+        slot.list.begin_always(cx);
         cx.begin_root_turtle(self.format.size, Layout::flow_overlay());
+        if job.capture_text {
+            cx.glyph_capture = Some(GlyphCapture::new(band == 0, job.stock_shader));
+        }
         Some(job.index)
     }
 
     pub fn end_page(&mut self, cx: &mut Cx2d) {
         cx.end_pass_sized_turtle();
-        self.list.end(cx);
-        cx.end_pass(&self.pass);
-        cx.repaint_pass(self.pass.draw_pass_id());
-        if let Some(job) = &mut self.job {
-            job.state = Band::Ask;
+        let capture = cx.glyph_capture.take();
+        let Some(job) = &mut self.job else { return };
+        let Some((band, slot)) = job.drawing.take() else { return };
+        if let Some(capture) = capture.filter(GlyphCapture::records) {
+            job.text = capture.finish(cx);
         }
+        let slot = &mut self.slots[slot];
+        slot.list.end(cx);
+        cx.end_pass(&slot.pass);
+        if job.raster.is_none() {
+            let raster = raster_bands(cx, slot.list.id(), self.band_rows, self.band_count, self.format.scale());
+            for (raster, pixels) in raster.iter().zip(&mut job.bands) {
+                if !raster {
+                    *pixels = Some(BandPixels::Paper(self.band_rows));
+                }
+            }
+            job.todo.retain(|band| raster[*band]);
+            job.raster = Some(raster);
+        }
+        if job.bands[band].is_some() {
+            // Paper: neither painted nor read back.
+            if job.bands.iter().all(Option::is_some) {
+                self.retry = cx.new_next_frame();
+            }
+            return;
+        }
+        cx.repaint_pass(slot.pass.draw_pass_id());
+        slot.state = SlotState::Ask(band);
         self.ask(cx);
     }
 
-    /// Asks for the drawn band's pixels.
+    /// Asks for each drawn band's pixels.
     fn ask(&mut self, cx: &mut Cx) {
         let Some(job) = &mut self.job else { return };
-        if !matches!(job.state, Band::Ask) {
-            return;
-        }
-        match self.color.read_back(cx, ReadbackRequest::default()) {
-            Ok(ticket) => {
-                job.state = Band::Wait(ticket);
-                job.refused = 0;
-            }
-            Err(ReadbackError::Backpressure) => {
-                // The per-context limit of outstanding readback tickets is reached:
-                // ask again each frame until results are taken.
-                if job.refused == 0 {
-                    log!("page render: per-context readback request limit reached; band waits, asking again each frame");
+        for slot in &mut self.slots {
+            let SlotState::Ask(band) = slot.state else { continue };
+            match slot.color.read_back(cx, ReadbackRequest::default()) {
+                Ok(ticket) => {
+                    slot.state = SlotState::Wait(band, ticket);
+                    job.refused = 0;
                 }
-                job.refused += 1;
-                self.retry = cx.new_next_frame();
+                Err(ReadbackError::Backpressure) => {
+                    // The per-context limit of outstanding readback tickets is reached:
+                    // ask again each frame until results are taken.
+                    if job.refused == 0 {
+                        log!("page render: per-context readback request limit reached; band waits, asking again each frame");
+                    }
+                    job.refused += 1;
+                    self.retry = cx.new_next_frame();
+                }
+                Err(ReadbackError::NotRendered) => {
+                    slot.state = SlotState::Free;
+                    job.todo.push_front(band);
+                    cx.redraw_area(self.host);
+                }
+                Err(error) => {
+                    self.failed = Some(error);
+                    return;
+                }
             }
-            Err(ReadbackError::NotRendered) => {
-                job.state = Band::Draw;
-                cx.redraw_area(self.host);
-            }
-            Err(error) => self.failed = Some(error),
         }
     }
 
-    /// Call with every event the host gets: takes a finished band and
+    /// Call with every event the host gets: takes finished bands and
     /// answers the page once its last band is in, or why it could not be
     /// made (the backend reads no pixels back).
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Option<Result<RenderedPage, ReadbackError>> {
         if let Some(error) = self.failed.take() {
-            self.job = None;
+            self.cancel();
             return Some(Err(error));
         }
         if self.retry.is_event(event).is_some() {
             self.ask(cx);
         }
         let job = self.job.as_mut()?;
-        let Band::Wait(ticket) = job.state else { return None };
-        let result = cx.try_take_texture_readbacks_for(&[ticket]).pop()?;
-        match result.data {
-            Ok(pixels) => {
-                job.bands.push((pixels, result.width, result.height));
-                job.band += 1;
-                if job.band < self.band_count {
-                    job.state = Band::Draw;
-                    cx.redraw_area(self.host);
-                    return None;
+        let tickets: Vec<ReadbackTicket> = self
+            .slots
+            .iter()
+            .filter_map(|slot| match slot.state {
+                SlotState::Wait(_, ticket) => Some(ticket),
+                _ => None,
+            })
+            .collect();
+        let mut freed = false;
+        for result in cx.try_take_texture_readbacks_for(&tickets) {
+            let Some(slot) = self
+                .slots
+                .iter_mut()
+                .find(|slot| matches!(slot.state, SlotState::Wait(_, ticket) if ticket == result.ticket))
+            else {
+                continue;
+            };
+            let SlotState::Wait(band, _) = slot.state else { continue };
+            slot.state = SlotState::Free;
+            freed = true;
+            match result.data {
+                Ok(pixels) => job.bands[band] = Some(BandPixels::Read(pixels, result.width, result.height)),
+                // The target changed under the readback: draw the band again.
+                Err(error @ (ReadbackError::Cancelled | ReadbackError::AllocationChanged | ReadbackError::NotRendered)) => {
+                    log!("page render: band {band} of page {} again ({error:?})", job.index);
+                    job.todo.push_front(band);
                 }
-                let job = self.job.take()?;
-                let (width, height) = self.format.pixels();
-                Some(Ok(RenderedPage { index: job.index, width, height, bands: job.bands }))
+                Err(error) => {
+                    self.cancel();
+                    return Some(Err(error));
+                }
             }
-            // The target changed under the readback: draw the band again.
-            Err(error @ (ReadbackError::Cancelled | ReadbackError::AllocationChanged | ReadbackError::NotRendered)) => {
-                log!("page render: band {} of page {} again ({error:?})", job.band, job.index);
-                job.state = Band::Draw;
-                cx.redraw_area(self.host);
-                None
+        }
+        if job.bands.iter().all(Option::is_some) {
+            let job = self.job.take()?;
+            let (width, height) = self.format.pixels();
+            let bands = job.bands.into_iter().flatten().collect();
+            return Some(Ok(RenderedPage { index: job.index, width, height, text: job.text, bands }));
+        }
+        if freed && !job.todo.is_empty() {
+            cx.redraw_area(self.host);
+        }
+        None
+    }
+}
+
+/// Per band of `band_rows` pixel rows, whether a draw in `list` (or a list in
+/// it) paints there: its instances' rects in points, clipped, `scale` pixels a
+/// point, widened by [`BLEED`]. Text the capture took out left no instances.
+/// A draw it cannot place (a shader without a rect, instances it does not hold,
+/// a list that moves or transforms its content, a native layer) counts on
+/// every band. Runs on the UI thread once per page: one pass over the
+/// instances left in the list.
+fn raster_bands(cx: &Cx, list: DrawListId, band_rows: usize, count: usize, scale: f64) -> Vec<bool> {
+    let everywhere = vec![true; count];
+    let mut raster = vec![false; count];
+    let band_points = band_rows as f64 / scale;
+    let mut lists = vec![list];
+    while let Some(list) = lists.pop() {
+        let list = &cx.draw_lists[list];
+        let uniforms = &list.draw_list_uniforms;
+        if uniforms.view_shift != vec2(0.0, 0.0) || uniforms.view_transform != Mat4f::identity() {
+            return everywhere;
+        }
+        let clip = uniforms.view_clip;
+        for order in 0..list.draw_item_order_len() {
+            let Some(item) = list.draw_item_id_at_order_index(order) else { continue };
+            let item = &list.draw_items[item];
+            let call = match &item.kind {
+                CxDrawKind::DrawCall(call) => call,
+                CxDrawKind::SubList(sub) => {
+                    lists.push(*sub);
+                    continue;
+                }
+                CxDrawKind::Empty => continue,
+                CxDrawKind::NativeLayer { .. } => return everywhere,
+            };
+            if item.retained_instances.is_some() {
+                return everywhere;
             }
-            Err(error) => {
-                self.job = None;
-                Some(Err(error))
+            let Some(instances) = item.instances.as_ref().filter(|instances| !instances.is_empty()) else { continue };
+            let mapping = &cx.draw_shaders[call.draw_shader_id.index].mapping;
+            let stride = mapping.instances.total_slots;
+            let (Some(pos), Some(size)) = (mapping.rect_pos, mapping.rect_size) else { return everywhere };
+            if stride == 0 || mapping.instances.stride_bytes != stride * 4 {
+                return everywhere;
+            }
+            for instance in instances.chunks_exact(stride) {
+                let (mut x0, mut y0) = (instance[pos] as f64, instance[pos + 1] as f64);
+                let (mut x1, mut y1) = (x0 + instance[size] as f64, y0 + instance[size + 1] as f64);
+                if let Some(draw_clip) = mapping.draw_clip {
+                    x0 = x0.max(instance[draw_clip] as f64);
+                    y0 = y0.max(instance[draw_clip + 1] as f64);
+                    x1 = x1.min(instance[draw_clip + 2] as f64);
+                    y1 = y1.min(instance[draw_clip + 3] as f64);
+                }
+                x0 = x0.max(clip.x as f64);
+                y0 = y0.max(clip.y as f64);
+                x1 = x1.min(clip.z as f64);
+                y1 = y1.min(clip.w as f64);
+                if !(x1 > x0 && y1 > y0) {
+                    continue;
+                }
+                let first = ((y0 - BLEED) / band_points).floor().max(0.0) as usize;
+                let last = (((y1 + BLEED) / band_points).ceil().max(0.0) as usize).min(count);
+                for band in first..last {
+                    raster[band] = true;
+                }
             }
         }
     }
+    raster
 }
 
 #[cfg(test)]

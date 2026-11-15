@@ -4,8 +4,9 @@
 #   Stage cold (present, idle, the first-visit tab burst), Stage warm (same home: warm start + burst),
 #   Calculator cold, Sandbox boot into the race game, three rwbench workloads (lowering + O3 compile),
 #   `makepad check` of makepad-widgets and makepad-platform (front end, typeck, borrowck), `makepad test relax-lex` (test harness).
-# Every app is stopped with SIGTERM (makepad run's quit path: the process exits normally, so the profile
-# runtime writes its .profraw; a forced exit would lose that run's counts). Runs need the source tree with
+# Every app is stopped with SIGTERM (makepad run's quit path: the JIT's exit writes the profile runtime's
+# .profraw, as build.sh gen passes --cfg makepad_profile_runtime; a second, forced signal would lose that
+# run's counts). Runs need the source tree with
 # apps/commercial (Stage, Sandbox); a missing app is skipped with a note.
 # Linux: runs on the current Wayland/X display, or starts a headless weston for the training (stopped by PID).
 # macOS: hidden windows (MAKEPAD_HIDE_WINDOWS=1).

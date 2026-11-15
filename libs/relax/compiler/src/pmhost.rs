@@ -8,7 +8,8 @@
 //! with the macro fn's address, and decodes the output. Functions compile lazily on first call,
 //! like any Relax code; the world lives for the process (later calls reuse it).
 //!
-//! Trust: one policy per process, chosen by the entry point (`set_policy`; runner Host):
+//! Trust: the process's policy for third-party compile-time code (sandbox.rs `Policy`, chosen by
+//! the entry point):
 //! - `Policy::Open` (bare `relax`, the dev/test runner for general crates): every proc-macro
 //!   crate runs as cargo would run it, `unsafe` and std capabilities included.
 //! - `Policy::Sandboxed` (`makepad run`, and the default): a proc-macro root whose dependency
@@ -25,8 +26,9 @@
 //!   The twins' code goes to the world's disk cache like its other code (keyed by the macro
 //!   domain and their base's key; what it holds of the run's sandbox is linked again): a warm
 //!   start compiles none of it.
-//! Neither policy covers build scripts: a third-party package's `build.rs` runs as its own
-//! process with the user's rights (unitgraph.rs).
+//! The same switch covers build scripts: under `Policy::Sandboxed` the build script of a package
+//! whose units hold a third-party package runs confined (relax-front unitgraph.rs
+//! `script_confined`, sandbox/script.rs), and its output lines are held to its folders.
 //! Every call runs under the hang watchdog.
 
 use crate::macro_reg::{in_world, set_in_world, trace, Entry, REG, STATS};
@@ -142,6 +144,9 @@ struct World {
     /// the confined macros' arena and the bridge's twin, or why there is none (no arena windows
     /// on this platform): every confined macro reports it
     sandbox: Result<(std::sync::Arc<crate::sandbox::Arena>, u64), String>,
+    /// unit -> why its crate is not in the world: it did not load, or a crate it builds on did not
+    /// (its macros report that; every other crate's macros work)
+    failed: Vec<Option<String>>,
 }
 
 impl Drop for World {
@@ -215,7 +220,7 @@ fn world_for(sess: &std::sync::Arc<crate::Session>, unit: usize) -> Option<std::
         return Some(w);
     }
     let stage = BOOT_WORLDS.lock().unwrap_or_else(|e| e.into_inner()).iter()
-        .find(|bw| bw.as_ref().as_ref().is_ok_and(|w| w.crate_of.get(unit).copied().unwrap_or(u32::MAX) != u32::MAX)).cloned();
+        .find(|bw| bw.as_ref().as_ref().is_ok_and(|w| w.crate_of.get(unit).copied().unwrap_or(u32::MAX) != u32::MAX || w.failed.get(unit).is_some_and(Option::is_some))).cloned();
     if stage.is_some() {
         return stage;
     }
@@ -261,21 +266,52 @@ fn world_inner(sess: &std::sync::Arc<crate::Session>, prewarm: bool) -> Option<s
         set_in_world(true);
         crate::macro_reg::set_world_builder(true);
         let _in_world = InWorld;
+        let _single = SingleLoad::when(single_world_load());
         std::sync::Arc::new(build_world(sess))
     };
     tl_set_once(1, crate::clock::ms_since_start());
+    *WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.clone());
+    // BUILDING goes before the owner is asked: the owner may be the thread waiting for it (a
+    // module loaded at run time on a program request expands its macros there), and it would
+    // wait for this build while the build waits in its queue.
+    drop(_b);
     // the runtime's unit is the final world's until the program's runs, set on the owner (no
     // owner-path macro call is in flight there): a stage world's call left its unit behind. A
     // world built while the program runs (an expansion of a lazily parsed body) leaves the
-    // program's in place (jit.rs adopt_runtime_unit)
+    // program's in place (jit.rs adopt_runtime_unit). A macro call that comes first adopts the
+    // world's unit itself (jit.rs call_jit_in), and `w` keeps the world alive until this is done.
     if let Ok(world) = w.as_ref() {
         let wu = world.u as usize;
         crate::owner::call(crate::owner::Class::Program, || unsafe { crate::jit::set_runtime_unit(wu as *mut crate::jit::Unit) });
     }
-    *WORLD.lock().unwrap_or_else(|e| e.into_inner()) = Some(w.clone());
     tl_add(4, 1.0);
     tl_add(5, t.elapsed().as_secs_f64() * 1e3);
     Some(w)
+}
+
+/// Does this world build load its crates on its own thread, with no parse workers? Yes on the
+/// owner while the program runs: a worker's expansion with a stage world is then an owner request
+/// (`call`), and the owner is the thread that waits in the load for that worker (a live edit's
+/// first derive after a warm boot built the world inside the patch's request, and a large app's
+/// reload hung with the owner in `Pool::take_ahead`). On the owner a request runs in place, so the
+/// loads expand their macros there, as an added crate's do (`modules::add_crates`).
+fn single_world_load() -> bool {
+    crate::owner::is_owner() && !crate::run::running_unit().is_null()
+}
+
+/// Sets the thread's single-thread load (`preload::SINGLE`) while it lives, then restores it.
+struct SingleLoad(Option<bool>);
+impl SingleLoad {
+    fn when(single: bool) -> Self {
+        Self(single.then(|| crate::preload::SINGLE.with(|s| s.replace(true))))
+    }
+}
+impl Drop for SingleLoad {
+    fn drop(&mut self) {
+        if let Some(before) = self.0 {
+            crate::preload::SINGLE.with(|s| s.set(before));
+        }
+    }
 }
 
 /// After the program's files are loaded: the macro world goes (its Program, type context and
@@ -355,31 +391,10 @@ fn prewarm(sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
 
 
 
-/// Whether third-party proc macros run confined (module doc): the entry point's choice, one per
-/// process.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Policy {
-    /// every macro runs as host code, as cargo runs it (bare `relax`)
-    Open,
-    /// a macro whose code includes a registry or git package runs confined (`makepad run`)
-    Sandboxed,
-}
-
-/// 0 = Sandboxed (the default when no entry point chose), 1 = Open
-static POLICY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// The entry point's proc-macro policy, before any crate graph loads.
-pub fn set_policy(p: Policy) {
-    POLICY.store((p == Policy::Open) as u8, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn policy() -> Policy {
-    if POLICY.load(std::sync::atomic::Ordering::Relaxed) == 1 { Policy::Open } else { Policy::Sandboxed }
-}
-
 /// The confined macros' domain (sandbox.rs `Domain`). No fuel: the world's arena sets no budget,
-/// and a macro that never returns is the hang watchdog's (`watch_begin`).
-const MACRO_DOMAIN: crate::sandbox::Domain = crate::sandbox::Domain { name: "proc-macro", allow: macro_allow, fuel: false };
+/// and a macro that never returns is the hang watchdog's (`watch_begin`). The clean-up always:
+/// the macro world's code never tiers up, so no O3 pass does it later.
+const MACRO_DOMAIN: crate::sandbox::Domain = crate::sandbox::Domain { name: "proc-macro", allow: macro_allow, fuel: false, clean_up: true };
 
 /// The macro domain's own entries (sandbox.rs `Allow`): what a confined macro reaches of the
 /// host beyond memory, math and formatting.
@@ -481,7 +496,7 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
             closure[i] = true;
             st.extend(units[i].deps.iter().map(|&(d, _)| d));
         }
-        let confine = policy() == Policy::Sandboxed && (0..units.len()).any(|i| closure[i] && units[i].registry);
+        let confine = crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed && (0..units.len()).any(|i| closure[i] && units[i].registry);
         for i in (0..units.len()).filter(|&i| closure[i]) {
             if confine { confined[i] = true } else { host[i] = true }
         }
@@ -553,7 +568,40 @@ fn build_world(sess: &std::sync::Arc<crate::Session>) -> Result<World, String> {
     build_world_inner(sess, &units, &std_dir, &need, &uses_boot, &confined, &host)
 }
 
+/// A world of the `need` crates. rustc builds each proc-macro crate on its own, so one that does
+/// not load fails only its own macros and those of the crates built on it (relax issue 199): the
+/// world is built again without them, and their macros report why.
 fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macro_reg::UnitInfo], std_dir: &str, need: &[bool], uses_boot: &[bool], confined: &[bool], host_run: &[bool]) -> Result<World, String> {
+    let mut need = need.to_vec();
+    let mut failed: Vec<Option<String>> = vec![None; units.len()];
+    loop {
+        match build_world_once(sess, units, std_dir, &need, uses_boot, confined, host_run) {
+            Ok(mut w) => {
+                w.failed = failed;
+                return Ok(w);
+            }
+            Err((Some(i), e)) => {
+                need[i] = false;
+                failed[i] = Some(e);
+                let mut progress = true;
+                while progress {
+                    progress = false;
+                    for j in 0..units.len() {
+                        if let Some(&(d, _)) = units[j].deps.iter().find(|&&(d, _)| failed[d].is_some()).filter(|_| need[j]) {
+                            need[j] = false;
+                            failed[j] = failed[d].clone();
+                            progress = true;
+                        }
+                    }
+                }
+            }
+            Err((None, e)) => return Err(e),
+        }
+    }
+}
+
+/// One build of the world; a macro crate that does not load is named with the error.
+fn build_world_once(sess: &std::sync::Arc<crate::Session>, units: &[crate::macro_reg::UnitInfo], std_dir: &str, need: &[bool], uses_boot: &[bool], confined: &[bool], host_run: &[bool]) -> Result<World, (Option<usize>, String)> {
     let t0 = std::time::Instant::now();
     let _mem = crate::memstat::tag(crate::memstat::Tag::PmHost);
     let mut prog = crate::program::Program::new(sess);
@@ -563,18 +611,18 @@ fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macr
     prog.ptr_bytes = 8;
     // macros run here: the machine's cfg, never RELAX_CHECK_TARGET's
     let host = |f: &[String]| crate::cfg::CfgSet::machine(sess, f);
-    let core = prog.load_crate_deferred("core", &format!("{}/core/lib.rs", std_dir), 2021, host(&[]), Vec::new())?;
+    let core = prog.load_crate_deferred("core", &format!("{}/core/lib.rs", std_dir), 2021, host(&[]), Vec::new()).map_err(|e| (None, e))?;
     let mut std_deps = vec![(prog.syms.intern("core"), core)];
     let alloc_root = format!("{}/alloc/lib.rs", std_dir);
     if crate::vfs::exists(&alloc_root) {
-        let a = prog.load_crate_deferred("alloc", &alloc_root, 2021, host(&[]), std_deps.clone())?;
+        let a = prog.load_crate_deferred("alloc", &alloc_root, 2021, host(&[]), std_deps.clone()).map_err(|e| (None, e))?;
         std_deps.push((prog.syms.intern("alloc"), a));
     }
-    let st = prog.load_crate_deferred("std", &format!("{}/std/lib.rs", std_dir), 2021, host(&[]), std_deps.clone())?;
+    let st = prog.load_crate_deferred("std", &format!("{}/std/lib.rs", std_dir), 2021, host(&[]), std_deps.clone()).map_err(|e| (None, e))?;
     std_deps.push((prog.syms.intern("std"), st));
     let t_std = t0.elapsed().as_secs_f64() * 1e3;
     let m_std = crate::memstat::live_of(crate::memstat::Tag::PmHost) >> 20;
-    let pm = prog.load_crate_deferred("proc_macro", &format!("{}/proc_macro/lib.rs", std_dir), 2021, host(&[]), std_deps.clone())?;
+    let pm = prog.load_crate_deferred("proc_macro", &format!("{}/proc_macro/lib.rs", std_dir), 2021, host(&[]), std_deps.clone()).map_err(|e| (None, e))?;
     let mut deps0 = std_deps.clone();
     deps0.push((prog.syms.intern("proc_macro"), pm));
     // dependencies first
@@ -615,7 +663,7 @@ fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macr
             } else {
                 AllowBoot(false)
             };
-            let k = prog.load_crate_deferred(&u.name, &u.src_path, u.edition, cs, deps).map_err(|e| format!("macro crate {}: {}", u.name, e))?;
+            let k = prog.load_crate_deferred(&u.name, &u.src_path, u.edition, cs, deps).map_err(|e| (Some(i), format!("macro crate {}: {}", u.name, e)))?;
             drop(_allow);
             crate_of[i] = k;
             done[i] = true;
@@ -638,7 +686,7 @@ fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macr
             let def = prog.def(d);
             def.krate == pm && prog.syms.str(def.name) == "bridge" && def.parent != NO_DEF && prog.syms.str(prog.def(def.parent).name) == "__relax"
         })
-        .ok_or("std proc_macro has no __relax::bridge")?;
+        .ok_or((None, "std proc_macro has no __relax::bridge".to_string()))?;
     let mut u = crate::jit::Unit::new(prog, tcx, core);
     // an auxiliary unit: never the runtime's in place of the program's (jit.rs adopt_runtime_unit)
     u.aux = true;
@@ -688,7 +736,7 @@ fn build_world_inner(sess: &std::sync::Arc<crate::Session>, units: &[crate::macr
         s.set(x);
     });
     let confined = (0..units.len()).map(|i| need[i] && confined[i]).collect();
-    Ok(World { u: Box::into_raw(u), bridge, crate_of, entries: Default::default(), broken: Default::default(), confined, sandbox })
+    Ok(World { u: Box::into_raw(u), bridge, crate_of, entries: Default::default(), broken: Default::default(), confined, sandbox, failed: Vec::new() })
 }
 
 /// Address of macro fn `fname` at the root of unit `unit`'s crate in the world.
@@ -814,6 +862,9 @@ fn call(sess: &std::sync::Arc<crate::Session>, entry: &Entry, attr: Option<&Toke
         Some(Err(e)) => return Err(format!("proc-macro host: {}", e)),
         None => return Err("a proc macro used while the macro world itself is being built".to_string()),
     };
+    if let Some(Some(e)) = w.failed.get(entry.unit) {
+        return Err(format!("proc-macro host: {}", e));
+    }
     // Reload's lexer/parser now run off the unit, but the JIT macro world still uses
     // the runtime's process-wide UNIT and TLS machinery. Preserve the original reload
     // serialization for this step. Cached script expansions never enter the host.
@@ -1047,6 +1098,26 @@ pub(crate) fn stand_in_world() {
 
 #[cfg(test)]
 mod tests {
+    /// Off the owner (no running program) a world build keeps its parse workers; the single-thread
+    /// load it sets on the owner is the thread's own and goes back to what it was, an outer one
+    /// included.
+    #[test]
+    fn a_single_world_load_is_the_owners_and_restores_the_thread() {
+        assert!(!super::single_world_load(), "a test thread is not the owner");
+        let single = || crate::preload::SINGLE.with(|s| s.get());
+        {
+            let _off = super::SingleLoad::when(false);
+            assert!(!single(), "off: untouched");
+            let _on = super::SingleLoad::when(true);
+            assert!(single(), "on");
+        }
+        assert!(!single(), "restored");
+        crate::preload::SINGLE.with(|s| s.set(true));
+        drop(super::SingleLoad::when(true));
+        assert!(single(), "an outer single load stays");
+        crate::preload::SINGLE.with(|s| s.set(false));
+    }
+
     /// The worlds stay while a world is being built (BUILDING held by its builder): the build's
     /// crates expand a stage's macros there. A free after the build takes them.
     #[test]

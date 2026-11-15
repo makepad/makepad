@@ -237,6 +237,10 @@ pub struct Krate {
     /// why its tests run in the lane's tree, never a JIT overlay: its
     /// `[package.metadata.makepad] test-tree` (an overlay's root is one only the JIT reads)
     pub test_tree: Option<String>,
+    /// the test targets that run under cargo, never the JIT, each with why: its
+    /// `[package.metadata.makepad.native-tests]` (`lib`, `bin:<name>`, `test:<name>`); the tests
+    /// bucket gives each a unit of its own and `devhub test` routes a run of one to cargo
+    pub native_tests: BTreeMap<String, String>,
 }
 
 fn dir_of(path: &str) -> &str {
@@ -295,7 +299,9 @@ pub fn krate(tree: &Tree, manifest: &str) -> Option<Krate> {
         }
     }
     let test_tree = doc.get_path(&["package", "metadata", "makepad", "test-tree"]).and_then(Toml::as_str).map(str::to_string);
-    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree })
+    let native_tests = doc.get_path(&["package", "metadata", "makepad", "native-tests"]).and_then(Toml::as_table)
+        .map(|t| t.iter().filter_map(|(target, why)| Some((target.clone(), why.as_str()?.to_string()))).collect()).unwrap_or_default();
+    Some(Krate { package, dir, bins, lib, tests: tests.into_iter().collect(), required, test_tree, native_tests })
 }
 
 fn skipped(package: &str, dir: &str) -> bool {
@@ -1281,6 +1287,136 @@ pub fn select(repo: &Path, pair: &Pair, tree: &Tree, digests: &Digests, candidat
     Ok((out, lines, urgency))
 }
 
+/// The live replays: fixtures run through `makepad run`, `makepad test` and the check server (in
+/// tools/run/fixture and the compiler's tests), each judged by its exit, on Linux and Windows. The
+/// CI run takes them besides the sweep ([`gate_held`]): no sweep starts on its own, and in the
+/// sweep alone most of them never ran (by 11-14 only the kinds, restart, replay and rebuild ones
+/// had ever logged, and four `--allow-c` ones that failed read as nothing wrong). Like every live
+/// shard they read the JIT's crates ([`units_of`]), so a run takes them again when those move.
+/// `rotation` picks the app of the replay and the rebuild. A shard's guess is its time in one run
+/// on a Linux box on 11-14 (the CI's own timing replaces it after its first run; the replay's is
+/// the CI's); the Windows ones and the `--allow-c` ones did not run then and keep a guess.
+fn live_replays(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u64) -> Vec<Shard> {
+    let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
+    let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
+    if rotation % 2 == 0 {
+        rebuild.push("--wm");
+    }
+    let ps = |file| vec!["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", file];
+    let (build, screen, linux, windows, exit) = (Kind::Build, Kind::Screen, Os::Linux, Os::Windows, Judge::Exit);
+    // (id, kind, os, gui, judge, step, seconds): the step's first path is the file it runs
+    let rows: Vec<(&str, Kind, Os, bool, Judge, Vec<&str>, f64)> = vec![
+        // nothing breaks a running app: every edit kind, and the real landings replayed as live edits
+        ("live:kinds", screen, linux, true, exit, vec!["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"], 134.0),
+        // a restart keeps the process and the window: a restart-rung edit, a panic, a repeated
+        // relaunch; the state kept, no leftovers
+        ("live:restart", screen, linux, true, exit, vec!["python3", "tools/run/fixture/restart_in_place.py"], 495.0),
+        // a live edit that is refused, or puts the boot text back, leaves no crate edited, and the
+        // next start restores what the run recorded
+        ("live:edit-undone", screen, linux, false, exit, vec!["python3", "tools/run/fixture/edit_undone_warm.py"], 83.0),
+        // a patch reaches the O1 code a warm start placed from the startup image: the code holding
+        // an unguarded copy of the patched body is built again
+        ("live:warm-image-patch", screen, linux, false, exit, vec!["python3", "tools/run/fixture/warm_image_patch.py"], 3.0),
+        // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live
+        // meanwhile
+        ("live:landing-hold", screen, linux, false, exit, vec!["python3", "tools/run/fixture/landing_hold.py"], 9.0),
+        // the window manager at rest draws nothing: a sticky toast, a window waiting to be hidden,
+        // the closed AI pane's client and the bar's thermometer each kept every node's WM drawing
+        // (11-07)
+        ("live:wm-rest", screen, linux, false, exit, vec!["python3", "tools/run/fixture/wm_rest.py"], 66.0),
+        // a boot that panics after its unit is published ends with the panic's code and message,
+        // cold and warm, and the run's exit work never walks a freed program
+        ("live:boot-panic", build, linux, false, exit, vec!["sh", "tools/run/fixture/boot_panic.sh"], 160.0),
+        // a build script's run and its package's test (a load that records lint uses) on one cache
+        // share the std code they have in common: no miss, no failed link, no internal compiler error
+        ("live:shared-std", build, linux, false, exit, vec!["python3", "tools/run/fixture/shared_std.py"], 117.0),
+        // a landing that moves one of makepad's inputs and the program's sources at once: the
+        // sources patch, the input waits for the offered restart
+        ("live:landing-whole", build, linux, false, exit, vec!["python3", "tools/run/fixture/landing_whole.py"], 3.0),
+        // an edit's restart-only items wait alone, the rest patches; `inspect live` says what waits
+        // and which commit the run loaded
+        ("live:hold-back", build, linux, false, exit, vec!["python3", "tools/run/fixture/hold_back.py"], 4.0),
+        // `makepad test` prints the warnings `cargo test` does, and no import it reads (through a
+        // fn's `use X as Y`, through a test's macro call) as unused
+        ("live:test-warnings", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/test_warnings/run.py"], 94.0),
+        // a live test session answers each test's outcome and whether it ran for the edit, and
+        // refuses another edit's group
+        ("live:test-results", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_test_results/run.py"], 67.0),
+        // a live test session in a workspace of several crates applies each save: a member's, the
+        // package's and the test file's, in a checkout a crashed git left a lock in (relax issue 33)
+        ("live:test-workspace", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_workspace/run.py"], 5.0),
+        // the live driver of a bare relax run: a body edit patches, a type error is refused, a
+        // layout edit restarts in place with the program's state, edits wait for a first present,
+        // the terminal status keeps ticking, and the transcript outlives an abnormal exit
+        ("live:relax-app", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/live_app/run_all.py"], 15.0),
+        // Relax's built-in smallvec and arrayvec (libs/relax/compiler/std) behave as the real
+        // crates do under rustc: their differential tests, a rustc build of its own (not under the
+        // JIT, whose `smallvec` is the built-in one)
+        ("rustc:check-ext", build, linux, false, exit, vec!["cargo", "test", "--release", "-q", "--manifest-path", "tools/run/tests/check_ext/Cargo.toml"], 1.0),
+        // the code that replaced inline assembly (libm's sqrt and fma, f16 conversions) gives the
+        // instructions' results bit for bit (the instructions this box has). Linux x86_64 only: its
+        // aarch64 half (fma, rint, sqrt, the half conversions, f16 arithmetic, fcvtl) runs on no CI box
+        ("rustc:asm-identity", build, linux, false, exit, vec!["cargo", "run", "--release", "-q", "--manifest-path", "tools/run/tests/asm_identity/Cargo.toml"], 1.0),
+        // the check server's edits of one file declared as two modules: the import stays in scope
+        // in both, and a file that includes itself ends the module walk
+        ("live:two-module-file", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/two_module_file/run.py"], 4.0),
+        // the check server: protocol, CLI and one-shot parity, and a server of another compiler
+        // (what an upgrade leaves running) stopped by its recorded pid, the check run in-process
+        ("live:check-server", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/serve/run.py"], 6.0),
+        // a test's and a program's process have cargo's run-time environment (their package's
+        // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
+        // member of a virtual workspace run from the workspace root too
+        ("live:run-env", build, linux, false, exit, vec!["bash", "tools/run/fixture/run_env.sh"], 2.0),
+        // `makepad run --allow-c` (the allow_c*/verify.py scripts): cargo and the system C compiler
+        // build a fixture's C, and the run must do what the cargo-built binary does. A path crate
+        // whose build script compiles C with the system cc runs as under cargo; its native build is
+        // keyed and reused, and a bad native library is refused with the symbol and crate named
+        ("live:allow-c", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c/verify.py"], 120.0),
+        // a check without --allow-c reads the build script outputs a cached --allow-c build left
+        // (relax#41), and names the missing OUT_DIR when there is none
+        ("live:allow-c-cached", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"], 120.0),
+        // a build script that calls into a C crate it build-depends on: its own child run compiles
+        // that crate from the run's native build, a warm run does not run the script again
+        // (relax#76), and a check runs it only with --allow-c
+        ("live:allow-c-script-native", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_script_native/verify.py"], 120.0),
+        // a shared library the build script names in a search folder outside the loader's path: the
+        // program's link arguments (an rpath) reach the native library, one that fails to load is
+        // linked again on the next run (relax#54), and a warm run builds no native code
+        ("live:allow-c-dylib", build, linux, false, exit, vec!["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"], 120.0),
+        // a save the live session holds, or one that changes nothing the program runs, says so in a
+        // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
+        ("live:gates", build, linux, false, exit, vec!["bash", "tools/run/fixture/live_gates.sh"], 6.0),
+        // a panic the program catches has its report tagged `(caught)`; a failed unit's summary
+        // lists only the panics that ended a thread or a test
+        ("live:caught-report", build, linux, false, exit, vec!["python3", "tools/run/fixture/caught_report.py"], 1.0),
+        // a failed hot load is a warm restart and a ledger report, never a parked panic
+        ("live:hot-fail", screen, linux, false, exit, vec!["python3", "tools/run/fixture/hot_fail.py"], 365.0),
+        // the same on Windows, where a restart is another process under one parent
+        ("live:hot-fail-windows", screen, windows, false, exit, ps("tools/run/fixture/hot_fail.ps1"), 180.0),
+        // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
+        // new landing's to clear, so a miss reports and does not fail the run), and a landing into
+        // what makepad is built from (offer, click, back), under a WM every other run, which gates
+        ("live:replay", screen, linux, true, Judge::Report, vec!["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", "40"], 1793.0),
+        ("live:rebuild", screen, linux, true, exit, rebuild, 336.0),
+    ];
+    // a live shard on Linux builds the JIT its script runs first, in its own step: on a box whose
+    // build was cold (every run after the JIT moved), the build ran inside the script's first
+    // `cargo run`, past its wait for the program to start, and failed it (live:kinds,
+    // live:edit-undone, 11-14). A step naming makepad-run also has the box build it before its
+    // first shard ([`tool_first`]); this step is then a no-op
+    let shard = |id: &str, kind, os, gui, judge, step: &[&str], secs: f64, dirs| {
+        let build = (os == Os::Linux && id.starts_with("live:")).then(|| argv(&["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run", "--bin", "makepad"]));
+        Shard { id: id.to_string(), kind, os, gui, gpu: false, steps: build.into_iter().chain([argv(step)]).collect(), judge, est: timing(id).unwrap_or(secs), dirs, whole: false, cores: None }
+    };
+    // a tree without a row's file (a bisect's baseline) has no shard for it
+    let mut out: Vec<Shard> = rows.into_iter().filter(|r| r.5.iter().find(|a| a.contains('/')).is_some_and(|f| tree.has(f))).map(|(id, kind, os, gui, judge, step, secs)| shard(id, kind, os, gui, judge, &step, secs, None)).collect();
+    // Runner on Windows: its list, a live run and Stop, in real windows (a tree with the commercial apps)
+    if tree.has("tools/run/fixture/runner_windows.ps1") && tree.has("apps/commercial/runner/Cargo.toml") {
+        out.push(shard("live:runner-windows", screen, windows, true, exit, &ps("tools/run/fixture/runner_windows.ps1"), 240.0, Some(vec!["apps/commercial/runner".to_string()])));
+    }
+    out
+}
+
 /// Every shard of the sweep on `tree` (`devhub ci sweep`: background work alongside the gate,
 /// never a gate): the JIT checks of every crate, the cross targets, every crate's tests, the
 /// slices, the smoke scripts and the live replays. Its report lists the failures by crate.
@@ -1470,144 +1606,15 @@ pub fn sweep_plan(tree: &Tree, timing: &dyn Fn(&str) -> Option<f64>, rotation: u
         }
         push(format!("smoke:{}", sc.dir), Kind::Screen, os, true, vec![step], Judge::Exit, 30.0, Some(vec![sc.dir.clone()]));
     }
-    // nothing breaks a running app: every edit kind, and the real landings replayed as live edits
-    if tree.has("tools/run/fixture/live_kinds.py") {
-        push("live:kinds".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_kinds.py", "--jobs", "6"])], Judge::Exit, 300.0, None);
-    }
-    // a restart keeps the process and the window: a restart-rung edit, a panic, a repeated relaunch; the state kept, no leftovers
-    if tree.has("tools/run/fixture/restart_in_place.py") {
-        push("live:restart".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/restart_in_place.py"])], Judge::Exit, 240.0, None);
-    }
-    // every static of the JIT's crates is reset at a run's end or stays with a reason: a new one is a
-    // decision, or the next run sees the last one's
-    if tree.has("tools/run/fixture/restart_statics.py") {
-        push("live:restart-statics".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/restart_statics.py"])], Judge::Exit, 5.0, None);
-    }
-    // a live edit that is refused, or puts the boot text back, leaves no crate edited, and the
-    // next start restores what the run recorded
-    if tree.has("tools/run/fixture/edit_undone_warm.py") {
-        push("live:edit-undone".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/edit_undone_warm.py"])], Judge::Exit, 120.0, None);
-    }
-    // a patch reaches the O1 code a warm start placed from the startup image: the code holding an
-    // unguarded copy of the patched body is built again
-    if tree.has("tools/run/fixture/warm_image_patch.py") {
-        push("live:warm-image-patch".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/warm_image_patch.py"])], Judge::Exit, 30.0, None);
-    }
-    // a landing devhub holds back in a show's JIT waits, and the person's own saves apply live meanwhile
-    if tree.has("tools/run/fixture/landing_hold.py") {
-        push("live:landing-hold".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_hold.py"])], Judge::Exit, 30.0, None);
-    }
-    // the window manager at rest draws nothing: a sticky toast, a window waiting to be hidden, the
-    // closed AI pane's client and the bar's thermometer each kept every node's WM drawing (11-07)
-    if tree.has("tools/run/fixture/wm_rest.py") {
-        push("live:wm-rest".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/wm_rest.py"])], Judge::Exit, 120.0, None);
-    }
-    // a boot that panics after its unit is published ends with the panic's code and message, cold
-    // and warm, and the run's exit work never walks a freed program
-    if tree.has("tools/run/fixture/boot_panic.sh") {
-        push("live:boot-panic".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["sh", "tools/run/fixture/boot_panic.sh"])], Judge::Exit, 60.0, None);
-    }
-    // a build script's run and its package's test (a load that records lint uses) on one cache
-    // share the std code they have in common: no miss, no failed link, no internal compiler error
-    if tree.has("tools/run/fixture/shared_std.py") {
-        push("live:shared-std".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/shared_std.py"])], Judge::Exit, 120.0, None);
-    }
-    // a landing that moves one of makepad's inputs and the program's sources at once: the sources
-    // patch, the input waits for the offered restart
-    if tree.has("tools/run/fixture/landing_whole.py") {
-        push("live:landing-whole".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/landing_whole.py"])], Judge::Exit, 90.0, None);
-    }
-    // an edit's restart-only items wait alone, the rest patches; `inspect live` says what waits
-    // and which commit the run loaded
-    if tree.has("tools/run/fixture/hold_back.py") {
-        push("live:hold-back".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hold_back.py"])], Judge::Exit, 90.0, None);
-    }
-    // `makepad test` prints the warnings `cargo test` does, and no import it reads (through a
-    // fn's `use X as Y`, through a test's macro call) as unused
-    if tree.has("libs/relax/compiler/tests/test_warnings/run.py") {
-        push("live:test-warnings".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/test_warnings/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // a live test session answers each test's outcome and whether it ran for the edit, and
-    // refuses another edit's group
-    if tree.has("libs/relax/compiler/tests/live_test_results/run.py") {
-        push("live:test-results".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/live_test_results/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // the check server's edits of one file declared as two modules: the import stays in scope in
-    // both, and a file that includes itself ends the module walk
-    if tree.has("libs/relax/compiler/tests/two_module_file/run.py") {
-        push("live:two-module-file".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/two_module_file/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // the check server: protocol, CLI and one-shot parity, and a server of another compiler (what
-    // an upgrade leaves running) stopped by its recorded pid, the check run in-process
-    if tree.has("libs/relax/compiler/tests/serve/run.py") {
-        push("live:check-server".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/serve/run.py"])], Judge::Exit, 120.0, None);
-    }
-    // a test's and a program's process have cargo's run-time environment (their package's
-    // variables, its build script's rustc-env, `[env]`; a test in its package's folder), for a
-    // member of a virtual workspace run from the workspace root too
-    if tree.has("tools/run/fixture/run_env.sh") {
-        push("live:run-env".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/run_env.sh"])], Judge::Exit, 120.0, None);
-    }
-    // `makepad run --allow-c`: a path crate whose build script compiles C with the system cc runs
-    // as under cargo; its native build is keyed and reused, and a bad native library is refused
-    // with the symbol and crate named
-    if tree.has("libs/relax/compiler/tests/allow_c/verify.py") {
-        push("live:allow-c".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a check without --allow-c reads the build script outputs a cached --allow-c build left
-    // (relax#41), and names the missing OUT_DIR when there is none
-    if tree.has("libs/relax/compiler/tests/allow_c_cached_check/verify.py") {
-        push("live:allow-c-cached".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_cached_check/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a build script that calls into a C crate it build-depends on: its own child run compiles
-    // that crate from the run's native build, and a warm run does not run the script again (relax#76)
-    if tree.has("libs/relax/compiler/tests/allow_c_script_native/verify.py") {
-        push("live:allow-c-script-native".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_script_native/verify.py"])], Judge::Exit, 120.0, None);
-    }
-    // a shared library the build script names in a search folder outside the loader's path: the
-    // program's link arguments (an rpath) reach the native library, and one that fails to load
-    // is linked again on the next run (relax#54)
+    // the live replays are [`live_replays`], which the CI run takes too. Only the sweep runs the
+    // macOS one: `makepad run --allow-c` on a Mac, where dyld also binds a dependency to a loaded
+    // image of its install name: the callback lookup's copy of the library must not answer the
+    // native library's @rpath
     if tree.has("libs/relax/compiler/tests/allow_c_dylib/verify.py") {
-        push("live:allow-c-dylib".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
-        // and on a Mac, where dyld also binds a dependency to a loaded image of its install name:
-        // the callback lookup's copy of the library must not answer the native library's @rpath
         push("live:allow-c-dylib-macos".to_string(), Kind::Build, Os::Macos, false, vec![argv(&["python3", "libs/relax/compiler/tests/allow_c_dylib/verify.py"])], Judge::Exit, 120.0, None);
     }
-    // a save the live session holds, or one that changes nothing the program runs, says so in a
-    // line naming the file: a deferred module's file, a save while a restart is pending (relax#33)
-    if tree.has("tools/run/fixture/live_gates.sh") {
-        push("live:gates".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["bash", "tools/run/fixture/live_gates.sh"])], Judge::Exit, 120.0, None);
-    }
-    // a panic the program catches has its report tagged `(caught)`; a failed unit's summary lists
-    // only the panics that ended a thread or a test
-    if tree.has("tools/run/fixture/caught_report.py") {
-        push("live:caught-report".to_string(), Kind::Build, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/caught_report.py"])], Judge::Exit, 60.0, None);
-    }
-    // a failed hot load is a warm restart and a ledger report, never a parked panic
-    if tree.has("tools/run/fixture/hot_fail.py") {
-        push("live:hot-fail".to_string(), Kind::Screen, Os::Linux, false, vec![argv(&["python3", "tools/run/fixture/hot_fail.py"])], Judge::Exit, 60.0, None);
-    }
-    // the same on Windows, where a restart is another process under one parent
-    if tree.has("tools/run/fixture/hot_fail.ps1") {
-        push("live:hot-fail-windows".to_string(), Kind::Screen, Os::Windows, false, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/hot_fail.ps1"])], Judge::Exit, 180.0, None);
-    }
-    // Runner on Windows: its list, a live run and Stop, in real windows
-    if tree.has("tools/run/fixture/runner_windows.ps1") && tree.has("apps/commercial/runner/Cargo.toml") {
-        push("live:runner-windows".to_string(), Kind::Screen, Os::Windows, true, vec![argv(&["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "tools/run/fixture/runner_windows.ps1"])], Judge::Exit, 240.0, Some(vec!["apps/commercial/runner".to_string()]));
-    }
-    if tree.has("tools/run/fixture/live_replay.py") {
-        // the apps in turn: the newest landings as live edits, measured (old landings' bugs are no
-        // new landing's to clear, so a miss reports and does not fail the run), and a landing into
-        // what makepad is built from (offer, click, back), under a WM every other run, which gates
-        let app = REPLAY_APPS[rotation as usize % REPLAY_APPS.len()];
-        push("live:replay".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&["python3", "tools/run/fixture/live_replay.py", "--app", app, "--count", "40"])], Judge::Report, 900.0, None);
-        let mut rebuild = vec!["python3", "tools/run/fixture/live_replay.py", "--host", "--app", app];
-        if rotation % 2 == 0 {
-            rebuild.push("--wm");
-        }
-        push("live:rebuild".to_string(), Kind::Screen, Os::Linux, true, vec![argv(&rebuild)], Judge::Exit, 500.0, None);
-    }
     shards.extend(extra);
+    shards.extend(live_replays(tree, timing, rotation));
     shards
 }
 
@@ -2617,6 +2624,10 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
     if !sweep && arm.full {
         shards.extend(sweep_plan(&tree, &timing_of, rotation).into_iter().filter(|s| s.id.starts_with("mjit:")));
     }
+    // a run of the CI bucket takes the live replays too: in the sweep alone they never ran
+    if !sweep && !calling && !own {
+        shards.extend(live_replays(&tree, &timing_of, rotation));
+    }
     if sweep || calling {
         // Whole crate proofs need every test target, independently of sweep rotation.
         shards.retain(|s| !s.id.starts_with("test:") && !s.id.starts_with("wtest:"));
@@ -2962,11 +2973,14 @@ fn gate_held(_one: std::sync::MutexGuard<'static, ()>, ctx: &Arc<Ctx>, pair: &Pa
         }
     }
     let mut g = pool.0.lock().unwrap();
-    // a gate failure goes to the inbox for the lane that fixes it, with its first error lines
-    if !sweep && !dry {
+    // a failure goes to the inbox for the lane that fixes it, with its first error lines: a gate's,
+    // and a sweep's (its shards run nowhere else, and a failure nobody hears of read as nothing
+    // wrong: none of its live replays had logged a failure, 11-14)
+    if !dry {
+        let run = if sweep { "sweep" } else { "gate" };
         for st in g.state.iter().filter(|s| s.state == "fail") {
             let errors: Vec<&str> = st.errors.iter().map(String::as_str).take(3).collect();
-            ctx.store.event("ci", Sev::Err, format!("ci gate {} FAILED at {} on {} ({}): {}{}", st.id, pair.short(), st.node, st.log, st.summary, if errors.is_empty() { String::new() } else { format!(" | {}", errors.join(" | ")) }), None);
+            ctx.store.event("ci", Sev::Err, format!("ci {run} {} FAILED at {} on {} ({}): {}{}", st.id, pair.short(), st.node, st.log, st.summary, if errors.is_empty() { String::new() } else { format!(" | {}", errors.join(" | ")) }), None);
         }
     }
     // an own-units failure goes to the inbox with its crate and its tests (the step's name and
@@ -4214,6 +4228,9 @@ pub fn serve(ctx: &Arc<Ctx>, line: &str) -> Result<String, String> {
                 if !sweep && arm.full {
                     shards.extend(sweep_plan(&tree, &|s| d.ci.timing(s), rotation).into_iter().filter(|s| s.id.starts_with("mjit:")));
                 }
+                if !sweep {
+                    shards.extend(live_replays(&tree, &|s| d.ci.timing(s), rotation));
+                }
                 shards
             });
             let skipped = arm_plan(&tree, &mut shards, &arm);
@@ -4453,6 +4470,9 @@ mod tests {
     /// input hashed once for every OS: each document's sources read again from the repository
     /// found again for each blob, the input and its OS line hashed whole by another SHA-256 (the
     /// network crate's). A digest that changed would prove a unit on sources it never ran (11-06).
+    /// Unix only: a tree with no lock gets one in a farm of symlinks, and one run hashes every
+    /// OS's digest, so a Windows host would only repeat it.
+    #[cfg(unix)]
     #[test]
     fn digests_of_real_tips_are_as_before() {
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
@@ -4625,6 +4645,33 @@ mod tests {
             ("apps/commercial/slices.json", "{\"foo\": [\"makepad-foo\"]}"),
             (".claude/x/ci.splash", "nil"),
         ])
+    }
+
+    #[test]
+    fn every_live_shard_runs_in_the_ci_run_but_the_macos_one() {
+        let t = Tree::mem(vec![
+            ("Cargo.toml", "[workspace]\nmembers = [\"tools/ci_leg\"]\n"),
+            ("tools/ci_leg/Cargo.toml", "[package]\nname = \"makepad-ci-leg\"\n"),
+            ("tools/ci_leg/src/main.rs", ""),
+            ("tools/run/fixture/live_kinds.py", ""),
+            ("tools/run/fixture/hot_fail.ps1", ""),
+            ("tools/run/fixture/live_replay.py", ""),
+            ("tools/run/tests/check_ext/Cargo.toml", ""),
+            ("libs/relax/compiler/tests/allow_c_dylib/verify.py", ""),
+        ]);
+        // the sweep alone ran almost none of them (11-14): each is the CI run's too, but the Mac's
+        let ci = live_replays(&t, &|_| None, 0);
+        let sweep = sweep_plan(&t, &|_| None, 0);
+        let only_sweep: Vec<&str> = sweep.iter().map(|s| s.id.as_str()).filter(|id| (id.starts_with("live:") || id.starts_with("rustc:")) && !ci.iter().any(|c| c.id == *id)).collect();
+        assert_eq!(only_sweep, ["live:allow-c-dylib-macos"], "a live shard only the sweep runs");
+        let ids: Vec<&str> = ci.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["live:kinds", "rustc:check-ext", "live:allow-c-dylib", "live:hot-fail-windows", "live:replay", "live:rebuild"], "a shard for each script the tree has");
+        // a Linux live shard builds its JIT in a step of its own: in its script's first `cargo run`
+        // a cold build ran past the wait for the program to start
+        for s in &ci {
+            let builds = s.steps.len() == 2 && s.steps[0].join(" ") == "cargo build --profile host -q -p makepad-run --bin makepad";
+            assert_eq!(builds, s.os == Os::Linux && s.id.starts_with("live:"), "{}: {:?}", s.id, s.steps);
+        }
     }
 
     #[test]

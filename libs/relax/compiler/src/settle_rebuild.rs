@@ -22,7 +22,9 @@
 //!    listed as a boot would list it (`with_added`), and their stores and the graph of the whole
 //!    program are written for it (cache::record_added_crates); the cache stays the boot's;
 //! 2. the image restored into a new program and type context, on the monitor thread (it reads
-//!    only the image and the stores);
+//!    only the image and the stores), and its counts checked against the program's under a front
+//!    read: an image the store holds from another process of this program (its interners grew
+//!    otherwise) is not this program's, and the next try encodes its own;
 //! 3. one owner request under a front write: the counts must be those of the encode (only the
 //!    interners may have grown: the new interner is topped up from the live one, so type ids stay
 //!    identical), what the old cache recorded since step 1 is written to its stores, the cache is
@@ -30,6 +32,11 @@
 //!    compile fields are replaced; the old ones are returned;
 //! 4. the old values are dropped on the monitor's thread, then the heap is trimmed.
 //! `RELAX_SETTLE_REBUILD=0` turns it off.
+//!
+//! The monitor asks again a second after a precondition failed; a try that paid for an encode or a
+//! restore and then stopped waits longer each time, and one that failed as the last one failed ends
+//! the round (`Round::wait`): the same restore a hundred times held the front write and the owner
+//! a hundred times, and cost a running game its frames.
 
 use super::*;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -92,10 +99,75 @@ pub(crate) const TAIL_WAIT: u32 = 60;
 
 pub(crate) enum Outcome {
     Done,
-    /// not now: the monitor tries again
+    /// not now (a precondition): the monitor asks again in a second
     Retry(String),
+    /// the try paid for an encode or a restore, then stopped. `passing`: on a condition that passes
+    /// (a request or a reader waited, a slot was being built), else on the image or the store
+    Costly { why: String, passing: bool },
     /// never in this run
     Refused(String),
+}
+
+/// A try that paid for an encode or a restore and met a passing condition.
+fn busy(why: impl Into<String>) -> Outcome {
+    Outcome::Costly { why: why.into(), passing: true }
+}
+
+/// The restored image is not this program's: the store's is not taken again (STORED goes), the
+/// next try encodes the program's own.
+fn misfit(why: impl Into<String>) -> Outcome {
+    *STORED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    failed(why)
+}
+
+/// A try that paid for an encode or a restore and failed on the image or the stores.
+fn failed(why: impl Into<String>) -> Outcome {
+    Outcome::Costly { why: why.into(), passing: false }
+}
+
+/// The tries of one settle round (the monitor's: a round per first present).
+#[derive(Default)]
+pub(crate) struct Round {
+    pub(crate) tries: u32,
+    /// tries that paid for an encode or a restore and stopped
+    costly: u32,
+    /// what the last of those that did not meet a passing condition failed on (its text before ':')
+    failed: Option<String>,
+}
+
+impl Round {
+    /// How long the monitor waits after `o` (a retry) before it tries again; None ends the round.
+    /// A precondition is asked again in a second. A try that paid for an encode or a restore waits
+    /// longer each time (1, 2, 4 .. 60 s); one that failed on what the last such try failed on ends
+    /// the round (the same image and stores: the next try would do the same), a passing condition
+    /// does not. `TAIL_WAIT` + 40 tries end it too.
+    pub(crate) fn wait(&mut self, o: &Outcome) -> Option<std::time::Duration> {
+        let secs = match o {
+            Outcome::Costly { why, passing } => {
+                if !passing {
+                    let kind = why.split(':').next().unwrap_or(why);
+                    if self.failed.as_deref() == Some(kind) {
+                        return None;
+                    }
+                    self.failed = Some(kind.to_string());
+                }
+                self.costly += 1;
+                (1u64 << (self.costly - 1).min(6)).min(60)
+            }
+            _ => 1,
+        };
+        (self.tries < TAIL_WAIT + 40).then(|| std::time::Duration::from_secs(secs))
+    }
+}
+
+impl Outcome {
+    /// Why a retry stopped (empty for Done).
+    pub(crate) fn why(&self) -> &str {
+        match self {
+            Outcome::Done => "",
+            Outcome::Retry(why) | Outcome::Refused(why) | Outcome::Costly { why, .. } => why,
+        }
+    }
 }
 
 /// What must be equal between the encode and the replace (the interners may only grow).
@@ -184,11 +256,18 @@ fn not_now() -> Option<String> {
     if owner::request_waiting() {
         return Some("a request waits for the owner".into());
     }
-    if !FIRST_PRESENT.load(Ordering::Acquire) || startup_phase() {
+    // (its first present, or a program that never presents went quiet at its start)
+    if !started() || startup_phase() {
         return Some("still starting".into());
     }
     if RELOADING.load(Ordering::Acquire) > 0 {
         return Some("a reload is in progress".into());
+    }
+    // a live save seen and not applied yet (its tree settling, a git lock): the restore checks
+    // the crates against the files on disk and would take only those before the saved one, a
+    // misfit after a costly encode, twice (a live test session held by a git lock, 11-14)
+    if crate::reload::save_seen() {
+        return Some("a save waits to be applied".into());
     }
     None
 }
@@ -220,6 +299,35 @@ fn trace(what: &str) {
 
 fn ms(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1e3
+}
+
+/// The settle's steps off the owner and on it, timed for its summary line: a frame a program
+/// thread loses during a settle is matched to the step that ran then (the steps between the
+/// restore and the cache open were untimed, and a frame lost there was taken for the settle's).
+#[derive(Default)]
+struct Steps(Vec<(&'static str, f64)>);
+impl Steps {
+    fn time<R>(&mut self, what: &'static str, f: impl FnOnce() -> R) -> R {
+        let t = Instant::now();
+        let r = f();
+        self.0.push((what, ms(t)));
+        r
+    }
+    /// An owner call: how long it waited for the owner and how long it held it.
+    fn owner<R>(&mut self, what: &'static str, f: impl FnOnce() -> R) -> R {
+        let t = Instant::now();
+        let (r, t_in, held) = owner::call(owner::Class::Program, || {
+            let t_in = Instant::now();
+            let r = f();
+            (r, t_in, ms(t_in))
+        });
+        self.0.push((what, held));
+        self.0.push(("  its wait for the owner", t_in.duration_since(t).as_secs_f64() * 1e3));
+        r
+    }
+    fn said(&self) -> String {
+        self.0.iter().map(|(w, ms)| format!("{} {ms:.1}", w.trim_start())).collect::<Vec<_>>().join(", ")
+    }
 }
 
 /// The replaced compile state of the Unit, dropped by value off the owner. (The slot fields
@@ -287,6 +395,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     RUNNING.store(true, Ordering::Relaxed);
     let _running = Running;
     let t_all = Instant::now();
+    let mut steps = Steps::default();
     let rss0 = crate::memstat::resident();
     let boot = BOOT.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap();
     let sess = unsafe { unit_session(up) };
@@ -299,12 +408,12 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     // the recorded entries go to the stores now, off the owner: the new cache opens the stores
     // as they are, and an entry recorded but not yet written would be unknown to it (every slot
     // such entries hold compiled again: a large app's settled state grew back to 18k RIR bodies)
-    let spill = owner::publish(|| unsafe {
+    let spill = steps.time("records flushed and taken first (a publish)", || owner::publish(|| unsafe {
         (*up).flush_cache_records();
         (*up).cache.as_mut().and_then(|c| c.spill_take())
-    });
+    }));
     if let Some(s) = spill {
-        if let Err(e) = s.write() {
+        if let Err(e) = steps.time("spill written first", || s.write()) {
             return Outcome::Retry(format!("the cache spill failed: {e}"));
         }
     }
@@ -319,7 +428,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     let stored = *STORED.lock().unwrap_or_else(|e| e.into_inner());
     // the run's resident cache file pages go first: the encode adds its image to what the old
     // state holds
-    crate::pack::release_resident();
+    steps.time("pages released before the encode", crate::pack::release_resident);
     let (before, encoded, pre) = {
         let _c = crate::zone_alloc::compiler();
         let r = front_read("settle rebuild encode");
@@ -341,12 +450,12 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
             let (dest, payload) = match inputs.encode_now(prog, tcx, &stop) {
                 crate::cache::CollectedRecord::Ready(dest, payload) => (dest, payload),
                 crate::cache::CollectedRecord::Current => return Outcome::Retry("the store already holds the image".into()),
-                crate::cache::CollectedRecord::Yielded => return Outcome::Retry("the encode yielded to a front writer".into()),
+                crate::cache::CollectedRecord::Yielded => return busy("the encode yielded to a front writer"),
                 crate::cache::CollectedRecord::Failed => return Outcome::Refused("the program is not recordable".into()),
             };
             trace("encoded, before the store write");
             if crate::cache::Cache::commit_collected(None, dest, payload, &stop).is_none() {
-                return Outcome::Retry(if stop() { "the image write yielded to a front writer" } else { "the collected image could not be written" }.into());
+                return if stop() { busy("the image write yielded to a front writer") } else { failed("the collected image could not be written") };
             }
             (before, true, pre)
         }
@@ -359,7 +468,7 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     // the cache files' pages this process has resident (the old state's images, read by the
     // encode) go before the new state maps its own: never both at once (they are read-only file
     // pages; a later read faults one back from the page cache)
-    crate::pack::release_resident();
+    steps.time("pages released after it", crate::pack::release_resident);
     let encode_ms = ms(t);
     let encode = if encoded { format!("encode {encode_ms:.1} ms") } else { "no encode (the store holds the program's image)".to_string() };
     trace(&encode);
@@ -386,22 +495,35 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
                 collected.boot_crates(boot.len());
                 Fresh { prog, tcx, collected, cache: None, added }
             }
-            Ok(Ok(_)) => return Outcome::Retry("only a prefix of the program was restored".into()),
-            Ok(Err(why)) => return Outcome::Retry(format!("the collected image was not restored: {why}")),
-            Err(_) => return Outcome::Retry("the restore panicked".into()),
+            Ok(Ok(_)) => return misfit("only a prefix of the program was restored"),
+            Ok(Err(why)) => return misfit(format!("the collected image was not restored: {why}")),
+            Err(_) => return misfit("the restore panicked"),
         }
     };
     crate::program::share_std_end();
-    // (another process of this program may have stored its image since: the next try encodes)
-    if !encoded && !stored.is_some_and(|s| s.same_items(&Counts::of(&fresh.prog, &fresh.tcx))) {
-        *STORED.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        return Outcome::Retry("the store's image is not this program's".into());
+    // the image must be the program's as it is now, but for the interners, which may only have
+    // grown since (the replace tops them up): asked under a front read, before the replace takes
+    // the front write. Another process of this program may have stored its image since, its
+    // interners grown otherwise (a game's second instance on one cache: "regions running 69413,
+    // restored 69438", the same restore and front write each second for 100 s): the next try
+    // encodes this one's
+    let restored = Counts::of(&fresh.prog, &fresh.tcx);
+    let now = {
+        let r = front_read("settle rebuild counts");
+        let (prog, tcx) = r.unit(up);
+        Counts::of(prog, tcx)
+    };
+    if !before.same_program(&now) {
+        return busy("the program changed after the encode");
+    }
+    if !restored.same_program(&now) {
+        return misfit(format!("the store's image is not this program's: running {now:?}, restored {restored:?}{}", if encoded { " (stored over this one's)" } else { "" }));
     }
     let restore_ms = ms(t);
     trace(&format!("restored in {restore_ms:.1} ms"));
     // the new image's pages the restore read go again: the new state faults back what it uses,
     // as a warm start does
-    crate::pack::release_resident();
+    steps.time("pages released after the restore", crate::pack::release_resident);
 
     // 3. the replace, on the owner under a front write; what the cache recorded so far is
     // written first, off the owner (the replace writes only what comes after this)
@@ -410,67 +532,72 @@ pub(crate) fn run(up: *mut Unit, patient: bool) -> Outcome {
     // and found by the next start). The records made so far are encoded first in bounded
     // publishes, a batch per owner hold, as the run monitor drains them: the call below takes
     // only what is left (in a cold run thousands, else a long owner hold)
-    super::drain_records_bounded();
-    let (spill, settings) = owner::call(owner::Class::Program, || unsafe {
+    steps.time("records drained", super::drain_records_bounded);
+    let (spill, settings) = steps.owner("the rest flushed and taken on the owner", || unsafe {
         let u = &mut *up;
         u.flush_cache_records();
-        (u.cache.as_mut().and_then(|c| c.spill_take()), (u.opt.clone(), u.tier1.is_some(), u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect::<Vec<_>>()))
+        // (the shared code stores as the run's cache uses them: its stale ones stay stale)
+        let shared = u.cache.as_ref().and_then(|c| c.shared_for_rebuild());
+        (u.cache.as_mut().and_then(|c| c.spill_take()), (u.opt.clone(), u.tier1.is_some(), u.provided.iter().map(|(k, pc)| (*k, pc.binding)).collect::<Vec<_>>(), shared))
     });
     if let Some(s) = spill {
-        if let Err(e) = s.write() { return Outcome::Retry(format!("the cache spill failed: {e}")); }
+        if let Err(e) = steps.time("spill written", || s.write()) { return failed(format!("the cache spill failed: {e}")); }
     }
     let mut fresh = fresh;
     let t_open = Instant::now();
     {
-        let (opt, tier1, provided) = settings;
-        let from = crate::cache::OpenFrom { prog: &fresh.prog, tcx: &fresh.tcx, opt, tier1, global_allocator: crate::jit::global_allocator_static_of(&fresh.prog, false), provided };
+        let (opt, tier1, provided, shared) = settings;
+        let from = crate::cache::OpenFrom { prog: &fresh.prog, tcx: &fresh.tcx, opt, tier1, global_allocator: crate::jit::global_allocator_static_of(&fresh.prog, false), provided, anchors: None, shared };
         let mut cache = match crate::cache::Cache::open_from(&from, mode, crate::dirs::relax_dir(), Some(&fresh.collected)) {
             Ok(c) => c,
-            Err(e) => return Outcome::Retry(format!("the cache did not open: {e}")),
+            Err(e) => return failed(format!("the cache did not open: {e}")),
         };
         cache.load_manifest(crate::layout::root_crate());
         fresh.cache = Some(cache);
     }
     trace(&format!("cache opened in {:.1} ms", ms(t_open)));
+    steps.0.push(("cache opened", ms(t_open)));
     // and the pages the open read once (indexes, ledgers), before the replace
-    crate::pack::release_resident();
+    steps.time("pages released after the open", crate::pack::release_resident);
     // what was recorded while the cache opened goes the same way, so that the replace's own flush
     // and spill, on the owner under the front write, are only what the last moments added
     let t = Instant::now();
-    super::drain_records_bounded();
-    let spill = owner::call(owner::Class::Program, || unsafe {
+    steps.time("records drained again", super::drain_records_bounded);
+    let spill = steps.owner("the rest flushed and taken again", || unsafe {
         let u = &mut *up;
         u.flush_cache_records();
         u.cache.as_mut().and_then(|c| c.spill_take())
     });
     if let Some(s) = spill {
-        if let Err(e) = s.write() { return Outcome::Retry(format!("the cache spill failed: {e}")); }
+        if let Err(e) = steps.time("spill written again", || s.write()) { return failed(format!("the cache spill failed: {e}")); }
     }
     let spill_ms = ms(t);
     let t = Instant::now();
-    let replaced = owner::call(owner::Class::Program, || unsafe { replace(up, &sess, mode, fresh, before) });
+    let replaced = steps.owner("replaced on the owner", || unsafe { replace(up, &sess, mode, fresh, before) });
     let old = match replaced {
         Ok(old) => old,
-        Err(why) => return Outcome::Retry(why),
+        Err(o) => return o,
     };
     let replace_ms = ms(t);
 
     // 4. the old state goes by value, off the owner (on this, the monitor's, thread)
     let t = Instant::now();
     note_replaced_front(&old._front);
-    drop(old);
+    steps.time("old state dropped", || drop(old));
     // the process-wide memos that only grow go too (made again on demand)
-    drop_compile_memos();
-    relax_types::tcx::drop_process_memos();
-    crate::program::drop_shared_std();
+    steps.time("memos dropped", || {
+        drop_compile_memos();
+        relax_types::tcx::drop_process_memos();
+    });
+    steps.time("shared std dropped", crate::program::drop_shared_std);
     let drop_ms = ms(t);
-    crate::memstat::trim();
-    crate::pack::release_resident();
+    steps.time("heap trimmed", crate::memstat::trim);
+    steps.time("pages released at the end", crate::pack::release_resident);
     let rss1 = crate::memstat::resident();
     trace("the old state dropped");
     REBUILDS.fetch_add(1, Ordering::Relaxed);
-    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("relax settle rebuild at t={:.0} ms: {}, restore {:.1} ms, spill {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB",
-        crate::clock::ms_since_start(), encode, restore_ms, spill_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0); }
+    if crate::run::VERBOSE.load(Ordering::Relaxed) || crate::memstat::enabled() { eprintln!("relax settle rebuild at t={:.0} ms: {}, restore {:.1} ms, spill {:.1} ms, replace on the owner {:.1} ms, old state dropped in {:.1} ms; total {:.1} ms; rss {:.0} -> {:.0} MB; steps (ms): {}",
+        crate::clock::ms_since_start(), encode, restore_ms, spill_ms, replace_ms, drop_ms, ms(t_all), rss0 as f64 / 1048576.0, rss1 as f64 / 1048576.0, steps.said()); }
     Outcome::Done
 }
 
@@ -493,7 +620,7 @@ pub(crate) fn replaced_fronts_alive() -> Vec<std::sync::Arc<FrontShared>> {
 /// Owner request under a front write: checks the program against the encode, finishes the new
 /// state (interner top-up, cache, front state) and moves it into the Unit. The old values come
 /// back to be dropped elsewhere.
-unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: crate::cache::Mode, fresh: Fresh, before: Counts) -> Result<Old, String> {
+unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: crate::cache::Mode, fresh: Fresh, before: Counts) -> Result<Old, Outcome> {
     let t_r = Instant::now();
     let _mem = crate::memstat::tag(crate::memstat::Tag::CacheLoad);
     let mut laps: Vec<(&str, f64)> = Vec::new();
@@ -504,7 +631,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let quitting = || crate::jit::QUIT_SEEN.load(Ordering::Relaxed);
     let yielded = || owner::request_waiting() && !quitting();
     let Some(_front) = super::front_write_unless(1000, &|| owner::program_waiting() && !quitting()) else {
-        return Err(if owner::program_waiting() && !quitting() { gave_way("front write", t_r) } else { "a front reader held on for 1 s".into() });
+        return Err(busy(if owner::program_waiting() && !quitting() { gave_way("front write", t_r) } else { "a front reader held on for 1 s".into() }));
     };
     lap("front write", &mut laps);
     // The proc-macro world stays alive through the rebuild: it is its own unit, program, type
@@ -514,30 +641,30 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let calls = crate::pmhost::calls_in_flight();
     if calls != 0 {
         crate::inspect::flightrec::event("settle.hosted-call", &format!("{calls} hosted macro call(s) in flight at the replace"), calls as u64, 0);
-        return Err(format!("{calls} hosted macro call(s) in flight"));
+        return Err(busy(format!("{calls} hosted macro call(s) in flight")));
     }
     let _f = crate::zone_alloc::compiler_fresh();
     let u = &mut *up;
     let now = Counts::of(&u.prog, &u.tcx);
     if !before.same_program(&now) {
-        return Err("the program changed after the encode".into());
+        return Err(busy("the program changed after the encode"));
     }
     for (i, f) in u.fns.iter().enumerate() {
         if f.building || f.inflight {
-            return Err(format!("slot {i} is being built"));
+            return Err(busy(format!("slot {i} is being built")));
         }
     }
     let Fresh { mut prog, mut tcx, collected: _, cache: fresh_cache, added } = fresh;
     // the types interned since the encode, copied from the live interner: ids stay identical
-    tcx.tys.top_up_from(&u.tcx.tys).ok_or("the image holds more types than the program")?;
+    tcx.tys.top_up_from(&u.tcx.tys).ok_or_else(|| misfit("the image holds more types than the program"))?;
     // ... and which of those closure types are coroutines. The image holds declarations only, and
     // the slots that stay (their keys name these types) are the only users left: without the mark
     // an async block's type is a plain closure with no `Future` impl, and the next instance built
     // from source over it stops at "failed to normalize body for codegen".
     tcx.inherit_coroutines(&u.tcx);
     lap("top up", &mut laps);
-    if yielded() { return Err(gave_way("top up", t_r)); }
-    compare((&u.prog, &u.tcx), (&prog, &tcx))?;
+    if yielded() { return Err(busy(gave_way("top up", t_r))); }
+    compare((&u.prog, &u.tcx), (&prog, &tcx)).map_err(misfit)?;
     // the crates the unit bound (Unit::new, bind_added_provided) keep rustc's layout: the restored
     // program has their marks, as the new layouts below have the opaque types
     for (c, now) in prog.crates.iter_mut().zip(&u.prog.crates) {
@@ -550,20 +677,20 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
         prog.load_recipe = u.prog.load_recipe.clone();
     }
     lap("compare", &mut laps);
-    if yielded() { return Err(gave_way("compare", t_r)); }
+    if yielded() { return Err(busy(gave_way("compare", t_r))); }
     // what was recorded since the spill just before this request (a few entries) is written
     // before the new cache takes over: a rebuild never waits for spills
     u.flush_cache_records();
     lap("flush", &mut laps);
     if let Some(s) = u.cache.as_mut().and_then(|c| c.spill_take()) {
-        s.write().map_err(|e| format!("the cache spill failed: {e}"))?;
+        s.write().map_err(|e| failed(format!("the cache spill failed: {e}")))?;
     }
     lap("spill", &mut laps);
     // the cache, as the warm start opens it, and what the old one learned
     let _ = mode;
-    let mut cache = fresh_cache.ok_or("no cache")?;
+    let mut cache = fresh_cache.ok_or_else(|| failed("no cache"))?;
     lap("cache open", &mut laps);
-    if yielded() { return Err(gave_way("cache open", t_r)); }
+    if yielded() { return Err(busy(gave_way("cache open", t_r))); }
     if let Some(old) = u.cache.as_ref() {
         cache.inherit_run_state(old);
     }
@@ -580,7 +707,7 @@ unsafe fn replace(up: *mut Unit, sess: &std::sync::Arc<crate::Session>, mode: cr
     let query_errors = tcx.dcx.clone();
     let checked_epoch = u.tcx.collect_epoch.load(Ordering::SeqCst);
     lap("front state", &mut laps);
-    if yielded() { return Err(gave_way("front state", t_r)); }
+    if yielded() { return Err(busy(gave_way("front state", t_r))); }
     // the replace: nothing can fail from here
     u.front.retire_memos();
     // the old front state names the old program: no reader may reach it after the replace (a

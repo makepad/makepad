@@ -228,6 +228,12 @@ impl Field {
         self.pipe = None;
     }
 
+    /// A new GPU device kept the buffer's id, not what it held: the next frame writes it again
+    /// from nothing (the counters go on; `reset` is a new run).
+    pub fn device_reset(&mut self) {
+        self.pipe = None;
+    }
+
     /// The buffer for records of `stride`: one that fits stays (a new run only writes it again);
     /// a new size is a new generation, as the HAL refuses a destroyed id's generation.
     fn buffer_for(&mut self, writer: &mut CmdWriter, stride: usize) {

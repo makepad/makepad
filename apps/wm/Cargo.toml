@@ -81,6 +81,8 @@ makepad-xr-core = { path = "../../libs/xr_core" }
 
 # Foreign Wayland windows (src/wayland_host): the WM serves the protocol itself.
 [target.'cfg(target_os = "linux")'.dependencies]
+# The Wi-Fi panel's join code.
+makepad-qr = { path = "../../libs/qr" }
 makepad-wayland-server = { path = "../../libs/wayland_server" }
 makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
 

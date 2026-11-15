@@ -2,7 +2,6 @@ use {
     super::{
         font_face::{FontData, FontFace},
         geom::Rect,
-        glyph_outline,
         glyph_outline::GlyphOutline,
         glyph_raster_image::GlyphRasterImage,
         intern::Intern,
@@ -157,20 +156,7 @@ impl Font {
             return outline.clone();
         }
 
-        let units_per_em = self.units_per_em;
-        let outline = self.with_ttf_parser_face(|face| {
-            let glyph_id = ttf_parser::GlyphId(glyph_id);
-            let mut builder = glyph_outline::Builder::new();
-            face.outline_glyph(glyph_id, &mut builder)?;
-            builder.finish(units_per_em).map(Rc::new)
-        });
-
-        // Fonts whose outlines live in Apple's proprietary `hvgl` table
-        // (PingFang on macOS 26+) parse fine but yield no outlines through
-        // ttf_parser; ask CoreText — which decodes hvgl in-OS — instead.
-        #[cfg(target_os = "macos")]
-        let outline = outline
-            .or_else(|| self.face.coretext_glyph_outline(glyph_id, units_per_em).map(Rc::new));
+        let outline = self.face.glyph_outline(glyph_id, self.units_per_em).map(Rc::new);
 
         {
             let mut cache = self.cached_glyph_outlines.borrow_mut();

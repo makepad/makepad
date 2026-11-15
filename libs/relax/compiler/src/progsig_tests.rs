@@ -394,6 +394,14 @@ fn an_outside_sigabrt_in_a_compile_reports_and_ends_the_process() {
     let arg = out.as_mut_ptr() as u64;
     call(&mut u, krate, "install_abrt", arg);
     call(&mut u, krate, "target_in_compile", arg);
+    // A host thread that took the process-directed signal hands it back to the process, so it can
+    // still be on its way when the call returns: returning now would end the child with status 0.
+    // The minute only turns a lost signal into a failure instead of a hung parent.
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_secs(60) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the outside SIGABRT must end the process once the compile is over");
 }
 
 #[test]

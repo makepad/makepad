@@ -1308,9 +1308,15 @@ fn inline_site(f: &mut Func, bi: usize, ii: usize, callee: &Func, args: &[VReg],
     // (`unguard_prefix`). A build that read its slot's copy version (`Func::copy_ver`) checks that
     // one word first: while it holds the value the build read, no flag its code reads was set
     // after the build began, so the flags are read (in a block of their own) only once it moved.
-    let mut flags: Vec<Sym> = callee.patch_flag.into_iter().chain(callee.unguarded_flags.iter().copied()).collect();
-    flags.sort_unstable();
-    flags.dedup();
+    // In the copies' order, the ones its body took in first and its own flag last -- never by
+    // symbol number: symbols are numbered as a run interns them, so a cached build and a fresh one
+    // of the same inputs read the same flags in another order (another relocation list)
+    let mut flags: Vec<Sym> = Vec::with_capacity(callee.unguarded_flags.len() + 1);
+    for flag in callee.unguarded_flags.iter().copied().chain(callee.patch_flag) {
+        if !flags.contains(&flag) {
+            flags.push(flag);
+        }
+    }
     // a split body's fast half takes the copy in unguarded where an exit covers the site
     // (`patched::split_patched_path`): its flags are noted as a copy before any wait point's are
     if unguarded {
@@ -6874,52 +6880,55 @@ mod inline_priority_tests {
         // a live session: no call and no loop before the site, so no frame waits there for a
         // patch; the patch rebuilds the caller. The copy is the unpatched build's, its flag noted
         // for the guard of a copy of the caller elsewhere, which reads both flags.
+        // The flags come in the copies' order however the run numbered their symbols (a run
+        // numbers them as it interns them): a cached build and a fresh one name them alike.
         let options = &relax_session::Options::default();
-        let (flag, mid_flag) = (Sym { id: 9, off: 16 }, Sym { id: 9, off: 24 });
-        let mut leaf = callee(2);
-        leaf.patch_flag = Some(flag);
-        let mut mid = callee(0);
-        mid.patch_flag = Some(mid_flag);
-        mid.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
-        mid.blocks[0].pos = vec![5];
-        let get = |id: u32| (id == 1).then_some((&leaf as *const Func, ATTR_ALWAYS));
-        assert_eq!(inline_calls(options, &mut mid, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        mid.verify().unwrap();
-        assert!(!mid.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Addr(..) | Inst::AtomicLoad(..) | Inst::Call(..))), "{}", mid.dump());
-        assert!(mid.guard_calls.is_empty());
-        assert_eq!(mid.unguarded_flags, vec![flag]);
-        // the ordered inliner (O3) the same
-        let mut mid3 = callee(0);
-        mid3.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
-        mid3.blocks[0].pos = vec![5];
-        assert_eq!(inline_calls_ordered(options, &mut mid3, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 1);
-        mid3.verify().unwrap();
-        assert!(mid3.guard_calls.is_empty() && mid3.unguarded_flags == vec![flag], "{}", mid3.dump());
-        // in a loop: the copy of `mid` reads its flag and the one of its unguarded copy
-        let get = |id: u32| match id {
-            1 => Some((&leaf as *const Func, ATTR_ALWAYS)),
-            2 => Some((&mid as *const Func, ATTR_ALWAYS)),
-            _ => None,
-        };
-        let mut outer = caller_in_loop();
-        outer.blocks[1].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
-        outer.blocks[1].pos = vec![7];
-        assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        outer.verify().unwrap();
-        let read: Vec<Sym> = outer.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i { Inst::Addr(_, s) => Some(*s), _ => None }).collect();
-        assert_eq!(read, vec![flag, mid_flag], "{}", outer.dump());
-        assert!(outer.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::IBin(IOp::Or, ..))));
-        assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
-        assert!(outer.unguarded_flags.is_empty());
-        // before the loop: unguarded as well, both flags noted
-        let mut outer = caller();
-        outer.blocks[0].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
-        outer.blocks[1].insts.clear();
-        outer.blocks[1].pos.clear();
-        assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
-        outer.verify().unwrap();
-        assert!(outer.guard_calls.is_empty(), "{}", outer.dump());
-        assert_eq!(outer.unguarded_flags, vec![flag, mid_flag]);
+        for (flag, mid_flag) in [(Sym { id: 9, off: 16 }, Sym { id: 9, off: 24 }), (Sym { id: 10, off: 16 }, Sym { id: 9, off: 16 })] {
+            let mut leaf = callee(2);
+            leaf.patch_flag = Some(flag);
+            let mut mid = callee(0);
+            mid.patch_flag = Some(mid_flag);
+            mid.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
+            mid.blocks[0].pos = vec![5];
+            let get = |id: u32| (id == 1).then_some((&leaf as *const Func, ATTR_ALWAYS));
+            assert_eq!(inline_calls(options, &mut mid, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            mid.verify().unwrap();
+            assert!(!mid.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Addr(..) | Inst::AtomicLoad(..) | Inst::Call(..))), "{}", mid.dump());
+            assert!(mid.guard_calls.is_empty());
+            assert_eq!(mid.unguarded_flags, vec![flag]);
+            // the ordered inliner (O3) the same
+            let mut mid3 = callee(0);
+            mid3.blocks[0].insts = vec![Inst::Call(Callee::Fn(1), vec![], vec![])];
+            mid3.blocks[0].pos = vec![5];
+            assert_eq!(inline_calls_ordered(options, &mut mid3, 0, &get, &|_| None, &|_, _| false, &|_| false, &InlineLimits::tier1(), None, None).len(), 1);
+            mid3.verify().unwrap();
+            assert!(mid3.guard_calls.is_empty() && mid3.unguarded_flags == vec![flag], "{}", mid3.dump());
+            // in a loop: the copy of `mid` reads its flag and the one of its unguarded copy
+            let get = |id: u32| match id {
+                1 => Some((&leaf as *const Func, ATTR_ALWAYS)),
+                2 => Some((&mid as *const Func, ATTR_ALWAYS)),
+                _ => None,
+            };
+            let mut outer = caller_in_loop();
+            outer.blocks[1].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
+            outer.blocks[1].pos = vec![7];
+            assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            outer.verify().unwrap();
+            let read: Vec<Sym> = outer.blocks.iter().flat_map(|b| &b.insts).filter_map(|i| match i { Inst::Addr(_, s) => Some(*s), _ => None }).collect();
+            assert_eq!(read, vec![flag, mid_flag], "a guard reads the flags in the copies' order (flags {:?}): {}", (flag, mid_flag), outer.dump());
+            assert!(outer.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::IBin(IOp::Or, ..))));
+            assert_eq!(outer.guard_calls, vec![(7 | POS_GUARD, 2)]);
+            assert!(outer.unguarded_flags.is_empty());
+            // before the loop: unguarded as well, both flags noted
+            let mut outer = caller();
+            outer.blocks[0].insts = vec![Inst::Call(Callee::Fn(2), vec![], vec![])];
+            outer.blocks[1].insts.clear();
+            outer.blocks[1].pos.clear();
+            assert_eq!(inline_calls(options, &mut outer, 0, &get, &|_| false, &InlineLimits::tier1()).len(), 1);
+            outer.verify().unwrap();
+            assert!(outer.guard_calls.is_empty(), "{}", outer.dump());
+            assert_eq!(outer.unguarded_flags, vec![flag, mid_flag], "unguarded copies note their flags in the copies' order");
+        }
     }
 
     #[test]

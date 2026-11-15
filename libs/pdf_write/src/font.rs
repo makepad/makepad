@@ -25,6 +25,8 @@ pub(crate) struct Font {
     kind: Kind,
     used: BTreeMap<u16, UsedGlyph>,
     order: Vec<u16>,
+    /// Glyphs drawn as shapes (`TextMode::Outlines`), each a Form XObject.
+    shapes: BTreeMap<u16, usize>,
 }
 
 impl Font {
@@ -43,6 +45,7 @@ impl Font {
             },
             used: BTreeMap::new(),
             order: Vec::new(),
+            shapes: BTreeMap::new(),
         }
     }
 
@@ -67,8 +70,21 @@ impl Font {
         }
     }
 
+    /// The glyphs set as text or drawn as shapes, in ascending order.
     pub(crate) fn used_glyphs(&self) -> Vec<u16> {
-        self.used.keys().copied().collect()
+        let mut used: Vec<u16> = self.used.keys().chain(self.shapes.keys()).copied().collect();
+        used.sort_unstable();
+        used.dedup();
+        used
+    }
+
+    /// The Form XObject that draws glyph `id` as a shape, reserved on its first use.
+    pub(crate) fn record_shape(&mut self, id: u16, objects: &mut Objects) -> usize {
+        assert!(
+            matches!(self.kind, Kind::Type3(_)),
+            "a run drawn as outlines requires a Type 3 font"
+        );
+        *self.shapes.entry(id).or_insert_with(|| objects.reserve())
     }
 
     pub(crate) fn conflicts(&self, glyph: &Glyph) -> bool {
@@ -108,6 +124,9 @@ impl Font {
     }
 
     pub(crate) fn write(self, objects: &mut Objects, index: usize) {
+        if let Kind::Type3(glyphs) = &self.kind {
+            self.write_shapes(objects, glyphs);
+        }
         if self.used.is_empty() {
             return;
         }
@@ -120,7 +139,7 @@ impl Font {
                 );
                 self.write_sfnt(objects, index, program.as_ref().unwrap());
             }
-            Kind::Type3(glyphs) => self.write_type3(objects, glyphs),
+            Kind::Type3(glyphs) => self.write_type3(objects, index, glyphs),
         }
     }
 
@@ -186,21 +205,37 @@ impl Font {
         );
     }
 
-    fn write_type3(&self, objects: &mut Objects, glyphs: &BTreeMap<u16, Type3Glyph>) {
-        // 1/units_per_em in full: `number`'s millipoints would distort the
-        // glyphs, or make the matrix zero.
+    /// The Form XObjects of the glyphs drawn as shapes, in glyph space as the font's own.
+    fn write_shapes(&self, objects: &mut Objects, glyphs: &BTreeMap<u16, Type3Glyph>) {
+        let scale = self.unit_scale();
+        for (id, &object) in &self.shapes {
+            let glyph = glyphs.get(id).unwrap_or_else(|| {
+                panic!("font {} has no Type 3 glyph {id}", self.metrics.postscript_name)
+            });
+            crate::type3::write_form(objects, glyph, *id, &format!("{scale} 0 0 {scale} 0 0"), object);
+        }
+    }
+
+    /// 1/units_per_em in full: `number`'s millipoints would distort the glyphs, or make the
+    /// matrix zero.
+    fn unit_scale(&self) -> String {
         let scale = format!("{:.12}", 1.0 / f64::from(self.metrics.units_per_em));
-        let scale = scale.trim_end_matches('0').trim_end_matches('.');
-        let bbox = self
-            .metrics
-            .bbox
-            .map(|value| number(f64::from(value)))
-            .join(" ");
+        scale.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+
+    fn write_type3(&self, objects: &mut Objects, index: usize, glyphs: &BTreeMap<u16, Type3Glyph>) {
+        let scale = self.unit_scale();
+        let name = base_name(index, &self.metrics.postscript_name);
         for (subfont, ids) in self.order.chunks(256).enumerate() {
             let mut procedures = String::new();
             let mut encoding = String::new();
             let mut widths = String::new();
             let mut images = String::new();
+            // The box around the glyphs this font holds, as the spec defines a font's box:
+            // a face's own box (a math face's reaches three ems down for its largest
+            // delimiters) would make a reader that sizes text by it take every glyph for
+            // one that tall, and merge or reorder the lines around it.
+            let mut ink: Option<[f64; 4]> = None;
             for id in ids {
                 assert!(
                     glyphs.contains_key(id),
@@ -208,12 +243,35 @@ impl Font {
                     self.metrics.postscript_name
                 );
                 let used = &self.used[id];
-                let procedure =
+                let (procedure, bounds) =
                     crate::type3::write(objects, &glyphs[id], used.advance, *id, &mut images);
+                if let Some(bounds) = bounds {
+                    let ink = ink.get_or_insert(bounds);
+                    for axis in 0..2 {
+                        ink[axis] = ink[axis].min(bounds[axis]);
+                        ink[axis + 2] = ink[axis + 2].max(bounds[axis + 2]);
+                    }
+                }
                 procedures.push_str(&format!("/g{id} {procedure} 0 R "));
                 encoding.push_str(&format!("/g{id} "));
                 widths.push_str(&format!("{} ", number(f64::from(used.advance))));
             }
+            let bbox = ink.unwrap_or([0.0; 4]).map(number).join(" ");
+            // A tagged document gives every Type 3 font a descriptor; its values are in
+            // glyph space, the face's units here. The glyphs are named, not standard
+            // Latin ones: symbolic.
+            let descriptor = objects.reserve();
+            let suffix = if subfont == 0 { String::new() } else { format!("-{subfont}") };
+            objects.write(
+                descriptor,
+                &format!(
+                    "<< /Type /FontDescriptor /FontName /{name}{suffix} /Flags 4 /FontBBox [{bbox}] \
+                     /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} >>",
+                    number(f64::from(self.metrics.ascent)),
+                    number(f64::from(self.metrics.descent)),
+                    number(f64::from(self.metrics.cap_height)),
+                ),
+            );
             let unicode = objects.reserve();
             objects.stream(
                 unicode,
@@ -233,7 +291,8 @@ impl Font {
                  /FontBBox [{bbox}] /CharProcs << {procedures} >> \
                  /Encoding << /Type /Encoding /Differences [0 {encoding}] >> \
                  /FirstChar 0 /LastChar {} /Widths [{widths}] \
-                 /Resources << /XObject << {images} >> >> /ToUnicode {unicode} 0 R >>",
+                 /Resources << /XObject << {images} >> >> /FontDescriptor {descriptor} 0 R \
+                 /ToUnicode {unicode} 0 R >>",
                     ids.len() - 1,
                 ),
             );

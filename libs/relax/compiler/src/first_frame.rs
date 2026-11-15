@@ -132,6 +132,8 @@ fn cold_like() -> bool {
 static MAIN_ENTERED_NS: OnceLock<u64> = OnceLock::new();
 /// When the program entered `app_main!`'s entry (ms since the process started).
 static APP_STARTED_MS: OnceLock<f64> = OnceLock::new();
+/// The app domain ended (`app_ended`).
+static APP_ENDED: AtomicBool = AtomicBool::new(false);
 
 /// The app domain's main starts now: the quiet of a program with no app counts from here, as the
 /// run's boot before it is no part of the program's own time.
@@ -152,6 +154,21 @@ pub(crate) fn presented() {
     if let Some(t) = THREAD.get() { t.unpark(); }
 }
 
+/// The app domain ended (domain.rs `end`: its main returned, it exited or it crashed): what it
+/// was is settled, and its run ends. The quiet after it is its exit's, never a batch program's:
+/// a short program whose exit ran past the quiet was taken for one, and the tier-up, lowering
+/// ahead and coherence check that wakes ran in its exit (rwbench: 1.8 s more, and 2075 compiles
+/// RELAX_WARM_STRICT counted as warm misses, 11-14).
+pub(crate) fn app_ended() {
+    APP_ENDED.store(true, Release);
+    if let Some(t) = THREAD.get() { t.unpark(); }
+}
+
+/// The run ends, or its app did: the watch has nothing left to decide.
+fn gone() -> bool {
+    crate::run_threads::ending() || APP_ENDED.load(Acquire)
+}
+
 /// Until the program shows what it is: an app (`app_started`, the first thing `app_main!`'s main
 /// reaches: lazy compiles on the way there keep the quiet from ending; or a frame it presented) or
 /// a batch program, whose main goes quiet without either. A batch program draws no frame: no
@@ -163,7 +180,7 @@ fn watch_app() -> f64 {
     loop {
         if let Some(ms) = APP_STARTED_MS.get() { return *ms; }
         if crate::jit::presented() { return crate::clock::ms_since_process_start(); }
-        if crate::run_threads::ending() { return 0.0; }
+        if gone() { return 0.0; }
         match MAIN_ENTERED_NS.get().filter(|_| !batch).map(|at| crate::jit::quiet_left(*at)) {
             None => std::thread::park(),
             Some(0) => {
@@ -189,7 +206,7 @@ pub(crate) fn arm(package: &str) {
         let _ = THREAD.set(std::thread::current());
         crate::run_threads::on_end(|| if let Some(t) = THREAD.get() { t.unpark(); });
         let started = watch_app();
-        if crate::run_threads::ending() { return; }
+        if gone() { return; }
         let (secs, basis) = deadline(&package, state);
         if !crate::run::silent() { eprintln!("relax: first-frame timeout {secs} s ({basis})"); }
         watch(&package, state, started, secs, &basis);
@@ -354,6 +371,7 @@ pub(crate) unsafe fn reset_statics() {
     reset(&THREAD, OnceLock::new());
     reset(&MAIN_ENTERED_NS, OnceLock::new());
     reset(&APP_STARTED_MS, OnceLock::new());
+    reset(&APP_ENDED, AtomicBool::new(false));
     reset(&CACHE_STATE, AtomicU8::new(0));
 }
 
@@ -388,25 +406,38 @@ mod tests {
         assert!(!super::still_compiling(true, 61 * s), "one compile running past a minute is a hang");
     }
 
-    /// An app whose own entry never says it is one (no `app_main!`, so no `app_started`) but has
-    /// presented is an app when its main goes quiet: never a batch program, whose run lets the
-    /// window go. An app wrote its entry out by hand, and the run closed the window it drew in once
-    /// its compiles went quiet (28-109 s after each start, 11-06).
+    /// A batch program is one whose main goes quiet while it runs. Not one whose app ended: a
+    /// short program whose exit ran past the quiet was taken for one, and its tier-up, lowering
+    /// ahead and coherence check ran in the exit (rwbench, 1.8 s and 2075 compiles counted as warm
+    /// misses, 11-14). Not one that presented: an app whose own entry never says it is one (no
+    /// `app_main!`, so no `app_started`) is an app when its main goes quiet; an app wrote its entry
+    /// out by hand, and the run closed the window it drew in once its compiles went quiet (28-109 s
+    /// after each start, 11-06).
     #[test]
-    fn a_program_that_presented_is_never_a_batch_program() {
-        isolated_test!(a_program_that_presented_is_never_a_batch_program);
-        // main entered long ago, and no demand compile since: the quiet is over
+    fn only_a_running_program_that_never_presented_is_a_batch_program() {
+        isolated_test!(only_a_running_program_that_never_presented_is_a_batch_program);
+        let wait = |watch: &std::thread::JoinHandle<f64>| {
+            // (past the 2 s quiet: a watch that takes it for a batch program says so first)
+            let t0 = std::time::Instant::now();
+            while !watch.is_finished() && !crate::jit::past_startup_headless() && t0.elapsed() < std::time::Duration::from_secs(5) {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
         super::main_entered();
-        std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(super::APP_STARTED_MS.get().is_none(), "the entry never said it is an app");
+        // its main returned: the exit's quiet is no batch program's
+        super::app_ended();
+        let watch = std::thread::spawn(super::watch_app);
+        wait(&watch);
+        assert!(!crate::jit::past_startup_headless(), "the exit of a program whose app ended was taken for a batch program");
+        assert!(watch.is_finished(), "the app ended: the watch has nothing left to decide");
+        assert_eq!(watch.join().unwrap(), 0.0, "no start to time");
+        // it presented: the watch knows an app at once
         crate::jit::FIRST_PRESENT.store(true, std::sync::atomic::Ordering::Release);
         let watch = std::thread::spawn(super::watch_app);
-        let t0 = std::time::Instant::now();
-        while !watch.is_finished() && t0.elapsed() < std::time::Duration::from_secs(20) {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait(&watch);
         assert!(watch.is_finished(), "it presented: the watch knows an app at once");
         assert!(watch.join().unwrap() > 0.0, "an app's start");
-        assert!(!crate::jit::past_startup_headless(), "not a batch program");
+        assert!(!crate::jit::past_startup_headless(), "a program that presented was taken for a batch program");
     }
 }

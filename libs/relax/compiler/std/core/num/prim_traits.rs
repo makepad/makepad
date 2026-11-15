@@ -1522,6 +1522,20 @@ impl BitXor for bool { type Output = bool; fn bitxor(self, rhs: bool) -> bool { 
 impl BitAndAssign for bool { fn bitand_assign(&mut self, rhs: bool) { *self = *self & rhs; } }
 impl BitOrAssign for bool { fn bitor_assign(&mut self, rhs: bool) { *self = *self | rhs; } }
 impl BitXorAssign for bool { fn bitxor_assign(&mut self, rhs: bool) { *self = *self ^ rhs; } }
+// library/core/src/ops/bit.rs: bool's bit operators take references as the integers' do
+// (forward_ref_binop / forward_ref_op_assign: `bool: BitAnd<&bool>` and the rest)
+impl<'a> BitAnd<&'a bool> for bool { type Output = bool; fn bitand(self, rhs: &'a bool) -> bool { self & *rhs } }
+impl<'a> BitAnd<bool> for &'a bool { type Output = bool; fn bitand(self, rhs: bool) -> bool { *self & rhs } }
+impl<'a, 'b> BitAnd<&'a bool> for &'b bool { type Output = bool; fn bitand(self, rhs: &'a bool) -> bool { *self & *rhs } }
+impl<'a> BitOr<&'a bool> for bool { type Output = bool; fn bitor(self, rhs: &'a bool) -> bool { self | *rhs } }
+impl<'a> BitOr<bool> for &'a bool { type Output = bool; fn bitor(self, rhs: bool) -> bool { *self | rhs } }
+impl<'a, 'b> BitOr<&'a bool> for &'b bool { type Output = bool; fn bitor(self, rhs: &'a bool) -> bool { *self | *rhs } }
+impl<'a> BitXor<&'a bool> for bool { type Output = bool; fn bitxor(self, rhs: &'a bool) -> bool { self ^ *rhs } }
+impl<'a> BitXor<bool> for &'a bool { type Output = bool; fn bitxor(self, rhs: bool) -> bool { *self ^ rhs } }
+impl<'a, 'b> BitXor<&'a bool> for &'b bool { type Output = bool; fn bitxor(self, rhs: &'a bool) -> bool { *self ^ *rhs } }
+impl<'a> BitAndAssign<&'a bool> for bool { fn bitand_assign(&mut self, rhs: &'a bool) { *self = *self & *rhs; } }
+impl<'a> BitOrAssign<&'a bool> for bool { fn bitor_assign(&mut self, rhs: &'a bool) { *self = *self | *rhs; } }
+impl<'a> BitXorAssign<&'a bool> for bool { fn bitxor_assign(&mut self, rhs: &'a bool) { *self = *self ^ *rhs; } }
 
 // ---- char
 impl Clone for char { fn clone(&self) -> char { *self } }

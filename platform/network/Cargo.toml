@@ -6,6 +6,7 @@ description = "Networking runtime for Makepad UI and CLI apps"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+makepad-civil-time = { path = "../../libs/civil_time", version = "0.1.0" }
 makepad-error-log = { path = "../../libs/error_log", version = "1.0.0" }
 makepad-live-id = { path = "../../libs/live_id", version = "1.0.0" }
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }

@@ -614,8 +614,14 @@ pub struct Program {
     /// the crates being checked (`makepad check`): the only ones whose paths are privacy-checked
     pub own_crates: Vec<bool>,
     /// rustc's glob ambiguities in the checked crates (the import replay, program/rsim.rs):
-    /// (module, name, type namespace) -> 1 an error, 2 the lint `ambiguous_glob_imports`
+    /// (module, name, type namespace) -> 1 an error, 2 the lint `ambiguous_glob_imports`, for what a
+    /// use finds (bits 0-1) and for the module's glob declaration (bits 2-3); bit 4: the module
+    /// binds the name itself (rsim.rs `ambiguity_table`)
     pub sim_ambiguity: Option<HashMap<(u32, Sym, bool), u8>>,
+    /// the crates the import replay covered (`run_import_sim`'s own): `sim_ambiguity` answers for
+    /// their modules; every other module's ambiguities are read from its globs (privacy.rs
+    /// `glob_ambiguity_in`), as rustc reads a finished crate's from its metadata
+    pub sim_own: Vec<bool>,
     /// what the replay reported, until the check emits it
     pub sim_diags: Option<Vec<SimDiag>>,
     /// the import replay's macro namespace of the checked modules (rsim.rs `macro_table`)
@@ -969,6 +975,7 @@ impl Program {
             glob_prec_cache: Default::default(),
             own_crates: Vec::new(),
             sim_ambiguity: None,
+            sim_own: Vec::new(),
             sim_diags: None,
             sim_macros: None,
             scope_cache: crate::conc::MemoMap::with_bits(NAME_MEMO_BITS),
@@ -3852,6 +3859,7 @@ impl Program {
             settle = false;
         }
         self.import_settle = false;
+        run.waited_on = RUN_TABLES.with(|t| std::mem::take(&mut t.borrow_mut().waited_on));
         IMPORT_RUN.with(|r| r.set(outer));
         run
     }
@@ -3896,11 +3904,13 @@ impl Program {
                 return false;
             }
         }
-        let waits = open.into_iter().any(|j| from.map_or(true, |from| self.vis_visible(self.open_import_vis(j), from)));
-        if waits {
-            IMPORT_RUN.with(|c| c.set(ImportRun { blocked: true, ..r }));
+        let waits: Vec<u32> = open.into_iter().filter(|&j| from.map_or(true, |from| self.vis_visible(self.open_import_vis(j), from))).collect();
+        if waits.is_empty() {
+            return false;
         }
-        waits
+        RUN_TABLES.with(|t| t.borrow_mut().waited_on.extend(waits));
+        IMPORT_RUN.with(|c| c.set(ImportRun { blocked: true, ..r }));
+        true
     }
 
     /// Whether module `from` sees what module `m` binds through the globs a lookup followed to it
@@ -3967,6 +3977,8 @@ impl Program {
         if !outer.active {
             RUN_TABLES.with(|t| *t.borrow_mut() = RunTables::default());
         }
+        // (what this lookup waits on is no wait of the run's tries: FixRun::waited_on)
+        let waited_on = RUN_TABLES.with(|t| std::mem::take(&mut t.borrow_mut().waited_on));
         let mut stop = im.module;
         for k in (1..=full).rev() {
             IMPORT_RUN.with(|r| r.set(ImportRun { blocked: false, ..r.get() }));
@@ -3979,6 +3991,7 @@ impl Program {
                 break;
             }
         }
+        RUN_TABLES.with(|t| t.borrow_mut().waited_on = waited_on);
         IMPORT_RUN.with(|r| r.set(outer));
         stop
     }
@@ -4326,6 +4339,7 @@ impl Program {
         let indexed = self.load_graph.is_none();
         let mut graph = self.load_graph.take().unwrap_or_else(|| self.make_load_graph());
         self.index_load_modules(&mut graph);
+        let t_load = std::time::Instant::now();
         let (path, cdir, is_mod_rs) = self.skipped_files.remove(&m).unwrap();
         let (d0, i0, m0) = (self.defs.len(), self.imports.len(), self.mods.len());
         let krate = self.mods[m as usize].krate;
@@ -4353,12 +4367,13 @@ impl Program {
         changed.extend(m0 as u32..self.mods.len() as u32);
         let (mut retried, mut settled, mut completed) = (0usize, 0usize, 0usize);
         let mut bindings_changed = self.defs.len() != d0 || self.imports.len() != i0;
-        let done_before: Vec<_> = imports.iter().map(|&i| (i, self.imports[i].done)).collect();
+        let mut done_before: Vec<_> = imports.iter().map(|&i| (i, self.imports[i].done)).collect();
         // The cone already follows every possible completion through its
         // importers. New glob edges end in modules in that cone, so they
         // cannot add an outside consumer during these append-only passes.
-        let cone: Vec<usize> = imports.iter().copied().collect();
-        self.import_fixpoint(&cone, &mut |p, i, settle| {
+        let mut cone: Vec<usize> = imports.iter().copied().collect();
+        let cone0 = cone.len();
+        let mut step = |p: &mut Program, i: usize, settle: bool| -> bool {
             retried += 1;
             settled += usize::from(settle);
             let module = p.imports[i].module;
@@ -4386,7 +4401,22 @@ impl Program {
                 }
             }
             ok
-        });
+        };
+        // ... and the open imports outside it that its lookups waited on (`import_waits`), until
+        // none is new: a failure is determined only in a run that tries the failing import
+        // (`import_failed` is the run's). Without them an import of the cone waited for good on
+        // one that never completes -- `use dep::sync::Mutex` beside `use dep::dep;`, a re-export
+        // of a proc macro that binds no type or value -- unless the load was the last of the
+        // program's skipped modules (the fixpoint forces a wait only then).
+        loop {
+            let run = self.import_fixpoint(&cone, &mut step);
+            let more: Vec<usize> = run.waited_on.into_iter().map(|j| j as usize).filter(|&j| !self.imports[j].done && imports.insert(j)).collect();
+            if more.is_empty() {
+                break;
+            }
+            done_before.extend(more.iter().map(|&j| (j, false)));
+            cone = imports.iter().copied().collect();
+        }
         for &i in &imports {
             graph.stop(i, self.import_may_wait(i).then(|| self.import_stop(i)));
         }
@@ -4405,10 +4435,10 @@ impl Program {
         if std::env::var_os("RELAX_DEFERRED_TRACE").is_some() {
             let kept = scope.0 + glob.0 + trait_bind.0 + trait_scope.0;
             let dropped = scope.1 + glob.1 + trait_bind.1 + trait_scope.1;
-            eprintln!("relax deferred: front-load {} imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} trait_bind={:?} trait_scope={:?} index_built={}",
-                self.def_path(self.mods[m as usize].def), retried, completed, settled, affected.len(),
+            eprintln!("relax deferred: front-load {} cone={}+{} waited on imports_retried={} imports_done={} settle_retries={} wait_modules={} modules_invalidated={} cache_kept={} cache_dropped={} prelude_changed={} scope={:?} glob={:?} trait_bind={:?} trait_scope={:?} index_built={} in {:.2} ms",
+                self.def_path(self.mods[m as usize].def), cone0, cone.len() - cone0, retried, completed, settled, affected.len(),
                 if prelude_changed { self.mods.len() } else { invalid.len() }, kept, dropped, prelude_changed,
-                scope, glob, trait_bind, trait_scope, indexed);
+                scope, glob, trait_bind, trait_scope, indexed, t_load.elapsed().as_secs_f64() * 1e3);
         }
         Ok((d0, bindings_changed))
     }
@@ -5382,6 +5412,8 @@ impl Program {
         // the most visible binding (rustc_resolve imports.rs / try_define): a module's private
         // `use` never leaks through `pub use module::*`
         let mut best: Option<(DefId, BindVis)> = None;
+        let collecting = q.collect == Some(m);
+        if collecting { q.collected.clear(); }
         for &(g, gv) in &md.globs {
             let gd = self.def(g);
             let r = match gd.kind {
@@ -5392,6 +5424,7 @@ impl Program {
                 DefKind::Enum => self.lookup_in_container(g, name, false).map(|d| (d, None)),
                 _ => None,
             };
+            if collecting { q.collected.push((g, r)); }
             if let Some((d, v)) = r {
                 if !self.vis_visible(v, m) {
                     continue;
@@ -5406,12 +5439,25 @@ impl Program {
                         }
                     }
                 }
-                if matches!(best, Some((_, None))) {
+                if matches!(best, Some((_, None))) && !collecting {
                     break;
                 }
             }
         }
         best
+    }
+
+    /// What each glob of module `m` gives it for `name` within `m`'s own lookup (a glob cycle back
+    /// to `m` answers what `m` binds as the lookup's passes settle it, not what a lookup entering
+    /// the cycle at the glob's module finds), with precise visibilities; None: `m` binds the name
+    /// itself. No import uses are recorded.
+    pub(crate) fn glob_answers(&self, m: u32, name: Sym, ns_type: bool) -> Option<Vec<(DefId, Option<(DefId, BindVis)>)>> {
+        let md = &self.mods[m as usize];
+        if if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) } { return None; }
+        let _quiet = QuietLookups::begin();
+        let mut q = GlobQuery { precise: true, collect: Some(m), ..Default::default() };
+        self.lookup_in_module_vis(m, name, ns_type, &mut q);
+        Some(q.collected)
     }
 
     /// Lexical lookup from a (possibly anonymous) module: block modules fall through to
@@ -6251,13 +6297,15 @@ impl ImportUses {
 
 /// One import fixpoint run's counts (`Program::import_fixpoint`): its passes for the boot trace
 /// ("resolved/tried ms"), the tries that waited on an open import, the imports whose failure it
-/// determined at a stall, the forced steps.
+/// determined at a stall, the forced steps, and the open imports its tries waited on.
 #[derive(Default)]
 struct FixRun {
     passes: Vec<String>,
     waited: usize,
     failed: usize,
     forced: usize,
+    /// the open imports the run's lookups waited on (`import_waits`)
+    waited_on: crate::fxhash::HashSet<u32>,
 }
 
 /// This thread's import fixpoint run: whether one is running (`active`: no memo is read or
@@ -6279,6 +6327,8 @@ struct ImportRun {
 struct RunTables {
     open: HashMap<u32, HashMap<Sym, Vec<u32>>>,
     vis: HashMap<u32, BindVis>,
+    /// the open imports a lookup of the run waited on (FixRun::waited_on)
+    waited_on: crate::fxhash::HashSet<u32>,
 }
 
 thread_local! {
@@ -6846,6 +6896,10 @@ struct GlobQuery {
     /// and how often such an answer was read
     tainted: std::collections::HashSet<u32>,
     taints: usize,
+    /// a module whose globs' answers are kept, each glob's (`collected`, of the last pass): what
+    /// they give the module within its own lookup (privacy.rs `glob_ambiguity_in`)
+    collect: Option<u32>,
+    collected: Vec<(DefId, Option<(DefId, BindVis)>)>,
 }
 
 /// A trait a module's scope binds: the trait, the binding's visibility and the binding's name

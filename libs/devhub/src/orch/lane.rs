@@ -1369,7 +1369,7 @@ fn sweep(ctx: &Arc<Ctx>, dry: bool) -> Result<String, String> {
 fn free_bytes(p: &Path) -> u64 {
     #[cfg(unix)]
     {
-        let o = std::process::Command::new("df").arg("-k").arg(p).output();
+        let o = std::process::Command::new(crate::os::tool("df")).arg("-k").arg(p).output();
         if let Ok(o) = o {
             let t = String::from_utf8_lossy(&o.stdout);
             if let Some(l) = t.lines().nth(1) {
@@ -1480,7 +1480,7 @@ fn sweep_run(ctx: &Ctx, dir: &Path, dry: bool) -> Result<String, String> {
             text.push(0);
         }
         std::fs::write(&list, &text).map_err(|e| e.to_string())?;
-        let mut cmd = std::process::Command::new("nice");
+        let mut cmd = std::process::Command::new(crate::os::tool("nice"));
         cmd.args(["tar", "-c", "-J", "--options", "xz:threads=0,xz:compression-level=3", "-f"]).arg(&archive).arg("--no-recursion");
         // one `-C` only (a second one would move the list's directory too): the bundles by their
         // full paths
@@ -1492,7 +1492,7 @@ fn sweep_run(ctx: &Ctx, dir: &Path, dry: bool) -> Result<String, String> {
             return Err(format!("tar failed (nothing deleted): {}", crate::proto::clean(&String::from_utf8_lossy(&o.stderr), 400)));
         }
         // the archive reads back before anything goes
-        let t = std::process::Command::new("tar").arg("-t").arg("-f").arg(&archive).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output().map_err(|e| e.to_string())?;
+        let t = std::process::Command::new(crate::os::tool("tar")).arg("-t").arg("-f").arg(&archive).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output().map_err(|e| e.to_string())?;
         if !t.status.success() {
             return Err(format!("the archive does not read back (nothing deleted): {}", crate::proto::clean(&String::from_utf8_lossy(&t.stderr), 300)));
         }

@@ -10,8 +10,10 @@
 mod builders;
 mod float;
 mod num;
+mod num_buffer;
 
 pub use builders::{DebugList, DebugMap, DebugSet, DebugStruct, DebugTuple};
+pub use num_buffer::{NumBuffer, NumBufferTrait};
 
 use crate::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
 use crate::marker::PhantomData;

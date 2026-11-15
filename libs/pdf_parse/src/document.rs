@@ -45,6 +45,29 @@ impl<'a> PdfDocument<'a> {
         self.pages.len()
     }
 
+    /// The indirect object number of a page, given its zero-based index.
+    pub fn page_object_number(&self, index: usize) -> Option<u32> {
+        self.pages.get(index).map(|page| page.obj_num)
+    }
+
+    /// The zero-based index of a page's indirect object number.
+    pub fn page_index_of(&self, object_number: u32) -> Option<usize> {
+        self.pages
+            .iter()
+            .position(|page| page.obj_num == object_number)
+    }
+
+    /// Resolve the trailer's /Root dictionary.
+    pub fn catalog(&mut self) -> PdfResult<PdfDict> {
+        let root = self
+            .xref
+            .trailer
+            .get("Root")
+            .ok_or_else(|| PdfError::new("trailer missing /Root"))?
+            .clone();
+        self.resolve_dict(&root)
+    }
+
     /// Get a page by index (0-based).
     pub fn page(&mut self, index: usize) -> PdfResult<PdfPage> {
         if index >= self.pages.len() {

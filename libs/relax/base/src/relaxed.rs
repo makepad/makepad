@@ -1,4 +1,4 @@
-//! Relaxed Rust (local/plans/relaxed-rust.md): which crates opt in to which relaxations, the
+//! Relaxed Rust: which crates opt in to which relaxations, the
 //! notes an accepted relaxation leaves, and the write-back (`makepad fix --to-strict`) that turns
 //! the source into the plain Rust rustc accepts.
 //!

@@ -1,20 +1,31 @@
-//! Vec<T>: a contiguous growable array (alloc::vec).
+//! Vec<T, A>: a contiguous growable array (alloc::vec) in allocator A, Global unless one is named
+//! (rustc 1.100's allocator_api; library/alloc/src/vec/mod.rs @1.100.0). Its allocator is its last
+//! field. Constructors without an allocator, Default, FromIterator and the conversions from
+//! slices, arrays, str and Cow are the global allocator's, as library/'s are; the rest takes any
+//! allocator.
 
 mod drain;
 mod extract_if;
 mod into_iter;
+mod splice;
 
 pub use drain::Drain;
 pub use extract_if::ExtractIf;
 pub use into_iter::IntoIter;
+pub use splice::Splice;
 
 use crate::borrow::{Borrow, BorrowMut, Cow, ToOwned};
+use crate::boxed::Box;
 use crate::cmp::Ordering;
+use crate::collections::TryReserveError;
 use crate::fmt;
 use crate::hash::{Hash, Hasher};
-use crate::heap::{self, Layout};
+use crate::heap::{self, Allocator, AllocatorNightly, Global, Layout};
 use crate::intrinsics_mem as im;
+use crate::marker::PhantomData;
+use crate::mem::ManuallyDrop;
 use crate::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
+use crate::ptr::NonNull;
 use crate::slice::SliceIndex;
 
 /// RawVec's stored capacity: the high bit stays unused, including for ZSTs.
@@ -40,15 +51,16 @@ impl Cap {
 
 #[rustc_diagnostic_item = "Vec"]
 #[rustc_insignificant_dtor]
-pub struct Vec<T> {
-    ptr: crate::ptr::NonNull<T>,
+pub struct Vec<T, A: Allocator = Global> {
+    ptr: NonNull<T>,
     cap: Cap,
     len: usize,
-    _marker: crate::marker::PhantomData<T>,
+    _marker: PhantomData<T>,
+    alloc: A,
 }
 
-unsafe impl<T: Send> Send for Vec<T> {}
-unsafe impl<T: Sync> Sync for Vec<T> {}
+unsafe impl<T: Send, A: Allocator + Send> Send for Vec<T, A> {}
+unsafe impl<T: Sync, A: Allocator + Sync> Sync for Vec<T, A> {}
 
 fn is_zst<T>() -> bool {
     crate::mem::size_of::<T>() == 0
@@ -74,43 +86,61 @@ const fn capacity_overflow() -> ! {
 // layout arithmetic and the allocator calls) is one body for every element type, the element's
 // layout passed as a value, so the `Vec<T>` instances keep only a capacity compare and a call
 // (a game's wasm had 694 `try_grow_to`, 88 `try_reserve`, 875 `do_reserve_and_handle` copies).
+// They are generic over the allocator only, as RawVecInner<A> is.
 
 /// `n` elements of `elem` (Layout::array).
-fn raw_array(elem: Layout, n: usize) -> Result<Layout, crate::collections::TryReserveError> {
+fn raw_array(elem: Layout, n: usize) -> Result<Layout, TryReserveError> {
     match elem.size().checked_mul(n) {
-        Some(size) => Layout::from_size_align(size, elem.align()).map_err(|_| crate::collections::TryReserveError::capacity_overflow()),
-        None => Err(crate::collections::TryReserveError::capacity_overflow()),
+        Some(size) => Layout::from_size_align(size, elem.align()).map_err(|_| TryReserveError::capacity_overflow()),
+        None => Err(TryReserveError::capacity_overflow()),
     }
 }
 
-/// Reallocates the buffer to exactly `new_cap` elements of `elem` (not a ZST).
+/// Reallocates the buffer to exactly `new_cap` elements of `elem` (not a ZST) in `alloc`
+/// (RawVecInner::finish_grow): the allocator's error is an AllocError of the new layout.
 #[inline(never)]
-fn raw_grow_to(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, new_cap: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+fn raw_grow_to<A: Allocator>(ptr: &mut NonNull<u8>, cap: &mut Cap, new_cap: usize, elem: Layout, alloc: &A) -> Result<(), TryReserveError> {
     let new_layout = raw_array(elem, new_cap)?;
-    let p = if cap.get() == 0 {
-        heap::alloc_or_abort(new_layout)
+    let memory = if cap.get() == 0 {
+        alloc.allocate(new_layout)
     } else {
         // the current allocation's layout was valid when it was made
         let old = unsafe { Layout::from_size_align_unchecked(elem.size() * cap.get(), elem.align()) };
-        heap::realloc_or_abort(ptr.as_ptr(), old, new_layout.size())
+        unsafe { alloc.grow(*ptr, old, new_layout) }
     };
-    *ptr = unsafe { crate::ptr::NonNull::new_unchecked(p) };
-    // raw_array checked that the allocation fits in isize::MAX bytes (a non-ZST: u8 stands in)
-    *cap = unsafe { Cap::new::<u8>(new_cap) };
-    Ok(())
+    match memory {
+        Ok(p) => {
+            *ptr = p.cast::<u8>();
+            // raw_array checked that the allocation fits in isize::MAX bytes (a non-ZST: u8 stands in)
+            *cap = unsafe { Cap::new::<u8>(new_cap) };
+            Ok(())
+        }
+        Err(_) => Err(TryReserveError::alloc_error(new_layout)),
+    }
+}
+
+/// RawVec's handle_error: a capacity overflow panics, an allocator's error is
+/// handle_alloc_error.
+#[cold]
+#[inline(never)]
+fn handle_error(e: TryReserveError) -> ! {
+    match e.kind() {
+        crate::collections::TryReserveErrorKind::AllocError { layout, .. } => heap::handle_alloc_error(layout),
+        crate::collections::TryReserveErrorKind::CapacityOverflow => capacity_overflow(),
+    }
 }
 
 /// Room for `additional` more after `len`, growing amortized (doubling, at least the minimum
 /// non-zero capacity), as RawVecInner::grow_amortized.
 #[inline(never)]
-fn raw_reserve(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) -> Result<(), crate::collections::TryReserveError> {
+fn raw_reserve<A: Allocator>(ptr: &mut NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout, alloc: &A) -> Result<(), TryReserveError> {
     if elem.size() == 0 {
         // a ZST's capacity is usize::MAX already
-        return Err(crate::collections::TryReserveError::capacity_overflow());
+        return Err(TryReserveError::capacity_overflow());
     }
     let required = match len.checked_add(additional) {
         Some(r) => r,
-        None => return Err(crate::collections::TryReserveError::capacity_overflow()),
+        None => return Err(TryReserveError::capacity_overflow()),
     };
     let mut new_cap = cap.get() * 2;
     if new_cap < required {
@@ -120,21 +150,21 @@ fn raw_reserve(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, add
     if new_cap < min {
         new_cap = min;
     }
-    raw_grow_to(ptr, cap, new_cap, elem)
+    raw_grow_to(ptr, cap, new_cap, elem, alloc)
 }
 
-/// raw_reserve that aborts on overflow (RawVecInner's do_reserve_and_handle).
+/// raw_reserve that aborts on an error (RawVecInner's do_reserve_and_handle).
 #[cold]
 #[inline(never)]
-fn raw_reserve_or_abort(ptr: &mut crate::ptr::NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout) {
-    if raw_reserve(ptr, cap, len, additional, elem).is_err() {
-        capacity_overflow();
+fn raw_reserve_or_abort<A: Allocator>(ptr: &mut NonNull<u8>, cap: &mut Cap, len: usize, additional: usize, elem: Layout, alloc: &A) {
+    if let Err(e) = raw_reserve(ptr, cap, len, additional, elem, alloc) {
+        handle_error(e);
     }
 }
 
 impl<T> Vec<T> {
     pub const fn new() -> Vec<T> {
-        Vec { ptr: crate::ptr::NonNull::dangling(), cap: Cap::ZERO, len: 0, _marker: crate::marker::PhantomData }
+        Vec { ptr: NonNull::dangling(), cap: Cap::ZERO, len: 0, _marker: PhantomData, alloc: Global }
     }
 
     pub const fn with_capacity(capacity: usize) -> Vec<T> {
@@ -157,20 +187,23 @@ impl<T> Vec<T> {
     /// For non-ZSTs it must own an allocation for `capacity` elements, fitting in
     /// isize::MAX bytes, and `length` must not exceed `capacity`.
     pub const unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Vec<T> {
-        Vec { ptr: crate::ptr::NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length, _marker: crate::marker::PhantomData }
+        Vec { ptr: NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length, _marker: PhantomData, alloc: Global }
     }
 
     pub const fn into_raw_parts(self) -> (*mut T, usize, usize) {
-        let me = crate::mem::ManuallyDrop::new(self);
+        let me = ManuallyDrop::new(self);
         (me.ptr.as_ptr(), me.len, me.capacity())
     }
 
-    pub const fn capacity(&self) -> usize {
-        if is_zst::<T>() {
-            usize::MAX
-        } else {
-            self.cap.get()
-        }
+    /// # Safety: as from_raw_parts (library/'s from_parts, box_vec_non_null 1.99).
+    pub const unsafe fn from_parts(ptr: NonNull<T>, length: usize, capacity: usize) -> Vec<T> {
+        Self::from_parts_in(ptr, length, capacity, Global)
+    }
+
+    pub const fn into_parts(self) -> (NonNull<T>, usize, usize) {
+        let (ptr, len, capacity) = self.into_raw_parts();
+        // a Vec's pointer is never null
+        (unsafe { NonNull::new_unchecked(ptr) }, len, capacity)
     }
 
     fn layout_for(cap: usize) -> Layout {
@@ -185,23 +218,73 @@ impl<T> Vec<T> {
     pub(crate) fn current_layout(cap: usize) -> Layout {
         unsafe { Layout::from_size_align_unchecked(cap.wrapping_mul(crate::mem::size_of::<T>()), crate::mem::align_of::<T>()) }
     }
+}
 
-    /// Reallocates to exactly `new_cap` (>= len). Not for ZSTs.
-    fn grow_to(&mut self, new_cap: usize) {
-        if self.try_grow_to(new_cap).is_err() {
-            capacity_overflow();
+impl<T, A: Allocator> Vec<T, A> {
+    pub const fn new_in(alloc: A) -> Vec<T, A> {
+        Vec { ptr: NonNull::dangling(), cap: Cap::ZERO, len: 0, _marker: PhantomData, alloc }
+    }
+
+    pub fn with_capacity_in(capacity: usize, alloc: A) -> Vec<T, A> {
+        let mut v = Vec::new_in(alloc);
+        if capacity > 0 && !is_zst::<T>() {
+            v.grow_to(capacity);
+        }
+        v
+    }
+
+    /// # Safety: as from_raw_parts, the buffer allocated by `alloc`.
+    pub const unsafe fn from_raw_parts_in(ptr: *mut T, length: usize, capacity: usize, alloc: A) -> Vec<T, A> {
+        Vec { ptr: NonNull::new_unchecked(ptr), cap: Cap::new::<T>(capacity), len: length, _marker: PhantomData, alloc }
+    }
+
+    /// The pointer, length, capacity and allocator, the Vec given up (its buffer is the caller's).
+    pub fn into_raw_parts_with_allocator(self) -> (*mut T, usize, usize, A) {
+        let me = ManuallyDrop::new(self);
+        let alloc = unsafe { im::ptr_read(&me.alloc as *const A) };
+        (me.ptr.as_ptr(), me.len, me.capacity(), alloc)
+    }
+
+    /// # Safety: as from_raw_parts_in.
+    pub const unsafe fn from_parts_in(ptr: NonNull<T>, length: usize, capacity: usize, alloc: A) -> Vec<T, A> {
+        Vec { ptr, cap: Cap::new::<T>(capacity), len: length, _marker: PhantomData, alloc }
+    }
+
+    pub fn into_parts_with_allocator(self) -> (NonNull<T>, usize, usize, A) {
+        let (ptr, len, capacity, alloc) = self.into_raw_parts_with_allocator();
+        // a Vec's pointer is never null
+        (unsafe { NonNull::new_unchecked(ptr) }, len, capacity, alloc)
+    }
+
+    pub const fn allocator(&self) -> &A {
+        &self.alloc
+    }
+
+    pub const fn capacity(&self) -> usize {
+        if is_zst::<T>() {
+            usize::MAX
+        } else {
+            self.cap.get()
         }
     }
 
-    fn try_grow_to(&mut self, new_cap: usize) -> Result<(), crate::collections::TryReserveError> {
-        let (ptr, cap) = self.raw_parts_mut();
-        raw_grow_to(ptr, cap, new_cap, Layout::new::<T>())
+    /// Reallocates to exactly `new_cap` (>= len). Not for ZSTs.
+    fn grow_to(&mut self, new_cap: usize) {
+        if let Err(e) = self.try_grow_to(new_cap) {
+            handle_error(e);
+        }
     }
 
-    /// The buffer's pointer (as bytes) and capacity, for the element-independent growth.
-    fn raw_parts_mut(&mut self) -> (&mut crate::ptr::NonNull<u8>, &mut Cap) {
+    fn try_grow_to(&mut self, new_cap: usize) -> Result<(), TryReserveError> {
+        let (ptr, cap, alloc) = self.raw_parts_mut();
+        raw_grow_to(ptr, cap, new_cap, Layout::new::<T>(), alloc)
+    }
+
+    /// The buffer's pointer (as bytes), its capacity and the allocator, for the
+    /// element-independent growth.
+    fn raw_parts_mut(&mut self) -> (&mut NonNull<u8>, &mut Cap, &A) {
         // NonNull<T> and NonNull<u8> are one pointer
-        (unsafe { &mut *(&mut self.ptr as *mut crate::ptr::NonNull<T>).cast::<crate::ptr::NonNull<u8>>() }, &mut self.cap)
+        (unsafe { &mut *(&mut self.ptr as *mut NonNull<T>).cast::<NonNull<u8>>() }, &mut self.cap, &self.alloc)
     }
 
     /// Real alloc's RawVecInner::reserve: only the capacity check inline, the growth and its
@@ -217,32 +300,41 @@ impl<T> Vec<T> {
     #[cold]
     fn do_reserve_and_handle(&mut self, additional: usize) {
         let len = self.len;
-        let (ptr, cap) = self.raw_parts_mut();
-        raw_reserve_or_abort(ptr, cap, len, additional, Layout::new::<T>());
+        let (ptr, cap, alloc) = self.raw_parts_mut();
+        raw_reserve_or_abort(ptr, cap, len, additional, Layout::new::<T>(), alloc);
     }
 
-    pub fn reserve_exact(&mut self, additional: usize) {
-        if self.try_reserve_exact(additional).is_err() {
-            capacity_overflow();
+    /// Room for `additional` more after `len` elements, `len` past this Vec's length (Splice's
+    /// tail move: RawVec::reserve with Drain's length).
+    fn reserve_after(&mut self, len: usize, additional: usize) {
+        if additional > self.capacity().wrapping_sub(len) {
+            let (ptr, cap, alloc) = self.raw_parts_mut();
+            raw_reserve_or_abort(ptr, cap, len, additional, Layout::new::<T>(), alloc);
         }
     }
 
-    pub fn try_reserve(&mut self, additional: usize) -> Result<(), crate::collections::TryReserveError> {
+    pub fn reserve_exact(&mut self, additional: usize) {
+        if let Err(e) = self.try_reserve_exact(additional) {
+            handle_error(e);
+        }
+    }
+
+    pub fn try_reserve(&mut self, additional: usize) -> Result<(), TryReserveError> {
         if self.capacity() - self.len >= additional {
             return Ok(());
         }
         let len = self.len;
-        let (ptr, cap) = self.raw_parts_mut();
-        raw_reserve(ptr, cap, len, additional, Layout::new::<T>())
+        let (ptr, cap, alloc) = self.raw_parts_mut();
+        raw_reserve(ptr, cap, len, additional, Layout::new::<T>(), alloc)
     }
 
-    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), crate::collections::TryReserveError> {
+    pub fn try_reserve_exact(&mut self, additional: usize) -> Result<(), TryReserveError> {
         if self.capacity() - self.len >= additional {
             return Ok(());
         }
         let required = match self.len.checked_add(additional) {
             Some(r) => r,
-            None => return Err(crate::collections::TryReserveError::capacity_overflow()),
+            None => return Err(TryReserveError::capacity_overflow()),
         };
         self.try_grow_to(required)
     }
@@ -259,26 +351,30 @@ impl<T> Vec<T> {
         if target >= self.cap.get() {
             return;
         }
+        let old = Vec::<T>::current_layout(self.cap.get());
         if target == 0 {
-            heap::free(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
-            self.ptr = crate::ptr::NonNull::dangling();
+            unsafe { self.alloc.deallocate(self.ptr.cast::<u8>(), old) };
+            self.ptr = NonNull::dangling();
             self.cap = Cap::ZERO;
         } else {
-            let p = heap::realloc_or_abort(
-                self.ptr.as_ptr() as *mut u8,
-                Vec::<T>::layout_for(self.cap.get()),
-                Vec::<T>::layout_for(target).size(),
-            );
-            self.ptr = unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) };
-            self.cap = unsafe { Cap::new::<T>(target) };
+            // RawVecInner::shrink_unchecked: a smaller size of the same element layout
+            let new_layout = unsafe { Layout::from_size_align_unchecked(crate::mem::size_of::<T>() * target, old.align()) };
+            match unsafe { self.alloc.shrink(self.ptr.cast::<u8>(), old, new_layout) } {
+                Ok(p) => {
+                    self.ptr = p.cast::<T>();
+                    self.cap = unsafe { Cap::new::<T>(target) };
+                }
+                Err(_) => heap::handle_alloc_error(new_layout),
+            }
         }
     }
 
-    pub fn into_boxed_slice(self) -> crate::boxed::Box<[T]> {
+    pub fn into_boxed_slice(self) -> Box<[T], A> {
         let mut me = self;
         me.shrink_to_fit();
-        let me = crate::mem::ManuallyDrop::new(me);
-        unsafe { crate::boxed::Box::from_raw(im::slice_from_raw_mut(me.ptr.as_ptr(), me.len) as *mut [T]) }
+        let me = ManuallyDrop::new(me);
+        let alloc = unsafe { im::ptr_read(&me.alloc as *const A) };
+        unsafe { Box::from_raw_in(im::slice_from_raw_mut(me.ptr.as_ptr(), me.len) as *mut [T], alloc) }
     }
 
     pub fn truncate(&mut self, len: usize) {
@@ -352,6 +448,27 @@ impl<T> Vec<T> {
         self.len = len + 1;
     }
 
+    /// library/'s insert_mut (push_mut, 1.95): insert, then the inserted element.
+    #[track_caller]
+    pub fn insert_mut(&mut self, index: usize, element: T) -> &mut T {
+        let len = self.len;
+        if index > len {
+            crate::panicking::panic_fmt(format_args!("insertion index (is {}) should be <= len (is {})", index, len));
+        }
+        if len == self.capacity() {
+            self.reserve(1);
+        }
+        unsafe {
+            let p = im::ptr_add_mut(self.ptr.as_ptr(), index);
+            if index < len {
+                im::copy(p as *const T, im::ptr_add_mut(p, 1), len - index);
+            }
+            im::ptr_write(p, element);
+            self.len = len + 1;
+            &mut *p
+        }
+    }
+
     #[track_caller]
     pub fn remove(&mut self, index: usize) -> T {
         let len = self.len;
@@ -382,13 +499,13 @@ impl<T> Vec<T> {
         if original_len == 0 {
             return;
         }
-        struct PanicGuard<'a, T> {
-            v: &'a mut Vec<T>,
+        struct PanicGuard<'a, T, A: Allocator> {
+            v: &'a mut Vec<T, A>,
             read: usize,
             write: usize,
             original_len: usize,
         }
-        impl<T> Drop for PanicGuard<'_, T> {
+        impl<T, A: Allocator> Drop for PanicGuard<'_, T, A> {
             #[cold]
             fn drop(&mut self) {
                 let remaining = self.original_len - self.read;
@@ -528,7 +645,7 @@ impl<T> Vec<T> {
         }
     }
 
-    pub fn append(&mut self, other: &mut Vec<T>) {
+    pub fn append(&mut self, other: &mut Self) {
         let count = other.len;
         self.reserve(count);
         unsafe {
@@ -538,15 +655,19 @@ impl<T> Vec<T> {
         self.len += count;
     }
 
-    pub fn drain<R: RangeBounds<usize>>(&mut self, range: R) -> Drain<'_, T> {
+    pub fn drain<R: RangeBounds<usize>>(&mut self, range: R) -> Drain<'_, T, A>
+    where
+        A: AllocatorNightly,
+    {
         let (start, end) = crate::slice::range(&range, self.len);
         drain::new(self, start, end)
     }
 
     /// library/alloc/src/vec/mod.rs `Vec::extract_if` (stable 1.87): removes and yields the
     /// elements of `range` the filter selects.
-    pub fn extract_if<F, R>(&mut self, range: R, filter: F) -> ExtractIf<'_, T, F>
+    pub fn extract_if<F, R>(&mut self, range: R, filter: F) -> ExtractIf<'_, T, F, A>
     where
+        A: AllocatorNightly,
         F: FnMut(&mut T) -> bool,
         R: RangeBounds<usize>,
     {
@@ -567,12 +688,15 @@ impl<T> Vec<T> {
     }
 
     #[track_caller]
-    pub fn split_off(&mut self, at: usize) -> Vec<T> {
+    pub fn split_off(&mut self, at: usize) -> Self
+    where
+        A: Clone,
+    {
         if at > self.len {
             crate::panicking::panic_fmt(format_args!("`at` split index (is {}) should be <= len (is {})", at, self.len));
         }
         let other_len = self.len - at;
-        let mut other = Vec::with_capacity(other_len);
+        let mut other = Vec::with_capacity_in(other_len, self.alloc.clone());
         unsafe {
             im::copy_nonoverlapping(im::ptr_add(self.ptr.as_ptr() as *const T, at), other.ptr.as_ptr(), other_len);
             self.len = at;
@@ -595,8 +719,11 @@ impl<T> Vec<T> {
         }
     }
 
-    pub fn leak<'a>(self) -> &'a mut [T] {
-        let me = crate::mem::ManuallyDrop::new(self);
+    pub fn leak<'a>(self) -> &'a mut [T]
+    where
+        A: 'a,
+    {
+        let me = ManuallyDrop::new(self);
         unsafe { im::slice_from_raw_mut(me.ptr.as_ptr(), me.len) }
     }
 
@@ -609,18 +736,17 @@ impl<T> Vec<T> {
         }
     }
 
-    /// Replaces `range` with the items of `replace_with`; returns the removed items.
-    pub fn splice<R: RangeBounds<usize>, I: IntoIterator<Item = T>>(&mut self, range: R, replace_with: I) -> IntoIter<T> {
-        let (start, end) = crate::slice::range(&range, self.len);
-        let mut tail = self.split_off(end);
-        let removed = self.split_off(start);
-        self.extend(replace_with);
-        self.append(&mut tail);
-        removed.into_iter()
+    /// Replaces `range` with the items of `replace_with`: a Drain of the range whose drop puts
+    /// them in (library/alloc/src/vec/splice.rs).
+    pub fn splice<R: RangeBounds<usize>, I: IntoIterator<Item = T>>(&mut self, range: R, replace_with: I) -> Splice<'_, I::IntoIter, A>
+    where
+        A: AllocatorNightly,
+    {
+        Splice { drain: self.drain(range), replace_with: replace_with.into_iter() }
     }
 }
 
-impl<T: Clone> Vec<T> {
+impl<T: Clone, A: Allocator> Vec<T, A> {
     pub fn resize(&mut self, new_len: usize, value: T) {
         let len = self.len;
         if new_len > len {
@@ -697,7 +823,7 @@ impl<T: Clone> Vec<T> {
     }
 }
 
-impl<T: PartialEq> Vec<T> {
+impl<T: PartialEq, A: Allocator> Vec<T, A> {
     pub fn dedup(&mut self) {
         self.dedup_by(|a, b| a == b)
     }
@@ -716,7 +842,7 @@ pub fn from_elem<T: Clone>(elem: T, n: usize) -> Vec<T> {
         if p.is_null() {
             heap::handle_alloc_error(layout);
         }
-        return Vec { ptr: unsafe { crate::ptr::NonNull::new_unchecked(p as *mut T) }, cap: unsafe { Cap::new::<T>(n) }, len: n, _marker: crate::marker::PhantomData };
+        return Vec { ptr: unsafe { NonNull::new_unchecked(p as *mut T) }, cap: unsafe { Cap::new::<T>(n) }, len: n, _marker: PhantomData, alloc: Global };
     }
     let mut v = Vec::with_capacity(n);
     v.extend_with(n, elem);
@@ -760,11 +886,11 @@ impl<'a> Drop for SetLenOnDrop<'a> {
     }
 }
 
-unsafe impl<#[may_dangle] T> Drop for Vec<T> {
+unsafe impl<#[may_dangle] T, A: Allocator> Drop for Vec<T, A> {
     fn drop(&mut self) {
         // library/alloc/src/vec/mod.rs: Vec::drop leaves deallocation to RawVec's
         // field drop, including on unwind. A zero-sized layout has no allocation.
-        let _guard = heap::DeallocGuard(self.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(self.cap.get()));
+        let _guard = heap::DeallocGuard { ptr: self.ptr.cast::<u8>(), layout: Vec::<T>::current_layout(self.cap.get()), alloc: &self.alloc };
         unsafe {
             if crate::mem::needs_drop::<T>() {
                 // one drop_in_place of the slice: an element whose drop panics does not stop
@@ -776,20 +902,20 @@ unsafe impl<#[may_dangle] T> Drop for Vec<T> {
     }
 }
 
-impl<T> Deref for Vec<T> {
+impl<T, A: Allocator> Deref for Vec<T, A> {
     type Target = [T];
     fn deref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-impl<T> DerefMut for Vec<T> {
+impl<T, A: Allocator> DerefMut for Vec<T, A> {
     fn deref_mut(&mut self) -> &mut [T] {
         self.as_mut_slice()
     }
 }
 
-impl<T, I: SliceIndex<[T]>> Index<I> for Vec<T> {
+impl<T, I: SliceIndex<[T]>, A: Allocator> Index<I> for Vec<T, A> {
     type Output = I::Output;
     #[track_caller]
     fn index(&self, index: I) -> &I::Output {
@@ -797,20 +923,20 @@ impl<T, I: SliceIndex<[T]>> Index<I> for Vec<T> {
     }
 }
 
-impl<T, I: SliceIndex<[T]>> IndexMut<I> for Vec<T> {
+impl<T, I: SliceIndex<[T]>, A: Allocator> IndexMut<I> for Vec<T, A> {
     #[track_caller]
     fn index_mut(&mut self, index: I) -> &mut I::Output {
         index.index_mut(self.as_mut_slice())
     }
 }
 
-impl<T: Clone> Clone for Vec<T> {
-    fn clone(&self) -> Vec<T> {
-        let mut v = Vec::with_capacity(self.len);
+impl<T: Clone, A: Allocator + Clone> Clone for Vec<T, A> {
+    fn clone(&self) -> Self {
+        let mut v = Vec::with_capacity_in(self.len, self.alloc.clone());
         v.extend_from_slice(self.as_slice());
         v
     }
-    fn clone_from(&mut self, source: &Vec<T>) {
+    fn clone_from(&mut self, source: &Self) {
         self.clear();
         self.extend_from_slice(source.as_slice());
     }
@@ -822,28 +948,28 @@ impl<T> Default for Vec<T> {
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for Vec<T> {
+impl<T: fmt::Debug, A: Allocator> fmt::Debug for Vec<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_slice(), f)
     }
 }
 
-impl<T: Hash> Hash for Vec<T> {
+impl<T: Hash, A: Allocator> Hash for Vec<T, A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Hash::hash(self.as_slice(), state)
     }
 }
 
-impl<T, U> PartialEq<Vec<U>> for Vec<T>
+impl<T, U, A1: Allocator, A2: Allocator> PartialEq<Vec<U, A2>> for Vec<T, A1>
 where
     T: PartialEq<U>,
 {
-    fn eq(&self, other: &Vec<U>) -> bool {
+    fn eq(&self, other: &Vec<U, A2>) -> bool {
         crate::slice::slice_eq(self.as_slice(), other.as_slice())
     }
 }
 
-impl<T, U> PartialEq<[U]> for Vec<T>
+impl<T, U, A: Allocator> PartialEq<[U]> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -852,7 +978,7 @@ where
     }
 }
 
-impl<'a, T, U> PartialEq<&'a [U]> for Vec<T>
+impl<'a, T, U, A: Allocator> PartialEq<&'a [U]> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -861,7 +987,7 @@ where
     }
 }
 
-impl<'a, T, U> PartialEq<&'a mut [U]> for Vec<T>
+impl<'a, T, U, A: Allocator> PartialEq<&'a mut [U]> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -870,7 +996,7 @@ where
     }
 }
 
-impl<T, U, const N: usize> PartialEq<[U; N]> for Vec<T>
+impl<T, U, A: Allocator, const N: usize> PartialEq<[U; N]> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -879,7 +1005,7 @@ where
     }
 }
 
-impl<'a, T, U, const N: usize> PartialEq<&'a [U; N]> for Vec<T>
+impl<'a, T, U, A: Allocator, const N: usize> PartialEq<&'a [U; N]> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -888,38 +1014,38 @@ where
     }
 }
 
-impl<T, U> PartialEq<Vec<U>> for [T]
+impl<T, U, A: Allocator> PartialEq<Vec<U, A>> for [T]
 where
     T: PartialEq<U>,
 {
-    fn eq(&self, other: &Vec<U>) -> bool {
+    fn eq(&self, other: &Vec<U, A>) -> bool {
         crate::slice::slice_eq(self, other.as_slice())
     }
 }
 
-impl<'a, T, U> PartialEq<Vec<U>> for &'a [T]
+impl<'a, T, U, A: Allocator> PartialEq<Vec<U, A>> for &'a [T]
 where
     T: PartialEq<U>,
 {
-    fn eq(&self, other: &Vec<U>) -> bool {
+    fn eq(&self, other: &Vec<U, A>) -> bool {
         crate::slice::slice_eq(*self, other.as_slice())
     }
 }
 
-impl<'a, T, U> PartialEq<Vec<U>> for &'a mut [T]
+impl<'a, T, U, A: Allocator> PartialEq<Vec<U, A>> for &'a mut [T]
 where
     T: PartialEq<U>,
 {
-    fn eq(&self, other: &Vec<U>) -> bool {
+    fn eq(&self, other: &Vec<U, A>) -> bool {
         crate::slice::slice_eq(&**self, other.as_slice())
     }
 }
 
-impl<'a, T: Clone, U> PartialEq<Vec<U>> for Cow<'a, [T]>
+impl<'a, T: Clone, U, A: Allocator> PartialEq<Vec<U, A>> for Cow<'a, [T]>
 where
     T: PartialEq<U>,
 {
-    fn eq(&self, other: &Vec<U>) -> bool {
+    fn eq(&self, other: &Vec<U, A>) -> bool {
         crate::slice::slice_eq(&**self, other.as_slice())
     }
 }
@@ -945,7 +1071,7 @@ where
 
 // rustc 1.100.0 (partialeq_cow_for_vec_and_slice): a vector or slice reference compares with a borrowed or
 // owned slice
-impl<'a, T, U: Clone> PartialEq<Cow<'a, [U]>> for Vec<T>
+impl<'a, T, U: Clone, A: Allocator> PartialEq<Cow<'a, [U]>> for Vec<T, A>
 where
     T: PartialEq<U>,
 {
@@ -972,46 +1098,46 @@ where
     }
 }
 
-impl<T: Eq> Eq for Vec<T> {}
+impl<T: Eq, A: Allocator> Eq for Vec<T, A> {}
 
-impl<T: PartialOrd> PartialOrd for Vec<T> {
-    fn partial_cmp(&self, other: &Vec<T>) -> Option<Ordering> {
+impl<T: PartialOrd, A1: Allocator, A2: Allocator> PartialOrd<Vec<T, A2>> for Vec<T, A1> {
+    fn partial_cmp(&self, other: &Vec<T, A2>) -> Option<Ordering> {
         crate::slice::slice_partial_cmp(self.as_slice(), other.as_slice())
     }
 }
 
-impl<T: Ord> Ord for Vec<T> {
-    fn cmp(&self, other: &Vec<T>) -> Ordering {
+impl<T: Ord, A: Allocator> Ord for Vec<T, A> {
+    fn cmp(&self, other: &Self) -> Ordering {
         crate::slice::slice_cmp(self.as_slice(), other.as_slice())
     }
 }
 
-impl<T> AsRef<Vec<T>> for Vec<T> {
-    fn as_ref(&self) -> &Vec<T> {
+impl<T, A: Allocator> AsRef<Vec<T, A>> for Vec<T, A> {
+    fn as_ref(&self) -> &Vec<T, A> {
         self
     }
 }
-impl<T> AsMut<Vec<T>> for Vec<T> {
-    fn as_mut(&mut self) -> &mut Vec<T> {
+impl<T, A: Allocator> AsMut<Vec<T, A>> for Vec<T, A> {
+    fn as_mut(&mut self) -> &mut Vec<T, A> {
         self
     }
 }
-impl<T> AsRef<[T]> for Vec<T> {
+impl<T, A: Allocator> AsRef<[T]> for Vec<T, A> {
     fn as_ref(&self) -> &[T] {
         self
     }
 }
-impl<T> AsMut<[T]> for Vec<T> {
+impl<T, A: Allocator> AsMut<[T]> for Vec<T, A> {
     fn as_mut(&mut self) -> &mut [T] {
         self
     }
 }
-impl<T> Borrow<[T]> for Vec<T> {
+impl<T, A: Allocator> Borrow<[T]> for Vec<T, A> {
     fn borrow(&self) -> &[T] {
         &self[..]
     }
 }
-impl<T> BorrowMut<[T]> for Vec<T> {
+impl<T, A: Allocator> BorrowMut<[T]> for Vec<T, A> {
     fn borrow_mut(&mut self) -> &mut [T] {
         &mut self[..]
     }
@@ -1037,7 +1163,7 @@ impl<'a, T: Clone> From<&'a mut [T]> for Vec<T> {
 impl<T, const N: usize> From<[T; N]> for Vec<T> {
     fn from(s: [T; N]) -> Vec<T> {
         let mut v = Vec::with_capacity(N);
-        let s = crate::mem::ManuallyDrop::new(s);
+        let s = ManuallyDrop::new(s);
         unsafe {
             im::copy_nonoverlapping(&*s as *const [T; N] as *const T, v.ptr.as_ptr(), N);
             v.len = N;
@@ -1063,13 +1189,13 @@ impl<'a, T: Clone> From<Cow<'a, [T]>> for Vec<T> {
         s.into_owned()
     }
 }
-impl<T> From<crate::boxed::Box<[T]>> for Vec<T> {
-    fn from(s: crate::boxed::Box<[T]>) -> Vec<T> {
+impl<T, A: Allocator> From<Box<[T], A>> for Vec<T, A> {
+    fn from(s: Box<[T], A>) -> Vec<T, A> {
         s.into_vec()
     }
 }
-impl<T> From<Vec<T>> for crate::boxed::Box<[T]> {
-    fn from(v: Vec<T>) -> crate::boxed::Box<[T]> {
+impl<T, A: Allocator> From<Vec<T, A>> for Box<[T], A> {
+    fn from(v: Vec<T, A>) -> Box<[T], A> {
         v.into_boxed_slice()
     }
 }
@@ -1115,7 +1241,7 @@ impl<T> FromIterator<T> for Vec<T> {
     }
 }
 
-impl<T> Vec<T> {
+impl<T, A: Allocator> Vec<T, A> {
     /// Real alloc's extend_trusted, for a TrustedLen iterator of exactly `n` items (its upper size
     /// hint): one reserve, then writes through a raw pointer with the length in a local (no
     /// capacity check per item). A short iterator just ends early.
@@ -1143,7 +1269,7 @@ fn is_slice_iter<I, T>() -> bool {
     }
 }
 
-impl<T> Extend<T> for Vec<T> {
+impl<T, A: Allocator> Extend<T> for Vec<T, A> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         let mut iter = iter.into_iter();
         // real alloc's SpecExtend: a TrustedLen iterator takes extend_trusted (its size hint is
@@ -1175,7 +1301,7 @@ impl<T> Extend<T> for Vec<T> {
     }
 }
 
-impl<'a, T: Copy + 'a> Extend<&'a T> for Vec<T> {
+impl<'a, T: Copy + 'a, A: Allocator> Extend<&'a T> for Vec<T, A> {
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         let mut iter = iter.into_iter();
         if is_slice_iter::<I::IntoIter, T>() {
@@ -1206,15 +1332,15 @@ impl<'a, T: Copy + 'a> Extend<&'a T> for Vec<T> {
     }
 }
 
-impl<T> IntoIterator for Vec<T> {
+impl<T, A: Allocator> IntoIterator for Vec<T, A> {
     type Item = T;
-    type IntoIter = IntoIter<T>;
-    fn into_iter(self) -> IntoIter<T> {
+    type IntoIter = IntoIter<T, A>;
+    fn into_iter(self) -> IntoIter<T, A> {
         into_iter::new(self)
     }
 }
 
-impl<'a, T> IntoIterator for &'a Vec<T> {
+impl<'a, T, A: Allocator> IntoIterator for &'a Vec<T, A> {
     type Item = &'a T;
     type IntoIter = crate::slice::Iter<'a, T>;
     fn into_iter(self) -> crate::slice::Iter<'a, T> {
@@ -1222,7 +1348,7 @@ impl<'a, T> IntoIterator for &'a Vec<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut Vec<T> {
+impl<'a, T, A: Allocator> IntoIterator for &'a mut Vec<T, A> {
     type Item = &'a mut T;
     type IntoIter = crate::slice::IterMut<'a, T>;
     fn into_iter(self) -> crate::slice::IterMut<'a, T> {
@@ -1230,30 +1356,28 @@ impl<'a, T> IntoIterator for &'a mut Vec<T> {
     }
 }
 
-impl<T, const N: usize> TryFrom<Vec<T>> for [T; N] {
-    type Error = Vec<T>;
-    fn try_from(vec: Vec<T>) -> Result<[T; N], Vec<T>> {
+impl<T, A: Allocator, const N: usize> TryFrom<Vec<T, A>> for [T; N] {
+    type Error = Vec<T, A>;
+    fn try_from(vec: Vec<T, A>) -> Result<[T; N], Vec<T, A>> {
         if vec.len() != N {
             return Err(vec);
         }
-        let me = crate::mem::ManuallyDrop::new(vec);
-        let arr = unsafe { im::ptr_read(me.ptr.as_ptr() as *const [T; N]) };
-        if !is_zst::<T>() && me.cap.get() != 0 {
-            heap::free(me.ptr.as_ptr() as *mut u8, Vec::<T>::current_layout(me.cap.get()));
-        }
-        Ok(arr)
+        // the elements move out; the Vec's drop frees the buffer only (and drops its allocator)
+        let mut vec = vec;
+        unsafe { vec.set_len(0) };
+        Ok(unsafe { im::ptr_read(vec.ptr.as_ptr() as *const [T; N]) })
     }
 }
 
 /// dedup_by's panic guard (real alloc's FillGapOnDrop): moves the unchecked tail `[read..len)` down
 /// over the dropped gap `[write..read)` and shortens the Vec.
-struct DedupGap<'a, T> {
+struct DedupGap<'a, T, A: Allocator> {
     read: usize,
     write: usize,
-    vec: &'a mut Vec<T>,
+    vec: &'a mut Vec<T, A>,
 }
 
-impl<'a, T> Drop for DedupGap<'a, T> {
+impl<'a, T, A: Allocator> Drop for DedupGap<'a, T, A> {
     fn drop(&mut self) {
         unsafe {
             let ptr = self.vec.ptr.as_ptr();
@@ -1280,10 +1404,10 @@ impl<'a, 'b, T: Copy + 'a, I: Iterator<Item = &'a T>> Iterator for CopiedRefs<'b
     }
 }
 
-impl<T, const N: usize> Vec<[T; N]> {
+impl<T, A: Allocator, const N: usize> Vec<[T; N], A> {
     /// The arrays' elements as one Vec, in place (real alloc's into_flattened).
-    pub fn into_flattened(self) -> Vec<T> {
-        let (ptr, len, cap) = self.into_raw_parts();
+    pub fn into_flattened(self) -> Vec<T, A> {
+        let (ptr, len, cap, alloc) = self.into_raw_parts_with_allocator();
         let (new_len, new_cap) = if crate::mem::size_of::<T>() == 0 {
             match len.checked_mul(N) {
                 Some(l) => (l, usize::MAX),
@@ -1292,6 +1416,6 @@ impl<T, const N: usize> Vec<[T; N]> {
         } else {
             (len * N, cap * N)
         };
-        unsafe { Vec::from_raw_parts(ptr as *mut T, new_len, new_cap) }
+        unsafe { Vec::from_raw_parts_in(ptr as *mut T, new_len, new_cap, alloc) }
     }
 }

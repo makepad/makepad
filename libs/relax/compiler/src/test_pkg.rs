@@ -16,11 +16,13 @@
 //! default), `release` with `--release`, another with `--profile <name>` (run.rs `--profile`,
 //! resolve.rs `profile`). Before, every test ran release (relax issue 141).
 
-pub fn cmd_test_package(args: &[String]) -> i32 {
+pub fn cmd_test_package(args: &[String], grants: &[String]) -> i32 {
     stop::install();
-    // Loader options go before each run's package; feature flags go after it.
+    // Loader options go before each run's package; feature flags go after it. This invocation's
+    // grants (`--allow-*`, which the session took out of `args`) are each run's: words of its
+    // command line (options.rs GRANTS).
     let mut i = 0;
-    let mut pre: Vec<String> = Vec::new();
+    let mut pre: Vec<String> = grants.to_vec();
     let mut flags: Vec<String> = Vec::new();
     let mut feature_flags: Vec<String> = Vec::new();
     let mut live = false;
@@ -206,7 +208,7 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
     }
     let sess = std::sync::Arc::new(crate::Session::default());
     let live_default = live && !lib && bins.is_none() && tests.is_none();
-    let crate::resolve::TestTargets { lib: has_lib, bins: bin_targets, tests: targets, examples: example_targets, all_examples: every_example } = match crate::resolve::test_targets(&sess, &crate::run::workspace_dir(), &package,
+    let crate::resolve::TestTargets { lib: has_lib, bins: bin_targets, tests: targets, examples: example_targets, all_bins: every_bin, all_examples: every_example } = match crate::resolve::test_targets(&sess, &crate::run::workspace_dir(), &package,
         &feature_flags, bins.as_deref().unwrap_or_default(), tests.as_deref().unwrap_or_default(), examples.as_deref().unwrap_or_default()) {
         Ok(t) => t,
         Err(e) => {
@@ -308,6 +310,26 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
         }
     }
     let _launches = Launches;
+    // cargo builds every bin of the package beside an integration test (its CARGO_BIN_EXE_<name>),
+    // and a bin rustc rejects fails `cargo test --test <name>`. A test starts the bin with
+    // `makepad run --unattended`, which checks types before it runs and borrows only lazily
+    // beside it, and a bin no test starts is never checked at all: each bin is checked here as
+    // `makepad check` checks it, in a process of its own beside the runs, and its errors fail the
+    // command at its end, as a path dependency's do (check.rs start_test_deps). The bins are no
+    // crates of the test program.
+    let runs_tests = tests.as_ref().is_some_and(|names| targets.iter().any(|t| names.is_empty() || names.contains(&t.0)));
+    let mut bin_checks = BinChecks(Vec::new());
+    if runs_tests && !live {
+        for (name, _, _) in &every_bin {
+            match start_bin_check(&exe, &profile, &pre, &package, name, &flags) {
+                Ok(child) => bin_checks.0.push(BinCheck { name: name.clone(), child: Some(child), t0: std::time::Instant::now() }),
+                Err(e) => {
+                    eprintln!("relax test: starting the check of bin `{name}`: {e}");
+                    return 101;
+                }
+            }
+        }
+    }
     for run in runs {
         let mut a: Vec<String> = vec!["run".to_string()];
         match &run {
@@ -369,6 +391,10 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
             code = 101;
         }
     }
+    if finish_bin_checks(&mut bin_checks, &package, pre.iter().any(|w| w == "--verbose")) {
+        code = 101;
+    }
+    if let Some(sig) = stop::signalled() { return 128 + sig; }
     if unmatched && !matched {
         eprintln!("error: no test matched {}", prog.join(" "));
         return makepad_remote::hot::NO_TESTS_EXIT;
@@ -384,6 +410,105 @@ pub fn cmd_test_package(args: &[String]) -> i32 {
         }
     }
     code
+}
+
+/// The checks of the package's bins beside the runs (start_bin_check). A return before their
+/// join (finish_bin_checks) ends them with the command.
+struct BinChecks(Vec<BinCheck>);
+
+struct BinCheck {
+    name: String,
+    child: Option<std::process::Child>,
+    t0: std::time::Instant,
+}
+
+impl Drop for BinChecks {
+    fn drop(&mut self) {
+        for c in &mut self.0 {
+            let Some(mut child) = c.child.take() else { continue };
+            // the check leads a process group of its own (start_bin_check)
+            #[cfg(unix)]
+            crate::reload::host::end_group(child.id());
+            #[cfg(not(unix))]
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// `makepad check --root-only <package> --bin <bin>` with the runs' profile, loader options and
+/// feature flags: the bin crate's bodies type- and borrow-checked as rustc builds the bin, the
+/// crates under it read for their items only. Its output is kept for finish_bin_checks.
+fn start_bin_check(exe: &std::path::Path, profile: &str, pre: &[String], package: &str, bin: &str, flags: &[String]) -> std::io::Result<std::process::Child> {
+    let mut a: Vec<String> = ["check", "--no-serve", "--root-only", "--profile", profile].iter().map(|w| w.to_string()).collect();
+    // the runs' loader options, but a report and the run's own words (finish_bin_checks says
+    // what the check found)
+    let mut words = pre.iter();
+    while let Some(w) = words.next() {
+        match w.as_str() {
+            "--report-to" => { words.next(); }
+            "--verbose" | "--quiet" | "--silent" => {}
+            _ => a.push(w.clone()),
+        }
+    }
+    a.extend([package.to_string(), "--bin".to_string(), bin.to_string()]);
+    // what the runs take after the package that the build of the bin depends on
+    let mut words = flags.iter();
+    while let Some(w) = words.next() {
+        if matches!(w.as_str(), "--cfg" | "--features" | "-F") {
+            a.push(w.clone());
+            a.extend(words.next().cloned());
+        } else if is_feature_flag(w) || matches!(w.as_str(), "--offline" | "--frozen") {
+            a.push(w.clone());
+        }
+    }
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(&a).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    cmd.spawn()
+}
+
+/// Waits for the bins' checks and prints what they found, rustc's way: their diagnostics, and a
+/// bin with errors as cargo names one it could not build. True: a bin did not pass.
+fn finish_bin_checks(checks: &mut BinChecks, package: &str, verbose: bool) -> bool {
+    let mut failed = false;
+    for c in &mut checks.0 {
+        let Some(child) = c.child.take() else { continue };
+        let t_join = std::time::Instant::now();
+        // a signal now ends the check (its group), as it ends a run
+        stop::started(child.id());
+        let out = child.wait_with_output();
+        stop::ended();
+        let (status, text) = match out {
+            Ok(o) => (o.status.code(), format!("{}{}", String::from_utf8_lossy(&o.stderr), String::from_utf8_lossy(&o.stdout))),
+            Err(e) => (None, format!("relax test: waiting for the check of bin `{}`: {e}\n", c.name)),
+        };
+        if stop::signalled().is_some() { return true; }
+        // the check's own lines (counts, timings) are Relax's, not the bin's
+        let own = |l: &str| l.starts_with("relax ") || l.starts_with("relax:");
+        let mut errors = None;
+        for l in text.lines() {
+            if verbose || !own(l) {
+                eprintln!("{l}");
+            }
+            if let Some(r) = l.strip_prefix("relax check: ").filter(|r| r.contains(" body owners of the checked crates, ")) {
+                errors = r.strip_suffix(" errors").and_then(|r| r.rsplit(' ').next()).and_then(|n| n.parse::<usize>().ok());
+            }
+        }
+        if verbose {
+            eprintln!("relax test: bin `{}` checked beside the runs: done {:.0} ms after its start, the end waited {:.0} ms for it", c.name, c.t0.elapsed().as_secs_f64() * 1e3, t_join.elapsed().as_secs_f64() * 1e3);
+        }
+        if status == Some(0) { continue; }
+        failed = true;
+        match errors.filter(|&n| n > 0) {
+            Some(n) => eprintln!("error: could not compile `{package}` (bin \"{}\") due to {n} previous error{} (`{tool} test` checks the package's bins as cargo builds them beside its integration tests)",
+                c.name, if n == 1 { "" } else { "s" }, tool = crate::tool_name()),
+            None => eprintln!("error: could not check bin `{}` of `{package}`: `{tool} check` exited with {}", c.name,
+                status.map_or("a signal".to_string(), |s| format!("status {s}")), tool = crate::tool_name()),
+        }
+    }
+    failed
 }
 
 /// A signal that ends `makepad test` (a driver's terminate: SIGTERM; SIGINT, SIGHUP) ends the

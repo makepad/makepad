@@ -10,12 +10,12 @@ repository = "https://github.com/makepad/makepad/"
 [dependencies]
 relax-api-macro = { path = "macro", version = "1.0.0" }
 # the host shims' run and kept guards (run_op, host_op, process_heap)
-makepad-alloc-phase = { path = "phase", version = "1.0.0", optional = true }
+relax-api-phase = { path = "phase", version = "1.0.0", optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 # sync's Mutex and Condvar on Apple's platforms
-makepad-alloc-phase = { path = "phase", version = "1.0.0" }
+relax-api-phase = { path = "phase", version = "1.0.0" }
 
 [features]
 # entries(): the table reader (only the `makepad` loader enables it)
-host-shims = ["dep:makepad-alloc-phase"]
+host-shims = ["dep:relax-api-phase"]

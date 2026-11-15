@@ -518,14 +518,11 @@ impl Renderer {
         // the foliage/PBR lanes' layout: the lane swaps only the shader id
         // for that layer. Without it (the diffuse lane, or before its
         // pipeline exists) the model draws its own layers at every distance:
-        // the stand-in's quad is not a picture on its own. Its pipelines are built when a resident
-        // model has a stand-in.
+        // the stand-in's quad is not a picture on its own. The frame builds
+        // it as soon as a resident model has a stand-in (realm.rs
+        // `prepare_impostor_lane`).
         let lane_shader = draw.base().draw_vars.draw_shader_id;
-        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) && self.a_resident_layer(|s| s.definition.impostor > 0.0) {
-            self.lane_shaders(cx.cx, variants::ModelLane::Impostor, None).0.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
-        } else {
-            None
-        };
+        let impostor_shader = if matches!(draw, ModelDraw::Foliage(_) | ModelDraw::Pbr(_)) { self.impostor_shader } else { None };
         let impostor_scale = self.impostor_scale;
         let terrain_blend_reach = self.terrain_blend_reach;
         let occluder_focus = self.occluder.focus();
@@ -932,7 +929,10 @@ impl Renderer {
                 // A static copy's own layers take no shadow from its stand-in,
                 // which casts for it past the first cascade (shaders/csm.rs
                 // `csm_own_limit`); a mover casts its own layers everywhere.
-                let own = match root.stand_in { Some(c) if !stand_in && !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
+                // The stand-in itself never takes its own shadow either, so
+                // mesh and stand-in agree where one takes over from the other
+                // (shaders/impostor.rs).
+                let own = match root.stand_in { Some(c) if stand_in || !dynamic => [c.x, c.y, c.z, 1.0], _ => [0.0; 4] };
                 draw.base().draw_vars.set_uniform(cx.cx, live_id!(csm_own), &own);
                 draw.base().draw_vars.set_texture(0, texture);
                 // A painted tile's slot 0 is its layers' albedo array; a
@@ -1405,7 +1405,7 @@ impl Renderer {
                     } => format!(
                         "VecMipBGRAu8_32({width}x{height}, texels={}, first={:#010x}, \
                          max_level={max_level:?}, wrap={wrap:?}, {updated:?})",
-                        data.as_ref().map_or(0, Vec::len),
+                        data.as_ref().map_or(0, |data| data.len()),
                         data.as_ref()
                             .and_then(|pixels| pixels.first())
                             .copied()

@@ -8,6 +8,7 @@ pub mod cx_3d;
 pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
+pub mod glyph_capture;
 pub mod image_cache;
 pub mod match_event;
 pub mod nav;
@@ -29,6 +30,10 @@ pub use crate::{
     cx_3d::Cx3d,
     cx_draw::CxDraw,
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
+    glyph_capture::{
+        CapturedFace, CapturedGlyph, CapturedPictured, CapturedRow, CapturedText, GlyphCapture, OutlineGlyph,
+        PicturedText,
+    },
     image_cache::{
         decode_image_from_data, evict_image_from_cache, handle_image_cache_network_responses,
         has_enough_pixels, image_size_by_data, is_animated_image, is_decoding_image,
@@ -54,7 +59,7 @@ pub use crate::{
         draw_pbr::DrawPbrMaterialState, draw_pbr::DrawPbrRefractive, draw_pbr::DrawPbrTextureSet,
         draw_nv12::DrawNv12, draw_quad::DrawAffineQuad, draw_quad::DrawCachedQuad, draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
-        draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::PreparedTextRun,
+        draw_svg_glyph::DrawSvgGlyph, draw_text::stock_text_shader, draw_text::DrawText, draw_text::PreparedTextRun,
         draw_text::TextStyle, draw_text_3d::DrawText3d,
         draw_vector::{DrawVector, FeatherSide},
     },

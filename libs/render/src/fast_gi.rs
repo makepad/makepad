@@ -710,6 +710,10 @@ impl FastGi {
         }
     }
 
+    /// Make the screen AO's draws before its first run (see `SsaoPass::prepare_draws`).
+    pub(crate) fn prepare_screen_ao_draws(&mut self,cx:&mut Cx)->bool { self.ao.pass.prepare_draws(cx) }
+    pub(crate) fn screen_ao_draws_ready(&self)->bool { self.ao.pass.draws_ready() }
+
     /// Run SSAO over `depth` (the scene pass's hardware depth, holding the
     /// PREVIOUS frame) as child passes of `scene_pass`, at half resolution;
     /// returns the (ao, view distance) target. The scene pass's camera

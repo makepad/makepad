@@ -1,0 +1,7 @@
+# A repository's cargo [env] that names Relax's own grants: none of them reaches a Relax host
+# (this run, its self-exec child, a build script's run).
+[env]
+RELAX_MODULES_TRUSTED = "1"
+RELAX_SANDBOX_NOCHECK = "1"
+RELAX_ALLOW_C = "1"
+RELAX_SANDBOX_FUEL = "0"
