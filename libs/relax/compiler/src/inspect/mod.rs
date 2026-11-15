@@ -1,7 +1,7 @@
-//! makepad inspect: a running program answers questions about itself (local/agent_state/fast-rust/
-//! inspect/DESIGN.md). One thread per `makepad run` listens on a Unix socket next to a discovery file
-//! in the temp dir; a client (`makepad inspect <pid|app|all> <command>`, or any agent speaking the
-//! line protocol) sends one request per line and reads JSON lines back, ending with an `end` line.
+//! makepad inspect: a running program answers questions about itself. One thread per `makepad run`
+//! listens on a Unix socket next to a discovery file in the temp dir; a client (`makepad inspect
+//! <pid|app|all> <command>`, or any agent speaking the line protocol) sends one request per line
+//! and reads JSON lines back, ending with an `end` line.
 //!
 //! The basics never need the owner thread: thread lists and stacks come from the OS and the code
 //! tables, waits from the lock-free wait registry, events from this module's own queue. Only names
@@ -251,7 +251,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("pause", "", "stops the program's threads (Relax's and inspect's keep running); stacks work while paused"),
     ("resume", "", "after pause: the program runs again (`resume P<n> panic` releases a parked panic)"),
     ("gpu", "[top [by=bytes|owner|site|churn] [n=15]|idle [frames=1800] [n=15]|snap <name>|diff <a> <b|now>|path <session>:<kind>:<index>:<generation>]", "HAL GPU memory: totals per session, kind and owner against the device (native apps: MAKEPAD_INSPECT=1 or MAKEPAD_REMOTE=1)"),
-    ("hal", "pump|pace", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing"),
+    ("hal", "pump|pace|lose", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none); pace: the WM-hosted shell's frame pacing; lose: the GPU device is taken for lost, as a driver reset would (the run and the app recover on a new one)"),
     ("writes", "<Type::field> | (none: the watches) | W<n> [n=20] | rm <W<n>|all>", "who writes a struct field: the compiled fns that assign `x.field` (`=`, `op=`) are rebuilt to record every write: its site (fn, file:line), the value written and the field's address; `writes W<n>` reads the sites and the latest writes"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
     ("live", "[after=<next>]", "an instant look for live graphs (no window, no sleep), one JSON line: now_ms, frames presented, live patches installed and the ones the newest presented window frame was built with (frame_patch), finished builds so far per kind (lazy, ahead, o2, o3, linked; diff two looks for a rate), queues [ahead,o2,o3], UI ms waited on the JIT; with after=<the last answer's next>: the UI frames since then (the last minute at most) as ft [[ms before now_ms the frame ended, ms it worked], ...]"),
@@ -1946,7 +1946,7 @@ fn serve_program_service(endpoint: &makepad_remote::Endpoint, name: &str, versio
             let ch = opened.channel;
             let service = active.clone();
             { let _k = crate::zone_alloc::kept();
-            if let Err(e) = std::thread::Builder::new().name("makepad-remote-service".into()).spawn(move || {
+            if let Err(e) = std::thread::Builder::new().name("run-inspect-service".into()).spawn(move || {
                 while let Some(ev) = ch.recv() {
                     if matches!(ev, makepad_remote::Event::Closed(..)) {
                         break;

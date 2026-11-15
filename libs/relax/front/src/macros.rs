@@ -3578,7 +3578,9 @@ impl<'a> Parser<'a> {
                     }),
                     // `...` is no type start (rustc Token::can_begin_type): only a C-variadic parameter
                     Frag::Ty if k == T::DotDotDot => Err(crate::parser::PErr { pos: self.toks.at(i).lo, msg: "expected a type".to_string() }),
-                    Frag::Ty => self.ty().map(|_| ()),
+                    // rustc_parse nonterminal.rs: `ty` is parse_ty_no_question_mark_recover, `+`
+                    // bounds allowed (a bare `Display + Send` is one type)
+                    Frag::Ty => self.ty_plus().map(|_| ()),
                     Frag::Pat => self.pat_top().map(|_| ()),
                     Frag::PatParam => self.pat_no_or().map(|_| ()),
                     Frag::Path => self.path(false).map(|_| ()),
@@ -3968,6 +3970,13 @@ impl<'a> Parser<'a> {
                             // a path inside a type-macro call subsequently matched as tt.
                             if let Some((end, flags)) = self.fragment_group(t.lo) {
                                 groups.push((end, out.start(t.kind, &text, Some(t.lo)), flags));
+                            } else if let Some(&kind) = self.meta_frags.get(&{ t.lo }) {
+                                // a one-token expression or literal inside the copy stays one: its
+                                // kind, and a proc macro's invisible group (builtins.rs
+                                // group_fragments; const_format's `__str_const!` passes on the block
+                                // holding `formatcp!`'s `"b"` argument)
+                                let kind = if kind == "expr" { EXPR_FRAG } else { LIT_FRAG };
+                                groups.push((t.hi, out.start(t.kind, &text, Some(t.lo)), kind | META_ONLY));
                             }
                             out.push(t.kind, &text, Some(t.lo), u32::MAX);
                             while groups.last().is_some_and(|&(end, _, _)| end == t.hi) {

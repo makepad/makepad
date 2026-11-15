@@ -195,6 +195,26 @@ impl Slice {
     pub fn offset(&self, line: usize, byte: usize) -> usize {
         self.line_starts[line - self.first_line] + byte
     }
+
+    /// The text as the parser reads it while the formula on `held`'s lines
+    /// is edited: each blank line inside it, which would end the paragraph
+    /// and so the formula, ends in `.` instead of a line break, so the
+    /// formula parses whole at the same offsets. `None` when no blank line
+    /// of the slice is inside it.
+    fn joined(&self, held: Option<&Range<usize>>) -> Option<String> {
+        let held = held?;
+        let inner = (held.start + 1).max(self.first_line)..held.end.saturating_sub(1).min(self.first_line + self.line_count());
+        let mut text: Option<Vec<u8>> = None;
+        for line in inner {
+            let at = line - self.first_line;
+            let (start, end) = (self.line_starts[at], self.line_starts[at + 1] - 1);
+            if self.text[start..end].trim_matches([' ', '\t']).is_empty() {
+                text.get_or_insert_with(|| self.text.as_bytes().to_vec())[end] = b'.';
+            }
+        }
+        // only a `\n` became a `.`: still UTF-8
+        text.map(|bytes| String::from_utf8(bytes).unwrap_or_default())
+    }
 }
 
 /// Normalises a link or footnote label the way the parser compares them:
@@ -233,7 +253,7 @@ pub fn front_matter_end(lines: &[String]) -> Option<usize> {
 /// into blocks with absolute start lines. Every `[^label]` counts as a
 /// footnote reference here, so a block's references do not depend on the
 /// definitions elsewhere in the document.
-fn parse_window(lines: &[String], range: Range<usize>) -> Vec<Block> {
+fn parse_window(lines: &[String], range: Range<usize>, held: Option<&Range<usize>>) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut start = range.start;
     if start == 0 {
@@ -253,7 +273,8 @@ fn parse_window(lines: &[String], range: Range<usize>) -> Vec<Block> {
     }
     let first_new = blocks.len();
     let slice = Slice::new(lines, start..range.end);
-    let mut parser = Parser::new_ext(&slice.text, parse_options());
+    let joined = slice.joined(held);
+    let mut parser = Parser::new_ext(joined.as_deref().unwrap_or(&slice.text), parse_options());
     parser.assume_footnote_labels_defined();
     let mut iter = parser.into_offset_iter();
     let mut depth = 0usize;
@@ -399,6 +420,8 @@ pub struct Index {
     /// The number of each defined label: in order of first reference, then
     /// the unreferenced ones in order of definition.
     footnote_numbers: HashMap<String, usize>,
+    /// The lines of the formula being edited (see [`Index::hold`]).
+    held: Option<Range<usize>>,
 }
 
 impl Index {
@@ -412,6 +435,7 @@ impl Index {
             links: HashMap::new(),
             footnotes: Vec::new(),
             footnote_numbers: HashMap::new(),
+            held: None,
         };
         index.rebuild(lines);
         index
@@ -423,7 +447,7 @@ impl Index {
         self.blocks = if lines.is_empty() {
             Vec::new()
         } else {
-            parse_window(lines, 0..lines.len())
+            parse_window(lines, 0..lines.len(), self.held.as_ref())
         };
         for block in &mut self.blocks {
             block.gen = self.next_gen;
@@ -567,11 +591,49 @@ impl Index {
     /// Parses a slice of the document the way the index sees it: links
     /// resolve through the document's reference definitions and footnote
     /// references through its footnote labels.
+    /// A blank line inside a held formula does not end it (see [`Index::hold`]).
     pub fn parse_slice<'s>(&self, slice: &'s Slice) -> Vec<(Event<'s>, Range<usize>)> {
-        let mut parser =
-            Parser::new_with_broken_link_callback(&slice.text, parse_options(), Some(self.resolve()));
+        match slice.joined(self.held.as_ref()) {
+            Some(joined) => self.parse_text(&joined).into_iter().map(|(event, range)| (event.into_static(), range)).collect(),
+            None => self.parse_text(&slice.text),
+        }
+    }
+
+    fn parse_text<'s>(&self, text: &'s str) -> Vec<(Event<'s>, Range<usize>)> {
+        let mut parser = Parser::new_with_broken_link_callback(text, parse_options(), Some(self.resolve()));
         parser.declare_footnote_labels(self.footnotes.iter().map(String::as_str));
         parser.into_offset_iter().collect()
+    }
+
+    /// The lines of the formula held together, end exclusive.
+    pub fn held(&self) -> Option<Range<usize>> {
+        self.held.clone()
+    }
+
+    /// Holds the formula on `held`'s lines (end exclusive) together while
+    /// it is edited: a blank line inside it, which an Enter in its source
+    /// leaves until text is typed there, does not end the paragraph and so
+    /// split the formula; edits move the hold with its lines. `None` lets
+    /// go: the lines parse as they read again. Reparses what the change of
+    /// hold changes, as an edit there would.
+    pub fn hold(&mut self, lines: &[String], held: Option<Range<usize>>) -> Option<Splice> {
+        if held == self.held {
+            return None;
+        }
+        let blank_inside = |held: &Option<Range<usize>>| {
+            held.as_ref().is_some_and(|held| {
+                lines.get(held.start + 1..held.end.saturating_sub(1).max(held.start + 1)).is_some_and(|inner| {
+                    inner.iter().any(|line| line.trim_matches([' ', '\t']).is_empty())
+                })
+            })
+        };
+        let edits: Vec<LineEdit> = [&self.held, &held]
+            .into_iter()
+            .filter(|held| blank_inside(held))
+            .filter_map(|held| held.as_ref().map(|held| LineEdit { line: held.start, removed: 0, added: 0 }))
+            .collect();
+        self.held = held;
+        self.apply(lines, &edits)
     }
 
     /// Parses Markdown cut from the document (a copy) as the document
@@ -614,6 +676,13 @@ impl Index {
                     line - edit.removed + edit.added
                 }
             };
+            // Lines added or removed inside the held formula are its own.
+            if let Some(held) = &mut self.held {
+                let last = held.end.saturating_sub(1);
+                let last = if last >= edit.line { (last + edit.added).saturating_sub(edit.removed).max(edit.line) } else { last };
+                held.start = map(held.start);
+                held.end = last.max(held.start) + 1;
+            }
             let touched = (edit.line, edit.line + edit.added);
             dirty = Some(match dirty {
                 None => touched,
@@ -680,7 +749,7 @@ impl Index {
             } else {
                 self.blocks[end_block].start
             };
-            let parsed = parse_window(lines, window_start..window_end);
+            let parsed = parse_window(lines, window_start..window_end, self.held.as_ref());
             let resync = (guard..end_block).find(|&candidate| {
                 let line = self.blocks[candidate].start;
                 parsed

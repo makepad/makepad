@@ -1,0 +1,6 @@
+# Two modules a lazy load brings in one at a time, each importing a dependency's re-export of a
+# proc macro beside a path through that dependency (tools/run/fixture/modules_harness.rs).
+# `cargo run -p lmi-app` prints `2 3`.
+[workspace]
+members = ["mac", "dep", "app"]
+resolver = "2"

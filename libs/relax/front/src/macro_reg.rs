@@ -57,7 +57,7 @@ pub struct UnitInfo {
     pub proc_macro: bool,
     pub harness: bool,
     /// a registry/git package (CrateUnit::registry): third-party, its macros confined under
-    /// pmhost::Policy::Sandboxed
+    /// sandbox::Policy::Sandboxed
     pub registry: bool,
     pub cfgs: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -356,7 +356,13 @@ pub fn call_krate_env(key: &str) -> Option<String> {
             _ => None,
         }
     });
-    own.or_else(|| crate::crates::config_env_value(key))
+    own.or_else(|| {
+        // cargo's `[env]`: a checkout's configuration, in no key; noted as the crate's late input
+        // (present or absent: another checkout may set it), checked by its stores' ledgers
+        let v = crate::crates::config_env_value(key);
+        crate::sip::note_late_input(&krate, crate::sip::LATE_CONFIG_ENV, key, v.as_deref().map(|x| x.as_bytes()));
+        v
+    })
 }
 
 /// The registry and the stats are process-wide: files parse on worker threads too.
@@ -581,8 +587,8 @@ fn merged_host_units_keep_features_and_dependencies() {
         unit("target_helper", "lib", false, &[], &[]),
         unit("shared", "lib", true, &["full", "visit"], &[(5, "host_helper")]),
         unit("host_helper", "lib", true, &["walk"], &[]),
-    ], roots: vec![0], bins: Vec::new() };
-    let mut g = crate::unitgraph::load(&units, false).unwrap();
+    ], roots: vec![0], bins: Vec::new(), script: None };
+    let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let saved = REG.with(|r| r.borrow_mut().take());
     register_and_strip(sess, &mut g.crates, &dir, false).unwrap();
@@ -593,7 +599,7 @@ fn merged_host_units_keep_features_and_dependencies() {
     let helper = g.crates.iter().find(|u| u.name == "host_helper").unwrap();
     assert_eq!(helper.src_path, format!("{dir}/proc_macro/empty.rs"));
     // Re-registering the original graph matches the host feature set, not the app's.
-    let again = crate::unitgraph::load(&units, false).unwrap();
+    let again = crate::unitgraph::load(&units, false, false).unwrap();
     register(sess, &again.crates, &dir, true).unwrap();
     REG.with(|r| {
         let r = r.borrow();
@@ -664,8 +670,8 @@ fn a_crate_only_a_build_script_links_is_no_root_of_the_app() {
         unit("codegen", "lib", "build", "src/lib.rs", true, &[], &[(5, "generator")]),
         unit("generator", "lib", "build", "src/lib.rs", true, &[], &[(6, "rand")]),
         unit("rand", "lib", "build", "src/lib.rs", true, &["small_rng", "std"], &[]),
-    ], roots: vec![0], bins: Vec::new() };
-    let mut g = crate::unitgraph::load(&units, false).unwrap();
+    ], roots: vec![0], bins: Vec::new(), script: None };
+    let mut g = crate::unitgraph::load(&units, false, false).unwrap();
     let sess = &std::sync::Arc::new(crate::Session::default());
     let saved = REG.with(|r| r.borrow_mut().take());
     register_and_strip(sess, &mut g.crates, &dir, false).unwrap();

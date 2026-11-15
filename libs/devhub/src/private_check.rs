@@ -91,7 +91,7 @@ pub fn merge_gate(root: &Path, base: &str, sha: &str, tree: &str) -> Result<(), 
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String, Vec<String>> {
-    let out = Command::new("git").arg("-C").arg(root).args(args).output().map_err(|e| vec![format!("private check: git: {e}")])?;
+    let out = Command::new(crate::os::tool("git")).arg("-C").arg(root).args(args).output().map_err(|e| vec![format!("private check: git: {e}")])?;
     if !out.status.success() {
         return Err(vec![format!("private check: git {} failed: {}", args[0], String::from_utf8_lossy(&out.stderr).trim())]);
     }
@@ -138,7 +138,7 @@ pub fn scan_in(makepad_root: &Path) -> PathBuf {
 /// One scan.sh run over `input`; Ok holds its hit lines (none when clean).
 fn scan(staged: &Staged, root: &Path, mode: &str, input: &str) -> Result<Vec<String>, Vec<String>> {
     let script = staged.0.join("scan.sh");
-    let mut child = Command::new("sh")
+    let mut child = Command::new(crate::os::tool("sh"))
         .arg(&script)
         .arg(mode)
         .current_dir(root)

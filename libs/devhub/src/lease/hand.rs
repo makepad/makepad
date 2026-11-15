@@ -74,8 +74,8 @@ pub fn in_use_records() -> Vec<(u32, String)> {
     makepad_app_registry::machine::in_use_dir().map_or_else(Vec::new, |dir| records_in(&dir, &crate::procinfo::alive))
 }
 
-/// [`in_use_records`] of `dir`, `alive` telling a live pid.
-#[cfg(all(unix, any(test, feature = "checkout")))]
+/// [`in_use_records`] of `dir`, `alive` telling a live pid (plain files: its test runs on every OS).
+#[cfg(any(test, all(unix, feature = "checkout")))]
 fn records_in(dir: &std::path::Path, alive: &dyn Fn(u32) -> bool) -> Vec<(u32, String)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {

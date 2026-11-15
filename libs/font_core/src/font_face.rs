@@ -1,3 +1,7 @@
+use super::{
+    font::GlyphId,
+    glyph_outline::{self, GlyphOutline},
+};
 use makepad_shared_bytes::HostBuf;
 use std::{cell::RefCell, fmt, rc::Rc};
 use {rustybuzz, rustybuzz::ttf_parser};
@@ -234,6 +238,19 @@ impl FontFace {
 
         let ttf_cache = self.cached_ttf_face.borrow();
         f(ttf_cache.as_ref().unwrap())
+    }
+
+    /// The glyph's outline at this face's variations, in font units, with the same
+    /// CoreText fallback as screen text when the parser cannot read its outlines.
+    pub fn glyph_outline(&self, glyph_id: GlyphId, units_per_em: f32) -> Option<GlyphOutline> {
+        let outline = self.with_ttf_parser_face(|face| {
+            let mut builder = glyph_outline::Builder::new();
+            face.outline_glyph(ttf_parser::GlyphId(glyph_id), &mut builder)?;
+            builder.finish(units_per_em)
+        });
+        #[cfg(target_os = "macos")]
+        let outline = outline.or_else(|| self.coretext_glyph_outline(glyph_id, units_per_em));
+        outline
     }
 
     pub fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {

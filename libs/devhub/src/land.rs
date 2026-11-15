@@ -398,16 +398,13 @@ pub fn merge_onto(dir: &Path, base: &str, sha: &str, msg: &str) -> Result<String
 /// outside the files that conflict there: what its resolution changed that no conflict asked for.
 /// A merge made by hand from a tree merged against an older tip, committed with the newer tip as
 /// its parent and in the merge bot's form, reverted another lane's landing in three files this way
-/// (11-13). Err: git failed, or `merge` has not two parents.
-pub fn merge_strays(dir: &Path, merge: &str) -> Result<Vec<String>, String> {
-    let (ok, line) = git(dir, &["rev-list", "--parents", "-n", "1", merge]);
-    match line.split_whitespace().collect::<Vec<_>>().as_slice() {
-        [m, p1, p2] if ok => strays(dir, m, p1, p2),
-        _ => Err(format!("{merge:.10}: no merge of two parents")),
-    }
-}
-
+/// (11-13). Where each path's clean merge is the one side that changed it, it is read in process
+/// ([`crate::gitread::one_sided_strays`]); git's merge decides the rest (a path both sides
+/// changed, a criss-cross). Err: git failed.
 fn strays(dir: &Path, merge: &str, p1: &str, p2: &str) -> Result<Vec<String>, String> {
+    if let Some(files) = crate::gitread::one_sided_strays(dir, merge, p1, p2) {
+        return Ok(files);
+    }
     let (_, out) = git(dir, &["merge-tree", "--write-tree", "--name-only", "--no-messages", p1, p2]);
     let mut lines = out.lines();
     let clean = lines.next().unwrap_or("");
@@ -437,7 +434,7 @@ fn carries(repo: &Path, (ms, cs, cwt): (&str, &str, &str), path: &str, shipped: 
 }
 
 /// The merges a hand-in brings (`target..sha`) against their parents' clean merge
-/// ([`merge_strays`]), one merge-tree each. Err: a merge with files outside its conflicts that
+/// ([`strays`]). Err: a merge with files outside its conflicts that
 /// differ from that clean merge, which the branch has not changed again since by a commit of its
 /// own: a merge resolves its conflicts and nothing else, and a resolution past them is a commit
 /// of its own. Such a file the tip changed since the merge base is a landing the merge reverts;
@@ -1015,6 +1012,14 @@ impl Train {
                 }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
                 continue;
             }
+            // the protected-path rule (docs/agents/intake.md), on every landing
+            if let Err(why) = crate::intake::protect::check(r, &e.branch, &w0, &cm, &ms) {
+                self.set(e.id, |e| {
+                    e.state = St::Failed;
+                    e.detail = why.clone();
+                }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
+                continue;
+            }
             landed |= self.land_one(e.id, Attempt { ms, cs, cm, cc, w0, m0, halves });
         }
         if landed { self.sync_now(); }
@@ -1103,6 +1108,18 @@ impl Train {
                 e.detail = why.clone();
             }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
             return false;
+        }
+        if let Err(why) = crate::intake::protect::land_check(r, &branch, &w, &tm, ms) {
+            unlock();
+            self.set(id, |e| {
+                e.state = St::Failed;
+                e.detail = why.clone();
+            }, Some((Sev::Err, format!("land refused {label}: {}", why[0]))));
+            return false;
+        }
+        // the tripwire: agent-instruction files that changed since the last landing are said
+        if let Some(changed) = crate::intake::protect::tripwire_check(r, &tm) {
+            self.set(id, |_| {}, Some((Sev::Warn, format!("tripwire at {label}: {changed}"))));
         }
         // a marked change of the wire is said where everyone reads: the rolls restart the WMs on it
         let wire_note = if wire { wire_changed(r, &w, &tm).ok().filter(|f| !f.is_empty()).map_or(String::new(), |f| format!("; it changes the hosted wire ({})", f.join(" "))) } else { String::new() };
@@ -1338,14 +1355,17 @@ mod tests {
         let merge = |tree: &str, msg: &str| g(&["commit-tree", tree, "-p", &x, "-p", &w2, "-m", msg]);
         let bot_form = format!("Merge work ({w2:.10}) into rc-x");
         let bad = merge(&stale, &bot_form);
-        assert_eq!(merge_strays(&d, &bad).unwrap(), vec!["b".to_string()], "the old tip's b reverts the newer tip's");
+        // each path here is as the one side that changed it has it: read in process, no git
+        let spawned = crate::git_exec::on_this_thread();
+        assert_eq!(strays(&d, &bad, &x, &w2).unwrap(), vec!["b".to_string()], "the old tip's b reverts the newer tip's");
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "a one-sided merge's check started git");
         let refused = merges_checked(&d, "work", &bad, "rc-x").unwrap_err();
         assert!(refused.contains(&format!("merge {bad:.10} \"{bot_form}\" is not the clean merge")) && refused.contains("changed in b since the merge base"), "{refused}");
         let by_hand = merge(&stale, "merge work by hand");
         assert!(merges_checked(&d, "work", &by_hand, "rc-x").unwrap_err().contains("changed in b since the merge base"), "a lane's own message refuses the same");
         // the clean merge: nothing to say
         let good = merge(&fresh, &bot_form);
-        assert_eq!(merge_strays(&d, &good).unwrap(), Vec::<String>::new());
+        assert_eq!(strays(&d, &good, &x, &w2).unwrap(), Vec::<String>::new());
         assert_eq!(merges_checked(&d, "work", &good, "rc-x").unwrap(), Vec::<String>::new());
         // the branch put b right since: said, not refused
         g(&["checkout", "-q", &bad]);
@@ -1359,7 +1379,42 @@ mod tests {
         let amended = merge(&g(&["write-tree"]), &bot_form);
         g(&["reset", "-q", "--hard", &x]);
         assert!(merges_checked(&d, "work", &amended, "rc-x").unwrap_err().contains("the branch's own changes to c"));
-        assert!(merge_strays(&d, &x).is_err(), "no merge");
+        // a file both sides changed (git's content merge), a file both deleted, a criss-cross:
+        // git's merge decides, and the answer is the same
+        g(&["checkout", "-q", "work"]);
+        commit("f", "1\n2\n3\n4\n5\n", "f");
+        g(&["checkout", "-qb", "rc-y"]);
+        let y1 = commit("f", "1y\n2\n3\n4\n5\n", "y");
+        g(&["checkout", "-q", "work"]);
+        let w4 = commit("f", "1\n2\n3\n4\n5w\n", "w4");
+        let on = |tree: &str, p: &str, q: &str| g(&["commit-tree", tree, "-p", p, "-p", q, "-m", "m"]);
+        let tree_of = |c: &str| g(&["rev-parse", &format!("{c}^{{tree}}")]);
+        let content = on(&g(&["merge-tree", "--write-tree", &y1, &w4]), &y1, &w4);
+        let reverted = on(&tree_of(&y1), &y1, &w4);
+        let (c1, c2) = (on(&tree_of(&y1), &y1, &w4), on(&tree_of(&w4), &w4, &y1));
+        let crossed = on(&tree_of(&c1), &c1, &c2);
+        g(&["checkout", "-qb", "rc-z", &w4]);
+        g(&["rm", "-q", "a"]);
+        g(&["commit", "-qm", "z: a goes"]);
+        let z1 = g(&["rev-parse", "HEAD"]);
+        g(&["checkout", "-q", "work"]);
+        g(&["rm", "-q", "a"]);
+        g(&["commit", "-qm", "w5: a goes"]);
+        let w5 = g(&["rev-parse", "HEAD"]);
+        let gone = on(&tree_of(&z1), &z1, &w5);
+        let lane = on(&tree_of(&z1), &z1, &w4);
+        for (m, p, q) in [(&content, &y1, &w4), (&reverted, &y1, &w4), (&crossed, &c1, &c2), (&gone, &z1, &w5)] {
+            assert!(crate::gitread::one_sided_strays(&d, m, p, q).is_none(), "{m:.10} of {p:.10} and {q:.10} read as one-sided");
+        }
+        let spawned = crate::git_exec::on_this_thread();
+        assert_eq!(strays(&d, &content, &y1, &w4).unwrap(), Vec::<String>::new(), "git's content merge of f");
+        assert_eq!(strays(&d, &reverted, &y1, &w4).unwrap(), vec!["f".to_string()], "the lane's f alone drops work's line 5");
+        assert_eq!(strays(&d, &gone, &z1, &w5).unwrap(), Vec::<String>::new(), "a deleted on both sides");
+        assert!(crate::git_exec::on_this_thread() > spawned, "git's merge did not decide");
+        // one side deleted it: in process
+        let spawned = crate::git_exec::on_this_thread();
+        assert_eq!(strays(&d, &lane, &z1, &w4).unwrap(), Vec::<String>::new());
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "a one-sided deletion started git");
         let _ = std::fs::remove_dir_all(&d);
     }
 

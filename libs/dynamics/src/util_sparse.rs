@@ -452,17 +452,18 @@ pub fn mul_sym_vec_sparse(
     colind: &[i32],
 ) {
     zero(res, n);
+    // res and vec cut to n, so a column checks once for both; each row's values and columns cut to its count
+    let (res, vec) = (&mut res[..n], &vec[..n]);
     for i in 0..n {
         let adr = rowadr[i] as usize;
         let diag = rownnz[i] as usize - 1;
-        let row = &mat[adr..];
-        res[i] = row[diag] * vec[i];
-        let ind = &colind[adr..];
-        for k in (0..diag).rev() {
-            let j = ind[k] as usize;
-            let val = row[k];
+        let (row, ind) = (&mat[adr..adr + diag + 1], &colind[adr..adr + diag]);
+        let vec_i = vec[i];
+        res[i] = row[diag] * vec_i;
+        for (&j, &val) in ind.iter().zip(&row[..diag]).rev() {
+            let j = j as usize;
             res[i] += val * vec[j];
-            res[j] += val * vec[i];
+            res[j] += val * vec_i;
         }
     }
 }
@@ -1201,18 +1202,18 @@ pub fn sqr_mat_tdsparse_symbolic(
     res_rowadr[nc - 1] + res_rownnz[nc - 1]
 }
 
-// W is a constant (4, or MAXSUPER), as the C passes a literal width to its inlined function.
-// ind_k and val_k are M's row k, which holds column r.
+// W is a constant (4, or MAXSUPER), as the C passes a literal width to its inlined function. `rows` is the
+// accumulator's rows of the columns c < r. ind_k and val_k are M's row k, which holds column r: the C stops there
+// by sentinel, here a column past `rows` stops it.
 #[inline(always)]
 fn accum_super_row<const W: usize>(
     block: &mut [[f64; MAXSUPER]; MAXSUPER],
-    buffer: &mut [f64],
+    rows: &mut [[f64; MAXSUPER]],
     scale: &[f64; MAXSUPER],
     mat_t_s: &[&[f64]; MAXSUPER],
     ind_k: &[i32],
     val_k: &[f64],
     i: usize,
-    r: usize,
     ns: usize,
     any_off: i32,
 ) {
@@ -1223,13 +1224,10 @@ fn accum_super_row<const W: usize>(
         }
     }
     if any_off != 0 {
-        let buffer = &mut buffer[..r * MAXSUPER];
         for (&c, &v) in ind_k.iter().zip(val_k) {
-            let c = c as usize;
-            if c >= r {
+            let Some(buf) = rows.get_mut(c as usize) else {
                 break;
-            }
-            let buf = &mut buffer[c * MAXSUPER..c * MAXSUPER + W];
+            };
             for s in 0..W {
                 buf[s] += scale[s] * v;
             }
@@ -1344,6 +1342,7 @@ pub fn sqr_mat_tdsparse_numeric(
             }
             let mut block = [[0.0; MAXSUPER]; MAXSUPER];
             let mut scale = [0.0; MAXSUPER];
+            let rows = buffer[..r * MAXSUPER].as_chunks_mut::<MAXSUPER>().0;
             for i in 0..nnz_t_r {
                 let k = colind_t[adr_r + i] as usize;
                 if let Some(di) = diag {
@@ -1363,9 +1362,9 @@ pub fn sqr_mat_tdsparse_numeric(
                 let end_k = adr_k + rownnz[k] as usize;
                 let (ind_k, val_k) = (&colind[adr_k..end_k], &mat[adr_k..end_k]);
                 if ns <= 4 {
-                    accum_super_row::<4>(&mut block, &mut buffer, &scale, &mat_t_s, ind_k, val_k, i, r, ns, any_off);
+                    accum_super_row::<4>(&mut block, rows, &scale, &mat_t_s, ind_k, val_k, i, ns, any_off);
                 } else {
-                    accum_super_row::<MAXSUPER>(&mut block, &mut buffer, &scale, &mat_t_s, ind_k, val_k, i, r, ns, any_off);
+                    accum_super_row::<MAXSUPER>(&mut block, rows, &scale, &mat_t_s, ind_k, val_k, i, ns, any_off);
                 }
             }
             for s in 0..ns {

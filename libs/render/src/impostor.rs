@@ -11,16 +11,21 @@
 //! racing camera at a tree's foot and a flight camera above the canopy both
 //! find frames made for them.
 //!
-//! Each frame stores two images: the albedo the model shows from there,
-//! times an occlusion term (the vertex AO and a darkening of texels deep
-//! behind the silhouette's front, a crown's inside), alpha = coverage, colour
-//! bled into the cut-out texels so mips never fringe; and the normal in that
-//! view's own frame, x and y in red and green (normal layers are
+//! Each frame stores three images: the albedo the model shows from there
+//! (the colour its own lane lights, without occlusion), alpha = coverage,
+//! colour bled into the cut-out texels so mips never fringe; and the normal
+//! in that view's own frame, x and y in red and green (normal layers are
 //! block-compressed to two channels on the GPU; z is rebuilt, the viewer's
-//! side). The draw (shaders/impostor.rs) blends the three
-//! frames nearest to the view and lights the result with the real sun, so a
-//! far forest turns with the camera and shades with the time of day instead
-//! of showing one baked picture.
+//! side); and the depth of the nearest surface toward that view's viewer
+//! (16 bits split over red and green) with that surface's occlusion in blue
+//! (see [`ImpostorBake::depth`]). The draw (shaders/impostor.rs) blends the
+//! three frames nearest to the view, lights the result with the real sun as
+//! the foliage lane lights the mesh (the occlusion shading the fill and the
+//! light through the leaves, not the colour) and writes each pixel's depth at
+//! its baked surface, so a far forest turns with the camera, shades with the
+//! time of day, takes the shadows of hills and buildings and meets terrain
+//! and walls where its leaves are, instead of showing one baked picture on a
+//! plane through its centre.
 //!
 //! The quad carries what the shader needs in its own vertices: positions
 //! are the bounding sphere's centre plus the corner times the radius in the
@@ -56,11 +61,26 @@ pub struct ImpostorBake {
     /// in rg. Half the albedo's resolution: shading varies slower than the
     /// silhouette, and every texel here is block-compressed on first load.
     pub normal: Vec<u8>,
+    /// size/2 x size/2 RGBA8: per texel the nearest surface's depth toward
+    /// its view's viewer, dot(p - center, f) / radius in -1..1, quantised to
+    /// 16 bits q = (d * 0.5 + 0.5) * 65535, high byte in red, low byte in
+    /// green; that surface's occlusion in blue (the value its mesh's lane
+    /// reads: a crown layer's vertex green, else the vertex AO, 1 under a
+    /// surface material), alpha 255. Linear filtering of both depth bytes is
+    /// linear in q, so the GPU's bilinear reads blend depths exactly; 8 bits
+    /// banded at r / 128 (10 cm on a large crown). It rides in the stand-in
+    /// material's OCCLUSION layer, which only shaders/impostor.rs reads. The
+    /// normal layer has no room: normal maps load as two-channel BC5
+    /// (texture_pack.rs).
+    pub depth: Vec<u8>,
     /// The albedo atlas's edge (the normal atlas's is half of it).
     pub size: usize,
     /// The bounding sphere the frames were taken around (model space).
     pub center: [f32; 3],
     pub radius: f32,
+    /// The model's leaves are crown layers (`makepadShading.crown`): the
+    /// stand-in lights them as the foliage lane lights a crown.
+    pub crown: bool,
 }
 
 fn f16_to_f32(h: u16) -> f32 {
@@ -109,31 +129,39 @@ struct Layer<'a> {
     uvs: Option<&'a [[f32; 2]]>,
     image: Option<ImageBuffer>,
     cutoff: Option<f32>,
+    /// `makepadShading.crown`: the normals stay as authored and the vertex
+    /// green is the occlusion (shaders/foliage.rs).
+    crown: bool,
+    /// A surface material: the foliage lane ignores the vertex AO.
+    surface: bool,
     /// The image's box-filtered mip chain (level 0 = the image): a view
     /// texel reads the level that matches its footprint on the image.
     mips: Vec<(usize, usize, Vec<u32>)>,
 }
 
-/// Box-filtered mips of a straight-alpha ARGB image, colour weighted by
-/// alpha (no dark fringes where leaves meet the cut-out), down to 1x1.
+/// Box-filtered mips of a straight-alpha ARGB image, down to 1x1: colour
+/// averaged in linear light and weighted by alpha (no dark fringes where
+/// leaves meet the cut-out), as the loader's own colour mips are
+/// (material_surface.rs): an average of the sRGB bytes darkens a varied
+/// leaf texture, and the bake reads coarser levels than the mesh does at
+/// its switch distance (one view texel spans several screen pixels).
 fn image_mips(img: &ImageBuffer) -> Vec<(usize, usize, Vec<u32>)> {
+    let lin: [f32; 256] = std::array::from_fn(|b| crate::material_surface::linear(b as f32 / 255.0));
     let mut out = vec![(img.width, img.height, img.data[..img.width * img.height].to_vec())];
     while let Some((w, h, d)) = out.last().filter(|(w, h, _)| *w > 1 || *h > 1) {
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
         let mut nd = vec![0u32; nw * nh];
         for y in 0..nh {
             for x in 0..nw {
-                let mut acc = [0u32; 4];
+                let (mut acc, mut alpha) = ([0.0f32; 3], 0u32);
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     let p = d[(2 * y + dy).min(h - 1) * w + (2 * x + dx).min(w - 1)];
                     let a = p >> 24;
-                    acc[0] += ((p >> 16) & 0xff) * a;
-                    acc[1] += ((p >> 8) & 0xff) * a;
-                    acc[2] += (p & 0xff) * a;
-                    acc[3] += a;
+                    for (c, shift) in [(0, 16), (1, 8), (2, 0)] { acc[c] += lin[((p >> shift) & 0xff) as usize] * a as f32; }
+                    alpha += a;
                 }
-                let a = acc[3].max(1);
-                nd[y * nw + x] = ((acc[3] / 4) << 24) | ((acc[0] / a) << 16) | ((acc[1] / a) << 8) | (acc[2] / a);
+                let byte = |c: usize| if alpha > 0 { crate::material_surface::srgb_byte(acc[c] / alpha as f32) } else { 0 };
+                nd[y * nw + x] = ((alpha / 4) << 24) | (byte(0) << 16) | (byte(1) << 8) | byte(2);
             }
         }
         out.push((nw, nh, nd));
@@ -162,13 +190,14 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
     let image = |png: &Option<Vec<u8>>| png.as_ref().and_then(|p| ImageBuffer::from_png(p).ok());
     let mut layers = Vec::new();
     if model.draw_layers.is_empty() {
-        layers.push(Layer { vertices: &model.vertices, indices: &model.indices, uvs: None, image: image(&model.texture_png), cutoff: None, mips: Vec::new() });
+        layers.push(Layer { vertices: &model.vertices, indices: &model.indices, uvs: None, image: image(&model.texture_png), cutoff: None, crown: false, surface: false, mips: Vec::new() });
     } else {
         for l in &model.draw_layers {
             let surface = l.pbr.surface.as_ref();
             if surface.is_some_and(|s| s.impostor > 0.0) { continue; }
             let cutoff = surface.filter(|s| s.alpha_mode == 1).map(|s| s.alpha_cutoff);
-            layers.push(Layer { vertices: &l.vertices, indices: &l.indices, uvs: Some(&l.uvs), image: image(&l.texture_png), cutoff, mips: Vec::new() });
+            let crown = surface.is_some_and(|s| s.crown);
+            layers.push(Layer { vertices: &l.vertices, indices: &l.indices, uvs: Some(&l.uvs), image: image(&l.texture_png), cutoff, crown, surface: surface.is_some(), mips: Vec::new() });
         }
     }
     const F: usize = crate::model::MODEL_VERTEX_FLOATS;
@@ -195,6 +224,7 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
             for d in 0..3 { clo[d] = clo[d].min(v[d]); chi[d] = chi[d].max(v[d]); }
         }
     }
+    let crowned = layers.iter().any(|l| l.crown);
     let crown = if clo[0] <= chi[0] { [(clo[0] + chi[0]) * 0.5, (clo[1] + chi[1]) * 0.5, (clo[2] + chi[2]) * 0.5] } else { center };
 
     // Triangles once; every frame reuses them.
@@ -231,8 +261,9 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
     let w = GRID * cell;
     let mut albedo = vec![0u8; w * w * 4];
     let mut normal = vec![0u8; w * w * 4];
+    let mut deep = vec![0u16; w * w];
+    let mut ao = vec![0u8; w * w];
     let mut depth = vec![f32::MIN; cell * cell];
-    let mut occ = vec![0.0f32; cell * cell];
     for j in 0..GRID {
         for i in 0..GRID {
             let f = frame_dir(i, j);
@@ -251,7 +282,7 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                 // interpolated normal on that side, below); leaves bend toward
                 // "out of the crown" per texel so a crown shades as a soft volume.
                 let n_side = if dot(t.n, f) < 0.0 { [-t.n[0], -t.n[1], -t.n[2]] } else { t.n };
-                let leaf = t.layer.cutoff.is_some();
+                let leaf = t.layer.cutoff.is_some() && !t.layer.crown;
                 // The image level whose texels match one view texel's footprint
                 // on it: a point read of the full image aliased a leaf card's
                 // texture into speckle, which a magnified stand-in shows as
@@ -294,11 +325,16 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         if let Some(cut) = t.layer.cutoff { if al < cut { continue; } }
                         let c = [0, 1, 2, 3].map(|k| w0 * t.col[0][k] + w1 * t.col[1][k] + w2 * t.col[2][k]);
                         depth[cell] = z;
-                        occ[cell] = c[3];
                         let o = ((y_off + py) * w + x_off + px) * 4;
-                        albedo[o] = (r * c[0] * 255.0).clamp(0.0, 255.0) as u8;
-                        albedo[o + 1] = (g * c[1] * 255.0).clamp(0.0, 255.0) as u8;
-                        albedo[o + 2] = (bl * c[2] * 255.0).clamp(0.0, 255.0) as u8;
+                        // What the mesh's lane reads (shaders/foliage.rs): a
+                        // crown's vertex colour is its occlusion (green), not
+                        // a tint; elsewhere the vertex colour tints and its
+                        // alpha is the AO, which a surface material ignores.
+                        let (tint, occ) = if t.layer.crown { ([1.0; 3], c[1]) } else { ([c[0], c[1], c[2]], if t.layer.surface { 1.0 } else { c[3] }) };
+                        albedo[o] = (r * tint[0] * 255.0).clamp(0.0, 255.0) as u8;
+                        albedo[o + 1] = (g * tint[1] * 255.0).clamp(0.0, 255.0) as u8;
+                        albedo[o + 2] = (bl * tint[2] * 255.0).clamp(0.0, 255.0) as u8;
+                        ao[o / 4] = (occ * 255.0).round().clamp(0.0, 255.0) as u8;
                         // Alpha tells leaves (LEAF_ALPHA) from the solid core and
                         // trunk (255): the stand-in's shadow lets light through
                         // some leaf texels (shaders/lm_depth.rs).
@@ -310,10 +346,12 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         // The interpolated vertex normal (a low-poly crown core
                         // shaded with its face normals showed its facets as
                         // squares on a magnified stand-in).
+                        // A crown layer's normals stay as authored (the
+                        // foliage lane never flips them toward the viewer).
                         let vi = [0, 1, 2].map(|d| w0 * t.vn[0][d] + w1 * t.vn[1][d] + w2 * t.vn[2][d]);
                         let mut n = if dot(vi, vi) > 1e-6 {
                             let vi = norm(vi);
-                            if dot(vi, n_side) < 0.0 { [-vi[0], -vi[1], -vi[2]] } else { vi }
+                            if !t.layer.crown && dot(vi, n_side) < 0.0 { [-vi[0], -vi[1], -vi[2]] } else { vi }
                         } else { n_side };
                         if leaf {
                             let m = [0, 1, 2].map(|d| w0 * t.p[0][d] + w1 * t.p[1][d] + w2 * t.p[2][d] - crown[d]);
@@ -327,31 +365,16 @@ pub fn bake(glb: &[u8], cell: usize) -> Option<ImpostorBake> {
                         normal[o + 1] = ((e[1] * 0.5 + 0.5) * 255.0).round() as u8;
                         normal[o + 2] = 128;
                         normal[o + 3] = 255;
+                        deep[o / 4] = ((z / radius * 0.5 + 0.5).clamp(0.0, 1.0) * 65535.0).round() as u16;
                     }
-                }
-            }
-            // Occlusion, multiplied into the albedo (the normal atlas is
-            // block-compressed to two channels, see the module docs): the
-            // vertex AO times a darkening of texels far behind the
-            // silhouette's front (the crown's inside, which a sunlit tree
-            // shows darker in direct and ambient light alike).
-            let (mut zmin, mut zmax) = (f32::MAX, f32::MIN);
-            for &d in &depth { if d > f32::MIN { zmin = zmin.min(d); zmax = zmax.max(d); } }
-            let span = (zmax - zmin).max(1e-4);
-            for py in 0..cell {
-                for px in 0..cell {
-                    let cell = py * cell + px;
-                    if depth[cell] == f32::MIN { continue; }
-                    let k = occ[cell] * (1.0 - 0.4 * ((zmax - depth[cell]) / span));
-                    let o = ((y_off + py) * w + x_off + px) * 4;
-                    for c in 0..3 { albedo[o + c] = (albedo[o + c] as f32 * k) as u8; }
                 }
             }
         }
     }
-    bleed(&mut albedo, &mut normal, w);
+    bleed(&mut albedo, &mut normal, &mut deep, &mut ao, w);
     let normal = half(&normal, w);
-    Some(ImpostorBake { albedo, normal, size: w, center, radius })
+    let depth = half_depth(&deep, &ao, w);
+    Some(ImpostorBake { albedo, normal, depth, size: w, center, radius, crown: crowned })
 }
 
 /// A normal in its view's own frame (right, up, toward the viewer), the
@@ -393,10 +416,27 @@ fn half(normal: &[u8], w: usize) -> Vec<u8> {
     out
 }
 
-/// Spread each covered texel's colour and normal into its uncovered
-/// neighbours (alpha stays 0), so mips and bilinear reads never pull black
-/// or a zero normal into the silhouette.
-fn bleed(albedo: &mut [u8], normal: &mut [u8], w: usize) {
+/// The depth and occlusion atlas at half resolution (each 2x2 block's
+/// means), as the RGBA8 bytes [`ImpostorBake::depth`] describes.
+fn half_depth(deep: &[u16], ao: &[u8], w: usize) -> Vec<u8> {
+    let h = w / 2;
+    let mut out = vec![0u8; h * h * 4];
+    for y in 0..h {
+        for x in 0..h {
+            let s: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().map(|&(dx, dy)| deep[(2 * y + dy) * w + 2 * x + dx] as u32).sum();
+            let q = ((s + 2) / 4).min(65535);
+            let a: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)].iter().map(|&(dx, dy)| ao[(2 * y + dy) * w + 2 * x + dx] as u32).sum();
+            let o = (y * h + x) * 4;
+            out[o..o + 4].copy_from_slice(&[(q >> 8) as u8, q as u8, ((a + 2) / 4) as u8, 255]);
+        }
+    }
+    out
+}
+
+/// Spread each covered texel's colour, normal, depth and occlusion into its
+/// uncovered neighbours (alpha stays 0), so mips and bilinear reads never
+/// pull black, a zero normal, a false depth or a dark rim into the silhouette.
+fn bleed(albedo: &mut [u8], normal: &mut [u8], deep: &mut [u16], ao: &mut [u8], w: usize) {
     let mut filled: Vec<bool> = albedo.chunks_exact(4).map(|p| p[3] != 0).collect();
     let mut front: Vec<usize> = Vec::new();
     for _ in 0..8 {
@@ -405,7 +445,7 @@ fn bleed(albedo: &mut [u8], normal: &mut [u8], w: usize) {
             for x in 0..w {
                 let at = y * w + x;
                 if filled[at] { continue; }
-                let (mut sa, mut sn, mut n) = ([0u32; 3], [0u32; 4], 0u32);
+                let (mut sa, mut sn, mut sd, mut so, mut n) = ([0u32; 3], [0u32; 4], 0u32, 0u32, 0u32);
                 for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                     let (nx, ny) = (x as i32 + dx, y as i32 + dy);
                     if nx < 0 || ny < 0 || nx >= w as i32 || ny >= w as i32 { continue; }
@@ -413,11 +453,15 @@ fn bleed(albedo: &mut [u8], normal: &mut [u8], w: usize) {
                     if !filled[p] { continue; }
                     for c in 0..3 { sa[c] += albedo[p * 4 + c] as u32; }
                     for c in 0..4 { sn[c] += normal[p * 4 + c] as u32; }
+                    sd += deep[p] as u32;
+                    so += ao[p] as u32;
                     n += 1;
                 }
                 if n > 0 {
                     for c in 0..3 { albedo[at * 4 + c] = (sa[c] / n) as u8; }
                     for c in 0..4 { normal[at * 4 + c] = (sn[c] / n) as u8; }
+                    deep[at] = (sd / n) as u16;
+                    ao[at] = (so / n) as u8;
                     front.push(at);
                 }
             }

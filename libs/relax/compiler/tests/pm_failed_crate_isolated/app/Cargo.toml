@@ -1,0 +1,13 @@
+[package]
+name = "pfi-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+# the program also calls the macro of the crate that does not load
+bad = []
+
+[dependencies]
+pfi-good = { path = "../good" }
+pfi-bad = { path = "../bad" }

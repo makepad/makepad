@@ -1748,10 +1748,16 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
     });
     let shading=material.get("extras").and_then(|e|e.get("makepadShading"));
     let term=|key:&str|value(shading,key,0.0).clamp(0.0,1.0);
+    let impostor=value(shading,"impostor",0.0).max(0.0);
+    let occlusion_png=image("occlusionTexture");
+    // Every stand-in the bake writes carries its depth atlas in the occlusion
+    // slot (impostor.rs `ImpostorBake::depth`); one without draws at the front
+    // of its bounds (the white fallback reads as the nearest depth).
+    if impostor>0.0&&occlusion_png.is_none(){makepad_draw::log!("model: a far stand-in without its depth atlas (a bake bug): it draws at the front of its bounds");}
     Some(crate::material_surface::MaterialSurface {
         wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
         crown:value(shading,"crown",0.0)>0.5,
-        impostor:value(shading,"impostor",0.0).max(0.0),
+        impostor,
         plate:value(shading,"plate",0.0)>0.5,
         msdf:shading.filter(|s|value(Some(s),"msdf",0.0)>0.5).and_then(|s| {
             let rgba = |key: &str| -> Option<[f32; 4]> {
@@ -1772,7 +1778,7 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
         lamp:shading.and_then(|s|s.get("lamp")).and_then(Val::str).and_then(makepad_gltf::GlbLamp::from_name),
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
-        occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
+        occlusion_png,occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),
         emissive_png:image("emissiveTexture"),emissive,
         alpha_mode:match material.get("alphaMode").and_then(Val::str){Some("MASK")=>1,Some("BLEND")=>2,_=>0},
         alpha_cutoff:value(Some(material),"alphaCutoff",0.5),base_alpha:alpha,

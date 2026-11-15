@@ -744,8 +744,14 @@ fields!(GraphImage, identity, crates, inputs, stamps, probes, demand_image);
 /// Share the whole frozen options identity with the code cache. This is conservative, but
 /// preserves sharing between apps with the same target and compiler options.
 /// rustc: compiler/rustc_session/src/options.rs:280-303 (tracked inputs).
+/// It holds the policy for third-party compile-time code too (compile_time.rs: bare `relax` Open,
+/// `makepad` Sandboxed, two binaries of one codegen identity): a registry package's proc macro
+/// expands from other inputs under each (confined, it reads nothing of the process environment
+/// or the files), so the front stores, graphs and collected programs that hold its expansions
+/// are each policy's own.
 pub fn parse_options(options: &crate::options::Options) -> u128 {
     let mut h = crate::sip::Sip128::new();
     h.u128(options.fingerprint());
+    h.u8((crate::compile_time::policy() == crate::compile_time::Policy::Sandboxed) as u8);
     h.finish128()
 }

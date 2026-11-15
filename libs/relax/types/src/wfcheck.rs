@@ -727,7 +727,7 @@ pub mod obligations {
     pub(crate) fn fulfillment_message(infcx: &crate::infer::InferCtxt<'_>, prog: &Program, code: &str, goal: &Goal) -> Option<String> {
         let tcx = infcx.tcx;
         let goal = leaf_goal(infcx, prog, goal, 0);
-        let ty_str = |t: TyId| crate::typeck::ty_to_string(false, prog, tcx, infcx.deeply_resolve_ignoring_regions(t));
+        let ty_str = |t: TyId| crate::typeck::ty_to_diag_string(prog, tcx, infcx.deeply_resolve_ignoring_regions(t));
         match &goal.predicate.kind {
             PredicateKind::Clause(ClauseKind::Trait(p)) => {
                 let mut message = format!("{code}: {}", crate::typeck::trait_error_message(prog, tcx, code, p, &mut |t| ty_str(t)));

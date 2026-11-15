@@ -112,9 +112,9 @@ pub fn bare() -> bool {
     crate::host().package == env!("CARGO_PKG_NAME")
 }
 
-/// The command this binary is run as, for titles, usage lines and hints.
+/// The command this binary is run as, for titles, usage lines and hints (Host.tool).
 pub fn command() -> &'static str {
-    if bare() { "relax" } else { "makepad" }
+    crate::host().tool
 }
 
 fn title(p: &mut Page, what: &str) {
@@ -149,7 +149,7 @@ fn relax_main_page(st: &Style) -> String {
     p.row("--verbose", "Phase timings and info (also RELAX_VERBOSE=1)");
     p.row("--quiet", "Hide the compile-error stream");
     p.row("--no-asm", "Refuse inline assembly (asm!/global_asm!/naked_asm!),\nfor sandboxed uses (also RELAX_NO_ASM=1)");
-    p.row("--allow-c", "Build C dependencies with cargo and the system C\ncompiler and link them in (also RELAX_ALLOW_C=1)");
+    p.row("--allow-c", "Build C dependencies with cargo and the system C\ncompiler and link them in (bare relax: also\nRELAX_ALLOW_C=1)");
     p.row("--version", "Print the version and exit");
     p.row("-h, --help", "Print this help");
     p.section("Environment:");
@@ -193,7 +193,7 @@ fn main_page(st: &Style) -> String {
     p.row("--verbose", "Phase timings and info (also RELAX_VERBOSE=1)");
     p.row("--quiet", "Hide the compile-error stream");
     p.row("--no-asm", "Refuse inline assembly (asm!/global_asm!/naked_asm!),\nfor sandboxed uses (also RELAX_NO_ASM=1)");
-    p.row("--allow-c", "Build C dependencies with cargo and the system C\ncompiler and link them in (also RELAX_ALLOW_C=1)");
+    p.row("--allow-c", "Build C dependencies with cargo and the system C\ncompiler and link them in (bare relax: also\nRELAX_ALLOW_C=1)");
     p.row("--version", "Print the version and exit");
     p.row("-h, --help", "Print this help");
     p.section("Environment:");
@@ -225,7 +225,7 @@ fn run_page(st: &Style) -> String {
     p.row("--heap[=<bytes>]", "Track the heap by stack from the start (inspect heap)");
     p.row("--cfg <spec>", "Set a cfg for the program (name or name=\"value\"), as RUSTFLAGS=--cfg");
     p.row("--no-asm", "Refuse the program's inline assembly (asm!,\nglobal_asm!, naked_asm!: an error naming the crate),\nfor sandboxed uses; also RELAX_NO_ASM=1");
-    p.row("--allow-c", "Build dependencies that compile C with cargo and the\nsystem C compiler; also RELAX_ALLOW_C=1");
+    p.row("--allow-c", "Build dependencies that compile C with cargo and the\nsystem C compiler (a grant: a word of the command\nline; bare relax also reads RELAX_ALLOW_C=1)");
     p.row("--privileged", "Grant the app the HAL's domain control: it may start,\nstop and embed other apps as domains (a window\nmanager)");
     p.row("--relaxed[=<list>]", "Relaxed Rust for every crate (all, or a list)");
     p.row("--mount <dir>=<git-url>", "Mount another repository at a folder of the\nfirst (repeatable); an optional #ref pins it");
@@ -344,8 +344,11 @@ fn test_page(st: &Style) -> String {
     p.text("test harness.");
     p.text("A package's tests build with cargo test's profile: `test` (debug assertions and overflow");
     p.text("checks as the workspace's [profile.test] / [profile.dev] set them), --release the release one.");
-    p.text("Build scripts see that profile's PROFILE, OPT_LEVEL and DEBUG, as under cargo.");
+    p.text("Build scripts see that profile's PROFILE, OPT_LEVEL and DEBUG, as under cargo, and the");
+    p.text("package binaries an integration test starts (CARGO_BIN_EXE_<name>) build with it too.");
     p.text("A file's tests build as rustc -O --test.");
+    p.text("No rustc runs, so the target holds no rustc-format .rlib or .rmeta of the crate: a test that");
+    p.text("hands the crate's .rlib to an external rustc needs `cargo build --lib` first.");
     p.row("-- --precompile", "Build the selected tests and all they call before the first one starts (no compile inside a test's deadlines)");
     p.usage(&format!("{tool} test --live <package> [--lib | --test <name>] [-- <test args>]", tool = command()));
     p.text("Keeps one target warm (default --lib); body edits rerun tests that entered the changed functions, including inlinees.");
@@ -353,6 +356,8 @@ fn test_page(st: &Style) -> String {
     p.text(&format!("Each run prints testverdict; {tool} inspect <pid> watch on=testverdict follows its JSON verdicts.", tool = command()));
     p.text(&format!("Each test's outcome, and whether it ran for that edit: {tool} inspect <pid> test-results group=<verdict group> --json.", tool = command()));
     p.text("Hot-load failures restart the test process; only the replacement tests give a verdict.");
+    p.text("A run whose patched code faulted says faulted=[groups]: no pass of the edit. The JIT undoes those patches and runs again;");
+    p.text("that run says reverted=[groups]: it tested the code from before the edit, not the saved source.");
     p.out
 }
 

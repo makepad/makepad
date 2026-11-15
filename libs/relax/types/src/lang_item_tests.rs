@@ -154,7 +154,10 @@ fn relax_std_provides_coerce_unsized_for_pointers_and_smart_pointers() {
     let slice = tys.intern(TyKind::Slice(tys.i32_));
     let r = tys.intern_region(crate::types::RegionKind::ReStatic);
     let boxed = tcx.lang_items.require(LangItem::OwnedBox).unwrap();
-    let adt = |d, t| tys.intern(TyKind::Adt(d, tys.mk_list(&[t]), crate::types::RegionArgsId::EMPTY));
+    // `Box<T, A = Global>`, as in rustc 1.100: the type carries its allocator argument.
+    let global = (0..prog.defs.len() as u32).map(DefId).find(|d| prog.name(*d) == "Global" && tcx.adts.contains_key(d)).expect("Global");
+    let global = tys.intern(TyKind::Adt(global, tys.mk_list(&[]), crate::types::RegionArgsId::EMPTY));
+    let adt = |d, t| tys.intern(TyKind::Adt(d, tys.mk_list(&[t, global]), crate::types::RegionArgsId::EMPTY));
     let infcx = crate::infer::InferCtxt::new(&tcx, crate::tcx::TypingMode::PostAnalysis, Default::default());
     let holds = |from, to| infcx.evaluate_obligation(&prog, Goal { param_env: crate::tcx::ParamEnvId::EMPTY,
         predicate: collect::trait_predicate(coerce, vec![GenericArg::Type(from), GenericArg::Type(to)]) }).must_apply_modulo_regions();
@@ -178,8 +181,12 @@ fn relax_std_marks_container_drops_may_dangle() {
     prog.resolve_imports();
     let mut tcx = Tcx::new();
     tcx.collect(&prog);
-    // `Vec<&T>` may be dropped while `T` is borrowed: the element type is not among what the destructor touches.
+    // `Vec<&T>` may be dropped while `T` is borrowed: the element type is not among what the
+    // destructor touches. Its allocator is (`unsafe impl<#[may_dangle] T, A: Allocator> Drop`, as
+    // rustc's alloc has it): what must outlive the drop is `A` alone, rustc's destructor_constraints.
     let vec = named(&prog, "Vec");
     let constraint = adt_dtorck_constraint(&tcx, &prog, vec, 256);
-    assert!(constraint.outlives.is_empty(), "{constraint:?}");
+    let params = tcx.generic_indices_of(&prog, vec).identity_args(&tcx.tys);
+    assert_eq!(params.len(), 2, "Vec<T, A>");
+    assert_eq!(constraint.outlives, [params[1]], "{constraint:?}");
 }

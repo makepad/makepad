@@ -7,4 +7,5 @@ export RELAX_CACHE=off
 ERR=$(mktemp)
 OUT=$(cd "$H" && RELAX_STD=$H/../../std "$1" run --quiet fwd-app 2>"$ERR")
 echo "$OUT"
-if [ "$OUT" = "$(printf 'forwarded expr group ok head tail true\nhanded back: 4')" ]; then rm -f "$ERR"; echo "macro_forwarded_expr_group: ok"; else tail -5 "$ERR"; rm -f "$ERR"; echo "macro_forwarded_expr_group: FAILED"; exit 1; fi
+SHAPES='shapes: None["b"] | None[- 1] | None["b"] | None[u8] | None[Brace[1]] | x | "b" | Paren[None["a{0}"]] , None["b"] , | , None["b"] ,'
+if [ "$OUT" = "$(printf 'forwarded expr group ok head tail true\nhanded back: 4\n%s' "$SHAPES")" ]; then rm -f "$ERR"; echo "macro_forwarded_expr_group: ok"; else tail -5 "$ERR"; rm -f "$ERR"; echo "macro_forwarded_expr_group: FAILED"; exit 1; fi

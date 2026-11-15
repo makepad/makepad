@@ -451,49 +451,37 @@ impl DemandImage {
             return parts;
         }
         let t0 = std::time::Instant::now();
-        let mut names = Names::new(&crates);
-        // A crate's namespace is final once it is prepared: imports bind only in scopes of
-        // their own crate (Names::prepare_crate). So the namespaces are taken after the loop,
-        // in one pass over the tables, except where crates share a name (a package's library
-        // and binary): those are taken in place, as each one's projection at that point.
-        let mut shared = HashMap::<&str, usize>::default();
-        for c in &crates { *shared.entry(c.name.as_str()).or_default() += 1; }
-        let mut later = Vec::new();
-        let mut fresh = vec![false; parts.len()];
-        for (ci, part) in parts.iter_mut().enumerate() {
-            if part.namespace.is_empty() {
-                for (_, module, _, scan, ..) in &part.scans {
-                    if let Some(scan) = scan { names.add(ci, module, &scan.src, &scan.toks, &scan.uses, &scan.mods, &scan.inner_macro_use); }
-                }
-                names.recorded_indexes(&part.files);
-                names.prepare_crate(ci);
-                if shared[crates[ci].name.as_str()] > 1 { (part.namespace, part.input_id) = names.snapshot(ci); } else { later.push(ci); }
-                fresh[ci] = true;
-            } else { names.restore(ci, &part.namespace, false).expect("planner namespace"); }
-        }
-        let t_loop = t0.elapsed();
-        for (ci, (namespace, input)) in later.iter().copied().zip(names.snapshots(&later)) { (parts[ci].namespace, parts[ci].input_id) = (namespace, input); }
+        // The plan's own namespaces are the ones to record. A crate's namespace is final once it is
+        // prepared (imports bind only in scopes of their own crate, Names::prepare_crate), and nothing
+        // after the plan's crate loop writes one: the closure reads Names shared. A namespace without
+        // its id is this load's. Where crates share a name (a package's library and binary), the plan
+        // took each one's but the last in place, its projection after its prepare, since their tables
+        // cannot be told apart by name later; the others are taken here, in one pass over the tables.
+        let fresh = parts.iter().map(|p| p.namespace_id == 0).collect::<Vec<_>>();
+        let later = (0..parts.len()).filter(|&ci| fresh[ci] && parts[ci].namespace.is_empty()).collect::<Vec<_>>();
+        for (ci, (namespace, input)) in later.iter().copied().zip(final_names.snapshots(&later)) { (parts[ci].namespace, parts[ci].input_id) = (namespace, input); }
         let t_snap = t0.elapsed();
+        let references = (0..parts.len()).map(|ci| if fresh[ci] { final_names.reference_crates(ci) } else { Vec::new() }).collect::<Vec<_>>();
+        if std::env::var_os("RELAX_DEMAND_RESTORE_CHECK").is_some_and(|v| v == "1") { verify_recorded(&crates, &final_names, &parts, &fresh, &references); }
+        // not held through the parts' identities, the encode and their publication
+        drop(final_names);
         let mut identities = Vec::new();
         for (ci, part) in parts.iter_mut().enumerate() {
             if fresh[ci] {
                 part.namespace_id = crate::crate_image::file_hash("", &part.namespace);
-                part.dependencies = super::dependency_identities(&names.reference_crates(ci).into_iter().filter(|&d| d < ci).collect::<Vec<_>>(), &identities);
+                part.dependencies = super::dependency_identities(&references[ci].iter().copied().filter(|&d| d < ci).collect::<Vec<_>>(), &identities);
                 part.seal_identity();
             }
             identities.push(part.surface_id);
         }
         let t_seal = t0.elapsed();
         if let Some(first) = parts.first_mut() {
-            let value = final_names.closure_delta(&names);
-            // Both namespaces end here (planner + rebuilt, ~1 GB on a large app's cold start): not held
-            // through the delta's encode, its shrink copy and the parts' publication.
-            drop((final_names, names));
+            // The closure delta covers this graph, including other edited crates: the plan's
+            // namespaces over themselves, none (a local selection keeps its stored one, above).
+            // An equivalent local edit leaves this row untouched too.
+            let value = demand::NamespaceDelta::default();
             let legacy = if profile { value.legacy_size(true) } else { 0 };
             let delta = demand::ClosureDelta::new(&value, legacy);
-            drop(value);
-            // The closure delta covers this graph, including other edited crates.
-            // An equivalent local edit leaves this row untouched too.
             if first.closure_delta.as_ref().is_none_or(|old| !old.same_image(&delta)) {
                 first.key = 0;
             }
@@ -501,8 +489,8 @@ impl DemandImage {
         }
         if crate::preload::trace() {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-            eprintln!("rx-demand-record: {} parts in {:.0} ms: prepare {:.0}, namespaces {:.0} ({} in one pass), identities+boundaries {:.0}, closure delta {:.0}",
-                parts.len(), ms(t0.elapsed()), ms(t_loop), ms(t_snap - t_loop), later.len(), ms(t_seal - t_snap), ms(t0.elapsed() - t_seal));
+            eprintln!("rx-demand-record: {} parts in {:.0} ms: namespaces {:.0} ({} in one pass, {} taken by the plan), references+identities+boundaries {:.0}",
+                parts.len(), ms(t0.elapsed()), ms(t_snap), later.len(), fresh.iter().filter(|&&f| f).count() - later.len(), ms(t_seal - t_snap));
         }
         let parts = parts.into_iter().map(Arc::new).collect::<Vec<_>>();
         *recording.ready.lock().unwrap() = parts.clone();
@@ -516,4 +504,39 @@ impl DemandImage {
             drop(old);
         }
     }
+}
+/// RELAX_DEMAND_RESTORE_CHECK=1: each fresh crate's recorded namespace, input id and reference
+/// crates (taken from the plan's own names) against a second `Names` rebuilt from every part's
+/// scans, as each crate's prepare left it; and the closure delta between the two, both ways.
+fn verify_recorded(crates: &[PreCrate], plan: &Names, parts: &[DemandPart], fresh: &[bool], references: &[Vec<usize>]) {
+    let mut names = Names::new(crates);
+    let mut shared = HashMap::<&str, usize>::default();
+    for c in crates { *shared.entry(c.name.as_str()).or_default() += 1; }
+    let mut rebuilt = vec![None; parts.len()];
+    let mut later = Vec::new();
+    for (ci, part) in parts.iter().enumerate() {
+        if !fresh[ci] { names.restore(ci, &part.namespace, false).expect("planner namespace"); continue; }
+        for (_, module, _, scan, ..) in &part.scans {
+            if let Some(scan) = scan { names.add(ci, module, &scan.src, &scan.toks, &scan.uses, &scan.mods, &scan.inner_macro_use); }
+        }
+        names.recorded_indexes(&part.files);
+        names.prepare_crate(ci);
+        if shared[crates[ci].name.as_str()] > 1 { rebuilt[ci] = Some(names.snapshot(ci)); } else { later.push(ci); }
+    }
+    for (ci, image) in later.iter().copied().zip(names.snapshots(&later)) { rebuilt[ci] = Some(image); }
+    let mut differ = 0;
+    for (ci, image) in rebuilt.iter().enumerate() {
+        let Some((namespace, input)) = image else { continue };
+        let part = &parts[ci];
+        let mut what = Vec::new();
+        if *namespace != part.namespace { what.push(format!("namespace({})", demand::namespace_differences(&part.namespace, namespace))); }
+        if *input != part.input_id { what.push("input".to_string()); }
+        if names.reference_crates(ci) != references[ci] { what.push("references".to_string()); }
+        differ += !what.is_empty() as usize;
+        let kind = if shared[crates[ci].name.as_str()] > 1 { " (shared name)" } else { "" };
+        eprintln!("rust-demand-record-check: crate={}{kind} {}", crates[ci].name, if what.is_empty() { "identical".to_string() } else { format!("MISMATCH {}", what.join(" ")) });
+    }
+    let count = rebuilt.iter().flatten().count();
+    eprintln!("rust-demand-record-check: {count} fresh crates ({} of a shared name), {differ} differ; closure delta plan over rebuilt: {}; rebuilt over plan: {}",
+        count - later.len(), plan.closure_delta(&names).summary(), names.closure_delta(plan).summary());
 }

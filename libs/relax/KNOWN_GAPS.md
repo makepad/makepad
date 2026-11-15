@@ -120,3 +120,87 @@ What stays out of reach:
 
 Start in libs/relax_api/src/lib.rs (`env`) for the read, and in tools/run/runner/src/lib.rs
 `run_spec` for a store run's order.
+
+## 8. `drain`, `splice` and `extract_if` of a Vec in another allocator: E0277 where rustc says E0658
+
+```rust
+use std::alloc::System;
+
+fn main() {
+    let mut v = Vec::new_in(System);
+    v.push(1u8);
+    println!("{}", v.drain(..).count());
+}
+```
+
+- rustc 1.100: E0658, use of unstable library feature `allocator_ext`, at `drain`, with the note
+  "required for `System` to implement `std::alloc::AllocatorNightly`". Vec's allocator parameter
+  is stable, Drain's, Splice's and ExtractIf's are not: these methods need `A: AllocatorNightly`, a
+  `#[marker]` trait that library/ implements for Global, and for every allocator under an
+  `#[unstable_feature_bound(allocator_ext)]` impl. rustc 1.100.0 also says E0658 for `splice` and
+  `extract_if` on such a Vec, for `drain` on a generic `A: Allocator` (the note names `A`), and for
+  `VecDeque::from(v)` of a `Vec<u8, System>` (its `From` impl needs `A: AllocatorNightly` too).
+  Only `#![feature(allocator_ext)]` makes these programs compile (the one above prints 1);
+  `#![feature(allocator_api)]` does not, although it implies `allocator_ext` for the `#[unstable]`
+  items: a feature bound takes the exact feature (and rustc warns that `allocator_api` has been
+  partially stabilized and is succeeded by `allocator_ext`).
+- Relax: E0277, the trait bound `System: AllocatorNightly` is not satisfied. Relax std has the
+  Global impl only, since Relax does not take `#[unstable_feature_bound]`: the same programs are
+  rejected on stable, under another code, and with `#![feature(allocator_ext)]` they stay rejected.
+
+Start in the trait solver (types/src/next_solver). rustc's mechanism, as we understand it (check it
+against rustc_next_trait_solver before porting): an
+`#[unstable_feature_bound(f)]` on an impl (or fn) adds a where clause that holds when the param env
+has the same clause, in post-analysis typing modes (codegen of an upstream body), or when the crate
+being solved enables exactly `f` and is not a staged-API crate; otherwise the goal is ambiguous, not
+false, and an ambiguity whose leaf is that clause is reported as E0658 with the "required for" note.
+For `Global`, the plain impl's answer wins over the ambiguous blanket one. The catch in Relax: one
+solver serves every crate of the program, and a canonical answer for a goal with no inference
+variables is shared by all of them (`CanonicalQueryInput` keeps `impl_view` only for goals with
+inference variables). This clause's answer depends on the solving crate's features, so the cache key
+has to say which crate's features apply (for instance only for a crate that enables some feature, so
+stable crates keep sharing every answer). The fix is that cache-key change, the new clause kind, the
+E0658 report, and the blanket impl in std/core/heap.rs.
+
+## 9. A confined build script reaches files, folders, its environment, pipes and `$RUSTC` only
+
+Under `makepad run` (compile-time policy Sandboxed), the build script of a package whose units
+hold a registry or git package runs confined (compiler/src/sandbox/script.rs): its program runs in
+an arena, and the only host functions it reaches are the domain's entries. It reads its package's
+source (a registry package's folder, a git package's repository in the store, a path package's
+workspace) and OUT_DIR, writes OUT_DIR, reads the environment its parent gave it, and asks
+`$RUSTC` option-led questions, answered in the host. Bare `relax` runs every script as cargo does.
+
+```rust
+// build.rs of a registry package
+fn main() {
+    let t = std::time::SystemTime::now();
+    println!("cargo:rustc-env=BUILT_AT={:?}", t);
+}
+```
+
+- cargo: the script runs with the person's rights.
+- Relax under `makepad run`: the script fails, naming the C function its code reached
+  (`clock_gettime`).
+
+Not served yet, each a refusal naming its C function unless said otherwise:
+- Windows: there are no arena windows yet; such a script is refused there with that reason.
+- threads, clocks, sockets and name lookups, and any C function a script declares itself.
+- `symlink`, hard links, `chown`, and setting file times.
+- `$CARGO` questions, and programs other than `$RUSTC`: refused as not found (NotFound).
+- A folder of the store opened as a `File`: an error.
+- A store package is read as committed: the run's edits (RELAX_EDITS) do not reach a confined
+  script.
+- A git package checked out on disk by cargo reads its own folder, not its whole repository.
+
+Its output lines act in the run with the person's rights, so they are held to what the script
+reaches (relax-front unitgraph.rs `confined_output_refusals`); a line past that fails the build,
+naming it, and none of that output is kept: `rustc-link-search` and `rerun-if-changed` paths lie
+in its folders (a `rerun-if-changed` folder is walked without following links); `rustc-link-lib`
+names a plain library of a kind the run loads, never found in the working folder; no
+`rustc-link-arg` of any form; `rustc-env` sets no name that steers the run's process or its tools
+(`script_env_refused`: the program's variables only); no `cargo::` instruction cargo does not
+know.
+
+Start in compiler/src/sandbox/script.rs (`entry`, the domain's table) and sandbox/broker.rs (the
+folders and the walk); the decision is relax-front unitgraph.rs `script_confined`.
