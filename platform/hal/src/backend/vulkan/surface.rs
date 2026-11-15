@@ -429,11 +429,13 @@ impl Windows {
         }
         // The window image is rendered upright and blitted, so the chain is created un-rotated and
         // the compositor applies the display rotation (a chain pre-rotated by `current_transform`
-        // would need the blit to rotate too). A pre-rotated surface reports its extent swapped.
+        // would need the blit to rotate too). The chain takes the window image's shape, so the blit
+        // copies pixel for pixel: a rotated surface may report its extent in the display's
+        // orientation (Android 10 reports it in the window's); a chain the other way round made the
+        // blit squeeze 1920 columns into 1200 and the compositor stretch them back.
         let (pre_transform, extent) = if caps.supported_transforms.contains(vk::SurfaceTransformFlagsKHR::IDENTITY) {
-            // ROTATE_90, ROTATE_270 and their mirrored forms
-            let swapped = caps.current_transform.as_raw() & 0xAA != 0;
-            let extent = if swapped && caps.current_extent.width != u32::MAX { vk::Extent2D { width: extent.height, height: extent.width } } else { extent };
+            let crossed = (extent.width > extent.height) != (requested[0] > requested[1]);
+            let extent = if crossed && caps.current_extent.width != u32::MAX { vk::Extent2D { width: extent.height, height: extent.width } } else { extent };
             (vk::SurfaceTransformFlagsKHR::IDENTITY, extent)
         } else { (caps.current_transform, extent) };
         let count = if caps.max_image_count == 0 { caps.min_image_count + 1 } else { (caps.min_image_count + 1).min(caps.max_image_count) };
