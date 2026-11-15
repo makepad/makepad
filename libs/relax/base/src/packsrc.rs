@@ -1,5 +1,5 @@
 //! `makepad pack-src <out.store> <package>...`: the packed source archive `makepad run --src` runs from
-//! (local/agent_state/fast-rust/android/ANDROID.md section 3). There is no archive format of its
+//! (on a device with no checkout of the sources, such as a phone). There is no archive format of its
 //! own: the output is a git store (gitstore.rs) holding ONE synthetic commit, mounted by the VFS
 //! (vfs.rs) as the workspace root.
 //!
@@ -215,7 +215,7 @@ pub fn run(opts: Options) -> Result<(), String> {
         cmd.env("RELAX_READ_LOG", &log);
         crate::progenv::scrub_run_facts(&mut cmd);
         cmd.env_remove("RELAX_CHECK_TARGET");
-        cmd.env("RELAX_OFFLINE", "1").env("MAKEPAD_CEF_OFFLINE", "1");
+        cmd.env("RELAX_OFFLINE", "1").envs(crate::progenv::host_env().offline.iter().copied());
         if let Some(t) = &opts.target {
             cmd.env("RELAX_CHECK_TARGET", t);
         }

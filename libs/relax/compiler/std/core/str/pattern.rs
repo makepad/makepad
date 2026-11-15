@@ -1039,7 +1039,7 @@ pub(crate) struct IsWhitespace;
 impl<'a> Pattern<'a> for IsWhitespace {
     type Searcher = CharPredicateSearcher<'a, fn(char) -> bool>;
     fn into_searcher(self, haystack: &'a str) -> CharPredicateSearcher<'a, fn(char) -> bool> {
-        let f: fn(char) -> bool = crate::char::is_whitespace;
+        let f: fn(char) -> bool = crate::char::methods::is_whitespace;
         CharPredicateSearcher::new(haystack, f)
     }
 }

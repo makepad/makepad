@@ -1,0 +1,7 @@
+out short ok: true
+out fuel stop holding values: Some("sandboxed module: instruction budget (fuel) exhausted")
+out fuel stop in a cleanup: Some("sandboxed module: instruction budget (fuel) exhausted")
+out panic in a cleanup stopped: true
+out plain panic's cleanup ran: Ok(11)
+out host cleanups ran: 5
+out module goes on: Ok(5)

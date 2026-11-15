@@ -258,3 +258,23 @@ fn visible_text_maps_to_source_and_back() {
         "footnote reference"
     );
 }
+
+#[test]
+fn a_held_formula_stays_whole_across_a_blank_line() {
+    let mut lines = lines_of("Before.\n\n$$\nx = 1\n$$\n\nAfter.");
+    let mut index = Index::new(&lines);
+    let starts = |index: &Index| index.blocks().iter().map(|block| block.start).collect::<Vec<_>>();
+    assert_eq!(index.hold(&lines, Some(2..5)), None, "holding a formula without a blank line reparses nothing");
+    // An Enter at the end of `x = 1` leaves a blank line inside the formula.
+    lines.insert(4, String::new());
+    index.apply(&lines, &[LineEdit { line: 3, removed: 0, added: 1 }]);
+    assert_eq!(index.held(), Some(2..6), "the hold takes the line added inside it");
+    assert_eq!(starts(&index), [0, 2, 7], "held, the formula stays one paragraph");
+    let slice = Slice::new(&lines, 2..6);
+    let formula = index.parse_slice(&slice).into_iter().find(|(event, _)| matches!(event, pulldown_cmark::Event::DisplayMath(_)));
+    assert_eq!(formula.map(|(_, range)| range), Some(0..12), "the row parses the whole formula at its own offsets");
+    // Let go, the blank line ends the paragraph, as the document reads.
+    assert!(index.hold(&lines, None).is_some(), "letting go reparses the formula");
+    assert_eq!(starts(&index), [0, 2, 5, 7], "let go, the blank line splits it");
+    assert!(index.same_blocks(&Index::new(&lines)), "let go, the index is the document's own parse");
+}

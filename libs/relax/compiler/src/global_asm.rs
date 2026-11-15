@@ -444,6 +444,33 @@ pub(crate) fn exported_fns_of(prog: &crate::program::Program, in_crate: impl Fn(
     out
 }
 
+/// Symbol name of a foreign item: `#[link_name = ".."]` or its own name.
+pub(crate) fn foreign_link_name(prog: &crate::program::Program, d: DefId) -> String {
+    let def = prog.def(d);
+    let f = &prog.files[def.file as usize];
+    for a in f.ast.list(f.ast.item(def.item).attrs) {
+        if a.toks.hi >= a.toks.lo + 3 && f.tok_text(a.toks.lo) == "link_name" && f.tok_text(a.toks.lo + 1) == "=" {
+            let name = crate::lit::unescape_str(f.tok_text(a.toks.lo + 2));
+            // LLVM's leading SOH requests an exact object-file symbol. Our lookups use
+            // C names, so undo Mach-O's ABI prefix only for these exact names.
+            if let Some(exact) = name.strip_prefix('\u{1}') {
+                return c_name(exact).to_string();
+            }
+            return name;
+        }
+    }
+    prog.name(d).to_string()
+}
+
+/// The symbols the extern blocks of the crates `in_crate` keeps import (fns and statics): what a
+/// linker resolves against the program's static libraries.
+pub(crate) fn foreign_names_of(prog: &crate::program::Program, in_crate: impl Fn(u32) -> bool) -> std::collections::HashSet<String> {
+    (0..prog.defs.len() as u32).map(DefId)
+        .filter(|&d| matches!(prog.def(d).kind, DefKind::ForeignFn | DefKind::ForeignStatic) && in_crate(prog.def(d).krate))
+        .map(|d| foreign_link_name(prog, d))
+        .collect()
+}
+
 /// A fn item's callable address (its slot; compiled on its first call).
 pub(crate) fn fn_addr(u: &Unit, d: DefId) -> Result<u64, String> {
     let instance = crate::instance::Instance::resolve_for_fn_ptr(&u.tcx, &u.prog, d, &[]).map_err(|_| format!("`{}`: a generic fn cannot be a global_asm! symbol", u.prog.def_path(d)))?;

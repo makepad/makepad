@@ -216,37 +216,76 @@ impl<T: Ord> Ord for Reverse<T> {
     }
 }
 
-// References compare by value.
+// References compare by value. Every method forwards (core/src/cmp.rs `mod impls`): a type that
+// overrides `lt`/`ne` keeps its own through a reference (an `Ord::cmp` written as `self < other`
+// on references, whose `partial_cmp` is `cmp`, recursed until the stack overflowed when a
+// reference's `lt` went through `partial_cmp`).
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialEq<B>, B: crate::marker::PointeeSized> PartialEq<&'b B> for &'a A {
     fn eq(&self, other: &&'b B) -> bool {
-        (**self).eq(*other)
+        PartialEq::eq(*self, *other)
+    }
+    fn ne(&self, other: &&'b B) -> bool {
+        PartialEq::ne(*self, *other)
     }
 }
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialEq<B>, B: crate::marker::PointeeSized> PartialEq<&'b mut B> for &'a mut A {
     fn eq(&self, other: &&'b mut B) -> bool {
-        (**self).eq(*other)
+        PartialEq::eq(*self, *other)
+    }
+    fn ne(&self, other: &&'b mut B) -> bool {
+        PartialEq::ne(*self, *other)
     }
 }
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialEq<B>, B: crate::marker::PointeeSized> PartialEq<&'b mut B> for &'a A {
     fn eq(&self, other: &&'b mut B) -> bool {
-        (**self).eq(&**other)
+        PartialEq::eq(*self, *other)
+    }
+    fn ne(&self, other: &&'b mut B) -> bool {
+        PartialEq::ne(*self, *other)
     }
 }
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialEq<B>, B: crate::marker::PointeeSized> PartialEq<&'b B> for &'a mut A {
     fn eq(&self, other: &&'b B) -> bool {
-        (**self).eq(*other)
+        PartialEq::eq(*self, *other)
+    }
+    fn ne(&self, other: &&'b B) -> bool {
+        PartialEq::ne(*self, *other)
     }
 }
 impl<'a, A: crate::marker::PointeeSized + Eq> Eq for &'a A {}
 impl<'a, A: crate::marker::PointeeSized + Eq> Eq for &'a mut A {}
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialOrd<B>, B: crate::marker::PointeeSized> PartialOrd<&'b B> for &'a A {
     fn partial_cmp(&self, other: &&'b B) -> Option<Ordering> {
-        (**self).partial_cmp(*other)
+        PartialOrd::partial_cmp(*self, *other)
+    }
+    fn lt(&self, other: &&'b B) -> bool {
+        PartialOrd::lt(*self, *other)
+    }
+    fn le(&self, other: &&'b B) -> bool {
+        PartialOrd::le(*self, *other)
+    }
+    fn gt(&self, other: &&'b B) -> bool {
+        PartialOrd::gt(*self, *other)
+    }
+    fn ge(&self, other: &&'b B) -> bool {
+        PartialOrd::ge(*self, *other)
     }
 }
 impl<'a, 'b, A: crate::marker::PointeeSized + PartialOrd<B>, B: crate::marker::PointeeSized> PartialOrd<&'b mut B> for &'a mut A {
     fn partial_cmp(&self, other: &&'b mut B) -> Option<Ordering> {
-        (**self).partial_cmp(*other)
+        PartialOrd::partial_cmp(*self, *other)
+    }
+    fn lt(&self, other: &&'b mut B) -> bool {
+        PartialOrd::lt(*self, *other)
+    }
+    fn le(&self, other: &&'b mut B) -> bool {
+        PartialOrd::le(*self, *other)
+    }
+    fn gt(&self, other: &&'b mut B) -> bool {
+        PartialOrd::gt(*self, *other)
+    }
+    fn ge(&self, other: &&'b mut B) -> bool {
+        PartialOrd::ge(*self, *other)
     }
 }
 impl<'a, A: crate::marker::PointeeSized + Ord> Ord for &'a A {

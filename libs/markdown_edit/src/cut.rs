@@ -349,7 +349,8 @@ fn key(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize, backward:
     if text[line_at(text, caret)].trim().is_empty() {
         return blank_line(text, events, caret, backward);
     }
-    let p = Projection::new(text, events);
+    // The formula the caret stands in is its source, a character at a time.
+    let p = Projection::with_open_math(text, events, |formula| formula.start < caret && caret < formula.end);
     let scope = block(text, events, &p, caret);
     // A table cell's edge holds: the keys never reach into the next cell.
     if scope.containers.leaf == Leaf::Table {
@@ -461,7 +462,9 @@ pub fn cut(text: &str, events: &[(Event<'_>, Range<usize>)], range: Range<usize>
     if range.is_empty() {
         return (Plan { edits: vec![], caret: range.start }.checked(text), String::new());
     }
-    let p = Projection::new(text, events);
+    // A formula one end stands in is its source, cut like text.
+    let inside = |formula: &Range<usize>, at: usize| formula.start < at && at < formula.end;
+    let p = Projection::with_open_math(text, events, |formula| inside(formula, range.start) || inside(formula, range.end));
     let first = block(text, events, &p, range.start);
     let last_at = previous_char(text, range.end);
     let last = block(text, events, &p, last_at);
@@ -611,6 +614,9 @@ mod tests {
             ("image is atomic", "a![x](u)‸b\n", "a‸b\n"),
             ("footnote is atomic", "a[^n]‸b\n", "a‸b\n"),
             ("math is atomic", "a$x$‸b\n", "a‸b\n"),
+            ("open math is its source", "a$x‸y$b\n", "a$‸y$b\n"),
+            ("open math loses its delimiter", "a$‸xy$b\n", "a‸xy$b\n"),
+            ("open display math is its source", "$$\nx‸y\n$$\n", "$$\n‸y\n$$\n"),
             ("hard break is atomic", "a\\\n‸b\n", "a‸b\n"),
             ("space hard break is atomic", "a  \n‸b\n", "a‸b\n"),
             ("soft break adds a space", "a\n‸b\n", "a ‸b\n"),
@@ -632,6 +638,7 @@ mod tests {
             ("delete image", "a‸![x](u)b\n", "a‸b\n"),
             ("delete footnote", "a‸[^n]b\n", "a‸b\n"),
             ("delete math", "a‸$x$b\n", "a‸b\n"),
+            ("delete in open math", "a$x‸y$b\n", "a$x‸$b\n"),
             ("delete hard break", "a‸\\\nb\n", "a‸b\n"),
             ("delete soft break", "a‸\nb\n", "a ‸b\n"),
             ("delete quoted soft break", "> a‸\n> b\n", "> a ‸b\n"),
@@ -700,6 +707,7 @@ mod tests {
                 "**ld** and *it*",
             ),
             ("whole strong content removes markers", "a**‹b›**c\n", "a‸c\n", "**b**"),
+            ("inside open math", "a$‹x›y$b\n", "a$‸y$b\n", "x"),
             ("whole nested container", "a***‹b›***c\n", "a‸c\n", "***b***"),
             ("whole container including markers", "a‹**b**›c\n", "a‸c\n", "**b**"),
             ("partial link text", "[ab‹cd›ef](u)\n", "[ab‸ef](u)\n", "[cd](u)"),

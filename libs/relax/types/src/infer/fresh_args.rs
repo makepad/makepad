@@ -37,8 +37,10 @@ impl InferCtxt<'_> {
 }
 
 impl crate::tcx::Tcx {
+    /// (Not item text of its own: the indices are read from `resolve_bound_vars`, whose cell reads
+    /// the declaration's text, body_facts.rs item_text.)
     pub fn generic_indices_of(&self, prog: &Program, def: DefId) -> &GenericIndices {
-        self.declaration_queries(prog, def).generics.get_or_init(|| crate::body_facts::item_text(prog, def, crate::body_facts::ItemCell::Declaration, || self.generic_indices_uncached(prog, def)))
+        self.declaration_queries(prog, def).generics.get_or_init(|| self.generic_indices_uncached(prog, def))
     }
 
     fn generic_indices_uncached(&self, prog: &Program, def: DefId) -> GenericIndices {

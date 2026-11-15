@@ -6,12 +6,16 @@
 mod font;
 mod object;
 mod outline;
+mod structure;
 mod type3;
 
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeSet, HashMap};
+#[cfg(test)]
+mod tests_tagged;
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use font::Font;
 use makepad_fast_inflate::ZlibCompressor;
@@ -163,6 +167,166 @@ pub enum TextMode {
     Fill,
     /// Searchable text with PDF render mode 3; paints nothing.
     Invisible,
+    /// Each glyph painted as a vector shape, its procedure drawn as a Form XObject, which
+    /// holds no text: copy and search find nothing in the run, and its glyph text is
+    /// unused. The run's font must be a Type 3 one; a font only such runs use writes no
+    /// font, only its shapes.
+    Outlines,
+}
+
+/// A standard structure type (ISO 32000-1 14.8.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StructKind {
+    Document,
+    Div,
+    P,
+    H1,
+    H2,
+    H3,
+    H4,
+    H5,
+    H6,
+    L,
+    LI,
+    Lbl,
+    LBody,
+    Table,
+    THead,
+    TBody,
+    TR,
+    TH,
+    TD,
+    Code,
+    BlockQuote,
+    Note,
+    Figure,
+    /// A mathematical expression; PDF/UA asks for its /Alt.
+    Formula,
+    /// An inline run of text in a block, beside a formula.
+    Span,
+}
+
+impl StructKind {
+    /// The heading type for a level, clamped to 1..=6.
+    pub fn heading(level: u8) -> StructKind {
+        match level {
+            0 | 1 => Self::H1,
+            2 => Self::H2,
+            3 => Self::H3,
+            4 => Self::H4,
+            5 => Self::H5,
+            _ => Self::H6,
+        }
+    }
+
+    /// The /S name, e.g. "H1", "LBody".
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Document => "Document",
+            Self::Div => "Div",
+            Self::P => "P",
+            Self::H1 => "H1",
+            Self::H2 => "H2",
+            Self::H3 => "H3",
+            Self::H4 => "H4",
+            Self::H5 => "H5",
+            Self::H6 => "H6",
+            Self::L => "L",
+            Self::LI => "LI",
+            Self::Lbl => "Lbl",
+            Self::LBody => "LBody",
+            Self::Table => "Table",
+            Self::THead => "THead",
+            Self::TBody => "TBody",
+            Self::TR => "TR",
+            Self::TH => "TH",
+            Self::TD => "TD",
+            Self::Code => "Code",
+            Self::BlockQuote => "BlockQuote",
+            Self::Note => "Note",
+            Self::Figure => "Figure",
+            Self::Formula => "Formula",
+            Self::Span => "Span",
+        }
+    }
+}
+
+/// Layout attribute /WritingMode (14.8.5.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WritingMode {
+    LrTb,
+    RlTb,
+}
+
+/// List attribute /ListNumbering (14.8.5.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListNumbering {
+    None,
+    Disc,
+    Decimal,
+}
+
+/// A structure element's attributes and accessibility entries.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StructAttrs {
+    /// Layout /WritingMode.
+    pub writing_mode: Option<WritingMode>,
+    /// Layout /Placement /Block.
+    pub block: bool,
+    /// List /ListNumbering (for L).
+    pub list_numbering: Option<ListNumbering>,
+    /// Table /Scope /Column (for TH).
+    pub scope_column: bool,
+    /// Layout /BBox: zero-based page index and a rect in top-left page points (for Figure and Formula).
+    pub bbox: Option<(usize, Rect)>,
+    /// /Alt alternate description.
+    pub alt: Option<String>,
+    /// /Lang language identifier.
+    pub lang: Option<String>,
+}
+
+/// A structure element added to this writer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StructId(pub usize);
+
+/// A pagination artifact (14.8.2.2.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArtifactKind {
+    Header,
+    Footer,
+}
+
+/// How a text run takes part in a tagged document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunTag {
+    /// Not marked (the only value an untagged writer accepts).
+    None,
+    /// Real content owned by a leaf structure element.
+    Element(StructId),
+    /// A pagination artifact.
+    Artifact(ArtifactKind),
+}
+
+/// Document-wide Tagged PDF settings.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tagging {
+    /// Catalog /Lang.
+    pub lang: Option<String>,
+    /// The predominant reading order: catalog /ViewerPreferences /Direction (/L2R or /R2L).
+    pub direction: WritingMode,
+}
+
+/// A replacement text (ActualText, ISO 32000-1 14.9.4) that consecutive runs share: a reader
+/// that honours it takes the text in place of the runs' own, for example right-to-left text whose
+/// glyphs are in visual order, in several fonts, read back in logical order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Replacement {
+    /// The run takes part in no shared replacement.
+    None,
+    /// The run starts a replacement with this text.
+    Start(String),
+    /// The run continues the previous run's replacement (without one, it takes part in none).
+    Continue,
 }
 
 /// Positioned text anchored at a baseline, with optional per-glyph offsets.
@@ -181,6 +345,14 @@ pub struct TextRun {
     pub mode: TextMode,
     /// Glyphs in drawing order.
     pub glyphs: Vec<Glyph>,
+    /// Horizontal scale of the run about its origin, glyph offsets and advances included;
+    /// 1 for none. An invisible text set over a picture of it is stretched to the
+    /// picture's width.
+    pub stretch: f32,
+    /// How the run takes part in a tagged document.
+    pub tag: RunTag,
+    /// A replacement text the run shares with the runs next to it.
+    pub replacement: Replacement,
 }
 
 /// A link's external or in-document destination.
@@ -250,6 +422,7 @@ pub struct PdfWriter {
     pages: Vec<PageRecord>,
     links: Vec<PendingLink>,
     outline: Vec<OutlineEntry>,
+    structure: Option<structure::Structure>,
 }
 
 impl PdfWriter {
@@ -263,7 +436,35 @@ impl PdfWriter {
             pages: Vec::new(),
             links: Vec::new(),
             outline: Vec::new(),
+            structure: None,
         }
+    }
+
+    /// Makes this a tagged document. Panics if called twice or after adding a page.
+    pub fn set_tagged(&mut self, tagging: Tagging) {
+        assert!(
+            self.pages.is_empty(),
+            "set_tagged must be called before adding a page"
+        );
+        assert!(
+            self.structure.is_none(),
+            "set_tagged must only be called once"
+        );
+        self.structure = Some(structure::Structure::new(&mut self.objects, tagging));
+    }
+
+    /// Adds an element in child order; no parent makes it a kid of the structure root.
+    /// Panics unless tagged, or if the parent is unknown or already owns content.
+    pub fn add_struct(
+        &mut self,
+        parent: Option<StructId>,
+        kind: StructKind,
+        attrs: StructAttrs,
+    ) -> StructId {
+        self.structure
+            .as_mut()
+            .expect("add_struct requires a tagged writer")
+            .add_element(&mut self.objects, parent, kind, attrs)
     }
 
     /// Registers an sfnt font whose program is supplied before finish().
@@ -281,7 +482,8 @@ impl PdfWriter {
         id
     }
 
-    /// Returns the glyph ids used so far by a registered font, in ascending order.
+    /// Returns the glyph ids used so far by a registered font, set as text or drawn as
+    /// shapes, in ascending order.
     pub fn used_glyphs(&self, font: FontId) -> Vec<u16> {
         self.fonts
             .get(font.0)
@@ -308,8 +510,10 @@ impl PdfWriter {
 
     /// Writes the page's content and images immediately: the images are
     /// compressed already, and the content stream is compressed here.
+    /// Panics if a tag needs a tagged writer, or names an unknown or non-leaf element.
     pub fn add_page(&mut self, page: Page) {
-        let page_object = self.reserve_page(self.pages.len());
+        let page_index = self.pages.len();
+        let page_object = self.reserve_page(page_index);
         let mut content = String::new();
         let mut images = String::new();
         for (index, image) in page.images.into_iter().enumerate() {
@@ -324,6 +528,9 @@ impl PdfWriter {
                 &image.image.flate,
             );
             images.push_str(&format!("/Im{index} {object} 0 R "));
+            if self.structure.is_some() {
+                content.push_str("/Artifact BMC ");
+            }
             content.push_str(&format!(
                 "q {} 0 0 {} {} {} cm /Im{index} Do Q\n",
                 number(f64::from(image.rect.w)),
@@ -331,12 +538,37 @@ impl PdfWriter {
                 number(f64::from(image.rect.x)),
                 number(f64::from(page.height) - f64::from(image.rect.y) - f64::from(image.rect.h)),
             ));
+            if self.structure.is_some() {
+                content.push_str("EMC\n");
+            }
         }
 
         let mut used_fonts = BTreeSet::new();
+        let mut used_shapes = BTreeMap::new();
         let mut alphas = HashMap::new();
         let mut states = String::new();
+        let mut tag = RunTag::None;
+        let mut owners = Vec::new();
+        // A replacement span nests inside its runs' marked-content group.
+        let mut replacing = false;
         for run in page.text {
+            if replacing && (run.tag != tag || run.replacement != Replacement::Continue) {
+                content.push_str("EMC\n");
+                replacing = false;
+            }
+            if let Some(structure) = &mut self.structure {
+                if run.tag != tag {
+                    structure::end_group(&mut content, tag);
+                    structure.begin_group(&mut content, run.tag, page_index, &mut owners);
+                    tag = run.tag;
+                }
+            } else {
+                assert_eq!(run.tag, RunTag::None, "text run tags require a tagged writer");
+            }
+            if let Replacement::Start(text) = &run.replacement {
+                content.push_str(&format!("/Span << /ActualText <FEFF{}> >> BDC\n", utf16_hex(text)));
+                replacing = true;
+            }
             let font = self
                 .fonts
                 .get_mut(run.font.0)
@@ -348,6 +580,7 @@ impl PdfWriter {
                 run.color.iter().all(|value| (0.0..=1.0).contains(value)),
                 "text colour components must be in 0..1"
             );
+            assert!(run.stretch.is_finite() && run.stretch > 0.0, "a run's stretch must be positive");
             let alpha = run.color[3];
             let saved = alpha < 1.0 || run.clip.is_some();
             if saved {
@@ -377,12 +610,27 @@ impl PdfWriter {
                     number(f64::from(clip.h)),
                 ));
             }
-            for subfont in write_run(&mut content, &run, font, &mut self.objects, page.height) {
-                used_fonts.insert((run.font.0, subfont));
+            if run.mode == TextMode::Outlines {
+                write_shapes(&mut content, &run, font, &mut self.objects, page.height, &mut used_shapes);
+            } else {
+                for subfont in write_run(&mut content, &run, font, &mut self.objects, page.height) {
+                    used_fonts.insert((run.font.0, subfont));
+                }
             }
             if saved {
                 content.push_str("Q\n");
             }
+        }
+        if replacing {
+            content.push_str("EMC\n");
+        }
+        structure::end_group(&mut content, tag);
+        let structure = match &mut self.structure {
+            Some(structure) => structure.add_page(page_index, owners),
+            None => String::new(),
+        };
+        for ((font, id), object) in used_shapes {
+            images.push_str(&format!("/S{font}_{id} {object} 0 R "));
         }
         let mut fonts = String::new();
         for (index, subfont) in used_fonts {
@@ -426,7 +674,7 @@ impl PdfWriter {
             &format!(
                 "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] \
                  /Resources << /XObject << {images} >> /Font << {fonts} >> {states} >> \
-                 /Contents {contents} 0 R /Annots [{annotations}] >>",
+                 /Contents {contents} 0 R /Annots [{annotations}]{structure} >>",
                 number(f64::from(page.width)),
                 number(f64::from(page.height)),
             ),
@@ -453,6 +701,7 @@ impl PdfWriter {
     /// Writes fonts, destinations, page tree and xref, returning the completed PDF.
     /// All in-document destinations must refer to pages added before this call.
     /// Panics with the font name if a used font program or Type 3 glyph is missing.
+    /// A structure bounding box must name a page added before this call.
     pub fn finish(mut self) -> Vec<u8> {
         for (index, font) in self.fonts.into_iter().enumerate() {
             font.write(&mut self.objects, index);
@@ -473,8 +722,12 @@ impl PdfWriter {
             );
         }
         let outline = outline::write(&mut self.objects, &self.pages, self.outline);
+        let structure = match self.structure {
+            Some(structure) => structure.write(&mut self.objects, &self.pages),
+            None => String::new(),
+        };
         self.objects
-            .write(1, &format!("<< /Type /Catalog /Pages 2 0 R {outline} >>"));
+            .write(1, &format!("<< /Type /Catalog /Pages 2 0 R {outline}{structure} >>"));
         let mut kids = String::new();
         for page in &self.pages {
             kids.push_str(&format!("{} 0 R ", page.object));
@@ -585,9 +838,12 @@ fn write_run(
                     }
                 }
             } else {
+                // The stretch scales text space, so the array's advances and offsets with it.
+                let stretch = f64::from(run.stretch);
                 content.push_str(&format!(
-                    "1 0 0 1 {} {} Tm [",
-                    number(f64::from(run.origin[0]) + f64::from(glyph.x)),
+                    "{} 0 0 1 {} {} Tm [",
+                    number(stretch),
+                    number(f64::from(run.origin[0]) + f64::from(glyph.x) * stretch),
                     number(f64::from(height) - f64::from(run.origin[1]) - f64::from(glyph.y)),
                 ));
             }
@@ -604,6 +860,39 @@ fn write_run(
     close_text_array(content, &mut previous);
     content.push_str("ET\n");
     subfonts
+}
+
+/// Paints an `Outlines` run: each glyph's shape at its pen position, scaled to the run's
+/// size, in the run's colour. Notes the shapes the page uses by font index and glyph id.
+fn write_shapes(
+    content: &mut String,
+    run: &TextRun,
+    font: &mut Font,
+    objects: &mut Objects,
+    height: f32,
+    used: &mut BTreeMap<(usize, u16), usize>,
+) {
+    let size = f64::from(run.size);
+    let stretch = f64::from(run.stretch);
+    content.push_str(&format!(
+        "{} {} {} rg\n",
+        number(f64::from(run.color[0])),
+        number(f64::from(run.color[1])),
+        number(f64::from(run.color[2])),
+    ));
+    for glyph in &run.glyphs {
+        let object = font.record_shape(glyph.id, objects);
+        used.insert((run.font.0, glyph.id), object);
+        content.push_str(&format!(
+            "q {} 0 0 {} {} {} cm /S{}_{} Do Q\n",
+            number(size * stretch),
+            number(size),
+            number(f64::from(run.origin[0]) + f64::from(glyph.x) * stretch),
+            number(f64::from(height) - f64::from(run.origin[1]) - f64::from(glyph.y)),
+            run.font.0,
+            glyph.id,
+        ));
+    }
 }
 
 fn close_text_array(content: &mut String, previous: &mut Option<&Glyph>) {

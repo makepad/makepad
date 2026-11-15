@@ -165,23 +165,54 @@ enum Fill {
     Retry,
 }
 
-pub struct Conn {
-    stream: TcpStream,
+/// What a [`Conn`] runs over: a TCP stream, or a stream layered on one (TLS)
+/// whose socket options reach that TCP stream. Reads that time out report
+/// `WouldBlock` or `TimedOut`, as a TCP stream's do.
+pub trait Transport: Read + Write {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()>;
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()>;
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr>;
+}
+
+impl Transport for TcpStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        TcpStream::set_read_timeout(self, timeout)
+    }
+
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        TcpStream::set_nonblocking(self, nonblocking)
+    }
+
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        TcpStream::peer_addr(self)
+    }
+}
+
+pub struct Conn<S: Transport = TcpStream> {
+    stream: S,
     buf: Vec<u8>,
     pos: usize,
     read_timeout: Duration,
 }
 
-impl Conn {
+impl Conn<TcpStream> {
     pub fn new(stream: TcpStream, read_timeout_ms: u64, write_timeout_ms: u64) -> std::io::Result<Conn> {
         stream.set_nodelay(true)?;
         stream.set_write_timeout(Some(Duration::from_millis(write_timeout_ms.max(1))))?;
-        Ok(Conn {
+        Ok(Conn::over(stream, read_timeout_ms))
+    }
+}
+
+impl<S: Transport> Conn<S> {
+    /// A connection over any transport. The caller has set its write timeout
+    /// (and TCP_NODELAY) on the socket underneath.
+    pub fn over(stream: S, read_timeout_ms: u64) -> Conn<S> {
+        Conn {
             stream,
             buf: Vec::with_capacity(16 * 1024),
             pos: 0,
             read_timeout: Duration::from_millis(read_timeout_ms.max(1)),
-        })
+        }
     }
 
     /// Is the peer on this machine's loopback interface?

@@ -381,7 +381,7 @@ fn key_name(package: &str) -> &str {
 /// the program's closure of that crate (`current`) does not reach, by name. A package leaves a
 /// closure only by a dependency that features or the target select, and every such change shows
 /// in the entries both closures keep (a manifest's bytes, a package's features or version) but
-/// one: a dependency that only an ignored feature brings in (relax-api's makepad-alloc-phase,
+/// one: a dependency that only an ignored feature brings in (relax-api's relax-api-phase,
 /// optional behind host-shims), which the loader's build links and a program's graph never does.
 /// Another version of a package keeps its name, so it still counts.
 pub fn reached_by(built: &Manifest, current: &Manifest) -> Manifest {

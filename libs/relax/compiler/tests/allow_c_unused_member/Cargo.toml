@@ -1,0 +1,15 @@
+[package]
+name = "acu-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "acu"
+build = "build.rs"
+
+[features]
+# the program also calls C that calls a symbol nothing defines
+needed = []
+# the static library holds the program's member twice (a merged archive)
+twice = []
+
+[workspace]

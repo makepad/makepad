@@ -1,6 +1,7 @@
 //! Relax's `impl char`. Each method forwards to the free fns in char/mod.rs.
 
 use super::*;
+use super::methods::*;
 
 impl char {
     pub const MIN: char = '\0';

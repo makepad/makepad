@@ -21,7 +21,7 @@ const ROWS: &[Row] = &[
     Row { name: "makepad_live_id_macros_impl", dir: "../../live_id/id_macros_impl", module: None, features: &[] },
     Row { name: "makepad_micro_serde_derive", dir: "../../micro_serde/derive", module: Some("serde"), features: &[] },
     Row { name: "makepad_micro_serde_derive_impl", dir: "../../micro_serde/derive_impl", module: None, features: &[] },
-    Row { name: "makepad_alloc_phase", dir: "../../relax_api/phase", module: None, features: &[] },
+    Row { name: "relax_api_phase", dir: "../../relax_api/phase", module: None, features: &[] },
     // the loader's copy is built with host-shims (the loader links makepad-hal, which enables it):
     // a graph that links makepad-hal (its own tests) asks for that build
     Row { name: "relax_api", dir: "../../relax_api", module: None, features: &["host-shims"] },

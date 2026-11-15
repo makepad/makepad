@@ -126,20 +126,36 @@ pub fn trace_topics() -> String {
         .clone()
 }
 
-/// Content keys already reported, for [`first_report`].
-static REPORTED: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+/// Content keys already reported, for [`first_report`]: a set of keys open-addressed by the key
+/// (keys are content hashes), each claimed with one compare-exchange, 0 marking a free slot. No
+/// lock and no allocation: code an op of a run reaches may ask, and a lock's first use (std's on
+/// macOS) or a growing list would allocate in that run's heap, which goes with the run.
+const REPORTED_SLOTS: usize = 4096;
+static REPORTED: [std::sync::atomic::AtomicU64; REPORTED_SLOTS] = [const { std::sync::atomic::AtomicU64::new(0) }; REPORTED_SLOTS];
+/// Every slot holds a key (said once).
+static REPORTED_FULL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// True the first time `key` is reported in this process. A condition that
 /// repeated work meets again (the same input prepared on every install) logs
 /// once: the caller keys it by its input and logs only when this is true.
+/// Past 4096 distinct keys a new key is reported each time it comes (never
+/// dropped), and that is said once.
 pub fn first_report(key: u64) -> bool {
-    let mut reported = REPORTED.lock().unwrap_or_else(|e| e.into_inner());
-    if reported.contains(&key) {
-        false
-    } else {
-        reported.push(key);
-        true
+    use std::sync::atomic::Ordering;
+    // 0 marks a free slot: key 0 shares a slot value with key 1
+    let key = key.max(1);
+    let start = (key % REPORTED_SLOTS as u64) as usize;
+    for i in 0..REPORTED_SLOTS {
+        match REPORTED[(start + i) % REPORTED_SLOTS].compare_exchange(0, key, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(held) if held == key => return false,
+            Err(_) => {}
+        }
     }
+    if !REPORTED_FULL.swap(true, Ordering::Relaxed) {
+        eprintln!("error_log: {REPORTED_SLOTS} distinct conditions were reported once each; a new one is now reported each time it comes");
+    }
+    true
 }
 
 /// An enabled trace span. Dropping it logs elapsed wall-clock time.

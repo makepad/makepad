@@ -2,10 +2,10 @@
 
 [app.linux]
 capture = ""
-date = "2026-11-07"
-digest = "2b30088eb66cfe4a0d2a342f0611f0cee4ed890e7aea3e9f8785c554dc63a93c"
-main = "4f8bf6f5c74eec138e10a4c72c10c8579cc3e40c"
-work = "f846b2047215349aa13ba2a265f13f3305635e8f"
+date = "2026-11-14"
+digest = "1d2da1bd18a9855113be2e81e9050263449def7afb0b64659e65b8808289e086"
+main = "2c5a7f1c3138dd2656863c83f7b4d9f3ee78e5fd"
+work = "77672e7bbfe8c75357c8eb6b6a9439f39684e92a"
 
 [app.macos]
 capture = ""

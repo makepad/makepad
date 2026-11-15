@@ -24,7 +24,7 @@ fn table<'a>(data: &'a [u8], tag: &[u8; 4]) -> &'a [u8] {
     panic!("fixture font must contain table {tag:?}");
 }
 
-fn glyph_id(data: &[u8], ch: char) -> u16 {
+pub(crate) fn glyph_id(data: &[u8], ch: char) -> u16 {
     let cmap = table(data, b"cmap");
     for index in 0..usize::from(u16_at(cmap, 2)) {
         let record = 4 + index * 8;
@@ -89,6 +89,9 @@ fn text_run(data: &[u8], font: FontId, mode: TextMode, baseline: f32) -> TextRun
         clip: None,
         mode,
         glyphs,
+        stretch: 1.0,
+        tag: RunTag::None,
+        replacement: Replacement::None,
     }
 }
 
@@ -473,6 +476,10 @@ fn round_trip_raster_text_links_and_outline() {
         "ASCII metadata escapes must round trip"
     );
 
+    check_xref(&bytes, &mut doc);
+}
+
+fn check_xref(bytes: &[u8], doc: &mut PdfDocument<'_>) {
     let marker = bytes
         .windows(b"startxref\n".len())
         .rposition(|window| window == b"startxref\n")
@@ -485,46 +492,134 @@ fn round_trip_raster_text_links_and_outline() {
         .expect("startxref must have an offset")
         .parse()
         .expect("xref offset must be decimal");
-    let mut lines = std::str::from_utf8(&bytes[xref..])
-        .expect("xref and trailer must be ASCII")
-        .lines();
+    let (xref_ref, xref_object) = makepad_pdf_parse::parser::parse_indirect_object_at(bytes, xref)
+        .expect("startxref must address an indirect object");
+    assert!(
+        bytes[xref..].starts_with(format!("{} 0 obj\n", xref_ref.num).as_bytes()),
+        "startxref must point exactly at the xref stream object"
+    );
+    let stream = xref_object.as_stream().expect("xref object must be a stream");
     assert_eq!(
-        lines.next(),
-        Some("xref"),
-        "startxref must point exactly at the classic xref table"
+        stream.dict.get_name("Type"),
+        Some("XRef"),
+        "startxref must address an XRef stream"
     );
     let size = doc
         .trailer()
         .get_int("Size")
         .expect("trailer must declare object count") as usize;
     assert_eq!(
-        lines.next(),
-        Some(format!("0 {size}").as_str()),
+        stream.dict.get_int("Size"),
+        Some(size as i64),
         "xref range must agree with trailer Size"
     );
     assert_eq!(
-        lines.next(),
-        Some("0000000000 65535 f "),
-        "xref object zero must be free"
+        xref_ref.num as usize + 1,
+        size,
+        "xref stream must be the last reserved object"
+    );
+    let root = stream
+        .dict
+        .get_ref("Root")
+        .expect("xref stream must reference the catalog");
+    assert_eq!((root.num, root.gen), (1, 0), "Root must be 1 0 R");
+    assert_eq!(Some(root), doc.trailer().get_ref("Root"));
+    let info = stream
+        .dict
+        .get_ref("Info")
+        .expect("xref stream must reference document info");
+    assert_eq!(info.gen, 0, "Info must use generation zero");
+    assert_eq!(Some(info), doc.trailer().get_ref("Info"));
+    assert!(
+        stream.dict.get("Index").is_none(),
+        "xref must use the default full object range"
+    );
+    let widths: Vec<usize> = stream
+        .dict
+        .get_array("W")
+        .expect("xref stream must declare field widths")
+        .iter()
+        .map(|width| width.as_int().expect("field width must be an integer") as usize)
+        .collect();
+    assert_eq!(widths.len(), 3, "xref entries must have three fields");
+    assert_eq!(widths[0], 1, "xref type field must use one byte");
+    assert!(
+        widths[1] >= 1 && widths[2] >= 2,
+        "xref widths must preserve offsets and the free generation"
+    );
+    assert!(
+        widths
+            .iter()
+            .all(|&width| width <= std::mem::size_of::<usize>()),
+        "xref fields must fit the writer's integer type"
+    );
+    let decoded = doc.decode_stream(stream).expect("xref stream must decode");
+    let entry_size: usize = widths.iter().sum();
+    assert_eq!(
+        decoded.len(),
+        size * entry_size,
+        "every reserved object must have exactly one complete xref entry"
+    );
+    let entries: Vec<[usize; 3]> = decoded
+        .chunks_exact(entry_size)
+        .map(|entry| {
+            let mut fields = [0; 3];
+            let mut offset = 0;
+            for (field, &width) in fields.iter_mut().zip(&widths) {
+                *field = entry[offset..offset + width]
+                    .iter()
+                    .fold(0, |value, &byte| (value << 8) | usize::from(byte));
+                offset += width;
+            }
+            fields
+        })
+        .collect();
+    for (field, minimum) in [(1, 1), (2, 2)] {
+        let largest = entries.iter().map(|entry| entry[field]).max().unwrap();
+        let needed = largest
+            .to_be_bytes()
+            .iter()
+            .skip_while(|&&byte| byte == 0)
+            .count()
+            .max(minimum);
+        assert_eq!(widths[field], needed, "xref widths must be minimal");
+    }
+    assert_eq!(entries[0], [0, 0, 65535], "xref object zero must be free");
+    assert_eq!(
+        entries[xref_ref.num as usize],
+        [1, xref, 0],
+        "xref stream must include its own top-level offset"
     );
     for object in 1..size {
-        let line = lines
-            .next()
-            .expect("every reserved object must have an xref entry");
-        assert_eq!(
-            line.len(),
-            19,
-            "xref entries must have ten-digit offsets and fixed-width fields"
-        );
-        let offset: usize = line[..10].parse().expect("object offset must be decimal");
-        assert!(
-            bytes[offset..].starts_with(format!("{object} 0 obj\n").as_bytes()),
-            "xref offset must address its own numbered object"
-        );
+        let [kind, field2, field3] = entries[object];
+        match kind {
+            1 => {
+                assert_eq!(field3, 0, "top-level objects must use generation zero");
+                assert!(
+                    bytes[field2..].starts_with(format!("{object} 0 obj\n").as_bytes()),
+                    "xref offset must address its own numbered object"
+                );
+            }
+            2 => {
+                assert_eq!(entries[field2][0], 1, "object streams must be top-level");
+                let container = doc
+                    .resolve_obj_num(field2 as u32)
+                    .expect("compressed object must reference an existing object stream");
+                let container = container.as_stream().expect("container must be a stream");
+                assert_eq!(container.dict.get_name("Type"), Some("ObjStm"));
+                let count = container
+                    .dict
+                    .get_int("N")
+                    .expect("object stream must have N");
+                assert!(field3 < count as usize, "object index must be below N");
+            }
+            _ => panic!("every object after zero must have a type 1 or type 2 entry"),
+        }
         let resolved = doc
             .resolve_obj_num(object as u32)
             .expect("every written object must resolve");
         if let PdfObj::Stream(stream) = resolved {
+            assert_eq!(kind, 1, "stream objects must never be inside object streams");
             assert_eq!(
                 stream.dict.get_name("Filter"),
                 Some("FlateDecode"),
@@ -535,13 +630,125 @@ fn round_trip_raster_text_links_and_outline() {
                 Some(stream.data.len() as i64),
                 "stream Length must equal compressed byte length"
             );
-            doc.decode_stream(&stream)
+            let decoded = doc
+                .decode_stream(&stream)
                 .expect("every compressed stream must decode");
+            if stream.dict.get_name("Type") == Some("ObjStm") {
+                let first = stream
+                    .dict
+                    .get_int("First")
+                    .expect("object stream must have First");
+                let header: Vec<usize> = std::str::from_utf8(&decoded[..first as usize])
+                    .expect("object stream header must be ASCII")
+                    .split_ascii_whitespace()
+                    .map(|value| value.parse().expect("object header fields must be decimal"))
+                    .collect();
+                let count = stream.dict.get_int("N").expect("object stream must have N");
+                assert_eq!(
+                    header.len(),
+                    count as usize * 2,
+                    "header must contain N pairs"
+                );
+                for (index, pair) in header.chunks_exact(2).enumerate() {
+                    assert_eq!(
+                        entries[pair[0]],
+                        [2, object, index],
+                        "each object header must match its unique xref entry and index"
+                    );
+                }
+            }
         }
     }
 }
 
-fn font_metrics(data: &[u8], name: &str) -> FontMetrics {
+#[test]
+fn object_streams_split_without_dropping_objects() {
+    let mut writer = PdfWriter::new(DocInfo {
+        title: String::new(),
+        producer: String::new(),
+    });
+    // Replacing the outline leaves an unwritten forward page reservation.
+    writer.set_outline(vec![OutlineEntry {
+        title: "Replaced".into(),
+        level: 1,
+        page: 1,
+        y: 0.0,
+    }]);
+    writer.set_outline(Vec::new());
+    let suffix = "a".repeat(1024);
+    let targets: Vec<String> = (0..256)
+        .map(|index| format!("https://example.com/{index}/{suffix}"))
+        .collect();
+    let mut page = vector_page(Vec::new());
+    page.links = targets
+        .iter()
+        .map(|target| Link {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 10.0,
+                h: 10.0,
+            },
+            target: LinkTarget::Uri(target.clone()),
+        })
+        .collect();
+    writer.add_page(page);
+    let bytes = writer.finish();
+    let mut doc = PdfDocument::parse(&bytes).expect("split object streams must parse");
+    check_xref(&bytes, &mut doc);
+    assert_eq!(doc.page_count(), 1, "unused reservation must not add a page");
+    let pages = doc.resolve_obj_num(2).expect("page tree must resolve");
+    let kids = pages
+        .as_dict()
+        .and_then(|dict| dict.get_array("Kids"))
+        .expect("page tree must contain Kids");
+    let page = doc.resolve(&kids[0]).expect("page must resolve");
+    let annotations = page
+        .as_dict()
+        .and_then(|dict| dict.get_array("Annots"))
+        .expect("page must contain annotations");
+    assert_eq!(annotations.len(), targets.len(), "no link may be dropped");
+    for (annotation, target) in annotations.iter().zip(&targets) {
+        let annotation = doc.resolve(annotation).expect("every link must resolve");
+        assert_eq!(
+            annotation
+                .as_dict()
+                .and_then(|dict| dict.get_dict("A"))
+                .and_then(|action| action.get_str("URI")),
+            Some(target.as_bytes()),
+            "every link target must survive in order across object streams"
+        );
+    }
+    let size = doc.trailer().get_int("Size").expect("trailer must have Size");
+    let mut streams = 0;
+    let mut decoded_size = 0;
+    let mut nulls = 0;
+    for id in 1..size {
+        let object = doc
+            .resolve_obj_num(id as u32)
+            .expect("every object must resolve across the split");
+        if object == PdfObj::Null {
+            nulls += 1;
+        }
+        if let PdfObj::Stream(stream) = object {
+            if stream.dict.get_name("Type") == Some("ObjStm") {
+                streams += 1;
+                decoded_size += doc
+                    .decode_stream(&stream)
+                    .expect("object stream must decode")
+                    .len();
+            }
+        }
+    }
+    assert!(decoded_size > 256 * 1024, "fixture must exceed the split size");
+    assert!(
+        streams > 1,
+        "large documents must split into multiple object streams"
+    );
+    assert_eq!(nulls, 1, "unused reservation must resolve to null");
+}
+
+pub(crate) fn font_metrics(data: &[u8], name: &str) -> FontMetrics {
     let head = table(data, b"head");
     let hhea = table(data, b"hhea");
     FontMetrics {
@@ -570,7 +777,7 @@ fn synthetic_metrics() -> FontMetrics {
     }
 }
 
-fn positioned_glyph(id: u16, x: f32, text: &str) -> Glyph {
+pub(crate) fn positioned_glyph(id: u16, x: f32, text: &str) -> Glyph {
     Glyph {
         id,
         x,
@@ -580,7 +787,7 @@ fn positioned_glyph(id: u16, x: f32, text: &str) -> Glyph {
     }
 }
 
-fn vector_run(font: FontId, baseline: f32, glyphs: Vec<Glyph>) -> TextRun {
+pub(crate) fn vector_run(font: FontId, baseline: f32, glyphs: Vec<Glyph>) -> TextRun {
     TextRun {
         font,
         size: 12.0,
@@ -589,6 +796,9 @@ fn vector_run(font: FontId, baseline: f32, glyphs: Vec<Glyph>) -> TextRun {
         clip: None,
         mode: TextMode::Fill,
         glyphs,
+        stretch: 1.0,
+        tag: RunTag::None,
+        replacement: Replacement::None,
     }
 }
 
@@ -650,7 +860,7 @@ fn decoded_runs(page: &makepad_pdf_parse::PdfPage) -> Vec<String> {
         match op {
             PdfOp::BeginText => runs.push(String::new()),
             PdfOp::SetFont(name, _) => font = name,
-            PdfOp::BeginMarkedContentProps(tag) => {
+            PdfOp::BeginMarkedContentProps(tag, _) => {
                 assert_eq!(tag, "Span", "ActualText must use a Span tag");
                 assert!(!inside_actual, "generated ActualText spans must not nest");
                 runs.last_mut()
@@ -806,13 +1016,24 @@ fn round_trip_vector_clusters_and_type3() {
         w: 100.0,
         h: 150.0,
     });
+    let mut stretched = vector_run(font, 80.0, vec![positioned_glyph(ligature, 0.0, "fl")]);
+    stretched.stretch = 1.5;
+    // Shapes hold no text; glyph 15 is drawn only as a shape.
+    let mut shapes = vector_run(
+        type3,
+        140.0,
+        vec![positioned_glyph(13, 0.0, "∑"), positioned_glyph(15, 12.0, "")],
+    );
+    shapes.mode = TextMode::Outlines;
+    shapes.stretch = 2.0;
     writer.add_page(vector_page(vec![
         vector_run(font, 20.0, vec![positioned_glyph(ligature, 0.0, "fi")]),
         accented,
         rtl,
-        vector_run(font, 80.0, vec![positioned_glyph(ligature, 0.0, "fl")]),
+        stretched,
         colour,
         zero,
+        shapes,
         vector_run(unused, 140.0, Vec::new()),
     ]));
     assert_eq!(
@@ -822,8 +1043,8 @@ fn round_trip_vector_clusters_and_type3() {
     );
     assert_eq!(
         writer.used_glyphs(type3),
-        [12, 13, 14],
-        "Type 3 usage must deduplicate repeated ids"
+        [12, 13, 14, 15],
+        "Type 3 usage must deduplicate repeated ids and include glyphs drawn as shapes"
     );
     assert!(
         writer.used_glyphs(unused).is_empty(),
@@ -897,6 +1118,16 @@ fn round_trip_vector_clusters_and_type3() {
             PathCommand::QuadTo(300.0, 600.0, 600.0, 0.0),
             PathCommand::LineTo(600.0, -60.0),
             PathCommand::CurveTo(400.0, -60.0, 200.0, -60.0, 0.0, -60.0),
+            PathCommand::Close,
+        ]),
+    );
+    writer.set_type3_glyph(
+        type3,
+        15,
+        Type3Glyph::Outline(vec![
+            PathCommand::MoveTo(0.0, 0.0),
+            PathCommand::LineTo(1000.0, 0.0),
+            PathCommand::LineTo(1000.0, 1000.0),
             PathCommand::Close,
         ]),
     );
@@ -984,6 +1215,17 @@ fn round_trip_vector_clusters_and_type3() {
         content.contains("EMC 1 0 0 1 22 160 Tm"),
         "text after ActualText must resume at its own baseline and x"
     );
+    assert!(
+        content.contains("1.5 0 0 1 10 120 Tm"),
+        "a stretched run must scale text space about its origin"
+    );
+    assert!(
+        content.contains("0 0 0 rg\nq 24 0 0 12 10 60 cm /S2_13 Do Q\nq 24 0 0 12 34 60 cm /S2_15 Do Q\n"),
+        "shapes must be drawn in the run's colour at their stretched pen positions"
+    );
+    for name in ["S2_13", "S2_15"] {
+        assert_eq!(page.xobjects[name].subtype, "Form", "a shape must be a Form XObject");
+    }
     assert_eq!(
         content.matches("/GS0 gs").count(),
         2,
@@ -1041,14 +1283,14 @@ fn round_trip_vector_clusters_and_type3() {
         ops.iter()
             .filter(|op| matches!(op, PdfOp::SaveState))
             .count(),
-        4,
-        "only alpha or clipped runs should save graphics state"
+        6,
+        "only alpha or clipped runs, and each shape, should save graphics state"
     );
     assert_eq!(
         ops.iter()
             .filter(|op| matches!(op, PdfOp::RestoreState))
             .count(),
-        4,
+        6,
         "each saved graphics state must be restored"
     );
 
@@ -1069,12 +1311,41 @@ fn round_trip_vector_clusters_and_type3() {
     );
     assert_eq!(
         type3_dict.get("FontBBox").and_then(PdfObj::as_number_array),
-        Some(vec![-100.0, -100.0, 1000.0, 1000.0]),
-        "Type 3 FontBBox must remain in font units"
+        Some(vec![-20.0, -60.0, 780.0, 760.0]),
+        "Type 3 FontBBox must bound its own glyphs (images and outlines), in font units"
+    );
+    let descriptor = doc
+        .resolve(type3_dict.get("FontDescriptor").expect("a tagged Type 3 font must have a descriptor"))
+        .expect("Type 3 descriptor must resolve");
+    let descriptor = descriptor.as_dict().expect("Type 3 descriptor must be a dictionary");
+    let metric = |key: &str| descriptor.get(key).and_then(PdfObj::as_f64);
+    assert_eq!(
+        (metric("Flags"), metric("Ascent"), metric("Descent"), metric("CapHeight")),
+        (Some(4.0), Some(900.0), Some(-100.0), Some(800.0)),
+        "Type 3 descriptor must be symbolic with the face's metrics in font units"
+    );
+    assert_eq!(
+        descriptor.get("FontBBox").and_then(PdfObj::as_number_array),
+        type3_dict.get("FontBBox").and_then(PdfObj::as_number_array),
+        "Type 3 descriptor must carry the font's box"
     );
     assert_eq!(
         page.fonts["F2_0"].widths, [600.0; 3],
-        "Type 3 widths must use unscaled font advances"
+        "Type 3 widths must use unscaled font advances, for the glyphs set as text only"
+    );
+    let form = doc
+        .resolve(&PdfObj::Ref(page.xobjects["S2_13"].obj_ref))
+        .expect("a shape must resolve");
+    let form = form.as_dict().expect("a shape must be a stream dictionary");
+    assert_eq!(
+        form.get("BBox").and_then(PdfObj::as_number_array),
+        Some(vec![0.0, -60.0, 600.0, 300.0]),
+        "a shape's box must bound its outline in font units"
+    );
+    assert_eq!(
+        form.get("Matrix").and_then(PdfObj::as_number_array),
+        type3_dict.get("FontMatrix").and_then(PdfObj::as_number_array),
+        "a shape must map font units as its font does"
     );
     let procedures = type3_dict
         .get_dict("CharProcs")

@@ -59,14 +59,16 @@ impl Tcx {
     }
 
     /// rustc_hir_analysis/src/collect/item_bounds.rs:526: elaborate in the impl's
-    /// identity binder once, then instantiate for each candidate.
+    /// identity binder once, then instantiate for each candidate. (Not item text of its own: it
+    /// is read from the impl's trait reference and the trait's supertraits, cells that read their
+    /// text, body_facts.rs item_text.)
     pub fn impl_super_outlives(&self, prog: &Program, imp: DefId) -> &[Predicate] {
-        self.declaration_queries(prog, imp).impl_super_outlives.get_or_init(|| crate::body_facts::item_text(prog, imp, crate::body_facts::ItemCell::Declaration, || {
+        self.declaration_queries(prog, imp).impl_super_outlives.get_or_init(|| {
             let identity = self.identity_impl_trait_ref(prog, imp);
             self.supertraits(prog, collect::trait_predicate(identity.def_id, identity.args.clone()))
                 .into_iter().filter(|p| matches!(p.kind,
                     PredicateKind::Clause(ClauseKind::RegionOutlives(..) | ClauseKind::TypeOutlives(..)))).collect()
-        }))
+        })
     }
 
 }

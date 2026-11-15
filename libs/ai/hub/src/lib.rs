@@ -42,6 +42,7 @@ pub mod body_native_backend;
 pub mod chat_wire;
 pub mod claude_cli;
 pub mod claude_cli_calls;
+pub mod intake_scope;
 pub use makepad_base64;
 pub mod client;
 mod child_process;

@@ -8,6 +8,9 @@ of the run's: it cannot compute the run's native key, so it reads the native bui
 (cfgs, env, OUT_DIR) and library from the receipt the run hands it. Without that the child
 refuses `cnative` as C only `--allow-c` builds, and the script fails.
 
+A check runs the script only with `--allow-c`: without it no C runs (the script's calls into
+cnative are C), and the check says so, naming the flag.
+
 The receipt's name is its content: a warm run hands the script the same name, so the script's
 rerun key holds and it does not run again (it counts its runs in its OUT_DIR).
 
@@ -60,11 +63,20 @@ assert "building native dependencies with cargo" in cold.stderr, "cold native bu
 assert cold.stdout == expected, cold.stdout
 print("PASS cold: a build script's child run calls the C its build-dependency built, with its cfg")
 
-# A check without the flag hands the script the receipt of the cached build: the same one.
-check = run("check", [binary, "check", "script-native-fixture"])
+# A check without the flag runs no C: not the script, which calls into cnative. It says why,
+# naming the grant, and the crate that includes the script's OUT_DIR file fails for it.
+flagless = run("check", [binary, "check", "script-native-fixture"], success=False)
+assert "building native dependencies with cargo" not in flagless.stderr, "the check built native code"
+assert "`helper`'s build script can run C (it build-depends on `cnative`" in flagless.stderr and "not run without `--allow-c`" in flagless.stderr, (
+    f"the flagless check does not say why the script is not run:\n{flagless.stderr}")
+assert "not available on this host" not in flagless.stderr, f"the script ran without its C:\n{flagless.stderr}"
+print("PASS check: a flagless check does not run the script that can run C, and names the grant")
+
+# With the flag the check hands the script the receipt of the cached build: the same one.
+check = run("check-allow-c", [binary, "check", "--allow-c", "script-native-fixture"])
 assert "building native dependencies with cargo" not in check.stderr, "the check built native code"
 assert "0 errors" in check.stderr, check.stderr
-print("PASS check: a flagless check runs the script from the cached native build")
+print("PASS check --allow-c: the check runs the script from the cached native build, without cargo")
 
 # Warm: no cargo, and the script's output stands (one receipt, named by its content).
 warm = run("run-warm", [binary, "run", "--allow-c", "script-native-fixture"])

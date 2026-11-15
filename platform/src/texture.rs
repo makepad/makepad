@@ -2,7 +2,7 @@
 use crate::os::web::CxOsTexture;
 use {
     crate::{
-        cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*, script::vm::*,
+        cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*, script::vm::*, HostBuf,
     },
     std::{
         rc::Rc,
@@ -642,10 +642,11 @@ pub enum TextureFormat {
         data: Option<Vec<u32>>,
         updated: TextureUpdated,
     },
+    /// The mip chain is shared, not copied, with its producer; a clone shares it.
     VecMipBGRAu8_32 {
         width: usize,
         height: usize,
-        data: Option<Vec<u32>>,
+        data: Option<HostBuf<u32>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -661,11 +662,12 @@ pub enum TextureFormat {
     /// level 0 first, each level's 16-byte 4x4 blocks in raster order
     /// (`ceil(w/4) * ceil(h/4)` blocks). Only create one for a format the
     /// backend reports in `GpuInfo` (`texture_bc7`, `texture_astc4x4`).
+    /// The mip chain is shared, not copied, with its producer; a clone shares it.
     VecMipCompressed {
         width: usize,
         height: usize,
         format: CompressedTextureFormat,
-        data: Option<Vec<u8>>,
+        data: Option<HostBuf<u8>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -674,23 +676,25 @@ pub enum TextureFormat {
     /// coordinate's z, an integer). `layers` images of `width` x `height`,
     /// layer-major: each layer's mip chain as in [`TextureFormat::VecMipBGRAu8_32`]
     /// (levels 0..=max_level concatenated), then the next layer's.
+    /// The mip chains are shared, not copied, with their producer; a clone shares them.
     VecArrayMipBGRAu8_32 {
         width: usize,
         height: usize,
         layers: usize,
-        data: Option<Vec<u32>>,
+        data: Option<HostBuf<u32>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
     },
     /// The block-compressed [`TextureFormat::VecArrayMipBGRAu8_32`]: each
     /// layer's mip chain as in [`TextureFormat::VecMipCompressed`], layer-major.
+    /// The mip chains are shared, not copied, with their producer; a clone shares them.
     VecArrayMipCompressed {
         width: usize,
         height: usize,
         layers: usize,
         format: CompressedTextureFormat,
-        data: Option<Vec<u8>>,
+        data: Option<HostBuf<u8>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -1261,12 +1265,11 @@ impl CxTexture {
 }
 
 impl TextureFormat {
-    /// CPU pixel bytes this format currently holds (capacity, not length).
+    /// CPU pixel bytes this format currently holds (Vec capacity or shared chain length).
     pub(crate) fn cpu_data_bytes(&self) -> usize {
         match self {
             TextureFormat::VecBGRAu8_32 { data, .. }
-            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. } => data
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. } => data
                 .as_ref()
                 .map_or(0, |data| data.capacity().saturating_mul(4)),
             TextureFormat::VecMipRGBAf32 { data, .. }
@@ -1277,25 +1280,25 @@ impl TextureFormat {
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
-            TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
-            TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4)),
+            TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.len() * std::mem::size_of::<u8>()),
+            TextureFormat::VecMipBGRAu8_32 { data, .. } | TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.len() * std::mem::size_of::<u32>()),
             _ => 0,
         }
     }
 
-    /// Release any CPU pixel `Vec` held by a `Vec*` variant, keeping format and dimensions intact.
+    /// Release any CPU pixel storage held by a `Vec*` variant, keeping format and dimensions intact.
     pub(crate) fn discard_cpu_data(&mut self) {
         match self {
             TextureFormat::VecBGRAu8_32 { data, .. }
-            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. } => *data = None,
+            TextureFormat::VecMipBGRAu8_32 { data, .. }
             | TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => *data = None,
             TextureFormat::VecMipRGBAf32 { data, .. }
             | TextureFormat::VecRGBAf32 { data, .. }
             | TextureFormat::VecRf32 { data, .. } => *data = None,
             TextureFormat::VecMipCompressed { data, .. }
-            | TextureFormat::VecArrayMipCompressed { data, .. }
-            | TextureFormat::VecRu8 { data, .. }
+            | TextureFormat::VecArrayMipCompressed { data, .. } => *data = None,
+            TextureFormat::VecRu8 { data, .. }
             | TextureFormat::VecRGu8 { data, .. } => *data = None,
             _ => {}
         }

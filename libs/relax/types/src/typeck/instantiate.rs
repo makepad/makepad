@@ -35,7 +35,22 @@ pub(super) fn try_normalize_body(prog: &Program, tcx: &Tcx, env: crate::tcx::Typ
     let mut s = |ty: TyId| {
         if let Some(&ty) = folded.get(&ty) { return Ok(ty); }
         let instantiated = crate::types::fold::EarlyBinder::bind(&tcx.tys, ty).instantiate(&tcx.tys, &indices, &full);
-        let result = tcx.try_normalize_erasing_regions(prog, env, instantiated)?;
+        let result = tcx.try_normalize_erasing_regions(prog, env, instantiated).inspect_err(|_| {
+            // RELAX_NORMALIZE_TRACE=1: which type of which body has no normal form
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var_os("RELAX_NORMALIZE_TRACE").is_some()) {
+                eprintln!("normalize-trace: {} has no normal form for `{}` (as written `{}`)", prog.def_path(body.def), type_name(prog, tcx, instantiated), type_name(prog, tcx, ty));
+                // the alias's own arguments, and for a closure among them what its callable goals read
+                if let TyKind::Alias(_, alias) = tcx.tys.kind(instantiated) {
+                    for &arg in tcx.tys.list(alias.args).iter() {
+                        eprintln!("normalize-trace:   arg `{}`", type_name(prog, tcx, arg));
+                        if let TyKind::Closure(_, _, closure) = tcx.tys.kind(arg) {
+                            eprintln!("normalize-trace:   closure sig `{}`, kind `{}`, upvars `{}`, coroutine {}", type_name(prog, tcx, closure.sig_as_fn_ptr_ty()), type_name(prog, tcx, closure.kind_ty()), type_name(prog, tcx, closure.tupled_upvars_ty()), tcx.is_coroutine(arg));
+                        }
+                    }
+                }
+            }
+        })?;
         folded.insert(ty, result);
         Ok(result)
     };

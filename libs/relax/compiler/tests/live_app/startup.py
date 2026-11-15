@@ -2,8 +2,8 @@
 """Live edits wait for present even across a compile-quiet startup interval.
 
 Run with an absolute release Relax binary; RELAX_STD names this checkout's std.
-The fixture uses the platform crate name to exercise the GUI admission policy,
-without creating a window or requiring a GPU.
+The fixture's manifest says it presents frames (`[package.metadata.relax] presents = true`)
+to exercise the GUI admission policy, without creating a window or requiring a GPU.
 """
 import os
 from pathlib import Path
@@ -16,7 +16,7 @@ binary = str(Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="relax-startup-") as tmp:
     root = Path(tmp)
     (root / "src").mkdir()
-    (root / "Cargo.toml").write_text('[package]\nname="makepad-platform"\nversion="0.0.0"\nedition="2021"\n[workspace]\n')
+    (root / "Cargo.toml").write_text('[package]\nname="presents-startup"\nversion="0.0.0"\nedition="2021"\n[package.metadata.relax]\npresents = true\n[workspace]\n')
     (root / "src/main.rs").write_text('''
 mod helper;
 extern "C" { fn relax_first_present(); }
@@ -39,7 +39,7 @@ fn main() {
     helper.write_text('#[inline(never)] pub fn value() -> u32 { 1 }\n')
     log_path = root / "run.log"
     with log_path.open("w") as log:
-        p = subprocess.Popen([binary, "run", "makepad-platform"], cwd=root,
+        p = subprocess.Popen([binary, "run", "presents-startup"], cwd=root,
                              env=dict(os.environ, RELAX_LIVE_READY=str(root / "live-ready"), RELAX_CACHE="off", RELAX_STARTUP_PHASE="0"),
                              stdout=log, stderr=subprocess.STDOUT)
         def text():

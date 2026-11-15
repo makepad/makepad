@@ -184,8 +184,8 @@ pub fn rust_command(prog: &str) -> std::process::Command {
 }
 
 /// The toolchain a lease's run finds ([`rust_command`]): `rustc -vV`'s release (`1.100.0`) and
-/// commit hash. The box's report and the JIT store's keys (loaders::compiler) read it again on
-/// their own, so a rustup update reaches both without a hub restart.
+/// commit hash. Each read ([`read_rustc`]) keys the JIT store too (loaders::compiler), so a rustup
+/// update reaches the box's report and its keys without a hub restart.
 #[derive(Clone, Default)]
 pub struct Rustc {
     pub release: String,
@@ -200,10 +200,14 @@ fn parse_rustc(vv: &str) -> Rustc {
     Rustc { release: line("release: "), commit: line("commit-hash: ") }
 }
 
-/// Reads the toolchain again now: a lease's start ([`super::loaders::refresh_compiler`]).
+/// Reads the toolchain again now, and keys the box's JIT binaries by what it read
+/// ([`super::loaders::rekey`]): a lease's start and end, the box's report when 5 min old, and the
+/// toolchain probe each read it. A key changed only at lease starts left a rustup update between
+/// two leases unseen by the hub's report and its prebuilds (11-13).
 pub fn read_rustc() -> Rustc {
     let r = rust_command("rustc").arg("-vV").output().ok().map(|o| parse_rustc(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
     *RUSTC.lock().unwrap() = Some((std::time::Instant::now(), r.clone()));
+    super::loaders::rekey(&r.commit);
     r
 }
 
@@ -428,7 +432,12 @@ pub fn probe_git() -> (Option<String>, bool) {
 
 /// Links a small program the way a build does, system libraries included (a damaged SDK fails every
 /// lane's job at its last step). The first line that says why, or None. `changed`: the verdict moved.
+/// One probe at a time: the hub's loop and a `toolchain-probe` ask write and link the same files in
+/// `dir`, and two rustc runs on them at once could fail one falsely and take the box out of
+/// rotation (a second waits for the first, seconds).
 pub fn probe_toolchain(dir: &std::path::Path) -> (Option<String>, bool) {
+    static PROBING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = PROBING.lock().unwrap_or_else(|e| e.into_inner());
     let src = dir.join("toolchain-probe.rs");
     let out = dir.join(if cfg!(windows) { "toolchain-probe.exe" } else { "toolchain-probe" });
     let text = "#[cfg(target_os = \"macos\")] #[link(name = \"objc\")] #[link(name = \"m\")] #[link(name = \"Foundation\", kind = \"framework\")] #[link(name = \"Metal\", kind = \"framework\")] unsafe extern \"C\" {}\nfn main() {}\n";
@@ -588,13 +597,21 @@ pub fn parse_battery(capacity: &str, status: &str) -> Option<(u32, bool)> {
     Some((pct, matches!(status.trim(), "Charging" | "Full")))
 }
 
-/// How long [`load_now`] measures the CPU for.
+/// How long [`load_now`] measures the CPU for on Linux and Windows, whose counters move as the
+/// time goes; macOS publishes its own about once a second, and a measure there spans the next
+/// publication (at most [`LOAD_WAIT`] after its first read).
 pub const LOAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The box's load now: (CPU use in percent over [`LOAD_WINDOW`], available RAM in GB). A lease-end
-/// answers it after the teardown: the caps the master holds are a 10 s average from up to 10 s ago
-/// and still count the ended lease's work (a medium lease waited 23 s, two caps rounds, after two
-/// small tests that pegged its box had ended, 11-04).
+/// How long a macOS [`load_now`] waits for its CPU counters to move: past it (the counters stood
+/// still for three of their periods) the answer has no load, said in one line.
+#[cfg(target_os = "macos")]
+pub const LOAD_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The box's load now: (CPU use in percent over [`LOAD_WINDOW`], or on macOS over the counters'
+/// last whole period, available RAM in GB). A lease-end answers it after the teardown: the caps
+/// the master holds are a 10 s average from up to 10 s ago and still count the ended lease's work
+/// (a medium lease waited 23 s, two caps rounds, after two small tests that pegged its box had
+/// ended, 11-04).
 pub fn load_now() -> Option<(f64, f64)> {
     os::load_now()
 }
@@ -854,7 +871,10 @@ mod os {
     }
 
     /// (busy, total) CPU ticks of all cores: `host_statistics(HOST_CPU_LOAD_INFO)` (user, system,
-    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line.
+    /// idle, nice), the macOS twin of `/proc/stat`'s `cpu` line. The kernel publishes them about
+    /// once a second, every core's period at once: on a 16-core M-series box two in three windows
+    /// of 100 ms saw them stand still, idle or with every core spinning, and windows of 1 s each
+    /// saw a period's 1600 ticks (11-14).
     fn cpu_ticks() -> Option<(u64, u64)> {
         let mut t = [0u32; 4];
         let mut count = 4u32;
@@ -866,19 +886,32 @@ mod os {
         Some((busy, busy + t[2] as u64))
     }
 
+    /// The CPU over the counters' last whole period: from the first read (the last publication)
+    /// to the next publication, which comes within about a second. A fixed window of 100 ms most
+    /// often saw no tick at all, and the lease-end answer then had no load.
     pub fn load_now() -> Option<(f64, f64)> {
         let a = cpu_ticks()?;
-        std::thread::sleep(LOAD_WINDOW);
-        let b = cpu_ticks()?;
-        (b.1 > a.1).then(|| (crate::top::cpu_pct(a, b), crate::procinfo::machine().mem_avail_mb as f64 / 1024.0))
+        let t0 = std::time::Instant::now();
+        let b = loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let b = cpu_ticks()?;
+            if b.1 > a.1 {
+                break b;
+            }
+            if t0.elapsed() >= LOAD_WAIT {
+                eprintln!("devhub: the CPU counters stood still for {LOAD_WAIT:?}: a lease-end answers no load");
+                return None;
+            }
+        };
+        Some((crate::top::cpu_pct(a, b), crate::procinfo::machine().mem_avail_mb as f64 / 1024.0))
     }
 
     pub fn hardware() -> Caps {
         let m = crate::procinfo::machine();
         // CPU use since the previous measure (the master asks every 10 s): what decides "busy", not
         // the 1-minute load average, which stays high for a minute after a lease's build ended
-        // (a measure within the same tick as the last one, from another caller, answers the last
-        // value and keeps its base: the ticks advance at 100 Hz)
+        // (a measure within the same period of the counters as the last one, from another caller,
+        // answers the last value and keeps its base: the kernel publishes them about once a second)
         static LAST: std::sync::Mutex<(Option<(u64, u64)>, Option<f64>)> = std::sync::Mutex::new((None, None));
         let now = cpu_ticks();
         let cpu_pct = {

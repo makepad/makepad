@@ -248,7 +248,10 @@ fn edited_async_code_runs_on_the_next_call() {
                 ("t.from.unwrap_or(0) + t.n + 200;", "t.from.unwrap_or(0) + t.n.0 + t.n.1 + 300;"),
             ]);
             assert_eq!(outcome.rung, crate::reload::Rung::Restart, "{:?}", outcome.lines);
-            assert!(outcome.lines.iter().any(|l| ["drive", "held"].iter().any(|f| l.contains(&format!("struct `Trace` changed its layout, and the running code made trait objects of `live_app::driver::{f}::{{{{closure}}}}`")))), "{:?}", outcome.lines);
+            // (named by the fn that made it and its place in driver.rs: `drive`'s async block, or
+            // `held`'s body -- an async fn's coroutine -- never the JIT's own name for the type)
+            let maker = ["the async block in `live_app::driver::drive` at ", "the body in `live_app::driver::held` at "];
+            assert!(outcome.lines.iter().any(|l| maker.iter().any(|m| l.split(&format!("struct `Trace` changed its layout, and the running code made trait objects of {m}")).nth(1).is_some_and(|at| at.contains("driver.rs:")))), "{:?}", outcome.lines);
             assert_eq!((call("drive"), call("drive_outer")), (205, 1205), "nothing of the edit installed");
         });
     });

@@ -13,6 +13,7 @@ pub use makepad_html;
 pub mod html;
 pub mod log_list;
 pub mod markdown;
+mod math_outline;
 pub mod math_view;
 pub mod rich_text;
 pub mod text_flow;

@@ -14,3 +14,5 @@ makepad-code-editor = { path = "../../../code_editor", version = "2.0.0" }
 makepad-code-language = { path = "../../../libs/code_language" }
 makepad-markdown-edit = { path = "../../../libs/markdown_edit" }
 makepad-pdf-write = { path = "../../../libs/pdf_write" }
+makepad-font-subset = { path = "../../../libs/font_subset", version = "0.1.0" }
+ttf-parser = { version = "0.24.1", path = "../../../libs/ttf-parser", features = ["gvar-alloc"] }

@@ -146,7 +146,7 @@ pub(crate) fn request(cmd: &std::process::Command) -> String {
     let _ = unsafe { makepad_windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(ASFW_ANY) };
     // an exec does not run the program's exit handlers either; the process's own exit work does run
     // (the discovery file of this pid goes: the hub reads one left behind as a crash)
-    makepad_core_util::process_end::end(RESTART_EXIT as i32)
+    makepad_core_util::process_end::end_without_c_handlers(RESTART_EXIT as i32)
 }
 
 /// Windows, on entry of the loader with the resolved command line `args`: the run its parent started
@@ -184,7 +184,7 @@ fn parent(args: &[Vec<u8>]) -> ! {
         }
     };
     let job = kill_on_close_job();
-    let file = std::env::temp_dir().join(format!("makepad-restart-{}", std::process::id()));
+    let file = std::env::temp_dir().join(format!("relax-restart-{}", std::process::id()));
     // SAFETY: args_bytes gives the encoded bytes of OsStrings
     let words = args[1..].iter().map(|a| unsafe { OsStr::from_encoded_bytes_unchecked(a) }.to_os_string()).collect();
     let dir = std::env::current_dir().map(std::path::PathBuf::into_os_string).unwrap_or_default();
@@ -245,7 +245,7 @@ fn kill_on_close_job() -> Option<makepad_windows_sys::Win32::Foundation::HANDLE>
 #[cfg(windows)]
 fn next_failed(next: &Next, why: &str) -> ! {
     eprintln!("relax live: restart failed: {why}");
-    if let Some((_, path)) = next.envs.iter().find(|(k, _)| k == "MAKEPAD_JIT_RECOVERY") {
+    if let Some((_, path)) = next.envs.iter().find(|(k, _)| k == "RELAX_JIT_RECOVERY") {
         crate::hot_failure::next_run_failed(std::path::Path::new(path), why);
     }
     std::process::exit(1)

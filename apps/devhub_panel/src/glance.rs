@@ -1,7 +1,8 @@
-//! The panel at a glance: what its menu-bar item shows (the glyph, the tooltip, the menu's
-//! status lines), from the fleet it holds and that fleet's needs. Nothing in it is a clock or
-//! an age the panel counts itself, so it changes only when the fleet does and the tray is set
-//! again rarely.
+//! The panel at a glance: what its menu-bar item shows (the glyph and the menu's status lines),
+//! from the fleet it holds and that fleet's needs. The item has no tooltip: AppKit shows a status
+//! item's changed tooltip wherever the pointer is, so a count in it popped up over other apps.
+//! Nothing in it is a clock or an age the panel counts itself, so it changes only when the fleet
+//! does and the tray is set again rarely.
 
 use crate::model::{Fleet, Link};
 use crate::needs::{Need, Sev};
@@ -15,7 +16,6 @@ const LINE: usize = 72;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Glance {
     pub glyph: Glyph,
-    pub tooltip: String,
     /// the menu's status lines, above its actions
     pub lines: Vec<String>,
 }
@@ -38,16 +38,16 @@ impl Glance {
             Link::Live | Link::Demo => None,
         };
         if let Some(word) = off {
-            return Glance { glyph: Glyph::Off, tooltip: format!("devhub panel \u{b7} {word}"), lines: vec![clip(&format!("The panel is {word}"))] };
+            return Glance { glyph: Glyph::Off, lines: vec![clip(&format!("The panel is {word}"))] };
         }
         let (running, waiting) = (f.running(), f.queued().len());
         let red = needs.iter().filter(|n| n.sev == Sev::Red).count();
-        let (glyph, word) = if red > 0 {
-            (Glyph::Attention, format!("{red} need{} a look", if red == 1 { "s" } else { "" }))
+        let glyph = if red > 0 {
+            Glyph::Attention
         } else if running > 0 {
-            (Glyph::Busy, "busy".to_string())
+            Glyph::Busy
         } else {
-            (Glyph::Quiet, "idle".to_string())
+            Glyph::Quiet
         };
         let mut lines = Vec::new();
         if f.link == Link::Demo {
@@ -61,7 +61,7 @@ impl Glance {
             n if n > NEEDS => lines.push(format!("\u{2026} and {} more", n - NEEDS)),
             _ => {}
         }
-        Glance { glyph, tooltip: format!("devhub panel \u{b7} {word}"), lines }
+        Glance { glyph, lines }
     }
 }
 
@@ -79,7 +79,6 @@ mod tests {
         let v = needs(&f);
         let g = Glance::of(&f, &v);
         assert_eq!(g.glyph, Glyph::Attention);
-        assert!(g.tooltip.contains("a look"), "{}", g.tooltip);
         assert_eq!(g.lines[0], "Demo fleet (synthetic)");
         assert!(g.lines[2].starts_with(v[0].what.tag()), "{:?}", g.lines);
         assert!(v.len() <= NEEDS || g.lines.last().is_some_and(|l| l.contains("more")), "{:?}", g.lines);

@@ -428,6 +428,10 @@ struct Loop {
     /// (name, position of the label: hygiene)
     label: Option<(Sym, u32)>,
     break_ty: Option<TyId>,
+    /// a `loop`'s expected type, when it is one (not a mere hint): what each `break` value is
+    /// checked against and coerced to (rustc check_expr_loop: `expected.coercion_target_type`), its
+    /// break type once one breaks
+    target: Option<TyId>,
     kind: LoopKind,
 }
 
@@ -1603,7 +1607,7 @@ impl<'a> Fcx<'a> {
 
     fn ty_str(&mut self, t: TyId) -> String {
         let t = self.infcx.deeply_resolve_ignoring_regions(t);
-        ty_to_string(false, self.prog, self.tcx, t)
+        ty_to_diag_string(self.prog, self.tcx, t)
     }
 
     /// rustc_hir_typeck demand_eqtype / demand_suptype: the types are the same, or E0308.
@@ -1611,7 +1615,7 @@ impl<'a> Fcx<'a> {
         if self.eq(expected, actual) { return true; }
         let (x, a) = (self.infcx.deeply_resolve_ignoring_regions(expected), self.infcx.deeply_resolve_ignoring_regions(actual));
         if self.tcx.tys.has_error(x) || self.tcx.tys.has_error(a) { return false; }
-        let (sx, sa) = (ty_to_string(false, self.prog, self.tcx, x), ty_to_string(false, self.prog, self.tcx, a));
+        let (sx, sa) = (ty_to_diag_string(self.prog, self.tcx, x), ty_to_diag_string(self.prog, self.tcx, a));
         let (sx, sa) = if sx == sa { (ty_to_string_paths(self.prog, self.tcx, x), ty_to_string_paths(self.prog, self.tcx, a)) } else { (sx, sa) };
         self.err(pos, format!("E0308: mismatched types: expected `{}`, found `{}`", sx, sa));
         false
@@ -1901,6 +1905,19 @@ impl<'a> Fcx<'a> {
             return Some((td, tuple, inputs, ret));
         }
         None
+    }
+
+    /// A `!` branch of an `if` or `match` is `NeverToAny` to the type the branches meet at; a type
+    /// variable it reaches is diverging (rustc fn_ctxt apply_adjustments), so `match Err(e) { Ok(v)
+    /// => v, Err(e) => return Err(e) }` falls back instead of leaving `Ok`'s type unknown
+    fn never_to_any(&mut self, e: Option<ExprId>, target: TyId) {
+        if let Some(e) = e {
+            self.set_coerce(e.0, Coerce::Never, target);
+        }
+        let s = self.shallow(target);
+        if matches!(self.tcx.tys.kind(s), TyKind::Infer(_)) {
+            self.diverging.push(s);
+        }
     }
 
     /// A diverging scrutinee (`match return 1 { 2 => .. }`): rustc types it against a fresh
@@ -3411,8 +3428,14 @@ impl<'a> Fcx<'a> {
                             let full = self.tcx.complete_args(self.prog, d, &v, regions);
                             self.write_user_type_annotation_from_args(key, d, &full, user_self_ty);
                             self.apply_fn_bounds(d, &full, self.last_lo);
+                            // the type with those regions too (rustc type_of(..).instantiate(args)): an
+                            // impl's lifetime in it (`impl S<'_, ()> { const C: Self }`) is no
+                            // early-bound region of the body that names the const (relax issue 188:
+                            // "wrong generic argument kind" when that body's own arguments replaced it)
+                            self.tcx.instantiate_ty(self.prog, d, &full, t)
+                        } else {
+                            self.tcx.tys.subst(t, &v)
                         }
-                        self.tcx.tys.subst(t, &v)
                     }
                     None => t,
                 }
@@ -3685,14 +3708,10 @@ impl<'a> Fcx<'a> {
         if let Some(q) = self.ast().qself(path) {
             // `<T as Trait>::item`
             let self_t = self.lower_ty(q.ty);
-            let tp = &match q.trait_path.get() {
-                Some(tp) => tp,
-                None => return self.resolve_qself_no_trait(self_t, segs[segs.len() - 1].1, key, path.lo, path),
-            };
-            // `<T as Trait>::Assoc::item`: the qualified part names a type (a projection),
-            // the last segment an item on it, resolved type-relatively as `<Ty>::item` (rustc
-            // resolve_qpath with a partial resolution: the unresolved segments go to
-            // hir_ty_lowering's associated-path lowering)
+            // `<T as Trait>::Assoc::item` / `<T>::Assoc::item`: the qualified part names a type
+            // (a projection), the last segment an item on it, resolved type-relatively as
+            // `<Ty>::item` (rustc resolve_qpath with a partial resolution: the unresolved segments
+            // go to hir_ty_lowering's associated-path lowering). cranelift's `<M>::I::rc_for_type`.
             if segs.len() >= 2 {
                 let sub = Path { segs: path.segs.prefix(path.segs.len() - 1), lo: path.lo };
                 let env = self.env.clone();
@@ -3705,6 +3724,10 @@ impl<'a> Fcx<'a> {
                 }
                 return self.resolve_qself_no_trait(t, segs[segs.len() - 1].1, key, path.lo, path);
             }
+            let tp = &match q.trait_path.get() {
+                Some(tp) => tp,
+                None => return self.resolve_qself_no_trait(self_t, segs[segs.len() - 1].1, key, path.lo, path),
+            };
             let td = match self.tcx.resolve_type_path_def(prog, self.file, self.module, tp) {
                 Some(d) => d,
                 None => return (Res::Err, error),
@@ -4359,6 +4382,20 @@ impl<'a> Fcx<'a> {
         }
     }
 
+    /// fn_ctxt/checks.rs check_argument_types: an argument that is a closure, which a call checks
+    /// after its other arguments (an async block is not one). HIR has no parentheses, so `(|x| ..)`
+    /// is one too: peg's `call_custom_closure((|input, pos| input.ident(pos)), __input, __pos)`
+    /// learns `input` from `__input`.
+    fn is_closure_arg(&self, mut e: ExprId) -> bool {
+        loop {
+            match self.ast().expr(e).kind {
+                ExprKind::Paren(inner) => e = inner,
+                ExprKind::Closure { .. } => return true,
+                _ => return false,
+            }
+        }
+    }
+
     /// A call with the wrong number of arguments (fn_ctxt/checks.rs check_argument_types): each
     /// argument is checked with its position's input as a hint only, and nothing is demanded of
     /// it: report_arg_errors reports the call once, as E0061, not an E0308 per shifted argument.
@@ -4370,7 +4407,7 @@ impl<'a> Fcx<'a> {
                 self.select_before_closures();
             }
             for (i, a) in args.iter().enumerate() {
-                if matches!(self.ast().expr(*a).kind, ExprKind::Closure { .. }) == check_closures {
+                if self.is_closure_arg(*a) == check_closures {
                     let hint = params.get(i).map(|&p| self.normalize_signature(p));
                     given[i] = self.check_expr(*a, hint);
                 }
@@ -4982,6 +5019,13 @@ impl<'a> Fcx<'a> {
                                     self.coerce_or_unify(t, x, Some(*e), pos);
                                     result = x;
                                 }
+                            } else if !unsized_x && !soft && matches!(self.tcx.tys.kind(st), TyKind::Infer(_)) && !matches!(self.tcx.tys.kind(sx), TyKind::Infer(_)) {
+                                // rustc coerce_from_inference_variable: an open tail coerced to a
+                                // known type is unified with it (`!{ let r; .. r }` as an `if`
+                                // condition, objc's `msg_send!`, is a bool)
+                                let pos = self.ast().expr(*e).lo;
+                                self.coerce_or_unify(t, x, Some(*e), pos);
+                                result = x;
                             }
                         }
                     } else if !*semi {
@@ -5273,6 +5317,11 @@ impl<'a> Fcx<'a> {
                 } else if matches!(kt, TyKind::FnPtr(..)) && matches!(kx, TyKind::FnDef(..) | TyKind::Closure(..) | TyKind::FnPtr(..)) {
                     // (a failed coercion is the cast check's E0605)
                     self.try_coerce(xt, target, Some(*x));
+                } else if matches!(kt, TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..)) && self.has_open_infer(st) {
+                    // `Rc::new(v) as Rc<_>`: the `_` is decided by later uses (a `collect` into
+                    // `Vec<Rc<dyn Tr>>`), not by the operand; rustc check_casts coerces at the end
+                    // of typeck, an unsizing coercion then
+                    self.deferred_casts.push((*x, xt, target));
                 } else if matches!(kt, TyKind::Adt(..) | TyKind::Tuple(_) | TyKind::Array(..)) {
                     // no primitive cast has these targets: only a coercion (a trivial cast `Some(4u32)
                     // as Option<u32>`, `(1, 2) as (u32, u32)` types its literals); when none applies
@@ -5281,6 +5330,10 @@ impl<'a> Fcx<'a> {
                 } else if matches!((&kx, &kt), (TyKind::Ref(..), TyKind::Ref(_, p, _)) if matches!(self.tcx.tys.kind(self.shallow(*p)), TyKind::Infer(_))) {
                     // `z as &_`: rustc checks the cast at the end of typeck (check_casts), where
                     // try_coercion_cast's reborrow coercion decides `_` (`&mut i32 as &_`: i32)
+                    self.deferred_casts.push((*x, xt, target));
+                } else if matches!((&kx, &kt), (TyKind::Ref(_, p, _), TyKind::Ref(..)) if matches!(self.tcx.tys.kind(self.shallow(*p)), TyKind::Infer(_))) {
+                    // `p.as_ref() as &Path`: the source referent is open (`AsRef<_>` with several
+                    // impls); rustc check_casts coerces at the end of typeck, which decides it
                     self.deferred_casts.push((*x, xt, target));
                 } else if let (TyKind::Ref(m1, a, _), TyKind::Ref(m2, bt, _)) = (&kx, &kt) {
                     // a cast is first a coercion when one applies (rustc cast.rs
@@ -5298,7 +5351,7 @@ impl<'a> Fcx<'a> {
             ExprKind::Block(b, label) => {
                 if label.is_some() {
                     let l = label.map(|x| self.sym_lifetime(x));
-                    self.loops.push(Loop { label: l, break_ty: expected, kind: LoopKind::Block });
+                    self.loops.push(Loop { label: l, break_ty: expected, target: None, kind: LoopKind::Block });
                     let t = self.check_block_soft(*b, expected, soft);
                     let lp = self.loops.pop().unwrap();
                     if let Some(bt) = lp.break_ty {
@@ -5362,11 +5415,12 @@ impl<'a> Fcx<'a> {
                         let es = self.shallow(et);
                         if ts == self.tcx.tys.never {
                             // the `!` then-branch is `NeverToAny` to the else type
-                            if let Some(crate::ast::Stmt::Expr(false, t2)) = self.ast().stmts(*then).last() { self.set_coerce(t2.0, Coerce::Never, et); }
+                            let tail = match self.ast().stmts(*then).last() { Some(crate::ast::Stmt::Expr(false, t2)) => Some(*t2), _ => None };
+                            self.never_to_any(tail, et);
                             return et;
                         }
                         if es == self.tcx.tys.never {
-                            self.set_coerce(x.0, Coerce::Never, tt);
+                            self.never_to_any(Some(*x), tt);
                             return tt;
                         }
                         // the then-branch's value is its block's tail expression
@@ -5474,7 +5528,7 @@ impl<'a> Fcx<'a> {
                 self.diverges = all_div;
                 // coercion.rs CoerceMany: a `!` arm is `NeverToAny` to the match's type
                 if let (true, Some(r)) = (any_value, result) {
-                    for body in never_arms { self.set_coerce(body.0, Coerce::Never, r); }
+                    for body in never_arms { self.never_to_any(Some(body), r); }
                 }
                 match result {
                     Some(r) if any_value => r,
@@ -5488,7 +5542,7 @@ impl<'a> Fcx<'a> {
                 let saved = self.scopes.len();
                 let l = label.map(|x| self.sym_lifetime(x));
                 // rustc_ast_lowering puts both the condition and body in the loop scope.
-                self.loops.push(Loop { label: l, break_ty: None, kind: LoopKind::While });
+                self.loops.push(Loop { label: l, break_ty: None, target: None, kind: LoopKind::While });
                 let was_in_condition = std::mem::replace(&mut self.in_loop_condition, true);
                 let ct = self.check_expr(*c, Some(bool_));
                 let cpos = self.ast().expr(*c).lo;
@@ -5504,7 +5558,7 @@ impl<'a> Fcx<'a> {
             }
             ExprKind::Loop(b, label) => {
                 let l = label.map(|x| self.sym_lifetime(x));
-                self.loops.push(Loop { label: l, break_ty: None, kind: LoopKind::Loop });
+                self.loops.push(Loop { label: l, break_ty: None, target: if soft { None } else { expected }, kind: LoopKind::Loop });
                 let was_in_condition = std::mem::replace(&mut self.in_loop_condition, false);
                 // a loop body has type `()`: an open tail type is unit (`for _ in r { zeroed() }`)
                 self.check_block_no_value(*b);
@@ -5533,7 +5587,7 @@ impl<'a> Fcx<'a> {
                 let item = self.check_for_iter(*it, lo);
                 self.check_pat(*p, item);
                 let l = label.map(|x| self.sym_lifetime(x));
-                self.loops.push(Loop { label: l, break_ty: None, kind: LoopKind::For });
+                self.loops.push(Loop { label: l, break_ty: None, target: None, kind: LoopKind::For });
                 let was_in_condition = std::mem::replace(&mut self.in_loop_condition, false);
                 // a loop body has type `()`: an open tail type is unit (`for _ in r { zeroed() }`)
                 self.check_block_no_value(*b);
@@ -5567,7 +5621,7 @@ impl<'a> Fcx<'a> {
                     Some(v) => {
                         let target = self.loop_index(l);
                         let exp = match target {
-                            Some(i) => self.loops[i].break_ty,
+                            Some(i) => self.loops[i].break_ty.or(self.loops[i].target),
                             None => None,
                         };
                         let vt = self.check_expr(*v, exp);
@@ -5602,9 +5656,21 @@ impl<'a> Fcx<'a> {
                             Some(prev) => {
                                 // rustc check_expr_break: every `break` coerces to the loop's type
                                 let bpos = match x.get() { Some(v) => self.ast().expr(v).lo, None => lo };
-                                self.demand_eq(prev, bt, bpos);
+                                match (self.loops[i].target, x.get()) {
+                                    (Some(_), Some(v)) => { self.coerce_or_unify(bt, prev, Some(v), bpos); }
+                                    _ => { self.demand_eq(prev, bt, bpos); }
+                                }
                             }
-                            None => self.loops[i].break_ty = Some(bt),
+                            // the first `break` of a `loop` with an expected type coerces to it
+                            // (ec4rs: `break Some((key, val))`, key a `&String`, into `Option<(&str, _)>`)
+                            None => match (self.loops[i].target, x.get()) {
+                                (Some(tt), Some(v)) => {
+                                    let bpos = self.ast().expr(v).lo;
+                                    self.coerce_or_unify(bt, tt, Some(v), bpos);
+                                    self.loops[i].break_ty = Some(tt);
+                                }
+                                _ => self.loops[i].break_ty = Some(bt),
+                            },
                         }
                     }
                 } else if let Some((_, _)) = l {
@@ -5883,9 +5949,12 @@ impl<'a> Fcx<'a> {
                             // only a usize (or a still-open integer) and the std range structs
                             // index builtin; every other index type selects `Index` (rustc
                             // lookup_indexing), std's `(Bound<usize>, Bound<usize>)` included
+                            // (rustc try_index_step: an open index type -- a closure parameter its call
+                            // types later -- selects `Index<?I>` too, its output a projection that type
+                            // settles: `|range| &stamp[range]` called with `2..5usize`, relax issue 200)
                             let std_range = match self.tcx.tys.kind(tis) {
                                 TyKind::Adt(..) => idx_is_range,
-                                TyKind::Int(_) | TyKind::IntVar(_) | TyKind::Infer(_) | TyKind::Never | TyKind::Error => true,
+                                TyKind::Int(_) | TyKind::IntVar(_) | TyKind::Never | TyKind::Error => true,
                                 _ => false,
                             };
                             if !std_range {
@@ -6070,6 +6139,16 @@ impl<'a> Fcx<'a> {
                 // N:rustc_hir_typeck/src/expr.rs:1823 and fn_ctxt/_impl.rs:1293-1301:
                 // obligations belong to the instantiated path, including explicit args.
                 self.register_wf(adt_ty, lo);
+                // fn_ctxt/mod.rs check_struct_path, add_required_obligations_for_hir: the ADT's own
+                // predicates on the path's arguments, `S: Sized` of `Kind<S>` among them. A pending
+                // `?S: Sized` is what lets the closure in `Kind { get: |s| s }` unsize `&mut ?S` to
+                // `&mut dyn Tr` once `?S` is known, instead of taking `?S = dyn Tr` (relax issue 201).
+                if let TyKind::Adt(ad, args, regions) = self.tcx.tys.kind(self.shallow(adt_ty)).clone() {
+                    if crate::wfcheck::obligations::arity_ok(self.tcx, self.prog, adt_ty) {
+                        let full = self.tcx.complete_args(self.prog, ad, &self.tcx.tys.list(args).to_vec(), regions);
+                        self.apply_fn_bounds(ad, &full, lo);
+                    }
+                }
                 // an unsized expectation (`Wrap<dyn Debug>` for `Box::new(Wrap { .. })`) is no
                 // type to check against (rustc only_has_type of ExpectRvalueLikeUnsized)
                 if let Some(x) = expected {
@@ -7041,7 +7120,7 @@ impl<'a> Fcx<'a> {
                 self.select_before_closures();
             }
             for (i, a) in args.iter().enumerate() {
-                if matches!(self.ast().expr(*a).kind, ExprKind::Closure { .. }) != check_closures {
+                if self.is_closure_arg(*a) != check_closures {
                     continue;
                 }
                 if variadic && i >= params.len() {
@@ -7111,6 +7190,12 @@ impl<'a> Fcx<'a> {
         if !self.diverges {
             self.coerce_or_unify(bt, out, None, self.ast().block(b).hi);
         } else {
+            // a tail after a diverging statement still types the output (rustc coerces the
+            // tail: `async { loop { x? } Ok::<(), E>(()) }` is a future of `Result<(), E>`)
+            if !matches!(self.tcx.tys.kind(self.shallow(bt)), TyKind::Never) {
+                let save = self.start_snapshot();
+                if self.try_coerce(bt, out, None) { self.commit_from(save); } else { self.rollback_to(save); }
+            }
             // a body that only diverges (`async { todo!() }`): the return type's still-open
             // variable falls back like any variable a `!` flowed into
             let so = self.shallow(out);
@@ -7276,8 +7361,11 @@ impl<'a> Fcx<'a> {
         self.loops = save_loops;
         self.in_loop_condition = save_condition;
         self.coerce_or_unify(bt, rt, Some(body), self.ast().expr(body).lo);
-        // a coerced body keeps its own type: lowering converts it to the return type
-        if !self.b.coerce(body.0).is_some() {
+        // a coerced body keeps its own type: lowering converts it to the return type. So does one
+        // whose pointer-to-dyn coercion waits for its pointee (`|s| s` returning `&mut dyn Tr` for
+        // a `&mut ?S`): typed as the return type, its thin value was lowered as a fat one (relax
+        // issue 202).
+        if self.b.coerce(body.0).is_none() && !self.deferred_dyn.iter().any(|&(x, ..)| x.0 == body.0) {
             self.set_ty(body, rt);
         }
         self.ret_stack.pop();
@@ -7713,7 +7801,7 @@ impl<'a> Fcx<'a> {
                 self.select_before_closures();
             }
             for (i, a) in args.iter().enumerate() {
-                if matches!(self.ast().expr(*a).kind, ExprKind::Closure { .. }) != check_closures {
+                if self.is_closure_arg(*a) != check_closures {
                     continue;
                 }
                 let pt = if i + 1 < ps.len() { ps[i + 1] } else { error };
@@ -7723,7 +7811,7 @@ impl<'a> Fcx<'a> {
                     // (`.filter(|(_, c)| ..)` into `Filter<_, fn(&(usize, &str)) -> bool>`)
                     let ei = self.deeply_resolve_ignoring_regions_with_obligations(ei);
                     let to_fn_ptr = matches!(self.tcx.tys.kind(self.shallow(ei)), TyKind::FnPtr(..));
-                    if to_fn_ptr || !matches!(self.ast().expr(*a).kind, ExprKind::Closure { .. }) {
+                    if to_fn_ptr || !self.is_closure_arg(*a) {
                         let t = self.check_expr(*a, Some(ei));
                         let ei = self.deeply_resolve_ignoring_regions_with_obligations(ei);
                         let pt = self.deeply_resolve_ignoring_regions_with_obligations(pt);
@@ -8472,8 +8560,12 @@ pub fn type_name(prog: &Program, tcx: &Tcx, t: TyId) -> String {
     match tcx.tys.kind(t) {
         TyKind::Adt(d, args, _) => {
             let mut s = type_path(prog, tcx, *d);
-            if !args.is_empty() {
-                s.push_str(&format!("<{}>", list(tcx.tys.list(*args))));
+            // the trailing arguments that are their parameter's default are left out, as rustc's
+            // printer leaves them (`Vec<u8>` for `Vec<u8, Global>`)
+            let args = tcx.tys.list(*args);
+            let shown = tcx.shown_args(prog, *d, args);
+            if shown > 0 {
+                s.push_str(&format!("<{}>", list(&args[..shown])));
             }
             s
         }
@@ -8641,6 +8733,18 @@ pub fn item_path(prog: &Program, tcx: &Tcx, d: DefId) -> String {
 }
 
 pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -> String {
+    ty_string(stable_closures, false, prog, tcx, t)
+}
+
+/// A type as rustc's diagnostics print it: an ADT's trailing arguments that equal their
+/// parameter's default are left out (`Vec<u8>` for `Vec<u8, Global>`, rustc_middle
+/// ty/print/pretty.rs `generic_args_to_print`). For messages only: it lowers the defaults, so
+/// keys and names keep `ty_to_string`.
+pub fn ty_to_diag_string(prog: &Program, tcx: &Tcx, t: TyId) -> String {
+    ty_string(false, true, prog, tcx, t)
+}
+
+fn ty_string(stable_closures: bool, elide: bool, prog: &Program, tcx: &Tcx, t: TyId) -> String {
     match tcx.tys.kind(t) {
         TyKind::Bool => "bool".to_string(),
         TyKind::Char => "char".to_string(),
@@ -8654,7 +8758,7 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&ty_to_string(stable_closures, prog, tcx, *x));
+                s.push_str(&ty_string(stable_closures, elide, prog, tcx, *x));
             }
             if tcx.tys.list(*v).len() == 1 {
                 s.push(',');
@@ -8662,20 +8766,22 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
             s.push(')');
             s
         }
-        TyKind::Array(e, n) => format!("[{}; {}]", ty_to_string(stable_closures, prog, tcx, *e), const_str(prog, tcx, *n)),
+        TyKind::Array(e, n) => format!("[{}; {}]", ty_string(stable_closures, elide, prog, tcx, *e), const_str(prog, tcx, *n)),
         TyKind::Const(v) => const_str(prog, tcx, *v),
-        TyKind::Slice(e) => format!("[{}]", ty_to_string(stable_closures, prog, tcx, *e)),
-        TyKind::Ref(m, e, _) => format!("&{}{}", if *m { "mut " } else { "" }, ty_to_string(stable_closures, prog, tcx, *e)),
-        TyKind::Ptr(m, e) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_to_string(stable_closures, prog, tcx, *e)),
+        TyKind::Slice(e) => format!("[{}]", ty_string(stable_closures, elide, prog, tcx, *e)),
+        TyKind::Ref(m, e, _) => format!("&{}{}", if *m { "mut " } else { "" }, ty_string(stable_closures, elide, prog, tcx, *e)),
+        TyKind::Ptr(m, e) => format!("*{} {}", if *m { "mut" } else { "const" }, ty_string(stable_closures, elide, prog, tcx, *e)),
         TyKind::Adt(d, args, _) => {
             let mut s = prog.name(*d).to_string();
+            let args = tcx.tys.list(*args);
+            let args = if elide { &args[..tcx.shown_args(prog, *d, args)] } else { args };
             if !args.is_empty() {
                 s.push('<');
-                for (i, x) in tcx.tys.list(*args).iter().enumerate() {
+                for (i, x) in args.iter().enumerate() {
                     if i > 0 {
                         s.push_str(", ");
                     }
-                    s.push_str(&ty_to_string(stable_closures, prog, tcx, *x));
+                    s.push_str(&ty_string(stable_closures, elide, prog, tcx, *x));
                 }
                 s.push('>');
             }
@@ -8687,10 +8793,10 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
                 if i > 0 {
                     s.push_str(", ");
                 }
-                s.push_str(&ty_to_string(stable_closures, prog, tcx, *x));
+                s.push_str(&ty_string(stable_closures, elide, prog, tcx, *x));
             }
             s.push_str(") -> ");
-            s.push_str(&ty_to_string(stable_closures, prog, tcx, *r));
+            s.push_str(&ty_string(stable_closures, elide, prog, tcx, *r));
             s
         }
         TyKind::FnDef(d, _, _) => format!("fn item {}", prog.def_path(*d)),
@@ -8721,7 +8827,7 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
                     if i > 0 {
                         s.push_str(", ");
                     }
-                    s.push_str(&ty_to_string(stable_closures, prog, tcx, *a));
+                    s.push_str(&ty_string(stable_closures, elide, prog, tcx, *a));
                 }
                 s.push('>');
             }
@@ -8733,7 +8839,7 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
         }
         TyKind::Alias(_, AliasTy { kind: AliasTyKind::Projection { def_id: d }, args, regions: _ }) => {
             let st = match tcx.tys.list(*args).first() {
-                Some(t) => ty_to_string(stable_closures, prog, tcx, *t),
+                Some(t) => ty_string(stable_closures, elide, prog, tcx, *t),
                 None => "?".to_string(),
             };
             format!("<{} as {}>::{}", st, prog.name(prog.def(*d).parent), prog.name(*d))
@@ -8750,7 +8856,7 @@ pub fn ty_to_string(stable_closures: bool, prog: &Program, tcx: &Tcx, t: TyId) -
             }
             s
         }
-        TyKind::Alias(_, alias) => format!("{}<{}>", prog.name(alias.kind.def_id()), tcx.tys.list(alias.args).iter().map(|ty| ty_to_string(stable_closures, prog, tcx, *ty)).collect::<Vec<_>>().join(", ")),
+        TyKind::Alias(_, alias) => format!("{}<{}>", prog.name(alias.kind.def_id()), tcx.tys.list(alias.args).iter().map(|ty| ty_string(stable_closures, elide, prog, tcx, *ty)).collect::<Vec<_>>().join(", ")),
         TyKind::Error => "{error}".to_string(),
     }
 }

@@ -392,6 +392,12 @@ pub fn to_vec<T: Clone>(s: &[T]) -> crate::vec::Vec<T> {
     v
 }
 
+pub fn to_vec_in<T: Clone, A: crate::heap::Allocator>(s: &[T], alloc: A) -> crate::vec::Vec<T, A> {
+    let mut v = crate::vec::Vec::with_capacity_in(s.len(), alloc);
+    v.extend_from_slice(s);
+    v
+}
+
 pub fn repeat<T: Copy>(s: &[T], n: usize) -> crate::vec::Vec<T> {
     let total = match s.len().checked_mul(n) {
         Some(t) => t,

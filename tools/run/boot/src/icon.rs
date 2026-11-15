@@ -52,6 +52,11 @@ impl Icon {
             [1, 1],
             Attr::default(),
         );
+        self.fill(writer);
+    }
+
+    /// The pixels, into the texture `upload` made (again on a new GPU device).
+    pub(crate) fn fill(&self, writer: &mut CmdWriter) {
         writer.texture_update(
             TEXTURE,
             0,

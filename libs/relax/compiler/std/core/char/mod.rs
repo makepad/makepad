@@ -3,6 +3,10 @@
 
 mod inherent;
 mod convert_impls;
+// What `char`'s methods are made of, outside `core::char` itself: real core has no such free
+// functions there, so `use std::char; char::is_ascii_hexdigit` is the primitive's method
+// (rustc_resolve late.rs resolve_qpath falls back to the primitive when the module has no item).
+pub(crate) mod methods;
 
 use crate::fmt;
 use crate::fmt::Write as _;
@@ -44,51 +48,13 @@ pub const fn from_digit(num: u32, radix: u32) -> Option<char> {
     }
 }
 
-pub fn to_digit(c: char, radix: u32) -> Option<u32> {
-    assert!(radix >= 2 && radix <= 36, "to_digit: invalid radix -- radix must be in the range 2 to 36 inclusive");
-    let value = if c > '9' && radix > 10 {
-        ((c as u32).wrapping_sub('A' as u32) & !0b0010_0000u32) + 10
-    } else {
-        (c as u32).wrapping_sub('0' as u32)
-    };
-    if value < radix {
-        Some(value)
-    } else {
-        None
-    }
-}
-
-pub fn is_digit(c: char, radix: u32) -> bool {
-    to_digit(c, radix).is_some()
-}
-
 // ---------------------------------------------------------------- UTF-8 / UTF-16
-
-pub const fn len_utf8(code: u32) -> usize {
-    if code < 0x80 {
-        1
-    } else if code < 0x800 {
-        2
-    } else if code < 0x10000 {
-        3
-    } else {
-        4
-    }
-}
-
-pub const fn len_utf16(code: u32) -> usize {
-    if (code & 0xFFFF) == code {
-        1
-    } else {
-        2
-    }
-}
 
 /// Encodes `code` into `dst`, returning the byte count; panics like real core when `dst`
 /// is too short.
 #[track_caller]
 pub fn encode_utf8_raw(code: u32, dst: &mut [u8]) -> usize {
-    let len = len_utf8(code);
+    let len = methods::len_utf8(code);
     if dst.len() < len {
         panic!(
             "encode_utf8: need {} bytes to encode U+{:04X} but buffer has just {}",
@@ -117,7 +83,7 @@ pub fn encode_utf8_raw(code: u32, dst: &mut [u8]) -> usize {
 
 #[track_caller]
 pub fn encode_utf16_raw(code: u32, dst: &mut [u16]) -> usize {
-    let len = len_utf16(code);
+    let len = methods::len_utf16(code);
     if dst.len() < len {
         panic!(
             "encode_utf16: need {} bytes to encode U+{:04X} but buffer has just {}",
@@ -136,120 +102,7 @@ pub fn encode_utf16_raw(code: u32, dst: &mut [u16]) -> usize {
     len
 }
 
-/// `char::encode_utf8`: the encoded bytes as a `&mut str` inside `dst`.
-#[track_caller]
-pub fn encode_utf8(c: char, dst: &mut [u8]) -> &mut str {
-    let n = encode_utf8_raw(c as u32, dst);
-    unsafe { crate::str::from_utf8_unchecked_mut(&mut dst[..n]) }
-}
-
-#[track_caller]
-pub fn encode_utf16(c: char, dst: &mut [u16]) -> &mut [u16] {
-    let n = encode_utf16_raw(c as u32, dst);
-    &mut dst[..n]
-}
-
 // ---------------------------------------------------------------- properties
-
-pub fn is_alphabetic(c: char) -> bool {
-    match c {
-        'a'..='z' | 'A'..='Z' => true,
-        _ => c > '\x7f' && crate::unicode::is_alphabetic(c),
-    }
-}
-
-pub fn is_lowercase(c: char) -> bool {
-    match c {
-        'a'..='z' => true,
-        _ => c > '\x7f' && crate::unicode::is_lowercase(c),
-    }
-}
-
-pub fn is_uppercase(c: char) -> bool {
-    match c {
-        'A'..='Z' => true,
-        _ => c > '\x7f' && crate::unicode::is_uppercase(c),
-    }
-}
-
-pub fn is_whitespace(c: char) -> bool {
-    match c {
-        ' ' | '\x09'..='\x0d' => true,
-        _ => c > '\x7f' && crate::unicode::is_white_space(c),
-    }
-}
-
-pub fn is_numeric(c: char) -> bool {
-    match c {
-        '0'..='9' => true,
-        _ => c > '\x7f' && crate::unicode::is_numeric(c),
-    }
-}
-
-pub fn is_alphanumeric(c: char) -> bool {
-    is_alphabetic(c) || is_numeric(c)
-}
-
-/// General category Cc.
-pub fn is_control(c: char) -> bool {
-    let u = c as u32;
-    u < 0x20 || (u >= 0x7f && u <= 0x9f)
-}
-
-pub fn is_ascii(c: char) -> bool {
-    (c as u32) < 0x80
-}
-
-pub fn is_ascii_alphabetic(c: char) -> bool {
-    matches!(c, 'A'..='Z' | 'a'..='z')
-}
-pub fn is_ascii_uppercase(c: char) -> bool {
-    matches!(c, 'A'..='Z')
-}
-pub fn is_ascii_lowercase(c: char) -> bool {
-    matches!(c, 'a'..='z')
-}
-pub fn is_ascii_alphanumeric(c: char) -> bool {
-    matches!(c, '0'..='9' | 'A'..='Z' | 'a'..='z')
-}
-pub fn is_ascii_digit(c: char) -> bool {
-    matches!(c, '0'..='9')
-}
-pub fn is_ascii_octdigit(c: char) -> bool {
-    matches!(c, '0'..='7')
-}
-pub fn is_ascii_hexdigit(c: char) -> bool {
-    matches!(c, '0'..='9' | 'A'..='F' | 'a'..='f')
-}
-pub fn is_ascii_punctuation(c: char) -> bool {
-    matches!(c, '!'..='/' | ':'..='@' | '['..='`' | '{'..='~')
-}
-pub fn is_ascii_graphic(c: char) -> bool {
-    matches!(c, '!'..='~')
-}
-pub fn is_ascii_whitespace(c: char) -> bool {
-    matches!(c, '\t' | '\n' | '\x0C' | '\r' | ' ')
-}
-pub fn is_ascii_control(c: char) -> bool {
-    matches!(c, '\0'..='\x1F' | '\x7F')
-}
-pub fn to_ascii_uppercase(c: char) -> char {
-    if is_ascii_lowercase(c) {
-        ((c as u8) - 32) as char
-    } else {
-        c
-    }
-}
-pub fn to_ascii_lowercase(c: char) -> char {
-    if is_ascii_uppercase(c) {
-        ((c as u8) + 32) as char
-    } else {
-        c
-    }
-}
-pub fn eq_ignore_ascii_case(a: char, b: char) -> bool {
-    to_ascii_lowercase(a) == to_ascii_lowercase(b)
-}
 
 // ---------------------------------------------------------------- case mapping
 
@@ -307,14 +160,6 @@ pub struct ToLowercase(CaseMappingIter);
 
 #[derive(Clone, Debug)]
 pub struct ToUppercase(CaseMappingIter);
-
-pub fn to_lowercase(c: char) -> ToLowercase {
-    ToLowercase(CaseMappingIter::new(crate::unicode::to_lower(c)))
-}
-
-pub fn to_uppercase(c: char) -> ToUppercase {
-    ToUppercase(CaseMappingIter::new(crate::unicode::to_upper(c)))
-}
 
 impl Iterator for ToLowercase {
     type Item = char;
@@ -487,20 +332,8 @@ pub struct EscapeDefault(EscapeIter);
 #[derive(Clone, Debug)]
 pub struct EscapeUnicode(EscapeIter);
 
-pub fn escape_debug(c: char) -> EscapeDebug {
-    EscapeDebug(escape_debug_ext(c, ESCAPE_ALL))
-}
-
 pub(crate) fn escape_debug_with(c: char, args: EscapeDebugArgs) -> EscapeDebug {
     EscapeDebug(escape_debug_ext(c, args))
-}
-
-pub fn escape_default(c: char) -> EscapeDefault {
-    EscapeDefault(escape_default_iter(c))
-}
-
-pub const fn escape_unicode(c: char) -> EscapeUnicode {
-    EscapeUnicode(EscapeIter::unicode(c))
 }
 
 impl EscapeDebug {
@@ -727,28 +560,10 @@ impl fmt::Display for ParseCharError {
     }
 }
 
-/// `str::parse::<char>`
-pub fn parse_char(s: &str) -> Result<char, ParseCharError> {
-    let mut chars = crate::str::chars(s);
-    match (chars.next(), chars.next()) {
-        (None, _) => Err(ParseCharError { kind: CharErrorKind::EmptyString }),
-        (Some(c), None) => Ok(c),
-        _ => Err(ParseCharError { kind: CharErrorKind::TooManyChars }),
-    }
-}
-
 impl crate::str::FromStr for char {
     type Err = ParseCharError;
     fn from_str(s: &str) -> Result<char, ParseCharError> {
-        parse_char(s)
-    }
-}
-
-/// `char::try_from(u32)`
-pub fn try_from_u32(i: u32) -> Result<char, CharTryFromError> {
-    match from_u32(i) {
-        Some(c) => Ok(c),
-        None => Err(CharTryFromError(())),
+        methods::parse_char(s)
     }
 }
 

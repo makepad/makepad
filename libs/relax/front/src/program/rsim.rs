@@ -67,8 +67,9 @@ struct Decl {
     /// `Some`: a definition; None with no import: the dummy `Res::Err` binding
     def: Option<DefId>,
     import: Option<(u32, DeclId)>,
-    ambiguity: Option<DeclId>,
-    warn_ambiguity: bool,
+    /// the other declaration of a glob ambiguity, and whether a use of it is the lint
+    /// `ambiguous_glob_imports` (true) or E0659
+    ambiguity: Option<(DeclId, bool)>,
     vis: BindVis,
     vis_max: Option<DeclId>,
     vis_min: Option<DeclId>,
@@ -177,19 +178,25 @@ fn ns_type(ns: usize) -> bool { ns == 0 }
 /// module at once. Inside a glob cycle such a lookup can depend on the module it enters the cycle
 /// at -- when two definitions, or two visibilities neither of which is the wider, reach a name
 /// there --; those names are `contested` and are looked up one at a time, and every name of a
-/// cycle that did not settle is (`unsettled`).
+/// cycle that did not settle is (`unsettled`). `ambiguous`: the names two of the module's globs give
+/// different definitions, or a glob gives from a module where they are ambiguous (privacy.rs
+/// `glob_ambiguity_in`): rustc stores them in metadata as ambiguous children (imports.rs
+/// `finalize_resolutions_in`, `AmbigModChild`), and a crate that uses one gets the lint
+/// `ambiguous_glob_imports` (build_reduced_graph.rs `define_extern`).
 #[derive(Default)]
 struct ExtTable {
     names: crate::fxhash::HashMap<(Sym, bool), (DefId, BindVis)>,
     contested: crate::fxhash::HashSet<(Sym, bool)>,
+    ambiguous: crate::fxhash::HashSet<(Sym, bool)>,
     unsettled: bool,
 }
 
 impl ExtTable {
-    /// The table's answer for a name, or None when the name is looked up one at a time.
-    fn answer(&self, key: (Sym, bool)) -> Option<Option<(DefId, BindVis)>> {
+    /// The table's answer for a name (with whether it is ambiguous), or None when the name is
+    /// looked up one at a time.
+    fn answer(&self, key: (Sym, bool)) -> Option<(Option<(DefId, BindVis)>, bool)> {
         if self.unsettled || self.contested.contains(&key) { return None; }
-        Some(self.names.get(&key).copied())
+        Some((self.names.get(&key).copied(), self.ambiguous.contains(&key)))
     }
 }
 
@@ -243,6 +250,7 @@ impl Program {
         };
         self.sim_macros = Some(macros);
         super::resume_import_uses(prev);
+        self.sim_own = own.to_vec();
         self.sim_ambiguity = Some(amb);
         self.sim_diags = Some(out);
         self.glob_amb_cache.clear();
@@ -350,7 +358,7 @@ impl<'a> Sim<'a> {
             no_prelude: Default::default(), extern_items: Default::default(), dummy: 0, unexpanded: Default::default(),
             indeterminate: Vec::new(), determined: Vec::new(), synthetic_macros: Vec::new(), proc_macros: Vec::new(),
         };
-        s.dummy = s.alloc(Decl { def: None, import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
+        s.dummy = s.alloc(Decl { def: None, import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 });
         s
     }
 
@@ -413,11 +421,6 @@ impl<'a> Sim<'a> {
         dd.ambiguity.is_some() || dd.import.map_or(false, |(_, s)| self.is_ambiguity_recursive(s))
     }
 
-    fn warn_ambiguity_recursive(&self, d: DeclId) -> bool {
-        let dd = &self.decls[d as usize];
-        dd.warn_ambiguity || dd.import.map_or(false, |(_, s)| self.warn_ambiguity_recursive(s))
-    }
-
     fn is_extern_crate_import(&self, d: DeclId) -> bool {
         // `extern crate` imports are planted with an `ext` Program import
         match self.decls[d as usize].import {
@@ -431,20 +434,25 @@ impl<'a> Sim<'a> {
     fn ext_decl(&mut self, m: u32, name: Sym, ns: usize) -> Option<DeclId> {
         if let Some(r) = self.ext_decls.get(&(m, name, ns)) { return *r; }
         let r = if ns == 2 {
-            self.ext_macro(m, name).map(|d| self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 }))
+            self.ext_macro(m, name).map(|d| self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 }))
         } else {
             // a module a glob read answers from its flattened table; a single name of another
             // module, and a contested one, is looked up as it is
             let p = self.p;
             let lookup = || p.lookup_in_module_vis(m, name, ns_type(ns), &mut GlobQuery { precise: true, ..Default::default() });
-            let found = match self.ext_tables.get(&m).and_then(|t| t.answer((name, ns_type(ns)))) {
+            let ambiguous = || p.glob_ambiguity(m, name, ns_type(ns), m, false) != 0;
+            let (found, amb) = match self.ext_tables.get(&m).and_then(|t| t.answer((name, ns_type(ns)))) {
                 Some(a) => {
-                    debug_assert_eq!(a, lookup(), "the flattened table of module {m} for `{}`", p.syms.str(name));
+                    debug_assert_eq!(a.0, lookup(), "the flattened table of module {m} for `{}`", p.syms.str(name));
+                    debug_assert!(a.0.is_none() || a.1 == ambiguous(), "the flattened table's ambiguity of module {m} for `{}`", p.syms.str(name));
                     a
                 }
-                None => lookup(),
+                None => { let f = lookup(); let a = f.is_some() && ambiguous(); (f, a) }
             };
-            found.map(|(d, v)| self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: v, vis_max: None, vis_min: None, exp: 0 }))
+            // an ambiguous child of an extern module: its other binding is not needed (only that
+            // there is one), and its use is always the lint (build_reduced_graph.rs `define_extern`)
+            let dummy = self.dummy;
+            found.map(|(d, v)| self.alloc(Decl { def: Some(d), import: None, ambiguity: amb.then_some((dummy, true)), vis: v, vis_max: None, vis_min: None, exp: 0 }))
         };
         self.ext_decls.insert((m, name, ns), r);
         r
@@ -520,7 +528,7 @@ impl<'a> Sim<'a> {
             let mut changed = false;
             for &m in comp {
                 let t = self.fold_ext(m, &work, None);
-                changed |= t.names != work[&m].names || t.unsettled != work[&m].unsettled;
+                changed |= t.names != work[&m].names || t.ambiguous != work[&m].ambiguous || t.unsettled != work[&m].unsettled;
                 work.insert(m, t);
             }
             if !changed { settled = true; break; }
@@ -542,7 +550,12 @@ impl<'a> Sim<'a> {
     /// rest are built): its own bindings, then each glob's, as `lookup_in_module_globs` takes them
     /// -- visible to `m`, at most as visible as the glob, the first one found unless the same
     /// definition comes again more visible. `contest` collects the names two globs give different
-    /// definitions, or visibilities neither of which is the wider.
+    /// definitions, or visibilities neither of which is the wider; `ambiguous` the names two visible
+    /// globs give different definitions, and those whose binding a glob brings from a module that
+    /// has the name ambiguous -- as rustc 1.100's `select_glob_decl` keeps it: the first glob's,
+    /// or a later one's of the same definition at the first one's visibility. A binding the glob's
+    /// module holds that `m` cannot see is no import of `m`, nor its ambiguity (a private module's
+    /// two globs of `shader` under the crate root's `pub use that::*`, beside a visible `shader`).
     fn fold_ext(&self, m: u32, work: &crate::fxhash::HashMap<u32, ExtTable>, mut contest: Option<&mut crate::fxhash::HashSet<(Sym, bool)>>) -> ExtTable {
         use std::collections::hash_map::Entry;
         let p = self.p;
@@ -551,15 +564,24 @@ impl<'a> Sim<'a> {
         let mut t = ExtTable::default();
         for (&n, &d) in &md.types { t.names.insert((n, true), (d, p.precise_vis(m, n, true, d))); }
         for (&n, &d) in &md.values { t.names.insert((n, false), (d, p.precise_vis(m, n, false, d))); }
+        // the visibility of each name's first glob binding (rustc's `old_glob_decl.vis()`: a later
+        // binding of the same definition at another visibility changes no ambiguity)
+        let mut first_vis: crate::fxhash::HashMap<(Sym, bool), BindVis> = Default::default();
         for &(g, gv) in &md.globs {
             let gd = p.def(g);
-            let mut take = |t: &mut ExtTable, k: (Sym, bool), d: DefId, v: BindVis| {
+            // `amb`: the glob's module has the name ambiguous
+            let mut take = |t: &mut ExtTable, k: (Sym, bool), d: DefId, v: BindVis, amb: bool| {
                 if own(&k) || !p.vis_visible(v, m) { return; }
                 let v = p.vis_min(gv, v);
                 match t.names.entry(k) {
-                    Entry::Vacant(e) => { e.insert((d, v)); }
+                    Entry::Vacant(e) => {
+                        e.insert((d, v));
+                        first_vis.insert(k, v);
+                        if amb { t.ambiguous.insert(k); }
+                    }
                     Entry::Occupied(mut e) => {
                         let (bd, bv) = *e.get();
+                        if bd != d || (amb && first_vis.get(&k) == Some(&v)) { t.ambiguous.insert(k); }
                         if bd == d && p.vis_wider(v, bv) {
                             e.insert((d, v));
                         } else if bd != d || (v != bv && !p.vis_wider(bv, v)) {
@@ -571,15 +593,16 @@ impl<'a> Sim<'a> {
             match gd.kind {
                 DefKind::Mod => {
                     let src = work.get(&gd.sub).or_else(|| self.ext_tables.get(&gd.sub).map(|x| &**x)).expect("a glob target's table is built before its importer's");
-                    for (&k, &(d, v)) in &src.names { take(&mut t, k, d, v); }
+                    // (what privacy.rs `glob_ambiguity_in` judges the same way)
+                    for (&k, &(d, v)) in &src.names { take(&mut t, k, d, v, src.ambiguous.contains(&k)); }
                     t.contested.extend(src.contested.iter().filter(|k| !own(k)));
                     t.unsettled |= src.unsettled;
                 }
                 DefKind::Enum => {
                     for &v in &p.variants[gd.sub as usize] {
                         let n = p.def(v).name;
-                        take(&mut t, (n, true), v, None);
-                        take(&mut t, (n, false), v, None);
+                        take(&mut t, (n, true), v, None, false);
+                        take(&mut t, (n, false), v, None, false);
                     }
                 }
                 _ => {}
@@ -615,7 +638,7 @@ impl<'a> Sim<'a> {
         let n = self.p.syms.str(name);
         if !set.names().contains(&n) { return None; }
         let d = self.builtin_macro(name, set == StdMacros::Std && n == "panic");
-        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 }))
+        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 }))
     }
 
     fn builtin_macro(&mut self, name: Sym, std_panic: bool) -> DefId {
@@ -698,12 +721,12 @@ impl<'a> Sim<'a> {
             if lo < pos && best.map_or(true, |(b, _)| lo > b) { best = Some((lo, DefId(k as u32))); }
         }
         let (_, d) = best?;
-        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 }))
+        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 }))
     }
 
     fn container_decl(&mut self, c: DefId, name: Sym, ns: usize) -> Option<DeclId> {
         let d = self.p.lookup_in_container(c, name, ns_type(ns))?;
-        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 }))
+        Some(self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 }))
     }
 
     fn import_decl_vis_ext(&self, decl: DeclId, imp: u32, min: bool) -> BindVis {
@@ -729,7 +752,7 @@ impl<'a> Sim<'a> {
                 if let IK::Glob { max_vis } = &mut self.imps[imp as usize].kind { *max_vis = Some(vis); }
             }
         }
-        self.alloc(Decl { def: None, import: Some((imp, decl)), ambiguity: None, warn_ambiguity: false, vis, vis_max: None, vis_min: None, exp })
+        self.alloc(Decl { def: None, import: Some((imp, decl)), ambiguity: None, vis, vis_max: None, vis_min: None, exp })
     }
 
     fn remove_same_import(&self, d1: DeclId, d2: DeclId) -> (DeclId, DeclId) {
@@ -739,19 +762,21 @@ impl<'a> Sim<'a> {
         (d1, d2)
     }
 
-    fn select_glob_decl(&mut self, old: DeclId, new: DeclId, warn: bool) -> DeclId {
-        let (old_deep, deep) = self.remove_same_import(old, new);
+    /// rustc_resolve imports.rs `select_glob_decl`: which of two glob declarations of a name a module
+    /// keeps. Two different items are an ambiguity a use reports as E0659 (rustc's lint exceptions for
+    /// four old crate versions -- noise, rustybuzz, pdf, net2 -- are not modelled); a glob that brings
+    /// an ambiguous declaration over a plain one of the same item, or a re-fetched one that kept the
+    /// old one's, is the lint `ambiguous_glob_imports`.
+    fn select_glob_decl(&mut self, old: DeclId, new: DeclId) -> DeclId {
+        let (_, deep) = self.remove_same_import(old, new);
         if deep != new {
-            let _ = old_deep;
-            if self.decls[old as usize].ambiguity.is_some() && self.decls[new as usize].ambiguity.is_none() {
-                self.decls[new as usize].ambiguity = self.decls[old as usize].ambiguity;
+            if let Some((a, _)) = self.decls[old as usize].ambiguity {
+                if self.decls[new as usize].ambiguity.is_none() { self.decls[new as usize].ambiguity = Some((a, true)); }
             }
-            if self.is_ambiguity_recursive(new) { self.decls[new as usize].warn_ambiguity = true; }
             new
         } else if self.dres(new) != self.dres(old) {
-            self.decls[old as usize].ambiguity = Some(new);
-            self.decls[old as usize].warn_ambiguity = warn;
-            if warn { old } else { let c = self.decls[old as usize].clone(); self.alloc(c) }
+            self.decls[old as usize].ambiguity = Some((new, false));
+            old
         } else if self.dvis(old) != self.dvis(new) {
             let (old_vis, vis) = (self.dvis(old), self.dvis(new));
             if self.greater_than(vis, old_vis) {
@@ -762,8 +787,7 @@ impl<'a> Sim<'a> {
             }
             old
         } else if self.is_ambiguity_recursive(new) && !self.is_ambiguity_recursive(old) {
-            self.decls[old as usize].ambiguity = Some(new);
-            self.decls[old as usize].warn_ambiguity = true;
+            self.decls[old as usize].ambiguity = Some((new, true));
             old
         } else {
             old
@@ -782,7 +806,7 @@ impl<'a> Sim<'a> {
 
     /// `update_local_resolution`: `f` changes the resolution; a new or changed determined declaration
     /// is defined in the module's glob importers.
-    fn update_local_resolution<T>(&mut self, module: u32, name: Sym, ns: usize, warn: bool, f: impl FnOnce(&mut Self, &mut NameRes) -> T) -> T {
+    fn update_local_resolution<T>(&mut self, module: u32, name: Sym, ns: usize, f: impl FnOnce(&mut Self, &mut NameRes) -> T) -> T {
         let key = (module, name, ns);
         // (taken out while `f` runs: none of them reads the resolutions)
         let mut r = std::mem::take(self.resolution_mut(key));
@@ -795,14 +819,13 @@ impl<'a> Sim<'a> {
             Some(b) if old_decl != Some(b) || old_vis != Some(self.dvis(b)) => b,
             _ => return t,
         };
-        let warn = warn || old_decl.is_some();
         if !self.propagating.insert(module) { return t; }
         let importers = self.glob_importers.get(&module).cloned().unwrap_or_default();
         for imp in importers {
             let scope = self.imps[imp as usize].module;
             if self.accessible(self.dvis(binding), scope) {
                 let d = self.new_import_decl(binding, imp);
-                let _ = self.try_plant(scope, name, ns, d, warn);
+                let _ = self.try_plant(scope, name, ns, d);
             }
         }
         self.propagating.remove(&module);
@@ -810,10 +833,10 @@ impl<'a> Sim<'a> {
     }
 
     /// `try_plant_decl_into_local_module`; the module is the declaration's parent.
-    fn try_plant(&mut self, module: u32, name: Sym, ns: usize, decl: DeclId, warn: bool) -> Result<(), DeclId> {
+    fn try_plant(&mut self, module: u32, name: Sym, ns: usize, decl: DeclId) -> Result<(), DeclId> {
         let is_glob = self.is_glob_decl(decl);
         let is_err = self.dres(decl).is_none();
-        self.update_local_resolution(module, name, ns, warn, |this, r| {
+        self.update_local_resolution(module, name, ns, |this, r| {
             // error recovery does not override a real declaration
             if is_err {
                 if let Some(old) = r.best_decl() {
@@ -822,7 +845,7 @@ impl<'a> Sim<'a> {
             }
             if is_glob {
                 r.glob = Some(match r.glob {
-                    Some(old) => this.select_glob_decl(old, decl, warn && r.non_glob.is_none()),
+                    Some(old) => this.select_glob_decl(old, decl),
                     None => decl,
                 });
                 Ok(())
@@ -881,8 +904,8 @@ impl<'a> Sim<'a> {
                         if exp != 0 { self.unexpanded.insert(m); }
                         continue;
                     }
-                    let decl = self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis, vis_max: None, vis_min: None, exp });
-                    let _ = self.try_plant(m, name, ns, decl, false);
+                    let decl = self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis, vis_max: None, vis_min: None, exp });
+                    let _ = self.try_plant(m, name, ns, decl);
                 }
             }
             // the macro namespace: a `#[macro_export]` macro_rules! is a binding of its crate root
@@ -894,8 +917,8 @@ impl<'a> Sim<'a> {
                     if exp != 0 { self.unexpanded.insert(m); }
                     continue;
                 }
-                let decl = self.alloc(Decl { def: Some(d), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp });
-                let _ = self.try_plant(m, name, 2, decl, false);
+                let decl = self.alloc(Decl { def: Some(d), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp });
+                let _ = self.try_plant(m, name, 2, decl);
             }
         }
         // imports
@@ -923,11 +946,11 @@ impl<'a> Sim<'a> {
                 };
                 let Some(c) = krate else { continue };
                 let root = p.mods[p.crates[c as usize].root_mod as usize].def;
-                let src = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
+                let src = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 });
                 let idx = self.imps.len() as u32;
                 self.imps.push(SImp { pi, module, vis, exp, kind: IK::Single { source: name, target: bind, decls: [Pend::Ready(None), Pend::Ready(None), Pend::Ready(None)] }, path: Vec::new(), global: false, imported: None, edition });
                 let d = self.new_import_decl(src, idx);
-                let _ = self.try_plant(module, bind, 0, d, false);
+                let _ = self.try_plant(module, bind, 0, d);
                 if let IK::Single { decls, .. } = &mut self.imps[idx as usize].kind { decls[0] = Pend::Ready(Some(d)); }
                 if module == p.crates[p.mods[module as usize].krate as usize].root_mod {
                     self.extern_items.entry((p.mods[module as usize].krate, bind)).or_insert(d);
@@ -952,11 +975,11 @@ impl<'a> Sim<'a> {
                 // `use crate as c;` / `use self as s;` / `use super as p;`: a module, resolved at once
                 if let Some(def) = p.resolve_mod_path(module, im.global, &im.segs, edition < 2018, true) {
                     if p.def(def).kind == DefKind::Mod {
-                        let src = self.alloc(Decl { def: Some(def), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
+                        let src = self.alloc(Decl { def: Some(def), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 });
                         let idx = self.imps.len() as u32;
                         self.imps.push(SImp { pi, module, vis, exp, kind: IK::Single { source: last, target, decls: [Pend::Ready(None), Pend::Ready(None), Pend::Ready(None)] }, path: Vec::new(), global: false, imported: None, edition });
                         let d = self.new_import_decl(src, idx);
-                        if p.syms.str(target) != "_" { let _ = self.try_plant(module, target, 0, d, false); }
+                        if p.syms.str(target) != "_" { let _ = self.try_plant(module, target, 0, d); }
                         if let IK::Single { decls, .. } = &mut self.imps[idx as usize].kind { decls[0] = Pend::Ready(Some(d)); }
                     }
                 }
@@ -1148,7 +1171,11 @@ impl<'a> Sim<'a> {
                 let aps = if matches!(set, ScopeSet::Module(..) | ScopeSet::ModuleAndExternPrelude(..)) { ps } else { Ps { module: m, exp: ps.exp } };
                 if !self.local(m) {
                     return match self.ext_decl(m, name, ns) {
-                        Some(d) if Some(d) != ign_decl => if self.accessible(self.dvis(d), aps.module) { Ok(d) } else { Err(Ctl::Break(Determined)) },
+                        Some(d) if Some(d) != ign_decl => if self.accessible(self.dvis(d), aps.module) {
+                            // (finalizing: a use of an extern module's ambiguous child)
+                            if fin.is_some() { self.record_use(name, d); }
+                            Ok(d)
+                        } else { Err(Ctl::Break(Determined)) },
                         _ => Err(Ctl::Continue(Determined)),
                     };
                 }
@@ -1173,7 +1200,7 @@ impl<'a> Sim<'a> {
                 match found {
                     Some(c) => {
                         let root = self.p.mods[self.p.crates[c as usize].root_mod as usize].def;
-                        let d = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
+                        let d = self.alloc(Decl { def: Some(root), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 });
                         Ok(d)
                     }
                     None => Err(Ctl::Continue(Determined)),
@@ -1198,7 +1225,7 @@ impl<'a> Sim<'a> {
             Scope::Builtin => {
                 for i in 0..PRIMS.len() {
                     if self.p.syms.get(PRIMS[i].0) == Some(name) {
-                        let d = self.alloc(Decl { def: Some(self.p.prim_defs[i]), import: None, ambiguity: None, warn_ambiguity: false, vis: None, vis_max: None, vis_min: None, exp: 0 });
+                        let d = self.alloc(Decl { def: Some(self.p.prim_defs[i]), import: None, ambiguity: None, vis: None, vis_max: None, vis_min: None, exp: 0 });
                         return Ok(d);
                     }
                 }
@@ -1299,16 +1326,26 @@ impl<'a> Sim<'a> {
         Ok(b)
     }
 
-    /// `record_use_inner`'s walk down a declaration's import chain: the ambiguity errors it records,
-    /// as the `warning` of each (None: an error).
-    fn chain_ambiguities(&self, used: DeclId) -> Vec<Option<Warn>> {
+    /// The crate of the module an import declaration is in (None: a definition's declaration).
+    fn import_crate(&self, d: DeclId) -> Option<u32> {
+        self.decls[d as usize].import.map(|(i, _)| self.p.mods[self.imps[i as usize].module as usize].krate)
+    }
+
+    /// `record_use`'s walk down a declaration's import chain (rustc_resolve lib.rs): the ambiguity of
+    /// each declaration on it, as its `warning` (None: an error). `krate`: the crate of the use. To it
+    /// another crate's declaration is an extern one, which holds the first ambiguity of its chain
+    /// (metadata's ambiguous children, imports.rs `finalize_resolutions_in`), always as the lint.
+    fn chain_ambiguities(&self, used: DeclId, krate: Option<u32>) -> Vec<Option<Warn>> {
         let mut out = Vec::new();
         let mut cur = used;
-        let mut warn = self.decls[used as usize].warn_ambiguity;
         loop {
-            if self.decls[cur as usize].ambiguity.is_some() { out.push(if warn { Some(Warn::Glob) } else { None }); }
+            if krate.is_some() && self.import_crate(cur).is_some_and(|k| Some(k) != krate) {
+                if self.is_ambiguity_recursive(cur) { out.push(Some(Warn::Glob)); }
+                break;
+            }
+            if let Some((_, w)) = self.decls[cur as usize].ambiguity { out.push(if w { Some(Warn::Glob) } else { None }); }
             match self.decls[cur as usize].import {
-                Some((_, src)) => { warn = warn || self.decls[src as usize].warn_ambiguity; cur = src; }
+                Some((_, src)) => cur = src,
                 None => break,
             }
         }
@@ -1316,7 +1353,8 @@ impl<'a> Sim<'a> {
     }
 
     fn record_use(&mut self, name: Sym, used: DeclId) {
-        for w in self.chain_ambiguities(used) { self.push_amb(name, w); }
+        let krate = self.imps.get(self.cur_imp as usize).map(|im| self.p.mods[im.module as usize].krate);
+        for w in self.chain_ambiguities(used, krate) { self.push_amb(name, w); }
     }
 
     fn push_amb(&mut self, name: Sym, warning: Option<Warn>) {
@@ -1561,13 +1599,13 @@ impl<'a> Sim<'a> {
                 Ok(binding) => {
                     let d = self.new_import_decl(binding, i);
                     let m = ps.module;
-                    if self.p.syms.str(target) != "_" { let _ = self.try_plant(m, target, ns, d, false); }
+                    if self.p.syms.str(target) != "_" { let _ = self.try_plant(m, target, ns, d); }
                     Pend::Ready(Some(d))
                 }
                 Err(Determined) => {
                     if self.p.syms.str(target) != "_" {
                         let m = ps.module;
-                        self.update_local_resolution(m, target, ns, false, |_, r| { r.single_imports.retain(|&x| x != i); });
+                        self.update_local_resolution(m, target, ns, |_, r| { r.single_imports.retain(|&x| x != i); });
                     }
                     Pend::Ready(None)
                 }
@@ -1614,36 +1652,43 @@ impl<'a> Sim<'a> {
     fn plant_glob(&mut self, i: u32, here: u32, name: Sym, ns: usize, binding: DeclId) {
         if !self.accessible(self.dvis(binding), here) { return; }
         let d = self.new_import_decl(binding, i);
-        let warn = self.res.get(&(here, name, ns)).and_then(|r| r.determined_decl()).map_or(false, |b| self.warn_ambiguity_recursive(b));
-        let _ = self.try_plant(here, name, ns, d, warn);
+        let _ = self.try_plant(here, name, ns, d);
     }
 
     // ------------------------------------------------------------------ finalization
 
-    /// The ambiguities recorded on the glob declarations of the modules: (module, name, type ns).
-    /// `chain_ambiguities` of every declaration summed up: 0 none, 1 one with no warning flag at or
-    /// before it in the chain, 2 each after one. One pass: an import declaration's source was
-    /// allocated before it.
+    /// `chain_ambiguities` of every declaration, for a use in its own crate, summed up: 0 none, 1 one
+    /// of them an error, 2 the lint. One pass: an import declaration's source was allocated before it.
     fn chain_summaries(&self) -> Vec<u8> {
-        // (an ambiguity in the chain, one with no warning flag at or before it)
+        // (an ambiguity on the chain, one of them an error)
         let mut s: Vec<(bool, bool)> = Vec::with_capacity(self.decls.len());
-        for d in &self.decls {
-            let amb = d.ambiguity.is_some();
-            let (any, none) = d.import.map_or((false, false), |(_, src)| s[src as usize]);
-            s.push((amb || any, !d.warn_ambiguity && (amb || none)));
+        for (k, d) in self.decls.iter().enumerate() {
+            let (amb, err) = d.ambiguity.map_or((false, false), |(_, w)| (true, !w));
+            let (any, below) = match d.import {
+                Some((_, src)) => {
+                    let (a, e) = s[src as usize];
+                    // another crate's declaration is an extern one here: its ambiguity is the lint
+                    let cross = self.import_crate(src).is_some_and(|c| Some(c) != self.import_crate(k as DeclId));
+                    (a, e && !cross)
+                }
+                None => (false, false),
+            };
+            s.push((amb || any, err || below));
         }
-        s.into_iter().map(|(any, none)| if !any { 0 } else if none { 1 } else { 2 }).collect()
+        s.into_iter().map(|(any, err)| if !any { 0 } else if err { 1 } else { 2 }).collect()
     }
 
     fn ambiguity_table(&self, chains: &[u8]) -> HashMap<(u32, Sym, bool), u8> {
         let mut t = HashMap::with_capacity_and_hasher(self.res.len(), Default::default());
         for (&(m, name, ns), r) in &self.res {
             if ns == 2 { continue; }
-            // low bits: what a use of the name finds (a name a module binds directly -- an item or a
-            // single import -- has no glob ambiguity); bits 2..: the glob declaration's own
+            // bits 0-1: what a use of the name finds (its own declaration's, an item's or a single
+            // import's, when the module binds it so: a use goes down an import's chain to an
+            // ambiguous declaration); bits 2-3: the glob declaration's; bit 4: an own declaration
             let glob = r.glob.map_or(0, |g| chains[g as usize]);
             if r.non_glob.is_none() && r.glob.is_none() { continue; }
-            t.insert((m, name, ns_type(ns)), (if r.non_glob.is_some() { 0 } else { glob }) | (glob << 2));
+            let found = r.non_glob.map_or(glob, |d| chains[d as usize]);
+            t.insert((m, name, ns_type(ns)), found | (glob << 2) | if r.non_glob.is_some() { 16 } else { 0 });
         }
         t
     }
@@ -1828,8 +1873,8 @@ impl<'a> Sim<'a> {
         let m = self.imps[i as usize].module;
         for ns in 0..3 {
             if self.p.syms.str(target) != "_" {
-                let _ = self.try_plant(m, target, ns, d, false);
-                self.update_local_resolution(m, target, ns, false, |_, r| { r.single_imports.retain(|&x| x != i); });
+                let _ = self.try_plant(m, target, ns, d);
+                self.update_local_resolution(m, target, ns, |_, r| { r.single_imports.retain(|&x| x != i); });
             }
         }
     }

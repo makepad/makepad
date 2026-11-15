@@ -1861,7 +1861,11 @@ impl GpuLightmapBaker {
         Some(delivery)
     }
 
-    fn ensure_draws(&mut self, cx: &mut Cx) -> bool {
+    pub(crate) fn has_draws(&self) -> bool {
+        self.draws.is_some()
+    }
+
+    pub(crate) fn ensure_draws(&mut self, cx: &mut Cx) -> bool {
         if self.draws.is_some() {
             return true;
         }

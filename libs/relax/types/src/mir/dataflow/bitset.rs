@@ -41,6 +41,19 @@ impl BitSet {
         old != *word
     }
 
+    /// rustc_index/src/bit_set.rs:260 (DenseBitSet::first_set_at_or_after).
+    pub fn first_set_at_or_after(&self, bit: usize) -> Option<usize> {
+        assert!(bit < self.size);
+        let mut index = bit / 64;
+        // Mask out all bits below `bit`.
+        let mut word = self.words[index] & !((1 << (bit % 64)) - 1);
+        loop {
+            if word != 0 { return Some(64 * index + word.trailing_zeros() as usize); }
+            index += 1;
+            word = *self.words.get(index)?;
+        }
+    }
+
     pub fn clear(&mut self) { self.words.fill(0); }
 
     pub fn insert_all(&mut self) {

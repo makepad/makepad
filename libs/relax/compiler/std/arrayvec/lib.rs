@@ -3,7 +3,8 @@
 //! CAP, u32 length, panic messages, CapacityError); ported from it (Copyright (c) Ulrik Sverdrup
 //! "bluss" 2015-2023, MIT/Apache-2.0; see libs/relax/compiler/std/CREDITS.md).
 //! Includes ArrayString's API without optional external trait integrations.
-//! The rustc path keeps the real crate and std/check_ext tests this file against it.
+//! The rustc path keeps the real crate and Makepad's tools/run/tests/check_ext tests this file
+//! against it.
 
 use core::borrow::{Borrow, BorrowMut};
 use core::cmp;

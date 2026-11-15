@@ -58,6 +58,13 @@ pub struct RawUnit {
     /// a path package outside the sysroot (its cargo pkg_id is `path+`): its files are its source,
     /// where a registry or git package is its id and a sysroot crate is Relax's own
     pub path_source: bool,
+    /// a registry or git package (cargo's pkg_id is no `path+`; a sysroot crate's is): what a
+    /// build script's unit graph says of it (`script_units`), so the script's run sees its
+    /// third-party packages as this run does
+    pub registry: bool,
+    /// a git package (cargo's pkg_id is `git+`): its repository is its source (a confined
+    /// script's read root, `script_folders`)
+    pub git: bool,
     /// the checks its profile gives the unit as a host unit, which a build script's run builds it
     /// with (`makepad test`'s profile: run.rs; a build script's run: its graph's)
     pub host_checks: Option<crate::resolve::ProfileChecks>,
@@ -74,8 +81,9 @@ pub struct Graph {
     pub cfgs: Vec<Vec<String>>,
     /// per crate: compile-time environment for env!()
     pub env: Vec<Vec<(String, String)>>,
-    /// libraries the build scripts link: (name, framework)
-    pub link_libs: Vec<(String, bool)>,
+    /// libraries the build scripts link: (name, framework, named by a confined script: the run
+    /// never finds it in the working folder, relax-compiler os/proc.rs `load_library_outside_cwd`)
+    pub link_libs: Vec<(String, bool, bool)>,
     /// `--allow-c`: the shared library the native dependencies were linked into (native.rs)
     pub native: Option<crate::native::NativeLib>,
     pub raw: Vec<RawUnit>,
@@ -119,12 +127,13 @@ pub(crate) fn parse_pkg_id(id: &str) -> (String, String, String) {
     };
     let (name, ver) = match frag.rfind('@') {
         Some(j) => (frag[..j].to_string(), frag[j + 1..].to_string()),
+        // cargo's package id spec leaves the name out when it is the URL's last path segment, for
+        // any source: `path+file:///w/app#0.1.0`, and a git dependency's
+        // `git+https://github.com/o/tree-sitter-yaml?rev=baff0b51#0.6.1`
         None => {
-            let last = match dir.rfind('/') {
-                Some(k) => dir[k + 1..].to_string(),
-                None => dir.clone(),
-            };
-            (last, frag.to_string())
+            let path = url.split('?').next().unwrap_or(url).trim_end_matches('/');
+            let last = path.rsplit('/').next().unwrap_or(path);
+            (last.to_string(), frag.to_string())
         }
     };
     (dir, name, ver)
@@ -142,7 +151,7 @@ pub fn check_unit_graph(sess: &std::sync::Arc<crate::Session>, workspace: &str, 
     crate::resolve::check_unit_graph(sess, workspace, package, cargo_flags)
 }
 
-pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
+pub fn load(g: &Units, check_all_bins: bool, allow_c: bool) -> Result<Graph, String> {
     let units = &g.units;
     let roots = &g.roots;
     let mut crates: Vec<CrateUnit> = Vec::new();
@@ -158,7 +167,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
     let mut test_crates: Vec<usize> = Vec::new();
     // unit index of a run-custom-build unit -> its script (src_path, edition, features, build unit)
     let mut run_build: Vec<Option<(String, u16, Vec<String>, usize)>> = vec![None; n_units];
-    let mut raw: Vec<RawUnit> = vec![RawUnit { name: String::new(), src_path: String::new(), edition: 2015, features: Vec::new(), proc_macro: false, deps: Vec::new(), run_script: false, pkg: Default::default(), path_source: false, host_checks: None }; n_units];
+    let mut raw: Vec<RawUnit> = vec![RawUnit { name: String::new(), src_path: String::new(), edition: 2015, features: Vec::new(), proc_macro: false, deps: Vec::new(), run_script: false, pkg: Default::default(), path_source: false, registry: false, git: false, host_checks: None }; n_units];
     // a crate used on both sides (normal dependency and build-dependency / proc-macro side) is one
     // crate here: keep the target side for the app and the host side for the macro world.
     // Cargo reference features.md#feature-resolver-version-2 keeps their features separate;
@@ -204,7 +213,7 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
             (d, n, v)
         };
         raw[ui] = RawUnit { name: tname.clone(), src_path: src_path.clone(), edition, features: features.clone(), proc_macro: pm, deps: udeps.clone(), run_script: build && mode == "run-custom-build", pkg: (pkg_dir.clone(), pname.clone(), ver.clone()),
-            path_source: !u.sysroot && u.pkg_id.starts_with("path+"), host_checks: u.checks };
+            path_source: !u.sysroot && u.pkg_id.starts_with("path+"), registry: !u.pkg_id.starts_with("path+"), git: u.pkg_id.starts_with("git+"), host_checks: u.checks };
         // the run unit depends on the script's compile unit, whose deps are the build-dependencies
         let build_unit = udeps.first().map(|d| d.0).unwrap_or(usize::MAX);
         run_build[ui] = if build && mode == "run-custom-build" { Some((src_path.clone(), edition, features.clone(), build_unit)) } else { None };
@@ -338,7 +347,6 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
                 // cargo builds a package's bins with the features its tests are built with (one
                 // feature set per package): the run of the bin selects exactly those
                 let features = crates[integration_tests[0]].features.join(",");
-                let allow_c = std::env::var_os("RELAX_ALLOW_C").is_some_and(|v| v == "1");
                 // a file the bin's starts read, replaced whole (another run's test may be reading it)
                 let put = |path: &std::path::Path, text: &str| {
                     if std::fs::read(path).ok().as_deref() == Some(text.as_bytes()) {
@@ -355,11 +363,21 @@ pub fn load(g: &Units, check_all_bins: bool) -> Result<Graph, String> {
                     }
                 };
                 for bin_name in &g.bins {
-                    // the bin's run: the loader's command line before the bin's own arguments
-                    let mut words: Vec<String> = [exe_str.as_str(), "run", "--quiet", "--silent", "--no-live", "--run-dir", td_str.as_str(), "--workspace-dir", pkg_dir.as_str(), pkg_name.as_str(), "--no-default-features"].iter().map(|w| w.to_string()).collect();
+                    // the bin's run: the loader's command line before the bin's own arguments. A
+                    // run no one attends, as the test's own: a panic unwinds and a compile error
+                    // ends it at once, as a rustc build's binary ends, however the test run is
+                    // watched (a devhub-observed run parked a panic 600 s)
+                    let mut words: Vec<String> = [exe_str.as_str(), "run", "--quiet", "--silent", "--no-live", "--unattended", "--run-dir", td_str.as_str(), "--workspace-dir", pkg_dir.as_str()].iter().map(|w| w.to_string()).collect();
+                    // the test's profile, as cargo builds the binary with the test: its debug
+                    // assertions and overflow checks (before, the binary built as a run, without
+                    // them, relax issue 207)
+                    if let Some(p) = test_profile() {
+                        words.extend(["--profile".to_string(), p.to_string()]);
+                    }
+                    words.extend([pkg_name.clone(), "--no-default-features".to_string()]);
                     // the test run's native permission is the binary's, as cargo builds the binary
-                    // with the test: a test that clears its child's environment (or takes
-                    // RELAX_ALLOW_C out of it) still starts the binary (relax issue 157)
+                    // with the test: a word of its command line, so a test that clears its child's
+                    // environment still starts the binary (relax issue 157)
                     if allow_c {
                         words.push("--allow-c".to_string());
                     }
@@ -459,7 +477,7 @@ fn host_triple(sess: &std::sync::Arc<crate::Session>) -> &'static str {
 
 /// Compiles (once per source) and runs every build script; records cfgs, link libraries,
 /// OUT_DIR and rustc-env per crate. Scripts run in parallel. `target_dir` is the run's relax dir,
-/// `<target>/relax` (OUT_DIR = <target>/relax/build/<crate>-<hash>/out: as deep as cargo's
+/// `<target>/relax` (OUT_DIR = <target>/relax/build/<crate>-<hash>-<key hash>/out: as deep as cargo's
 /// <target>/release/build/<crate>-<hash>/out, since scripts look 5 ancestors up for the
 /// workspace root).
 /// What Relax does with a package's build script. A package keeps its script by its manifest
@@ -483,7 +501,7 @@ pub enum ScriptRole {
 
 pub fn script_role(pkg: &str, bs: &BuildScript) -> ScriptRole {
     let has = |f: &str| bs.features.iter().any(|x| x == f);
-    if let Some(a) = script_answer(pkg) {
+    if let Some(a) = script_answer(pkg, bs) {
         return ScriptRole::Native(a);
     }
     match pkg {
@@ -529,7 +547,10 @@ fn relax_meta(dir: &str, key: &str) -> Option<String> {
     None
 }
 
-/// `[package.metadata.relax] build-script = "keep"` in the manifest of the package in `dir`.
+/// `[package.metadata.relax] build-script = "keep"` in the manifest of the package in `dir`. The
+/// role says only that the script runs (it is never listed for removal); it grants no rights. A
+/// registry package can declare it in its own manifest: what its script may do is the process's
+/// policy for third-party compile-time code (sandbox.rs `Policy`), whatever the role says.
 fn kept_script(dir: &str) -> bool {
     relax_meta(dir, "build-script").as_deref() == Some("\"keep\"")
 }
@@ -558,13 +579,18 @@ pub fn export_opt_level(dir: &str) -> Option<u8> {
 /// A host's own answer to a package's build script: what the script prints (`cargo:` lines) and
 /// writes to its OUT_DIR, from the code the script shares, without running it. Its cfg lines and
 /// OUT_DIR files key the crate as a run script's output does (crate_image Record: cfg, files).
+/// It answers only the package whose script reads as the host's: another version of the package (a
+/// registry copy, an older checkout) or an edited script runs its own.
 pub struct ScriptAnswer {
     pub package: &'static str,
+    /// the files the answer stands for, by their path from the script's folder (the script
+    /// itself, the files it includes), with the text the host was built from
+    pub sources: &'static [(&'static str, &'static str)],
     pub answer: fn(&ScriptEnv) -> Result<Vec<String>, String>,
 }
 
-/// What the script would be given: cargo's build-script environment (CARGO_CFG_*, TARGET, ..),
-/// the target triple and its OUT_DIR (made, empty or as the last answer left it).
+/// What the script would be given: the environment a run of it would see (`answer_env`), the
+/// target triple and its OUT_DIR (made, empty or as the last answer left it).
 pub struct ScriptEnv<'a> {
     pub env: &'a [(String, String)],
     pub target: &'a str,
@@ -580,8 +606,29 @@ pub fn register_script_answer(a: &'static ScriptAnswer) {
     v.push(a);
 }
 
-fn script_answer(pkg: &str) -> Option<&'static ScriptAnswer> {
-    SCRIPT_ANSWERS.lock().unwrap().iter().copied().find(|a| a.package == pkg)
+/// The host's answer to `pkg`'s script `bs`, when the script's files read as the answer's sources.
+fn script_answer(pkg: &str, bs: &BuildScript) -> Option<&'static ScriptAnswer> {
+    let a = SCRIPT_ANSWERS.lock().unwrap().iter().copied().find(|a| a.package == pkg)?;
+    let folder = std::path::Path::new(&bs.src_path).parent()?;
+    a.sources.iter().all(|(path, text)| crate::vfs::read_to_string(folder.join(path)).is_ok_and(|t| t == *text)).then_some(a)
+}
+
+/// The environment a run of the build script of package `pname` (folder `dir`, version `ver`)
+/// would see (run_one): cargo's variables for the package, its features and the target first,
+/// then cargo's `[env]` configuration, then this process's environment.
+fn answer_env(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, dir: &str, pname: &str, ver: &str) -> Vec<(String, String)> {
+    let mut env = crate::cfg::CfgSet::host(sess, &[]).build_script_env();
+    env.extend(pkg_env(dir, pname, ver));
+    env.push(("TARGET".to_string(), target_triple(sess).to_string()));
+    env.push(("HOST".to_string(), host_triple(sess).to_string()));
+    env.extend(bs.features.iter().map(|f| (format!("CARGO_FEATURE_{}", f.to_uppercase().replace('-', "_")), "1".to_string())));
+    let process = std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)));
+    for (k, v) in crate::crates::config_env().into_iter().chain(process) {
+        if !env.iter().any(|(n, _)| *n == k) {
+            env.push((k, v));
+        }
+    }
+    env
 }
 
 /// Packages whose build script ran although it is to be removed: (package, script path).
@@ -589,8 +636,9 @@ pub static TO_REMOVE: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// `check_only` (`relax check`): a script that compiles C is not run without `--allow-c` (rustc's
 /// check never links native code): its crate gets an empty answer (OUT_DIR, no cfgs), said once,
-/// and so does a script that reads such a script's `DEP_` metadata. Any other script that fails
-/// fails the check, as under `cargo check`.
+/// and so does a script that can run C (its build-dependencies reach a native package) and one
+/// that reads such a script's `DEP_` metadata. Any other script that fails fails the check, as
+/// under `cargo check`.
 pub type ScriptsDone<'a> = dyn Fn(&Graph, &[usize], &[Vec<String>], &[Vec<(String, String)>]) -> Option<Box<dyn std::any::Any>> + Sync + 'a;
 
 /// `scripts_done`: called once the scripts Relax runs have finished while cargo is still building
@@ -600,10 +648,15 @@ pub type ScriptsDone<'a> = dyn Fn(&Graph, &[usize], &[Vec<String>], &[Vec<(Strin
 ///
 /// `native_receipt`: the native build of the run that started this one (`Inherit`).
 ///
+/// `tool`: what runs a script here, apart from where that program lies: the identity of the Relax
+/// that compiles and runs it (its codegen identity, which holds its answers to the script's RUSTC
+/// questions) and of the std the script compiles against. A script's output is kept under it
+/// (`script_env_key`), never under the program's path.
+///
 /// Its result: the receipt of the native build this run made, for the runs that take it: the
 /// package binaries its integration tests start (CARGO_BIN_EXE_<name>, `BIN_NATIVE_RECEIPT`) and a
 /// run of this program again (run.rs, `RELAX_RUN_NATIVE`).
-pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, native: Option<crate::native::Mode<'_>>, check_only: bool,
+pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, target_dir: &str, tool: u128, native: Option<crate::native::Mode<'_>>, check_only: bool,
     native_receipt: Option<Inherit<'_>>, scripts_done: Option<&ScriptsDone<'_>>) -> Result<Option<String>, String> {
     // the packages whose scripts compile or link C (native.rs): built by cargo with `--allow-c`,
     // an error naming the flag without it; Relax runs the other scripts. A check without the flag
@@ -662,7 +715,9 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         _ => None,
     };
     let mut native_seeds: Vec<usize> = Vec::new();
-    let mut check_skipped: Vec<usize> = Vec::new();
+    // the scripts not run for want of `--allow-c`, with what their crates' dependents' scripts are
+    // told (C_NOT_RUN, C_CALL_NOT_RUN)
+    let mut check_skipped: Vec<(usize, &'static str)> = Vec::new();
     for (i, reason) in native_scripts {
         let bs = &g.build_scripts[i];
         let (_, pname, _) = &g.pkg[bs.krate];
@@ -678,7 +733,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
         // alone run under Relax as before
         if reason.compiles_c() && check_only {
             eprintln!("relax check: `{}`'s build script compiles C ({}): not run without `--allow-c` (its cfgs and OUT_DIR are missing; a `--allow-c` run fills the cache this check reads)", pname, why);
-            check_skipped.push(bs.krate);
+            check_skipped.push((bs.krate, C_NOT_RUN));
             continue;
         }
         if reason.compiles_c() {
@@ -689,9 +744,26 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     // The scripts Relax runs whose build-dependencies reach a native package: their child runs
     // compile it, so they read the native outputs from a receipt (native.rs `write_receipt`).
     // Only they wait for a cold native build and only their rerun keys hold the receipt's name.
-    let reach: Vec<bool> = g.build_scripts.iter().map(|bs| {
-        !native_krates.is_empty() && !native_krates.contains(&bs.krate) && !check_skipped.contains(&bs.krate) && reaches_native(g, bs, &native_krates)
+    let mut reach: Vec<bool> = g.build_scripts.iter().map(|bs| {
+        !native_krates.is_empty() && !native_krates.contains(&bs.krate) && !check_skipped.iter().any(|s| s.0 == bs.krate) && reaches_native(g, bs, &native_krates).is_some()
     }).collect();
+    // Such a script can run C (call into the native library, run a program the native build made),
+    // and without `--allow-c` no C runs: nothing external does unless the flag grants it. A check
+    // reads the native packages' cached outputs and runs none of their code; the script is not
+    // run, as a C compile is not, with a line that names the grant (11-14: its child ran without
+    // the native library, and its first call into it reported a fn "not available on this host").
+    if !sess.options.allow_c {
+        for (i, bs) in g.build_scripts.iter().enumerate() {
+            if !std::mem::take(&mut reach[i]) {
+                continue;
+            }
+            let pname = &g.pkg[bs.krate].1;
+            let via = reaches_native(g, bs, &native_krates).unwrap_or_default();
+            let cmd = if check_only { "check" } else { "run" };
+            eprintln!("relax {cmd}: `{pname}`'s build script can run C (it build-depends on `{via}`, whose build script compiles C): not run without `--allow-c`, the grant to run C (its OUT_DIR is missing; `makepad {cmd} --allow-c` runs it with the native build)");
+            check_skipped.push((bs.krate, C_CALL_NOT_RUN));
+        }
+    }
     let mut receipt: Option<String> = None;
     let mut prebuilt = false;
     if reach.contains(&true) {
@@ -728,7 +800,7 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
     // the other scripts: they share nothing (each script's output is its own crate's)
     let gr: &Graph = g;
     let meta: LinksMeta = Default::default();
-    let root = BuildRoot::new(sess, gr, target_dir, check_only);
+    let root = BuildRoot::new(sess, gr, target_dir, check_only, tool);
     let (native_built, results) = std::thread::scope(|scope| {
         let native_job = match (native, native_seeds.is_empty()) {
             (Some(crate::native::Mode::Build(req)), false) if !prebuilt => Some(scope.spawn(|| {
@@ -753,10 +825,10 @@ pub fn run_build_scripts(sess: &std::sync::Arc<crate::Session>, g: &mut Graph, t
             if !job.is_finished() {
                 let (mut cfgs, mut env, mut libs) = (gr.cfgs.clone(), gr.env.clone(), gr.link_libs.clone());
                 let mut ok = true;
-                for (krates, r, out_dir) in &results {
+                for (krates, r, out_dir, confined) in &results {
                     let Ok(stdout) = r else { ok = false; break };
                     for &k in krates {
-                        if script_output_into(&mut cfgs, &mut env, &mut libs, &gr.pkg, k, stdout, out_dir.clone(), check_only).is_err() { ok = false; }
+                        if script_output_into(&mut cfgs, &mut env, &mut libs, &gr.pkg, k, stdout, out_dir.clone(), check_only, *confined).is_err() { ok = false; }
                     }
                 }
                 if ok { _kept = done(gr, &native_krates, &cfgs, &env); }
@@ -822,9 +894,9 @@ fn apply_built(g: &mut Graph, native_krates: &[usize], built: crate::native::Bui
     Ok(())
 }
 
-/// Whether `bs`'s build-dependencies reach one of the native packages (`native_krates`): its
-/// child run compiles that package (a build-dependency is the same package built for the host).
-fn reaches_native(g: &Graph, bs: &BuildScript, native_krates: &[usize]) -> bool {
+/// The first of the native packages (`native_krates`) `bs`'s build-dependencies reach, by name:
+/// its child run compiles that package (a build-dependency is the same package built for the host).
+fn reaches_native<'g>(g: &'g Graph, bs: &BuildScript, native_krates: &[usize]) -> Option<&'g str> {
     let native: Vec<(&str, &str)> = native_krates.iter().map(|&k| (g.pkg[k].1.as_str(), g.pkg[k].2.as_str())).collect();
     let mut seen = vec![false; g.raw.len()];
     let mut stack: Vec<usize> = bs.build_deps.iter().map(|d| d.0).collect();
@@ -834,11 +906,11 @@ fn reaches_native(g: &Graph, bs: &BuildScript, native_krates: &[usize]) -> bool 
         }
         let u = &g.raw[i];
         if native.contains(&(u.pkg.1.as_str(), u.pkg.2.as_str())) {
-            return true;
+            return Some(u.pkg.1.as_str());
         }
         stack.extend(u.deps.iter().map(|d| d.0));
     }
-    false
+    None
 }
 
 /// The native outputs a child run's receipt names, onto this graph's native scripts by their
@@ -885,7 +957,8 @@ fn apply_native_scripts(g: &mut Graph, scripts: Vec<crate::native::ScriptOut>) {
             g.env[k].extend(n.env.iter().cloned());
             g.env[k].push(("OUT_DIR".to_string(), n.out_dir.clone()));
         }
-        for l in n.system {
+        for (name, fw) in n.system {
+            let l = (name, fw, false);
             if !g.link_libs.contains(&l) {
                 g.link_libs.push(l);
             }
@@ -896,28 +969,29 @@ fn apply_native_scripts(g: &mut Graph, scripts: Vec<crate::native::ScriptOut>) {
 /// What each script handed on to the scripts of its dependents, by script index: the metadata
 /// its output carried (`script_metadata`), or why it has none (its script was not run, or failed).
 /// The metadata a check without `--allow-c` hands on for a script it did not run for its C compile
-/// (C_NOT_RUN), or for that script's `DEP_` metadata (C_DEP_NOT_RUN): a script that reads it is not
-/// run either, and is no failure of the check.
+/// (C_NOT_RUN), for the C it can run (C_CALL_NOT_RUN), or for such a script's `DEP_` metadata
+/// (C_DEP_NOT_RUN): a script that reads it is not run either, and is no failure of the check.
 const C_NOT_RUN: &str = "its build script compiles C, which is not run without `--allow-c`";
+const C_CALL_NOT_RUN: &str = "its build script can run C (a build-dependency of it compiles C), which is not run without `--allow-c`";
 const C_DEP_NOT_RUN: &str = "its build script was not run, for a C build script's metadata it reads";
 
 /// One table for both calls of `relax_scripts` (the macro world's scripts first).
 type LinksMeta = Mutex<std::collections::HashMap<usize, Result<Vec<(String, String)>, String>>>;
 
 /// The scripts Relax runs itself (every one but the native packages' and a check's skipped
-/// ones), on the pool: (crates, stdout or error, OUT_DIR) per script. A script whose package
+/// ones), on the pool: (crates, stdout or error, OUT_DIR, confined) per script. A script whose package
 /// depends on `links` packages runs after their scripts, given their metadata (cargo orders the
 /// runs the same way); most graphs have no such pair and run every script at once.
-fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &str, root: &BuildRoot, native_krates: &[usize], check_skipped: &[usize],
+fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &str, root: &BuildRoot, native_krates: &[usize], check_skipped: &[(usize, &'static str)],
     receipts: &[Option<&str>], meta: &LinksMeta,
-    only: &(dyn Fn(usize) -> bool + Sync)) -> Vec<(Vec<usize>, Result<String, String>, String)> {
-    let results: Mutex<Vec<(Vec<usize>, Result<String, String>, String)>> = Mutex::new(Vec::new());
-    let done = |i: usize, r: Result<String, String>, out_dir: String| {
+    only: &(dyn Fn(usize) -> bool + Sync)) -> Vec<ScriptRun> {
+    let results: Mutex<Vec<ScriptRun>> = Mutex::new(Vec::new());
+    let done = |i: usize, r: Result<String, String>, out_dir: String, confined: bool| {
         meta.lock().unwrap().insert(i, match &r {
             Ok(stdout) => Ok(script_metadata(stdout)),
             Err(_) => Err("its build script failed".to_string()),
         });
-        results.lock().unwrap().push((g.build_scripts[i].krates(), r, out_dir));
+        results.lock().unwrap().push((g.build_scripts[i].krates(), r, out_dir, confined));
     };
     let unbuilt = |bs: &BuildScript| {
         let build_dir = root.take(&format!("{}-unbuilt", g.crates[bs.krate].name));
@@ -930,13 +1004,13 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
         if native_krates.contains(&bs.krate) || !only(bs.krate) {
             continue;
         }
-        if check_skipped.contains(&bs.krate) {
+        if let Some(&(_, why)) = check_skipped.iter().find(|s| s.0 == bs.krate) {
             let out_dir = unbuilt(bs);
-            results.lock().unwrap().push((bs.krates(), Ok(String::new()), out_dir));
-            meta.lock().unwrap().insert(i, Err(C_NOT_RUN.to_string()));
+            results.lock().unwrap().push((bs.krates(), Ok(String::new()), out_dir, false));
+            meta.lock().unwrap().insert(i, Err(why.to_string()));
             continue;
         }
-        let (dir, pname, _) = &g.pkg[bs.krate];
+        let (dir, pname, ver) = &g.pkg[bs.krate];
         let name = &g.crates[bs.krate].name;
         let role = if noop::script(bs, &g.raw) {
             if sess.runtime.profile {
@@ -949,7 +1023,7 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                 // cargo sets OUT_DIR for every package with a build script
                 let out_dir = format!("{}/out", root.take(&format!("{}-answered", name)));
                 let r = std::fs::create_dir_all(&out_dir).map(|_| lines.join("\n")).map_err(|e| format!("{}: {}", out_dir, e));
-                done(i, r, out_dir);
+                done(i, r, out_dir, false);
                 continue;
             }
             ScriptRole::ToRemove => {
@@ -975,15 +1049,15 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                     }
                     Ok(String::new())
                 });
-                done(i, r, out_dir);
+                done(i, r, out_dir, false);
                 continue;
             }
             ScriptRole::Native(a) => {
                 let out_dir = format!("{}/out", root.take(&format!("{}-answered", name)));
-                let env: Vec<(String, String)> = crate::cfg::CfgSet::host(sess, &[]).build_script_env();
+                let env = answer_env(sess, bs, dir, pname, ver);
                 let r = std::fs::create_dir_all(&out_dir).map_err(|e| format!("{}: {}", out_dir, e))
                     .and_then(|_| (a.answer)(&ScriptEnv { env: &env, target: target_triple(sess), out_dir: std::path::Path::new(&out_dir) }));
-                done(i, r.map(|l| l.join("\n")), out_dir);
+                done(i, r.map(|l| l.join("\n")), out_dir, false);
                 continue;
             }
             ScriptRole::Artefact => {}
@@ -1022,13 +1096,13 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                     // reads aws-lc-sys's DEP_ metadata) leaves its crate unconfigured, said once, not fatal
                     Err((e, true)) => {
                         eprintln!("relax check: {} (its crate is checked without the script's cfgs)", e.lines().next().unwrap_or(""));
-                        results.lock().unwrap().push((bs.krates(), Ok(String::new()), unbuilt(bs)));
+                        results.lock().unwrap().push((bs.krates(), Ok(String::new()), unbuilt(bs), false));
                         meta.lock().unwrap().insert(i, Err(C_DEP_NOT_RUN.to_string()));
                         continue;
                     }
                     Err((e, false)) => {
                         let out_dir = unbuilt(bs);
-                        done(i, Err(e), out_dir);
+                        done(i, Err(e), out_dir, false);
                         continue;
                     }
                 }
@@ -1039,7 +1113,7 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
                 let receipt = receipts[i];
                 s.spawn(move || {
                     let r = run_one(sess, bs, raw, &cenv, &dir, &pname, &ver, &name, target_dir, root, receipt);
-                    done(i, r.0, r.1);
+                    done(i, r.0, r.1, r.2);
                 });
             }
         });
@@ -1051,8 +1125,8 @@ fn relax_scripts(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &
 /// metadata the scripts of its package's `links` dependencies printed. Err: such a script handed
 /// nothing on (not run, or failed) and this script reads `DEP_` variables, so it is not run: it
 /// would fail on the missing value, or answer other than under cargo; with true when it is missing
-/// for a check's C skip (C_NOT_RUN, C_DEP_NOT_RUN). A dependency built by cargo (`--allow-c`) is
-/// not in the table: a script reading its metadata is cargo's too.
+/// for a check's C skip (C_NOT_RUN, C_CALL_NOT_RUN, C_DEP_NOT_RUN). A dependency built by cargo
+/// (`--allow-c`) is not in the table: a script reading its metadata is cargo's too.
 fn links_env(g: &Graph, bs: &BuildScript, meta: &LinksMeta) -> Result<Vec<(String, String)>, (String, bool)> {
     let mut env = Vec::new();
     for &d in &bs.links_deps {
@@ -1066,7 +1140,7 @@ fn links_env(g: &Graph, bs: &BuildScript, meta: &LinksMeta) -> Result<Vec<(Strin
             }
             Some(Err(why)) if crate::native::reads_dep_metadata(bs) => {
                 return Err((format!("{}: the build script of `{}` was not run: it reads the `DEP_` metadata of `{}` (links = \"{}\"), and {}",
-                    bs.src_path, g.pkg[bs.krate].1, dname, links, why), why == C_NOT_RUN || why == C_DEP_NOT_RUN));
+                    bs.src_path, g.pkg[bs.krate].1, dname, links, why), [C_NOT_RUN, C_CALL_NOT_RUN, C_DEP_NOT_RUN].contains(&why.as_str())));
             }
             _ => {}
         }
@@ -1103,24 +1177,30 @@ fn script_metadata(stdout: &str) -> Vec<(String, String)> {
 }
 
 /// The scripts' `cargo:` lines into the graph: cfgs, link libraries, env (OUT_DIR included).
-fn apply_script_results(g: &mut Graph, results: Vec<(Vec<usize>, Result<String, String>, String)>, check_only: bool) -> Result<(), String> {
-    for (krates, r, out_dir) in results {
+fn apply_script_results(g: &mut Graph, results: Vec<ScriptRun>, check_only: bool) -> Result<(), String> {
+    for (krates, r, out_dir, confined) in results {
         // a script that failed fails a check too, as under `cargo check` (the scripts a check did
         // not run for C answered empty: relax_scripts)
         let stdout = r?;
-        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone(), check_only)?; }
+        for k in krates { apply_script_output(g, k, &stdout, out_dir.clone(), check_only, confined)?; }
     }
     Ok(())
 }
 
-/// One crate's share of a script's output (`stdout`, its OUT_DIR).
-fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, check_only: bool) -> Result<(), String> {
-    script_output_into(&mut g.cfgs, &mut g.env, &mut g.link_libs, &g.pkg, k, stdout, out_dir, check_only)
+/// One crate's share of a script's output (`stdout`, its OUT_DIR; `confined`: the script ran
+/// confined, its output checked: `confined_output_refusals`).
+fn apply_script_output(g: &mut Graph, k: usize, stdout: &str, out_dir: String, check_only: bool, confined: bool) -> Result<(), String> {
+    script_output_into(&mut g.cfgs, &mut g.env, &mut g.link_libs, &g.pkg, k, stdout, out_dir, check_only, confined)
 }
 
+/// A script's share of the graph: (its crates, its stdout or why it failed, its OUT_DIR, whether
+/// it ran confined).
+type ScriptRun = (Vec<usize>, Result<String, String>, String, bool);
+
 /// apply_script_output into these tables (the graph's, or copies of them).
-fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>], link_libs: &mut Vec<(String, bool)>, pkg: &[(String, String, String)],
-    k: usize, stdout: &str, out_dir: String, check_only: bool) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>], link_libs: &mut Vec<(String, bool, bool)>, pkg: &[(String, String, String)],
+    k: usize, stdout: &str, out_dir: String, check_only: bool, confined: bool) -> Result<(), String> {
     env[k].push(("OUT_DIR".to_string(), out_dir));
     for line in stdout.lines() {
         let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
@@ -1144,9 +1224,9 @@ fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>
             if kind == "static" {
                 return Err(format!("`{}`'s build script links the static library `{}` (native code): it {}", pkg[k].1, name, relax_session::options::C_GATE));
             }
-            let fw = kind == "framework";
-            if !link_libs.contains(&(name.clone(), fw)) {
-                link_libs.push((name, fw));
+            let l = (name, kind == "framework", confined);
+            if !link_libs.contains(&l) {
+                link_libs.push(l);
             }
         } else if let Some(e) = rest.strip_prefix("rustc-env=") {
             if let Some(i) = e.find('=') {
@@ -1157,10 +1237,21 @@ fn script_output_into(cfgs: &mut [Vec<String>], env: &mut [Vec<(String, String)>
     Ok(())
 }
 
+/// Whether a build script's run is confined: under Policy::Sandboxed, when the units it runs with
+/// (its own and everything its build-dependencies reach, `script_units`) hold a registry or git
+/// package. One function for both sides: the script's parent asks it of the units it writes, the
+/// script's run of the units it read (relax-compiler run.rs), and a run where the two differ is
+/// refused.
+pub fn script_confined<'a>(units: impl IntoIterator<Item = &'a RawUnit>) -> bool {
+    crate::compile_time::policy() == crate::compile_time::Policy::Sandboxed && units.into_iter().any(|u| u.registry)
+}
+
 /// The units a build script runs with: its build-dependencies and everything they reach (their
 /// own build scripts included), plus the script itself as the bin root, in cargo's unit-graph
-/// JSON (unitgraph::load reads it back in the child).
-fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrite>, target_dir: &str) -> (String, u64) {
+/// JSON (unitgraph::load reads it back in the child); and, when its run is confined
+/// (`script_confined`), its folders (what it reads, what it never reaches), which the graph
+/// names too (`relax_script`, `script_folders`).
+fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrite>, target_dir: &str) -> (String, u64, Option<(Vec<String>, Vec<String>)>) {
     let _why = crate::why::enabled().then(|| crate::why::enter(crate::why::Cause::new(&bs.src_path, 1, "build-script-dependency-hash", "script_units")));
     let build_deps: Vec<_> = bs.build_deps.iter().filter(|(_, name)|
         !rewrite.is_some_and(|r| r.calls.iter().any(|(dep, _)| dep == name))).cloned().collect();
@@ -1205,12 +1296,25 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
     // the worktree: payloads still hold its absolute paths (Target B removes this per payload)
     h = fnv(&crate::dirs::anchors_key().to_le_bytes(), h);
     let mut units: Vec<String> = Vec::new();
+    // a registry or git package's unit keeps a non-path id (its folder still in it), so the
+    // script's run sees it as third-party, as this run does (RawUnit::registry): its proc macros
+    // run confined under Policy::Sandboxed (relax-compiler pmhost.rs)
+    let source = |u: Option<&RawUnit>| match u {
+        Some(u) if u.git => "git",
+        Some(u) if u.registry => "registry",
+        _ => "path",
+    };
     let deps_json = |deps: &[(usize, String)]| -> String {
         deps.iter().filter_map(|(d, n)| idx(*d).map(|k| format!("{{\"index\":{},\"extern_crate_name\":{}}}", k, q(n)))).collect::<Vec<_>>().join(",")
     };
     for &i in &seen {
         let u = &raw[i];
         h = fnv(crate::dirs::anchored(&u.src_path).as_bytes(), h);
+        // (the run of a script whose units were all written as path packages ran their macros
+        // as host code: its output does not stand for one that sees them as third-party)
+        if u.registry {
+            h = fnv(b"registry", h);
+        }
         if let Ok(src) = crate::vfs::read(&u.src_path) {
             h = fnv(&src, h);
         }
@@ -1231,7 +1335,7 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
         let feats: Vec<String> = u.features.iter().map(|f| q(f)).collect();
         units.push(format!(
             "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"{}\"],\"name\":{},\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"{}}},\"mode\":\"{}\",\"features\":[{}],\"dependencies\":[{}]}}",
-            q(&format!("path+file://{}#{}@{}", u.pkg.0, u.pkg.1, u.pkg.2)),
+            q(&format!("{}+file://{}#{}@{}", source(Some(u)), u.pkg.0, u.pkg.1, u.pkg.2)),
             kind,
             q(&name),
             q(&u.src_path),
@@ -1254,10 +1358,15 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
     let pkg_dir = manifest_dir_of(&bs.src_path);
     let sfeats: Vec<String> = bs.features.iter().map(|f| q(f)).collect();
     // the script's own checks: its compile unit's
-    let script_checks = checks_json(raw.iter().find(|u| u.src_path == bs.src_path && !u.run_script).and_then(|u| u.host_checks));
+    let script_compile = raw.iter().find(|u| u.src_path == bs.src_path && !u.run_script);
+    let script_checks = checks_json(script_compile.and_then(|u| u.host_checks));
+    let script_registry = script_compile.is_some_and(|u| u.registry);
+    if script_registry {
+        h = fnv(b"registry", h);
+    }
     let script_unit = |src_path: &str| format!(
         "{{\"pkg_id\":{},\"target\":{{\"kind\":[\"bin\"],\"name\":\"build-script-build\",\"src_path\":{},\"edition\":\"{}\"}},\"profile\":{{\"opt_level\":\"3\"{}}},\"mode\":\"build\",\"features\":[{}],\"dependencies\":[{}]}}",
-        q(&format!("path+file://{}#build-script-build@0.0.0", pkg_dir)),
+        q(&format!("{}+file://{}#build-script-build@0.0.0", source(script_compile), pkg_dir)),
         q(src_path),
         bs.edition,
         script_checks,
@@ -1266,7 +1375,17 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
     );
     units.push(script_unit(&bs.src_path));
     let root = units.len() - 1;
-    let encode = |units: &[String]| format!("{{\"version\":1,\"units\":[{}],\"roots\":[{}]}}", units.join(","), root);
+    // the decision over the units written here, which are the units its run reads
+    let confined = script_confined(seen.iter().map(|&i| &raw[i]).chain(script_compile));
+    let folders = confined.then(|| script_folders(&pkg_dir, script_compile, target_dir));
+    let record = match &folders {
+        Some((read, excluded)) => {
+            let list = |l: &[String]| l.iter().map(|p| q(p)).collect::<Vec<_>>().join(",");
+            format!(",\"relax_script\":{{\"read\":[{}],\"excluded\":[{}],\"cwd\":{}}}", list(read), list(excluded), q(&pkg_dir))
+        }
+        None => String::new(),
+    };
+    let encode = |units: &[String]| format!("{{\"version\":1,\"units\":[{}],\"roots\":[{}]{}}}", units.join(","), root, record);
     let mut json = encode(&units);
     // Hash the logical graph and the source the child actually compiles before
     // substituting the hash-derived path. Edges/aliases affect the rerun key too.
@@ -1275,7 +1394,192 @@ fn script_units(bs: &BuildScript, raw: &[RawUnit], rewrite: Option<&noop::Rewrit
         units[root] = script_unit(&format!("{}/build-scripts/{:016x}/build.rs", target_dir, h));
         json = encode(&units);
     }
-    (json, h)
+    (json, h, folders)
+}
+
+/// A confined script's folders (Q2's roots): (what it reads, what it never reaches). It reads its
+/// package's source: a registry package's folder, a git package's repository (its store mount; a
+/// checkout on disk: the package's folder), a path package's workspace. It never reaches the
+/// run's folder (`run_dir`), the workspace's target folder, Relax's dir or the code a user's
+/// checkouts share (`<relax home>/code`), however it spells them. OUT_DIR, which it writes, is its environment's (a shared workspace's moves after this).
+/// A store's or a folder mount's path stays as this run names it: the script's run maps it
+/// (relax-compiler sandbox/script.rs `roots_of`), so the checkouts of a shared workspace keep one
+/// units file.
+fn script_folders(pkg_dir: &str, script: Option<&RawUnit>, run_dir: &str) -> (Vec<String>, Vec<String>) {
+    let read = match script {
+        Some(u) if u.git => crate::vfs::store_root(pkg_dir).unwrap_or_else(|| pkg_dir.to_string()),
+        Some(u) if u.registry => pkg_dir.to_string(),
+        _ => crate::resolve::find_root(pkg_dir).unwrap_or_else(|_| pkg_dir.to_string()),
+    };
+    let mut excluded = vec![run_dir.to_string(), crate::dirs::relax_dir().display().to_string(), crate::gitstore::relax_home().join("code").display().to_string()];
+    if let Ok(t) = crate::resolve::target_dir(pkg_dir) {
+        excluded.push(t);
+    }
+    excluded.sort();
+    excluded.dedup();
+    (vec![read], excluded)
+}
+
+/// The forms of `rustc-link-arg`: a confined script passes none.
+const LINK_ARGS: [&str; 8] = ["rustc-link-arg", "rustc-link-arg-bins", "rustc-link-arg-bin", "rustc-link-arg-tests", "rustc-link-arg-benches",
+    "rustc-link-arg-examples", "rustc-link-arg-cdylib", "rustc-cdylib-link-arg"];
+
+/// What a confined script's output asks of this run that reaches past the script's folders: each
+/// such line once, with why. Its lines act here with the person's rights (the run loads the
+/// libraries they name, sets their variables in this process, walks their paths), so each is held
+/// to what the script itself reaches (`read`: its package's source, `excluded`: the folders inside
+/// it never reaches, `out_dir`, which it writes; `pkg_dir`, its package's folder, is where a
+/// relative path starts):
+/// - `rustc-link-search` (and `rustc-flags`' `-L`): a folder inside its folders;
+/// - `rustc-link-lib` (and `-l`): a plain name of a kind the run loads (none, dylib, framework,
+///   static); the run never finds it in the working folder (`Graph::link_libs`);
+/// - no `rustc-link-arg`, in any of its forms;
+/// - `rustc-env`: no name that steers this process or its tools (relax-base resolve.rs
+///   `script_env_refused`);
+/// - `rerun-if-changed`: a path inside its folders (the rerun key's walk follows no links for it);
+/// - `cargo::` lines cargo knows; the old syntax's other keys are metadata, as cargo reads them.
+/// Its parent keeps none of an output that has any (run_one).
+fn confined_output_refusals(stdout: &str, read: &[String], excluded: &[String], out_dir: &str, pkg_dir: &str) -> Vec<String> {
+    let folders = ScriptReach::new(read, excluded, out_dir);
+    let mut refused: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim_end_matches('\r');
+        let (new, rest) = match line.strip_prefix("cargo::") {
+            Some(r) => (true, r),
+            None => match line.strip_prefix("cargo:") {
+                Some(r) => (false, r),
+                None => continue,
+            },
+        };
+        let (key, value) = rest.split_once('=').unwrap_or((rest, ""));
+        let why = match key {
+            "rustc-link-search" => folders.link_search(value, pkg_dir),
+            "rustc-link-lib" => link_lib_refusal(value),
+            "rustc-flags" => folders.rustc_flags(value, pkg_dir),
+            k if LINK_ARGS.contains(&k) => Some("a confined build script passes no link arguments".to_string()),
+            "rustc-env" => match value.split_once('=') {
+                Some((name, _)) if !name.is_empty() => crate::resolve::script_env_refused(name).then(|| format!("`{name}`: {}", crate::resolve::SCRIPT_ENV_PRINCIPLE)),
+                _ => Some("it names no variable".to_string()),
+            },
+            "rerun-if-changed" => folders.path(value, pkg_dir),
+            "rustc-cfg" | "rustc-check-cfg" | "rerun-if-env-changed" | "warning" | "error" | "metadata" => None,
+            _ if new => Some("it is no instruction cargo knows".to_string()),
+            _ => None,
+        };
+        if let Some(why) = why {
+            let said = format!("`{line}`: {why}");
+            if !refused.contains(&said) {
+                refused.push(said);
+            }
+        }
+    }
+    refused
+}
+
+/// `rustc-link-lib=[KIND[:MODIFIERS]=]NAME[:RENAME]` of a confined script: Some(why) it is refused.
+fn link_lib_refusal(value: &str) -> Option<String> {
+    let (kind, name) = value.split_once('=').unwrap_or(("", value));
+    let base = kind.split(':').next().unwrap_or(kind);
+    if !["", "dylib", "framework", "static"].contains(&base) {
+        return Some(format!("the link kind `{base}` is none a confined build script names (none, dylib, framework, static)"));
+    }
+    let (name, rename) = match name.split_once(':') {
+        Some((n, r)) => (n, Some(r)),
+        None => (name, None),
+    };
+    let plain = |n: &str| !n.is_empty() && !n.starts_with('.') && !n.contains("..") && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-+.".contains(&b));
+    std::iter::once(name).chain(rename).find(|n| !plain(n)).map(|n| format!("`{n}` is no plain library name (letters, digits, `_ - + .`, no path)"))
+}
+
+/// A confined script's folders, each spelled every way this run may meet it (a folder mount's
+/// virtual path and its disk folder), and, for a path on disk, as its links resolve
+/// (`confined_output_refusals`).
+struct ScriptReach {
+    read: Vec<String>,
+    excluded: Vec<String>,
+    out_dir: Vec<String>,
+}
+
+impl ScriptReach {
+    fn new(read: &[String], excluded: &[String], out_dir: &str) -> ScriptReach {
+        let all = |l: &[String]| -> Vec<String> {
+            let mut v: Vec<String> = Vec::new();
+            for f in l {
+                let disk = crate::vfs::on_disk(f).into_owned();
+                let real = std::fs::canonicalize(&disk).ok().map(|c| c.to_string_lossy().into_owned());
+                for s in [f.clone(), disk.clone(), crate::vfs::virtual_of(f).into_owned()].into_iter().chain(real) {
+                    let s = crate::vfs::normalize_path(&s);
+                    if !v.contains(&s) {
+                        v.push(s);
+                    }
+                }
+            }
+            v
+        };
+        ScriptReach { read: all(read), excluded: all(excluded), out_dir: all(&[out_dir.to_string()]) }
+    }
+
+    /// Some(why) when `path` (from `pkg_dir` when relative) lies outside the script's folders, or
+    /// inside one it never reaches; a path on disk is judged again as its links resolve.
+    fn path(&self, path: &str, pkg_dir: &str) -> Option<String> {
+        let joined = if std::path::Path::new(path).is_absolute() { path.to_string() } else { format!("{pkg_dir}/{path}") };
+        let p = crate::vfs::normalize_path(&joined);
+        let mut spellings = vec![p.clone()];
+        for s in [crate::vfs::on_disk(&p).into_owned(), crate::vfs::virtual_of(&p).into_owned()] {
+            let s = crate::vfs::normalize_path(&s);
+            if !spellings.contains(&s) {
+                spellings.push(s);
+            }
+        }
+        if let Some(why) = self.judge(&spellings) {
+            return Some(why.to_string());
+        }
+        if crate::vfs::in_store(&p) {
+            return None;
+        }
+        let real = std::fs::canonicalize(&*crate::vfs::on_disk(&p)).ok()?;
+        self.judge(&[crate::vfs::normalize_path(&real.to_string_lossy())]).map(|why| format!("{why}, where its links lead"))
+    }
+
+    fn judge(&self, spellings: &[String]) -> Option<&'static str> {
+        let within = |folders: &[String]| spellings.iter().any(|x| folders.iter().any(|f| crate::vfs::relative_path(x, f).is_some()));
+        if within(&self.out_dir) {
+            None
+        } else if within(&self.excluded) {
+            Some("it lies in a folder a confined build script never reaches (the run's, the target folder or Relax's)")
+        } else if within(&self.read) {
+            None
+        } else {
+            Some("it lies outside the script's folders (its package's source and OUT_DIR)")
+        }
+    }
+
+    /// `rustc-link-search=[KIND=]PATH` (rustc's `-L`: a known kind before `=`, else the path).
+    fn link_search(&self, value: &str, pkg_dir: &str) -> Option<String> {
+        let path = match value.split_once('=') {
+            Some((kind, p)) if ["dependency", "crate", "native", "framework", "all"].contains(&kind) => p,
+            _ => value,
+        };
+        self.path(path, pkg_dir)
+    }
+
+    /// `rustc-flags`: `-l` and `-L` alone, as cargo takes them (a value joined or the next word).
+    fn rustc_flags(&self, value: &str, pkg_dir: &str) -> Option<String> {
+        let mut words = value.split_whitespace();
+        while let Some(w) = words.next() {
+            let (flag, joined) = if w.starts_with("-l") || w.starts_with("-L") { w.split_at(2) } else { return Some(format!("`{w}`: only `-l` and `-L` are flags a build script gives")) };
+            let v = if joined.is_empty() { words.next().unwrap_or("") } else { joined };
+            let why = match (flag, v) {
+                (_, "") => Some(format!("`{flag}` names nothing")),
+                ("-l", v) => link_lib_refusal(v),
+                (_, v) => self.link_search(v, pkg_dir),
+            };
+            if why.is_some() {
+                return why;
+            }
+        }
+        None
+    }
 }
 
 /// A unit's checks in a build script's unit graph (its `profile`), which the script's run builds
@@ -1285,6 +1589,23 @@ fn checks_json(c: Option<crate::resolve::ProfileChecks>) -> String {
 }
 
 static SELF_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// `makepad test`'s cargo profile (`--profile <name>`, test_pkg.rs): the debug assertions and
+/// overflow checks the program's crates build with, as cargo test builds them (relax issue 141),
+/// and the package binaries its integration tests start (CARGO_BIN_EXE_<name>), which cargo builds
+/// with the test (relax issue 207). None: a run, built as cargo's release profile leaves the code
+/// (no checks).
+static TEST_PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Sets [`test_profile`] (the run's `--profile <name>`), once.
+pub fn set_test_profile(name: String) {
+    let _ = TEST_PROFILE.set(name);
+}
+
+/// The run's cargo profile: `makepad test`'s, None for a plain run.
+pub fn test_profile() -> Option<&'static str> {
+    TEST_PROFILE.get().map(String::as_str)
+}
 
 /// The program a build script runs as: Relax running itself again. It is the loader
 /// (dirs::loader_exe) unless the host names another one ([`set_self_exe`]): in an Android app this
@@ -1301,14 +1622,14 @@ fn self_exe() -> std::io::Result<std::path::PathBuf> {
     }
 }
 
-/// (stdout of the script, OUT_DIR). The script runs as a Relax program: this executable started
+/// (stdout of the script, OUT_DIR, whether it ran confined). The script runs as a Relax program: this executable started
 /// again on the script's units (script_units) -- no rustc, no script binary; Relax re-running
 /// itself is the only process it starts. A script of a git run reads its package through the
 /// VFS (RELAX_VFS / RELAX_WORKSPACE for the child), and writes only OUT_DIR (on disk).
 #[allow(clippy::too_many_arguments)]
-fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUnit], cenv: &[(String, String)], dir: &str, pname: &str, ver: &str, name: &str, target_dir: &str, root: &BuildRoot, receipt: Option<&str>) -> (Result<String, String>, String) {
+fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUnit], cenv: &[(String, String)], dir: &str, pname: &str, ver: &str, name: &str, target_dir: &str, root: &BuildRoot, receipt: Option<&str>) -> (Result<String, String>, String, bool) {
     if let Err(e) = crate::vfs::read(&bs.src_path) {
-        return (Err(format!("{}: {}", bs.src_path, e)), String::new());
+        return (Err(format!("{}: {}", bs.src_path, e)), String::new(), false);
     }
     let rewrite = noop::rewrite(bs, raw);
     if sess.runtime.profile {
@@ -1318,15 +1639,22 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
             }
         }
     }
-    let (units, h) = script_units(bs, raw, rewrite.as_ref(), target_dir);
+    let (units, h, folders) = script_units(bs, raw, rewrite.as_ref(), target_dir);
+    let confined = folders.is_some();
+    // a confined script's output acts here with the person's rights: held to its folders first
+    let refusals = |output: &str, out_dir: &str| match &folders {
+        Some((read, excluded)) => confined_output_refusals(output, read, excluded, out_dir, dir),
+        None => Vec::new(),
+    };
     let mut fh = h;
     for f in &bs.features {
         fh = fnv(f.as_bytes(), fh);
     }
     let unit_dir = format!("{}/build-scripts/{:016x}", target_dir, h);
     let units_path = format!("{}/units.json", unit_dir);
-    // a package of a shared workspace (vfs.rs SHARE): its script's output is kept per content of
-    // its inputs (`shared_build_dir`), and `base_dir` holds the claim and what the script declared
+    // a script's output is kept per key of its inputs (`script_build_dir`), and `base_dir` holds
+    // the claim and what the script declared; a package of a shared workspace (vfs.rs SHARE) keys
+    // its checkout's files by what they hold
     let shared: Option<SharedContent> = crate::vfs::in_folder(dir).then(Default::default);
     let base_dir = root.take(&format!("{}-{:016x}", name, fh));
     let mut out_dir = format!("{}/out", base_dir);
@@ -1341,15 +1669,15 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
                 let _ = std::fs::create_dir_all(&unit_dir);
                 let tmp = format!("{}.tmp{}-{}", path, std::process::id(), TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
                 if std::fs::write(&tmp, content).and_then(|_| std::fs::rename(&tmp, path)).is_err() {
-                    return (Err(format!("{}: cannot write", path)), out_dir);
+                    return (Err(format!("{}: cannot write", path)), out_dir, confined);
                 }
             }
         }
     }
-    let _ = std::fs::create_dir_all(if shared.is_some() { &base_dir } else { &out_dir });
+    let _ = std::fs::create_dir_all(&base_dir);
     let exe = match self_exe() {
         Ok(e) => e,
-        Err(e) => return (Err(format!("this executable: {e}")), out_dir),
+        Err(e) => return (Err(format!("this executable: {e}")), out_dir, confined),
     };
     // nesting: a build-dependency's own script runs inside a script's run, and its
     // build-dependencies' scripts inside that, as deep as the graph goes (cargo refuses a cyclic
@@ -1360,17 +1688,19 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let chain = std::env::var("RELAX_SCRIPT_CHAIN").unwrap_or_default();
     let me = format!("{pname}@{ver}");
     if chain.split('>').any(|p| p == me) {
-        return (Err(format!("{}: the build script of `{}` runs again inside its own run (build-dependency cycle: {} -> {}); refused", bs.src_path, me, chain.replace('>', " -> "), me)), out_dir);
+        return (Err(format!("{}: the build script of `{}` runs again inside its own run (build-dependency cycle: {} -> {}); refused", bs.src_path, me, chain.replace('>', " -> "), me)), out_dir, confined);
     }
     let chain = if chain.is_empty() { me } else { format!("{chain}>{me}") };
     let mut cmd = std::process::Command::new(&exe);
     // a run of its own: nothing this run says of itself crosses; its folder's mount is set below,
-    // and this invocation's `--allow-c` is the script's too
+    // and of this invocation's grants `--allow-c` is the script's too (the others are about this
+    // run's modules)
     crate::progenv::scrub_run_facts(&mut cmd);
+    cmd.arg("run");
     if sess.options.allow_c {
-        cmd.env("RELAX_ALLOW_C", "1");
+        cmd.arg("--allow-c");
     }
-    cmd.args(["run", "--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
+    cmd.args(["--quiet", "--silent", "--run-dir", target_dir, "--units", &units_path, "build-script-build"]);
     cmd.env("OUT_DIR", &out_dir)
         // Build scripts may test this to skip work only rustc needs.
         .env("RELAX_BUILD_SCRIPT", "1")
@@ -1441,24 +1771,35 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
             cmd.env(k, v);
         }
     }
+    // a confined script (`script_confined`: Policy::Sandboxed, a registry or git package among
+    // its units) is given what is set above and nothing else of this environment: cargo's
+    // variables for a script and cargo's `[env]`, no PATH, HOME, tokens or wrappers. Its run's
+    // program reads those names and Relax's own (progenv SCRIPT_ENV); a `rerun-if-env-changed`
+    // declaration grants nothing. The handed names are part of the rerun key below, so an output
+    // of the script run as host code does not stand for a confined run and the other way round.
+    // Its run reaches the folders its units file names and nothing else (relax-compiler
+    // sandbox/script.rs).
+    let given: Option<Vec<(String, String)>> = confined.then(|| {
+        let set: Vec<(String, String)> = cmd.get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned()))).collect();
+        let names: crate::progenv::Own = cmd.get_envs().filter(|(_, v)| v.is_some()).map(|(k, _)| (k.as_encoded_bytes().to_vec(), None)).collect();
+        cmd.env(std::str::from_utf8(crate::progenv::SCRIPT_ENV).unwrap(), unsafe { std::ffi::OsStr::from_encoded_bytes_unchecked(&crate::progenv::encode(&names)) });
+        set
+    });
     // cargo's rerun rules: the previous output stands while the script's units, the environment
     // it was given and its `rerun-if-changed` / `rerun-if-env-changed` inputs are unchanged (a
     // script that names none: no file of its package changed)
-    let mut env_key = format!("{:016x}", h);
-    for (k, v) in cmd.get_envs() {
-        // no receipt is no part of the key (it held none before there were receipts); a shared
-        // workspace's OUT_DIR is named by this key (`shared_build_dir`)
-        if SCRIPT_RUN_SHAPE_VARS.iter().any(|s| k == *s) || (k == NATIVE_RECEIPT && v.is_none()) || (shared.is_some() && k == "OUT_DIR") {
-            continue;
-        }
-        env_key.push_str(&format!("\n{}={}", k.to_string_lossy(), v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()));
-    }
+    let env_key = script_env_key(h, root.tool, cmd.get_envs(), &exe);
     // Ok: the output in `build_dir`, which stands; Err: why the script runs again
     let previous = |build_dir: &str| match (std::fs::read_to_string(format!("{}/output", build_dir)), std::fs::read_to_string(format!("{}/relax-rerun", build_dir))) {
         (Ok(old), Ok(key)) => {
-            let own = std::path::Path::new(&format!("{}/{}", build_dir, CHECKOUT_MARK)).is_file();
-            let keyed = if own { format!("{CHECKOUT_LINE}\n{old}") } else { old.clone() };
-            let now = rerun_key(&keyed, dir, &env_key, shared.as_ref()).unwrap_or_default();
+            // (only a checked output is kept; checked again before it stands, and before the key's
+            // walk takes its paths)
+            if !refusals(&old, &format!("{}/out", build_dir)).is_empty() {
+                return Err("its kept output reaches past its folders".to_string());
+            }
+            let marked = |mark: &str| std::path::Path::new(&format!("{}/{}", build_dir, mark)).is_file();
+            let keyed = keyed_output(&old, marked(CHECKOUT_MARK), marked(PROGRAM_MARK));
+            let now = rerun_key(&keyed, dir, &env_key, shared.as_ref(), given.as_deref()).unwrap_or_default();
             if now == key { Ok(old) } else { Err(rerun_reason(&key, &now, &std::fs::read_to_string(format!("{}/relax-rerun-env", build_dir)).unwrap_or_default(), &env_key)) }
         }
         _ => Err("no previous output".to_string()),
@@ -1466,22 +1807,19 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     let declared_path = format!("{}/relax-declared", base_dir);
     // where this run's output is (its build dir, named in the pass's root before it is read), and
     // whether one stands there
-    let place = || match &shared {
-        None => (base_dir.clone(), previous(&base_dir)),
-        Some(content) => {
-            let (at, standing) = shared_build_dir(&base_dir, &std::fs::read_to_string(&declared_path).unwrap_or_default(),
-                &|declared| rerun_key(declared, dir, &env_key, Some(content)).unwrap_or_default(), &previous);
-            let at = root.take(at.rsplit('/').next().unwrap_or_default());
-            // (a prune may have taken it before the root named it)
-            let standing = standing.and_then(|old| if std::path::Path::new(&format!("{}/output", at)).is_file() { Ok(old) } else { Err("no previous output".to_string()) });
-            (at, standing)
-        }
+    let place = || {
+        let (at, standing) = script_build_dir(&base_dir, &std::fs::read_to_string(&declared_path).unwrap_or_default(),
+            &|declared| rerun_key(declared, dir, &env_key, shared.as_ref(), given.as_deref()).unwrap_or_default(), &previous);
+        let at = root.take(at.rsplit('/').next().unwrap_or_default());
+        // (a prune may have taken it before the root named it)
+        let standing = standing.and_then(|old| if std::path::Path::new(&format!("{}/output", at)).is_file() { Ok(old) } else { Err("no previous output".to_string()) });
+        (at, standing)
     };
     let (mut build_dir, standing) = place();
     let mut why = match standing {
         Ok(old) => {
             if sess.runtime.profile { eprintln!("relax build-script: {} cached", pname); }
-            return (Ok(old), format!("{}/out", build_dir));
+            return (Ok(old), format!("{}/out", build_dir), confined);
         }
         Err(why) => why,
     };
@@ -1492,9 +1830,9 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     // The script slot (this process's) comes first: a run holding the claim and waiting for a slot
     // could wait on a slot whose script's nested run waits for this claim (a package that is
     // both a dependency here and a build-dependency of another script).
-    // The run that holds it names itself in it (its pid and its devhub lease, `claim_holder`):
+    // The run that holds it names itself in it (its pid and its owner, `claim_holder`):
     // a waiter says whom it waits on, and a hang names its holder. A relax-runner test sat 26 min
-    // on its build-script claim, held by a hung run in another lease (11-13).
+    // on its build-script claim, held by a hung run of another owner (11-13).
     let _slot = script_slot();
     let claim_path = format!("{}/relax-claim", base_dir);
     let claim = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&claim_path).ok();
@@ -1511,20 +1849,21 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
         match standing {
             Ok(old) => {
                 if sess.runtime.profile { eprintln!("relax build-script: {} made by another run", pname); }
-                return (Ok(old), format!("{}/out", build_dir));
+                return (Ok(old), format!("{}/out", build_dir), confined);
             }
             Err(now) => why = now,
         }
     }
     if let Some(claim) = claim.as_ref() { name_claim(claim); }
-    if shared.is_some() {
-        out_dir = format!("{}/out", build_dir);
-        let _ = std::fs::create_dir_all(&out_dir);
-        cmd.env("OUT_DIR", &out_dir);
-    }
+    out_dir = format!("{}/out", build_dir);
+    let _ = std::fs::create_dir_all(&out_dir);
+    cmd.env("OUT_DIR", &out_dir);
     let output_path = format!("{}/output", build_dir);
     let key_path = format!("{}/relax-rerun", build_dir);
     let env_path = format!("{}/relax-rerun-env", build_dir);
+    // an output stands with its key, written after it: a folder this run makes again holds none
+    // until the run is done (a start whose inputs read the same never takes it half made)
+    let _ = std::fs::remove_file(&key_path);
     // why this script runs again, kept beside its output (relax-rerun-why: the last 20) and shown with RELAX_PROFILE
     if sess.runtime.profile { eprintln!("relax build-script: {} runs: {}", pname, why); }
     note_rerun(&build_dir, &why);
@@ -1536,31 +1875,43 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
     match output {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout).into_owned();
-            let stdout = if shared.is_some() { shared_output(&stdout) } else { stdout };
-            // an output that names its checkout stands for that checkout alone (`names_checkout`)
-            let own = shared.is_some() && names_checkout(&stdout, &out_dir);
-            let mark = format!("{}/{}", build_dir, CHECKOUT_MARK);
-            if own {
-                let _ = std::fs::write(&mark, crate::vfs::folder_disks().join("\n"));
-            } else {
-                let _ = std::fs::remove_file(&mark);
+            let refused = refusals(&stdout, &out_dir);
+            if !refused.is_empty() {
+                // nothing of it is kept, so it never stands
+                let _ = std::fs::remove_file(&key_path);
+                let _ = std::fs::remove_file(&output_path);
+                return (Err(format!("{}: the build script of `{}` ran confined and printed what a confined build script may not:\n  {}", bs.src_path, pname, refused.join("\n  "))), out_dir, confined);
             }
-            let keyed = if own { format!("{CHECKOUT_LINE}\n{stdout}") } else { stdout.clone() };
-            if let Some(key) = rerun_key(&keyed, dir, &env_key, shared.as_ref()) {
+            let stdout = if shared.is_some() { shared_output(&stdout) } else { stdout };
+            // an output that names its checkout stands for that checkout alone (`names_checkout`),
+            // one that names the program that ran it for that program alone (`names_program`)
+            let own = shared.is_some() && names_checkout(&stdout, &out_dir);
+            let program = names_program(&stdout, &out_dir, &exe);
+            for (named, mark, what) in [(own, CHECKOUT_MARK, crate::vfs::folder_disks().join("\n")), (program, PROGRAM_MARK, exe.to_string_lossy().into_owned())] {
+                let mark = format!("{}/{}", build_dir, mark);
+                if named {
+                    let _ = std::fs::write(&mark, what);
+                } else {
+                    let _ = std::fs::remove_file(&mark);
+                }
+            }
+            let keyed = keyed_output(&stdout, own, program);
+            if let Some(given) = &given {
+                say_withheld(pname, &stdout, given);
+            }
+            if let Some(key) = rerun_key(&keyed, dir, &env_key, shared.as_ref(), given.as_deref()) {
                 let _ = std::fs::write(&output_path, &stdout);
                 let _ = std::fs::write(&key_path, key);
                 let _ = std::fs::write(&env_path, &env_key);
             } else {
                 let _ = std::fs::remove_file(&key_path);
             }
-            // what the script declared names the place of its next output (`shared_build_dir`)
-            if shared.is_some() {
-                let declared = declared_inputs(&keyed);
-                if std::fs::read_to_string(&declared_path).ok().as_deref() != Some(declared.as_str()) {
-                    let _ = std::fs::write(&declared_path, &declared);
-                }
+            // what the script declared names the place of its next output (`script_build_dir`)
+            let declared = declared_inputs(&keyed);
+            if std::fs::read_to_string(&declared_path).ok().as_deref() != Some(declared.as_str()) {
+                let _ = std::fs::write(&declared_path, &declared);
             }
-            (Ok(stdout), out_dir)
+            (Ok(stdout), out_dir, confined)
         }
         Ok(o) => {
             let cause = script_error_cause(&String::from_utf8_lossy(&o.stderr));
@@ -1577,10 +1928,35 @@ fn run_one(sess: &std::sync::Arc<crate::Session>, bs: &BuildScript, raw: &[RawUn
                     (None, Some(sig)) => format!("killed by signal {}", sig),
                     _ => "exit -1".to_string(),
                 };
-                (Err(format!("{}: build script failed ({}): {}", bs.src_path, how, cause)), out_dir)
+                (Err(format!("{}: build script failed ({}): {}", bs.src_path, how, cause)), out_dir, confined)
             }
         }
-        Err(e) => (Err(format!("{} (build script of {}): {}", exe.display(), name, e)), out_dir),
+        Err(e) => (Err(format!("{} (build script of {}): {}", exe.display(), name, e)), out_dir, confined),
+    }
+}
+
+/// The variables confined scripts declared (`rerun-if-env-changed`) that this environment sets and
+/// they were not given: each is said once per run.
+static WITHHELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// A confined script's output (`given`: what it was given, run_one): a variable it declares that
+/// is set here and was withheld is said once, with the way to give it (cargo's `[env]`, the
+/// person's own file); the script saw it unset and took its own default.
+fn say_withheld(pname: &str, output: &str, given: &[(String, String)]) {
+    for line in output.lines() {
+        let Some(name) = line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")).and_then(|r| r.strip_prefix("rerun-if-env-changed=")) else { continue };
+        if given.iter().any(|(k, _)| k == name) || std::env::var_os(name).is_none() {
+            continue;
+        }
+        let mut said = WITHHELD.lock().unwrap();
+        if said.iter().any(|n| n == name) {
+            continue;
+        }
+        said.push(name.to_string());
+        drop(said);
+        crate::progress::say(&format!(
+            "relax build-script: {pname} reads {name}, which is set here: a confined build script is given cargo's variables and the `[env]` of .cargo/config.toml, not this environment; name {name} in `[env]` to give it"
+        ));
     }
 }
 
@@ -1689,13 +2065,23 @@ fn note_rerun(build_dir: &str, why: &str) {
 /// `rerun-if-env-changed` variable its value; an output that names none: the package's newest file.
 /// A shared workspace's (`shared`, vfs.rs SHARE): a path of its checkout keyed by what it holds
 /// (`shared_content`), not its time (its output names the mount's paths, `shared_output`).
-fn rerun_key(output: &str, pkg_dir: &str, env_key: &str, shared: Option<&SharedContent>) -> Option<String> {
+/// A confined script's (`given`, run_one): a variable's value as the script was given it, unset
+/// when it was not given.
+/// A confined script's walks follow no links (its paths lie inside its folders,
+/// `confined_output_refusals`; a link there could lead anywhere).
+fn rerun_key(output: &str, pkg_dir: &str, env_key: &str, shared: Option<&SharedContent>, given: Option<&[(String, String)]>) -> Option<String> {
+    let follow = given.is_none();
     let mut key = format!("{:016x}\n", fnv(env_key.as_bytes(), 0xcbf29ce484222325));
     let mut any = false;
     for line in output.lines() {
         if line == CHECKOUT_LINE {
             // (an output kept per checkout: this run's checkout, on disk)
             key.push_str(&format!("k {}\n", crate::vfs::folder_disks().join(" ")));
+            continue;
+        }
+        if line == PROGRAM_LINE {
+            // (an output kept per program: the path of the one that runs the script)
+            key.push_str(&format!("x {}\n", self_exe().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default()));
             continue;
         }
         let rest = match line.strip_prefix("cargo::").or_else(|| line.strip_prefix("cargo:")) {
@@ -1705,22 +2091,26 @@ fn rerun_key(output: &str, pkg_dir: &str, env_key: &str, shared: Option<&SharedC
         if let Some(p) = rest.strip_prefix("rerun-if-changed=") {
             any = true;
             let path = if std::path::Path::new(p).is_absolute() { p.to_string() } else { format!("{}/{}", pkg_dir, p) };
-            match (shared_content(shared, &path, false), crate::vfs::identity(&path)) {
+            match (shared_content(shared, &path, false, follow), crate::vfs::identity(&path)) {
                 (Some(c), _) => key.push_str(&format!("f c{:032x} {}\n", c, path)),
                 (None, Some(id)) => key.push_str(&format!("f {} {}\n", id, path)),
-                (None, None) => key.push_str(&format!("f {} {}\n", newest_mtime(std::path::Path::new(&path)), path)),
+                (None, None) => key.push_str(&format!("f {} {}\n", newest_mtime(std::path::Path::new(&path), follow), path)),
             }
         } else if let Some(v) = rest.strip_prefix("rerun-if-env-changed=") {
             any = true;
-            key.push_str(&format!("e {}={:?}\n", v, std::env::var(v).ok()));
+            let value = match given {
+                Some(given) => given.iter().find(|(k, _)| k == v).map(|(_, x)| x.clone()),
+                None => std::env::var(v).ok(),
+            };
+            key.push_str(&format!("e {}={:?}\n", v, value));
         }
     }
     if !any {
         // cargo: a script that names no inputs reruns when any file of its package changes
-        match (shared_content(shared, pkg_dir, true), crate::vfs::identity(pkg_dir)) {
+        match (shared_content(shared, pkg_dir, true, follow), crate::vfs::identity(pkg_dir)) {
             (Some(c), _) => key.push_str(&format!("p c{:032x} {}\n", c, pkg_dir)),
             (None, Some(id)) => key.push_str(&format!("p {} {}\n", id, pkg_dir)),
-            (None, None) => key.push_str(&format!("p {} {}\n", newest_mtime_pkg(std::path::Path::new(pkg_dir)), pkg_dir)),
+            (None, None) => key.push_str(&format!("p {} {}\n", newest_mtime_pkg(std::path::Path::new(pkg_dir), follow), pkg_dir)),
         }
     }
     Some(key)
@@ -1733,8 +2123,9 @@ type SharedContent = std::cell::RefCell<std::collections::HashMap<(String, bool)
 /// What a file holds, or a folder with everything below it (each entry's name and content; 0:
 /// missing). `pkg`: a package's own folder, without its target directories and hidden entries
 /// (`newest_mtime_pkg`). Links are followed, as cargo's walk of a rerun-if-changed folder follows
-/// them; a folder that is its own ancestor (a link back up) ends there, so a loop ends.
-fn content(p: &std::path::Path, pkg: bool) -> u128 {
+/// them; a folder that is its own ancestor (a link back up) ends there, so a loop ends. Not
+/// `follow`: a link is its target's text (a confined script's, `rerun_key`).
+fn content(p: &std::path::Path, pkg: bool, follow: bool) -> u128 {
     // (unix: device and inode; elsewhere the canonical path)
     fn identity(p: &std::path::Path, m: &std::fs::Metadata) -> (u64, u64, String) {
         #[cfg(unix)]
@@ -1749,9 +2140,14 @@ fn content(p: &std::path::Path, pkg: bool) -> u128 {
             (0, 0, std::fs::canonicalize(p).map(|c| c.to_string_lossy().into_owned()).unwrap_or_default())
         }
     }
-    fn walk(p: &std::path::Path, pkg: bool, ancestors: &mut Vec<(u64, u64, String)>) -> u128 {
-        let Ok(m) = std::fs::metadata(p) else { return 0 };
+    fn walk(p: &std::path::Path, pkg: bool, follow: bool, ancestors: &mut Vec<(u64, u64, String)>) -> u128 {
+        let Ok(m) = (if follow { std::fs::metadata(p) } else { std::fs::symlink_metadata(p) }) else { return 0 };
         let mut h = crate::sip::Sip128::new();
+        if m.file_type().is_symlink() {
+            h.str("link");
+            h.str(&std::fs::read_link(p).map(|t| t.to_string_lossy().into_owned()).unwrap_or_default());
+            return h.finish128();
+        }
         if !m.is_dir() {
             let Ok(bytes) = std::fs::read(p) else { return 0 };
             h.str("file");
@@ -1774,25 +2170,25 @@ fn content(p: &std::path::Path, pkg: bool) -> u128 {
                 continue;
             }
             h.str(&name);
-            h.u128(walk(&p.join(&n), false, ancestors));
+            h.u128(walk(&p.join(&n), false, follow, ancestors));
         }
         ancestors.pop();
         h.finish128()
     }
-    walk(p, pkg, &mut Vec::new())
+    walk(p, pkg, follow, &mut Vec::new())
 }
 
 /// `path`'s part of a shared workspace's rerun key (vfs.rs SHARE): what the checkout holds there,
 /// not when it was written. The checkouts of one repository have one run dir: a file's time says
 /// which of them was written last. None: no shared workspace, or a path outside its folder mount (a
-/// registry package's, the same folder for every checkout).
-fn shared_content(shared: Option<&SharedContent>, path: &str, pkg: bool) -> Option<u128> {
+/// registry package's, the same folder for every checkout). `follow`: as `content`.
+fn shared_content(shared: Option<&SharedContent>, path: &str, pkg: bool, follow: bool) -> Option<u128> {
     let shared = shared.filter(|_| crate::vfs::in_folder(path))?;
     let at = (crate::vfs::normalize_path(path), pkg);
     if let Some(c) = shared.borrow().get(&at) {
         return Some(*c);
     }
-    let c = content(std::path::Path::new(&*crate::vfs::on_disk(&at.0)), pkg);
+    let c = content(std::path::Path::new(&*crate::vfs::on_disk(&at.0)), pkg, follow);
     shared.borrow_mut().insert(at, c);
     Some(c)
 }
@@ -1802,6 +2198,56 @@ fn shared_content(shared: Option<&SharedContent>, path: &str, pkg: bool) -> Opti
 /// an output, says so.
 const CHECKOUT_LINE: &str = "relax:per-checkout";
 const CHECKOUT_MARK: &str = "relax-checkout";
+
+/// The same for an output kept per program (`names_program`): its key holds the path of the
+/// program that runs the script. `PROGRAM_MARK`, beside such an output, says so.
+const PROGRAM_LINE: &str = "relax:per-program";
+const PROGRAM_MARK: &str = "relax-program";
+
+/// A script's output as its key reads it: the lines of the marks it carries first.
+fn keyed_output(output: &str, per_checkout: bool, per_program: bool) -> String {
+    let mut keyed = String::new();
+    for (on, line) in [(per_checkout, CHECKOUT_LINE), (per_program, PROGRAM_LINE)] {
+        if on {
+            keyed.push_str(line);
+            keyed.push('\n');
+        }
+    }
+    keyed.push_str(output);
+    keyed
+}
+
+/// Whether a script's output names the program that ran it (`exe`, its RUSTC and CARGO): its
+/// stdout or a file it left in its OUT_DIR holds that program's path (a script that records
+/// `$RUSTC`). Its key is the program's identity, not its path (`script_env_key`), so such an
+/// output stands for that path alone, else another copy of the program took the first one's path.
+fn names_program(stdout: &str, out_dir: &str, exe: &std::path::Path) -> bool {
+    let mut paths = vec![exe.to_string_lossy().into_owned()];
+    if let Ok(c) = std::fs::canonicalize(exe) {
+        paths.push(c.to_string_lossy().into_owned());
+    }
+    paths.dedup();
+    paths.iter().any(|p| stdout.contains(p.as_str())) || folder_mentions(std::path::Path::new(out_dir), &paths)
+}
+
+/// A script run's environment as its rerun key holds it: the hash of its units, what runs it
+/// (`tool`, run_build_scripts) and the variables it is given. Left out: the variables that only
+/// shape the run (SCRIPT_RUN_SHAPE_VARS), a receipt it is not given, OUT_DIR (the key names the
+/// output's folder, `script_build_dir`), and RUSTC and CARGO while they name the program that runs
+/// it (`exe`): where that program lies is no input of the script, what it is (`tool`) is. Two
+/// copies of one Relax find each other's outputs; a Relax that compiles the script or answers its
+/// RUSTC otherwise keeps its own beside them.
+fn script_env_key<'a>(h: u64, tool: u128, envs: impl Iterator<Item = (&'a std::ffi::OsStr, Option<&'a std::ffi::OsStr>)>, exe: &std::path::Path) -> String {
+    let mut key = format!("{:016x}\ntool={:032x}", h, tool);
+    for (k, v) in envs {
+        let the_program = (k == "RUSTC" || k == "CARGO") && v == Some(exe.as_os_str());
+        if SCRIPT_RUN_SHAPE_VARS.iter().any(|s| k == *s) || (k == NATIVE_RECEIPT && v.is_none()) || k == "OUT_DIR" || the_program {
+            continue;
+        }
+        key.push_str(&format!("\n{}={}", k.to_string_lossy(), v.map(|v| v.to_string_lossy().into_owned()).unwrap_or_default()));
+    }
+    key
+}
 
 /// Whether a shared workspace's script output (vfs.rs SHARE) is its checkout's own: its stdout
 /// (rerun-if-changed paths already the mount's) or a file it left in its OUT_DIR names the
@@ -1887,7 +2333,7 @@ fn shared_output(output: &str) -> String {
 /// The inputs a script's output declares (its `rerun-if` lines, sorted, once each).
 fn declared_inputs(output: &str) -> String {
     let mut lines: Vec<&str> = output.lines().filter(|l| {
-        if *l == CHECKOUT_LINE {
+        if *l == CHECKOUT_LINE || *l == PROGRAM_LINE {
             return true;
         }
         let rest = l.strip_prefix("cargo::").or_else(|| l.strip_prefix("cargo:")).unwrap_or("");
@@ -1898,17 +2344,19 @@ fn declared_inputs(output: &str) -> String {
     lines.join("\n")
 }
 
-/// Where the output of a shared workspace's script is (vfs.rs SHARE), and whether one stands
-/// there (`previous`: the output of a build dir, or why it does not stand). The checkouts of one
-/// repository have one run dir. With one output per package, a checkout whose inputs differ ran
-/// the script into the folder another checkout's run was reading, and each made it again after
-/// the other. So an output is kept per content of its inputs, in `<base_dir>-<hash>`: the hash of
-/// the rerun key (`key_of`) that `declared`, the inputs the script's last output named, gives for
-/// this checkout now (none yet: the package's files, cargo's rule for a script that names none).
+/// Where a script's output is, and whether one stands there (`previous`: the output of a build
+/// dir, or why it does not stand). The runs of one run dir share its build dirs: the checkouts of
+/// one repository (vfs.rs SHARE), and the Relax builds run on one project. With one output per
+/// package, a run whose inputs differ (another checkout's files, another Relax: `script_env_key`)
+/// ran the script into the folder another run was reading, and each made it again after the
+/// other: every switch between a release and a dev build ran its scripts again. So an output is
+/// kept per key of its inputs, in `<base_dir>-<hash>`: the hash of the rerun key (`key_of`) that
+/// `declared`, the inputs the script's last output named, gives for this run now (none yet: the
+/// package's files, cargo's rule for a script that names none).
 /// An output made before its script's inputs were known, or one whose script names other inputs
 /// from run to run, has another name: when the named one does not stand, any output of this
 /// script that does is taken. The build prune (`prune_build`) keeps what the roots name.
-fn shared_build_dir(base_dir: &str, declared: &str, key_of: &dyn Fn(&str) -> String, previous: &dyn Fn(&str) -> Result<String, String>) -> (String, Result<String, String>) {
+fn script_build_dir(base_dir: &str, declared: &str, key_of: &dyn Fn(&str) -> String, previous: &dyn Fn(&str) -> Result<String, String>) -> (String, Result<String, String>) {
     let named = format!("{}-{:016x}", base_dir, crate::sip::hash_bytes(key_of(declared).as_bytes()) as u64);
     let why = match previous(&named) {
         Ok(old) => return (named, Ok(old)),
@@ -1934,20 +2382,45 @@ fn shared_build_dir(base_dir: &str, declared: &str, key_of: &dyn Fn(&str) -> Str
 
 /// The build dirs one script pass uses (`<run dir>/build/<name>`): named in the pass's root,
 /// `build/roots/<slot>`, before each is used, and use-locked for the life of the process. Its slot:
-/// the checkout on disk and what the pass is for (the build script chain it runs in, the target, a
-/// check, the root package), never content, so a pass of the same selection replaces its root.
+/// the checkout on disk, what the pass is for (the build script chain it runs in, the target, a
+/// check, the root package) and what runs its scripts (`tool`), never content, so a pass of the
+/// same selection replaces its root, and one of another Relax keeps the outputs of this one.
 /// The root's text: the checkout's folder on disk, then the build dirs' names. `prune_build`
-/// (cache.rs prune_root) removes the build dirs no root names.
+/// (cache.rs prune_root) removes the build dirs no root names, and a root no pass refreshed for
+/// ROOT_UNUSED (a Relax no longer run here).
 pub struct BuildRoot {
     build: std::path::PathBuf,
     path: std::path::PathBuf,
     head: String,
     /// (what the root file says now, the names this pass took)
     names: Mutex<(Vec<String>, Vec<String>)>,
+    /// what runs this pass's scripts (run_build_scripts `tool`)
+    tool: u128,
 }
+
+/// A build root no pass refreshed for this long goes (`prune_build`), and with it the outputs
+/// only it named: what costs that Relax, run here again, is its scripts' runs, never a failure.
+const ROOT_UNUSED: std::time::Duration = std::time::Duration::from_secs(7 * 24 * 3600);
+/// A pass refreshes a root it leaves unchanged once it is this old (a warm pass writes nothing else).
+const ROOT_REFRESH: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
 
 /// The use locks this process holds (shared locks on `<build dir>/relax-use`), kept for its life.
 static USE_LOCKS: Mutex<Vec<(std::path::PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
+
+/// Whether open file `f` is the file at `path` now (not one removed and replaced). Windows does
+/// not remove a file another holds open, so there it always is.
+fn is_file_at(f: &std::fs::File, path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        f.metadata().ok().zip(std::fs::metadata(path).ok()).is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (f, path);
+        true
+    }
+}
 
 fn build_lock(build: &std::path::Path, wait: bool) -> Option<std::fs::File> {
     let f = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(build.join("lock")).ok()?;
@@ -1956,12 +2429,13 @@ fn build_lock(build: &std::path::Path, wait: bool) -> Option<std::fs::File> {
 }
 
 impl BuildRoot {
-    pub fn new(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &str, check_only: bool) -> BuildRoot {
+    pub fn new(sess: &std::sync::Arc<crate::Session>, g: &Graph, target_dir: &str, check_only: bool, tool: u128) -> BuildRoot {
         let checkout = crate::vfs::on_disk(&crate::dirs::workspace_dir()).into_owned();
         let chain = std::env::var("RELAX_SCRIPT_CHAIN").unwrap_or_default();
         let subject = g.pkg.get(g.root).map(|(d, n, v)| format!("{}\t{n}@{v}", crate::dirs::anchored(d))).unwrap_or_default();
-        let what = [chain.as_str(), target_triple(sess), if check_only { "check" } else { "run" }, subject.as_str()];
-        BuildRoot::at(std::path::Path::new(target_dir).join("build"), checkout, &what)
+        let tool_id = format!("{tool:032x}");
+        let what = [chain.as_str(), target_triple(sess), if check_only { "check" } else { "run" }, subject.as_str(), tool_id.as_str()];
+        BuildRoot { tool, ..BuildRoot::at(std::path::Path::new(target_dir).join("build"), checkout, &what) }
     }
 
     /// The root of a pass in `build` of the checkout `checkout` (on disk) for `what`.
@@ -1974,7 +2448,7 @@ impl BuildRoot {
         }
         let path = build.join("roots").join(format!("{:032x}", slot.finish128()));
         let now: Vec<String> = std::fs::read_to_string(&path).unwrap_or_default().lines().skip(1).map(str::to_string).collect();
-        BuildRoot { build, path, head: checkout, names: Mutex::new((now, Vec::new())) }
+        BuildRoot { build, path, head: checkout, names: Mutex::new((now, Vec::new())), tool: 0 }
     }
 
     fn text(&self, names: &[String]) -> String {
@@ -2013,9 +2487,13 @@ impl BuildRoot {
             }
         }
         let _ = std::fs::create_dir_all(&dir);
+        let use_file = dir.join("relax-use");
         let mut locks = USE_LOCKS.lock().unwrap();
+        // a lock on a file no longer at its path holds nothing: the dir was removed outside the
+        // prune and made again (a test run again in one process, a clean), so the new file is locked
+        locks.retain(|(p, f)| *p != dir || is_file_at(f, &use_file));
         if !locks.iter().any(|(p, _)| *p == dir) {
-            if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("relax-use")) {
+            if let Ok(f) = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&use_file) {
                 let _ = f.lock_shared();
                 crate::zone_alloc::kept_with(|| locks.push((dir.clone(), f)));
             }
@@ -2023,19 +2501,25 @@ impl BuildRoot {
         dir.to_string_lossy().into_owned()
     }
 
-    /// The pass is over: its root names exactly what it took.
+    /// The pass is over: its root names exactly what it took, and is fresh (`ROOT_UNUSED`).
     pub fn finish(&self) {
         let mut names = self.names.lock().unwrap();
         names.1.sort();
         names.0 = names.1.clone();
         self.write(&names.0);
+        if let Ok(f) = std::fs::File::options().write(true).open(&self.path) {
+            if f.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > ROOT_REFRESH)) {
+                let _ = f.set_modified(std::time::SystemTime::now());
+            }
+        }
     }
 }
 
 /// Keeps `build/` to what the roots name (`BuildRoot`): every other build dir goes, unless a run
 /// holds its use lock or it changed since `since` (a Relax build without roots may be writing it),
-/// and so does the root of a checkout that is gone. A base dir (`<name>-<16 hex>`, the claim and
-/// what a shared script declared) stays while a dir of it (`<base>-<16 hex>`) does. Under the build
+/// and so does the root of a checkout that is gone, and one no pass refreshed for ROOT_UNUSED
+/// (said once per prune that drops any). A base dir (`<name>-<16 hex>`, the claim and
+/// what its script declared) stays while a dir of it (`<base>-<16 hex>`) does. Under the build
 /// lock, taken only if free (else the next start prunes), or with `wait` once it is (a child being
 /// spawned may hold it a moment after its holder let go, native.rs `prune`): what goes is moved
 /// to `build/trash` there and deleted after it. Returns how many dirs went.
@@ -2049,12 +2533,20 @@ pub fn prune_build(build: &std::path::Path, since: std::time::SystemTime, wait: 
     {
         let Some(_lock) = build_lock(build, wait) else { return 0 };
         let mut named: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut dropped = 0;
         for e in std::fs::read_dir(build.join("roots")).into_iter().flatten().flatten() {
             let p = e.path();
             // (`.<slot>.<pid>`: a root being written, or what a writer that ended midway left)
             if e.file_name().to_string_lossy().starts_with('.') {
                 if !recent(&p) {
                     let _ = std::fs::remove_file(&p);
+                }
+                continue;
+            }
+            let unused = std::fs::metadata(&p).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age > ROOT_UNUSED));
+            if unused {
+                if std::fs::remove_file(&p).is_ok() {
+                    dropped += 1;
                 }
                 continue;
             }
@@ -2065,6 +2557,10 @@ pub fn prune_build(build: &std::path::Path, since: std::time::SystemTime, wait: 
                 // a checkout that is gone
                 _ => { let _ = std::fs::remove_file(&p); }
             }
+        }
+        if dropped > 0 {
+            crate::progress::say(&format!("relax build: {dropped} build-script root(s) in {} no run refreshed for {} days dropped: the outputs only they named go, and a Relax that needs them again runs those scripts again",
+                build.display(), ROOT_UNUSED.as_secs() / 86400));
         }
         let mut doomed: Vec<String> = Vec::new();
         let names: Vec<String> = std::fs::read_dir(build).into_iter().flatten().flatten()
@@ -2102,7 +2598,7 @@ pub fn prune_build(build: &std::path::Path, since: std::time::SystemTime, wait: 
 }
 
 /// newest_mtime of a package directory, without its target directories and hidden entries.
-fn newest_mtime_pkg(p: &std::path::Path) -> u128 {
+fn newest_mtime_pkg(p: &std::path::Path, follow: bool) -> u128 {
     let mut t = 0;
     if let Ok(rd) = std::fs::read_dir(p) {
         for e in rd.flatten() {
@@ -2111,20 +2607,21 @@ fn newest_mtime_pkg(p: &std::path::Path) -> u128 {
             if n.starts_with("target") || n.starts_with('.') {
                 continue;
             }
-            t = t.max(newest_mtime(&e.path()));
+            t = t.max(newest_mtime(&e.path(), follow));
         }
     }
     t
 }
 
 /// Newest modification time (ns) of a file, or of everything below a directory; 0 if missing.
-fn newest_mtime(p: &std::path::Path) -> u128 {
-    let Ok(m) = std::fs::metadata(p) else { return 0 };
+/// Not `follow`: a link is itself (its own time), never what it leads to.
+fn newest_mtime(p: &std::path::Path, follow: bool) -> u128 {
+    let Ok(m) = (if follow { std::fs::metadata(p) } else { std::fs::symlink_metadata(p) }) else { return 0 };
     let mut t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
     if m.is_dir() {
         if let Ok(rd) = std::fs::read_dir(p) {
             for e in rd.flatten() {
-                t = t.max(newest_mtime(&e.path()));
+                t = t.max(newest_mtime(&e.path(), follow));
             }
         }
     }
@@ -2230,28 +2727,28 @@ fn self_stamp_text(dir: &str, pkg: &str, features: &[String]) -> Result<String, 
 
 static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The lease a devhub runs this process in (`MAKEPAD_DEVHUB_LEASE`: its ledger dir and the
-/// lease), else `none`.
-fn devhub_lease() -> String {
-    std::env::var("MAKEPAD_DEVHUB_LEASE").ok().and_then(|mark| mark.rsplit('/').next().filter(|id| !id.is_empty()).map(str::to_string)).unwrap_or_else(|| "none".to_string())
+/// Who this run works for, as whatever started it names it (`RELAX_RUN_OWNER`: a build farm's
+/// job or lease), else `none`.
+fn run_owner() -> String {
+    std::env::var("RELAX_RUN_OWNER").ok().filter(|o| !o.is_empty() && !o.contains(char::is_whitespace)).unwrap_or_else(|| "none".to_string())
 }
 
-/// A build script's run that took its `relax-claim` writes in it who holds it: `<pid> <lease>`.
+/// A build script's run that took its `relax-claim` writes in it who holds it: `<pid> <owner>`.
 fn name_claim(claim: &std::fs::File) {
     use std::io::{Seek, Write};
     let mut f = claim;
     let _ = f.set_len(0);
     let _ = f.seek(std::io::SeekFrom::Start(0));
-    let _ = writeln!(f, "{} {}", std::process::id(), devhub_lease());
+    let _ = writeln!(f, "{} {}", std::process::id(), run_owner());
 }
 
-/// Who holds the claim at `path`, said: "held by pid N (lease L...)", from what its holder wrote in
+/// Who holds the claim at `path`, said: "held by pid N (owner O...)", from what its holder wrote in
 /// it ([`name_claim`]), and on Linux the kernel's lock table, which names a holder that wrote
 /// nothing (a run of an older relax).
 fn claim_holder(path: &str) -> String {
     let named = std::fs::read_to_string(path).unwrap_or_default();
     let mut words = named.split_whitespace();
-    let (pid, lease) = (words.next().and_then(|p| p.parse::<u32>().ok()), words.next().map(str::to_string));
+    let (pid, owner) = (words.next().and_then(|p| p.parse::<u32>().ok()), words.next().map(str::to_string));
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -2263,12 +2760,12 @@ fn claim_holder(path: &str) -> String {
             })
         });
         if let Some(holder) = locked.filter(|holder| Some(*holder) != pid) {
-            return format!("held by pid {holder} (lease unknown: it named none)");
+            return format!("held by pid {holder} (owner unknown: it named none)");
         }
     }
-    match (pid, lease) {
-        (Some(pid), Some(lease)) => format!("held by pid {pid} (lease {lease})"),
-        _ => "held by a run that has not named itself (lease unknown)".to_string(),
+    match (pid, owner) {
+        (Some(pid), Some(owner)) => format!("held by pid {pid} (owner {owner})"),
+        _ => "held by a run that has not named itself (owner unknown)".to_string(),
     }
 }
 
@@ -2286,22 +2783,40 @@ mod script_error_tests {
         assert_eq!(super::script_error_cause("one\ntwo\nthree\nfour\n"), "two | three | four", "else its last lines");
     }
 
-    /// A build script's claim names its holder to whoever waits on it: the pid and devhub lease
+    /// A build script's claim names its holder to whoever waits on it: the pid and the owner
     /// its holder wrote in it, the kernel's lock holder on Linux, else that it named none.
     #[test]
     fn a_claims_waiter_hears_who_holds_it() {
         let path = std::env::temp_dir().join(format!("relax-claim-holder-{}", std::process::id()));
         let path_s = path.to_string_lossy().to_string();
         std::fs::write(&path, "4242 L7\n").unwrap();
-        assert_eq!(super::claim_holder(&path_s), "held by pid 4242 (lease L7)", "what its holder wrote");
+        assert_eq!(super::claim_holder(&path_s), "held by pid 4242 (owner L7)", "what its holder wrote");
         std::fs::write(&path, "").unwrap();
-        assert_eq!(super::claim_holder(&path_s), "held by a run that has not named itself (lease unknown)");
+        assert_eq!(super::claim_holder(&path_s), "held by a run that has not named itself (owner unknown)");
         let claim = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         claim.lock().unwrap();
         super::name_claim(&claim);
-        assert_eq!(super::claim_holder(&path_s), format!("held by pid {} (lease {})", std::process::id(), super::devhub_lease()), "the run that took it named itself");
+        assert_eq!(super::claim_holder(&path_s), format!("held by pid {} (owner {})", std::process::id(), super::run_owner()), "the run that took it named itself");
         drop(claim);
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod package_id_tests {
+    /// Cargo's package id spec names the package after `#`, or leaves the name out when it is the
+    /// URL's last path segment (git dependencies: cargo's build-script messages for them matched no
+    /// package, so `--allow-c` said cargo had not run their scripts; relax PR 193).
+    #[test]
+    fn a_package_id_names_its_package_in_either_spelling() {
+        let name_version = |id: &str| { let (_, n, v) = super::parse_pkg_id(id); (n, v) };
+        let pair = |n: &str, v: &str| (n.to_string(), v.to_string());
+        assert_eq!(name_version("registry+https://github.com/rust-lang/crates.io-index#libc@0.2.182"), pair("libc", "0.2.182"));
+        assert_eq!(name_version("git+https://github.com/o/tree-sitter-yaml?rev=baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a#0.6.1"), pair("tree-sitter-yaml", "0.6.1"), "a git id without the name");
+        assert_eq!(name_version("git+https://github.com/o/calloop#0.14.3"), pair("calloop", "0.14.3"), "without a query");
+        assert_eq!(name_version("git+https://github.com/o/candle?branch=9.1-patched#candle-core@0.9.1"), pair("candle-core", "0.9.1"), "a git id with the name");
+        let (dir, n, v) = super::parse_pkg_id("path+file:///work/app#0.1.0");
+        assert_eq!((dir.as_str(), n.as_str(), v.as_str()), ("/work/app", "app", "0.1.0"), "a path id without the name");
     }
 }
 
@@ -2332,25 +2847,29 @@ mod shared_script_tests {
             std::fs::write(c.join("target/x/junk"), "junk").unwrap();
         }
         // content: what the files hold, wherever and whenever they were written
-        assert_eq!(content(&a.join("proto"), false), content(&b.join("proto"), false), "two checkouts, one content");
+        assert_eq!(content(&a.join("proto"), false, true), content(&b.join("proto"), false, true), "two checkouts, one content");
         std::fs::write(b.join("target/x/junk"), "other").unwrap();
         std::fs::write(b.join(".hidden"), "h").unwrap();
-        assert_eq!(content(&a, true), content(&b, true), "a package's target dirs and hidden entries are not its files");
-        assert_ne!(content(&a, false), content(&b, false), "a declared folder's are");
-        assert_ne!(content(&a.join("build.rs"), false), content(&a.join("proto/inner/m.proto"), false));
-        assert_eq!(content(&a.join("none"), false), 0);
+        assert_eq!(content(&a, true, true), content(&b, true, true), "a package's target dirs and hidden entries are not its files");
+        assert_ne!(content(&a, false, true), content(&b, false, true), "a declared folder's are");
+        assert_ne!(content(&a.join("build.rs"), false, true), content(&a.join("proto/inner/m.proto"), false, true));
+        assert_eq!(content(&a.join("none"), false, true), 0);
         #[cfg(unix)]
         {
             // a linked folder is walked (cargo follows links); a link back up ends there
             std::fs::create_dir_all(base.join("elsewhere")).unwrap();
             std::fs::write(base.join("elsewhere/f"), "1").unwrap();
             std::os::unix::fs::symlink(base.join("elsewhere"), base.join("linked")).unwrap();
-            let before = content(&base.join("linked"), false);
+            let before = content(&base.join("linked"), false, true);
             std::fs::write(base.join("elsewhere/f"), "2").unwrap();
-            assert_ne!(before, content(&base.join("linked"), false), "a change behind a linked folder");
+            assert_ne!(before, content(&base.join("linked"), false, true), "a change behind a linked folder");
             std::os::unix::fs::symlink(base.join("elsewhere"), base.join("elsewhere/up")).unwrap();
-            let looped = content(&base.join("linked"), false);
-            assert_eq!(looped, content(&base.join("linked"), false), "a loop ends, the same each time");
+            let looped = content(&base.join("linked"), false, true);
+            assert_eq!(looped, content(&base.join("linked"), false, true), "a loop ends, the same each time");
+            // a confined script's walk follows no link: what lies behind one is not its key's
+            let unfollowed = content(&base.join("linked"), false, false);
+            std::fs::write(base.join("elsewhere/f"), "3").unwrap();
+            assert_eq!(unfollowed, content(&base.join("linked"), false, false), "a confined script's key reads a link as itself");
         }
 
         let root = crate::vfs::normalize_path(&base.join("vfs/share/ws").to_string_lossy());
@@ -2364,7 +2883,7 @@ mod shared_script_tests {
 
         let key_in = |checkout: &Path| {
             crate::vfs::mount_folder(&root, checkout);
-            rerun_key(&output, &root, "env", Some(&SharedContent::default())).unwrap()
+            rerun_key(&output, &root, "env", Some(&SharedContent::default()), None).unwrap()
         };
         let ka = key_in(&a);
         assert!(!ka.contains(&disk_a) && ka.contains("f c") && ka.contains(&format!(" {root}/proto\n")), "a key names the mount, never a checkout: {ka}");
@@ -2372,7 +2891,7 @@ mod shared_script_tests {
         std::fs::write(b.join("proto/inner/m.proto"), "message B").unwrap();
         assert_ne!(ka, key_in(&b), "its own file differs");
         let shared = SharedContent::default();
-        let none = rerun_key("cargo:rustc-cfg=x\n", &root, "env", Some(&shared)).unwrap();
+        let none = rerun_key("cargo:rustc-cfg=x\n", &root, "env", Some(&shared), None).unwrap();
         assert!(none.contains("p c") && none.contains(&format!(" {root}\n")), "a script that names nothing: its package's files: {none}");
 
         // the build dir of one content of the inputs, else any of this script's that stands
@@ -2381,25 +2900,94 @@ mod shared_script_tests {
         let base_dir = format!("{}/s-0123456789abcdef", crate::vfs::normalize_path(&build.to_string_lossy()));
         let stands = |at: &str| std::fs::read_to_string(format!("{at}/output")).map_err(|_| "no previous output".to_string());
         let key_of = |declared: &str| format!("key of {declared}");
-        let (named, r) = shared_build_dir(&base_dir, "decl", &key_of, &stands);
+        let (named, r) = script_build_dir(&base_dir, "decl", &key_of, &stands);
         assert_eq!((r, named.len()), (Err("no previous output".to_string()), base_dir.len() + 17));
         assert!(named.starts_with(&format!("{base_dir}-")));
-        assert_eq!(named, shared_build_dir(&base_dir, "decl", &key_of, &stands).0, "one name per key");
-        assert_ne!(named, shared_build_dir(&base_dir, "other", &key_of, &stands).0);
+        assert_eq!(named, script_build_dir(&base_dir, "decl", &key_of, &stands).0, "one name per key");
+        assert_ne!(named, script_build_dir(&base_dir, "other", &key_of, &stands).0);
         let older = format!("{base_dir}-00000000000000aa");
         std::fs::create_dir_all(&older).unwrap();
         std::fs::write(format!("{older}/output"), "old").unwrap();
-        assert_eq!(shared_build_dir(&base_dir, "decl", &key_of, &stands), (older.clone(), Ok("old".to_string())), "an output made under another name");
+        assert_eq!(script_build_dir(&base_dir, "decl", &key_of, &stands), (older.clone(), Ok("old".to_string())), "an output made under another name");
         std::fs::create_dir_all(&named).unwrap();
         std::fs::write(format!("{named}/output"), "named").unwrap();
-        assert_eq!(shared_build_dir(&base_dir, "decl", &key_of, &stands), (named, Ok("named".to_string())), "the named one first");
+        assert_eq!(script_build_dir(&base_dir, "decl", &key_of, &stands), (named, Ok("named".to_string())), "the named one first");
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A script's output is kept per what runs it, not where that program lies: two copies of one
+    /// Relax (one identity, two paths) key and name one output, and the second finds the first's;
+    /// a Relax of another identity keys its own beside it, and switching back and forth leaves
+    /// both standing (each ran the script once). RUSTC and CARGO are out of the key while they name
+    /// the program and in it when they name another; OUT_DIR is never in it. An output that names
+    /// its program's path is kept for that path alone.
+    #[test]
+    fn a_scripts_output_is_kept_per_what_runs_it_not_where_it_lies() {
+        let base = scratch("tool");
+        let pkg = base.join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(pkg.join("build.rs"), "fn main() {}").unwrap();
+        let pkg = crate::vfs::normalize_path(&pkg.to_string_lossy());
+        let (a, b) = (std::path::PathBuf::from("/opt/a/makepad"), std::path::PathBuf::from("/opt/b/makepad"));
+        let env_key = |tool: u128, exe: &std::path::Path, rustc: &std::path::Path| {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.env("OUT_DIR", base.join("somewhere")).env("TARGET", "x86_64-unknown-linux-gnu").env("RUSTC", rustc).env("CARGO", exe);
+            script_env_key(7, tool, cmd.get_envs(), exe)
+        };
+        assert_eq!(env_key(1, &a, &a), env_key(1, &b, &b), "one identity at two paths: one key");
+        assert_ne!(env_key(1, &a, &a), env_key(2, &a, &a), "another identity: another key");
+        let other = env_key(1, &a, std::path::Path::new("/usr/bin/rustc"));
+        assert!(other.contains("\nRUSTC=/usr/bin/rustc") && !other.contains("CARGO=") && !env_key(1, &a, &a).contains("OUT_DIR"), "{other}");
+
+        // where each identity's output is: written once by its first run, standing on every switch after
+        let build = base.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let base_dir = format!("{}/s-0123456789abcdef", crate::vfs::normalize_path(&build.to_string_lossy()));
+        let output = "cargo:rerun-if-changed=build.rs\ncargo:rustc-cfg=x\n";
+        let runs = std::cell::Cell::new(0);
+        let start = |tool: u128, exe: &std::path::Path| {
+            let key = env_key(tool, exe, exe);
+            let stands = |at: &str| match (std::fs::read_to_string(format!("{at}/output")), std::fs::read_to_string(format!("{at}/relax-rerun"))) {
+                (Ok(old), Ok(k)) if rerun_key(&old, &pkg, &key, None, None).as_deref() == Some(k.as_str()) => Ok(old),
+                _ => Err("does not stand".to_string()),
+            };
+            let key_of = |declared: &str| rerun_key(declared, &pkg, &key, None, None).unwrap();
+            let (at, standing) = script_build_dir(&base_dir, &declared_inputs(output), &key_of, &stands);
+            if standing.is_err() {
+                runs.set(runs.get() + 1);
+                std::fs::create_dir_all(&at).unwrap();
+                std::fs::write(format!("{at}/output"), output).unwrap();
+                std::fs::write(format!("{at}/relax-rerun"), rerun_key(output, &pkg, &key, None, None).unwrap()).unwrap();
+            }
+            at
+        };
+        let first = start(1, &a);
+        assert_eq!((start(1, &b), runs.get()), (first.clone(), 1), "the other copy finds the first one's output");
+        let second = start(2, &b);
+        assert_ne!(second, first);
+        for _ in 0..2 {
+            assert_eq!((start(1, &a), start(2, &b)), (first.clone(), second.clone()));
+        }
+        assert_eq!(runs.get(), 2, "each identity ran the script once, whatever the switches");
+
+        let out = base.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let out = out.to_string_lossy().into_owned();
+        assert!(!names_program(output, &out, &a));
+        assert!(names_program("cargo:rustc-env=TOOL=/opt/a/makepad\n", &out, &a), "stdout naming the program");
+        std::fs::write(format!("{out}/built.rs"), "pub const RUSTC: &str = \"/opt/a/makepad\";").unwrap();
+        assert!(names_program(output, &out, &a) && !names_program(output, &out, &b), "a file in OUT_DIR naming it");
+        let per_program = rerun_key(&keyed_output(output, false, true), &pkg, "env", None, None).unwrap();
+        assert!(per_program.contains("\nx ") && declared_inputs(&keyed_output(output, false, true)).contains(PROGRAM_LINE), "its key and name hold the path: {per_program}");
         std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// `build/` keeps what the roots name: a pass names each build dir in its root before it uses
-    /// it and leaves the root naming exactly what it took; the prune removes what no root names and
-    /// no run holds, the root of a checkout that is gone with what only it named, and keeps a base
-    /// dir while one of its outputs stays; it does nothing while another holds the build lock.
+    /// it and leaves the root naming exactly what it took (and fresh, once it is old); the prune
+    /// removes what no root names and no run holds, the root of a checkout that is gone and one no
+    /// pass refreshed for ROOT_UNUSED, each with what only it named, and keeps a base dir while one
+    /// of its outputs stays; it does nothing while another holds the build lock. A
+    /// held dir made again is locked again (the test run twice in one process failed on that).
     #[test]
     fn the_build_prune_keeps_what_the_roots_name() {
         let base = scratch("prune");
@@ -2421,28 +3009,47 @@ mod shared_script_tests {
         assert_eq!(root_text(), format!("{ck}\nheld-0123456789abcdef\nagain-0123456789abcdef\n"));
         two.finish();
         assert_eq!(root_text(), format!("{ck}\nagain-0123456789abcdef\n"), "the pass's root names what it took");
+        // a pass that leaves its root as it was refreshes it once it is old (ROOT_REFRESH)
+        let three = BuildRoot::at(build.clone(), ck.clone(), &["run"]);
+        three.take("again-0123456789abcdef");
+        let age = |p: &std::path::Path| std::fs::metadata(p).unwrap().modified().unwrap().elapsed().unwrap_or_default();
+        let set_age = |p: &std::path::Path, days: u64| std::fs::File::options().write(true).open(p).unwrap()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(days * 24 * 3600)).unwrap();
+        set_age(&three.path, 2);
+        three.finish();
+        assert!(age(&three.path) < std::time::Duration::from_secs(3600), "refreshed");
 
-        for n in ["named-0123456789abcdef", "s-0123456789abcdef", "s-0123456789abcdef-00000000000000aa", "t-0123456789abcdef", "unnamed-0123456789abcdef", "gone-0123456789abcdef"] {
+        for n in ["named-0123456789abcdef", "s-0123456789abcdef", "s-0123456789abcdef-00000000000000aa", "t-0123456789abcdef", "unnamed-0123456789abcdef", "gone-0123456789abcdef", "aged-0123456789abcdef"] {
             std::fs::create_dir_all(build.join(n).join("out")).unwrap();
         }
         let roots = build.join("roots");
         std::fs::write(roots.join("other"), format!("{ck}\nnamed-0123456789abcdef\ns-0123456789abcdef-00000000000000aa\n")).unwrap();
         std::fs::write(roots.join("gone"), format!("{}\ngone-0123456789abcdef\n", base.join("deleted").display())).unwrap();
         std::fs::write(roots.join(".writing.1"), "").unwrap();
+        // the root of a Relax no longer run here: no pass refreshed it for ROOT_UNUSED
+        std::fs::write(roots.join("aged"), format!("{ck}\naged-0123456789abcdef\n")).unwrap();
+        set_age(&roots.join("aged"), 8);
         let later = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
         {
             let _other = build_lock(&build, true).unwrap();
             assert_eq!(prune_build(&build, later, false), 0, "the build lock is another's");
         }
         assert_eq!(prune_build(&build, std::time::UNIX_EPOCH, true), 0, "what changed since `since` stays");
-        assert_eq!(prune_build(&build, later, true), 3);
+        assert_eq!(prune_build(&build, later, true), 4);
         let mut left: Vec<String> = std::fs::read_dir(&build).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         left.sort();
         assert_eq!(left, ["again-0123456789abcdef", "held-0123456789abcdef", "lock", "named-0123456789abcdef", "roots", "s-0123456789abcdef", "s-0123456789abcdef-00000000000000aa"],
             "named, held by this run (its use lock), and a base dir with an output; no trash");
         let mut roots_left: Vec<String> = std::fs::read_dir(&roots).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
         roots_left.retain(|n| n.len() != 32);
-        assert_eq!(roots_left, ["other"], "a gone checkout's root and a stale root write go");
+        assert_eq!(roots_left, ["other"], "a gone checkout's root, an unused one and a stale root write go");
+        // a held dir removed outside the prune and made again (this test run again in one process,
+        // which makes its scratch folder anew): the next take use-locks the new one
+        let held = build.join("held-0123456789abcdef");
+        std::fs::remove_dir_all(&held).unwrap();
+        BuildRoot::at(build.clone(), ck.clone(), &["run"]).take("held-0123456789abcdef");
+        let use_file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(held.join("relax-use")).unwrap();
+        assert!(use_file.try_lock().is_err(), "a build dir made again is use-locked again");
         std::fs::remove_dir_all(&base).unwrap();
     }
 }
@@ -2452,4 +3059,5 @@ pub(crate) unsafe fn reset_statics() {
     use relax_session::reset_static as reset;
     reset(&TO_REMOVE, Mutex::new(Vec::new()));
     reset(&SCRIPT_RUNNING, Mutex::new(0));
+    reset(&WITHHELD, Mutex::new(Vec::new()));
 }

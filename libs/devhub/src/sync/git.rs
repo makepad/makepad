@@ -140,8 +140,9 @@ impl Store {
     }
 
     /// The commit a ref names, if any.
+    /// The commit `r` names here (makepad-git: a node's caps read three of these every 10 s).
     pub fn rev(&self, r: &str) -> Option<String> {
-        self.git(&["rev-parse", "-q", "--verify", &format!("{r}^{{commit}}")]).ok().map(|s| s.trim().to_string()).filter(|s| valid_sha(s))
+        crate::gitread::store_rev(&self.git_dir, r)
     }
 
     pub fn has(&self, sha: &str) -> bool {
@@ -187,8 +188,41 @@ impl Store {
         let b = bundle.to_string_lossy();
         self.git(&["bundle", "verify", "-q", &b])?;
         let dst = format!("{PUSHED}{branch}");
-        self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")])?;
+        let fetch = || self.git(&["fetch", "-q", "--no-tags", "--no-write-fetch-head", &b, &format!("+refs/heads/{branch}:{dst}")]);
+        if let Err(e) = fetch() {
+            // A ref of the store's own it cannot read (this branch's, or another the fetch names:
+            // git reads them all) is only its copy of a master's branch: dropped, and the fetch
+            // made again. A box's store that could not resolve one refused a lane's lease start
+            // ("cannot lock ref ... unable to resolve reference", 11-13).
+            let named = e.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ':' | '!' | ',')).filter(|w| w.starts_with("refs/devhub/")).map(str::to_string);
+            let broken: std::collections::BTreeSet<String> = std::iter::once(dst.clone()).chain(named).filter(|r| self.broken_ref(r)).collect();
+            if broken.is_empty() {
+                return Err(e);
+            }
+            for r in &broken {
+                self.drop_ref(r);
+            }
+            let dropped = broken.into_iter().collect::<Vec<_>>().join(", ");
+            fetch().map_err(|again| format!("{again} (after dropping {dropped}, which it could not read: {e})"))?;
+            eprintln!("sync: {}: dropped {dropped}, which it could not read, and fetched again", self.git_dir.display());
+        }
         self.rev(&dst).ok_or_else(|| format!("the bundle holds no branch {branch}"))
+    }
+
+    /// Whether `r` is there but names no commit the store holds: a loose ref file that is empty,
+    /// not a sha, or a sha of a missing object (a crash mid-write), or a packed one of a missing
+    /// object.
+    fn broken_ref(&self, r: &str) -> bool {
+        let loose = self.git_dir.join(r);
+        let packed = std::fs::read_to_string(self.git_dir.join("packed-refs")).is_ok_and(|t| t.lines().any(|l| l.split_once(' ').is_some_and(|(_, n)| n == r)));
+        (loose.is_file() || packed) && self.rev(r).is_none()
+    }
+
+    /// Drops `r` whatever it holds: its loose file, then its packed line (git refuses to delete a
+    /// ref it cannot read).
+    fn drop_ref(&self, r: &str) {
+        let _ = std::fs::remove_file(self.git_dir.join(r));
+        let _ = self.git(&["update-ref", "--no-deref", "-d", r]);
     }
 
     /// Drops `refs/devhub/pushed/<branch>` of each branch, in one git process: the master's word
@@ -475,6 +509,15 @@ mod tests {
         store.prune_pushed(&["rc-x", "rc-never"]).unwrap();
         assert_eq!(store.refs().iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(), vec!["refs/devhub/pushed/work"]);
         assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane);
+        // a ref the store cannot read (empty, not a sha, a missing object) is dropped and fetched again
+        for broken in ["", "garbage\n", "0123456789012345678901234567890123456789\n"] {
+            std::fs::write(stores.join("makepad.git/refs/devhub/pushed/rc-x"), broken).unwrap();
+            assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane, "{broken:?}");
+        }
+        // as is another one of its refs the fetch trips on
+        std::fs::write(stores.join("makepad.git/refs/devhub/pushed/work"), "garbage\n").unwrap();
+        assert_eq!(store.fetch_bundle(&bundle, "rc-x").unwrap(), lane, "another broken ref");
+        assert_eq!(store.fetch_bundle(&bundle, "work").unwrap(), two);
 
         // a tree shipped at `one` by a deploy script: no .git, no dotfiles, a target and FLEET-REVISION
         std::fs::create_dir_all(work.join("target")).unwrap();
@@ -492,6 +535,12 @@ mod tests {
         assert_eq!(run(Some(&work), None, &[], &["rev-parse", "HEAD"]).unwrap().trim(), two);
         assert!(!store.tree_dirty(&work).unwrap(), "target/ is ignored, FLEET-REVISION.txt excluded");
         assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        // what a node's caps read every 10 s starts no git
+        let spawned = crate::git_exec::on_this_thread();
+        assert_eq!(store.rev(CHECKOUT_REF).as_deref(), Some(two.as_str()));
+        assert_eq!(store.rev("refs/devhub/never"), None, "a ref the store lacks");
+        assert_eq!(crate::lease::tree::current(&work).map(|p| p.makepad), Some(two.clone()), "the tree's HEAD");
+        assert_eq!(crate::git_exec::on_this_thread(), spawned, "the caps reads are makepad-git's");
 
         // a lease moves it to an unlanded lane commit (not a fast-forward) and back: only changed files
         let a_time = mtime(&work.join("a.txt"));
