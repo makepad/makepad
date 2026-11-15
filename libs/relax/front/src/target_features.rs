@@ -234,9 +234,11 @@ static X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Arch { X86_64, AArch64 }
 
-/// The architecture of the session's target triple (Session::target).
-pub fn target_arch(prog: &Program) -> Arch {
-    if prog.session.options.target.starts_with("aarch64") { Arch::AArch64 } else { Arch::X86_64 }
+/// The architecture `file` is compiled for: its crate's cfg set, the one its `cfg(target_arch)`
+/// reads (a proc macro's is the machine's, not the session target's).
+pub fn target_arch(prog: &Program, file: u32) -> Arch {
+    let cfg = &prog.crates[prog.file_crate[file as usize] as usize].cfg;
+    if cfg.holds("target_arch=aarch64") { Arch::AArch64 } else { Arch::X86_64 }
 }
 
 /// Target::rust_target_features (target_features.rs:1183-1204).

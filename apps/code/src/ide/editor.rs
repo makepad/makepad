@@ -462,7 +462,10 @@ script_mod! {
                             padding: Inset{left: 28 right: 28 top: 0 bottom: 0}
                             host_selection: true
                             inline_links: true
+                            use_math_widget: true
                             body: ""
+                            inline_math := MathView{inline: true font_size: theme.font_size_p color: mod.look.text}
+                            display_math := MathView{width: Fill font_size: theme.font_size_p color: mod.look.text}
                             font_color: mod.look.text
                             link_color: mod.look.agent
                             draw_text +: { color: mod.look.text }
@@ -1816,6 +1819,7 @@ impl Widget for FileEditor {
         }
         self.handle_print(cx, event);
         let mut actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        super::forward_tips(cx, &actions);
         self.handle_bar(cx, event, &actions);
         if !self.ready {
             return;

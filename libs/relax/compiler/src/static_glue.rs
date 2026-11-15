@@ -26,43 +26,43 @@ std::arch::global_asm!(
     ".text",
     // ---- slot thunks: x16 = the thunk's address; x16 - thunks = 8k = table[k]'s offset; br
     ".p2align 3",
-    "_makepad_run_sg_thunk_common:",
-    "  adrp x17, _makepad_run_sg_thunks@PAGE",
-    "  add x17, x17, _makepad_run_sg_thunks@PAGEOFF",
+    "_relax_sg_thunk_common:",
+    "  adrp x17, _relax_sg_thunks@PAGE",
+    "  add x17, x17, _relax_sg_thunks@PAGEOFF",
     "  sub x16, x16, x17",
     "  adrp x17, {table}@PAGE",
     "  add x17, x17, {table}@PAGEOFF",
     "  ldr x16, [x17, x16]",
     "  br x16",
     ".p2align 3",
-    ".globl _makepad_run_sg_thunks",
-    "_makepad_run_sg_thunks:",
+    ".globl _relax_sg_thunks",
+    "_relax_sg_thunks:",
     ".rept 262144",
     "  adr x16, .",
-    "  b _makepad_run_sg_thunk_common",
+    "  b _relax_sg_thunk_common",
     ".endr",
     // ---- lazy stubs: x16 = k ((address - stubs) / 8); the lazy entry compiles slot k and
     // continues in its code
     ".p2align 3",
-    "_makepad_run_sg_stub_common:",
-    "  adrp x17, _makepad_run_sg_stubs@PAGE",
-    "  add x17, x17, _makepad_run_sg_stubs@PAGEOFF",
+    "_relax_sg_stub_common:",
+    "  adrp x17, _relax_sg_stubs@PAGE",
+    "  add x17, x17, _relax_sg_stubs@PAGEOFF",
     "  sub x16, x16, x17",
     "  lsr x16, x16, #3",
-    "  b _makepad_run_sg_lazy_entry",
+    "  b _relax_sg_lazy_entry",
     ".p2align 3",
-    ".globl _makepad_run_sg_stubs",
-    "_makepad_run_sg_stubs:",
+    ".globl _relax_sg_stubs",
+    "_relax_sg_stubs:",
     ".rept 262144",
     "  adr x16, .",
-    "  b _makepad_run_sg_stub_common",
+    "  b _relax_sg_stub_common",
     ".endr",
     // ---- lazy entry (x16 = global slot: the window it is in names the unit, jit.rs
     // nc_window_of): saves the argument registers (q0-q7 whole), x8; rt_compile_global
     // returns the address to continue at
     ".p2align 2",
-    ".globl _makepad_run_sg_lazy_entry",
-    "_makepad_run_sg_lazy_entry:",
+    ".globl _relax_sg_lazy_entry",
+    "_relax_sg_lazy_entry:",
     "  stp x29, x30, [sp, #-16]!",
     "  mov x29, sp",
     "  sub sp, sp, #208",
@@ -93,8 +93,8 @@ std::arch::global_asm!(
     // ---- hot entry: the same with rt_hot (generated count stubs' path; the interpreter's count
     // stubs call rt_hot themselves: interp::count_entry)
     ".p2align 2",
-    ".globl _makepad_run_sg_hot_entry",
-    "_makepad_run_sg_hot_entry:",
+    ".globl _relax_sg_hot_entry",
+    "_relax_sg_hot_entry:",
     "  stp x29, x30, [sp, #-16]!",
     "  mov x29, sp",
     "  sub sp, sp, #208",
@@ -125,8 +125,8 @@ std::arch::global_asm!(
     // ---- enter(fn = x0, arg = x1, ctx = x2): saves the callee-saved registers, ctx[0] = sp,
     // calls fn(arg); returns 0. leave(ctx = x0, code = x1): back to that enter, which returns code.
     ".p2align 2",
-    ".globl _makepad_run_sg_enter",
-    "_makepad_run_sg_enter:",
+    ".globl _relax_sg_enter",
+    "_relax_sg_enter:",
     "  stp x29, x30, [sp, #-16]!",
     "  mov x29, sp",
     "  sub sp, sp, #160",
@@ -145,7 +145,7 @@ std::arch::global_asm!(
     "  mov x0, x1",
     "  blr x16",
     "  mov x0, #0",
-    "Lmakepad_run_sg_enter_tail:",
+    "Lrelax_sg_enter_tail:",
     "  ldp x19, x20, [sp, #0]",
     "  ldp x21, x22, [sp, #16]",
     "  ldp x23, x24, [sp, #32]",
@@ -158,15 +158,15 @@ std::arch::global_asm!(
     "  add sp, sp, #160",
     "  ldp x29, x30, [sp], #16",
     "  ret",
-    ".globl _makepad_run_sg_leave",
-    "_makepad_run_sg_leave:",
+    ".globl _relax_sg_leave",
+    "_relax_sg_leave:",
     "  ldr x16, [x0]",
     "  mov sp, x16",
     "  mov x0, x1",
-    "  b Lmakepad_run_sg_enter_tail",
+    "  b Lrelax_sg_enter_tail",
     // ---- panic trampolines: the caller's register block [fp, lr, x19..x28, d8..d15, x0..x15]
     // on the stack, its address in x6, x7 = 0, then the host entry (never returns)
-    ".macro makepad_run_sg_tramp name, target",
+    ".macro relax_sg_tramp name, target",
     ".p2align 2",
     ".globl \\name",
     "\\name:",
@@ -195,15 +195,15 @@ std::arch::global_asm!(
     "  add x16, x16, \\target@PAGEOFF",
     "  br x16",
     ".endm",
-    "makepad_run_sg_tramp _makepad_run_sg_panic_site, {panic_site}",
-    "makepad_run_sg_tramp _makepad_run_sg_panic_bounds, {panic_bounds}",
-    "makepad_run_sg_tramp _makepad_run_sg_panic_impl, {panic_impl}",
-    "makepad_run_sg_tramp _makepad_run_sg_resume, {resume}",
+    "relax_sg_tramp _relax_sg_panic_site, {panic_site}",
+    "relax_sg_tramp _relax_sg_panic_bounds, {panic_bounds}",
+    "relax_sg_tramp _relax_sg_panic_impl, {panic_impl}",
+    "relax_sg_tramp _relax_sg_resume, {resume}",
     // ---- land(regs = x0, fp = x1, sp = x2, pc = x3): continues at pc with x19..x28, d8..d15
     // from the register block, x29 = fp, sp = sp
     ".p2align 2",
-    ".globl _makepad_run_sg_land",
-    "_makepad_run_sg_land:",
+    ".globl _relax_sg_land",
+    "_relax_sg_land:",
     "  ldp x19, x20, [x0, #16]",
     "  ldp x21, x22, [x0, #32]",
     "  ldp x23, x24, [x0, #48]",
@@ -226,17 +226,17 @@ std::arch::global_asm!(
 );
 
 extern "C" {
-    static makepad_run_sg_thunks: u8;
-    static makepad_run_sg_stubs: u8;
-    static makepad_run_sg_lazy_entry: u8;
-    static makepad_run_sg_hot_entry: u8;
-    static makepad_run_sg_enter: u8;
-    static makepad_run_sg_leave: u8;
-    static makepad_run_sg_panic_site: u8;
-    static makepad_run_sg_panic_bounds: u8;
-    static makepad_run_sg_panic_impl: u8;
-    static makepad_run_sg_resume: u8;
-    static makepad_run_sg_land: u8;
+    static relax_sg_thunks: u8;
+    static relax_sg_stubs: u8;
+    static relax_sg_lazy_entry: u8;
+    static relax_sg_hot_entry: u8;
+    static relax_sg_enter: u8;
+    static relax_sg_leave: u8;
+    static relax_sg_panic_site: u8;
+    static relax_sg_panic_bounds: u8;
+    static relax_sg_panic_impl: u8;
+    static relax_sg_resume: u8;
+    static relax_sg_land: u8;
 }
 
 /// The addresses of the precompiled glue.
@@ -261,18 +261,18 @@ pub(super) fn glue() -> Glue {
     }
     unsafe {
         Glue {
-            thunks: a(&makepad_run_sg_thunks),
-            stubs: a(&makepad_run_sg_stubs),
+            thunks: a(&relax_sg_thunks),
+            stubs: a(&relax_sg_stubs),
             table: std::ptr::addr_of!(RELAX_SG_TABLE) as u64,
-            lazy_entry: a(&makepad_run_sg_lazy_entry),
-            hot_entry: a(&makepad_run_sg_hot_entry),
-            enter: a(&makepad_run_sg_enter),
-            leave: a(&makepad_run_sg_leave),
-            panic_site: a(&makepad_run_sg_panic_site),
-            panic_bounds: a(&makepad_run_sg_panic_bounds),
-            panic_impl: a(&makepad_run_sg_panic_impl),
-            resume: a(&makepad_run_sg_resume),
-            land: a(&makepad_run_sg_land),
+            lazy_entry: a(&relax_sg_lazy_entry),
+            hot_entry: a(&relax_sg_hot_entry),
+            enter: a(&relax_sg_enter),
+            leave: a(&relax_sg_leave),
+            panic_site: a(&relax_sg_panic_site),
+            panic_bounds: a(&relax_sg_panic_bounds),
+            panic_impl: a(&relax_sg_panic_impl),
+            resume: a(&relax_sg_resume),
+            land: a(&relax_sg_land),
         }
     }
 }

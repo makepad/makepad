@@ -26,7 +26,7 @@ use makepad_code_editor::{
 use makepad_markdown_edit::{
     plan::{self, BlockStyle, Mark, Plan},
     pulldown_cmark::{CodeBlockKind, CowStr, Event as MdEvent, Tag, TagEnd},
-    BlockKind, Index, LineEdit, Row, RowPart, Slice,
+    BlockKind, Index, LineEdit, Row, RowPart, Slice, Splice,
 };
 use makepad_widgets_core::makepad_platform::{
     clipboard_read::{ClipboardContent, ClipboardImage, ClipboardWrite},
@@ -77,7 +77,10 @@ script_mod! {
                 padding: Inset{left: 24 right: 24 top: 0 bottom: 0}
                 host_selection: true
                 inline_links: true
+                use_math_widget: true
                 body: ""
+                inline_math := MathView{inline: true font_size: theme.font_size_p color: theme.color_label_inner}
+                display_math := MathView{width: Fill font_size: theme.font_size_p color: theme.color_label_inner}
             }
         }
         // The picture a move drags, riding the pointer: drawn by the view
@@ -99,7 +102,10 @@ script_mod! {
                 padding: Inset{left: 0 right: 0 top: 0 bottom: 0}
                 host_selection: true
                 inline_links: true
+                use_math_widget: true
                 body: ""
+                inline_math := MathView{inline: true font_size: theme.font_size_p color: #x1a1a1a}
+                display_math := MathView{width: Fill font_size: theme.font_size_p color: #x1a1a1a}
                 font_color: #x1a1a1a
                 draw_text +: { color: #x1a1a1a }
                 link_color: #x1a4fb8
@@ -730,6 +736,11 @@ pub struct MarkdownEditor {
     /// The start of the picture whose alt text and source the host edits.
     #[rust]
     editing_picture: Option<Position>,
+    /// The lines of the formula the caret stands in, as the caret's row
+    /// last drew (`Some(None)`: in none): the index holds that formula
+    /// together while it is edited.
+    #[rust]
+    caret_formula: Option<Option<Range<usize>>>,
 }
 
 impl MarkdownEditor {
@@ -919,9 +930,19 @@ impl MarkdownEditor {
                 }
             }
         }
+        self.take_splice(cx, splice);
+        self.caret = self.clamp(self.caret);
+        self.anchor = self.clamp(self.anchor);
+        if let (Some(find), Some(doc)) = (self.find.as_mut(), self.doc.as_ref()) {
+            find.count(doc.document.as_text().as_lines());
+        }
+        self.view.redraw(cx);
+    }
+
+    /// The rows an index change replaced: the rows drawn after them
+    /// renumber, the replaced ones are gone until the next draw.
+    fn take_splice(&mut self, cx: &mut Cx, splice: Option<Splice>) {
         if let Some(splice) = &splice {
-            // The rows drawn after the edit renumber; the replaced ones are
-            // gone until the next draw.
             let moved = splice.new_rows.len() as isize - splice.old_rows.len() as isize;
             self.drawn.retain_mut(|drawn| {
                 if drawn.row >= splice.old_rows.end {
@@ -945,12 +966,23 @@ impl MarkdownEditor {
                 self.rows.clear();
             }
         }
-        self.caret = self.clamp(self.caret);
-        self.anchor = self.clamp(self.anchor);
-        if let (Some(find), Some(doc)) = (self.find.as_mut(), self.doc.as_ref()) {
-            find.count(doc.document.as_text().as_lines());
+    }
+
+    /// Holds the formula the caret stands in together (see `Index::hold`),
+    /// or lets the held one go once the caret has left it.
+    fn hold_formula(&mut self, cx: &mut Cx, lines: Option<Range<usize>>) {
+        let Some(doc) = self.doc.as_mut() else { return };
+        if doc.index.held() == lines {
+            return;
         }
-        self.view.redraw(cx);
+        let splice = {
+            let text = doc.document.as_text();
+            doc.index.hold(text.as_lines(), lines)
+        };
+        if splice.is_some() {
+            self.take_splice(cx, splice);
+            self.view.redraw(cx);
+        }
     }
 
     fn ordered_selection(&self) -> (Position, Position) {
@@ -974,6 +1006,7 @@ impl MarkdownEditor {
             }
         }
         let (sel_start, sel_end) = self.ordered_selection();
+        self.caret_formula = None;
         let footnote = |label: &str| index.footnote_number(label);
         // A picture dragged over the view: its row draws from a copy with
         // the picture in it.
@@ -1040,13 +1073,6 @@ impl MarkdownEditor {
                 md.text_flow.set_marks(cx, found);
             }
             let follows_block = follows_block(row_id, &row);
-            // A caret on a line that draws no text gets a place made for it.
-            let caret_line = self.caret.line_index;
-            let anchors = if ghost_range.is_none() && caret_line >= start.line_index && caret_line <= end.line_index && cache.line_is_blank(caret_line) {
-                vec![(cache.offset_of(self.caret), None)]
-            } else {
-                Vec::new()
-            };
             // Code blocks take the code editor's colours; a long one split in
             // rows is lexed whole.
             let whole = match row.part {
@@ -1069,12 +1095,40 @@ impl MarkdownEditor {
                 },
                 colors: &self.token_colors,
             };
+            // The formula the caret (or the selection's other end) stands in
+            // shows its source, edited as text.
+            let open_math = [self.caret, self.anchor]
+                .into_iter()
+                .filter(|at| ghost_range.is_none() && start <= *at && *at <= end)
+                .find_map(|at| plan::formula_in(&cache.events, cache.offset_of(at)))
+                .map(|formula| formula.range);
+            if ghost_range.is_none() && start <= self.caret && self.caret <= end {
+                let held = plan::formula_in(&cache.events, cache.offset_of(self.caret))
+                    .map(|formula| cache.slice.line_of(formula.range.start)..cache.slice.line_of(formula.range.end - 1) + 1);
+                if held.is_some() || self.caret_formula.is_none() {
+                    self.caret_formula = Some(held);
+                }
+            }
+            // A caret on a line that draws no text gets a place made for it;
+            // a blank line of the open formula draws as its own line.
+            let caret_line = self.caret.line_index;
+            let anchors = if ghost_range.is_none()
+                && caret_line >= start.line_index
+                && caret_line <= end.line_index
+                && cache.line_is_blank(caret_line)
+                && !open_math.as_ref().is_some_and(|range| range.contains(&cache.offset_of(self.caret)))
+            {
+                vec![(cache.offset_of(self.caret), None)]
+            } else {
+                Vec::new()
+            };
             let mut host = MarkdownHost {
                 footnote_number: Some(&footnote),
                 list_start: cache.list_start,
                 follows_block,
                 anchors,
                 highlight: Some(&highlight),
+                open_math,
                 ..Default::default()
             };
             md.draw_events(cx, walk, &cache.slice.text, cache.events.iter().cloned(), &mut host);
@@ -1264,6 +1318,27 @@ impl MarkdownEditor {
         let piece = cache.pieces.iter().find(|piece| !piece.identity && piece.flat == (flat..end))?;
         let (alt, dest) = plan::picture_at(&cache.events, piece.src.start)?;
         Some(Picture { start: cache.position_of(piece.src.start), end: cache.position_of(piece.src.end), alt, dest })
+    }
+
+    /// Where a press at `abs` on a closed formula (typeset, or drawn as code
+    /// when it cannot be) puts the caret to open it: at the source place of
+    /// the character pressed when the formula draws its content as it is
+    /// spelled, past the opening delimiter otherwise.
+    fn formula_press(&self, cx: &Cx, abs: DVec2) -> Option<Position> {
+        let at = self.row_at(cx, abs)?;
+        let drawn = &self.drawn[at];
+        let cache = self.rows.get(&drawn.key)?;
+        let object = drawn.item.borrow::<Markdown>()?.text_flow.object_at(cx, abs);
+        let flat = match object {
+            Some(flat) => flat,
+            None => self.char_at(cx, at, abs)?,
+        };
+        let piece = cache.pieces.iter().find(|piece| !piece.identity && piece.flat.contains(&flat))?;
+        let formula = plan::formulas(&cache.events).find(|formula| formula.range == piece.src)?;
+        let content = formula.range.start + formula.delimiter..formula.range.end - formula.delimiter;
+        let spelled = object.is_none() && content.len() == piece.flat.len();
+        let offset = if spelled { content.start + (flat - piece.flat.start) } else { content.start };
+        Some(cache.position_of(offset))
     }
 
     /// What a press at `abs` would hit besides text: a task box (the
@@ -1909,6 +1984,12 @@ impl MarkdownEditor {
             }
             return;
         }
+        // At a closed formula's edge the key opens it: the caret steps in
+        // past its delimiter, and the next key edits its source.
+        if let Some(inside) = self.formula_edge(forward) {
+            self.move_to(cx, inside, false);
+            return;
+        }
         let line = self.caret.line_index;
         let lines = if forward { self.blocks_around(line, line, 0, 1) } else { self.blocks_around(line, line, 1, 0) };
         let Some((slice, events)) = lines.and_then(|lines| self.parse(lines)) else { return };
@@ -2240,6 +2321,23 @@ impl MarkdownEditor {
         self.moved(cx);
     }
 
+    /// The caret's place inside the closed formula it stands at the edge of
+    /// (its start going right, its end going left): past the delimiter,
+    /// where the formula opens as its source.
+    fn formula_edge(&self, right: bool) -> Option<Position> {
+        let (_, cache) = self.caret_row()?;
+        let here = cache.offset_of(self.caret);
+        let inside = plan::formulas(&cache.events).find_map(|formula| {
+            let range = formula.range;
+            match right {
+                true if range.start == here => Some(range.start + formula.delimiter),
+                false if range.end == here => Some(range.end - formula.delimiter),
+                _ => None,
+            }
+        })?;
+        Some(cache.position_of(inside))
+    }
+
     /// One step left or right through what the rows draw: a character, or
     /// with `word` to a word's start. Steps that land where the source does
     /// not change (a bullet, a hidden marker) step on.
@@ -2344,6 +2442,8 @@ impl MarkdownEditor {
                     self.line_edge(cx, right)
                 } else if start != end && !shift && !word {
                     Some(if right { end } else { start })
+                } else if !shift && !word {
+                    self.formula_edge(right).or_else(|| self.step(right, false))
                 } else {
                     self.step(right, word)
                 };
@@ -2525,7 +2625,9 @@ impl Widget for MarkdownEditor {
                     self.moved(cx);
                     return;
                 }
-                if let Some(position) = self.position_at(cx, fe.abs) {
+                // A press on a closed formula opens it.
+                let formula = if fe.modifiers.shift { None } else { self.formula_press(cx, fe.abs) };
+                if let Some(position) = formula.or_else(|| self.position_at(cx, fe.abs)) {
                     self.caret = position;
                     if !fe.modifiers.shift {
                         self.anchor = position;
@@ -2634,6 +2736,9 @@ impl Widget for MarkdownEditor {
         self.draw_caret(cx);
         self.draw_chip(cx, scope);
         self.reveal_caret(cx);
+        if let Some(lines) = self.caret_formula.take() {
+            self.hold_formula(cx, lines);
+        }
         if let (Some(target), Some(at)) = (self.place_caret_y.take(), self.caret_y) {
             let delta = at - target;
             if delta.abs() > 0.5 {

@@ -2,6 +2,7 @@
 
 use super::Vec;
 use crate::fmt;
+use crate::heap::{Allocator, Global};
 use crate::intrinsics_mem as im;
 
 /// Yields the elements of a range of the vec the predicate selects, removing them; the kept
@@ -9,8 +10,8 @@ use crate::intrinsics_mem as im;
 /// drop the unvisited tail moves down and the len is set.
 #[must_use = "iterators are lazy and do nothing unless consumed; \
     use `retain_mut` or `extract_if().for_each(drop)` to remove and discard elements"]
-pub struct ExtractIf<'a, T, F> {
-    vec: &'a mut Vec<T>,
+pub struct ExtractIf<'a, T, F, #[unstable(feature = "allocator_ext", issue = "163177", implied_by = "allocator_api")] A: Allocator = Global> {
+    vec: &'a mut Vec<T, A>,
     /// the next element to check
     idx: usize,
     /// one past the last element of the range
@@ -21,13 +22,13 @@ pub struct ExtractIf<'a, T, F> {
     pred: F,
 }
 
-pub(super) fn new<'a, T, F>(vec: &'a mut Vec<T>, pred: F, start: usize, end: usize) -> ExtractIf<'a, T, F> {
+pub(super) fn new<'a, T, F, A: Allocator>(vec: &'a mut Vec<T, A>, pred: F, start: usize, end: usize) -> ExtractIf<'a, T, F, A> {
     let old_len = vec.len;
     vec.len = 0;
     ExtractIf { vec, idx: start, end, del: 0, old_len, pred }
 }
 
-impl<T, F: FnMut(&mut T) -> bool> Iterator for ExtractIf<'_, T, F> {
+impl<T, F: FnMut(&mut T) -> bool, A: Allocator> Iterator for ExtractIf<'_, T, F, A> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
@@ -52,7 +53,7 @@ impl<T, F: FnMut(&mut T) -> bool> Iterator for ExtractIf<'_, T, F> {
     }
 }
 
-impl<T, F> Drop for ExtractIf<'_, T, F> {
+impl<T, F, A: Allocator> Drop for ExtractIf<'_, T, F, A> {
     fn drop(&mut self) {
         if self.del > 0 {
             unsafe {
@@ -63,7 +64,7 @@ impl<T, F> Drop for ExtractIf<'_, T, F> {
     }
 }
 
-impl<T: fmt::Debug, F> fmt::Debug for ExtractIf<'_, T, F> {
+impl<T: fmt::Debug, F, A: Allocator> fmt::Debug for ExtractIf<'_, T, F, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let start = self.vec.ptr.as_ptr() as *const T;
         let retained = unsafe { im::slice_from_raw(start, self.idx - self.del) };

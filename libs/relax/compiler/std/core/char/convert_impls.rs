@@ -1,7 +1,8 @@
 //! Relax's conversion trait impls between char and integers.
 //! Integer<->integer conversions are generated in num/.
 
-use super::{try_from_u32, CharTryFromError, TryFromCharError};
+use super::methods::try_from_u32;
+use super::{CharTryFromError, TryFromCharError};
 use crate::convert::{From, TryFrom};
 use crate::result::Result::{self, Err, Ok};
 

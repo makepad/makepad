@@ -344,6 +344,7 @@ pub fn type_text(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize,
         && !matches!(containers.leaf, Leaf::Code { .. } | Leaf::Html)
         && text[containers.line.clone()].trim().is_empty()
         && !goes_on(text, events, caret, containers.line.end)
+        && !fills_formula(text, caret, &typed)
     {
         let filled = |at: usize| !text[line_at(text, at)].trim().is_empty();
         let above = containers.line.start > 0 && filled(containers.line.start - 1);
@@ -372,6 +373,14 @@ pub fn type_text(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize,
         }
     }
     plan.checked(text)
+}
+
+/// Whether `typed` on the blank line at `caret` makes it a line of a formula
+/// again: the line an Enter in an open display formula left, which split it.
+fn fills_formula(text: &str, caret: usize, typed: &str) -> bool {
+    let joined = Plan::insert(caret, typed).apply(text);
+    let events: Vec<_> = pulldown_cmark::Parser::new_ext(&joined, crate::parse_options()).into_offset_iter().collect();
+    formula_in(&events, caret).is_some()
 }
 
 /// Whether a block holding `at` also holds the first line with text after
@@ -440,9 +449,39 @@ fn empty_enter(text: &str, containers: &Containers) -> Option<Plan> {
     }
 }
 
-/// Enter: a code line, a new item, a paragraph split, or one level out.
+/// A formula's source: `$..$` or `$$..$$`, delimiters included.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Formula {
+    pub range: Range<usize>,
+    /// The length of each delimiter: 1 inline, 2 display.
+    pub delimiter: usize,
+}
+
+/// The formulas of a parse, in source order.
+pub fn formulas<'a>(events: &'a [(Event<'_>, Range<usize>)]) -> impl Iterator<Item = Formula> + 'a {
+    events.iter().filter_map(|(event, range)| {
+        let delimiter = match event {
+            Event::InlineMath(_) => 1,
+            Event::DisplayMath(_) => 2,
+            _ => return None,
+        };
+        Some(Formula { range: range.clone(), delimiter })
+    })
+}
+
+/// The formula `at` stands inside, past its start and before its end: the
+/// one a caret there opens as its source.
+pub fn formula_in(events: &[(Event<'_>, Range<usize>)], at: usize) -> Option<Formula> {
+    formulas(events).find(|formula| formula.range.start < at && at < formula.range.end)
+}
+
+/// Enter: a code line, a new item, a paragraph split, or one level out. In
+/// an open formula, a line break in its source.
 pub fn enter(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize) -> Option<Plan> {
     let containers = Containers::at(text, events, caret);
+    if formula_in(events, caret).is_some() {
+        return Some(Plan::insert(caret, format!("\n{}", containers.continuation())).checked(text));
+    }
     let content = text[containers.content_start(text)..containers.line.end].trim_matches([' ', '\t']);
     let empty_task = matches!(containers.stack.last(), Some(Container::Item { task: Some(_), .. }))
         && matches!(content, "[ ]" | "[x]" | "[X]");
@@ -481,6 +520,10 @@ pub fn enter(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize) -> 
 
 /// Shift+Enter: a backslash hard break, or an indented newline in code.
 pub fn hard_break(text: &str, events: &[(Event<'_>, Range<usize>)], caret: usize) -> Option<Plan> {
+    // In an open formula a backslash would be TeX: a plain line break.
+    if formula_in(events, caret).is_some() {
+        return enter(text, events, caret);
+    }
     let containers = Containers::at(text, events, caret);
     let plan = match containers.leaf {
         Leaf::Code { .. } => code_enter(text, caret, &containers),
@@ -552,6 +595,7 @@ mod tests {
             ("pasted lines before a paragraph", "‸\nb\n", "a\n", "a\n‸\nb\n"),
             ("between blank lines stays", "a\n\n‸\n\nb\n", "x", "a\n\nx‸\n\nb\n"),
             ("blank code line stays", "```\na\n‸\nb\n```\n", "x", "```\na\nx‸\nb\n```\n"),
+            ("blank line in a display formula fills it", "$$\nx\n‸\n$$\n", "y", "$$\nx\ny‸\n$$\n"),
         ] {
             case(rule, before, after, |text, events, caret| {
                 Some(type_text(text, events, caret, typed)).filter(|plan| !plan.edits.is_empty())
@@ -563,6 +607,9 @@ mod tests {
     fn enter_continues_the_containers() {
         for (rule, before, after) in [
             ("paragraph split", "a‸b\n", "a\n\n‸b\n"),
+            ("line in open math", "a $x‸y$\n", "a $x\n‸y$\n"),
+            ("line in open display math", "$$\nx‸y\n$$\n", "$$\nx\n‸y\n$$\n"),
+            ("quoted line in open math", "> $$\n> x‸\n> $$\n", "> $$\n> x\n> ‸\n> $$\n"),
             ("quoted paragraph", "> a‸b\n", "> a\n>\n> ‸b\n"),
             ("tight bullet", "- a‸\n", "- a\n- ‸\n"),
             ("star bullet", "* a‸\n", "* a\n* ‸\n"),

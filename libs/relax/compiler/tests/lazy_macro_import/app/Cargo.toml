@@ -1,0 +1,8 @@
+[package]
+name = "lmi-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lmi-dep = { path = "../dep" }

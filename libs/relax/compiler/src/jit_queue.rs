@@ -172,21 +172,41 @@ impl Queue {
         self.sync_ahead();
         if self.entries.is_empty() { return; }
         self.refresh_cursor %= self.entries.len();
-        let entry = &mut self.entries[self.refresh_cursor];
+        let i = self.refresh_cursor;
         self.refresh_cursor += 1;
-        if entry.job.tier() == 0 { return; }
-        self.plan[entry.job.tier()][entry.class as usize].remove(&order(entry.key, entry.serial));
+        self.rekey(i, now);
+    }
+    /// Entry `i`'s class and key sampled again, its place in the plan with them. True: either moved.
+    fn rekey(&mut self, i: usize, now: &HeatNow) -> bool {
+        let entry = &mut self.entries[i];
+        if entry.job.tier() == 0 { return false; }
         let class = if entry.promoted { entry.class } else { job_class(&entry.job, now) };
+        let key = key(entry, now);
+        if class == entry.class && key == entry.key { return false; }
+        self.plan[entry.job.tier()][entry.class as usize].remove(&order(entry.key, entry.serial));
         if class != entry.class {
             budget::queued(entry.class, budget::JIT, -1);
             budget::queued(class, budget::JIT, 1);
             entry.class = class;
         }
-        entry.key = key(entry, now);
+        entry.key = key;
         self.plan[entry.job.tier()][entry.class as usize].insert(order(entry.key, entry.serial));
+        true
     }
+    /// The entry to start now. An O3 entry's heat is live (its slot's record is charged until the
+    /// build), so the one chosen has its key read again: moved since its last sample (code that
+    /// stopped running, or got hotter), it goes to its place and the pick runs again. Each entry
+    /// moves at most once per pick (its key is then current).
     fn head(&mut self, now: &HeatNow, takes: Takes) -> Option<usize> {
         self.refresh(now);
+        // (a key read twice at one `now` is the same unless the program charged the record in
+        // between: the walk ends after one pass over the entries whatever happens)
+        for _ in 0..self.entries.len() {
+            let i = self.first_for(takes)?;
+            if !matches!(self.entries[i].job, Job::O3(_)) || !self.rekey(i, now) {
+                return Some(i);
+            }
+        }
         self.first_for(takes)
     }
     /// The entry to start now, in rank order (head without its heat sample): the first class whose
@@ -702,13 +722,6 @@ pub(super) fn tiers_where(keep: impl Fn(&TierEntry) -> bool) -> Vec<TierEntry> {
     drain_tier_inbox();
     lock().entries.iter().filter_map(|e| if let Job::O3(t) = e.job { keep(&t).then_some(t) } else { None }).collect()
 }
-/// Takes the O3 entries `gone` off the queue (tier_revalidate). By the whole entry, not by slot: hot
-/// code counted again is queued again within microseconds, and that new entry stays.
-pub(super) fn drop_tiers(gone: Vec<TierEntry>) {
-    if !gone.is_empty() {
-        lock().drop_tiers(&gone.into_iter().collect());
-    }
-}
 fn note_job(tier: usize, slot: Option<u32>, ns: u64) {
     JOB_CPU[tier].fetch_add(ns, Ordering::Relaxed);
     JOB_RUNS[tier].fetch_add(1, Ordering::Relaxed);
@@ -763,12 +776,6 @@ impl Queue {
             if !self.entries[i].promoted { gone.push(self.remove(i)); }
         }
         gone
-    }
-    fn drop_tiers(&mut self, gone: &std::collections::HashSet<TierEntry>) {
-        let mut i = 0;
-        while i < self.entries.len() {
-            if matches!(&self.entries[i].job, Job::O3(e) if gone.contains(e)) { self.remove(i); } else { i += 1; }
-        }
     }
     /// Promotes slot `id`'s queued and running jobs to their waiters' class; returns whether a
     /// queued one can start now.
@@ -1081,36 +1088,6 @@ pub(super) fn view(n: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_queued_slot_keeps_the_heat_it_was_queued_at() {
-        const S: u64 = 1_000_000_000;
-        let mut q = Queue::new();
-        let now = 1000 * S;
-        let (cold, hot, old_cold) = ((u32::MAX - 1, 0, now, 1 << 15), (u32::MAX - 2, 0, now, 1 << 34), (u32::MAX - 3, 0, now - 40 * S, 1 << 15));
-        for e in [cold, hot, old_cold] {
-            q.push(Job::O3(e), e.2);
-        }
-        let keys = [0, 1, 2].map(|i| q.entries[i].key);
-        assert!(keys[1] > keys[2] && keys[2] > keys[0], "the hottest first, then what waited longest: {keys:?}");
-        q.drop_tiers(&[cold, hot, old_cold].into_iter().collect());
-    }
-
-    #[test]
-    fn a_slot_queued_again_keeps_its_new_entry() {
-        let mut q = Queue::new();
-        let (old, new, other) = ((7, 0, 100, 5), (7, 0, 200, 5), (8, 0, 100, 5));
-        for e in [old, other, new] {
-            q.push(Job::O3(e), e.2);
-        }
-        q.drop_tiers(&[old].into_iter().collect());
-        let left: Vec<TierEntry> = q.entries.iter().filter_map(|e| if let Job::O3(t) = e.job { Some(t) } else { None }).collect();
-        assert_eq!(left.len(), 2);
-        assert!(left.contains(&new) && left.contains(&other), "only the entry counted again goes: {left:?}");
-        for e in [new, other] {
-            q.drop_tiers(&[e].into_iter().collect());
-        }
-    }
 
     #[test]
     fn a_jobs_cpu_goes_to_its_tier_and_slot() {

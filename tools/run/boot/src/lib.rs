@@ -286,6 +286,13 @@ pub struct Boot {
     caption_look: Option<makepad_hal::HostCaption>,
     /// the title the app gave its window (the lent window's), once it did
     app_title: Option<String>,
+    /// the backend replaces a lost GPU device (`info_flags::DEVICE_RESET`): a loss is waited out
+    recovers: bool,
+    /// the GPU device is lost and not replaced yet: nothing is drawn until the HAL's
+    /// `DeviceReset`, as an app draws nothing then (`Cx::gpu_device_lost`)
+    device_lost: bool,
+    /// the window's icon (`icon`), uploaded again on a new device
+    icon: Option<Icon>,
 }
 
 impl Boot {
@@ -349,6 +356,9 @@ impl Boot {
             focused: true,
             caption_look: None,
             app_title: None,
+            recovers: info.flags & info_flags::DEVICE_RESET != 0,
+            device_lost: false,
+            icon: None,
         };
         if let Some(chrome) = boot.dump.as_ref().and_then(|d| d.chrome) {
             boot.chrome = chrome;
@@ -385,28 +395,20 @@ impl Boot {
         writer.window_create(window, window_kind::NORMAL | style, Id::NONE, geometry, false);
         writer.str_def(1, boot.state.app.as_bytes());
         writer.window_title(window, 1);
-        let vertices: Vec<u8> = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        let indices: Vec<u8> = [0_u32, 1, 2, 0, 2, 3]
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
+        let (vertices, indices) = quad();
         writer.buffer_create(
             gpu::VERTICES,
             buffer_kind::VERTEX,
             vertices.len() as u64,
             Attr::default(),
         );
-        writer.buffer_update(gpu::VERTICES, 0, &vertices);
         writer.buffer_create(
             gpu::INDICES,
             buffer_kind::INDEX,
             indices.len() as u64,
             Attr::default(),
         );
-        writer.buffer_update(gpu::INDICES, 0, &indices);
+        upload_quad(&mut writer);
         let text = text::Text::new(&mut writer)?;
         program.create(&mut writer, info.dialect);
         hal.submit(&writer.buf());
@@ -496,7 +498,32 @@ impl Boot {
             renderer.icon_aspect = Some(icon.aspect());
             renderer.dirty = true;
             Hal::global().submit(&writer.buf());
+            self.icon = Some(icon);
         }
+    }
+
+    /// `DeviceReset`: the HAL made a new GPU device and kept every id (it rebuilt the pipelines
+    /// and restored the glyph atlas); what this session uploaded is gone, so it is uploaded
+    /// again and the window paints again, as an app's session does (`Cx::hal_device_reset`).
+    fn device_reset(&mut self, generation: u32) {
+        eprintln!("relax: GPU device {generation} is up; the run window uploads and paints again");
+        self.device_lost = false;
+        let Some(renderer) = &mut self.renderer else { return };
+        let mut writer = CmdWriter::new(HOST);
+        upload_quad(&mut writer);
+        if let Some(icon) = &self.icon {
+            icon.fill(&mut writer);
+        }
+        // the field's instances are written again from nothing by its next frame
+        renderer.field.device_reset();
+        renderer.layer.blurred = None;
+        renderer.dirty = true;
+        renderer.redraw = true;
+        Hal::global().submit(&writer.buf());
+        let now = Instant::now();
+        self.layer_next = now;
+        self.veil_next = now;
+        self.ring.next_frame = now;
     }
 
     pub fn layout_revision(&self) -> u64 {
@@ -839,6 +866,7 @@ impl Boot {
             return false;
         }
         let mut alive = true;
+        let mut reset = None;
         let mut drag_queries = Vec::new();
         let window = self.window;
         let mut latencies = self.latencies.take();
@@ -1029,15 +1057,26 @@ impl Boot {
                     eprintln!("relax: the boot window ends: the system asked the app to quit");
                     alive = false
                 }
+                // a backend that replaces a lost device (a driver reset, a GPU hang recovery) gives
+                // the run a new one: the window waits for it, drawing nothing, as the app does
+                HalEvent::DeviceLost { generation, .. } if self.recovers => {
+                    if !std::mem::replace(&mut self.device_lost, true) {
+                        eprintln!("relax: GPU device {generation} was lost; the run waits for the HAL to replace it");
+                    }
+                }
                 HalEvent::DeviceLost { .. } => {
-                    eprintln!("relax: the boot window ends: the graphics device was lost");
+                    eprintln!("relax: the boot window ends: the graphics device was lost, and this backend cannot replace it");
                     alive = false
                 }
+                HalEvent::DeviceReset { generation } => reset = Some(generation),
                 _ => {}
             }
         });
         self.queue = queue;
         self.latencies = latencies;
+        if let Some(generation) = reset {
+            self.device_reset(generation);
+        }
         if !drag_queries.is_empty() {
             // answered at once: the window system starts the move only while the button is down
             let mut writer = CmdWriter::new(HOST);
@@ -1143,7 +1182,7 @@ impl Boot {
     /// the halted view (when something changed: it never animates, the field is frozen) or
     /// nothing.
     fn presents(&self) -> Option<Presents> {
-        if !self.geometry[2..].iter().all(|v| v.is_finite() && *v > 0.0) {
+        if self.device_lost || !self.geometry[2..].iter().all(|v| v.is_finite() && *v > 0.0) {
             return None;
         }
         self.window?;
@@ -1414,6 +1453,9 @@ impl Boot {
             return Some("its size is not known");
         }
         let Some(renderer) = &self.renderer else { return Some("it has no renderer") };
+        if self.device_lost {
+            return Some("its GPU device is lost: it waits for the HAL to replace it");
+        }
         if renderer.active.is_none() {
             return Some("its shaders are compiling");
         }
@@ -1837,6 +1879,9 @@ impl Boot {
     /// (or a ring faded in all the way and hovered alike) presents the window once, not at the
     /// ring's frame rate. True: it drew one.
     fn present_ring(&mut self, window: Id, tip: Option<(Arc<text::Shaped>, String)>, dark: bool) -> bool {
+        if self.device_lost {
+            return false;
+        }
         let reduce_motion = self.environment.reduce_motion;
         let dpi = self.dpi;
         let Some((look, mut shown)) = self.ring_shows(tip.as_ref().map(|(_, text)| text.clone()), dark) else { return false };
@@ -1936,7 +1981,7 @@ impl Boot {
     /// The boot field: in the boot window, or over the running app (the window layer, the
     /// start screen's veil).
     fn present_field(&mut self) {
-        let Some(window) = self.window else { return };
+        let Some(window) = self.window.filter(|_| !self.device_lost) else { return };
         let viewport = [self.geometry[2], self.geometry[3]];
         let dpi = self.dpi;
         let pixels = makepad_hal::window_pixels(viewport.map(f64::from), dpi as f64).map(|n| n as f32);
@@ -2258,6 +2303,20 @@ impl Boot {
         renderer.presented_revision = renderer.layout_revision;
         renderer.presented_scroll = renderer.scroll;
     }
+}
+
+/// The unit quad every pipeline draws its instances on: its vertices and indices.
+fn quad() -> (Vec<u8>, Vec<u8>) {
+    let vertices = [0.0_f32, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let indices = [0_u32, 1, 2, 0, 2, 3].iter().flat_map(|v| v.to_le_bytes()).collect();
+    (vertices, indices)
+}
+
+/// The quad's contents, into its buffers (made at `Boot::new`, again on a new device).
+fn upload_quad(writer: &mut CmdWriter) {
+    let (vertices, indices) = quad();
+    writer.buffer_update(gpu::VERTICES, 0, &vertices);
+    writer.buffer_update(gpu::INDICES, 0, &indices);
 }
 
 /// The window layer's textures: made at `size` (window pixels), or destroyed (`None`).

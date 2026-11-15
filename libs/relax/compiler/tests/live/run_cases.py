@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hot-reload cases for `makepad live` (local/plans/hotreload.md section 8).
+"""Hot-reload cases for `makepad live`.
 
 usage: run_cases.py --makepad <makepad binary> [--only name[,name..]] [--copies N] [--verbose] [--keep DIR]
 

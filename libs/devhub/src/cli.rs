@@ -709,6 +709,9 @@ pub fn main(args: &[String]) -> i32 {
     if a.first() == Some(&"reports") {
         return crate::reports::cli(&a[1..]);
     }
+    if a.first() == Some(&"intake") {
+        return crate::intake::cli(&a[1..]);
+    }
     let c = match control() {
         Ok(c) => c,
         Err(e) => {

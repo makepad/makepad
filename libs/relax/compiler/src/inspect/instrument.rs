@@ -1167,6 +1167,20 @@ pub fn pause_for_patch() -> bool {
 /// The pause is a patch's (`pause_for_patch`): its install resumes the program in a moment.
 static PATCH_PAUSE: AtomicBool = AtomicBool::new(false);
 
+/// A pause for a report or an inspection holds no program thread inside the compiler's front end
+/// (a front read: a lazy compile's type check, a check ahead): held there, its read kept every
+/// front writer out while the program stayed paused -- an `inspect eval` at a parked stale access
+/// failed after 30 s, "the compiler's front end stayed busy (read by makepad at typeck_ahead)".
+/// Such a thread runs on and is held once it has left the front end (the pause's sweep). A
+/// patch's pause holds every thread, as it reads their stacks before its install. Async-signal-
+/// safe (the Linux hold handler asks): two atomic loads. Where a pause holds threads: the Apple
+/// pause, the Linux and Android aarch64 hold handler (inspect/threads.rs); elsewhere a pause
+/// holds no thread.
+#[cfg(any(target_vendor = "apple", target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
+pub(crate) fn pause_lets_front_readers_go() -> bool {
+    PAUSED.load(Relaxed) && !PATCH_PAUSE.load(Relaxed)
+}
+
 /// Whether the program is paused for a report or an inspection (not a patch's moment).
 pub fn paused() -> bool {
     PAUSED.load(SeqCst) && !PATCH_PAUSE.load(SeqCst)
@@ -1380,6 +1394,7 @@ mod pause_imp {
     pub(crate) unsafe fn reset_statics() {
         relax_session::reset_static(&HELD, relax_session::sync::Mutex::new(Vec::new()));
         relax_session::reset_static(&KEPT, relax_session::sync::Mutex::new(Vec::new()));
+        relax_session::reset_static(&DECLINED, relax_session::sync::Mutex::new(Vec::new()));
     }
     extern "C" {
         static mach_task_self_: u32;
@@ -1418,12 +1433,7 @@ mod pause_imp {
         let _ = crate::inspect::threads::self_os_id();
         let mut rest: Vec<crate::inspect::threads::Thread> = Vec::with_capacity(list.len());
         unsafe {
-            let zs = zones();
-            for &z in zs {
-                if let Some(f) = zone_fn(z, 5) {
-                    f(z);
-                }
-            }
+            lock_zones();
             // no allocation or free from here to the unlock: `held` has room, the threads move
             // out of `list` by drain (its buffer is freed after the unlock)
             for (k, t) in list.drain(..).enumerate() {
@@ -1434,14 +1444,92 @@ mod pause_imp {
                     rest.push(t);
                 }
             }
-            for &z in zs.iter().rev() {
-                if let Some(f) = zone_fn(z, 6) {
-                    f(z);
-                }
-            }
+            unlock_zones();
         }
         drop((list, picked, rest));
+        // a thread inside the compiler's front end goes on (super::pause_lets_front_readers_go)
+        if super::pause_lets_front_readers_go() {
+            let readers = front_readers();
+            let mut out = Vec::new();
+            let mut k = 0;
+            while k < held.len() {
+                if held[k].handle != 0 && readers.contains(&held[k].handle) {
+                    let t = held.remove(k);
+                    crate::inspect::threads::resume(&t);
+                    out.push(t);
+                } else {
+                    k += 1;
+                }
+            }
+            if !out.is_empty() {
+                let n = held.len();
+                // (HELD's lock first released: a sweep takes DECLINED's, then HELD's)
+                drop(held);
+                DECLINED.lock().unwrap_or_else(|e| e.into_inner()).extend(out);
+                let _k = crate::zone_alloc::kept();
+                let _ = crate::run_threads::spawn("run-inspect-pause", || {
+                    crate::inspect::heap::exclude_this_thread();
+                    while crate::run_threads::sleep(std::time::Duration::from_millis(5)) && sweep_declined() {}
+                });
+                return n;
+            }
+        }
         held.len()
+    }
+    /// The threads the pause let go inside the compiler's front end (pause), until it holds them.
+    static DECLINED: relax_session::sync::Mutex<Vec<crate::inspect::threads::Thread>> = relax_session::sync::Mutex::new(Vec::new());
+    /// The pthread handles of the threads with a front read now (jit::front_holders: a thread
+    /// stopped between taking its read and listing it, a few instructions, is not seen).
+    fn front_readers() -> Vec<u64> {
+        crate::jit::front_holders::snapshot().iter().map(|r| r.0).collect()
+    }
+    unsafe fn lock_zones() {
+        for &z in zones() {
+            if let Some(f) = zone_fn(z, 5) {
+                f(z);
+            }
+        }
+    }
+    unsafe fn unlock_zones() {
+        for &z in zones().iter().rev() {
+            if let Some(f) = zone_fn(z, 6) {
+                f(z);
+            }
+        }
+    }
+    /// One sweep of the threads the pause let go: each is stopped, and held when it has left the
+    /// front end (let go again when not). False: none is left to hold, or the pause ended.
+    fn sweep_declined() -> bool {
+        let mut declined = DECLINED.lock().unwrap_or_else(|e| e.into_inner());
+        let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+        // (a resume clears the flag, then takes HELD's lock: a sweep it did not wait for holds nothing)
+        if !super::PAUSED.load(std::sync::atomic::Ordering::SeqCst) {
+            declined.clear();
+            return false;
+        }
+        held.reserve(declined.len());
+        let mut stopped = Vec::with_capacity(declined.len());
+        unsafe {
+            lock_zones();
+            for t in declined.iter() {
+                stopped.push(crate::inspect::threads::suspend(t));
+            }
+            unlock_zones();
+        }
+        let readers = front_readers();
+        let mut k = 0;
+        for ok in stopped {
+            if !ok {
+                // it ended
+                declined.remove(k);
+            } else if declined[k].handle != 0 && readers.contains(&declined[k].handle) {
+                crate::inspect::threads::resume(&declined[k]);
+                k += 1;
+            } else {
+                held.push(declined.remove(k));
+            }
+        }
+        !declined.is_empty()
     }
     pub fn resume() -> usize {
         let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
@@ -1449,6 +1537,8 @@ mod pause_imp {
         for t in held.drain(..) {
             crate::inspect::threads::resume(&t);
         }
+        drop(held);
+        DECLINED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         n
     }
     /// Out of the pause's set: no resume reaches it (its Mach suspension stays until the run's end,
@@ -1739,6 +1829,60 @@ mod name_tests {
         assert_eq!(name_match(t, "makepad_model_script::vector::Outline::move_to"), Match::Exact);
         assert_eq!(name_match(t, "crate::vector::Outline::move_to"), Match::Exact);
         assert_eq!(name_match("a::b::f", "crate::f"), Match::Tail);
+    }
+}
+
+#[cfg(all(test, any(target_vendor = "apple", all(target_os = "linux", target_arch = "x86_64"))))]
+mod pause_tests {
+    use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+
+    /// A pause for a report holds no program thread inside the compiler's front end: the thread
+    /// runs on while it reads, is held once it has left, and a front writer gets in while the
+    /// program stays paused. (Held while it read, the main thread kept the front end for as long
+    /// as a stale access stayed parked: the module fixtures' `inspect eval` failed after 30 s,
+    /// "the compiler's front end stayed busy (read by makepad at typeck_ahead)", 11-12.)
+    #[test]
+    fn a_pause_holds_no_thread_inside_the_compilers_front_end() {
+        isolated_test!(a_pause_holds_no_thread_inside_the_compilers_front_end);
+        static STEP: AtomicU32 = AtomicU32::new(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::Builder::new().name("pause-reader".into()).spawn(move || {
+            tx.send(crate::inspect::threads::self_os_id()).unwrap();
+            let read = crate::jit::front_read("pause test");
+            STEP.store(1, SeqCst);
+            while STEP.load(SeqCst) < 2 { std::hint::spin_loop(); }
+            drop(read);
+            while STEP.load(SeqCst) < 3 { std::hint::spin_loop(); }
+        }).unwrap();
+        let os_id = rx.recv().unwrap();
+        while STEP.load(SeqCst) < 1 { std::thread::yield_now(); }
+        // The pause is asked for, and its effect read, from a thread of the runtime's inspector
+        // (as `inspect pause` and a stale access's report are): the pause holds every program
+        // thread, this test's own among them (on Linux, held asleep, it waited out the hold's 10
+        // minutes).
+        let inspector = std::thread::Builder::new().name("run-inspect-t".into()).spawn(move || {
+            super::pause_program();
+            // (several of the pause's sweeps, 5 ms apart)
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            let reading_held = super::held_now(os_id);
+            let writer_while_read = crate::jit::FRONT_RW.try_write().is_ok();
+            STEP.store(2, SeqCst);
+            let t0 = std::time::Instant::now();
+            while !super::held_now(os_id) && t0.elapsed().as_secs() < 5 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let held_after = super::held_now(os_id);
+            let writer_while_paused = crate::jit::FRONT_RW.try_write().is_ok();
+            super::resume_program();
+            STEP.store(3, SeqCst);
+            (reading_held, writer_while_read, held_after, writer_while_paused)
+        }).unwrap();
+        let (reading_held, writer_while_read, held_after, writer_while_paused) = inspector.join().unwrap();
+        reader.join().unwrap();
+        assert!(!reading_held, "a thread holding a front read is not held by the pause");
+        assert!(!writer_while_read, "(the reader still read: no writer got in)");
+        assert!(held_after, "the thread is held once it has left the front end");
+        assert!(writer_while_paused, "a front writer gets in while the program stays paused");
     }
 }
 

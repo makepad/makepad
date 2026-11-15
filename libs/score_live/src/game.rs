@@ -21,8 +21,8 @@
 //! The instrument's `render` never allocates, locks or frees.
 
 use crate::compose::Composer;
-use crate::live::{ClockSource, Cmd, LiveConfig, LiveScore};
-use crate::model::{self, Diag};
+use crate::live::{ClockSource, Cmd, LiveConfig, LiveScore, LiveThread};
+use crate::model::{self, Diag, ScoreDoc};
 use crate::player::{prepare, prepare_slice, transport, ClockMode, Player};
 use crate::render::transport_bpm;
 use makepad_audio_synth::instrument::Instrument;
@@ -159,51 +159,160 @@ struct Inline {
     tempo: Arc<makepad_audio_engine::feed::TempoFeed>,
 }
 
-/// Prepare `source` as a game's music at the bus's `rate`.
-pub fn music(source: &str, rate: f32, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), Vec<Diag>> {
+/// A score's graph prepared at a bus rate ([`prepare_music`]), not playing yet. It is `Send`:
+/// a host prepares it on a worker, may launch it there too ([`PreparedMusic::launch`]), and
+/// starts it ([`PreparedMusic::start`]) where its music plays.
+pub struct PreparedMusic {
+    source: String,
+    rate: f32,
+    doc: ScoreDoc,
+    name: String,
+    stage: Stage,
+}
+
+/// How far a prepared score got off the thread that starts it.
+enum Stage {
+    Graph(Player),
+    /// Its realtime start's halves, and its composer's thread waiting for the source.
+    Launched(Box<Launched>),
+}
+
+struct Launched {
+    parts: Parts,
+    live: LiveThread,
+}
+
+/// What a start hands out but the composer: the instrument, and the handle's transport and
+/// rings.
+struct Parts {
+    shared: Arc<Shared>,
+    events: Consumer<MusicEvent>,
+    swaps: Producer<Swap>,
+    retired: Consumer<Box<Player>>,
+    slice: OwnerSlice,
+    layout: Arc<Layout>,
+    instrument: MusicInstrument,
+}
+
+// A prepared graph must be able to leave the worker that prepared it.
+const _: fn() = || { fn send<T: Send>() {} send::<PreparedMusic>(); };
+
+/// Load `source` and prepare its graph at `rate`: the costly half of [`music`].
+pub fn prepare_music(source: &str, rate: f32) -> Result<PreparedMusic, Vec<Diag>> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let loaded = model::load(source)?;
     let name = format!("music_{}", NEXT.fetch_add(1, Ordering::Relaxed));
     let instance = prepare(&loaded.doc, rate, &name, ClockMode::Own, None, 1)?;
-    let shared = Arc::new(Shared {
-        beat: AtomicU64::new(0f64.to_bits()),
-        bpm: AtomicU64::new(transport_bpm(&loaded.doc).to_bits()),
-        playing: AtomicBool::new(false),
-        gain: AtomicU32::new(1f32.to_bits()),
-        fade: AtomicU32::new(0f32.to_bits()),
-        parked: AtomicBool::new(false),
-        bar: AtomicU64::new(loaded.doc.beats_per_bar().to_bits()),
-        ready: AtomicBool::new(clocking == Clocking::Headless),
-        clock_reads: AtomicU32::new(0),
-    });
-    let slice = instance.slice.clone();
-    let (events_in, events) = ring(EVENTS);
-    let (swaps, swaps_out) = ring(2);
-    let (retired_in, retired) = ring(4);
-    let (live, inline) = match clocking {
-        Clocking::Realtime => {
-            let live = LiveScore::new(LiveConfig { instance: name.clone(), lookahead: LOOKAHEAD, clock: Arc::new(Clock(shared.clone())) });
-            live.set_source(source);
-            (Some(live), None)
-        }
-        Clocking::Headless => {
-            let feeds = instance.feeds.clone();
-            let tempo = makepad_audio_engine::feed::tempo_feed(&transport(&name));
-            (None, Some(Box::new(Inline { composer: Composer::new(loaded), feeds, tempo })))
-        }
-    };
-    let layout = instance.layout.clone();
-    let playing_index = layout.controls.get(&format!("{}.playing", transport(&name))).map(|c| c.0);
-    if let (Clocking::Realtime, Some(index)) = (clocking, playing_index) {
-        instance.schedule.controls.set_manual(index, 0.0);
+    Ok(PreparedMusic { source: source.to_string(), rate, doc: loaded.doc, name, stage: Stage::Graph(instance) })
+}
+
+impl PreparedMusic {
+    pub fn source(&self) -> &str {
+        &self.source
     }
-    let handle = GameMusic { shared: shared.clone(), live, inline, events, swaps, retired, name, slice, layout, generation: 1, rate, section: None, cued: f64::NEG_INFINITY };
-    let instrument = MusicInstrument {
-        instance: Box::new(instance), shared, events: events_in, swaps: swaps_out, retired: retired_in, playing_index,
-        rate, gain: 1.0, parked: false, last_beat: None,
-        buffer_l: vec![0.0; CHUNK].into_boxed_slice(), buffer_r: vec![0.0; CHUNK].into_boxed_slice(), buffered: 0, taken: 0, pass: ClockChunk::default(), started: false,
-    };
-    Ok((handle, instrument))
+
+    pub fn rate(&self) -> f32 {
+        self.rate
+    }
+
+    pub fn doc(&self) -> &ScoreDoc {
+        &self.doc
+    }
+
+    /// Build what a realtime start needs here (a host's worker), so the start only hands it
+    /// over: the instrument, the handle's rings, and the composer's thread, which waits for the
+    /// source the start sends. Without threads ([`crate::live::threads_available`]) it stays a
+    /// graph.
+    pub fn launch(self) -> PreparedMusic {
+        let Self { source, rate, doc, name, stage } = self;
+        let stage = match stage {
+            Stage::Graph(instance) if crate::live::threads_available() => {
+                let parts = Parts::new(instance, &doc, &name, rate, Clocking::Realtime);
+                let live = LiveThread::new(live_config(&name, &parts.shared), &transport(&name));
+                Stage::Launched(Box::new(Launched { parts, live }))
+            }
+            stage => stage,
+        };
+        PreparedMusic { source, rate, doc, name, stage }
+    }
+
+    /// The handle and the instrument (what [`music`] returns). Headless clocking loads the source
+    /// again for its composer (the composer's VM stays on the thread that runs it).
+    pub fn start(self, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), Vec<Diag>> {
+        let Self { source, rate, doc, name, stage } = self;
+        let instance = match (stage, clocking) {
+            (Stage::Launched(launched), Clocking::Realtime) => {
+                let Launched { parts, live } = *launched;
+                let live = LiveScore::from_thread(live);
+                live.set_source(&source);
+                return Ok(parts.finish(name, rate, Some(live), None));
+            }
+            // Launched for the bus, its graph is not a headless one: prepare that.
+            (Stage::Launched(_), Clocking::Headless) => return prepare_music(&source, rate)?.start(clocking),
+            (Stage::Graph(instance), _) => instance,
+        };
+        let feeds = (clocking == Clocking::Headless).then(|| instance.feeds.clone());
+        let parts = Parts::new(instance, &doc, &name, rate, clocking);
+        let (live, inline) = match feeds {
+            None => {
+                let live = LiveScore::new(live_config(&name, &parts.shared));
+                live.set_source(&source);
+                (Some(live), None)
+            }
+            Some(feeds) => {
+                let loaded = model::load(&source)?;
+                let tempo = makepad_audio_engine::feed::tempo_feed(&transport(&name));
+                (None, Some(Box::new(Inline { composer: Composer::new(loaded), feeds, tempo })))
+            }
+        };
+        Ok(parts.finish(name, rate, live, inline))
+    }
+}
+
+fn live_config(name: &str, shared: &Arc<Shared>) -> LiveConfig {
+    LiveConfig { instance: name.to_string(), lookahead: LOOKAHEAD, clock: Arc::new(Clock(shared.clone())) }
+}
+
+impl Parts {
+    fn new(instance: Player, doc: &ScoreDoc, name: &str, rate: f32, clocking: Clocking) -> Parts {
+        let shared = Arc::new(Shared {
+            beat: AtomicU64::new(0f64.to_bits()),
+            bpm: AtomicU64::new(transport_bpm(doc).to_bits()),
+            playing: AtomicBool::new(false),
+            gain: AtomicU32::new(1f32.to_bits()),
+            fade: AtomicU32::new(0f32.to_bits()),
+            parked: AtomicBool::new(false),
+            bar: AtomicU64::new(doc.beats_per_bar().to_bits()),
+            ready: AtomicBool::new(clocking == Clocking::Headless),
+            clock_reads: AtomicU32::new(0),
+        });
+        let slice = instance.slice.clone();
+        let (events_in, events) = ring(EVENTS);
+        let (swaps, swaps_out) = ring(2);
+        let (retired_in, retired) = ring(4);
+        let layout = instance.layout.clone();
+        let playing_index = layout.controls.get(&format!("{}.playing", transport(name))).map(|c| c.0);
+        if let (Clocking::Realtime, Some(index)) = (clocking, playing_index) {
+            instance.schedule.controls.set_manual(index, 0.0);
+        }
+        let instrument = MusicInstrument {
+            instance: Box::new(instance), shared: shared.clone(), events: events_in, swaps: swaps_out, retired: retired_in, playing_index,
+            rate, gain: 1.0, parked: false, last_beat: None,
+            buffer_l: vec![0.0; CHUNK].into_boxed_slice(), buffer_r: vec![0.0; CHUNK].into_boxed_slice(), buffered: 0, taken: 0, pass: ClockChunk::default(), started: false,
+        };
+        Parts { shared, events, swaps, retired, slice, layout, instrument }
+    }
+
+    fn finish(self, name: String, rate: f32, live: Option<LiveScore>, inline: Option<Box<Inline>>) -> (GameMusic, MusicInstrument) {
+        let Parts { shared, events, swaps, retired, slice, layout, instrument } = self;
+        let handle = GameMusic { shared, live, inline, events, swaps, retired, name, slice, layout, generation: 1, rate, section: None, cued: f64::NEG_INFINITY };
+        (handle, instrument)
+    }
+}
+
+/// Prepare `source` as a game's music at the bus's `rate`.
+pub fn music(source: &str, rate: f32, clocking: Clocking) -> Result<(GameMusic, MusicInstrument), Vec<Diag>> {
+    prepare_music(source, rate)?.start(clocking)
 }
 
 impl GameMusic {

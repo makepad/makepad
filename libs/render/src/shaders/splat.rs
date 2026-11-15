@@ -106,11 +106,15 @@ script_mod! {
         // The grass's far carpet (renderer/grass_draw.rs set_grass_carpet):
         // the field's origin x, z and 1 / its width and depth; the sRGB lush
         // and dry blade (lush.w: the blades' wind); the screen's density
-        // (grass.rs GrassLod: full, reach; w 1 while a field grows).
+        // (grass.rs GrassLod: full, reach, the flowers' reach (0: none); w 1
+        // while a field grows); the flowers' heads as a far meadow shows
+        // them (grass_draw.rs bloom_mean: mean sRGB, the share of the view
+        // they take).
         grass_map: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         grass_lush: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         grass_dry: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         grass_lod: uniform(vec4(1.0, 1.0, 0.0, 0.0))
+        grass_bloom: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         // The trampled field (crate::trample) as the blades read it: its
         // corner x, z and 1 / side (0: nothing pressed, no read). It rides
         // the PBR lane's emissive slot (renderer/grass_draw.rs
@@ -120,7 +124,7 @@ script_mod! {
         wind_scroll: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
         // The grass field's cover raster at u (0..1 over the field):
-        // density in x, dryness in y. It is bound on the PBR lane's ORM
+        // density in x, dryness in y, the flowers' bloom in z. It is bound on the PBR lane's ORM
         // slot (renderer/grass_draw.rs GRASS_COVER_SLOT): this lane reads no
         // ORM map and the model shaders have no free texture slot, so the
         // slot is read here and nowhere else.
@@ -177,7 +181,18 @@ script_mod! {
             let gust = self.scene_wind(xz, self.wind_state, self.wind_scroll)
             let lift = 1.0 + (gust.z - 0.5) * 0.12 * self.grass_lush.w
             let shade = mix(mix(0.55, 0.3, cover.x * 0.5), 1.12, t) * (1.0 + tufts * 0.32) * (1.0 + 0.12 * cover.z)
-            let col = mix(self.grass_lush.xyz, self.grass_dry.xyz, dry) * vec3(1.0 + hue, 1.0, 1.0 - hue * 1.5)
+            var col = mix(self.grass_lush.xyz, self.grass_dry.xyz, dry) * vec3(1.0 + hue, 1.0, 1.0 - hue * 1.5)
+            // As the flowers (grass.rs GrassLod::flowers) fade over the last
+            // 20% of their reach (shaders/grass.rs), the bloom's colour takes
+            // over the share of the view they gave up. Before it, seen low,
+            // the thinned heads hide the ground behind them and hold their
+            // share (the meadow guard's far bands).
+            if self.grass_lod.z > 0.0 {
+                let fu = (xz - self.grass_map.xy) * self.grass_map.zw
+                let bloom = self.grass_cover_at(fu).z
+                let fd = length(self.eye.xyz - wp)
+                col = mix(col, self.grass_bloom.xyz, bloom * min(self.grass_bloom.w, 0.8) * smoothstep(self.grass_lod.z * 0.8, self.grass_lod.z, fd))
+            }
             let albedo = self.to_scene(col * (shade * lift * detail))
             let v = normalize(self.eye.xyz - wp)
             let n = normalize(vec3(v.x, 0.0, v.z) * 0.64 + vec3(0.0, 0.9 + 1.5 * cover.z, 0.0))

@@ -223,6 +223,7 @@ impl Renderer {
         // bound, the scene's. First, after a live edit, what the renderer
         // derived from the shaders' defaults is derived again (variants.rs).
         self.follow_reload(cx.cx);
+        self.restore_textures(cx.cx);
         self.resolve_ibl_for(cx.cx, &world.environment, scope);
         self.prepare_stock_ibl(cx.cx);
         self.push_item_instances(cx.cx, world);
@@ -1627,6 +1628,7 @@ impl Renderer {
                 * (scene_state.viewport_rect.size.y * cx.current_dpi_factor()).max(1.0) as f32;
             self.prepare_foliage_lane(cx.cx);
             self.prepare_splat_lane(cx.cx);
+            self.prepare_impostor_lane(cx.cx);
             self.draw_models_inner(
                 cx,
                 ModelDraw::Diffuse(draw),

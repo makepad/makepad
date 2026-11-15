@@ -569,7 +569,7 @@ subprocess.run(["cargo", "build", "--profile", "host", "-q", "-p", "makepad-run"
 binary = os.path.join(os.environ.get("CARGO_TARGET_DIR", "target"), "host", "makepad")
 warm = subprocess.run([sys.executable, "libs/relax/compiler/tests/live_closure_owner_app/run.py", "--makepad", binary, "--warm"], capture_output=True, text=True)
 print(warm.stdout[-3000:], flush=True)
-consts = subprocess.run([sys.executable, "libs/relax/compiler/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
+consts = subprocess.run([sys.executable, "tools/run/tests/cache_warm_const_edit/run.py", "--makepad", binary], capture_output=True, text=True)
 print(consts.stdout[-3000:], flush=True)
 shutil.rmtree(root, ignore_errors=True)
 sys.exit(0 if landed == len(results) and warm.returncode == 0 and consts.returncode == 0 else 1)

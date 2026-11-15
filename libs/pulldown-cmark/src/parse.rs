@@ -2276,6 +2276,44 @@ mod test {
     }
 
     #[test]
+    fn inline_math_pandoc_dollar_rules() {
+        fn math_events(text: &str) -> (Vec<Event<'_>>, bool) {
+            let mut math = Vec::new();
+            let mut text_dollar = false;
+            for event in Parser::new_ext(text, Options::ENABLE_MATH) {
+                match event {
+                    Event::InlineMath(_) | Event::DisplayMath(_) => math.push(event),
+                    Event::Text(text) => text_dollar |= text.contains('$'),
+                    _ => {}
+                }
+            }
+            (math, text_dollar)
+        }
+
+        for (input, math, text_dollar) in [
+            ("$x$5", vec![], true),
+            ("$x$ 5", vec![Event::InlineMath("x".into())], false),
+            ("$$5$$", vec![Event::DisplayMath("5".into())], false),
+            ("$5 and $10", vec![], true),
+            (
+                "$5 and 10$",
+                vec![Event::InlineMath("5 and 10".into())],
+                false,
+            ),
+            ("$2x+1$", vec![Event::InlineMath("2x+1".into())], false),
+            (r"\$x$", vec![], true),
+            ("`$x$`", vec![], false),
+            (
+                "$a$, $b$",
+                vec![Event::InlineMath("a".into()), Event::InlineMath("b".into())],
+                false,
+            ),
+        ] {
+            assert_eq!(math_events(input), (math, text_dollar), "case {input:?}");
+        }
+    }
+
+    #[test]
     #[cfg(target_pointer_width = "64")]
     fn node_size() {
         let node_size = std::mem::size_of::<Node<Item>>();

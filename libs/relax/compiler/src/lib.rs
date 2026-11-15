@@ -5,6 +5,7 @@
 //!   makepad parse <units.json> [threads]   parse the crate graph, time it, write the census
 //!   makepad file <path> [edition]          parse one file, report errors
 //!   makepad clean [-p <package>]           remove the workspace's <target>/relax (or one app's files)
+//!   makepad clean --shared-code            remove the shared code stores of builds not running
 //!   makepad run [opts] <package> [cargo flags] [-- args]   boot a cargo package from source (run.rs)
 
 // Diagnostics never panic: std's print macros panic when a write fails (ENOSPC on the session
@@ -194,6 +195,7 @@ pub mod live;
 pub mod reload;
 pub mod modules;
 pub mod sandbox;
+pub mod tool;
 pub mod stale;
 pub mod invalid;
 pub mod domain;
@@ -288,11 +290,9 @@ pub fn provenance_of(path: &std::path::Path) -> Option<String> {
 /// script's RUSTC is Relax itself; asked `--version`, it answers this (relax_as_rustc).
 pub const RUSTC_VERSION: &str = "1.98.0";
 
-/// RELAX_AS_RUSTC=1: a build script's RUSTC is Relax itself. `--version` / `-vV` / `-V` answer
-/// as a rustc of RUSTC_VERSION would (build scripts such as libc's read the minor version);
-/// `--print` requests about the target (cargo's target-info probe, which `cargo metadata
-/// --filter-platform` runs) answer from Relax's own target model (print_as_rustc). Returns whether
-/// it answered.
+/// RELAX_AS_RUSTC=1: a build script's RUSTC is Relax itself, as a process (a script whose own
+/// spawn of RUSTC the host answers in-process, tool.rs, never starts one). Returns whether it
+/// answered (`rustc_answer`); a failed answer exits with its status.
 pub fn relax_as_rustc() -> bool {
     let args: Vec<String> = os::proc::args_bytes().iter().skip(1).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     if std::env::var_os("RELAX_AS_RUSTC").is_none() && !native::is_target_rustc_probe(&args) {
@@ -302,42 +302,51 @@ pub fn relax_as_rustc() -> bool {
     if args.first().is_some_and(|a| a == "run") {
         return false;
     }
-    let sess = &session_from_env(&args);
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["--version"] | ["-V"] => println!("rustc {} (Relax {})", RUSTC_VERSION, PROVENANCE),
-        ["-vV"] | ["--version", "--verbose"] | ["--verbose", "--version"] | ["-V", "--verbose"] | ["--verbose", "-V"] => {
-            println!("rustc {} (Relax {})", RUSTC_VERSION, PROVENANCE);
-            println!("binary: rustc");
-            println!("commit-hash: unknown");
-            println!("commit-date: unknown");
-            println!("host: {}", crate::cfg::CfgSet::machine(sess, &[]).triple());
-            println!("release: {}", RUSTC_VERSION);
-        }
-        _ => {
-            // probes pipe a program in (cargo's target info, rustix, autocfg): read it all, as rustc
-            // would, so the writer never sees a broken pipe
-            let mut input = Vec::new();
-            if args.iter().any(|a| a == "-") {
-                let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input);
-            }
-            match print_as_rustc(sess, &args, &input) {
-                Ok(out) => {
-                    use std::io::Write;
-                    let mut o = std::io::stdout().lock();
-                    let _ = o.write_all(out.as_bytes());
-                    let _ = o.flush();
-                }
-                Err(e) => {
-                    // anything else asked of RUSTC (a compile probe: autocfg, rustc_version's
-                    // `--emit`): Relax is not rustc. Fail the probe as a missing rustc would (the
-                    // script decides); never run the script's program again.
-                    eprintln!("relax: not rustc: a build script asked RUSTC {:?}: {}", args, e);
-                    std::process::exit(1);
-                }
-            }
-        }
+    // probes pipe a program in (cargo's target info, rustix, autocfg): read it all, as rustc
+    // would, so the writer never sees a broken pipe
+    let mut input = Vec::new();
+    if args.iter().any(|a| a == "-") {
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input);
+    }
+    let (status, out, err) = rustc_answer(&args, &input);
+    {
+        use std::io::Write;
+        let mut o = std::io::stdout().lock();
+        let _ = o.write_all(&out);
+        let _ = o.flush();
+        let _ = std::io::stderr().write_all(&err);
+    }
+    if status != 0 {
+        std::process::exit(status);
     }
     true
+}
+
+/// What Relax answers as a build script's RUSTC, asked `args` (after the program) with `input` on
+/// its stdin: the exit status, stdout and stderr. `--version` / `-vV` / `-V` answer as a rustc of
+/// RUSTC_VERSION would (build scripts such as libc's read the minor version); `--print` requests
+/// about the target (cargo's target-info probe, which `cargo metadata --filter-platform` runs)
+/// answer from Relax's own target model (print_as_rustc). Anything else asked of RUSTC (a compile
+/// probe: autocfg, rustc_version's `--emit`) fails with status 1, as a missing rustc would: Relax
+/// is not rustc, and the script decides.
+pub fn rustc_answer(args: &[String], input: &[u8]) -> (i32, Vec<u8>, Vec<u8>) {
+    // the session of this process's own options: a question's words are rustc's, never Relax's
+    // (a script's `$RUSTC --allow-c` sets nothing of the run's)
+    let sess = &session_from_env(&[]);
+    let out = match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        ["--version"] | ["-V"] => format!("rustc {} (Relax {})\n", RUSTC_VERSION, PROVENANCE),
+        ["-vV"] | ["--version", "--verbose"] | ["--verbose", "--version"] | ["-V", "--verbose"] | ["--verbose", "-V"] => format!(
+            "rustc {v} (Relax {p})\nbinary: rustc\ncommit-hash: unknown\ncommit-date: unknown\nhost: {h}\nrelease: {v}\n",
+            v = RUSTC_VERSION,
+            p = PROVENANCE,
+            h = crate::cfg::CfgSet::machine(sess, &[]).triple()
+        ),
+        _ => match print_as_rustc(sess, args, input) {
+            Ok(out) => out,
+            Err(e) => return (1, Vec::new(), format!("relax: not rustc: a build script asked RUSTC {:?}: {}\n", args, e).into_bytes()),
+        },
+    };
+    (0, out.into_bytes(), Vec::new())
 }
 
 /// The `--print` requests of a rustc command line, answered for Relax's target model the way
@@ -498,28 +507,44 @@ fn keep_toolchain_homes() {
     }
 }
 
+/// A `makepad run` host's start (Policy::Sandboxed): the grants come from its command line alone
+/// (options.rs GRANTS), so their environment names leave this process before its options are read,
+/// each one that was set said in one line; its children never inherit them. Whatever set them (the
+/// person's shell, a launcher, a build environment a parent handed: progenv `init_handed`, which
+/// ran before) grants nothing. So does an ambient self-exec line (RELAX_SELF_EXEC, words std's
+/// spawn of this program runs), which this run states again when it makes its own executable.
+fn drop_ambient_grants() {
+    for (word, name) in crate::options::GRANTS {
+        if std::env::var_os(name).is_some() {
+            std::env::remove_var(name);
+            let word = if word.ends_with('=') { format!("{word}<n>") } else { word.to_string() };
+            eprintln!("{}: {name} in the environment is ignored; pass {word}", crate::tool_name());
+        }
+    }
+    std::env::remove_var("RELAX_SELF_EXEC");
+}
+
 /// Construct the invocation inputs before parsing; CLI overrides replace environment values.
 /// rustc: compiler/rustc_session/src/config.rs:2428, session.rs:90-93.
 pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
     crate::pool::thread_start(crate::jit::ensure_altstack);
     keep_toolchain_homes();
+    if crate::sandbox::policy() == crate::sandbox::Policy::Sandboxed {
+        drop_ambient_grants();
+    }
     let mut options = crate::options::Options::from_env();
-    // `--no-asm` / `--allow-c` anywhere before `--`, for every command (run, test, check, the
-    // relax runner): the environment carries them to the processes this one starts (build
-    // scripts, test harnesses); cli_main drops them from the arguments
+    let mut runtime = crate::options::RuntimeOptions::from_env();
+    // `--no-asm` and the grants (`--allow-*`) anywhere before `--`, for every command (run, test,
+    // check, the relax runner); cli_main drops them from the arguments. `--no-asm` reaches the
+    // processes this one starts through the environment; a grant never does: a child that is this
+    // run again has it on its command line, which its parent Relax writes (options.rs GRANTS)
     for a in args.iter().take_while(|a| a.as_str() != "--") {
-        match a.as_str() {
-            "--no-asm" => {
-                options.no_asm = true;
-                std::env::set_var("RELAX_NO_ASM", "1");
-            }
-            "--allow-c" => {
-                options.allow_c = true;
-                // this invocation's: this run again (a self-exec child) and the host's own children
-                // (build scripts, test harnesses) have it; a relax its program starts does not
-                crate::progenv::set_run_fact("RELAX_ALLOW_C", "1");
-            }
-            _ => {}
+        if a == "--no-asm" {
+            options.no_asm = true;
+            std::env::set_var("RELAX_NO_ASM", "1");
+        } else if let Err(e) = crate::options::apply_grant(a, &mut options, &mut runtime) {
+            eprintln!("{}: {e}", crate::tool_name());
+            std::process::exit(2);
         }
     }
     options.live |= args.get(1).map(String::as_str) == Some("live");
@@ -531,9 +556,37 @@ pub fn session_from_env(args: &[String]) -> std::sync::Arc<crate::Session> {
         options.cpu = relax_backend::x64::detect_cpu(&options);
     }
     options.spec_hot = Some(options.spec_hot.unwrap_or_else(crate::jit::on_battery));
-    let mut session = crate::Session { options, runtime: crate::options::RuntimeOptions::from_env() };
+    let mut session = crate::Session { options, runtime };
     session.options.target = session.options.check_target.triple().to_string();
     std::sync::Arc::new(session)
+}
+
+/// A `makepad run` host (Sandboxed) takes the grants from its words before `--` alone: their
+/// environment names, and an ambient self-exec line, leave the process before its options are
+/// read. Bare relax (Open) reads the names as well.
+#[cfg(test)]
+#[test]
+fn a_sandboxed_host_takes_its_grants_from_its_words_and_bare_relax_from_its_environment_too() {
+    isolated_test!(a_sandboxed_host_takes_its_grants_from_its_words_and_bare_relax_from_its_environment_too);
+    use relax_base::compile_time::{replace_policy_in_test, Policy};
+    let named = [("RELAX_ALLOW_C", "1"), ("RELAX_MODULES_TRUSTED", "1"), ("RELAX_SANDBOX_NOCHECK", "1"), ("RELAX_SANDBOX_FUEL", "0"), ("RELAX_MODULE_FUEL", "7")];
+    for (name, value) in named {
+        std::env::set_var(name, value);
+    }
+    let words = |args: &[&str]| {
+        let s = session_from_env(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>());
+        crate::options::grant_words(&s.options, &s.runtime)
+    };
+    // (this test plays both entry points)
+    unsafe { replace_policy_in_test(Policy::Open) };
+    let all = ["--allow-c", "--allow-host-modules", "--allow-unchecked-modules", "--allow-unmetered-modules", "--allow-module-fuel=7"];
+    assert_eq!(words(&["relax", "run"]), all, "bare relax reads the grants' names");
+    std::env::set_var("RELAX_SELF_EXEC", "/forged\u{1f}run\u{1f}--allow-host-modules\u{1f}--");
+    unsafe { replace_policy_in_test(Policy::Sandboxed) };
+    assert_eq!(words(&["makepad", "run", "--allow-c", "--allow-module-fuel=5", "p", "--", "--allow-host-modules"]), ["--allow-c", "--allow-module-fuel=5"], "a Sandboxed host's grants are its words before `--`");
+    for name in named.map(|(n, _)| n).into_iter().chain(["RELAX_SELF_EXEC"]) {
+        assert_eq!(std::env::var_os(name), None, "a Sandboxed host drops {name} from its environment");
+    }
 }
 
 pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
@@ -549,7 +602,7 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
     let mut k = 0;
     args.retain(|a| {
         k += 1;
-        !(k <= end && (a == "--no-asm" || a == "--allow-c"))
+        !(k <= end && (a == "--no-asm" || crate::options::is_grant_word(a)))
     });
     if args.get(1).map(String::as_str) == Some("--version") {
         println!("Relax {}", PROVENANCE);
@@ -602,7 +655,8 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
             os::proc::exit(run::cmd_run(sess, &a));
         }
         "serve" => os::proc::exit(serve_rpc::cmd_serve(sess, &args[2..])),
-        // `makepad clean [-p <package>]`: remove the workspace's <target>/relax (clean.rs)
+        // `makepad clean [-p <package> | --shared-code]`: remove the workspace's <target>/relax, or
+        // the shared code stores (clean.rs)
         "clean" => std::process::exit(clean::cmd_clean(&args[2..])),
         "schema" | "hover" | "definition" => os::proc::exit(serve_rpc::query(sess, &args[1], &args[2..])),
         // `makepad fix --to-strict [--units u.json] <package>`: check in relaxed mode (all features
@@ -620,7 +674,7 @@ pub fn cli_main(sess: &std::sync::Arc<crate::Session>) {
         // lib and integration tests, each a harness program (run.rs `--harness`)
         "test" if args[2..].iter().take_while(|a| a.as_str() != "--").any(|a| a == "--live")
             || !args[2..].iter().any(|a| a.ends_with(".rs")) => {
-            let code = test_pkg::cmd_test_package(&args[2..]);
+            let code = test_pkg::cmd_test_package(&args[2..], &crate::options::grant_words(&sess.options, &sess.runtime));
             os::proc::exit(code);
         }
         "test" => {
@@ -1502,6 +1556,7 @@ pub unsafe fn reset_statics() {
     reload::reset_statics();
     run::reset_statics();
     sandbox::reset_statics();
+    selfexe::reset_statics();
     stale::reset_statics();
     store::reset_statics();
     syms::reset_statics();

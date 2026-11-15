@@ -24,6 +24,10 @@
 //! `runner` (the entry scripts write it), then the host's default (the `makepad` binary: the
 //! runner of the checkout it was built from).
 //!
+//! A record grants nothing: an `arg` before `--` that is a grant (`--allow-*`: options.rs GRANTS)
+//! is an error naming it, as a record is a file RELAX_HOME names, and a grant is the person's
+//! word on the command line.
+//!
 //! A launcher that wants to follow a start sets RELAX_REPORT_TO=<file> in the environment
 //! of the launch (macOS `open --env`): a `run` then reports to it as with `--report-to`, after a
 //! first line `pid <pid>` that names the process.
@@ -70,7 +74,12 @@ pub fn parse(id: &str, text: &str) -> Result<Launch, String> {
                 Some((k, v)) if !k.is_empty() => l.env.push((k.to_string(), v.to_string())),
                 _ => return Err(format!("line {}: env wants NAME=value", n + 1)),
             },
-            "arg" => l.args.push(value.to_string()),
+            "arg" => {
+                if !l.args.iter().any(|a| a == "--") && relax_compiler::options::is_grant_word(value) {
+                    return Err(format!("line {}: `{value}` is a grant, which a launch record does not give: pass it on the command line", n + 1));
+                }
+                l.args.push(value.to_string())
+            }
             _ => return Err(format!("line {}: unknown key `{key}`", n + 1)),
         }
     }
@@ -255,6 +264,12 @@ mod tests {
         assert!(parse("x", "title\tX\n").is_err());
         assert!(parse("x", "arg\trun\nbogus\tv\n").is_err());
         assert!(parse("x", "env\tnovalue\narg\trun\n").is_err());
+        // a grant is the person's word on the command line, never a record's; the program's own
+        // words after `--` are its own
+        let e = parse("x", "arg\trun\narg\t--allow-c\narg\tapp\n").unwrap_err();
+        assert!(e.contains("line 2: `--allow-c` is a grant"), "{e}");
+        assert!(parse("x", "arg\trun\narg\t--allow-module-fuel=9\narg\tapp\n").is_err());
+        assert!(parse("x", "arg\trun\narg\tapp\narg\t--\narg\t--allow-c\n").is_ok());
         assert!(!valid_id("../etc"));
         assert!(!valid_id(""));
         assert!(valid_id("stage_2-x"));

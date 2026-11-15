@@ -1,5 +1,5 @@
-//! The wasm32 web target run on this machine (`RELAX_CHECK_TARGET=wasm32-unknown-unknown`,
-//! local/agent_state/wasm/web32.DESIGN.md): the runtime half. The program's pointers are 32-bit
+//! The wasm32 web target run on this machine (`RELAX_CHECK_TARGET=wasm32-unknown-unknown`): the
+//! runtime half (codegen's web32.rs is the compile half). The program's pointers are 32-bit
 //! offsets into the linear memory's 4 GB window at `BASE` (zone_alloc/web.rs), so everything it
 //! can address is placed in the window (offsets):
 //! - `UNIT_AT`: the program unit's reservation (code, data, statics, the symbol table);

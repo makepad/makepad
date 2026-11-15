@@ -72,14 +72,17 @@ pub enum PdfOp {
 
     // XObject
     PaintXObject(String), // Do
+    /// Paint a shading resource (`sh`).
+    PaintShading(String),
 
     // Inline image (decoded separately)
     InlineImage { dict: PdfDict, data: Vec<u8> },
 
-    // Marked content (we skip these but parse them to not break)
-    BeginMarkedContent(String),      // BMC
-    BeginMarkedContentProps(String), // BDC
-    EndMarkedContent,                // EMC
+    // Marked content, including the original property-list operand.
+    BeginMarkedContent(String), // BMC
+    /// Begin marked content with a tag and an inline dictionary or property name.
+    BeginMarkedContentProps(String, PdfObj), // BDC
+    EndMarkedContent, // EMC
 }
 
 /// Item in a TJ array: either a string or a position adjustment.
@@ -324,15 +327,19 @@ fn build_op(kw: &str, operands: &[PdfObj]) -> Option<PdfOp> {
 
         // XObject
         "Do" => Some(PdfOp::PaintXObject(get_name(operands, 0)?)),
+        "sh" => Some(PdfOp::PaintShading(get_name(operands, 0)?)),
 
-        // Marked content (skip but parse)
+        // Marked content
         "BMC" => {
             let tag = get_name(operands, 0).unwrap_or_default();
             Some(PdfOp::BeginMarkedContent(tag))
         }
         "BDC" => {
             let tag = get_name(operands, 0).unwrap_or_default();
-            Some(PdfOp::BeginMarkedContentProps(tag))
+            Some(PdfOp::BeginMarkedContentProps(
+                tag,
+                operands.get(1).cloned().unwrap_or(PdfObj::Null),
+            ))
         }
         "EMC" => Some(PdfOp::EndMarkedContent),
 

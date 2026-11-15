@@ -9,6 +9,9 @@ pub enum MathNode {
     Symbol(Symbol),
     /// Fraction: \frac{numerator}{denominator}
     Frac(Vec<MathNode>, Vec<MathNode>),
+    /// One part over the other with no rule between, set as a fraction's
+    /// parts are: the inside of `\binom{n}{k}`.
+    Stack(Vec<MathNode>, Vec<MathNode>),
     /// Square root or nth root: \sqrt{content} or \sqrt[n]{content}
     Sqrt(Option<Vec<MathNode>>, Vec<MathNode>),
     /// Superscript: base^{exponent} (base is previous node, stored separately)
@@ -37,6 +40,16 @@ pub enum MathNode {
     /// \overbrace{...} / \underbrace{...}
     Overbrace(Vec<MathNode>),
     Underbrace(Vec<MathNode>),
+    /// `\overset{over}{base}` / `\underset{under}{base}`: the base with a
+    /// script-size part centered above or below it, as an operator's limits.
+    /// The pair spaces as its base does (`\overset{!}{=}` is a relation).
+    Overset(Vec<MathNode>, Vec<MathNode>),
+    Underset(Vec<MathNode>, Vec<MathNode>),
+    /// `\xrightarrow[under]{over}`, `\xleftarrow[under]{over}`: the arrow
+    /// grown to its labels, which sit above and below it; a relation.
+    ExtensibleArrow(Symbol, Vec<MathNode>, Vec<MathNode>),
+    /// `\boxed{...}`: the content in display style inside a ruled frame.
+    Boxed(Vec<MathNode>),
     /// \mathbf{...}, \mathit{...}, etc.
     MathVariant(MathVariant, Vec<MathNode>),
     /// \sum, \prod, \int with limits — encoded as the symbol followed by Sub/Superscript
@@ -286,6 +299,7 @@ pub enum MatrixKind {
     DoubleVert, // Vmatrix
     Cases,      // cases
     Aligned,    // aligned, align: columns alternate right and left aligned
+    Substack,   // \substack{a \\ b}: one centered column of tight script rows
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -624,6 +638,37 @@ impl<'a> Parser<'a> {
                 let den = self.parse_brace_group();
                 return Some(MathNode::Frac(num, den));
             }
+            "binom" | "dbinom" | "tbinom" => {
+                let n = self.parse_brace_group();
+                let k = self.parse_brace_group();
+                return Some(MathNode::LeftRight(
+                    Delimiter::Paren,
+                    vec![MathNode::Stack(n, k)],
+                    Delimiter::Paren,
+                ));
+            }
+            "overset" | "underset" => {
+                let script = self.parse_brace_group();
+                let base = self.parse_brace_group();
+                return Some(if name == "overset" {
+                    MathNode::Overset(script, base)
+                } else {
+                    MathNode::Underset(script, base)
+                });
+            }
+            "xrightarrow" | "xleftarrow" => {
+                let under = self.parse_bracket_group().unwrap_or_default();
+                let over = self.parse_brace_group();
+                let arrow = if name == "xrightarrow" { Symbol::RightArrow } else { Symbol::LeftArrow };
+                return Some(MathNode::ExtensibleArrow(arrow, over, under));
+            }
+            "boxed" => {
+                let c = self.parse_brace_group();
+                return Some(MathNode::Boxed(c));
+            }
+            "substack" => {
+                return Some(self.parse_substack());
+            }
             "sqrt" => {
                 let index = self.parse_bracket_group();
                 let content = self.parse_brace_group();
@@ -884,6 +929,32 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    /// `\substack{a \\ b}`'s argument: one cell per `\\`-separated row. A
+    /// trailing `\\` starts no row, as at the end of an environment.
+    fn parse_substack(&mut self) -> MathNode {
+        self.skip_whitespace();
+        if self.peek() != Some('{') {
+            return MathNode::Matrix(MatrixKind::Substack, vec![vec![self.parse_brace_group()]]);
+        }
+        self.advance();
+        let mut rows = Vec::new();
+        loop {
+            let cell = self.parse_until(|p| p.peek() == Some('}') || p.remaining().starts_with("\\\\"));
+            if self.remaining().starts_with("\\\\") {
+                self.pos += 2;
+                rows.push(vec![cell]);
+                continue;
+            }
+            if self.peek() == Some('}') {
+                self.advance();
+            }
+            if !cell.is_empty() || rows.is_empty() {
+                rows.push(vec![cell]);
+            }
+            return MathNode::Matrix(MatrixKind::Substack, rows);
         }
     }
 

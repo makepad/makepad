@@ -580,6 +580,38 @@ impl<T> RangeBounds<T> for RangeToInclusive<T> {
         Bound::Included(&self.end)
     }
 }
+// real core's ops::range module, for the definition paths stability.tsv gates (one_sided_range)
+mod range {
+    use super::{RangeBounds, RangeFrom, RangeTo, RangeToInclusive};
+    /// library/core/src/ops/range.rs: which end a one-sided range has (feature `one_sided_range`).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum OneSidedRangeBound {
+        StartInclusive,
+        End,
+        EndInclusive,
+    }
+    /// library/core/src/ops/range.rs: a range bounded at one end only (`a..`, `..b`, `..=b`), as
+    /// slice's `split_off` takes.
+    pub trait OneSidedRange<T>: RangeBounds<T> {
+        fn bound(self) -> (OneSidedRangeBound, T);
+    }
+    impl<T> OneSidedRange<T> for RangeTo<T> {
+        fn bound(self) -> (OneSidedRangeBound, T) {
+            (OneSidedRangeBound::End, self.end)
+        }
+    }
+    impl<T> OneSidedRange<T> for RangeFrom<T> {
+        fn bound(self) -> (OneSidedRangeBound, T) {
+            (OneSidedRangeBound::StartInclusive, self.start)
+        }
+    }
+    impl<T> OneSidedRange<T> for RangeToInclusive<T> {
+        fn bound(self) -> (OneSidedRangeBound, T) {
+            (OneSidedRangeBound::EndInclusive, self.end)
+        }
+    }
+}
+pub use self::range::{OneSidedRange, OneSidedRangeBound};
 impl<T> RangeBounds<T> for RangeInclusive<T> {
     fn start_bound(&self) -> Bound<&T> {
         Bound::Included(&self.start)

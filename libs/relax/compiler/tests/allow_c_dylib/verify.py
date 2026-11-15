@@ -14,6 +14,7 @@ binary does, in the same order of runs, with one native cache:
             callback lookup finds demo_answer in the search folder);
   warm:     the rpath run again reuses the native build;
   cold:     with the native library gone and cargo's units fresh, the link arguments are read again.
+libdemo is installed in its folder first, as an SDK is: the build script writes only its OUT_DIR.
 Uses cargo and the system C toolchain; no registry dependency.
 """
 import atexit
@@ -44,6 +45,10 @@ base.update(CARGO_INCREMENTAL="0", CARGO_NET_OFFLINE="true", DEMO_SDK_DIR=str(sd
             CARGO_TARGET_DIR=str(scratch / "cargo"), RELAX_CACHE_DIR=str(scratch / "jit"))
 rpath = {"RUSTFLAGS": f"-C link-arg=-Wl,-rpath,{sdk}"}
 library = "libdemo.dylib" if sys.platform == "darwin" else "libdemo.so"
+sdk.mkdir(parents=True, exist_ok=True)
+demo_c = str(fixture / "cdemo" / "csrc" / "demo.c")
+shared = ["-dynamiclib", "-install_name", "@rpath/" + library] if sys.platform == "darwin" else ["-shared", "-fPIC"]
+subprocess.run([os.environ.get("CC", "cc"), *shared, "-o", str(sdk / library), demo_c], check=True)
 
 
 def run(label, args, extra=None, success=True):

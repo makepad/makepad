@@ -228,7 +228,7 @@ impl Widget for TexBurst {
                         width: 8,
                         height: 8,
                         format: CompressedTextureFormat::Bc7,
-                        data: Some(bc7),
+                        data: Some(bc7.into()),
                         max_level: Some(0),
                         wrap: TextureWrap::ClampToEdge,
                         updated: TextureUpdated::Full,

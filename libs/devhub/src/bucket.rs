@@ -2130,7 +2130,11 @@ fn hold_run_jits(log: &Path, part: &str, ask: &dyn Fn(&str, &str) -> Result<(), 
         let hold = format!("{stem}-run-{}", &key[..8]);
         match ask(&node, &format!("jit-keep {hold} {key}{}", bin.map_or(String::new(), |b| format!(" {b}")))) {
             Ok(()) => {
-                if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(run_holds(log)).and_then(|mut f| writeln!(f, "{node} {hold}")) {
+                // one write of the whole line: the run's shards end on their own threads, and a
+                // `writeln!` to the file wrote the node, the space, the hold and the newline apart,
+                // so two shards ending at once ran their lines together (two boxes' names as one, 11-14)
+                let line = format!("{node} {hold}\n");
+                if let Err(e) = std::fs::OpenOptions::new().create(true).append(true).open(run_holds(log)).and_then(|mut f| f.write_all(line.as_bytes())) {
                     eprintln!("bucket: {}: {e} (the hold of JIT {key} on {node} stays until released by hand)", run_holds(log).display());
                 }
             }
@@ -4616,6 +4620,39 @@ mod tests {
         assert_eq!(asked.borrow().clone(), vec![format!("box-a: jit-keep fast-15-c0da2f54 {k1}"), "box-a: jit-unkeep fast-15-run-c0da2f54".to_string(), "box-b: jit-unkeep fast-9-run-01234567".to_string()], "kept for its red, then its run's hold goes, and the superseded run's");
         assert!(!run_holds(&log).exists() && !logs.join("fast-9.log.holds").exists(), "the run's holds and the older unjudged run's are let go once");
         assert!(logs.join("fast-20.log.holds").exists(), "a newer run's stay: no verdict superseded it");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// Shards that end at once on two boxes each list their JIT's hold whole, and the verdict lets
+    /// each go on its own box: a holds line written in pieces ran two shards' together, and its
+    /// release asked for two holds at once on a "box" named by two boxes' names run together (11-14).
+    #[test]
+    fn shards_ending_at_once_on_two_boxes_hold_and_release_each_on_its_box() {
+        let home = std::env::temp_dir().join(format!("devhub-bucket-twoholds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let log = home.join("tests-7.log");
+        let (ka, kb) = ("0123456789abcdef01234567", "fedcba9876543210fedcba98");
+        let parts = [format!("L1 box-a: sources at work@0123456789\njit: kept {ka}\n"), format!("L2 box-b: sources at work@0123456789\njit: kept {kb}\n")];
+        let rounds = 200;
+        std::thread::scope(|scope| {
+            for part in &parts {
+                let log = &log;
+                scope.spawn(move || {
+                    for _ in 0..rounds { hold_run_jits(log, part, &|_, _| Ok(())); }
+                });
+            }
+        });
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |node: &str, line: &str| { asked.borrow_mut().push(format!("{node}: {line}")); Ok(()) };
+        let warned = std::cell::RefCell::new(Vec::new());
+        release_holds("tests", &run_holds(&log), &ask, &|_, line, _| warned.borrow_mut().push(line));
+        let asked = asked.into_inner();
+        let (a, b) = ("box-a: jit-unkeep tests-7-run-01234567", "box-b: jit-unkeep tests-7-run-fedcba98");
+        assert_eq!(asked.len(), 2 * rounds, "one release per hold taken: {:?}", &asked[..asked.len().min(4)]);
+        assert!(asked.iter().all(|l| l == a || l == b), "each hold is released on its own box by its own name: {:?}", asked.iter().find(|l| *l != a && *l != b));
+        assert_eq!(asked.iter().filter(|l| *l == a).count(), rounds, "box-a's holds, every one");
+        assert!(warned.into_inner().is_empty() && !run_holds(&log).exists(), "all released, the holds file gone");
         let _ = std::fs::remove_dir_all(&home);
     }
 

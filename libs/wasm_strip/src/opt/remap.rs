@@ -156,69 +156,25 @@ impl Remap {
         }
     }
 
-    /// Rewrites every reference, then moves the items. Imported items may
-    /// only be removed, never reordered.
+    /// Drops the removed items, then rewrites every reference of what stays and moves it to its
+    /// new slot. Imported items may only be removed, never reordered. The removed items go first:
+    /// a removed function's body may call another removed function or a removed import, a removed
+    /// global's init read a removed global, which have no new index (rewritten in place, such a
+    /// reference was the "reference to a removed item" of a module whose dead code called dead
+    /// imports).
     pub fn apply(&self, module: &mut Module) {
         let old_imported_funcs = module.num_imported(ExternKind::Func) as usize;
         let old_imported_globals = module.num_imported(ExternKind::Global) as usize;
         let old_imported_tables = module.num_imported(ExternKind::Table) as usize;
 
-        for func in &mut module.funcs {
-            map_one(&self.types, &mut func.ty);
-            self.expr(&mut func.body);
-        }
-        for_each_const_expr(module, &mut |expr| self.expr(expr));
-        for elem in &mut module.elems {
-            if let ElemMode::Active { table, .. } = &mut elem.mode {
-                map_one(&self.tables, table);
-            }
-            if let ElemItems::Funcs(funcs) = &mut elem.items {
-                for func in funcs {
-                    map_one(&self.funcs, func);
-                }
-            }
-        }
-        for export in &mut module.exports {
-            match export.kind {
-                ExternKind::Func => map_one(&self.funcs, &mut export.index),
-                ExternKind::Global => map_one(&self.globals, &mut export.index),
-                ExternKind::Table => map_one(&self.tables, &mut export.index),
-                ExternKind::Memory => {}
-            }
-        }
-        if let Some(start) = &mut module.start {
-            map_one(&self.funcs, start);
-        }
-        if let Some(names) = &mut module.names {
-            let remap_names = |list: &mut Vec<(u32, String)>, map: &Option<Vec<u32>>| {
-                if let Some(map) = map {
-                    let mut out: Vec<(u32, String)> = std::mem::take(list)
-                        .into_iter()
-                        .filter_map(|(index, name)| {
-                            let new = *map.get(index as usize)?;
-                            (new != GONE).then_some((new, name))
-                        })
-                        .collect();
-                    out.sort_by_key(|(index, _)| *index);
-                    out.dedup_by_key(|(index, _)| *index);
-                    *list = out;
-                }
-            };
-            remap_names(&mut names.funcs, &self.funcs);
-            remap_names(&mut names.globals, &self.globals);
-        }
-
-        // Imports: type references, then removal of the dropped ones.
+        // Imports: removal of the dropped ones.
         let mut counters = [0usize; 3];
         let funcs_map = self.funcs.as_deref();
         let globals_map = self.globals.as_deref();
         let tables_map = self.tables.as_deref();
-        module.imports.retain_mut(|import| {
-            let (slot, map) = match &mut import.desc {
-                ImportDesc::Func(ty) => {
-                    map_one(&self.types, ty);
-                    (0, funcs_map)
-                }
+        module.imports.retain(|import| {
+            let (slot, map) = match &import.desc {
+                ImportDesc::Func(_) => (0, funcs_map),
                 ImportDesc::Global(_) => (1, globals_map),
                 ImportDesc::Table(_) => (2, tables_map),
                 ImportDesc::Memory(_) => return true,
@@ -266,6 +222,57 @@ impl Remap {
         }
         if let Some(map) = &self.elems {
             module.elems = permute(std::mem::take(&mut module.elems), map, 0, 0);
+        }
+
+        // The references of what stays (old indices, wherever their item moved).
+        for import in &mut module.imports {
+            if let ImportDesc::Func(ty) = &mut import.desc {
+                map_one(&self.types, ty);
+            }
+        }
+        for func in &mut module.funcs {
+            map_one(&self.types, &mut func.ty);
+            self.expr(&mut func.body);
+        }
+        for_each_const_expr(module, &mut |expr| self.expr(expr));
+        for elem in &mut module.elems {
+            if let ElemMode::Active { table, .. } = &mut elem.mode {
+                map_one(&self.tables, table);
+            }
+            if let ElemItems::Funcs(funcs) = &mut elem.items {
+                for func in funcs {
+                    map_one(&self.funcs, func);
+                }
+            }
+        }
+        for export in &mut module.exports {
+            match export.kind {
+                ExternKind::Func => map_one(&self.funcs, &mut export.index),
+                ExternKind::Global => map_one(&self.globals, &mut export.index),
+                ExternKind::Table => map_one(&self.tables, &mut export.index),
+                ExternKind::Memory => {}
+            }
+        }
+        if let Some(start) = &mut module.start {
+            map_one(&self.funcs, start);
+        }
+        if let Some(names) = &mut module.names {
+            let remap_names = |list: &mut Vec<(u32, String)>, map: &Option<Vec<u32>>| {
+                if let Some(map) = map {
+                    let mut out: Vec<(u32, String)> = std::mem::take(list)
+                        .into_iter()
+                        .filter_map(|(index, name)| {
+                            let new = *map.get(index as usize)?;
+                            (new != GONE).then_some((new, name))
+                        })
+                        .collect();
+                    out.sort_by_key(|(index, _)| *index);
+                    out.dedup_by_key(|(index, _)| *index);
+                    *list = out;
+                }
+            };
+            remap_names(&mut names.funcs, &self.funcs);
+            remap_names(&mut names.globals, &self.globals);
         }
     }
 }

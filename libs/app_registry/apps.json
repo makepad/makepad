@@ -60,6 +60,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": true
   },
   {
+    "id": "party", "label": "Party", "package": "makepad-app-party",
+    "dir": "apps/party", "bin": "makepad-app-party", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "clock", "label": "Clock", "package": "makepad-app-clock",
     "dir": "apps/clock", "bin": "makepad-app-clock", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"], "mobile": true
