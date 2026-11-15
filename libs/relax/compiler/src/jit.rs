@@ -21839,6 +21839,20 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // build -- on the owner: twin_rir -- needs its base's front: the round ends without a snapshot,
     // this thread makes the fronts the take noted (`needs`) and asks again, as for `fronts`
     let twin_wait = std::cell::Cell::new(false);
+    // the twins a round's takes left out so: a try that made way for new fronts is not counted
+    // (as a candidate's own build below). A base's build wants the fronts of its own inline
+    // candidates a level per round: counted, a twin whose code came from the disk cache was
+    // left out for good after two, and a module's own code -- built again by every run --
+    // kept its calls to `u32::rotate_right` and `Range::next` (a SHA-256 loop: 8x the time)
+    let twin_skips: std::cell::RefCell<Vec<u32>> = Default::default();
+    // the twins left out for good (their counted tries made no new front: a front that cannot be
+    // made off the owner, or that another build took), and the fronts the takes that left them
+    // out noted: this build waits for the owner to build those, as for a candidate of its own
+    // (left_out_wait), and is queued again. Kept a call without that, `mix`'s rotates stayed
+    // calls for the run whenever its first build met its fronts unmade (one run in four)
+    let twin_out: std::cell::RefCell<Vec<u32>> = Default::default();
+    let mut twin_wanted: Vec<u32> = Vec::new();
+    let mut twin_asked = 0usize;
     let owner_fallback = |c: u32, upgrade: bool, split: bool| {
         let o = if split { split_out.borrow().get(&c).copied().unwrap_or(3) as usize } else { 0 };
         cand_skip(19 + if upgrade { 0 } else { 4 } + o);
@@ -22069,8 +22083,14 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
                 *n += 1;
                 if twin_base.is_some() && *n < SPLIT_TRIES {
                     twin_wait.set(true);
-                } else if tier1_trace() {
-                    eprintln!("O3 cand #{} {} left out: its build on the owner was skipped", c, short_name(&(&*up).fns[c as usize].name));
+                    twin_skips.borrow_mut().push(c);
+                } else {
+                    if twin_base.is_some() {
+                        twin_out.borrow_mut().push(c);
+                    }
+                    if tier1_trace() {
+                        eprintln!("O3 cand #{} {} left out: its build on the owner was skipped", c, short_name(&(&*up).fns[c as usize].name));
+                    }
                 }
             }
             compile_watch(None);
@@ -22154,6 +22174,10 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     const O3_TAKE_ROUNDS: u32 = 16;
     let snapped = match taken {
         Ok((s, n)) => {
+            if twin_out.borrow().len() > twin_asked {
+                twin_asked = twin_out.borrow().len();
+                twin_wanted.extend(n.iter().copied());
+            }
             needs.extend(n);
             s
         }
@@ -22256,6 +22280,13 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
     // out, the build installed incomplete and was built again when their bodies came (an app's
     // warm run: 277 incomplete O3 builds, the big ones built 3-5 times)
     let progress = needs.iter().any(|s| refronted.get(s).is_none_or(|n| *n < FRONT_TRIES));
+    for c in twin_skips.borrow_mut().drain(..) {
+        if progress && rounds < O3_TAKE_ROUNDS {
+            if let Some(n) = left_out.borrow_mut().get_mut(&c) {
+                *n = n.saturating_sub(1);
+            }
+        }
+    }
     for (c, wanted) in gave {
         let mut l = left_out.borrow_mut();
         let n = l.entry(c).or_insert(0);
@@ -22299,6 +22330,13 @@ pub unsafe fn compile_tier1(up: *mut Unit, id: u32) -> bool {
         lowered_end();
     }
     drop(front);
+    if snapped.is_some() && !twin_wanted.is_empty() {
+        twin_wanted.sort_unstable();
+        twin_wanted.dedup();
+        if left_out_wait(id, &twin_wanted, &BuildWants::noted()) != LeftOutWait::Never {
+            waiting.extend(twin_out.borrow().iter().copied());
+        }
+    }
     let t1 = cpu_ns();
     let Some((rir, version, (epoch, host_ver), sandboxed, assembled, callees, inline_all, ro, env, cfg, name, counts, hot_root)) = snapped else {
         if bailed {
