@@ -172,32 +172,68 @@ pub fn leases() -> Option<Arc<LeaseMaster>> {
 }
 
 /// The rustc the boxes of `os` run, when most of them agree (verify and CI take only those: a box
-/// on another toolchain makes the agree fixtures disagree); None: no majority (a tie), nothing is
-/// held back. Every box off the fleet's own version is said once, as an error.
+/// on another toolchain makes the agree fixtures disagree). On a tie among `os`'s boxes the
+/// fleet-wide majority decides when it is one of the tied versions; None only when it is not
+/// (nothing is held back then, said once). Every box off the fleet's own version is said once, as
+/// an error.
 pub fn fleet_rustc(ctx: &Ctx, os: &str) -> Option<String> {
     let nodes = ctx.leases.nodes();
     let versions: Vec<(String, String, String)> = nodes.iter().filter(|n| n.up).filter_map(|n| n.caps.as_ref().map(|c| (n.name.clone(), c.os.to_ascii_lowercase(), c.rustc.clone()))).filter(|(_, _, v)| !v.is_empty()).collect();
-    let majority = |of: &mut dyn Iterator<Item = &String>| -> Option<String> {
-        let mut count: std::collections::BTreeMap<&String, usize> = std::collections::BTreeMap::new();
-        for v in of {
-            *count.entry(v).or_default() += 1;
+    static SAID: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap();
+    let mut say_once = |key: (String, String), sev: crate::proto::Sev, line: String| {
+        if !said.contains(&key) {
+            said.push(key);
+            ctx.store.event("toolchain", sev, line, None);
         }
-        let best = count.values().copied().max()?;
-        let top: Vec<&&String> = count.iter().filter(|(_, n)| **n == best).map(|(v, _)| v).collect();
-        (top.len() == 1).then(|| (*top[0]).clone())
     };
-    if let Some(fleet) = majority(&mut versions.iter().map(|(_, _, v)| v)) {
-        static SAID: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
-        let mut said = SAID.lock().unwrap();
+    if let Some(fleet) = top_version(versions.iter().map(|(_, _, v)| v)).one() {
         for (node, _, v) in versions.iter().filter(|(_, _, v)| *v != fleet) {
-            if !said.iter().any(|(n, x)| n == node && x == v) {
-                said.push((node.clone(), v.clone()));
-                ctx.store.event("toolchain", crate::proto::Sev::Err, format!("toolchain: {node} runs rustc {v}, most of the fleet {fleet} (verify and CI hold back a box that is off its own OS's majority; the box's owner updates it)"), None);
-            }
+            say_once((node.clone(), v.clone()), crate::proto::Sev::Err, format!("toolchain: {node} runs rustc {v}, most of the fleet {fleet} (verify and CI hold back a box that is off its own OS's majority; the box's owner updates it)"));
         }
     }
     let os = os.to_ascii_lowercase();
-    majority(&mut versions.iter().filter(|(_, o, _)| *o == os).map(|(_, _, v)| v))
+    let pick = os_rustc(versions.iter().map(|(_, o, v)| (o.as_str(), v.as_str())), &os);
+    if let Err(tied) = &pick {
+        if !tied.is_empty() {
+            say_once((format!("tie:{os}"), tied.join(" ")), crate::proto::Sev::Warn, format!("toolchain: the {os} boxes split evenly between rustc {} and the fleet's majority is none of them; verify and CI do not pin rustc for {os} legs until one side is updated", tied.join(" and ")));
+        }
+    }
+    pick.ok()
+}
+
+/// The versions that occur most often (one: a majority; several: a tie; none: no versions).
+struct Top(Vec<String>);
+
+impl Top {
+    fn one(&self) -> Option<String> {
+        (self.0.len() == 1).then(|| self.0[0].clone())
+    }
+}
+
+fn top_version<'a>(of: impl Iterator<Item = &'a String>) -> Top {
+    let mut count: std::collections::BTreeMap<&String, usize> = std::collections::BTreeMap::new();
+    for v in of {
+        *count.entry(v).or_default() += 1;
+    }
+    let best = count.values().copied().max().unwrap_or(0);
+    Top(count.into_iter().filter(|(_, n)| *n == best && best > 0).map(|(v, _)| v.clone()).collect())
+}
+
+/// `os`'s rustc from the up boxes' (os, rustc) pairs: its own majority, or on a tie the
+/// fleet-wide majority when that is one of the tied versions. Err holds the tied versions when
+/// neither decides (empty: `os` has no boxes).
+fn os_rustc<'a>(boxes: impl Iterator<Item = (&'a str, &'a str)> + Clone, os: &str) -> Result<String, Vec<String>> {
+    let own: Vec<String> = boxes.clone().filter(|(o, _)| *o == os).map(|(_, v)| v.to_string()).collect();
+    let top = top_version(own.iter());
+    if let Some(v) = top.one() {
+        return Ok(v);
+    }
+    let all: Vec<String> = boxes.map(|(_, v)| v.to_string()).collect();
+    match top_version(all.iter()).one() {
+        Some(fleet) if top.0.contains(&fleet) => Ok(fleet),
+        _ => Err(top.0),
+    }
 }
 
 /// Lane work that waited this long takes a box from background work.
@@ -423,5 +459,24 @@ mod preempt_tests {
         assert!(!super::fits(&n("arch=arm64,os=macos"), Some(&caps)));
         assert!(super::fits(&n(""), Some(&caps)));
         assert!(!super::fits(&n(""), None));
+    }
+
+    #[test]
+    fn a_tie_on_one_os_takes_the_fleets_majority() {
+        let fleet = [("macos", "1.99.1"), ("macos", "1.100.0"), ("linux", "1.100.0"), ("linux", "1.100.0"), ("windows", "1.100.0")];
+        let pick = |boxes: &[(&'static str, &'static str)], os: &str| super::os_rustc(boxes.iter().copied(), os);
+        // one Mac per toolchain: the fleet's 1.100.0 decides, so the older Mac is held back
+        assert_eq!(pick(&fleet, "macos"), Ok("1.100.0".to_string()), "a per-OS tie falls back to the fleet's majority");
+        assert_eq!(pick(&fleet, "linux"), Ok("1.100.0".to_string()), "an OS with its own majority keeps it");
+        // a majority of its own wins over the fleet's
+        let own = [("macos", "1.99.1"), ("macos", "1.99.1"), ("macos", "1.100.0"), ("linux", "1.100.0"), ("linux", "1.100.0"), ("linux", "1.100.0")];
+        assert_eq!(pick(&own, "macos"), Ok("1.99.1".to_string()), "an OS's own majority is not overruled by the fleet");
+        // the fleet's majority is not among the tied versions: nothing to pin
+        let split = [("macos", "1.98.0"), ("macos", "1.99.1"), ("linux", "1.100.0"), ("linux", "1.100.0")];
+        assert_eq!(pick(&split, "macos"), Err(vec!["1.98.0".to_string(), "1.99.1".to_string()]), "a tie the fleet cannot decide names its versions");
+        // the fleet itself tied: no fallback either
+        let even = [("macos", "1.99.1"), ("macos", "1.100.0")];
+        assert_eq!(pick(&even, "macos"), Err(vec!["1.100.0".to_string(), "1.99.1".to_string()]), "a fleet-wide tie decides nothing");
+        assert_eq!(pick(&fleet, "freebsd"), Err(vec![]), "an OS without boxes has no rustc");
     }
 }

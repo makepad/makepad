@@ -148,6 +148,16 @@ impl<T: Scalar> HostBuf<T> {
         Arc::ptr_eq(&self.store, &other.store)
     }
 
+    /// How many handles keep the allocation alive: every clone and slice of it counts once.
+    pub fn holders(&self) -> usize {
+        Arc::strong_count(&self.store)
+    }
+
+    /// Names the allocation while any handle to it lives: equal for all its clones and slices.
+    pub fn allocation(&self) -> usize {
+        Arc::as_ptr(&self.store) as *const () as usize
+    }
+
     /// Mutable whole heap storage, only when unique and not a subrange view.
     pub fn get_mut(&mut self) -> Option<&mut Vec<T>> {
         if self.range.is_some() {
@@ -657,9 +667,15 @@ mod tests {
         let mut shared = buffer.clone();
         assert!(buffer.ptr_eq(&shared));
         assert!(buffer.get_mut().is_none());
+        let view = buffer.slice(1..2);
+        assert_eq!((buffer.holders(), view.allocation()), (3, buffer.allocation()), "a clone and a slice hold the allocation");
+        drop(view);
+        assert_eq!(buffer.holders(), 2, "a dropped handle no longer holds it");
         shared.make_mut()[0] = 4.0;
         assert_eq!(HostBuf::stats().cow, 1);
         assert!(!buffer.ptr_eq(&shared));
+        assert_ne!(shared.allocation(), buffer.allocation(), "a copy is a new allocation");
+        assert_eq!((buffer.holders(), shared.holders()), (1, 1));
         assert_eq!(buffer[0], 3.0, "the original must retain its contents");
         assert_eq!(shared[0], 4.0);
         shared.make_mut().push(5.0);

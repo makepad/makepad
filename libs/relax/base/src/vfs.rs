@@ -1,4 +1,4 @@
-//! Every file the front end reads goes through here (local/plans/run-from-git.md). Two backends
+//! Every file the front end reads goes through here (`makepad run <git url>`: gitstore.rs). Two backends
 //! behind one interface: the plain filesystem (today's std::fs calls; with nothing mounted it is
 //! exactly that, one relaxed load in front) and git mounts: a virtual folder (never created on
 //! disk) whose files come from a repository store (store.rs) at a commit. A path under a mount is
@@ -25,6 +25,10 @@
 //! edits it in place. `.makepad-run-seeded` records each written file's blob: a seeded file whose
 //! bytes still are that blob is not an edit; `reconcile_edits` brings it to the release being run.
 //! One whose bytes changed becomes an edit (recorded in `.makepad-run-edits` from that blob).
+//!
+//! The `.makepad-run-*` names stay as they are, though relax's other names say `relax`: these
+//! files hold people's edits across runs (an installed app's edits folder), and a rename would
+//! need a migration of every existing edits folder for a cosmetic gain.
 //!
 //! FOLDER MOUNTS (`mount_folder`): a virtual folder served from a disk folder, the plain map
 //! `<root>/<rel>` -> `<folder>/<rel>`: no store, ledger, whiteouts, base copies or seeding; reads,
@@ -369,6 +373,12 @@ pub fn relative_path(path: &str, root: &str) -> Option<String> {
     relative(&normalize_path(path), &normalize_path(root)).map(str::to_string)
 }
 
+/// relative_path's containment for inputs already normalized (normalize_path): many paths
+/// checked against folders normalized once.
+pub fn is_under_normalized(path: &str, root: &str) -> bool {
+    relative(path, root).is_some()
+}
+
 // Inputs already have normalized spelling. Kept separate so canonicalize can
 // check `..` before resolving it, using exactly the same mount boundaries.
 fn relative<'a>(path: &'a str, root: &str) -> Option<&'a str> {
@@ -543,6 +553,50 @@ impl Mount {
 
 fn not_found(path: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("{path}: no such file"))
+}
+
+// ---- the store alone: for code that must reach nothing on disk (a confined build script,
+// compiler sandbox/script.rs). A store mount's committed files only: never a folder mount's disk,
+// the edits folder or a link's target (a link entry reads as its text). None: `path` is under no
+// store mount (a folder mount's path is the disk's).
+
+/// What a store mount holds at `path`.
+pub enum StoreKind {
+    /// a file: its length and stat time ([`store_time_ns`])
+    File(u64, u64),
+    Dir,
+    Missing,
+}
+
+pub fn store_kind(path: &str) -> Option<StoreKind> {
+    let (m, rel) = find(path)?;
+    Some(match m.file(&rel) {
+        Some(e) if e.mode == 0o160000 => StoreKind::Missing,
+        Some(e) => StoreKind::File(m.store.object_size(&e.oid).ok().flatten().unwrap_or(0), store_time_ns(&m, Some(e))),
+        None if m.is_dir(&rel) => StoreKind::Dir,
+        None => StoreKind::Missing,
+    })
+}
+
+pub fn store_read(path: &str) -> Option<io::Result<Vec<u8>>> {
+    let (m, rel) = find(path)?;
+    let Some(e) = m.file(&rel).filter(|e| e.mode != 0o160000) else { return Some(Err(not_found(path))) };
+    Some(match m.store.object(&e.oid) {
+        Ok(Some((_, data))) => Ok(data),
+        Ok(None) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("{path}: object missing from {}", m.store.path.display()))),
+        Err(e) => Err(e),
+    })
+}
+
+/// The root of the store mount `path` lies under (a git package's repository).
+pub fn store_root(path: &str) -> Option<String> {
+    find(path).map(|(m, _)| m.root.clone())
+}
+
+/// A store folder's entries (name, is folder).
+pub fn store_list(path: &str) -> Option<io::Result<Vec<(String, bool)>>> {
+    let (m, rel) = find(path)?;
+    Some(m.folders().get(&rel).cloned().ok_or_else(|| not_found(path)))
 }
 
 // Read bindings: a load binds its read snapshot to the thread it runs on for the extent of a

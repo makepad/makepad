@@ -379,7 +379,7 @@ macro_rules! impl_h_int {
                     self.zero_widen().wrapping_mul(rhs.zero_widen())
                 }
                 fn widen_mul(self, rhs: Self) -> Self::D {
-                    self.widen().wrapping_mul(rhs.widen())
+                    HInt::widen(self).wrapping_mul(HInt::widen(rhs))
                 }
                 fn widen_hi(self) -> Self::D {
                     (self as $X) << <Self as MinInt>::BITS

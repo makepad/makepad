@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Party</title>
+<style>
+  :root { color-scheme: light dark; --bg: #faf7f2; --fg: #1d1b19; --soft: #6d655c; --card: #fff; --line: #e4ddd3; --bad: #b3261e; --accent: #6b4de6; --accent-fg: #fff; --chip: #efe9e1; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f1ece6; --soft: #a89f95; --card: #221f1c; --line: #3a352f; --bad: #ff8a80; --accent: #a58cff; --accent-fg: #160f2e; --chip: #2d2925; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom)); font: 16px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); max-width: 560px; margin-inline: auto; }
+  h1 { font-size: 24px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0 0 8px; }
+  p { margin: 4px 0 12px; }
+  .soft { color: var(--soft); font-size: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin: 12px 0; }
+  button, label.pick { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; font: inherit; padding: 10px 16px; border-radius: 12px; border: 0; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  button.plain { background: var(--chip); color: var(--fg); }
+  button:disabled { opacity: .5; }
+  input[type=file] { display: none; }
+  textarea { width: 100%; font: inherit; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); resize: vertical; min-height: 64px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .square { position: relative; width: 100%; aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: var(--chip); }
+  .square video, .square canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  .bar { height: 6px; border-radius: 3px; background: var(--chip); overflow: hidden; margin-top: 8px; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .1s linear; }
+  .keep { display: inline-flex; border-radius: 12px; background: var(--chip); padding: 3px; gap: 3px; flex-wrap: wrap; }
+  .keep button { min-height: 36px; padding: 6px 12px; background: transparent; color: var(--fg); border-radius: 9px; font-size: 15px; }
+  .keep button.on { background: var(--accent); color: var(--accent-fg); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pair canvas { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 10px; background: var(--chip); }
+  .state { font-size: 14px; color: var(--soft); margin-top: 6px; word-break: break-word; }
+  .bad { color: var(--bad); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Party</h1>
+<p>Make a short loop or pick a few photos. The box redraws them, and the ones you share go up on the big screen.</p>
+
+<div class="card" id="c-make">
+  <h2>A short loop</h2>
+  <div class="square"><video id="v-cam" playsinline muted autoplay></video><canvas id="k-shot" class="hidden"></canvas></div>
+  <div class="bar"><div id="b-rec"></div></div>
+  <div class="row">
+    <button id="b-cam">Turn on the camera</button>
+    <button id="b-loop" class="hidden">Record 3 seconds</button>
+    <button id="b-flip" class="plain hidden">Flip</button>
+    <label class="pick plain" for="f-photo" style="background:var(--chip);color:var(--fg)">Pick photos</label>
+    <input type="file" id="f-photo" accept="image/*" multiple>
+  </div>
+  <div class="state" id="s-make"></div>
+</div>
+
+<div class="card hidden" id="c-send">
+  <h2>What should it become?</h2>
+  <textarea id="t-wish" maxlength="300" placeholder="Leave it empty and the box will pick something, or say what you'd like: a painting, a stage, a different place…"></textarea>
+  <div class="row"><span class="soft">Who sees it:</span></div>
+  <div class="row"><div class="keep" id="k-new"></div></div>
+  <div class="row">
+    <button id="b-send">Send</button>
+    <button id="b-drop" class="plain">Start over</button>
+  </div>
+  <div class="state" id="s-send"></div>
+</div>
+
+<div id="mine"></div>
+
+<div class="card">
+  <h2>Done for tonight?</h2>
+  <p class="soft">Leaving deletes everything you sent and everything made from it, kept copies included.</p>
+  <button id="b-leave" class="plain">Leave and delete my things</button>
+  <div class="state" id="s-leave"></div>
+</div>
+
+<script>
+"use strict";
+const base = location.pathname.replace(/\/+$/, "") + "/";
+const KEEP = [["me", "Just me"], ["wall", "Big screen tonight"], ["keep", "Keep it"]];
+const FPS = 8, SECONDS = 3, SIDE = 512, PHOTO_SIDE = 1280;
+let token = null, stream = null, facing = "user";
+let pending = null;            // { kind: "loop" | "photo", blobs: [Blob], preview: canvas }
+let newKeep = "me";
+const players = new Map();     // canvas -> { frames: [ImageBitmap], fps, i }
+const bitmaps = new Map();     // "s12" / "t40" -> Promise<[ImageBitmap]>
+
+function $(id) { return document.getElementById(id); }
+function say(id, text, bad) { const el = $(id); el.textContent = text || ""; el.className = "state" + (bad ? " bad" : ""); }
+function errText(e) { return e && e.message ? e.message : String(e); }
+function store(key, value) { try { value == null ? sessionStorage.removeItem(key) : sessionStorage.setItem(key, value); } catch (e) {} }
+function stored(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+
+async function call(method, path, body, type) {
+  for (let attempt = 0; ; attempt++) {
+    if (!token && path !== "join") await join();
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    if (type) headers["Content-Type"] = type;
+    const r = await fetch(base + path, { method, headers, body });
+    // Over a limit (429) or with the box full or busy (503): nothing was taken; send it again when it says.
+    if ((r.status === 429 || r.status === 503) && attempt < 30) {
+      const wait = Number(r.headers.get("Retry-After") || "1");
+      await new Promise(res => setTimeout(res, Math.max(0.2, wait) * 1000));
+      continue;
+    }
+    if (r.status === 401 && path !== "join" && attempt < 1) { token = null; store("party-token", null); continue; }
+    if (!r.ok) throw new Error((await r.text()) || ("the box answered " + r.status));
+    return r;
+  }
+}
+
+async function join() {
+  const r = await call("POST", "join");
+  token = (await r.json()).token;
+  store("party-token", token);
+}
+
+function keepPicker(el, current, onPick) {
+  el.textContent = "";
+  for (const [level, label] of KEEP) {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.className = level === current ? "on" : "";
+    b.onclick = () => onPick(level);
+    el.appendChild(b);
+  }
+}
+
+function toJpeg(canvas, quality) {
+  return new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error("the phone made no picture")), "image/jpeg", quality));
+}
+
+function frameSet(blobs) {
+  const parts = [];
+  for (const b of blobs) {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, b.size);
+    parts.push(len, b);
+  }
+  return new Blob(parts, { type: "application/x-party-frames" });
+}
+
+// --- the camera and the loop ---------------------------------------------
+
+async function startCamera() {
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    $("v-cam").srcObject = stream;
+    await $("v-cam").play().catch(() => {});
+    $("b-cam").classList.add("hidden");
+    $("b-loop").classList.remove("hidden");
+    $("b-flip").classList.remove("hidden");
+    showCamera();
+    say("s-make", "");
+  } catch (e) {
+    say("s-make", "The camera did not start (" + errText(e) + "). You can still pick photos.", true);
+  }
+}
+
+function showCamera() {
+  $("v-cam").classList.remove("hidden");
+  $("k-shot").classList.add("hidden");
+  stopPlayer($("k-shot"));
+}
+
+function grab(video) {
+  // the square in the middle of the picture, as the preview shows it
+  const w = video.videoWidth, h = video.videoHeight, s = Math.min(w, h);
+  const c = document.createElement("canvas");
+  c.width = SIDE; c.height = SIDE;
+  const g = c.getContext("2d");
+  if (facing === "user") { g.translate(SIDE, 0); g.scale(-1, 1); }
+  g.drawImage(video, (w - s) / 2, (h - s) / 2, s, s, 0, 0, SIDE, SIDE);
+  return c;
+}
+
+async function recordLoop() {
+  const video = $("v-cam");
+  if (!video.videoWidth) return say("s-make", "The camera is not ready yet.", true);
+  $("b-loop").disabled = true;
+  const count = FPS * SECONDS, frames = [], shots = [];
+  const started = performance.now();
+  for (let i = 0; i < count; i++) {
+    const due = started + i * 1000 / FPS;
+    const wait = due - performance.now();
+    if (wait > 0) await new Promise(res => setTimeout(res, wait));
+    const c = grab(video);
+    shots.push(c);
+    frames.push(toJpeg(c, 0.85));
+    $("b-rec").style.width = Math.round((i + 1) * 100 / count) + "%";
+  }
+  const blobs = await Promise.all(frames);
+  $("b-loop").disabled = false;
+  $("b-rec").style.width = "0";
+  const bitmaps = await Promise.all(shots.map(c => createImageBitmap(c)));
+  pending = { kind: "loop", blobs };
+  $("v-cam").classList.add("hidden");
+  $("k-shot").classList.remove("hidden");
+  play($("k-shot"), bitmaps, FPS);
+  openSend();
+}
+
+// --- photos --------------------------------------------------------------
+
+async function pickPhotos(files) {
+  const blobs = [];
+  for (const file of files) {
+    try {
+      // drawing through a canvas leaves the photo's metadata (place, time, phone) behind
+      const bitmap = await createImageBitmap(file);
+      const s = Math.min(1, PHOTO_SIDE / Math.max(bitmap.width, bitmap.height));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(bitmap.width * s));
+      c.height = Math.max(1, Math.round(bitmap.height * s));
+      c.getContext("2d").drawImage(bitmap, 0, 0, c.width, c.height);
+      blobs.push(await toJpeg(c, 0.88));
+    } catch (e) {
+      say("s-make", "One photo could not be read here (" + errText(e) + ").", true);
+    }
+  }
+  if (!blobs.length) return;
+  pending = { kind: "photo", blobs };
+  const first = await createImageBitmap(blobs[0]);
+  $("v-cam").classList.add("hidden");
+  $("k-shot").classList.remove("hidden");
+  play($("k-shot"), [first], 1);
+  say("s-make", blobs.length === 1 ? "One photo ready." : blobs.length + " photos ready; each one goes on its own.");
+  openSend();
+}
+
+// --- sending -------------------------------------------------------------
+
+function openSend() {
+  $("c-send").classList.remove("hidden");
+  keepPicker($("k-new"), newKeep, function pick(level) { newKeep = level; keepPicker($("k-new"), newKeep, pick); });
+  say("s-send", "");
+  $("c-send").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function closeSend() {
+  pending = null;
+  $("c-send").classList.add("hidden");
+  $("t-wish").value = "";
+  if (stream) showCamera(); else { stopPlayer($("k-shot")); $("k-shot").classList.add("hidden"); $("v-cam").classList.remove("hidden"); }
+}
+
+async function send() {
+  if (!pending) return;
+  const wish = $("t-wish").value.trim();
+  $("b-send").disabled = true;
+  try {
+    const bodies = pending.kind === "loop" ? [frameSet(pending.blobs)] : pending.blobs;
+    let n = 0;
+    for (const body of bodies) {
+      say("s-send", "Sending" + (bodies.length > 1 ? " " + (++n) + " of " + bodies.length : "") + "…");
+      const path = pending.kind === "loop" ? "loop?fps=" + FPS + "&keep=" + newKeep : "photo?keep=" + newKeep;
+      const r = await call("POST", path, body, pending.kind === "loop" ? "application/x-party-frames" : "image/jpeg");
+      const { source } = await r.json();
+      if (wish) await call("POST", "wish?source=" + source, wish, "text/plain; charset=utf-8");
+    }
+    closeSend();
+    refresh(true);
+  } catch (e) {
+    say("s-send", "That did not go through: " + errText(e), true);
+  } finally {
+    $("b-send").disabled = false;
+  }
+}
+
+// --- playing loops -------------------------------------------------------
+
+function play(canvas, frames, fps) {
+  if (!frames.length) return;
+  canvas.width = frames[0].width; canvas.height = frames[0].height;
+  players.set(canvas, { frames, fps, i: 0, at: 0 });
+}
+
+function stopPlayer(canvas) { players.delete(canvas); }
+
+function tick(now) {
+  for (const [canvas, p] of players) {
+    if (!canvas.isConnected) { players.delete(canvas); continue; }
+    if (now - p.at >= 1000 / p.fps) {
+      p.at = now;
+      canvas.getContext("2d").drawImage(p.frames[p.i], 0, 0, canvas.width, canvas.height);
+      p.i = (p.i + 1) % p.frames.length;
+    }
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+function frames(key, query, count) {
+  if (!bitmaps.has(key)) {
+    const all = [];
+    for (let i = 0; i < count; i++) {
+      all.push(call("GET", "frame?" + query + "&i=" + i).then(r => r.blob()).then(b => createImageBitmap(b)));
+    }
+    const p = Promise.all(all);
+    p.catch(() => bitmaps.delete(key));
+    bitmaps.set(key, p);
+  }
+  return bitmaps.get(key);
+}
+
+// --- my things -----------------------------------------------------------
+
+let version = -1, timer = null;
+
+function stateText(take) {
+  if (!take) return "Waiting for the box…";
+  switch (take.state) {
+    case "queued": return "In line for the box…";
+    case "running": return "Being redrawn… " + (take.frames ? take.frames + " frames so far" : "");
+    case "done": return take.quality === "best" ? "Redrawn, in the best quality." : "Redrawn.";
+    default: return "That one did not work out" + (take.error ? " (" + take.error + ")" : "") + ".";
+  }
+}
+
+function render(sources) {
+  const mine = $("mine");
+  const seen = new Set();
+  for (const s of sources) {
+    seen.add("m" + s.id);
+    let card = document.getElementById("m" + s.id);
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "card";
+      card.id = "m" + s.id;
+      card.innerHTML = '<div class="pair"><canvas class="src"></canvas><canvas class="out"></canvas></div>' +
+        '<div class="state st"></div><div class="row"><div class="keep kp"></div></div>' +
+        '<textarea class="wish" maxlength="300" placeholder="Try another wish…"></textarea>' +
+        '<div class="row"><button class="again">Redraw with this</button><button class="plain del">Delete</button></div>';
+      mine.prepend(card);
+      frames("s" + s.id, "source=" + s.id, s.frames).then(f => play(card.querySelector(".src"), f, s.fps || 1)).catch(() => {});
+      card.querySelector(".again").onclick = async () => {
+        const wish = card.querySelector(".wish").value.trim();
+        try { await call("POST", "wish?source=" + s.id, wish, "text/plain; charset=utf-8"); card.querySelector(".wish").value = ""; refresh(true); }
+        catch (e) { card.querySelector(".st").textContent = errText(e); }
+      };
+      card.querySelector(".del").onclick = async () => {
+        if (!confirm("Delete this and everything made from it?")) return;
+        try { await call("POST", "delete?source=" + s.id); card.remove(); refresh(true); }
+        catch (e) { card.querySelector(".st").textContent = errText(e); }
+      };
+    }
+    const take = s.takes[s.takes.length - 1];
+    const done = s.takes.filter(t => t.state === "done").pop();
+    card.querySelector(".st").textContent = stateText(take) + (s.wish ? " Wish: " + s.wish : "");
+    keepPicker(card.querySelector(".kp"), s.keep, async level => {
+      try { await call("POST", "keep?source=" + s.id + "&level=" + level); refresh(true); }
+      catch (e) { card.querySelector(".st").textContent = errText(e); }
+    });
+    const out = card.querySelector(".out");
+    if (done && out.dataset.take !== String(done.id)) {
+      out.dataset.take = String(done.id);
+      frames("t" + done.id, "take=" + done.id, done.frames).then(f => play(out, f, s.fps || 1)).catch(() => {});
+    }
+  }
+  for (const card of Array.from(mine.children)) if (!seen.has(card.id)) card.remove();
+  return sources.some(s => s.takes.some(t => t.state === "queued" || t.state === "running"));
+}
+
+async function refresh(soon) {
+  clearTimeout(timer);
+  let busy = false;
+  try {
+    if (token) {
+      const me = await (await call("GET", "me")).json();
+      busy = me.sources.some(s => s.takes.some(t => t.state === "queued" || t.state === "running"));
+      if (me.version !== version) { version = me.version; render(me.sources); }
+    }
+  } catch (e) { /* the next round tries again */ }
+  timer = setTimeout(refresh, soon || busy ? 1500 : 6000);
+}
+
+async function leave() {
+  if (!confirm("Delete everything you sent tonight, and everything made from it?")) return;
+  try {
+    await call("POST", "leave");
+    token = null; store("party-token", null);
+    $("mine").textContent = "";
+    say("s-leave", "Everything of yours is gone from the box.");
+  } catch (e) { say("s-leave", errText(e), true); }
+}
+
+$("b-cam").onclick = startCamera;
+$("b-flip").onclick = () => { facing = facing === "user" ? "environment" : "user"; startCamera(); };
+$("b-loop").onclick = recordLoop;
+$("f-photo").onchange = e => { pickPhotos(Array.from(e.target.files || [])); e.target.value = ""; };
+$("b-send").onclick = send;
+$("b-drop").onclick = closeSend;
+$("b-leave").onclick = leave;
+token = stored("party-token");
+if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+  $("b-cam").classList.add("hidden");
+  say("s-make", "This browser gives no camera here; you can still pick photos.");
+}
+refresh(false);
+</script>
+</body>
+</html>

@@ -80,7 +80,10 @@ impl Program {
                 for &ns in nss {
                     let ambig = self.glob_ambiguity(m, name, ns, from, false);
                     if ambig != 0 {
-                        return Some(PrivacyError { name, def: next.unwrap_or(cur), import: true, ext: false, ambiguous: true, lint: ambig == 2 });
+                        // another crate's ambiguous name is an extern one to `from`'s: rustc reads it
+                        // from metadata as the lint (build_reduced_graph.rs `define_extern`)
+                        let lint = ambig == 2 || self.mods[m as usize].krate != self.mods[from as usize].krate;
+                        return Some(PrivacyError { name, def: next.unwrap_or(cur), import: true, ext: false, ambiguous: true, lint });
                     }
                 }
             }
@@ -114,15 +117,19 @@ impl Program {
     }
 
     /// 0: not ambiguous; 1: two globs of `m` bring different items; 2: only inherited through a
-    /// glob whose module is itself ambiguous for `name`.
+    /// glob whose module is itself ambiguous for `name`. In a checked module, what rustc's import
+    /// resolution has a use of the name find, a name the module binds itself included (a single
+    /// import of an ambiguous name); `skip_direct`: its glob declaration's.
     pub fn glob_ambiguity(&self, m: u32, name: Sym, ns_type: bool, _from: u32, skip_direct: bool) -> u8 {
-        // a checked module: what the replay of rustc's import resolution found
+        // a module of a crate the replay of rustc's import resolution covered: what it found
         if let Some(t) = &self.sim_ambiguity {
-            if self.own_crates.get(self.mods[m as usize].krate as usize).copied().unwrap_or(false) {
+            if self.sim_own.get(self.mods[m as usize].krate as usize).copied().unwrap_or(false) {
                 let md = &self.mods[m as usize];
-                if !skip_direct && (if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) }) { return 0; }
                 let v = t.get(&(m, name, ns_type)).copied().unwrap_or(0);
-                return if skip_direct { v >> 2 } else { v & 3 };
+                if skip_direct { return (v >> 2) & 3; }
+                // (a name Relax binds directly that the replay binds through a glob only: none)
+                if (if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) }) && v & 16 == 0 { return 0; }
+                return v & 3;
             }
         }
         let key = (m, name, ns_type, skip_direct);
@@ -152,28 +159,37 @@ impl Program {
         // a module still being judged answers 0 (glob cycles)
         if let Some(&r) = seen.get(&m) { return r; }
         seen.insert(m, 0);
-        let mut found: Option<DefId> = None;
         let mut out = 0u8;
-        for &(g, _) in &md.globs {
+        // what each glob gives `m` (its own lookup's answers: in a glob cycle a lookup entering at
+        // the glob's module can find another binding); a name `m` binds itself (`skip_direct`):
+        // each glob's module looked up on its own
+        let answers = self.glob_answers(m, name, ns_type).unwrap_or_else(|| md.globs.iter().map(|&(g, _)| {
             let gd = self.def(g);
-            let r = match gd.kind {
-                DefKind::Mod => {
-                    let r = self.glob_binding(gd.sub, name, ns_type);
-                    if r.is_some() && self.glob_ambiguity_in(gd.sub, name, ns_type, false, seen) != 0 { out = out.max(2); }
-                    r
-                }
+            (g, match gd.kind {
+                DefKind::Mod => self.glob_binding(gd.sub, name, ns_type),
                 DefKind::Enum => self.lookup_in_container(g, name, false).map(|d| (d, None)),
                 _ => None,
-            };
-            if let Some((d, v)) = r {
-                if !self.vis_visible(v, m) {
-                    continue;
+            })
+        }).collect());
+        // a glob's module that has the name ambiguous makes it so in `m` when `m` imports that
+        // binding: the first glob's, or a later one's of the same definition at the first one's
+        // visibility (rustc 1.100 `select_glob_decl`; rsim.rs `fold_ext` judges the same way)
+        let mut found: Option<(DefId, BindVis)> = None;
+        for (g, r) in answers {
+            let gd = self.def(g);
+            let Some((d, v)) = r else { continue };
+            if !self.vis_visible(v, m) {
+                continue;
+            }
+            let v = self.vis_min(md.globs.iter().find(|x| x.0 == g).and_then(|x| x.1), v);
+            let mut inherited = || gd.kind == DefKind::Mod && self.glob_ambiguity_in(gd.sub, name, ns_type, false, seen) != 0;
+            match found {
+                None => {
+                    found = Some((d, v));
+                    if inherited() { out = out.max(2); }
                 }
-                match found {
-                    None => found = Some(d),
-                    Some(f) if f != d => out = 1,
-                    _ => {}
-                }
+                Some((f, _)) if f != d => out = 1,
+                Some((_, fv)) => if fv == v && inherited() { out = out.max(2); },
             }
         }
         seen.insert(m, out);
@@ -188,7 +204,9 @@ impl Program {
         let mut m = from;
         loop {
             let md = &self.mods[m as usize];
-            if !skip_direct && if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) } {
+            let direct = !skip_direct && if ns_type { md.types.contains_key(&name) } else { md.values.contains_key(&name) };
+            // (a direct binding of a checked module can still lead to an ambiguous one: a single import)
+            if direct && !(self.sim_ambiguity.is_some() && self.sim_own.get(md.krate as usize).copied().unwrap_or(false)) {
                 return None;
             }
             let ambig = self.glob_ambiguity(m, name, ns_type, from, skip_direct);
@@ -196,9 +214,10 @@ impl Program {
                 let def = self.lookup_in_module(m, name, ns_type, &mut Vec::new())?;
                 return Some(PrivacyError { name, def, import: true, ext: false, ambiguous: true, lint: ambig == 2 });
             }
+            if direct { return None; }
             // the first scope that binds the name settles it (late resolution reports no ambiguity
             // between a scope's glob and an outer scope)
-            if self.sim_ambiguity.as_ref().is_some_and(|t| self.own_crates.get(md.krate as usize).copied().unwrap_or(false) && t.contains_key(&(m, name, ns_type))) {
+            if self.sim_ambiguity.as_ref().is_some_and(|t| self.sim_own.get(md.krate as usize).copied().unwrap_or(false) && t.contains_key(&(m, name, ns_type))) {
                 return None;
             }
             match md.lexical_parent {

@@ -764,12 +764,12 @@ impl Sync {
             // filed the WM's aichat as one, 11-06)
             crate::lease::exec::note_stopped_pids(&format!("by the WM restart ({why})"), super::jits::list().into_iter().filter(|j| wm_own(&j.app)).map(|j| j.pid).collect());
             self.event(Sev::Info, format!("sync: restarting the WM ({svc}): {why}"), String::new());
-            let st = makepad_remote::group::command("sudo").args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
+            let st = makepad_remote::group::command(crate::os::tool("sudo")).args(["-n", "/usr/bin/systemctl", "restart", &svc]).stdin(std::process::Stdio::null()).output().map_err(|e| failed(format!("sudo: {e}")))?;
             if !st.status.success() {
                 let _ = std::fs::remove_file(Self::marker());
                 return Err(failed(format!("sudo -n systemctl restart {svc}: {}", proto::clean(String::from_utf8_lossy(&st.stderr).trim(), 300))));
             }
-            let active = makepad_remote::group::command("systemctl").args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+            let active = makepad_remote::group::command(crate::os::tool("systemctl")).args(["is-active", &svc]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
             let _ = std::fs::remove_file(Self::marker());
             let line = format!("sync: WM restarted ({svc} {active})");
             self.event(if active == "active" { Sev::Info } else { Sev::Err }, line, String::new());

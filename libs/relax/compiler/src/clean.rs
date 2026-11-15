@@ -19,10 +19,16 @@
 //! and its stores (cache.rs app_store_files: the app crate's own stores and its program's graph
 //! stores). The stores of the crates the workspace's apps share, the registry packages and the
 //! build script outputs stay.
+//!
+//! `--shared-code`: the code stores a user's checkouts share (cache.rs shared_code_root:
+//! `<relax home>/code`), not the workspace's run dir. A build's stores go under that build's live
+//! lock (store::retire_build): the stores of a Relax build running now stay, said so. A link or a
+//! file in place of the folder is refused.
 use std::path::{Path, PathBuf};
 
 pub fn cmd_clean(args: &[String]) -> i32 {
     let mut package = None;
+    let mut shared = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -30,12 +36,30 @@ pub fn cmd_clean(args: &[String]) -> i32 {
                 package = Some(args[i + 1].clone());
                 i += 1;
             }
+            "--shared-code" => shared = true,
             _ => {
-                eprintln!("usage: {tool} clean [-p <package>]", tool = crate::tool_name());
+                eprintln!("usage: {tool} clean [-p <package> | --shared-code]", tool = crate::tool_name());
                 return 2;
             }
         }
         i += 1;
+    }
+    if shared {
+        if package.is_some() {
+            eprintln!("usage: {tool} clean [-p <package> | --shared-code]", tool = crate::tool_name());
+            return 2;
+        }
+        let code = crate::cache::shared_code_root();
+        return match clean_shared(&code) {
+            Ok(r) => {
+                r.report_shared(&code);
+                0
+            }
+            Err(e) => {
+                eprintln!("relax clean: {e}");
+                1
+            }
+        };
     }
     let dir = match checked_dir(&crate::dirs::workspace_dir(), crate::dirs::override_dir().is_some()) {
         Ok(Some(d)) => d,
@@ -108,6 +132,61 @@ pub fn checked_dir(workspace: &str, overridden: bool) -> Result<Option<PathBuf>,
     Ok(Some(real))
 }
 
+/// The shared code folder `code` emptied of every store whose Relax build is not running: per
+/// build, under its live lock taken exclusively (store::retire_build), which also removes the lock
+/// file. A running build's stores stay (`kept`); so does a store being written right now (its
+/// build unreadable). Only checked store files are deleted (store::delete_checked).
+fn clean_shared(code: &Path) -> Result<Removal, String> {
+    let mut r = Removal::default();
+    for d in [code.to_path_buf(), code.join("cache")] {
+        match std::fs::symlink_metadata(&d) {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(format!("{} is not a folder (a link or a file): refused", d.display())),
+            Err(_) => {
+                println!("relax clean: {} does not exist: nothing to remove", d.display());
+                return Ok(r);
+            }
+        }
+    }
+    let dir = code.join("cache");
+    let mut by_build: std::collections::BTreeMap<u64, Vec<PathBuf>> = std::collections::BTreeMap::new();
+    for e in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten() {
+        let p = e.path();
+        let ours = e.file_name().to_str().is_some_and(crate::store::name_ours);
+        if !ours || !std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_file()) {
+            continue;
+        }
+        match crate::store::build_of(&p) {
+            Some(b) => by_build.entry(b).or_default().push(p),
+            None => r.skipped.push((p, "being written".to_string())),
+        }
+    }
+    for b in crate::store::lock_builds(&dir) {
+        by_build.entry(b).or_default();
+    }
+    for (b, files) in by_build {
+        let mut gone = Vec::new();
+        let retired = crate::store::retire_build(&dir, b, || {
+            for p in &files {
+                let len = std::fs::metadata(p).map_or(0, |m| m.len());
+                if crate::store::delete_checked(p) {
+                    gone.push((p.clone(), len));
+                }
+            }
+        });
+        if !retired {
+            r.kept.push((b, files.len()));
+            continue;
+        }
+        for (p, len) in gone {
+            r.files += 1;
+            r.bytes += len;
+            r.removed.push(p);
+        }
+    }
+    Ok(r)
+}
+
 /// Folder names compare without case on Windows (its file system's rule), exactly elsewhere.
 fn same_name(n: Option<&std::ffi::OsStr>, want: &str) -> bool {
     let Some(n) = n.and_then(|n| n.to_str()) else { return false };
@@ -120,6 +199,8 @@ struct Removal {
     bytes: u64,
     skipped: Vec<(PathBuf, String)>,
     removed: Vec<PathBuf>,
+    /// (build, store files) of the running builds whose stores stayed (clean_shared)
+    kept: Vec<(u64, usize)>,
 }
 
 impl Removal {
@@ -181,6 +262,18 @@ impl Removal {
             for (p, e) in &self.skipped {
                 println!("  {} ({e})", p.display());
             }
+        }
+    }
+}
+
+impl Removal {
+    fn report_shared(&self, code: &Path) {
+        println!("relax clean --shared-code: removed {} store files of {} ({} bytes, {})", self.files, code.display(), self.bytes, human(self.bytes));
+        for (b, n) in &self.kept {
+            println!("relax clean: build {b:016x} is running: its {n} store files stay");
+        }
+        for (p, e) in &self.skipped {
+            println!("relax clean: {} skipped ({e})", p.display());
         }
     }
 }
@@ -278,6 +371,62 @@ mod tests {
         for d in [&ws, &bare, &solo, &custom, &cfg] {
             std::fs::remove_dir_all(d).unwrap();
         }
+    }
+
+    /// `clean --shared-code`: the stores of a build not running go, with its lock file; a running
+    /// build's stay (this process's own build runs: it holds that lock), and so does a file that is
+    /// not a store; a link in place of the folder is refused and what it points to stays.
+    #[test]
+    fn shared_code_clean_keeps_a_running_builds_stores() {
+        isolated_test!(shared_code_clean_keeps_a_running_builds_stores);
+        let code = tmp("shared");
+        let dir = code.join("cache");
+        std::fs::create_dir_all(&dir).unwrap();
+        let me = crate::store::this_build();
+        let (ended, alive, unlocked) = (me ^ 0x11, me ^ 0x22, me ^ 0x33);
+        let store = |name: &str, build: Option<u64>| -> PathBuf {
+            let p = dir.join(name);
+            // (kind 2: a data entry)
+            crate::store::append(&p, vec![crate::pack::NewEntry { key: 1, kind: 2, payload: vec![7; 64] }], true).unwrap();
+            if let Some(b) = build { crate::store::set_build_for_test(&p, b); }
+            p
+        };
+        let mine = store("core-0000000000000001.rcs", None);
+        let gone = [store("core-0000000000000002.rcs", Some(ended)), store("dep-0000000000000003.rcs", Some(unlocked))];
+        let gone_gen = crate::store::gen_path(&gone[0], 1);
+        std::fs::copy(&gone[0], &gone_gen).unwrap();
+        let running = store("core-0000000000000004.rcs", Some(alive));
+        w(&dir.join("notes.txt"), "not a store");
+        // a process of build `alive` (its lock, as hold_build takes it); `ended`'s lock is free
+        let lock = std::fs::File::create(dir.join("live").join(format!("{alive:016x}"))).unwrap();
+        lock.lock_shared().unwrap();
+        std::fs::File::create(dir.join("live").join(format!("{ended:016x}"))).unwrap();
+        let size: u64 = gone.iter().chain([&gone_gen]).map(|p| std::fs::metadata(p).unwrap().len()).sum();
+        let r = clean_shared(&code).unwrap();
+        assert!(gone.iter().all(|p| !p.exists()) && !gone_gen.exists(), "a build not running loses its stores, every generation");
+        assert_eq!((r.files, r.bytes), (3, size), "counted as removed");
+        #[cfg(unix)]
+        assert!(!dir.join("live").join(format!("{ended:016x}")).exists(), "and its lock file");
+        assert!(running.exists() && mine.exists(), "a running build's stores stay (this process's build runs too)");
+        let mut kept = r.kept.clone();
+        kept.sort();
+        let mut want = vec![(me, 1), (alive, 1)];
+        want.sort();
+        assert_eq!(kept, want, "reported per running build");
+        assert!(dir.join("notes.txt").exists(), "a file that is not a store stays");
+        drop(lock);
+        #[cfg(unix)]
+        {
+            let elsewhere = tmp("shared-elsewhere");
+            let linked = tmp("shared-linked").join("code");
+            std::os::unix::fs::symlink(&elsewhere, &linked).unwrap();
+            assert!(clean_shared(&linked).err().is_some_and(|e| e.contains("refused")), "a link in place of the folder");
+            assert!(elsewhere.exists());
+            std::fs::remove_file(&linked).unwrap();
+            std::fs::remove_dir_all(linked.parent().unwrap()).unwrap();
+            std::fs::remove_dir(&elsewhere).unwrap();
+        }
+        std::fs::remove_dir_all(&code).unwrap();
     }
 
     /// A folder whose name is not `relax` under `target` is never what checked_dir returns, and a

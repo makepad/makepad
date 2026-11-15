@@ -63,6 +63,7 @@ pub mod dirs;
 pub use relax_lex::tokens as pm_tokens;
 pub mod pm;
 pub mod progenv;
+pub mod compile_time;
 pub mod zone_alloc;
 pub mod clock;
 pub mod relaxed;

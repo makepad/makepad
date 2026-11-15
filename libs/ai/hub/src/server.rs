@@ -753,6 +753,14 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 body,
                 response,
             } => {
+                // the intake gate answers from its own worker: the route loop never waits on the
+                // upstream Messages API
+                if headers.path == "/v1/messages" {
+                    let client = caller_of(&shared, &headers).map(|c| c.client_id);
+                    let serving = shared.registry.models.iter().any(|spec| spec.backend == crate::claude_cli::BACKEND);
+                    crate::intake_scope::route_messages(&shared.cache_dir, client.as_deref(), serving, &headers.lines, body, response);
+                    continue;
+                }
                 if headers.path.starts_with("/kernel") {
                     let _ = response.send(error_json(404, "no such kernel route".into()));
                     continue;
@@ -968,6 +976,16 @@ fn route_post_request(
             return error_json(403, "local-use is set by this machine's window manager only".to_string());
         }
         return control_local_use(shared, body);
+    }
+    if crate::intake_scope::is_intake(&caller.client_id) {
+        if !crate::intake_scope::route_allowed("POST", &headers.path) {
+            return error_json(403, "intake scope: route".to_string());
+        }
+        if headers.path == "/generate" {
+            if let Err(refusal) = crate::intake_scope::gate_generate(&shared.cache_dir, &caller.client_id, &headers.lines, body) {
+                return refusal;
+            }
+        }
     }
     route_post_by(shared, &caller, &headers.path, body)
 }

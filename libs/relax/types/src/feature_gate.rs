@@ -1220,7 +1220,7 @@ pub fn check_stability(prog: &Program, body: &crate::typeck::Body) -> Vec<String
 }
 
 /// `#[unstable(feature = "name", reason = "..")]` on a definition's item: (feature, reason).
-fn unstable_of(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {
+pub(crate) fn unstable_of(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {
     let def = prog.def(d);
     // (the other definitions -- primitives, locals -- have no item of their own)
     if !matches!(def.kind, DefKind::Mod | DefKind::Fn | DefKind::AssocFn | DefKind::Const | DefKind::Static | DefKind::AssocConst | DefKind::Struct | DefKind::Enum | DefKind::Union | DefKind::Trait | DefKind::TypeAlias | DefKind::AssocTy) { return None; }
@@ -1293,12 +1293,39 @@ fn check_imports(prog: &Program, krate: u32, imports: &[usize]) -> Vec<String> {
 fn unstable_in_attrs(prog: &Program, d: crate::program::DefId) -> Option<(String, Option<String>)> {
     let def = prog.def(d);
     let pf = &*prog.files[def.file as usize];
-    let src = prog.src(def.file);
     let item = pf.ast.item(def.item);
-    for a in pf.ast.list(item.attrs) {
+    unstable_attr(prog, def.file, pf.ast.list(item.attrs)).map(|u| (u.feature, u.reason))
+}
+
+/// An `#[unstable(feature = "..", reason = "..", implied_by = "..")]` attribute.
+pub struct Unstable {
+    pub feature: String,
+    pub reason: Option<String>,
+    /// a feature that enables this one too
+    pub implied_by: Option<String>,
+}
+
+impl Unstable {
+    /// rustc's message for a use outside the feature.
+    pub fn message(&self) -> String {
+        match &self.reason {
+            Some(r) => format!("E0658: use of unstable library feature `{}`: {}", self.feature, r),
+            None => format!("E0658: use of unstable library feature `{}`", self.feature),
+        }
+    }
+
+    /// Whether the crate's features enable it (its own, or the one implying it).
+    pub fn enabled(&self, feats: &Features) -> bool {
+        feats.has(&self.feature) || self.implied_by.as_deref().is_some_and(|f| feats.has(f))
+    }
+}
+
+fn unstable_attr(prog: &Program, file: u32, attrs: &[Attr]) -> Option<Unstable> {
+    let src = prog.src(file);
+    for a in attrs {
         let (lo, hi) = (a.toks.lo as usize, a.toks.hi as usize);
         if hi <= lo + 3 || cfg::tok_str(src, lo) != b"unstable" { continue; }
-        let (mut feature, mut reason) = (None, None);
+        let (mut feature, mut reason, mut implied_by) = (None, None, None);
         let mut i = lo + 2;
         while i + 2 < hi {
             if src.tok(i + 1).kind == T::Eq && src.tok(i + 2).kind == T::Str {
@@ -1306,6 +1333,7 @@ fn unstable_in_attrs(prog: &Program, d: crate::program::DefId) -> Option<(String
                 match cfg::tok_str(src, i) {
                     b"feature" => feature = Some(v),
                     b"reason" => reason = Some(v),
+                    b"implied_by" => implied_by = Some(v),
                     _ => {}
                 }
                 i += 3;
@@ -1313,7 +1341,25 @@ fn unstable_in_attrs(prog: &Program, d: crate::program::DefId) -> Option<(String
                 i += 1;
             }
         }
-        return feature.map(|f| (f, reason));
+        return feature.map(|feature| Unstable { feature, reason, implied_by });
     }
     None
+}
+
+/// rustc_hir_analysis hir_ty_lowering generics.rs `lower_generic_args` (the stability check of an
+/// argument given to a parameter): a definition's `#[unstable]` type and const parameters, by their
+/// index among them (`vec::IntoIter<T, A>`'s allocator in rustc 1.100).
+pub fn unstable_generic_params(prog: &Program, d: crate::program::DefId) -> Vec<(usize, Unstable)> {
+    let def = prog.def(d);
+    let pf = &*prog.files[def.file as usize];
+    let item = pf.ast.item(def.item);
+    let Some(g) = pf.ast.kind_generics(&item.kind) else { return Vec::new() };
+    let mut out = Vec::new();
+    let mut i = 0;
+    for p in pf.ast.list(g.params) {
+        if matches!(p.kind, GenericParamKind::Lifetime(_)) { continue; }
+        if let Some(u) = unstable_attr(prog, def.file, pf.ast.list(p.attrs)) { out.push((i, u)); }
+        i += 1;
+    }
+    out
 }

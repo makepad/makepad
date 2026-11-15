@@ -16,3 +16,4 @@ makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "
 
 [dev-dependencies]
 makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }
+makepad-zune-png = { path = "../../libs/zune/zune-png", version = "0.5.2" }

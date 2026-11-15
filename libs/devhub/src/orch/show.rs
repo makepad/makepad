@@ -930,7 +930,7 @@ fn mac_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
 
 /// The Quest: the adb device whose model names a Quest.
 fn quest_serial() -> Result<String, String> {
-    let o = makepad_remote::group::command("adb").args(["devices", "-l"]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("adb: {e}"))?;
+    let o = makepad_remote::group::command(crate::os::tool("adb")).args(["devices", "-l"]).stdin(std::process::Stdio::null()).output().map_err(|e| format!("adb: {e}"))?;
     let text = String::from_utf8_lossy(&o.stdout).into_owned();
     text.lines().filter(|l| l.contains(" device ") && l.to_ascii_lowercase().contains("model:quest")).find_map(|l| l.split_whitespace().next().map(str::to_string)).ok_or_else(|| "no Quest in `adb devices -l`".into())
 }
@@ -950,13 +950,13 @@ fn quest_launch(ctx: &Ctx, x: &Show) -> Result<(u32, String), String> {
         }
     };
     try_set(ctx, &x.id, |s| s.note = "building the Quest JIT host on the Mac".into())?;
-    let mut build = makepad_remote::group::command("nice");
+    let mut build = makepad_remote::group::command(crate::os::tool("nice"));
     build.args(["-n", "10"]).arg(cargo()).args(["run", "--release", "-p", "cargo-makepad", "--", "android", "--abi=aarch64", "build-host", "--app", &x.app, "--devhub-name=quest", "--quest"]).current_dir(&ctx.repo).env("CARGO_INCREMENTAL", "0").env("CARGO_BUILD_JOBS", "4");
     run(&mut build, "the Quest build")?;
     let name = x.app.replace('-', "_");
     let apk = ctx.repo.join(format!("target/makepad-android-apk/{name}/apk/{name}.apk"));
-    run(makepad_remote::group::command("adb").args(["-s", &serial, "install", "--no-incremental", "-r"]).arg(&apk), "adb install")?;
-    run(makepad_remote::group::command("adb").args(["-s", &serial, "shell", "am", "start", "-n", "dev.makepad.run/dev.makepad.run.RunActivity"]), "adb am start")?;
+    run(makepad_remote::group::command(crate::os::tool("adb")).args(["-s", &serial, "install", "--no-incremental", "-r"]).arg(&apk), "adb install")?;
+    run(makepad_remote::group::command(crate::os::tool("adb")).args(["-s", &serial, "shell", "am", "start", "-n", "dev.makepad.run/dev.makepad.run.RunActivity"]), "adb am start")?;
     Ok((0, path.to_string_lossy().into_owned()))
 }
 
@@ -1353,7 +1353,7 @@ fn stop(x: &Show) -> Result<(), String> {
         "mac" => Ok(()),
         "quest" => {
             let serial = quest_serial()?;
-            let st = makepad_remote::group::command("adb").args(["-s", &serial, "shell", "am", "force-stop", "dev.makepad.run"]).stdin(std::process::Stdio::null()).status().map_err(|e| e.to_string())?;
+            let st = makepad_remote::group::command(crate::os::tool("adb")).args(["-s", &serial, "shell", "am", "force-stop", "dev.makepad.run"]).stdin(std::process::Stdio::null()).status().map_err(|e| e.to_string())?;
             st.success().then_some(()).ok_or_else(|| "adb am force-stop failed".into())
         }
         node if x.pid > 0 => crate::cli::ask(&ctl(), Some(node), "launch", &format!("stop {}", x.pid)).and_then(|l| match l.first() {

@@ -1,4 +1,6 @@
-//! Opt-in accounting for compiler work on a fully validated warm launch.
+//! Opt-in accounting for compiler work on a fully validated warm launch (RELAX_WARM_STRICT=1),
+//! and its one verdict: a start that missed code a prior run of its cache recorded fails the run
+//! (`strict_code`). Work on a path no run took before is accounting only.
 use std::{
     cell::RefCell,
     collections::{BTreeSet, HashMap},
@@ -32,6 +34,11 @@ struct State {
     bodies: HashMap<(u32, Vec<u32>), u32>,
     reasons: HashMap<u32, String>,
     events: Vec<Event>,
+    /// slots whose code a prior run of this cache recorded and this start did not find
+    /// (`recorded_miss`): slot -> (its name, the key looked up, the key it was recorded under)
+    lost: HashMap<u32, (String, u128, u128)>,
+    /// `strict_code` said its verdict
+    judged: bool,
 }
 static STATE: OnceLock<Mutex<State>> = OnceLock::new();
 
@@ -88,6 +95,53 @@ pub fn reason(slot: u32, reason: &str) {
             .insert(slot, reason.to_owned());
     }
 }
+/// Slot `slot` (`name`)'s lookup under `key` found no code, and a prior run of this cache recorded the
+/// slot's code under `recorded` (the cold run's ledger: `recorded == key` when its entry is gone,
+/// another key when the slot's key changed). A validated warm start that misses such code fails
+/// RELAX_WARM_STRICT (`strict_code`); a path no run took before is accounting only.
+pub fn recorded_miss(slot: u32, name: &str, key: u128, recorded: u128) {
+    if enabled() {
+        state().1.lost.entry(slot).or_insert_with(|| (name.to_owned(), key, recorded));
+    }
+}
+
+/// The keys `recorded_miss` noted for the slot named `name` on a validated warm start: (the key
+/// looked up, the key it was recorded under).
+pub fn lost_slot(name: &str) -> Option<(u128, u128)> {
+    if !enabled() {
+        return None;
+    }
+    let (_kept, s) = state();
+    if s.valid != Some(true) {
+        return None;
+    }
+    s.lost.values().find(|l| l.0 == name).map(|l| (l.1, l.2))
+}
+
+/// RELAX_WARM_STRICT's verdict as the process ends with `code`: a validated warm start that missed
+/// code a prior run of its cache recorded (`recorded_miss`) says which, each with its key, and
+/// fails (1 for a run that would exit 0; a failing run keeps its code). Otherwise `code`.
+pub fn strict_code(code: i32) -> i32 {
+    if !enabled() {
+        return code;
+    }
+    let (_kept, mut s) = state();
+    if s.valid != Some(true) || s.lost.is_empty() {
+        return code;
+    }
+    if std::mem::replace(&mut s.judged, true) {
+        return if code == 0 { 1 } else { code };
+    }
+    let mut lost: Vec<(String, u128, u128)> = s.lost.values().cloned().collect();
+    lost.sort();
+    for (name, key, recorded) in &lost {
+        let how = if key == recorded { "its entry is gone".to_owned() } else { format!("recorded under key {recorded:032x}") };
+        eprintln!("relax: warm miss of recorded code: {name} key {key:032x} ({how})");
+    }
+    eprintln!("relax: RELAX_WARM_STRICT: {} slot(s) whose code a prior run of this cache recorded missed on a validated warm start: the run fails", lost.len());
+    if code == 0 { 1 } else { code }
+}
+
 /// Classification happens after all stores and late-input ledgers were validated.
 /// Work before that point is retained, so early type checking cannot escape the check.
 pub fn classify(valid: bool) {

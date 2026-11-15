@@ -137,7 +137,7 @@ fn settle_rebuild_segregates_slot_lifetimes() {
     FIRST_PRESENT.store(true, Ordering::Release);
     match settle_rebuild::run(up, false) {
         settle_rebuild::Outcome::Done => {}
-        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("settle rebuild did not replace: {why}"),
+        o => panic!("settle rebuild did not replace: {}", o.why()),
     }
     assert_eq!(queue::counts()[0], 0, "settle discards jobs against the replaced front");
     queue::queue().lock().unwrap().push(queue::Job::Ahead(retired_front.clone(), AheadWork::Slot(0)), wall_ns());
@@ -162,7 +162,7 @@ fn settle_rebuild_segregates_slot_lifetimes() {
     let encodes = settle_rebuild::encodes();
     match settle_rebuild::run(up, false) {
         settle_rebuild::Outcome::Done => {}
-        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the second settle rebuild did not replace: {why}"),
+        o => panic!("the second settle rebuild did not replace: {}", o.why()),
     }
     assert_eq!(settle_rebuild::encodes(), encodes, "a rebuild of a program the store holds encodes nothing");
     crate::owner::call(crate::owner::Class::Program, || {
@@ -241,7 +241,7 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
     let encodes = settle_rebuild::encodes();
     match settle_rebuild::run(up, false) {
         settle_rebuild::Outcome::Done => {}
-        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("settle rebuild did not replace: {why}"),
+        o => panic!("settle rebuild did not replace: {}", o.why()),
     }
     assert_eq!(settle_rebuild::encodes(), encodes + 1, "the image of the whole program is recorded");
     crate::owner::call(crate::owner::Class::Program, || {
@@ -258,7 +258,7 @@ fn settle_rebuild_covers_a_crate_added_at_run_time() {
     crate::pmhost::stand_in_world();
     match settle_rebuild::run(up, false) {
         settle_rebuild::Outcome::Done => {}
-        settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the second settle rebuild did not replace: {why}"),
+        o => panic!("the second settle rebuild did not replace: {}", o.why()),
     }
     assert_eq!(settle_rebuild::encodes(), encodes + 1, "a rebuild of a program the store holds encodes nothing");
     assert!(crate::pmhost::world_alive(), "the rebuild leaves the world alive");
@@ -345,7 +345,7 @@ fn settle_rebuild_keeps_coroutines() {
     for round in ["first", "second"] {
         match settle_rebuild::run(up, false) {
             settle_rebuild::Outcome::Done => {}
-            settle_rebuild::Outcome::Retry(why) | settle_rebuild::Outcome::Refused(why) => panic!("the {round} settle rebuild did not replace: {why}"),
+            o => panic!("the {round} settle rebuild did not replace: {}", o.why()),
         }
         crate::owner::call(crate::owner::Class::Program, || {
             let env = crate::tcx::TypingEnv::fully_monomorphized(&u.prog);
@@ -361,6 +361,112 @@ fn settle_rebuild_keeps_coroutines() {
     assert_eq!(settle_rebuild::rebuilds(), 2);
     // The isolated process owns the runtime globals; no workers survive the child.
     std::mem::forget(u);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Two instances of a program on one cache: the store's collected image is the other instance's,
+/// its interners grown otherwise (a game's second instance, warm: "regions running 69413,
+/// restored 69438"). The settle rebuild took that image as this program's (the warm start's
+/// counts were remembered), restored it, took the front write and failed its compare, each
+/// second, a hundred times, and the game stalled. The image is checked against the program before
+/// the front write and not taken again: the next try encodes this instance's own. A costly try
+/// that fails as the last one did ends the round.
+#[test]
+fn settle_rebuild_takes_another_instances_image_once() {
+    isolated_test!(settle_rebuild_takes_another_instances_image_once);
+    use settle_rebuild::Outcome;
+    std::env::set_var("RELAX_CACHE", "on");
+    crate::borrowck::lazy::disable_gandalf();
+    let dir = std::env::temp_dir().join(format!("relax-settle-instances-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::dirs::set_relax_dir(dir.join("run"));
+    let path = dir.join("lib.rs");
+    std::fs::write(dir.join("Cargo.toml"), "[package]\nname = \"settle_instances\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n").unwrap();
+    std::fs::write(&path, "#![no_std]\npub fn value(x: u32) -> u32 { x * 3 }\n").unwrap();
+    let mut session = crate::Session::default();
+    session.options.ctfe = crate::options::Ctfe::Off;
+    let session = std::sync::Arc::new(session);
+    let cfg = crate::cfg::CfgSet::host(&session, &[]);
+    let root = path.to_string_lossy().into_owned();
+    let pre = vec![crate::preload::PreCrate {
+        name: "settle_instances".into(), root: root.clone(), edition: 2021,
+        cfg: cfg.clone(), deps: vec![], proc_macro: false, image_deps: vec![], image_dep_names: vec![],
+    }];
+    settle_rebuild::remember_boot(&pre);
+    let _compiler = crate::zone_alloc::compiler();
+    // an instance's program, as its load makes it
+    let load = || {
+        let mut prog = Program::new(&session);
+        prog.record_front = true;
+        prog.front_sink = Some(crate::cache::FrontSink::for_dir(&crate::dirs::cache_dir()));
+        prog.preload(pre.clone());
+        prog.load_crate("settle_instances", &root, 2021, cfg.clone(), vec![]).unwrap();
+        prog.resolve_imports();
+        assert!(prog.errors.is_empty(), "{:?}", prog.errors);
+        crate::cache::ColdFront::default().finish_in(&mut prog, crate::dirs::cache_dir());
+        let mut tcx = Tcx::new();
+        tcx.collect(&prog);
+        assert!(tcx.errors.is_empty(), "{:?}", tcx.errors);
+        (prog, tcx)
+    };
+    let (prog, tcx) = load();
+    let mut u = Unit::new(prog, tcx, 0);
+    let up = &mut *u as *mut Unit;
+    let inputs = crate::owner::call(crate::owner::Class::Program, || {
+        let cache = crate::cache::Cache::open(&u, crate::cache::Mode::On).unwrap();
+        let inputs = cache.collected_inputs();
+        u.cache = Some(Box::new(crate::cache::CacheCell::new(cache)));
+        inputs
+    });
+    FIRST_PRESENT.store(true, Ordering::Release);
+    // this instance's image in the store, its counts remembered (as a warm start has them)
+    match settle_rebuild::run(up, false) {
+        Outcome::Done => {}
+        o => panic!("settle rebuild did not replace: {}", o.why()),
+    }
+    // the other instance's over it: the same program, more region lists interned
+    let (other, other_tcx) = load();
+    let running = crate::owner::call(crate::owner::Class::Program, || u.tcx.tys.region_counts());
+    for n in 1.. {
+        if other_tcx.tys.region_counts().1 > running.1 { break; }
+        other_tcx.tys.intern_region_args(&vec![crate::types::RegionId::ERASED; n]);
+    }
+    let stop = || false;
+    match inputs.encode_now(&other, &other_tcx, &stop) {
+        crate::cache::CollectedRecord::Ready(dest, payload) => assert!(crate::cache::Cache::commit_collected(None, dest, payload, &stop).is_some(), "the other instance's image is stored"),
+        _ => panic!("the other instance's image was not encoded"),
+    }
+    // the tries as the run monitor makes them
+    let encodes = settle_rebuild::encodes();
+    let mut round = settle_rebuild::Round::default();
+    let mut said = Vec::new();
+    loop {
+        round.tries += 1;
+        match settle_rebuild::run(up, false) {
+            Outcome::Done => break,
+            o => {
+                said.push(o.why().to_string());
+                assert!(!matches!(o, Outcome::Refused(_)) && round.wait(&o).is_some(), "the round ended: {said:?}");
+            }
+        }
+    }
+    assert_eq!(round.tries, 2, "the other instance's image is restored once, then this one's encoded: {said:?}");
+    assert!(said[0].starts_with("the store's image is not this program's"), "the image is checked before the replace: {said:?}");
+    assert_eq!(settle_rebuild::encodes(), encodes + 1, "the second try encodes this instance's image");
+    crate::owner::call(crate::owner::Class::Program, || {
+        assert_eq!(u.tcx.tys.region_counts(), running, "the rebuilt interner is this program's");
+    });
+    // how the monitor paces a round: a try that paid for a restore waits longer each time, a
+    // precondition is asked again in a second, and a failure that comes back ends the round (a
+    // passing condition does not)
+    let costly = |why: &str, passing| Outcome::Costly { why: why.into(), passing };
+    let mut round = settle_rebuild::Round::default();
+    let waits: Vec<_> = [costly("image: a", false), costly("yielded", true), costly("yielded", true), Outcome::Retry("starting".into()), costly("stores: b", false)]
+        .iter().map(|o| { round.tries += 1; round.wait(o).map(|d| d.as_secs()) }).collect();
+    assert_eq!(waits, [Some(1), Some(2), Some(4), Some(1), Some(8)]);
+    assert_eq!(round.wait(&costly("stores: c", false)), None, "the same failure twice in a row ends the round");
+    // The isolated process owns the runtime globals; no workers survive the child.
+    std::mem::forget((u, other, other_tcx));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

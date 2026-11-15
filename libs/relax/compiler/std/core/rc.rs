@@ -1,9 +1,10 @@
 //! Rc / Weak: single-threaded reference counting.
 //!
-//! Layout (Relax's own, R14): one heap block = a header (strong, weak, block size, block
-//! align) followed by the value at the next multiple of the value's alignment. An `Rc<T>` is
-//! a single (possibly fat) pointer to the value; the header is found from the value's
-//! alignment (header_of). So `Rc<str>`, `Rc<[T]>` and `Rc<dyn Trait>` need no custom DST and
+//! Layout: one heap block = rustc's RcInner / ArcInner, the two counts (strong, weak) followed
+//! by the value at the next multiple of the value's alignment, the block padded to its
+//! alignment (the allocator sees rustc's request). An `Rc<T>` is a single (possibly fat) pointer
+//! to the value; the header is found from the value's alignment (header_of), and the block's
+//! layout from the value's size and alignment (block_layout, free_block_of). So `Rc<str>`, `Rc<[T]>` and `Rc<dyn Trait>` need no custom DST and
 //! unsizing an `Rc<T>` to `Rc<dyn Tr>` is the plain pointer unsizing of its one field.
 
 use crate::vec::Vec;
@@ -42,11 +43,9 @@ pub(crate) unsafe fn block_free(p: *mut u8, size: usize, align: usize) {
 pub(crate) struct Header {
     pub strong: usize,
     pub weak: usize,
-    pub size: usize,
-    pub align: usize,
 }
 
-pub(crate) const HEADER: usize = 4 * crate::mem::size_of::<usize>();
+pub(crate) const HEADER: usize = crate::mem::size_of::<Header>();
 
 /// Offset of a value with alignment `align` after the header.
 #[inline]
@@ -54,16 +53,27 @@ pub(crate) fn value_offset(align: usize) -> usize {
     (HEADER + align - 1) & !(align - 1)
 }
 
+/// The block's (size, align) for a value of `value_size` bytes at alignment `value_align`:
+/// rustc's rc_inner_layout_for_value_layout, `Layout::new::<RcInner<()>>().extend(value)` padded
+/// to its alignment (library/alloc/src/rc.rs; sync.rs's ArcInner is the same). A free computes it
+/// again from the value's size and alignment, as rustc's Layout::for_value_raw does.
+pub(crate) fn block_layout(value_size: usize, value_align: usize) -> (usize, usize) {
+    let word = crate::mem::align_of::<usize>();
+    let align = if value_align > word { value_align } else { word };
+    match value_offset(value_align).checked_add(value_size).and_then(|s| s.checked_add(align - 1)) {
+        Some(s) => (s & !(align - 1), align),
+        None => crate::panicking::panic_str("Rc/Arc: capacity overflow"),
+    }
+}
+
 /// A block for `value_size` bytes at alignment `value_align`: (header, value address).
 pub(crate) fn alloc_block(value_size: usize, value_align: usize, strong: usize, weak: usize) -> (*mut Header, *mut u8) {
-    let off = value_offset(value_align);
-    let align = if value_align > 8 { value_align } else { 8 };
-    let size = off + value_size;
+    let (size, align) = block_layout(value_size, value_align);
     let base = block_alloc(size, align);
     let h = base as *mut Header;
     unsafe {
-        ptr::write(h, Header { strong, weak, size, align });
-        (h, base.add(off))
+        ptr::write(h, Header { strong, weak });
+        (h, base.add(value_offset(value_align)))
     }
 }
 
@@ -81,10 +91,18 @@ pub(crate) fn is_dangling<T: ?Sized>(p: *const T) -> bool {
     (p as *const u8 as usize) == DANGLING
 }
 
-pub(crate) unsafe fn free_block(h: *mut Header) {
-    let size = (*h).size;
-    let align = (*h).align;
+/// Frees the block at `h` that holds a value of `value_size` bytes at `value_align`.
+pub(crate) unsafe fn free_block(h: *mut Header, value_size: usize, value_align: usize) {
+    let (size, align) = block_layout(value_size, value_align);
     block_free(h as *mut u8, size, align);
+}
+
+/// Frees the block of the value at `p`, dropped or not: its size and alignment come from the
+/// pointer's metadata (a slice's length, a trait object's vtable).
+pub(crate) unsafe fn free_block_of<T: ?Sized>(p: *const T) {
+    let size = crate::intrinsics_mem::size_of_val(&*p);
+    let align = crate::intrinsics_mem::align_of_val(&*p);
+    free_block(header_of(p), size, align);
 }
 
 // ---------------------------------------------------------------- Rc
@@ -202,7 +220,7 @@ impl<T: ?Sized + crate::clone_uninit::CloneToUninit> Rc<T> {
                 let size = crate::intrinsics_mem::size_of_val(&*p);
                 let align = crate::intrinsics_mem::align_of_val(&*p);
                 let (nh, np) = alloc_block(size, align, 1, 1);
-                let guard = FreeBlockGuard(nh);
+                let guard = FreeBlockGuard(nh, size, align);
                 (*p).clone_to_uninit(np);
                 crate::mem::forget(guard);
                 *this = Rc::from_parts(crate::clone_uninit::with_addr(p, np));
@@ -223,12 +241,12 @@ impl<T: ?Sized + crate::clone_uninit::CloneToUninit> Rc<T> {
     }
 }
 
-/// Frees a fresh block if cloning into it panics.
-pub(crate) struct FreeBlockGuard(pub(crate) *mut Header);
+/// Frees a fresh block (its header, the value's size and alignment) if cloning into it panics.
+pub(crate) struct FreeBlockGuard(pub(crate) *mut Header, pub(crate) usize, pub(crate) usize);
 
 impl Drop for FreeBlockGuard {
     fn drop(&mut self) {
-        unsafe { free_block(self.0) }
+        unsafe { free_block(self.0, self.1, self.2) }
     }
 }
 
@@ -315,7 +333,7 @@ impl<T: ?Sized> Rc<T> {
             ptr::drop_in_place(self.ptr.as_ptr());
             (*header_of(self.ptr.as_ptr())).weak -= 1;
             if (*header_of(self.ptr.as_ptr())).weak == 0 {
-                free_block(header_of(self.ptr.as_ptr()));
+                free_block_of(self.ptr.as_ptr());
             }
         }
     }
@@ -645,7 +663,7 @@ unsafe impl<#[may_dangle] T: ?Sized> Drop for Weak<T> {
         unsafe {
             (*header_of(self.ptr.as_ptr())).weak -= 1;
             if (*header_of(self.ptr.as_ptr())).weak == 0 {
-                free_block(header_of(self.ptr.as_ptr()));
+                free_block_of(self.ptr.as_ptr());
             }
         }
     }

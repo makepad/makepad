@@ -354,7 +354,7 @@ impl ImageBuffer {
             TextureFormat::VecMipBGRAu8_32 {
                 width: self.width,
                 height: self.height,
-                data: Some(self.data),
+                data: Some(self.data.into()),
                 max_level: Some(max_level),
                 wrap: TextureWrap::ClampToEdge,
                 updated: TextureUpdated::Full,
@@ -405,7 +405,7 @@ impl ImageBuffer {
             TextureFormat::VecMipBGRAu8_32 {
                 width: self.width,
                 height: self.height,
-                data: Some(self.data),
+                data: Some(self.data.into()),
                 max_level: Some(max_level),
                 wrap,
                 updated: TextureUpdated::Full,
@@ -1682,7 +1682,11 @@ pub fn evict_image_from_cache(cx: &mut Cx, image_path: &Path) -> bool {
         match texture.get_format(cx) {
             // Pixels that something showing them still has to upload are kept.
             TextureFormat::VecBGRAu8_32 { data, updated, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, updated, .. }
+                if is_last_handle || updated.is_empty() =>
+            {
+                *data = None;
+            }
+            TextureFormat::VecMipBGRAu8_32 { data, updated, .. }
                 if is_last_handle || updated.is_empty() =>
             {
                 *data = None;

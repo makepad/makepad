@@ -86,7 +86,13 @@ pub const HELP: &str = "  lease <kind> [--node N [--series S|--pin-why R]|--need
   run <lane> <kind> [--node N [--series S|--pin-why R]|--needs ..] [--rev R] [--with-uncommitted] [--tree] [--patch <diff> ..]
         [--cost small|medium|large] [--est-min N] [--cores N] [--ram-gb N] [--whole]
         [--class name] [--priority interactive|background] [--jit key] [--native <reason>] [--keep <dir>]
-        [--for <node>] -- cmd...
+        [--for <node>] [--rounds N] -- cmd...
+                                          --rounds N (timed): the command runs once per round, DEVHUB_ROUND=1..N and
+                                          DEVHUB_ROUNDS=N in its environment; when a short timed ask waits on the box
+                                          (whatever this run's length) it hands the box over after the round and asks
+                                          again for the rest, DEVHUB_RESUMED=1 in the first round after (another run had
+                                          the box: redo a warm-up). Name each round's output by its round. A timed run
+                                          without it hands its box over only when it ends, and hears so as it asks.
                                           --cores N: the run sees N cores, as each unit of a land gate's tests bucket does:
                                           MAKEPAD_CPU_CORES (its pools and JIT workers), RELAX_JOBS, CARGO_BUILD_JOBS and
                                           RUST_TEST_THREADS are N, unpinned (`devhub test ... --cores 4` runs as a unit of 4).
@@ -531,6 +537,7 @@ const FLAG_FIELDS: &[(&[&str], &str)] = &[
     (&["--cores", "2"], "cores"),
     (&["--cost", "small"], "cost"),
     (&["--est-min", "3"], "est_min"),
+    (&["--rounds", "3"], "rounds"),
     (&["--jit", "x"], "loader"),
     (&["--lane", "lane-b"], "lane"),
     (&["--needs", "os=linux"], "needs"),
@@ -570,6 +577,7 @@ fn parse(kind: &str, lane: Option<&str>, args: &[&str]) -> Result<Opts, String> 
             "--whole" => { req.whole = true; i += 1; continue; }
             "--cost" => { req.cost = CostClass::parse(val(i)?).ok_or("--cost is small, medium or large")?; req.cost_asked = true; }
             "--est-min" => req.est_min = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.0).ok_or("--est-min is a nonnegative number")?),
+            "--rounds" => req.rounds = Some(val(i)?.parse::<u32>().ok().filter(|n| *n >= 1).ok_or("--rounds is a positive whole number")?),
             "--cores" => req.cores = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--cores is a positive number")?),
             "--ram-gb" => req.ram_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-gb is a positive number")?),
             "--ram-floor-gb" => req.ram_floor_gb = Some(val(i)?.parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0).ok_or("--ram-floor-gb is a positive number")?),
@@ -799,7 +807,9 @@ fn acquire_said(c: &Client, req: &Req) -> Result<Held, (i32, String)> {
                     let short = deployment.split(',').map(|sha| &sha[..sha.len().min(10)]).collect::<Vec<_>>().join(",");
                     eprintln!("{id} timed@{}: runs on deployment {short}", s(&v, "node"));
                 }
-                if req.kind == Kind::Timed {
+                if req.kind == Kind::Timed && req.rounds.is_some_and(|n| n > 1) {
+                    eprintln!("{id}: a run in rounds: when a short timed ask waits on its box, it hands the box over after the current round and asks again for the rest");
+                } else if req.kind == Kind::Timed {
                     eprintln!("{id}: between steps, check $DEVHUB_YIELD: it appears when this run is past twice its estimate while a timed ask waits on its box, or runs over 10 min while one of 10 min or less waits there; then stop after the current step with what you have and release");
                 }
                 let start = v.get("start");
@@ -1007,6 +1017,10 @@ fn lease(args: &[&str]) -> i32 {
         return 2;
     };
     let mut o = match parse(kind, None, rest) {
+        Ok(o) if o.req.rounds.is_some() => {
+            eprintln!("makepad devhub lease: --rounds is `devhub run`'s: its client runs the command once per round");
+            return 2;
+        }
         Ok(o) => o,
         Err(e) => {
             eprintln!("makepad devhub lease: {e}");
@@ -1409,6 +1423,10 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         }
     };
     let mut o = match parse(kind, Some(lane), &rest) {
+        Ok(o) if o.req.rounds.is_some() && o.req.kind != Kind::Timed => {
+            eprintln!("makepad devhub run: --rounds is for a timed run: only timed work hands its box over between rounds");
+            return 2;
+        }
         Ok(o) if !o.cmd.is_empty() => Opts { patched, ..o },
         Ok(_) => {
             eprintln!("makepad devhub run <lane> <kind> [--node N|--needs ..] [--tree] -- cmd...");
@@ -1427,6 +1445,7 @@ fn run(lane: &str, kind: &str, rest: &[&str]) -> i32 {
         eprintln!("makepad devhub run: {e}");
         return 2;
     }
+    if let Some(note) = rounds_note(&o.req) { eprintln!("makepad devhub run: {note}"); }
     let exit_to = o.exit_to.clone();
     let code = match native_gate(&c, &o) {
         Ok(()) => run_worktree(o, uncommitted, None),
@@ -1494,49 +1513,117 @@ fn run_worktree_into(o: &mut Opts, uncommitted: bool, test: Option<&str>, out: &
         Err(e) => return (fail(e), false),
     };
     shipped_hint(&c, &root, &mut o.req, &snapped);
-    let queued = Instant::now();
-    let mut held = match acquire_said(&c, &o.req) {
-        Ok(h) => h,
-        Err((code, said)) => {
-            // (a test's verdict line: one whose lease never started has none)
-            if let Some(pkg) = test { let _ = writeln!(out, "{}", not_run_line(pkg, &said)); }
+    // a run in rounds, told to yield, hands its box over after a round and asks again for the rest
+    // ([`run_rounds`]): a new ask, behind the short ones it yielded to
+    let rounds = o.req.rounds.filter(|n| *n > 1 && test.is_none());
+    let mut from = 1;
+    loop {
+        let queued = Instant::now();
+        let mut held = match acquire_said(&c, &o.req) {
+            Ok(h) => h,
+            Err((code, said)) => {
+                // (a test's verdict line: one whose lease never started has none)
+                if let Some(pkg) = test { let _ = writeln!(out, "{}", not_run_line(pkg, &said)); }
+                return (code, false);
+            }
+        };
+        held.adopt = adopt_body(o, rel.trim_end_matches('/'));
+        let queue = queued.elapsed();
+        let shipping = Instant::now();
+        let rev = o.req.rev.clone().unwrap_or_default();
+        // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
+        // ledger): the ship is made again once it answers
+        let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, o.commits_only, &snapped), &master);
+        let ship = shipping.elapsed();
+        let running = Instant::now();
+        let mut tally = crate::testlog::Tally::default();
+        let mut yielded = None;
+        let r = shipped.and_then(|_| {
+            let mut tee = Tee { out: &mut *out, tally: &mut tally };
+            match rounds {
+                Some(n) => run_rounds(&c, &held, rel.trim_end_matches('/'), &o.cmd, &o.inputs, &mut tee, (from, n)).map(|(code, at)| { yielded = at; code }),
+                None => run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, &o.inputs, &mut tee),
+            }
+        });
+        let run = running.elapsed();
+        let completed = r.is_ok();
+        // what the run put in $DEVHUB_KEEP, before the lease's end takes its tmp: `devhub run` and
+        // `devhub test` took `--keep` and copied nothing back, three Source Library rig runs' grabs
+        // in a row (11-07)
+        if let (Ok(_), Some(dst)) = (&r, &o.keep) {
+            eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
+        }
+        let mut code = finish(&c, &held, r);
+        // its run went on as a job: no verdict yet; what its owner hears goes last
+        if let Some(said) = held.handed.lock().unwrap().as_deref() {
+            let _ = writeln!(out, "{said}");
             return (code, false);
         }
-    };
-    held.adopt = adopt_body(o, rel.trim_end_matches('/'));
-    let queue = queued.elapsed();
-    let shipping = Instant::now();
-    let rev = o.req.rev.clone().unwrap_or_default();
-    // a node hub restarting mid-ship keeps the lease (its new hub takes it back from the
-    // ledger): the ship is made again once it answers
-    let shipped = through_restarts(&held.id, &mut c.clone(), |c| ship(c, &root, &held, &rev, o.commits_only, &snapped), &master);
-    let ship = shipping.elapsed();
-    let running = Instant::now();
-    let mut tally = crate::testlog::Tally::default();
-    let r = shipped.and_then(|_| run_there_into(&c, &held, rel.trim_end_matches('/'), &o.cmd, &o.inputs, &mut Tee { out: &mut *out, tally: &mut tally }));
-    let run = running.elapsed();
-    let completed = r.is_ok();
-    // what the run put in $DEVHUB_KEEP, before the lease's end takes its tmp: `devhub run` and
-    // `devhub test` took `--keep` and copied nothing back, three Source Library rig runs' grabs
-    // in a row (11-07)
-    if let (Ok(_), Some(dst)) = (&r, &o.keep) {
-        eprintln!("{}", keep_said(&held.id, dst, &kept(&c, &held.node, &o.req.lane, &held.id, dst)));
+        if let (0, Some(k), Some(n)) = (code, yielded, rounds) {
+            eprintln!("{}: handed its box over after round {k} of {n}; asks again for rounds {}..{n}", held.id, k + 1);
+            from = k + 1;
+            continue;
+        }
+        if let Some(pkg) = test {
+            // a test run that executed no test is no pass
+            let mut none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
+            if let Some(why) = &mut none { crate::testlog::no_pass_hint(why, &root, &rev, &o.cmd); }
+            if none.is_some() { code = 1; }
+            let verdict = match (code, &none) { (0, _) => "passed".into(), (CANCELLED_EXIT, _) => "cancelled".into(), (LOST_EXIT, _) => "had no verdict (its lease was lost)".into(), (_, Some(why)) => format!("failed: {why}"), _ => "failed".to_string() };
+            let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
+        }
+        break (code, completed);
     }
-    let mut code = finish(&c, &held, r);
-    // its run went on as a job: no verdict yet; what its owner hears goes last
-    if let Some(said) = held.handed.lock().unwrap().as_deref() {
-        let _ = writeln!(out, "{said}");
-        return (code, false);
+}
+
+/// What a timed run without `--rounds` hears as it asks: it hands its box over only when it ends.
+/// A 60-min script that never read $DEVHUB_YIELD held a bench box 70 min while three short timed
+/// asks waited, told to yield five times (11-14). None for other runs, and for one in rounds.
+fn rounds_note(req: &Req) -> Option<String> {
+    (req.kind == Kind::Timed && req.rounds.is_none()).then(|| "a timed run without --rounds hands its box over only when it ends: a short timed ask that comes meanwhile waits for all of it. `--rounds N` runs the command once per round (DEVHUB_ROUND=1..N, DEVHUB_ROUNDS=N) and, when a short timed ask waits, hands the box over after the round and asks again for the rest (DEVHUB_RESUMED=1 in the first round after); each round's output goes in files named by its round".to_string())
+}
+
+/// Rounds `from..=n` of a run in rounds (`--rounds N`), its command once each in `held`'s lease
+/// ([`rounds_until`]).
+fn run_rounds(c: &Client, held: &Held, rel: &str, cmd: &[String], inputs: &[super::ship::Input], out: &mut dyn Write, (from, n): (u32, u32)) -> Result<(i32, Option<u32>), String> {
+    rounds_until((from, n), cmd, |k, argv| {
+        eprintln!("{}: round {k} of {n}{}", held.id, if from > 1 && k == from { " (resumed: DEVHUB_RESUMED=1)" } else { "" });
+        run_there_into(c, held, rel, argv, inputs, &mut *out)
+    }, || told_to_yield(c, &held.id))
+}
+
+/// Runs rounds `from..=n` of `cmd` ([`round_argv`]) with `run`. It stops at a failed round (its
+/// exit), and after a round before the last once `told` says the lease was told to yield
+/// ([`super::sched::Sched::say_overruns`]): `(0, Some(k))`, and the next lease goes on at k+1.
+fn rounds_until(
+    (from, n): (u32, u32),
+    cmd: &[String],
+    mut run: impl FnMut(u32, &[String]) -> Result<i32, String>,
+    mut told: impl FnMut() -> bool,
+) -> Result<(i32, Option<u32>), String> {
+    for k in from..=n {
+        let code = run(k, &round_argv(cmd, k, n, from > 1 && k == from))?;
+        if code != 0 { return Ok((code, None)); }
+        if k < n && told() { return Ok((0, Some(k))); }
     }
-    if let Some(pkg) = test {
-        // a test run that executed no test is no pass
-        let mut none = if code == 0 { tally.no_pass(&o.cmd) } else { None };
-        if let Some(why) = &mut none { crate::testlog::no_pass_hint(why, &root, &rev, &o.cmd); }
-        if none.is_some() { code = 1; }
-        let verdict = match (code, &none) { (0, _) => "passed".into(), (CANCELLED_EXIT, _) => "cancelled".into(), (LOST_EXIT, _) => "had no verdict (its lease was lost)".into(), (_, Some(why)) => format!("failed: {why}"), _ => "failed".to_string() };
-        let _ = writeln!(out, "devhub test: {pkg} {verdict} in {:.3}s (queue {:.3}s, ship {:.3}s, run {:.3}s) on {}", t.elapsed().as_secs_f64(), queue.as_secs_f64(), ship.as_secs_f64(), run.as_secs_f64(), held.node);
-    }
-    (code, completed)
+    Ok((0, None))
+}
+
+/// Round `k` of `n`'s command: `DEVHUB_ROUND`, `DEVHUB_ROUNDS` and, in the first round after its
+/// run handed the box over, `DEVHUB_RESUMED=1` (another run had the box meanwhile: its caches may
+/// be cold, so a warm-up runs again), joined with the command's own `env` words: the node reads
+/// one `env` prefix as the run's environment.
+fn round_argv(cmd: &[String], k: u32, n: u32, resumed: bool) -> Vec<String> {
+    let mut argv = vec!["env".to_string(), format!("DEVHUB_ROUND={k}"), format!("DEVHUB_ROUNDS={n}")];
+    if resumed { argv.push("DEVHUB_RESUMED=1".to_string()); }
+    let rest = if cmd.first().is_some_and(|c| c == "env") { &cmd[1..] } else { cmd };
+    argv.extend(rest.iter().cloned());
+    argv
+}
+
+/// Whether the master told lease `id` to yield (its beat's `yield`); not when it does not answer.
+fn told_to_yield(c: &Client, id: &str) -> bool {
+    one(c, "beat", id).ok().and_then(|v| v.get("yield").and_then(Value::as_bool)).unwrap_or(false)
 }
 
 /// The JIT ids an overlay run is placed by, read off what it ships ([`super::loaders::shipped_ids`]):
@@ -1800,18 +1887,34 @@ fn test(lane: &str, pkg: &str, rest: &[&str]) -> i32 {
         }
         let default_class = o.req.class.is_empty();
         if default_class {
-            o.req.class = target.map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}"));
+            o.req.class = target.as_ref().map_or_else(|| format!("test:{pkg}"), |t| format!("test:{pkg}:{t}"));
             if live { o.req.class = format!("live:{}", o.req.class); }
         }
         let own = if native { false } else {
-            let (own, tree) = crate::jit_misses::test_package(&root, &pin.pair(), pkg)?;
+            let p = crate::jit_misses::test_package(&root, &pin.pair(), pkg)?;
             // tests that read the checkout itself (its history, cargo on it) say so in their
             // Cargo.toml, and run in the lane's tree: an overlay has neither
-            if let Some(why) = tree.filter(|_| !o.tree) {
+            if let Some(why) = p.tree.filter(|_| !o.tree) {
                 eprintln!("devhub test: {}", crate::jit_misses::tree_line(pkg, &why));
                 o.tree = true;
             }
-            own
+            // a target its Cargo.toml runs under cargo (native-tests): a run that selects it goes
+            // there whole, as the tests bucket runs it (`--live`'s default target is the lib)
+            let select = match target.as_deref() {
+                None if live => vec!["lib".to_string()],
+                None => Vec::new(),
+                Some(ALL_TESTS) => vec!["tests".to_string()],
+                Some(t) if t == "lib" || t.starts_with("bin:") => vec![t.to_string()],
+                Some(t) => vec![format!("test:{t}")],
+            };
+            let declared: Vec<String> = crate::jit_misses::native_selected(&p.native, &select).into_iter().map(|(t, why)| format!("{t}: {why}")).collect();
+            if !declared.is_empty() {
+                if live { return Err(format!("{pkg} {}: its Cargo.toml runs it under cargo (native-tests), and --live is the JIT's warm run: drop --live", declared.join("; "))); }
+                let rest = if target.is_none() { " (the whole package with it: --lib, --bin B or --test T runs another target under the JIT)" } else { "" };
+                eprintln!("devhub test: {}: cargo, as its Cargo.toml's native-tests says: {}{rest}", o.req.class, declared.join("; "));
+                native = true;
+            }
+            p.own
         };
         // Warm iteration always uses the JIT; measured routing is only for one-shot runs.
         if !native && !live {
@@ -1913,7 +2016,7 @@ fn pre_land_checks(lane: &str, rev: &str, commits_only: bool) -> i32 {
     let mut sides = Vec::new();
     for pkg in touched {
         match crate::jit_misses::test_package(&root, &pin.pair(), &pkg) {
-            Ok((own, _)) => sides.push((pkg, own)),
+            Ok(p) => sides.push((pkg, p.own)),
             Err(e) => return fail(format!("devhub test: check {pkg}: {e}")),
         }
     }
@@ -3071,6 +3174,38 @@ mod tests {
         assert!(alone.entries.is_empty() && alone.deleted.is_empty(), "--rev: the commits alone");
         drop(alone);
         let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// A run in rounds: each round's command names its round, the first after a hand-over says
+    /// it resumed, and the command's own `env` words join the one prefix the node reads as its
+    /// environment. A timed run without rounds hears as it asks that it hands its box over only
+    /// when it ends; other runs and runs in rounds hear nothing.
+    #[test]
+    fn a_run_in_rounds_names_its_round_and_a_timed_run_without_hears_why() {
+        let cmd: Vec<String> = ["env", "A=1", "sh", "bench.sh"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(round_argv(&cmd, 2, 4, false), ["env", "DEVHUB_ROUND=2", "DEVHUB_ROUNDS=4", "A=1", "sh", "bench.sh"]);
+        assert_eq!(round_argv(&cmd[2..], 3, 4, true), ["env", "DEVHUB_ROUND=3", "DEVHUB_ROUNDS=4", "DEVHUB_RESUMED=1", "sh", "bench.sh"]);
+        assert_eq!(super::super::loaders::command_of(&round_argv(&cmd, 1, 4, true)), &cmd[2..], "the node runs the command itself");
+        let timed = parse("timed", Some("lane-a"), &["--", "sh", "bench.sh"]).unwrap().req;
+        assert!(rounds_note(&timed).is_some_and(|n| n.contains("only when it ends") && n.contains("--rounds N")), "{:?}", rounds_note(&timed));
+        let rounds = parse("timed", Some("lane-a"), &["--rounds", "4", "--", "sh", "bench.sh"]).unwrap().req;
+        assert_eq!((rounds.rounds, rounds_note(&rounds)), (Some(4), None));
+        assert_eq!(rounds_note(&parse("build", Some("lane-a"), &["--", "cargo", "build"]).unwrap().req), None);
+        assert!(parse("timed", Some("lane-a"), &["--rounds", "0", "--", "sh"]).is_err());
+        // told to yield during round 2 of 4: it hands the box over after it, and the next lease
+        // runs rounds 3 and 4, the first of them resumed
+        let cmd = &cmd[2..];
+        let ran = std::cell::RefCell::new(Vec::new());
+        let round = |k: u32, argv: &[String]| { ran.borrow_mut().push((k, argv.iter().any(|a| a == "DEVHUB_RESUMED=1"))); Ok(0) };
+        let r = rounds_until((1, 4), cmd, round, || ran.borrow().len() == 2);
+        assert_eq!((r, ran.take()), (Ok((0, Some(2))), vec![(1, false), (2, false)]));
+        let r = rounds_until((3, 4), cmd, round, || false);
+        assert_eq!((r, ran.take()), (Ok((0, None)), vec![(3, true), (4, false)]));
+        let r = rounds_until((4, 4), cmd, round, || true);
+        assert_eq!((r, ran.take()), (Ok((0, None)), vec![(4, true)]), "told at its last round: done, no hand-over");
+        // a failed round ends the run with its exit, told or not
+        let r = rounds_until((1, 4), cmd, |k, _| Ok(if k == 2 { 3 } else { 0 }), || false);
+        assert_eq!(r, Ok((3, None)));
     }
 
     #[test]

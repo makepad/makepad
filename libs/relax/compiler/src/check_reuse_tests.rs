@@ -51,6 +51,9 @@ fn check_in_child_store(dir: &std::path::Path, reuse: bool, store: &std::path::P
         }
         if let Some(c) = l.strip_prefix("reuse child exit ") { run.code = c.parse().unwrap(); }
     }
+    // the owners phase computes every item cell of a fresh crate (body_facts.rs item_text): no
+    // body is the first to read interface text, so no check's import uses depend on which bodies ran
+    assert_eq!(run.in_body, 0, "interface text first read in a body: {}", stderr.lines().find(|l| l.contains("items resolved in a body")).unwrap_or(""));
     run
 }
 
@@ -237,6 +240,28 @@ fn a_dependency_body_edit_checks_only_that_dependency() {
     std::fs::write(dir.join("bin.rs"), bin.replace("pkg::show(1u8).position()", "0")).unwrap();
     let (reused, cold) = reused_and_verified(&dir, &one, "the body that computed the library's item text first edited");
     assert_eq!((reused.hits, reused.replayed, cold.verified), (1, 4, 6), "the body that computed the library's item text first edited: {reused:?}, {cold:?}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The import replay covers the crates checked again; a crate whose verdict is reused is read as a
+/// finished one, as rustc reads a dependency's names from its metadata (run.rs). The binary's
+/// imports through the library, a single import and a glob of a module whose two globs bring
+/// different `Dup`s, resolve as a replay of every crate resolves them when only the binary is
+/// checked again, and its uses of `Dup` stay ambiguous.
+#[test]
+fn a_reused_crate_is_read_as_a_finished_one_by_the_import_replay() {
+    if std::env::var_os(CHILD).is_some() { return; }
+    let lib = "pub mod inner { mod a { pub struct Dup; } mod b { pub struct Dup; } pub use a::*; pub use b::*; }\n\
+        pub use inner::*;\npub fn f() -> u32 { 1 }\n";
+    let bin = "#![warn(ambiguous_glob_imports)]\nuse pkg::inner::Dup as Single;\nuse pkg::inner::*;\n\
+        fn main() { let _ = pkg::Dup; let _ = Single; let _ = Dup; let _ = pkg::f(); }\n";
+    let dir = package("finished", &[("lib.rs", lib), ("bin.rs", bin)]);
+    let first = check_in_child(&dir, true, &[]);
+    let ambiguous = |r: &Run| r.diags.iter().filter(|d| d.contains("`Dup` is ambiguous")).count();
+    assert!(first.code == 0 && ambiguous(&first) >= 2, "the imports and the uses are the lint: {first:?}");
+    std::fs::write(dir.join("bin.rs"), bin.replace("let _ = pkg::f();", "let _ = pkg::f() + 1;")).unwrap();
+    let (reused, _) = reused_and_verified(&dir, &[], "the binary edited");
+    assert_eq!((reused.hits, ambiguous(&reused)), (1, ambiguous(&first)), "only the binary checked again, its reports as before: {reused:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -737,7 +762,11 @@ fn a_dependency_error_fails_the_check() {
 /// the names resolve, and a name the app's own two globs both provide is ambiguous where it is
 /// used (E0659). A `pub(crate)` glob of the dependency's module brings the app nothing (relax
 /// issue 186: its `Scalar` met the app's own through the app's two globs, E0659, and in a type
-/// it named the dependency's `f32`, E0308).
+/// it named the dependency's `f32`, E0308). Nor does a private module's ambiguous name the
+/// dependency's root globs beside a visible binding of it: the root's `Gear` is `tool`'s, and the
+/// app's uses of it are clean, as rustc has them (a private module's two globs of `shader`
+/// reached a framework crate's root through its `pub use vm::*`, and an app's single import of
+/// a path through `shader` got the lint, which rustc does not report).
 #[test]
 fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     if std::env::var_os(CHILD).is_some() || std::env::var_os(EARLY_CHILD).is_some() || std::env::var_os(APP_CHILD).is_some() { return; }
@@ -750,10 +779,10 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     };
     write("ws/Cargo.toml", "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n");
     write("dep/Cargo.toml", "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n");
-    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\nmod units { pub type Scalar = f32; }\npub mod prelude { pub struct Body; #[allow(unused_imports)] pub(crate) use crate::units::*; }\n");
+    write("dep/lib.rs", "pub mod inner;\nmod a { pub struct Dup; }\npub use inner::*;\npub use a::*;\npub enum Shape { Round, Square }\npub use Shape::*;\npub struct Thing;\npub fn root_fn() -> u32 { 1 }\nmod units { pub type Scalar = f32; }\npub mod prelude { pub struct Body; #[allow(unused_imports)] pub(crate) use crate::units::*; }\npub mod tool { pub struct Gear; }\nmod other { pub struct Gear; }\nmod mix { #[allow(unused_imports)] use super::tool::*; #[allow(unused_imports)] use super::other::*; pub fn mixed() -> u32 { 2 } }\npub use mix::*;\npub use tool::*;\n");
     write("dep/inner.rs", "use super::*;\nmod b { pub struct Dup; }\npub use b::*;\npub struct Inner;\npub fn inner_fn() -> u32 { root_fn() + 1 }\n");
     write("ws/app/Cargo.toml", "[package]\nname = \"app_pkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[lib]\npath = \"lib.rs\"\n[dependencies]\ndep = { path = \"../../dep\" }\n");
-    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\nuse dep::prelude::*;\nmod clock {{ pub struct Scalar; }}\nuse clock::*;\npub fn body() -> Body {{ let _s: Scalar = Scalar; Body }}\n{clash}");
+    let app = |clash: &str| format!("use dep::*;\npub fn top(s: Shape) -> u32 {{ let _ = Inner; root_fn() + inner_fn() + match s {{ Round => 1, Square => 2 }} }}\nuse dep::prelude::*;\nmod clock {{ pub struct Scalar; }}\nuse clock::*;\npub fn body() -> Body {{ let _s: Scalar = Scalar; Body }}\npub fn gear() -> u32 {{ let _ = Gear; let _ = dep::Gear; mixed() }}\npub mod two {{ use dep::Gear; pub fn h() {{ let _ = Gear; }} }}\n{clash}");
     let check = || {
         let out = crate::test_child::output(std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "check_reuse_tests::app_check_child", "--nocapture", "--test-threads=1", "--format=terse"])
@@ -764,8 +793,8 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
         let code = stderr.lines().find_map(|l| l.strip_prefix("app child exit ")).map(|c| c.parse::<i32>().unwrap());
         (code, stderr.into_owned())
     };
-    // the dep's names through the cycle and the enum glob, and the app's `Scalar` beside the dep's
-    // `pub(crate)` glob: no diagnostic
+    // the dep's names through the cycle and the enum glob, the app's `Scalar` beside the dep's
+    // `pub(crate)` glob, and `Gear` past the private module's ambiguous one: no diagnostic
     write("ws/app/lib.rs", &app(""));
     let clean = check();
     assert!(clean.0 == Some(0) && !clean.1.contains(": error") && !clean.1.contains(": warning:"), "{}", clean.1);
@@ -773,5 +802,12 @@ fn an_app_check_reads_the_globs_of_unchecked_crates_as_rustc_does() {
     write("ws/app/lib.rs", &app("mod own { pub struct Thing; }\nuse own::*;\npub fn clash() -> u32 { let _ = Thing; 0 }\n"));
     let clash = check();
     assert!(clash.0.is_some_and(|c| c != 0) && clash.1.contains("E0659") && clash.1.contains("`Thing` is ambiguous"), "{}", clash.1);
+    // the dep's own ambiguous `Dup` (its two globs): rustc reads it from metadata as an ambiguous
+    // child, and each use -- through the glob, as a type, by path, by a single import and through
+    // that import -- is the deny-by-default lint `ambiguous_glob_imports`, not E0659
+    write("ws/app/lib.rs", &app("pub fn dup(_d: Dup) { let _ = Dup; let _ = dep::Dup; }\nmod one { use dep::Dup; pub fn g() { let _ = Dup; } }\n"));
+    let dup = check();
+    let lines: Vec<&str> = dup.1.lines().filter(|l| l.contains("`Dup` is ambiguous")).collect();
+    assert!(dup.0.is_some_and(|c| c != 0) && lines.len() == 5 && lines.iter().all(|l| l.contains("ambiguous_glob_imports") && !l.contains("E0659")), "{}", dup.1);
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """A live test session answers each test's outcome, not only counts and failing names: run.py
-[/path/to/makepad] (without one, from the workspace root: `cargo run --profile host` of makepad).
+[/path/to/relax] (without one, from the workspace root: relax-runner's relax, built by cargo).
 Relax issue 131 (ported from makepad/relax PR 134).
 
 `makepad test --live live-test-results --lib -- --skip filtered`, found with `inspect list`:
@@ -10,6 +10,10 @@ Relax issue 131 (ported from makepad/relax PR 134).
 2. An edit of value() fails value_is_one: the next verdict's query has it failed and run, and
    `independent`, which the edit does not reach, passed from the earlier run (ran false).
 3. The first verdict's group is refused now: its results are gone, the error names the group kept.
+4. An edit whose patched value() faults (a read of an unmapped address): its verdict says
+   `faulted` with its group, the JIT undoes it, and the run after that says `reverted` with the
+   group, in its verdict and its results' header: it tested the code from before the edit, which
+   is no verdict on the saved source (a session read 77/77 after a revert as one, 11-14).
 Prints "live_test_results: ok" or "live_test_results: FAILED (...)"."""
 import json
 import os
@@ -24,7 +28,10 @@ import time
 if len(sys.argv) > 1:
     jit = [str(Path(sys.argv[1]).resolve())]
 else:
-    jit = ["cargo", "run", "--profile", "host", "-q", "--manifest-path", str(Path.cwd() / "Cargo.toml"), "-p", "makepad-run", "--bin", "makepad", "--"]
+    # built once, here: a `cargo run` per call ran in the test's package, outside the workspace,
+    # without its .cargo/config.toml, so the first call built relax again with other flags (100 s)
+    sp.run(["cargo", "build", "--profile", "host", "-q", "-p", "relax-runner", "--bin", "relax"], check=True)
+    jit = [str((Path(os.environ.get("CARGO_TARGET_DIR", "target")) / "host" / "relax").resolve())]
 here = Path(__file__).resolve().parent
 
 
@@ -101,6 +108,18 @@ with tempfile.TemporaryDirectory(prefix="live-test-results-") as tmp:
         stale = inspect(pid, "test-results", "group=%d" % first["group"], check=False)
         if any("name" in r for r in stale) or not any(("group %d" % edited["group"]) in r.get("err", "") for r in stale):
             fail("the first group's results after the edit: %s" % stale, log)
+        time.sleep(1.1)
+        lib.write_text(lib.read_text().replace("{ 2 }", "{ unsafe { (16usize as *const u32).read_volatile() } }"))
+        faulted = verdict(edited["seq"])
+        g = faulted["group"]
+        if g <= edited["group"] or faulted.get("faulted") != [g] or "reverted" in faulted:
+            fail("the faulting edit's verdict: %s" % faulted, log)
+        undone = verdict(faulted["seq"])
+        if undone["group"] != g or undone.get("reverted") != [g] or "faulted" in undone:
+            fail("the verdict after the revert: %s" % undone, log)
+        head = [r for r in inspect(pid, *undone["results"].split()) if "test_count" in r]
+        if head != [{"group": g, "test_count": 4, "reverted": [g]}]:
+            fail("the results after the revert: %s" % head, log)
     finally:
         try:
             os.killpg(p.pid, signal.SIGTERM)

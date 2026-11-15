@@ -132,7 +132,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     fn ensure_seeded(cx: &mut Cx) {
         if cx.script_data.random_seed == 0 {
             // a flight-recorder replay starts from the recorded seed (`seed.script` event)
-            let replay = std::env::var("MAKEPAD_FLIGHT_SEED").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v != 0);
+            let replay = std::env::var("RELAX_REPLAY_SEED").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v != 0);
             cx.script_data.random_seed = replay.or_else(|| crate::remote::app_clock::seed()
                 .map(|seed| next_hash(&seed.to_le_bytes()).max(1)))
                 .unwrap_or_else(fresh_seed);

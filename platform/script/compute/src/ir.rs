@@ -356,11 +356,12 @@ impl Program {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t, depth, c, funcs).max(walk(e, depth, c, funcs)),
+                    // saturating from the true sums: a branch or body already at u64::MAX stays there
+                    Stmt::If(_, t, e) => walk(t, depth, c, funcs).max(walk(e, depth, c, funcs)).saturating_add(1),
                     Stmt::Loop { cap, body } => {
                         // The outermost loop is the per-frame loop: count one frame.
                         let reps = if depth == 0 { 1 } else { *cap as u64 };
-                        reps.saturating_mul(walk(body, depth + 1, c, funcs) + 2)
+                        reps.saturating_mul(walk(body, depth + 1, c, funcs).saturating_add(2))
                     }
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
                     // A call costs its function's body (its loops at their
@@ -595,7 +596,8 @@ pub fn eval_wrap(x: u32, len: u32) -> u32 {
         x & (len - 1)
     } else {
         let r = (x as i32).wrapping_rem(len as i32);
-        (if r < 0 { r + len as i32 } else { r }) as u32
+        // the 32-bit add the backends emit (native.rs, wasm.rs wrap_rem): a len past i32::MAX wraps
+        (if r < 0 { r.wrapping_add(len as i32) } else { r }) as u32
     }
 }
 

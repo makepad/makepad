@@ -1,0 +1,9 @@
+# Sandboxed modules whose escapes sit in fn bodies, loaded by a `makepad run` program
+# (tools/run/fixture/modules_harness.rs). Runs only under the runner (std::relax::Module).
+[package]
+name = "slb-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]

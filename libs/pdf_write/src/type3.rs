@@ -1,18 +1,20 @@
 use crate::object::{number, Objects};
 use crate::{PathCommand, Type3Glyph};
 
-pub(crate) fn write(
-    objects: &mut Objects,
-    glyph: &Type3Glyph,
-    advance: u16,
-    id: u16,
-    images: &mut String,
-) -> usize {
-    let width = number(f64::from(advance));
-    let content = match glyph {
+/// A glyph's drawing in font units: its content without a Type 3 width operator, the box
+/// around what it draws (none for an empty outline), and the image it draws as a resource
+/// entry (`/Im<id> <object> 0 R`), if any.
+struct Drawing {
+    content: String,
+    ink: Option<[f64; 4]>,
+    image: Option<String>,
+}
+
+fn drawing(objects: &mut Objects, glyph: &Type3Glyph, id: u16) -> Drawing {
+    match glyph {
         Type3Glyph::Outline(commands) => {
-            let (path, bbox) = outline(commands);
-            format!("{width} 0 {} d1\n{path}f\n", bbox.map(number).join(" "))
+            let (path, ink) = outline(commands);
+            Drawing { content: format!("{path}f\n"), ink, image: None }
         }
         Type3Glyph::Image {
             rgba,
@@ -60,22 +62,62 @@ pub(crate) fn write(
                 ),
                 &rgb,
             );
-            images.push_str(&format!("/Im{id} {image} 0 R "));
-            format!(
-                "{width} 0 d0\nq {} 0 0 {} {} {} cm /Im{id} Do Q\n",
-                number(f64::from(rect[2]) - f64::from(rect[0])),
-                number(f64::from(rect[3]) - f64::from(rect[1])),
-                number(f64::from(rect[0])),
-                number(f64::from(rect[1])),
-            )
+            Drawing {
+                content: format!(
+                    "q {} 0 0 {} {} {} cm /Im{id} Do Q\n",
+                    number(f64::from(rect[2]) - f64::from(rect[0])),
+                    number(f64::from(rect[3]) - f64::from(rect[1])),
+                    number(f64::from(rect[0])),
+                    number(f64::from(rect[1])),
+                ),
+                ink: Some((*rect).map(f64::from)),
+                image: Some(format!("/Im{id} {image} 0 R ")),
+            }
         }
-    };
-    let object = objects.reserve();
-    objects.stream(object, "", content.as_bytes());
-    object
+    }
 }
 
-fn outline(commands: &[PathCommand]) -> (String, [f64; 4]) {
+/// Writes a glyph's procedure, adding the image it draws to the font's `images`. Answers
+/// the procedure's object and the box around what it draws.
+pub(crate) fn write(
+    objects: &mut Objects,
+    glyph: &Type3Glyph,
+    advance: u16,
+    id: u16,
+    images: &mut String,
+) -> (usize, Option<[f64; 4]>) {
+    let width = number(f64::from(advance));
+    let drawing = drawing(objects, glyph, id);
+    // An outline is uncoloured (the text's colour fills it); an image has its own colours.
+    let header = match glyph {
+        Type3Glyph::Outline(_) => format!("{width} 0 {} d1\n", drawing.ink.unwrap_or([0.0; 4]).map(number).join(" ")),
+        Type3Glyph::Image { .. } => format!("{width} 0 d0\n"),
+    };
+    if let Some(image) = &drawing.image {
+        images.push_str(image);
+    }
+    let object = objects.reserve();
+    objects.stream(object, "", format!("{header}{}", drawing.content).as_bytes());
+    (object, drawing.ink)
+}
+
+/// Writes a glyph as a Form XObject in `object`, drawn in glyph space: `matrix` maps the
+/// font's units to it. An outline takes the fill colour of the page drawing it.
+pub(crate) fn write_form(objects: &mut Objects, glyph: &Type3Glyph, id: u16, matrix: &str, object: usize) {
+    let drawing = drawing(objects, glyph, id);
+    objects.stream(
+        object,
+        &format!(
+            "/Type /XObject /Subtype /Form /BBox [{}] /Matrix [{matrix}] /Resources << /XObject << {} >> >>",
+            drawing.ink.unwrap_or([0.0; 4]).map(number).join(" "),
+            drawing.image.unwrap_or_default(),
+        ),
+        drawing.content.as_bytes(),
+    );
+}
+
+/// The outline's path and the box around what it draws (none for an empty outline).
+fn outline(commands: &[PathCommand]) -> (String, Option<[f64; 4]>) {
     let mut path = String::new();
     let mut bounds = Bounds(None);
     let mut current = None;
@@ -136,7 +178,7 @@ fn outline(commands: &[PathCommand]) -> (String, [f64; 4]) {
             }
         }
     }
-    (path, bounds.0.unwrap_or([0.0; 4]))
+    (path, bounds.0)
 }
 
 struct Bounds(Option<[f64; 4]>);
