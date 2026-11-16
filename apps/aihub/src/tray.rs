@@ -16,7 +16,8 @@ pub use makepad_ai_hub_panel::tray_glyph::{image, Glyph};
 pub const TRAY: LiveId = live_id!(aihub_tray);
 pub const OPEN: LiveId = live_id!(open);
 pub const ENABLED: LiveId = live_id!(enabled);
-pub const CLAUDE: LiveId = live_id!(claude);
+pub const CLAUDE_LAN: LiveId = live_id!(claude_lan);
+pub const CLAUDE_INTAKE: LiveId = live_id!(claude_intake);
 pub const LOCAL: LiveId = live_id!(local);
 pub const QUIT: LiveId = live_id!(quit_hub);
 
@@ -36,7 +37,8 @@ pub fn icon(settings: &Settings, glyph: Glyph, status: &str, window: bool) -> Tr
         TrayMenuItem::Item { id: live_id!(status), label: status.to_string(), enabled: false, checked: None },
         TrayMenuItem::Line,
         TrayMenuItem::check(ENABLED, "Enabled", settings.enabled),
-        svc(Backend::Claude, CLAUDE),
+        svc(Backend::ClaudeLan, CLAUDE_LAN),
+        svc(Backend::ClaudeIntake, CLAUDE_INTAKE),
         svc(Backend::Local, LOCAL),
         TrayMenuItem::Line,
     ];

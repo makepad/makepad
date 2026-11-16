@@ -336,6 +336,10 @@ pub enum HubCommand {
 #[derive(Default)]
 struct Shared {
     admission: Option<Admission>,
+    /// Its jobs running or queued, as `/control` last said (None: it does not answer).
+    jobs: Option<u64>,
+    /// What the last [`FleetHub::stop_when_idle`] read decided, until taken.
+    idle_stop: Option<IdleStop>,
     report: Option<String>,
     /// The last failure logged: a command that keeps failing the same way (a refused
     /// local-use, re-sent every poll) is one line, not one every 3 s.
@@ -349,13 +353,41 @@ struct Shared {
 /// reads what the worker published: it never waits on the net.
 pub struct FleetHub {
     shared: std::sync::Arc<std::sync::Mutex<Shared>>,
-    tx: std::sync::mpsc::Sender<HubCommand>,
+    tx: std::sync::mpsc::Sender<Msg>,
+}
+
+/// What the worker takes: a command for the hub, or a stop that waits on a fresh read.
+enum Msg {
+    Command(HubCommand),
+    StopWhenIdle(Box<dyn FnOnce() + Send>),
+}
+
+/// What a fresh `/control` read decided for [`FleetHub::stop_when_idle`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IdleStop {
+    /// No job: the stop ran.
+    Stopped,
+    /// This many jobs run or queue: the stop did not run.
+    Busy(u64),
+    /// No answer (or an answer without a queue): the stop did not run; the swap waits.
+    Silent,
+}
+
+impl IdleStop {
+    /// No job lets the stop run; a read with no answer does not stop the hub.
+    pub fn of(jobs: Option<u64>) -> IdleStop {
+        match jobs {
+            Some(0) => IdleStop::Stopped,
+            Some(n) => IdleStop::Busy(n),
+            None => IdleStop::Silent,
+        }
+    }
 }
 
 impl FleetHub {
     pub fn start(base: String) -> FleetHub {
         let shared = std::sync::Arc::new(std::sync::Mutex::new(Shared::default()));
-        let (tx, rx) = std::sync::mpsc::channel::<HubCommand>();
+        let (tx, rx) = std::sync::mpsc::channel::<Msg>();
         let s2 = shared.clone();
         std::thread::Builder::new()
             .name("wm-hub-control".into())
@@ -365,7 +397,20 @@ impl FleetHub {
     }
 
     pub fn send(&self, command: HubCommand) {
-        let _ = self.tx.send(command);
+        let _ = self.tx.send(Msg::Command(command));
+    }
+
+    /// Runs `stop` on the worker right after a fresh `/control` read says the hub holds no job;
+    /// a read with no answer does not stop it. A swap's stop decided on the last poll's count, up to 3 s old,
+    /// could stop a job that came in since. [`Self::take_idle_stop`] says what it decided; the
+    /// outcome is published before `stop` runs.
+    pub fn stop_when_idle(&self, stop: Box<dyn FnOnce() + Send>) {
+        let _ = self.tx.send(Msg::StopWhenIdle(stop));
+    }
+
+    /// What the last [`Self::stop_when_idle`] decided, once.
+    pub fn take_idle_stop(&self) -> Option<IdleStop> {
+        self.shared.lock().ok().and_then(|mut s| s.idle_stop.take())
     }
 
     /// The hub's report of the last finished yield, once.
@@ -377,6 +422,18 @@ impl FleetHub {
     pub fn admission(&self) -> Option<Admission> {
         self.shared.lock().ok().and_then(|s| s.admission.clone())
     }
+
+    /// The hub's jobs running or queued, as last read (None: it does not answer): a WM swaps
+    /// its hub for a new build only when it holds none.
+    pub fn jobs(&self) -> Option<u64> {
+        self.shared.lock().ok().and_then(|s| s.jobs)
+    }
+}
+
+/// The jobs `/control` says a hub runs or queues.
+fn jobs_of(v: &makepad_strict_json::Value) -> Option<u64> {
+    let q = v.get("queue")?;
+    Some(q.get("running").and_then(|n| n.as_u64()).unwrap_or(0) + q.get("queued").and_then(|n| n.as_u64()).unwrap_or(0))
 }
 
 /// Sends one command. A yield is followed to its end (`GET /job/<id>`), and the hub's
@@ -442,7 +499,33 @@ fn take_command(
     }
 }
 
-fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: std::sync::mpsc::Receiver<HubCommand>) {
+/// Takes one message: a command, or a stop that a fresh read lets run ([`FleetHub::stop_when_idle`]).
+fn take_msg(
+    t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport,
+    base: &str,
+    msg: Msg,
+    shared: &std::sync::Mutex<Shared>,
+    local: &mut Option<HubCommand>,
+    local_sent: &mut bool,
+) {
+    use makepad_ai_hub::providers::qwen::FleetTransport;
+    match msg {
+        Msg::Command(cmd) => take_command(t, base, cmd, shared, local, local_sent),
+        Msg::StopWhenIdle(stop) => {
+            let jobs = t.get_json(&format!("{base}/control")).ok().and_then(|v| jobs_of(&v));
+            let outcome = IdleStop::of(jobs);
+            if let Ok(mut s) = shared.lock() {
+                s.jobs = jobs;
+                s.idle_stop = Some(outcome);
+            }
+            if outcome == IdleStop::Stopped {
+                stop();
+            }
+        }
+    }
+}
+
+fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: std::sync::mpsc::Receiver<Msg>) {
     use makepad_ai_hub::providers::qwen::{FleetTransport, HttpFleetTransport};
     use std::time::Duration;
     // The WM's last local-use report: sent again to a hub that does not hold it (a restarted
@@ -455,8 +538,8 @@ fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: st
     makepad_network::fleet::id::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
     let mut t = HttpFleetTransport;
     loop {
-        while let Ok(cmd) = rx.try_recv() {
-            take_command(&mut t, &base, cmd, &shared, &mut local, &mut local_sent);
+        while let Ok(msg) = rx.try_recv() {
+            take_msg(&mut t, &base, msg, &shared, &mut local, &mut local_sent);
         }
         match t.get_json(&format!("{base}/control")) {
             Ok(v) => {
@@ -469,15 +552,17 @@ fn worker(base: String, shared: std::sync::Arc<std::sync::Mutex<Shared>>, rx: st
                 }
                 if let Ok(mut s) = shared.lock() {
                     s.admission = admission;
+                    s.jobs = jobs_of(&v);
                 }
                 // Look again in a few seconds, or at once for a command.
-                if let Ok(cmd) = rx.recv_timeout(Duration::from_secs(3)) {
-                    take_command(&mut t, &base, cmd, &shared, &mut local, &mut local_sent);
+                if let Ok(msg) = rx.recv_timeout(Duration::from_secs(3)) {
+                    take_msg(&mut t, &base, msg, &shared, &mut local, &mut local_sent);
                 }
             }
             Err(_) => {
                 if let Ok(mut s) = shared.lock() {
                     s.admission = None;
+                    s.jobs = None;
                 }
                 local_sent = false;
                 std::thread::sleep(Duration::from_secs(3));
@@ -620,6 +705,8 @@ mod tests {
         assert_eq!(s.chat_model.as_deref(), Some("q"));
         assert_eq!(s.policy.as_deref(), Some("ran flux1-schnell-q4 for flux1-schnell: too big"));
         assert_eq!((s.activity.len(), s.queue), (1, 2), "queued jobs are not working");
+        assert_eq!(jobs_of(&v), Some(3), "a hub's jobs are the running and the queued ones");
+        assert_eq!((IdleStop::of(Some(3)), IdleStop::of(Some(0)), IdleStop::of(None)), (IdleStop::Busy(3), IdleStop::Stopped, IdleStop::Silent), "a swap's stop runs on no job; no answer holds it");
         assert_eq!(s.activity[0].app, "translator");
         assert_eq!(s.activity[0].tokens_per_s, Some(31.5));
         assert_eq!((s.context, s.kv, s.context_options.clone()), (16384, KvPrecision::Q8, vec![16384, 32768]));

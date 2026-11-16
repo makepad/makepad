@@ -2,9 +2,9 @@
 //! (`MAKEPAD_AI_HUB_APP_CONF` overrides the path): one `key = value` per line.
 //!
 //! Safe defaults: the hub is Enabled, but every backend is off until the person turns it
-//! on, and the Claude backend turns itself off after an hour without a request. An
-//! inactivity turn-off is saved like a switch by hand, so a restart never brings a
-//! service back on its own.
+//! on, and each Claude switch (the LAN's use, PR reviews) turns itself off after an hour
+//! without a request of its own. An inactivity turn-off is saved like a switch by hand, so
+//! a restart never brings a service back on its own.
 //!
 //! Started by a makepad WM as its node's hub (`MAKEPAD_AI_HUB_NODE_CONF`), the app serves
 //! what the node's `ai-hub.conf` says (where, the cache, the chat model, the compute mode:
@@ -60,28 +60,38 @@ impl IdleOff {
     }
 }
 
-/// One backend the hub can offer.
+/// One backend the hub can offer. Claude Code on this machine, tool-less in its sandbox
+/// (`claude-cli`), has two switches of its own: the fleet's use and the PR reviews.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Backend {
-    /// Claude Code on this machine, tool-less in its sandbox (`claude-cli`).
-    Claude,
+    /// claude-cli for the fleet, through `/generate` (Sandbox, the asset tools).
+    ClaudeLan,
+    /// claude-cli for the intake credential's PR reviews, through `/v1/messages`.
+    ClaudeIntake,
     /// The local models this machine can run and has on disk.
     Local,
 }
 
 impl Backend {
-    pub const ALL: [Backend; 2] = [Backend::Claude, Backend::Local];
+    pub const ALL: [Backend; 3] = [Backend::ClaudeLan, Backend::ClaudeIntake, Backend::Local];
 
     pub fn label(self) -> &'static str {
         match self {
-            Backend::Claude => "Claude (sandboxed) as a fleet service",
+            Backend::ClaudeLan => "Claude for the LAN",
+            Backend::ClaudeIntake => "Claude for PR reviews",
             Backend::Local => "Local models",
         }
     }
 
+    /// Whether this is one of the two claude-cli switches.
+    pub fn is_claude(self) -> bool {
+        matches!(self, Backend::ClaudeLan | Backend::ClaudeIntake)
+    }
+
     fn key(self) -> &'static str {
         match self {
-            Backend::Claude => "claude",
+            Backend::ClaudeLan => "claude_lan",
+            Backend::ClaudeIntake => "claude_intake",
             Backend::Local => "local",
         }
     }
@@ -99,7 +109,8 @@ pub struct Service {
 pub struct Settings {
     /// The master switch: off = nothing listens and nothing is announced.
     pub enabled: bool,
-    pub claude: Service,
+    pub claude_lan: Service,
+    pub claude_intake: Service,
     pub local: Service,
     /// The LAN address to serve on; empty = this machine's first private address.
     pub host: String,
@@ -115,7 +126,8 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             enabled: true,
-            claude: Service { on: false, idle_off: IdleOff::Hour1, auto_off_at: None },
+            claude_lan: Service { on: false, idle_off: IdleOff::Hour1, auto_off_at: None },
+            claude_intake: Service { on: false, idle_off: IdleOff::Hour1, auto_off_at: None },
             local: Service { on: false, idle_off: IdleOff::Never, auto_off_at: None },
             host: String::new(),
             port: DEFAULT_PORT,
@@ -139,7 +151,8 @@ impl Settings {
         std::fs::read_to_string(Self::path()).map(|t| Self::parse(&t)).unwrap_or_else(|_| if node { Self::node_defaults() } else { Settings::default() })
     }
 
-    /// A WM node's hub: its local models on and never turned off for idleness; Claude off.
+    /// A WM node's hub: its local models on and never turned off for idleness; both Claude
+    /// switches off.
     pub fn node_defaults() -> Settings {
         let mut s = Settings::default();
         s.local = Service { on: true, idle_off: IdleOff::Never, auto_off_at: None };
@@ -158,14 +171,16 @@ impl Settings {
 
     pub fn service(&self, backend: Backend) -> &Service {
         match backend {
-            Backend::Claude => &self.claude,
+            Backend::ClaudeLan => &self.claude_lan,
+            Backend::ClaudeIntake => &self.claude_intake,
             Backend::Local => &self.local,
         }
     }
 
     pub fn service_mut(&mut self, backend: Backend) -> &mut Service {
         match backend {
-            Backend::Claude => &mut self.claude,
+            Backend::ClaudeLan => &mut self.claude_lan,
+            Backend::ClaudeIntake => &mut self.claude_intake,
             Backend::Local => &mut self.local,
         }
     }
@@ -282,19 +297,21 @@ pub fn apply_idle_offs(settings: &mut Settings, on_since_ms: impl Fn(Backend) ->
 mod tests {
     use super::*;
 
+    const CLAUDE: [Backend; 2] = [Backend::ClaudeLan, Backend::ClaudeIntake];
+
     #[test]
-    fn defaults_serve_nothing_and_claude_turns_off_after_an_hour() {
+    fn defaults_serve_nothing_and_each_claude_switch_turns_off_after_an_hour() {
         let s = Settings::default();
-        assert!(s.enabled && !s.claude.on && !s.local.on);
+        assert!(s.enabled && !s.claude_lan.on && !s.claude_intake.on && !s.local.on, "everything starts off");
         assert!(s.offered().is_empty());
-        assert_eq!(s.claude.idle_off, IdleOff::Hour1);
+        assert_eq!((s.claude_lan.idle_off, s.claude_intake.idle_off), (IdleOff::Hour1, IdleOff::Hour1), "an hour each");
         assert_eq!(s.port, DEFAULT_PORT);
     }
 
     #[test]
     fn a_wm_nodes_first_start_serves_its_local_models_and_never_idles_them_off() {
         let s = Settings::node_defaults();
-        assert!(s.enabled && s.local.on && !s.claude.on);
+        assert!(s.enabled && s.local.on && !s.claude_lan.on && !s.claude_intake.on);
         assert_eq!(s.local.idle_off, IdleOff::Never);
         assert_eq!(s.offered(), vec![Backend::Local]);
     }
@@ -302,14 +319,15 @@ mod tests {
     #[test]
     fn settings_round_trip() {
         let mut s = Settings::default();
-        s.set_service(Backend::Claude, true);
-        s.claude.idle_off = IdleOff::Min15;
+        s.set_service(Backend::ClaudeIntake, true);
+        s.claude_intake.idle_off = IdleOff::Never;
+        s.claude_lan.idle_off = IdleOff::Min15;
         s.local.auto_off_at = Some(42);
         s.host = "192.0.2.91".into();
         s.cache_dir = Some(PathBuf::from("/tmp/x"));
         s.compute = makepad_ai_hub::activity::ComputeMode::UiFirst;
         assert_eq!(Settings::parse(&s.render()), s);
-        assert_eq!(s.offered(), vec![Backend::Claude]);
+        assert_eq!(s.offered(), vec![Backend::ClaudeIntake], "the PR-review switch alone");
         s.enabled = false;
         assert!(s.offered().is_empty(), "the master switch wins");
     }
@@ -333,42 +351,56 @@ mod tests {
         assert!(!idle_expired(&svc, 0, None, 100 * hour), "an off service has no clock");
     }
 
+    /// The two Claude switches keep their own clocks: requests under one never keep the other
+    /// on, and each turns off as if by hand.
     #[test]
-    fn the_expiry_path_turns_claude_off_and_leaves_it_off() {
+    fn the_claude_switches_idle_off_on_their_own_clocks() {
         let hour = 60 * 60 * 1000;
-        let mut s = Settings::default();
-        s.set_service(Backend::Claude, true);
-        s.set_service(Backend::Local, true);
-        s.local.idle_off = IdleOff::Never;
-        // Claude served at 10 min; at 1 h 9 min nothing happens, at 1 h 10 min it turns off.
-        let used = |b: Backend| (b == Backend::Claude).then_some(10 * 60 * 1000);
-        assert!(apply_idle_offs(&mut s, |_| 0, used, hour + 9 * 60 * 1000).is_empty());
-        assert_eq!(apply_idle_offs(&mut s, |_| 0, used, hour + 10 * 60 * 1000), vec![Backend::Claude]);
-        assert!(!s.claude.on && s.local.on, "only the idle service, and local has no limit");
-        assert_eq!(s.claude.auto_off_at, Some(hour + 10 * 60 * 1000));
-        assert_eq!(s.offered(), vec![Backend::Local], "the hub stops offering Claude");
-        // Saved and loaded again (an app restart): still off, nothing fires again.
-        let mut again = Settings::parse(&s.render());
-        assert!(apply_idle_offs(&mut again, |_| 10 * hour, |_| None, 20 * hour).is_empty());
-        assert!(!again.claude.on);
-        // The master switch off: no clocks run.
-        again.set_service(Backend::Claude, true);
-        again.enabled = false;
-        assert!(apply_idle_offs(&mut again, |_| 0, |_| None, 100 * hour).is_empty());
+        for (busy, idle) in [(Backend::ClaudeLan, Backend::ClaudeIntake), (Backend::ClaudeIntake, Backend::ClaudeLan)] {
+            let mut s = Settings::default();
+            for b in Backend::ALL {
+                s.set_service(b, true);
+            }
+            s.local.idle_off = IdleOff::Never;
+            // `busy` served every few minutes, `idle` never: at 1 h only `idle` turns off.
+            let used = |b: Backend| (b == busy).then_some(hour - 5 * 60 * 1000);
+            assert_eq!(apply_idle_offs(&mut s, |_| 0, used, hour), vec![idle], "{} use keeps only itself on", busy.label());
+            assert!(s.service(busy).on && !s.service(idle).on && s.local.on, "only the idle switch, and local has no limit");
+            assert_eq!(s.service(idle).auto_off_at, Some(hour));
+            assert!(!s.offered().contains(&idle) && s.offered().contains(&busy), "the hub stops offering only that one");
+            // Saved and loaded again (an app restart): still off, nothing fires again.
+            let mut again = Settings::parse(&s.render());
+            assert!(!again.service(idle).on);
+            again.set_service(busy, false);
+            assert!(apply_idle_offs(&mut again, |_| 10 * hour, |_| None, 20 * hour).is_empty());
+            // The master switch off: no clocks run.
+            again.set_service(idle, true);
+            again.enabled = false;
+            assert!(apply_idle_offs(&mut again, |_| 0, |_| None, 100 * hour).is_empty());
+        }
     }
 
     #[test]
-    fn an_auto_turn_off_is_saved_like_a_switch_and_survives_a_restart() {
-        let mut s = Settings::default();
-        s.set_service(Backend::Claude, true);
-        // The turn-off fires: what the app does on expiry.
-        s.claude.on = false;
-        s.claude.auto_off_at = Some(1_700_000_000_000);
-        let reloaded = Settings::parse(&s.render());
-        assert!(!reloaded.claude.on, "a restart never re-enables it");
-        assert_eq!(reloaded.claude.auto_off_at, Some(1_700_000_000_000));
-        let mut again = reloaded;
-        again.set_service(Backend::Claude, true);
-        assert_eq!(again.claude.auto_off_at, None, "the person turning it on clears the note");
+    fn a_turn_off_is_saved_like_a_switch_and_a_restart_never_re_enables_either() {
+        for b in CLAUDE {
+            let mut s = Settings::default();
+            for c in CLAUDE {
+                s.set_service(c, true);
+            }
+            // The turn-off fires: what the app does on expiry.
+            s.service_mut(b).on = false;
+            s.service_mut(b).auto_off_at = Some(1_700_000_000_000);
+            let reloaded = Settings::parse(&s.render());
+            assert!(!reloaded.service(b).on, "a restart never re-enables {}", b.label());
+            assert_eq!(reloaded.service(b).auto_off_at, Some(1_700_000_000_000));
+            let other = CLAUDE.into_iter().find(|c| *c != b).unwrap();
+            assert!(reloaded.service(other).on, "and leaves the other switch as it was");
+            let mut again = reloaded;
+            again.set_service(b, true);
+            assert_eq!(again.service(b).auto_off_at, None, "the person turning it on clears the note");
+        }
+        // A settings file from before the split: neither switch comes on from its old key.
+        let old = Settings::parse("claude = on\nclaude_idle_off = never\n");
+        assert!(!old.claude_lan.on && !old.claude_intake.on, "the old single switch turns neither on");
     }
 }

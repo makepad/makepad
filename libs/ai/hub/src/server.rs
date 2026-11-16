@@ -186,6 +186,8 @@ pub struct ArtifactMeta {
 
 pub struct ServiceShared {
     pub activity: Arc<crate::activity::ActivityGate>,
+    /// The two claude-cli switches (LAN use, PR reviews), set by the hub's owner.
+    pub claude: crate::claude_cli::Scopes,
     pub registry: Registry,
     pub cache_dir: PathBuf,
     pub downloader: Downloader,
@@ -378,6 +380,7 @@ pub fn start_service(mut config: ServiceConfig) -> Result<ServiceHandle, AssetAi
     );
     let shared = Arc::new(ServiceShared {
         activity: activity.clone(),
+        claude: Default::default(),
         leases: Mutex::new(crate::lease::LeaseTable::new()),
         port,
         residency_claims: Mutex::new(HashMap::new()),
@@ -753,6 +756,17 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 body,
                 response,
             } => {
+                // the intake gate answers from its own worker: the route loop never waits on the
+                // upstream Messages API
+                if headers.path == "/v1/messages" {
+                    let client = caller_of(&shared, &headers).map(|c| c.client_id);
+                    let serving = intake_serving(&shared);
+                    if serving && client.as_deref().is_some_and(crate::intake_scope::is_intake) {
+                        shared.claude.used(true, crate::jobs::now_ms());
+                    }
+                    crate::intake_scope::route_messages(&shared.cache_dir, client.as_deref(), serving, &headers.lines, body, response);
+                    continue;
+                }
                 if headers.path.starts_with("/kernel") {
                     let _ = response.send(error_json(404, "no such kernel route".into()));
                     continue;
@@ -969,6 +983,16 @@ fn route_post_request(
         }
         return control_local_use(shared, body);
     }
+    if crate::intake_scope::is_intake(&caller.client_id) {
+        if !crate::intake_scope::route_allowed("POST", &headers.path) {
+            return error_json(403, "intake scope: route".to_string());
+        }
+        if headers.path == "/generate" {
+            if let Err(refusal) = crate::intake_scope::gate_generate(&shared.cache_dir, &caller.client_id, &headers.lines, body) {
+                return refusal;
+            }
+        }
+    }
     route_post_by(shared, &caller, &headers.path, body)
 }
 
@@ -1179,10 +1203,11 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     route_post_by(shared, &makepad_network::fleet::front::Caller::local(), path, body)
 }
 
-/// A paired phone reads only its own jobs and their artifacts (job and
-/// artifact ids are not secrets); fleet machines read everything.
+/// A paired phone, and an intake credential whatever its role, reads only
+/// its own jobs and their artifacts (job and artifact ids are not secrets);
+/// fleet machines read everything.
 fn may_read(shared: &ServiceShared, caller: &makepad_network::fleet::front::Caller, path: &str) -> bool {
-    if caller.role != makepad_network::fleet::id::Role::Paired {
+    if caller.role != makepad_network::fleet::id::Role::Paired && !crate::intake_scope::is_intake(&caller.client_id) {
         return true;
     }
     let job = if let Some(rest) = path.strip_prefix("/job/") {
@@ -1619,6 +1644,12 @@ pub fn control_snapshot(shared: &Arc<ServiceShared>) -> String {
 /// Fleet clients heard within this long show as connected (`GET /control` `clients`).
 pub const CLIENT_SEEN_MS: u64 = 10 * 60 * 1000;
 
+/// Whether the hub answers the intake credential's `/v1/messages`: it serves claude-cli and its
+/// PR-review switch is on (the LAN switch is /generate's, [`route_generate`]). One flag a request.
+fn intake_serving(shared: &ServiceShared) -> bool {
+    shared.claude.intake() && shared.registry.models.iter().any(|spec| spec.backend == crate::claude_cli::BACKEND)
+}
+
 fn control_json(shared: &Arc<ServiceShared>) -> String {
     use crate::control::{job_meta, model_kind, model_mb};
     let seq = crate::control::seq();
@@ -1857,6 +1888,19 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
             ]),
         ),
         ("models", Value::Arr(models.into_iter().map(|(_, v)| v).collect())),
+        // the claude-cli switches and the clock of each (its owner's idle turn-off reads them)
+        (
+            "claude",
+            json::obj(
+                [("lan", false), ("intake", true)]
+                    .into_iter()
+                    .map(|(name, intake)| {
+                        let on = if intake { shared.claude.intake() } else { shared.claude.lan() };
+                        (name, json::obj(vec![("on", Value::Bool(on)), ("last_used_ms", num(shared.claude.used_ms(intake)))]))
+                    })
+                    .collect(),
+            ),
+        ),
         ("active", Value::Arr(active.iter().map(|job| job_json(job, false)).collect())),
         ("recent", Value::Arr(recent.iter().map(|job| job_json(job, true)).collect())),
     ])
@@ -2023,6 +2067,14 @@ fn route_generate(shared: &Arc<ServiceShared>, caller: &makepad_network::fleet::
     };
     if spec.backend == "llm" {
         crate::llm_backend::apply_chat_thinking_control(&mut request);
+    }
+    // claude-cli for the fleet: only with the LAN switch on (one flag), and its use stamps the
+    // LAN clock alone (the PR-review switch is /v1/messages')
+    if spec.backend == crate::claude_cli::BACKEND {
+        if !shared.claude.lan() {
+            return error_json(503, "claude-off-lan: this hub's Claude for the LAN switch is off".to_string());
+        }
+        shared.claude.used(false, crate::jobs::now_ms());
     }
     // claude-cli: every fleet caller (admin, node, paired) may USE it while the user has it
     // switched on on this hub (off by default, idle auto-off; the backend refuses otherwise);
@@ -4444,6 +4496,7 @@ mod lifecycle_tests {
         };
         Arc::new(ServiceShared {
             activity: crate::activity::ActivityGate::new(crate::activity::Config { enabled:false, supported:false, ..Default::default() }),
+            claude: Default::default(),
             registry: Registry::default(),
             cache_dir: std::env::temp_dir(),
             downloader: Downloader::new("http://127.0.0.1:1", None).unwrap(),
@@ -4851,6 +4904,36 @@ mod lifecycle_tests {
         assert!(caller_of(&shared, &headers).is_none());
     }
 
+    /// The two claude-cli switches: each admits only its own scope, each request stamps only
+    /// its own clock, and the control picture shows both.
+    #[test]
+    fn each_claude_switch_admits_only_its_own_scope() {
+        let mut shared = fixture_shared(&[]);
+        Arc::get_mut(&mut shared).unwrap().registry = Registry { models: vec![crate::claude_cli::model_spec()] };
+        let node = makepad_network::fleet::front::Caller { client_id: "box".into(), role: makepad_network::fleet::id::Role::Node, admin: false, this_machine: false, app: None };
+        let body = br#"{"model":"claude-cli","domain":"chat","chat_messages":[{"role":"user","text":"hi"}]}"#;
+        let lan_refused = |shared: &Arc<ServiceShared>| {
+            let r = route_generate(shared, &node, body);
+            r.header.starts_with("HTTP/1.1 503") && String::from_utf8_lossy(&r.body).contains("claude-off-lan")
+        };
+        assert!(lan_refused(&shared) && !intake_serving(&shared), "both switches start off");
+        shared.claude.set(false, true);
+        assert!(intake_serving(&shared), "the PR-review switch lets the intake credential's reviews in");
+        assert!(lan_refused(&shared), "and not the fleet's claude-cli use");
+        shared.claude.set(true, false);
+        assert!(!lan_refused(&shared), "the LAN switch lets the fleet's use past its gate");
+        assert!(!intake_serving(&shared), "and not the PR reviews");
+        assert_eq!((shared.claude.used_ms(false).is_some(), shared.claude.used_ms(true)), (true, None), "the LAN use stamped the LAN clock alone");
+        shared.claude.used(true, 5);
+        assert_eq!(shared.claude.used_ms(true), Some(5), "a review stamps its own clock");
+        let control = json::parse(control_json(&shared).as_bytes()).unwrap();
+        let switch = |name: &str| control.get("claude").and_then(|c| c.get(name)).and_then(|s| s.get("on")).and_then(Value::as_bool);
+        assert_eq!((switch("lan"), switch("intake")), (Some(true), Some(false)), "the control picture shows both switches");
+        let registry_without = fixture_shared(&[]);
+        registry_without.claude.set(true, true);
+        assert!(!intake_serving(&registry_without), "a hub that does not serve claude-cli answers no review, switch or not");
+    }
+
     #[test]
     fn paired_phones_read_only_their_own_jobs() {
         let shared = fixture_shared(&[]);
@@ -4865,6 +4948,15 @@ mod lifecycle_tests {
         }
         assert!(!may_read(&shared, &phone, "/job/job-8"));
         assert!(may_read(&shared, &other, "/health"));
+        // an intake credential reads only its own jobs, whatever role it was issued with
+        shared.job_owners.lock().unwrap().insert("job-9".into(), "intake".into());
+        let intake = makepad_network::fleet::front::Caller { client_id: "intake".into(), role: makepad_network::fleet::id::Role::Device, admin: false, this_machine: false, app: None };
+        for path in ["/job/job-9", "/artifact/job-9-0", "/realtime/job-9"] {
+            assert!(may_read(&shared, &intake, path), "intake reads its own {path}");
+        }
+        for path in ["/job/job-7", "/artifact/job-7-0", "/realtime/job-7"] {
+            assert!(!may_read(&shared, &intake, path), "intake does not read another client's {path}");
+        }
     }
 
     #[test]

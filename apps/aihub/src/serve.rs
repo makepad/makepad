@@ -51,9 +51,16 @@ impl Plan {
         !self.offered.is_empty() || self.programs
     }
 
-    /// Whether the hub `self` describes serves the same as `other` (all but the compute mode).
+    /// The two Claude switches as the hub holds them: (LAN, PR reviews).
+    pub fn claude(&self) -> (bool, bool) {
+        (self.offered.contains(&Backend::ClaudeLan), self.offered.contains(&Backend::ClaudeIntake))
+    }
+
+    /// Whether the hub `self` describes serves the same as `other` (all but the compute mode
+    /// and which Claude switches are on: both are sent to the running hub, no restart).
     fn same_service(&self, other: &Plan) -> bool {
-        (&self.offered, &self.host, self.port, &self.cache_dir, &self.node_model, self.programs) == (&other.offered, &other.host, other.port, &other.cache_dir, &other.node_model, other.programs)
+        let shape = |p: &Plan| (p.offered.contains(&Backend::Local), p.offered.iter().any(|b| b.is_claude()));
+        (shape(self), &self.host, self.port, &self.cache_dir, &self.node_model, self.programs) == (shape(other), &other.host, other.port, &other.cache_dir, &other.node_model, other.programs)
     }
 
     /// Whether the hub serves exactly the local models on disk (not a WM node, whose hub
@@ -136,6 +143,12 @@ impl Published {
     pub fn last_used_ms(&self, model: &str) -> Option<u64> {
         let models = self.control.as_ref()?.get("models")?.as_arr()?;
         models.iter().find(|m| m.get("id").and_then(|i| i.as_str()) == Some(model))?.get("last_used_ms")?.as_u64()
+    }
+
+    /// Unix ms a Claude switch last let a request in (`GET /control` `claude`; `intake`: the
+    /// PR-review switch, else the LAN's).
+    pub fn claude_used_ms(&self, intake: bool) -> Option<u64> {
+        self.control.as_ref()?.get("claude")?.get(if intake { "intake" } else { "lan" })?.get("last_used_ms")?.as_u64()
     }
 
     /// Whether a job of `model` runs now.
@@ -463,6 +476,24 @@ fn owner(rx: Receiver<Msg>, published: Arc<Mutex<Published>>) {
                     local_use(&r.handle, plan.compute);
                     r.plan.compute = plan.compute;
                 }
+                if r.plan.claude() != plan.claude() {
+                    // a Claude switch flipped while the other stays on: the hub's flags, no restart
+                    let (lan, intake) = plan.claude();
+                    r.handle.shared.claude.set(lan, intake);
+                    r.plan.offered = plan.offered.clone();
+                    let claude: Vec<Backend> = plan.offered.iter().copied().filter(|b| b.is_claude()).collect();
+                    publish(&mut |p| {
+                        let note = p.notes.iter().find(|(b, _)| b.is_claude()).map(|(_, n)| n.clone());
+                        let serving = p.serving.iter().any(|b| b.is_claude());
+                        p.serving.retain(|b| !b.is_claude());
+                        p.notes.retain(|(b, _)| !b.is_claude());
+                        if serving {
+                            p.serving.extend(claude.iter().copied());
+                        } else if let Some(note) = &note {
+                            p.notes.extend(claude.iter().map(|b| (*b, note.clone())));
+                        }
+                    });
+                }
             } else if running.as_ref().is_some_and(|r| r.plan.same_service(&plan)) && working(control.as_ref()) {
                 // Only the on-disk set changed and a job runs: later.
                 wanted = Some(plan);
@@ -605,15 +636,20 @@ fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backe
     }
     let mut models = Vec::new();
     let mut serving = Vec::new();
+    // claude-cli once for both switches; each request checks its own switch in the hub
+    let claude: Vec<Backend> = plan.offered.iter().copied().filter(|b| b.is_claude()).collect();
+    if !claude.is_empty() {
+        match enable_claude(bind) {
+            Ok(spec) => {
+                models.push(spec);
+                serving.extend(claude.iter().copied());
+            }
+            Err(e) => notes.extend(claude.iter().map(|b| (*b, e.clone()))),
+        }
+    }
     for backend in &plan.offered {
         match backend {
-            Backend::Claude => match enable_claude(bind) {
-                Ok(spec) => {
-                    models.push(spec);
-                    serving.push(Backend::Claude);
-                }
-                Err(e) => notes.push((Backend::Claude, e)),
-            },
+            Backend::ClaudeLan | Backend::ClaudeIntake => {}
             Backend::Local => {
                 let local = if plan.node_model.is_some() { node_registry(&plan.cache_dir) } else { local.clone() };
                 if local.is_empty() {
@@ -642,6 +678,8 @@ fn start(plan: &Plan, local: Vec<ModelSpec>) -> Result<(ServiceHandle, Vec<Backe
         fleet: makepad_ai_hub::discovery::normalize_fleet(&makepad_ai_hub::discovery::fleet_from_env()),
     })
     .map_err(|e| (e.to_string(), notes.clone()))?;
+    let (lan, intake) = plan.claude();
+    handle.shared.claude.set(lan, intake);
     // this machine's apps find it in ~/.makepad/run and reach it on loopback with the machine token
     if let Err(e) = handle.register_on_machine() {
         eprintln!("aihub: this machine's apps cannot find the hub: {e}");

@@ -263,7 +263,8 @@ fn state_line(st: &ViewState, backend: Backend) -> String {
     }
     if !svc.on {
         return match backend {
-            Backend::Claude => "Off: the hub does not offer Claude (Sandboxes drop the row)".to_string(),
+            Backend::ClaudeLan => "Off: the hub does not offer Claude to the LAN (Sandboxes drop the row)".to_string(),
+            Backend::ClaudeIntake => "Off: the hub reviews no PR (the intake's reviews wait)".to_string(),
             Backend::Local => match p.local_models.len() {
                 0 => "Off: no local model on disk yet (Download one under Models)".to_string(),
                 n => format!("Off \u{b7} {n} on disk: {}", p.local_models.join(", ")),
@@ -277,7 +278,7 @@ fn state_line(st: &ViewState, backend: Backend) -> String {
         "On, but the hub is off".to_string()
     } else if p.serving.contains(&backend) {
         match backend {
-            Backend::Claude => "Serving claude-cli: chat only, no tools, sandboxed".to_string(),
+            Backend::ClaudeLan | Backend::ClaudeIntake => "Serving claude-cli: chat only, no tools, sandboxed".to_string(),
             Backend::Local => format!("Serving {}", p.local_models.join(", ")),
         }
     } else {

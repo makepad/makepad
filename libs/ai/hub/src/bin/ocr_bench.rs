@@ -85,6 +85,9 @@
 //! `--keep-reference` leaves named kill switches set in the fast arm, which
 //! turns a total into an attribution: one kernel at a time carries the blame.
 
+use makepad_ai_hub::backend::CancelToken;
+use makepad_ai_hub::ocr_backend::{page_fit, OcrBackend, OcrRequest, MAX_INPUT_PIXELS};
+use makepad_ai_hub::vision_backend::decode_image_rgb8_within;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -190,10 +193,6 @@ fn run(args: &[String]) -> i32 {
         .unwrap_or(lanes * 4)
         .max(lanes);
     let lane_driver = has_flag(args, "--lane-driver") || lanes > 1;
-
-    use makepad_ai_hub::backend::CancelToken;
-    use makepad_ai_hub::ocr_backend::{page_fit, OcrBackend, OcrRequest, MAX_INPUT_PIXELS};
-    use makepad_ai_hub::vision_backend::decode_image_rgb8_within;
 
     let mut pages = collect_pages(&pages_dir);
     if pages.is_empty() {
@@ -410,7 +409,7 @@ fn run(args: &[String]) -> i32 {
 /// Returns false when the batch failed outright, which ends the run.
 #[allow(clippy::too_many_arguments)]
 fn lane_run(
-    backend: &makepad_ai_hub::ocr_backend::OcrBackend,
+    backend: &OcrBackend,
     decoded: &[((usize, usize), PathBuf, String, String)],
     prompt: &makepad_ai_hub::ocr_backend::OcrPrompt,
     max_new_tokens: u32,
@@ -419,10 +418,6 @@ fn lane_run(
     total: usize,
     tally: &mut Tally,
 ) -> bool {
-    use makepad_ai_hub::backend::CancelToken;
-    use makepad_ai_hub::ocr_backend::{OcrRequest, MAX_INPUT_PIXELS};
-    use makepad_ai_hub::vision_backend::decode_image_rgb8_within;
-
     for (group_index, group) in decoded.chunks(batch).enumerate() {
         let mut requests = Vec::with_capacity(group.len());
         let mut sizes = Vec::with_capacity(group.len());
@@ -599,8 +594,7 @@ fn vision_execution_config(
 /// fixed when each patch-grid graph is planned and cached.
 fn vision_parity(args: &[String]) -> i32 {
     use makepad_ai_llm::{preprocess_rgb8, GgufFile, VisionConfig, VisionTower};
-    use makepad_ai_hub::ocr_backend::{page_fit, resample_rgb8, MAX_INPUT_PIXELS};
-    use makepad_ai_hub::vision_backend::decode_image_rgb8_within;
+    use makepad_ai_hub::ocr_backend::resample_rgb8;
 
     let Some(mmproj) = flag(args, "--mmproj") else {
         eprintln!("vision-parity: --mmproj <mmproj.gguf> is required");

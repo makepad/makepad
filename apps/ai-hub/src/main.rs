@@ -230,6 +230,9 @@ fn run() -> Result<(), AssetAiError> {
         peer: Default::default(),
         fleet: fleet.clone(),
     })?;
+    // `--claude-cli` serves the fleet's claude-cli use (the LAN switch); PR reviews go to the
+    // AI Hub app's own switch, never to a headless hub
+    handle.shared.claude.set(claude_cli, false);
 
     println!("{SERVICE_NAME} {SERVICE_VERSION}");
     let scheme = if handle.addr.ip().is_loopback() { "http" } else { "https (fleet TLS front)" };

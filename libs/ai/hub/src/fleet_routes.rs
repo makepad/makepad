@@ -2,16 +2,18 @@
 //! (makepad_network::fleet::front applies it; anything refused is a 403).
 //! Peers come from makepad_network::fleet::id (tools/fleet-identity.md):
 //! - the admin (the Mac's device credential from its bound address) reaches
-//!   everything: control (incl. switching the Claude service), the panel,
-//!   every job;
+//!   everything: control, the panel, every job;
 //! - a fleet machine (a node, or the Mac's credential from elsewhere) reaches
-//!   what fleet job routing needs: the job API (the Claude service included,
-//!   while the user has it on), kernels, model blobs and inventories;
+//!   what fleet job routing needs: the job API (claude-cli included, while
+//!   the hub's LAN switch is on), kernels, model blobs and inventories;
 //! - this machine's own credential (the WM hosting the hub, proven by the
 //!   hub's own key) also reaches the machine-local control: the panel's
 //!   picture and watch, local use, GPU yield and model load/unload. Admin
 //!   settings (`/llm/context`, the panel pages) stay with the admin;
 //! - a paired phone reaches its own jobs and the on-device model files.
+//!
+//! The two Claude switches (the LAN's use, PR reviews) are the person's, set in
+//! the hub's own process by the AI Hub app; no route switches either.
 
 use makepad_network::fleet::id::{Peer, Role};
 
@@ -41,6 +43,10 @@ fn blob_route(method: &str, path: &str) -> bool {
 /// narrows everyone to the job API.
 pub fn route_allowed(peer: &Peer, edge: bool, method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
+    // the hostile-intake jail's credential: its own narrow scope, whatever its role
+    if crate::intake_scope::is_intake(&peer.name) {
+        return crate::intake_scope::route_allowed(method, path);
+    }
     if edge {
         return job_route(method, path);
     }
@@ -112,6 +118,12 @@ mod tests {
         // Local use is this machine's only: another node or the Mac away is refused.
         for other in [&node, &mac_elsewhere, &phone] {
             assert!(!route_allowed(other, false, "POST", "/control/local-use"));
+        }
+        // The Claude switches: no peer but the hub's own process flips either of them.
+        for who in [&mac_elsewhere, &node, &phone, &own] {
+            for p in ["/control/claude", "/control/claude/lan", "/control/claude/intake"] {
+                assert!(!route_allowed(who, false, "POST", p), "{p} for {:?}", who.role);
+            }
         }
         // Phones: their jobs and model files.
         assert!(route_allowed(&phone, false, "POST", "/generate"));

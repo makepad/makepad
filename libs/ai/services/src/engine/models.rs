@@ -110,20 +110,14 @@ pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     rows
 }
 
-fn claude_auth_from_values(api_key: Option<&str>, oauth_token: Option<&str>) -> Option<ClaudeAuth> {
-    if let Some(key) = api_key.filter(|value| !value.trim().is_empty()) {
-        ClaudeAuth::api_key(key).ok()
-    } else {
-        oauth_token.filter(|value| !value.trim().is_empty())
-            .and_then(|token| ClaudeAuth::oauth_token(token).ok())
-    }
+/// The API's credential: an API key only. A Claude subscription is used through the `claude` CLI,
+/// never sent to the API.
+fn claude_auth_from_value(api_key: Option<&str>) -> Option<ClaudeAuth> {
+    api_key.filter(|value| !value.trim().is_empty()).and_then(|key| ClaudeAuth::api_key(key).ok())
 }
 
 fn claude_key() -> Option<ClaudeAuth> {
-    claude_auth_from_values(
-        std::env::var("ANTHROPIC_API_KEY").ok().as_deref(),
-        std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().as_deref(),
-    )
+    claude_auth_from_value(std::env::var("ANTHROPIC_API_KEY").ok().as_deref())
 }
 
 /// What a panel starts on instead of the default Local: in a build without
@@ -398,19 +392,13 @@ mod tests {
     }
 
     #[test]
-    fn claude_env_values_preserve_auth_kind_and_key_precedence() {
-        for (key, token, oauth) in [
-            (None, None, None), (Some(""), Some("  "), None),
-            (Some("key"), None, Some(false)), (None, Some("token"), Some(true)),
-            (Some("key"), Some("token"), Some(false)), (Some("  "), Some("token"), Some(true)),
-            (Some("invalid\nkey"), Some("token"), None), (None, Some("invalid\ntoken"), None),
-        ] {
-            let auth = claude_auth_from_values(key, token);
-            assert_eq!(auth.as_ref().map(ClaudeAuth::is_oauth), oauth);
+    fn claude_env_value_is_an_api_key_only() {
+        for (key, some) in [(None, false), (Some(""), false), (Some("  "), false), (Some("invalid\nkey"), false), (Some("key"), true)] {
+            let auth = claude_auth_from_value(key);
+            assert_eq!(auth.is_some(), some, "{key:?}");
             if let Some(auth) = auth {
                 let mut model = ClaudeModel::new(DEFAULT_CLAUDE_MODEL, auth);
                 model.configure("system", &[]).unwrap();
-                assert_eq!(model.auth.is_oauth(), oauth.unwrap());
             }
         }
     }

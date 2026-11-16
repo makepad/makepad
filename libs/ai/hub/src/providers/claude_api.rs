@@ -4,7 +4,8 @@
 //! a detached worker. Anthropic's bounded SSE response is parsed without a
 //! UI `Cx`; `poll` stays non-blocking and preserves the upstream text-delta
 //! order. Production configuration pins `api.anthropic.com`; tests replace
-//! only the transport.
+//! only the transport. The credential is an API key (`ANTHROPIC_API_KEY`): a Claude subscription
+//! login is never sent to the API, only to the `claude` CLI (`claude_cli`).
 
 use crate::chat_wire::{
     sanitize_public_error, split_delta_text, tool_arguments_too_large, ChatMessage, ChatRole,
@@ -22,10 +23,7 @@ use std::time::{Duration, Instant};
 
 pub const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
-pub const ANTHROPIC_BETA: &str =
-    "oauth-2025-04-20,interleaved-thinking-2025-05-14,output-128k-2025-02-19";
 pub const ANTHROPIC_API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
-pub const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 pub const CLAUDE_MODEL_ENV: &str = "MAKEPAD_CONTENT_CHAT_CLAUDE_MODEL";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 pub const SERVER_SIDE_FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
@@ -43,41 +41,23 @@ const MAX_FUNCTION_NAME_BYTES: usize = 64;
 const MAX_SSE_LINE_BYTES: usize = 2 * MAX_TOOL_JSON_BYTES + 64 * 1024;
 const MAX_SSE_EVENT_BYTES: usize = MAX_SSE_LINE_BYTES;
 
-/// Opaque Claude credential. It deliberately implements neither `Debug`
+/// Opaque Claude API key. It deliberately implements neither `Debug`
 /// nor `Display`.
 #[derive(Clone)]
 pub struct ClaudeAuth {
-    kind: AuthKind,
     secret: String,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AuthKind {
-    ApiKey,
-    OAuth,
 }
 
 impl ClaudeAuth {
     pub fn api_key(value: impl Into<String>) -> Result<Self, String> {
-        Self::new(AuthKind::ApiKey, value.into())
-    }
-
-    pub fn oauth_token(value: impl Into<String>) -> Result<Self, String> {
-        Self::new(AuthKind::OAuth, value.into())
-    }
-
-    fn new(kind: AuthKind, secret: String) -> Result<Self, String> {
+        let secret = value.into();
         if secret.is_empty()
             || secret.len() > 8 * 1024
             || secret.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)
         {
             return Err("credential is empty or invalid".to_string());
         }
-        Ok(ClaudeAuth { kind, secret })
-    }
-
-    pub fn is_oauth(&self) -> bool {
-        self.kind == AuthKind::OAuth
+        Ok(ClaudeAuth { secret })
     }
 
     fn secret(&self) -> &str {
@@ -125,34 +105,19 @@ impl ClaudeApiConfig {
         }
     }
 
-    /// OAuth has the same precedence as the old Cx backend: use it when
-    /// present, otherwise use `ANTHROPIC_API_KEY`.
+    /// The API key from `ANTHROPIC_API_KEY`: a subscription login is never a credential here.
     pub fn from_env(kind: ProviderKind) -> Self {
         let model = std::env::var(CLAUDE_MODEL_ENV)
             .ok()
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_CLAUDE_MODEL.to_string());
-        let oauth = std::env::var(CLAUDE_CODE_OAUTH_TOKEN_ENV)
-            .ok()
-            .filter(|value| !value.is_empty());
         let api_key = std::env::var(ANTHROPIC_API_KEY_ENV)
             .ok()
             .filter(|value| !value.is_empty());
-        let (auth, unavailable_reason) = if let Some(token) = oauth {
-            match ClaudeAuth::oauth_token(token) {
-                Ok(auth) => (Some(auth), missing_credential_reason()),
-                Err(_) => (
-                    None,
-                    format!("{CLAUDE_CODE_OAUTH_TOKEN_ENV} is invalid"),
-                ),
-            }
-        } else if let Some(key) = api_key {
-            match ClaudeAuth::api_key(key) {
-                Ok(auth) => (Some(auth), missing_credential_reason()),
-                Err(_) => (None, format!("{ANTHROPIC_API_KEY_ENV} is invalid")),
-            }
-        } else {
-            (None, missing_credential_reason())
+        let (auth, unavailable_reason) = match api_key.map(ClaudeAuth::api_key) {
+            Some(Ok(auth)) => (Some(auth), missing_credential_reason()),
+            Some(Err(_)) => (None, format!("{ANTHROPIC_API_KEY_ENV} is invalid")),
+            None => (None, missing_credential_reason()),
         };
         ClaudeApiConfig {
             kind,
@@ -185,16 +150,14 @@ fn uses_server_fallback(model: &str) -> bool {
     matches!(model, "claude-fable-5-2" | "claude-opus-5-5" | "claude-sonnet-5-5")
 }
 
-/// The `anthropic-beta` header: the OAuth set for a token, the fallback
-/// beta for the models that send `fallbacks`; empty sends no header.
+/// The `anthropic-beta` header: the fallback beta for the models that send
+/// `fallbacks`; empty sends no header.
 fn anthropic_beta(config: &ClaudeApiConfig) -> String {
-    let oauth = config.auth.as_ref().is_some_and(ClaudeAuth::is_oauth).then_some(ANTHROPIC_BETA);
-    let fallback = uses_server_fallback(&config.model).then_some(SERVER_SIDE_FALLBACK_BETA);
-    oauth.into_iter().chain(fallback).collect::<Vec<_>>().join(",")
+    if uses_server_fallback(&config.model) { SERVER_SIDE_FALLBACK_BETA.to_string() } else { String::new() }
 }
 
 fn missing_credential_reason() -> String {
-    format!("{ANTHROPIC_API_KEY_ENV} or {CLAUDE_CODE_OAUTH_TOKEN_ENV} is not set")
+    format!("{ANTHROPIC_API_KEY_ENV} is not set")
 }
 
 fn bound_model(model: String) -> String {
@@ -229,12 +192,7 @@ pub struct ClaudeRawHttp {
 }
 
 fn request_headers(auth: &ClaudeAuth, beta: &str) -> Vec<(&'static str, String)> {
-    let mut headers = vec![("anthropic-version", ANTHROPIC_VERSION.to_string())];
-    if auth.is_oauth() {
-        headers.push(("Authorization", format!("Bearer {}", auth.secret())));
-    } else {
-        headers.push(("x-api-key", auth.secret().to_string()));
-    }
+    let mut headers = vec![("anthropic-version", ANTHROPIC_VERSION.to_string()), ("x-api-key", auth.secret().to_string())];
     if !beta.is_empty() {
         headers.push(("anthropic-beta", beta.to_string()));
     }
@@ -1430,7 +1388,6 @@ data: {}
 
     struct SeenRequest {
         url: String,
-        oauth: bool,
         secret_len: usize,
         body: Vec<u8>,
         beta: String,
@@ -1454,7 +1411,6 @@ data: {}
         ) -> Result<ClaudeRawHttp, String> {
             self.seen.lock().unwrap().push(SeenRequest {
                 url: url.to_string(),
-                oauth: auth.is_oauth(),
                 secret_len: auth.secret().len(),
                 body: body.to_vec(),
                 beta: beta.to_string(),
@@ -1535,7 +1491,7 @@ data: {"type":"message_stop"}
 
 "#;
         for model in ["claude-fable-5-2", "claude-opus-5-5", DEFAULT_CLAUDE_MODEL] {
-            for (oauth, stop_reason, reply) in [(true, "end_turn", "hello"), (false, "refusal", "hello"), (true, "refusal", "")] {
+            for (stop_reason, reply) in [("end_turn", "hello"), ("refusal", "hello"), ("refusal", "")] {
                 let response = std::str::from_utf8(response).unwrap().replace("end_turn", stop_reason);
                 let response = if reply.is_empty() { response.replace(r#""text":"hel""#, r#""text":"""#).replace(r#""text":"lo""#, r#""text":"""#) } else { response };
                 let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1546,20 +1502,14 @@ data: {"type":"message_stop"}
                         body: response.into_bytes(),
                     }])),
                 };
-                let auth = if oauth { ClaudeAuth::oauth_token("opaque-test-token") } else { ClaudeAuth::api_key("opaque-test-token") }.unwrap();
+                let auth = ClaudeAuth::api_key("opaque-test-token").unwrap();
                 let config = ClaudeApiConfig::new(ProviderKind::OpenAi, auth, model);
                 let headers = request_headers(config.auth.as_ref().unwrap(), &anthropic_beta(&config));
                 let header = |name| headers.iter().find(|(key, _)| *key == name).map(|(_, value)| value.as_str());
                 assert_eq!(header("anthropic-version"), Some(ANTHROPIC_VERSION));
-                if oauth {
-                    assert_eq!(header("Authorization"), Some("Bearer opaque-test-token"));
-                    assert!(header("x-api-key").is_none());
-                } else {
-                    assert_eq!(header("x-api-key"), Some("opaque-test-token"));
-                    assert!(header("Authorization").is_none());
-                }
-                assert_eq!(header("anthropic-beta").unwrap().contains("oauth-2025-04-20"), oauth);
-                assert!(header("anthropic-beta").unwrap().contains(SERVER_SIDE_FALLBACK_BETA));
+                assert_eq!(header("x-api-key"), Some("opaque-test-token"));
+                assert!(header("Authorization").is_none(), "an API key only: never a bearer");
+                assert_eq!(header("anthropic-beta"), Some(SERVER_SIDE_FALLBACK_BETA));
                 let prefill = encode_messages(&[ChatMessage::new(ChatRole::Assistant, "unfinished")]);
                 assert!(build_request_body(&config, "", prefill, None, true).is_err(), "{model}: no assistant prefill");
                 let tools = Value::Arr(vec![json::obj(vec![
@@ -1603,9 +1553,7 @@ data: {"type":"message_stop"}
 
                 let seen = seen.lock().unwrap().remove(0);
                 assert_eq!(seen.url, CLAUDE_MESSAGES_URL);
-                assert_eq!(seen.oauth, oauth);
-                let beta = if oauth { format!("{ANTHROPIC_BETA},{SERVER_SIDE_FALLBACK_BETA}") } else { SERVER_SIDE_FALLBACK_BETA.to_string() };
-                assert_eq!(seen.beta, beta, "{model}: oauth {oauth}");
+                assert_eq!(seen.beta, SERVER_SIDE_FALLBACK_BETA, "{model}");
                 assert_eq!(seen.secret_len, "opaque-test-token".len());
                 let body = json::parse(&seen.body).expect("request json");
                 assert_eq!(body.get("model").and_then(Value::as_str), Some(model));
@@ -1641,7 +1589,7 @@ data: {"type":"message_stop"}
             }
             let transport = FakeTransport { seen: seen.clone(), responses: Mutex::new(responses) };
             let tools = json::parse(br#"[{"name":"lookup","input_schema":{"type":"object"}}]"#).unwrap();
-            let config = ClaudeApiConfig::new(ProviderKind::OpenAi, ClaudeAuth::oauth_token("test-token").unwrap(), DEFAULT_CLAUDE_MODEL);
+            let config = ClaudeApiConfig::new(ProviderKind::OpenAi, ClaudeAuth::api_key("test-token").unwrap(), DEFAULT_CLAUDE_MODEL);
             let mut provider = ClaudeApiChatProvider::with_transport(config, transport, Some(tools.clone()));
             let mut input = TurnInput::new("fixed system", vec![ChatMessage::new(ChatRole::User, "first question")]);
             input.dynamic_context = "first context".into();

@@ -1253,6 +1253,12 @@ pub fn run_live(
                     }
                     session.wait_for_mailbox(Duration::from_millis(250));
                 };
+                // A camera's pictures come at its own size, and a browser
+                // changes that size as its link allows; the model draws at
+                // the session's (backend-rounded) size, so the frame is
+                // scaled to it.
+                let (width, height) = (config.width.max(16) / 16 * 16, config.height.max(16) / 16 * 16);
+                let frame = if frame.width != width || frame.height != height { resize_bilinear(&frame, width, height) } else { frame };
                 // Remembered as the feedback source, so a client that opens
                 // in feed mode and flips to feedback keeps the picture it
                 // last pushed as its anchor. Invisible to the backend.
@@ -2153,7 +2159,8 @@ mod tests {
     #[test]
     fn run_live_feed_mode_passes_init_without_anchor_and_rerolls_the_seed() {
         let source = gradient_image(32, 32);
-        let pushed = source.clone();
+        // A camera's own size, not the session's.
+        let pushed = gradient_image(48, 36);
         let frames = run_recording_session(
             recording_params(LoopMode::Feed),
             move |session, _| {
@@ -2165,6 +2172,7 @@ mod tests {
         );
         let first = &frames[0];
         assert!(first.has_init);
+        assert_eq!(first.init_size, Some((32, 32)), "a frame of another size is scaled to the session's");
         assert!(!first.has_anchor, "feed mode never passes an anchor");
         assert_eq!(first.strength, 0.45);
         // seed_mode increment applies in feed mode (noise auto = reroll).

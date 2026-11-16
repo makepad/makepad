@@ -95,7 +95,7 @@ struct Hub {
     serve: Serve,
     timer: Timer,
     /// Unix ms each backend came on (or the app launched with it on).
-    on_since: [(Backend, u64); 2],
+    on_since: [(Backend, u64); 3],
     last_seq: u64,
     tray_key: String,
     /// A WM node's hub: its `ai-hub.conf` (path and what it said at start).
@@ -122,7 +122,7 @@ impl Hub {
         let serve = Serve::start();
         serve.plan(Plan::of(&settings, node.as_ref().map(|(_, c)| c)));
         let now = now_ms();
-        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: [(Backend::Claude, now), (Backend::Local, now)], last_seq: u64::MAX, tray_key: String::new(), node }
+        Hub { settings, serve, timer: cx.start_interval(0.5), on_since: Backend::ALL.map(|b| (b, now)), last_seq: u64::MAX, tray_key: String::new(), node }
     }
 
     fn plan(&self) -> Plan {
@@ -187,17 +187,16 @@ impl Hub {
         self.on_since.iter().find(|(b, _)| *b == backend).map_or(0, |(_, at)| *at)
     }
 
-    /// The models a backend serves, for its inactivity clock.
-    fn models_of(p: &Published, backend: Backend) -> Vec<String> {
-        match backend {
-            Backend::Claude => vec![makepad_ai_hub::claude_cli::MODEL_ID.to_string()],
-            Backend::Local => p.local_models.clone(),
-        }
-    }
-
+    /// A backend's last request, for its inactivity clock: each Claude switch its own (the
+    /// hub's clock of that switch; a running fleet turn counts as now for the LAN), the local
+    /// models their jobs.
     fn last_used(p: &Published, backend: Backend) -> Option<u64> {
         let now = now_ms();
-        Self::models_of(p, backend).iter().filter_map(|m| if p.working(m) { Some(now) } else { p.last_used_ms(m) }).max()
+        match backend {
+            Backend::ClaudeLan => p.working(makepad_ai_hub::claude_cli::MODEL_ID).then_some(now).or(p.claude_used_ms(false)),
+            Backend::ClaudeIntake => p.claude_used_ms(true),
+            Backend::Local => p.local_models.iter().filter_map(|m| if p.working(m) { Some(now) } else { p.last_used_ms(m) }).max(),
+        }
     }
 
     /// The inactivity turn-offs: a service idle past its limit switches off exactly like
@@ -422,7 +421,8 @@ impl AppMain for App {
                 match e.item {
                     id if id == tray::OPEN => self.open_window(cx),
                     id if id == tray::ENABLED => hub.set_enabled(!hub.settings.enabled),
-                    id if id == tray::CLAUDE => hub.set_service(Backend::Claude, !hub.settings.claude.on),
+                    id if id == tray::CLAUDE_LAN => hub.set_service(Backend::ClaudeLan, !hub.settings.claude_lan.on),
+                    id if id == tray::CLAUDE_INTAKE => hub.set_service(Backend::ClaudeIntake, !hub.settings.claude_intake.on),
                     id if id == tray::LOCAL => hub.set_service(Backend::Local, !hub.settings.local.on),
                     id if id == tray::QUIT => return self.quit(cx),
                     _ => {}

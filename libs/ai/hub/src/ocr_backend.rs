@@ -2424,6 +2424,7 @@ mod tests {
     // whole of the discipline that makes that safe, and these pin it down
     // without a tower, a session or a GPU.
 
+    #[cfg(feature = "llm")] // lane_refill_wait lives behind llm
     #[test]
     fn a_lane_driver_with_nothing_resident_waits_for_the_tower() {
         // No lane holds a job, so there is nothing to stall: block.
@@ -2431,6 +2432,7 @@ mod tests {
         assert_eq!(lane_refill_wait(0, 0, 7, 8), RefillWait::Block);
     }
 
+    #[cfg(feature = "llm")]
     #[test]
     fn a_lane_mid_answer_is_never_stalled_on_an_encode() {
         // Someone is resident, so only take a page that is already there.
@@ -2439,6 +2441,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "llm")]
     #[test]
     fn a_staged_page_is_taken_without_touching_the_queue() {
         for resident in 0..=4usize {
@@ -2447,6 +2450,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "llm")]
     #[test]
     fn the_driver_never_blocks_once_the_batch_is_fully_received() {
         // The deadlock guard. Every page of the batch crosses the hand-off
@@ -2466,6 +2470,7 @@ mod tests {
         assert_eq!(lane_refill_wait(0, 0, 0, 0), RefillWait::None);
     }
 
+    #[cfg(feature = "llm")]
     #[test]
     fn a_lane_batch_always_reaches_its_last_page() {
         // Walk the decision the way the driver does: as long as pages are
