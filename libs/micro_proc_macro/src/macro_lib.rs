@@ -626,6 +626,13 @@ impl TokenParser {
         false
     }
 
+    pub fn is_punct_joint(&self, what: char) -> bool {
+        if let Some(TokenTree::Punct(current)) = &self.current {
+            return current.as_char() == what && current.spacing() == Spacing::Joint;
+        }
+        false
+    }
+
     pub fn eat_double_colon_destruct(&mut self) -> bool {
         // check if our punct is multichar.
         if let Some(TokenTree::Punct(current)) = &self.current {
@@ -881,18 +888,29 @@ impl TokenParser {
 
     pub fn eat_generic(&mut self) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
-        // if we have a <, keep running and keep a < stack
-
-        if self.eat_punct_alone('<') {
+        // if we have a <, keep running and keep a < stack. Every `<` counts whatever its
+        // spacing: proc_macro marks it Joint when a punct follows (`<&`, `<'a`, `<::`, `<<`).
+        if self.eat_punct_any('<') {
             tb.add("<");
             let mut stack = 1;
             // keep eating things till we are at stack 0 for a ">"
             while stack > 0 {
-                if self.eat_punct_alone('<') {
+                if self.eat_punct_any('<') {
                     tb.add("<");
                     stack += 1;
-                }
-                if self.eat_punct_alone('>') {
+                } else if self.is_punct_joint('-') {
+                    // `->` of a fn type: neither token changes the level
+                    if let Some(current) = &self.current {
+                        tb.extend(current.clone());
+                    }
+                    self.advance();
+                    if self.is_punct_any('>') {
+                        if let Some(current) = &self.current {
+                            tb.extend(current.clone());
+                        }
+                        self.advance();
+                    }
+                } else if self.eat_punct_alone('>') {
                     tb.add(">");
                     stack -= 1;
                 } else if self.eat_eot() {
