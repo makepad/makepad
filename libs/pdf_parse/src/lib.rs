@@ -8,6 +8,10 @@ pub mod lexer;
 pub mod object;
 pub mod page;
 pub mod parser;
+pub mod structure;
+
+#[cfg(test)]
+mod structure_tests;
 
 #[cfg(test)]
 mod tests;

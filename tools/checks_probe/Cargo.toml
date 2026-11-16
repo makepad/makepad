@@ -1,0 +1,10 @@
+[package]
+name = "makepad-checks-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Fails a JIT test run devhub drives that lacks cargo test's checks (debug assertions, overflow checks)"
+publish = false
+
+[lib]
+path = "src/lib.rs"

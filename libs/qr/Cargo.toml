@@ -1,0 +1,12 @@
+# makepad-qr — a small QR Code encoder (byte mode, level M, versions 1-10)
+# for join codes and links shown on a screen. Nothing here draws.
+
+[package]
+name = "makepad-qr"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_qr"
+path = "src/lib.rs"

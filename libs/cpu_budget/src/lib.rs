@@ -18,6 +18,10 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering::Re
 use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 use std::thread::{self, Thread};
 
+relax_api::option_layouts! {
+    (u8, Span),
+}
+
 pub const INTERACTIVE: u8 = 0;
 pub const VISIBLE: u8 = 1;
 pub const BACKGROUND: u8 = 2;
@@ -424,26 +428,37 @@ impl Budget {
     }
     fn checkpoint_following(&self, permit: u32, held_locks: u32, lock_site: &str, desired: Option<&AtomicU8>) -> u32 {
         let mut s = self.lock();
+        match self.yields(&mut s, permit, held_locks, lock_site) {
+            // Release and enqueue under the same lock; retain the original admission ticket.
+            Some(job) => self.acquire(s, job, desired),
+            None => {
+                let class = s.slots[permit as usize].as_ref().expect("released CPU permit").class;
+                drop(s);
+                set_thread_class(class);
+                permit
+            }
+        }
+    }
+    /// A checkpoint's account and verdict: the job it took out of its slot to yield, or None (it goes
+    /// on: no reason to yield, or it holds locks).
+    fn yields(&self, s: &mut State, permit: u32, held_locks: u32, lock_site: &str) -> Option<Job> {
         let now = self.now();
         let job = s.slots[permit as usize].as_mut().expect("released CPU permit");
         let span = Span { label: job.label, ns: now.saturating_sub(job.checkpoint_at) };
         job.checkpoint_at = now;
         let class = job.class;
-        Self::span(&mut s, span.label, span.ns);
-        if self.should_yield(permit) {
-            if held_locks != 0 {
-                if let Some(count) = s.warnings.get_mut(lock_site) { *count += 1; }
-                else { s.warnings.insert(lock_site.to_owned(), 1); }
-            } else {
-                let job = self.remove(&mut s, permit, now);
-                s.parked[class as usize] += 1;
-                // Release and enqueue under the same lock; retain the original admission ticket.
-                return self.acquire(s, job, desired);
-            }
+        Self::span(s, span.label, span.ns);
+        if !self.should_yield(permit) {
+            return None;
         }
-        drop(s);
-        set_thread_class(class);
-        permit
+        if held_locks != 0 {
+            if let Some(count) = s.warnings.get_mut(lock_site) { *count += 1; }
+            else { s.warnings.insert(lock_site.to_owned(), 1); }
+            return None;
+        }
+        let job = self.remove(s, permit, now);
+        s.parked[class as usize] += 1;
+        Some(job)
     }
     /// A run of the app ended in place (`makepad run`): the threads of the app's and the JIT's rows
     /// are gone and never release them. The HAL's stay, its threads with them.
@@ -796,6 +811,26 @@ impl Admission {
             b.refresh(&mut s);
             None
         }
+    }
+    /// `checkpoint` that never parks, on a new admission: Some(the permit to go on with), or None:
+    /// the job yielded its slot, and this admission asks for it back with the job's own ticket
+    /// (`poll` it with the job's client and label, `park_admission` between polls). For a caller that
+    /// marks its thread's wait as a wait (Relax lifts a compile job for it: a pause waits for the
+    /// jobs running, and one parked inside a checkpoint was counted as running).
+    pub fn checkpoint(&mut self, permit: u32, held_locks: u32, lock_site: &str) -> Option<u32> {
+        assert!(self.ticket.is_none(), "a checkpoint on an admission that waits already");
+        let b = global();
+        let mut s = b.lock();
+        let Some(job) = b.yields(&mut s, permit, held_locks, lock_site) else {
+            let class = s.slots[permit as usize].as_ref().expect("released CPU permit").class;
+            drop(s);
+            set_thread_class(class);
+            return Some(permit);
+        };
+        s.waiters.push(Waiter { class: job.class, client: job.client, ticket: job.ticket, thread: thread::current(), id: me() });
+        self.ticket = Some(job.ticket);
+        b.refresh(&mut s);
+        None
     }
 }
 impl Drop for Admission {

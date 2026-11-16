@@ -1,0 +1,27 @@
+# makepad-webrtc — the receiving end of a WebRTC call, for a phone's camera
+# into local compute: ICE-lite (STUN), DTLS-SRTP, SRTP/SRTCP, the SDP answer
+# and RTP H.264 to access units, with RTCP feedback (RR, NACK, PLI, REMB).
+# Receive-only and app-neutral. The protocol pieces are sans-IO (bytes in,
+# bytes and events out); the crypto is the system's OpenSSL, as the network
+# layer's TLS uses it, so it builds on Linux only.
+
+[package]
+name = "makepad-webrtc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_webrtc"
+path = "src/lib.rs"
+
+[features]
+# A phone browser's end of a call (`browser`), for other crates' tests.
+browser = []
+
+[dependencies]
+crc32fast = { path = "../crc32fast" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The DTLS certificate: made with the network layer's P-256 and X.509 code.
+makepad-network = { path = "../../platform/network" }

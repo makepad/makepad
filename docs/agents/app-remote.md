@@ -91,7 +91,9 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `move x=X y=Y` | Mouse move alias (hover) |
 | `key k=press c=KeyA` | Key input; down/up are also supported |
 | `text t=TEXT`, `key t=TEXT` | Text/IME input |
-| `drop path=ABSOLUTE_PATH x=X y=Y` | One file through native drag, drop, and drag-end events |
+| `drop path=ABSOLUTE_PATH x=X y=Y` | One file through native drag, drop, and drag-end events; on an open `drag` of that file, drop and drag-end there |
+| `drag path=ABSOLUTE_PATH x=X y=Y` | Hold one file dragged over the window: the first call enters, repeats move it; it stays open for `drag_end` or `drop` |
+| `drag_end` | The open drag leaves the window without a drop (drag-end) |
 | `cpu` | Shared CPU budget and app pool: classes, queues, waits, running jobs and checkpoint warnings |
 | `log [n=50] [since=N]` | App log tail; `n` in the reply is the latest sequence |
 | `step [frames=K] [fps=60]` | Run K virtual-clock frames (needs `--virtual-clock`), see below |
@@ -102,7 +104,7 @@ is a quoted shell argument. There is no HTTP, no status code and no POST body.
 | `activity` | Native user activity counters, see below |
 | `trace`, `midi`, `ai`, `ai transcript`, `handsoff`, `shader consts`, `shader const` | Diagnostics and overlays |
 | `tweak ...`, `design <op> ...` | Design feedback and source edits, see [Tweaker](tweaker.md) |
-| `quit` | Graceful shutdown without a final grab |
+| `quit [native=1]` | Graceful shutdown without a final grab; `native=1` asks as a logout does (macOS: AppKit's `terminate:`, so a held quit is answered on its real path; a hidden run needs `MAKEPAD_HAL_BACKEND=metal`, as an offscreen one has no AppKit app and refuses it) |
 
 Images: `grab`, `gseq`, `gq` and `tweak grab` read the app's `frames`
 service and the client writes the PNG files, by default to
@@ -149,6 +151,20 @@ not that an asynchronous file import has completed. For example:
 
 ```sh
 makepad-remote app $P drop 'path=/absolute/path/reference car.png' x=300 y=400 wait=1
+```
+
+To see what an app shows while a file hovers over it (a drop preview), hold the
+drag with `drag`, which takes the same parameters as `drop`: the first call
+enters, each later one moves the file, and the reply says `"drag":"in"` or
+`"over"` with the app's `drag_response`. `drag_end` then leaves the window
+without a drop, and `drop` of the same file drops it, after a move when its
+point differs. One drag is open at a time, over the window it was opened over;
+another file or window is refused until it ends:
+
+```sh
+makepad-remote app $P drag 'path=/absolute/path/part.splash' x=300 y=400 wait=1
+makepad-remote app $P drag 'path=/absolute/path/part.splash' x=320 y=410 wait=1
+makepad-remote app $P drop 'path=/absolute/path/part.splash' x=320 y=410 wait=1
 ```
 
 ## Drive an owned instance
@@ -220,8 +236,10 @@ MAKEPAD_HIDE_WINDOWS=1 MAKEPAD_MUTE=1 ./target/release/APP --remote \
   (asynchronous work whose result will change a frame, counted by kind in
   `"loads":{"image":2,...}`: image decodes and fetches, glyph rasters,
   Splash resources; subsystems and apps add kinds with
-  `Cx::register_async_load_probe`). Step until it settles rather than
-  sleeping.
+  `Cx::register_async_load_probe`), `pool` (jobs queued or running on the
+  app's task pool; a job that runs for the app's whole life belongs on a
+  long-lived worker, or the app never settles). Step until it settles
+  rather than sleeping.
 - Loads run on workers and the network, off the virtual clock, so under
   load a picture can land a frame earlier or later from run to run.
   `step frames=K wait_loads=1` opens no frame while loads are in flight

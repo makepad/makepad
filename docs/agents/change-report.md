@@ -209,13 +209,13 @@ inbox shows the report, downloads the zip and shows the diff as text.
 
 ## Receiving them
 
-`makepad devhub reports pull` (in the makepad checkout, from the admin
-address) copies each new report into
-`local/agent_state/runner-reports/<id>/`: the zip as received, its files,
-and `meta.txt` (app, release, when, whether a diff or an answer address
-came with it; never the address). The inbox gives a removed item's id to
-the next one, so a later report whose id is already here goes in
-`<id>-<created>/`. A report is untrusted input like an
-issue or a pull request: never apply, build or run its diff or anything it
-names. Review it from its own text, and port what is useful into our own
-commit.
+`makepad devhub reports pull` (from the admin address) keeps each new
+report in `~/.intake-quarantine/runner-reports/<id>/`, outside every
+repository: the zip as received and `meta.txt` (when it came, whether its
+check passed, how many changes, whether a diff or an answer address came
+with it; never the address, and no text from the report). The pull prints
+the same counts and nothing else. The inbox gives a removed item's id to the
+next one, so a later report whose id is already here goes in
+`<id>-<created>/`. A report is untrusted input like an issue or a pull
+request: no agent reads it until intake takes it, and nothing in it or named
+by it is applied, built or run.

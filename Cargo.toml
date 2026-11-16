@@ -1,5 +1,6 @@
 workspace.members = [
     "tools/arch_installer",
+    "tools/checks_probe",
     "tools/ci_merge",
     "tools/private_check",
     "tools/uv_unwrap_corpus",
@@ -26,6 +27,7 @@ workspace.members = [
     "apps/clock",
     "apps/weather",
     "apps/translator",
+    "apps/party",
     "apps/mail",
     "apps/notes",
     "apps/calendar",
@@ -50,6 +52,8 @@ workspace.members = [
     "libs/relax_api/phase",
     "libs/civil_time",
     "libs/wm_api",
+    "libs/qr",
+    "libs/webrtc",
     "libs/shell_kit",
     "libs/app_module",
     "libs/app_registry",
@@ -79,6 +83,7 @@ workspace.members = [
     "apps/flow",
     "apps/ai-hub",
     "apps/aihub",
+    "apps/aires",
     "apps/devhub",
     "apps/devhub_panel",
     "apps/mixer",
@@ -307,6 +312,7 @@ workspace.members = [
     "tools/run/native_macros",
     "tools/run/boot",
     "tools/run/fixture/diffpkg",
+    "tools/run/fixture/diffpkg/ed2015",
     "tools/run/fixture/diffpkg/tables",
     "tools/run/fixture/cli_exit",
     "tools/run/android_host",
@@ -556,6 +562,16 @@ debug = "line-tables-only"
 [profile.release]
 incremental = true
 lto = "off"
+
+# release-checks: every JIT test run devhub drives (`devhub test`, --live, its prebuild, CI's JIT
+# shards, the land gate, the tests bucket): release with cargo test's checks, debug assertions and
+# overflow checks on. The JIT reads it; cargo never builds it. Tests routed to cargo (native-tests,
+# measured routing, the JIT's own crates) stay `cargo test --release`: a checked cargo build would be
+# a second copy of every crate in target/. tools/checks_probe fails a run without the checks.
+[profile.release-checks]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
 
 # host: the `makepad` JIT binary (Relax + makepad run) built for speed on the machine that runs it.
 # Output goes to target/host/ (or target/<triple>/host/), never over target/release: release stays the
