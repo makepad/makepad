@@ -280,7 +280,7 @@ impl Sub for GlitchShifter {
                             if scanone > 256 {
                                 scanone -= 256;
                             }
-                            let mut howdiff: f64 = (s.temp_l - s.pastzero_l[scanone as usize] + (s.lasttemp_l - s.previous_l[scanone as usize]) + (s.thirdtemp_l - s.third_l[scanone as usize]) + (s.fourthtemp_l - s.fourth_l[scanone as usize])) as f64;
+                            let mut howdiff: f64 = s.temp_l.wrapping_sub(s.pastzero_l[scanone as usize]).wrapping_add(s.lasttemp_l.wrapping_sub(s.previous_l[scanone as usize])).wrapping_add(s.thirdtemp_l.wrapping_sub(s.third_l[scanone as usize])).wrapping_add(s.fourthtemp_l.wrapping_sub(s.fourth_l[scanone as usize])) as f64;
                             howdiff -= scan as f64 * bias;
                             if howdiff < diff {
                                 diff = howdiff;
@@ -313,7 +313,7 @@ impl Sub for GlitchShifter {
                             if scanone > 256 {
                                 scanone -= 256;
                             }
-                            let mut howdiff: f64 = (s.temp_l - s.pastzero_l[scanone as usize] + (s.lasttemp_l - s.previous_l[scanone as usize]) + (s.thirdtemp_l - s.third_l[scanone as usize]) + (s.fourthtemp_l - s.fourth_l[scanone as usize])) as f64;
+                            let mut howdiff: f64 = s.temp_l.wrapping_sub(s.pastzero_l[scanone as usize]).wrapping_add(s.lasttemp_l.wrapping_sub(s.previous_l[scanone as usize])).wrapping_add(s.thirdtemp_l.wrapping_sub(s.third_l[scanone as usize])).wrapping_add(s.fourthtemp_l.wrapping_sub(s.fourth_l[scanone as usize])) as f64;
                             howdiff -= scan as f64 * bias;
                             if howdiff < diff {
                                 diff = howdiff;
@@ -347,7 +347,7 @@ impl Sub for GlitchShifter {
                             if scanone > 256 {
                                 scanone -= 256;
                             }
-                            let mut howdiff: f64 = (s.temp_r - s.pastzero_r[scanone as usize] + (s.lasttemp_r - s.previous_r[scanone as usize]) + (s.thirdtemp_r - s.third_r[scanone as usize]) + (s.fourthtemp_r - s.fourth_r[scanone as usize])) as f64;
+                            let mut howdiff: f64 = s.temp_r.wrapping_sub(s.pastzero_r[scanone as usize]).wrapping_add(s.lasttemp_r.wrapping_sub(s.previous_r[scanone as usize])).wrapping_add(s.thirdtemp_r.wrapping_sub(s.third_r[scanone as usize])).wrapping_add(s.fourthtemp_r.wrapping_sub(s.fourth_r[scanone as usize])) as f64;
                             howdiff -= scan as f64 * bias;
                             if howdiff < diff {
                                 diff = howdiff;
@@ -380,7 +380,7 @@ impl Sub for GlitchShifter {
                             if scanone > 256 {
                                 scanone -= 256;
                             }
-                            let mut howdiff: f64 = (s.temp_r - s.pastzero_r[scanone as usize] + (s.lasttemp_r - s.previous_r[scanone as usize]) + (s.thirdtemp_r - s.third_r[scanone as usize]) + (s.fourthtemp_r - s.fourth_r[scanone as usize])) as f64;
+                            let mut howdiff: f64 = s.temp_r.wrapping_sub(s.pastzero_r[scanone as usize]).wrapping_add(s.lasttemp_r.wrapping_sub(s.previous_r[scanone as usize])).wrapping_add(s.thirdtemp_r.wrapping_sub(s.third_r[scanone as usize])).wrapping_add(s.fourthtemp_r.wrapping_sub(s.fourth_r[scanone as usize])) as f64;
                             howdiff -= scan as f64 * bias;
                             if howdiff < diff {
                                 diff = howdiff;
@@ -422,20 +422,22 @@ impl Sub for GlitchShifter {
                 counttwo -= width;
             }
             s.temp_l = 0;
-            s.temp_l += (s.p_l[count as usize] as f64 * (1.0 - (s.position_l - s.position_l.floor()))) as i32;
-            s.temp_l += s.p_l[(count + 1) as usize];
-            s.temp_l += (s.p_l[(count + 2) as usize] as f64 * (s.position_l - s.position_l.floor())) as i32;
-            s.temp_l -= (s.p_l[count as usize] - s.p_l[(count + 1) as usize] - (s.p_l[(count + 1) as usize] - s.p_l[(count + 2) as usize])) / 50;
+            // the interpolation sums samples in a 32-bit int as the original does: a runaway signal wraps
+            s.temp_l = s.temp_l.wrapping_add((s.p_l[count as usize] as f64 * (1.0 - (s.position_l - s.position_l.floor()))) as i32);
+            s.temp_l = s.temp_l.wrapping_add(s.p_l[(count + 1) as usize]);
+            s.temp_l = s.temp_l.wrapping_add((s.p_l[(count + 2) as usize] as f64 * (s.position_l - s.position_l.floor())) as i32);
+            s.temp_l = s.temp_l.wrapping_sub(s.p_l[count as usize].wrapping_sub(s.p_l[(count + 1) as usize]).wrapping_sub(s.p_l[(count + 1) as usize].wrapping_sub(s.p_l[(count + 2) as usize])) / 50);
             s.temp_l /= 2;
-            if s.temp_l.abs() as f64 > 8388352.0 {
-                s.temp_l = s.lasttemp_l + (s.lasttemp_l - s.thirdtemp_l);
+            if s.temp_l.wrapping_abs() as f64 > 8388352.0 {
+                // the extrapolation grows past i32 on a runaway signal: it wraps, as the original's 32-bit int did
+                s.temp_l = s.lasttemp_l.wrapping_add(s.lasttemp_l.wrapping_sub(s.thirdtemp_l));
             }
             s.sincezerocross_l += 1;
             if s.sincezerocross_l < 0 || s.sincezerocross_l > width {
                 s.sincezerocross_l = 0;
             }
             if s.splicing_l {
-                s.temp_l = (s.temp_l + (s.lasttemp_l + (s.lasttemp_l - s.thirdtemp_l))) / 2;
+                s.temp_l = s.temp_l.wrapping_add(s.lasttemp_l.wrapping_add(s.lasttemp_l.wrapping_sub(s.thirdtemp_l))) / 2;
                 s.splicing_l = false;
             }
             if s.lasttemp_l > 0 && s.temp_l < 0 || s.lasttemp_l < 0 && s.temp_l > 0 {
@@ -463,20 +465,20 @@ impl Sub for GlitchShifter {
                 counttwo -= width;
             }
             s.temp_r = 0;
-            s.temp_r += (s.p_r[count as usize] as f64 * (1.0 - (s.position_r - s.position_r.floor()))) as i32;
-            s.temp_r += s.p_r[(count + 1) as usize];
-            s.temp_r += (s.p_r[(count + 2) as usize] as f64 * (s.position_r - s.position_r.floor())) as i32;
-            s.temp_r -= (s.p_r[count as usize] - s.p_r[(count + 1) as usize] - (s.p_r[(count + 1) as usize] - s.p_r[(count + 2) as usize])) / 50;
+            s.temp_r = s.temp_r.wrapping_add((s.p_r[count as usize] as f64 * (1.0 - (s.position_r - s.position_r.floor()))) as i32);
+            s.temp_r = s.temp_r.wrapping_add(s.p_r[(count + 1) as usize]);
+            s.temp_r = s.temp_r.wrapping_add((s.p_r[(count + 2) as usize] as f64 * (s.position_r - s.position_r.floor())) as i32);
+            s.temp_r = s.temp_r.wrapping_sub(s.p_r[count as usize].wrapping_sub(s.p_r[(count + 1) as usize]).wrapping_sub(s.p_r[(count + 1) as usize].wrapping_sub(s.p_r[(count + 2) as usize])) / 50);
             s.temp_r /= 2;
-            if s.temp_r.abs() as f64 > 8388352.0 {
-                s.temp_r = s.lasttemp_r + (s.lasttemp_r - s.thirdtemp_r);
+            if s.temp_r.wrapping_abs() as f64 > 8388352.0 {
+                s.temp_r = s.lasttemp_r.wrapping_add(s.lasttemp_r.wrapping_sub(s.thirdtemp_r));
             }
             s.sincezerocross_r += 1;
             if s.sincezerocross_r < 0 || s.sincezerocross_r > width {
                 s.sincezerocross_r = 0;
             }
             if s.splicing_r {
-                s.temp_r = (s.temp_r + (s.lasttemp_r + (s.lasttemp_r - s.thirdtemp_r))) / 2;
+                s.temp_r = s.temp_r.wrapping_add(s.lasttemp_r.wrapping_add(s.lasttemp_r.wrapping_sub(s.thirdtemp_r))) / 2;
                 s.splicing_r = false;
             }
             if s.lasttemp_r > 0 && s.temp_r < 0 || s.lasttemp_r < 0 && s.temp_r > 0 {

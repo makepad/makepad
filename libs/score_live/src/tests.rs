@@ -1353,6 +1353,71 @@ fn at_in_a_loop_is_the_ring_lookup_and_a_position_is_a_record() {
     assert!(events.iter().any(|e| e.note == 64.0) && events.iter().any(|e| e.note == 60.0), "{events:?}");
 }
 
+/// A runner defers the slot's prepare, coalesces edits while it is out,
+/// and returns plan errors to the host's next pump.
+#[test]
+fn a_slot_runner_defers_prepares_and_keeps_the_latest_doc() {
+    use makepad_audio_engine::schedule::ClockChunk;
+    use std::sync::{Arc, Mutex};
+
+    const SLOT: &str = "deferred_score_prepare";
+    let mut registry = makepad_flow::document::Registry::with_builtins();
+    makepad_audio_engine::nodes::register_nodes(&mut registry).unwrap();
+    crate::node::register(&mut registry).unwrap();
+    let slot = crate::node::slot(SLOT);
+    let jobs = Arc::new(Mutex::new(Vec::<Box<dyn FnOnce() + Send>>::new()));
+    let queued = jobs.clone();
+    slot.set_runner(Arc::new(move |job| {
+        queued.lock().unwrap().push(job);
+        Ok(())
+    }));
+    let score = crate::player::live_node(&crate::node::descriptor(), "score".into(), &[("score", Literal::Str(SLOT.into()))], &[]);
+    let mut node = makepad_audio_engine::nested::factory(crate::node::TYPE).unwrap()(&score, 48_000, 1, None).unwrap();
+    let doc = model::ScoreDoc::load("use mod.score.*\nlet clock = Clock{bpm: 120}\nlet s = Synth{preset: @pluck}\nlet first = Loop{play: s beats: 1 notes: [[0 @c4 0.5 1]]}\nScore{clock s first}\n").unwrap();
+    slot.set_doc(doc.clone()).expect("submitting the first prepare succeeds");
+    assert_eq!(jobs.lock().unwrap().len(), 1, "the first prepare waits in the runner");
+    assert_eq!(slot.playing(), 0, "a deferred prepare starts no player");
+    assert!(!node.running(), "the mailbox is empty until the runner executes the job");
+
+    let mut middle = doc.clone();
+    middle.loops[0].name = "middle".into();
+    slot.set_doc(middle).expect("an edit while preparing stays pending");
+    let mut newest = doc;
+    newest.loops[0].name = "newest".into();
+    slot.set_doc(newest.clone()).expect("the newest edit replaces the pending document");
+    assert_eq!(jobs.lock().unwrap().len(), 1, "two edits leave exactly one prepare out");
+    let first = jobs.lock().unwrap().pop().unwrap();
+    first();
+    assert!(node.running(), "running the deferred job posts a player");
+    assert_eq!(slot.playing(), 0, "posting waits for the node's next pass");
+    assert!(jobs.lock().unwrap().is_empty(), "a full mailbox keeps the latest edit pending");
+    slot.pump().expect("a full mailbox needs no new prepare");
+    assert!(jobs.lock().unwrap().is_empty(), "pumping cannot overwrite a waiting player");
+
+    let (mut left, mut right) = ([0.0; CHUNK], [0.0; CHUNK]);
+    node.run(&ClockChunk::default(), &mut left, &mut right);
+    assert!(slot.playing() > 0, "the first posted player is taken at the next pass");
+    slot.pump().expect("the empty mailbox admits the pending edit");
+    assert_eq!(jobs.lock().unwrap().len(), 1, "the next pump starts exactly one more prepare");
+    let latest = jobs.lock().unwrap().pop().unwrap();
+    latest();
+    node.run(&ClockChunk::default(), &mut left, &mut right);
+    assert!(slot.read(&format!("{SLOT}/newest"), "peak").is_some(), "the posted player uses the newest document");
+    assert!(slot.read(&format!("{SLOT}/middle"), "peak").is_none(), "the intermediate document is never prepared");
+    slot.pump().expect("the newest player leaves nothing pending");
+    assert!(jobs.lock().unwrap().is_empty(), "coalesced edits leave no extra job");
+
+    newest.loops[0].amp = -1.0;
+    slot.set_doc(newest).expect("a deferred plan error is not reported at submit time");
+    assert_eq!(jobs.lock().unwrap().len(), 1, "the invalid graph is checked by one deferred job");
+    let invalid = jobs.lock().unwrap().pop().unwrap();
+    invalid();
+    let diags = slot.pump().expect_err("the next pump reports the job's plan error");
+    assert!(diags.iter().any(|d| d.message.contains("audio control is outside its range")), "the pump preserves the plan diagnostic: {diags:?}");
+    slot.pump().expect("reported diagnostics are cleared");
+    assert!(jobs.lock().unwrap().is_empty(), "a failed plan does not loop without another edit");
+}
+
 /// A root flow with a `Score` node on its transport plays its slot's score
 /// sample for sample as the player on its own clock does; a new score in
 /// the slot takes over at the next pass, and the host reads the player's

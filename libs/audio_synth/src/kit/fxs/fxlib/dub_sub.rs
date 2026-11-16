@@ -301,7 +301,8 @@ impl Sub for DubSub {
             s.noisesource_l += 1;
             residue = s.noisesource_l.wrapping_mul(s.noisesource_l);
             residue = residue % 170003;
-            residue *= residue;
+            // the remainder is under 170003, so its square passes i32::MAX: it wraps, as the original's 32-bit int did
+            residue = residue.wrapping_mul(residue);
             residue = residue % 17011;
             residue *= residue;
             residue = residue % 1709;
@@ -320,7 +321,8 @@ impl Sub for DubSub {
             s.noisesource_r += 1;
             residue = s.noisesource_r.wrapping_mul(s.noisesource_r);
             residue = residue % 170003;
-            residue *= residue;
+            // the remainder is under 170003, so its square passes i32::MAX: it wraps, as the original's 32-bit int did
+            residue = residue.wrapping_mul(residue);
             residue = residue % 17011;
             residue *= residue;
             residue = residue % 1709;

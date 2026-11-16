@@ -3,8 +3,10 @@
 //! following the clock wired into it, and outputs the master.
 //!
 //! - The host gives a slot its score ([`Slot::set_doc`], [`Slot::set_source`]);
-//!   the slot prepares a player for it off the audio thread, against the one
-//!   playing, and hands it to the node through a one-place mailbox. The node
+//!   the slot prepares a player off the host's thread through its runner,
+//!   against the one playing, and hands it to the node through a one-place
+//!   mailbox. Without a runner it prepares on the calling thread, outside
+//!   the host lock (tests, offline renders and hosts without a pool). The node
 //!   takes it at its next pass: staying loops keep their voices and feeds
 //!   (state migration, as a revision of any graph).
 //! - Loop feeds are `<slot>/<loop>`, so a composer (`LiveScore`) drives a
@@ -33,6 +35,9 @@ pub const TYPE: &str = "Score";
 pub const DEFAULT_SLOT: &str = "score";
 /// Players retired by the audio thread the host has not freed yet.
 const RETIRED: usize = 8;
+
+/// Run a slot's prepare job off the host's thread, or report a submit error.
+pub type Runner = Arc<dyn Fn(Box<dyn FnOnce() + Send>) -> Result<(), String> + Send + Sync>;
 
 /// Register `Score` in a flow registry (after the audio types and nodes,
 /// `makepad_audio_engine::nodes::register_nodes`) and its player factory
@@ -83,10 +88,12 @@ struct Watch {
 }
 
 struct Host {
-    doc: Option<ScoreDoc>,
+    doc: Option<Arc<ScoreDoc>>,
     /// The device rate the slot's node runs at (from its last prepare).
     rate: Option<u32>,
     generation: u64,
+    /// Generations reserved by ordinary and fresh prepares, even on failure.
+    reserved: u64,
     /// The layout of the newest player prepared: the base of the next.
     base: Option<Arc<Layout>>,
     /// A score is waiting for the mailbox to empty.
@@ -100,6 +107,11 @@ struct Host {
     /// A fresh player is being filled ([`Slot::prepare_fresh`]): what is
     /// pending waits for it.
     fresh: bool,
+    /// One ordinary prepare is out, either through the runner or inline.
+    in_flight: bool,
+    runner: Option<Runner>,
+    /// Prepare errors waiting for the host's next turn.
+    diags: Vec<Diag>,
 }
 
 /// A score the `Score` nodes named after it play.
@@ -119,7 +131,7 @@ impl Slot {
                 playing: AtomicU64::new(0),
                 wanted: AtomicBool::new(false),
             }),
-            host: Mutex::new(Host { doc: None, rate: None, generation: 0, base: None, pending: false, slice: None, watches: Vec::new(), fresh: false }),
+            host: Mutex::new(Host { doc: None, rate: None, generation: 0, reserved: 0, base: None, pending: false, slice: None, watches: Vec::new(), fresh: false, in_flight: false, runner: None, diags: Vec::new() }),
         }
     }
 
@@ -131,29 +143,43 @@ impl Slot {
         self.host.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Submit prepares through `runner`, always outside the host lock.
+    /// Without a runner, tests, offline renders and hosts without a pool
+    /// use the same snapshot/prepare/post path on the calling thread.
+    pub fn set_runner(&self, runner: Runner) {
+        let old = self.lock().runner.replace(runner);
+        drop(old);
+    }
+
     /// Play `source` (loaded here: its problems come back).
     pub fn set_source(&self, source: &str) -> Result<(), Vec<Diag>> {
         self.set_doc(ScoreDoc::load(source)?)
     }
 
     /// Play `doc`: when its graph differs from the one playing, its player
-    /// is prepared now (or at the next pump, when the node has not taken the
-    /// last one yet). Register its samples, singers and files first
+    /// is prepared through the runner (inline without one), once the node
+    /// has taken the last one. Register its samples, singers and files first
     /// (`render::register_*`); after a later arrival, [`Slot::refresh`].
     pub fn set_doc(&self, doc: ScoreDoc) -> Result<(), Vec<Diag>> {
-        let mut host = self.lock();
-        let same = host.slice.as_ref().is_some_and(|slice| *slice == score_slice(&doc, &self.name, ClockMode::Host));
-        host.doc = Some(doc);
-        host.pending |= !same;
-        self.prepare_due(&mut host)
+        let slice = score_slice(&doc, &self.name, ClockMode::Host);
+        let doc = Arc::new(doc);
+        let old = {
+            let mut host = self.lock();
+            let same = host.slice.as_ref() == Some(&slice);
+            host.pending |= !same;
+            host.doc.replace(doc)
+        };
+        drop(old);
+        self.kick();
+        self.take_diags()
     }
 
     /// Prepare the score again (samples, singers or files it plays arrived:
     /// its instruments look them up when prepared).
     pub fn refresh(&self) -> Result<(), Vec<Diag>> {
-        let mut host = self.lock();
-        host.pending = true;
-        self.prepare_due(&mut host)
+        self.lock().pending = true;
+        self.kick();
+        self.take_diags()
     }
 
     /// The host's turn (every UI frame): frees what the audio thread
@@ -177,7 +203,9 @@ impl Slot {
             host.base = None;
             host.pending = true;
         }
-        self.prepare_due(&mut host)
+        drop(host);
+        self.kick();
+        self.take_diags()
     }
 
     /// A player for the slot's score that carries nothing over from the one
@@ -186,46 +214,109 @@ impl Slot {
     /// [`Slot::post_fresh`] it. None before a node asked for a rate or the
     /// slot has a score.
     pub(crate) fn prepare_fresh(&self) -> Result<Option<Player>, Vec<Diag>> {
-        let mut host = self.lock();
-        let (Some(doc), Some(rate)) = (host.doc.as_ref(), host.rate) else { return Ok(None) };
-        let generation = host.generation + 1;
-        let slice = score_slice(doc, &self.name, ClockMode::Host);
-        let player = prepare_slice(doc, slice.clone(), rate as f32, &self.name, ClockMode::Host, None, generation)?;
-        host.generation = generation;
-        host.slice = Some(slice);
-        host.pending = false;
-        host.fresh = true;
+        let (doc, rate, generation, was_pending) = {
+            let mut host = self.lock();
+            let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return Ok(None) };
+            host.reserved += 1;
+            host.fresh = true;
+            let was_pending = std::mem::replace(&mut host.pending, false);
+            (doc, rate, host.reserved, was_pending)
+        };
+        let slice = score_slice(&doc, &self.name, ClockMode::Host);
+        let player = match prepare_slice(&doc, slice.clone(), rate as f32, &self.name, ClockMode::Host, None, generation) {
+            Ok(player) => player,
+            Err(diags) => {
+                // As before the move: a failed fresh player leaves what was pending pending.
+                let mut host = self.lock();
+                host.fresh = false;
+                host.pending |= was_pending;
+                return Err(diags);
+            }
+        };
+        let old = {
+            let mut host = self.lock();
+            host.generation = generation;
+            host.slice.replace(slice)
+        };
+        drop(old);
         Ok(Some(player))
     }
 
     /// The node takes `player` at its next pass; what became pending
     /// meanwhile is prepared on it.
     pub(crate) fn post_fresh(&self, player: Player) {
-        let mut host = self.lock();
-        host.fresh = false;
-        self.post(&mut host, player);
-        let _ = self.prepare_due(&mut host);
+        let old = {
+            let mut host = self.lock();
+            host.fresh = false;
+            self.post(&mut host, player)
+        };
+        drop(old);
+        self.kick();
     }
 
     /// Prepare the pending score when the mailbox is empty (so the base is
     /// the player the node plays).
-    fn prepare_due(&self, host: &mut Host) -> Result<(), Vec<Diag>> {
-        if host.fresh || !host.pending || !self.shared.next.load(Ordering::Acquire).is_null() {
-            return Ok(());
+    fn kick(&self) {
+        let (doc, rate, base, generation, runner) = {
+            let mut host = self.lock();
+            if host.fresh || !host.pending || host.in_flight || !self.shared.next.load(Ordering::Acquire).is_null() {
+                return;
+            }
+            let (Some(doc), Some(rate)) = (host.doc.clone(), host.rate) else { return };
+            host.reserved += 1;
+            host.in_flight = true;
+            host.pending = false;
+            (doc, rate, host.base.clone(), host.reserved, host.runner.clone())
+        };
+        let name = self.name.clone();
+        let job = Box::new(move || {
+            let slice = score_slice(&doc, &name, ClockMode::Host);
+            let result = prepare_slice(&doc, slice.clone(), rate as f32, &name, ClockMode::Host, base.as_deref(), generation);
+            let slot = slot(&name);
+            let retired = {
+                let mut host = slot.lock();
+                host.in_flight = false;
+                match result {
+                    // (stale: a fresh player took a newer generation, or the node's rate changed
+                    // while it was out; `attach` left the slot pending for the new rate)
+                    Ok(player) if !host.fresh && generation > host.generation && host.rate == Some(rate) => {
+                        host.generation = generation;
+                        let old_slice = host.slice.replace(slice);
+                        (None, slot.post(&mut host, player), old_slice)
+                    }
+                    Ok(player) => (Some(player), None, None),
+                    Err(diags) => {
+                        host.diags.extend(diags);
+                        (None, None, None)
+                    }
+                }
+            };
+            // Stale players and anything replaced are freed off the lock.
+            drop(retired);
+            slot.kick();
+        });
+        match runner {
+            Some(runner) => {
+                if let Err(error) = runner(job) {
+                    eprintln!("score: prepare: {error}");
+                    let mut host = self.lock();
+                    host.in_flight = false;
+                    host.pending = true;
+                }
+            }
+            None => job(),
         }
-        let (Some(doc), Some(rate)) = (host.doc.as_ref(), host.rate) else { return Ok(()) };
-        host.pending = false;
-        let generation = host.generation + 1;
-        let slice = score_slice(doc, &self.name, ClockMode::Host);
-        let player = prepare_slice(doc, slice.clone(), rate as f32, &self.name, ClockMode::Host, host.base.as_deref(), generation)?;
-        host.generation = generation;
-        host.slice = Some(slice);
-        self.post(host, player);
-        Ok(())
     }
 
-    /// Put `player` in the mailbox (one there not taken is freed here).
-    fn post(&self, host: &mut Host, player: Player) {
+    /// Inline errors return in the call that prepared; runner errors are
+    /// collected by a later set_doc, refresh or pump.
+    fn take_diags(&self) -> Result<(), Vec<Diag>> {
+        let diags = std::mem::take(&mut self.lock().diags);
+        if diags.is_empty() { Ok(()) } else { Err(diags) }
+    }
+
+    /// Put `player` in the mailbox; free the one replaced after unlocking.
+    fn post(&self, host: &mut Host, player: Player) -> Option<Box<Player>> {
         host.base = Some(player.layout.clone());
         if let Some(meters) = &player.meters {
             host.watches.push(Watch { generation: player.schedule.generation, layout: player.layout.clone(), controls: player.schedule.controls.clone(), meters: meters.clone() });
@@ -233,8 +324,8 @@ impl Slot {
         let old = self.shared.next.swap(Box::into_raw(Box::new(player)), Ordering::AcqRel);
         if !old.is_null() {
             // SAFETY: made by `Box::into_raw` here and never taken.
-            drop(unsafe { Box::from_raw(old) });
-        }
+            Some(unsafe { Box::from_raw(old) })
+        } else { None }
     }
 
     /// A node of this slot is prepared at `rate`: a player for it now,
@@ -247,16 +338,15 @@ impl Slot {
         host.rate = Some(rate);
         host.base = None;
         host.pending = true;
-        // A score that does not prepare leaves the node silent; the problem
-        // came back from `set_doc` when it was given.
-        if !self.shared.next.load(Ordering::Acquire).is_null() {
-            let old = self.shared.next.swap(std::ptr::null_mut(), Ordering::AcqRel);
-            if !old.is_null() {
-                // SAFETY: as in `post`.
-                drop(unsafe { Box::from_raw(old) });
-            }
+        // A score that does not prepare leaves the node silent; the host
+        // collects its diagnostics at the next pump.
+        let old = self.shared.next.swap(std::ptr::null_mut(), Ordering::AcqRel);
+        drop(host);
+        if !old.is_null() {
+            // SAFETY: as in `post`.
+            drop(unsafe { Box::from_raw(old) });
         }
-        let _ = self.prepare_due(&mut host);
+        self.kick();
     }
 
     /// The generation the node plays (0: none yet).

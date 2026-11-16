@@ -123,6 +123,15 @@ impl Run {
     }
 }
 
+/// What a caught panic said, for the song it ended.
+fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+    match (panic.downcast_ref::<&str>(), panic.downcast_ref::<String>()) {
+        (Some(s), _) => s.to_string(),
+        (_, Some(s)) => s.clone(),
+        _ => "a panic without a message".into(),
+    }
+}
+
 fn next_id(root: &Path) -> u32 {
     std::fs::read_dir(root.join("batches")).map_or(0, |dir| dir.filter_map(|e| e.ok()?.file_name().to_str()?.strip_prefix('b')?.parse::<u32>().ok()).max().unwrap_or(0)) + 1
 }
@@ -206,7 +215,9 @@ impl Batch {
             let (tx, writer, cancel, request, dir) = director;
             let planned = match cards {
                 Some(cards) => Ok(cards),
-                None => gen::direct(&*writer, &request, n, &history, &cancel),
+                // a director that panics is a plan that failed: the composers still write
+                None => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gen::direct(&*writer, &request, n, &history, &cancel)))
+                    .unwrap_or_else(|p| Err(format!("the director panicked: {}", panic_text(&*p)))),
             };
             let concepts = match planned {
                 Ok(cards) => {
@@ -227,7 +238,16 @@ impl Batch {
             };
             for (k, concept) in concepts.into_iter().enumerate() {
                 let (tx, writer, cancel, system, recent, request, dir) = (tx.clone(), writer.clone(), cancel.clone(), system.clone(), recent.clone(), request.clone(), dir.clone());
-                std::thread::spawn(move || compose(k, n, concept, &*writer, &system, &request, &recent, &cancel, &dir, &tx));
+                std::thread::spawn(move || {
+                    // A composer that panics (writing, rendering or scoring) fails its song with
+                    // the panic's text: a dead composer left its song at Rendering for ever.
+                    let composed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compose(k, n, concept, &*writer, &system, &request, &recent, &cancel, &dir, &tx)));
+                    if let Err(p) = composed {
+                        let e = format!("its composer panicked: {}", panic_text(&*p));
+                        let _ = std::fs::write(dir.join(format!("s{}.failed", k + 1)), &e);
+                        let _ = tx.send(Update::State(k, State::Failed(e)));
+                    }
+                });
             }
         });
         let songs = vec![Entry::default(); n];
@@ -440,7 +460,8 @@ mod tests {
 
     /// A batch with a scripted model: songs arrive (one after a repair),
     /// ratings round trip, learning rewrites the rules in a copy of the
-    /// guide and the log records it.
+    /// guide and the log records it. Then a batch whose workers panic: its
+    /// songs fail with the panic's text and it ends.
     #[test]
     fn a_batch_writes_renders_rates_and_learns() {
         let dir = std::env::temp_dir().join(format!("music_iter_test_{}", std::process::id()));
@@ -492,6 +513,27 @@ mod tests {
         let h = history(&dir, 3);
         assert!(h.contains("(techno)") && h.contains("120 bpm") && h.contains("drums liked"), "{h}");
         assert!(std::fs::read_to_string(dir.join("log.md")).unwrap().contains("concept: techno"));
+        // A director and composers that panic: each song fails with its panic's text and the
+        // batch ends (a dead worker left its songs at Rendering, and its batch never ended).
+        let boom: SharedWriter = Arc::new(Scripted(|system: &str, _: &[String]| -> Result<String, String> {
+            if system.contains("You are the director") {
+                panic!("a test director's panic");
+            }
+            panic!("a test composer's panic");
+        }));
+        let req = Request { prompt: "a panic".into(), markers: vec!["techno".into()], seconds: 8 };
+        let (mut failed, mut run) = Batch::start(boom, req, 2).unwrap();
+        let t0 = std::time::Instant::now();
+        while !run.done() && t0.elapsed().as_secs() < 120 {
+            run.poll(&mut failed);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let states: Vec<_> = failed.songs.iter().map(|e| &e.state).collect();
+        assert!(run.done(), "a panicking worker ends its song: {states:?}");
+        assert!(states.iter().all(|s| matches!(s, State::Failed(e) if e.contains("its composer panicked: a test composer's panic"))), "{states:?}");
+        assert!(std::fs::read_to_string(failed.dir.join("concepts.failed")).unwrap().contains("the director panicked: a test director's panic"));
+        let reopened = Batch::open(&failed.dir).unwrap();
+        assert!(matches!(&reopened.songs[1].state, State::Failed(e) if e.contains("a test composer's panic")), "reopened: {:?}", reopened.songs[1].state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

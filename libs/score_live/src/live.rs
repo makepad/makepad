@@ -147,22 +147,19 @@ impl LiveScore {
     }
 
     fn start(config: LiveConfig, transport: &str, pumped: bool) -> LiveScore {
-        // Its MIDI loops play to the MIDI outputs.
-        makepad_audio_engine::feed::midi_out::set_live(&config.instance, true);
         let instance = config.instance.clone();
-        let tempo = makepad_audio_engine::feed::tempo_feed(transport);
-        let status = Arc::new(Mutex::new(Status { bpm: 120.0, sig: (4, 4), ..Status::default() }));
-        let (tx, rx) = channel();
-        // Made where it runs: the composer's VM never moves between threads.
-        let worker = {
-            let status = status.clone();
-            move || Worker { config, rx, status, composer: None, source: String::new(), revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, tempo, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false }
-        };
+        let (cmd, status, worker) = worker(config, transport);
         if !threads_available() || pumped {
-            return LiveScore { cmd: tx, status, thread: None, inline: Some(Mutex::new(worker())), instance };
+            return LiveScore { cmd, status, thread: None, inline: Some(Mutex::new(worker())), instance };
         }
         let thread = std::thread::Builder::new().name("score-composer".into()).spawn(move || worker().run()).expect("the composer thread");
-        LiveScore { cmd: tx, status, thread: Some(thread), inline: None, instance }
+        LiveScore { cmd, status, thread: Some(thread), inline: None, instance }
+    }
+
+    /// The score whose composer thread `thread` is (started elsewhere: [`LiveThread::new`]).
+    pub fn from_thread(mut live: LiveThread) -> LiveScore {
+        let (cmd, status, thread, instance) = live.parts.take().expect("a composer thread is owned once");
+        LiveScore { cmd, status, thread: Some(thread), inline: None, instance }
     }
 
     /// Without a composer thread: run what is due (commands, the loops'
@@ -249,6 +246,50 @@ impl Drop for LiveScore {
     }
 }
 
+/// A live score's composer thread, started on any thread (a host's worker) and handed to the
+/// thread that drives the score ([`LiveScore::from_thread`]). Unlike [`LiveScore::new_on`]'s, it
+/// waits for its first command (the source) before it reads the clock, so it can start well
+/// before its music. Dropped unowned, it tells its thread to quit and does not wait for it.
+pub struct LiveThread {
+    parts: Option<(Sender<Cmd>, Arc<Mutex<Status>>, JoinHandle<()>, String)>,
+}
+
+// A composer thread must be able to leave the thread that started it.
+const _: fn() = || { fn send<T: Send>() {} send::<LiveThread>(); };
+
+impl LiveThread {
+    /// The composer thread of a score whose tempo changes go to `transport`. Where threads
+    /// exist only ([`threads_available`]).
+    pub fn new(config: LiveConfig, transport: &str) -> LiveThread {
+        let instance = config.instance.clone();
+        let (cmd, status, worker) = worker(config, transport);
+        let thread = std::thread::Builder::new().name("score-composer".into()).spawn(move || worker().run_from_first_command()).expect("the composer thread");
+        LiveThread { parts: Some((cmd, status, thread, instance)) }
+    }
+}
+
+impl Drop for LiveThread {
+    fn drop(&mut self) {
+        if let Some((cmd, _, _, instance)) = self.parts.take() {
+            let _ = cmd.send(Cmd::Quit);
+            makepad_audio_engine::feed::midi_out::set_live(&instance, false);
+        }
+    }
+}
+
+/// A composer's command line and status, and the worker to build where it runs: the
+/// composer's VM never moves between threads.
+fn worker(config: LiveConfig, transport: &str) -> (Sender<Cmd>, Arc<Mutex<Status>>, impl FnOnce() -> Worker + Send) {
+    // Its MIDI loops play to the MIDI outputs.
+    makepad_audio_engine::feed::midi_out::set_live(&config.instance, true);
+    let tempo = makepad_audio_engine::feed::tempo_feed(transport);
+    let status = Arc::new(Mutex::new(Status { bpm: 120.0, sig: (4, 4), ..Status::default() }));
+    let (tx, rx) = channel();
+    let shared = status.clone();
+    let worker = move || Worker { config, rx, status: shared, composer: None, source: String::new(), revision: 0, feeds: HashMap::new(), last_beat: None, dropped: 0, tempo, osc_in: None, osc_out: None, osc_pending: Vec::new(), seek_stopped: None, loop_range: None, steps: 0, locating: None, from_top: false };
+    (tx, status, worker)
+}
+
 struct Worker {
     config: LiveConfig,
     rx: Receiver<Cmd>,
@@ -280,6 +321,18 @@ struct Worker {
 }
 
 impl Worker {
+    /// [`Self::run`] once the first command came (a [`LiveThread`]'s source): until then
+    /// nothing reads the clock.
+    fn run_from_first_command(mut self) {
+        match self.rx.recv() {
+            Ok(Cmd::Quit) | Err(_) => return,
+            Ok(cmd) => self.command(cmd),
+        }
+        if self.step(PUBLISH_EVERY) {
+            self.run();
+        }
+    }
+
     /// The composer thread: a step whenever a command comes or every
     /// [`STEP`].
     fn run(mut self) {

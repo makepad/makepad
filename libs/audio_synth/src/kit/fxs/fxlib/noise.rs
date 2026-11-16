@@ -385,7 +385,8 @@ impl Sub for Noise {
                 s.position += 1;
                 s.quadratic = s.position.wrapping_mul(s.position);
                 s.quadratic = s.quadratic % 170003;
-                s.quadratic *= s.quadratic;
+                // the remainder is under 170003, so its square passes i32::MAX: it wraps, as the original's 32-bit int did
+                s.quadratic = s.quadratic.wrapping_mul(s.quadratic);
                 s.quadratic = s.quadratic % 17011;
                 s.quadratic *= s.quadratic;
                 s.quadratic = s.quadratic % dcut;
