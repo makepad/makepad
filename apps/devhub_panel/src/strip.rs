@@ -201,7 +201,7 @@ impl LandStrip {
                 St::Landed => self.good,
                 St::Failed | St::Conflict => self.bad,
                 St::Waiting => self.warn,
-                St::Queued => self.accent,
+                St::Queued | St::Checking => self.accent,
             };
             chips.push((s, c, i));
         }

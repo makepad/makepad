@@ -282,7 +282,7 @@ fn items_world(scene: Scene) -> World {
             }
         }
         Scene::Ibl => {
-            w.environment.ibl = Some(makepad_scene::Ibl { source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
+            w.environment.ibl = Some(makepad_scene::Ibl { key_reflection: makepad_scene::KeyReflection::Light, source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
         }
         Scene::Hooks => {}
     }

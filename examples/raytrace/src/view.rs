@@ -322,7 +322,8 @@ pub struct Harness {
     step: usize,
     phase: Phase,
     captures: Vec<Capture>,
-    waiting: usize,
+    /// Frames the current step has waited for its captures.
+    await_frames: u32,
     lines: Vec<String>,
     failures: u32,
     checkpoints: Vec<(f32, f64)>,
@@ -437,9 +438,10 @@ impl PtView {
 
     // ---- selftest ----
     /// Every GPU gate is tiny (≤128², ≤4 spp) and BIT-LEVEL against the CPU
-    /// twin; anything statistical lives in `cargo test -p makepad-raytrace`.
+    /// twin, so every step traces exact; anything statistical lives in
+    /// `cargo test -p makepad-raytrace`.
     fn selftest_scene(step: usize) -> (&'static str, SceneInput, RenderSettings, (usize, usize), Option<SkyUniforms>) {
-        let mut s = RenderSettings { adaptive_min: 0, denoise: false, hybrid_primary: false, frame_budget: 0.012, ..Default::default() };
+        let mut s = RenderSettings { adaptive_min: 0, denoise: false, hybrid_primary: false, frame_budget: 0.012, exact: true, ..Default::default() };
         match step {
             // The sampler itself, bit-for-bit: shader hashes == rng.rs hashes.
             0 => {
@@ -491,6 +493,49 @@ impl PtView {
                 s.target_spp = 1;
                 ("gbuffer_primary", SceneInput::cornell_box(false), s, (96, 96), None)
             }
+            // Scale geometry and every camera length together, as in the CPU
+            // transport_is_invariant_under_scene_scaling fixture.
+            11 | 12 => {
+                let (name, scale) = if step == 11 {
+                    ("cornell_scale_small_exact", 1.0e-3)
+                } else {
+                    ("cornell_scale_large_exact", 1.0e3)
+                };
+                let mut scene = SceneInput::cornell_box(false);
+                for position in &mut scene.positions {
+                    for component in position {
+                        *component *= scale;
+                    }
+                }
+                scene.camera.pos = scene.camera.pos * scale;
+                scene.camera.target = scene.camera.target * scale;
+                scene.camera.focus_dist *= scale;
+                scene.camera.ortho_height = scene.camera.ortho_height.map(|height| height * scale);
+                scene.camera.bokeh_scale *= scale;
+                s.target_spp = 4;
+                (name, scene, s, (96, 96), None)
+            }
+            13 => {
+                s.target_spp = 4;
+                s.max_bounces = 16;
+                s.preview_clamp = None;
+                ("solid_glass_4spp_exact", crate::solid_glass_scene(), s, (96, 96), None)
+            }
+            14 => {
+                // Keep geometry/camera in sync with solid_clear_sphere_furnace;
+                // its comment bounds facet tilt and near-axis incidence.
+                let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+                scene.materials = vec![Material { solid: true, ..Material::glass([1.0; 3]) }];
+                makepad_raytrace::scene::push_sphere(&mut scene, Vec3f::default(), 1.0, 64, 0);
+                scene.camera = Camera {
+                    pos: vec3f(0.0, 0.0, 3.0), target: Vec3f::default(),
+                    fov_y: 4.0f32.to_radians(), f_stop: 0.0, ..Default::default()
+                };
+                s.target_spp = 4;
+                s.max_bounces = 16;
+                s.preview_clamp = None;
+                ("solid_sphere_furnace_exact", scene, s, (64, 64), Some(SkyUniforms::uniform_white(1.0)))
+            }
             // Path state entering bounce N, bit-level: (tri, t, throughput).
             _ => {
                 s.target_spp = 1;
@@ -509,7 +554,7 @@ impl PtView {
     }
 
     fn selftest_step(&mut self, cx: &mut Cx) {
-        const STEPS: usize = 11;
+        const STEPS: usize = 15;
         match self.harness.phase {
             Phase::Start => {
                 // PT_STEPS=2,13 runs a subset.
@@ -546,12 +591,17 @@ impl PtView {
                     self.harness.gpu_seed = t.seed();
                     t.request_capture(CaptureKind::Accum);
                     t.request_capture(CaptureKind::View);
-                    self.harness.waiting = 2;
+                    self.harness.await_frames = 0;
                     self.harness.phase = Phase::AwaitCaptures;
                 }
             }
             Phase::AwaitCaptures => {
-                if self.harness.captures.len() < self.harness.waiting {
+                let missing: Vec<CaptureKind> = [CaptureKind::Accum, CaptureKind::View]
+                    .into_iter()
+                    .filter(|kind| !self.harness.captures.iter().any(|c| c.kind == *kind))
+                    .collect();
+                if !missing.is_empty() {
+                    self.ask_again(&missing);
                     return;
                 }
                 let caps = std::mem::take(&mut self.harness.captures);
@@ -568,6 +618,21 @@ impl PtView {
                 self.harness.phase = Phase::Start;
             }
             Phase::Done => {}
+        }
+    }
+
+    /// A capture whose copy fails (its target was reallocated before the GPU copied it) never
+    /// comes back: every tenth frame without it, ask for it again rather than wait forever.
+    /// Asking while one is in flight is folded into it.
+    fn ask_again(&mut self, missing: &[CaptureKind]) {
+        self.harness.await_frames += 1;
+        if self.harness.await_frames % 10 != 0 {
+            return;
+        }
+        log!("harness step {}: {:?} not back after {} frames, asked again", self.harness.step, missing, self.harness.await_frames);
+        let t = self.tracer.as_mut().unwrap();
+        for kind in missing {
+            t.request_capture(*kind);
         }
     }
 
@@ -839,6 +904,7 @@ impl PtView {
                     }
                 }
                 if t.stats.done {
+                    self.harness.await_frames = 0;
                     if gate {
                         t.request_capture(CaptureKind::Accum);
                         self.harness.next_checkpoint = 0;
@@ -849,7 +915,10 @@ impl PtView {
             Phase::AwaitCaptures => {
                 if self.harness.step == 0 {
                     // The gate: compare against the CPU reference; abort on failure.
-                    let Some(c) = self.harness.captures.pop() else { return };
+                    let Some(c) = self.harness.captures.pop() else {
+                        self.ask_again(&[CaptureKind::Accum]);
+                        return;
+                    };
                     self.selftest_check(2, "gate_cornell_96", &c);
                     if self.harness.failures > 0 {
                         self.harness.lines.push("bench aborted: the parity gate failed".into());

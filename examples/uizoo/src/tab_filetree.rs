@@ -6,7 +6,7 @@ script_mod! {
 
     mod.widgets.DemoFT = UIZooTabLayout_B{
         desc +: {
-            Markdown{body: "# FileTree\n\nFileTree displays a file system tree."}
+            Markdown{body: "# FileTree\n\nFileTree displays a file system tree. Rows can be dragged, and a chip naming the row rides the pointer."}
         }
         demos +: {
             DemoFileTree{file_tree +: {width: Fill height: Fill}}

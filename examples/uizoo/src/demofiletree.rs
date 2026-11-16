@@ -15,7 +15,7 @@ script_mod! {
     mod.widgets.DemoFileTreeBase = #(DemoFileTree::register_widget(vm))
 
     mod.widgets.DemoFileTree = set_type_default() do mod.widgets.DemoFileTreeBase{
-        file_tree: FileTree{}
+        file_tree: FileTree{drag_cursor: true}
     }
 }
 
@@ -196,6 +196,23 @@ impl Widget for DemoFileTree {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event {
+            Event::Actions(actions) => {
+                for action in actions.filter_widget_actions(self.file_tree.widget_uid()) {
+                    if let FileTreeAction::ShouldFileStartDrag(id) = action.cast() {
+                        if let Some(node) = self.file_nodes.get(&id) {
+                            self.file_tree.start_dragging_file_node(
+                                cx,
+                                id,
+                                vec![DragItem::FilePath {
+                                    path: node.name.clone(),
+                                    internal_id: Some(id),
+                                }],
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
             Event::Startup => {
                 fn get_directory_entries(
                     path: &Path,

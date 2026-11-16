@@ -366,6 +366,8 @@ pub struct Desk {
     pub pad_audition: Option<(String, String, String)>,
     /// The preset index's build was started.
     index_asked: bool,
+    /// The slot submits its prepares through the task pool.
+    score_runner_set: bool,
     /// Instrument browsers popped out into their own windows.
     browsers: browsers::BrowserWindows,
     /// A browser asked for an engine's library (its licence accepted
@@ -400,7 +402,7 @@ impl Default for Desk {
             doc: None, status: Status::default(), typed: false, timer: Timer::default(), frame: NextFrame::default(), midi_stamp: 0, idle: Timer::default(),
             started: false, code_shown: 0, loops_shown: Vec::new(), folds: Folds::default(), menu: false, arrangement: transport::Arrangement::default(), arranged: 0, looping: None,
             bpm_written: None, bpm_shown: None, bpm_typed_at: f64::NEG_INFINITY, document: Document::default(), gesture: 0, panel: panel::ScorePanel::default(), vary: vary::VaryDesk::default(),
-            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, pad_audition: None, index_asked: false, browsers: Default::default(), library_ask: None, index_seen: 0,
+            vary_ai_made: None, batch: batch::BatchDesk::default(), tracker: Default::default(), preview_main: true, audition: None, auditioned: None, audition_rx: None, pad_audition: None, index_asked: false, score_runner_set: false, browsers: Default::default(), library_ask: None, index_seen: 0,
             jobs: run::Jobs::default(), lib: lib_pane::LibPane::default(), samples_asked: Default::default(), save_clean: None, gm_known: None, patches_known: None,
             side_open: true, side: Side::Chat,
         }
@@ -803,11 +805,19 @@ impl Desk {
     /// The desk's turn: status in, the code view refreshed, jobs polled.
     /// Cheap when nothing changed.
     pub fn pump(&mut self, cx: &mut Cx, ui: &WidgetRef) {
+        let pool = cx.task_pool();
+        if !self.score_runner_set {
+            let pool = pool.clone();
+            audio::slot().set_runner(std::sync::Arc::new(move |job| {
+                pool.submit(Class::Visible, job).map(|job| job.detach()).map_err(|error| error.to_string())
+            }));
+            self.score_runner_set = true;
+        }
         // The instrument browser's preset index, built once in the
         // background (every engine's presets: no hitch when it opens).
         if !self.index_asked {
             self.index_asked = true;
-            match cx.task_pool().submit(Class::Background, || makepad_score_live::browse::set_index(makepad_score_live::browse::build())) {
+            match pool.submit(Class::Background, || makepad_score_live::browse::set_index(makepad_score_live::browse::build())) {
                 Ok(job) => job.detach(),
                 Err(error) => log!("preset index: {error:?}"),
             }
@@ -833,7 +843,7 @@ impl Desk {
         self.pump_library(cx, ui);
         self.pump_gm(cx, ui);
         self.pump_audition(cx);
-        self.pump_audio();
+        self.pump_audio(&pool);
         let Some(live) = &self.live else { return };
         let status = live.status();
         let changed = status.revision != self.status.revision || status.diags != self.status.diags;
@@ -1187,8 +1197,8 @@ impl Desk {
 
     /// Between the desk and the audio: the score into the slot, the
     /// transport's tempo, the meters out.
-    fn pump_audio(&mut self) {
-        self.engine.pump();
+    fn pump_audio(&mut self, pool: &TaskPool) {
+        self.engine.pump(pool);
         let slot = audio::slot();
         if let Some(doc) = self.module.take() {
             if let Err(diags) = slot.set_doc(doc) {

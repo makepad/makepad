@@ -578,6 +578,7 @@ impl FileContents {
     // -------------------------------------------------------------- model
 
     pub fn set_entries(&mut self, cx: &mut Cx, entries: Vec<FileEntry>) {
+        self.cancel_rename(cx);
         self.entries = entries;
         // A new listing is a new folder: nothing it expanded still applies.
         self.children.clear();
@@ -585,7 +586,6 @@ impl FileContents {
         self.pending.clear();
         self.selected.clear();
         self.anchor = None;
-        self.renaming = None;
         self.reorder(cx);
     }
 
@@ -681,8 +681,8 @@ impl FileContents {
 
     pub fn set_mode(&mut self, cx: &mut Cx, mode: ViewMode) {
         let was_tree = self.mode == ViewMode::List;
-        self.mode = mode;
         self.cancel_rename(cx);
+        self.mode = mode;
         self.view
             .view(cx, ids!(icons_page))
             .set_visible(cx, mode == ViewMode::Icons);
@@ -994,8 +994,7 @@ impl FileContents {
 
     // ----------------------------------------------------------- renaming
 
-    /// True while an inline editor is open — the shell must then leave the
-    /// keyboard alone, because a hidden text field keeps key focus.
+    /// True while an inline editor is open, so Escape can close it.
     pub fn is_renaming(&self) -> bool {
         self.renaming.is_some()
     }
@@ -1023,10 +1022,17 @@ impl FileContents {
 
     /// Close the editor without renaming anything.
     pub fn cancel_rename(&mut self, cx: &mut Cx) {
-        if self.renaming.take().is_some() {
-            // A hidden text field would otherwise keep key focus and swallow
-            // every navigation key from here on.
-            cx.set_key_focus(Area::Empty);
+        if self.renaming.is_some() {
+            if let Some(field) = self
+                .rename_position()
+                .and_then(|position| self.rename_editor(cx, position))
+            {
+                let area = field.area();
+                if !area.is_empty() && cx.has_key_focus(area) {
+                    cx.set_key_focus(Area::Empty);
+                }
+            }
+            self.renaming = None;
             self.view.redraw(cx);
         }
     }

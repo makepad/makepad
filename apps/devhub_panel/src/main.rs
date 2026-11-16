@@ -60,7 +60,7 @@ impl App {
         menu.push(TrayMenuItem::Line);
         menu.push(TrayMenuItem::item(OPEN, "Open panel"));
         menu.push(TrayMenuItem::item(QUIT, "Quit panel"));
-        cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(glance.glyph) }, tooltip: glance.tooltip.clone(), menu, dropdown: true });
+        cx.set_tray(TrayIcon { id: TRAY, image: TrayImage { width: glyph::SIZE, height: glyph::SIZE, alpha: glyph::alpha(glance.glyph) }, tooltip: String::new(), menu, dropdown: true });
         self.tray = Some(glance);
     }
 

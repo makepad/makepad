@@ -1,0 +1,19 @@
+[package]
+name = "makepad-app-aires"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "The user's question inbox in the menu bar"
+
+[[bin]]
+name = "makepad-app-aires"
+path = "src/main.rs"
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-shell-kit = { path = "../../libs/shell_kit" }
+makepad-devhub = { path = "../../libs/devhub", default-features = false }
+makepad-remote = { workspace = true }
+makepad-strict-json = { workspace = true }
+makepad-civil-time = { path = "../../libs/civil_time" }

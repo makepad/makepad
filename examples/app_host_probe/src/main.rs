@@ -11,6 +11,7 @@ use makepad_widgets::*;
 use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc::Sender, OnceLock};
 use makepad_platform::thread::{Class, TaskHandle};
+use makepad_platform::makepad_hal::a11y::remote::Backend;
 
 static REMOTE_UI: OnceLock<makepad_app_host::a11y::RemoteUi> = OnceLock::new();
 fn dispatch_hosted(req: &makepad_remote::Req, out: &mut makepad_remote::Out) {
@@ -67,6 +68,9 @@ pub struct App {
 
 fn finish(probe: &mut Probe, cx: &mut Cx, ok: bool, message: &str) -> ! {
     println!("{} {}", if ok { "PASS" } else { "FAIL" }, message);
+    if probe.phase != Phase::WaitFrame {
+        probe.hosted.remote_ui().deactivate();
+    }
     probe.hosted.send(vec![makepad_studio_protocol::StudioToApp::Kill]);
     probe.flush();
     let deadline = std::time::Instant::now() + launch::GROUP_KILL_GRACE;
@@ -155,7 +159,8 @@ impl Probe {
         match self.phase {
             Phase::WaitFrame => {
                 if self.hosted.texture().is_some() {
-                    remote.enable(makepad_platform::a11y_tree::consumer::TEST);
+                    // The probe holds its snapshot across the before/action/after check.
+                    remote.activate(std::time::Duration::ZERO);
                     self.phase = Phase::SnapBefore;
                 }
             }

@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Party camera check</title>
+<style>
+  :root { color-scheme: light dark; --bg: #faf7f2; --fg: #1d1b19; --card: #fff; --line: #e4ddd3; --ok: #1f7a3e; --bad: #b3261e; --accent: #6b4de6; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f1ece6; --card: #221f1c; --line: #3a352f; --ok: #6fd18f; --bad: #ff8a80; --accent: #a58cff; } }
+  body { margin: 0; padding: 16px; font: 16px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p { margin: 4px 0 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin: 10px 0; }
+  .card h2 { font-size: 16px; margin: 0 0 8px; }
+  button, label.pick { display: inline-block; font: inherit; padding: 10px 14px; border-radius: 10px; border: 0; background: var(--accent); color: #fff; }
+  input[type=file] { display: none; }
+  .state { font-size: 14px; margin-top: 6px; white-space: pre-wrap; word-break: break-word; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  video, canvas, img { max-width: 100%; border-radius: 8px; margin-top: 8px; }
+  #preview { display: none; }
+</style>
+</head>
+<body>
+<h1>Camera check</h1>
+<p>Tap each step in turn. Every result goes to the party box by itself; nothing is kept there.</p>
+
+<div class="card"><h2>0. This page</h2><div class="state" id="s-env">checking…</div></div>
+
+<div class="card"><h2>1. Live camera</h2>
+  <button id="b-cam">Start the camera</button>
+  <div class="state" id="s-cam"></div>
+  <video id="preview" playsinline muted autoplay></video>
+</div>
+
+<div class="card"><h2>2. Record a 3 second loop</h2>
+  <button id="b-loop">Record a loop</button>
+  <div class="state" id="s-loop"></div>
+</div>
+
+<div class="card"><h2>3. Record a clip (MediaRecorder)</h2>
+  <button id="b-rec">Record 2 seconds</button>
+  <div class="state" id="s-rec"></div>
+</div>
+
+<div class="card"><h2>4. Photos from your album</h2>
+  <label class="pick" for="f-photo">Pick photos</label>
+  <input type="file" id="f-photo" accept="image/*" multiple>
+  <div class="state" id="s-photo"></div>
+</div>
+
+<div class="card"><h2>5. A video with the camera app</h2>
+  <label class="pick" for="f-video">Film a few seconds</label>
+  <input type="file" id="f-video" accept="video/*" capture>
+  <div class="state" id="s-video"></div>
+</div>
+
+<div class="card"><h2>6. Motion sensors</h2>
+  <button id="b-motion">Allow motion</button>
+  <div class="state" id="s-motion"></div>
+</div>
+
+<script>
+"use strict";
+const base = location.pathname.replace(/\/camtest\/?$/, "");
+const session = Array.from(crypto.getRandomValues(new Uint8Array(4)), b => b.toString(16).padStart(2, "0")).join("");
+let stream = null;
+
+function show(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "state " + (ok === true ? "ok" : ok === false ? "bad" : "");
+}
+
+function errText(e) {
+  return e ? ((e.name || "Error") + ": " + (e.message || String(e))) : "unknown error";
+}
+
+async function report(test, ok, detail) {
+  try {
+    await fetch(base + "/camtest/report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session, test, ok, detail: String(detail).slice(0, 4000), ua: navigator.userAgent.slice(0, 400) }),
+    });
+  } catch (e) { /* the result still shows on the page */ }
+}
+
+async function upload(kind, blob, extra) {
+  const q = "?session=" + session + "&kind=" + kind + (extra || "");
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(base + "/camtest/upload" + q, {
+      method: "POST",
+      headers: { "Content-Type": blob.type || "application/octet-stream" },
+      body: blob,
+    });
+    if (r.status === 429 && attempt < 20) {
+      const wait = Number(r.headers.get("Retry-After") || "1");
+      await new Promise(res => setTimeout(res, Math.max(0.2, wait) * 1000));
+      continue;
+    }
+    const text = await r.text();
+    if (!r.ok) throw new Error("upload " + r.status + " " + text);
+    return text;
+  }
+}
+
+function toJpeg(canvas, quality) {
+  return new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error("toBlob gave nothing")), "image/jpeg", quality));
+}
+
+function fit(w, h, longSide) {
+  const s = Math.min(1, longSide / Math.max(w, h));
+  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+
+function drawScaled(source, w, h, longSide) {
+  const [cw, ch] = fit(w, h, longSide);
+  const c = document.createElement("canvas");
+  c.width = cw; c.height = ch;
+  c.getContext("2d").drawImage(source, 0, 0, cw, ch);
+  return c;
+}
+
+function frameSet(blobs) {
+  // each frame: a 4-byte big-endian length, then the JPEG
+  const parts = [];
+  for (const b of blobs) {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, b.size);
+    parts.push(len, b);
+  }
+  return new Blob(parts, { type: "application/x-party-frames" });
+}
+
+// 0. The page itself
+(async () => {
+  const lines = [];
+  lines.push("secure context: " + window.isSecureContext);
+  lines.push("camera API: " + !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia));
+  lines.push("MediaRecorder: " + (typeof MediaRecorder !== "undefined"));
+  if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported) {
+    const types = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=h264", "video/webm;codecs=vp8", "video/webm;codecs=vp9", "video/webm"];
+    lines.push("recorder types: " + (types.filter(t => MediaRecorder.isTypeSupported(t)).join(", ") || "none"));
+  }
+  lines.push("createImageBitmap: " + (typeof createImageBitmap === "function"));
+  lines.push("requestVideoFrameCallback: " + ("requestVideoFrameCallback" in HTMLVideoElement.prototype));
+  lines.push("motion permission API: " + (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function"));
+  lines.push("screen: " + screen.width + "x" + screen.height + " @" + devicePixelRatio);
+  const text = lines.join("\n");
+  show("s-env", text, window.isSecureContext);
+  report("env", window.isSecureContext, text);
+})();
+
+// 1. Live camera
+document.getElementById("b-cam").onclick = async () => {
+  show("s-cam", "asking for the camera…");
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error("no navigator.mediaDevices (not a secure context?)");
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    const v = document.getElementById("preview");
+    v.style.display = "block";
+    v.srcObject = stream;
+    await v.play();
+    await new Promise(res => setTimeout(res, 600));
+    const s = stream.getVideoTracks()[0].getSettings();
+    const c = drawScaled(v, v.videoWidth, v.videoHeight, 512);
+    const jpeg = await toJpeg(c, 0.85);
+    const answer = await upload("frame", jpeg);
+    const detail = "track " + s.width + "x" + s.height + " @" + (s.frameRate || "?") + " fps, facing " + (s.facingMode || "?") +
+      "\nframe " + c.width + "x" + c.height + ", " + jpeg.size + " bytes\nbox: " + answer;
+    show("s-cam", "camera works\n" + detail, true);
+    report("getUserMedia", true, detail);
+  } catch (e) {
+    show("s-cam", "camera failed: " + errText(e), false);
+    report("getUserMedia", false, errText(e));
+  }
+};
+
+// 2. A loop as canvas frames: 3 s at 12 frames a second, 512 px on the long side
+document.getElementById("b-loop").onclick = async () => {
+  if (!stream) { show("s-loop", "start the camera first (step 1)", false); return; }
+  const v = document.getElementById("preview");
+  const frames = [], times = [];
+  const fps = 12, count = 36;
+  show("s-loop", "recording…");
+  try {
+    const t0 = performance.now();
+    for (let i = 0; i < count; i++) {
+      const due = t0 + i * 1000 / fps;
+      const wait = due - performance.now();
+      if (wait > 0) await new Promise(res => setTimeout(res, wait));
+      times.push(performance.now() - t0);
+      frames.push(toJpeg(drawScaled(v, v.videoWidth, v.videoHeight, 512), 0.8));
+    }
+    const blobs = await Promise.all(frames);
+    const gaps = times.slice(1).map((t, i) => t - times[i]);
+    const bytes = blobs.reduce((a, b) => a + b.size, 0);
+    const answer = await upload("loop", frameSet(blobs));
+    const detail = blobs.length + " frames, " + bytes + " bytes, gap " + Math.min(...gaps).toFixed(0) + ".." + Math.max(...gaps).toFixed(0) +
+      " ms (want " + (1000 / fps).toFixed(0) + ")\nbox: " + answer;
+    show("s-loop", "loop sent\n" + detail, true);
+    report("loop", true, detail);
+  } catch (e) {
+    show("s-loop", "loop failed: " + errText(e), false);
+    report("loop", false, errText(e));
+  }
+};
+
+// 3. MediaRecorder: 2 s of the live camera, then a frame of it drawn back
+document.getElementById("b-rec").onclick = async () => {
+  if (!stream) { show("s-rec", "start the camera first (step 1)", false); return; }
+  if (typeof MediaRecorder === "undefined") { show("s-rec", "no MediaRecorder here", false); report("MediaRecorder", false, "no MediaRecorder"); return; }
+  const types = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=h264", "video/webm;codecs=vp8", "video/webm"];
+  const type = types.find(t => MediaRecorder.isTypeSupported(t)) || "";
+  show("s-rec", "recording 2 s (" + (type || "default type") + ")…");
+  try {
+    const rec = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 2500000 } : undefined);
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const stopped = new Promise(res => rec.onstop = res);
+    rec.start(500);
+    await new Promise(res => setTimeout(res, 2000));
+    rec.stop();
+    await stopped;
+    const blob = new Blob(chunks, { type: rec.mimeType || type });
+    const answer = await upload("recorder", blob);
+    const back = await videoFrame(blob, 0.5);
+    let detail = "asked " + (type || "default") + ", got " + (rec.mimeType || "?") + ", " + blob.size + " bytes\nbox: " + answer;
+    if (back) {
+      const jpeg = await toJpeg(back, 0.85);
+      await upload("recframe", jpeg);
+      detail += "\ndrawn back: " + back.width + "x" + back.height;
+    } else {
+      detail += "\ndrawn back: no (the page cannot decode its own clip)";
+    }
+    show("s-rec", "clip recorded\n" + detail, true);
+    report("MediaRecorder", true, detail);
+  } catch (e) {
+    show("s-rec", "recording failed: " + errText(e), false);
+    report("MediaRecorder", false, errText(e));
+  }
+};
+
+// A frame of a video blob at `at` seconds, as a canvas (null when the browser cannot decode it).
+function videoFrame(blob, at) {
+  return new Promise(res => {
+    const v = document.createElement("video");
+    v.muted = true; v.playsInline = true; v.preload = "auto";
+    const url = URL.createObjectURL(blob);
+    let done = false;
+    const finish = c => { if (!done) { done = true; URL.revokeObjectURL(url); res(c); } };
+    setTimeout(() => finish(null), 8000);
+    v.onerror = () => finish(null);
+    v.onloadedmetadata = () => { v.currentTime = Math.min(at, Math.max(0, (v.duration || 1) - 0.05)); };
+    v.onseeked = () => {
+      try { finish(v.videoWidth ? drawScaled(v, v.videoWidth, v.videoHeight, 512) : null); } catch (e) { finish(null); }
+    };
+    v.src = url;
+  });
+}
+
+// 4. Album photos: each decoded by the browser and re-encoded through a canvas (no metadata)
+document.getElementById("f-photo").onchange = async (ev) => {
+  const files = Array.from(ev.target.files || []);
+  const lines = [];
+  let allOk = files.length > 0;
+  for (const [i, f] of files.entries()) {
+    let line = (i + 1) + ". " + (f.type || "no type") + ", " + f.size + " bytes, ." + (f.name.split(".").pop() || "?");
+    try {
+      let bitmap, w, h;
+      if (typeof createImageBitmap === "function") {
+        bitmap = await createImageBitmap(f);
+        w = bitmap.width; h = bitmap.height;
+      } else {
+        bitmap = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("image did not decode")); im.src = URL.createObjectURL(f); });
+        w = bitmap.naturalWidth; h = bitmap.naturalHeight;
+      }
+      const c = drawScaled(bitmap, w, h, 1280);
+      const jpeg = await toJpeg(c, 0.85);
+      const answer = await upload("photo", jpeg, "&i=" + i);
+      line += " -> decoded " + w + "x" + h + ", sent " + c.width + "x" + c.height + " " + jpeg.size + " bytes; box: " + answer;
+    } catch (e) {
+      allOk = false;
+      line += " -> " + errText(e);
+    }
+    lines.push(line);
+    show("s-photo", lines.join("\n"));
+  }
+  const text = lines.join("\n") || "no file picked";
+  show("s-photo", text, allOk);
+  report("photos", allOk, text);
+};
+
+// 5. A clip from the camera app: can the page decode it and draw its frames?
+document.getElementById("f-video").onchange = async (ev) => {
+  const f = (ev.target.files || [])[0];
+  if (!f) { show("s-video", "no clip", false); report("captureVideo", false, "no file came back"); return; }
+  let detail = (f.type || "no type") + ", " + f.size + " bytes, ." + (f.name.split(".").pop() || "?");
+  show("s-video", detail + "\nreading…");
+  try {
+    await upload("vhead", f.slice(0, 65536));
+    if (f.size > 65536) await upload("vtail", f.slice(Math.max(65536, f.size - 524288)));
+    const times = [0.1, 0.5, 1.0, 1.5];
+    let drawn = 0, first = null;
+    for (const t of times) {
+      const c = await videoFrame(f, t);
+      if (c) { drawn++; if (!first) first = c; }
+    }
+    if (first) await upload("vframe", await toJpeg(first, 0.85));
+    detail += "\nframes drawn: " + drawn + " of " + times.length + (first ? " (" + first.width + "x" + first.height + ")" : "");
+    show("s-video", detail, drawn > 0);
+    report("captureVideo", drawn > 0, detail);
+  } catch (e) {
+    show("s-video", detail + "\nfailed: " + errText(e), false);
+    report("captureVideo", false, detail + "; " + errText(e));
+  }
+};
+
+// 6. Motion sensors (the iPhone asks first)
+document.getElementById("b-motion").onclick = async () => {
+  try {
+    let permission = "not asked (no permission API)";
+    if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
+      permission = await DeviceMotionEvent.requestPermission();
+    }
+    let n = 0, t0 = 0, last = null;
+    const on = e => { if (!n) t0 = performance.now(); n++; last = e.accelerationIncludingGravity; };
+    window.addEventListener("devicemotion", on);
+    await new Promise(res => setTimeout(res, 1500));
+    window.removeEventListener("devicemotion", on);
+    const rate = n > 1 ? (n / ((performance.now() - t0) / 1000)).toFixed(0) + " events/s" : "no events";
+    const detail = "permission " + permission + ", " + rate + (last && last.x != null ? ", gravity " + [last.x, last.y, last.z].map(x => (+x).toFixed(1)).join(" ") : "");
+    show("s-motion", detail, n > 0);
+    report("motion", n > 0, detail);
+  } catch (e) {
+    show("s-motion", "motion failed: " + errText(e), false);
+    report("motion", false, errText(e));
+  }
+};
+</script>
+</body>
+</html>

@@ -218,3 +218,45 @@ fn rows_drawn_with_nothing_on_screen_are_offscreen(app: TestApp) {
         assert!(!offscreen(&w) && !w.bounds.is_empty(), "{text}, inside the crop, is on screen: {crop:?}");
     }
 }
+
+#[makepad_test]
+fn rows_outside_the_viewport_answer_a_lookup_and_scroll_into_view(app: TestApp) {
+    app.locator(Selector::all().text_exact("Play 0")).wait_visible();
+
+    let row = app.locator(Selector::all().text_exact("Row 150"));
+    // count/snapshot locators require visibility; assert_text also queries
+    // offscreen nodes. Read the plain tree immediately after that lookup.
+    row.try_assert_text("Row 150")
+        .expect("a named lookup must find exactly one undrawn Row 150");
+    let rows: Vec<_> = app
+        .widget_snapshot()
+        .nodes()
+        .into_iter()
+        .filter(|node| node.name == "Row 150")
+        .collect();
+    assert_eq!(rows.len(), 1, "the lookup must expose exactly one Row 150");
+    let found = &rows[0];
+    assert!(
+        found.states.contains(makepad_test::States::OFFSCREEN),
+        "undrawn Row 150 must be marked OFFSCREEN"
+    );
+    assert!(
+        found.bounds.is_empty(),
+        "undrawn Row 150 must have no clickable bounds"
+    );
+    assert_eq!(
+        (found.role, found.pos_in_set, found.set_size),
+        (makepad_test::Role::ListItem, 151, 200),
+        "the lookup must describe Row 150's position in the list"
+    );
+    assert!(
+        found.actions.contains(makepad_test::Actions::SCROLL_INTO_VIEW),
+        "undrawn Row 150 must offer scrolling into view"
+    );
+
+    row.scroll_into_view();
+    app.locator(Selector::all().text_exact("Play 150"))
+        .wait_visible()
+        .click_at_center();
+    app.locator(Selector::id("last_played")).wait_text("Row 150");
+}

@@ -1,9 +1,12 @@
-//! A window plus a system tray icon whose menu shows the window, toggles a check mark and quits.
+//! A window plus a system tray icon whose menu shows the window, toggles a check mark, posts
+//! a notification and quits. Clicking the notification shows the window.
 //! Closing the window hides it: the app lives on in the tray. Every tray event is logged.
 //!
 //! `MAKEPAD_TRAY_SELFTEST=1`: the platform shell performs the tray menu's first item itself once
 //! the tray exists (macOS: `performActionForItemAtIndex:`, a `TrayMenu`; Windows: a click on the
 //! icon, a `TrayClick`); the example logs the event it gets and quits.
+//! `MAKEPAD_NOTIFY_SELFTEST=1`: posts at startup, then logs its `NotificationClick` and quits.
+//! On macOS the shell supplies a synthetic click even when the app runs outside a bundle.
 
 pub use makepad_widgets;
 
@@ -64,10 +67,19 @@ impl App {
             menu: vec![
                 TrayMenuItem::item(live_id!(show), "Show window"),
                 TrayMenuItem::check(live_id!(enabled), "Enabled", self.enabled),
+                TrayMenuItem::item(live_id!(post_notification), "Post a notification"),
                 TrayMenuItem::Line,
                 TrayMenuItem::item(live_id!(quit), "Quit"),
             ],
             dropdown: false,
+        });
+    }
+
+    fn post_notification(&self, cx: &mut Cx) {
+        cx.post_notification(Notification {
+            id: live_id!(tray_example_note),
+            title: "Tray example".into(),
+            body: "Click to show the window".into(),
         });
     }
 }
@@ -77,6 +89,9 @@ impl MatchEvent for App {
         self.enabled = true;
         self.set_tray(cx);
         log!("tray: created");
+        if std::env::var("MAKEPAD_NOTIFY_SELFTEST").is_ok_and(|v| v == "1") {
+            self.post_notification(cx);
+        }
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
@@ -108,6 +123,8 @@ impl AppMain for App {
                     self.enabled = !self.enabled;
                     self.set_tray(cx);
                     self.ui.label(cx, ids!(status)).set_text(cx, if self.enabled { "Enabled" } else { "Disabled" });
+                } else if e.item == live_id!(post_notification) {
+                    self.post_notification(cx);
                 } else if e.item == live_id!(quit) {
                     cx.quit();
                 }
@@ -120,6 +137,16 @@ impl AppMain for App {
                     return;
                 }
                 self.ui.window(cx, ids!(main_window)).set_visible(cx, true);
+            }
+            Event::NotificationClick(e) if e.id == live_id!(tray_example_note) => {
+                log!("tray: notification click {:?}", e.id);
+                self.ui.window(cx, ids!(main_window)).set_visible(cx, true);
+                if std::env::var("MAKEPAD_NOTIFY_SELFTEST").is_ok_and(|v| v == "1") {
+                    log!("notify selftest: NotificationClick {:?} received, quitting", e.id);
+                    cx.remove_notification(e.id);
+                    cx.quit();
+                    return;
+                }
             }
             Event::WindowCloseRequested(e) if cx.has_tray() => {
                 // the window goes away, the app stays in the tray

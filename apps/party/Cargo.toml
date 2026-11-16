@@ -1,0 +1,57 @@
+# party — guests' phones send short camera loops, album photos and prompts to
+# the party box; the box redraws them with its AI hub and puts the results on
+# the big screen.
+#
+# The box serves one HTTPS page (a self-signed certificate on its own
+# addresses), and nothing else: the hub, devhub and every other service stay
+# behind it. Guests' pictures live in memory; only a guest's own "keep it"
+# writes anything to disk.
+
+[package]
+name = "makepad-app-party"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-party"
+
+[lib]
+name = "makepad_app_party"
+path = "src/lib.rs"
+
+# The big screen: the party (as below) and its wall.
+[[bin]]
+name = "makepad-app-party"
+path = "src/main.rs"
+
+# The party server without the big screen: the phone page, the camera check
+# (`--camtest`) and the hub queue, for a box with no screen and for tests.
+[[bin]]
+name = "makepad-party-server"
+path = "src/bin/server.rs"
+
+[dependencies]
+makepad-network = { path = "../../platform/network" }
+makepad-bounded-http = { path = "../../libs/bounded_http" }
+makepad-micro-serde = { path = "../../libs/micro_serde" }
+makepad-live-id = { path = "../../libs/live_id" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
+makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-base64 = { path = "../../libs/base64" }
+makepad-zune-jpeg = { path = "../../libs/zune/zune-jpeg" }
+makepad-zune-png = { path = "../../libs/zune/zune-png" }
+makepad-zune-core = { path = "../../libs/zune/zune-core" }
+jpeg-encoder = { path = "../../libs/jpeg-encoder" }
+# The big screen.
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-wm-api = { path = "../../libs/wm_api" }
+makepad-qr = { path = "../../libs/qr" }
+
+# Live: a guest's camera as a WebRTC call (the receiving end; Linux only).
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-webrtc = { path = "../../libs/webrtc" }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+makepad-webrtc = { path = "../../libs/webrtc", features = ["browser"] }
+# examples/fake_phone.rs: a camera's H.264 from the GPU's encoder.
+makepad-platform-video = { path = "../../platform/video" }
+makepad-hal = { path = "../../platform/hal" }

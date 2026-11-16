@@ -951,7 +951,7 @@ impl FleetTimeline {
         // landings as ticks: landed, failed, still queued
         for (i, e) in f.land.iter().enumerate() {
             use makepad_devhub::land::St;
-            let at = if e.state == St::Queued { e.asked_ms } else { e.changed_ms };
+            let at = if matches!(e.state, St::Queued | St::Checking) { e.asked_ms } else { e.changed_ms };
             if at < t0 || at > t1 {
                 continue;
             }
@@ -960,7 +960,7 @@ impl FleetTimeline {
                 St::Landed => self.good,
                 St::Failed | St::Conflict => self.bad,
                 St::Waiting => self.warn,
-                St::Queued => self.accent,
+                St::Queued | St::Checking => self.accent,
             };
             let r = Rect { pos: dvec2(x - 2.5, y + 1.0), size: dvec2(5.0, 8.0) };
             if matches!(e.state, St::Failed | St::Conflict) {

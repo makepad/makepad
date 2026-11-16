@@ -46,3 +46,6 @@ makepad-app-module = { path = "../../libs/app_module" }
 # only when the panel is first opened. Standalone only — a host that links the
 # MODULE leaves this off.
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, features = ["localai"], optional = true }
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test" }

@@ -30,8 +30,19 @@ pub mod terminal;
 
 use makepad_code_agent::event::AgentConfig;
 use makepad_code_agent::index;
-use makepad_widgets::*;
+use makepad_widgets::{tip::TipAction, *};
 use std::path::{Path, PathBuf};
+
+/// Passes the hover tips in `actions` (taken with `capture_actions`) on to
+/// the window's tip layer, which only hears actions nobody captured.
+pub fn forward_tips(cx: &mut Cx, actions: &ActionsBuf) {
+    for action in actions.iter().filter_map(|action| action.as_widget_action()) {
+        let tip = action.cast::<TipAction>();
+        if tip != TipAction::None {
+            cx.widget_action(action.widget_uid, tip);
+        }
+    }
+}
 
 /// What a panel asks of the workspace. Paths are relative to the project
 /// root with `/` separators; lines and columns are 1-based.

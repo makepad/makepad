@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<link rel="icon" href="data:,">
+<title>Party</title>
+<style>
+  :root { color-scheme: light dark; --bg: #faf7f2; --fg: #1d1b19; --soft: #6d655c; --line: #e4ddd3; --accent: #6b4de6; --accent-fg: #fff; --chip: #efe9e1; --rec: #e5484d; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161412; --fg: #f1ece6; --soft: #a89f95; --line: #3a352f; --accent: #a58cff; --accent-fg: #160f2e; --chip: #2d2925; } }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--fg); font: 16px/1.35 system-ui, sans-serif; }
+  /* The whole page is one screen: the visible viewport, never scrolled. */
+  #app { position: fixed; left: 0; right: 0; top: 0; height: 100dvh; display: flex; flex-direction: column; align-items: center; gap: 10px;
+         padding: max(10px, env(safe-area-inset-top)) 12px max(10px, env(safe-area-inset-bottom)); }
+  .tabs { flex: none; display: inline-flex; background: var(--chip); border-radius: 999px; padding: 3px; }
+  .tabs button { border: 0; background: transparent; color: var(--fg); font: inherit; font-size: 15px; padding: 6px 20px; border-radius: 999px; min-height: 34px; }
+  .tabs button.on { background: var(--accent); color: var(--accent-fg); }
+  #stage { flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  #square { position: relative; flex: none; width: var(--side, 300px); height: var(--side, 300px); border-radius: 18px; overflow: hidden; background: var(--chip); }
+  #square video, #square canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+  #v-cam.mirror { transform: scaleX(-1); }
+  .note { position: absolute; left: 10px; right: 10px; bottom: 10px; padding: 8px 12px; border-radius: 12px; background: rgba(0, 0, 0, .5); color: #fff; font-size: 15px; text-align: center; pointer-events: none; }
+  .note:empty { display: none; }
+  #flip { position: absolute; top: 10px; right: 10px; width: 42px; height: 42px; border-radius: 50%; border: 0; padding: 0; background: rgba(0, 0, 0, .45); color: #fff; display: grid; place-items: center; }
+  #del { flex: none; margin-top: 4px; font: inherit; font-size: 13px; color: var(--soft); background: none; border: 0; text-decoration: underline; padding: 2px 8px; }
+  .bar { flex: none; width: 100%; height: 76px; display: flex; align-items: center; justify-content: center; }
+  #rec { position: relative; width: 72px; height: 72px; border-radius: 50%; border: 0; padding: 0;
+         background: conic-gradient(var(--rec) calc(var(--p, 0) * 1turn), var(--fg) 0); display: grid; place-items: center; }
+  #rec::before { content: ""; position: absolute; inset: 4px; border-radius: 50%; background: var(--bg); }
+  #rec span { position: relative; width: 56px; height: 56px; border-radius: 50%; background: var(--rec); transition: transform .15s, border-radius .15s; }
+  #rec.going span { transform: scale(.55); border-radius: 10px; }
+  #f-prompt { width: min(100%, var(--side, 100%)); display: flex; gap: 8px; }
+  #f-prompt input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 12px 16px; border-radius: 999px; border: 1px solid var(--line); background: var(--chip); color: var(--fg); }
+  #f-prompt button { flex: none; width: 48px; height: 48px; border-radius: 50%; border: 0; padding: 0; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="tabs" role="tablist">
+    <button id="t-cam" role="tab" class="on">Camera</button>
+    <button id="t-res" role="tab">Result</button>
+  </div>
+  <div id="stage">
+    <div id="square">
+      <video id="v-cam" playsinline muted autoplay></video>
+      <canvas id="k-out" class="hidden"></canvas>
+      <button id="flip" class="hidden" aria-label="Flip the camera">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 21v-5h5"/></svg>
+      </button>
+      <div class="note" id="n-cam"></div>
+      <div class="note hidden" id="n-res"></div>
+    </div>
+    <button id="del" class="hidden">delete</button>
+  </div>
+  <div class="bar">
+    <button id="rec" aria-label="Record 3 seconds"><span></span></button>
+    <form id="f-prompt" class="hidden">
+      <input id="i-prompt" maxlength="300" enterkeyhint="send" autocomplete="off" placeholder="Prompt it (empty: the box picks)">
+      <button aria-label="Redraw with this prompt">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M13 6l6 6-6 6"/></svg>
+      </button>
+    </form>
+  </div>
+</div>
+
+<script>
+"use strict";
+// One screen, two tabs: the camera records a 3 s loop, the result plays the
+// box's redraw of it in the same square, and a prompt redraws the same loop
+// again, as often as the guest likes (the newest replaces what is shown).
+// Everything stays "just me": nothing goes on the wall, nothing is kept.
+const base = location.pathname.replace(/\/+$/, "") + "/";
+const FPS = 8, SECONDS = 3, SIDE = 512;
+let token = null, stream = null, facing = "user", tab = "camera", recording = false;
+let current = null;            // the loop on the Result tab: { source: id or null while sending, fps }
+let shownTake = null, loading = null, poller = null, pending = false, looks = 0;
+let sending = null;
+const player = { frames: [], fps: FPS, i: 0, at: 0 };
+
+function $(id) { return document.getElementById(id); }
+function note(id, text) {
+  if (id === "n-res" && sending && sending.waiting) return;
+  $(id).textContent = text || "";
+}
+function errText(e) { return e && e.message ? e.message : String(e); }
+function store(key, value) { try { value == null ? sessionStorage.removeItem(key) : sessionStorage.setItem(key, value); } catch (e) {} }
+function stored(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+
+// What the page meets goes to the box's own log through the camera check's
+// report route: the browser, the camera, how long a redraw took, errors. A
+// line names this page's random session, never the phone or what it shows.
+const session = "p" + Math.random().toString(36).slice(2, 8);
+function report(test, ok, detail, withBrowser) {
+  const body = { session, test, ok, detail: String(detail).slice(0, 400) };
+  if (withBrowser) body.ua = navigator.userAgent.slice(0, 400);
+  fetch(base + "camtest/report", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+}
+function why(e) { return e ? (e.name || "Error") + ": " + (e.message || String(e)) : "unknown"; }
+function secondsSince(t) { return ((performance.now() - t) / 1000).toFixed(1) + " s"; }
+
+async function call(method, path, body, type, action) {
+  const signal = action && action.signal;
+  for (let first = true; ; first = false) {
+    if (signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
+    if (!token && path !== "join") await join(action);
+    if (signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
+    const headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    if (type) headers["Content-Type"] = type;
+    const r = await fetch(base + path, { method, headers, body });
+    if (!r.ok && signal && signal.aborted) throw new DOMException("Sending cancelled", "AbortError");
+    // Over a limit (429) or with the box full or busy (503): nothing was taken; send it again when it says.
+    if (r.status === 429 || r.status === 503) {
+      const wait = Math.max(0.2, Number(r.headers.get("Retry-After")) || 1);
+      const said = await r.text();
+      if (action) action.onWait(said, wait);
+      try {
+        await new Promise((res, rej) => {
+          const timer = setTimeout(() => {
+            if (signal) signal.removeEventListener("abort", cancel);
+            res();
+          }, wait * 1000);
+          function cancel() { clearTimeout(timer); rej(new DOMException("Sending cancelled", "AbortError")); }
+          if (signal) {
+            if (signal.aborted) cancel();
+            else signal.addEventListener("abort", cancel, { once: true });
+          }
+        });
+      } finally {
+        if (action) action.onWait();
+      }
+      continue;
+    }
+    // A token the box no longer knows (it expired, and everything with it): a new one.
+    if (r.status === 401 && path !== "join" && first) { token = null; store("party-token", null); continue; }
+    if (!r.ok) throw new Error((await r.text()) || ("the box answered " + r.status));
+    return r;
+  }
+}
+
+async function join(action) {
+  const r = await call("POST", "join", null, null, action);
+  token = (await r.json()).token;
+  store("party-token", token);
+}
+
+function toJpeg(canvas, quality) {
+  return new Promise((res, rej) => canvas.toBlob(b => b ? res(b) : rej(new Error("the phone made no picture")), "image/jpeg", quality));
+}
+
+function frameSet(blobs) {
+  const parts = [];
+  for (const b of blobs) {
+    const len = new Uint8Array(4);
+    new DataView(len.buffer).setUint32(0, b.size);
+    parts.push(len, b);
+  }
+  return new Blob(parts, { type: "application/x-party-frames" });
+}
+
+// --- the screen ------------------------------------------------------------
+
+// Only uploads and wishes own a visible wait. Recording again, a new wish or
+// a delete stops the old retry, but lets an upload already on its way finish
+// so it can be deleted.
+function startSending() {
+  stopSending();
+  const controller = new AbortController();
+  const action = {
+    signal: controller.signal, cancel: () => controller.abort(), waiting: null,
+    onWait(why, seconds) {
+      if (sending !== action) return;
+      if (why == null) {
+        if (!action.waiting) return;
+        const before = action.waiting.before;
+        action.waiting = null;
+        note("n-res", before);
+      } else {
+        action.waiting = { why, until: performance.now() + seconds * 1000, before: $("n-res").textContent, seconds: null };
+        showWait();
+      }
+    }
+  };
+  return sending = action;
+}
+
+function stopSending() {
+  if (!sending) return;
+  sending.onWait();
+  sending.cancel();
+  sending = null;
+}
+
+function showWait() {
+  if (!sending || !sending.waiting) return;
+  const wait = sending.waiting, seconds = Math.max(0, Math.ceil((wait.until - performance.now()) / 1000));
+  if (seconds === wait.seconds) return;
+  wait.seconds = seconds;
+  const said = (wait.why || "the box is busy").trim().replace(/\.$/, "");
+  $("n-res").textContent = said[0].toUpperCase() + said.slice(1) + " (sending again in " + seconds + " s).";
+}
+
+// The square takes what the visible viewport leaves: smaller while the
+// keyboard is up, so the page never scrolls.
+function layout() {
+  const vv = window.visualViewport, app = $("app");
+  if (vv) { app.style.height = vv.height + "px"; app.style.top = vv.offsetTop + "px"; }
+  const stage = $("stage"), del = $("del");
+  const below = del.classList.contains("hidden") ? 0 : del.offsetHeight + 4;
+  const side = Math.max(96, Math.floor(Math.min(stage.clientWidth, stage.clientHeight - below)));
+  app.style.setProperty("--side", side + "px");
+}
+
+function show(name) {
+  tab = name;
+  const camera = name === "camera";
+  $("t-cam").classList.toggle("on", camera);
+  $("t-res").classList.toggle("on", !camera);
+  $("v-cam").classList.toggle("hidden", !camera);
+  $("flip").classList.toggle("hidden", !camera || !stream);
+  $("n-cam").classList.toggle("hidden", !camera);
+  $("k-out").classList.toggle("hidden", camera);
+  $("n-res").classList.toggle("hidden", camera);
+  $("del").classList.toggle("hidden", camera || !current);
+  $("rec").classList.toggle("hidden", !camera);
+  $("f-prompt").classList.toggle("hidden", camera);
+  layout();
+}
+
+function play(frames, fps) {
+  player.frames = frames;
+  player.fps = fps || FPS;
+  player.i = 0;
+  player.at = 0;
+  const c = $("k-out");
+  if (frames.length) { c.width = frames[0].width; c.height = frames[0].height; }
+  else c.getContext("2d").clearRect(0, 0, c.width, c.height);
+}
+
+function tick(now) {
+  showWait();
+  if (player.frames.length && now - player.at >= 1000 / player.fps) {
+    player.at = now;
+    $("k-out").getContext("2d").drawImage(player.frames[player.i], 0, 0, $("k-out").width, $("k-out").height);
+    player.i = (player.i + 1) % player.frames.length;
+  }
+  requestAnimationFrame(tick);
+}
+
+// --- the camera and the loop -------------------------------------------------
+
+async function startCamera() {
+  if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) {
+    report("camera", false, "no getUserMedia" + (window.isSecureContext ? "" : " (not a secure context)"));
+    return note("n-cam", "This browser gives no camera here.");
+  }
+  const asked = performance.now();
+  try {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    note("n-cam", "Starting the camera…");
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    const v = $("v-cam");
+    v.srcObject = stream;
+    v.classList.toggle("mirror", facing === "user");
+    await v.play().catch(() => {});
+    note("n-cam", "");
+    const got = stream.getVideoTracks()[0], set = got && got.getSettings ? got.getSettings() : {};
+    report("camera", true, facing + " " + (set.width || v.videoWidth) + "x" + (set.height || v.videoHeight) +
+      (set.frameRate ? " " + Math.round(set.frameRate) + " fps" : "") + ", up in " + secondsSince(asked));
+  } catch (e) {
+    stream = null;
+    report("camera", false, facing + " " + why(e));
+    note("n-cam", "The camera did not start (" + errText(e) + "). Tap to try again.");
+  }
+  show(tab);
+}
+
+function grab(video) {
+  // the square in the middle of the picture, as the preview shows it
+  const w = video.videoWidth, h = video.videoHeight, s = Math.min(w, h);
+  const c = document.createElement("canvas");
+  c.width = SIDE; c.height = SIDE;
+  const g = c.getContext("2d");
+  if (facing === "user") { g.translate(SIDE, 0); g.scale(-1, 1); }
+  g.drawImage(video, (w - s) / 2, (h - s) / 2, s, s, 0, 0, SIDE, SIDE);
+  return c;
+}
+
+async function record() {
+  if (recording) return;
+  if (!stream) return startCamera();
+  const video = $("v-cam");
+  if (!video.videoWidth) return note("n-cam", "The camera is not ready yet.");
+  stopSending();
+  recording = true;
+  const rec = $("rec");
+  rec.classList.add("going");
+  const count = FPS * SECONDS, jpegs = [], shots = [];
+  const started = performance.now();
+  for (let i = 0; i < count; i++) {
+    const wait = started + i * 1000 / FPS - performance.now();
+    if (wait > 0) await new Promise(res => setTimeout(res, wait));
+    const c = grab(video);
+    shots.push(c);
+    jpegs.push(toJpeg(c, 0.85));
+    rec.style.setProperty("--p", ((i + 1) / count).toFixed(3));
+  }
+  rec.classList.remove("going");
+  rec.style.setProperty("--p", "0");
+  recording = false;
+  const recorded = performance.now();
+  // A new loop starts fresh: the one before goes from the box.
+  const before = current;
+  const replaces = before ? (before.source != null ? before.source : before.replaces) : null;
+  const action = startSending();
+  const mine = current = { source: null, fps: FPS, askedAt: recorded, asked: "the recording", failed: null, replaces };
+  shownTake = null;
+  loading = null;
+  try {
+    const frames = await Promise.all(shots.map(c => createImageBitmap(c)));
+    if (current !== mine || action.signal.aborted) return;
+    play(frames, FPS);
+    note("n-res", "Sending…");
+    show("result");
+    const set = frameSet(await Promise.all(jpegs));
+    const r = await call("POST", "loop?fps=" + FPS + "&keep=me", set, "application/x-party-frames", action);
+    const sent = (await r.json()).source;
+    report("loop", true, "source " + sent + ": " + count + " frames, " + Math.round(set.size / 1024) + " KB, sent " + secondsSince(recorded) + " after recording");
+    if (replaces != null) call("POST", "delete?source=" + replaces).catch(() => {});
+    if (current !== mine || action.signal.aborted) {
+      // Left Result, deleted, or recorded again while this one was on its way.
+      call("POST", "delete?source=" + sent).catch(() => {});
+      return;
+    }
+    mine.source = sent;
+    show(tab);
+    note("n-res", "Redrawing…");
+    watch();
+  } catch (e) {
+    if (current !== mine || action.signal.aborted) return;
+    report("loop", false, why(e));
+    note("n-res", "That did not go through: " + errText(e));
+  } finally {
+    if (sending === action) sending = null;
+  }
+}
+
+// --- the result ------------------------------------------------------------
+
+// Plays the newest finished take of the loop; a newer one (a new prompt, or
+// the best quality) replaces it in place when it is done.
+async function watch() {
+  clearTimeout(poller);
+  // One look at a time: a newer call (a prompt, the page coming back) takes over.
+  const look = ++looks;
+  if (!current || current.source == null) return;
+  try {
+    const me = await (await call("GET", "me")).json();
+    if (look !== looks || !current) return;
+    const s = me.sources.find(x => x.id === current.source);
+    if (!s) { forget("Gone from the box. Record a new loop on the Camera tab."); return; }
+    const newest = s.takes[s.takes.length - 1];
+    const done = s.takes.filter(t => t.state === "done").pop();
+    pending = !!newest && (newest.state === "queued" || newest.state === "running");
+    if (done && done.id !== shownTake) showTake("take=" + done.id, done.frames, s.fps, done.id);
+    // After a reload, the recorded loop until a redraw is done.
+    if (!done && !player.frames.length) showTake("source=" + s.id, s.frames, s.fps, "s" + s.id);
+    if (pending) note("n-res", newest.state === "queued" ? "Waiting for the box…" : "Redrawing…");
+    else if (newest && newest.state === "failed") {
+      if (current.failed !== newest.id) { current.failed = newest.id; report("take", false, "take " + newest.id + ": " + (newest.error || "failed")); }
+      note("n-res", "That one did not work out" + (newest.error ? " (" + newest.error + ")" : "") + ". Try another prompt.");
+    }
+    else if (done && done.id === shownTake) note("n-res", "");
+  } catch (e) {
+    pending = true;
+  }
+  if (look === looks) poller = setTimeout(watch, pending || loading != null ? 1000 : 6000);
+}
+
+// Loads `count` frames of `what` (a take's, or the source's) and plays them.
+async function showTake(what, count, fps, id) {
+  if (loading === id) return;
+  loading = id;
+  try {
+    const frames = await Promise.all(Array.from({ length: count }, (_, i) =>
+      call("GET", "frame?" + what + "&i=" + i).then(r => r.blob()).then(b => createImageBitmap(b))));
+    if (loading !== id) return;
+    if (typeof id === "number") {
+      shownTake = id;
+      if (current && current.askedAt != null) {
+        report("take", true, "take " + id + " playing " + secondsSince(current.askedAt) + " after " + current.asked);
+        current.askedAt = null;
+      }
+    }
+    play(frames, fps);
+    if (!pending && typeof id === "number") note("n-res", "");
+  } catch (e) {
+    // the next look tries again
+  } finally {
+    if (loading === id) loading = null;
+  }
+}
+
+async function prompt(ev) {
+  ev.preventDefault();
+  $("i-prompt").blur();
+  if (!current || current.source == null) return note("n-res", current ? "Still sending the loop…" : "Record a loop on the Camera tab first.");
+  const mine = current, action = startSending();
+  note("n-res", "Sending…");
+  try {
+    // The prompt stays in the field, to change and send again.
+    const asked = performance.now(), text = $("i-prompt").value.trim();
+    await call("POST", "wish?source=" + mine.source, text, "text/plain; charset=utf-8", action);
+    if (current !== mine || action.signal.aborted) return;
+    mine.askedAt = asked; mine.asked = "the prompt";
+    report("prompt", true, text ? text.length + " characters" : "empty: the box picks");
+    note("n-res", "Redrawing…");
+    watch();
+  } catch (e) {
+    if (current !== mine || action.signal.aborted) return;
+    report("prompt", false, why(e));
+    note("n-res", errText(e));
+  } finally {
+    if (sending === action) sending = null;
+  }
+}
+
+function forget(text) {
+  stopSending();
+  clearTimeout(poller);
+  looks++;
+  pending = false;
+  current = null;
+  shownTake = null;
+  loading = null;
+  play([], FPS);
+  note("n-res", text || "Record a loop on the Camera tab.");
+  show(tab);
+}
+
+async function del() {
+  if (!current) return;
+  if (!confirm("Delete this loop and its redraws from the box?")) return;
+  const source = current.source != null ? current.source : current.replaces;
+  forget();
+  show("camera");
+  if (source != null) {
+    try { await call("POST", "delete?source=" + source); } catch (e) {}
+  }
+}
+
+$("t-cam").onclick = () => show("camera");
+$("t-res").onclick = () => show("result");
+$("square").onclick = ev => { if (tab === "camera" && !stream && ev.target.closest("#flip") == null) startCamera(); };
+$("flip").onclick = ev => { ev.stopPropagation(); facing = facing === "user" ? "environment" : "user"; startCamera(); };
+$("rec").onclick = record;
+$("f-prompt").onsubmit = prompt;
+$("del").onclick = del;
+window.addEventListener("resize", layout);
+if (window.visualViewport) {
+  visualViewport.addEventListener("resize", layout);
+  visualViewport.addEventListener("scroll", layout);
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && current) watch(); });
+requestAnimationFrame(tick);
+window.addEventListener("error", e => report("error", false, (e.message || "error") + " at line " + (e.lineno || "?")));
+window.addEventListener("unhandledrejection", e => report("error", false, why(e.reason)));
+report("page", true, innerWidth + "x" + innerHeight + " at " + (window.devicePixelRatio || 1) + "x" +
+  (window.visualViewport ? "" : ", no visualViewport") + (window.isSecureContext ? "" : ", not a secure context"), true);
+
+token = stored("party-token");
+note("n-cam", navigator.mediaDevices && navigator.mediaDevices.getUserMedia ? "Tap to start the camera" : "This browser gives no camera here.");
+note("n-res", "Record a loop on the Camera tab.");
+show("camera");
+// After a reload the newest loop comes back on the Result tab.
+(async () => {
+  if (!token) return;
+  try {
+    const me = await (await call("GET", "me")).json();
+    const loops = me.sources.filter(s => s.kind === "loop");
+    const last = loops[loops.length - 1];
+    if (!last || current) return;
+    current = { source: last.id, fps: last.fps };
+    show("result");
+    watch();
+  } catch (e) { /* a fresh start */ }
+})();
+</script>
+</body>
+</html>

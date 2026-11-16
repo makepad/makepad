@@ -504,6 +504,7 @@ script_mod! {
                             draw_bg +: {color: theme.color_outset}
 
                             back_button := ToolButton{
+                                a11y: {role: "button" label: "Back"}
                                 tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
@@ -513,6 +514,7 @@ script_mod! {
                                 }
                             }
                             forward_button := ToolButton{
+                                a11y: {role: "button" label: "Forward"}
                                 tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
@@ -574,6 +576,7 @@ script_mod! {
                                 width: Fit height: Fit flow: Right spacing: 2
                                 margin: Inset{left: 4 right: 4}
                                 icons_button := ToolButton{
+                                    a11y: {role: "button" label: "Icon view"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -583,6 +586,7 @@ script_mod! {
                                     }
                                 }
                                 list_button := ToolButton{
+                                    a11y: {role: "button" label: "List view"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -592,6 +596,7 @@ script_mod! {
                                     }
                                 }
                                 compact_button := ToolButton{
+                                    a11y: {role: "button" label: "Compact view"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -604,6 +609,7 @@ script_mod! {
                                 // 2.5D, and perspective. One scan, one pick.
                                 View{width: 8 height: 1}
                                 proj_flat := ToolButton{
+                                    a11y: {role: "button" label: "Flat map"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -613,6 +619,7 @@ script_mod! {
                                     }
                                 }
                                 proj_ortho := ToolButton{
+                                    a11y: {role: "button" label: "Tilted map"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -622,6 +629,7 @@ script_mod! {
                                     }
                                 }
                                 proj_persp := ToolButton{
+                                    a11y: {role: "button" label: "3D map"}
                                     Icon{
                                         icon_walk: Walk{width: 18 height: 18}
                                         draw_icon +: {
@@ -633,6 +641,7 @@ script_mod! {
 
                             }
                             search_button := ToolButton{
+                                a11y: {role: "button" label: "Search"}
                                 tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
@@ -642,6 +651,7 @@ script_mod! {
                                 }
                             }
                             storage_button := ToolButton{
+                                a11y: {role: "button" label: "Storage options"}
                                 visible: false
                                 tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
@@ -652,6 +662,7 @@ script_mod! {
                                 }
                             }
                             menu_button := ToolButton{
+                                a11y: {role: "button" label: "Menu"}
                                 tool_icon := Icon{
                                     icon_walk: Walk{width: 18 height: 18}
                                     draw_icon +: {
@@ -713,22 +724,27 @@ script_mod! {
                                     padding: Inset{top: 10 bottom: 10}
 
                                     home_item := SideItem{
+                                        a11y: {role: "button" label: "Home"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/home.svg")}}
                                         side_title +: {text: "Home"}
                                     }
                                     recent_item := SideItem{
+                                        a11y: {role: "button" label: "Recent"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/clock.svg")}}
                                         side_title +: {text: "Recent"}
                                     }
                                     starred_item := SideItem{
+                                        a11y: {role: "button" label: "Starred"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/star.svg")}}
                                         side_title +: {text: "Starred"}
                                     }
                                     network_item := SideItem{
+                                        a11y: {role: "button" label: "Network"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/network.svg")}}
                                         side_title +: {text: "Network"}
                                     }
                                     trash_item := SideItem{
+                                        a11y: {role: "button" label: "Trash"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/trash.svg")}}
                                         side_title +: {text: "Trash"}
                                     }
@@ -737,26 +753,32 @@ script_mod! {
                                     SectionLabel{text: "Places"}
 
                                     desktop_item := SideItem{
+                                        a11y: {role: "button" label: "Desktop"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Desktop"}
                                     }
                                     documents_item := SideItem{
+                                        a11y: {role: "button" label: "Documents"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Documents"}
                                     }
                                     downloads_item := SideItem{
+                                        a11y: {role: "button" label: "Downloads"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Downloads"}
                                     }
                                     music_item := SideItem{
+                                        a11y: {role: "button" label: "Music"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Music"}
                                     }
                                     pictures_item := SideItem{
+                                        a11y: {role: "button" label: "Pictures"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Pictures"}
                                     }
                                     videos_item := SideItem{
+                                        a11y: {role: "button" label: "Videos"}
                                         side_icon +: {draw_icon +: {svg: crate_resource("self://resources/icons/folder.svg")}}
                                         side_title +: {text: "Videos"}
                                     }
@@ -1795,16 +1817,21 @@ impl FilesView {
 
     fn apply_focus(&mut self, cx: &mut Cx) {
         let field = match self.focus_target {
-            FocusTarget::None => return,
-            FocusTarget::Path => self.view.text_input(cx, ids!(path_edit)),
-            FocusTarget::Search => self.view.text_input(cx, ids!(search_input)),
-            FocusTarget::Batch => self
+            FocusTarget::Path if self.path_edit_open => self.view.text_input(cx, ids!(path_edit)),
+            FocusTarget::Search if self.search_visible => self.view.text_input(cx, ids!(search_input)),
+            FocusTarget::Batch if self.batch_open => self
                 .view
                 .view(cx, ids!(batch_find))
                 .text_input(cx, ids!(field_input)),
             #[cfg(feature = "chat")]
-            FocusTarget::Chat => self.view.text_input(cx, ids!(chat_input)),
-            FocusTarget::Filter => self.view.text_input(cx, ids!(filter_query)),
+            FocusTarget::Chat if self.chat_open => self.view.text_input(cx, ids!(chat_input)),
+            FocusTarget::Filter if self.filter_popup_open && self.tabs[self.tab].mode.is_treemap() => {
+                self.view.text_input(cx, ids!(filter_query))
+            }
+            _ => {
+                self.focus_target = FocusTarget::None;
+                return;
+            }
         };
         // `take_key_focus` focuses the field's *area*, and a field that has
         // not been drawn since it was revealed has none — focusing it would
@@ -2214,6 +2241,9 @@ impl FilesView {
         self.view
             .widget(cx, ids!(storage_button))
             .set_visible(cx, mode.is_treemap());
+        if !mode.is_treemap() && self.filter_is_typing(cx) {
+            cx.set_key_focus(Area::Empty);
+        }
         self.view
             .widget(cx, ids!(map_side))
             .set_visible(cx, mode.is_treemap() && self.filter_popup_open);
@@ -3798,22 +3828,11 @@ impl FilesView {
             return;
         }
 
-        // Every text field in this window keeps key focus while it is hidden,
-        // so what is *open* decides whether a key is text or navigation. The
-        // chat's field is the exception: the panel stays open while the user
-        // reads, so it is the keyboard that says whether they are typing in it.
-        // The filter's query field counts too: without it, typing a word into
-        // the filter let Backspace fall through to "go up" — which navigated
-        // away and started a whole new scan mid-keystroke — and q/e spun the
-        // camera under the caret.
-        let editing = self.batch_open
-            || self.path_edit_open
-            || self.search_visible
-            || self.chat_is_typing(cx)
-            || self.filter_is_typing(cx)
-            || self
-                .with_contents(cx, |contents, _| contents.is_renaming())
-                .unwrap_or(false);
+        // A key is text while the key focus takes typed text, whichever field
+        // has it; the field's panel drops that focus when it closes.
+        // Backspace typed in the filter once fell through to "go up", navigated
+        // away and started a new scan mid-keystroke.
+        let editing = cx.key_focus_takes_text();
 
         if command {
             match event.key_code {
@@ -4171,6 +4190,10 @@ impl FilesView {
         self.chat_open = open;
         self.view.widget(cx, ids!(chat_panel)).set_visible(cx, open);
         if !open {
+            let area = self.view.text_input(cx, ids!(chat_input)).area();
+            if !area.is_empty() && cx.has_key_focus(area) {
+                cx.set_key_focus(Area::Empty);
+            }
             return;
         }
         if self.agent.is_none() {
@@ -4305,11 +4328,6 @@ impl FilesView {
         }
         let area = self.view.text_input(cx, ids!(chat_input)).area();
         !area.is_empty() && cx.has_key_focus(area)
-    }
-
-    #[cfg(not(feature = "chat"))]
-    fn chat_is_typing(&mut self, _cx: &mut Cx) -> bool {
-        false
     }
 
     /// Whether the caret is in the filter sidebar's query field.
@@ -4559,6 +4577,11 @@ impl FilesView {
             // The field has no area until the sidebar's first frame; focus
             // lands on the frame that gives it one.
             self.focus_soon(cx, FocusTarget::Filter);
+        } else {
+            let area = self.view.text_input(cx, ids!(filter_query)).area();
+            if !area.is_empty() && cx.has_key_focus(area) {
+                cx.set_key_focus(Area::Empty);
+            }
         }
         self.view.redraw(cx);
     }

@@ -722,7 +722,7 @@ impl IdeShell {
                 }
                 FileEditorAction::Caret { line, col } => {
                     if self.editors.iter().any(|e| e.uid == wa.widget_uid) {
-                        self.view.label(cx, ids!(status_caret)).set_text(cx, &format!("Ln {line}, Col {col}"));
+                        self.view.label(cx, ids!(ide_status.status_caret)).set_text(cx, &format!("Ln {line}, Col {col}"));
                     }
                 }
                 FileEditorAction::Saved => {
@@ -842,7 +842,12 @@ impl IdeShell {
     fn answer_close(&mut self, cx: &mut Cx, save: Option<bool>) {
         self.view.modal(cx, ids!(discard)).close(cx);
         let Some(pending) = self.closing.take() else { return };
-        let Some(save) = save else { return };
+        let Some(save) = save else {
+            if pending == Pending::Quit {
+                cx.cancel_quit();
+            }
+            return;
+        };
         match pending {
             Pending::Close(tab) => {
                 if save && !self.save_tab(cx, tab) {
@@ -855,6 +860,7 @@ impl IdeShell {
                     let dirty: Vec<LiveId> = self.editors.iter().filter(|e| e.dirty).map(|e| e.tab).collect();
                     for tab in dirty {
                         if !self.save_tab(cx, tab) {
+                            cx.cancel_quit();
                             return;
                         }
                     }
@@ -966,6 +972,7 @@ impl Widget for IdeShell {
         }
         let actions = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
         if !actions.is_empty() {
+            super::forward_tips(cx, &actions);
             self.discard_actions(cx, &actions);
             self.handle_dock_actions(cx, &actions);
             self.handle_ide_actions(cx, &actions);
@@ -993,8 +1000,8 @@ impl Widget for IdeShell {
             Some(e) => (e.path.clone(), if e.dirty { "● unsaved" } else { "" }),
             None => (String::new(), ""),
         };
-        self.view.label(cx, ids!(status_path)).set_text(cx, &path);
-        self.view.label(cx, ids!(status_state)).set_text(cx, state);
+        self.view.label(cx, ids!(ide_status.status_path)).set_text(cx, &path);
+        self.view.label(cx, ids!(ide_status.status_state)).set_text(cx, state);
         // The line belongs to the editor: a chat tab has its own.
         self.view.view(cx, ids!(ide_status)).set_visible(cx, active.is_some());
         self.view.draw_walk(cx, scope, walk)

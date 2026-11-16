@@ -4939,6 +4939,7 @@ Flow{video}
             assert!(matches!(remap_event(&scroll, &camera), Some(Event::Scroll(e)) if e.abs == expected && e.scroll == dvec2(8.0 / scale, -4.0 / scale)));
 
             let drop = Event::Drop(DropEvent {
+                window_id: WindowId(1, 1),
                 modifiers: KeyModifiers::default(),
                 handled: Arc::new(Mutex::new(false)),
                 abs: screen,

@@ -5,7 +5,7 @@
 //! the same player Stage's audio flow plays, with its per-loop meters and
 //! scopes, here on the app's own clock.
 //!
-//! - The UI thread builds the root at the device's rate ([`Engine::pump`])
+//! - The task pool builds the root at the device's rate ([`Engine::pump`])
 //!   and hands it to the callback under a lock the callback only tries:
 //!   a rebuild costs one silent buffer, never a wait on the audio thread.
 //! - Play, stop and the tempo are the transport's controls (atomics).
@@ -24,6 +24,7 @@ use makepad_score_live::live::ClockSource;
 use makepad_score_live::model::ScoreDoc;
 use makepad_score_live::node::Slot;
 use makepad_score_live::player::live_node;
+use makepad_widgets::{Class, TaskPool};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,7 +48,6 @@ pub fn slot() -> Arc<Slot> {
 struct Root {
     schedule: Box<Schedule<(), ()>>,
     clock: usize,
-    rate: u32,
     buf_l: Box<[f32]>,
     buf_r: Box<[f32]>,
     buffered: usize,
@@ -254,11 +254,23 @@ impl makepad_score_player::Meters for SynthMeters {
     }
 }
 
+/// The transport's bank, bpm index and playing index.
+type Controls = (Arc<ControlBank>, u16, u16);
+
+/// A build's result: the worker publishes it once, after replacing the root.
+#[derive(Default)]
+struct RootBuild {
+    finished: AtomicBool,
+    result: Mutex<Option<Result<(u32, Controls), String>>>,
+}
+
 /// The app's audio: the root, its controls, the meters.
 pub struct Engine {
     shared: Arc<Shared>,
     /// The transport's bpm and playing controls of the root built last.
-    controls: Option<(Arc<ControlBank>, u16, u16)>,
+    controls: Option<Controls>,
+    built_rate: Option<u32>,
+    building: Option<Arc<RootBuild>>,
     bpm: f64,
     playing: bool,
     pub meters: Arc<SynthMeters>,
@@ -266,7 +278,7 @@ pub struct Engine {
 
 impl Default for Engine {
     fn default() -> Self {
-        Engine { shared: Arc::default(), controls: None, bpm: 120.0, playing: false, meters: Arc::default() }
+        Engine { shared: Arc::default(), controls: None, built_rate: None, building: None, bpm: 120.0, playing: false, meters: Arc::default() }
     }
 }
 
@@ -292,6 +304,27 @@ fn root_slice() -> Option<OwnerSlice> {
     Some(OwnerSlice { owner: OWNER.into(), nodes: vec![transport, score, out] })
 }
 
+/// Build and replace the root off the UI thread; return its transport controls.
+fn build_root(shared: &Arc<Shared>, rate: u32) -> Result<Controls, String> {
+    register_score_node();
+    let slice = root_slice().ok_or("the audio engine has no Transport or AudioOutput")?;
+    let format = (1u64 << 32) | rate as u64;
+    let compiled = compile::<NoExt, ()>(&slice, 1, 1, format, None, &Arc::new(AudioBudget::default())).map_err(|e| e.message)?;
+    let clock = *compiled.layout.transports.get(TRANSPORT).ok_or("the root has no transport")? as usize;
+    let control = |name: &str| compiled.layout.controls.get(&format!("{TRANSPORT}.{name}")).map(|(index, _)| *index);
+    let (bpm, playing) = (control("bpm").ok_or("no bpm control")?, control("playing").ok_or("no playing control")?);
+    let bank = compiled.schedule.controls.clone();
+    let next = Root { schedule: compiled.schedule, clock, buf_l: vec![0.0; CHUNK].into_boxed_slice(), buf_r: vec![0.0; CHUNK].into_boxed_slice(), buffered: 0, taken: 0 };
+    let old = {
+        let mut root = shared.root.lock().unwrap_or_else(|e| e.into_inner());
+        root.replace(next)
+    };
+    // The old root (and the score node in it) is let go off the lock and
+    // off both the UI and audio threads.
+    drop(old);
+    Ok((bank, bpm, playing))
+}
+
 impl Engine {
     /// The callback's half (one for the life of the app).
     pub fn output(&self) -> Output {
@@ -313,33 +346,47 @@ impl Engine {
     }
 
     /// Build the root at `rate` (the device's), replacing the one playing.
+    #[cfg(test)]
     pub fn build(&mut self, rate: u32) -> Result<(), String> {
-        register_score_node();
-        let slice = root_slice().ok_or("the audio engine has no Transport or AudioOutput")?;
-        let format = (1u64 << 32) | rate as u64;
-        let compiled = compile::<NoExt, ()>(&slice, 1, 1, format, None, &Arc::new(AudioBudget::default())).map_err(|e| e.message)?;
-        let clock = *compiled.layout.transports.get(TRANSPORT).ok_or("the root has no transport")? as usize;
-        let control = |name: &str| compiled.layout.controls.get(&format!("{TRANSPORT}.{name}")).map(|(index, _)| *index);
-        let (bpm, playing) = (control("bpm").ok_or("no bpm control")?, control("playing").ok_or("no playing control")?);
-        let bank = compiled.schedule.controls.clone();
-        bank.set_manual(bpm, self.bpm as f32);
-        bank.set_manual(playing, if self.playing { 1.0 } else { 0.0 });
-        self.controls = Some((bank, bpm, playing));
-        let next = Root { schedule: compiled.schedule, clock, rate, buf_l: vec![0.0; CHUNK].into_boxed_slice(), buf_r: vec![0.0; CHUNK].into_boxed_slice(), buffered: 0, taken: 0 };
-        let old = self.shared.root.lock().map(|mut root| root.replace(next)).unwrap_or(None);
-        // The old root (and the score node in it) is let go here, off the
-        // audio thread.
-        drop(old);
+        let controls = build_root(&self.shared, rate)?;
+        self.apply_controls(rate, controls);
         Ok(())
     }
 
-    /// The UI thread's turn: a root at the device's rate.
-    pub fn pump(&mut self) {
+    fn apply_controls(&mut self, rate: u32, controls: Controls) {
+        self.controls = Some(controls);
+        self.built_rate = Some(rate);
+        self.set_bpm(self.bpm);
+        self.set_playing(self.playing);
+    }
+
+    /// The UI thread's turn: collect the last build, then request the
+    /// device's latest rate. No compile or wait for the worker here.
+    pub fn pump(&mut self, pool: &TaskPool) {
+        if self.building.as_ref().is_some_and(|build| build.finished.load(Ordering::Acquire)) {
+            let build = self.building.take().unwrap();
+            let result = build.result.lock().unwrap_or_else(|e| e.into_inner()).take();
+            match result {
+                Some(Ok((rate, controls))) => self.apply_controls(rate, controls),
+                Some(Err(error)) => makepad_widgets::log!("synth: the audio root: {error}"),
+                None => unreachable!("a finished root build published its result"),
+            }
+        }
         let Some(rate) = self.device_rate() else { return };
-        let built = self.shared.root.lock().ok().and_then(|root| root.as_ref().map(|r| r.rate));
-        if built != Some(rate) {
-            if let Err(error) = self.build(rate) {
-                makepad_widgets::log!("synth: the audio root: {error}");
+        if self.built_rate != Some(rate) && self.building.is_none() {
+            let shared = self.shared.clone();
+            let build = Arc::new(RootBuild::default());
+            let completed = build.clone();
+            match pool.submit(Class::Visible, move || {
+                let result = build_root(&shared, rate).map(|controls| (rate, controls));
+                *completed.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+                completed.finished.store(true, Ordering::Release);
+            }) {
+                Ok(job) => {
+                    self.building = Some(build);
+                    job.detach();
+                }
+                Err(error) => makepad_widgets::log!("synth: the audio root: {error}"),
             }
         }
     }

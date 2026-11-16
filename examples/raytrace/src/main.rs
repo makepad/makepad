@@ -3,7 +3,7 @@
 //! selftest / benchmark harness (`--selftest`, `--bench`, `--render`).
 //!
 //! ```text
-//! makepad-example-raytrace [--scene cornell|glass|building|furnace|file.glb]
+//! makepad-example-raytrace [--scene cornell|glass|building|furnace|solid-glass|file.glb]
 //!                           [--selftest DIR] [--bench DIR] [--remote]
 //! ```
 
@@ -35,7 +35,7 @@ script_mod! {
                         show_bg: true
                         draw_bg +: { color: theme.color_bg_container }
                         H3{ text: "Render" }
-                        Row{ Label{ text: "scene" } scene := DropDown{ width: Fill labels: ["cornell" "cornell glass" "building" "furnace" "glb"] } }
+                        Row{ Label{ text: "scene" } scene := DropDown{ width: Fill labels: ["cornell" "cornell glass" "building" "furnace" "glb" "solid glass"] } }
                         Row{ render_btn := Button{ text: "Render Image (F12)" } save_btn := Button{ text: "Save PNG" } }
                         Row{ Label{ width: 90 text: "target spp" } spp := Knob{ min: 16 max: 4096 step: 16 default: 1024 } }
                         Row{ Label{ width: 90 text: "scale" } scale := Knob{ min: 0.25 max: 2.0 step: 0.25 default: 1.0 } }
@@ -134,6 +134,7 @@ impl MatchEvent for App {
                 1 => SceneInput::cornell_box(true),
                 2 => makepad_raytrace::building::building(8, 10),
                 3 => SceneInput::furnace(),
+                5 => solid_glass_scene(),
                 _ => Args::parse().glb().unwrap_or_else(|| SceneInput::cornell_box(false)),
             };
             self.load_scene(cx, scene);
@@ -343,6 +344,7 @@ impl Args {
             "glass" => SceneInput::cornell_box(true),
             "building" => makepad_raytrace::building::building(8, 10),
             "furnace" => SceneInput::furnace(),
+            "solid-glass" => solid_glass_scene(),
             _ => self.glb().unwrap_or_else(|| SceneInput::cornell_box(false)),
         };
         if self.zup {
@@ -350,4 +352,36 @@ impl Args {
         }
         s
     }
+}
+
+/// Metre-scale optical check: high-contrast bars behind a 10 mm clear slab
+/// tilted 30 degrees about Y, with a separate tinted solid block beside it.
+fn solid_glass_scene() -> SceneInput {
+    use makepad_raytrace::{scene::push_box, Camera, Material, Sun};
+    let mut scene = SceneInput { up: vec3f(0.0, 1.0, 0.0), ..Default::default() };
+    scene.materials = vec![
+        Material::diffuse([0.85; 3]),
+        Material::diffuse([0.005; 3]),
+        Material { solid: true, ..Material::glass([1.0; 3]) },
+        Material { solid: true, absorption: [0.01, 0.35, 0.8], ..Material::glass([1.0; 3]) },
+        Material::diffuse([0.3; 3]),
+    ];
+    // Adjacent geometry, not a texture: narrow bars expose loss of edge detail.
+    for bar in 0..40 {
+        let x0 = -0.16 + bar as f32 * 0.005;
+        let x1 = x0 + 0.005;
+        let material = if bar % 2 == 0 { 0 } else { 1 };
+        scene.push_quad([[x0, 0.025, -0.085], [x1, 0.025, -0.085], [x1, 0.175, -0.085], [x0, 0.175, -0.085]], material);
+    }
+    push_box(&mut scene, vec3f(-0.06, 0.015, 0.0), vec3f(0.24, 0.17, 0.010), 30.0f32.to_radians(), 2);
+    push_box(&mut scene, vec3f(0.13, 0.0, 0.0), vec3f(0.09, 0.13, 0.06), -15.0f32.to_radians(), 3);
+    scene.push_quad([[-0.4, 0.0, -0.3], [-0.4, 0.0, 0.3], [0.4, 0.0, 0.3], [0.4, 0.0, -0.3]], 4);
+    scene.ensure_normals();
+    scene.camera = Camera {
+        pos: vec3f(0.0, 0.105, 0.65), target: vec3f(0.0, 0.105, 0.0),
+        fov_y: 28.0f32.to_radians(), f_stop: 0.0, focus_dist: 0.65,
+        ..Default::default()
+    };
+    scene.sun = Sun { dir: vec3f(-0.4, 0.8, 0.6).normalize(), ..Default::default() };
+    scene
 }

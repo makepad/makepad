@@ -10,6 +10,8 @@
 //! `last_played`, so any consumer that locates a row by its reported rect and
 //! clicks the middle of it — the `--remote` `ui find` + raw `click` loop, a
 //! `makepad_test` locator — can be checked against what the app actually did.
+//! Named semantic lookups also expose undrawn rows as offscreen list items
+//! that can be scrolled into view without instantiating the other rows.
 
 pub use makepad_widgets;
 
@@ -123,6 +125,8 @@ script_mod! {
 pub struct HitList {
     #[deref]
     view: View,
+    #[rust]
+    drawn_rows: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -148,10 +152,17 @@ impl Widget for HitList {
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.borrow_mut::<PortalList>() {
                 list.set_item_range(cx, 0, ROW_COUNT);
+                // This list skips no rows, so the down/up draw passes cover a
+                // contiguous range, including rows clipped past either edge.
+                self.drawn_rows = None;
                 while let Some(index) = list.next_visible_item(cx) {
                     if index >= ROW_COUNT {
                         continue;
                     }
+                    self.drawn_rows = Some(match self.drawn_rows {
+                        Some((first, last)) => (first.min(index), last.max(index)),
+                        None => (index, index),
+                    });
                     let item = list.item(cx, index, id!(Row));
                     item.label(cx, ids!(title))
                         .set_text(cx, &format!("Row {index}"));
@@ -162,6 +173,64 @@ impl Widget for HitList {
             }
         }
         DrawStep::done()
+    }
+
+    fn semantics_lookup(
+        &self,
+        _cx: &Cx,
+        lookup: &SemanticLookup,
+        out: &mut Vec<(u64, Option<u64>, a11y_tree::Node)>,
+    ) {
+        let indices = match lookup {
+            SemanticLookup::Terms(_) => 0..ROW_COUNT,
+            SemanticLookup::Key(key) if (1..=ROW_COUNT as u64).contains(key) => {
+                let index = (*key - 1) as usize;
+                index..index + 1
+            }
+            SemanticLookup::Key(_) => return,
+        };
+        for index in indices {
+            if self
+                .drawn_rows
+                .is_some_and(|(first, last)| (first..=last).contains(&index))
+            {
+                continue;
+            }
+            let node = a11y_tree::Node {
+                role: a11y_tree::Role::ListItem,
+                name: format!("Row {index}"),
+                states: a11y_tree::States::OFFSCREEN,
+                actions: a11y_tree::Actions::SCROLL_INTO_VIEW,
+                pos_in_set: index as u32 + 1,
+                set_size: ROW_COUNT as u32,
+                ..Default::default()
+            };
+            if matches!(lookup, SemanticLookup::Terms(query) if !query.matches(&node)) {
+                continue;
+            }
+            out.push((index as u64 + 1, None, node));
+        }
+    }
+
+    fn handle_action(
+        &mut self,
+        cx: &mut Cx,
+        request: &a11y_tree::ActionRequest,
+        _scope: &mut Scope,
+    ) -> a11y_tree::ActionResult {
+        if request.action != a11y_tree::Actions::SCROLL_INTO_VIEW {
+            return a11y_tree::ActionResult::Unhandled;
+        }
+        let Some(key) = cx.a11y.action_part_key(request.node) else {
+            return a11y_tree::ActionResult::Unhandled;
+        };
+        if !(1..=ROW_COUNT as u64).contains(&key) {
+            return a11y_tree::ActionResult::Unhandled;
+        }
+        let list = self.portal_list(cx, ids!(list));
+        list.set_first_id_and_scroll((key - 1) as usize, 0.0);
+        list.redraw(cx);
+        a11y_tree::ActionResult::Handled
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
