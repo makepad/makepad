@@ -319,6 +319,7 @@ fn start(desktop: &mut dyn Desktop, settings: &dyn Fn() -> HostSettings, status:
             Server::start(config, Arc::new(move || {
                 let _ = wake_tx.send(());
             }))
+            .map_err(String::from)
         });
         match started {
             Ok(server) => {

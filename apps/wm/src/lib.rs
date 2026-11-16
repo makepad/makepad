@@ -3381,6 +3381,7 @@ impl App {
                     client,
                     socket,
                     sender,
+                    ..
                 } => {
                     let theme_splash = theme::theme_splash_path(&self.state_mut().theme_name)
                         .to_string_lossy()

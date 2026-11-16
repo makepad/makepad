@@ -459,19 +459,40 @@ fn refuse(addr: &str, why: String) -> String {
     format!("desk link: listens on {addr} but {why}; a network-reachable desktop serves only to fleet credentials (tools/fleet-identity.md)")
 }
 
+/// Why [`Server::start`] did not listen, and whether a later try can succeed.
+#[derive(Debug)]
+pub struct StartError {
+    /// The address is not up yet or the port is still held, or the fleet identity is not
+    /// installed yet: the same start can work later. False: it never will without a change
+    /// of settings.
+    pub retry: bool,
+    pub why: String,
+}
+
+impl From<StartError> for String {
+    fn from(e: StartError) -> String {
+        e.why
+    }
+}
+
 impl Server {
     /// Starts listening, or says why it does not: not a LAN address, no fleet identity
-    /// ([`fleet_identity`]). `wake` makes the owner's UI thread look at `rx`.
-    pub fn start(config: ServerConfig, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Server, String> {
+    /// ([`fleet_identity`]), the address not bindable. `wake` makes the owner's UI thread look
+    /// at `rx`.
+    pub fn start(config: ServerConfig, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Server, StartError> {
         let addr = config.addr;
+        let never = |why: String| StartError { retry: false, why };
+        let later = |why: String| StartError { retry: true, why };
         if !bindable(addr.ip()) {
-            return Err(format!("desk link: {} is not a LAN address (loopback, 10/8, 172.16/12, 192.168/16, link-local, fc00::/7)", addr.ip()));
+            return Err(never(format!("desk link: {} is not a LAN address (loopback, 10/8, 172.16/12, 192.168/16, link-local, fc00::/7)", addr.ip())));
         }
         let text = addr.to_string();
-        let (identity, verifier, name) = fleet_identity(&config.tls_name).map_err(|why| refuse(&text, why))?;
-        let tls = Arc::new(TlsServer::new(identity).map_err(|e| format!("desk link: TLS server: {e}"))?);
-        let listener = TcpListener::bind(addr).map_err(|e| format!("desk link: bind {addr}: {e}"))?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+        // a boot before the LAN address is assigned (EADDRNOTAVAIL), or a previous instance
+        // still holding the port: both pass
+        let listener = TcpListener::bind(addr).map_err(|e| later(format!("desk link: bind {addr}: {e}")))?;
+        let (identity, verifier, name) = fleet_identity(&config.tls_name).map_err(|why| later(refuse(&text, why)))?;
+        let tls = Arc::new(TlsServer::new(identity).map_err(|e| never(format!("desk link: TLS server: {e}")))?);
+        listener.set_nonblocking(true).map_err(|e| later(e.to_string()))?;
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let geometry = Arc::new(Mutex::new(Geometry::default()));
@@ -538,7 +559,7 @@ impl Server {
                     }
                 }
             })
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| later(e.to_string()))?;
         Ok(Server { addr, name, stop, rx, geometry, input_note, sent })
     }
 }
@@ -761,6 +782,34 @@ impl SessionCtx {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+
+    fn config(addr: SocketAddr) -> ServerConfig {
+        ServerConfig {
+            addr,
+            tls_name: "start test".into(),
+            log: Arc::new(|_: &str| {}),
+            clock: || 0,
+            input: Arc::new(|| Err("no input in this test".into())),
+        }
+    }
+
+    #[test]
+    fn a_held_port_is_tried_again_and_an_address_off_the_lan_never() {
+        let held = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = held.local_addr().unwrap();
+        let err = Server::start(config(addr), Arc::new(|| {})).err().expect("the port is held");
+        assert!(err.retry && err.why.contains("bind"), "a held port or an address not up yet passes: {}", err.why);
+        drop(held);
+        let err = Server::start(config(addr), Arc::new(|| {})).err();
+        assert!(err.map_or(true, |e| e.retry && !e.why.contains("bind")), "the freed port binds; only the identity can still be missing");
+        let off_lan = Server::start(config("8.8.8.8:9".parse().unwrap()), Arc::new(|| {})).err().expect("not a LAN address");
+        assert!(!off_lan.retry, "a settings error never passes: {}", off_lan.why);
     }
 }
 

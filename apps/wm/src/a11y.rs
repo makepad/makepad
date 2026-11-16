@@ -20,7 +20,7 @@ pub fn disconnected(id: ClientId) {
     if let Some(mut old) = old { old.ui.reset(); }
 }
 pub fn apply(id: ClientId, msg: &AppToStudio) -> bool {
-    if !matches!(msg, AppToStudio::A11yUpdate { .. } | AppToStudio::A11yActionDone { .. } | AppToStudio::A11yReadDone { .. }) { return false; }
+    if !matches!(msg, AppToStudio::A11yUpdate { .. } | AppToStudio::A11yActionDone { .. } | AppToStudio::A11yReadDone { .. } | AppToStudio::A11yLookupDone { .. }) { return false; }
     let ui = children().lock().unwrap().get(&id).map(|c| c.ui.clone());
     if let Some(ui) = ui { ui.apply(msg); }
     true

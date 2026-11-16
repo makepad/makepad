@@ -64,6 +64,7 @@ fn only_the_admin_views_a_desktop() {
 
     // No identity: it does not listen, and says why.
     let err = Server::start(config(addr), Arc::new(|| {})).err().expect("no identity, no server");
+    let err = err.why;
     assert!(err.contains("no fleet identity") && err.contains("fleet-identity.md"), "{err}");
 
     // This desktop's identity: a node credential of a test root.

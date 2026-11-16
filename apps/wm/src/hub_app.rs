@@ -43,6 +43,7 @@
 //! test desktops must not take the GPU or the port of the real one. The hub's output goes to
 //! `~/.makepad/wm/ai-hub.log`.
 
+use makepad_ai_hub_panel::hub_control::IdleStop;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -538,6 +539,27 @@ pub struct Supervised<C: ServiceConf> {
     pub conf: C,
     conf_path: PathBuf,
     running: Option<Running>,
+    /// The replacement's build and the kept app's pid: it serves until the build succeeds.
+    building: Option<(Child, u32)>,
+    build_failures: u32,
+    build_retry_at: Option<f64>,
+    /// Built, the kept app's swap waits for its jobs to end: its pid and when that was last
+    /// said. A swap stops what it runs, and a hub's jobs live in its memory.
+    swap_waits: Option<(u32, f64)>,
+    /// The jobs the app runs or queues, as its link last read (None: not known).
+    jobs: Option<u64>,
+    /// A link reads its jobs ([`Self::set_jobs`]): its swap's stop waits on a fresh read there.
+    linked: bool,
+    /// Since when the app's job reads have had no answer (`set_jobs(None)`), while it was
+    /// linked; reset by any answer.
+    silent_since: Option<f64>,
+    /// The kept app's pid the link is to stop once a fresh read finds no job, until it takes it
+    /// ([`Self::take_stop_ask`]), and that ask until its outcome came ([`Self::idle_stop`]).
+    stop_ask: Option<u32>,
+    stop_asked: Option<u32>,
+    idle_outcome: Option<IdleStop>,
+    /// The deploy's build command (tests give a short child).
+    build_command: fn(&Supervised<C>) -> Result<Command, String>,
     /// Its output's log (`~/.makepad/wm/ai-hub.log`): the reason of an exit is in its tail.
     log: PathBuf,
     /// `~/.makepad/wm/ai-hub.state`.
@@ -586,6 +608,17 @@ impl<C: ServiceConf> Supervised<C> {
             conf,
             conf_path,
             running: None,
+            building: None,
+            build_failures: 0,
+            build_retry_at: None,
+            swap_waits: None,
+            jobs: None,
+            linked: false,
+            silent_since: None,
+            stop_ask: None,
+            stop_asked: None,
+            idle_outcome: None,
+            build_command: |s| s.cargo(Verb::Build, false),
             log: wm.join(format!("{}.log", kind.file)),
             state: wm.join(format!("{}.state", kind.file)),
             crashes: 0,
@@ -666,7 +699,7 @@ impl<C: ServiceConf> Supervised<C> {
 
     /// The first start: a live app an earlier WM started with this identity is kept (a WM
     /// restart no longer costs the hub, its loaded models or its running jobs). One started
-    /// from another binary or other settings is stopped, and a new one starts once it is gone.
+    /// from another binary or other settings is replaced once the new program is built.
     fn adopt_or_replace(&mut self, now: f64, binary: &Path) -> bool {
         let label = self.kind.label;
         let Some((pid, id)) = read_state(&self.state) else { return false };
@@ -694,7 +727,7 @@ impl<C: ServiceConf> Supervised<C> {
             return true;
         }
         makepad_widgets::log!("wm: {label}: pid {pid} runs another program or other settings; replacing it");
-        self.replace(pid, now);
+        self.build_then_replace(pid, now);
         true
     }
 
@@ -710,11 +743,75 @@ impl<C: ServiceConf> Supervised<C> {
         }
     }
 
+    /// Builds before stopping the kept app: compiling after its stop left the hub down for
+    /// minutes and a client got a 502 (11-16).
+    fn build_then_replace(&mut self, pid: u32, now: f64) {
+        let label = self.kind.label;
+        let log = self.log.with_file_name(format!("{}.build.log", self.kind.file));
+        self.running = Some(Running::Adopted(pid));
+        self.restart_at = None;
+        self.build_retry_at = None;
+        let child = (self.build_command)(self).and_then(|mut cmd| {
+            crate::host::no_console_window(&mut cmd);
+            if let Some(dir) = log.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+            }
+            let out = std::fs::OpenOptions::new().create(true).append(true).open(&log).map_err(|e| e.to_string())?;
+            let err = out.try_clone().map_err(|e| e.to_string())?;
+            cmd.stdin(Stdio::null()).stdout(out).stderr(err).spawn().map_err(|e| e.to_string())
+        });
+        match child {
+            Ok(child) => {
+                makepad_widgets::log!("wm: {label}: building the new program before replacing pid {pid} (log: {})", log.display());
+                self.building = Some((child, pid));
+            }
+            Err(reason) => self.build_failed(pid, now, &reason),
+        }
+    }
+
+    /// The link's read of the jobs the app runs or queues (the AI hub's `/control`).
+    pub fn set_jobs(&mut self, jobs: Option<u64>) {
+        self.jobs = jobs;
+        self.linked = true;
+    }
+
+    /// The kept app the link is to stop once a fresh read finds it runs no job, once.
+    pub fn take_stop_ask(&mut self) -> Option<u32> {
+        self.stop_ask.take()
+    }
+
+    /// What the link's fresh read decided for [`Self::take_stop_ask`]'s stop.
+    pub fn idle_stop(&mut self, outcome: IdleStop) {
+        self.idle_outcome = Some(outcome);
+    }
+
+    /// What a swap would stop: a devhub's live leases, another app's jobs as its link read
+    /// them. None (an app that does not answer) holds the swap until it answers or stays silent
+    /// past [`SWAP_SILENT_S`].
+    fn busy(&self) -> Option<u64> {
+        if std::ptr::eq(self.kind, &DEVHUB) { Some(live_leases().len() as u64) } else { self.jobs }
+    }
+
+    fn build_failed(&mut self, pid: u32, now: f64, status: &str) {
+        let log = self.log.with_file_name(format!("{}.build.log", self.kind.file));
+        let reason = format!("the new program's build failed ({status}); pid {pid} keeps running (log: {})", log.display());
+        makepad_widgets::log!("wm: {}: {reason}", self.kind.label);
+        self.note_trouble(&reason);
+        self.build_failures = self.build_failures.saturating_add(1);
+        self.build_retry_at = Some(now + backoff_s(self.build_failures) as f64);
+    }
+
     /// Stops the kept app `pid` (SIGTERM, SIGKILL after the grace) and starts this WM's own once
     /// it is gone.
     fn replace(&mut self, pid: u32, now: f64) {
         #[cfg(unix)]
         makepad_app_host::launch::signal_group(pid, false);
+        self.stopping(pid, now);
+    }
+
+    /// The kept app `pid` was sent its stop: SIGKILL after the grace, and this WM's own starts
+    /// once it is gone.
+    fn stopping(&mut self, pid: u32, now: f64) {
         self.kill_at = Some(now + STOP_GRACE.as_secs_f64());
         self.running = Some(Running::Adopted(pid));
         self.restart_pending = true;
@@ -950,7 +1047,7 @@ impl<C: ServiceConf> Supervised<C> {
                     makepad_widgets::log!("wm: {label}: the leases of pid {pid} are done; replacing it with this WM's program");
                     self.replace_when_idle = false;
                     self.adopt_by = None;
-                    self.replace(pid, now);
+                    self.build_then_replace(pid, now);
                 }
             } else {
                 self.replace_when_idle = false;
@@ -983,6 +1080,90 @@ impl<C: ServiceConf> Supervised<C> {
                 self.adopt_by = None;
             }
         }
+        let built = self.building.as_mut().and_then(|(child, pid)| match child.try_wait() {
+            Ok(Some(status)) => Some((*pid, Ok(status))),
+            Ok(None) => None,
+            Err(e) => Some((*pid, Err(e))),
+        });
+        if let Some((pid, status)) = built {
+            self.building = None;
+            // The old app may have exited during the build: its normal restart builds itself.
+            if matches!(self.running, Some(Running::Adopted(kept)) if kept == pid) && app_alive(self.kind, pid) {
+                match status {
+                    Ok(status) if status.success() => {
+                        self.build_failures = 0;
+                        makepad_widgets::log!("wm: {label}: the new program is built; pid {pid} is replaced once it runs no job");
+                        // (said at once below when it waits)
+                        self.swap_waits = Some((pid, f64::NEG_INFINITY));
+                    }
+                    Ok(status) => self.build_failed(pid, now, &status.to_string()),
+                    Err(e) => self.build_failed(pid, now, &e.to_string()),
+                }
+            }
+        }
+        if let Some((pid, said)) = self.swap_waits {
+            if !matches!(self.running, Some(Running::Adopted(kept)) if kept == pid) || !app_alive(self.kind, pid) {
+                // (its exit below: one a fresh read's stop caused restarts it as a swap)
+                self.swap_waits = None;
+                self.silent_since = None;
+            } else {
+                if self.linked && self.busy().is_none() {
+                    self.silent_since.get_or_insert(now);
+                } else {
+                    self.silent_since = None;
+                }
+                if let Some(outcome) = self.idle_outcome.take() {
+                    self.stop_asked = None;
+                    match outcome {
+                        IdleStop::Stopped => {
+                            makepad_widgets::log!("wm: {label}: a fresh read found no job; pid {pid} stops for the new program");
+                            self.swap_waits = None;
+                            self.stopping(pid, now);
+                        }
+                        IdleStop::Busy(n) => {
+                            makepad_widgets::log!("wm: {label}: a fresh read found {n} jobs; hub swap waits for them");
+                            self.swap_waits = Some((pid, now));
+                        }
+                        IdleStop::Silent => {
+                            if now - said >= SWAP_WAIT_SAY_S {
+                                makepad_widgets::log!("wm: {label}: a fresh read got no answer from pid {pid}; the swap waits for one");
+                            }
+                            self.swap_waits = Some((pid, if now - said >= SWAP_WAIT_SAY_S { now } else { said }));
+                        }
+                    }
+                } else if self.stop_asked.is_none() {
+                    if self.silent_since.is_some_and(|t| now - t >= SWAP_SILENT_S) {
+                        let secs = now - self.silent_since.unwrap();
+                        let reason = format!("pid {pid} answered no job read for {secs:.0} s; taken as hung, it stops for the new program");
+                        makepad_widgets::log!("wm: {label}: {reason}");
+                        self.note_trouble(&reason);
+                        self.swap_waits = None;
+                        self.silent_since = None;
+                        self.stopping(pid, now);
+                    } else {
+                        match self.busy() {
+                            Some(n) if n > 0 => {
+                                if now - said >= SWAP_WAIT_SAY_S {
+                                    makepad_widgets::log!("wm: {label}: hub swap waits for {n} jobs of pid {pid}");
+                                    self.swap_waits = Some((pid, now));
+                                }
+                            }
+                            // the last poll's count is up to 3 s old: the link's worker reads again and
+                            // stops it only if that read finds none (a job that came in since stays)
+                            _ if self.linked => {
+                                self.stop_ask = Some(pid);
+                                self.stop_asked = Some(pid);
+                            }
+                            _ => {
+                                makepad_widgets::log!("wm: {label}: the jobs of pid {pid} are done; replacing it with the new program");
+                                self.swap_waits = None;
+                                self.replace(pid, now);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // (and whether it is known to have failed: a clean exit is the hub's self-update, and one
         // an earlier WM started ends with a status this WM never sees)
         let exited = match self.running.as_mut() {
@@ -1000,6 +1181,14 @@ impl<C: ServiceConf> Supervised<C> {
         if let Some((status, failed)) = exited {
             let adopted = matches!(self.running, Some(Running::Adopted(_)));
             self.running = None;
+            self.build_retry_at = None;
+            self.swap_waits = None;
+            self.silent_since = None;
+            self.idle_outcome = None;
+            // (a stop the link's worker ran: its exit came before its outcome)
+            if self.stop_asked.take().is_some() {
+                self.restart_pending = true;
+            }
             self.kill_at = None;
             self.kill_waits = false;
             if self.restart_pending {
@@ -1036,6 +1225,13 @@ impl<C: ServiceConf> Supervised<C> {
                 self.restart_at = Some(now + wait as f64);
             }
             return;
+        }
+        if self.build_retry_at.is_some_and(|at| now >= at) {
+            if let Some(Running::Adopted(pid)) = self.running {
+                self.build_then_replace(pid, now);
+            } else {
+                self.build_retry_at = None;
+            }
         }
         if self.running.is_none() {
             if self.restart_at.is_some_and(|at| now >= at) && self.socket_ready(now) {
@@ -1100,6 +1296,14 @@ fn starting_leases() -> Vec<String> {
 
 /// How long a kept app has to come to the new WM's socket.
 const ADOPT_WAIT_S: f64 = 10.0;
+
+/// How often a swap that waits for its app's jobs says so ([`Supervised::busy`]).
+const SWAP_WAIT_SAY_S: f64 = 60.0;
+
+/// A kept app that answers no job read for this long while its swap waits is taken as hung:
+/// it is stopped and replaced (a hub too busy to answer `/control` was stopped under a job it
+/// had just taken, 11-16; one that never answers must still be replaced).
+const SWAP_SILENT_S: f64 = 120.0;
 
 /// Service pids that came to this WM's socket.
 static ADOPTED: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
@@ -1248,18 +1452,23 @@ mod tests {
     fn a_kept_app_runs_as_started_when_it_runs_the_current_program() {
         let dir = scratch("runs");
         let program = dir.join("makepad-app-aihub");
-        std::fs::copy("/bin/sleep", &program).unwrap();
+        std::fs::copy("/bin/sh", &program).unwrap();
         let h = app("runs");
         // its start recorded the binary before cargo built it again (same bytes, a new file)
         let stale = format!("{} 1 2 {}", program.display(), h.conf.identity());
-        let mut child = Command::new(&program).arg("30").spawn().unwrap();
+        // A spawn returns when the child leaves our memory (posix_spawn's vfork), a moment before
+        // /proc/<pid>/exe names its new program: the child says when it runs.
+        let mut child = Command::new(&program).args(["-c", "echo up; read x"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut up = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(child.stdout.take().unwrap()), &mut up).unwrap();
+        assert_eq!(up, "up\n", "the child runs its program");
         let fresh = identity(&program, &h.conf);
         assert!(h.runs_as_started(child.id(), &fresh, &program));
         assert!(h.runs_as_started(child.id(), &stale, &program), "a stale size and time in its state never replace the program it runs");
         let other = format!("{} 1 2 nice=0 features=other env=[]", program.display());
         assert!(!h.runs_as_started(child.id(), &other, &program), "other settings replace it");
         let next = dir.join("next");
-        std::fs::copy("/bin/sleep", &next).unwrap();
+        std::fs::copy("/bin/sh", &next).unwrap();
         std::fs::rename(&next, &program).unwrap();
         assert!(h.runs_as_started(child.id(), &stale, &program), "a relink to the same bytes keeps it");
         std::fs::write(&next, b"another build").unwrap();
@@ -1267,6 +1476,135 @@ mod tests {
         assert!(!h.runs_as_started(child.id(), &fresh, &program), "a new build replaces it");
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    fn success(_: &HubApp) -> Result<Command, String> {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        Ok(cmd)
+    }
+
+    #[cfg(unix)]
+    fn finish_build(h: &mut HubApp, sleeper: &mut Child, now: f64) {
+        assert!(sleeper.try_wait().unwrap().is_none(), "the kept app still serves");
+        assert!(h.kill_at.is_none() && !h.restart_pending, "no stop while building");
+        h.building.as_mut().unwrap().0.wait().unwrap();
+        h.tick(now);
+        assert!(h.building.is_none(), "the short build finishes");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_kept_app_is_replaced_only_after_its_new_program_builds() {
+        fn failure(_: &HubApp) -> Result<Command, String> {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", "exit 3"]);
+            Ok(cmd)
+        }
+        let mut h = app("build-replace");
+        let dir = h.state.parent().unwrap().to_path_buf();
+        let program = dir.join("makepad-app-aihub");
+        let next = dir.join("next");
+        std::fs::copy("/bin/sleep", &program).unwrap();
+        std::fs::write(&next, b"another program").unwrap();
+        // No process group of its own: the stop is observed in kill_at and restart_pending.
+        let mut sleeper = Command::new(&program).arg("30").spawn().unwrap();
+        let pid = sleeper.id();
+        std::fs::write(&h.state, format!("pid = {pid}\nidentity = {}\n", identity(&program, &h.conf))).unwrap();
+        h.build_command = failure;
+        assert!(h.adopt_or_replace(10.0, &next));
+        assert!(matches!(h.running, Some(Running::Adopted(kept)) if kept == pid));
+        assert!(h.building.is_some(), "a replacement starts its build");
+        finish_build(&mut h, &mut sleeper, 10.0);
+        assert!(sleeper.try_wait().unwrap().is_none(), "a failed build keeps the app running");
+        assert!(h.kill_at.is_none() && !h.restart_pending, "a failed build never stops it");
+        let retry = 10.0 + backoff_s(1) as f64;
+        assert_eq!((h.build_failures, h.build_retry_at), (1, Some(retry)));
+        assert_eq!((h.crashes, h.restart_at), (0, None), "build retries are separate from crashes");
+        h.build_command = success;
+        h.set_jobs(Some(1));
+        h.tick(retry - 0.1);
+        assert!(h.building.is_none(), "the retry waits for its backoff");
+        h.tick(retry);
+        assert!(h.building.is_some(), "the build retries when due");
+        assert_eq!(h.pid(), Some(pid));
+        finish_build(&mut h, &mut sleeper, retry);
+        assert_eq!(h.swap_waits.map(|(p, _)| p), Some(pid), "built, the swap waits for the job it would stop");
+        h.tick(retry + 120.0);
+        assert!(sleeper.try_wait().unwrap().is_none() && h.kill_at.is_none() && !h.restart_pending, "a busy hub keeps serving, however long");
+        assert_eq!(h.take_stop_ask(), None, "no stop is asked while its jobs run");
+        // its poll says none: the link's worker reads again before it stops it
+        h.set_jobs(Some(0));
+        h.tick(retry + 121.0);
+        assert_eq!(h.take_stop_ask(), Some(pid));
+        assert!(h.kill_at.is_none() && !h.restart_pending && h.swap_waits.is_some(), "the swap waits for the fresh read");
+        h.idle_stop(IdleStop::Busy(1));
+        h.tick(retry + 122.0);
+        assert!(h.kill_at.is_none() && h.swap_waits.is_some(), "a job came in since the poll: it waits again");
+        h.tick(retry + 123.0);
+        assert_eq!(h.take_stop_ask(), Some(pid), "and asks again on the next tick its poll says none");
+        h.idle_stop(IdleStop::Stopped);
+        h.tick(retry + 124.0);
+        assert!(h.swap_waits.is_none(), "the fresh read found none: it swaps");
+        let retry = retry + 124.0;
+        assert_eq!(h.kill_at, Some(retry + STOP_GRACE.as_secs_f64()));
+        assert!(h.restart_pending, "a successful build stops the kept app for replacement");
+        assert_eq!((h.build_failures, h.build_retry_at), (0, None));
+        assert!(dir.join("ai-hub.build.log").exists());
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_kept_app_that_does_not_answer_holds_its_swap_until_silent_past_the_bound() {
+        let mut h = app("silent-replace");
+        let dir = h.state.parent().unwrap().to_path_buf();
+        let program = dir.join("makepad-app-aihub");
+        let next = dir.join("next");
+        std::fs::copy("/bin/sleep", &program).unwrap();
+        std::fs::write(&next, b"another program").unwrap();
+        // No process group of its own: the stop is observed in kill_at and restart_pending.
+        let mut sleeper = Command::new(&program).arg("30").spawn().unwrap();
+        let pid = sleeper.id();
+        std::fs::write(&h.state, format!("pid = {pid}\nidentity = {}\n", identity(&program, &h.conf))).unwrap();
+        h.build_command = success;
+        h.set_jobs(Some(1));
+        assert!(h.adopt_or_replace(10.0, &next), "the kept app is adopted while its replacement builds");
+        finish_build(&mut h, &mut sleeper, 10.0);
+        assert_eq!(h.swap_waits.map(|(p, _)| p), Some(pid), "built, the swap waits for the kept app");
+
+        h.set_jobs(None);
+        h.tick(11.0);
+        assert_eq!(h.take_stop_ask(), Some(pid), "no answer asks for a fresh read");
+        assert!(h.kill_at.is_none() && !h.restart_pending && h.swap_waits.is_some(), "the swap waits for the fresh read without stopping");
+        h.idle_stop(IdleStop::Silent);
+        h.tick(12.0);
+        assert!(h.kill_at.is_none() && !h.restart_pending && h.swap_waits.is_some(), "no answer holds the swap");
+
+        h.set_jobs(Some(2));
+        h.tick(13.0);
+        assert!(h.silent_since.is_none(), "an answer resets the silent spell");
+        assert!(h.kill_at.is_none() && !h.restart_pending && h.swap_waits.is_some(), "a busy answer keeps the app serving");
+
+        h.set_jobs(None);
+        let t0 = 14.0;
+        for now in [t0, t0 + SWAP_SILENT_S - 1.0] {
+            h.tick(now);
+            assert!(h.kill_at.is_none() && !h.restart_pending && h.swap_waits.is_some(), "silent within the bound: it waits");
+            if let Some(asked) = h.take_stop_ask() {
+                assert_eq!(asked, pid, "a fresh read asks only the kept app");
+                h.idle_stop(IdleStop::Silent);
+            }
+        }
+        h.tick(t0 + SWAP_SILENT_S);
+        assert!(h.swap_waits.is_none() && h.restart_pending && h.kill_at == Some(t0 + SWAP_SILENT_S + STOP_GRACE.as_secs_f64()), "silent past the bound: taken as hung, stopped and replaced");
+
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -171,6 +171,10 @@ mod native {
         owed_next: NextFrame,
         /// Fires when the desktop held still after its last picture: the refinement.
         refine_timer: Timer,
+        /// The server did not start but a later try can work: when to try again, and whether
+        /// the wait is logged.
+        server_retry: Timer,
+        server_waiting: bool,
         /// Bumped whenever a viewer comes, goes, pauses or resumes (the bar follows it).
         generation: u32,
         /// The pictures a second streamed now ([`Self::stream_fps`]).
@@ -248,12 +252,14 @@ mod native {
             }
         }
 
-        fn start(&mut self, cx: &mut Cx) {
-            let settings = DeskLinkSettings::load();
-            if settings.enabled {
-                let signal = self.signal.clone();
-                let host = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).unwrap_or_default();
-                let config = settings.listen_addr().map(|addr| ServerConfig {
+        /// One try at the server (the settings enabled it): at the start, and again every
+        /// `LAN_RETRY` while a later try can work (the LAN address not up yet at a boot, the
+        /// port still held, no fleet identity yet), as the hub does for its address.
+        fn try_server(&mut self, cx: &mut Cx, settings: &DeskLinkSettings) {
+            let signal = self.signal.clone();
+            let host = std::fs::read_to_string("/etc/hostname").map(|h| h.trim().to_string()).unwrap_or_default();
+            let started = settings.listen_addr().map_err(|why| server::StartError { retry: false, why }).and_then(|addr| {
+                Server::start(ServerConfig {
                     addr,
                     tls_name: format!("makepad desk link {host}"),
                     log: Arc::new(|t: &str| super::note(t)),
@@ -264,14 +270,29 @@ mod native {
                         #[cfg(not(target_os = "linux"))]
                         return Err("input unavailable on this host: no input injection on this desktop".into());
                     }),
-                });
-                match config.and_then(|c| Server::start(c, Arc::new(move || signal.set()))) {
-                    Ok(server) => {
-                        super::note(&format!("desk link listens on {} as {}", server.addr, server.name));
-                        self.server = Some(server);
-                    }
-                    Err(e) => super::note(&e),
+                }, Arc::new(move || signal.set()))
+            });
+            match started {
+                Ok(server) => {
+                    let waited = self.server_waiting;
+                    self.server_waiting = false;
+                    super::note(&format!("desk link listens on {} as {}{}", server.addr, server.name, if waited { " (after waiting)" } else { "" }));
+                    self.server = Some(server);
                 }
+                Err(e) if e.retry => {
+                    if !std::mem::replace(&mut self.server_waiting, true) {
+                        super::note(&format!("{}: looking again every {} s", e.why, crate::hub_link::LAN_RETRY.as_secs()));
+                    }
+                    self.server_retry = cx.start_timeout(crate::hub_link::LAN_RETRY.as_secs_f64());
+                }
+                Err(e) => super::note(&format!("{} (the settings need a change: not tried again)", e.why)),
+            }
+        }
+
+        fn start(&mut self, cx: &mut Cx) {
+            let settings = DeskLinkSettings::load();
+            if settings.enabled {
+                self.try_server(cx, &settings);
             } else {
                 super::note(&format!("desk link is off ({})", DeskLinkSettings::path().display()));
             }
@@ -1036,6 +1057,12 @@ mod native {
             }
             if self.refine_timer.is_event(event).is_some() {
                 self.refine(cx);
+            }
+            if self.server_retry.is_event(event).is_some() && self.server.is_none() {
+                if let Some(settings) = self.settings.take() {
+                    self.try_server(cx, &settings);
+                    self.settings = Some(settings);
+                }
             }
             if !self.viewers.is_empty() && matches!(event, Event::Draw(_)) {
                 self.tl_frames += 1;

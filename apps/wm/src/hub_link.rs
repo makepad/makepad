@@ -21,7 +21,7 @@ pub struct HubLink {
 }
 
 /// How often a WM that found no LAN address for its hub looks again.
-const LAN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const LAN_RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What [`HubLink::make`] decided.
 enum Made {
@@ -163,7 +163,20 @@ impl HubLink {
         let link = self.link(processes);
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(link) = link {
+            link.app.set_jobs(link.hub.jobs());
+            if let Some(outcome) = link.hub.take_idle_stop() {
+                link.app.idle_stop(outcome);
+            }
             link.app.tick(now);
+            // its swap's stop runs on the control client's worker, right after a fresh read
+            if let Some(pid) = link.app.take_stop_ask() {
+                link.hub.stop_when_idle(Box::new(move || {
+                    #[cfg(unix)]
+                    makepad_app_host::launch::signal_group(pid, false);
+                    #[cfg(not(unix))]
+                    let _ = pid;
+                }));
+            }
             return;
         }
         #[cfg(target_arch = "wasm32")]

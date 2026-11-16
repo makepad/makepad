@@ -2158,6 +2158,7 @@ impl Widget for MpTerm {
                 self.handle_scroll(cx, &e);
             }
             Hit::KeyFocus(_) => {
+                cx.set_key_focus_takes_text(self.area, !self.read_only);
                 if let Some(session) = self.session.as_mut() {
                     if session.terminal.modes.get(Mode::FocusEvent) {
                         session.write(b"\x1b[I");
