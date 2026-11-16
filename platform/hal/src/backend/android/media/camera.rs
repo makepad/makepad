@@ -5,6 +5,10 @@ use crate::{backend::android::{frame_results::{FrameFailures, FrameResults, Poll
 use makepad_jni_sys::*;
 use std::{collections::{HashMap, HashSet}, ffi::{c_char, c_void, CStr, CString}, sync::{atomic::{AtomicI32, AtomicUsize, Ordering}, Arc, Mutex, OnceLock}, thread::Thread, time::{Duration, Instant}};
 
+relax_api::option_layouts! {
+    (Image, i64, CameraExposure),
+}
+
 type Key = (u64, u64);
 pub(super) enum Command {
     Inputs(u64, u32, Vec<Key>),

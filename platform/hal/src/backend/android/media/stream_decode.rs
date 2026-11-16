@@ -16,6 +16,10 @@ use super::mediacodec::{checked, ndk, BufferInfo, Codec as MediaCodec, Format, I
 use std::ffi::{c_void, CStr, CString};
 use std::time::{Duration, Instant};
 
+relax_api::option_layouts! {
+    GpuPicture,
+}
+
 /// MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar / SemiPlanar.
 const COLOR_I420: i32 = 19;
 const COLOR_NV12: i32 = 21;

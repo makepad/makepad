@@ -113,6 +113,15 @@ pub struct Cx {
     pub a11y: crate::a11y::CxA11y,
     pub(crate) a11y_host_consumers: u32,
     pub(crate) a11y_native_consumers: u32,
+    /// The next frame is owed only to answer a tree request: the frame-request count once the
+    /// request asked for it. An ask from anything else since (the count moved) makes the frame
+    /// the app's too ([`Cx::a11y_take_answer_frame`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) a11y_answer_frame: Option<u64>,
+    /// The frame drawn was only a tree request's: its CPU is the request's
+    /// ([`crate::remote::charge_answered`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) a11y_answer_drawn: bool,
     pub draw_matrices: CxDrawMatrixPool,
     pub textures: CxTexturePool,
     /// Shared-instance publications (cleanup DL-1 freeze): the registry that
@@ -1073,6 +1082,10 @@ impl Cx {
             a11y: Default::default(),
             a11y_host_consumers: 0,
             a11y_native_consumers: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            a11y_answer_frame: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            a11y_answer_drawn: false,
             draw_matrices: Default::default(),
             geometries: Default::default(),
             textures,

@@ -67,6 +67,7 @@ fn app(hal: &Hal, session: u32, stop: &AtomicBool) {
                     w.a11y_action_done(request.req,ActionResult::Handled as u32);
                     paint(&mut w, &mut frame);
                 }
+                HalEvent::A11yLookup { seq, .. } => w.a11y_lookup_done(seq),
                 HalEvent::Query { req, bytes } if bytes == b"poke" => {
                     // an id the HAL never saw: counted as stale
                     w.window_close(Id::new(9, 1));

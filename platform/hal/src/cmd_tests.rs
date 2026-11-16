@@ -14,22 +14,22 @@ fn every_command_round_trips() {
     let expected = sample_cmds(&mut w);
     assert_eq!(expected.len(), CMD_TABLE.len());
     assert_eq!(w.cmds().len(), CMD_TABLE.len());
-    // 58 core (including BufferReadbacks, PipelineWanted, ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
-    // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 2 accessibility, 3 fonts, 8 direct display/input
+    // 59 core (including BufferReadbacks, PipelineWanted, ClipRead, GpuBudget, WindowChrome, WindowCaption and WindowDpiOverride, with
+    // timer start/stop counted separately), 6 embedded, 4 domains, 9 media, 3 native layers, 3 accessibility, 3 fonts, 8 direct display/input
     // (incl. DirectDisplayArrangement, DirectDisplayPacing, DirectTapToClick, DirectDisplayVirtual tag 153), 2 GL interop, 3 mobile system UI (MobileUi,
     // SelectionHandles, Haptic), 1 system back (BackUnhandled), 1 font touch (GlyphTouch, tag 150), 3 tray (TraySet,
     // TrayRemove, WindowAtTray tag 154), 3 XR frame (XrFrameEyes 155, XrPoseLead 156, XrRefreshRate 157),
-    // 2 accessibility (A11yUpdate 158, A11yActionDone 159), 1 XR haptic (XrHaptic 163), 4 hosted (WindowScreenOrigin 28,
+    // 3 accessibility (A11yUpdate 158, A11yActionDone 159, A11yLookupDone 168), 1 XR haptic (XrHaptic 163), 4 hosted (WindowScreenOrigin 28,
     // HostedPresented 29, HostedNativeBridge 33, HostedNativeIn 34), 1 GPU profiler readout (GpuProfQuery 35),
     // 1 hosted focus for accessibility (WindowA11yActive 36), 1 refresh rate (FrameRateBoost 165), 1 working-set reclaim (GpuReclaim 166),
-    // 1 PDF print request (PrintPdf 167).
+    // 1 PDF print request (PrintPdf 167), 2 notifications (NotifyPost 169, NotifyRemove 170).
     // The media section (tags 120-129, backend/apple/media) has its own budget.
     let media = CMD_TABLE.iter().filter(|t| (120..130).contains(&t.0)).count();
     let fonts = CMD_TABLE.iter().filter(|t| (130..133).contains(&t.0)).count();
     assert_eq!(media, 9);
     assert_eq!(fonts, 3);
     assert!(media <= 15, "the media section is budgeted at 15 commands, it has {media}");
-    assert_eq!(CMD_TABLE.len(), 58 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 2 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1);
+    assert_eq!(CMD_TABLE.len(), 59 + 6 + 4 + media + fonts + 8 + 2 + 4 + 1 + 3 + 3 + 3 + 3 + 1 + 4 + 1 + 1 + 1 + 1 + 1 + 1 + 2);
     for ((cmd, want), (tag, name, _)) in w.cmds().iter().zip(&expected).zip(CMD_TABLE) {
         assert_eq!(cmd.tag, *tag, "{name}");
         let got = cmd.decode(w.arena()).unwrap_or_else(|| panic!("{name} does not decode"));

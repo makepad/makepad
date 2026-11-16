@@ -17,6 +17,14 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+relax_api::option_layouts! {
+    (DmaPlaneLayout, DmaPlaneLayout),
+    DmaPlaneLayout,
+    I420Layout,
+    VideoMetaLayout,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum VideoCapsProfile {
     DmaBuf,

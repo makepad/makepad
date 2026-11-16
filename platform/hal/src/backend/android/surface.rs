@@ -6,6 +6,10 @@ use makepad_vulkan::{vk, Instance};
 use std::{ffi::{c_void, CStr}, sync::Arc};
 use makepad_jni_sys::{JNIEnv, jobject};
 
+relax_api::option_layouts! {
+    Window,
+}
+
 #[link(name = "android")]
 extern "C" {
     fn ANativeWindow_acquire(window: *mut c_void);

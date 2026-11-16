@@ -144,6 +144,7 @@ impl Shell for AndroidShell {
         match cmd {
             // The executor immediately answers unsupported requests.
             OsCmd::PrintPdf { .. } => false,
+            OsCmd::NotifyPost { .. } | OsCmd::NotifyRemove { .. } => true,
             OsCmd::WindowGeom { id, .. } if lock(&Shared::global().state).recipient == Some((sid, id)) => {
                 // The Activity determines its geometry; application resize requests cannot
                 // change the canonical host window independently of the Android surface.

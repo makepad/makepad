@@ -19,6 +19,10 @@ use makepad_apple_sys::*;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+relax_api::option_layouts! {
+    Pool,
+}
+
 type CVPixelBufferPoolRef = *mut c_void;
 
 #[link(name = "CoreVideo", kind = "framework")]

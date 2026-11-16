@@ -4,7 +4,7 @@ use crate::recording_buffer::{CpuReservation, RecordingBudget, RecordingBuffer};
 use crate::{
     cx::Cx,
     draw_pass::DrawPassId,
-    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderBlendOp, DrawShaderColorFormat, DrawShaderId},
+    draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderBlendOp, DrawShaderId},
     draw_vars::{
         DrawVars, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
     },
@@ -1441,13 +1441,8 @@ crate::makepad_math::impl_gpu_pod!(DrawCallUniforms,
 impl DrawCallUniforms {
     /// A call's block: its zbias comes with its paint order; `premultiplied` from how it blends.
     pub fn for_call(mapping: &CxDrawShaderMapping, options: &CxDrawShaderOptions) -> Self {
-        let raw = matches!(mapping.color_format, DrawShaderColorFormat::Bgra8NoBlend | DrawShaderColorFormat::Rf16 | DrawShaderColorFormat::Ru8);
-        // The declared rule, which every backend applies to an 8-bit or RGBA16F target, except
-        // one edge: Metal blends only a shader that declares the default BGRA8 colour format, so a
-        // shader declaring a float format with `alpha_blend` on would decode as blended there
-        // while it writes raw. No shader is declared that way (the float-declared ones turn
-        // `alpha_blend` off).
-        let over = options.alpha_blend && !raw && mapping.blend_op == DrawShaderBlendOp::Over;
+        // The declared rule every backend applies: only a BGRA8-declared shader blends.
+        let over = options.alpha_blend && mapping.color_format.blends() && mapping.blend_op == DrawShaderBlendOp::Over;
         Self { premultiplied: if over { 1.0 } else { 0.0 }, ..Self::default() }
     }
 
@@ -1545,6 +1540,10 @@ pub struct CxDrawItem {
     /// immutable publication/schema/recording cycle. Backend `consumed_serial`
     /// stays the latest encode; this memo is observational only.
     content_receipt: Cell<RetainedContentReceipt>,
+    /// The draw bounds of `retained_instances` under the key they were walked for (the frame
+    /// builder's memo: a publication's rows never change, so an equal key gives equal bounds).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) retained_bounds: Cell<Option<(crate::frame_build::RetainedBoundsKey, [f32; 4])>>,
     /// Recording may vary draw count without changing the immutable publication.
     pub retained_instance_count: usize,
     pub retained_upload_range: std::ops::Range<usize>,
@@ -2207,6 +2206,8 @@ impl CxDrawItems {
                 consumed_serial: 0,
                 consumed_uniforms_gen: 0,
                 content_receipt: Cell::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                retained_bounds: Cell::default(),
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),
@@ -2404,6 +2405,8 @@ impl CxDrawItems {
                 consumed_serial: 0,
                 consumed_uniforms_gen: 0,
                 content_receipt: Cell::default(),
+                #[cfg(not(target_arch = "wasm32"))]
+                retained_bounds: Cell::default(),
                 retained_instance_count: 0,
                 retained_upload_range: 0..0,
                 instance_ranges: Vec::new(),

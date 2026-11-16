@@ -91,14 +91,14 @@ fn grab(req: &Req) -> Result<(Arc<Capture>, Option<String>), String> {
         }
         hal.wake();
     };
-    crate::a11y::remote_activity();
+    let timeout = Duration::from_millis(req.num("timeout", 3000));
+    let _hold = crate::a11y::SnapshotHold::new(hal, makepad_a11y::consumer::REMOTE, timeout);
     redraw(false);
     if let Some(sid) = session {
-        hal.await_frames(sid, 1, Duration::from_millis(req.num("timeout", 3000)));
+        hal.await_frames(sid, 1, timeout);
     }
     let seq = arm(session, window);
     redraw(true);
-    let timeout = Duration::from_millis(req.num("timeout", 3000));
     let Some(c) = wait(seq, timeout) else {
         disarm(seq);
         return Err(format!("no window frame of session {} within {} ms (is a window open and drawing?); try: cap grab session=<n> timeout=10000", session.map_or("any".into(), |s| s.to_string()), timeout.as_millis()));

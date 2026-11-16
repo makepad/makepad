@@ -66,6 +66,8 @@ pub enum OsCmd {
     /// `flags`: `tray_flags`.
     TraySet { tray: u64, w: u32, h: u32, flags: u32, alpha: Vec<u8>, tooltip: String, items: Vec<(MenuItem, String)> },
     TrayRemove { tray: u64 },
+    NotifyPost { id: u64, title: String, body: String },
+    NotifyRemove { id: u64 },
     /// Size dropdown `id` to `w` x `h` points and show it at tray `tray`'s icon.
     WindowAtTray { id: Id, tray: u64, w: f32, h: f32 },
     /// The eyes the XR window's next frame shows with (`HalCmd::XrFrameEyes`).
@@ -1379,6 +1381,10 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             s.strings.insert(id, String::from_utf8_lossy(bytes).into_owned());
         }
         HalCmd::Quit {} => s.quit = true,
+        HalCmd::QuitCancel {} => {
+            #[cfg(target_os = "macos")]
+            crate::backend::apple::appkit::cancel_terminate();
+        }
         HalCmd::TimerStart { timer, interval_ns, repeat } => {
             s.timers.insert(timer, TimerObj { interval_ns, repeat, due_ns: now + interval_ns });
         }
@@ -1547,6 +1553,14 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         }
         HalCmd::TrayRemove { tray } => {
             os_cmd(gpu, sid, OsCmd::TrayRemove { tray });
+        }
+        HalCmd::NotifyPost { id, title, body } => {
+            let title = s.string(title).unwrap_or("").to_string();
+            let body = s.string(body).unwrap_or("").to_string();
+            os_cmd(gpu, sid, OsCmd::NotifyPost { id, title, body });
+        }
+        HalCmd::NotifyRemove { id } => {
+            os_cmd(gpu, sid, OsCmd::NotifyRemove { id });
         }
         HalCmd::WindowAtTray { id, tray, w, h } => {
             if w.is_finite() && h.is_finite() && w >= 1.0 && h >= 1.0 {
@@ -1944,6 +1958,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             }
         }
         HalCmd::A11yActionDone { req, result } => crate::a11y::action_done(sid, req, result as u8),
+        HalCmd::A11yLookupDone { seq } => crate::a11y::lookup_done(sid, seq),
         HalCmd::QueryReply { req, bytes } => s.replies.push((req, bytes.to_vec())),
         HalCmd::TraceMark { text } => {
             let t = s.string(text).unwrap_or("").to_string();

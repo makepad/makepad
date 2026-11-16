@@ -91,13 +91,15 @@ fn define_pulse_class() -> *const Class {
 
 fn define_app_delegate() -> *const Class {
     extern "C" fn application_should_terminate(_: &Object, _: Sel, sender: ObjcId) -> isize {
-        const CANCEL: isize = 0;
         const NOW: isize = 1;
+        const LATER: isize = 2;
         eprintln!("makepad-hal: asked to quit (applicationShouldTerminate:): sender {}, {}", super::close_why::sender(sender), super::close_why::cause());
         app::note_exit_requested();
-        // the sessions decide: each is asked to quit, the app answers with a `Quit` command
-        if app().ask_sessions_to_quit() {
-            CANCEL
+        // the sessions decide: each is asked to quit, the app answers with `Quit` or `QuitCancel`
+        // (a second ask while one is held is held too: the stop or the cancel answers it)
+        let asked = app().ask_sessions_to_quit();
+        if (asked || app::terminate_held()) && app::hold_terminate() {
+            LATER
         } else {
             app::windows_gone_before_exit();
             // NOW: AppKit calls exit() itself, past the hosts' own end of run. The HAL's driver

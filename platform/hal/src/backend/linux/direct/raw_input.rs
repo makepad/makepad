@@ -7,6 +7,11 @@ use makepad_math::*;
 use std::{collections::HashSet, fs::{File, OpenOptions}, io::{self, Read},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt}, path::PathBuf};
 
+relax_api::option_layouts! {
+    AbsInfo,
+    [AbsInfo; 2],
+}
+
 #[allow(non_snake_case)]
 mod InputEventType {
     pub const EV_SYN: u16 = 0x00;

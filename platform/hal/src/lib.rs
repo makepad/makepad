@@ -3,11 +3,13 @@
 //! Cx writes a [`CmdWriter`] (fire-and-forget commands, FramePackets inside) and submits it once
 //! per loop turn; the HAL answers only through events ([`EventQueue`] -> [`EventReader`]). Ids are
 //! chosen by Cx, the HAL keys its tables by (session, kind, index) and checks generations
-//! ([`session`]). Four synchronous entries cross the boundary as `#[relax_api]` ops:
-//! [`hal_open`], [`hal_submit`], [`hal_pump`], [`hal_wake`] (OS nested loops block the main thread
-//! only, where the HAL runs; the sessions go on, so no call into the app is needed). Types are in
-//! [`types`], the command and event tables in [`cmds`] and [`events`], the GPU ledger in
-//! [`ledger`]. This crate ships the headless backend; the platform backends come with their phases.
+//! ([`session`]). Synchronous entries cross the boundary as `#[relax_api]` ops, including
+//! [`hal_open`], [`hal_submit`], [`hal_pump`], [`hal_wake`], [`expect_main_loop`],
+//! [`run_main_loop`], [`stop_main_loop`], [`hal_close_all`] and [`hal_before_exit`]. OS nested loops
+//! block the main thread only, where the HAL runs; the sessions go on, so no call into the app
+//! is needed. Types are in [`types`], the command and event tables in [`cmds`] and [`events`],
+//! the GPU ledger in [`ledger`]. This crate ships the headless backend; the platform backends
+//! come with their phases.
 
 /// The HAL's maps of objects, keyed by small ids ((session, index) pairs, string ids): hashed
 /// with the in-tree FxHash. The per-draw path looks textures, buffers and pipelines up in them
@@ -110,6 +112,167 @@ pub use cmds::{cmd_tag, HalCmd};
 pub use events::{event_tag, HalEvent};
 pub use session::World;
 pub use types::*;
+
+// Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
+relax_api::option_layouts! {
+    #[cfg(windows)]
+    (),
+    #[cfg(target_os = "android")]
+    (*mut core::ffi::c_void, *mut core::ffi::c_void),
+    #[cfg(target_os = "linux")]
+    (*mut backend::linux::media::gstreamer_sys::GstElement, *mut backend::linux::media::gstreamer_sys::GstElement),
+    ([u32; 2], [u32; 2], [i32; 2]),
+    #[cfg(target_os = "android")]
+    ([u32; 2], f32),
+    #[cfg(target_os = "android")]
+    ([types::XrController; 2], [types::XrHand; 2]),
+    (f32, f32),
+    #[cfg(windows)]
+    (f64, f64),
+    (f64, f64, f64),
+    (f64, u64, f64),
+    (i32, i32, u32, u32),
+    #[cfg(target_vendor = "apple")]
+    (makepad_apple_sys::CVPixelBufferRef, makepad_apple_sys::CVMetalTextureRef),
+    #[cfg(target_vendor = "apple")]
+    (makepad_apple_sys::ObjcId, u64),
+    #[cfg(target_vendor = "apple")]
+    (makepad_apple_sys::ObjcId, usize),
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    (makepad_vulkan::vk::Buffer, makepad_vulkan::vk::DeviceMemory, *mut u8, u64),
+    (types::Id, [f32; 4]),
+    #[cfg(target_vendor = "apple")]
+    (types::Id, makepad_apple_sys::ObjcId),
+    #[cfg(target_os = "android")]
+    (types::XrHand, i64),
+    (u16, u32, u32),
+    #[cfg(target_os = "android")]
+    (u32, [f32; 7]),
+    (u32, types::Id),
+    (u32, types::Id, u64),
+    #[cfg(any(windows, target_os = "android"))]
+    (u32, u32),
+    (u32, u32, f64),
+    (u32, u32, u32),
+    #[cfg(windows)]
+    (u32, u32, u32, u32),
+    (u32, u32, u64),
+    (u32, u64),
+    (u64, f64, usize, usize),
+    (u64, makepad_a11y::NodeId),
+    #[cfg(windows)]
+    (u64, u32),
+    (u64, u64),
+    (u64, u64, makepad_a11y::NodeId),
+    #[cfg(windows)]
+    (u64, u64, u64),
+    #[cfg(target_os = "android")]
+    (usize, i64),
+    (usize, u32),
+    (usize, u32, i32),
+    (usize, u64),
+    #[cfg(target_os = "linux")]
+    *mut backend::linux::media::pulse_sys::pa_threaded_mainloop,
+    #[cfg(target_os = "android")]
+    [f32; 2],
+    [f32; 3],
+    #[cfg(windows)]
+    [f32; 4],
+    [f32; 5],
+    #[cfg(target_os = "ios")]
+    [f64; 10],
+    [f64; 12],
+    [f64; 2],
+    [i32; 2],
+    #[cfg(windows)]
+    [i32; 3],
+    [i32; 4],
+    #[cfg(target_vendor = "apple")]
+    [makepad_apple_sys::ObjcId; 3],
+    [u32; 2],
+    [u32; 3],
+    [u32; 4],
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    backend::gl::surface::Display,
+    #[cfg(target_os = "linux")]
+    backend::vulkan::share::OpaqueMemory,
+    #[cfg(target_os = "linux")]
+    backend::vulkan::share::copy::Layout,
+    lease::Held,
+    makepad_a11y::NodeId,
+    makepad_a11y::Rect,
+    #[cfg(target_vendor = "apple")]
+    makepad_apple_sys::IOSurfaceRef,
+    #[cfg(target_vendor = "apple")]
+    makepad_apple_sys::ObjcId,
+    #[cfg(target_os = "linux")]
+    makepad_studio_protocol::PresentableDraw,
+    #[cfg(target_os = "linux")]
+    makepad_studio_protocol::shared_framebuf::LinuxVulkanSharedImage,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::DisplayPlaneAlphaFlagsKHR,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::Extent2D,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::Format,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::ImageView,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::QueryPool,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::Sampler,
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    makepad_vulkan::vk::Semaphore,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::HANDLE,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::HGLOBAL,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::HWND,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::LRESULT,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::POINT,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Foundation::RECT,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Graphics::Dwm::DWMWINDOWATTRIBUTE,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Graphics::Dxgi::Common::DXGI_FORMAT,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::Graphics::Dxgi::DXGI_FRAME_STATISTICS,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::System::Threading::AVRT_TASK_HANDLE,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::UI::Input::Ime::HIMC,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::UI::WindowsAndMessaging::HCURSOR,
+    #[cfg(windows)]
+    makepad_windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+    session::Embedded,
+    session::LentRef,
+    types::HalInfo,
+    types::Id,
+    #[cfg(target_os = "android")]
+    types::Layer,
+    types::RawEvent,
+    #[cfg(target_os = "android")]
+    types::XrDepth,
+    #[cfg(target_os = "android")]
+    types::XrFrame,
+    #[cfg(target_os = "android")]
+    types::XrHand,
+    #[cfg(target_os = "android")]
+    types::XrHeadAt,
+    types::XrPose,
+    #[cfg(target_os = "linux")]
+    wide_desktop::SliceRect,
+    window_controls::HostCaption,
+    window_controls::HostedAppFrame,
+    window_controls::HostedResize,
+    #[cfg(target_os = "linux")]
+    wm_socket::Versions,
+}
 
 use backend::{headless::Headless, Backend};
 use relax_api::relax_api;
@@ -1168,9 +1331,11 @@ pub use backend::apple::shell::{keep_main_loop_alive, MainLoopGuard};
 
 /// Gives the calling thread, which must be the process's main thread, to the HAL: it becomes the
 /// window system's thread (on macOS `NSApp`'s event loop) and does not return until
-/// [`stop_main_loop`]. Every session's Cx runs on its own thread. A host API, not a relax op.
+/// [`stop_main_loop`]. Every session's Cx runs on its own thread. A host API; an op, so a
+/// standalone app under the JIT runs the host's main loop, not a copy of its state.
 /// Until a backend asks for windows (`hal_open` without `OFFSCREEN_WINDOWS`) the thread only
 /// serves its run loop (on macOS the main queue the system frameworks finish their work on).
+#[relax_api]
 pub fn run_main_loop() {
     main_loop::run()
 }
@@ -1232,7 +1397,8 @@ pub fn host_dark() -> Option<bool> {
 
 /// Announces that the host will run [`run_main_loop`] on its main thread (call it before the
 /// threads that open sessions start): a backend that wants windows without it fails at once
-/// instead of waiting for a main thread that never comes.
+/// instead of waiting for a main thread that never comes. An op, as [`run_main_loop`] is.
+#[relax_api]
 pub fn expect_main_loop() {
     main_loop::expect()
 }
@@ -1257,9 +1423,58 @@ pub fn end_run() {
     backend::end_run();
 }
 
-/// Ends [`run_main_loop`] (any thread), as the app does when it is done.
+/// Before this process execs itself in place (a self-update that keeps its pid, from any thread):
+/// what the OS holds for the process by its pid and would keep past the exec goes. macOS: the
+/// activity an unseen app (menu-bar, no-focus) holds against App Nap, whose power assertion an
+/// exec would leave behind while the next image begins another. [`exec_failed`] takes it back.
+pub fn before_exec() {
+    #[cfg(target_os = "macos")]
+    backend::apple::appkit::end_unseen_activity();
+}
+
+/// The exec [`before_exec`] prepared for did not happen: the process goes on as it was.
+pub fn exec_failed() {
+    #[cfg(target_os = "macos")]
+    backend::apple::appkit::resume_unseen_activity();
+}
+
+/// Ends [`run_main_loop`] (any thread), as the app does when it is done. An op, as
+/// [`run_main_loop`] is.
+#[relax_api]
 pub fn stop_main_loop() {
     main_loop::stop()
+}
+
+/// [`stop_main_loop`] for a process that ends with `code`. A quit the OS holds for the app
+/// (macOS: NSTerminateLater) ends the process with `code` when it is not 0, instead of the OS's
+/// exit with 0; without such a quit the main loop returns and its caller exits with the code.
+/// An op, as [`run_main_loop`] is.
+#[relax_api]
+pub fn stop_main_loop_with(code: i32) {
+    #[cfg(target_os = "macos")]
+    backend::apple::appkit::stop_main_loop_with(code);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = code;
+        main_loop::stop()
+    }
+}
+
+/// Asks the system to quit this app on the path its own quit takes (macOS: NSApp `terminate:`,
+/// the call a logout's quit event, Cmd+Q and the Dock's Quit make: the sessions are asked and may
+/// hold the quit). False, and nothing asked, where the app has no such path: other platforms, and
+/// a macOS run without AppKit's app (an offscreen run). For automation (`makepad-remote ... quit
+/// native=1`). An op, as [`run_main_loop`] is: AppKit's app and its run state are the loader's.
+#[relax_api]
+pub fn ask_native_quit() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        backend::apple::appkit::ask_terminate()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 #[cfg(target_vendor = "apple")]
@@ -1366,6 +1581,11 @@ pub fn hal_open(req: &OpenReq) -> HalInfo {
         }
     });
     let info = hal.open_as(req, CAPS.with(|c| c.get()), false, false);
+    // a quit AppKit still waits on from a run that ended in place goes to the new run's app
+    #[cfg(target_os = "macos")]
+    if info.session != 0 && req.parent == 0 {
+        backend::apple::appkit::ask_if_quit_held(info.session);
+    }
     // (the script drives the app the process runs; the domains it starts are driven through it)
     if let (Some(script), true) = (script, info.session != 0 && req.parent == 0) {
         let mut cfg = automation::Config::new(info.session, info.dpi);
@@ -1373,6 +1593,23 @@ pub fn hal_open(req: &OpenReq) -> HalInfo {
         lock(&hal.runners).insert(info.session, automation::Running::start(hal, script, cfg));
     }
     info
+}
+
+/// Closes every session still open when a standalone app returns or unwinds without Quit.
+/// An op: the sessions are the host's global HAL's, which JIT-compiled HAL code would not see.
+#[relax_api]
+pub fn hal_close_all() {
+    let hal = Hal::global();
+    for session in hal.with_world(|world| world.session_ids()) {
+        hal.close(session);
+    }
+}
+
+/// Stops and joins the global HAL's driver threads before the process exits ([`Hal::before_exit`]).
+/// The last HAL call before exit; an op for the same reason as [`hal_close_all`].
+#[relax_api]
+pub fn hal_before_exit() {
+    Hal::global().before_exit()
 }
 
 /// The transport: one batch of commands per loop turn. Nothing is returned; borrowed slices in

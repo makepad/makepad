@@ -37,6 +37,11 @@ const LIBRARY: &str = "libEGL.so";
 pub struct ModuleLoader(Handle);
 
 #[cfg(target_os = "android")]
+relax_api::option_layouts! {
+    ModuleLoader,
+}
+
+#[cfg(target_os = "android")]
 #[link(name = "dl")]
 extern "C" {
     fn dlopen(name: *const std::ffi::c_char, flags: i32) -> Handle;

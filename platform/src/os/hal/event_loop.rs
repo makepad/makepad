@@ -956,7 +956,14 @@ impl Cx {
         }
         self.run_live_edit_if_needed("hal");
         if !self.hosted_frames_held() {
-            if !self.hal_draw_frame() {
+            // a frame drawn only to answer a tree request is the request's CPU, not the app's
+            let answering = self.a11y_answer_frame.is_some().then(makepad_hal::clock::thread_cpu_ns);
+            let drawn = self.hal_draw_frame();
+            let answered = std::mem::take(&mut self.a11y_answer_drawn);
+            if let Some(start) = answering.filter(|_| answered) {
+                crate::remote::charge_answered(makepad_hal::clock::thread_cpu_ns().saturating_sub(start));
+            }
+            if !drawn {
                 return false;
             }
         }

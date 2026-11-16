@@ -348,6 +348,8 @@ pub enum Event {
     TrayMenu(crate::tray::TrayMenuEvent),
     /// A primary click on one of the app's tray icons (Windows; macOS opens the menu).
     TrayClick(crate::tray::TrayClickEvent),
+    /// The person clicked one of the app's notifications (see [`crate::notification`]).
+    NotificationClick(crate::notification::NotificationClickEvent),
 
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
@@ -481,6 +483,7 @@ impl Event {
             90 => "GpuPressure",
             91 => "TrayMenu",
             92 => "TrayClick",
+            98 => "NotificationClick",
             93 => "NativeLayer",
             _ => panic!(),
         }
@@ -589,6 +592,7 @@ impl Event {
             Self::GpuPressure(_) => 90,
             Self::TrayMenu(_) => 91,
             Self::TrayClick(_) => 92,
+            Self::NotificationClick(_) => 98,
             Self::NativeLayer(_) => 93,
 
             #[cfg(target_arch = "wasm32")]

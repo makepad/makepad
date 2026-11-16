@@ -34,16 +34,18 @@ pub struct CxDrawShaderOptions {
     /// Strict greater-than depth test for occluded-surface overlays; default is less-equal.
     pub depth_test_greater: bool,
     /// Premultiplied source-over blending for this draw call. `false` makes a
-    /// fragment replace the destination, alpha included. Honoured per draw
-    /// call by every backend: Metal binds a second pipeline state with
-    /// blending disabled (BGRA8 window targets only; data formats keep their
-    /// never-blending pipeline), D3D11 binds a blend state with BlendEnable
-    /// off, Vulkan keys its pipeline on the flag, GL and WebGL toggle
-    /// GL_BLEND around the call; native backends blend only
-    /// when the target is BGRA8 AND the flag is set. With `true`, GL, WebGL,
-    /// D3D11 and Vulkan blend into any target format the pass gives them;
-    /// only Metal's data formats stay unblended. Shaders declared with
-    /// `alpha_blend: false` must output alpha 1.0 or intend a raw write.
+    /// fragment replace the destination, alpha included. Only a shader that
+    /// declares the default BGRA8 colour format blends: every other declared
+    /// format ([`DrawShaderColorFormat::blends`]) writes raw on every backend,
+    /// whatever this flag says. Honoured per draw call: Metal binds a second
+    /// pipeline state with blending disabled, D3D11 binds a blend state with
+    /// BlendEnable off, Vulkan keys its pipeline on the flag, GL and WebGL
+    /// toggle GL_BLEND around the call. With `true` a BGRA8-declared shader
+    /// blends into the target its pass gives it: BGRA8 and RGBA16F on every
+    /// backend, RGBA32F and R32F only where the device blends 32-bit floats
+    /// (Vulkan, GL with float blending; Metal and D3D11 write them raw).
+    /// Shaders declared with `alpha_blend: false` must output alpha 1.0 or
+    /// intend a raw write.
     pub alpha_blend: bool,
     pub backface_culling: bool,
     /// How many times a second a shader that animates from `draw_pass.time` needs its pass repainted,
@@ -871,6 +873,15 @@ pub enum DrawShaderColorFormat {
     /// small per-texel data such as slot ids written as `id / 255`.
     /// Blending disabled. Declared as `color_format: @Ru8`.
     Ru8,
+}
+
+impl DrawShaderColorFormat {
+    /// Whether a shader declaring this format blends at all: only the default
+    /// BGRA8 does. Every other format is a raw write on every backend (no
+    /// framebuffer blending; alpha is payload), whatever `alpha_blend` says.
+    pub fn blends(self) -> bool {
+        self == Self::Bgra8Unorm
+    }
 }
 
 /// How a blending pipeline combines a fragment with the target. Declared in

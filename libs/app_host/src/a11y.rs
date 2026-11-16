@@ -12,8 +12,10 @@ struct State {
     outgoing: Vec<StudioToApp>,
     actions: HashMap<u64, Option<u8>>,
     reads: HashMap<u64, Option<u64>>,
+    lookups: HashMap<u64, bool>,
+    next_lookup: u32,
     consumers: u32,
-    last: Option<Instant>,
+    holds: u32,
     closed: bool,
 }
 struct Shared { state: Mutex<State>, changed: Condvar, snapshots: remote::Snapshots }
@@ -36,7 +38,7 @@ impl RemoteUi {
     pub fn enable(&self, consumers: u32) {
         let mut state = lock(&self.0.state);
         state.consumers = consumers;
-        let consumers = consumers | if state.last.is_some() { a11y::consumer::REMOTE } else { 0 };
+        let consumers = consumers | if state.holds > 0 { a11y::consumer::REMOTE } else { 0 };
         state.outgoing.push(StudioToApp::A11yState { consumers });
         drop(state);
         makepad_platform::SignalToUI::set_ui_signal();
@@ -70,6 +72,7 @@ impl RemoteUi {
             AppToStudio::A11yUpdate { window, .. } => { state.mirror.apply(*window as u64, update.unwrap()); }
             AppToStudio::A11yActionDone { req, result } => { if let Some(slot) = state.actions.get_mut(req) { *slot = Some(*result); } }
             AppToStudio::A11yReadDone { req, user_seq } => { if let Some(slot) = state.reads.get_mut(req) { *slot = Some(*user_seq); } }
+            AppToStudio::A11yLookupDone { req } => { if let Some(done) = state.lookups.get_mut(req) { *done = true; } }
             _ => return false,
         }
         drop(state); self.0.changed.notify_all(); true
@@ -99,38 +102,27 @@ fn next() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 impl Backend for RemoteUi {
-    fn activate(&self) {
-        let start_timer = {
-            let mut s = lock(&self.0.state);
-            let first = s.last.is_none(); s.last = Some(Instant::now());
-            if first {
-                if s.consumers == 0 { s.mirror.trees.clear(); }
-                let consumers = s.consumers | a11y::consumer::REMOTE;
-                s.outgoing.push(StudioToApp::A11yState { consumers });
-            }
-            first
-        };
-        if start_timer {
+    fn activate(&self, _timeout: Duration) {
+        let mut s = lock(&self.0.state);
+        s.holds += 1;
+        if s.holds == 1 {
+            if s.consumers == 0 { s.mirror.trees.clear(); }
+            let consumers = s.consumers | a11y::consumer::REMOTE;
+            s.outgoing.push(StudioToApp::A11yState { consumers });
+            drop(s);
             makepad_platform::SignalToUI::set_ui_signal();
-            let weak = Arc::downgrade(&self.0);
-            // One sleeping lease worker per live endpoint, not one worker per command.
-            std::thread::Builder::new().name("hosted-a11y-lease".into()).spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_secs(1));
-                    let Some(shared) = weak.upgrade() else { break };
-                    let mut s = lock(&shared.state);
-                    if s.closed { break; }
-                    if s.last.is_some_and(|t| t.elapsed() >= Duration::from_secs(60)) {
-                        s.last = None;
-                        let consumers = s.consumers;
-                        if consumers == 0 { s.mirror.trees.clear(); }
-                        s.outgoing.push(StudioToApp::A11yState { consumers });
-                        drop(s);
-                        makepad_platform::SignalToUI::set_ui_signal();
-                        break;
-                    }
-                }
-            }).expect("hosted accessibility lease timer");
+        }
+    }
+    fn deactivate(&self) {
+        let mut s = lock(&self.0.state);
+        if s.holds == 0 { return; }
+        s.holds -= 1;
+        if s.holds == 0 {
+            let consumers = s.consumers;
+            s.outgoing.push(StudioToApp::A11yState { consumers });
+            if consumers == 0 { s.mirror.trees.clear(); }
+            drop(s);
+            makepad_platform::SignalToUI::set_ui_signal();
         }
     }
     fn trees(&self) -> Trees {
@@ -139,6 +131,22 @@ impl Backend for RemoteUi {
     }
     fn wait_change(&self, versions: &[(u64,u64)], timeout: Duration) {
         let _ = self.wait(timeout, |s| (s.mirror.trees.len() != versions.len() || versions.iter().any(|(k,v)| s.mirror.tree(*k).is_none_or(|t| t.updates != *v))).then_some(()));
+    }
+    fn lookup(&self, query: &str) -> u32 {
+        let seq = {
+            let mut state = lock(&self.0.state);
+            state.next_lookup = state.next_lookup.wrapping_add(1).max(1);
+            let seq = state.next_lookup;
+            state.lookups.insert(seq as u64, false);
+            seq
+        };
+        self.send(StudioToApp::A11yLookup { req: seq as u64, query: query.into() });
+        seq
+    }
+    fn wait_lookup(&self, seq: u32, timeout: Duration) {
+        let req = seq as u64;
+        let _ = self.wait(timeout, |state| state.lookups.get(&req).copied().unwrap_or(false).then_some(()));
+        lock(&self.0.state).lookups.remove(&req);
     }
     fn action(&self, _window: u64, mut request: ActionRequest, timeout: Duration) -> Result<ActionResult,String> {
         request.req = next();
@@ -170,5 +178,42 @@ impl Backend for RemoteUi {
     fn frames(&self, _window: u64) -> u64 { 0 }
     fn os_selfcheck(&self, _window: u64, _act: bool) -> Result<String,String> {
         Err("oscheck walks the OS tree of the app's own process: ask the app's ui endpoint".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hosted_lookup_is_acked_and_a_disconnect_ends_its_wait() {
+        let mut ui = RemoteUi::default();
+        let query = "name=SW1";
+        let seq = ui.lookup(query);
+        let req = seq as u64;
+        assert_ne!(seq, 0, "a hosted lookup returns a nonzero sequence");
+        let outgoing = ui.drain();
+        assert!(matches!(outgoing.as_slice(), [StudioToApp::A11yLookup { req: sent, query: text }] if *sent == req && text == query), "the outbound queue holds exactly the lookup request and query");
+
+        assert!(ui.apply(&AppToStudio::A11yLookupDone { req: req + 1 }), "lookup acknowledgements are handled by the semantic endpoint");
+        {
+            let state = lock(&ui.0.state);
+            assert_eq!(state.lookups.get(&req), Some(&false), "an unrelated acknowledgement leaves the lookup pending");
+            assert_eq!(state.lookups.len(), 1, "an unknown request acknowledgement adds no lookup entry");
+        }
+        assert!(ui.apply(&AppToStudio::A11yLookupDone { req }), "the matching lookup acknowledgement is handled");
+        let started = Instant::now();
+        ui.wait_lookup(seq, Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(1), "an acknowledged lookup returns well before its timeout");
+        assert!(!lock(&ui.0.state).lookups.contains_key(&req), "waiting consumes the acknowledged lookup entry");
+
+        let closed = ui.clone();
+        ui.reset();
+        let seq = closed.lookup(query);
+        assert_ne!(seq, 0, "a lookup on the disconnected clone still returns a nonzero sequence");
+        let started = Instant::now();
+        closed.wait_lookup(seq, Duration::from_secs(10));
+        assert!(started.elapsed() < Duration::from_secs(1), "a disconnected clone ends its lookup wait immediately");
+        assert!(!lock(&closed.0.state).lookups.contains_key(&(seq as u64)), "disconnect cleanup removes the pending lookup entry");
     }
 }

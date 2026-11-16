@@ -92,10 +92,7 @@ pub fn run_app(app: fn()) {
                     // A standalone app can return or unwind without submitting Quit. The
                     // process-global backend would then retain its swapchains forever,
                     // while the shell waited for their native window leases to retire.
-                    let hal = makepad_hal::Hal::global();
-                    for session in hal.with_world(|world| world.session_ids()) {
-                        hal.close(session);
-                    }
+                    makepad_hal::hal_close_all();
                 }
                 makepad_hal::stop_main_loop();
             }
@@ -119,10 +116,10 @@ pub fn run_app(app: fn()) {
         if std::env::var_os("MAKEPAD_HAL_LOG").is_some() {
             eprintln!("[hal-linux] app thread joined; the process ends");
         }
-        // the HAL's driver threads stop and are joined, then the process ends the one way every
-        // Makepad process does, natively and under the JIT alike: its exit work, the flushes, and
-        // no C library exit handlers (a GPU driver's teardown in those can wait for good)
-        makepad_hal::Hal::global().before_exit();
+        // the HAL's driver threads stop and are joined, then the process ends on its main thread
+        // through the C library's exit (process_end::end): every atexit handler (the process's
+        // own exit work once among them, a profile or sanitizer runtime's), the C streams' flushes
+        makepad_hal::hal_before_exit();
         makepad_core_util::process_end::end(if panicked { 101 } else { 0 });
     }
     let _ = hosted;

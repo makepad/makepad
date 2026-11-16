@@ -692,6 +692,10 @@ pub mod input {
     pub const MOD_LOGO: u32 = 8;
     /// On a pointer event: the remote endpoint fed it, no person did.
     pub const MOD_INJECTED: u32 = 1 << 31;
+    /// On a pointer event: `x`/`y` are the app's layout points (a semantic node's bounds), not
+    /// native points, so the intake takes them as they are instead of remapping a window's DPI
+    /// override (a saved UI scale lays out in points of its own).
+    pub const MOD_LAYOUT_POINTS: u32 = 1 << 30;
 
     // `MouseDown` / `MouseUp` `button` is the bit mask Cx's `MouseButton` uses (primary 1,
     // secondary 2, middle 4, back 8, forward 16). A key event's `key` is the index of the key in

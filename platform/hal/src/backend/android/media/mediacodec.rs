@@ -5,6 +5,10 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::time::{Duration, Instant};
 
+relax_api::option_layouts! {
+    Reader,
+}
+
 /// MediaCodec.BUFFER_FLAG_*.
 pub const FLAG_CODEC_CONFIG: u32 = 2;
 pub const FLAG_END_OF_STREAM: u32 = 4;

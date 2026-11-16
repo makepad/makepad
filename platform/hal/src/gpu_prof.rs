@@ -206,8 +206,10 @@ fn first_time(f: &Frame) -> u64 {
     f.cpu.iter().map(|c| c.start).chain(f.passes.iter().map(|p| p.start)).filter(|t| *t != 0).min().unwrap_or(0)
 }
 
+/// The app's name, its executable's stem: under the JIT the program's own, not the loader's that
+/// every app runs (relax-api current_exe), so each app's recordings say which app they are.
 fn app_name() -> String {
-    std::env::current_exe().ok().and_then(|p| p.file_stem().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into())
+    relax_api::env::current_exe().ok().and_then(|p| p.file_stem().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "app".into())
 }
 
 fn unix_ms() -> u64 {

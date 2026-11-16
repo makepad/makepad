@@ -515,7 +515,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         self.poll_closing();
         while let Some(event) = self.hub.as_ref().and_then(|hub| hub.rx.try_recv().ok()) {
             match event {
-                HubEvent::Connected { client, socket, sender } => {
+                HubEvent::Connected { client, socket, sender, .. } => {
                     self.sockets.insert(socket, client);
                     if let Some(slot) = self.slots.iter_mut().find(|slot| slot.client == client) {
                         slot.sender = Some(sender);

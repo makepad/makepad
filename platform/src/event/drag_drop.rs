@@ -10,6 +10,7 @@ use {
         },
         makepad_live_id::*,
         makepad_math::*,
+        window::WindowId,
     },
     std::sync::Arc,
     std::sync::Mutex,
@@ -17,6 +18,8 @@ use {
 
 #[derive(Clone, Debug)]
 pub struct DragEvent {
+    /// The window the pointer is over: the window of the pointer event the drag event came from.
+    pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub handled: Arc<Mutex<bool>>,
     pub abs: Vec2d,
@@ -26,6 +29,8 @@ pub struct DragEvent {
 
 #[derive(Clone, Debug)]
 pub struct DropEvent {
+    /// The window the pointer is over: the window of the pointer event the drag event came from.
+    pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub handled: Arc<Mutex<bool>>,
     pub abs: Vec2d,
@@ -247,6 +252,7 @@ impl CxDragDrop {
             Event::MouseMove(event) => {
                 let items = self.internal_drag_items.as_ref()?.clone();
                 Some(InternalDragEvent::Drag(DragEvent {
+                    window_id: event.window_id,
                     modifiers: event.modifiers,
                     handled: Arc::new(Mutex::new(false)),
                     abs: event.abs,
@@ -257,6 +263,7 @@ impl CxDragDrop {
             Event::MouseUp(event) if event.button.is_primary() => {
                 let items = self.internal_drag_items.take()?;
                 Some(InternalDragEvent::Drop(DropEvent {
+                    window_id: event.window_id,
                     modifiers: event.modifiers,
                     handled: Arc::new(Mutex::new(false)),
                     abs: event.abs,

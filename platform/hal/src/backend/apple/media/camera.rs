@@ -14,6 +14,10 @@ use std::collections::{HashMap, HashSet};
 use std::os::raw::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
+relax_api::option_layouts! {
+    CameraStreamKey,
+}
+
 /// Slots of `VideoInput`, as `MAX_VIDEO_DEVICE_INDEX` of the app side.
 pub const MAX_VIDEO_DEVICE_INDEX: usize = 32;
 /// Frames waiting for the step, per session, before the oldest goes (the app thread is late).

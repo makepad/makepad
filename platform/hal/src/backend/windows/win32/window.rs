@@ -27,6 +27,10 @@ use std::rc::Rc;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+relax_api::option_layouts! {
+    Press,
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -689,6 +693,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::TrayRemove { tray } => tray::remove(sid, tray),
+        OsCmd::NotifyPost { .. } | OsCmd::NotifyRemove { .. } => {}
         OsCmd::PrintPdf { req, .. } => s.push((sid, Id::NONE), |q, _| q.print_result(req, print_status::UNSUPPORTED, &[])),
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => {
             let owner = APP.with_borrow(|a| session_window(a, sid).map(|w| w.hwnd.get().0 as usize)).unwrap_or(0);
@@ -775,6 +780,8 @@ pub(super) fn handles(cmd: &OsCmd) -> bool {
             | OsCmd::MenuSet { .. }
             | OsCmd::TraySet { .. }
             | OsCmd::TrayRemove { .. }
+            | OsCmd::NotifyPost { .. }
+            | OsCmd::NotifyRemove { .. }
             | OsCmd::WindowAtTray { .. }
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }

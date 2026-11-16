@@ -5,6 +5,11 @@ use std::{
     ffi::{c_char, c_int, c_ulong, c_void},
     mem, ptr,
 };
+
+relax_api::option_layouts! {
+    (x11_sys::XPoint, x11_sys::XRectangle),
+}
+
 thread_local! {
     // Accumulates the XIM on-the-spot preedit (composition) string. The Xlib
     // callbacks below run synchronously inside `XFilterEvent`, where the event

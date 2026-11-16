@@ -16,6 +16,11 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd},
 };
 
+relax_api::option_layouts! {
+    Image,
+    ImageLayout,
+}
+
 pub(super) const FORMAT: vk::Format = vk::Format::B8G8R8A8_UNORM;
 pub(super) const DRM_ARGB8888: u32 = u32::from_le_bytes(*b"AR24");
 pub(super) const REQUIRED_EXTENSIONS: [&CStr; 6] = [

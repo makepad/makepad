@@ -2697,7 +2697,8 @@ impl TaskPool {
             return;
         }
         if std::thread::current().id() == self.inner.ui_thread {
-            debug_assert!(false, "TaskPool::fan_out on the UI thread would block it");
+            // a closed pool (TaskPool::closed: tests, targets without threads) runs every spread inline by design
+            debug_assert!(!self.is_open(), "TaskPool::fan_out on the UI thread would block it on an open pool's helpers (a closed pool runs inline)");
             for i in 0..len {
                 f(i);
             }

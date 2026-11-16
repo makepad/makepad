@@ -8,7 +8,8 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/makepad/makepad/"
 metadata.makepad-auto-version = "ue5pTU0e_KaMiNqLQpo2CaD-WeQ="
 
-# Measure wake-up latency on the process main thread, without a UI backend.
+# The app pool leaves the process main thread its cores under a full Background load (counted;
+# the main thread's wake times are printed, not gated). No UI backend.
 [[test]]
 name = "pool_latency"
 harness = false
@@ -28,7 +29,6 @@ makepad-cpu-budget = { workspace = true }
 makepad-a11y = { path = "../libs/a11y", version = "0.1.0" }
 relax-attr = { workspace = true }
 makepad-alloc-epoch = { path = "../libs/alloc_epoch", version = "1.0.0" }
-makepad-stack = { path = "../libs/stack", version = "1.0.0" }
 makepad-studio-protocol = { path = "./studio", version = "0.1.0" }
 makepad-futures = { path = "../libs/futures", version = "1.0.0" }
 makepad-shared-bytes = { path = "../libs/shared_bytes", version = "1.0.0" }
@@ -64,6 +64,8 @@ makepad-prof-stream = { path = "../libs/prof_stream", version = "1.0.0" }
 # Every native target uses the HAL; web retains its browser backend.
 makepad-hal = { path = "./hal", version = "1.0.0" }
 makepad-gpu-trace = { path = "../libs/gpu_trace", version = "1.0.0" }
+# the native frame build's secondary stack (frame-scoped scratch); web has no frame build
+makepad-stack = { path = "../libs/stack", version = "1.0.0" }
 # the web backend's messages for a host that plays the page (feature web-protocol)
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0", optional = true }
 

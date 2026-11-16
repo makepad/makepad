@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::time::Instant;
 
+relax_api::option_layouts! {
+    OwnedCursor,
+}
+
 const CLIENT_KEY: &str = "Software\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
 const RUNTIME_FOLDER: &str = "MAKEPAD_SYSTEM_WEB_VIEW_RUNTIME";
 // The target version specified by the pinned SDK's environment-options header.

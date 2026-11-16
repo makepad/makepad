@@ -19,6 +19,7 @@ pub(crate) struct Snapshot {
     pub reason: String,
     pub wm_socket: Option<String>,
     pub protocol: Option<u32>,
+    pub wire: Option<u64>,
     pub admitted: Option<u64>,
     pub refused: Option<String>,
     pub hub: &'static str,
@@ -38,7 +39,7 @@ impl Snapshot {
     pub(crate) fn new(backend: &'static str, reason: String) -> Self {
         Self {
             backend, reason,
-            wm_socket: None, protocol: None, admitted: None, refused: None,
+            wm_socket: None, protocol: None, wire: None, admitted: None, refused: None,
             hub: "none",
             #[cfg(target_os = "linux")]
             hub_id: 0,
@@ -80,9 +81,9 @@ pub(crate) fn line() -> String {
         number(w.starved.map(|at| at.elapsed().as_millis() as u64)), w.pending_swapchain,
     )).collect::<Vec<_>>().join(",");
     format!(
-        "{{\"backend\":{},\"reason\":{},\"wm_socket\":{},\"protocol\":{},\"admitted\":{},\"refused\":{},\"hub\":{},\"app_frame_shown\":{},\"app_frame_ago_ms\":{},\"detached\":{},\"windows\":[{}],\"windows_made\":{}}}",
+        "{{\"backend\":{},\"reason\":{},\"wm_socket\":{},\"protocol\":{},\"wire\":{},\"admitted\":{},\"refused\":{},\"hub\":{},\"app_frame_shown\":{},\"app_frame_ago_ms\":{},\"detached\":{},\"windows\":[{}],\"windows_made\":{}}}",
         json_str(s.backend), json_str(&s.reason), string(s.wm_socket.as_deref()),
-        number(s.protocol.map(u64::from)), number(s.admitted), string(s.refused.as_deref()),
+        number(s.protocol.map(u64::from)), string(s.wire.map(|wire| format!("{wire:016x}")).as_deref()), number(s.admitted), string(s.refused.as_deref()),
         json_str(s.hub), s.app_frame_shown.map_or_else(|| "null".into(), |b| b.to_string()),
         number(s.app_frame_at.map(|at| crate::clock_ns().saturating_sub(at) / 1_000_000)), s.detached, windows, s.windows_made,
     )

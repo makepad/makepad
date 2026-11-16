@@ -170,6 +170,8 @@ pub(crate) struct FrameBuilder {
     window_presenting: HashMap<(Id, u64), u64>,
     /// Packet serial -> (window/repaint group, pass name, closes the presented frame).
     pub(crate) timings: HashMap<u64, (u64, String, bool)>,
+    /// Packets painting a pass with GPU timing on, answered by their `FrameDone`.
+    pub(crate) gpu_times: crate::draw_pass::PendingGpuTimes,
     pub(crate) info: HalInfo,
     strings: HashMap<String, StrId>,
     live_names: HashMap<u64, StrId>,
@@ -226,33 +228,93 @@ pub(crate) struct FrameBuilder {
     pub(crate) stats: BuildStats,
 }
 
-/// Each clipped instance's target-pixel rect. Keep the pieces for native input: the
-/// union of four corner decorations covers a whole window, though the corners do not.
-fn instance_rects<'a>(m: &CxDrawShaderMapping, list: &'a DrawListUniforms, item: &'a CxDrawItem,
-    slots: usize, instances: usize, (ox, oy, dpi): (f32, f32, f32)) -> Option<impl Iterator<Item = [f32; 4]> + 'a>
-{
-    let (rp, rs) = (m.rect_pos?, m.rect_size?);
-    if list.view_transform != crate::makepad_math::Mat4f::identity() || slots == 0 { return None; }
-    let data = item.retained_instances.as_ref().map(|v| v.data()).or(item.instances.as_deref())?;
-    let draw_clip = m.draw_clip;
-    Some(data.chunks_exact(slots).take(instances).filter_map(move |inst| {
-        let (mut a, mut b) = (inst[rp], inst[rp + 1]);
-        let (mut c, mut d) = (a + inst[rs], b + inst[rs + 1]);
-        if let Some(k) = draw_clip {
-            a = a.max(inst[k]); b = b.max(inst[k + 1]);
-            c = c.min(inst[k + 2]); d = d.min(inst[k + 3]);
-        }
-        a = (a + list.view_shift.x).max(list.view_clip.x);
-        b = (b + list.view_shift.y).max(list.view_clip.y);
-        c = (c + list.view_shift.x).min(list.view_clip.z);
-        d = (d + list.view_shift.y).min(list.view_clip.w);
-        (c > a && d > b).then_some([(a - ox) * dpi, (b - oy) * dpi, (c - a) * dpi, (d - b) * dpi])
-    }))
+/// A draw's instance rows in order: a retained publication segment by segment (never its
+/// contiguous copy, which `RetainedInstances::data` would build and keep), or a recording.
+struct Records<'a> {
+    rest: &'a [crate::retained_instances::InstanceSegment],
+    cur: std::slice::ChunksExact<'a, f32>,
+    slots: usize,
+    left: usize,
 }
 
-/// Draw bounds still size the Metal surface by the union; native input uses its pieces.
-fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, pass_px: (f32, f32, f32)) -> [f32; 4] {
-    let Some(rects) = instance_rects(m, list, item, slots, instances, pass_px) else { return [f32::NAN; 4]; };
+impl<'a> Records<'a> {
+    fn of(item: &'a CxDrawItem, slots: usize, instances: usize) -> Option<Self> {
+        if slots == 0 { return None; }
+        match (&item.retained_instances, item.instances.as_deref()) {
+            (Some(p), _) => Some(Self::of_publication(p, slots, instances)),
+            (None, Some(data)) => Some(Records { rest: &[], cur: data.chunks_exact(slots), slots, left: instances }),
+            (None, None) => None,
+        }
+    }
+}
+
+impl<'a> Records<'a> {
+    fn of_publication(p: &'a crate::retained_instances::RetainedInstances, slots: usize, instances: usize) -> Self {
+        Records { rest: p.segments(), cur: [].chunks_exact(slots.max(1)), slots: slots.max(1), left: instances }
+    }
+}
+
+impl<'a> Iterator for Records<'a> {
+    type Item = &'a [f32];
+    fn next(&mut self) -> Option<&'a [f32]> {
+        if self.left == 0 { return None; }
+        loop {
+            if let Some(row) = self.cur.next() {
+                self.left -= 1;
+                return Some(row);
+            }
+            // a segment holds whole rows (`RetainedInstances::from_segments` checks the stride)
+            let (first, rest) = self.rest.split_first()?;
+            self.rest = rest;
+            self.cur = first.data().chunks_exact(self.slots);
+        }
+    }
+}
+
+/// Where a shader keeps an instance's rect and clip in its row, and the list and pass the rows
+/// are drawn under: everything an instance rect depends on beside the row itself.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RectFrame {
+    rect_pos: usize,
+    rect_size: usize,
+    draw_clip: Option<usize>,
+    view_shift: [f32; 2],
+    view_clip: [f32; 4],
+    /// the pass origin (logical px) and dpi
+    pass_px: (f32, f32, f32),
+}
+
+impl RectFrame {
+    /// None when the shader has no rect or the list transforms its rows (its rects are not
+    /// screen rects then).
+    fn of(m: &CxDrawShaderMapping, list: &DrawListUniforms, pass_px: (f32, f32, f32)) -> Option<Self> {
+        let (rect_pos, rect_size) = (m.rect_pos?, m.rect_size?);
+        if list.view_transform != crate::makepad_math::Mat4f::identity() { return None; }
+        let (sh, cl) = (list.view_shift, list.view_clip);
+        Some(RectFrame { rect_pos, rect_size, draw_clip: m.draw_clip, view_shift: [sh.x, sh.y], view_clip: [cl.x, cl.y, cl.z, cl.w], pass_px })
+    }
+
+    /// Each clipped row's target-pixel rect.
+    fn rects<'a>(self, rows: Records<'a>) -> impl Iterator<Item = [f32; 4]> + 'a {
+        let RectFrame { rect_pos: rp, rect_size: rs, draw_clip, view_shift, view_clip, pass_px: (ox, oy, dpi) } = self;
+        rows.filter_map(move |inst| {
+            let (mut a, mut b) = (inst[rp], inst[rp + 1]);
+            let (mut c, mut d) = (a + inst[rs], b + inst[rs + 1]);
+            if let Some(k) = draw_clip {
+                a = a.max(inst[k]); b = b.max(inst[k + 1]);
+                c = c.min(inst[k + 2]); d = d.min(inst[k + 3]);
+            }
+            a = (a + view_shift[0]).max(view_clip[0]);
+            b = (b + view_shift[1]).max(view_clip[1]);
+            c = (c + view_shift[0]).min(view_clip[2]);
+            d = (d + view_shift[1]).min(view_clip[3]);
+            (c > a && d > b).then_some([(a - ox) * dpi, (b - oy) * dpi, (c - a) * dpi, (d - b) * dpi])
+        })
+    }
+}
+
+/// The union of rects, `[0; 4]` when it is empty.
+fn rects_union(rects: impl Iterator<Item = [f32; 4]>) -> [f32; 4] {
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for r in rects {
         x0 = x0.min(r[0]); y0 = y0.min(r[1]);
@@ -260,6 +322,65 @@ fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDr
     }
     if x1 <= x0 || y1 <= y0 { return [0.0; 4]; }
     [x0, y0, x1 - x0, y1 - y0]
+}
+
+/// What a retained draw's bounds are a function of: its publication (whose rows never change),
+/// how many rows it draws and their stride, and the rect frame, floats by their bits (so equal
+/// keys give the walk's bounds bit for bit). A draw redrawn under an unchanged key keeps its
+/// bounds instead of walking every instance again each frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RetainedBoundsKey {
+    publication: u64,
+    slots: usize,
+    instances: usize,
+    rect_pos: usize,
+    rect_size: usize,
+    draw_clip: Option<usize>,
+    view_shift: [u32; 2],
+    view_clip: [u32; 4],
+    pass_px: [u32; 3],
+}
+
+impl RetainedBoundsKey {
+    fn of(publication: u64, slots: usize, instances: usize, f: &RectFrame) -> Self {
+        RetainedBoundsKey {
+            publication, slots, instances,
+            rect_pos: f.rect_pos, rect_size: f.rect_size, draw_clip: f.draw_clip,
+            view_shift: f.view_shift.map(f32::to_bits),
+            view_clip: f.view_clip.map(f32::to_bits),
+            pass_px: [f.pass_px.0.to_bits(), f.pass_px.1.to_bits(), f.pass_px.2.to_bits()],
+        }
+    }
+}
+
+/// `walk`'s bounds for `key`, from `memo` when it holds that key.
+fn memo_bounds(memo: &std::cell::Cell<Option<(RetainedBoundsKey, [f32; 4])>>, key: RetainedBoundsKey, walk: impl FnOnce() -> [f32; 4]) -> [f32; 4] {
+    if let Some((k, b)) = memo.get() {
+        if k == key { return b; }
+    }
+    let b = walk();
+    memo.set(Some((key, b)));
+    b
+}
+
+/// Each clipped instance's target-pixel rect. Keep the pieces for native input: the
+/// union of four corner decorations covers a whole window, though the corners do not.
+fn instance_rects<'a>(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &'a CxDrawItem,
+    slots: usize, instances: usize, pass_px: (f32, f32, f32)) -> Option<impl Iterator<Item = [f32; 4]> + 'a>
+{
+    let frame = RectFrame::of(m, list, pass_px)?;
+    Some(frame.rects(Records::of(item, slots, instances)?))
+}
+
+/// Draw bounds still size the Metal surface by the union; native input uses its pieces.
+/// A retained draw's bounds are remembered on the item by `RetainedBoundsKey`.
+fn instance_bounds(m: &CxDrawShaderMapping, list: &DrawListUniforms, item: &CxDrawItem, slots: usize, instances: usize, pass_px: (f32, f32, f32)) -> [f32; 4] {
+    let Some(frame) = RectFrame::of(m, list, pass_px) else { return [f32::NAN; 4]; };
+    let walk = || Records::of(item, slots, instances).map_or([f32::NAN; 4], |rows| rects_union(frame.rects(rows)));
+    match &item.retained_instances {
+        Some(p) if slots != 0 => memo_bounds(&item.retained_bounds, RetainedBoundsKey::of(p.id(), slots, instances, &frame), walk),
+        _ => walk(),
+    }
 }
 
 impl FrameBuilder {
@@ -633,6 +754,11 @@ impl FrameBuilder {
         self.pipes.get(pipe).is_some_and(|p| p.ready)
     }
 
+    /// Whether the HAL said the pipeline failed: it never draws, and nothing waits for it.
+    pub(crate) fn pipeline_has_failed(&self, pipe: usize) -> bool {
+        self.pipes.get(pipe).is_some_and(|p| p.failed)
+    }
+
     /// Whether the draws of pipeline `pipe` show this frame, or `None` while the HAL is still compiling it.
     pub(crate) fn pipeline_draws(&self, pipe: usize) -> Option<bool> {
         let p = self.pipes.get(pipe)?;
@@ -797,19 +923,19 @@ fn vec_image(format: &TextureFormat) -> Option<VecImage<'_>> {
         TextureFormat::VecBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecCubeBGRAu8_32 { width, height, data: Some(d), .. } => img(*width, *height, 4, VecLayout::Cube, as_bytes(d)),
         TextureFormat::VecMipBGRAu8_32 { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d.as_slice()))
         }
         TextureFormat::VecMipRGBAf32 { width, height, data: Some(d), max_level, .. } => {
             img(*width, *height, 16, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: 1 }, as_bytes(d))
         }
         TextureFormat::VecMipCompressed { width, height, data: Some(d), max_level, .. } => {
-            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: 1 }, d)
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: 1 }, d.as_slice())
         }
         TextureFormat::VecArrayMipBGRAu8_32 { width, height, layers, data: Some(d), max_level, .. } => {
-            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, as_bytes(d))
+            img(*width, *height, 4, VecLayout::Mip { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, as_bytes(d.as_slice()))
         }
         TextureFormat::VecArrayMipCompressed { width, height, layers, data: Some(d), max_level, .. } => {
-            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, d)
+            img(*width, *height, 0, VecLayout::Compressed { max_level: max_level.unwrap_or(0), layers: (*layers).max(1) }, d.as_slice())
         }
         TextureFormat::VecRGBAf32 { width, height, data: Some(d), .. } => img(*width, *height, 16, VecLayout::Plain, as_bytes(d)),
         TextureFormat::VecRu8 { width, height, data: Some(d), .. } => img(*width, *height, 1, VecLayout::Plain, d),
@@ -1253,7 +1379,7 @@ impl Cx {
                 storage_push_size: mapping.storage_push_size,
                 color_formats: [pipeline_color_format(mapping.color_format), 0, 0, 0],
                 blend: (if mapping.blend_op == DrawShaderBlendOp::Max { pipeline_blend::MAX } else { 0 })
-                    | (if matches!(mapping.color_format, DrawShaderColorFormat::Bgra8NoBlend | DrawShaderColorFormat::Rf16 | DrawShaderColorFormat::Ru8) { pipeline_blend::RAW } else { 0 }),
+                    | (if mapping.color_format.blends() { 0 } else { pipeline_blend::RAW }),
                 flags: if mapping.precise_math { pipeline_flags::PRECISE } else { 0 },
                 outputs: mapping.fragment_outputs as u32,
                 shader: index as u32,
@@ -1741,6 +1867,9 @@ impl Cx {
             let class = self.pass_class(pass_id);
             self.pass_load.painted(serial, class);
         }
+        if !picking {
+            fb.gpu_times.painted(serial, &self.passes[pass_id]);
+        }
         if !picking && crate::gpu_frame_timer::enabled() {
             if let Some(window) = self.get_pass_window_id(pass_id) {
                 let group = (window.id() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ self.repaint_id;
@@ -2014,7 +2143,7 @@ impl Cx {
         tex.resize(wanted, Id::NONE);
         for (i, tid) in texture_ids.iter().enumerate().take(wanted) {
             let Some(tid) = tid else { continue };
-            let picture = crate::os::cx_shared::sampled_picture(&self.passes, &self.textures, *tid, pass_id);
+            let picture = crate::os::cx_shared::sampled_picture(&self.passes, &self.textures, *tid, pass_id, self.repaint_id);
             if picture.to_paint {
                 self.passes[pass_id].paint_dirty = true;
             }
@@ -2357,6 +2486,92 @@ impl Cx {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A retained draw's bounds come from the item's memo only under the key they were walked
+    /// for: every key part changed alone gives exactly what a fresh walk of the contiguous rows
+    /// gives (and differs from the bounds before, so a memo that ignored that part would fail),
+    /// and a repeated key walks nothing.
+    #[test]
+    fn retained_bounds_memo_gives_the_walks_bounds_for_every_key_change() {
+        use crate::retained_instances::{InstanceSegment, RetainedInstances};
+        use std::cell::Cell;
+        // rows: rect (x, y, w, h) at 0, a second rect at 4, a clip (x0, y0, x1, y1) at 8
+        const SLOTS: usize = 12;
+        let row = |x: f32, y: f32, clip: [f32; 4]| [x, y, 10.0, 5.0, x + 1.0, y - 2.0, 4.0, 9.0, clip[0], clip[1], clip[2], clip[3]];
+        let open = [-1e9, -1e9, 1e9, 1e9];
+        let rows: Vec<[f32; SLOTS]> = vec![
+            row(0.0, 0.0, open), row(20.0, 3.0, open), row(-7.0, 40.0, [-5.0, 0.0, 1e9, 1e9]),
+            row(55.0, -9.0, open), row(30.0, 70.0, [0.0, 0.0, 34.0, 72.0]),
+        ];
+        let seg = |r: &[[f32; SLOTS]]| InstanceSegment::new(r.iter().flatten().copied().collect::<Vec<_>>().into());
+        let publication = RetainedInstances::from_segments(SLOTS, vec![seg(&rows[..3]), seg(&rows[3..])]).unwrap();
+        let other = RetainedInstances::from_segments(SLOTS, vec![seg(&rows[..4])]).unwrap();
+
+        // the walk as it was: the contiguous rows, rect, clip, list shift and clip, pass px
+        fn reference(data: &[f32], slots: usize, instances: usize, f: &RectFrame) -> [f32; 4] {
+            let (ox, oy, dpi) = f.pass_px;
+            let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            for inst in data.chunks_exact(slots).take(instances) {
+                let (mut a, mut b) = (inst[f.rect_pos], inst[f.rect_pos + 1]);
+                let (mut c, mut d) = (a + inst[f.rect_size], b + inst[f.rect_size + 1]);
+                if let Some(k) = f.draw_clip {
+                    a = a.max(inst[k]); b = b.max(inst[k + 1]);
+                    c = c.min(inst[k + 2]); d = d.min(inst[k + 3]);
+                }
+                a = (a + f.view_shift[0]).max(f.view_clip[0]);
+                b = (b + f.view_shift[1]).max(f.view_clip[1]);
+                c = (c + f.view_shift[0]).min(f.view_clip[2]);
+                d = (d + f.view_shift[1]).min(f.view_clip[3]);
+                if c > a && d > b {
+                    let r = [(a - ox) * dpi, (b - oy) * dpi, (c - a) * dpi, (d - b) * dpi];
+                    x0 = x0.min(r[0]); y0 = y0.min(r[1]);
+                    x1 = x1.max(r[0] + r[2]); y1 = y1.max(r[1] + r[3]);
+                }
+            }
+            if x1 <= x0 || y1 <= y0 { return [0.0; 4]; }
+            [x0, y0, x1 - x0, y1 - y0]
+        }
+
+        let base = RectFrame { rect_pos: 0, rect_size: 2, draw_clip: Some(8), view_shift: [0.0, 0.0], view_clip: [-1e9, -1e9, 1e9, 1e9], pass_px: (0.0, 0.0, 1.0) };
+        let segmented: Vec<&[f32]> = Records::of_publication(&publication, SLOTS, 5).collect();
+        let contiguous: Vec<&[f32]> = publication.data().chunks_exact(SLOTS).collect();
+        assert_eq!(segmented, contiguous, "segment records are the contiguous rows, in order");
+
+        let memo = Cell::new(None);
+        let walks = Cell::new(0);
+        let bounds = |p: &RetainedInstances, instances: usize, f: RectFrame| {
+            let key = RetainedBoundsKey::of(p.id(), SLOTS, instances, &f);
+            let got = memo_bounds(&memo, key, || {
+                walks.set(walks.get() + 1);
+                rects_union(f.rects(Records::of_publication(p, SLOTS, instances)))
+            });
+            (got, reference(p.data(), SLOTS, instances, &f))
+        };
+        let (first, want) = bounds(&publication, 5, base);
+        assert_eq!(first, want, "a first walk is the reference walk");
+        assert_eq!(bounds(&publication, 5, base).0, want, "a repeated key keeps the bounds");
+        assert_eq!(walks.get(), 1, "a repeated key walks nothing");
+
+        let changes: [(&str, &RetainedInstances, usize, RectFrame); 9] = [
+            ("publication", &other, 4, base),
+            ("instances", &publication, 3, base),
+            ("rect_pos", &publication, 3, RectFrame { rect_pos: 4, ..base }),
+            ("rect_size", &publication, 3, RectFrame { rect_pos: 4, rect_size: 6, ..base }),
+            ("draw_clip", &publication, 5, RectFrame { draw_clip: None, ..base }),
+            ("view_shift", &publication, 5, RectFrame { view_shift: [3.0, -4.0], ..base }),
+            ("view_clip", &publication, 5, RectFrame { view_clip: [2.0, 1.0, 60.0, 50.0], ..base }),
+            ("pass origin", &publication, 5, RectFrame { pass_px: (5.0, 6.0, 1.0), ..base }),
+            ("pass dpi", &publication, 5, RectFrame { pass_px: (0.0, 0.0, 2.0), ..base }),
+        ];
+        let mut before = want;
+        for (i, (part, p, instances, f)) in changes.into_iter().enumerate() {
+            let (got, want) = bounds(p, instances, f);
+            assert_eq!(got, want, "{part}: the memo gives the walk's bounds");
+            assert_ne!(want, before, "{part}: the change moves the bounds (the case proves the key part)");
+            assert_eq!(walks.get(), i + 2, "{part}: a changed key walks again");
+            before = want;
+        }
+    }
 
     #[test]
     fn a_staged_upload_sends_the_rows_its_budget_holds_and_keeps_the_rest() {
@@ -2725,7 +2940,7 @@ mod tests {
         crate::gpu_compute::ComputePass::new("bake", Some(id)).submit(&mut cx);
         assert!(cx.fb_pass(&mut fb, id, 0).is_none(), "no paint before its compute");
         assert!(cx.passes[id].incomplete, "the picture it keeps is not what it recorded");
-        let picture = crate::os::cx_shared::sampled_picture(&cx.passes, &cx.textures, target.texture_id(), consumer.draw_pass_id());
+        let picture = crate::os::cx_shared::sampled_picture(&cx.passes, &cx.textures, target.texture_id(), consumer.draw_pass_id(), cx.repaint_id);
         assert!(picture.unfinished, "and what samples it is not whole");
     }
 

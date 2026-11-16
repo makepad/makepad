@@ -644,6 +644,10 @@ impl Cx {
         ready
     }
 
+    pub fn is_draw_shader_window_failed(&self, shader_id: crate::draw_shader::DrawShaderId) -> bool {
+        self.draw_shaders.shaders[shader_id.index].pipeline_id.is_some_and(|pipe| self.hal.frames.pipeline_has_failed(pipe))
+    }
+
     pub(crate) fn poll_texture_lifetimes(&mut self) {
         // the HAL frees what a TextureDestroy names; shared blocks retire in the frame builder
         self.publications.retire_without_backing();

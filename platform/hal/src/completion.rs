@@ -15,6 +15,12 @@ pub struct SyncFile {
     _never: (),
 }
 
+// Off unix a SyncFile has no niche, so the answer's Option is tagged.
+#[cfg(not(unix))]
+relax_api::option_layouts! {
+    SyncFile,
+}
+
 /// The answer: complete (`None`), complete once the sync_file signals, or failed.
 pub type Answer = Result<Option<SyncFile>, String>;
 

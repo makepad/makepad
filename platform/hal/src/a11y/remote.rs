@@ -9,9 +9,19 @@ pub type Trees = Vec<(u64, Tree)>;
 pub type Snapshots = Mutex<HashMap<String, Trees>>;
 
 pub trait Backend {
-    fn activate(&self);
+    /// A command holds its snapshot consumer while it runs. The first hold that turns
+    /// the builder on waits for every session's built frame, bounded by the command timeout.
+    fn activate(&self, timeout: Duration);
+    fn deactivate(&self);
     fn trees(&self) -> Trees;
     fn wait_change(&self, versions: &[(u64, u64)], timeout: Duration);
+    /// Requests one lookup frame in every session/window covered by [`Backend::trees`],
+    /// returning a nonzero backend sequence, or zero if this backend has no lookup path.
+    /// Hosted children answer through their host's hub with `StudioToApp::A11yLookup`.
+    fn lookup(&self, _query: &str) -> u32 { 0 }
+    /// Waits on the consumer thread until every selected tree has answered `seq` (or a
+    /// newer lookup), or the timeout passes. A closed tree no longer needs an answer.
+    fn wait_lookup(&self, _seq: u32, _timeout: Duration) {}
     /// Injects `request` and waits up to `timeout` for its result. One the app has not taken by
     /// then fails with `action N timed out`, and stays pending: [`Backend::wait_action`] waits on.
     fn action(&self, window: u64, request: ActionRequest, timeout: Duration) -> Result<ActionResult, String>;
@@ -31,6 +41,35 @@ pub trait Backend {
     /// The OS adapter's self-check of `window` ([`super::OsSelfCheck`]): the process's own
     /// windows only (the HAL's adapter walks them in place).
     fn os_selfcheck(&self, window: u64, act: bool) -> Result<String, String>;
+}
+
+struct CommandHold<'a> {
+    backend: &'a dyn Backend,
+    held: bool,
+}
+impl<'a> CommandHold<'a> {
+    fn new(backend: &'a dyn Backend, timeout: Duration) -> Self {
+        let mut hold = Self { backend, held: false };
+        hold.activate(timeout);
+        hold
+    }
+    fn activate(&mut self, timeout: Duration) {
+        if !self.held {
+            self.backend.activate(timeout);
+            self.held = true;
+        }
+    }
+    fn deactivate(&mut self) {
+        if self.held {
+            self.held = false;
+            self.backend.deactivate();
+        }
+    }
+}
+impl Drop for CommandHold<'_> {
+    fn drop(&mut self) {
+        self.deactivate();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -57,7 +96,7 @@ fn selected(req: &Req, trees: Trees) -> Result<Trees, String> {
     Ok(trees)
 }
 
-fn query(req: &Req, verb: &str) -> Result<Query, String> {
+fn query(req: &Req, verb: &str) -> Result<(Query, String), String> {
     let mut terms = req.get("q").unwrap_or("").to_string();
     if let Some(id) = req.get("node").filter(|_| !verb.is_empty()) {
         NodeId::parse_short(id).ok_or("invalid node id")?;
@@ -75,7 +114,7 @@ fn query(req: &Req, verb: &str) -> Result<Query, String> {
             terms.push_str(&makepad_a11y::query::quote(word));
         }
     }
-    Query::parse(&terms)
+    Ok((Query::parse(&terms)?, terms))
 }
 
 pub fn find(trees: &Trees, q: &Query) -> Vec<(u64, Node)> {
@@ -149,7 +188,8 @@ fn paced_drag(req: &Req, backend: &dyn Backend, key: u64, node: &Node) -> Result
     if !(ms >= 1.0 && hz >= 1.0 && hz <= 8000.0) { return Err("drag wants ms>=1 and hz in 1..=8000".into()); }
     let legs = number(req, "legs", 1u32)?.max(1);
     let button = 1u32 << number(req, "b", 0u32)?.min(31);
-    let mods = crate::automation::modifiers(&[req.get("mods").unwrap_or("").to_string()])? | input::MOD_INJECTED;
+    // positions come from the node's bounds: the app's layout points
+    let mods = crate::automation::modifiers(&[req.get("mods").unwrap_or("").to_string()])? | input::MOD_INJECTED | input::MOD_LAYOUT_POINTS;
     let b = node.bounds;
     let x0 = b.x as f64 + number(req, "x", b.w as f64 * 0.5)?;
     let y0 = b.y as f64 + number(req, "y", b.h as f64 * 0.5)?;
@@ -202,21 +242,25 @@ pub fn dispatch(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Sna
         return out.err("ui: find, act, type, wait, done, present, snap, diff, speak, lint, oscheck (help lists arguments)");
     };
     if let Err(e) = req.validate_params(params) { return out.err(&e); }
-    backend.activate();
     if let Err(e) = run(req, out, backend, snapshots) { out.err(&e); }
 }
 fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -> Result<(), String> {
     let verb = req.pos.first().map_or("", String::as_str);
     let json = req.get("json") == Some("1");
     let timeout = Duration::from_millis(number(req, "timeout_ms", 5000u64)?);
-    let q = query(req, verb)?;
+    let mut hold = CommandHold::new(backend, timeout);
+    let (q, terms) = query(req, verb)?;
     let start = Instant::now();
     let mut trees = selected(req, backend.trees())?;
     // (a window's present needs no tree: its window may be gone)
     let by_window = verb == "present" && q.is_empty();
     while !by_window && trees.iter().all(|(_, t)| t.nodes.is_empty()) && start.elapsed() < timeout && !out.cancelled() {
-        backend.activate();
         backend.wait_change(&versions(&backend.trees()), timeout.saturating_sub(start.elapsed()).min(Duration::from_millis(100)));
+        trees = selected(req, backend.trees())?;
+    }
+    if q.is_lookup() {
+        let seq = backend.lookup(&terms);
+        if seq != 0 { backend.wait_lookup(seq, timeout.saturating_sub(start.elapsed())); }
         trees = selected(req, backend.trees())?;
     }
     match verb {
@@ -269,7 +313,10 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 Ok(ActionResult::Fallback)
             };
             if verb == "act" && req.pos.get(1).map(String::as_str).or(req.get("action")) == Some("drag") {
-                let measured = paced_drag(req, backend, key, &node)?;
+                hold.deactivate();
+                let measured = paced_drag(req, backend, key, &node);
+                hold.activate(timeout);
+                let measured = measured?;
                 // the person's input during it invalidates the numbers, the way it does a sequence's
                 if backend.user_seq(key)? != seq { return Err(format!("user_intervened: the drag ran, its numbers are not evidence: {{{measured}}}")); }
                 let rows = find(&selected(req, backend.trees())?, &Query::parse(&format!("id={}", node.id.short()))?).into_iter().filter(|(k,_)| *k == key).collect::<Vec<_>>();
@@ -282,6 +329,10 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 invoke(Actions::FOCUS, ActionArg::None)?;
                 // Focus may move the caret; read its next semantic update before replacing.
                 backend.present(key, timeout)?;
+                if q.is_lookup() {
+                    let seq = backend.lookup(&format!("id={}", node.id.short()));
+                    if seq != 0 { backend.wait_lookup(seq, timeout); }
+                }
                 let fresh = selected(req, backend.trees())?;
                 let (_, current) = resolve(&fresh, &Query::parse(&format!("id={}", node.id.short()))?)?;
                 if current.actions.contains(Actions::REPLACE_TEXT) {
@@ -325,13 +376,19 @@ fn run(req: &Req, out: &mut Out, backend: &dyn Backend, snapshots: &Snapshots) -
                 if out.cancelled() { break; }
                 let left = timeout.saturating_sub(start.elapsed());
                 if left.is_zero() { return Err(format!("ui wait timed out after {} ms ({} matches)", start.elapsed().as_millis(), rows.len())); }
-                // An outstanding wait is still a live remote consumer.
-                backend.activate();
-                // Use all versions, including windows excluded by w=, to avoid a missed wake.
-                let all = backend.trees();
-                let current = selected(req, all.clone())?;
-                if versions(&trees) != versions(&current) { trees = current; continue; }
-                backend.wait_change(&versions(&all), left.min(Duration::from_millis(100)));
+                if q.is_lookup() {
+                    // Ask again once a frame changed a tree, or after the ordinary wait's 100 ms,
+                    // so an idle app is not redrawn back to back for the whole wait.
+                    backend.wait_change(&versions(&backend.trees()), left.min(Duration::from_millis(100)));
+                    let seq = backend.lookup(&terms);
+                    if seq != 0 { backend.wait_lookup(seq, timeout.saturating_sub(start.elapsed())); }
+                } else {
+                    // Use all versions, including windows excluded by w=, to avoid a missed wake.
+                    let all = backend.trees();
+                    let current = selected(req, all.clone())?;
+                    if versions(&trees) != versions(&current) { trees = current; continue; }
+                    backend.wait_change(&versions(&all), left.min(Duration::from_millis(100)));
+                }
                 trees = selected(req, backend.trees())?;
             }
         }

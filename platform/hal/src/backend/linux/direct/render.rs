@@ -9,6 +9,10 @@ use makepad_vulkan::vk;
 use std::{collections::{HashMap, HashSet, VecDeque}, fs::{File, OpenOptions},
     os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd}, path::{Path, PathBuf}, sync::{Arc, atomic::Ordering}, time::{Duration, Instant}};
 
+relax_api::option_layouts! {
+    Pace,
+}
+
 /// A flip outstanding this long (many refresh periods at any mode) is a stalled head.
 const FLIP_STALL: Duration = Duration::from_millis(500);
 

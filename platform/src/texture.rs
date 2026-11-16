@@ -2,7 +2,7 @@
 use crate::os::web::CxOsTexture;
 use {
     crate::{
-        cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*, script::vm::*,
+        cx::Cx, id_pool::*, makepad_error_log::*, makepad_math::*, makepad_script::*, script::vm::*, HostBuf,
     },
     std::{
         rc::Rc,
@@ -106,10 +106,10 @@ pub(crate) enum ReadbackOrigin {
     BottomLeft,
 }
 
-/// The attachment's UNORM8 pixels as RGBA, rows top to bottom, packed
-/// (`width * 4` bytes a row) on every backend; the alpha convention is the
-/// attachment's. An error is a terminal result for the ticket, with no
-/// payload.
+/// The attachment's pixels in packed rows, top to bottom, with no padding.
+/// BGRA8 attachments return RGBA8; other accepted formats retain their native
+/// texel layout (see [`Texture::read_back`]). The alpha convention is the
+/// attachment's. An error is a terminal result for the ticket, with no payload.
 #[derive(Debug)]
 pub struct TextureReadback {
     pub ticket: ReadbackTicket,
@@ -353,9 +353,16 @@ impl Texture {
         serial != 0 && cx.frame_completion_serial() >= serial
     }
 
-    /// Queue a full RenderBGRAu8 attachment without waiting for the GPU. The
-    /// request follows its pending producer, or issues only an ordered copy
-    /// when already rendered. On the HAL a SharedBGRAu8 image that no pass of
+    /// Queue a full colour render attachment without waiting for the GPU.
+    /// RenderBGRAu8 returns RGBA8 bytes. On the HAL, RenderRGBAf16 and
+    /// RenderRGBAf32 return little-endian floats in RGBA order (8 and 16 bytes
+    /// per texel); RenderRGf16 returns two half-floats (4 bytes), RenderRf16
+    /// and RenderRf32 one float (2 and 4 bytes), RenderRu32 one little-endian
+    /// u32 (4 bytes), and RenderRu8 one byte. Rows are tightly packed.
+    /// The browser bridge supports only RenderBGRAu8.
+    ///
+    /// The request follows its pending producer, or issues only an ordered
+    /// copy when already rendered. On the HAL a SharedBGRAu8 image that no pass of
     /// this Cx renders (another process or renderer writes it: a hosted app's
     /// frame) is copied as it is now, whatever `next_render` says; its result
     /// carries `producer_serial` 0. Other formats return UnsupportedFormat.
@@ -378,9 +385,20 @@ impl Texture {
                 .any(|attachment| attachment.texture.texture_id() == id)
         });
         let external = cfg!(not(target_arch = "wasm32")) && producer.is_none() && cx.textures[id].format.is_shared();
-        let size = match &cx.textures[id].format {
-            TextureFormat::RenderBGRAu8 { size, .. } => Some(size),
-            _ if external => None,
+        let format = &cx.textures[id].format;
+        if cfg!(target_arch = "wasm32") && !matches!(format, TextureFormat::RenderBGRAu8 { .. }) {
+            return Err(ReadbackError::UnsupportedFormat);
+        }
+        let (size, bytes_per_texel) = match format {
+            TextureFormat::RenderBGRAu8 { size, .. }
+            | TextureFormat::RenderRf32 { size, .. }
+            | TextureFormat::RenderRGf16 { size, .. }
+            | TextureFormat::RenderRu32 { size, .. } => (Some(size), 4),
+            TextureFormat::RenderRGBAf16 { size, .. } => (Some(size), 8),
+            TextureFormat::RenderRGBAf32 { size, .. } => (Some(size), 16),
+            TextureFormat::RenderRf16 { size, .. } => (Some(size), 2),
+            TextureFormat::RenderRu8 { size, .. } => (Some(size), 1),
+            _ if external => (None, 4),
             _ => return Err(ReadbackError::UnsupportedFormat),
         };
         let pending_pass = producer.filter(|pass| request.next_render || cx.passes[*pass].paint_dirty);
@@ -403,7 +421,7 @@ impl Texture {
         if width == 0 || height == 0 || width > i32::MAX as usize || height > i32::MAX as usize {
             return Err(ReadbackError::InvalidSize);
         }
-        let row = width.checked_mul(4).ok_or(ReadbackError::InvalidSize)?;
+        let row = width.checked_mul(bytes_per_texel).ok_or(ReadbackError::InvalidSize)?;
         // Covers row padding through 4 KiB on native staging textures. Drivers
         // with a larger mapped pitch fail explicitly before copying memory.
         let reserved_bytes = row.checked_add(4095).and_then(|row| (row & !4095).checked_mul(height))
@@ -642,10 +660,11 @@ pub enum TextureFormat {
         data: Option<Vec<u32>>,
         updated: TextureUpdated,
     },
+    /// The mip chain is shared, not copied, with its producer; a clone shares it.
     VecMipBGRAu8_32 {
         width: usize,
         height: usize,
-        data: Option<Vec<u32>>,
+        data: Option<HostBuf<u32>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -661,11 +680,12 @@ pub enum TextureFormat {
     /// level 0 first, each level's 16-byte 4x4 blocks in raster order
     /// (`ceil(w/4) * ceil(h/4)` blocks). Only create one for a format the
     /// backend reports in `GpuInfo` (`texture_bc7`, `texture_astc4x4`).
+    /// The mip chain is shared, not copied, with its producer; a clone shares it.
     VecMipCompressed {
         width: usize,
         height: usize,
         format: CompressedTextureFormat,
-        data: Option<Vec<u8>>,
+        data: Option<HostBuf<u8>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -674,23 +694,25 @@ pub enum TextureFormat {
     /// coordinate's z, an integer). `layers` images of `width` x `height`,
     /// layer-major: each layer's mip chain as in [`TextureFormat::VecMipBGRAu8_32`]
     /// (levels 0..=max_level concatenated), then the next layer's.
+    /// The mip chains are shared, not copied, with their producer; a clone shares them.
     VecArrayMipBGRAu8_32 {
         width: usize,
         height: usize,
         layers: usize,
-        data: Option<Vec<u32>>,
+        data: Option<HostBuf<u32>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
     },
     /// The block-compressed [`TextureFormat::VecArrayMipBGRAu8_32`]: each
     /// layer's mip chain as in [`TextureFormat::VecMipCompressed`], layer-major.
+    /// The mip chains are shared, not copied, with their producer; a clone shares them.
     VecArrayMipCompressed {
         width: usize,
         height: usize,
         layers: usize,
         format: CompressedTextureFormat,
-        data: Option<Vec<u8>>,
+        data: Option<HostBuf<u8>>,
         max_level: Option<usize>,
         wrap: TextureWrap,
         updated: TextureUpdated,
@@ -1261,12 +1283,11 @@ impl CxTexture {
 }
 
 impl TextureFormat {
-    /// CPU pixel bytes this format currently holds (capacity, not length).
+    /// CPU pixel bytes this format currently holds (Vec capacity or shared chain length).
     pub(crate) fn cpu_data_bytes(&self) -> usize {
         match self {
             TextureFormat::VecBGRAu8_32 { data, .. }
-            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. } => data
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. } => data
                 .as_ref()
                 .map_or(0, |data| data.capacity().saturating_mul(4)),
             TextureFormat::VecMipRGBAf32 { data, .. }
@@ -1277,25 +1298,25 @@ impl TextureFormat {
             TextureFormat::VecRu8 { data, .. } | TextureFormat::VecRGu8 { data, .. } => {
                 data.as_ref().map_or(0, |data| data.capacity())
             }
-            TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.capacity()),
-            TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.capacity().saturating_mul(4)),
+            TextureFormat::VecMipCompressed { data, .. } | TextureFormat::VecArrayMipCompressed { data, .. } => data.as_ref().map_or(0, |data| data.len() * std::mem::size_of::<u8>()),
+            TextureFormat::VecMipBGRAu8_32 { data, .. } | TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => data.as_ref().map_or(0, |data| data.len() * std::mem::size_of::<u32>()),
             _ => 0,
         }
     }
 
-    /// Release any CPU pixel `Vec` held by a `Vec*` variant, keeping format and dimensions intact.
+    /// Release any CPU pixel storage held by a `Vec*` variant, keeping format and dimensions intact.
     pub(crate) fn discard_cpu_data(&mut self) {
         match self {
             TextureFormat::VecBGRAu8_32 { data, .. }
-            | TextureFormat::VecCubeBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. }
+            | TextureFormat::VecCubeBGRAu8_32 { data, .. } => *data = None,
+            TextureFormat::VecMipBGRAu8_32 { data, .. }
             | TextureFormat::VecArrayMipBGRAu8_32 { data, .. } => *data = None,
             TextureFormat::VecMipRGBAf32 { data, .. }
             | TextureFormat::VecRGBAf32 { data, .. }
             | TextureFormat::VecRf32 { data, .. } => *data = None,
             TextureFormat::VecMipCompressed { data, .. }
-            | TextureFormat::VecArrayMipCompressed { data, .. }
-            | TextureFormat::VecRu8 { data, .. }
+            | TextureFormat::VecArrayMipCompressed { data, .. } => *data = None,
+            TextureFormat::VecRu8 { data, .. }
             | TextureFormat::VecRGu8 { data, .. } => *data = None,
             _ => {}
         }

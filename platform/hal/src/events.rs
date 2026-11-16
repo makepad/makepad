@@ -356,6 +356,8 @@ hal_events! {
     A11yState = 154, a11y_state { on: u32, consumers: u32 };
     A11yAction = 155, a11y_action { window: obj, bytes: rng };
     TrayClick = 149, tray_click { tray: u64, x: f64, y: f64, w: f64, h: f64, screen: rect };
+    /// The person clicked notification `id` (`NotifyPost::id`).
+    NotifyClick = 162, notify_click { id: u64 };
     /// Native content's state (`native_layer::state`); strings and packed data use `data`.
     NativeLayerState = 152, native_layer_state { id: obj, what: u32, a: u64, b: u64, data: rng };
     /// A native-layer request for the WM, to relay (the bridge session, `HostedNativeBridge`):
@@ -369,4 +371,6 @@ hal_events! {
     XrSpace = 159, xr_space { window: obj, generation: u32 };
     /// A system print operation's outcome (`print_status`); `message` is UTF-8 on failure.
     PrintResult = 160, print_result { req: u32, status: u32, message: rng };
+    /// On-demand semantic lookup for every window in the session; `query` is UTF-8.
+    A11yLookup = 161, a11y_lookup { seq: u32, query: rng };
 }

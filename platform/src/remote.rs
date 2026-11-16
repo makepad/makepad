@@ -181,7 +181,9 @@ mod imp {
             "move" => route_mouse(p, Some("move")),
             "key" => route_key(p),
             "text" => route_text(p),
-            "drop" => route_drop(p),
+            "drop" => route_file_input(p, FileInput::Drop),
+            "drag" => route_file_input(p, FileInput::Drag),
+            "drag_end" => route_file_input(p, FileInput::DragEnd),
             "trace" => route_trace(p),
             // read from the runtimes' ledgers, never through the UI thread: a stuck loop is what it shows
             "net" => Answer::Text(crate::makepad_network::ledger::report()),
@@ -319,6 +321,7 @@ mod imp {
                 let n = p.get(&["n"]).and_then(|v| v.parse::<usize>().ok()).unwrap_or(15);
                 reply_to_answer(ask(move |tx| Cmd::GpuInventory { n, tx }, 4))
             }
+            "quit" if p.flag(&["native"]) => reply_to_answer(ask(|tx| Cmd::QuitNative(tx), 4)),
             "quit" if p.get(&["force"]).is_some() => reply_to_answer(ask(|tx| Cmd::QuitForced(tx), 4)),
             "quit" => reply_to_answer(ask(|tx| Cmd::Quit(tx), 4)),
             // `cap start`, `cap stop`, `cursor`, `midi`, `log`: commands that
@@ -414,6 +417,17 @@ mod imp {
         static STEP: std::cell::RefCell<Option<StepJob>> = const { std::cell::RefCell::new(None) };
         /// The `/cap/start` session as the UI sees it.
         static CAPTURE: std::cell::RefCell<Option<UiCapture>> = const { std::cell::RefCell::new(None) };
+        /// The file a `drag` holds over a window, until `drag_end` or `drop`.
+        static FILE_DRAG: std::cell::RefCell<Option<FileDrag>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A file held over a window by `drag`: its items (one list for the whole drag, as a native
+    /// drag has) and where it was last.
+    struct FileDrag {
+        window_id: WindowId,
+        path: String,
+        items: Arc<Vec<crate::event::DragItem>>,
+        at: Vec2d,
     }
 
     // ------------------------------------------------------------------
@@ -565,7 +579,7 @@ mod imp {
         {
             let _ = driven;
             register_with_host();
-            for (name, _, _, _, _) in APP_QUERIES.lock().unwrap().iter() {
+            for (name, ..) in APP_QUERIES.lock().unwrap().iter() {
                 super::host_registration::register_with_host(name);
             }
             // held until ACTIVE is set, so a service registered meanwhile is not lost
@@ -742,16 +756,26 @@ mod imp {
     /// JSON-schema properties for these command words, checked before queuing the callback.
     pub type AppQueryParams = fn(&[String]) -> &'static str;
 
-    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryParams, AppQueryFn)>> = Mutex::new(Vec::new());
+    static APP_QUERIES: Mutex<Vec<(&'static str, &'static str, &'static str, AppQueryParams, AppQueryFn, crate::remote_schema::CmdRisk)>> = Mutex::new(Vec::new());
 
     /// Registers the app's inspect command `name` (`makepad inspect <app> game actors`): what a
     /// person or an agent asks the live app about its own state (a game's entities and actors).
     /// `args` and `answers` are its `help` line. Read-only by convention; a later registration of
     /// the same name replaces the earlier one. `params` selects its per-command JSON properties.
     pub fn register_app_query(name: &'static str, args: &'static str, answers: &'static str, params: AppQueryParams, f: AppQueryFn) {
+        register_app(name, args, answers, params, f, crate::remote_schema::CmdRisk::Read);
+    }
+
+    /// Registers the app's own command `name` that changes what the app does (a hold on its
+    /// work, a mode a test puts it in): as [`register_app_query`], listed in `help` as an act.
+    pub fn register_app_command(name: &'static str, args: &'static str, answers: &'static str, params: AppQueryParams, f: AppQueryFn) {
+        register_app(name, args, answers, params, f, crate::remote_schema::CmdRisk::Act);
+    }
+
+    fn register_app(name: &'static str, args: &'static str, answers: &'static str, params: AppQueryParams, f: AppQueryFn, risk: crate::remote_schema::CmdRisk) {
         let mut q = APP_QUERIES.lock().unwrap();
         q.retain(|x| x.0 != name);
-        q.push((name, args, answers, params, f));
+        q.push((name, args, answers, params, f, risk));
         drop(q);
         #[cfg(relax)]
         if ACTIVE.load(Ordering::SeqCst) {
@@ -807,13 +831,14 @@ mod imp {
             )),
             "help" => {
                 out.measured("commands", "static", &[]);
-                for (name, args, answers, _, _) in APP_QUERIES.lock().unwrap().iter() {
+                for (name, args, answers, _, _, risk) in APP_QUERIES.lock().unwrap().iter() {
                     out.line(&format!(
-                        "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"Read\"}}",
+                        "{{\"cmd\":{},\"args\":{},\"answers\":{},\"tool\":{},\"risk\":\"{:?}\"}}",
                         json_str(name),
                         json_str(args),
                         json_str(answers),
-                        json_str(&format!("app.{}", name))
+                        json_str(&format!("app.{}", name)),
+                        risk
                     ));
                 }
                 for c in COMMANDS.iter().chain(gpu_commands().iter()) {
@@ -1318,7 +1343,14 @@ mod imp {
                     .main_pass_id
                     .and_then(|pass| cx.passes[pass].color_textures.first())
                     .map(|color| color.texture.clone());
-                let texture = if cx.in_makepad_studio { texture } else { None };
+                // The encoder consumes RGBA8; other attachments use the window grab.
+                let texture = texture.filter(|texture| {
+                    cx.in_makepad_studio
+                        && matches!(
+                            cx.textures[texture.texture_id()].format,
+                            crate::TextureFormat::RenderBGRAu8 { .. }
+                        )
+                });
                 let ticket = match texture {
                     Some(texture) => match texture.read_back(cx, ReadbackRequest { next_render: true }) {
                         Ok(ticket) => {
@@ -1425,11 +1457,15 @@ mod imp {
                 Cmd::Tweak { wait: true, .. } | Cmd::Ai { wait: true, .. } => Some(None),
                 _ => None,
             };
-            // answering is observing the app, not its own work: what this thread runs for the
-            // command is counted as served (a test's idle rule leaves it out, wherever its asks fall)
+            // what this thread runs for a remote command is counted as served (a test's idle rule
+            // leaves it out, wherever its asks fall); for one that only observes the app, as the
+            // thread's answering too (a test's CPU budget for it leaves that out): driving the app
+            // is its work, observing it is not
+            let observes = cmd.cmd.observes();
             let start = makepad_hal::clock::thread_cpu_ns();
             apply(cx, cmd);
-            makepad_remote::charge_served(makepad_hal::clock::thread_cpu_ns().saturating_sub(start));
+            let ran = makepad_hal::clock::thread_cpu_ns().saturating_sub(start);
+            if observes { charge_answered(ran) } else { makepad_remote::charge_served(ran) }
             // Do not batch later input ahead of a grab in this same drain.
             poll_captures(cx);
             pending |= drive_step(cx);
@@ -1688,6 +1724,19 @@ mod imp {
     /// (swap, or a mapped file's page). A test's idle rule tells an app that waits on memory from
     /// one that sits idle by them: neither runs CPU. One getrusage call; 0 where none counts them
     /// (Windows' fault count has the soft ones in it).
+    /// What the UI thread has run answering remote peers ([`charge_answered`]).
+    static UI_ANSWERED_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// The UI thread ran `ns` of its CPU answering a remote peer: a command it applied that only
+    /// observes the app ([`Cmd::observes`]), or a frame it drew only to build the tree a request
+    /// asked for. Counted as served, and as the
+    /// UI thread's answering (`uicounts`' `answered_ns`), which a test's CPU budget for the app's
+    /// main thread leaves out: what observing the app costs it is not the app's work.
+    pub(crate) fn charge_answered(ns: u64) {
+        makepad_remote::charge_served(ns);
+        UI_ANSWERED_NS.fetch_add(ns, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn major_faults() -> u64 {
         #[cfg(unix)]
         {
@@ -1765,10 +1814,12 @@ mod imp {
         if cx.pipelines_pending() > 0 {
             reasons.push("shaders");
         }
-        // Jobs on the app's pool that wait for a worker or a CPU permit: their results are still
-        // to come (a starved pool runs nothing, and its app no CPU).
+        // Jobs on the app's pool, queued (waiting for a worker or a CPU permit: a starved pool runs
+        // nothing, and its app no CPU) or running: their results are still to come. A job that runs
+        // for the app's whole life belongs on a long-lived worker, not the pool, or its app never
+        // settles.
         let pool = cx.task_pool_backlog();
-        if pool.as_ref().is_some_and(|p| p.queued.iter().any(|&n| n > 0)) {
+        if pool.as_ref().is_some_and(|p| p.running > 0 || p.queued.iter().any(|&n| n > 0)) {
             reasons.push("pool");
         }
         let list: Vec<String> = reasons.iter().map(|reason| format!("\"{reason}\"")).collect();
@@ -2243,24 +2294,21 @@ mod imp {
                             cx.redraw_all();
                             continue;
                         }
-                        Input::DropFile { path, x, y } => {
+                        Input::DropFile { x, y, .. } | Input::DragFile { x, y, .. } if {
                             let size = cx.windows[window_id].window_geom.inner_size;
-                            if x >= size.x || y >= size.y {
-                                let _ = tx.send(Reply::Err(
-                                    "drop coordinates are outside the window".into(),
-                                ));
-                                return;
+                            x >= size.x || y >= size.y
+                        } => {
+                            let _ = tx.send(Reply::Err("file coordinates are outside the window".into()));
+                            return;
+                        }
+                        input @ (Input::DropFile { .. } | Input::DragFile { .. } | Input::DragFileEnd) => {
+                            match file_input(cx, window_id, input) {
+                                Ok(answer) => input_result = Some(answer),
+                                Err(e) => {
+                                    let _ = tx.send(Reply::Err(e));
+                                    return;
+                                }
                             }
-                            let (handled, response) = inject_file_drop(cx, path, x, y);
-                            let response = match response {
-                                crate::event::DragResponse::None => "none",
-                                crate::event::DragResponse::Copy => "copy",
-                                crate::event::DragResponse::Link => "link",
-                                crate::event::DragResponse::Move => "move",
-                            };
-                            input_result = Some(format!(
-                                "{{\"ok\":1,\"drop_handled\":{handled},\"drag_response\":\"{response}\"}}"
-                            ));
                             cx.redraw_all();
                             continue;
                         }
@@ -2398,6 +2446,7 @@ mod imp {
             Cmd::UiCounts(waited, tx) => {
                 let (ins, cyc) = crate::thread_counters::read().unwrap_or((0, 0));
                 let (cpu, process, served, runtime) = (makepad_hal::clock::thread_cpu_ns(), makepad_hal::clock::process_cpu_ns(), makepad_remote::served_cpu_ns(), makepad_remote::runtime_cpu_ns());
+                let answered = UI_ANSWERED_NS.load(std::sync::atomic::Ordering::Relaxed);
                 let faults = major_faults();
                 // what the app's other threads wanted and a loaded box did not give them: not this
                 // thread's (its CPU says its work; its waits are mostly to answer asks such as this
@@ -2406,7 +2455,7 @@ mod imp {
                     true => format!(",\"waited_ns\":{}", makepad_hal::clock::threads_waited_ns(makepad_remote::own_thread).saturating_sub(makepad_remote::runtime_waited_ns())),
                     false => String::new(),
                 };
-                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}{waited}}}")));
+                let _ = tx.send(Reply::Text(format!("{{\"ins\":{ins},\"cyc\":{cyc},\"cpu_ns\":{cpu},\"answered_ns\":{answered},\"process_cpu_ns\":{process},\"served_cpu_ns\":{served},\"runtime_cpu_ns\":{runtime},\"faults\":{faults}{waited}}}")));
             }
             Cmd::Platform(payload) => match *payload
                 .downcast::<PlatformCmd>()
@@ -2683,6 +2732,17 @@ mod imp {
                 let _ = tx.send(Reply::Ok);
                 cx.request_quit(crate::event::QuitReason::App);
             }
+            Cmd::QuitNative(tx) => {
+                push_log_line("[makepad-remote] remote quit through AppKit (terminate:, where a logout's quit arrives)".to_string());
+                // the HAL's op: under the JIT, AppKit's app and its run state are the loader's
+                let _ = tx.send(if makepad_hal::ask_native_quit() {
+                    Reply::Ok
+                } else if cfg!(target_os = "macos") {
+                    Reply::Err("native=1 needs AppKit's app, which an offscreen run (MAKEPAD_HIDE_WINDOWS on the default backend) does not start: MAKEPAD_HAL_BACKEND=metal keeps hidden AppKit windows".into())
+                } else {
+                    Reply::Err("native=1 requires AppKit".into())
+                });
+            }
         }
     }
 
@@ -2692,21 +2752,65 @@ mod imp {
 
     /// Called only while applying UI commands. These event markers never
     /// cross the HTTP command channel; only the path and coordinates do.
-    fn inject_file_drop(
-        cx: &mut Cx,
-        path: String,
-        x: f64,
-        y: f64,
-    ) -> (bool, crate::event::DragResponse) {
-        use crate::event::{DragEvent, DragItem, DragResponse, DropEvent, Event};
-        use std::sync::Arc;
+    /// A `drop`, `drag` or `drag_end` (coordinates already inside the window), as a native drag
+    /// gives it: a drop with no drag open is Drag, Drop and DragEnd at once; a `drag` holds the
+    /// file there (a Drag event per call, the same items throughout), `drag_end` leaves (DragEnd)
+    /// and a `drop` of the held file drops it (a Drag first where the point moved).
+    fn file_input(cx: &mut Cx, window_id: WindowId, input: Input) -> Result<String, String> {
+        let open = FILE_DRAG.with(|d| d.borrow_mut().take());
+        if let Some(drag) = open.as_ref().filter(|d| d.window_id != window_id) {
+            let message = format!("a drag is open over window {}: drag_end it first", drag.window_id.0);
+            FILE_DRAG.with(|d| *d.borrow_mut() = open);
+            return Err(message);
+        }
+        let response_word = |r: crate::event::DragResponse| match r {
+            crate::event::DragResponse::None => "none",
+            crate::event::DragResponse::Copy => "copy",
+            crate::event::DragResponse::Link => "link",
+            crate::event::DragResponse::Move => "move",
+        };
+        match (input, open) {
+            (Input::DropFile { path, x, y }, None) => {
+                let (handled, response) = inject_file_drop(cx, window_id, path, x, y);
+                Ok(format!("{{\"ok\":1,\"drop_handled\":{handled},\"drag_response\":\"{}\"}}", response_word(response)))
+            }
+            (Input::DragFileEnd, None) => Err("no drag is open: drag path= x= y= opens one".into()),
+            (Input::DragFile { path, .. } | Input::DropFile { path, .. }, Some(drag)) if path != drag.path => {
+                let message = format!("a drag of {} is open: drop or drag_end it first", drag.path);
+                FILE_DRAG.with(|d| *d.borrow_mut() = Some(drag));
+                Err(message)
+            }
+            (Input::DragFile { path, x, y }, open) => {
+                let entered = open.is_none();
+                let items = open.map_or_else(|| Arc::new(vec![crate::event::DragItem::FilePath { path: path.clone(), internal_id: None }]), |d| d.items);
+                let response = file_drag_at(cx, window_id, &items, x, y);
+                FILE_DRAG.with(|d| *d.borrow_mut() = Some(FileDrag { window_id, path, items, at: dvec2(x, y) }));
+                Ok(format!("{{\"ok\":1,\"drag\":\"{}\",\"drag_response\":\"{}\"}}", if entered { "in" } else { "over" }, response_word(response)))
+            }
+            (Input::DropFile { x, y, .. }, Some(drag)) => {
+                let response = (drag.at != dvec2(x, y)).then(|| file_drag_at(cx, window_id, &drag.items, x, y));
+                let handled = file_drop_at(cx, window_id, drag.items, x, y);
+                let response = response.map_or(String::new(), |r| format!(",\"drag_response\":\"{}\"", response_word(r)));
+                Ok(format!("{{\"ok\":1,\"drop_handled\":{handled}{response}}}"))
+            }
+            (Input::DragFileEnd, Some(_)) => {
+                cx.call_event_handler(&crate::event::Event::DragEnd);
+                cx.drag_drop.cycle_drag();
+                Ok("{\"ok\":1,\"drag_end\":1}".into())
+            }
+            (_, open) => {
+                FILE_DRAG.with(|d| *d.borrow_mut() = open);
+                Err("not a file input".into())
+            }
+        }
+    }
 
-        let items = Arc::new(vec![DragItem::FilePath {
-            path,
-            internal_id: None,
-        }]);
+    /// One Drag event of `items` at a point; what the app answered.
+    fn file_drag_at(cx: &mut Cx, window_id: WindowId, items: &Arc<Vec<crate::event::DragItem>>, x: f64, y: f64) -> crate::event::DragResponse {
+        use crate::event::{DragEvent, DragResponse, Event};
         let response = Arc::new(Mutex::new(DragResponse::None));
         cx.call_event_handler(&Event::Drag(DragEvent {
+            window_id,
             modifiers: Default::default(),
             handled: Arc::new(Mutex::new(false)),
             abs: dvec2(x, y),
@@ -2714,8 +2818,16 @@ mod imp {
             response: response.clone(),
         }));
         cx.drag_drop.cycle_drag();
+        let answered = *response.lock().unwrap_or_else(|e| e.into_inner());
+        answered
+    }
+
+    /// Drop and DragEnd of `items` at a point; whether a target took the drop.
+    fn file_drop_at(cx: &mut Cx, window_id: WindowId, items: Arc<Vec<crate::event::DragItem>>, x: f64, y: f64) -> bool {
+        use crate::event::{DropEvent, Event};
         let handled = Arc::new(Mutex::new(false));
         cx.call_event_handler(&Event::Drop(DropEvent {
+            window_id,
             modifiers: Default::default(),
             handled: handled.clone(),
             abs: dvec2(x, y),
@@ -2724,8 +2836,23 @@ mod imp {
         cx.drag_drop.cycle_drag();
         cx.call_event_handler(&Event::DragEnd);
         cx.drag_drop.cycle_drag();
-        let result = (*handled.lock().unwrap_or_else(|e| e.into_inner()), *response.lock().unwrap_or_else(|e| e.into_inner()));
-        result
+        let taken = *handled.lock().unwrap_or_else(|e| e.into_inner());
+        taken
+    }
+
+    fn inject_file_drop(
+        cx: &mut Cx,
+        window_id: WindowId,
+        path: String,
+        x: f64,
+        y: f64,
+    ) -> (bool, crate::event::DragResponse) {
+        let items = Arc::new(vec![crate::event::DragItem::FilePath {
+            path,
+            internal_id: None,
+        }]);
+        let response = file_drag_at(cx, window_id, &items, x, y);
+        (file_drop_at(cx, window_id, items, x, y), response)
     }
 
     /// `{"shaders":[{"id":N,"consts":[{"i":0,"name":..,"doc":..,"value":..,"initial":..,
@@ -3058,38 +3185,83 @@ mod imp {
     mod tests {
         use super::*;
 
+        /// The reasons of a `settled` answer, as written.
+        fn settled_reasons(json: &str) -> &str {
+            let start = json.find("\"reasons\":[").expect("a reasons list") + "\"reasons\":[".len();
+            &json[start..start + json[start..].find(']').expect("the list's end")]
+        }
+
+        /// `settled` waits for the app pool's jobs while they run, not only while they wait for a
+        /// worker: a job on a worker is a result still to come (a plate built for 30 s on the pool
+        /// read as settled, 11-16). Once it has ended, the pool is no reason.
+        #[test]
+        fn settled_waits_for_a_running_pool_job() {
+            let cx = Cx::new(Box::new(|_, _| {}));
+            let (started_tx, started) = std::sync::mpsc::channel::<()>();
+            let (release, gate) = std::sync::mpsc::channel::<()>();
+            let mut job = cx
+                .task_pool()
+                .submit(crate::thread::Class::Background, move || {
+                    started_tx.send(()).unwrap();
+                    let _ = gate.recv();
+                })
+                .unwrap();
+            started.recv().unwrap();
+            let busy = settled_json(&cx);
+            assert!(settled_reasons(&busy).contains("\"pool\""), "a running pool job is no reason: {busy}");
+            assert!(busy.contains("\"settled\":false") && busy.contains("\"running\":1"), "a running pool job read as settled: {busy}");
+            release.send(()).unwrap();
+            // The UI thread never joins: it takes the result once it is there, and the worker
+            // gives its slot back just after.
+            let ended = std::time::Instant::now();
+            let mut result = None;
+            while result.is_none() || cx.task_pool_backlog().is_some_and(|p| p.running > 0) {
+                assert!(ended.elapsed() < std::time::Duration::from_secs(5), "the ended job still runs");
+                if result.is_none() {
+                    result = job.try_take();
+                }
+                std::thread::yield_now();
+            }
+            assert!(matches!(result, Some(Ok(()))), "the job's result: {result:?}");
+            let idle = settled_json(&cx);
+            assert!(!settled_reasons(&idle).contains("\"pool\""), "an ended job is still a reason: {idle}");
+        }
+
+        /// A file input reaches a drop target as a native drag does: a drop is Drag, Drop and
+        /// DragEnd, twice with no stale drag state; a held drag enters once, moves, then leaves
+        /// or drops where it is (a move first when the drop's point is another).
         #[test]
         fn file_drop_dispatches_native_sequence_and_clears_drag_area() {
             use crate::area::{Area, RectArea};
             use crate::draw_list::{CxRectArea, DrawList};
-            use crate::event::{DragHit, DragItem, DragResponse, DragState, Event};
+            use crate::event::{DragHit, DragItem, DragResponse, Event};
             use crate::makepad_math::Rect;
             use std::{
                 cell::{Cell, RefCell},
                 rc::Rc,
             };
 
+            const PATH: &str = "/not-read-by-platform/reference.png";
             let area = Rc::new(Cell::new(Area::Empty));
             let target = area.clone();
-            let sequence = Rc::new(RefCell::new(Vec::new()));
+            let sequence = Rc::new(RefCell::new(Vec::<String>::new()));
             let seen = sequence.clone();
             let mut cx = Cx::new(Box::new(move |cx, event| {
-                seen.borrow_mut().push(event.name());
-                match event.drag_hits(cx, target.get()) {
+                let hit = event.drag_hits(cx, target.get());
+                seen.borrow_mut().push(match hit {
                     DragHit::Drag(hit) => {
-                        assert_eq!(
-                            hit.state,
-                            DragState::In,
-                            "previous drop left stale drag state"
-                        );
                         assert!(
-                            matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == "/not-read-by-platform/reference.png")
+                            matches!(hit.items.as_slice(), [DragItem::FilePath { path, internal_id: None }] if path == PATH)
                         );
                         *hit.response.lock().unwrap_or_else(|e| e.into_inner()) = DragResponse::Copy;
+                        format!("{:?}", hit.state)
                     }
-                    DragHit::Drop(hit) => assert_eq!(hit.abs, dvec2(20.0, 30.0)),
-                    DragHit::DragEnd | DragHit::NoHit => assert!(matches!(event, Event::DragEnd)),
-                }
+                    DragHit::Drop(hit) => format!("Drop {},{}", hit.abs.x, hit.abs.y),
+                    DragHit::DragEnd | DragHit::NoHit => {
+                        assert!(matches!(event, Event::DragEnd));
+                        "DragEnd".into()
+                    }
+                });
             }));
             let draw_list = DrawList::new(&mut cx);
             let list = &mut cx.draw_lists[draw_list.id()];
@@ -3105,21 +3277,26 @@ mod imp {
                 rect_id: 0,
                 redraw_id: list.redraw_id,
             }));
-            for _ in 0..2 {
-                assert_eq!(
-                    inject_file_drop(
-                        &mut cx,
-                        "/not-read-by-platform/reference.png".into(),
-                        20.0,
-                        30.0
-                    ),
-                    (true, DragResponse::Copy)
-                );
-            }
-            assert_eq!(
-                sequence.borrow().as_slice(),
-                ["Drag", "Drop", "DragEnd", "Drag", "Drop", "DragEnd"]
-            );
+            let window = WindowId(0, 0);
+            let run = |cx: &mut Cx, inputs: Vec<Input>| -> Vec<String> {
+                sequence.borrow_mut().clear();
+                for input in inputs {
+                    file_input(cx, window, input).unwrap();
+                }
+                sequence.borrow().clone()
+            };
+            let drop = |x, y| Input::DropFile { path: PATH.into(), x, y };
+            let drag = |x, y| Input::DragFile { path: PATH.into(), x, y };
+            assert_eq!(run(&mut cx, vec![drop(20.0, 30.0), drop(20.0, 30.0)]), ["In", "Drop 20,30", "DragEnd", "In", "Drop 20,30", "DragEnd"], "a drop is a whole drag, its state cleared after");
+            assert_eq!(run(&mut cx, vec![drag(20.0, 30.0), drag(40.0, 50.0), Input::DragFileEnd]), ["In", "Over", "DragEnd"], "a held drag enters, moves and leaves");
+            assert_eq!(run(&mut cx, vec![drag(20.0, 30.0), drag(40.0, 50.0), drop(40.0, 50.0)]), ["In", "Over", "Drop 40,50", "DragEnd"], "a held drag drops where it is");
+            assert_eq!(run(&mut cx, vec![drag(20.0, 30.0), drop(60.0, 70.0)]), ["In", "Over", "Drop 60,70", "DragEnd"], "a drop elsewhere moves there first");
+            assert!(file_input(&mut cx, window, Input::DragFileEnd).is_err(), "nothing to leave once dropped");
+            file_input(&mut cx, window, drag(20.0, 30.0)).unwrap();
+            let other = file_input(&mut cx, window, Input::DropFile { path: "/not-read-by-platform/other.png".into(), x: 20.0, y: 30.0 });
+            assert!(other.is_err_and(|e| e.contains("drag_end it first")), "another file waits for the open drag");
+            assert!(file_input(&mut cx, WindowId(1, 0), Input::DragFileEnd).is_err(), "the drag is the window's it was opened over");
+            assert_eq!(run(&mut cx, vec![Input::DragFileEnd]), ["DragEnd"], "the open drag survives the refusals");
         }
 
         fn params(pairs: &[(&str, &str)]) -> Params {
@@ -3290,6 +3467,7 @@ mod imp {
     pub type AppQueryParams = fn(&[String]) -> &'static str;
     /// No remote endpoint on the web: nothing asks.
     pub fn register_app_query(_name: &'static str, _args: &'static str, _answers: &'static str, _params: AppQueryParams, _f: AppQueryFn) {}
+    pub fn register_app_command(_name: &'static str, _args: &'static str, _answers: &'static str, _params: AppQueryParams, _f: AppQueryFn) {}
 
     pub(crate) fn note_user_event(_cx: &mut Cx, _event: &crate::event::Event) {}
     /// There is no remote bridge on these targets, so nothing ever asked for one.

@@ -144,7 +144,7 @@ impl Cx {
                 }
                 self.activate_window_on_pointer_down(window_id);
                 let mut abs = dvec2(x, y);
-                self.dpi_override_scale(&mut abs, window_id);
+                if mods & input::MOD_LAYOUT_POINTS == 0 { self.dpi_override_scale(&mut abs, window_id); }
                 self.fingers.process_tap_count(abs, time);
                 let button = MouseButton::from_bits_retain(button);
                 self.fingers.mouse_down(button, window_id);
@@ -164,7 +164,7 @@ impl Cx {
                     return true;
                 }
                 let mut abs = dvec2(x, y);
-                self.dpi_override_scale(&mut abs, window_id);
+                if mods & input::MOD_LAYOUT_POINTS == 0 { self.dpi_override_scale(&mut abs, window_id); }
                 let modifiers = key_modifiers(mods);
                 self.call_event_handler(&Event::MouseMove(MouseMoveEvent {
                     abs,
@@ -177,6 +177,7 @@ impl Cx {
                 // the in-window drag protocol: a drag the app started follows the pointer
                 if let Some(items) = self.hal.internal_drag_items.as_ref() {
                     self.call_event_handler(&Event::Drag(DragEvent {
+                        window_id,
                         modifiers,
                         handled: Arc::new(Mutex::new(false)),
                         abs,
@@ -204,7 +205,7 @@ impl Cx {
                     return true;
                 }
                 let mut abs = dvec2(x, y);
-                self.dpi_override_scale(&mut abs, window_id);
+                if mods & input::MOD_LAYOUT_POINTS == 0 { self.dpi_override_scale(&mut abs, window_id); }
                 let button = MouseButton::from_bits_retain(button);
                 let modifiers = key_modifiers(mods);
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent { abs, button, window_id, modifiers, time }));
@@ -213,7 +214,13 @@ impl Cx {
                 self.update_pointer_capture_pacing();
                 if button == MouseButton::PRIMARY {
                     if let Some(items) = self.hal.internal_drag_items.take() {
-                        self.call_event_handler(&Event::Drop(DropEvent { modifiers, handled: Arc::new(Mutex::new(false)), abs, items }));
+                        self.call_event_handler(&Event::Drop(DropEvent {
+                            window_id,
+                            modifiers,
+                            handled: Arc::new(Mutex::new(false)),
+                            abs,
+                            items,
+                        }));
                         self.drag_drop.cycle_drag();
                         self.call_event_handler(&Event::DragEnd);
                         self.drag_drop.cycle_drag();
@@ -676,6 +683,7 @@ impl Cx {
                 self.dpi_override_scale(&mut abs, window_id);
                 let response = Arc::new(Mutex::new(DragResponse::None));
                 self.call_event_handler(&Event::Drag(DragEvent {
+                    window_id,
                     modifiers: Default::default(),
                     handled: Arc::new(Mutex::new(false)),
                     abs,
@@ -700,6 +708,7 @@ impl Cx {
                     let mut abs = dvec2(x, y);
                     self.dpi_override_scale(&mut abs, window_id);
                     self.call_event_handler(&Event::Drop(DropEvent {
+                        window_id,
                         modifiers: Default::default(),
                         handled: Arc::new(Mutex::new(false)),
                         abs,
@@ -730,6 +739,7 @@ impl Cx {
                 let screen = Rect { pos: dvec2(screen[0] as f64, screen[1] as f64), size: dvec2(screen[2] as f64, screen[3] as f64) };
                 self.call_event_handler(&Event::TrayClick(crate::tray::TrayClickEvent { tray: LiveId(tray), anchor, screen }))
             }
+            HalEvent::NotifyClick { id } => self.call_event_handler(&Event::NotificationClick(crate::notification::NotificationClickEvent { id: LiveId(id) })),
 
             // ---- app
             // (every backend paints its windows once after the app started)
@@ -952,6 +962,7 @@ impl Cx {
             }
             HalEvent::FrameDone { window, frame, gpu_ns, present_ns, gpu_start, gpu_end } => {
                 self.pass_load.done(frame, gpu_ns);
+                self.hal.frames.gpu_times.done(frame, gpu_ns);
                 if let Some((group, name, closes)) = self.hal.frames.timings.remove(&frame) {
                     if gpu_ns > 0 {
                         crate::gpu_frame_timer::record_pass(group, &name, gpu_start, gpu_end);
@@ -1131,12 +1142,18 @@ impl Cx {
             }
             HalEvent::A11yState { consumers, .. } => {
                 self.a11y_native_consumers = consumers;
-                if self.a11y.set_consumers(consumers | self.a11y_host_consumers) { self.redraw_all(); }
+                self.a11y_consumers_changed(consumers | self.a11y_host_consumers);
             }
             HalEvent::A11yAction { window, bytes } => {
                 match makepad_a11y::wire::decode_action(bytes) {
                     Ok(action) => self.dispatch_a11y_action(window_id(window), action),
                     Err(error) => crate::error!("{error}"),
+                }
+            }
+            HalEvent::A11yLookup { seq, query } => {
+                match std::str::from_utf8(query) {
+                    Ok(query) => self.a11y_lookup(seq, query),
+                    Err(error) => crate::error!("semantic lookup: {error}"),
                 }
             }
             HalEvent::Query { req, bytes } => self.hal_answer_query(req, bytes),
@@ -1303,6 +1320,7 @@ impl Cx {
             if let Some(touch) = e.touches.iter().find(|t| t.state == TouchState::Stop) {
                 if let Some(items) = self.hal.internal_drag_items.take() {
                     self.call_event_handler(&Event::Drop(DropEvent {
+                        window_id: e.window_id,
                         modifiers: e.modifiers,
                         handled: Arc::new(Mutex::new(false)),
                         abs: touch.abs,
@@ -1315,6 +1333,7 @@ impl Cx {
             } else if let Some(touch) = e.touches.iter().find(|t| t.state == TouchState::Move) {
                 if let Some(items) = self.hal.internal_drag_items.as_ref() {
                     self.call_event_handler(&Event::Drag(DragEvent {
+                        window_id: e.window_id,
                         modifiers: e.modifiers,
                         handled: Arc::new(Mutex::new(false)),
                         abs: touch.abs,
@@ -1397,6 +1416,20 @@ pub(crate) unsafe fn texture_readback_pixels(record: makepad_hal::lease::Record)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_click_reaches_the_app() {
+        use std::{cell::Cell, rc::Rc};
+        let clicked = Rc::new(Cell::new(None));
+        let seen = clicked.clone();
+        let mut cx = Cx::new(Box::new(move |_, event| {
+            if let Event::NotificationClick(e) = event {
+                seen.set(Some(e.id));
+            }
+        }));
+        cx.hal_intake(0, HalEvent::NotifyClick { id: 7 });
+        assert_eq!(clicked.get(), Some(LiveId(7)), "the notification id reaches the app");
+    }
 
     #[test]
     fn modifier_bits_map_to_key_modifiers() {

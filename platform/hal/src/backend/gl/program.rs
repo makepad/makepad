@@ -13,6 +13,10 @@ use crate::glsl::GlslPipeline;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+relax_api::option_layouts! {
+    Key,
+}
+
 pub(super) struct Linking {
     program: GLuint,
     shaders: [GLuint; 2],

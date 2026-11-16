@@ -509,6 +509,9 @@ pub enum Cmd {
     /// The run ends either way (a hub stopping its lease's run): the app's exit, whatever the person
     /// is doing to it. Refused, the hub ended it on the spot, without its exit write.
     QuitForced(Sender<Reply>),
+    /// The quit a logout asks: on macOS AppKit's `terminate:` (where a logout's quit event arrives),
+    /// so AppKit asks `applicationShouldTerminate:` and the app's held quit runs on its real path.
+    QuitNative(Sender<Reply>),
     /// The hot-patchable constant tables of the compiled shaders (one
     /// shader, or all that have entries).
     ShaderConsts {
@@ -532,10 +535,22 @@ pub enum Cmd {
 }
 
 impl Cmd {
+    /// Only observes the app (its state, its picture, its counters, a capture of it): what the
+    /// UI thread runs applying it answers the asker and is none of the app's work (`uicounts`'
+    /// `answered_ns`). Input, steps, tweaks, window changes and the app's own commands drive it.
+    pub fn observes(&self) -> bool {
+        matches!(
+            self,
+            Self::Activity(_) | Self::Gamepads(_) | Self::Grab { .. } | Self::CancelGrabs(_)
+                | Self::Settled(_) | Self::UiCounts(..) | Self::CapStop(_) | Self::CapPause(..)
+                | Self::ShaderConsts { .. } | Self::GpuInventory { .. }
+        )
+    }
+
     pub fn mutation_reply(&self) -> Option<&Sender<Reply>> {
         match self {
             Self::Input { tx, .. } | Self::Close { tx, .. }
-            | Self::Quit(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
+            | Self::Quit(tx) | Self::QuitNative(tx) | Self::ShaderConstPatch { tx, .. } => Some(tx),
             Self::Tweak { op, tx, .. }
                 if !matches!(
                     op.as_str(),
@@ -611,11 +626,22 @@ pub enum Input {
         mods: RemoteKeyModifiers,
     },
     Text(String),
+    /// A file dropped at a point: through Drag, Drop and DragEnd, or Drop and DragEnd on the
+    /// open drag of the same file (after a Drag there when the point moved).
     DropFile {
         path: String,
         x: f64,
         y: f64,
     },
+    /// A file dragged over a point and held there (`drag`): one Drag event, the drag left open
+    /// for the next `drag`, `drag_end` or `drop`.
+    DragFile {
+        path: String,
+        x: f64,
+        y: f64,
+    },
+    /// The open drag leaves the window without a drop (`drag_end`): DragEnd.
+    DragFileEnd,
     /// The window's own maximise (macOS: toggleFullScreen) — the test
     /// hook for the maximise/occlusion proof.
     Maximize,
@@ -860,7 +886,9 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "move", args: "x= y= [hw=1] [w=ID] [wait=1]", answers: "mouse k=move", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"hw\":{\"type\":\"boolean\"},\"time\":{\"type\":\"number\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["x", "y"], positional: &[] },
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["t"], positional: &[] },
-    Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
+    Command { words: "drop", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "drop one absolute file path through Drag/Drop/DragEnd; on an open drag of it, Drop and DragEnd there", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
+    Command { words: "drag", args: "path=ABS x= y= [w=ID] [wait=1]", answers: "hold one absolute file path dragged over x,y: a Drag event (the first one enters, repeats move it); drag_end leaves, drop drops it", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
+    Command { words: "drag_end", args: "[w=ID] [wait=1]", answers: "the open drag leaves the window without a drop (DragEnd)", service: "ui", risk: CmdRisk::Act, params: "\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "window", args: "k=maximize | k=fullscreen | k=resize width= height= | k=dragquery x= y= [w=ID] [wait=1]", answers: "window operations (the maximise/occlusion proof, fullscreen at the screen's size, the caption hit test)", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"maximize\",\"fullscreen\",\"resize\",\"dragquery\"]},\"width\":{\"type\":\"number\"},\"height\":{\"type\":\"number\"},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &["k"], positional: &[] },
     Command { words: "cpu", args: "", answers: "shared CPU budget and app pool summary", service: "platform", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
     Command { words: "log", args: "[n=50] [since=N]", answers: "{\"n\":lastseq,\"l\":[lines]}", service: "logs", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"since\":{\"type\":\"integer\"}", required: &[], positional: &[] },
@@ -870,7 +898,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "trace", args: "[topics=a,b] [off=1]", answers: "get / set the trace topics", service: "logs", risk: CmdRisk::Act, params: "\"topics\":{\"type\":\"string\"},\"off\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "step", args: "[frames=1] [fps=60] [wait_loads=1] [w=ID]", answers: "--virtual-clock only: run frames of 1/fps; answers {\"frame\",\"time\"} after the last", service: "ui", risk: CmdRisk::Act, params: "\"frames\":{\"type\":\"integer\"},\"fps\":{\"type\":\"number\"},\"wait_loads\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "settled", args: "", answers: "{\"settled\":bool,\"reasons\":[next_frame|redraw|repaint|timer|step|shaders|loads|pool],\"loads\":{kind:n},\"pool\":{\"queued\":[interactive,visible,background],\"running\":n,\"taken\":n}} (pool: the app pool's jobs waiting for a worker and its CPU permit, on its workers, and taken so far)", service: "ui", risk: CmdRisk::Read, params: "", required: &[], positional: &[] },
-    Command { words: "uicounts", args: "[waited=1]", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n,\"process_cpu_ns\":n,\"served_cpu_ns\":n,\"runtime_cpu_ns\":n,\"faults\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0), the CPU of all the process's threads, and of that what serving remote peers cost it (its serving threads, and its UI thread answering their commands) and what the runtime's own threads ran (under makepad run, the JIT's; natively 0), and the process's major page faults so far (getrusage; 0 on Windows); waited=1 adds \"waited_ns\":n, what the app's threads that run now (not the UI thread, the serving ones or the runtime's) have spent runnable, waiting for a core (Linux schedstat run_delay; 0 where the OS keeps none per thread: macOS, Windows), a file or two a thread: ask it seldom", service: "ui", risk: CmdRisk::Read, params: "\"waited\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "uicounts", args: "[waited=1]", answers: "{\"ins\":n,\"cyc\":n,\"cpu_ns\":n,\"answered_ns\":n,\"process_cpu_ns\":n,\"served_cpu_ns\":n,\"runtime_cpu_ns\":n,\"faults\":n} of the UI thread so far (ins/cyc: thread_counters, user mode: macOS thread_selfcounts, Linux perf_event; else 0) and of its CPU what it ran answering remote peers (the commands it applied for them that only observe the app, the frames it drew only to build a tree a request asked for), the CPU of all the process's threads, and of that what serving remote peers cost it (its serving threads, and its UI thread answering their commands) and what the runtime's own threads ran (under makepad run, the JIT's; natively 0), and the process's major page faults so far (getrusage; 0 on Windows); waited=1 adds \"waited_ns\":n, what the app's threads that run now (not the UI thread, the serving ones or the runtime's) have spent runnable, waiting for a core (Linux schedstat run_delay; 0 where the OS keeps none per thread: macOS, Windows), a file or two a thread: ask it seldom", service: "ui", risk: CmdRisk::Read, params: "\"waited\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "cap start", args: "path=ABS.mp4 [fps=60] [audio=1] [overwrite=1] [w=ID]", answers: "record the window in process (native pixels, H.264)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"},\"fps\":{\"type\":\"number\"},\"audio\":{\"type\":\"boolean\"},\"overwrite\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"}", required: &["path"], positional: &[] },
     Command { words: "cap stop", args: "[hashes=1]", answers: "finalize the recording: {\"frames\",\"sz\",\"missing\",\"hash\"}", service: "ui", risk: CmdRisk::Act, params: "\"hashes\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "input record", args: "path=<file>", answers: "record the person's native pointer, wheel, key and text input as the commands that inject it (one line each: ms, presented frame, command)", service: "ui", risk: CmdRisk::Act, params: "\"path\":{\"type\":\"string\"}", required: &["path"], positional: &[] },
@@ -898,7 +926,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "shader consts", args: "[shader=ID]", answers: "the compiled shaders' hot-patchable constants", service: "edit", risk: CmdRisk::Read, params: "\"shader\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "shader const", args: "shader=ID i=N v=VALUE | reset=1", answers: "patch one constant on the GPU (no recompile)", service: "edit", risk: CmdRisk::Act, params: "\"shader\":{\"type\":\"integer\"},\"i\":{\"type\":\"integer\"},\"v\":{\"type\":\"number\"},\"reset\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
     Command { words: "gpu_inventory", args: "[n=15]", answers: "Cx GPU and CPU-retained graphics memory (textures, free pool slots, draw-list instances, geometries)", service: "inspect", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "quit", args: "[force=1]", answers: "shut the app down gracefully (no final grab); force=1: even while the person is using it", service: "ui", risk: CmdRisk::Destructive, params: "\"force\":{\"type\":\"integer\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
+    Command { words: "quit", args: "[force=1] [native=1]", answers: "shut the app down gracefully (no final grab); force=1: even while the person is using it; native=1: as a logout asks (macOS: AppKit's terminate:)", service: "ui", risk: CmdRisk::Destructive, params: "\"force\":{\"type\":\"integer\"},\"native\":{\"type\":\"boolean\"},\"if_user_seq\":{\"type\":\"integer\"}", required: &[], positional: &[] },
 ];
 
 /// The commands the client side answers by opening the `frames` service.
@@ -1335,70 +1363,88 @@ pub fn send_input(window: Option<usize>, inputs: Vec<Input>, wait: bool) -> Answ
     ))
 }
 
-pub fn parse_drop(p: &Params) -> Result<(Option<usize>, Input, bool), &'static str> {
-    // Unlike permissive mouse aliases, file input must not silently
-    // ignore a typo or choose between duplicate parameters.
+/// The file commands (`drop`, `drag`, `drag_end`): what each takes.
+#[derive(Clone, Copy, PartialEq)]
+pub enum FileInput {
+    Drop,
+    Drag,
+    DragEnd,
+}
+
+impl FileInput {
+    fn word(self) -> &'static str {
+        match self {
+            FileInput::Drop => "drop",
+            FileInput::Drag => "drag",
+            FileInput::DragEnd => "drag_end",
+        }
+    }
+}
+
+/// A file command's window, input and wait. Unlike permissive mouse aliases, file input must
+/// not silently ignore a typo or choose between duplicate parameters.
+pub fn parse_file_input(p: &Params, what: FileInput) -> Result<(Option<usize>, Input, bool), String> {
+    let word = what.word();
     let mut seen = Vec::new();
     for (key, _) in &p.0 {
         let key = match key.as_str() {
-            "path" | "x" | "y" | "wait" | "if_user_seq" => key.as_str(),
+            "path" | "x" | "y" if what != FileInput::DragEnd => key.as_str(),
+            "wait" | "if_user_seq" => key.as_str(),
             "w" | "window" => "w",
-            _ => return Err("unknown drop parameter"),
+            _ => return Err(format!("unknown {word} parameter")),
         };
         if seen.contains(&key) {
-            return Err("duplicate drop parameter");
+            return Err(format!("duplicate {word} parameter"));
         }
         seen.push(key);
     }
-    let path = p.get(&["path"]).ok_or("drop requires path=")?;
-    if path.is_empty()
-        || path.len() > 4096
-        || path.chars().any(char::is_control)
-        || !std::path::Path::new(path).is_absolute()
-    {
-        return Err(
-            "drop path must be absolute, at most 4096 bytes, with no control characters",
-        );
-    }
-    let coordinate = |key| {
-        p.get(&[key])
-            .and_then(|value| value.parse::<f64>().ok())
-            .filter(|value| value.is_finite() && *value >= 0.0)
-            .ok_or("drop requires finite, nonnegative x= and y=")
-    };
-    let x = coordinate("x")?;
-    let y = coordinate("y")?;
     let window = p
         .get(&["w", "window"])
         .map(|value| {
             if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err("drop window must be a nonnegative integer");
+                return Err(format!("{word} window must be a nonnegative integer"));
             }
             value
                 .parse::<usize>()
-                .map_err(|_| "drop window is out of range")
+                .map_err(|_| format!("{word} window is out of range"))
         })
         .transpose()?;
     let wait = match p.get(&["wait"]) {
         None | Some("0" | "false") => false,
         Some("1" | "true") => true,
-        _ => return Err("drop wait must be 0 or 1"),
+        _ => return Err(format!("{word} wait must be 0 or 1")),
     };
-    Ok((
-        window,
-        Input::DropFile {
-            path: path.to_string(),
-            x,
-            y,
-        },
-        wait,
-    ))
+    if what == FileInput::DragEnd {
+        return Ok((window, Input::DragFileEnd, wait));
+    }
+    let path = p.get(&["path"]).ok_or_else(|| format!("{word} requires path="))?;
+    if path.is_empty()
+        || path.len() > 4096
+        || path.chars().any(char::is_control)
+        || !std::path::Path::new(path).is_absolute()
+    {
+        return Err(format!(
+            "{word} path must be absolute, at most 4096 bytes, with no control characters"
+        ));
+    }
+    let coordinate = |key| {
+        p.get(&[key])
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| format!("{word} requires finite, nonnegative x= and y="))
+    };
+    let (path, x, y) = (path.to_string(), coordinate("x")?, coordinate("y")?);
+    let input = match what {
+        FileInput::Drag => Input::DragFile { path, x, y },
+        _ => Input::DropFile { path, x, y },
+    };
+    Ok((window, input, wait))
 }
 
-pub fn route_drop(p: &Params) -> Answer {
-    match parse_drop(p) {
+pub fn route_file_input(p: &Params, what: FileInput) -> Answer {
+    match parse_file_input(p, what) {
         Ok((window, input, wait)) => send_input(window, vec![input], wait),
-        Err(message) => Answer::Json(format!("{{\"err\":{}}}", json_str(message))),
+        Err(message) => Answer::Json(format!("{{\"err\":{}}}", json_str(&message))),
     }
 }
 
@@ -2011,7 +2057,7 @@ mod tests {
         let mut valid = fields.clone();
         valid.extend([("w".into(), "2".into()), ("wait".into(), "1".into())]);
         assert!(
-            matches!(parse_drop(&Params(valid)), Ok((Some(2), Input::DropFile { path: p, x: 12.5, y: 20.0 }, true)) if p == path)
+            matches!(parse_file_input(&Params(valid), FileInput::Drop), Ok((Some(2), Input::DropFile { path: p, x: 12.5, y: 20.0 }, true)) if p == path)
         );
         for (key, value) in [
             ("path", "relative.png"),
@@ -2030,19 +2076,26 @@ mod tests {
             invalid.retain(|(name, _)| name != key);
             invalid.push((key.into(), value.into()));
             assert!(
-                parse_drop(&Params(invalid)).is_err(),
+                parse_file_input(&Params(invalid), FileInput::Drop).is_err(),
                 "{key} accepted invalid value"
             );
         }
         let mut duplicate = fields.clone();
         duplicate.push(("path".into(), path.clone()));
-        assert!(parse_drop(&Params(duplicate)).is_err());
+        assert!(parse_file_input(&Params(duplicate), FileInput::Drop).is_err());
         let mut aliases = fields.clone();
         aliases.extend([("w".into(), "1".into()), ("window".into(), "2".into())]);
-        assert!(parse_drop(&Params(aliases)).is_err());
-        let mut long_path = fields;
+        assert!(parse_file_input(&Params(aliases), FileInput::Drop).is_err());
+        let mut long_path = fields.clone();
         long_path[0].1 = format!("{path}{}", "a".repeat(4096));
-        assert!(parse_drop(&Params(long_path)).is_err());
+        assert!(parse_file_input(&Params(long_path), FileInput::Drop).is_err());
+        // a drag takes what a drop takes; its end only the window and the wait
+        assert!(
+            matches!(parse_file_input(&Params(fields.clone()), FileInput::Drag), Ok((None, Input::DragFile { path: p, x: 12.5, y: 20.0 }, false)) if p == path)
+        );
+        assert!(parse_file_input(&Params(Vec::new()), FileInput::Drag).is_err_and(|e| e.contains("drag requires path=")));
+        assert!(matches!(parse_file_input(&Params(vec![("w".into(), "1".into())]), FileInput::DragEnd), Ok((Some(1), Input::DragFileEnd, false))));
+        assert!(parse_file_input(&Params(fields), FileInput::DragEnd).is_err_and(|e| e.contains("unknown drag_end parameter")));
     }
 
     #[test]
@@ -2106,6 +2159,8 @@ mod tests {
             ("key", 1),
             ("text", 1),
             ("drop", 1),
+            ("drag", 1),
+            ("drag_end", 1),
             ("trace", 1),
             ("step", 1),
             ("settled", 1),

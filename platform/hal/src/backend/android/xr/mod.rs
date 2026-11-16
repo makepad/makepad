@@ -35,6 +35,16 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+relax_api::option_layouts! {
+    (XrPosef, [Eye; 2]),
+    ([Eye; 2], f32),
+    [Eye; 2],
+    XrFoveationLevelFB,
+    XrPath,
+    XrSwapchain,
+    XrSwapchainUsageFlags,
+}
+
 /// The old backend's options (`CxOpenXrOptions`). The eye buffers are the recommended size
 /// (the old default scaled them by 1.4 for a light scene; Sandbox under the JIT renders whole
 /// games). Multisampling and foveation apply where the swapchain is rendered into directly,

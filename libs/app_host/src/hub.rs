@@ -4,19 +4,18 @@
 //! forwards their binary `AppToStudio` traffic to the UI thread; the host
 //! answers over the per-socket sender with `StudioToAppVec` frames.
 //!
-//! A child states the wire it speaks when it connects (`wire=<hex>`, the
-//! fingerprint `makepad_studio_protocol::WIRE` of the sources it was built
-//! from). A child that states another one, or none (built before children
-//! stated it), is not admitted: its socket is closed and the host hears
-//! [`HubEvent::Mismatch`] -- its messages would be decoded as something
-//! else, and it would hang in its first steps.
+//! A WM client states the version it negotiated on the WM socket (`proto=<v>`).
+//! A version in `makepad_studio_protocol::HOSTED_VERSIONS` admits it at that version,
+//! whatever its `wire=<hex>` fingerprint. A child that states no version must state
+//! this build's `makepad_studio_protocol::WIRE` and is admitted at its newest version.
+//! Otherwise its socket is closed and the host hears [`HubEvent::Mismatch`].
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest, HttpServerThread};
-use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WIRE};
+use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, HOSTED_VERSIONS, WIRE};
 use makepad_platform::makepad_micro_serde::{DeBin, SerBin};
 use makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 
@@ -26,14 +25,15 @@ pub enum HubEvent {
     /// A child connected its websocket; `sender` transmits raw ws frames.
     Connected {
         client: ClientId,
+        version: u32,
         socket: u64,
         sender: Sender<Vec<u8>>,
     },
     Disconnected {
         socket: u64,
     },
-    /// A child built from other protocol sources connected (`wire`: what it
-    /// stated, None: nothing). It was not admitted.
+    /// A child stated an unsupported version, or no version and another wire
+    /// (`wire`: what it stated, None: nothing). It was not admitted.
     Mismatch {
         client: ClientId,
         wire: Option<u64>,
@@ -114,8 +114,8 @@ impl AppHub {
                             } else {
                                 headers.path.clone()
                             };
-                            let client = match admit(&path) {
-                                Some(Ok(client)) => client,
+                            let (client, version) = match admit(&path) {
+                                Some(Ok(admission)) => admission,
                                 Some(Err(mismatch)) => {
                                     let _ = response_sender.send(Vec::new());
                                     let _ = event_tx.send(mismatch);
@@ -131,6 +131,7 @@ impl AppHub {
                             socket_client.insert(web_socket_id, client);
                             let _ = event_tx.send(HubEvent::Connected {
                                 client,
+                                version,
                                 socket: web_socket_id,
                                 sender: response_sender,
                             });
@@ -191,33 +192,38 @@ pub fn send_to_app(sender: &Sender<Vec<u8>>, msgs: Vec<StudioToApp>) {
     let _ = sender.send(StudioToAppVec(msgs).serialize_bin());
 }
 
-/// Whether a socket at `path` is a child this host talks to: its client,
-/// or the [`HubEvent::Mismatch`] of a child built from other protocol
-/// sources; None: not a child's socket.
-fn admit(path: &str) -> Option<Result<ClientId, HubEvent>> {
-    let (client, wire) = parse_app_path(path)?;
-    Some(if wire == Some(WIRE) { Ok(client) } else { Err(HubEvent::Mismatch { client, wire }) })
+/// A child's client id and admitted version: a `proto` in [`HOSTED_VERSIONS`], whatever its
+/// wire, or no `proto` and this build's [`WIRE`], at the newest version. Otherwise
+/// [`HubEvent::Mismatch`]; None: not a child's socket.
+fn admit(path: &str) -> Option<Result<(ClientId, u32), HubEvent>> {
+    let (client, wire, proto) = parse_app_path(path)?;
+    Some(match proto {
+        Some(version) if (HOSTED_VERSIONS.0..=HOSTED_VERSIONS.1).contains(&version) => Ok((client, version)),
+        None if wire == Some(WIRE) => Ok((client, HOSTED_VERSIONS.1)),
+        _ => Err(HubEvent::Mismatch { client, wire }),
+    })
 }
 
-/// `/app/<id>` and `/app?build=<id>[&crate=..][&wire=<hex>]`, like
-/// studio's gateway: the client, and the wire it states.
-fn parse_app_path(path: &str) -> Option<(ClientId, Option<u64>)> {
+/// `/app/<id>` and `/app?build=<id>[&crate=..][&wire=<hex>][&proto=<v>]`:
+/// the client, wire and version it states.
+fn parse_app_path(path: &str) -> Option<(ClientId, Option<u64>, Option<u32>)> {
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     let value = |name: &str| query.split('&').find_map(|pair| {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         (key == name).then(|| value.trim())
     });
     let wire = value("wire").and_then(|hex| u64::from_str_radix(hex, 16).ok());
+    let proto = value("proto").and_then(|v| v.parse().ok());
     if let Some(rest) = route.strip_prefix("/app/") {
         if rest.is_empty() || rest.contains('/') {
             return None;
         }
-        return Some((rest.parse::<u64>().ok()?, wire));
+        return Some((rest.parse::<u64>().ok()?, wire, proto));
     }
     if route != "/app" {
         return None;
     }
-    Some((value("build")?.parse::<u64>().ok()?, wire))
+    Some((value("build")?.parse::<u64>().ok()?, wire, proto))
 }
 
 #[cfg(test)]
@@ -226,11 +232,13 @@ mod tests {
 
     #[test]
     fn app_paths() {
-        assert_eq!(parse_app_path("/app/42"), Some((42, None)));
-        assert_eq!(parse_app_path("/app?build=7&crate=terminal"), Some((7, None)));
-        assert_eq!(parse_app_path("/app?build=7&crate=terminal&wire=00000000000000ff"), Some((7, Some(255))));
-        assert_eq!(parse_app_path("/app/42?wire=1f"), Some((42, Some(31))));
-        assert_eq!(parse_app_path("/app?build=7&wire=nothex"), Some((7, None)));
+        assert_eq!(parse_app_path("/app/42"), Some((42, None, None)));
+        assert_eq!(parse_app_path("/app?build=7&crate=terminal"), Some((7, None, None)));
+        assert_eq!(parse_app_path("/app?build=7&crate=terminal&wire=00000000000000ff"), Some((7, Some(255), None)));
+        assert_eq!(parse_app_path("/app/42?wire=1f"), Some((42, Some(31), None)));
+        assert_eq!(parse_app_path("/app?build=7&wire=nothex"), Some((7, None, None)));
+        assert_eq!(parse_app_path("/app?build=7&wire=ff&proto=1"), Some((7, Some(255), Some(1))));
+        assert_eq!(parse_app_path("/app?build=7&proto=x"), Some((7, None, None)));
         assert_eq!(parse_app_path("/app?crate=terminal"), None);
         assert_eq!(parse_app_path("/ui"), None);
         assert_eq!(parse_app_path("/app/x"), None);
@@ -239,12 +247,21 @@ mod tests {
     /// Fake children connecting: one built from these sources, one that
     /// states another wire, one from before children stated it.
     #[test]
-    fn only_a_child_of_this_wire_is_admitted() {
+    fn an_unversioned_child_needs_this_wire() {
         let ours = format!("/app?build=3&crate=makepad-example-calculator&wire={WIRE:016x}");
-        assert!(matches!(admit(&ours), Some(Ok(3))));
+        assert!(matches!(admit(&ours), Some(Ok((3, version))) if version == HOSTED_VERSIONS.1));
         let other = format!("/app?build=4&crate=makepad-example-calculator&wire={:016x}", WIRE ^ 1);
         assert!(matches!(admit(&other), Some(Err(HubEvent::Mismatch { client: 4, wire: Some(w) })) if w == WIRE ^ 1));
         assert!(matches!(admit("/app?build=5&crate=makepad-example-calculator"), Some(Err(HubEvent::Mismatch { client: 5, wire: None }))));
         assert!(admit("/ui").is_none());
+    }
+
+    #[test]
+    fn a_versioned_child_is_admitted_whatever_its_wire() {
+        let other = format!("/app?build=3&wire={:016x}&proto=1", WIRE ^ 1);
+        assert!(matches!(admit(&other), Some(Ok((3, 1)))));
+        assert!(matches!(admit("/app?build=4&proto=2"), Some(Ok((4, 2)))));
+        let unsupported = format!("/app?build=5&wire={WIRE:016x}&proto=9");
+        assert!(matches!(admit(&unsupported), Some(Err(HubEvent::Mismatch { client: 5, wire: Some(WIRE) }))));
     }
 }

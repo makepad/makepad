@@ -16,6 +16,10 @@ use std::ptr;
 use std::time::{Duration, Instant};
 use sys as x;
 
+relax_api::option_layouts! {
+    x::XButtonEvent,
+}
+
 const PROPERTY_CHANGE: c_long = 1 << 22;
 const WM_MASK: c_long = (x::SubstructureRedirectMask | x::SubstructureNotifyMask) as c_long;
 
@@ -1607,6 +1611,8 @@ impl Shell for App {
                 | OsCmd::MenuSet { .. }
                 | OsCmd::TraySet { .. }
                 | OsCmd::TrayRemove { .. }
+                | OsCmd::NotifyPost { .. }
+                | OsCmd::NotifyRemove { .. }
                 | OsCmd::WindowAtTray { .. }
                 | OsCmd::XrFrameEyes { .. }
                 | OsCmd::XrPoseLead { .. }

@@ -14,6 +14,10 @@ use std::{
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
 };
 
+relax_api::option_layouts! {
+    AbsInfo,
+}
+
 #[derive(Default)]
 pub(super) struct Snapshot {
     pub devices: Vec<GameDevice>,

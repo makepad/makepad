@@ -498,6 +498,8 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
         | OsCmd::MenuSet { .. }
         | OsCmd::TraySet { .. }
         | OsCmd::TrayRemove { .. }
+        | OsCmd::NotifyPost { .. }
+        | OsCmd::NotifyRemove { .. }
         | OsCmd::WindowAtTray { .. }
         | OsCmd::XrFrameEyes { .. }
         | OsCmd::XrPoseLead { .. }

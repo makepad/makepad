@@ -5,6 +5,11 @@ use crate::{backend::exec::Gpu, ledger::{Kind, LedgerEntry}, media::*, session::
 use makepad_jni_sys::{registration as reg, *};
 use std::{collections::{HashMap, VecDeque}, ffi::{c_char, c_void, CStr}, sync::{Arc, Mutex, OnceLock}, thread::Thread};
 
+relax_api::option_layouts! {
+    Egl,
+    Global,
+}
+
 pub(super) struct Plane { pub width: u32, pub height: u32, pub format: u32, pub bytes: Vec<u8> }
 pub(super) struct Frame { pub planes: Vec<Plane>, pub yuv: u32, pub matrix: f32 }
 impl Frame {

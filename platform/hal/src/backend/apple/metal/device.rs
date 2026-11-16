@@ -12,6 +12,10 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+relax_api::option_layouts! {
+    Loc,
+}
+
 /// What a finished piece of GPU work tells the backend thread. Completion handlers run on
 /// Metal's threads: they push here and wake the pump; `Metal::step` turns them into events.
 pub(crate) enum Done {

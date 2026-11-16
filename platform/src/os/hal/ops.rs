@@ -548,6 +548,7 @@ impl Cx {
                     self.hal.frames.w.quit();
                     return false;
                 }
+                CxOsOp::CancelQuit => self.hal.frames.w.quit_cancel(),
                 CxOsOp::StartDragging(items) => {
                     // the in-window drag protocol: Drag / Drop are made from the pointer events
                     self.hal.internal_drag_items = Some(std::sync::Arc::new(items));
@@ -636,6 +637,17 @@ impl Cx {
                         self.hal.frames.w.tray_remove(id.0);
                     }
                 }
+                CxOsOp::PostNotification(_) | CxOsOp::RemoveNotification(_) if self.hal.hosted.is_some() => {
+                    static SAID: std::sync::Once = std::sync::Once::new();
+                    SAID.call_once(|| crate::log!("notify: hosted apps do not support notifications yet"));
+                }
+                CxOsOp::PostNotification(n) => {
+                    let fb = &mut self.hal.frames;
+                    let title = fb.intern(&n.title);
+                    let body = fb.intern(&n.body);
+                    fb.w.notify_post(n.id.0, title, body);
+                }
+                CxOsOp::RemoveNotification(id) => self.hal.frames.w.notify_remove(id.0),
                 // program-side networking, as every backend does it
                 CxOsOp::HttpRequest { request_id, request } => {
                     let _ = self.net.http_start(request_id, request);
@@ -711,6 +723,8 @@ impl Cx {
                     }
                     self.hal.frames.w.a11y_action_done(req, result as u32);
                 }
+                CxOsOp::A11yLookupDone { seq } => self.hal.frames.w.a11y_lookup_done(seq),
+                CxOsOp::A11yHostLookupDone { req } => Self::send_studio_message(crate::studio::AppToStudio::A11yLookupDone { req }),
                 CxOsOp::CheckPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::CHECK, permission, request_id),
                 CxOsOp::RequestPermission { permission, request_id } => self.hal_permission(makepad_hal::media::permission_op::REQUEST, permission, request_id),
                 CxOsOp::StartLocationUpdates => self.hal_location(makepad_hal::media::location_op::START),

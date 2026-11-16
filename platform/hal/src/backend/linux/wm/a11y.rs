@@ -100,6 +100,14 @@ pub(super) fn start(hub: Arc<Hub>) {
                                 }
                             }
                         }
+                        Work::Request(StudioToApp::A11yLookup { req, query }) => {
+                            // The worker is busy for up to one frame; queued updates are covered
+                            // by this snapshot, and `versions` skips them afterwards.
+                            let seq = a11y::Native.lookup(&query);
+                            if seq != 0 { a11y::Native.wait_lookup(seq, Duration::from_secs(5)); }
+                            snapshot(&hub, &windows, &mut versions);
+                            if let Some(hub) = &hub { hub.send(vec![AppToStudio::A11yLookupDone { req }]); }
+                        }
                         Work::Request(StudioToApp::A11yType { text }) => {
                             if let Some((_, &key)) = windows.iter().min_by_key(|(window,_)| *window) { let _ = a11y::Native.type_text(key, &text); }
                         }
@@ -114,7 +122,7 @@ pub(super) fn start(hub: Arc<Hub>) {
     post(Work::Hub(hub));
 }
 pub(super) fn request(message: &StudioToApp) -> bool {
-    if !matches!(message, StudioToApp::A11yState { .. } | StudioToApp::A11yAction { .. } | StudioToApp::A11yRead { .. } | StudioToApp::A11yType { .. }) { return false; }
+    if !matches!(message, StudioToApp::A11yState { .. } | StudioToApp::A11yAction { .. } | StudioToApp::A11yRead { .. } | StudioToApp::A11yType { .. } | StudioToApp::A11yLookup { .. }) { return false; }
     post(Work::Request(message.clone())); true
 }
 pub(super) fn window(window: usize, key: Option<Key>) { post(Work::Window(window, key)); }

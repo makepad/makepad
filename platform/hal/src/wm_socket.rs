@@ -17,7 +17,8 @@
 //!   A client retries this on a fresh connection if the WM cannot answer `hello2`.
 //! - then client `adopt <pid> <crate>[ lane=<name>]`; server `admitted <hub port> <client id>`
 //!   or `refused <reason>`: the WM made a window slot for the caller, which connects to the hub
-//!   as that client like an app the WM launched itself. `lane=` marks a lane's test instance
+//!   as that client like an app the WM launched itself, stating the WM's fingerprint and the
+//!   negotiated version. `lane=` marks a lane's test instance
 //!   (`MAKEPAD_TEST_LANE`, [`TEST_LANE_ENV`]): the WM badges it and never takes it for the
 //!   dock's own instance of the app.
 //! - or, instead of the hello, client `makepad-wm launch <app id> [native]`; server `makepad-wm launched`
@@ -70,7 +71,10 @@ pub struct Versions {
 impl Versions {
     /// Bump `max` on any change to the hosted wire (the types in `platform/studio`);
     /// raise `min` only when dropping support for an older version.
-    pub const THIS: Versions = Versions { min: 1, max: 1 };
+    pub const THIS: Versions = Versions {
+        min: makepad_studio_protocol::HOSTED_VERSIONS.0,
+        max: makepad_studio_protocol::HOSTED_VERSIONS.1,
+    };
 
     fn parse(range: &str) -> Option<Versions> {
         let (min, max) = range.trim().split_once('-')?;
@@ -101,6 +105,8 @@ pub struct Admission {
     pub client: u64,
     /// The agreed hosted-protocol version.
     pub version: u32,
+    /// The fingerprint this client states at the WM's hub.
+    pub wire: u64,
 }
 
 /// The Linux window backends, in the order discovery tries them.
@@ -239,39 +245,44 @@ fn read_line(reader: &mut BufReader<&UnixStream>) -> io::Result<String> {
     Ok(line.trim_end().to_string())
 }
 
-fn hello(path: &Path, stream: &mut UnixStream, wire: u64, versions: Versions) -> (Probe, u32) {
+// Only hello2 states a version; a legacy hello has none.
+fn hello(path: &Path, stream: &mut UnixStream, wire: u64, versions: Versions) -> (Probe, Option<u32>) {
     let answer = (&*stream).write_all(format!("{GREETING} hello2 {}-{}\n", versions.min, versions.max).as_bytes())
         .and_then(|_| read_line(&mut BufReader::new(&*stream)));
     if let Ok(line) = answer {
         if let Some(rest) = line.strip_prefix(GREETING).map(str::trim) {
             if let Some(version) = rest.strip_prefix("ok ").and_then(|v| v.parse::<u32>().ok()) {
                 if version >= versions.min && version <= versions.max {
-                    return (Probe::Live, version);
+                    return (Probe::Live, Some(version));
                 }
             }
             if let Some(theirs) = rest.strip_prefix("incompatible ").and_then(Versions::parse) {
-                return (Probe::Incompatible { theirs }, 0);
+                return (Probe::Incompatible { theirs }, None);
             }
         }
     }
     // Old WMs close an unknown hello2 without answering. Retry the wire check on a fresh socket.
     *stream = match connect(path) {
         Ok(stream) => stream,
-        Err(probe) => return (probe, 0),
+        Err(probe) => return (probe, None),
     };
+    (legacy_hello(stream, wire), None)
+}
+
+fn legacy_hello(stream: &UnixStream, wire: u64) -> Probe {
     if let Err(e) = (&*stream).write_all(format!("{GREETING} hello {wire:016x}\n").as_bytes()) {
-        return (Probe::Dead(e.to_string()), 0);
+        return Probe::Dead(e.to_string());
     }
     match read_line(&mut BufReader::new(&*stream)) {
         Ok(line) => match line.strip_prefix(GREETING).map(str::trim) {
-            Some("ok") => (Probe::Live, Versions::THIS.max),
+            Some("ok") => Probe::Live,
             Some(rest) => match rest.strip_prefix("mismatch ").and_then(|w| u64::from_str_radix(w.trim(), 16).ok()) {
-                Some(theirs) => (Probe::Mismatch(theirs), 0),
-                None => (Probe::Dead(format!("unexpected answer {line:?}")), 0),
+                Some(theirs) => Probe::Mismatch(theirs),
+                None => Probe::Dead(format!("unexpected answer {line:?}")),
             },
-            None => (Probe::Dead(format!("not a makepad WM: {line:?}")), 0),
+            None => Probe::Dead(format!("not a makepad WM: {line:?}")),
         },
-        Err(e) => (Probe::Dead(e.to_string()), 0),
+        Err(e) => Probe::Dead(e.to_string()),
     }
 }
 
@@ -306,6 +317,9 @@ pub fn adopt(path: &Path, wire: u64, pid: u32, crate_name: &str) -> Result<Admis
 }
 
 /// Ask to be hosted with an explicit hosted-protocol range.
+/// After versioned admission, a legacy hello on a fresh connection learns the WM's fingerprint:
+/// the client states it at the hub along with the negotiated version, so an older WM's wire gate
+/// takes it too. A legacy admission, or no usable answer, keeps this build's `wire`.
 pub fn adopt_with(path: &Path, wire: u64, versions: Versions, pid: u32, crate_name: &str) -> Result<Admission, Probe> {
     let mut stream = connect(path)?;
     let (probe, version) = hello(path, &mut stream, wire, versions);
@@ -320,7 +334,17 @@ pub fn adopt_with(path: &Path, wire: u64, versions: Versions, pid: u32, crate_na
     let line = read_line(&mut reader).map_err(|e| Probe::Dead(e.to_string()))?;
     let mut parts = line.split(' ');
     match (parts.next(), parts.next().and_then(|p| p.parse().ok()), parts.next().and_then(|c| c.parse().ok())) {
-        (Some("admitted"), Some(port), Some(client)) => Ok(Admission { port, client, version }),
+        (Some("admitted"), Some(port), Some(client)) => {
+            let wire = if version.is_some() {
+                match connect(path).map(|stream| legacy_hello(&stream, wire)) {
+                    Ok(Probe::Mismatch(theirs)) => theirs,
+                    _ => wire,
+                }
+            } else {
+                wire
+            };
+            Ok(Admission { port, client, version: version.unwrap_or(Versions::THIS.max), wire })
+        }
         _ => Err(Probe::Dead(line.strip_prefix("refused ").map_or_else(|| format!("unexpected answer {line:?}"), str::to_string))),
     }
 }
@@ -580,12 +604,12 @@ mod tests {
         let path = socket.path.clone();
         let server = thread::spawn(move || {
             let mut adopted = Vec::new();
-            // the second bind's check, two probes, two legacy wire checks, an adoption
-            for _ in 0..6 {
+            // the second bind's check, two probes, two legacy wire checks, an adoption and its wire check
+            for _ in 0..7 {
                 let (stream, _) = socket.listener.accept().unwrap();
                 let got = WmSocket::serve(stream, wire, |req| {
                     assert_eq!(req.crate_name, "makepad-app-amp");
-                    Ok(Admission { port: 8766, client: 1 << 32, version: req.version })
+                    Ok(Admission { port: 8766, client: 1 << 32, version: req.version, wire })
                 }, |_, _| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
                 adopted.extend(got);
             }
@@ -605,7 +629,7 @@ mod tests {
                 assert_eq!(read_line(&mut reader).unwrap(), format!("admitted 8766 {}", 1u64 << 32));
             }
         }
-        assert_eq!(adopt(&path, wire, 42, "makepad-app-amp"), Ok(Admission { port: 8766, client: 1 << 32, version: Versions::THIS.max }));
+        assert_eq!(adopt(&path, wire, 42, "makepad-app-amp"), Ok(Admission { port: 8766, client: 1 << 32, version: Versions::THIS.max, wire }));
         let adopted = server.join().unwrap();
         // `adopt` says this process's test lane (MAKEPAD_TEST_LANE: a devhub lease sets it), whatever it is
         assert_eq!(adopted, vec![
@@ -628,6 +652,7 @@ mod tests {
     #[test]
     fn two_protocol_versions_agree_on_the_common_one() {
         let dir = temp_dir("versions");
+        let wire = 7;
         let one = Versions { min: 1, max: 1 };
         let two = Versions { min: 1, max: 2 };
         let newer = Versions { min: 3, max: 4 };
@@ -636,12 +661,12 @@ mod tests {
             let path = socket.path.clone();
             let server = thread::spawn(move || {
                 let mut adopted = Vec::new();
-                for _ in 0..2 {
+                for _ in 0..(if version == 0 { 2 } else { 3 }) {
                     let (stream, _) = socket.listener.accept().unwrap();
-                    let got = WmSocket::serve_with(stream, 7, theirs, |request| {
+                    let got = WmSocket::serve_with(stream, wire, theirs, |request| {
                         assert_ne!(version, 0, "incompatible clients never ask for admission");
                         assert_eq!(request.version, version);
-                        Ok(Admission { port: 1, client: 2, version: request.version })
+                        Ok(Admission { port: 1, client: 2, version: request.version, wire })
                     }, |_, _| Err("no launches here".into()), |_, _, _| Err("no toasts here".into())).unwrap();
                     adopted.extend(got);
                 }
@@ -654,9 +679,39 @@ mod tests {
                 assert_eq!(admission, Err(expected));
                 assert!(server.join().unwrap().is_empty());
             } else {
-                assert_eq!(admission, Ok(Admission { port: 1, client: 2, version }));
+                assert_eq!(admission, Ok(Admission { port: 1, client: 2, version, wire }));
                 assert_eq!(server.join().unwrap(), vec![AdoptRequest { pid: 42, crate_name: "app".into(), version, test_lane: test_lane() }]);
             }
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn versioned_admission_states_the_wms_wire_at_its_hub() {
+        let dir = temp_dir("admission-wire");
+        let wire = 0xcd;
+        for (answer, expected_wire) in [("makepad-wm mismatch 00000000000000ab\n", 0xab), ("makepad-wm ok\n", wire)] {
+            let socket = WmSocket::bind(&dir, 0).unwrap();
+            let path = socket.path.clone();
+            let server = thread::spawn(move || {
+                let (stream, _) = socket.listener.accept().unwrap();
+                stream.set_read_timeout(Some(LINE_TIMEOUT)).unwrap();
+                stream.set_write_timeout(Some(LINE_TIMEOUT)).unwrap();
+                let mut reader = BufReader::new(&stream);
+                assert_eq!(read_line(&mut reader).unwrap(), "makepad-wm hello2 1-2");
+                (&stream).write_all(b"makepad-wm ok 1\n").unwrap();
+                let line = read_line(&mut reader).unwrap();
+                assert_eq!(line.split_whitespace().take(3).collect::<Vec<_>>(), vec!["adopt", "42", "app"]);
+                (&stream).write_all(b"admitted 5 6\n").unwrap();
+                let (legacy, _) = socket.listener.accept().unwrap();
+                legacy.set_read_timeout(Some(LINE_TIMEOUT)).unwrap();
+                legacy.set_write_timeout(Some(LINE_TIMEOUT)).unwrap();
+                assert_eq!(read_line(&mut BufReader::new(&legacy)).unwrap(), format!("makepad-wm hello {wire:016x}"));
+                (&legacy).write_all(answer.as_bytes()).unwrap();
+            });
+            let admission = adopt_with(&path, wire, Versions { min: 1, max: 2 }, 42, "app").unwrap();
+            assert_eq!(admission, Admission { port: 5, client: 6, version: 1, wire: expected_wire });
+            server.join().unwrap();
         }
         let _ = std::fs::remove_dir(&dir);
     }
@@ -692,7 +747,7 @@ mod tests {
         });
         let versions = Versions { min: 1, max: 2 };
         assert_eq!(probe_with(&path, wire, versions), Probe::Live);
-        assert_eq!(adopt_with(&path, wire, versions, 42, "app"), Ok(Admission { port: 1, client: 2, version: Versions::THIS.max }));
+        assert_eq!(adopt_with(&path, wire, versions, 42, "app"), Ok(Admission { port: 1, client: 2, version: Versions::THIS.max, wire }));
         assert_eq!(probe_with(&path, wire ^ 1, versions), Probe::Mismatch(wire));
         assert_eq!(adopt_with(&path, wire ^ 1, versions, 42, "app"), Err(Probe::Mismatch(wire)));
         server.join().unwrap();
@@ -761,11 +816,13 @@ mod tests {
         let paths = reattach_paths_in(Some(stale.clone()), Some(dir.clone()));
         assert_eq!(paths, vec![stale.clone(), socket_path(&dir, 0)]);
         let server = thread::spawn(move || {
-            let (stream, _) = live.listener.accept().unwrap();
-            WmSocket::serve(stream, wire, |request| Ok(Admission { port: 1, client: 2, version: request.version }), |_, _| Ok(()), |_, _, _| Ok(())).unwrap();
+            for _ in 0..2 {
+                let (stream, _) = live.listener.accept().unwrap();
+                WmSocket::serve(stream, wire, |request| Ok(Admission { port: 1, client: 2, version: request.version, wire }), |_, _| Ok(()), |_, _, _| Ok(())).unwrap();
+            }
         });
         let found = paths.iter().find_map(|p| adopt(p, wire, 9, "devhub").ok());
-        assert_eq!(found, Some(Admission { port: 1, client: 2, version: Versions::THIS.max }));
+        assert_eq!(found, Some(Admission { port: 1, client: 2, version: Versions::THIS.max, wire }));
         server.join().unwrap();
         let _ = std::fs::remove_file(&stale);
         let _ = std::fs::remove_dir(&dir);

@@ -8,6 +8,7 @@ use crate::{
     window::WindowId,
 };
 use makepad_a11y::{
+    query::Query,
     ActionRequest, ActionResult, Actions, Live, Node, NodeId, Notification, Role, States,
     TreeUpdate,
 };
@@ -37,6 +38,8 @@ struct Record {
     depth: usize,
     owner: NodeId,
     part_key: u64,
+    /// The lookup frame that supplied this part; zero for ordinary draw-time parts.
+    looked_up: u32,
     /// A part drawn as an area of its own (a list's row): its bounds, and whether it is
     /// offscreen, are that area's once the frame's turtles finish, as a widget's are. Empty:
     /// the part carries its own.
@@ -73,6 +76,15 @@ struct Frame {
     list: Option<DrawListId>,
 }
 
+/// Where a lookup request originated, and the number its acknowledgement must echo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LookupSource {
+    /// A sequence from the app's native HAL semantic endpoint.
+    Native(u32),
+    /// A request number from the host's semantic endpoint.
+    Host(u64),
+}
+
 #[derive(Default)]
 pub struct CxA11y {
     pub on: bool,
@@ -86,8 +98,24 @@ pub struct CxA11y {
     announcements: Vec<Notification>,
     pending: Option<(u64, ActionResult)>,
     requested_focus: NodeId,
+    lookups: Vec<(LookupSource, Query, Option<(NodeId, u64)>)>,
+    lookup_frame: u32,
+    lookup_done: u32,
+    host_lookups_done: Vec<u64>,
+    snapshot: u32,
+    host_snapshots: Vec<u64>,
+    sticky: u32,
     /// Nodes whose path the widget layer could not name while they drew (`path_unknown`).
     paths_unknown: Vec<(WindowKey, NodeId)>,
+    /// A path joined `paths_unknown` in the frame building now (`path_unknown`).
+    paths_added: bool,
+    /// No path joined `paths_unknown` in the last frame that built: each one there was asked
+    /// again after a later frame than the one that found it, and stayed unnamed. A frame of an
+    /// app that did not change names none of them ([`CxA11y::current`]).
+    paths_settled: bool,
+    /// The last frame that built the tree: the app's event count once it drew (`Cx::event_id`)
+    /// and the key focus it built with ([`Cx::a11y_tree_current`]). None before the first.
+    built: Option<(u64, Area)>,
 }
 
 /// Names a widget node's path (`Node::path`) after the frame drew, for nodes whose path the
@@ -100,11 +128,27 @@ pub fn set_path_resolver(resolve: fn(&Cx, u64, u64) -> Option<String>) {
 }
 
 impl CxA11y {
+    /// The consumer bits (`makepad_a11y::consumer`) that keep the builder on; zero when off.
+    pub fn consumers(&self) -> u32 {
+        self.consumers
+    }
     /// Returns true on activation; the owning Cx must then redraw every window.
+    /// Off keeps the records so ids from the last snapshot still resolve through
+    /// `action_owner`, `action_part_key` and `request_lookup` id terms and act; only building stops.
     pub fn set_consumers(&mut self, consumers: u32) -> bool {
         let activate = !self.on && consumers != 0;
         if consumers == 0 {
-            *self = Self::default();
+            self.on = false;
+            self.consumers = 0;
+            // Host waiters end through their own timeout or disconnect when building stops.
+            self.lookups.clear();
+            self.host_snapshots.clear();
+            self.snapshot = 0;
+            self.stack.clear();
+            self.suspended.clear();
+            self.outside_windows.clear();
+            self.window_stack.clear();
+            self.announcements.clear();
             return false;
         }
         self.consumers = consumers;
@@ -115,6 +159,93 @@ impl CxA11y {
             }
         }
         activate
+    }
+    /// Back on for `consumers` (not zero) over the records the last built frame left, while they
+    /// are still the app's ([`Cx::a11y_tree_current`]): no window is rebuilt in full and no frame
+    /// is owed; the next frame that draws builds on them as a builder that stayed on does.
+    pub fn resume(&mut self, consumers: u32) {
+        debug_assert!(consumers != 0, "resume needs a consumer");
+        self.consumers = consumers;
+        self.on = true;
+    }
+    /// The tree the last built frame published is still the app's: since that frame (its event
+    /// count `event_id` once it drew, and the key focus `focus` it built with) no event reached
+    /// the app, which may change what the tree shows without a redraw; no redraw waits; and
+    /// nothing the builder holds waits for a frame (a lookup, a snapshot, an action's result, an
+    /// announcement, a path still unnamed that no later frame has asked again).
+    pub fn current(&self, event_id: u64, focus: Area, redraw_pending: bool) -> bool {
+        self.built == Some((event_id, focus))
+            && !redraw_pending
+            && self.lookups.is_empty()
+            && self.snapshot == 0
+            && self.host_snapshots.is_empty()
+            && self.pending.is_none()
+            && self.announcements.is_empty()
+            && (self.paths_unknown.is_empty() || self.paths_settled)
+    }
+    /// Requests one lookup frame while consumers are active; an empty query requests only
+    /// a snapshot acknowledgement. A true result requires the caller to redraw every window.
+    /// Invalid queries are logged and leave pending work intact.
+    pub fn request_lookup(&mut self, source: LookupSource, query: &str) -> bool {
+        if !self.on || source == LookupSource::Native(0) {
+            return false;
+        }
+        if query.trim().is_empty() {
+            match source {
+                LookupSource::Native(seq) => self.snapshot = self.snapshot.max(seq),
+                LookupSource::Host(req) => self.host_snapshots.push(req),
+            }
+            return true;
+        }
+        let query = match Query::parse(query) {
+            Ok(query) => query,
+            Err(error) => { crate::error!("semantic lookup: {error}"); return false; }
+        };
+        if !query.is_lookup() {
+            return false;
+        }
+        let owner = query.id_term().and_then(|id| {
+            if let Some(key) = self.action_part_key(id) {
+                return Some((self.action_owner(id), key));
+            }
+            // Part records expire, but their owner's stable key-to-id table does not.
+            // Packed ids name that owner directly; overflow ids need a table search.
+            if id.part_index() != 0 {
+                let owner = NodeId::widget(id.uid());
+                self.windows.values().find_map(|tree| {
+                    tree.records.get(&owner)?.parts.iter()
+                        .find_map(|(key, part)| (*part == id).then_some((owner, *key)))
+                })
+            } else {
+                self.windows.values().find_map(|tree| {
+                    tree.records.iter().find_map(|(owner, rec)| {
+                        rec.parts.iter().find_map(|(key, part)| (*part == id).then_some((*owner, *key)))
+                    })
+                })
+            }
+        });
+        if self.lookups.is_empty() {
+            self.lookup_frame = self.lookup_frame.wrapping_add(1).max(1);
+        }
+        self.lookups.push((source, query, owner));
+        true
+    }
+    /// Takes the completed lookup sequence once; zero means no acknowledgement is pending.
+    pub fn take_lookup_done(&mut self) -> u32 {
+        std::mem::take(&mut self.lookup_done)
+    }
+    /// Takes every completed host request once.
+    pub fn take_host_lookups_done(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.host_lookups_done)
+    }
+    /// The lookups for the node being built: `(query, None)` asks for matching terms;
+    /// `(query, Some(key))` asks only its resolved owner to refresh that stable part key.
+    /// With no pending lookup the iterator makes a single emptiness check.
+    pub fn lookups_for(&self, token: u32) -> impl Iterator<Item = (&Query, Option<u64>)> {
+        self.lookups.iter().filter_map(move |(_, query, owner)| match owner {
+            Some((owner, key)) => (self.stack[token as usize].id == *owner).then_some((query, Some(*key))),
+            None => Some((query, None)),
+        })
     }
     pub(crate) fn request_full(&mut self) {
         for w in self.windows.values_mut() { w.full = true; }
@@ -290,7 +421,16 @@ impl CxA11y {
     /// Overflow of the wire's 16-bit part field uses a fresh widget id from the same allocator;
     /// dispatch always resolves the owner, so large virtual collections do not truncate or collide.
     /// `drawn`: the area the part drew as, when it drew as one of its own (see [`Record::drawn`]).
-    pub fn set_part(&mut self, token: u32, key: u64, parent_key: Option<u64>, mut node: Node, drawn: Area, alloc: impl FnOnce() -> u64) {
+    pub fn set_part(&mut self, token: u32, key: u64, parent_key: Option<u64>, node: Node, drawn: Area, alloc: impl FnOnce() -> u64) {
+        self.set_part_inner(token, key, parent_key, node, drawn, 0, alloc);
+    }
+    /// Insert a lookup answer through the same stable ids and action routing as [`Self::set_part`].
+    /// Its record stays until the next lookup replaces it, even across ordinary redraws.
+    pub fn set_lookup_part(&mut self, token: u32, key: u64, parent_key: Option<u64>, node: Node, drawn: Area, alloc: impl FnOnce() -> u64) {
+        if self.lookups.is_empty() { return; }
+        self.set_part_inner(token, key, parent_key, node, drawn, self.lookup_frame, alloc);
+    }
+    fn set_part_inner(&mut self, token: u32, key: u64, parent_key: Option<u64>, mut node: Node, drawn: Area, looked_up: u32, alloc: impl FnOnce() -> u64) {
         let f = self.stack[token as usize];
         let Some(w) = f.window else { return };
         let tree = self.windows.get_mut(&w).unwrap();
@@ -327,6 +467,7 @@ impl CxA11y {
         let rec = tree.records.get_mut(&id).unwrap();
         rec.owner = f.id;
         rec.part_key = key;
+        rec.looked_up = looked_up;
         rec.drawn = drawn;
         rec.next = node;
     }
@@ -337,6 +478,7 @@ impl CxA11y {
         if let Some(w) = f.window {
             if !self.paths_unknown.contains(&(w, f.id)) {
                 self.paths_unknown.push((w, f.id));
+                self.paths_added = true;
             }
         }
     }
@@ -416,13 +558,19 @@ impl CxA11y {
         if !self.on {
             return;
         }
+        let serving = !self.lookups.is_empty();
+        let sticky = if serving { self.lookup_frame } else { self.sticky };
         for (window, tree) in &mut self.windows {
             tree.ids.clear();
             tree.ids.extend(tree.records.keys().copied());
             for rec in tree.records.values_mut() {
                 rec.reachable = false;
                 let redraw = rec.list.and_then(&mut list_redraw);
-                rec.alive = rec.seen == self.frame || redraw.is_some_and(|r| r == rec.redraw);
+                rec.alive = if rec.looked_up != 0 {
+                    rec.looked_up == sticky
+                } else {
+                    rec.seen == self.frame || redraw.is_some_and(|r| r == rec.redraw)
+                };
                 if rec.seen != self.frame && rec.annotated != self.frame {
                     reuse_node(&mut rec.next, &rec.node);
                     // A name a tip gave is given again below, from the tip as it is now.
@@ -435,7 +583,7 @@ impl CxA11y {
                     if !rec.owner.is_none() {
                         // Parts carry their own bounds, but focus belongs to the owner's real
                         // Area; one drawn as an area of its own stands where that area shows.
-                        if !rec.drawn.is_empty() {
+                        if !rec.drawn.is_empty() && (rec.looked_up == 0 || rec.seen == self.frame) {
                             shown_at(&mut rec.next, bounds(rec.drawn));
                         }
                     } else {
@@ -634,6 +782,17 @@ impl CxA11y {
             tree.focus = next_focus;
         }
         self.announcements.clear();
+        self.lookup_done = std::mem::take(&mut self.snapshot);
+        if serving {
+            self.sticky = self.lookup_frame;
+            for (source, _, _) in self.lookups.drain(..) {
+                match source {
+                    LookupSource::Native(seq) => self.lookup_done = self.lookup_done.max(seq),
+                    LookupSource::Host(req) => self.host_lookups_done.push(req),
+                }
+            }
+        }
+        self.host_lookups_done.extend(std::mem::take(&mut self.host_snapshots));
     }
 }
 fn ancestor(tree: &WindowTree, candidate: NodeId, mut child: NodeId) -> bool {
@@ -805,6 +964,7 @@ impl Cx {
             }
             self.a11y.paths_unknown = unknown;
         }
+        self.a11y.paths_settled = !std::mem::take(&mut self.a11y.paths_added);
         let mut a11y = std::mem::take(&mut self.a11y);
         let mut ops = std::mem::take(&mut self.platform_ops);
         a11y.finish_frame(
@@ -822,8 +982,67 @@ impl Cx {
             }),
             |window, bytes| ops.push_back(CxOsOp::A11yUpdate { window, bytes }),
         );
+        let seq = a11y.take_lookup_done();
+        if seq != 0 {
+            ops.push_back(CxOsOp::A11yLookupDone { seq });
+        }
+        for req in a11y.take_host_lookups_done() {
+            ops.push_back(CxOsOp::A11yHostLookupDone { req });
+        }
+        a11y.built = Some((self.event_id, self.keyboard.key_focus()));
         self.platform_ops = ops;
         self.a11y = a11y;
+    }
+    /// The tree the builder last built is still the app's ([`CxA11y::current`]): a snapshot of it
+    /// needs no frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn a11y_tree_current(&self) -> bool {
+        self.a11y.current(self.event_id, self.keyboard.key_focus(), self.need_redrawing())
+    }
+    /// The HAL's consumers changed (`consumers`, the app host's added): a builder that comes back
+    /// on redraws every window to build its tree, unless the tree it built last is still the
+    /// app's ([`Self::a11y_tree_current`]). A snapshot consumer (a remote or test request) holds
+    /// the builder only while its request runs, so between requests that draw nothing, each one
+    /// would otherwise draw every window again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn a11y_consumers_changed(&mut self, consumers: u32) {
+        if consumers != 0 && !self.a11y.on && self.a11y_tree_current() {
+            self.a11y.resume(consumers);
+            return;
+        }
+        if self.a11y.set_consumers(consumers) {
+            self.a11y_redraw_for_request();
+        }
+    }
+    /// A semantic lookup from the HAL (`seq`, `query`): a snapshot (an empty query) of a tree that
+    /// is still the app's is acknowledged at once, with no frame; anything else is built and
+    /// acknowledged by the next frame.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn a11y_lookup(&mut self, seq: u32, query: &str) {
+        if seq != 0 && query.trim().is_empty() && self.a11y.on && self.a11y_tree_current() {
+            self.platform_ops.push_back(CxOsOp::A11yLookupDone { seq });
+            return;
+        }
+        if self.a11y.request_lookup(LookupSource::Native(seq), query) {
+            self.a11y_redraw_for_request();
+        }
+    }
+    /// Redraws every window for a tree request. The frame is the request's alone
+    /// ([`Self::a11y_answer_frame`]) when nothing else waits for one: no redraw, no next frame,
+    /// none but this request's own asks.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn a11y_redraw_for_request(&mut self) {
+        let alone = self.a11y_answer_frame == Some(self.frame_requests)
+            || !(self.need_redrawing() || !self.new_next_frames.is_empty());
+        self.redraw_all();
+        self.a11y_answer_frame = alone.then_some(self.frame_requests);
+    }
+    /// The frame about to draw takes the request's claim: true when it is drawn only to answer a
+    /// tree request, with no frame asked for by anything else since the request asked
+    /// (its CPU is the request's, [`crate::remote::charge_answered`]).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn a11y_take_answer_frame(&mut self) -> bool {
+        self.a11y_answer_frame.take() == Some(self.frame_requests)
     }
 }
 /// A drawn node's bounds: its area clipped by every clip it drew under, on every side. None:
@@ -945,13 +1164,18 @@ impl Cx {
                     Actions::PRESS | Actions::TOGGLE | Actions::SELECT
                 ) && !bounds.is_empty()
                 {
+                    // The bounds are layout points; the studio pointer path remaps native points
+                    // into layout (a window's DPI override), so hand it native points.
                     let (x, y) = bounds.center();
+                    let center = dvec2(x as f64, y as f64);
+                    let native = if self.windows.is_valid(window) { self.windows[window].layout_vec2d_to_native_points(center) } else { center };
+                    let (x, y) = (native.x, native.y);
                     let time = self.seconds_since_app_start();
                     self.dispatch_studio_msg(
                         StudioToApp::MouseDown(RemoteMouseDown {
                             time,
-                            x: x as f64,
-                            y: y as f64,
+                            x,
+                            y,
                             button_raw_bits: 1,
                             modifiers: Default::default(),
                         }),
@@ -961,8 +1185,8 @@ impl Cx {
                     self.dispatch_studio_msg(
                         StudioToApp::MouseUp(RemoteMouseUp {
                             time: time + 0.001,
-                            x: x as f64,
-                            y: y as f64,
+                            x,
+                            y,
                             button_raw_bits: 1,
                             modifiers: Default::default(),
                         }),
@@ -1051,6 +1275,167 @@ mod tests {
         let mut b = CxA11y::default();
         assert!(b.set_consumers(4));
         b
+    }
+
+    #[test]
+    fn lookup_parts_stay_until_replaced_and_resolve_by_stable_key() {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let other_list = pool.alloc();
+        let mut b = active();
+        let mut tree = Tree::new();
+        let bounds = makepad_a11y::Rect { x: 12.0, y: 34.0, w: 20.0, h: 10.0 };
+        let draw = |b: &mut CxA11y, expected: Option<Option<u64>>, answer: bool, ordinary: bool, redraw| {
+            b.begin_frame();
+            let r = root(b, WindowId(0, 1), 1, list.id());
+            let terms = expected == Some(None);
+            assert_eq!(b.lookups_for(r).next().is_some(), terms, "only a terms lookup visits the first root");
+            let owner = b.begin_node(2, Some(list.id()));
+            assert_eq!(b.lookups_for(owner).next().map(|(_, key)| key), expected, "the owner receives terms, its key, or no lookup");
+            if answer {
+                let (query, key) = b.lookups_for(owner).next().expect("answers require a pending lookup");
+                let part = Node { bounds, actions: Actions::PRESS, ..node(Role::Button, "Item") };
+                assert!(key.is_some() || query.matches(&part), "a terms answer matches the complete query");
+                b.set_lookup_part(owner, key.unwrap_or(7), None, part, Area::Empty, || unreachable!("a packed part id"));
+            }
+            if ordinary {
+                b.set_part(owner, 8, None, node(Role::Button, "Ordinary"), Area::Empty, || unreachable!("a packed part id"));
+            }
+            b.end_node(owner, node(Role::Group, "Owner"), Area::Empty);
+            let sibling = b.begin_node(3, Some(list.id()));
+            assert_eq!(b.lookups_for(sibling).next().is_some(), terms, "a key lookup never visits another owner");
+            b.end_node(sibling, node(Role::Group, "Other"), Area::Empty);
+            end_root(b, r);
+            let other = root(b, WindowId(1, 1), 10, other_list.id());
+            assert_eq!(b.lookups_for(other).next().is_some(), terms, "no pending lookup visits no token, including other windows");
+            end_root(b, other);
+            finish(b, Area::Empty, |_| Some(redraw))
+        };
+        let apply = |tree: &mut Tree, updates: Vec<TreeUpdate>| {
+            for update in updates {
+                if update.root == NodeId::widget(1) { tree.apply(update); }
+            }
+        };
+        let acknowledge = |b: &mut CxA11y, seq| {
+            assert_eq!(b.take_lookup_done(), seq, "the frame acknowledges exactly its requested lookup, or none");
+            assert_eq!(b.take_lookup_done(), 0, "a completed lookup is acknowledged only once per frame");
+        };
+
+        assert!(!b.request_lookup(LookupSource::Native(1), "role=button"), "structural filters do not request materialisation");
+        apply(&mut tree, draw(&mut b, None, false, true, 1));
+        acknowledge(&mut b, 0);
+        let ordinary = tree.nodes.values().find(|n| n.name == "Ordinary").expect("ordinary part drawn").id;
+        assert!(b.request_lookup(LookupSource::Native(1), "name=Item"), "a named lookup requests every window redraw");
+        let updates = draw(&mut b, Some(None), true, false, 2);
+        assert_eq!(updates.len(), 1, "only the changed window emits an update");
+        assert_eq!(updates[0].root, NodeId::widget(1), "the unchanged window needs no update to acknowledge the lookup");
+        acknowledge(&mut b, 1);
+        apply(&mut tree, updates);
+        let part = tree.nodes.values().find(|n| n.name == "Item").expect("lookup answer is in the tree").id;
+        assert!(tree.node(ordinary).is_none(), "ordinary parts retain their existing redraw lifetime");
+        assert_eq!(b.action_owner(part), NodeId::widget(2), "lookup actions route to the owning widget");
+        assert_eq!(b.action_part_key(part), Some(7), "lookup actions retain the stable part key");
+
+        b.request_full();
+        let updates = draw(&mut b, None, false, false, 3);
+        acknowledge(&mut b, 0);
+        apply(&mut tree, updates);
+        assert_eq!(tree.node(part).map(|n| n.bounds), Some(bounds), "sticky parts keep their last bounds across redraws");
+
+        assert!(b.request_lookup(LookupSource::Native(2), "name=Missing"), "a second query requests another frame");
+        // The list's cached redraw number is unchanged: lookup expiry must take precedence.
+        apply(&mut tree, draw(&mut b, Some(None), false, false, 3));
+        assert!(tree.node(part).is_none(), "an empty lookup drops the previous sticky answer");
+        acknowledge(&mut b, 2);
+        assert_eq!(b.action_part_key(part), None, "the expired part record is removed");
+
+        let query = format!("id={}", part.short());
+        assert!(b.request_lookup(LookupSource::Native(3), &query), "an expired id can request its item again");
+        assert_eq!(b.lookups.first().and_then(|(_, _, owner)| *owner), Some((NodeId::widget(2), 7)), "the owner's parts table resolves an expired id");
+        apply(&mut tree, draw(&mut b, Some(Some(7)), true, false, 4));
+        acknowledge(&mut b, 3);
+        assert_eq!(tree.nodes.values().find(|n| n.name == "Item").map(|n| n.id), Some(part), "successive lookups keep the same NodeId after expiry");
+
+        assert!(b.request_lookup(LookupSource::Native(4), &query), "a live part id requests a refresh too");
+        assert_eq!(b.lookups.first().and_then(|(_, _, owner)| *owner), Some((NodeId::widget(2), 7)), "a live part resolves to its owner and key");
+        let updates = draw(&mut b, Some(Some(7)), true, false, 5);
+        assert!(updates.is_empty(), "an unchanged lookup needs no tree updates");
+        acknowledge(&mut b, 4);
+        apply(&mut tree, updates);
+
+        // An overflow id has no packed owner. Seed just its retained allocation, without
+        // creating a large collection, to exercise the same expired-record recovery path.
+        let overflow = NodeId::widget(99);
+        b.windows.get_mut(&key(WindowId(0, 1))).expect("window exists").records
+            .get_mut(&NodeId::widget(2)).expect("owner exists").parts.insert(9, overflow);
+        assert!(b.request_lookup(LookupSource::Native(5), &format!("id={}", overflow.short())), "an overflow id requests its owner");
+        apply(&mut tree, draw(&mut b, Some(Some(9)), true, false, 6));
+        acknowledge(&mut b, 5);
+        assert!(tree.node(overflow).is_some(), "overflow ids recover through owner tables without reallocating");
+        assert!(tree.node(part).is_none(), "a key lookup replaces the previous sticky set");
+
+        // Native and hosted consumers can ask for different items before the same frame.
+        assert!(b.request_lookup(LookupSource::Native(6), "name=NativeItem"), "a native lookup joins the next serving frame");
+        assert!(b.request_lookup(LookupSource::Host(40), "name=HostedItem"), "a host lookup joins the same serving frame");
+        b.begin_frame();
+        let r = root(&mut b, WindowId(0, 1), 1, list.id());
+        let owner = b.begin_node(2, Some(list.id()));
+        assert_eq!(b.lookups_for(owner).count(), 2, "the owner receives both pending lookup queries");
+        let items = [(10, node(Role::Button, "NativeItem")), (11, node(Role::Button, "HostedItem"))];
+        let mut answers = Vec::new();
+        for (query, key) in b.lookups_for(owner) {
+            assert_eq!(key, None, "both concurrent name queries use terms lookup");
+            for (key, item) in &items {
+                if query.matches(item) { answers.push((*key, item.clone())); }
+            }
+        }
+        assert_eq!(answers.len(), 2, "the serving frame answers both distinct item queries");
+        for (key, item) in answers {
+            b.set_lookup_part(owner, key, None, item, Area::Empty, || unreachable!("a packed part id"));
+        }
+        b.end_node(owner, node(Role::Group, "Owner"), Area::Empty);
+        let sibling = b.begin_node(3, Some(list.id()));
+        b.end_node(sibling, node(Role::Group, "Other"), Area::Empty);
+        end_root(&mut b, r);
+        let other = root(&mut b, WindowId(1, 1), 10, other_list.id());
+        end_root(&mut b, other);
+        apply(&mut tree, finish(&mut b, Area::Empty, |_| Some(7)));
+        for (_, item) in &items {
+            assert!(tree.nodes.values().any(|n| n.name == item.name), "both sources' answers appear in one tree: {}", item.name);
+        }
+        acknowledge(&mut b, 6);
+        assert_eq!(b.take_host_lookups_done(), vec![40], "the serving frame acknowledges its host request");
+        assert!(b.take_host_lookups_done().is_empty(), "a host lookup is acknowledged only once");
+
+        apply(&mut tree, draw(&mut b, None, false, false, 8));
+        acknowledge(&mut b, 0);
+        assert!(b.take_host_lookups_done().is_empty(), "an ordinary frame acknowledges no host lookup");
+        for (_, item) in &items {
+            assert!(tree.nodes.values().any(|n| n.name == item.name), "the union sticky set survives an ordinary frame: {}", item.name);
+        }
+
+        assert!(b.request_lookup(LookupSource::Native(7), "name=Item"), "the next lookup requests a replacement sticky set");
+        apply(&mut tree, draw(&mut b, Some(None), true, false, 8));
+        acknowledge(&mut b, 7);
+        assert!(tree.node(part).is_some(), "the next lookup installs its replacement answer");
+        for (_, item) in &items {
+            assert!(!tree.nodes.values().any(|n| n.name == item.name), "the next lookup replaces both sources' prior answers: {}", item.name);
+        }
+        assert!(b.take_host_lookups_done().is_empty(), "a later native lookup does not repeat the host acknowledgement");
+
+        assert!(b.request_lookup(LookupSource::Host(41), ""), "an empty host query requests a snapshot frame");
+        assert!(b.lookups.is_empty(), "an empty host query creates no materialisation query");
+        assert!(b.take_host_lookups_done().is_empty(), "a host snapshot is not acknowledged before its frame");
+        apply(&mut tree, draw(&mut b, None, false, false, 9));
+        acknowledge(&mut b, 0);
+        assert_eq!(b.take_host_lookups_done(), vec![41], "the next frame acknowledges the empty host query");
+        assert!(b.take_host_lookups_done().is_empty(), "a host snapshot is acknowledged only once");
+        assert!(tree.node(part).is_some(), "a host snapshot preserves the current sticky answer");
+
+        b.set_consumers(0);
+        assert!(!b.request_lookup(LookupSource::Native(6), "name=Item"), "disabled consumers cannot schedule a lookup");
+        assert!(finish(&mut b, Area::Empty, |_| Some(6)).is_empty(), "disabled consumers emit no updates");
+        acknowledge(&mut b, 0);
     }
 
     /// A node drawn with nothing of it on screen (clipped away, a row scrolled past a list's
@@ -1269,7 +1654,8 @@ mod tests {
             "cached unchanged tree sends nothing"
         );
         assert!(!b.set_consumers(0));
-        assert!(b.windows.is_empty() && b.stack.capacity() == 0);
+        assert!(!b.on, "no consumers stops building");
+        assert_eq!(b.windows[&key(WindowId(0, 1))].records.len(), 3, "off keeps the window's records, including pruned owners");
         assert!(b.set_consumers(2));
         b.begin_frame();
         let r = root(&mut b, WindowId(0, 1), 1, list.id());
@@ -1516,6 +1902,67 @@ mod tests {
         assert!(updates[0].notifications.is_empty());
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_snapshot_request_draws_only_when_the_app_changed_since_its_tree_was_built() {
+        use crate::{draw_list::DrawList, event::Event, window::WindowHandle};
+        use makepad_a11y::consumer::REMOTE;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let window = WindowHandle::new(&mut cx);
+        let wid = window.window_id();
+        let list = DrawList::new(&mut cx);
+        cx.draw_lists[list.id()].redraw_id = 1;
+        // one snapshot request as the HAL sends it: the builder on, an empty lookup, the frame it
+        // asks for (if any), then the builder off; whether it owed a frame, and that frame only
+        // to the request (its CPU the request's), whether it published a tree, what it acknowledged
+        let request = |cx: &mut Cx, seq: u32, unnamed: bool| {
+            cx.platform_ops.clear();
+            cx.a11y_consumers_changed(REMOTE);
+            cx.a11y_lookup(seq, "");
+            let drew = cx.need_redrawing();
+            let answer = cx.a11y_take_answer_frame();
+            if drew {
+                cx.new_draw_event = Default::default();
+                cx.a11y.begin_frame();
+                let r = root(&mut cx.a11y, wid, 1, list.id());
+                let t = cx.a11y.begin_node(2, Some(list.id()));
+                if unnamed { cx.a11y.path_unknown(t); }
+                cx.a11y.end_node(t, node(Role::Button, "Save"), Area::Empty);
+                end_root(&mut cx.a11y, r);
+                cx.a11y_finish_frame();
+            }
+            let acked: Vec<u32> = cx.platform_ops.iter().filter_map(|op| match op { CxOsOp::A11yLookupDone { seq } => Some(*seq), _ => None }).collect();
+            let updated = cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yUpdate { .. }));
+            cx.a11y_consumers_changed(0);
+            (drew, answer, updated, acked)
+        };
+        assert_eq!(request(&mut cx, 5, false), (true, true, true, vec![5]), "the first request builds the tree in a frame only it asked for, which acknowledges it");
+        assert!(!cx.a11y.on, "between requests the builder is off");
+        assert_eq!(request(&mut cx, 6, false), (false, false, false, vec![6]), "with nothing changed since, a request is acknowledged at once, with no frame and no update");
+        assert_eq!(request(&mut cx, 7, false), (false, false, false, vec![7]), "and so is the next one");
+        cx.call_event_handler(&Event::Signal);
+        let (drew, answer, ..) = request(&mut cx, 8, false);
+        assert_eq!((drew, answer), (true, true), "an event that reached the app (it may change the tree without a redraw) makes the next request build, in a frame only it asked for");
+        // a node whose path the widget layer cannot name (one never in its graph): the frame after
+        // the one that found it asks again, and once that one could not name it either, the tree
+        // of an app that did not change is answered at once
+        set_path_resolver(|_, _, _| None);
+        cx.call_event_handler(&Event::Signal);
+        assert!(request(&mut cx, 11, true).0, "a request after a change builds, and finds the unnamed path");
+        assert!(request(&mut cx, 12, true).0, "the next one builds again: a later frame may name it");
+        assert!(!request(&mut cx, 13, true).0, "it stayed unnamed: with nothing changed since, the tree is answered at once");
+        cx.call_event_handler(&Event::Signal);
+        cx.a11y_consumers_changed(REMOTE);
+        cx.a11y_lookup(9, "");
+        cx.redraw_all();
+        assert!(!cx.a11y_take_answer_frame(), "a frame the app asks for before the request's draws is the app's too");
+        cx.a11y_consumers_changed(0);
+        cx.a11y_consumers_changed(REMOTE);
+        cx.a11y_lookup(10, "");
+        assert!(!cx.platform_ops.iter().any(|op| matches!(op, CxOsOp::A11yLookupDone { seq: 10 })), "a redraw waiting is a change: the frame acknowledges the request, not the request itself");
+        assert!(!cx.a11y_take_answer_frame(), "a frame the app owed already is the app's, not the request's");
+    }
+
     #[test]
     fn actions_claim_focus_tap_reject_disabled_and_report_unknown_nodes() {
         use crate::{
@@ -1536,6 +1983,8 @@ mod tests {
             }
             Event::MouseDown(_) => observed.borrow_mut().push("down"),
             Event::MouseUp(_) => observed.borrow_mut().push("up"),
+            // the node's widget answers its key focus the way a text field does
+            Event::KeyFocus(kf) => cx.set_key_focus_takes_text(kf.focus, true),
             _ => {}
         }));
         let window = WindowHandle::new(&mut cx);
@@ -1589,6 +2038,9 @@ mod tests {
             };
             assert_eq!(req, 17);
             assert_eq!(result, expected as u8, "action {action:?}");
+            if action == Actions::FOCUS {
+                assert!(cx.key_focus_takes_text(), "a FOCUS action hands the focus over as a press does: its holder says it takes text");
+            }
         }
         assert_eq!(cx.keyboard.key_focus(), area);
         assert_eq!(
@@ -1691,6 +2143,86 @@ mod allocation_tests {
         f();
         COUNT.with(|c| c.replace(None).unwrap())
     }
+
+    #[test]
+    fn off_snapshots_preserve_ids_and_os_continuity() {
+        use makepad_a11y::consumer::{OS, REMOTE};
+        let mut builder = CxA11y::default();
+        let mut pool = crate::draw_list::CxDrawListPool::default();
+        let list = pool.alloc();
+        let part_key = 7;
+        let draw = |builder: &mut CxA11y, name: &str| {
+            builder.begin_frame();
+            let root = builder.begin_node(1, None);
+            builder.begin_window(WindowId(0, 1));
+            builder.window_draw_list(list.id());
+            let owner = builder.begin_node(2, Some(list.id()));
+            builder.set_part(owner, part_key, None, Node {
+                role: Role::Button, name: name.into(), ..Default::default()
+            }, Area::Empty, || unreachable!("the part has a packed id"));
+            builder.end_node(owner, Node { role: Role::Group, name: "Owner".into(), ..Default::default() }, Area::Empty);
+            builder.end_window();
+            builder.end_node(root, Node { role: Role::Window, name: "Test".into(), ..Default::default() }, Area::Empty);
+            let mut updates = Vec::new();
+            builder.finish_frame(
+                Area::Empty, |_| Some(1), |_| None, |_| None,
+                |_, bytes| updates.push(makepad_a11y::wire::decode_update(&bytes).expect("valid frame update")),
+            );
+            updates
+        };
+
+        assert!(builder.set_consumers(REMOTE), "the first snapshot activates building");
+        let first = draw(&mut builder, "Item");
+        assert_eq!(first.len(), 1, "the setup publishes one window");
+        let part = first[0].nodes.iter().find(|n| n.name == "Item").expect("the setup publishes its part").id;
+        let frame = builder.frame;
+        let stack_capacity = builder.stack.capacity();
+        builder.set_consumers(0);
+        assert!(!builder.on && builder.consumers() == 0, "releasing the last consumer stops building");
+        assert_eq!(builder.stack.capacity(), stack_capacity, "turning off retains scratch allocation");
+        let off = measured(|| {
+            for _ in 0..100_000 {
+                if std::hint::black_box(builder.on) {
+                    builder.begin_frame();
+                }
+                builder.finish_frame(
+                    Area::Empty,
+                    |_| unreachable!("off never inspects draw lists"),
+                    |_| unreachable!("off never resolves bounds"),
+                    |_| unreachable!("off never resolves origins"),
+                    |_, _| unreachable!("off never emits a tree update"),
+                );
+            }
+        });
+        assert_eq!(off, 0, "100000 off frames allocate nothing after a populated snapshot");
+        assert_eq!(builder.frame, frame, "off frames do not advance the builder frame");
+        assert_eq!(builder.action_owner(part), NodeId::widget(2), "off preserves the part's action owner");
+        assert_eq!(builder.action_part_key(part), Some(part_key), "off preserves the part's stable key");
+        assert!(!builder.request_lookup(LookupSource::Native(9), ""), "off rejects snapshot requests");
+
+        assert!(builder.set_consumers(REMOTE), "reactivation requests a full redraw");
+        assert!(builder.request_lookup(LookupSource::Native(10), ""), "an empty query requests a snapshot frame");
+        assert!(builder.request_lookup(LookupSource::Native(8), " \t"), "whitespace also requests a snapshot frame");
+        assert!(builder.lookups.is_empty(), "snapshot requests build no lookup query");
+        let next = draw(&mut builder, "Item");
+        assert_eq!(next.len(), 1, "reactivation publishes the retained window");
+        assert!(next[0].full, "the reactivation update is full");
+        assert_eq!(builder.windows[&key(WindowId(0, 1))].records[&NodeId::widget(2)].parts[&part_key], part, "the retained key maps to the same part id");
+        assert!(next[0].nodes.iter().any(|n| n.id == part && n.name == "Item"), "the rebuilt snapshot publishes the same part id");
+        assert_eq!(builder.take_lookup_done(), 10, "the built frame acknowledges the greatest snapshot sequence");
+
+        assert!(!builder.set_consumers(OS | REMOTE), "adding OS to a live snapshot does not reactivate");
+        assert!(!builder.set_consumers(OS), "releasing REMOTE leaves OS continuous");
+        assert!(builder.on, "OS keeps building between snapshot requests");
+        assert!(draw(&mut builder, "Item").is_empty(), "an unchanged OS frame emits nothing");
+        let changed = draw(&mut builder, "Changed");
+        assert_eq!(changed.len(), 1, "a changed OS frame emits one update");
+        assert!(!changed[0].full, "continuous OS updates remain incremental");
+        assert_eq!(changed[0].nodes.len(), 1, "the OS update contains only the changed node");
+        assert_eq!(changed[0].nodes[0].id, part, "the incremental update identifies the changed part");
+        assert_eq!(changed[0].nodes[0].name, "Changed", "the incremental update carries the new node value");
+    }
+
     #[test]
     fn off_and_unchanged_active_frames_allocate_nothing() {
         let mut builder = CxA11y::default();

@@ -75,6 +75,34 @@ fn consumer_bits() -> &'static AtomicU32 {
 pub fn consumers() -> u32 {
     consumer_bits().load(Ordering::Acquire)
 }
+
+#[derive(Default)]
+struct Holds {
+    counts: [u32; 32],
+    pending: Option<(u32, Vec<u32>)>,
+}
+impl Holds {
+    fn drop_session(&mut self, session: u32) {
+        if let Some((_, sessions)) = &mut self.pending {
+            sessions.retain(|sid| *sid != session);
+            if sessions.is_empty() {
+                self.pending = None;
+            }
+        }
+    }
+}
+
+/// Process-wide request holds. Lock order: HAL state, holds, then mirrors.
+fn holds() -> &'static Mutex<Holds> {
+    static HOLDS: OnceLock<Mutex<Holds>> = OnceLock::new();
+    HOLDS.get_or_init(|| {
+        let mut holds = Holds::default();
+        // MAKEPAD_A11Y's initial TEST bit is a permanent hold.
+        holds.counts[consumer::TEST.trailing_zeros() as usize] = u32::from(consumers() & consumer::TEST != 0);
+        Mutex::new(holds)
+    })
+}
+
 pub fn window_key(session: u32, window: u32) -> u64 {
     ((session as u64) << 32) | window as u64
 }
@@ -95,8 +123,8 @@ pub fn set_window_active(key: u64, active: bool) {
 
 /// Every session's window trees, keyed by [`window_key`]. Its own short-held lock, apart from the HAL
 /// state, so OS accessibility callbacks (any thread, re-entrant from inside the OS's event loop) read it
-/// without touching the HAL. Lock order: the HAL state, then this. Never call into the OS or the HAL while
-/// holding it.
+/// without touching the HAL. Lock order: HAL state, holds, then mirrors. Never take holds or
+/// call into the OS or the HAL while holding mirrors.
 fn mirrors() -> &'static Mutex<Mirror> {
     static MIRRORS: OnceLock<Mutex<Mirror>> = OnceLock::new();
     MIRRORS.get_or_init(|| Mutex::new(Mirror::default()))
@@ -107,6 +135,20 @@ pub(crate) fn apply_update(session: u32, window: u32, update: TreeUpdate) -> Vec
     lock(mirrors()).apply(window_key(session, window), update)
 }
 
+/// Acknowledges the session's lookup after its frame updates. As with `apply_update`,
+/// `Hal::submit` wakes `wait_until` waiters through `Hal::finish` after the batch completes.
+pub(crate) fn lookup_done(session: u32, seq: u32) {
+    let mut holds = lock(holds());
+    for (key, tree) in &mut lock(mirrors()).trees {
+        if (*key >> 32) as u32 == session {
+            tree.acknowledge_lookup(seq);
+        }
+    }
+    if holds.pending.as_ref().is_some_and(|(s, _)| seq >= *s) {
+        holds.drop_session(session);
+    }
+}
+
 pub(crate) fn drop_window(session: u32, window: u32) {
     lock(mirrors()).drop_window(window_key(session, window));
     #[cfg(target_os = "linux")]
@@ -114,7 +156,10 @@ pub(crate) fn drop_window(session: u32, window: u32) {
 }
 
 fn drop_session(session: u32) {
+    let mut holds = lock(holds());
+    holds.drop_session(session);
     lock(mirrors()).trees.retain(|key, _| (key >> 32) as u32 != session);
+    drop(holds);
     #[cfg(target_os = "linux")]
     crate::backend::linux::atspi::session_closed(session);
 }
@@ -136,10 +181,18 @@ pub fn request_consumer(bit: u32, on: bool) {
 pub(crate) fn request_consumer_in(hal: &Hal, bit: u32, on: bool) {
     // Serialize transitions with session creation so a newly opened session cannot miss one.
     let mut state = lock(&hal.state);
+    let holds = lock(holds());
+    let sessions = request_consumer_locked(&mut state, bit, on);
+    drop(holds);
+    drop(state);
+    hal.sig.notify(&sessions);
+}
+
+fn request_consumer_locked(state: &mut crate::State, bit: u32, on: bool) -> Vec<u32> {
     let old = consumers();
     let new = if on { old | bit } else { old & !bit };
     if new == old {
-        return;
+        return Vec::new();
     }
     consumer_bits().store(new, Ordering::Release);
     let sessions = state.world.session_ids();
@@ -148,8 +201,124 @@ pub(crate) fn request_consumer_in(hal: &Hal, bit: u32, on: bool) {
             .world
             .to_session(*sid, |q| q.a11y_state(u32::from(new != 0), new));
     }
+    sessions
+}
+
+/// Holds one snapshot consumer bit, returning the activation's pending frame sequence.
+pub(crate) fn hold_in(hal: &Hal, bit: u32) -> u32 {
+    debug_assert!(bit.is_power_of_two());
+    let mut state = lock(&hal.state);
+    let mut holds = lock(holds());
+    let was_off = consumers() == 0;
+    let count = &mut holds.counts[bit.trailing_zeros() as usize];
+    *count += 1;
+    let mut sessions = if *count == 1 {
+        request_consumer_locked(&mut state, bit, true)
+    } else {
+        Vec::new()
+    };
+    if was_off {
+        let (seq, requested) = request_lookup_locked(&mut state, "");
+        sessions = requested;
+        let mirrors = lock(mirrors());
+        let pending = sessions.iter().copied().filter(|sid| {
+            mirrors.trees.keys().any(|key| (*key >> 32) as u32 == *sid)
+        }).collect::<Vec<_>>();
+        holds.pending = (!pending.is_empty()).then_some((seq, pending));
+    }
+    let seq = holds.pending.as_ref().map_or(0, |(seq, _)| *seq);
+    drop(holds);
     drop(state);
     hal.sig.notify(&sessions);
+    seq
+}
+
+pub(crate) fn release_in(hal: &Hal, bit: u32) {
+    debug_assert!(bit.is_power_of_two());
+    let mut state = lock(&hal.state);
+    let mut holds = lock(holds());
+    let count = &mut holds.counts[bit.trailing_zeros() as usize];
+    if *count == 0 {
+        eprintln!("[hal] error: accessibility consumer {bit} released without a hold");
+        return;
+    }
+    *count -= 1;
+    let sessions = if *count == 0 {
+        request_consumer_locked(&mut state, bit, false)
+    } else {
+        Vec::new()
+    };
+    drop(holds);
+    drop(state);
+    hal.sig.notify(&sessions);
+}
+
+/// Consumer threads only: wait once for the activation, including overlapping requests.
+pub(crate) fn wait_snapshot(hal: &Hal, seq: u32, timeout: Duration) {
+    if seq == 0 || hal.wait_until(timeout, |_| {
+        lock(holds()).pending.as_ref().is_none_or(|(pending, _)| *pending != seq)
+    }) {
+        return;
+    }
+    let state = lock(&hal.state);
+    let mut holds = lock(holds());
+    if holds.pending.as_ref().is_some_and(|(pending, _)| *pending == seq) {
+        holds.pending = None;
+    }
+    drop(holds);
+    drop(state);
+    hal.sig.notify(&[]);
+}
+
+/// A request's hold, released on success and on every early return.
+pub(crate) struct SnapshotHold<'a> {
+    hal: &'a Hal,
+    bit: u32,
+}
+impl<'a> SnapshotHold<'a> {
+    pub(crate) fn new(hal: &'a Hal, bit: u32, timeout: Duration) -> Self {
+        let seq = hold_in(hal, bit);
+        let hold = Self { hal, bit };
+        wait_snapshot(hal, seq, timeout);
+        hold
+    }
+}
+impl Drop for SnapshotHold<'_> {
+    fn drop(&mut self) {
+        release_in(self.hal, self.bit);
+    }
+}
+
+/// A process-wide lookup sequence for the HAL remote. Zero is reserved for no lookup.
+fn next_lookup_seq() -> u32 {
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    loop {
+        let seq = NEXT.fetch_add(1, Ordering::Relaxed);
+        if seq != 0 { return seq; }
+    }
+}
+
+/// Requests a lookup from all sessions, including ones still drawing their first tree,
+/// allocating its sequence in queue order.
+pub(crate) fn request_lookup(query: &str) -> u32 {
+    request_lookup_in(Hal::global(), query)
+}
+
+pub(crate) fn request_lookup_in(hal: &Hal, query: &str) -> u32 {
+    let mut state = lock(&hal.state);
+    let (seq, sessions) = request_lookup_locked(&mut state, query);
+    drop(state);
+    hal.sig.notify(&sessions);
+    seq
+}
+
+fn request_lookup_locked(state: &mut crate::State, query: &str) -> (u32, Vec<u32>) {
+    let seq = next_lookup_seq();
+    let sessions = state.world.session_ids();
+    for sid in &sessions {
+        state.world.to_session(*sid, |q| q.a11y_lookup(seq, query.as_bytes()));
+    }
+    (seq, sessions)
 }
 
 #[derive(Default)]
@@ -247,45 +416,16 @@ pub fn wait_done(req: u64, timeout: Duration) -> Option<u8> {
     }
 }
 
-/// One long-lived consumer timer, independent of frames and the UI thread. Holding the lease
-/// through both transitions prevents an expiring request from switching off a newer request.
-#[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn remote_activity() {
-    static LEASE: OnceLock<std::sync::Arc<(Mutex<Instant>, Condvar)>> = OnceLock::new();
-    let lease = LEASE.get_or_init(|| {
-        let lease = std::sync::Arc::new((Mutex::new(Instant::now()), Condvar::new()));
-        let timer = lease.clone();
-        std::thread::Builder::new().name("a11y-remote-lease".into()).spawn(move || {
-            let (last, cv) = &*timer;
-            let mut last = lock(last);
-            loop {
-                let left = Duration::from_secs(60).saturating_sub(last.elapsed());
-                if left.is_zero() {
-                    request_consumer(consumer::REMOTE, false);
-                    last = cv.wait(last).unwrap_or_else(|e| e.into_inner());
-                } else {
-                    last = cv.wait_timeout(last, left).unwrap_or_else(|e| e.into_inner()).0;
-                }
-            }
-        }).expect("remote consumer timer");
-        lease
-    });
-    let mut last = lock(&lease.0);
-    *last = Instant::now();
-    request_consumer(consumer::REMOTE, true);
-    lease.1.notify_one();
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Native;
 #[cfg(not(target_arch = "wasm32"))]
 impl remote::Backend for Native {
-    fn activate(&self) {
-        let previous = (consumers() == 0).then(|| remote::versions(&self.trees()));
-        remote_activity();
-        // Reactivation schedules a full draw. Do not answer from the tree left over
-        // before the last consumer went away.
-        if let Some(previous) = previous { self.wait_change(&previous, Duration::from_secs(5)); }
+    fn activate(&self, timeout: Duration) {
+        let seq = hold_in(Hal::global(), consumer::REMOTE);
+        wait_snapshot(Hal::global(), seq, timeout);
+    }
+    fn deactivate(&self) {
+        release_in(Hal::global(), consumer::REMOTE);
     }
     fn trees(&self) -> remote::Trees {
         let mut trees = with_mirror(|m| m.trees.iter().map(|(k,t)| (*k,t.clone())).collect::<Vec<_>>());
@@ -295,6 +435,15 @@ impl remote::Backend for Native {
     fn wait_change(&self, versions: &[(u64,u64)], timeout: Duration) {
         Hal::global().wait_until(timeout, |_| {
             with_mirror(|m| m.trees.len() != versions.len() || versions.iter().any(|(k,v)| m.tree(*k).is_none_or(|t| t.updates != *v)))
+        });
+    }
+    fn lookup(&self, query: &str) -> u32 {
+        request_lookup(query)
+    }
+    fn wait_lookup(&self, seq: u32, timeout: Duration) {
+        let windows = with_mirror(|m| m.trees.keys().copied().collect::<Vec<_>>());
+        Hal::global().wait_until(timeout, |_| {
+            with_mirror(|m| windows.iter().all(|key| m.tree(*key).is_none_or(|t| t.lookup_seq >= seq)))
         });
     }
     fn action(&self, window: u64, request: ActionRequest, timeout: Duration) -> Result<ActionResult,String> {
@@ -491,6 +640,21 @@ mod tests {
     use super::*;
     use crate::{backend_id, window_kind, CmdWriter, Id, OpenReq};
     use makepad_a11y::{Node, NodeId, Role, TreeUpdate};
+
+    #[test]
+    fn snapshot_holds_balance_without_sessions() {
+        let hal = Hal::new();
+        let bit = consumer::AUTOMATION;
+        assert_eq!(hold_in(&hal, bit), 0, "no sessions need a snapshot acknowledgement");
+        assert_eq!(hold_in(&hal, bit), 0, "an overlapping hold also has nothing to wait for");
+        assert_ne!(consumers() & bit, 0, "two holds enable the consumer");
+        release_in(&hal, bit);
+        assert_ne!(consumers() & bit, 0, "one remaining hold keeps the consumer enabled");
+        release_in(&hal, bit);
+        assert_eq!(consumers() & bit, 0, "the last release disables the consumer");
+        release_in(&hal, bit);
+        assert_eq!(consumers() & bit, 0, "an unmatched release cannot underflow the count");
+    }
 
     #[test]
     fn commands_apply_to_owning_window_and_teardown_drops_mirrors() {

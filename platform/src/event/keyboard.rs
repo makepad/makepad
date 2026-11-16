@@ -18,6 +18,11 @@ pub struct CxKeyboard {
     pub(crate) is_key_focus_from_user: bool,
     pub(crate) is_prev_key_focus_from_user: bool,
     pub(crate) is_next_key_focus_from_user: bool,
+    /// Whether the holder of `key_focus` takes its keys as typed text, as it said with
+    /// `set_key_focus_takes_text`. Every focus move clears it: the new holder says it again
+    /// from its `Hit::KeyFocus`, however the focus came (a press, Tab, an accessibility
+    /// action, a restore, a window getting the keyboard back).
+    pub(crate) key_focus_takes_text: bool,
     /// The key focus of each window that lost the keyboard and whether the user gave it, restored
     /// when it gets it back. Kept here, not in the window widget, so a redraw while it is away moves
     /// it like the live focus (update_area): a stale copy would never match the widget's area again.
@@ -83,6 +88,19 @@ impl CxKeyboard {
         self.key_focus
     }
 
+    /// Says whether `focus_area`, which holds the key focus, takes its keys as typed text. An area
+    /// that does not hold the key focus changes nothing. See [`crate::Cx::set_key_focus_takes_text`].
+    pub fn set_key_focus_takes_text(&mut self, focus_area: Area, takes_text: bool) {
+        if !focus_area.is_empty() && self.key_focus == focus_area {
+            self.key_focus_takes_text = takes_text;
+        }
+    }
+
+    /// Whether the key focus belongs to a widget that takes its keys as typed text.
+    pub fn key_focus_takes_text(&self) -> bool {
+        self.key_focus_takes_text
+    }
+
     pub fn revert_key_focus(&mut self) {
         self.next_key_focus = self.prev_key_focus;
         self.is_next_key_focus_from_user = self.is_prev_key_focus_from_user;
@@ -142,6 +160,7 @@ impl CxKeyboard {
             self.is_prev_key_focus_from_user = self.is_key_focus_from_user;
             self.key_focus = self.next_key_focus;
             self.is_key_focus_from_user = self.is_next_key_focus_from_user;
+            self.key_focus_takes_text = false;
             return Some((self.prev_key_focus, self.key_focus));
         }
         None
@@ -246,4 +265,55 @@ pub struct TextRangeReplaceEvent {
     pub replaced_text: Option<String>,
     /// If the range no longer matches, treat this as ordinary text input.
     pub fallback_to_insert: bool,
+}
+
+#[cfg(test)]
+mod takes_text_tests {
+    use super::*;
+    use crate::{area::RectArea, draw_list::CxDrawListPool};
+
+    /// A text field, a button and the window's id, on one draw list.
+    fn areas() -> (Area, Area, WindowId) {
+        let mut pool = CxDrawListPool::default();
+        let list = pool.alloc();
+        let rect = |rect_id| Area::Rect(RectArea { draw_list_id: list.id(), rect_id, redraw_id: 0 });
+        (rect(0), rect(1), WindowId(0, 0))
+    }
+
+    /// Moves the key focus the way the platform does between events, then lets the new holder
+    /// answer its `Hit::KeyFocus` the way a text field does (the button says nothing).
+    fn settle(kb: &mut CxKeyboard, field: Area) -> bool {
+        if let Some((_, focus)) = kb.cycle_key_focus_changed() {
+            kb.set_key_focus_takes_text(focus, focus == field);
+        }
+        kb.key_focus_takes_text()
+    }
+
+    #[test]
+    fn the_flag_belongs_to_the_holder_and_every_focus_move_clears_it() {
+        let (field, button, window) = areas();
+        let mut kb = CxKeyboard::default();
+        kb.set_key_focus_takes_text(field, true);
+        assert!(!kb.key_focus_takes_text(), "an area without the key focus cannot say it takes text");
+        kb.set_key_focus_from_user(field);
+        assert!(settle(&mut kb, field), "a press on the field: it takes text once it has the focus");
+        kb.set_key_focus(field);
+        assert!(settle(&mut kb, field), "a plain set_key_focus on the holder moves nothing, so it keeps the flag");
+        kb.set_key_focus(button);
+        assert!(kb.cycle_key_focus_changed().is_some());
+        assert!(!kb.key_focus_takes_text(), "a plain set_key_focus elsewhere clears it, before anyone answers");
+        kb.revert_key_focus();
+        assert!(settle(&mut kb, field), "a revert hands the field its focus back, and the field says it again");
+        kb.set_key_focus_takes_text(field, false);
+        assert!(!kb.key_focus_takes_text(), "a holder turned read-only says it takes no text");
+        kb.set_key_focus_takes_text(field, true);
+        kb.park_key_focus(window);
+        assert!(!settle(&mut kb, field), "a window that loses the keyboard leaves nothing focused, and no text");
+        kb.unpark_key_focus(window);
+        assert!(settle(&mut kb, field), "getting the keyboard back restores the field, which says it again");
+        kb.restore_key_focus(button, true);
+        assert!(!settle(&mut kb, field), "a restore to the button: no text");
+        kb.restore_key_focus(field, true);
+        assert!(settle(&mut kb, field), "a restore to the field: text");
+    }
 }

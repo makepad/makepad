@@ -745,6 +745,7 @@ impl Cx {
                         })
                         .collect();
                     self.call_event_handler(&Event::Drag(DragEvent {
+                        window_id: self.windows.current_id_zero().unwrap_or(crate::window::WindowId(0, 0)),
                         modifiers: Self::web_key_modifiers(tw.modifiers),
                         handled: Arc::new(Mutex::new(false)),
                         abs,
@@ -767,6 +768,7 @@ impl Cx {
                                 self.dpi_override_scale(&mut abs, window_id);
                             }
                             self.call_event_handler(&Event::Drop(DropEvent {
+                                window_id: self.windows.current_id_zero().unwrap_or(crate::window::WindowId(0, 0)),
                                 modifiers: Self::web_key_modifiers(tw.modifiers),
                                 handled: Arc::new(Mutex::new(false)),
                                 abs,
@@ -1234,7 +1236,9 @@ impl Cx {
                     self.os.from_wasm(FromWasmSetDocumentTitle { title });
                 }
                 CxOsOp::SetNativeAppearance(_) => {}
+                CxOsOp::PostNotification(_) | CxOsOp::RemoveNotification(_) => {}
                 CxOsOp::BoostFrameRate => {}
+                CxOsOp::CancelQuit => {}
                 CxOsOp::SetWindowVisuals(_, _) => {}
                 CxOsOp::XrStartPresenting => {
                     self.os.from_wasm(FromWasmXrStartPresenting {});
@@ -1286,6 +1290,10 @@ impl Cx {
                         result: result as u32,
                     });
                 }
+                // Native lookups come only from the HAL remote.
+                CxOsOp::A11yLookupDone { .. } => {}
+                // A host asked through the studio channel: answer there.
+                CxOsOp::A11yHostLookupDone { req } => Self::send_studio_message(crate::studio::AppToStudio::A11yLookupDone { req }),
                 CxOsOp::StartDragging(items) => {
                     self.drag_drop.start_internal_drag(items);
                 }

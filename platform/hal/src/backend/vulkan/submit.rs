@@ -12,6 +12,10 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+relax_api::option_layouts! {
+    ([u8; 16], Placed),
+}
+
 #[derive(Clone)]
 pub(super) struct Token { pub sid: u32, pub incarnation: Arc<FrameProgress> }
 pub(super) enum Event {

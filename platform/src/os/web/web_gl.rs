@@ -464,6 +464,7 @@ impl Cx {
                         &self.textures,
                         texture_id,
                         draw_pass_id,
+                        self.repaint_id,
                     ) {
                         self.passes[draw_pass_id].paint_dirty = true;
                     }
@@ -700,7 +701,7 @@ impl Cx {
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     depth_test_greater: draw_call.options.depth_test_greater,
-                    alpha_blend: draw_call.options.alpha_blend,
+                    alpha_blend: draw_call.options.alpha_blend && sh.mapping.color_format.blends(),
                     blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
@@ -820,7 +821,7 @@ impl Cx {
                             width: *width,
                             height: *height,
                             data: WasmPtrU32::new(match data {
-                                Some(data) => data,
+                                Some(data) => data.as_slice(),
                                 None => return,
                             }),
                         });
@@ -877,7 +878,7 @@ impl Cx {
                             height: *height,
                             layers: *layers,
                             data: WasmPtrU32::new(match data {
-                                Some(data) => data,
+                                Some(data) => data.as_slice(),
                                 None => return,
                             }),
                         });
@@ -923,6 +924,8 @@ impl Cx {
         self.passes[draw_pass_id].paint_dirty = false;
         // the bake transaction's paint receipt (whole draws: ranges ignored)
         self.passes[draw_pass_id].painted_serial = self.repaint_id;
+        // its targets hold this repaint's picture for the passes after it
+        self.passes[draw_pass_id].painted_repaint = self.repaint_id;
         let dpi_factor = self.passes[draw_pass_id].dpi_factor.unwrap();
         let pass_rect = self.get_pass_rect(draw_pass_id, dpi_factor).unwrap();
         let dpi_uniforms_gen = self.next_uniform_gen();

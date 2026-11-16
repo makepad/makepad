@@ -320,9 +320,10 @@ impl Drop for Pipeline { fn drop(&mut self) { unsafe { self.program.dev.raw.dest
 struct VariantKey { colors: [u32; 4], depth: u32, flags: u32, views: u8, samples: u8 }
 
 impl VariantKey {
-    fn new(pass: PassKey, flags: u32) -> Self {
+    fn new(program: &Program, pass: PassKey, flags: u32) -> Self {
         let mut flags = flags & (Draw::BLEND | Draw::CULL | Draw::DEPTH_WRITE | Draw::WIREFRAME | Draw::DEPTH_GREATER);
         if pass.depth == ABSENT { flags &= !(Draw::DEPTH_WRITE | Draw::DEPTH_GREATER); } // no depth attachment: the bit changes nothing
+        if program.desc.blend & pipeline_blend::RAW != 0 { flags &= !Draw::BLEND; } // a raw write never blends: neither does the bit
         Self { colors: pass.colors, depth: pass.depth, flags, views: pass.views, samples: pass.samples.max(1) }
     }
 }
@@ -398,26 +399,30 @@ impl State {
     /// colour format (scene, UI and shadow-value passes). That is the first pipeline of about
     /// two thirds of the programs an app draws with, and nearly every program draws with one
     /// pipeline only; those draws are complete in the first frame after PipelineReady. A
-    /// raw-write program (pick ids, data passes) is not guessed: its layout is the pass's.
+    /// raw-write program into a float format (simulation states, accumulators, value targets)
+    /// is guessed the same way; other raw-write programs (pick ids, 8- and 16-bit data passes)
+    /// are not: their layout is the pass's.
     pub fn predict(&self, program: &Arc<Program>) {
-        if program.desc.blend & pipeline_blend::RAW != 0 { return; }
         let mut colors = [ABSENT; 4];
         for i in 0..4 { if program.desc.outputs & (1 << i) != 0 { colors[i] = program.desc.color_formats[i]; } }
+        let raw = program.desc.blend & pipeline_blend::RAW != 0;
+        if raw && !matches!(colors[0], format::RGBA16F | format::RGBA32F | format::R32F) { return; }
         let key = PassKey { colors, depth: format::DEPTH32F, load: [pass_load::DONT_CARE; 5], views: 1, fdm: false, samples: 1, depth_kept: true, ms_kept: false };
         // a data target (R32F depth/shadow values, ids) is drawn without blending
-        let blends = matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
+        let blends = !raw && matches!(colors[0], format::BGRA8 | format::RGBA8 | format::RGBA16F);
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
         let made = RenderPass::new(program.dev.clone(), key).and_then(|pass| create_variant(program.clone(), &pass, flags));
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
         // out of memory is not this pipeline's failure: the first draw that needs it tries again
         if made.as_ref().is_err_and(|e| out_of_memory(e)) { return; }
-        lock(&self.variants).insert(VariantKey::new(key, flags), made);
+        lock(&self.variants).insert(VariantKey::new(program, key, flags), made);
     }
 
     /// Whether a draw into a pass of `key` with `flags` would compile its pipeline now: the
     /// program is built and that variant is not.
     pub fn lacks(&self, key: PassKey, flags: u32) -> bool {
-        matches!(self.program.get(), Some(Ok(_))) && !lock(&self.variants).contains_key(&VariantKey::new(key, flags))
+        let Some(Ok(program)) = self.program.get() else { return false };
+        !lock(&self.variants).contains_key(&VariantKey::new(program, key, flags))
     }
 
     pub fn failure(&self) -> Option<String> {
@@ -431,7 +436,7 @@ impl State {
     /// paints again at PipelineReady) or when the pipeline failed.
     pub fn select(&self, pass: &RenderPass, flags: u32) -> Option<Arc<Pipeline>> {
         let program = self.program.get()?.as_ref().ok()?.clone();
-        let key = VariantKey::new(pass.key, flags);
+        let key = VariantKey::new(&program, pass.key, flags);
         if let Some(made) = lock(&self.variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); note_refusal(e); }
@@ -456,7 +461,7 @@ impl State {
                 made
             }).as_ref().ok()?.clone()
         };
-        let key = (video.to_vec(), VariantKey::new(pass.key, flags));
+        let key = (video.to_vec(), VariantKey::new(&program, pass.key, flags));
         if let Some(made) = lock(&self.video_variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
         if let Err(e) = &made { eprintln!("[hal-vulkan] video pipeline variant: {e}"); note_refusal(e); }

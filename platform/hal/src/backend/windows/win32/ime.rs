@@ -14,6 +14,10 @@ use makepad_windows_sys::Win32::Foundation::{HWND, POINT, RECT};
 use makepad_windows_sys::Win32::UI::Input::Ime::*;
 use std::cell::{Cell, RefCell};
 
+relax_api::option_layouts! {
+    Synced,
+}
+
 /// The text field's composition range the app last synced (`ImeSync`), in chars.
 #[derive(Default, Clone)]
 struct Synced {

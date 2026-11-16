@@ -13,6 +13,11 @@ use {
     std::time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+relax_api::option_layouts! {
+    PulseInputStream,
+    PulseOutputStream,
+}
+
 /// How long we are willing to block on a PulseAudio server that does not
 /// answer. A server that accepts our connection but never completes a request -
 /// a container with a stub sink, a server that is shutting down - must not hang

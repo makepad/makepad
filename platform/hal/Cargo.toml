@@ -77,6 +77,11 @@ makepad-windows-sys = { path = "../../libs/windows/sys", version = "0.1.0" }
 name = "close_source"
 harness = false
 
+# Holds an AppKit quit, then accepts or cancels it (macOS, with its own main loop and a hidden window); a stop with a code returns the main loop and ends the process with it (every platform).
+[[test]]
+name = "quit_later"
+harness = false
+
 # Real-bus Linux smoke rig; run by tools/a11y_rigs/linux_atspi.sh.
 [[test]]
 name = "linux_atspi"

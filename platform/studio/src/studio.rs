@@ -378,6 +378,9 @@ pub enum AppToStudio {
     /// timer). APPENDED LAST (ordinal tags).
     WakeIn(f64),
     NativeApp(crate::NativeAppRequest),
+    /// The child drew the frame that served `req` and sent that frame's `A11yUpdate`s
+    /// before this reply. Appended to preserve existing wire tags.
+    A11yLookupDone { req: u64 },
 }
 
 #[derive(SerBin, DeBin, SerJson, DeJson, Debug, Clone)]
@@ -500,6 +503,9 @@ pub enum StudioToApp {
     /// Activation of one hosted window. Appended to preserve existing wire tags.
     WindowFocus { window_id: usize, focused: bool },
     NativeApp(crate::NativeAppEvent),
+    /// A host asks the child for one lookup frame; `req` is the host's own number,
+    /// echoed back in `AppToStudio::A11yLookupDone`. Appended to preserve wire tags.
+    A11yLookup { req: u64, query: String },
 }
 
 /// A batch of host messages. On the wire every message is framed with its

@@ -922,6 +922,8 @@ impl State {
             | OsCmd::MenuSet { .. }
             | OsCmd::TraySet { .. }
             | OsCmd::TrayRemove { .. }
+            | OsCmd::NotifyPost { .. }
+            | OsCmd::NotifyRemove { .. }
             | OsCmd::WindowAtTray { .. }
             | OsCmd::XrFrameEyes { .. }
             | OsCmd::XrPoseLead { .. }

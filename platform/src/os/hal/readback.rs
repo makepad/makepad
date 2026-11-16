@@ -98,7 +98,7 @@ impl Drop for CaptureQueued {
 pub(crate) struct Readbacks {
     next: u32,
     active: HashSet<u32>,
-    textures: HashMap<u32, (usize, usize, ReadbackCompletion)>,
+    textures: HashMap<u32, (usize, usize, usize, ReadbackCompletion)>,
     windows: HashMap<u32, Vec<u64>>,
     snapshots: HashMap<u32, Texture>,
     /// Window copies in flight for `screen_capture` byte sinks: req -> window index. One per window.
@@ -349,12 +349,19 @@ impl Cx {
                 work.completion.finish(Err(ReadbackError::NotRendered));
                 continue;
             };
+            let Some(format) = self.textures[work.texture_id].alloc.as_ref()
+                .and_then(|alloc| crate::frame_build::hal_format(&alloc.pixel))
+            else {
+                work.completion.finish(Err(ReadbackError::UnsupportedFormat));
+                continue;
+            };
+            let bytes = work.width * work.height * makepad_hal::format::texel_bytes(format) as usize;
             let req = self.hal_readback_request();
             fb.w.texture_readback(id, req, [0, 0, work.width as u32, work.height as u32]);
             self.hal
                 .readbacks
                 .textures
-                .insert(req, (work.width, work.height, work.completion));
+                .insert(req, (work.width, work.height, bytes, work.completion));
         }
     }
 
@@ -516,6 +523,19 @@ impl Cx {
             self.hal_poll_readback_images();
             return;
         }
+        if let Some((width, height, bytes, completion)) = self.hal.readbacks.textures.remove(&req) {
+            let result = if matches!(status, makepad_hal::readback::OK | makepad_hal::readback::NATIVE)
+                && width == rect[2] as usize && height == rect[3] as usize
+                && pixels.as_ref().is_some_and(|pixels| pixels.len() == bytes) {
+                Ok(pixels.unwrap())
+            } else if status == makepad_hal::readback::NO_RASTER {
+                Err(ReadbackError::UnsupportedBackend)
+            } else {
+                Err(ReadbackError::Failed)
+            };
+            completion.finish(result);
+            return;
+        }
         let [_, _, w, h] = rect;
         let ok = status == makepad_hal::readback::OK && pixels.as_ref().is_some_and(|pixels| pixels.len() == w as usize * h as usize * 4);
         if let Some(window) = self.hal.readbacks.captures.remove(&req) {
@@ -553,15 +573,6 @@ impl Cx {
                 Err(crate::pick::PickError::Failed)
             };
             self.pick.results.push((ticket, result));
-        } else if let Some((width, height, completion)) = self.hal.readbacks.textures.remove(&req) {
-            let result = if ok && width == w as usize && height == h as usize {
-                Ok(pixels.unwrap())
-            } else if status == makepad_hal::readback::NO_RASTER {
-                Err(ReadbackError::UnsupportedBackend)
-            } else {
-                Err(ReadbackError::Failed)
-            };
-            completion.finish(result);
         } else if let Some(ids) = self.hal.readbacks.windows.remove(&req) {
             if ok {
                 self.hal
@@ -634,6 +645,7 @@ impl Cx {
         self.take_texture_readback_results(true)
             .into_iter()
             .filter_map(|(id, result)| {
+                if !self.textures.0.is_live_generation(id.0, id.generation()) { return None; }
                 // a capture that cannot be made says why, once, here: the result carries no bytes
                 let mut bytes = match result.data {
                     Ok(data) => data.to_vec(),
@@ -642,8 +654,10 @@ impl Cx {
                         return None;
                     }
                 };
-                for pixel in bytes.chunks_exact_mut(4) {
-                    pixel.swap(0, 2);
+                if matches!(self.textures[id].format, crate::TextureFormat::RenderBGRAu8 { .. } | crate::TextureFormat::SharedBGRAu8 { .. }) {
+                    for pixel in bytes.chunks_exact_mut(4) {
+                        pixel.swap(0, 2);
+                    }
                 }
                 Some((id, result.width, result.height, bytes))
             })

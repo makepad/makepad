@@ -26,6 +26,10 @@ use makepad_windows_sys::Win32::UI::Shell::*;
 use makepad_windows_sys::Win32::UI::WindowsAndMessaging::*;
 use std::cell::{Cell, RefCell};
 
+relax_api::option_layouts! {
+    Place,
+}
+
 /// The icons' callback message.
 const WM_TRAY: u32 = WM_APP + 2;
 const CLASS: &str = "MakepadHalTray";
@@ -161,8 +165,24 @@ fn destroy_icon(icon: Option<HICON>) {
     }
 }
 
-/// `TraySet` of session `sid`: creates the icon or updates it in place.
+/// Whether this process runs in session 0, the services' (a task that runs whether its user is
+/// logged on or not): no desktop a person sees and no shell to show a notification icon in.
+fn services_session() -> bool {
+    use makepad_windows_sys::Win32::System::{RemoteDesktop::ProcessIdToSessionId, Threading::GetCurrentProcessId};
+    let mut session = u32::MAX;
+    unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) }.is_ok() && session == 0
+}
+
+/// `TraySet` of session `sid`: creates the icon or updates it in place. None in the services'
+/// session ([`services_session`]): it says so once.
 pub(super) fn set(sid: u32, id: u64, w: u32, h: u32, alpha: Vec<u8>, tooltip: String, items: Vec<(MenuItem, String)>) {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if services_session() {
+        if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("[hal-win32] session {sid}: no tray: this process runs in the services' session, with no desktop to show it");
+        }
+        return;
+    }
     let Some(hwnd) = window() else { return };
     let icon = make_icon(w, h, &alpha, LIGHT.get());
     let existing = TRAYS.with_borrow(|t| t.iter().position(|t| t.sid == sid && t.id == id));

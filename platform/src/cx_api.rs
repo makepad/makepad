@@ -353,6 +353,8 @@ pub enum CxOsOp {
     },
     StopTimer(u64),
     Quit,
+    /// Keeps the app running and answers a held system quit request as cancelled.
+    CancelQuit,
 
     StartDragging(Vec<DragItem>),
     /// Begin an operating-system drag whose destination may be another
@@ -367,6 +369,8 @@ pub enum CxOsOp {
     UpdateMacosMenu(MacosMenu),
     SetTray(crate::tray::TrayIcon),
     RemoveTray(LiveId),
+    PostNotification(crate::notification::Notification),
+    RemoveNotification(LiveId),
     ShowClipboardActions {
         has_selection: bool,
         rect: Rect,
@@ -387,6 +391,8 @@ pub enum CxOsOp {
     HideSelectionHandles,
     A11yUpdate { window: WindowId, bytes: Vec<u8> },
     A11yActionDone { req: u64, result: u8 },
+    A11yLookupDone { seq: u32 },
+    A11yHostLookupDone { req: u64 },
 
     CheckPermission {
         permission: crate::permission::Permission,
@@ -532,12 +538,15 @@ impl CxOsOp {
             Self::StartTimer { .. } => "StartTimer",
             Self::StopTimer(..) => "StopTimer",
             Self::Quit => "Quit",
+            Self::CancelQuit => "CancelQuit",
 
             Self::StartDragging(..) => "StartDragging",
             Self::StartExternalDragging { .. } => "StartExternalDragging",
             Self::UpdateMacosMenu(..) => "UpdateMacosMenu",
             Self::SetTray(..) => "SetTray",
             Self::RemoveTray(..) => "RemoveTray",
+            Self::PostNotification(..) => "PostNotification",
+            Self::RemoveNotification(..) => "RemoveNotification",
             Self::ShowClipboardActions { .. } => "ShowClipboardActions",
             Self::HideClipboardActions => "HideClipboardActions",
             Self::CopyToClipboard(..) => "CopyToClipboard",
@@ -548,6 +557,8 @@ impl CxOsOp {
             Self::HideSelectionHandles => "HideSelectionHandles",
             Self::A11yUpdate { .. } => "A11yUpdate",
             Self::A11yActionDone { .. } => "A11yActionDone",
+            Self::A11yLookupDone { .. } => "A11yLookupDone",
+            Self::A11yHostLookupDone { .. } => "A11yHostLookupDone",
 
             Self::CheckPermission { .. } => "CheckPermission",
             Self::RequestPermission { .. } => "RequestPermission",
@@ -1503,6 +1514,15 @@ impl Cx {
         crate::log!("the app quits: Cx::quit at {}", std::panic::Location::caller());
         crate::cx::relax_quit_started();
         self.platform_ops.push_back(CxOsOp::Quit);
+    }
+
+    /// The app stays after it held a `QuitRequested` (its person cancelled the prompt it showed):
+    /// a quit the system asked for (macOS: a logout, Cmd+Q, the Dock) is answered as cancelled
+    /// instead of waiting for the app's `Quit`. Nothing when no quit is held.
+    #[track_caller]
+    pub fn cancel_quit(&mut self) {
+        crate::log!("the app keeps running: Cx::cancel_quit at {}", std::panic::Location::caller());
+        self.platform_ops.push_back(CxOsOp::CancelQuit);
     }
 
     #[track_caller]
@@ -2759,6 +2779,21 @@ impl Cx {
 
     pub fn key_focus(&self) -> Area {
         self.keyboard.key_focus()
+    }
+
+    /// Says whether the widget at `focus_area` takes its keys as typed text: a text field, a code
+    /// editor, a terminal, a web page. Only the holder of the key focus can say it (any other area
+    /// changes nothing). It says it from its `Hit::KeyFocus`, and again when it turns read-only or
+    /// editable; every focus move clears it. Shortcuts and canvases that act on bare keys ask
+    /// [`Self::key_focus_takes_text`] and leave the keys alone while it is true.
+    pub fn set_key_focus_takes_text(&mut self, focus_area: Area, takes_text: bool) {
+        self.keyboard.set_key_focus_takes_text(focus_area, takes_text);
+    }
+
+    /// Whether the key focus belongs to a widget that takes its keys as typed text, see
+    /// [`Self::set_key_focus_takes_text`].
+    pub fn key_focus_takes_text(&self) -> bool {
+        self.keyboard.key_focus_takes_text()
     }
 
     pub fn revert_key_focus(&mut self) {

@@ -1180,6 +1180,7 @@ impl Cx {
                         .collect::<Vec<_>>(),
                 );
                 self.call_event_handler(&Event::Drag(crate::event::DragEvent {
+                    window_id,
                     modifiers,
                     handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
                     abs,
@@ -1187,6 +1188,7 @@ impl Cx {
                     response: std::sync::Arc::new(std::sync::Mutex::new(crate::event::DragResponse::None)),
                 }));
                 self.call_event_handler(&Event::Drop(crate::event::DropEvent {
+                    window_id,
                     modifiers,
                     handled: std::sync::Arc::new(std::sync::Mutex::new(false)),
                     abs,
@@ -1225,6 +1227,13 @@ impl Cx {
                 }
                 #[cfg(target_arch = "wasm32")]
                 let _ = (req, window, present);
+            }
+            StudioToApp::A11yLookup { req, query } => {
+                if self.a11y.request_lookup(crate::a11y::LookupSource::Host(req), &query) {
+                    self.redraw_all();
+                } else {
+                    Self::send_studio_message(AppToStudio::A11yLookupDone { req });
+                }
             }
             StudioToApp::A11yAction { bytes } => {
                 match makepad_a11y::wire::decode_action(&bytes) {
@@ -2011,6 +2020,10 @@ impl Cx {
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         draw_event.time = time;
         if self.a11y.on { self.a11y.begin_frame(); }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.a11y_answer_drawn = self.a11y_take_answer_frame();
+        }
         // one drawing, however many draw contexts the handler makes
         self.drawing_id += 1;
         self.drawing_start = self.redraw_id;
@@ -2113,8 +2126,9 @@ pub(crate) fn samples_incomplete_target(
     textures: &crate::texture::CxTexturePool,
     texture: crate::texture::TextureId,
     consumer: DrawPassId,
+    repaint: u64,
 ) -> bool {
-    sampled_picture(passes, textures, texture, consumer).to_paint
+    sampled_picture(passes, textures, texture, consumer, repaint).to_paint
 }
 
 /// The picture a pass samples from other passes' colour target.
@@ -2137,29 +2151,50 @@ pub(crate) struct SampledPicture {
     pub(crate) unfinished: bool,
 }
 
-/// What `consumer` samples in `texture`, in one look over the passes.
+/// What `consumer` samples in `texture` while repaint `repaint` (`Cx::repaint_id`) is built, in
+/// one look over the passes. A target several passes of one recording write (a ping-pong:
+/// one pass writes it, the next reads it, a third writes it again) holds, for a pass painted
+/// after one of its writers in this repaint, that writer's picture: the writers still to paint
+/// overwrite it only after the consumer read it, so they owe it nothing. Counted as owed, the
+/// pass between the writers was dirty after every repaint and its chain never painted whole.
+/// A consumer painted before every writer of the repaint reads the last picture painted
+/// before it, owed a paint after each writer still to come, as before.
 #[allow(dead_code)]
 pub(crate) fn sampled_picture(
     passes: &crate::draw_pass::CxDrawPassPool,
     textures: &crate::texture::CxTexturePool,
     texture: crate::texture::TextureId,
     consumer: DrawPassId,
+    repaint: u64,
 ) -> SampledPicture {
     let mut picture = SampledPicture::default();
     if !textures[texture].format.is_render() {
         return picture;
     }
+    // Some(unfinished) once a writer painted in this repaint
+    let mut fresh: Option<bool> = None;
     for producer in passes.id_iter() {
         let pass = &passes[producer];
-        if producer == consumer || !(pass.paint_dirty || pass.incomplete) {
+        // A writer that painted in this repaint, before the consumer, holds the picture the
+        // consumer reads: one still to paint overwrites the target after the consumer.
+        let painted_now = repaint != 0 && pass.painted_repaint == repaint && !pass.paint_dirty;
+        if producer == consumer || !(pass.paint_dirty || pass.incomplete || painted_now) {
             continue;
         }
-        if pass.color_textures.iter().any(|attachment| attachment.texture.texture_id() == texture) {
+        if !pass.color_textures.iter().any(|attachment| attachment.texture.texture_id() == texture) {
+            continue;
+        }
+        if painted_now {
+            fresh = Some(fresh.unwrap_or(false) | pass.incomplete);
+        } else {
             picture.to_paint |= pass.paint_dirty;
             picture.unfinished |= if pass.paint_dirty { pass.left_out } else { pass.incomplete };
         }
     }
-    picture
+    match fresh {
+        Some(unfinished) => SampledPicture { to_paint: false, unfinished },
+        None => picture,
+    }
 }
 
 /// A drawing kept for a frame drawn again (`Cx::keep_unrepeated_recordings`):
@@ -2213,18 +2248,18 @@ mod tests {
         let sampled = producer_target.texture_id();
 
         cx.passes[p].paint_dirty = true;
-        assert!(samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        assert!(samples_incomplete_target(&cx.passes, &cx.textures, sampled, c, cx.repaint_id));
         // painted: the sample is final
         cx.passes[p].paint_dirty = false;
-        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, sampled, c));
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, sampled, c, cx.repaint_id));
         // a pass reading its own target (ping-pong) is not waiting on itself
         cx.passes[c].paint_dirty = true;
-        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, consumer_target.texture_id(), c));
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, consumer_target.texture_id(), c, cx.repaint_id));
         // only render targets have a producer
         let image = Texture::new_with_format(&mut cx, TextureFormat::VecBGRAu8_32 {
             width: 1, height: 1, data: Some(vec![0]), updated: crate::texture::TextureUpdated::Full,
         });
-        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, image.texture_id(), c));
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, image.texture_id(), c, cx.repaint_id));
     }
 
     #[test]
@@ -2244,11 +2279,11 @@ mod tests {
         });
         producer.add_color_texture(&mut cx, &target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
         let (c, p) = (consumer.draw_pass_id(), producer.draw_pass_id());
-        let sampled = |cx: &Cx, by| sampled_picture(&cx.passes, &cx.textures, target.texture_id(), by);
+        let sampled = |cx: &Cx, by| sampled_picture(&cx.passes, &cx.textures, target.texture_id(), by, cx.repaint_id);
         let picture = |to_paint, unfinished| SampledPicture { to_paint, unfinished };
         cx.passes[p].hold_picture();
         assert_eq!(sampled(&cx, c), picture(false, true));
-        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, target.texture_id(), c), "nothing to repaint for it");
+        assert!(!samples_incomplete_target(&cx.passes, &cx.textures, target.texture_id(), c, cx.repaint_id), "nothing to repaint for it");
         assert_eq!(sampled(&cx, p), picture(false, false), "not waiting on itself");
         // dirty as well (to paint after the consumer, or held for a queued
         // shader): the consumer paints again and is not whole either
@@ -2304,7 +2339,7 @@ mod tests {
             cx.passes[a].paint_dirty = true;
             cx.passes[b].paint_dirty = true;
             for (i, (pass, reads)) in [(a, tb.texture_id()), (b, ta.texture_id())].into_iter().enumerate() {
-                let picture = sampled_picture(&cx.passes, &cx.textures, reads, pass);
+                let picture = sampled_picture(&cx.passes, &cx.textures, reads, pass, n);
                 cx.passes[pass].painted(drew[i] && !picture.unfinished, drew[i], n);
                 cx.passes[pass].paint_dirty = false;
             }
@@ -2316,6 +2351,56 @@ mod tests {
         for n in 3..6 {
             assert_eq!(frame(&mut cx, n, [false, true]), (true, true), "frame {n}: `a` leaves its own draw out again");
         }
+    }
+
+    /// A target two passes of one recording write: `a` writes `t`, `b` reads it into `u`, `c`
+    /// writes `t` again from `u` (a denoiser's wavelet passes, two targets for four passes). `b`
+    /// reads the picture `a` painted in the same repaint; `c`, still to paint then, owes it
+    /// nothing. Counted as owed, `b` stayed dirty after every repaint, the chain never painted
+    /// whole, and whatever waited on its whole paint (the next step's recording) never came.
+    #[test]
+    fn a_target_two_passes_write_paints_whole_in_one_repaint() {
+        use crate::draw_pass::DrawPassClearColor;
+        use crate::makepad_math::vec4;
+        use crate::texture::{Texture, TextureFormat, TextureId, TextureSize};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let target = |cx: &mut Cx| Texture::new_with_format(cx, TextureFormat::RenderBGRAu8 {
+            size: TextureSize::Fixed { width: 4, height: 4 },
+            initial: true,
+        });
+        let (pass_a, pass_b, pass_c) = (DrawPass::new(&mut cx), DrawPass::new(&mut cx), DrawPass::new(&mut cx));
+        let (t, u) = (target(&mut cx), target(&mut cx));
+        let clear = DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0));
+        pass_a.add_color_texture(&mut cx, &t, clear.clone());
+        pass_b.add_color_texture(&mut cx, &u, clear.clone());
+        pass_c.add_color_texture(&mut cx, &t, clear);
+        let (a, b, c) = (pass_a.draw_pass_id(), pass_b.draw_pass_id(), pass_c.draw_pass_id());
+        // One repaint in the frame build's order: a pass's dirty flag clears as it paints, its
+        // read is judged as a draw call's is, a read owed a paint leaves it dirty again.
+        let repaint = |cx: &mut Cx, n: u64, order: &[(DrawPassId, Option<TextureId>)]| {
+            for &(pass, reads) in order {
+                cx.passes[pass].paint_dirty = false;
+                let picture = reads.map_or(SampledPicture::default(), |reads| sampled_picture(&cx.passes, &cx.textures, reads, pass, n));
+                cx.passes[pass].paint_dirty |= picture.to_paint;
+                cx.passes[pass].painted(!picture.unfinished, true, n);
+            }
+        };
+        let chain = [(a, None), (b, Some(t.texture_id())), (c, Some(u.texture_id()))];
+        for n in 1..3 {
+            for pass in [a, b, c] {
+                cx.passes[pass].paint_dirty = true;
+            }
+            repaint(&mut cx, n, &chain);
+            assert_eq!([a, b, c].map(|pass| cx.passes[pass].paint_dirty), [false; 3], "repaint {n}: no pass is owed another paint");
+            assert_eq!([a, b, c].map(|pass| cx.passes[pass].painted_serial), [n; 3], "repaint {n}: the chain painted whole");
+        }
+        // `a` left a draw out (a pipeline compiling): `b` read its unfinished picture
+        cx.passes[a].paint_dirty = true;
+        cx.passes[b].paint_dirty = true;
+        cx.passes[a].painted(false, false, 3);
+        cx.passes[a].paint_dirty = false;
+        let picture = sampled_picture(&cx.passes, &cx.textures, t.texture_id(), b, 3);
+        assert_eq!(picture, SampledPicture { to_paint: false, unfinished: true }, "the reader of an unfinished picture is not whole");
     }
 
     #[test]

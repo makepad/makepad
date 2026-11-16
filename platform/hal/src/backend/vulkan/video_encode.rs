@@ -22,6 +22,10 @@ use std::os::fd::{IntoRawFd, OwnedFd};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+relax_api::option_layouts! {
+    (PictureFormat, vk::Extent2D, u32),
+}
+
 /// One picture at a time: the encoder is driven synchronously (`StreamEncoder::encode_*`
 /// returns the picture's bitstream), so one set of per-picture objects is enough.
 const SLOTS: usize = 1;

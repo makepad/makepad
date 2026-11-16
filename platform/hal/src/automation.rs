@@ -557,7 +557,6 @@ impl Runner {
 
     fn ask_in(&self, hal: &Hal, session: u32, request: &str) -> Option<String> {
         if request == "ui" || request.starts_with("ui ") {
-            crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
             hal.wait_until(self.cfg.step_timeout, |_| crate::a11y::with_mirror(|m| m.trees.iter().any(|(k,t)| (*k >> 32) as u32 == session && !t.nodes.is_empty())));
             let query = request.strip_prefix("ui").unwrap().trim();
             let query = query.strip_prefix("q=").unwrap_or(query);
@@ -596,7 +595,6 @@ impl Runner {
 
     fn find_node(&self, hal: &Hal, session: u32, query: &str) -> Result<(u64, Node), String> {
         Query::parse(query)?;
-        crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
         let mut rows = Vec::new();
         hal.wait_until(self.cfg.step_timeout, |_| {
             rows = self.semantic_rows(session, query).unwrap_or_default();
@@ -638,6 +636,14 @@ impl Runner {
 
     fn step(&mut self, hal: &Hal, step: &Step) -> Result<String, String> {
         let session = self.cfg.session;
+        let ui_query = |request: &str| request == "ui" || request.starts_with("ui ");
+        let reads_tree = match step {
+            Step::Query(request) => ui_query(request),
+            Step::Expect(_) => self.last_query.as_ref().is_some_and(|(request, _)| ui_query(request)),
+            Step::Click(Target::Path(_) | Target::PathAt(..)) | Step::ExpectText(..) | Step::Snapshot(_) => true,
+            _ => false,
+        };
+        let _hold = reads_tree.then(|| crate::a11y::SnapshotHold::new(hal, makepad_a11y::consumer::TEST, self.cfg.step_timeout));
         match step {
             Step::Domain(app) => {
                 self.target = match app {
@@ -666,12 +672,13 @@ impl Runner {
                 }
             }
             Step::Click(target) => {
-                let (win, x, y, what) = match target {
-                    Target::Point(x, y) => (self.first_window(hal)?, *x, *y, format!("({x}, {y})")),
+                // a node's bounds are the app's layout points; a raw point is native
+                let (win, x, y, what, mods) = match target {
+                    Target::Point(x, y) => (self.first_window(hal)?, *x, *y, format!("({x}, {y})"), 0),
                     Target::PathAt(query, dx, dy) => {
                         let (key,node) = self.find_node(hal, session, query)?;
                         let win = hal.with_world(|w| w.session(session).and_then(|s| s.windows.keys_of(session).into_iter().find(|id| id.index == key as u32))).ok_or("window closed")?;
-                        (win, node.bounds.x as f64 + dx, node.bounds.y as f64 + dy, format!("{} at ({dx}, {dy})", node.path))
+                        (win, node.bounds.x as f64 + dx, node.bounds.y as f64 + dy, format!("{} at ({dx}, {dy})", node.path), input::MOD_LAYOUT_POINTS)
                     }
                     Target::Path(query) => {
                         let (key,node) = self.find_node(hal, session, query)?;
@@ -680,9 +687,9 @@ impl Runner {
                         return if matches!(result, ActionResult::Handled | ActionResult::Fallback) { Ok(format!("{}: {}", result.short(), render::node_line(&node))) } else { Err(result.short().into()) };
                     }
                 };
-                hal.inject(session, RawEvent::mouse_move(win, x, y, 0.0, 0.0, 0));
-                hal.inject(session, RawEvent::mouse_down(win, x, y, 1, 0));
-                hal.inject(session, RawEvent::mouse_up(win, x, y, 1, 0));
+                hal.inject(session, RawEvent::mouse_move(win, x, y, 0.0, 0.0, mods));
+                hal.inject(session, RawEvent::mouse_down(win, x, y, 1, mods));
+                hal.inject(session, RawEvent::mouse_up(win, x, y, 1, mods));
                 Ok(format!("clicked {what}"))
             }
             Step::Key { name, key, mods } => {
@@ -743,7 +750,6 @@ impl Runner {
             }
             Step::ExpectText(query, text) => {
                 Query::parse(query)?;
-                crate::a11y::request_consumer_in(hal, makepad_a11y::consumer::TEST, true);
                 let mut seen = Vec::new();
                 let ok = hal.wait_until(self.cfg.step_timeout, |_| {
                     seen = self.semantic_rows(self.target, query).unwrap_or_default();

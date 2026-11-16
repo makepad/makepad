@@ -101,6 +101,9 @@ hal_commands! {
     StrDef = 1, str_def { sid: sid, bytes: rng };
     /// The app asks to quit.
     Quit = 2, quit {};
+    /// The app keeps running after it held a quit request (its person cancelled): a quit the system
+    /// asked for and the sessions hold is answered as cancelled.
+    QuitCancel = 5, quit_cancel {};
     /// Starts (or restarts) timer `timer`: fires after `interval_ns` of HAL time, again every
     /// interval when `repeat`.
     TimerStart = 3, timer_start { timer: u32, interval_ns: u64, repeat: bool };
@@ -406,6 +409,11 @@ hal_commands! {
     /// next to the Windows notification icon), shows it in front and gives it the focus. Its focus
     /// loss (a click anywhere else) answers `PopupDismissed`.
     WindowAtTray = 154, window_at_tray { id: obj, tray: u64, w: f32, h: f32 };
+    /// Posts the app's notification `id` with `title` and `body`, replacing one with the same
+    /// id. A click answers `NotifyClick`.
+    NotifyPost = 169, notify_post { id: u64, title: sid, body: sid };
+    /// Removes the app's delivered and pending notification `id`.
+    NotifyRemove = 170, notify_remove { id: u64 };
     /// The eyes XR window `id`'s next frame shows with, when they are not its `XrFrame`'s (a
     /// picture rendered elsewhere, for other eyes): `eyes` is two `XrEye` (`buffers::Wire`) and
     /// the depth (metres along the view, f32 little-endian; 0 none) of what the frame shows
@@ -422,6 +430,8 @@ hal_commands! {
 
     A11yUpdate = 158, a11y_update { id: obj, bytes: rng };
     A11yActionDone = 159, a11y_action_done { req: u64, result: u32 };
+    /// Acknowledges an in-process semantic lookup after this session's frame updates.
+    A11yLookupDone = 168, a11y_lookup_done { seq: u32 };
     /// Creates native content (`native_layer::kind`). WEB: UTF-8 initial URL; CAMERA_PREVIEW:
     /// little-endian u64 input id followed by u64 format id. Placement comes from frame layers.
     NativeLayerCreate = 160, native_layer_create { id: obj, kind: u32, params: rng };

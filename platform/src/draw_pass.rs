@@ -52,15 +52,17 @@ impl Default for GpuTimeQuery {
         }
     }
 }
-// Only backends that report pass timing (Metal and D3D11 today) call the
-// recording half; the other backends still compile it.
-#[allow(dead_code)]
+// The HAL's `FrameDone` feeds the recording half (`PendingGpuTimes`); the web
+// backend takes no pass timing yet.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl GpuTimeRecorder {
     /// A sample the backend could not take (no free query, an unreliable
     /// clock) counts like one the full queue refused.
     pub(crate) fn record_dropped(&self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
+    // no backend reports a per-pass breakdown under the HAL yet
+    #[allow(dead_code)]
     pub(crate) fn record_breakdown(&self, tag: u64, line: String) {
         if self.breakdown.try_send((tag, line)).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -79,6 +81,41 @@ impl GpuTimeRecorder {
         self.tag.load(Ordering::Relaxed)
     }
 }
+/// Packets still on the GPU that paint a pass with GPU timing on
+/// (`set_gpu_timing_enabled`): each pass is a packet of its own, so the GPU time
+/// its `FrameDone` carries (the backend's timestamps around the packet) is the
+/// pass's, and it goes to the pass's samples under the tag the pass had when it
+/// was built.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Default)]
+pub(crate) struct PendingGpuTimes(std::collections::VecDeque<(u64, GpuTimeRecorder, u64)>);
+#[cfg(not(target_arch = "wasm32"))]
+impl PendingGpuTimes {
+    /// Packets kept waiting at most; an older one is forgotten and counts as a
+    /// dropped sample (a frame the HAL never answers).
+    const PENDING: usize = 256;
+    /// Packet `serial` paints `pass`.
+    pub(crate) fn painted(&mut self, serial: u64, pass: &CxDrawPass) {
+        let Some(query) = pass.gpu_time_query.as_ref() else { return };
+        if self.0.len() >= Self::PENDING {
+            if let Some((_, recorder, _)) = self.0.pop_front() {
+                recorder.record_dropped();
+            }
+        }
+        self.0.push_back((serial, query.recorder.clone(), query.recorder.current_tag()));
+    }
+    /// Packet `serial` is done on the GPU after `gpu_ns` (0: not measured).
+    pub(crate) fn done(&mut self, serial: u64, gpu_ns: u64) {
+        let Some(i) = self.0.iter().position(|(s, ..)| *s == serial) else { return };
+        let (_, recorder, tag) = self.0.remove(i).unwrap();
+        if gpu_ns > 0 {
+            recorder.record_seconds_tagged(tag, gpu_ns as f64 * 1e-9);
+        } else {
+            recorder.record_dropped();
+        }
+    }
+}
+
 impl GpuTimeQuery {
     fn set_tag(&self, tag: u64) {
         self.recorder.tag.store(tag, Ordering::Relaxed);
@@ -828,6 +865,9 @@ pub struct CxDrawPass {
     pub(crate) painted_frame: u64,
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) painted_before: u64,
+    /// The repaint (`Cx::repaint_id`) that last painted it, whole or not (0 before the first):
+    /// in that repaint its targets hold its picture for the passes painted after it.
+    pub(crate) painted_repaint: u64,
     /// Kept attached although its attaching list was recorded again without
     /// it: a drawing recorded it, the frame was drawn again before it painted
     /// whole, and the later drawing did not record it again (`Cx::frame_drawn_again`).
@@ -858,6 +898,7 @@ impl CxDrawPass {
     pub(crate) fn painted(&mut self, whole: bool, drew_all: bool, repaint: u64) {
         self.incomplete = !whole;
         self.left_out = !drew_all;
+        self.painted_repaint = repaint;
         if whole {
             self.painted_serial = repaint;
         }
@@ -981,6 +1022,7 @@ impl Default for CxDrawPass {
             left_out: false,
             painted_frame: 0,
             painted_before: 0,
+            painted_repaint: 0,
             kept_recording: false,
             pass_rect: None,
             #[cfg(target_arch = "wasm32")]

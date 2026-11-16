@@ -33,6 +33,10 @@ use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+relax_api::option_layouts! {
+    (Key, f64, f64),
+}
+
 static STATE: OnceLock<Arc<State>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -284,7 +288,7 @@ struct Hub {
 
 /// The connection an exec hands over (`prepare_exec`): the hub, its port and this client's id.
 static HANDOVER: Mutex<Option<(Arc<Hub>, u16, u64)>> = Mutex::new(None);
-/// The handed-over connection: `<fd> <port> <client> [protocol]` (older images omit protocol).
+/// The handed-over connection: `<fd> <port> <client> [protocol [wire]]` (older images omit them).
 const RESUME_ENV: &str = "MAKEPAD_WM_RESUME";
 
 /// Before an exec of this process (a restart into a rebuilt makepad): the WM connection stays
@@ -317,7 +321,11 @@ pub fn prepare_exec() -> Vec<(String, String)> {
         hub.pause.store(false, Ordering::Release);
         return Vec::new();
     }
-    let protocol = shell::snapshot().protocol.map_or(String::new(), |v| format!(" {v}"));
+    let s = shell::snapshot();
+    let protocol = s.protocol.map_or(String::new(), |v| {
+        let wire = s.wire.map_or(String::new(), |wire| format!(" {wire}"));
+        format!(" {v}{wire}")
+    });
     vec![(RESUME_ENV.to_string(), format!("{fd} {port} {client}{protocol}"))]
 }
 
@@ -336,11 +344,11 @@ impl Hub {
         if s.hub_id == self as *const Self as usize { s.hub = link; }
     }
 
-    fn connect(port: u16, client: u64, name: &str, state: Arc<State>) -> Result<Arc<Hub>, String> {
+    fn connect(port: u16, client: u64, wire: u64, version: u32, name: &str, state: Arc<State>) -> Result<Arc<Hub>, String> {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("hub 127.0.0.1:{port}: {e}"))?;
         let _ = stream.set_nodelay(true);
         let request = format!(
-            "GET /app?build={client}&crate={name}&wire={WIRE:016x} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+            "GET /app?build={client}&crate={name}&wire={wire:016x}&proto={version} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
              Sec-WebSocket-Key: bWFrZXBhZC13bS1zaGVsbA==\r\nSec-WebSocket-Version: 13\r\n\r\n");
         stream.write_all(request.as_bytes()).map_err(|e| format!("hub handshake: {e}"))?;
         let mut head = Vec::new();
@@ -370,6 +378,7 @@ impl Hub {
         let (Some(Some(fd)), Some(Some(port)), Some(Some(client))) = (w.next(), w.next(), w.next()) else { return None };
         let fd = i32::try_from(fd).ok()?;
         let protocol = w.next().flatten().and_then(|v| u32::try_from(v).ok());
+        let wire = w.next().flatten();
         // the descriptor must still be a connected socket (else: ask the WM socket)
         let stream = unsafe { TcpStream::from_raw_fd(fd) };
         if stream.peer_addr().is_err() {
@@ -383,6 +392,7 @@ impl Hub {
             let mut s = shell::snapshot();
             s.admitted = Some(client);
             s.protocol = protocol;
+            s.wire = wire;
         }
         *lock(&HANDOVER) = Some((hub.clone(), port, client));
         Some((hub, port, client))
@@ -595,9 +605,10 @@ impl App {
                 {
                     let mut s = shell::snapshot();
                     s.protocol = Some(admission.version);
+                    s.wire = Some(admission.wire);
                     s.admitted = Some(admission.client);
                 }
-                let hub = Hub::connect(admission.port, admission.client, &name, state.clone())?;
+                let hub = Hub::connect(admission.port, admission.client, admission.wire, admission.version, &name, state.clone())?;
                 eprintln!("[hal-wm] the makepad WM at {} hosts this process as client {} ({name}, hosted protocol {})", path.display(), admission.client, admission.version);
                 (hub, admission.port, admission.client)
             }
@@ -1090,6 +1101,7 @@ impl App {
                 let mut s = shell::snapshot();
                 s.wm_socket = Some(path.to_string_lossy().into_owned());
                 s.protocol = None;
+                s.wire = None;
                 s.admitted = None;
             }
             match wm_socket::adopt(&path, WIRE, std::process::id(), &name) {
@@ -1110,11 +1122,12 @@ impl App {
         {
             let mut s = shell::snapshot();
             s.protocol = Some(admission.version);
+            s.wire = Some(admission.wire);
             s.admitted = Some(admission.client);
             s.refused = None;
         }
         self.state.hung_up.store(false, Ordering::Release);
-        let hub = match Hub::connect(admission.port, admission.client, &name, self.state.clone()) {
+        let hub = match Hub::connect(admission.port, admission.client, admission.wire, admission.version, &name, self.state.clone()) {
             Ok(hub) => hub,
             Err(e) => {
                 shell::snapshot().refused = Some(e.clone());
@@ -1265,6 +1278,7 @@ impl Shell for App {
                         self.hub.send(vec![AppToStudio::Relay(ChildRelay::RemoveTray { tray })]);
                     }
                 }
+                OsCmd::NotifyPost { .. } | OsCmd::NotifyRemove { .. } => {}
                 // A tray dropdown: the WM places the window under the tray's bar item.
                 OsCmd::WindowAtTray { id, tray, w, h } => {
                     let Some(key) = self.resolve((sid, id)) else { return };
@@ -1463,7 +1477,7 @@ impl Shell for App {
 mod tests {
     use super::*;
     use makepad_micro_serde::DeBin;
-    use makepad_studio_protocol::HostedVisible;
+    use makepad_studio_protocol::{HostedVisible, HOSTED_VERSIONS};
     use std::net::TcpListener;
 
     /// One frame as the hub reads it: unmasks a client frame.
@@ -1494,7 +1508,7 @@ mod tests {
             let mut byte = [0u8];
             while !request.ends_with(b"\r\n\r\n") { stream.read_exact(&mut byte).unwrap(); request.push(byte[0]); }
             let request = String::from_utf8(request).unwrap();
-            assert!(request.starts_with(&format!("GET /app?build=77&crate=makepad-app-amp&wire={WIRE:016x} ")), "{request}");
+            assert!(request.starts_with(&format!("GET /app?build=77&crate=makepad-app-amp&wire={WIRE:016x}&proto={} ", HOSTED_VERSIONS.1)), "{request}");
             stream.write_all(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n").unwrap();
             // a batch, split over a continuation frame, then a ping
             let batch = StudioToAppVec(vec![StudioToApp::Tick, StudioToApp::Kill]).serialize_bin();
@@ -1517,7 +1531,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 77, "makepad-app-amp", state.clone()).unwrap();
+        let hub = Hub::connect(port, 77, WIRE, HOSTED_VERSIONS.1, "makepad-app-amp", state.clone()).unwrap();
         hub.send(vec![AppToStudio::CreateWindow { window_id: 3, kind_id: 0 }, AppToStudio::TickDone]);
         server.join().unwrap();
         for _ in 0..200 {
@@ -1543,7 +1557,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 78, "makepad-app-hidden", state.clone()).unwrap();
+        let hub = Hub::connect(port, 78, WIRE, HOSTED_VERSIONS.1, "makepad-app-hidden", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1574,7 +1588,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 79, "makepad-app-resize", state.clone()).unwrap();
+        let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-resize", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1611,7 +1625,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 79, "makepad-app-aihub", state.clone()).unwrap();
+        let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1665,7 +1679,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 81, "makepad-app-aihub", state.clone()).unwrap();
+        let hub = Hub::connect(port, 81, WIRE, HOSTED_VERSIONS.1, "makepad-app-aihub", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 0, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1708,7 +1722,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 80, "makepad-app-game", state.clone()).unwrap();
+        let hub = Hub::connect(port, 80, WIRE, HOSTED_VERSIONS.1, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1755,7 +1769,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 79, "makepad-app-game", state.clone()).unwrap();
+        let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-game", state.clone()).unwrap();
         let mut app = App { state: state.clone(), hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1802,7 +1816,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 79, "makepad-app-clock", state.clone()).unwrap();
+        let hub = Hub::connect(port, 79, WIRE, HOSTED_VERSIONS.1, "makepad-app-clock", state.clone()).unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),
             next_clip_read: 0, clip_flavours: None, selection: Default::default(), drag_queries: VecDeque::new(), wm_state: Vec::new(), wm_focus: HashMap::new(),
@@ -1893,7 +1907,7 @@ mod tests {
         });
         let state = Arc::new(State { shared: Shared::global(), inbox: Default::default(), hung_up: AtomicBool::new(false), detached: AtomicBool::new(false),
             rings: Default::default(), finished: Default::default(), in_flight: Default::default(), device: Default::default() });
-        let hub = Hub::connect(port, 80, "makepad-app-lend", state.clone()).unwrap();
+        let hub = Hub::connect(port, 80, WIRE, HOSTED_VERSIONS.1, "makepad-app-lend", state.clone()).unwrap();
         server.join().unwrap();
         let mut app = App { state, hub, aux_path: Default::default(), aux: None, pending: Vec::new(), windows: HashMap::new(),
             early: HashMap::new(), next_window: 1, ticking: false, asked_frame: false, app_drawn: false, hidden: false, clip_reads: HashMap::new(),

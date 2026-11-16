@@ -111,6 +111,19 @@ impl Cx {
         { let _ = (shader, float16); true }
     }
 
+    /// Whether `shader`'s pipeline failed to build. It never draws, and no
+    /// [`Event::DrawShadersReady`](crate::event::Event::DrawShadersReady) follows
+    /// for it, so a caller waiting on [`Cx::draw_shader_ready`] stops waiting.
+    /// False while it is still being built.
+    pub fn draw_shader_failed(&self, shader: crate::draw_shader::DrawShaderId) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.is_draw_shader_window_failed(shader)
+        }
+        #[cfg(target_arch = "wasm32")]
+        { let _ = shader; false }
+    }
+
     /// Draws left out of frames so far because they were not ready (their
     /// pipeline compiling, their instances not yet on the GPU).
     pub fn pipeline_skips(&self) -> u64 {

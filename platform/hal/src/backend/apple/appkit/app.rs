@@ -14,7 +14,7 @@ use makepad_apple_sys::*;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::os::raw::c_void;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
@@ -94,6 +94,11 @@ pub(super) fn read_appearance() {
 
 static EXIT_REQUESTED: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
+/// A termination AppKit asked for that the sessions still hold. The process's, not a run's: AppKit
+/// waits for the answer past a run that ends in place, so the next run is asked in its stead
+/// ([`ask_if_quit_held`]).
+static TERMINATE_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// What only the main thread touches.
 pub struct App {
     classes: OnceCell<Classes>,
@@ -110,7 +115,6 @@ pub struct App {
     /// The Dock icon's menu (`menu_kind::DOCK` items; the system adds the windows), nil: none.
     dock_menu: Cell<ObjcId>,
     pasteboard: Cell<ObjcId>,
-    nap: Cell<ObjcId>,
     marked_attributes: Cell<ObjcId>,
     cursor: Cell<u32>,
     cursors: RefCell<HashMap<u32, ObjcId>>,
@@ -149,7 +153,6 @@ pub fn app() -> &'static App {
             menu_delegate: Cell::new(nil),
             dock_menu: Cell::new(nil),
             pasteboard: Cell::new(nil),
-            nap: Cell::new(nil),
             marked_attributes: Cell::new(nil),
             cursor: Cell::new(cursor::DEFAULT),
             cursors: RefCell::new(HashMap::new()),
@@ -262,13 +265,40 @@ pub(crate) fn wake_idle_main() {
     }
 }
 
-/// Ends [`run_main_loop`] (any thread).
+/// Ends [`run_main_loop`] (any thread), as [`stop_main_loop_with`] with 0.
 pub fn stop_main_loop() {
+    stop_main_loop_with(0)
+}
+
+/// Ends [`run_main_loop`] (any thread); `code` is what the process ends with. A termination AppKit
+/// asked for and the sessions hold (NSTerminateLater) is answered here: pending ops applied,
+/// windows gone, the HAL's driver threads stopped, then YES (AppKit exits 0, as on NOW). A `code`
+/// other than 0 ends the process with it instead of the YES, and so does a call while a thread
+/// unwinds (the app thread's end in `run_app`), with 101, the code a returned main loop gives a
+/// panicked app. Without a held termination the main loop returns and its caller exits. Cost: O(1)
+/// here, one main-thread block for a held termination.
+pub fn stop_main_loop_with(code: i32) {
+    let panicked = code == 0 && std::thread::panicking();
+    let code = if panicked { 101 } else { code };
     let shared = Shared::global();
-    {
+    // under the run lock, as `hold_terminate`: a stop either finds the hold or comes before it
+    let held = {
         let mut run = lock(&shared.run);
         run.stop = true;
         shared.run_cv.notify_all();
+        TERMINATE_PENDING.swap(false, Ordering::AcqRel)
+    };
+    if held {
+        run_on_main(move || unsafe {
+            drain_ops();
+            windows_gone_before_exit();
+            crate::Hal::global().before_exit();
+            if code != 0 {
+                makepad_core_util::process_end::end(code);
+            }
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, replyToApplicationShouldTerminate: YES];
+        });
     }
     wake_idle_main();
     // an event ends the main loop's wait for the next event, which then sees the stop
@@ -276,6 +306,63 @@ pub fn stop_main_loop() {
     if ready {
         wake_event_loop();
     }
+}
+
+/// Whether a termination is held. O(1).
+pub(super) fn terminate_held() -> bool {
+    TERMINATE_PENDING.load(Ordering::Acquire)
+}
+
+/// A run that began while AppKit waits on a held termination (the run that held it ended in
+/// place before answering): its new top-level session `sid` is asked to quit as the old run's
+/// were, so its `Quit` or `QuitCancel` answers AppKit. O(1); nothing when no quit is held.
+pub fn ask_if_quit_held(sid: u32) {
+    if TERMINATE_PENDING.load(Ordering::Acquire) {
+        Shared::global().push(sid, |q| q.lifecycle(lifecycle::QUIT_REQUESTED));
+    }
+}
+
+/// `applicationShouldTerminate:` with sessions asked: holds the termination (true: answer LATER)
+/// unless the main loop is already stopping (false: answer NOW, no stop would answer a hold).
+/// O(1), under the run lock.
+pub(super) fn hold_terminate() -> bool {
+    let run = lock(&Shared::global().run);
+    if run.stop {
+        return false;
+    }
+    TERMINATE_PENDING.store(true, Ordering::Release);
+    true
+}
+
+/// Answers a held AppKit termination NO so the app keeps running; otherwise does nothing.
+/// O(1): a held termination queues one main-thread block for the reply.
+pub fn cancel_terminate() {
+    if TERMINATE_PENDING.swap(false, Ordering::AcqRel) {
+        run_on_main(|| unsafe {
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, replyToApplicationShouldTerminate: NO];
+        });
+    }
+}
+
+/// Asks AppKit to quit this app (`terminate:`), the call AppKit's quit Apple event handler
+/// makes for a logout and that Cmd+Q and the Dock's Quit make: `applicationShouldTerminate:`
+/// asks the sessions and holds the quit as for a logout. (A quit Apple event the app sends
+/// itself is refused, errAEEventNotHandled, and one from another process needs the person's
+/// consent.) For automation (`makepad-remote ... quit native=1`), so an app's held quit is
+/// driven on its real path. False, and nothing asked, while no backend wants AppKit windows
+/// (an offscreen run, `MAKEPAD_HIDE_WINDOWS` on the default backend): AppKit's app is not set up
+/// there, and `terminate:` without its delegate ends the process on the spot.
+/// Cost: one main-thread block.
+pub fn ask_terminate() -> bool {
+    if !lock(&Shared::global().run).wanted {
+        return false;
+    }
+    run_on_main(|| unsafe {
+        let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, terminate: nil];
+    });
+    true
 }
 
 fn stopping() -> bool {
@@ -387,20 +474,61 @@ unsafe fn init() {
 /// also keeps the Mac from idle sleep, and a menu-bar app (`accessory`: devhub's master, the AI
 /// Hub), whose work goes on with no window shown and which lets the Mac sleep as before.
 unsafe fn begin_unseen_activity(accessory: bool) {
-    if app().nap.get() != nil {
-        return;
-    }
-    let (options, reason) = if !focus_allowed() {
-        (ACTIVITY_USER_INITIATED, "makepad no-focus instance")
+    let kind = if !focus_allowed() {
+        UNSEEN_NO_FOCUS
     } else if accessory {
-        (ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP, "makepad menu-bar app at work")
+        UNSEEN_MENU_BAR
     } else {
         return;
     };
+    UNSEEN_KIND.store(kind, Ordering::Release);
+    start_unseen_activity();
+}
+
+/// The activity [`begin_unseen_activity`] holds (an `NSActivity` token, retained; 0: none), and
+/// which kind it is (0: none asked): held outside the main thread's state, so it ends from the
+/// thread that execs the process ([`end_unseen_activity`]).
+static UNSEEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static UNSEEN_KIND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const UNSEEN_NO_FOCUS: u8 = 1;
+const UNSEEN_MENU_BAR: u8 = 2;
+
+unsafe fn start_unseen_activity() {
+    let (options, reason) = match UNSEEN_KIND.load(Ordering::Acquire) {
+        UNSEEN_NO_FOCUS => (ACTIVITY_USER_INITIATED, "makepad no-focus instance"),
+        UNSEEN_MENU_BAR => (ACTIVITY_USER_INITIATED_ALLOWING_IDLE_SYSTEM_SLEEP, "makepad menu-bar app at work"),
+        _ => return,
+    };
+    if UNSEEN.load(Ordering::Acquire) != 0 {
+        return;
+    }
     let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
     let token: ObjcId = msg_send![info, beginActivityWithOptions: options reason: str_to_nsstring(reason)];
     let () = msg_send![token, retain];
-    app().nap.set(token);
+    if UNSEEN.compare_exchange(0, token as usize, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        let () = msg_send![info, endActivity: token];
+        let () = msg_send![token, release];
+    }
+}
+
+/// Ends the activity [`begin_unseen_activity`] holds, from any thread: before the process execs
+/// itself in place. The power assertion behind it is the pid's, which an exec keeps, so powerd
+/// never sees it end, and the next image begins its own: each self-update of devhub's master left
+/// one more (28 in a day, 11-13).
+pub fn end_unseen_activity() {
+    let token = UNSEEN.swap(0, Ordering::AcqRel) as ObjcId;
+    if token != nil {
+        unsafe {
+            let info: ObjcId = msg_send![class!(NSProcessInfo), processInfo];
+            let () = msg_send![info, endActivity: token];
+            let () = msg_send![token, release];
+        }
+    }
+}
+
+/// Begins the activity again after [`end_unseen_activity`] when the exec did not happen.
+pub fn resume_unseen_activity() {
+    unsafe { start_unseen_activity() }
 }
 
 /// Foundation `NSActivityIdleSystemSleepDisabled` (`1ULL << 20`), and
@@ -681,7 +809,7 @@ impl App {
     }
 
     /// `applicationShouldTerminate:`: each session with a window or a tray is asked to quit; true when
-    /// there is anyone to ask (the termination is cancelled, the app's `Quit` ends it).
+    /// there is anyone to ask (the termination is held until the app quits or cancels it).
     pub fn ask_sessions_to_quit(&self) -> bool {
         let mut sids: Vec<u32> = self.windows.borrow().iter().filter(|w| !w.retired.get()).map(|w| w.sid.get()).collect();
         // a tray app without a window is asked too
@@ -1271,6 +1399,8 @@ fn command(sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::TrayRemove { tray } => super::tray::remove(sid, tray),
+        OsCmd::NotifyPost { id, title, body } => super::notify::post(sid, id, &title, &body),
+        OsCmd::NotifyRemove { id } => super::notify::remove(sid, id),
         // (no headset here)
         OsCmd::XrFrameEyes { .. } | OsCmd::XrPoseLead { .. } | OsCmd::XrRefreshRate { .. } | OsCmd::XrHaptic { .. } => {}
         OsCmd::FileDialog { req, kind, title, location, filename, filters } => file_dialog(sid, req, kind, &title, &location, &filename, &filters),

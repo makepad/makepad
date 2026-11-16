@@ -11,6 +11,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+relax_api::option_layouts! {
+    MemoryBudget,
+}
+
 pub(super) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -712,9 +716,11 @@ fn pipeline_cache_file(properties: &vk::PhysicalDeviceProperties) -> Option<Path
         else if let Some(d) = std::env::var_os("XDG_CACHE_HOME") { PathBuf::from(d) }
         else if let Some(d) = std::env::var_os("LOCALAPPDATA") { PathBuf::from(d) }
         else { PathBuf::from(std::env::var_os("HOME")?).join(".cache") };
-    // outside Android, apps share the user's cache dir, so each app's file has its name in it
+    // outside Android, apps share the user's cache dir, so each app's file has its name in it: its
+    // executable's, which under the JIT is the program's own, not the loader's that every app
+    // runs (relax-api current_exe), so two apps at once each keep their own file
     let app = if cfg!(target_os = "android") { None }
-        else { std::env::current_exe().ok().and_then(|exe| Some(format!("{}-", exe.file_stem()?.to_string_lossy()))) };
+        else { relax_api::env::current_exe().ok().and_then(|exe| Some(format!("{}-", exe.file_stem()?.to_string_lossy()))) };
     Some(dir.join("makepad-hal").join(format!("pipelines-{}{:x}-{:x}-{:x}.bin", app.unwrap_or_default(), properties.vendor_id, properties.device_id, properties.driver_version)))
 }
 #[cfg(target_vendor = "apple")]
@@ -828,24 +834,31 @@ impl Device {
             Err(e) => { eprintln!("[hal-vulkan] pipeline cache data: {e:?}"); return; }
         };
         // each save writes its own temp file, so two saves at once (ours at exit, or another
-        // instance of the app's) can't publish a mix of both
+        // instance of the app's) can't publish a mix of both. No sync before the rename: a file a
+        // crash cut short fails its length and hash at the next open and counts as no cache, while
+        // a sync waits for the filesystem's other pending writes (on a test box running three apps
+        // it held a compile thread 12.6 s, and an exit waits for this save too).
         static SAVES: AtomicU32 = AtomicU32::new(0);
         let tmp = file.path.with_extension(format!("{}-{}.tmp", std::process::id(), SAVES.fetch_add(1, Ordering::Relaxed)));
+        let at = std::time::Instant::now();
+        // the write is disk time, not CPU: the thread's CPU token goes back to the budget meanwhile,
+        // so the work queued behind it runs (a compile thread's slot held through a disk wait left a
+        // budget of a few cores no room for any Background job)
+        let lent = makepad_cpu_budget::lend();
         let written = file.path.parent().map_or(Ok(()), std::fs::create_dir_all)
             .and_then(|_| std::fs::File::create(&tmp))
             .and_then(|mut f| {
                 f.write_all(&file.header)?;
                 f.write_all(&(data.len() as u64).to_le_bytes())?;
                 f.write_all(&fxhash::hash64(&data[..]).to_le_bytes())?;
-                f.write_all(&data)?;
-                // on disk before the rename, so a crash right after a save can't leave a short file
-                f.sync_all()
+                f.write_all(&data)
             })
             .and_then(|_| std::fs::rename(&tmp, &file.path));
+        if lent { makepad_cpu_budget::take_back(); }
         match written {
             Ok(()) => {
                 file.saved.store(data.len(), Ordering::Relaxed);
-                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes", data.len()); }
+                if log_enabled() { eprintln!("[hal-vulkan] pipeline cache saved: {} bytes in {:.1} ms", data.len(), at.elapsed().as_secs_f64() * 1e3); }
             }
             Err(e) => { let _ = std::fs::remove_file(&tmp); eprintln!("[hal-vulkan] pipeline cache {}: {e}", file.path.display()) }
         }

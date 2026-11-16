@@ -12,6 +12,11 @@ use makepad_apple_sys::*;
 use std::cell::Cell;
 use std::os::raw::c_void;
 
+relax_api::option_layouts! {
+    DefaultWindowButtons,
+    Rect,
+}
+
 /// The window's NSEvent kinds a window drag may start from.
 const DRAG_START_EVENTS: [NSEventType; 6] = [
     NSEventType::NSLeftMouseDown,

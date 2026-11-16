@@ -3,6 +3,12 @@ use crate::buffers::Wire;
 use std::os::unix::fs::FileExt;
 use std::time::{Duration, Instant};
 
+relax_api::option_layouts! {
+    (Key, [f64; 2]),
+    (Key, u32),
+    Press,
+}
+
 #[derive(Default)]
 struct Axis {
     raw: [f64; 2],

@@ -203,6 +203,9 @@ impl Shared {
         std::mem::take(&mut *lock(&self.ops))
     }
     pub fn command(&self, sid: u32, cmd: OsCmd) {
+        if matches!(cmd, OsCmd::NotifyPost { .. } | OsCmd::NotifyRemove { .. }) {
+            return;
+        }
         // Trays: a makepad WM shows them in its tray area (wm.rs relays them); another desktop
         // has none for us (no StatusNotifierItem host here), so they are dropped, said once.
         if matches!(cmd, OsCmd::TraySet { .. } | OsCmd::TrayRemove { .. }) && !self.window_manager() {
