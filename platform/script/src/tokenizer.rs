@@ -6,6 +6,7 @@ use crate::heap::*;
 use crate::makepad_live_id::LiveId;
 use crate::makepad_live_id_macros::*;
 use crate::value::*;
+use crate::units::{UnitIx, UnitTable};
 
 #[relax_api(plain, run)]
 #[repr(C, u8)]
@@ -277,57 +278,7 @@ pub struct ScriptTokenPos {
     end: u32,
     /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`, `150mm`):
     /// its value is already in the base unit; the unit says what it is.
-    pub unit: Option<ScriptUnit>,
-}
-
-/// The unit suffix of a number literal: what a value means (an editor picks its
-/// control by it). The token's value is in the base unit: seconds for time,
-/// radians for angles (`deg` and `°` are degrees), virtual pixels for screen
-/// lengths, metres for physical lengths (`m`, `cm`, `mm`).
-#[relax_api(plain, run)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum ScriptUnit {
-    /// `0.12s`: seconds.
-    Seconds,
-    /// `120ms`: milliseconds, the value in seconds.
-    Millis,
-    /// `90deg`: degrees, the value in radians.
-    Degrees,
-    /// `1.5rad`: radians (the base unit of angles).
-    Radians,
-    /// `12px`: virtual (DPI-scaled) pixels, the base unit of lengths and positions.
-    Pixels,
-    /// `2m`: metres, the base unit of physical lengths (models).
-    Metres,
-    /// `5cm`: centimetres, the value in metres.
-    Centimetres,
-    /// `150mm`: millimetres, the value in metres.
-    Millimetres,
-}
-
-impl ScriptUnit {
-    pub fn parse(suffix: &str) -> Option<Self> {
-        match suffix {
-            "s" => Some(Self::Seconds),
-            "ms" => Some(Self::Millis),
-            "deg" | "°" => Some(Self::Degrees),
-            "rad" => Some(Self::Radians),
-            "px" => Some(Self::Pixels),
-            "m" => Some(Self::Metres),
-            "cm" => Some(Self::Centimetres),
-            "mm" => Some(Self::Millimetres),
-            _ => None,
-        }
-    }
-    /// The value of `v` written in this unit, in the base unit.
-    pub fn to_base(self, v: f64) -> f64 {
-        match self {
-            Self::Seconds | Self::Radians | Self::Pixels | Self::Metres => v,
-            Self::Millis | Self::Millimetres => v / 1000.0,
-            Self::Centimetres => v / 100.0,
-            Self::Degrees => v * std::f64::consts::PI / 180.0,
-        }
-    }
+    pub unit: Option<UnitIx>,
 }
 
 impl ScriptTokenPos {
@@ -445,6 +396,7 @@ impl State {
 #[relax_api(handle, default, run)]
 #[derive(Default)]
 pub struct ScriptTokenizer {
+    units: UnitTable,
     pos: usize,
     /// Set when a newline is consumed; stamped onto (and cleared by) the next
     /// emitted token as `preceded_by_newline`.
@@ -485,6 +437,14 @@ pub struct ScriptLoc {
 
 #[relax_api(run)]
 impl ScriptTokenizer {
+    /// Lex number suffixes with the host's table.
+    #[relax_api(run)]
+    pub fn with_units(units: UnitTable) -> Self { Self { units, ..Self::default() } }
+
+    /// The table the tokens' unit indices refer to.
+    #[relax_api(run)]
+    pub fn units(&self) -> &UnitTable { &self.units }
+
     /// A tokenizer holding tokens another VM read from `original` (their
     /// positions are characters of `original`): what an adopted fn's body
     /// reads ([`crate::vm::ScriptFnImage`]). Nothing is lexed again.
@@ -531,6 +491,7 @@ impl ScriptTokenizer {
         self.line_starts.clear();
         self.unfinished.clear();
         self.temp.clear();
+        self.unit_start = None;
         self.state = State::Whitespace;
         self.lex_start = 0;
         self.tok_end = 0;
@@ -661,6 +622,7 @@ impl ScriptTokenizer {
         let newline_pending = self.newline_pending;
         let space_pending = self.space_pending;
         let temp = self.temp.clone();
+        let unit_start = self.unit_start;
         let state = self.state.clone();
         let (lex_start, tok_end) = (self.lex_start, self.tok_end);
         let (tokens_len, docs_len, original_len, lines_len) =
@@ -671,6 +633,7 @@ impl ScriptTokenizer {
         self.newline_pending = newline_pending;
         self.space_pending = space_pending;
         self.temp = temp;
+        self.unit_start = unit_start;
         self.state = state;
         self.lex_start = lex_start;
         self.tok_end = tok_end;
@@ -702,19 +665,50 @@ impl ScriptTokenizer {
     fn emit_f64(&mut self) {
         if let Some(k) = self.unit_start.take() {
             let suffix = self.temp.split_off(k);
-            match ScriptUnit::parse(&suffix) {
+            match self.units.lookup(&suffix) {
                 Some(unit) => {
                     let len = self.temp.chars().count() + suffix.chars().count();
-                    let v = self.temp.parse::<f64>().unwrap_or(0.0);
+                    let v = self.units.entry(unit).literal(&self.temp);
                     self.temp.clear();
-                    self.push_tok(self.pos - len, ScriptToken::F64(unit.to_base(v)));
+                    self.push_tok(self.pos - len, ScriptToken::F64(v));
                     if let Some(t) = self.tokens.last_mut() {
                         t.unit = Some(unit);
                     }
                 }
                 None => {
-                    // not a unit: the number, then an identifier
+                    if matches!(suffix.chars().next(), Some('f' | 'u' | 'i' | 'h')) {
+                        // Replay the type suffix at its original position: the old
+                        // emitters have different `pos` conventions (notably u32).
+                        let (pos, end) = (self.pos, self.tok_end);
+                        let rest = &suffix[1..];
+                        self.pos -= suffix.chars().count();
+                        self.tok_end = end - rest.chars().count();
+                        match suffix.as_bytes()[0] {
+                            b'f' => self.emit_f32(),
+                            b'u' => self.emit_u32(),
+                            b'i' => self.emit_i32(),
+                            b'h' => self.emit_f16(),
+                            _ => unreachable!(),
+                        }
+                        self.lex_start = self.tok_end;
+                        self.pos = pos;
+                        self.tok_end = end;
+                        if !rest.is_empty() {
+                            self.temp.push_str(rest);
+                            self.emit_identifier();
+                        }
+                        return;
+                    }
+                    // Not a unit: the number, then an identifier, each with its own span (`2.5V`
+                    // with no `V` registered is `2.5` and `V`, as `2.5 V` would be).
+                    let (pos, end) = (self.pos, self.tok_end);
+                    let n = suffix.chars().count();
+                    self.pos -= n;
+                    self.tok_end = end - n;
                     self.emit_f64();
+                    self.lex_start = self.tok_end;
+                    self.pos = pos;
+                    self.tok_end = end;
                     self.temp = suffix;
                     self.emit_identifier();
                 }
@@ -1010,11 +1004,39 @@ impl ScriptTokenizer {
             self.original.push(c);
             self.pos += 1;
             self.tok_end = self.pos - 1;
+            if self.state == State::Number
+                && self.unit_start.is_some()
+                && self.temp.ends_with('%')
+                && (c.is_alphanumeric() || matches!(c, '_' | '$' | '(' | '='))
+            {
+                // Replay the number at the pending '%' position, as for an
+                // unregistered suffix, then let the operator state consume c.
+                self.unit_start = None;
+                self.temp.pop();
+                let (pos, end) = (self.pos, self.tok_end);
+                self.pos -= 1;
+                self.tok_end = end - 1;
+                self.emit_f64();
+                self.lex_start = self.tok_end;
+                self.pos = pos;
+                self.tok_end = end;
+                self.temp.push('%');
+                self.state = State::Operator;
+            }
+            // Snapshot after replay so extending '%' to '%=' keeps its start.
             let was_lexing = self.state.lexing_token() && !(self.state == State::Operator && self.temp.is_empty());
             let was_in_string = self.state.in_string();
             let tokens_before = self.tokens.len();
             if c == '\n' {
                 self.line_starts.push(self.pos as u32);
+            }
+            // A suffix consumes a whole identifier run. Its terminator belongs
+            // to the next token; degree and percent signs end it by themselves.
+            if self.state == State::Number && self.unit_start.is_some()
+                && (self.temp.ends_with(['°', '%']) || !(c.is_alphanumeric() || c == '_' || c == '$'))
+            {
+                self.emit_f64();
+                self.state = State::Whitespace;
             }
             match self.state {
                 State::Whitespace => {
@@ -1460,7 +1482,7 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Number => {
-                    if self.unit_start.is_some() && c.is_alphabetic() && !self.temp.ends_with('°') {
+                    if self.unit_start.is_some() {
                         self.temp.push(c);
                     } else if c.is_numeric() {
                         self.temp.push(c);
@@ -1497,6 +1519,11 @@ impl ScriptTokenizer {
                             .is_none()
                     {
                         self.temp.push(c);
+                    } else if matches!(c, 'f' | 'u' | 'i' | 'h')
+                        && !self.temp.contains(['x', 'X']) && self.units.has_suffix_starting_with(c)
+                    {
+                        self.unit_start = Some(self.temp.len());
+                        self.temp.push(c);
                     } else if c == 'f' {
                         self.tok_end = self.pos;
                         self.emit_f32();
@@ -1530,6 +1557,11 @@ impl ScriptTokenizer {
                     } else if c == '#' {
                         self.emit_f64();
                         self.state = State::Color;
+                        self.temp.push(c);
+                    } else if c == '%' && !self.temp.contains(['x', 'X']) && self.units.lookup("%").is_some() {
+                        // Defer until the next character (or finish) decides
+                        // whether this is a unit suffix or a modulo operator.
+                        self.unit_start = Some(self.temp.len());
                         self.temp.push(c);
                     } else if is_operator(c) {
                         self.emit_f64();
@@ -1706,10 +1738,25 @@ pub fn lex(source: &str) -> Vec<LexedToken> {
     lex_into(source, &mut ScriptLexedOut::new(&mut out));
     out
 }
+
+/// [`lex`] with the host's registered number suffixes.
+#[inline(always)]
+pub fn lex_with(source: &str, units: &UnitTable) -> Vec<LexedToken> {
+    let mut out = Vec::new();
+    lex_into_with(source, units, &mut ScriptLexedOut::new(&mut out));
+    out
+}
+
 #[relax_api(run)]
 pub fn lex_into(source: &str, out: &mut ScriptLexedOut) {
+    lex_into_with(source, &UnitTable::standard(), out);
+}
+
+/// [`lex_into`] with the host's registered number suffixes.
+#[relax_api(run)]
+pub fn lex_into_with(source: &str, units: &UnitTable, out: &mut ScriptLexedOut) {
     let mut heap = ScriptHeap::default();
-    let mut tokenizer = ScriptTokenizer::default();
+    let mut tokenizer = ScriptTokenizer::with_units(units.clone());
     tokenizer.tokenize(source, &mut heap);
     tokenizer.finish(&mut heap);
     let mut bytes: Vec<usize> = source.char_indices().map(|(at, _)| at).collect();

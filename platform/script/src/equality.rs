@@ -8,7 +8,6 @@
 //! values are equal exactly when their bits are equal. String pairs therefore
 //! cost one work unit instead of a metered byte compare.
 
-use crate::makepad_live_id::LiveId;
 use crate::{array::ScriptArrayStorage, heap::ScriptHeap, value::ScriptValue};
 use relax_api::relax_api;
 use std::collections::HashSet;
@@ -97,9 +96,8 @@ impl ScriptHeap {
                                 s.and_then(|s| self.check_intern_string(s))
                                     .and_then(|key| ob.map_get(&key))
                             })
-                        } else if key.is_string_like() && !ob.tag.is_string_keys() {
-                            self.string_with(key, |_, s| ob.map_get(&LiveId::from_str(s).into()))
-                                .flatten()
+                        } else if !ob.tag.is_string_keys() {
+                            self.string_key_id(key, false).and_then(|id| ob.map_get(&id))
                         } else {
                             None
                         }

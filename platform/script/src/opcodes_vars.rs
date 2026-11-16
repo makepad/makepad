@@ -306,6 +306,14 @@ impl<'a> ScriptVm<'a> {
                 // them into a file's scope.
                 items.retain(|(id, _)| !self.bx.heap.is_private_name(*id));
                 self.bx.threads.cur().def_scope_values(&mut self.bx.heap, &items);
+                if obj != self.bx.heap.modules {
+                    let scope = *self.bx.threads.cur().scopes.last().unwrap();
+                    self.bx.heap.objects[scope].tag.set_globs();
+                    let sources = self.bx.heap.glob_sources.entry(scope).or_default();
+                    if !sources.contains(&obj) {
+                        sources.push(obj);
+                    }
+                }
             } else {
                 let mut value = self
                     .bx

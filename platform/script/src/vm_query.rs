@@ -44,6 +44,8 @@ pub const QUERY_BODY_INITIAL_SCOPE: u32 = 20;
 pub const QUERY_BODY_TEXT: u32 = 21;
 /// `index`: the body, `id`: the binding's name; the doc of that `let` / `var` is on text0.
 pub const QUERY_BODY_LET_DOC: u32 = 22;
+/// Per active `for` loop of the running thread, outermost first: its iteration position (u32).
+pub const QUERY_LOOP_POSITIONS: u32 = 23;
 
 /// The channels a query writes on.
 pub const CH_TEXT0: u32 = 0;
@@ -310,6 +312,14 @@ impl ScriptVmBase {
                         if let Some(v) = self.heap.scope_value_opt(scope, id).and_then(|v| v.as_number()) {
                             req.out.record(CH_RECORD, &ScriptLoopValue { id, value: v });
                         }
+                    }
+                }
+                true
+            }
+            QUERY_LOOP_POSITIONS => {
+                for frame in self.threads.cur_ref().loops.iter() {
+                    if let Some(values) = &frame.values {
+                        req.out.record(CH_RECORD, &values.pos);
                     }
                 }
                 true

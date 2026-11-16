@@ -17,9 +17,9 @@
 //!   insert is written by [`write`] from a Rust [`write::Value`]; that is the
 //!   one way text is produced.
 //!
-//! Operator sequences are kept as written, left to right ([`Kind::Chain`]);
-//! precedence is the VM's, not modelled here. Where the VM decides by
-//! evaluation (a `{` after a name is an object only when it follows
+//! Operator sequences stay flat, in source order ([`Kind::Chain`]);
+//! [`Node::grouped`] applies the VM's precedence ([`operator_order`]). Where the
+//! VM decides by evaluation (a `{` after a name is an object only when it follows
 //! the name closely or the name is a type) the tree follows the same lexical
 //! rules the VM's parser uses.
 
@@ -28,9 +28,33 @@ pub mod edit;
 pub mod write;
 
 use std::ops::Range;
+use crate::units::UnitTable;
 
 pub use edit::{At, EditError};
-pub use parse::parse_value;
+pub use parse::{parse_value, parse_value_with};
+
+/// The VM parser's binding order for a chain operator; lower orders bind tighter.
+///
+/// Includes the named operators `and`, `or` and `is`, and `>>>` (the unsigned
+/// shift of Splash compute kernels) at the order of `>>`. Returns `None` for
+/// assignments, operators represented by other node kinds, and unknown spellings.
+pub fn operator_order(op: &str) -> Option<u32> {
+    operator_info(op).map(|(order, _)| order)
+}
+
+fn operator_info(op: &str) -> Option<(u32, bool)> {
+    let op = match op {
+        "and" => "&&",
+        "or" => "||",
+        "is" => "is",
+        ">>>" => ">>",
+        op if parse::BINARY.contains(&op) => op,
+        _ => return None,
+    };
+    let op = crate::makepad_live_id::LiveId::from_str(op);
+    let order = crate::parser::State::operator_order(op);
+    (order != 0).then_some((order as u32, crate::parser::State::is_short_circuit_op(op)))
+}
 
 /// A parse failure: where, and what was found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,6 +74,36 @@ impl std::fmt::Display for SyntaxError {
 pub struct Node {
     pub span: Range<usize>,
     pub kind: Kind,
+}
+
+/// A `Chain` with the VM's precedence applied.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Grouped<'a> {
+    Operand(&'a Node),
+    Binary {
+        op: &'a str,
+        op_span: Range<usize>,
+        lhs: Box<Grouped<'a>>,
+        rhs: Box<Grouped<'a>>,
+    },
+}
+
+impl Grouped<'_> {
+    /// The source range from the first operand through the last operand.
+    pub fn span(&self) -> Range<usize> {
+        let mut first = self;
+        while let Self::Binary { lhs, .. } = first {
+            first = lhs;
+        }
+        let mut last = self;
+        while let Self::Binary { rhs, .. } = last {
+            last = rhs;
+        }
+        match (first, last) {
+            (Self::Operand(first), Self::Operand(last)) => first.span.start..last.span.end,
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// A `{ ... }` of statements, or a file (no braces).
@@ -207,6 +261,50 @@ impl Step {
 }
 
 impl Node {
+    /// Group a flat chain in linear time, leaving parentheses and other operands intact.
+    ///
+    /// Equal orders associate left. As in the VM, a pending short-circuit
+    /// operator keeps a following range inside its right operand.
+    /// A manually constructed chain with an unknown operator stays one operand.
+    pub fn grouped(&self) -> Grouped<'_> {
+        let Kind::Chain { first, rest } = &self.kind else {
+            return Grouped::Operand(self);
+        };
+        let mut value = Grouped::Operand(first);
+        let mut pending: Vec<(Grouped<'_>, &Link, u32, bool)> = Vec::new();
+        for link in rest {
+            let Some((order, short_circuit)) = operator_info(&link.op) else {
+                return Grouped::Operand(self);
+            };
+            // Ordinary EmitOps cannot pop past ShortCircuitEnd in the VM parser.
+            while pending
+                .last()
+                .is_some_and(|(_, _, previous_order, previous_short)| {
+                    *previous_order <= order && (short_circuit || !*previous_short)
+                })
+            {
+                let (lhs, operator, _, _) = pending.pop().unwrap();
+                value = Grouped::Binary {
+                    op: &operator.op,
+                    op_span: operator.op_span.clone(),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(value),
+                };
+            }
+            pending.push((value, link, order, short_circuit));
+            value = Grouped::Operand(&link.operand);
+        }
+        while let Some((lhs, operator, _, _)) = pending.pop() {
+            value = Grouped::Binary {
+                op: &operator.op,
+                op_span: operator.op_span.clone(),
+                lhs: Box::new(lhs),
+                rhs: Box::new(value),
+            };
+        }
+        value
+    }
+
     pub fn text<'a>(&self, source: &'a str) -> &'a str {
         &source[self.span.clone()]
     }
@@ -453,12 +551,18 @@ impl Node {
 pub struct Syntax {
     source: String,
     root: Node,
+    units: UnitTable,
 }
 
 /// Parse a whole file.
 pub fn parse(source: &str) -> Result<Syntax, SyntaxError> {
-    let root = parse::parse_file(source)?;
-    Ok(Syntax { source: source.to_string(), root })
+    parse_with(source, &UnitTable::standard())
+}
+
+/// Parse a whole file with the host's registered number suffixes, kept for edits.
+pub fn parse_with(source: &str, units: &UnitTable) -> Result<Syntax, SyntaxError> {
+    let root = parse::parse_file(source, units)?;
+    Ok(Syntax { source: source.to_string(), root, units: units.clone() })
 }
 
 impl Syntax {

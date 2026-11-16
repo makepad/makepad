@@ -65,6 +65,7 @@ impl<'a> ScriptVm<'a> {
                 index_id,
                 source,
                 index: first_index,
+                pos: 0,
                 range_cache,
             }),
             jump,
@@ -268,6 +269,7 @@ impl<'a> ScriptVm<'a> {
                     self.break_for_loop();
                     return;
                 }
+                values.pos += 1;
                 let start_ip = lf.start_ip;
                 let bases = lf.bases;
                 let bases_scope = bases.scope;
@@ -337,6 +339,7 @@ impl<'a> ScriptVm<'a> {
                         self.break_for_loop();
                         return;
                     }
+                    values.pos += 1;
                     let start_ip = lf.start_ip;
                     let bases = lf.bases;
                     let bases_scope = bases.scope;
@@ -372,6 +375,7 @@ impl<'a> ScriptVm<'a> {
                         return;
                     };
                     values.index += 1.0;
+                    values.pos += 1;
                     let index = values.index;
                     let source = values.source;
                     let Some(obj) = source.as_object() else {
@@ -434,6 +438,7 @@ impl<'a> ScriptVm<'a> {
                 }
             } else if let Some(arr) = values.source.as_array() {
                 values.index += 1.0;
+                values.pos += 1;
                 let index = values.index;
                 if index >= self.bx.heap.array_len(arr) as f64 {
                     self.break_for_loop();

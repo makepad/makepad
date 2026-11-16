@@ -17,6 +17,9 @@
 //! every machine, offline or live.
 use relax_api::relax_api;
 
+// Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
+relax_api::option_layouts! { f32, usize }
+
 pub mod boundary;
 pub use boundary::AudioShaderRef;
 pub mod fuse;

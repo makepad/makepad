@@ -299,6 +299,17 @@ fn container(node: &Node, source_len: usize) -> Result<Elements, EditError> {
     elements(node, source_len).ok_or_else(|| EditError { message: format!("a {} holds no elements", node.kind_name()) })
 }
 
+/// The `//` comment lines element `index` of `node` owns: the lines directly above it,
+/// as moving or removing the element takes them (a file's opening header stays the file's).
+/// An empty range at the element's line when it owns none.
+pub fn owned_comments(src: &str, node: &Node, index: usize) -> Result<Range<usize>, EditError> {
+    let el = container(node, src.len())?;
+    if index >= el.spans.len() {
+        return err(format!("no element {index} (it holds {})", el.spans.len()));
+    }
+    Ok(el.line_top(src, index)..line_start(src, el.spans[index].start))
+}
+
 /// The replacements that insert `text` as an element of `node` (a block,
 /// object, array or call) at `at`. The layout follows the container's: a new
 /// line (indented like its neighbour, with the separator the others use)
@@ -554,7 +565,7 @@ impl Syntax {
             at = e.range.end;
         }
         out.push_str(&self.source[at..]);
-        parse(&out).map_err(|e| EditError { message: format!("the edit leaves text that does not parse: {} (line {})", e.message, super::line_col(&out, e.at).0) })
+        parse_with(&out, &self.units).map_err(|e| EditError { message: format!("the edit leaves text that does not parse: {} (line {})", e.message, super::line_col(&out, e.at).0) })
     }
 
     /// [`apply`](Self::apply) for edits that put `text` over whole nodes:
@@ -564,7 +575,7 @@ impl Syntax {
         let mut edits = Vec::new();
         for (loc, text) in replacements {
             let node = self.require(loc)?;
-            let new = parse_value(text).map_err(|e| EditError { message: format!("the replacement does not parse: {e}") })?;
+            let new = parse_value_with(text, &self.units).map_err(|e| EditError { message: format!("the replacement does not parse: {e}") })?;
             *expected.at_mut(&loc.0) = shape(&new, text);
             edits.push(Replace::new(node.span.clone(), text.clone()));
         }
@@ -604,7 +615,7 @@ impl Syntax {
     /// that keeps its place in the surrounding structure.
     pub fn replace(&self, loc: &Loc, text: &str) -> Result<Edited, EditError> {
         let node = self.require(loc)?;
-        let new = parse_value(text).map_err(|e| EditError { message: format!("the replacement does not parse: {e}") })?;
+        let new = parse_value_with(text, &self.units).map_err(|e| EditError { message: format!("the replacement does not parse: {e}") })?;
         let mut expected = self.old_shape();
         *expected.at_mut(&loc.0) = shape(&new, text);
         self.commit(&[Replace::new(node.span.clone(), text)], expected, loc.clone())
@@ -615,7 +626,7 @@ impl Syntax {
     pub fn insert_element(&self, list: &Loc, at: At, text: &str) -> Result<Edited, EditError> {
         let container_node = self.require(list)?;
         let el = container(container_node, self.source.len())?;
-        let new = parse_value(text).map_err(|e| EditError { message: format!("the new element does not parse: {e}") })?;
+        let new = parse_value_with(text, &self.units).map_err(|e| EditError { message: format!("the new element does not parse: {e}") })?;
         let index = resolve_index(at, el.spans.len())?;
         let edits = insertion(&self.source, &el, index, text, at == At::AfterHeader);
         let mut expected = self.old_shape();
@@ -677,7 +688,7 @@ impl Syntax {
         let el = container(node, self.source.len())?;
         let key = super::write::key(name).map_err(|e| EditError { message: e })?;
         let wrapped = format!("{{{key}: {text}}}");
-        let new = parse_value(&wrapped).map_err(|e| EditError { message: format!("the field does not parse: {e}") })?;
+        let new = parse_value_with(&wrapped, &self.units).map_err(|e| EditError { message: format!("the field does not parse: {e}") })?;
         let Some(new_field) = new.field(name) else { return err("the field does not parse as one field") };
         if new.object().map_or(0, |(_, f)| f.len()) != 1 {
             return err("the field does not parse as one field");

@@ -1578,6 +1578,12 @@ impl ScriptCode {
     }
 
     pub(crate) fn ip_to_loc_native(&self, ip: ScriptIp, file: &mut crate::vm_api::ScriptTextOut, at: &mut crate::vm_api::ScriptLineCol) -> bool {
+        // no place at all (an object made where no instruction stands): no location. The
+        // fallback below names a body's unmapped instruction, and took the unknown ip's
+        // u16::MAX / u32::MAX for a line and a column, which a caller's `col + 1` overflowed
+        if ip.is_unknown() {
+            return false;
+        }
         let found = (|| -> Option<ScriptLoc> {
             if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
                 let source_map = &body.parser.source_map;
@@ -1700,6 +1706,19 @@ impl<'a> ScriptVm<'a> {
         let mut sink = ScriptQuerySink::new();
         sink.records = Some((out as *mut Vec<(LiveId, f64)> as *mut u8, push));
         self.bx.query(QUERY_LOOP_VALUES, &mut sink, |_| {});
+    }
+
+    /// The iteration position of each active `for` loop of the running thread, outermost
+    /// first: 0 on a loop's first iteration, whatever it iterates (`for i in 2..5` is at
+    /// position 0 when `i` is 2). Hosts name what a loop body makes by it.
+    pub fn loop_positions(&self, out: &mut Vec<u32>) {
+        unsafe extern "C-unwind" fn push(ctx: *mut u8, bytes: *const u8, _len: usize) {
+            (&mut *(ctx as *mut Vec<u32>)).push(std::ptr::read_unaligned(bytes as *const u32));
+        }
+        out.clear();
+        let mut sink = ScriptQuerySink::new();
+        sink.records = Some((out as *mut Vec<u32> as *mut u8, push));
+        self.bx.query(QUERY_LOOP_POSITIONS, &mut sink, |_| {});
     }
 
     /// Where the running code is: the instruction now, then each caller's
@@ -3140,7 +3159,7 @@ impl<'a> ScriptVm<'a> {
         let new_body = ScriptBody {
             source: ScriptSource::Mod(new_mod),
             effective_code,
-            tokenizer: ScriptTokenizer::default(),
+            tokenizer: ScriptTokenizer::with_units(self.bx.units.clone()),
             parser: ScriptParser::keeping_numbers(self.bx.keep_numbers),
             scope,
             me,
@@ -3176,7 +3195,7 @@ impl<'a> ScriptVm<'a> {
             body.shown = None;
             if code_changed || values_changed {
                 body.effective_code = new_body.effective_code;
-                body.tokenizer = ScriptTokenizer::default();
+                body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 body.checkpoint = None;
                 body.source_len = 0;
@@ -3473,7 +3492,7 @@ impl<'a> ScriptVm<'a> {
 
         if let ScriptSource::Mod(script_mod) = &body.source {
             if body.source_len == 0 {
-                body.tokenizer.clear();
+                body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 body.tokenizer
                     .tokenize(&body.effective_code, &mut self.bx.heap);
@@ -3592,7 +3611,7 @@ impl<'a> ScriptVm<'a> {
 
             if content_changed {
                 // Content changed entirely — reset and re-tokenize from scratch
-                body.tokenizer.clear();
+                body.tokenizer = ScriptTokenizer::with_units(self.bx.units.clone());
                 body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 body.checkpoint = None;
                 body.source_len = code.len();
@@ -3767,6 +3786,8 @@ pub struct ScriptVmBase {
     /// Code parsed from now on keeps its number literals as values of their
     /// own ([`ScriptParser::keep_numbers`]).
     pub keep_numbers: bool,
+    /// Number suffixes for code parsed from now on; each tokenizer keeps its table.
+    pub units: UnitTable,
     /// the allocation budgets with_heap_allocation_limit put aside (CTL_ALLOC_BEGIN / CTL_ALLOC_END)
     pub(crate) alloc_budgets: Vec<Option<ScriptAllocationBudget>>,
     /// The cross-thread stop runs under an instruction limit sample ([`Self::interrupt_handle`]).
@@ -3858,6 +3879,7 @@ impl ScriptVmBase {
             object_op_hook: None,
             let_hook: None,
             keep_numbers: false,
+            units: UnitTable::standard(),
             alloc_budgets: Vec::new(),
             interrupt: Default::default(),
         }
@@ -3912,6 +3934,7 @@ impl ScriptVmBase {
             object_op_hook: None,
             let_hook: None,
             keep_numbers: false,
+            units: UnitTable::standard(),
             alloc_budgets: Vec::new(),
             interrupt: Default::default(),
         }

@@ -687,7 +687,7 @@ pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body>
 fn scalar_ok(p: &Program) -> bool {
     fn ok(b: &Block) -> bool {
         b.iter().all(|s| match s {
-            Stmt::CallHost { .. } => false,
+            Stmt::CallHost { .. } | Stmt::Port { .. } => false,
             Stmt::If(_, t, e) => ok(t) && ok(e),
             Stmt::Loop { body, .. } => ok(body),
             _ => true,
@@ -755,7 +755,7 @@ pub(crate) struct Lifetimes {
 pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
     // Pass 1: positions and each loop's last position.
     fn ends(b: &Block, pos: &mut u32, out: &mut Vec<u32>) {
-        for s in b {
+        for s in crate::ir::unmarked(b) {
             *pos += 1;
             match s {
                 Stmt::If(_, t, e) => {
@@ -814,7 +814,7 @@ pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
             self.last[k] = self.last[k].max(self.pos);
         }
         fn walk(&mut self, b: &Block) {
-            for s in b {
+            for s in crate::ir::unmarked(b) {
                 self.pos += 1;
                 match s {
                     Stmt::Def(v, op) => {
@@ -859,7 +859,7 @@ pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
                             self.defined(*r);
                         }
                     }
-                    Stmt::Call { args, rets, .. } => {
+                    Stmt::Call { args, rets, .. } | Stmt::Port { args, rets, .. } => {
                         for a in args {
                             self.used(*a);
                         }
@@ -867,7 +867,7 @@ pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
                             self.defined(*r);
                         }
                     }
-                    Stmt::Break(_) | Stmt::Continue(_) => {}
+                    Stmt::Mark(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
                 }
             }
         }
@@ -1034,6 +1034,7 @@ impl<'a> Sc<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Mark(_) => {}
             Stmt::Def(v, op) => {
                 self.op(*v, op);
                 let l = self.val[v.0 as usize];
@@ -1056,7 +1057,7 @@ impl<'a> Sc<'a> {
                 self.f.b(op::VOID);
                 self.labels.push(Label::If);
                 self.block(t);
-                if !e.is_empty() {
+                if crate::ir::unmarked(e).next().is_some() {
                     self.f.b(op::ELSE);
                     self.block(e);
                 }
@@ -1130,7 +1131,7 @@ impl<'a> Sc<'a> {
                 self.f.b(op::F32_ADD);
                 self.f.mem(op::F32_STORE, 0);
             }
-            Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::CallHost { .. } | Stmt::Port { .. } => unreachable!("declined"),
         }
     }
 

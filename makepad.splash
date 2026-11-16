@@ -72,11 +72,13 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-app-route"}
     RunStudioRelease{name: "makepad-app-clock"}
     RunStudioRelease{name: "makepad-app-devhub-panel"}
+    RunStudioRelease{name: "makepad-app-aires"}
     RunStudioRelease{name: "makepad-app-desklink"}
     RunStudioRelease{name: "makepad-app-xr-bridge"}
     RunStudioRelease{name: "makepad-app-weather"}
     RunStudioRelease{name: "makepad-app-translator"}
     RunStudioRelease{name: "makepad-app-camera"}
+    RunStudioRelease{name: "makepad-app-party"}
     RunStudioRelease{name: "makepad-app-amp"}
     RunStudioRelease{name: "makepad-app-code"}
     RunStudioRelease{name: "makepad-example-todo"}

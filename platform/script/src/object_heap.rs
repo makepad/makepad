@@ -1090,7 +1090,10 @@ impl ScriptHeap {
         trap: ScriptTrap,
     ) -> ScriptValue {
         self.escape_value(value);
-        let key = key.unescape_id();
+        let mut key = key.unescape_id();
+        if key.is_string_like() && !self.objects[ptr].tag.is_string_keys() {
+            key = self.string_key_id(key, true).unwrap_or(key);
+        }
         if let Some(key_id) = key.as_id() {
             let object = &self.objects[ptr];
             if !object.tag.is_deep() {
@@ -1152,6 +1155,7 @@ impl ScriptHeap {
         self.escape_value(value);
         let root_ptr = ptr;
         let mut ptr = ptr;
+        let mut below: Option<ScriptObject> = None;
         loop {
             let object = &mut self.objects[ptr];
             if let Some(set) = object.map.get_mut(&key.into()) {
@@ -1161,6 +1165,15 @@ impl ScriptHeap {
                 set.value = value;
                 return NIL;
             }
+            // A declared parameter the call did not pass reads through to the fn's default; an
+            // assignment binds it in that call's own scope (the fn's child), never in the fn.
+            if object.tag.is_fn() && object.vec.iter().any(|kv| kv.key == key.into()) {
+                if let Some(call_scope) = below {
+                    self.bind_map_entry(call_scope, key.into(), value, "assigning a function argument");
+                    return NIL;
+                }
+            }
+            below = Some(ptr);
             if let Some(next_ptr) = object.proto.as_object() {
                 ptr = next_ptr
             } else {
@@ -1417,6 +1430,9 @@ impl ScriptHeap {
     #[cold]
     #[inline(never)]
     fn scope_value_not_found(&self, root_ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
+        if let Some(value) = self.glob_value(root_ptr, key) {
+            return value;
+        }
         script_err_not_found!(
             trap,
             "variable {} not found in scope{}{}",
@@ -1424,6 +1440,41 @@ impl ScriptHeap {
             suggest_scope_var(self, root_ptr, key),
             self.import_hint(key)
         )
+    }
+
+    /// Read names added after a glob `use`, from inner scopes and later sources first.
+    /// Kept on the miss path so the copied bindings still cost just their usual lookup.
+    #[cold]
+    #[inline(never)]
+    fn glob_value(&self, root: ScriptObject, key: LiveId) -> Option<ScriptValue> {
+        if self.is_private_name_uncached(key) {
+            return None;
+        }
+        let key: ScriptValue = key.into();
+        let mut ptr = root;
+        loop {
+            let scope = &self.objects[ptr];
+            if scope.tag.has_globs() {
+                if let Some(sources) = self.glob_sources.get(&ptr) {
+                    for &src in sources.iter().rev() {
+                        if !self.objects.is_valid(src) {
+                            continue;
+                        }
+                        self.touch_obj(src);
+                        let source = &self.objects[src];
+                        for kv in source.vec.iter().rev() {
+                            if kv.key == key {
+                                return Some(kv.value);
+                            }
+                        }
+                        if let Some(entry) = source.map.get(&key) {
+                            return Some(entry.value);
+                        }
+                    }
+                }
+            }
+            ptr = scope.proto.as_object()?;
+        }
     }
 
     /// Where a name that is not in scope lives among the system modules, as the `use` to add:
@@ -1604,7 +1655,28 @@ impl ScriptHeap {
         )
     }
 
+    /// The identifier a string key names. On an object that is not string-keyed
+    /// (`is_string_keys`, the JSON interop objects) the field `o.ab` and the key
+    /// `o["a" + "b"]` are one property: the store and every lookup map the text
+    /// to this id. `record` (the store) keeps the text in the id table, so a key
+    /// written as a string iterates and prints by its name. None: not a string,
+    /// or its text is gone.
+    pub(crate) fn string_key_id(&self, key: ScriptValue, record: bool) -> Option<ScriptValue> {
+        if !key.is_string_like() {
+            return None;
+        }
+        self.string_with(key, |_, s| {
+            let id = if record {
+                LiveId::from_str_with_lut(s).unwrap_or_else(|_| LiveId::from_str(s))
+            } else {
+                LiveId::from_str(s)
+            };
+            ScriptValue::from_id(id)
+        })
+    }
+
     fn value_deep(&self, obj_ptr: ScriptObject, key: ScriptValue, trap: ScriptTrap) -> ScriptValue {
+        let named = self.string_key_id(key, false);
         let mut ptr = obj_ptr;
         loop {
             self.touch_obj(ptr);
@@ -1644,22 +1716,13 @@ impl ScriptHeap {
                         return value;
                     }
                 }
-            } else if key.is_string_like() {
-                let id = if let Some(s) = key.as_string() {
-                    if let Some(s) = &self.strings[s] {
-                        LiveId::from_str(&s.string.0)
-                    } else {
-                        LiveId(0)
-                    }
-                } else {
-                    key.as_inline_string(|s| LiveId::from_str(s)).unwrap()
-                };
-                if let Some(value) = object.map_get(&id.into()) {
+            } else if let Some(id) = named {
+                if let Some(value) = object.map_get(&id) {
                     return value;
                 }
             }
             for kv in object.vec.iter().rev() {
-                if kv.key == key {
+                if kv.key == key || Some(kv.key) == named {
                     return kv.value;
                 }
             }
@@ -2493,6 +2556,12 @@ impl ScriptHeap {
             let mut head = [0u8; 2];
             LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__"
         })
+    }
+
+    /// The same private-name rule for a read-only lookup, without updating the cache.
+    fn is_private_name_uncached(&self, id: LiveId) -> bool {
+        let mut head = [0u8; 2];
+        LiveId::lut_name_copy(id, &mut head) == 2 && head == *b"__"
     }
 
     /// `use <object>.*`: the names of `items` into scope `ptr` at once, as [`Self::def_scope_value`]

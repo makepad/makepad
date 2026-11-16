@@ -27,6 +27,9 @@ pub struct LoopValues {
     pub index_id: Option<LiveId>,
     pub source: ScriptValue,
     pub index: f64,
+    /// Iterations begun before this one (0 on the first): the position in the iterated
+    /// sequence, where `index` is a range's value (`for i in 2..5` has index 2 at position 0).
+    pub pos: u32,
     /// (end, step) captured at loop entry for range sources the script can
     /// no longer reach (un-REFFED range literals like `for i in 0..n`) —
     /// skips two proto-chain lookups per iteration. REFFED ranges keep the

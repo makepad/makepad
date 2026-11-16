@@ -33,6 +33,32 @@
 //! buffer)`, every view the same stride).
 use relax_api::relax_api;
 
+// Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
+relax_api::option_layouts! {
+    (f32, f32),
+    (ir::Val, ir::Val),
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    (ir::Val, relax_backend::rir::VReg),
+    (ir::Var, i32),
+    #[cfg(feature = "vm")]
+    (makepad_script::shader_ir::GlobalId, makepad_script::shader_ir::TyId, makepad_script::shader_ir::LocalId, makepad_script::shader_ir::LocalId),
+    (u32, u32),
+    (u8, usize),
+    (usize, ir::Var, u32),
+    f64,
+    i32,
+    i64,
+    ir::Val,
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    relax_backend::rir::VReg,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+}
+
 pub mod cost;
 pub mod boundary;
 

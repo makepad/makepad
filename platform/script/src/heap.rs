@@ -189,6 +189,8 @@ pub struct ScriptHeap {
     /// A name's text never changes, and a glob `use` asks for every key it brings in: the
     /// interner's lookup per key was 7% of a design re-run's main thread (a large app, 11-04).
     pub(crate) private_names: HashMap<LiveId, bool, LiveIdHasherBuilder>,
+    /// Each scope's glob `use` sources in use order, kept outside its visible bindings.
+    pub(crate) glob_sources: HashMap<ScriptObject, Vec<ScriptObject>>,
 
     pub(crate) handles: GenVec<Option<ScriptHandleData>>,
     pub(crate) handles_free: Vec<ScriptHandle>,

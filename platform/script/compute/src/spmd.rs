@@ -96,8 +96,8 @@ impl Info {
                     let m = self.masked.contains(&id(s));
                     changed |= self.pass(body, div || m);
                 }
-                // A function's results vary (it runs on every lane's values).
-                Stmt::Call { rets, .. } => {
+                // A function's (and a port's) results vary (it runs on every lane's values).
+                Stmt::Call { rets, .. } | Stmt::Port { rets, .. } => {
                     for r in rets {
                         if !self.vval[r.0 as usize] {
                             self.vval[r.0 as usize] = true;
@@ -203,25 +203,27 @@ pub(crate) struct Shape<'a> {
 }
 
 /// The counted-work postlude: `x = Get(var); ctx[word] = x`.
-fn postlude(b: &[Stmt]) -> Option<(Var, u32)> {
-    match b {
-        [Stmt::Def(x, Op::Get(var)), Stmt::Store { region: Region::Ctx, base, extent: 1, off: None, val }] if val == x => Some((*var, *base)),
+fn postlude(b: &[Stmt]) -> Option<(usize, Var, u32)> {
+    let mut stmts = b.iter().enumerate().rev().filter(|(_, s)| !matches!(s, Stmt::Mark(_)));
+    match (stmts.next(), stmts.next()) {
+        (Some((_, Stmt::Store { region: Region::Ctx, base, extent: 1, off: None, val })), Some((k, Stmt::Def(x, Op::Get(var))))) if val == x => Some((k, *var, *base)),
         _ => None,
     }
 }
 
 pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
-    let (body_end, post) = match p.body.len().checked_sub(2).and_then(|k| postlude(&p.body[k..]).map(|post| (k, post))) {
-        Some((k, post)) => (k, Some(post)),
+    let (body_end, post) = match postlude(&p.body) {
+        Some((k, var, word)) => (k, Some((var, word))),
         None => (p.body.len(), None),
     };
-    let (last, prelude) = p.body[..body_end].split_last()?;
+    let last_at = p.body[..body_end].iter().rposition(|s| !matches!(s, Stmt::Mark(_)))?;
+    let (last, prelude) = (&p.body[last_at], &p.body[..last_at]);
     let Stmt::Loop { cap, body } = last else { return None };
-    if *cap != ELEMENT_CAP || !prelude.iter().all(|s| matches!(s, Stmt::Def(..) | Stmt::Set(..))) {
+    if *cap != ELEMENT_CAP || !crate::ir::unmarked(prelude).all(|s| matches!(s, Stmt::Def(..) | Stmt::Set(..))) {
         return None;
     }
     // The last statement steps the counter: Set(i, iv + 1), iv = Get(i).
-    let Some(Stmt::Set(i, next)) = body.last() else { return None };
+    let Some(Stmt::Set(i, next)) = crate::ir::unmarked(body).next_back() else { return None };
     // Loop-invariant code motion may have hoisted the step's constant.
     let defs: HashMap<u32, &Op> = body.iter().chain(prelude).filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
     let Some(Op::Bin(Bin::AddI, iv, one)) = defs.get(&next.0) else { return None };
@@ -331,7 +333,7 @@ pub(crate) fn supported(p: &Program, body: &Block) -> bool {
     fn walk(b: &Block, loads: &mut HashSet<(u32, u32)>, stores: &mut HashSet<(u32, u32)>) -> bool {
         for s in b {
             let ok = match s {
-                Stmt::Def(_, Op::In { .. }) | Stmt::Out { .. } | Stmt::CallHost { .. } => false,
+                Stmt::Def(_, Op::In { .. }) | Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Port { .. } => false,
                 Stmt::Def(_, Op::Load { region: Region::State, .. }) | Stmt::Store { region: Region::State, .. } => false,
                 Stmt::Def(_, Op::Load { region: Region::Ctx, base, extent, .. }) => {
                     loads.insert((*base, *extent));
@@ -366,9 +368,9 @@ pub(crate) fn analyse(p: &Program, sh: &Shape) -> Option<Info> {
     // The `i >= n` exit: a CmpI(Ge, Get(i), FrameCount) guarding a
     // Break(0) at the top of the element body.
     let defs: HashMap<u32, &Op> = body.iter().chain(sh.prelude).filter_map(|s| if let Stmt::Def(v, op) = s { Some((v.0, op)) } else { None }).collect();
-    for s in body.iter().take(4) {
+    for s in crate::ir::unmarked(body).take(4) {
         if let Stmt::If(c, t, e) = s {
-            if matches!(t[..], [Stmt::Break(0)]) && e.is_empty() {
+            if matches!((crate::ir::unmarked(t).next(), crate::ir::unmarked(t).nth(1)), (Some(Stmt::Break(0)), None)) && crate::ir::unmarked(e).next().is_none() {
                 if let Some(Op::CmpI(Cmp::Ge, a, n)) = defs.get(&c.0) {
                     if matches!(defs.get(&a.0), Some(Op::Get(g)) if *g == sh.i) && matches!(defs.get(&n.0), Some(Op::FrameCount)) {
                         info.uniform_by_shape.insert(c.0);

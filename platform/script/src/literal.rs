@@ -812,6 +812,7 @@ pub fn literal_value(text: &str) -> Option<LiteralValue> {
 /// Splits Splash text into literals and the text between them (strings,
 /// raw strings and comments skipped whole). Adjacent text is one piece.
 fn pieces(src: &str) -> Vec<Piece<'_>> {
+    let units = crate::units::UnitTable::standard();
     let b = src.as_bytes();
     let mut out: Vec<Piece> = Vec::new();
     let mut text_start = 0;
@@ -932,7 +933,7 @@ fn pieces(src: &str) -> Vec<Piece<'_>> {
             let value = if suffix.is_empty() {
                 Some(v)
             } else {
-                crate::tokenizer::ScriptUnit::parse(suffix).map(|u| u.to_base(v))
+                units.lookup(suffix).map(|ix| units.entry(ix).literal(&src[i..digits_end]))
             };
             if let Some(v) = value {
                 if text_start < i {

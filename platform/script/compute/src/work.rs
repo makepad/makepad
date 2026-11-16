@@ -50,7 +50,7 @@ pub fn op(s: &Stmt) -> u64 {
         Stmt::CallHost { args, .. } => 8 + args.len() as u64,
         // Its body counts (as an inlined copy would); the call itself no more.
         Stmt::Call { .. } => 0,
-        Stmt::Loop { .. } => 0,
+        Stmt::Mark(_) | Stmt::Loop { .. } => 0,
         _ => 1,
     }
 }
@@ -182,7 +182,7 @@ fn segments(body: &Block) -> Vec<std::ops::Range<usize>> {
     let mut out = Vec::new();
     let mut start = 0;
     for (k, s) in body.iter().enumerate() {
-        if leaves(std::slice::from_ref(s), 0) && k + 1 < body.len() {
+        if leaves(std::slice::from_ref(s), 0) && crate::ir::unmarked(&body[k + 1..]).next().is_some() {
             out.push(start..k + 1);
             start = k + 1;
         }
@@ -323,7 +323,7 @@ fn trips(before: &[Stmt], body: &Block, cap: u32, consts: &Consts) -> Option<u64
     }
     let defs: std::collections::HashMap<u32, &Op> = body.iter().filter_map(|s| if let Stmt::Def(x, op) = s { Some((x.0, op)) } else { None }).collect();
     let bound = body.iter().find_map(|s| match s {
-        Stmt::If(c, t, e) if matches!(t[..], [Stmt::Break(0)]) && e.is_empty() => match defs.get(&c.0) {
+        Stmt::If(c, t, e) if matches!((crate::ir::unmarked(t).next(), crate::ir::unmarked(t).nth(1)), (Some(Stmt::Break(0)), None)) && crate::ir::unmarked(e).next().is_none() => match defs.get(&c.0) {
             Some(Op::CmpI(crate::ir::Cmp::Ge, a, n)) if matches!(defs.get(&a.0), Some(Op::Get(g)) if *g == v) => consts.get(&n.0).copied(),
             _ => None,
         },
@@ -518,13 +518,13 @@ fn count_program(p: &mut Program) -> Option<u64> {
     let fixed = count_functions(p);
     let consts = const_ints(&p.body);
     let n = {
-        let Some(Stmt::Loop { cap: ELEMENT_CAP, body: element }) = p.body.last() else { return None };
-        if !matches!(element.last(), Some(Stmt::Set(..))) {
+        let Some(Stmt::Loop { cap: ELEMENT_CAP, body: element }) = crate::ir::unmarked(&p.body).next_back() else { return None };
+        if !matches!(crate::ir::unmarked(element).next_back(), Some(Stmt::Set(..))) {
             return None;
         }
         local(element, &fixed, &consts) + 2
     };
-    let dynamic = matches!(p.body.last(), Some(Stmt::Loop { body, .. }) if dynamic(body, &fixed, &consts));
+    let dynamic = matches!(crate::ir::unmarked(&p.body).next_back(), Some(Stmt::Loop { body, .. }) if dynamic(body, &fixed, &consts));
     if !dynamic {
         return Some(n);
     }
@@ -534,9 +534,9 @@ fn count_program(p: &mut Program) -> Option<u64> {
     p.vars.push(Ty::I32);
     let wv = Var(p.vars.len() as u32 - 1);
     let mut f = Fresh { vals: &mut p.vals };
-    let at = p.body.len() - 1;
+    let at = p.body.iter().rposition(|s| !matches!(s, Stmt::Mark(_)))?;
     let z = f.val(Ty::I32);
-    let Some(Stmt::Loop { body: element, .. }) = p.body.last_mut() else { return None };
+    let Some(Stmt::Loop { body: element, .. }) = p.body.get_mut(at) else { return None };
     loops(element, &mut f, wv, &fixed, &consts);
     calls(element, &mut f, wv, &fixed);
     let total = f.val(Ty::I32);

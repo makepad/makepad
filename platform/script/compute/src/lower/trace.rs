@@ -224,7 +224,7 @@ fn block_defs(b: &[IS], vals: &[Ty], out: &mut Vec<TraceDef>) {
                 };
                 out.push(TraceDef { val: v.0, args, argc, kind, float: float(v.0) });
             }
-            IS::Call { rets, .. } | IS::CallHost { rets, .. } => {
+            IS::Call { rets, .. } | IS::CallHost { rets, .. } | IS::Port { rets, .. } => {
                 out.extend(rets.iter().map(|r| TraceDef { val: r.0, args: [0; 3], argc: 0, kind: TraceDefKind::Memory, float: float(r.0) }));
             }
             _ => {}
@@ -274,7 +274,7 @@ impl KernelTrace {
         ir::validate(&program, &regions)?;
         let mut defs = Vec::new();
         block_defs(&program.body, &program.vals, &mut defs);
-        if let Some(IS::Loop { body, .. }) = program.body.last() {
+        if let Some(IS::Loop { body, .. }) = ir::unmarked(&program.body).next_back() {
             block_defs(body, &program.vals, &mut defs);
         }
         // SAFETY (all `forever` below): the views borrow the heap data of the strings and vectors

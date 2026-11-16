@@ -15,12 +15,15 @@ pub struct ScriptPodField {
     pub ty: ScriptPodTypeInline,
 }
 
+#[relax_api(handle, run)]
 #[derive(Clone, PartialEq, Eq)]
 pub struct ScriptPodEnum {
     pub name: LiveId,
     pub variant: ScriptPodEnumVariant,
 }
 
+#[relax_api(handle, run)]
+#[repr(u8)]
 #[derive(Clone, PartialEq, Eq)]
 pub enum ScriptPodEnumVariant {
     Bare,
@@ -426,6 +429,7 @@ impl ScriptPodMat {
 }
 
 #[relax_api(handle, clone, debug, default, run)]
+#[repr(u8)]
 #[derive(Default, Clone, PartialEq, Eq)]
 pub enum ScriptPodTy {
     #[default]

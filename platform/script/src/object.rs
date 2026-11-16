@@ -206,6 +206,9 @@ impl ScriptObjectTag {
 
     pub const FROM_EVAL: u64 = 0x8000 << 40;
 
+    // scope has glob sources in the heap's side table (not forwarded to prototypes)
+    pub const GLOBS: u64 = 0x10000 << 40;
+
     pub const FREEZE_MASK: u64 = Self::FROZEN | Self::VALIDATED | Self::MAP_ADD | Self::VEC_FROZEN;
 
     const PROTO_FWD: u64 = Self::ALLOCED
@@ -339,6 +342,16 @@ impl ScriptObjectTag {
     #[inline]
     pub fn is_from_eval(&self) -> bool {
         self.0 & Self::FROM_EVAL != 0
+    }
+
+    #[inline]
+    pub fn has_globs(&self) -> bool {
+        self.0 & Self::GLOBS != 0
+    }
+
+    #[inline]
+    pub fn set_globs(&mut self) {
+        self.0 |= Self::GLOBS
     }
 
     #[inline]

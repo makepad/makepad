@@ -306,6 +306,25 @@ fn moving_elements_keeps_the_blank_lines_between_them() {
 }
 
 #[test]
+fn owned_comment_ranges_follow_element_ownership() {
+    let src = "// file header\nlet header = 0\n// a\n// b\nlet x = 1\nlet y = 2\n// separated\n\nlet z = 3\n";
+    let s = sx(src);
+    let comments = |index| edit::owned_comments(src, s.root(), index)
+        .expect("the file has this statement");
+    let header = src.find("let header").expect("the first statement is in the fixture");
+    let x = src.find("let x").expect("x is in the fixture");
+    let y = src.find("let y").expect("y is in the fixture");
+    let z = src.find("let z").expect("z is in the fixture");
+    assert_eq!(comments(0), header..header, "the opening header belongs to the file");
+    assert_eq!(comments(1), src.find("// a").expect("a is in the fixture")..x,
+        "both adjacent comment lines belong to x");
+    assert_eq!(&src[comments(1)], "// a\n// b\n", "the range contains only owned comment lines");
+    assert_eq!(comments(2), y..y, "a statement without comments owns an empty range");
+    assert_eq!(comments(3), z..z, "a blank line separates the comment from z");
+    assert!(edit::owned_comments(src, s.root(), 4).is_err(), "an absent element is an edit error");
+}
+
+#[test]
 fn named_operators_and_try_postfix_read() {
     let s = sx("let a = x and y or not_z is w\nlet b = f()?\n");
     assert_eq!(s.statements().len(), 2);

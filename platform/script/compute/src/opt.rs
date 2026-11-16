@@ -20,6 +20,72 @@
 use crate::ir::{self, Block, Op, Program, Region, Stmt, Val};
 use std::collections::{HashMap, HashSet};
 
+/// Follow marks in program order, including nested blocks.
+fn end_mark(s: &Stmt, mark: &mut Option<u32>) {
+    match s {
+        Stmt::Mark(n) => *mark = Some(*n),
+        Stmt::If(_, t, e) => {
+            for s in t.iter().chain(e) {
+                end_mark(s, mark);
+            }
+        }
+        Stmt::Loop { body, .. } => {
+            for s in body {
+                end_mark(s, mark);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Reorder statements while preserving source effect boundaries. Each
+/// mark is placed once, before the first effect tagged with it or a later
+/// mark, or at the block's end when no such effect remains. Definitions
+/// may cross marks freely; the pass must preserve effect order. Unmarked
+/// blocks need no side table or rebuilding.
+fn reorder(b: &mut Block, inherited: Option<u32>, pass: impl FnOnce(&mut Block, &mut dyn FnMut(usize, usize))) {
+    let mut active = inherited;
+    for s in b.iter() {
+        end_mark(s, &mut active);
+    }
+    if active.is_none() {
+        pass(b, &mut |_, _| {});
+        return;
+    }
+    let mut tags = Vec::new();
+    let mut marks = Vec::new();
+    active = inherited;
+    let mut plain = Vec::with_capacity(b.len());
+    for s in std::mem::take(b) {
+        if let Stmt::Mark(n) = s {
+            active = Some(n);
+            marks.push(n);
+        } else {
+            tags.push(active);
+            end_mark(&s, &mut active);
+            plain.push(s);
+        }
+    }
+    pass(&mut plain, &mut |from, to| {
+        let tag = tags.remove(from);
+        tags.insert(to, tag);
+    });
+    let mut marks = marks.into_iter().peekable();
+    let mut previous = inherited;
+    for (s, tag) in plain.into_iter().zip(tags) {
+        if !matches!(s, Stmt::Def(..)) {
+            debug_assert!(tag >= previous, "reorder must preserve source effect order");
+            while marks.peek().is_some_and(|n| Some(*n) <= tag) {
+                b.push(Stmt::Mark(marks.next().unwrap()));
+            }
+            previous = tag;
+            end_mark(&s, &mut previous);
+        }
+        b.push(s);
+    }
+    b.extend(marks.map(Stmt::Mark));
+}
+
 thread_local! {
     /// What the functions of the program being optimized may write, all
     /// together: a call's effect (each function's passes see only its
@@ -226,37 +292,45 @@ pub fn peel_offsets(p: &mut Program) {
 /// offset in its block (its offset is defined by then; tables never
 /// change), so the reads of one row sit together.
 pub fn cluster_loads(p: &mut Program) {
-    fn block(b: &mut Block) {
+    fn block(b: &mut Block, inherited: Option<u32>) {
+        let mut mark = inherited;
         for s in b.iter_mut() {
             match s {
                 Stmt::If(_, t, e) => {
-                    block(t);
-                    block(e);
+                    block(t, mark);
+                    for s in t.iter() {
+                        end_mark(s, &mut mark);
+                    }
+                    block(e, mark);
                 }
-                Stmt::Loop { body, .. } => block(body),
+                Stmt::Loop { body, .. } => block(body, mark),
                 _ => {}
             }
+            end_mark(s, &mut mark);
         }
-        let mut k = 0;
-        while k < b.len() {
-            if let Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(o), .. }) = b[k] {
-                // The last read at this offset before k, and the run of
-                // reads at it that follows.
-                if let Some(j) = (0..k).rev().find(|&j| matches!(b[j], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o)) {
-                    let mut at = j + 1;
-                    while at < k && matches!(b[at], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o) {
-                        at += 1;
-                    }
-                    if at < k {
-                        let s = b.remove(k);
-                        b.insert(at, s);
+        reorder(b, inherited, |b, moved| {
+            let mut k = 0;
+            while k < b.len() {
+                if let Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(o), .. }) = b[k] {
+                    // The last read at this offset before k, and the run of
+                    // reads at it that follows.
+                    if let Some(j) = (0..k).rev().find(|&j| matches!(b[j], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o)) {
+                        let mut at = j + 1;
+                        while at < k && matches!(b[at], Stmt::Def(_, Op::Load { region: Region::Shared, off: Some(oo), .. }) if oo == o) {
+                            at += 1;
+                        }
+                        if at < k {
+                            let s = b.remove(k);
+                            b.insert(at, s);
+                            moved(k, at);
+                        }
                     }
                 }
+                k += 1;
             }
-            k += 1;
-        }
+        });
     }
-    block(&mut p.body);
+    block(&mut p.body, None);
 }
 
 /// `Wrap(x, n)` of an x proven in `0..n` ([`ir::bounds`]) is x.
@@ -574,7 +648,7 @@ pub fn dead_frame_stores(p: &mut Program) {
 pub fn dead_loops(p: &mut Program) {
     fn effects(b: &Block, depth: u32) -> bool {
         b.iter().any(|s| match s {
-            Stmt::Store { .. } | Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Call { .. } => true,
+            Stmt::Store { .. } | Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Call { .. } | Stmt::Port { .. } => true,
             Stmt::Break(d) | Stmt::Continue(d) => *d >= depth,
             Stmt::If(_, t, e) => effects(t, depth) || effects(e, depth),
             Stmt::Loop { body, .. } => effects(body, depth + 1),
@@ -635,21 +709,26 @@ pub fn dead_loops(p: &mut Program) {
 /// other store to it and no control flow is crossed, so every word gets
 /// the same value in the same order.
 pub fn cluster_stores(p: &mut Program) {
-    fn block(b: &mut Block) {
+    fn block(b: &mut Block, inherited: Option<u32>) {
+        let mut mark = inherited;
         for s in b.iter_mut() {
             match s {
                 Stmt::If(_, t, e) => {
-                    block(t);
-                    block(e);
+                    block(t, mark);
+                    for s in t.iter() {
+                        end_mark(s, &mut mark);
+                    }
+                    block(e, mark);
                 }
-                Stmt::Loop { body, .. } => block(body),
+                Stmt::Loop { body, .. } => block(body, mark),
                 _ => {}
             }
+            end_mark(s, &mut mark);
         }
         // Stores only move down, so this ends.
-        while cluster_pass(b) {}
+        reorder(b, inherited, |b, moved| while cluster_pass(b, moved) {});
     }
-    fn cluster_pass(b: &mut Block) -> bool {
+    fn cluster_pass(b: &mut Block, move_marks: &mut dyn FnMut(usize, usize)) -> bool {
         let mut moved = false;
         let mut i = 0;
         while i < b.len() {
@@ -670,6 +749,7 @@ pub fn cluster_stores(p: &mut Program) {
             if joins {
                 let st = b.remove(i);
                 b.insert(j - 1, st);
+                move_marks(i, j - 1);
                 moved = true;
                 // The statement that moved into position i is a definition.
                 continue;
@@ -678,7 +758,7 @@ pub fn cluster_stores(p: &mut Program) {
         }
         moved
     }
-    block(&mut p.body);
+    block(&mut p.body, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -750,12 +830,12 @@ fn rename_stmt(s: &mut Stmt, map: &HashMap<u32, Val>) {
                 subst(&mut x.len, map);
             }
         }
-        Stmt::Call { args, .. } => {
+        Stmt::Call { args, .. } | Stmt::Port { args, .. } => {
             for a in args {
                 subst(a, map);
             }
         }
-        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::Mark(_) | Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
 
@@ -968,9 +1048,7 @@ pub fn licm(p: &mut Program) {
                         // Values defined inside the loop (not yet hoisted).
                         let mut inside = HashSet::new();
                         defs_in(body, &mut inside);
-                        let mut hoisted = Vec::new();
-                        hoist(body, &w, ro, &mut inside, &mut hoisted);
-                        out.extend(hoisted);
+                        hoist(body, &w, ro, &mut inside, &mut out);
                     }
                 }
                 _ => {}
@@ -988,7 +1066,7 @@ fn defs_in(b: &Block, out: &mut HashSet<u32>) {
             Stmt::Def(v, _) => {
                 out.insert(v.0);
             }
-            Stmt::CallHost { rets, .. } | Stmt::Call { rets, .. } => {
+            Stmt::CallHost { rets, .. } | Stmt::Call { rets, .. } | Stmt::Port { rets, .. } => {
                 for r in rets {
                     out.insert(r.0);
                 }
@@ -1004,7 +1082,7 @@ fn defs_in(b: &Block, out: &mut HashSet<u32>) {
 }
 
 /// Moves the invariant definitions of `b` (in order, recursively through
-/// branches and inner loops) into `out`.
+/// branches and inner loops) into `out`, leaving source marks in place.
 fn hoist(b: &mut Block, w: &Writes, ro: &HashSet<u8>, inside: &mut HashSet<u32>, out: &mut Vec<Stmt>) {
     let mut keep = Vec::with_capacity(b.len());
     for mut s in std::mem::take(b) {
@@ -1190,6 +1268,7 @@ pub fn if_convert(p: &mut Program) {
         let mut set = HashSet::new();
         for s in b {
             match s {
+                Stmt::Mark(_) => {}
                 Stmt::Def(_, op) => {
                     // A get after a set of the same variable on this side
                     // would read the new value once flattened.
@@ -1242,8 +1321,10 @@ pub fn if_convert(p: &mut Program) {
                             let mut vars: Vec<u32> = st.iter().chain(&se).map(|(v, _)| *v).collect();
                             vars.sort();
                             vars.dedup();
+                            // Flattened effects belong to the enclosing If's
+                            // mark; the branches' marks no longer apply.
                             for x in t.drain(..).chain(e.drain(..)) {
-                                if let Stmt::Def(..) = x {
+                                if matches!(x, Stmt::Def(..)) {
                                     out.push(x);
                                 }
                             }
@@ -1395,7 +1476,7 @@ fn fuse(p: &mut Program, float: bool) {
                     vec![]
                 }
                 Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
-                Stmt::Call { args, .. } => args.clone(),
+                Stmt::Call { args, .. } | Stmt::Port { args, .. } => args.clone(),
                 _ => vec![],
             };
             for u in us {
@@ -1492,7 +1573,7 @@ pub fn dce(p: &mut Program) {
                         vec![]
                     }
                     Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
-                    Stmt::Call { args, .. } => args.clone(),
+                    Stmt::Call { args, .. } | Stmt::Port { args, .. } => args.clone(),
                     _ => vec![],
                 };
                 for u in us {

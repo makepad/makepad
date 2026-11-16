@@ -621,6 +621,7 @@ impl W<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Mark(_) => {}
             Stmt::Def(v, op) => self.def(*v, op),
             Stmt::Set(var, v) => self.set_var(*var, *v),
             Stmt::Store { region, base, extent, off, val } => self.store(*region, *base, *extent, *off, *val),
@@ -630,7 +631,7 @@ impl W<'_> {
                 self.open_if(op::VOID);
                 let full = self.full;
                 self.block(t);
-                if !e.is_empty() {
+                if crate::ir::unmarked(e).next().is_some() {
                     self.else_();
                     self.full = full;
                     self.block(e);
@@ -660,7 +661,7 @@ impl W<'_> {
                 self.open_if(op::VOID);
                 self.block(t);
                 self.end();
-                if e.is_empty() {
+                if crate::ir::unmarked(e).next().is_none() {
                     self.get(self.m);
                     self.get(else_m);
                 } else {
@@ -803,7 +804,7 @@ impl W<'_> {
                     self.set(l);
                 }
             }
-            Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Port { .. } => unreachable!("declined"),
         }
     }
 
@@ -893,15 +894,15 @@ impl W<'_> {
             return 0;
         }
         let mut n = 1;
-        while n < b.len() && key(&b[n]) == Some((store, k, o)) {
+        while n < b.len() && (matches!(b[n], Stmt::Mark(_)) || key(&b[n]) == Some((store, k, o))) {
             n += 1;
         }
         let base_of = |s: &Stmt| match s {
             Stmt::Store { base, .. } | Stmt::Def(_, Op::Load { base, .. }) => *base,
             _ => unreachable!(),
         };
-        let top = b[..n].iter().map(base_of).max().unwrap() as u64 + 3 * st as u64;
-        if n < 2 || top >= 1 << 31 {
+        let top = crate::ir::unmarked(&b[..n]).map(base_of).max().unwrap() as u64 + 3 * st as u64;
+        if crate::ir::unmarked(&b[..n]).count() < 2 || top >= 1 << 31 {
             return 0;
         }
         // Every lane's words inside: o0 + max(base) + 3 st <= last (64 bits).
@@ -927,7 +928,7 @@ impl W<'_> {
         self.sc.f.b(op::I32_ADD);
         self.set(a);
         let v = self.tv[7];
-        for s in &b[..n] {
+        for s in crate::ir::unmarked(&b[..n]) {
             let at = 4 * base_of(s);
             match s {
                 Stmt::Store { val, .. } => {
@@ -954,7 +955,7 @@ impl W<'_> {
             }
         }
         self.else_();
-        for s in &b[..n] {
+        for s in crate::ir::unmarked(&b[..n]) {
             self.stmt(s);
         }
         self.end();

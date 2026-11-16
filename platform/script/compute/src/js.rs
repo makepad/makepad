@@ -25,7 +25,7 @@ pub fn function(p: &Program) -> Option<String> {
     crate::wasm::collect_consts(&p.body, &mut g.consts);
     fn ok(b: &Block) -> bool {
         b.iter().all(|s| match s {
-            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Def(_, Op::In { .. }) => false,
+            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Port { .. } | Stmt::Def(_, Op::In { .. }) => false,
             Stmt::If(_, t, e) => ok(t) && ok(e),
             Stmt::Loop { body, .. } => ok(body),
             _ => true,
@@ -122,6 +122,7 @@ impl Gen<'_> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Mark(_) => {}
             Stmt::Def(x, op) => {
                 let e = self.op(*x, op);
                 let _ = writeln!(self.out, "{}={};", v(*x), e);
@@ -137,7 +138,7 @@ impl Gen<'_> {
             Stmt::If(c, t, e) => {
                 let _ = writeln!(self.out, "if({}!==0){{", v(*c));
                 self.block(t);
-                if !e.is_empty() {
+                if crate::ir::unmarked(e).next().is_some() {
                     self.out.push_str("}else{\n");
                     self.block(e);
                 }
@@ -160,7 +161,7 @@ impl Gen<'_> {
                 let id = self.loop_stack[self.loop_stack.len() - 1 - *d as usize];
                 let _ = writeln!(self.out, "continue L{id};");
             }
-            Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Port { .. } => unreachable!("declined"),
             Stmt::Call { .. } => unreachable!("flattened"),
         }
     }

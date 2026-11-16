@@ -223,6 +223,41 @@ pub enum Stmt {
     /// frame: functions are not recursive, so each has frame words of its
     /// own), then `rets` are defined as its results.
     Call { f: u16, args: Vec<Val>, rets: Vec<Val> },
+    /// An impure call of port `port` of the front end's port table
+    /// ([`PortSig`]), bound per run to its host's [`Ports`]: 32-bit
+    /// arguments, results defined here (like `Def`s). `site` names the
+    /// source place of the call in the front end's site table. Ports touch
+    /// no region of the program. Only a front end that gives a port table
+    /// to [`validate_ports`] has them; the native and wasm back ends decline
+    /// a program with ports ([`has_ports`]): it runs in the interpreter.
+    Port { port: u16, args: Vec<Val>, rets: Vec<Val>, site: u32 },
+    /// A source mark: statements after it, up to the next mark in program
+    /// order, come from source statement `n` in the lowering's mark table.
+    /// It reads and writes nothing, costs nothing, is valid anywhere, and
+    /// every back end emits nothing for it.
+    Mark(u32),
+}
+
+/// A port's signature: its parameters and results, each a 32-bit type
+/// (`F32`, `I32` or `Bool`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PortSig {
+    pub name: &'static str,
+    pub params: &'static [Ty],
+    pub rets: &'static [Ty],
+}
+
+/// Any port statement in `p` or its functions.
+pub fn has_ports(p: &Program) -> bool {
+    fn walk(b: &Block) -> bool {
+        b.iter().any(|s| match s {
+            Stmt::Port { .. } => true,
+            Stmt::If(_, t, e) => walk(t) || walk(e),
+            Stmt::Loop { body, .. } => walk(body),
+            _ => false,
+        })
+    }
+    walk(&p.body) || p.funcs.iter().any(|g| walk(&g.body))
 }
 
 /// A host call's buffer slice: host buffer `buf`, `len` words from word
@@ -292,6 +327,11 @@ fn call_cost(f: u16, slices: &[SliceArg], consts: &std::collections::HashMap<u32
 
 pub type Block = Vec<Stmt>;
 
+/// The executable statements of a block; debug marks do not affect its shape.
+pub fn unmarked(b: &[Stmt]) -> impl DoubleEndedIterator<Item = &Stmt> + Clone {
+    b.iter().filter(|s| !matches!(s, Stmt::Mark(_)))
+}
+
 /// One compiled entry (the render program or the table `init`).
 #[derive(Clone, Debug, Default)]
 pub struct Program {
@@ -328,6 +368,7 @@ impl Program {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
+                    Stmt::Mark(_) => 0,
                     Stmt::If(_, t, e) => 1 + walk(t, c, funcs).max(walk(e, c, funcs)),
                     Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c, funcs) + 2),
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
@@ -356,11 +397,13 @@ impl Program {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t, depth, c, funcs).max(walk(e, depth, c, funcs)),
+                    Stmt::Mark(_) => 0,
+                    // saturating from the true sums: a branch or body already at u64::MAX stays there
+                    Stmt::If(_, t, e) => walk(t, depth, c, funcs).max(walk(e, depth, c, funcs)).saturating_add(1),
                     Stmt::Loop { cap, body } => {
                         // The outermost loop is the per-frame loop: count one frame.
                         let reps = if depth == 0 { 1 } else { *cap as u64 };
-                        reps.saturating_mul(walk(body, depth + 1, c, funcs) + 2)
+                        reps.saturating_mul(walk(body, depth + 1, c, funcs).saturating_add(2))
                     }
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
                     // A call costs its function's body (its loops at their
@@ -595,7 +638,8 @@ pub fn eval_wrap(x: u32, len: u32) -> u32 {
         x & (len - 1)
     } else {
         let r = (x as i32).wrapping_rem(len as i32);
-        (if r < 0 { r + len as i32 } else { r }) as u32
+        // the 32-bit add the backends emit (native.rs, wasm.rs wrap_rem): a len past i32::MAX wraps
+        (if r < 0 { r.wrapping_add(len as i32) } else { r }) as u32
     }
 }
 
@@ -822,13 +866,27 @@ pub fn buf_index(base: u32, off: Option<u32>, len: usize) -> usize {
     ((base as u64 + off.unwrap_or(0) as u64) as usize).min(len.saturating_sub(1))
 }
 
+/// The host side of a run's [`Stmt::Port`]s.
+pub trait Ports {
+    /// Port `port` called at `site` with `args` (32-bit words); writes its
+    /// results (32-bit words) into `rets`, which arrive zeroed.
+    fn call(&mut self, port: u16, site: u32, args: &[u32], rets: &mut [u32]);
+}
+
+/// The ports of a program that has none (every result 0).
+pub struct NoPorts;
+
+impl Ports for NoPorts {
+    fn call(&mut self, _port: u16, _site: u32, _args: &[u32], _rets: &mut [u32]) {}
+}
+
 enum Flow {
     Next,
     Break(u32),
     Continue(u32),
 }
 
-struct Interp<'a, 'm, 'i> {
+struct Interp<'a, 'm, 'i, 'p> {
     regs: &'a mut [u32],
     /// High words of the registers (empty unless the program uses f64).
     hi: &'a mut [u32],
@@ -841,9 +899,10 @@ struct Interp<'a, 'm, 'i> {
     /// do not recurse: one at a time per function), taken while it runs.
     funcs: &'a [Program],
     func_regs: &'a mut Vec<(Vec<u32>, Vec<u32>)>,
+    ports: &'a mut (dyn Ports + 'p),
 }
 
-impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
+impl<'a, 'm, 'i, 'p> Interp<'a, 'm, 'i, 'p> {
     #[inline(always)]
     fn r(&self, v: Val) -> u64 {
         self.reg(v.0 as usize)
@@ -946,6 +1005,7 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
     fn block(&mut self, b: &Block) -> Flow {
         for s in b {
             match s {
+                Stmt::Mark(_) => {}
                 Stmt::Def(v, op) => {
                     let x = self.eval(op);
                     self.set_reg(v.0 as usize, x);
@@ -1015,7 +1075,7 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                         }
                     }
                     let out: Vec<u64> = {
-                        let mut callee = Interp { regs: &mut regs, hi: &mut hi, nvals: g.vals.len(), frame: &mut *self.frame, mem: &mut *self.mem, io: &mut *self.io, n: self.n, funcs: self.funcs, func_regs: &mut *self.func_regs };
+                        let mut callee = Interp { regs: &mut regs, hi: &mut hi, nvals: g.vals.len(), frame: &mut *self.frame, mem: &mut *self.mem, io: &mut *self.io, n: self.n, funcs: self.funcs, func_regs: &mut *self.func_regs, ports: &mut *self.ports };
                         callee.block(&g.body);
                         g.results.iter().map(|r| callee.r(*r)).collect()
                     };
@@ -1049,16 +1109,38 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                         self.set_reg(v.0 as usize, out[k] as u64);
                     }
                 }
+                Stmt::Port { port, args, rets, site } => {
+                    let mut a = [0u32; PORT_MAX_ARGS];
+                    for (k, v) in args.iter().enumerate().take(PORT_MAX_ARGS) {
+                        a[k] = self.r(*v) as u32;
+                    }
+                    let mut out = [0u32; PORT_MAX_RETS];
+                    let nr = rets.len().min(PORT_MAX_RETS);
+                    self.ports.call(*port, *site, &a[..args.len().min(PORT_MAX_ARGS)], &mut out[..nr]);
+                    for (k, v) in rets.iter().enumerate().take(nr) {
+                        self.set_reg(v.0 as usize, out[k] as u64);
+                    }
+                }
             }
         }
         Flow::Next
     }
 }
 
+/// Most arguments and results of one port (a signature with more is
+/// refused by [`validate_ports`]).
+pub const PORT_MAX_ARGS: usize = 8;
+pub const PORT_MAX_RETS: usize = 4;
+
 /// Runs `p` for `n` frames. `scratch` holds `p.scratch_words()` words (the
 /// frame region is zeroed by the program's own initializers, never read
 /// before written).
 pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32) {
+    run_ports(p, scratch, mem, io, n, &mut NoPorts)
+}
+
+/// [`run`] with the program's [`Stmt::Port`]s bound to `ports`.
+pub fn run_ports(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32, ports: &mut dyn Ports) {
     if n == 0 {
         return;
     }
@@ -1067,7 +1149,7 @@ pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32)
     let (frame, hi) = rest.split_at_mut(p.frame_words as usize);
     let hi = if p.uses_f64() { hi } else { &mut [] };
     let mut func_regs = vec![(Vec::new(), Vec::new()); p.funcs.len()];
-    let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n, funcs: &p.funcs, func_regs: &mut func_regs };
+    let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n, funcs: &p.funcs, func_regs: &mut func_regs, ports };
     interp.block(&p.body);
 }
 
@@ -1112,9 +1194,22 @@ impl Regions {
 /// always produces valid programs; this is the independent barrier in
 /// front of native code generation.
 pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
+    validate_ports(p, regions, &[])
+}
+
+/// [`validate`] for a front end whose programs may call `ports` (by index):
+/// every port statement names one, with its arity and 32-bit types.
+pub fn validate_ports(p: &Program, regions: &Regions, ports: &[PortSig]) -> Result<(), String> {
+    for sig in ports {
+        let wide = |t: &Ty| *t == Ty::F64;
+        if sig.params.len() > PORT_MAX_ARGS || sig.rets.len() > PORT_MAX_RETS || sig.params.iter().any(wide) || sig.rets.iter().any(wide) {
+            return Err(format!("port `{}`: at most {} 32-bit arguments and {} results", sig.name, PORT_MAX_ARGS, PORT_MAX_RETS));
+        }
+    }
     struct V<'a> {
         p: &'a Program,
         r: &'a Regions,
+        ports: &'a [PortSig],
         visible: Vec<bool>,
         ever: Vec<bool>,
         scope: Vec<u32>,
@@ -1254,6 +1349,7 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
             let mark = self.scope.len();
             for s in b {
                 match s {
+                    Stmt::Mark(_) => {}
                     Stmt::Def(v, op) => {
                         self.ty(*v)?;
                         if self.ever[v.0 as usize] {
@@ -1325,6 +1421,28 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                     Stmt::Break(d) | Stmt::Continue(d) => {
                         if *d >= depth {
                             return Err("break/continue outside its loop".into());
+                        }
+                    }
+                    Stmt::Port { port, args, rets, .. } => {
+                        let Some(sig) = self.ports.get(*port as usize) else {
+                            return Err(format!("no port {}", port));
+                        };
+                        if args.len() != sig.params.len() || rets.len() != sig.rets.len() {
+                            return Err(format!("port `{}`: wrong arity", sig.name));
+                        }
+                        for (v, t) in args.iter().zip(sig.params) {
+                            self.used(*v, Some(*t))?;
+                        }
+                        for (v, t) in rets.iter().zip(sig.rets) {
+                            if self.ty(*v)? != *t {
+                                return Err(format!("port `{}`: result {:?} is not {:?}", sig.name, v, t));
+                            }
+                            if self.ever[v.0 as usize] {
+                                return Err(format!("{:?} defined twice", v));
+                            }
+                            self.ever[v.0 as usize] = true;
+                            self.visible[v.0 as usize] = true;
+                            self.scope.push(v.0);
                         }
                     }
                     Stmt::Call { f, args, rets } => {
@@ -1407,7 +1525,7 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
         if !g.funcs.is_empty() {
             return Err(format!("function {} has functions of its own", k));
         }
-        let mut v = V { p: g, r: regions, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs };
+        let mut v = V { p: g, r: regions, ports, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs };
         for pv in &g.params {
             if pv.0 as usize >= g.vals.len() || v.ever[pv.0 as usize] {
                 return Err(format!("function {}: bad parameter {:?}", k, pv));
@@ -1422,7 +1540,7 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
             .iter()
             .flat_map(|s| match s {
                 Stmt::Def(d, _) => vec![d.0],
-                Stmt::Call { rets, .. } | Stmt::CallHost { rets, .. } => rets.iter().map(|r| r.0).collect(),
+                Stmt::Call { rets, .. } | Stmt::CallHost { rets, .. } | Stmt::Port { rets, .. } => rets.iter().map(|r| r.0).collect(),
                 _ => vec![],
             })
             .chain(g.params.iter().map(|x| x.0))
@@ -1431,7 +1549,7 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
             return Err(format!("function {}: result {:?} is not defined at its top level", k, r));
         }
     }
-    let mut v = V { p, r: regions, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs };
+    let mut v = V { p, r: regions, ports, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs };
     // The top block's values stay visible to the end; nothing follows it.
     v.block(&p.body, 0)
 }
@@ -1595,6 +1713,7 @@ fn inline_block(b: &Block, out: &mut Program, funcs: &[Program], vmap: &mut Vec<
 fn map_stmt(s: &Stmt, out: &mut Program, funcs: &[Program], vmap: &mut Vec<Val>, rmap: &[Var]) -> Stmt {
     let v = |x: &Val, vmap: &Vec<Val>| vmap[x.0 as usize];
     match s {
+        Stmt::Mark(n) => Stmt::Mark(*n),
         Stmt::Def(d, op) => Stmt::Def(v(d, vmap), map_op(op, vmap, rmap)),
         Stmt::Set(r, x) => Stmt::Set(rmap[r.0 as usize], v(x, vmap)),
         Stmt::Store { region, base, extent, off, val } => Stmt::Store { region: *region, base: *base, extent: *extent, off: off.map(|o| v(&o, vmap)), val: v(val, vmap) },
@@ -1612,6 +1731,7 @@ fn map_stmt(s: &Stmt, out: &mut Program, funcs: &[Program], vmap: &mut Vec<Val>,
             slices: slices.iter().map(|x| SliceArg { buf: x.buf, off: v(&x.off, vmap), len: v(&x.len, vmap) }).collect(),
             rets: rets.iter().map(|r| v(r, vmap)).collect(),
         },
+        Stmt::Port { port, args, rets, site } => Stmt::Port { port: *port, args: args.iter().map(|a| v(a, vmap)).collect(), rets: rets.iter().map(|r| v(r, vmap)).collect(), site: *site },
         Stmt::Call { .. } => unreachable!("inlined by inline_block"),
     }
 }
@@ -1641,7 +1761,7 @@ pub fn map_op(op: &Op, vmap: &[Val], rmap: &[Var]) -> Op {
 // words are the same on both.
 // ---------------------------------------------------------------------------
 
-/// `p` as words ([`from_words`] reads them back).
+/// `p` as words ([`from_words`] reads them back), without debug marks.
 pub fn to_words(p: &Program) -> Vec<u32> {
     let mut w = Vec::new();
     put_program(&mut w, p);
@@ -1688,9 +1808,11 @@ fn region_word(r: Region) -> u32 {
 }
 
 fn put_block(w: &mut Vec<u32>, b: &Block) {
+    let count = w.len();
     w.push(b.len() as u32);
     for s in b {
         match s {
+            Stmt::Mark(_) => w[count] -= 1,
             Stmt::Def(v, op) => {
                 w.extend([0, v.0]);
                 put_op(w, op);
@@ -1724,6 +1846,11 @@ fn put_block(w: &mut Vec<u32>, b: &Block) {
             }
             Stmt::Call { f, args, rets } => {
                 w.extend([9, *f as u32]);
+                put_vals(w, args);
+                put_vals(w, rets);
+            }
+            Stmt::Port { port, args, rets, site } => {
+                w.extend([10, *port as u32, *site]);
                 put_vals(w, args);
                 put_vals(w, rets);
             }
@@ -1887,6 +2014,12 @@ impl Words<'_> {
                     let f = self.next()? as u16;
                     let args = self.vals()?;
                     Stmt::Call { f, args, rets: self.vals()? }
+                }
+                10 => {
+                    let port = u16::try_from(self.next()?).ok()?;
+                    let site = self.next()?;
+                    let args = self.vals()?;
+                    Stmt::Port { port, args, rets: self.vals()?, site }
                 }
                 _ => return None,
             });

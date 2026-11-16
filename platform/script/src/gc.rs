@@ -358,7 +358,7 @@ impl ScriptHeap {
                 object.tag.set_mark();
 
                 // Mark proto/map/vec entries directly without temporary Vec snapshots.
-                let (objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec) = (
+                let (objects, arrays, strings, pods, handles, regexes, pod_types, glob_sources, mark_vec) = (
                     &self.objects,
                     &self.arrays,
                     &mut self.strings,
@@ -366,6 +366,7 @@ impl ScriptHeap {
                     &mut self.handles,
                     &mut self.regexes,
                     &self.pod_types,
+                    &self.glob_sources,
                     &mut self.mark_vec,
                 );
                 let object = &objects[obj];
@@ -377,6 +378,13 @@ impl ScriptHeap {
                 for kv in object.vec.iter() {
                     mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.key);
                     mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, kv.value);
+                }
+                if object.tag.has_globs() {
+                    if let Some(sources) = glob_sources.get(&obj) {
+                        for src in sources {
+                            mark_value_fields!(objects, arrays, strings, pods, handles, regexes, pod_types, mark_vec, ScriptValue::from(*src));
+                        }
+                    }
                 }
                 // A pod type lives while its owner object does: the owner keeps what the type
                 // holds, and an object made from the owner (which carries its type) keeps the owner.
@@ -433,7 +441,7 @@ impl ScriptHeap {
     }
 
     /// How many objects the given seeds reach, following what the marker
-    /// follows: the proto, every map key and value, every vec key and value,
+    /// follows: the proto, glob sources, every map key and value, every vec key and value,
     /// and every element of every array met on the way. `visited` is
     /// shared in and out, so a caller can mark a tree once and then ask
     /// what each further root reaches beyond it. A leak hunt's reading.
@@ -466,6 +474,11 @@ impl ScriptHeap {
                 for kv in object.vec.iter() {
                     stack.push(kv.key);
                     stack.push(kv.value);
+                }
+                if object.tag.has_globs() {
+                    if let Some(sources) = self.glob_sources.get(&obj) {
+                        stack.extend(sources.iter().map(|src| ScriptValue::from(*src)));
+                    }
                 }
                 self.pod_type_reach(obj, &mut stack);
             } else if let Some(arr) = val.as_array() {
@@ -507,6 +520,11 @@ impl ScriptHeap {
                 for kv in object.vec.iter() {
                     stack.push(kv.key);
                     stack.push(kv.value);
+                }
+                if object.tag.has_globs() {
+                    if let Some(sources) = self.glob_sources.get(&obj) {
+                        stack.extend(sources.iter().map(|src| ScriptValue::from(*src)));
+                    }
                 }
                 self.pod_type_reach(obj, &mut stack);
             } else if let Some(arr) = val.as_array() {
@@ -815,7 +833,11 @@ impl ScriptHeap {
             }
             if !obj.tag.is_marked() && obj.tag.is_alloced() {
                 let pod_ty = obj.tag.as_pod_type();
+                let has_globs = obj.tag.has_globs();
                 obj.clear();
+                if has_globs {
+                    self.glob_sources.remove(&ScriptObject::new(i as u32, self.objects.generation(i)));
+                }
                 if let Some(pt) = pod_ty {
                     self.free_pod_type_of(ScriptObject::new(i as u32, self.objects.generation(i)), pt);
                 }
@@ -1149,6 +1171,9 @@ impl ScriptHeap {
         // Must check is_alloced to avoid double-freeing
         if obj.tag.is_alloced() && !obj.tag.is_reffed() {
             let pod_ty = obj.tag.as_pod_type();
+            if obj.tag.has_globs() {
+                self.glob_sources.remove(&ptr);
+            }
             obj.clear();
             if let Some(pt) = pod_ty {
                 self.free_pod_type_of(ptr, pt);

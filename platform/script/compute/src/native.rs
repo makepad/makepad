@@ -157,7 +157,8 @@ pub fn compile_words(words: &[u32], writable: u64) -> Option<Code> {
 pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
     let flat = crate::ir::flat(p);
     let p = &*flat;
-    if !cpu_ok(p) {
+    // A program with ports runs in the interpreter (`ir::run_ports`).
+    if !cpu_ok(p) || crate::ir::has_ports(p) {
         return None;
     }
     let key = crate::kcache::key("scalar", p, writable);
@@ -648,6 +649,7 @@ impl<'a> Lx<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Mark(_) => {}
             Stmt::Def(v, op) => self.def(*v, op),
             Stmt::Set(var, v) => {
                 let (d, x) = (self.vars[var.0 as usize], self.v(*v));
@@ -727,6 +729,7 @@ impl<'a> Lx<'a> {
             }
             Stmt::CallHost { f, args, slices, rets } => self.call_host(*f, args, slices, rets),
             Stmt::Call { .. } => unreachable!("flattened"),
+            Stmt::Port { .. } => unreachable!("declined"),
         }
     }
 

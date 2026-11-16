@@ -236,3 +236,17 @@ fn id_literal_index_reads_and_writes_the_plain_key() {
         3.0
     );
 }
+
+#[test]
+fn computed_string_and_identifier_keys_name_one_property() {
+    let vm = &mut test_vm();
+    // n * 100 + o.<name> * 10 + o["<name>"]: one entry, and both spellings read the last write.
+    for (name, code) in [
+        ("string_then_id", "let o = {}\nlet i = 3\no[\"PA\" + i] = 1\no.PA3 = 2\nlet n = 0\nfor k, v in o { n += 1 }\nn * 100 + o.PA3 * 10 + o[\"PA\" + i]"),
+        ("id_then_string", "let o = {}\nlet i = 3\no.PA3 = 1\no[\"PA\" + i] = 2\nlet n = 0\nfor k, v in o { n += 1 }\nn * 100 + o.PA3 * 10 + o[\"PA\" + i]"),
+        ("literal_then_string", "let o = {PA3: 1}\no[\"PA3\"] = 2\nlet n = 0\nfor k, v in o { n += 1 }\nn * 100 + o.PA3 * 10 + o[\"PA3\"]"),
+        ("long_string_then_id", "let o = {}\nlet i = 3\no[\"LONG_PIN_NAME_\" + i] = 1\no.LONG_PIN_NAME_3 = 2\nlet n = 0\nfor k, v in o { n += 1 }\nn * 100 + o.LONG_PIN_NAME_3 * 10 + o[\"LONG_PIN_NAME_\" + i]"),
+    ] {
+        assert_eq!(number(vm, name, code), 122.0, "{name}: one property, last write wins under both spellings");
+    }
+}

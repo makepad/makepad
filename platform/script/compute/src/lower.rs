@@ -13,6 +13,7 @@
 
 use crate::ir::{self, Bin, Block, Cmp, Op, Program, Region, Stmt as IS, Ty, Un, Val, Var};
 
+pub mod event;
 pub mod kernel;
 mod portable;
 mod front;
@@ -27,6 +28,8 @@ pub enum Domain {
     Audio,
     /// Compute kernels: stateless per-element programs over host buffers.
     Kernel,
+    /// Event programs ([`event`]): entries over shared state, calling ports.
+    Event,
 }
 use crate::parse::*;
 use crate::ShaderError;
@@ -228,6 +231,11 @@ enum Bind {
     /// `vec3(..)`, a pure function of constants): its lanes' f32 bits,
     /// materialised as constants wherever it is read.
     ConstVec(u8, [u32; 16]),
+    /// A top-level scalar `let` with a declared type (`let high: i32 = 1`):
+    /// its type (`T::I` or `T::F`) and bits, materialised as a constant of
+    /// that type wherever it is read, so joins and conversions see the type.
+    /// An untyped one stays `Const(V::Lit)` and takes its use's type.
+    Scalar(T, u32),
     /// An immutable SSA value (loop indices).
     Value(V),
     /// A local function (`let f = fn(x) {..}`, `fn f(x) {..}` in a body):
@@ -328,6 +336,7 @@ impl Key {
 }
 
 #[derive(Default)]
+#[derive(Clone)]
 struct Builder {
     prog: Program,
     blocks: Vec<Block>,
@@ -368,15 +377,19 @@ impl Builder {
             }
             IS::Store { region, base, extent, off, val } => {
                 let region = *region;
-                // The words the store may write: its own, or its whole range with an offset.
-                let (lo, hi) = (*base, *base + if off.is_some() { *extent } else { 1 });
+                // The words the store may write: its own, or its whole range
+                // with an offset. In u64: a range ending past u32::MAX (an
+                // emit's word k of u32::MAX) must not wrap to a low end and
+                // read as a miss.
+                let lo = *base as u64;
+                let hi = lo + if off.is_some() { *extent as u64 } else { 1 };
                 for (map, _) in &mut self.cse {
                     map.retain(|k, _| match *k {
                         Key::Load(r, ..) if r != region => true,
                         // Two words past a host buffer's end clamp to the same word: any may alias.
                         Key::Load(Region::Buf(_), ..) => false,
                         // A load keeps its value while the store misses every word it may read.
-                        Key::Load(_, b, e, ..) => b + e <= lo || hi <= b,
+                        Key::Load(_, b, e, ..) => b as u64 + e as u64 <= lo || hi <= b as u64,
                         _ => true,
                     });
                 }
@@ -562,8 +575,9 @@ impl Builder {
         // A constant offset folds into the base.
         if let Some(o) = off {
             if let Some(c) = self.cst(o) {
+                // (Saturating: past u32::MAX is the last word, never a low one.)
                 let c = ir::clamp_off(c, extent);
-                return self.raw(ty, Op::Load { region, base: base + c, extent: 1, off: None }, None);
+                return self.raw(ty, Op::Load { region, base: base.saturating_add(c), extent: 1, off: None }, None);
             }
         }
         self.raw(ty, Op::Load { region, base, extent, off }, None)
@@ -572,7 +586,7 @@ impl Builder {
         if let Some(o) = off {
             if let Some(c) = self.cst(o) {
                 let c = ir::clamp_off(c, extent);
-                self.push(IS::Store { region, base: base + c, extent: 1, off: None, val });
+                self.push(IS::Store { region, base: base.saturating_add(c), extent: 1, off: None, val });
                 return;
             }
         }
@@ -582,7 +596,7 @@ impl Builder {
     /// True when a block only defines pure values (safe to hoist and run
     /// unconditionally).
     fn pure_block(b: &Block) -> bool {
-        b.iter().all(|s| matches!(s, IS::Def(..)))
+        ir::unmarked(b).all(|s| matches!(s, IS::Def(..)))
     }
 
     fn splice(&mut self, b: Block) {
@@ -854,7 +868,7 @@ fn dce(p: &mut Program) {
                         vec![]
                     }
                     IS::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
-                    IS::Call { args, .. } => args.clone(),
+                    IS::Call { args, .. } | IS::Port { args, .. } => args.clone(),
                     _ => vec![],
                 };
                 for u in us {
@@ -931,6 +945,9 @@ struct Lowerer {
     in_init: bool,
     /// Spans at or past this lie in the prelude.
     prelude_base: usize,
+    // cost: off creates no marks; on adds one Stmt per user statement.
+    marks: bool,
+    marks_spans: Vec<Span>,
     domain: Domain,
     /// Kernel front end: buffers, emit counters, the element value.
     kernel: kernel::KernelCtx,
@@ -959,6 +976,10 @@ struct Lowerer {
     live: Option<LiveLift>,
     /// A traced lowering: the calls so far (`trace.rs`).
     trace: Option<trace::TraceScope>,
+    /// The event front end's declarations, ports and sites.
+    event: event::EventCtx,
+    /// The spans of the calls being inlined, innermost last.
+    call_spans: Vec<Span>,
 }
 
 /// Edit mode's live literals in a kernel: the source offsets of the number
@@ -1663,6 +1684,7 @@ impl Lowerer {
                         ExprKind::Num(x, _) => *x,
                         ExprKind::Ident(n) => match l.lookup(n) {
                             Some(Bind::Const(V::Lit(x))) => x,
+                            Some(Bind::Scalar(T::I, w)) => w as i32 as f64,
                             // An unrolled kernel loop counter is an i32 constant.
                             Some(Bind::Const(V::I(v))) => l.b.cst64(v)? as u32 as i32 as f64,
                             _ => return None,
@@ -1792,10 +1814,12 @@ impl Lowerer {
                 }
             }
         }
-        // Header words.
-        self.state_init = vec![0; HEADER_WORDS as usize];
-        self.state_init[header::FRESH as usize] = 1;
-        self.state_init[header::RNG as usize] = 0x9e37_79b9;
+        // Header words (an event program's state is its own `var`s only).
+        if self.domain != Domain::Event {
+            self.state_init = vec![0; HEADER_WORDS as usize];
+            self.state_init[header::FRESH as usize] = 1;
+            self.state_init[header::RNG as usize] = 0x9e37_79b9;
+        }
         for item in items {
             match item {
                 Item::Struct { name, fields, span } => {
@@ -1819,6 +1843,16 @@ impl Lowerer {
                 Item::Let { name, ann, value, span } => {
                     self.check_new_global(name, *span)?;
                     if let ExprKind::Call(f, args) = &value.kind {
+                        if self.domain == Domain::Event {
+                            if let Some(k) = self.event.forms.iter().position(|d| d.name == f) {
+                                let bind = self.event_decl(name, k, args, value.span)?;
+                                self.globals.insert(name.clone(), bind);
+                                continue;
+                            }
+                            if f == "param" {
+                                return err(value.span, "an event program has no params: declare a constant, or keep the value in a `var`");
+                            }
+                        }
                         if self.domain == Domain::Kernel && matches!(f.as_str(), "input" | "output" | "emit_buffer" | "param") {
                             let bind = self.kernel_decl(name, f, args, value.span)?;
                             self.globals.insert(name.clone(), bind);
@@ -1858,8 +1892,16 @@ impl Lowerer {
                     let r = self.expr(value);
                     self.b = saved;
                     match r? {
-                        v @ V::Lit(_) => {
-                            self.globals.insert(name.clone(), Bind::Const(v));
+                        V::Lit(x) => {
+                            let bind = match ann {
+                                Some(TypeAnn::I32) if x.fract() != 0.0 || x < i32::MIN as f64 || x > i32::MAX as f64 => {
+                                    return err(*span, format!("`{}` is declared i32, but {} is not an i32", name, x));
+                                }
+                                Some(TypeAnn::I32) => Bind::Scalar(T::I, x as i32 as u32),
+                                Some(TypeAnn::F32) => Bind::Scalar(T::F, (x as f32).to_bits()),
+                                _ => Bind::Const(V::Lit(x)),
+                            };
+                            self.globals.insert(name.clone(), bind);
                         }
                         _ => {
                             // A folded non-literal constant (e.g. `sin(1)`,
@@ -1881,10 +1923,12 @@ impl Lowerer {
                                     None => return Err(e),
                                 },
                             };
-                            let bind = match c {
-                                CInit::W(w, T::F) => Bind::Const(V::Lit(f32::from_bits(w) as f64)),
-                                CInit::W(w, T::I) => Bind::Const(V::Lit(w as i32 as f64)),
-                                CInit::Vec(n, w) => Bind::ConstVec(n, w),
+                            let bind = match (c, ann) {
+                                (CInit::W(w, T::I), Some(TypeAnn::I32)) => Bind::Scalar(T::I, w),
+                                (CInit::W(w, T::F), Some(TypeAnn::F32)) => Bind::Scalar(T::F, w),
+                                (CInit::W(w, T::F), _) => Bind::Const(V::Lit(f32::from_bits(w) as f64)),
+                                (CInit::W(w, T::I), _) => Bind::Const(V::Lit(w as i32 as f64)),
+                                (CInit::Vec(n, w), _) => Bind::ConstVec(n, w),
                                 _ => return err(*span, "a top-level `let` must be a constant (a number, a vec2/3/4 or colour, a pure function of constants), a `param(...)` or a table; use `var` for state"),
                             };
                             self.globals.insert(name.clone(), bind);
@@ -2200,6 +2244,7 @@ impl Lowerer {
             scope.insert(name.clone(), bind);
         }
         self.call_stack.push(f.name.clone());
+        self.call_spans.push(span);
         let mut frame = outer;
         frame.push(scope);
         self.frames.push(frame);
@@ -2225,6 +2270,7 @@ impl Lowerer {
         let ret = self.rets.pop().unwrap();
         self.frames.pop();
         self.call_stack.pop();
+        self.call_spans.pop();
         let v = match r {
             Ok(v) => v,
             // An error inside a prelude helper is reported at the user's call.
@@ -2240,7 +2286,7 @@ impl Lowerer {
         let (t, vars) = ret.vars.clone().unwrap_or((T::F, vec![]));
         let mut body = body;
         // The fall-through value (if any) is the last return.
-        if !matches!(body.last(), Some(IS::Break(_))) {
+        if !matches!(ir::unmarked(&body).next_back(), Some(IS::Break(_))) {
             if vars.is_empty() {
                 if !matches!(v, V::Unit) {
                     return err(span, format!("`{}` returns a value in some paths only", f.name));
@@ -2588,7 +2634,7 @@ impl Lowerer {
         } else {
             let (t, vars) = ret.vars.clone().unwrap_or((T::F, vec![]));
             let mut body = body;
-            if !matches!(body.last(), Some(IS::Break(_))) {
+            if !matches!(ir::unmarked(&body).next_back(), Some(IS::Break(_))) {
                 if vars.is_empty() {
                     if !matches!(v, V::Unit) {
                         return err(span, format!("`{}` returns a value in some paths only", f.name));
@@ -2726,6 +2772,18 @@ impl Lowerer {
         let mut in_line: Vec<&str> = Vec::new();
         for (k, s) in stmts.iter().enumerate() {
             last = V::Unit;
+            if self.marks && !self.b.scratch {
+                let span = match s {
+                    Stmt::Let { value: Expr { kind: ExprKind::Lambda(_), .. }, .. } => None,
+                    Stmt::Let { span, .. } | Stmt::Assign { span, .. } | Stmt::For { span, .. } | Stmt::While { span, .. } | Stmt::Loop { span, .. }
+                    | Stmt::Break(span) | Stmt::Continue(span) | Stmt::Return(_, span) => Some(*span),
+                    Stmt::Expr(e) => Some(e.span),
+                };
+                if let Some(span) = span.filter(|span| span.start < self.prelude_base) {
+                    self.b.push(IS::Mark(self.marks_spans.len() as u32));
+                    self.marks_spans.push(span);
+                }
+            }
             match s {
                 Stmt::Let { name, value: Expr { kind: ExprKind::Lambda(f), .. }, .. } => {
                     let scopes = self.frames.last().cloned().unwrap_or_default();
@@ -2775,7 +2833,7 @@ impl Lowerer {
                     }
                 }
                 Stmt::For { var, from, to, body, span } => self.for_loop(var, from, to, body, *span)?,
-                Stmt::While { cond, body, .. } => {
+                Stmt::While { cond, body, span } => {
                     self.b.open_loop();
                     self.loops.push(LoopKind::User);
                     let r = (|| {
@@ -2788,16 +2846,16 @@ impl Lowerer {
                     self.loops.pop();
                     let b = self.b.close();
                     r?;
-                    self.capped_loop(b, true);
+                    self.capped_loop(b, true, *span);
                 }
-                Stmt::Loop { body, .. } => {
+                Stmt::Loop { body, span } => {
                     self.b.open_loop();
                     self.loops.push(LoopKind::User);
                     let r = self.scoped(|l| l.stmts(body));
                     self.loops.pop();
                     let b = self.b.close();
                     r?;
-                    self.capped_loop(b, false);
+                    self.capped_loop(b, false, *span);
                 }
                 Stmt::Break(span) | Stmt::Continue(span) => {
                     let mut depth = 0;
@@ -3010,18 +3068,35 @@ impl Lowerer {
         Ok(Place { ty: el, off: Some(off), ..p.clone() })
     }
 
-    /// Whether loops that reach their run-time cap set the call's overflow
-    /// word: a kernel's element code (audio and init() keep plain caps).
+    /// Whether loops that reach their run-time cap report it: a kernel's
+    /// element code (the call's overflow word) and an event program with a
+    /// cap port; audio and init() keep plain caps.
     fn reports_caps(&self) -> bool {
-        self.domain == Domain::Kernel && self.kernel.element.is_some()
+        (self.domain == Domain::Kernel && self.kernel.element.is_some()) || (self.domain == Domain::Event && self.event.cap_port.is_some())
     }
 
-    /// A `while` or `loop` body under the run-time cap. In a kernel, a loop
-    /// that starts a 1025th iteration sets the overflow word and stops
-    /// (reported, never silently cut). A `while` is checked after its
-    /// condition (`cond_first`: the body's first statement is the
-    /// condition's break), so one that ends after exactly 1024 is not.
-    fn capped_loop(&mut self, mut body: Block, cond_first: bool) {
+    /// The report of a loop at `span` that reached its cap (when
+    /// [`Lowerer::reports_caps`]): the overflow word, or the cap port called
+    /// with the loop's site.
+    fn cap_report(&mut self, span: Span) -> Vec<IS> {
+        match self.event.cap_port.filter(|_| self.domain == Domain::Event) {
+            Some(port) => {
+                let site = self.event_site(span);
+                vec![IS::Port { port, args: vec![], rets: vec![], site }]
+            }
+            None => {
+                let one = self.b.ci(1);
+                vec![IS::Store { region: Region::Ctx, base: crate::lower::kernel::K_OVERFLOW, extent: 1, off: None, val: one }]
+            }
+        }
+    }
+
+    /// A `while` or `loop` body under the run-time cap. Where caps are
+    /// reported ([`Lowerer::cap_report`]), a loop that starts a 1025th
+    /// iteration reports and stops (never silently cut). A `while` is
+    /// checked after its condition (`cond_first`: the body's first statement
+    /// is the condition's break), so one that ends after exactly 1024 is not.
+    fn capped_loop(&mut self, mut body: Block, cond_first: bool, span: Span) {
         if !self.reports_caps() {
             self.b.push(IS::Loop { cap: LOOP_CAP, body });
             return;
@@ -3033,8 +3108,9 @@ impl Lowerer {
         let k = self.b.get(n);
         let most = self.b.ci(LOOP_CAP as i32);
         let hit = self.b.cmpi(Cmp::Ge, k, most);
-        let one = self.b.ci(1);
-        self.b.push(IS::If(hit, vec![IS::Store { region: Region::Ctx, base: crate::lower::kernel::K_OVERFLOW, extent: 1, off: None, val: one }, IS::Break(0)], vec![]));
+        let mut report = self.cap_report(span);
+        report.push(IS::Break(0));
+        self.b.push(IS::If(hit, report, vec![]));
         let one = self.b.ci(1);
         let k1 = self.b.ib(Bin::AddI, k, one);
         self.b.set(n, k1);
@@ -3059,6 +3135,7 @@ impl Lowerer {
                 ExprKind::Num(x, _) => Some(*x),
                 ExprKind::Ident(n) => match l.globals.get(n) {
                     Some(Bind::Const(V::Lit(x))) => Some(*x),
+                    Some(Bind::Scalar(T::I, w)) => Some(*w as i32 as f64),
                     _ => None,
                 },
                 _ => None,
@@ -3139,7 +3216,7 @@ impl Lowerer {
             // (their golden hashes).
             let unroll = match self.domain {
                 Domain::Audio => count <= AUDIO_UNROLL_MAX as u64 || (count <= 64 && body.len() == 1),
-                Domain::Kernel => count <= UNROLL_MAX as u64 && count.saturating_mul(self.ast_cost(body)).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES,
+                Domain::Kernel | Domain::Event => count <= UNROLL_MAX as u64 && count.saturating_mul(self.ast_cost(body)).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES,
             };
             if unroll && !has_own_break(body) {
                 for k in a..z {
@@ -3148,7 +3225,7 @@ impl Lowerer {
                         // in the rolled loop below. An untyped literal
                         // would fold `k / 2` as f64 and change indexing.
                         let value = match l.domain {
-                            Domain::Kernel => V::I(l.b.ci(k as i32)),
+                            Domain::Kernel | Domain::Event => V::I(l.b.ci(k as i32)),
                             Domain::Audio => V::Lit(k as f64),
                         };
                         l.bind(var, Bind::Const(value));
@@ -3173,12 +3250,12 @@ impl Lowerer {
         let zv = self.to_i(&z, to.span)?;
         if cap == LOOP_CAP && self.reports_caps() {
             // A run-time range longer than the cap is reported, not
-            // silently cut: the call's overflow word.
+            // silently cut.
             let len = self.b.ib(Bin::SubI, zv, av);
             let most = self.b.ci(LOOP_CAP as i32);
             let over = self.b.cmpi(Cmp::Gt, len, most);
-            let one = self.b.ci(1);
-            self.b.push(IS::If(over, vec![IS::Store { region: Region::Ctx, base: crate::lower::kernel::K_OVERFLOW, extent: 1, off: None, val: one }], vec![]));
+            let report = self.cap_report(span);
+            self.b.push(IS::If(over, report, vec![]));
         }
         let iv = self.b.var(Ty::I32);
         self.b.set(iv, av);
@@ -3266,7 +3343,7 @@ impl Lowerer {
                 // (`4.0`) is a float: `i / 4.0` divides as floats, as in
                 // the documents (an integer-valued literal `4` still takes
                 // the other side's type).
-                if self.domain == Domain::Kernel {
+                if self.domain != Domain::Audio {
                     let float_lit = |e: &Expr| matches!(&e.kind, ExprKind::Num(_, false)) || matches!(&e.kind, ExprKind::Neg(x) if matches!(x.kind, ExprKind::Num(_, false)));
                     if let (V::I(_), V::Lit(y)) = (&av, &bv) {
                         if float_lit(b) {
@@ -3461,7 +3538,7 @@ impl Lowerer {
         let saved_entry = self.entry.take();
         let saved_globals = self.globals.clone();
         let saved_init = std::mem::replace(&mut self.in_init, true);
-        self.globals.retain(|_, b| matches!(b, Bind::Const(_) | Bind::ConstVec(..)) || matches!(b, Bind::Place(p) if p.region == Region::Shared));
+        self.globals.retain(|_, b| matches!(b, Bind::Const(_) | Bind::ConstVec(..) | Bind::Scalar(..)) || matches!(b, Bind::Place(p) if p.region == Region::Shared));
         let base = self.shared_init.len() as u32;
         let r = self.expr(e).map(|v| {
             let (lanes, ty): (Vec<Val>, Option<T>) = match v {
@@ -3526,6 +3603,9 @@ impl Lowerer {
             Some(Bind::Const(v)) | Some(Bind::Value(v)) => return Ok(v),
             Some(Bind::Closure(..)) => {
                 return err(span, format!("`{}` is a function: call it (`{}(..)`); kernels cannot store, pass or return functions", name, name))
+            }
+            Some(Bind::Scalar(t, w)) => {
+                return Ok(if t == T::I { V::I(self.b.ci(w as i32)) } else { V::F(self.b.cf(f32::from_bits(w))) });
             }
             Some(Bind::ConstVec(n, w)) => {
                 let mut lanes = [Val(0); 16];
@@ -3668,8 +3748,8 @@ impl Lowerer {
         let ev = else_(self);
         let eb = self.b.close();
         let ev = ev?;
-        let t_diverges = matches!(tb.last(), Some(IS::Break(_)) | Some(IS::Continue(_)));
-        let e_diverges = matches!(eb.last(), Some(IS::Break(_)) | Some(IS::Continue(_)));
+        let t_diverges = matches!(ir::unmarked(&tb).next_back(), Some(IS::Break(_)) | Some(IS::Continue(_)));
+        let e_diverges = matches!(ir::unmarked(&eb).next_back(), Some(IS::Break(_)) | Some(IS::Continue(_)));
         let tt = Self::value_t(&tv);
         let et = Self::value_t(&ev);
         let rt = match (&tt, &et) {
@@ -3699,9 +3779,9 @@ impl Lowerer {
         // Both branches only compute: evaluate both, select.
         // Small branches that only compute: evaluate both and select (no
         // branch). Big ones branch, so only the taken side costs.
-        if Builder::pure_block(&tb) && Builder::pure_block(&eb) && tb.len() + eb.len() <= 24 && tt.is_some() && et.is_some() {
-            self.b.splice(tb);
-            self.b.splice(eb);
+        if Builder::pure_block(&tb) && Builder::pure_block(&eb) && ir::unmarked(&tb).count() + ir::unmarked(&eb).count() <= 24 && tt.is_some() && et.is_some() {
+            self.b.splice(tb.into_iter().filter(|s| !matches!(s, IS::Mark(_))).collect());
+            self.b.splice(eb.into_iter().filter(|s| !matches!(s, IS::Mark(_))).collect());
             return self.select_v(c, &rt, &tv, &ev, span);
         }
         let vars = match &rt {
@@ -4057,7 +4137,7 @@ impl Lowerer {
             return self.kernel_emit(args, span);
         }
         if let Some(f) = self.fns.get(name).cloned() {
-            if matches!(name, "voice" | "effect" | "block" | "init") {
+            if matches!(name, "voice" | "effect" | "block" | "init") || self.event.entry_fns.iter().any(|e| e == name) {
                 return err(span, format!("`{}` is an entry point and cannot be called", name));
             }
             let mut vals = Vec::new();
@@ -4070,6 +4150,15 @@ impl Lowerer {
                 self.note_call(&f, args, &v);
             }
             return Ok(v);
+        }
+        if self.domain == Domain::Event {
+            if let Some(k) = self.event.ports.iter().position(|p| p.name == name) {
+                let mut vals = Vec::new();
+                for a in args {
+                    vals.push(self.expr(a)?);
+                }
+                return self.event_port(k, &vals, args, span);
+            }
         }
         // `p.length()` on a plain path that names no module fn: the value
         // method, the receiver as the first argument.
@@ -4715,6 +4804,8 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         entry: None,
         in_init: false,
         prelude_base,
+        marks: false,
+        marks_spans: Vec::new(),
         domain,
         kernel: Default::default(),
         portable: false,
@@ -4726,6 +4817,8 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         lenient_objects: false,
         live: None,
         trace: None,
+        event: Default::default(),
+        call_spans: Vec::new(),
     }
 }
 
@@ -4786,4 +4879,36 @@ pub fn lower(items: &[Item], prelude_base: usize) -> Result<Lowered, ShaderError
         state_vars: l.state_vars,
         shared_init: l.shared_init,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store drops every value-numbered load of a word it may write, also
+    /// for ranges that end past u32::MAX: summed in u32 such a range wrapped
+    /// to a low end, read as a miss, and a later load reused the value from
+    /// before the store.
+    #[test]
+    fn a_store_drops_the_loads_it_may_write_at_the_top_of_the_range() {
+        let top = u32::MAX;
+        let mut b = Builder::new();
+        let x = b.ci(7);
+        let i = b.ci(0);
+        // A load whose range runs past the top, a store inside it.
+        let wide = Key::Load(Region::Frame, top - 4, 8, Some(i), Ty::I32);
+        // A store whose range runs past the top, a load inside it.
+        let word = Key::Load(Region::Frame, top - 1, 1, None, Ty::I32);
+        // A load of words the store misses keeps its value.
+        let below = Key::Load(Region::Frame, 0, 4, Some(i), Ty::I32);
+        for key in [wide, word, below] {
+            b.cse[0].0.insert(key, x);
+        }
+        b.push(IS::Store { region: Region::Frame, base: top - 2, extent: 1, off: None, val: x });
+        assert!(b.lookup(&wide).is_none(), "a store to word top-2 drops a load of top-4..top+4");
+        assert!(b.lookup(&word).is_some(), "a store to word top-2 keeps a load of word top-1");
+        b.push(IS::Store { region: Region::Frame, base: top - 2, extent: 8, off: Some(i), val: x });
+        assert!(b.lookup(&word).is_none(), "a store to top-2..top+6 drops a load of word top-1");
+        assert_eq!(b.lookup(&below), Some(x), "a store to top-2..top+6 keeps a load of words 0..4");
+    }
 }

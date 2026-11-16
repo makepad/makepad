@@ -42,7 +42,7 @@ pub fn parse_warnings(source: &str) -> Vec<ScriptParserDiagnostic> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum State {
+pub(crate) enum State {
     BeginStmt {
         last_was_sep: bool,
     },
@@ -556,7 +556,7 @@ impl State {
         )
     }
 
-    fn is_short_circuit_op(op: LiveId) -> bool {
+    pub(crate) fn is_short_circuit_op(op: LiveId) -> bool {
         op == id!(&&) || op == id!(||) || op == id!(|?) || op == id!(??)
     }
 
@@ -596,7 +596,7 @@ Order list from highest prio to lowest
 */
 
 impl State {
-    fn operator_order(op: LiveId) -> usize {
+    pub(crate) fn operator_order(op: LiveId) -> usize {
         match op {
             id!(.) => 3,
             id!(.?) => 3,
@@ -1837,7 +1837,10 @@ impl ScriptParser {
         let id = tok.identifier();
         let starts_field = id.not_empty()
             && tokenizer.tokens.get(self.index as usize + 1)
-                .is_some_and(|next| next.token.operator() == id!(:));
+                .is_some_and(|next| matches!(
+                    next.token.operator(),
+                    id!(:) | id!(:=) | id!(+:) | id!(<:) | id!(>:) | id!(^:)
+                ));
         match self.state.pop().unwrap() {
             State::ForIdent { idents, index } => {
                 // we push k and v
@@ -4824,7 +4827,7 @@ impl ScriptParser {
                     return 1;
                 }
                 // named operators
-                // With optional commas, `and:` starts the next field rather
+                // With optional commas, `and:` or `and :=` starts the next field rather
                 // than continuing the preceding field's value as an operator.
                 if starts_field {
                     return 0;

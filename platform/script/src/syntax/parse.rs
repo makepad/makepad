@@ -1,11 +1,13 @@
 //! Tokens to tree. See the module docs in `mod.rs`.
 
 use super::*;
-use crate::tokenizer::{lex, LexedToken, ScriptTokenTag};
+use crate::tokenizer::{lex_with, LexedToken, ScriptTokenTag};
 
 /// Operators that continue an expression on the same line.
-const BINARY: &[&str] = &[
-    "==", "!=", "===", "!==", "<=", ">=", "&&", "||", "..", "...", "??", "+", "-", "*", "/", "%", "<", ">", "&", "|", "^", "<<", ">>", "++", "|?",
+// The tokenizer recognises `...`, but the VM parser has no binary rule for it.
+pub(super) const BINARY: &[&str] = &[
+    "==", "!=", "===", "!==", "<=", ">=", "&&", "||", "..", "??", "+", "-", "*", "/", "%", "<",
+    ">", "&", "|", "^", "<<", ">>", "++", "|?",
 ];
 const ASSIGN: &[&str] = &["=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>=", ":=", "?="];
 /// What follows a field name in an object.
@@ -21,8 +23,8 @@ struct Parser<'a> {
 
 type Res<T> = Result<T, SyntaxError>;
 
-pub(super) fn parse_file(source: &str) -> Res<Node> {
-    let mut p = Parser::new(source)?;
+pub(super) fn parse_file(source: &str, units: &UnitTable) -> Res<Node> {
+    let mut p = Parser::new(source, units)?;
     let mut stmts = Vec::new();
     loop {
         p.skip_separators();
@@ -36,7 +38,12 @@ pub(super) fn parse_file(source: &str) -> Res<Node> {
 
 /// Parse one value or statement (a fragment such as `keys([0, 1], [1, 2])`).
 pub fn parse_value(text: &str) -> Res<Node> {
-    let mut p = Parser::new(text)?;
+    parse_value_with(text, &UnitTable::standard())
+}
+
+/// Parse one value or statement with the host's registered number suffixes.
+pub fn parse_value_with(text: &str, units: &UnitTable) -> Res<Node> {
+    let mut p = Parser::new(text, units)?;
     p.skip_separators();
     let node = p.statement(true)?;
     p.skip_separators();
@@ -47,8 +54,8 @@ pub fn parse_value(text: &str) -> Res<Node> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str) -> Res<Self> {
-        let tokens = lex(source);
+    fn new(source: &'a str, units: &UnitTable) -> Res<Self> {
+        let tokens = lex_with(source, units);
         let mut close = vec![None; tokens.len()];
         let mut stack: Vec<usize> = Vec::new();
         for (index, token) in tokens.iter().enumerate() {
@@ -277,7 +284,9 @@ impl<'a> Parser<'a> {
             if BINARY.contains(&op) {
                 let mut op_span = token.span().clone();
                 self.at += 1;
-                // `>>>`: the tokenizer reads it as `>>` then `>`.
+                // `>>>` (the unsigned shift of Splash compute kernels): the tokenizer reads
+                // it as `>>` then a glued `>`. The script VM has no rule for it and refuses
+                // it when it parses; the tree still describes the code.
                 if op == ">>" && self.is_op(self.at, ">") && self.glued(self.at) {
                     op_span.end = self.end_of(self.at);
                     self.at += 1;

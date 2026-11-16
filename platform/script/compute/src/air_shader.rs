@@ -426,6 +426,7 @@ impl<'a> Tr<'a> {
         let mut out = Vec::new();
         for s in b {
             match s {
+                air::Stmt::Mark(_) => {}
                 air::Stmt::Def(v, op) => {
                     let ty = ir_ty(program.vals[v.0 as usize])?;
                     let e = self.op(io, op, ty)?;
@@ -510,6 +511,7 @@ impl<'a> Tr<'a> {
                 }
                 air::Stmt::Call { .. } => return Err("a call (not flattened)".into()),
                 air::Stmt::CallHost { .. } => return Err("a host call".into()),
+                air::Stmt::Port { .. } => return Err("a port call".into()),
             }
         }
         Ok(out)

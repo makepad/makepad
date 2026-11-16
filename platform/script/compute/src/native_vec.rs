@@ -34,6 +34,10 @@ use crate::spmd::{analyse, id, shape, steps, supported, Info};
 use relax_backend::rir::{self, Cls, Cond, Conv, Func, IOp, Inst, IntTy, Mem, NanBits, RoundTo, Term, VReg, VW, VX};
 use std::cell::Cell;
 
+relax_api::option_layouts! {
+    V,
+}
+
 const I32: IntTy = IntTy { bits: 32, signed: true };
 const U32: IntTy = IntTy { bits: 32, signed: false };
 const I64: IntTy = rir::I64;
@@ -979,13 +983,16 @@ impl<'a> Vx<'a> {
         }
         // (word, value, statement id, last word of its table) of the loads of root r
         let mut ls: Vec<(u32, Val, usize, u32)> = Vec::new();
-        for st in b.iter().take(64) {
+        for st in crate::ir::unmarked(b).take(64) {
             match st {
                 // (a small table is one TBL per read on NEON: cheaper than the rows)
                 Stmt::Def(v, Op::Load { region: r2, base, extent, off: Some(o) }) if *r2 == region && !self.uniform(*o) && !(region == Region::Shared && cfg!(target_arch = "aarch64") && *extent <= 16) => {
                     let (root, c) = self.root_of(*o);
                     if root == r && (*base as u64 + c as u64) < 1 << 30 && (region != Region::Shared || c < *extent) {
-                        ls.push((base + c, *v, id(st), (base + extent).saturating_sub(1)));
+                        // the table's last word from the true end: an extent near u32::MAX (an unbounded
+                        // table) wrapped base + extent to a small word before the saturation
+                        let last = (*base as u64 + *extent as u64).saturating_sub(1).min(u32::MAX as u64) as u32;
+                        ls.push((base + c, *v, id(st), last));
                     }
                 }
                 Stmt::Def(..) => {}
@@ -1130,11 +1137,14 @@ impl<'a> Vx<'a> {
             return 0;
         }
         let mut n = 1;
-        while n < b.len() {
-            match &b[n] {
+        let mut span_end = 1;
+        while span_end < b.len() {
+            match &b[span_end] {
+                Stmt::Mark(_) => {}
                 Stmt::Store { region: Region::Buf(r), base: bn, off: Some(on), .. } if *r == kb && *on == o && *bn == base + n as u32 => n += 1,
                 _ => break,
             }
+            span_end += 1;
         }
         let last = base as u64 + n as u64 - 1;
         if n < 2 || last >= 1 << 31 {
@@ -1149,7 +1159,7 @@ impl<'a> Vx<'a> {
         let (fast, slow, join) = (self.block_new(), self.block_new(), self.block_new());
         self.term(Term::Branch(inside, fast, slow));
         self.cur = fast;
-        let vals: Vec<Val> = b[..n].iter().map(|st| if let Stmt::Store { val, .. } = st { *val } else { unreachable!() }).collect();
+        let vals: Vec<Val> = crate::ir::unmarked(&b[..span_end]).map(|st| if let Stmt::Store { val, .. } = st { *val } else { unreachable!() }).collect();
         // each lane's record address, and (not every lane running) whether it runs
         let lanes = self.lanes() as usize;
         let mut addr = [VReg(0); 8];
@@ -1199,12 +1209,12 @@ impl<'a> Vx<'a> {
         }
         self.term(Term::Jump(join));
         self.cur = slow;
-        for st in &b[..n] {
+        for st in &b[..span_end] {
             self.stmt(st);
         }
         self.term(Term::Jump(join));
         self.cur = join;
-        n
+        span_end
     }
 
     /// `f` in a block of its own that runs when `run` (a lane's 0/1 running flag) is set; `f`
@@ -1267,6 +1277,7 @@ impl<'a> Vx<'a> {
 
     fn stmt(&mut self, s: &Stmt) {
         match s {
+            Stmt::Mark(_) => {}
             Stmt::Def(v, op) => self.def(*v, op),
             Stmt::Set(var, x) => {
                 let d = self.vars[var.0 as usize];
@@ -1406,7 +1417,7 @@ impl<'a> Vx<'a> {
                     self.full = false;
                 }
             }
-            Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Port { .. } => unreachable!("declined"),
             Stmt::Call { .. } => unreachable!("flattened"),
         }
     }

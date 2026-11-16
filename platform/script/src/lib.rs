@@ -2,6 +2,36 @@
 // spellings rather than depending on Rust's host-side constants.
 #![allow(clippy::approx_constant)]
 
+// Options JIT code reaches in this crate's unmarked items; the binding refuses a tagged Option with no entry.
+relax_api::option_layouts! {
+    (),
+    ([u8; 4], u8),
+    (mod_shader::ShaderIoType, value::ScriptPodType),
+    (opcode::Opcode, opcode::OpcodeArgs),
+    (u32, u32),
+    (usize, usize),
+    (value::ScriptObject, mod_shader::ShaderIoType),
+    [f32; 16],
+    f32,
+    function::NativeId,
+    i32,
+    makepad_math::Vec2f,
+    makepad_math::Vec3f,
+    makepad_math::Vec4f,
+    mod_shader::ShaderIoType,
+    opcode::Opcode,
+    tokenizer::ScriptLoc,
+    traits::ScriptTypeIndex,
+    u16,
+    value::ScriptArray,
+    value::ScriptPod,
+    value::ScriptRegex,
+    value::ScriptString,
+    value::ValueError,
+    vm::ScriptStrPin,
+    vm::ShaderFnInput,
+}
+
 /// A run of this process's app ended in place (`makepad run`): what this crate holds of it goes, as
 /// a fresh process has it. Its VMs went with the run's heap without dropping.
 pub fn end_run() {
@@ -66,6 +96,7 @@ pub mod string;
 pub mod string_heap;
 pub mod syntax;
 pub mod tokenizer;
+pub mod units;
 #[macro_use]
 pub mod native;
 pub mod apply;
@@ -147,6 +178,7 @@ pub use string::*;
 pub use string_heap::*;
 pub use thread::*;
 pub use traits::*;
+pub use units::*;
 pub use trap::*;
 pub use value::*;
 pub use vm::*;

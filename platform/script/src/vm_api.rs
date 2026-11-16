@@ -13,6 +13,7 @@ use crate::object::*;
 use crate::trap::*;
 use crate::mod_pod::ScriptPodBuiltins;
 use crate::thread::ScriptThreadId;
+use crate::units::UnitTable;
 use crate::value::*;
 use crate::vm::*;
 use crate::vm_ctl::*;
@@ -144,6 +145,14 @@ impl ScriptVm<'_> {
     pub fn set_keep_numbers(&mut self, keep: bool) { self.bx.vm_ctl(&mut ScriptCtlReq::with(CTL_SET_KEEP_NUMBERS, keep as u64)); }
     #[inline(always)]
     pub fn keep_numbers(&self) -> bool { self.bx.vm_stat(&mut ScriptCtlReq::new(STAT_KEEP_NUMBERS)) != 0 }
+
+    /// Number suffixes for code parsed from now on; parsed bodies keep their values.
+    #[inline(always)]
+    pub fn set_unit_table(&mut self, units: &UnitTable) { self.bx.set_unit_table(units); }
+
+    /// A copy of the table used for new code.
+    #[inline(always)]
+    pub fn unit_table(&self) -> UnitTable { self.bx.unit_table() }
 
     #[inline(always)]
     pub fn numeric_vec3(&mut self, value: crate::makepad_math::Vec3f) -> ScriptValue {
@@ -940,6 +949,14 @@ impl ScriptCrateManifests {
 
 #[relax_api(run)]
 impl ScriptVmBase {
+    /// Number suffixes for code parsed from now on.
+    #[relax_api(run)]
+    pub fn set_unit_table(&mut self, units: &UnitTable) { self.units = units.clone(); }
+
+    /// A copy of the table used for new code.
+    #[relax_api(run)]
+    pub fn unit_table(&self) -> UnitTable { self.units.clone() }
+
     #[relax_api(run)]
     pub fn shared_crate_manifests(&self) -> ScriptCrateManifests { ScriptCrateManifests(self.code.crate_manifests.clone()) }
     #[relax_api(run)]
